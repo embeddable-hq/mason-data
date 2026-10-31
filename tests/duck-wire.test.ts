@@ -105,6 +105,11 @@ const DDL = [
   "CREATE TABLE public.late (id INTEGER PRIMARY KEY, j JSON, k INTEGER, c INTEGER)",
   "INSERT INTO public.late SELECT range::INTEGER, json_object('n', CASE WHEN range = 2000 THEN 'x' ELSE range::VARCHAR END), (2000 - range)::INTEGER, (range % 50)::INTEGER FROM range(1, 2001)",
   "CREATE TABLE public.late_c (id INTEGER PRIMARY KEY, name VARCHAR)",
+  // a composite primary key, and a table the catalog declares no key of (the fan-out guard, src/duck/distinct-key.ts)
+  "CREATE TABLE public.late_p (c INTEGER, line INTEGER, note VARCHAR, PRIMARY KEY (c, line))",
+  "INSERT INTO public.late_p SELECT (range % 50)::INTEGER, (range // 50)::INTEGER, 'n' || range FROM range(200)",
+  "CREATE TABLE public.late_n (id INTEGER, c INTEGER)",
+  "INSERT INTO public.late_n SELECT range::INTEGER, (range % 50)::INTEGER FROM range(50)",
   'CREATE TABLE public.rowid_cased (id INTEGER PRIMARY KEY, "RowId" INTEGER)',
   'INSERT INTO public.rowid_cased SELECT range::INTEGER, 5 FROM range(1, 7)',
   "INSERT INTO public.late_c SELECT range::INTEGER, 'c' || range FROM range(50)",
@@ -156,6 +161,10 @@ const PG_DDL = [
   'CREATE TABLE public.rowid_cased (id integer PRIMARY KEY, "RowId" integer)',
   'INSERT INTO public.rowid_cased SELECT g, 5 FROM generate_series(1, 6) g',
   "INSERT INTO public.late_c SELECT g, 'c' || g FROM generate_series(0, 49) g",
+  "CREATE TABLE public.late_p (c integer, line integer, note text, PRIMARY KEY (c, line))",
+  "INSERT INTO public.late_p SELECT g % 50, g / 50, 'n' || g FROM generate_series(0, 199) g",
+  "CREATE TABLE public.late_n (id integer, c integer)",
+  "INSERT INTO public.late_n SELECT g, g % 50 FROM generate_series(0, 49) g",
   "CREATE TABLE public.jdocs (id integer PRIMARY KEY, b jsonb, j json)",
   jdocsInsert((doc) => doc),
   "CREATE TABLE public.jcase (id integer PRIMARY KEY, \"B\" jsonb)",
@@ -204,6 +213,8 @@ const schema: PgSchema = {
     { name: "late", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }, { name: "k", type: "int4" }, { name: "c", type: "int4" }] },
     { name: "late_c", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "name", type: "text" }] },
+    { name: "late_p", primaryKey: ["c", "line"], joins: [], columns: [{ name: "c", type: "int4" }, { name: "line", type: "int4" }, { name: "note", type: "text" }] },
+    { name: "late_n", primaryKey: [], joins: [], columns: [{ name: "id", type: "int4" }, { name: "c", type: "int4" }] },
     { name: "rowid_cased", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "RowId", type: "int4" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
@@ -349,7 +360,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "late_n"], ["public", "late_p"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -2271,7 +2282,7 @@ test("a top N over joined tables chooses its rows by row number and reads the co
 
 // ISSUE 105, the same preview with no ORDER BY: which rows a LIMIT keeps is defined by no one, so what is held is what
 // is defined: how many, each a row of the whole join, none more often than the join holds it, and a page of one list
-test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number, and they are rows of the join", async () => {
+test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number, sorted where the join is proved bounded, and they are rows of the join", async () => {
   const c = await client();
   const one = (v: unknown): unknown => typeof v === "string" ? v.replaceAll('": ', '":') : v;
   const key = (r: unknown[]): string => JSON.stringify(r.map(one));
@@ -2295,28 +2306,48 @@ test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number
     return left;
   };
   const JOINS = "FROM late l JOIN late_c c ON c.id = l.c";
-  const held = async (list: string, from: string, tail: string, values?: unknown[]): Promise<void> => {
+  /** the statement's rows held, and its form: sorted by row number where the proof holds, else row numbers with no sort */
+  const held = async (list: string, from: string, tail: string, values?: unknown[], unbounded = false): Promise<void> => {
     const sql = `SELECT ${list} ${from} ${tail}`;
     const [got, limited, whole] = [await answer(c, sql, values), await postgres(sql, values), await postgres(`SELECT ${list} ${from}`)];
     assert.deepEqual(got.fields, limited.fields, sql);
     assert.equal(got.rows.length, limited.rows.length, sql);
     within(got.rows, whole.rows, sql);
-    assert.match(await sent(sql, values), /rowid AS __mason_r1.* ORDER BY \w+\.rowid.*\) AS __mason_late LEFT JOIN .*ORDER BY __mason_late\.__mason_r1/, sql);
+    const written = await sent(sql, values);
+    if (unbounded) assert.match(written, /rowid AS __mason_r1(?!.* ORDER BY ).*\) AS __mason_late LEFT JOIN /, sql);
+    else assert.match(written, /rowid AS __mason_r1.* ORDER BY \w+\.rowid.*\) AS __mason_late LEFT JOIN .*ORDER BY __mason_late\.__mason_r1/, sql);
   };
+  const unsorted = (list: string, from: string, tail: string, values?: unknown[]): Promise<void> => held(list, from, tail, values, true);
   try {
     await held("l.*, c.*", JOINS, "LIMIT 7 OFFSET 0");
-    await held("l.id, l.j, c.name", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 40", "LIMIT 2000");
+    await unsorted("l.id, l.j, c.name", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 40", "LIMIT 2000"); // a key equated with an expression proves nothing
     await held("l.id, c.id AS c, c.name", "FROM late l RIGHT JOIN late_c c ON c.id = l.c AND l.id < 20", "LIMIT 60");
-    await held("l.id, c.id AS c, c.name", "FROM late l FULL JOIN late_c c ON c.id = l.c + 40 AND l.id < 20", "LIMIT 2000 OFFSET 1990");
+    await unsorted("l.id, c.id AS c, c.name", "FROM late l FULL JOIN late_c c ON c.id = l.c + 40 AND l.id < 20", "LIMIT 2000 OFFSET 1990");
     await held("l.id, c.name", "FROM late l, late_c c WHERE c.id = l.c", "LIMIT 3");
-    await held("l.id, c.name", "FROM late l, late_c c", "LIMIT 5 OFFSET 7"); // every pair
-    await held("l.id, y.id AS y, y.c", "FROM late l JOIN late y ON y.c = l.c", "LIMIT 9"); // a self-join that multiplies
+    await unsorted("l.id, c.name", "FROM late l, late_c c", "LIMIT 5 OFFSET 7"); // every pair
+    await unsorted("l.id, y.id AS y, y.c", "FROM late l JOIN late y ON y.c = l.c", "LIMIT 9"); // a self-join that multiplies
+    // EACH SIDE OF THE FAN-OUT GUARD (src/duck/distinct-key.ts fanOutBounded). Proved: the key on either side, and whole
+    await held("c.name, l.id", "FROM late_c c JOIN late l ON l.c = c.id", "LIMIT 9");
+    await held("l.id, c.name", "FROM late l RIGHT JOIN late_c c ON c.id = l.c", "LIMIT 9");
+    await held("x.note, p.note AS n", "FROM late_p x JOIN late_p p ON p.c = x.c AND p.line = x.line", "LIMIT 9");
+    await held("l.id, c.name, m.id AS m", "FROM late l JOIN late_c c ON c.id = l.c JOIN late m ON m.id = l.k", "LIMIT 9"); // a star
+    // not proved: many to many under each join kind, a composite key in part, no key at all, an OR, a chasm
+    for (const kind of ["JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"]) await unsorted("l.id, y.id AS y", `FROM late l ${kind} late y ON y.c = l.c`, "LIMIT 40 OFFSET 5");
+    await unsorted("l.id, p.note", "FROM late l JOIN late_p p ON p.c = l.c", "LIMIT 9");
+    await unsorted("l.id, n.id AS n", "FROM late l JOIN late_n n ON n.id = l.c", "LIMIT 9");
+    await unsorted("l.id, c.name", "FROM late l JOIN late_c c ON c.id = l.c OR c.id = l.k", "LIMIT 9");
+    await unsorted("c.name, a.id, b.id AS b", "FROM late_c c JOIN late a ON a.c = c.id JOIN late b ON b.c = c.id", "LIMIT 9");
+    await unsorted("a.j, b.j AS k, c.name", "FROM late_c c LEFT JOIN late a ON a.c = c.id LEFT JOIN late b ON b.c = c.id", "LIMIT 9 OFFSET 3"); // wide columns read after the limit
+    await unsorted("*", "FROM late l JOIN late y ON y.c = l.c", "LIMIT 3");
+    await unsorted("l.id, y.j", "FROM late l JOIN late y ON y.c = l.c", "LIMIT $1 OFFSET $2", [3, 1]);
+    // two queries alike, one proved and one not: not proved, whichever this SELECT is
+    assert.doesNotMatch(await sent("SELECT * FROM (SELECT l.id FROM late l JOIN late_c c ON c.id = l.c LIMIT 3) s, (SELECT l.id AS i FROM late l JOIN late_c c ON c.name = l.j ->> 'n' LIMIT 3) t LIMIT 2"), /ORDER BY \w+\.rowid/);
     await held("c.name", JOINS, "LIMIT 2000"); // a row number repeated, one table read
     await held("l.id, c.name", JOINS, "LIMIT 0");
     await held("l.id, c.name", JOINS, "LIMIT 3 OFFSET 100000");
     await held("l.id, c.name", `${JOINS} WHERE c.name = 'c7'`, "LIMIT 3");
     await held("upper(c.name) AS u, l.j ->> 'n' AS n", JOINS, "LIMIT 3");
-    await held("*", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000", "LIMIT 3");
+    await unsorted("*", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000", "LIMIT 3");
     await held("l.id, c.name", JOINS, "FETCH FIRST 2 ROWS ONLY");
     await held("l.id, c.name", JOINS, "LIMIT $1 OFFSET $2", [3, 1]);
     // a prepared statement, run again with another LIMIT and after a SET

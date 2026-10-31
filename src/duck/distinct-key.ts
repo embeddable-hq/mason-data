@@ -29,6 +29,10 @@
  * two rows hold one value costs an answer. The oracle holds every shape (tests/integration/oracle/bi-shapes.ts, the
  * type matrix's `keyed`), the plan fixture the plans (tests/duck-plans.test.ts), and tests/duck-distinct-key.test.ts
  * the decision.
+ *
+ * THE SAME KEYS BOUND A JOIN'S ROWS (`fanOutBounded`, for src/duck/late.ts): a join that equates a whole primary key of
+ * one side meets each row of the other side at most once, so its rows are at most those of its two sides, and a whole
+ * FROM of such joins is linear in its tables. Here a composite key counts, every column of it equated.
  */
 import type { TreeNode, TreeValue } from "./pgtree.ts";
 
@@ -46,6 +50,8 @@ export interface UniqueColumn {
   equalities: ReadonlySet<number>;
 }
 export type UniqueColumns = ReadonlyMap<string, UniqueColumn>;
+/** a table's whole primary key as the catalog Postgres declares it, of any number of columns: by relid, then attno */
+export type PrimaryKeys = ReadonlyMap<number, ReadonlyMap<number, UniqueColumn>>;
 export const columnKey = (relid: number, attno: number): string => `${relid}.${attno}`;
 
 const isNode = (v: TreeValue | undefined): v is TreeNode => v !== null && v !== undefined && typeof v === "object" && !Array.isArray(v);
@@ -75,23 +81,25 @@ export function distinctCountTables(tree: TreeValue): number[] {
 }
 
 /**
- * The catalog Postgres's single-column PRIMARY KEYS of `relids` (never another unique index: the module's doc), with
- * each one's collation and the equality operators of its btree family. A primary key is valid, unique and over a plain
- * column; the conditions are written out all the same, so the rule is this query's and not a reader's memory.
+ * The catalog Postgres's PRIMARY KEYS of `relids` (never another unique index: the module's doc), a row per column of
+ * the key, with its collation, the equality operators of its btree family and how many columns the key has. A primary
+ * key is valid, unique and over plain columns; the conditions are written out all the same, so the rule is this
+ * query's and not a reader's memory.
  */
 export function uniqueColumnsSql(relids: readonly number[]): string {
-  return "SELECT i.indrelid::text, i.indkey[0]::text, i.indcollation[0]::text, coalesce(string_agg(o.amopopr::text, ' ' ORDER BY o.amopopr), '') " +
-    "FROM pg_index i JOIN pg_opclass c ON c.oid = i.indclass[0] JOIN pg_am m ON m.oid = c.opcmethod AND m.amname = 'btree' " +
+  return "SELECT i.indrelid::text, i.indkey[k.at]::text, i.indcollation[k.at]::text, coalesce(string_agg(o.amopopr::text, ' ' ORDER BY o.amopopr), ''), i.indnkeyatts::text " +
+    "FROM pg_index i CROSS JOIN LATERAL generate_series(0, i.indnkeyatts - 1) AS k(at) JOIN pg_opclass c ON c.oid = i.indclass[k.at] JOIN pg_am m ON m.oid = c.opcmethod AND m.amname = 'btree' " +
     "LEFT JOIN pg_amop o ON o.amopfamily = c.opcfamily AND o.amopmethod = c.opcmethod AND o.amopstrategy = 3 " +
-    `WHERE i.indrelid IN (${relids.map((r) => String(Math.trunc(r))).join(", ")}) AND i.indisprimary AND i.indisunique AND i.indisvalid AND i.indnatts = 1 AND i.indnkeyatts = 1 ` +
-    "AND i.indkey[0] > 0 AND i.indpred IS NULL AND i.indexprs IS NULL GROUP BY 1, 2, 3";
+    `WHERE i.indrelid IN (${relids.map((r) => String(Math.trunc(r))).join(", ")}) AND i.indisprimary AND i.indisunique AND i.indisvalid AND i.indnatts = i.indnkeyatts ` +
+    "AND i.indkey[k.at] > 0 AND i.indpred IS NULL AND i.indexprs IS NULL GROUP BY 1, 2, 3, 5";
 }
 
-/** `uniqueColumnsSql`'s rows, as the decision reads them (a table has one primary key; the merge is for a second row
- *  of one column, which no catalog writes) */
+/** `uniqueColumnsSql`'s rows of a key of one column, as the decision reads them (a table has one primary key; the merge
+ *  is for a second row of one column, which no catalog writes) */
 export function uniqueColumnsOf(rows: ReadonlyArray<ReadonlyArray<string | null>>): Map<string, UniqueColumn> {
   const out = new Map<string, UniqueColumn>();
-  for (const [relid, attno, collation, ops] of rows) {
+  for (const [relid, attno, collation, ops, columns] of rows) {
+    if (columns !== "1") continue;
     const key = columnKey(Number(relid), Number(attno));
     const equalities = new Set((ops ?? "").split(" ").filter((x) => x !== "").map(Number));
     const had = out.get(key);
@@ -101,6 +109,18 @@ export function uniqueColumnsOf(rows: ReadonlyArray<ReadonlyArray<string | null>
     else if (had.collation === Number(collation ?? 0)) out.set(key, { collation: had.collation, equalities: new Set([...had.equalities, ...equalities]) });
   }
   return out;
+}
+
+/** `uniqueColumnsSql`'s rows, each table's whole key: a key not read whole is no key */
+export function primaryKeysOf(rows: ReadonlyArray<ReadonlyArray<string | null>>): PrimaryKeys {
+  const out = new Map<number, Map<number, UniqueColumn>>(), whole = new Map<number, number>();
+  for (const [relid, attno, collation, ops, columns] of rows) {
+    const key = out.get(Number(relid)) ?? new Map<number, UniqueColumn>();
+    key.set(Number(attno), { collation: Number(collation ?? 0), equalities: new Set((ops ?? "").split(" ").filter((x) => x !== "").map(Number)) });
+    out.set(Number(relid), key);
+    whole.set(Number(relid), Number(columns));
+  }
+  return new Map([...out].filter(([relid, key]) => key.size === whole.get(relid)));
 }
 
 /** a VAR of this query's own FROM (varlevelsup 0), bare or under a binary-compatible relabel (a varchar read as text) */
@@ -141,23 +161,29 @@ function baseTable(rtable: readonly TreeValue[], ref: TreeValue | undefined): { 
 }
 
 /**
+ * The column of the table at `rtindex` a conjunct equates with a column of `side`, both bare, by the operator and under
+ * the collation `key` says are that column's own; null where it does not.
+ */
+function equated(c: TreeNode, side: ReadonlySet<number>, rtindex: number, key: (attno: number) => UniqueColumn | undefined): number | null {
+  if (c._node !== "OPEXPR" || list(c.args).length !== 2) return null;
+  const [a, b] = list(c.args).map(ownVar);
+  if (a == null || b == null) return null;
+  for (const [mine, theirs] of [[a, b], [b, a]] as const) {
+    if (num(theirs.varno) !== rtindex || !side.has(num(mine.varno) ?? -1)) continue;
+    const attno = num(theirs.varattno)!, u = key(attno);
+    const collation = num(c.inputcollid) ?? 0;
+    if (u !== undefined && u.equalities.has(num(c.opno) ?? -1) && (collation === 0 || collation === u.collation)) return attno;
+  }
+  return null;
+}
+
+/**
  * Whether a join's condition matches each row of its `side` with at most ONE row of `other`, a base table: a conjunct
  * that is an equality, by the operator of `other`'s single-column primary key and under its collation, of that
  * column (bare) with a column of `side` (bare).
  */
 function atMostOne(quals: TreeValue | undefined, side: ReadonlySet<number>, other: { rtindex: number; relid: number }, unique: UniqueColumns): boolean {
-  return conjuncts(quals).some((c) => {
-    if (c._node !== "OPEXPR" || list(c.args).length !== 2) return false;
-    const [a, b] = list(c.args).map(ownVar);
-    if (a == null || b == null) return false;
-    for (const [mine, theirs] of [[a, b], [b, a]] as const) {
-      if (num(theirs.varno) !== other.rtindex || !side.has(num(mine.varno) ?? -1)) continue;
-      const u = unique.get(columnKey(other.relid, num(theirs.varattno)!));
-      const collation = num(c.inputcollid) ?? 0;
-      if (u !== undefined && u.equalities.has(num(c.opno) ?? -1) && (collation === 0 || collation === u.collation)) return true;
-    }
-    return false;
-  });
+  return conjuncts(quals).some((c) => equated(c, side, other.rtindex, (attno) => unique.get(columnKey(other.relid, attno))) !== null);
 }
 
 /**
@@ -181,6 +207,70 @@ export function notMultiplied(query: TreeNode, rtindex: number, unique: UniqueCo
     return other !== null && atMostOne(n.quals, indexesOf(side), other, unique) && down(side);
   };
   return down(from[0]);
+}
+
+/** a query's FROM so far: the rtindexes it holds, and the tables (rtindex to relid) each of whose rows it holds at most once */
+interface Side { indexes: ReadonlySet<number>; once: ReadonlyMap<number, number> }
+
+/**
+ * THE FAN-OUT PROOF: whether every join of `query` equates a whole primary key of a table whose rows its side holds at
+ * most once, so the FROM's rows are bounded by the sum of its tables'. A key must be unique IN ITS SIDE, not merely in
+ * its table: `a JOIN b ON a.id = b.a_id JOIN c ON a.id = c.a_id` equates a's key twice, and an `a` of a thousand b's and
+ * a thousand c's is a million rows, because the first join repeats `a`. So a join passes on, as held at most once, only
+ * the tables of a side whose every row it matches at most once.
+ *
+ * Each key column in an equality, by its btree family's operator and under its collation, with a bare column of the
+ * other side (`equated`); conjuncts of the join's top-level AND only, so an OR proves nothing and any other conjunct
+ * only filters. INNER, LEFT, RIGHT and FULL alike: a side's unmatched row is one row, and its NULL-extended key
+ * equals nothing. A comma's items are inner joins, left to right, on the WHERE's conjuncts. Everything else (a cross
+ * join, a key in part, a partial or UNIQUE index, no key, a key equated with an expression or a constant, a FROM item
+ * not a base table, a JOIN's condition written in the WHERE) proves nothing.
+ *
+ * What it decides is what a LIMIT with no ORDER BY costs and whether its pages are stable, never the rows' values, so
+ * a key stale in the catalog (the source's as of the start) costs time, not an answer.
+ */
+export function fanOutBounded(query: TreeNode, keys: PrimaryKeys): boolean {
+  const jt = query.jointree;
+  if (!isNode(jt)) return false;
+  const rtable = list(query.rtable);
+  const joined = (left: Side | null, right: Side | null, quals: readonly TreeNode[], indexes: ReadonlySet<number>): Side | null => {
+    if (left === null || right === null) return null;
+    const matchedOnce = (s: Side, by: Side): boolean => [...s.once].some(([rtindex, relid]) => {
+      const key = keys.get(relid);
+      if (key === undefined) return false;
+      const met = new Set(quals.map((c) => equated(c, by.indexes, rtindex, (attno) => key.get(attno))));
+      return [...key.keys()].every((attno) => met.has(attno));
+    });
+    const leftMatchesOne = matchedOnce(right, left), rightMatchesOne = matchedOnce(left, right);
+    if (!leftMatchesOne && !rightMatchesOne) return null;
+    return { indexes, once: new Map([...(leftMatchesOne ? left.once : []), ...(rightMatchesOne ? right.once : [])]) };
+  };
+  const side = (n: TreeValue | undefined): Side | null => {
+    if (isNode(n) && n._node === "JOINEXPR" && JOINS.has(num(n.jointype) ?? -1) && isNode(n.larg) && isNode(n.rarg)) return joined(side(n.larg), side(n.rarg), conjuncts(n.quals), indexesOf(n));
+    const t = baseTable(rtable, n);
+    return t === null ? null : { indexes: new Set([t.rtindex]), once: new Map([[t.rtindex, t.relid]]) };
+  };
+  const where = conjuncts(jt.quals);
+  const items = list(jt.fromlist).map(side);
+  if (items.length === 0) return false;
+  return items.reduce((l, r) => joined(l, r, where, new Set([...l?.indexes ?? [], ...r?.indexes ?? []]))) !== null;
+}
+
+/** The base tables `fanOutBounded` may be asked about: those of a query with a LIMIT, no sort and at least two of them
+ *  (none: the plan asks the catalog nothing). */
+export function fanOutTables(tree: TreeValue): number[] {
+  const relids = new Set<number>();
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (!isNode(v)) return;
+    if (v._node === "QUERY" && isNode(v.limitCount) && list(v.sortClause).length === 0) {
+      const tables = list(v.rtable).flatMap((e) => isNode(e) && num(e.rtekind) === RTE_RELATION ? [num(e.relid) ?? 0] : []).filter((r) => r > 0);
+      if (tables.length >= 2) for (const r of tables) relids.add(r);
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return [...relids].sort((a, b) => a - b);
 }
 
 /** Whether this AGGREF of `query` is a count(DISTINCT x) whose DISTINCT changes nothing (the module's doc). */

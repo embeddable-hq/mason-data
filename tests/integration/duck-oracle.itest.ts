@@ -112,7 +112,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "top_a", "top_b", "top_c", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
+const COPIED = [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -280,7 +280,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   if ("failure" in conn) throw new Error(`connect: ${JSON.stringify(conn.failure)}`);
   const facts = await readSourceFacts(conn.pg);
   conn.pg.close();
-  const added = facts.tables.filter((t) => COPIED.includes(t.table) && t.schema === "public");
+  // top_n has no primary key: it is copied as a sources file's `key:` would copy it, and the catalog declares none
+  const added = facts.tables.filter((t) => COPIED.includes(t.table) && t.schema === "public").map((t) => t.table === "top_n" ? { ...t, key: ["a", "b"], primaryKey: [] } : t);
   assert.equal(added.length, COPIED.length, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
   // the row filters' own shop (oracle/row-filters.ts), copied beside the rest and read by `rowFilterCases` alone
   const shop = facts.tables.filter((t) => t.schema === "shop");

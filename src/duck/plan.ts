@@ -17,7 +17,8 @@ import { pgTyplen } from "./types.ts";
 import type { CopyState } from "./sync.ts";
 import { datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
-import { distinctCountTables, distinctKeyCounts, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
+import { distinctCountTables, distinctKeyCounts, fanOutTables, primaryKeysOf, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
+import type { PrimaryKeys } from "./distinct-key.ts";
 import { enforceGrants, type RoleGrants } from "./grants.ts";
 import { attributeRefused, expandRowFilters, wallStatistics, wallSwitch, type Walls } from "./row-filter.ts";
 import type { PgAnalysis } from "./analyze.ts";
@@ -46,6 +47,13 @@ async function distinctKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>,
   const relids = distinctCountTables(tree);
   if (relids.length === 0) return new Set();
   return distinctKeyCounts(tree, uniqueColumnsOf(await catalogRows(catalog, uniqueColumnsSql(relids))));
+}
+
+/** the primary keys that may prove a LIMIT with no ORDER BY's joins bounded (src/duck/late.ts), read only for a statement
+ *  that has one */
+async function joinKeys(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, tree: PgAnalysis["tree"]): Promise<PrimaryKeys> {
+  const relids = fanOutTables(tree);
+  return relids.length === 0 ? new Map() : primaryKeysOf(await catalogRows(catalog, uniqueColumnsSql(relids)));
 }
 
 /**
@@ -334,7 +342,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the late select list, which then reads the columns this leaves
   if (kept !== null) hideKept(tree, { visible: kept.visible(), searchPath: searchSchemas(searchPath) });
   // a sorted, limited select list is computed over the rows the limit keeps (src/duck/late.ts)
-  tree = selectListAfterLimit(tree as Record<string, unknown>, analysis.tree) ?? tree;
+  tree = selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, await joinKeys(catalog, analysis.tree)) ?? tree;
   // ONLY WHAT THE ORACLE VERIFIED: after the rewrite, so a construct the rewrite refuses by name (with its own way out)
   // says so first
   const keys = [...resolved].sort();

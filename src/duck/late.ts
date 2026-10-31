@@ -38,16 +38,26 @@
  * reads each row number once. The rows and the order among different keys are the inner query's; rows of EQUAL keys
  * are in no defined order, here as on Postgres.
  *
- * A LIMIT WITH NO ORDER BY is written the same way, its keys the row numbers of the tables read (a statement with no
- * limit in fact, OFFSET alone or LIMIT ALL, stays as it was: every row comes back, and reading each again saves
- * nothing). It is here for the join's memory, where the last table is on the hash join's build side, and for its pages:
- * which rows such a statement answers is defined by no one, but DuckDB's parallel join hands the same statement's rows
- * back in another order each run, and a LIMIT over them overlaps its neighbouring pages (about a third of the rows of
- * a join paged to its end came back twice; one thread, none; a Postgres of one plan, in practice none). The top N on row
- * numbers is a full join where a streaming LIMIT stops early, so its cost grows with the join: over 50 M rows, a narrow
- * `dim LEFT JOIN big LIMIT 100` takes 134 ms against 1 ms, 1332 ms against 10 ms at OFFSET 2,000,000 (docs/DESIGN.md
- * "A top N over joined tables"). That is accepted for stable pages: unsorted row numbers cost about what the old plan
- * did, and overlap. Its order is total over what is read: two rows of equal row numbers are the same output.
+ * A LIMIT WITH NO ORDER BY is written the same way (a statement with no limit in fact, OFFSET alone or LIMIT ALL, stays
+ * as it was: every row comes back, and reading each again saves nothing), for the join's memory, where the last table is
+ * on the hash join's build side. Its keys are the row numbers of the tables read ONLY WHERE THE JOIN'S ROWS ARE PROVED
+ * BOUNDED (`fanOutBounded`, src/duck/distinct-key.ts: every join equates a whole primary key of a table its side holds
+ * once, from the analysis and the catalog's pg_index). That sort is for pages: which rows such a statement answers is
+ * defined by no one, but DuckDB's parallel join hands the same statement's rows back in another order each run, and a
+ * LIMIT over them overlaps its neighbouring pages (about a third of the rows of a join paged to its end came back twice;
+ * one thread, none; a Postgres of one plan, in practice none). The top N on row numbers is a full join where a streaming
+ * LIMIT stops early, so its cost grows with the join: over 50 M rows, a narrow `dim LEFT JOIN big LIMIT 100` takes 134 ms
+ * against 1 ms, 1332 ms against 10 ms at OFFSET 2,000,000, and that is accepted for stable pages. Its order is total
+ * over what is read: two rows of equal row numbers are the same output.
+ *
+ * WHAT IS GIVEN UP WHERE THE PROOF FAILS: the sort. A join the proof cannot bound may multiply (a self-join on a column
+ * of few values, 100 billion joined rows: 74 s sorted, milliseconds not; docs/DESIGN.md "A top N over joined tables"), so
+ * its rows are chosen on row numbers with no sort at all, inside or out: wide columns still stay out of the join, and
+ * the statement still stops early. ITS PAGES CAN OVERLAP AGAIN, as they could before PR 118: a many-to-many join, a cross
+ * join, a key in part, a table with no primary key and a join on an expression all pay this, and a tool that pages one
+ * can see rows twice and others never. The rows of each answer are still rows of the join, each as often as the join
+ * holds it: the proof decides the cost and the pages, never an answer, so the safe side of a proof that fails is no sort.
+ *
  * `afterLimit` still needs a sort: the keys put its rows back, and a list of no key has none.
  *
  * Measured over a 4 M-row join with wide JSON in the last table (a 2 GB
@@ -59,6 +69,8 @@
  * of its visible columns, src/duck/kept-route.ts, has no row numbers); a whole row is not listed, and stays as it was.
  */
 import type { TreeNode, TreeValue } from "./pgtree.ts";
+import { fanOutBounded } from "./distinct-key.ts";
+import type { PrimaryKeys } from "./distinct-key.ts";
 
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
@@ -136,11 +148,12 @@ function overLate(n: unknown, columns: Map<string, string>): unknown {
 
 /**
  * The statement with every sorted, limited SELECT written with its select list computed after its limit (see above),
- * or null where none is. `tree` is the rewrite's DuckDB tree, `analysis` Postgres's of the original.
+ * or null where none is. `tree` is the rewrite's DuckDB tree, `analysis` Postgres's of the original, `keys` the catalog's
+ * primary keys of the tables `fanOutTables` names.
  */
-export function selectListAfterLimit(tree: AstNode, analysis: TreeValue): AstNode | null {
+export function selectListAfterLimit(tree: AstNode, analysis: TreeValue, keys: PrimaryKeys): AstNode | null {
   if (!rowWiseStatement(analysis)) return null;
-  const relations = relationsOf(analysis);
+  const relations = relationsOf(analysis, keys);
   let changed = false;
   // bottom up: a SELECT's derived tables and WITH queries first, then the SELECT (never what it was written as)
   const visit = (n: unknown): unknown => {
@@ -257,9 +270,12 @@ const RTE_RELATION = "0", RTE_JOIN = "2";
 /** Postgres's first OID for an object not of its own (FirstNormalObjectId): below it, a catalog table, no copy */
 const FIRST_USER_OID = 16384;
 
-/** what each query of the analysed statement reads, FROM item by FROM item (a join itself is no item) */
-function relationsOf(analysis: TreeValue): Relation[][] {
-  const out: Relation[][] = [];
+/** a query of the analysed statement: what it reads, FROM item by FROM item (a join itself is no item), and whether its
+ *  rows are proved bounded by its tables' */
+interface Query { items: Relation[]; bounded: boolean }
+
+function relationsOf(analysis: TreeValue, keys: PrimaryKeys): Query[] {
+  const out: Query[] = [];
   const relation = (e: TreeNode): Relation => {
     if (e.rtekind !== RTE_RELATION || e.relkind !== "r" || Number(e.relid) < FIRST_USER_OID) return null;
     const ref = e.eref as TreeNode | null;
@@ -270,7 +286,8 @@ function relationsOf(analysis: TreeValue): Relation[][] {
     if (Array.isArray(v)) { for (const x of v) visit(x); return; }
     if (v === null || typeof v !== "object") return;
     if (v._node === "QUERY" && Array.isArray(v.rtable)) {
-      out.push(v.rtable.filter((e): e is TreeNode => typeof e === "object" && e !== null && !Array.isArray(e) && e.rtekind !== RTE_JOIN).map(relation));
+      const items = v.rtable.filter((e): e is TreeNode => typeof e === "object" && e !== null && !Array.isArray(e) && e.rtekind !== RTE_JOIN).map(relation);
+      out.push({ items, bounded: fanOutBounded(v, keys) });
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };
@@ -345,7 +362,7 @@ function writtenOut(targets: AstNode[], tables: ReadonlyArray<{ alias: string; c
 }
 
 /** one SELECT over joined tables written with its rows chosen by row number (see above), or null where it is not so shaped */
-function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
+function joinRows(select: AstNode, relations: Query[]): AstNode | null {
   const s = bodyOf(select);
   const shape = limited(s);
   if (shape === null) return null;
@@ -357,9 +374,9 @@ function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
   const aliases = from.map(aliasOfTable);
   if (new Set(aliases).size !== aliases.length) return null;
   // the query of the analysis this SELECT is: its FROM items, in order. Two queries alike must agree, or which is unsure
-  const named = relations.filter((r) => r.length === aliases.length && r.every((t, i) => t?.alias === aliases[i]));
-  const tables = named[0] as Array<{ alias: string; columns: string[] }> | undefined;
-  if (tables === undefined || named.some((r) => JSON.stringify(r) !== JSON.stringify(tables))) return null;
+  const named = relations.filter((q) => q.items.length === aliases.length && q.items.every((t, i) => t?.alias === aliases[i]));
+  const tables = named[0]?.items as Array<{ alias: string; columns: string[] }> | undefined;
+  if (tables === undefined || named.some((q) => JSON.stringify(q.items) !== JSON.stringify(tables))) return null;
   // DuckDB binds a name without regard to case: "RowId" hides the row number as rowid does
   if (tables.some((t) => t.columns.some((c) => c === "" || c.toLowerCase() === "rowid"))) return null;
   const written = writtenOut(targets, tables);
@@ -379,12 +396,15 @@ function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
     return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, bare(v)]));
   };
   const fetched = from.filter((t) => written.read.has(aliasOfTable(t)));
-  // no sort of its own: the row numbers are the order, so a page of the statement is one page of one list
+  // no sort of its own: the row numbers are the order where the join is proved bounded, so a page of the statement is
+  // one page of one list; otherwise none, or a join that multiplies is run whole. Two queries alike must both be proved
+  const pagedInOrder = sorts.length === 0 && named.every((q) => q.bounded);
   const order = (node: AstNode): AstNode => ({ SortBy: { node, sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } });
   const inner: Body = { ...s, fromClause: bare(s.fromClause), targetList: [
     ...fetched.map((t, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: rowNumber(aliasOfTable(t)) } })),
     ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
-  ], sortClause: sorts.length > 0 ? sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: keys[i] } })) : fetched.map((t) => order(rowNumber(aliasOfTable(t)))) };
+  ],
+  ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: keys[i] } })) } : pagedInOrder ? { sortClause: fetched.map((t) => order(rowNumber(aliasOfTable(t)))) } : {}) };
   let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
   fetched.forEach((t, i) => {
     joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg: { RangeVar: own(t) }, quals: { A_Expr: {
@@ -393,8 +413,8 @@ function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
   return { SelectStmt: {
     targetList: written.list,
     fromClause: [joined],
-    sortClause: sorts.length > 0 ? sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } }))
-      : fetched.map((_t, i) => order(ref(LATE, `__mason_r${i + 1}`))),
+    ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })) }
+      : pagedInOrder ? { sortClause: fetched.map((_t, i) => order(ref(LATE, `__mason_r${i + 1}`))) } : {}),
     limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
   } };
 }
