@@ -22,6 +22,7 @@ import { jsonbText } from "../src/duck/jsonb.ts";
 const keyModule = (): Promise<typeof import("../src/duck/jsonb-order.ts")> => import("../src/duck/jsonb-order.ts");
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { LibcOrder } from "../src/duck/libc-order.ts";
+import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 
 const KEY = "k".repeat(48);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-jsonb-order-"));
@@ -295,13 +296,5 @@ test("under ICU and a libc locale a jsonb's strings sort by the collation's key 
 /** a libc order small enough to write by hand, as tests/duck-libc-order.test.ts writes one: letters with case and accents
  *  at ICU's levels, `$` with a first-level weight below the letters, `@`, `-` and the space with none */
 function smallLibcOrder(): LibcOrder {
-  const MAX = 0x110000;
-  const l1 = new Uint32Array(MAX), l4 = new Uint32Array(MAX), uncovered = new Uint8Array(MAX).fill(1);
-  const cp = (c: string): number => c.codePointAt(0)!;
-  const letters = "abcdefghijklmnopqrstuvwxyz".split("").map((x) => x + x.toUpperCase() + (x === "e" ? "é" : x === "u" ? "ü" : ""));
-  const first = ["$", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...letters];
-  const ignored = [" ", "-", "@"];
-  ignored.forEach((cls, i) => { for (const c of cls) { l4[cp(c)] = 2 * (i + 1); uncovered[cp(c)] = 0; } });
-  first.forEach((cls, i) => { for (const c of cls) { l1[cp(c)] = i + 1; uncovered[cp(c)] = 0; l4[cp(c)] = 2 * ignored.length + 1; } });
-  return { collate: "en_US.utf8", version: "2.41", l1, l4, uncovered, expansions: new Map() };
+  return handLibcOrder(["$", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é", u: "ü" })], [" ", "-", "@"]);
 }

@@ -348,7 +348,7 @@ oracle. Those that changed a design:
 
 | found | decision |
 |---|---|
-| text under glibc `en_US.utf8` sorted as ICU (Hangul after Latin, `$` after `@`) | glibc's order MEASURED from the database at the first start (~14 s; 13 s one query sorting 159,865 code points), kept in the copy (`src/duck/libc-order.ts`); an unplaceable character refused (`libc-uncovered`); 2 in 10,000 random strings still differ |
+| text under glibc `en_US.utf8` sorted as ICU (Hangul after Latin, `$` after `@`) | glibc's order MEASURED from the database at the first start (~14 s; 13 s one query sorting 159,865 code points), kept in the copy (`src/duck/libc-order.ts`); its four levels read since issue 128, see "A libc order, read level by level"; what cannot be read refused (`libc-uncovered`) |
 | a foreign key to a UNIQUE index not listed (BIRD's 57 of 87): no join drawn | the catalog creates the source's unique indexes, enums, NOT NULL, defaults and views (`src/duck/views.ts`) |
 | `sum(CASE WHEN … THEN a ELSE 0.0 END)` read 5.0 for 5 (Metabase's "sum where") | a sum's scale is the most decimals a value summed has |
 | a preview (`ORDER BY id LIMIT 2000`, a computed list) 466 ms over 60 k rows: DuckDB computes the list below its Top N | the list computed outside the sorted, limited subquery (`src/duck/late.ts`): 15 ms (Postgres through its index 2 ms) |
@@ -1865,6 +1865,47 @@ read as a proof, so an interrupted run now has no verdict.
 notification; one test had deadlocked, so the job never exited and nothing came. It sat for 2h07 with 0.43 s of CPU,
 shown as completed. Across that day's agents, about 31 of 115 agent-hours were idle until a notification or message
 arrived and about 11 went on sleep loops, against about 4 running the oracle.
+## A libc order, read level by level
+
+Issue 128: under en_US.utf8 one value holding U+FE0F (`❤️`) or a Thai vowel refused a whole column's sort, group and
+dropdown, and the refusal quoted the row. The order until then was glibc's first and last levels, read from the source,
+with ICU's accent and case levels between them over the letters, and anything those could not say was refused.
+
+A real `strcoll` was not an option: the source's costs a round trip per value (and sends it a row), and the process has
+no libc call, nor this table: its glibc, if it runs on one, is another version. So the levels are read too.
+`iso14651_t1_common` and `strcoll_l` were read to learn what to read, never shipped: a simulator of them written from
+that table matched Postgres 18 / glibc 2.41 on every one of 20,000 random strings of Latin and marks, once it had the
+two things no document says. `<SPECIAL>` (digits, symbols, punctuation, marks) is `backward` at the second level, and
+`get_next_seq` decrements `backw` twice, so a run of two or more closed by a forward element skips the element before
+its last: that is why `1-X < 1x`, which the registry had called a difference (`libc-symbol-punctuation`, gone). And a
+code point the table does not list is one element per byte of its UTF-8 (`findidx` takes the lead byte), so `U+0378`,
+`U+E000` and `U+F0000` differ at the last level by their length.
+
+What the source is asked, by comparisons alone, so another table answers for itself, is in the header of
+`src/duck/libc-order.ts`. A spelling is proposed by Unicode's data and kept only when the source says so; a character
+whose neighbours or whose random pairs the key orders otherwise than the source is not covered, the later of the two,
+the rarer: a table this does not follow refuses, never answers otherwise. On glibc 2.41, 98 characters stay refused:
+ligatures whose first-level weights no letter has (`㏩`, 10 and a CJK weight; Arabic presentation forms such as U+FBEC).
+
+Measured against that Postgres, 60,000 pairs of random strings a script, a pair mostly one edit apart, read through
+`libcKey`: Latin and marks, emoji with their selectors, skin tones and joiners, Thai, Lao, Arabic with its marks,
+unassigned and private use: no difference. Ligatures and compatibility forms in mixtures no column holds: 12. Greek
+with Cyrillic: 1. Indic scripts in one string with Kana and Hangul: 4. Reading it costs what it did and a little (the
+one sort, 45–55 s on the loaded test laptop, 13 s on the server; the other 190 queries, 3 s). A row costs one JavaScript
+call where it cost two and ICU's key (1.9 µs against 2.6 µs of JavaScript alone, a value of 20 characters; the key is 16 %
+longer, its accent and case levels counted so plain letters cost one token), so issue 127's hop count fell with it.
+
+One difference is left in those scripts, about one pair in 20,000 of random text: a mark skipped in a run (mark,
+punctuation, then a letter) leaves a letter of a form of its own (`ß`, `ð`, `ſ`) beside another letter's case at the
+third level, and case is read within a letter, so across letters it has no measure.
+
+Other glibc locales, 20,000 pairs a script, the same strings: de_DE, th_TH and cs_CZ differ as en_US does, in the
+mixtures above (cs_CZ's letter contraction `ch` is not proposed, so random strings rarely meet it and it is not held).
+sv_SE differs on 13 of 20,000 Latin pairs and tr_TR on 77, with 655 refused and the unlisted code points not covered:
+those two tailorings are not followed yet, which is a known limit of this read, not a difference the registry lists.
+
+ICU had the same class in another place: U+FE0F is ignorable there, so `x` and `x` + U+FE0F tied, and a tie is two
+strings Postgres orders by their bytes. A sort under ICU now ends in the bytes, and `<`, GREATEST, min and max compare ICU's key and the bytes.
 
 ## Measurements
 

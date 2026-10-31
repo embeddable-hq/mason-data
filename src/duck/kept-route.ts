@@ -170,8 +170,8 @@ export interface ReadyPath { name: string; exact: boolean }
  */
 export function markedError(r: Omit<JsonRead, "source">, libc: boolean): { code: string; message: string } {
   if (isOrderRead(r) && libc) {
-    return { code: "0A000", message: "a jsonb compared or sorted here holds a string Mason cannot order as the database's collation does (a combining mark, a Thai or " +
-      "Lao vowel written before its consonant, a private-use or unassigned code point), in a row written since its stored keys were counted; asked again " +
+    return { code: "0A000", message: "a jsonb compared or sorted here holds a string Mason cannot order as the database's collation does, " +
+      "in a row written since its stored keys were counted; asked again " +
       "in a minute, the statement's own key answers or refuses it (Mason gap libc-uncovered)" };
   }
   return { code: "XX000", message: `a stored value of ${pathText(r)} could not be computed when its row was written (a Mason bug: report it, with mason logs); ` +

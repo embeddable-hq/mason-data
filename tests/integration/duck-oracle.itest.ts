@@ -240,7 +240,6 @@ const KNOWN: Decided[] = [
   { sql: /^SELECT \* FROM \(SELECT t\.id, t\.jb FROM docs t\) q LEFT JOIN jsonb_each\(CASE WHEN q\.id % 4 <> 1 AND .*\) d ON TRUE LIMIT 40 OFFSET 7$/, kind: "value", gap: "limit-lateral-argument", why: "an argument of two columns under a `*`: DuckDB plans the streamed UNNEST as a delimiter join, and the LIMIT keeps other rows (a step of its own would be a column the `*` reads)" },
   { sql: /^SELECT q\.id, v FROM docs q LEFT JOIN unnest\(ARRAY\(SELECT e FROM jsonb_array_elements_text\(.*\) e\)\) v ON TRUE LIMIT 50 OFFSET 7$/, kind: "value", gap: "limit-lateral-argument", why: "a subquery in the lateral's argument: DuckDB plans the streamed UNNEST as a delimiter join in every form, and the LIMIT keeps other rows" },
   { sql: /^SELECT q\.id, d\.key, row_number\(\) OVER (\(PARTITION BY q\.id\)|w) AS r/, kind: "value", gap: "window-partition-order", why: "row_number / lag / first_value over PARTITION BY with no ORDER BY: DuckDB's partitioning hands a partition's rows back in its own order, streamed lateral or not" },
-  { sql: /^SELECT s FROM coll WHERE id BETWEEN 50 AND 59 ORDER BY s$/, kind: "rows", gap: "libc-symbol-punctuation", why: "glibc's 1-X < 1x: punctuation after a digit outranks the case; Mason's 1x < 1-X" },
 ];
 
 let server: PgApiServer | null = null;

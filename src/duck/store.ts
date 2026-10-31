@@ -28,7 +28,7 @@ import type { CopyState } from "./sync.ts";
 import { VERIFIED } from "./verified.ts";
 import { registerFunctions, SESSION_VARIABLE, SETTINGS_VARIABLE } from "./functions.ts";
 import { duckCollation, type DuckCollation } from "./rewrite.ts";
-import { decodeLibcOrder, encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
+import { decodeLibcOrder, encodeLibcOrder, isCurrentLibcOrder, type LibcOrder } from "./libc-order.ts";
 import { dataRow } from "../api/postgres/protocol.ts";
 import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } from "./types.ts";
 import type { ExactColumn } from "./rewrite.ts";
@@ -263,13 +263,14 @@ export class DuckStore {
 
   /**
    * The source's order of text under a libc collation (src/duck/libc-order.ts), kept in the copy: the one recorded
-   * for this collation and version, else `read` from the source (a few seconds) and recorded. `read: true` when it was.
+   * for this collation and version, in this release's form, else `read` from the source (a few seconds) and recorded.
+   * `read: true` when it was.
    */
   async libcOrder(collate: string, version: string | null, read: () => Promise<LibcOrder>): Promise<{ order: LibcOrder; read: boolean }> {
     await this.writer.run(`CREATE SCHEMA IF NOT EXISTS ${MASON_SCHEMA}`);
     await this.writer.run(`CREATE TABLE IF NOT EXISTS ${MASON_SCHEMA}.libc_order (collation_name VARCHAR, collation_version VARCHAR, data VARCHAR)`);
     const kept = (await this.writer.runAndReadAll(`SELECT data FROM ${MASON_SCHEMA}.libc_order WHERE collation_name = $1 AND collation_version IS NOT DISTINCT FROM $2`, [collate, version])).getRowsJS();
-    if (kept.length > 0) return { order: decodeLibcOrder(String(kept[0]![0])), read: false };
+    if (kept.length > 0 && isCurrentLibcOrder(String(kept[0]![0]))) return { order: decodeLibcOrder(String(kept[0]![0])), read: false };
     const order = await read();
     // one order per collation: a version that moved replaces the last one's
     await this.writer.run(`DELETE FROM ${MASON_SCHEMA}.libc_order WHERE collation_name = $1`, [collate]);

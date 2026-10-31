@@ -30,18 +30,18 @@
  *    under ICU, ICU's sort key (DuckDB's `icu_sort_key`, which the rewrite hands in) and the bytes' hex; under a libc
  *    locale the measured key (src/duck/libc-order.ts `libcKey`) and the bytes' hex, as the rewrite sorts text
  *    (src/duck/rewrite.ts `libcKey`).
- * A string's collation key is computed by DuckDB's ICU for the ICU and libc kinds, which a JavaScript function cannot
+ * A string's collation key is computed by DuckDB's ICU for the ICU kind, which a JavaScript function cannot
  * call: the rewrite passes the document's strings' ICU keys as a list (`jsonbStrings` lists the strings, in the order
  * this walk meets them; `icuKeys` the list DuckDB made of them). Held to Postgres by tests/duck-jsonb-order.test.ts
  * (PGlite's order) and the oracle (tests/integration/duck-oracle.itest.ts, every collation it is run under).
  */
 import { Buffer } from "node:buffer";
 import { parseJson, storedPairs, type Json } from "./jsonb.ts";
-import { libcKept, libcKey, type LibcOrder } from "./libc-order.ts";
+import { libcKey, type LibcOrder } from "./libc-order.ts";
 
-/** how a string's collation key is made: C's bytes, or from the ICU key DuckDB made of it (`icu`), or of its
- *  characters libc's first level reads (`libc`) */
-export type JsonbCollation = { kind: "bytes" } | { kind: "icu"; icuKeys: readonly string[] } | { kind: "libc"; order: LibcOrder; icuKeys: readonly string[] };
+/** how a string's collation key is made: C's bytes, from the ICU key DuckDB made of it (`icu`), or from the order read
+ *  of the source (`libc`) */
+export type JsonbCollation = { kind: "bytes" } | { kind: "icu"; icuKeys: readonly string[] } | { kind: "libc"; order: LibcOrder };
 
 const TAG = { null: 0x10, str: 0x20, num: 0x30, bool: 0x40, arr: 0x50, obj: 0x60 } as const;
 const BIAS = 0x80000000;
@@ -65,7 +65,7 @@ function eachString(v: Json, out: string[]): void {
 export const JSONB_KEY_FUNCTIONS = {
   bytes: { key: "__mason_jsonb_key", strings: null },
   icu: { key: "__mason_jsonb_key_icu", strings: "__mason_jsonb_strings" },
-  libc: { key: "__mason_jsonb_key_libc", strings: "__mason_jsonb_libc_kept" },
+  libc: { key: "__mason_jsonb_key_libc" },
 } as const;
 export const STORED_SUFFIX = "_stored";
 /**
@@ -86,11 +86,6 @@ export function jsonbStrings(text: string): string[] {
  *  (`libc-uncovered`, src/duck/libc-order.ts `libcKey`), told from any other failure of the key (src/duck/kept.ts) */
 export function libcUncovered(order: LibcOrder, text: string): boolean {
   return jsonbStrings(text).some((s) => { for (const ch of s) if (order.uncovered[ch.codePointAt(0)!]) return true; return false; });
-}
-
-/** The strings ICU's accent and case levels read for a libc key of each (src/duck/libc-order.ts `libcKept`). */
-export function jsonbLibcKept(order: LibcOrder, text: string): string[] {
-  return jsonbStrings(text).map((s) => libcKept(order, s));
 }
 
 const u32 = (n: number): number[] => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
@@ -120,13 +115,13 @@ export function jsonbKey(text: string, c: JsonbCollation): Buffer {
   const out: number[] = [];
   let at = 0;
   const icuKey = (): string => {
-    if (c.kind === "bytes") throw new Error("a C collation's key needs no ICU key");
+    if (c.kind !== "icu") throw new Error("only ICU's key is handed in");
     const k = c.icuKeys[at++];
     if (k === undefined) throw new Error(`the jsonb holds more strings than the ${c.icuKeys.length} ICU keys handed in: a Mason bug (the rewrite's list and this walk disagree)`);
     return k;
   };
   const str = (s: string): void => {
-    const key = c.kind === "bytes" ? s : c.kind === "icu" ? `${icuKey()} ${hex(s)}` : `${libcKey(c.order, s, icuKey())} ${hex(s)}`;
+    const key = c.kind === "bytes" ? s : c.kind === "icu" ? `${icuKey()} ${hex(s)}` : `${libcKey(c.order, s)} ${hex(s)}`;
     for (const b of Buffer.from(key, "utf8")) out.push(b);
     out.push(0x00);
   };
@@ -149,6 +144,6 @@ export function jsonbKey(text: string, c: JsonbCollation): Buffer {
   // a scalar at the top is a raw scalar: a one-element array marked as one (0x00, below an array's 0x01)
   if (root.t !== "arr" && root.t !== "obj") out.push(TAG.arr, ...u32(1), 0x00);
   value(root);
-  if (c.kind !== "bytes" && at !== c.icuKeys.length) throw new Error(`the jsonb holds ${at} strings, ${c.icuKeys.length} ICU keys were handed in: a Mason bug (the rewrite's list and this walk disagree)`);
+  if (c.kind === "icu" && at !== c.icuKeys.length) throw new Error(`the jsonb holds ${at} strings, ${c.icuKeys.length} ICU keys were handed in: a Mason bug (the rewrite's list and this walk disagree)`);
   return Buffer.from(out);
 }

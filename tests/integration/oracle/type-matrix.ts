@@ -83,8 +83,7 @@ const CASTABLE: Array<[number, string]> = [
  * storage order (`{"b", "aa"}` against `{"a", "bb"}`), numbers equal at other scales and in other spellings (`1.0`,
  * `1.00`, `1e2`, `-0`), the raw scalar's place between `[]` and `[x]`, nested empty containers, a key held twice, and
  * strings that differ in case, accent, punctuation or script — compared under the database's collation, which the
- * oracle is run under (C, ICU and glibc's en_US.utf8 each sort these differently). No combining mark: a libc
- * collation refuses one (libc-uncovered).
+ * oracle is run under (C, ICU and glibc's en_US.utf8 each sort these differently).
  */
 export const JORDER: Array<string | null> = [
   null, "null", "true", "false", "0", "-0", "0.0", "1", "1.0", "1.00", "10", "9.5", "-1", "-10", "-9.5", "-0.5", "-0.50", "1e2", "100", "1E+2",
@@ -94,6 +93,7 @@ export const JORDER: Array<string | null> = [
   "[]", "[null]", "[1]", "[1.0]", "[2]", "[1, 2]", "[2, 1]", "[[]]", "[{}]", '["a"]', '["B"]', '["b"]', "[1, [2]]", "[[1], 1]", "[true, false]", "[[], []]", "[[[]]]",
   "{}", '{"a": 1}', '{"a": 1.0}', '{"a": 2}', '{"b": 1}', '{"B": 1}', '{"A": 1}', '{"a": null}', '{"a": []}', '{"a": {}}', '{"a": "1"}', '{"a": "B"}', '{"a": "b"}',
   '{"a": 1, "b": 2}', '{"b": 1, "aa": 1}', '{"a": 1, "bb": 1}', '{"aa": 1}', '{"Ab": 1}', '{"a": {"b": [1, "x"]}}', '{"a": 1, "a": 2}', '{"é": 1}', '{"e": 1}', '{"a": 1, "B": 2}',
+  '["e\u0301"]', '["\u2764\ufe0f"]', '["\u2764"]', '{"k": "\u0e40\u0e01"}', '{"k": "\u0e01"}',
 ];
 
 export const COLL: Array<[number, string | null]> = [
@@ -102,7 +102,18 @@ export const COLL: Array<[number, string | null]> = [
   [21, "가三"], [22, "三가"], [23, ":三"], [24, "a가"], [25, "가a"], [26, "-a"], [27, "a"], [28, "A"], [29, "ß"], [30, "ss"],
   [31, "Ss"], [32, "æ"], [33, "ae"], [34, "café"], [35, "Cafe"], [36, "co-op"], [37, "coop"], [38, "x?"], [39, "-X"], [40, "1a"],
   [41, "Ölbaum"], [42, "Zürich"], [43, "zulu"], [44, "αβγ"], [45, "абв"], [46, "東京"], [47, "\uFFFD"], [48, "£5"], [49, null],
-  [50, "1x"], [51, "1-X"], [99, "e\u0301"],
+  [50, "1x"], [51, "1-X"],
+  // what a libc collation's order holds beyond its letters (issue 128): an emoji's variation selector, skin tones and
+  // joiners, Thai and Lao vowels written before their consonant, Arabic and its marks, an accent spelled by its marks,
+  // in a run of marks (read backward, one skipped), an NFD spelling of a letter of its own, what the table does not
+  // list (one element per byte), digits and punctuation in a run, each beside the plain text it sorts by. 99: refused
+  [52, "Sales \u2764\uFE0F"], [53, "Sales \u2764"], [54, "Sales"], [55, "Sales \u2764\uFE0F!"], [56, "\u{1F600}"], [57, "\u{1F600}a"], [58, "a\u{1F600}"], [59, "\u{1F44D}"],
+  [60, "\u{1F44D}\u{1F3FD}"], [61, "\u{1F44D}\u{1F3FB}"], [62, "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}"], [63, "\u{1F468}\u{1F469}\u{1F467}"], [64, "\u0E40\u0E01"], [65, "\u0E01\u0E40"], [66, "\u0E01"],
+  [67, "\u0E44\u0E01\u0E48"], [68, "\u0E41\u0E21\u0E48"], [69, "\u0E01\u0E32"], [70, "\u0E33"], [71, "\u0E4D\u0E32"], [72, "\u0EC0\u0E81"], [73, "\u0E81"], [74, "\u0645\u0631\u062D\u0628\u0627"],
+  [75, "\u0645\u064E\u0631\u062D\u0628\u0627"], [76, "\u0622"], [77, "\u0627\u0653"], [78, "e\u0301"], [79, "\u00E9"], [80, "e"], [81, "E\u0301"], [82, "e\u0301\u0300x"], [83, "e\u0300\u0301x"],
+  [84, "o\u0302\u0301"], [85, "\u1ED1"], [86, "\u0418\u0306"], [87, "\u0419"], [88, "\u0378"], [89, "\uE000x"], [90, "\u{F0000}"], [91, "a\u0378b"], [92, "ab\uE000"], [93, "1\u0301a"],
+  [94, "12a"], [95, "1-2a"], [96, "$-X"], [97, "a\uFE0Fb"], [98, "\u200Bx"],
+  [99, "\u33E9"],
 ];
 
 /** the instants of `instants` (as UTC text, which every zone reads alike) */
@@ -135,8 +146,8 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   `(4, '["x", "y", "z"]', '["x", "y", "z"]'), (5, NULL, NULL), (6, '{"a": "p", "o": {"a": "q", "b": ["r", "s"]}}', '{"o": {"a": "q", "a": "q2"}}');` +
   // TEXT IN THE DATABASE'S ORDER (the BI-tools test of #517): what a glibc locale orders otherwise than ICU
   // and than its bytes — Hangul (no letter weight), $ and € (a letter-level weight, @ and ~ none), U+FFFD (after the
-  // letters), ß = ss, CJK (no last-level weight), punctuation runs, case. Below 50 the covered ones; 50–59 the decided
-  // difference (libc-symbol-punctuation); 99 a combining mark, refused (libc-uncovered)
+  // letters), ß = ss, CJK (no last-level weight), punctuation runs, case; from 50 issue 128's (COLL says each); 99 a
+  // ligature of a CJK weight, refused under libc (libc-uncovered)
   `CREATE TABLE public.coll (id int PRIMARY KEY, s text); INSERT INTO public.coll VALUES ${COLL.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
   // ENUMS IN THEIR DECLARED ORDER (the BI-tools test of #517): a label with a quote, an enum of another schema, an
   // array of one, NULL and empty arrays, and a text column read as the enum
@@ -609,6 +620,31 @@ function* matrix(): Generator<Matrixed> {
   yield q("a field's values, as Metabase lists them", "SELECT s FROM coll WHERE id < 50 GROUP BY s ORDER BY s ASC LIMIT 12");
   yield q("text compared in the database's order", "SELECT count(*) FILTER (WHERE s < 'b'), count(*) FILTER (WHERE s > 'Dob'), count(*) FILTER (WHERE s BETWEEN 'a' AND 'z'), count(*) FILTER (WHERE s >= '가') FROM coll WHERE id < 50");
   yield q("min and max text in the database's order", "SELECT min(s), max(s) FROM coll WHERE id < 50");
+  // ---- issue 128: an emoji, a Thai vowel, a mark in the value, in every form a BI tool orders by -----------------------
+  yield q("every value in the database's order", "SELECT id, s FROM coll WHERE id < 99 ORDER BY s, id");
+  yield q("every value in the database's order, descending", "SELECT s FROM coll WHERE id < 99 ORDER BY s DESC NULLS FIRST, id");
+  yield q("every value's sort by its bytes", `SELECT id FROM coll WHERE id < 99 ORDER BY s COLLATE "C", id`);
+  yield q("every value's sort under ICU", `SELECT id FROM coll WHERE id < 99 ORDER BY s COLLATE "und-x-icu", id`);
+  yield q("every value grouped, by its ordinal", "SELECT s, count(*) FROM coll WHERE id < 99 GROUP BY 1 ORDER BY 1");
+  yield q("every value grouped, by its output name", "SELECT s AS v, count(*) FROM coll WHERE id < 99 GROUP BY 1 ORDER BY v DESC");
+  yield q("every value grouped, by the qualified column", "SELECT c.s, count(*) FROM coll c WHERE id < 99 GROUP BY c.s ORDER BY c.s ASC NULLS LAST");
+  yield q("a dropdown's values", "SELECT DISTINCT s FROM coll WHERE id < 99 ORDER BY 1");
+  yield q("a dropdown's values, limited", "SELECT DISTINCT s FROM coll WHERE id < 99 ORDER BY 1 LIMIT 12");
+  yield q("a page of values", "SELECT id, s FROM coll WHERE id < 99 ORDER BY s, id LIMIT 7 OFFSET 40");
+  yield q("a field's values past the emoji, as Metabase lists them", "SELECT s FROM coll WHERE id < 99 GROUP BY s ORDER BY s DESC LIMIT 20");
+  yield q("min and max of every value", "SELECT min(s), max(s) FROM coll WHERE id < 99");
+  yield q("min and max of each group of values", "SELECT length(s), min(s), max(s) FROM coll WHERE id < 99 GROUP BY 1 ORDER BY 1");
+  yield q("every value compared with an emoji's", "SELECT id FROM coll WHERE id < 99 AND s > 'Sales \u2764\uFE0F' ORDER BY id");
+  yield q("every value compared with a Thai vowel's", "SELECT id FROM coll WHERE id < 99 AND s <= '\u0E40\u0E01' ORDER BY id");
+  yield q("every value compared with a spelled accent's", "SELECT id FROM coll WHERE id < 99 AND s >= 'e\u0301' AND s < 'f' ORDER BY id");
+  yield q("every value between two", "SELECT count(*) FILTER (WHERE s BETWEEN '\u{1F44D}' AND 'b'), count(*) FILTER (WHERE s < '\u0378'), count(*) FILTER (WHERE s > '12a') FROM coll WHERE id < 99");
+  yield q("the values equal, an emoji's", "SELECT id FROM coll WHERE s IN ('Sales \u2764\uFE0F', '\u0E40\u0E01', 'e\u0301', '\u33E9') ORDER BY id");
+  yield q("every value's greatest and least", "SELECT id, greatest(s, 'Sales'), least(s, 'e\u0301') FROM coll WHERE id < 99 ORDER BY id");
+  yield q("every value ranked", "SELECT id, rank() OVER (ORDER BY s), lag(id) OVER (ORDER BY s, id) FROM coll WHERE id < 99 ORDER BY id");
+  yield q("every value as a jsonb, sorted", "SELECT id FROM coll WHERE id < 99 ORDER BY to_jsonb(s), id");
+  yield q("every value's nulls idiom", "SELECT s FROM coll WHERE id < 99 GROUP BY s ORDER BY s IS NULL, s");
+  yield q("a statement over a * ordered by every value", "SELECT * FROM coll WHERE id < 99 ORDER BY 2, 1");
+  yield q("a run of marks, of digits and of punctuation", "SELECT s FROM coll WHERE id IN (50, 51, 78, 79, 80, 81, 82, 83, 84, 85, 93, 94, 95, 96) ORDER BY s");
   // ---- the corpus rerun of fbbf8f08: what reached DuckDB and failed, and the pieces still unverified -------------------
   // a name another table has in another case: qualified with the table Postgres resolved it to
   yield q("a name in another case, joined", `SELECT id, "T", t, "Tz" FROM typed JOIN cased USING (id) ORDER BY id`);

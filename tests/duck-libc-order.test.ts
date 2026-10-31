@@ -7,6 +7,7 @@
  * (tests/integration/duck-oracle.itest.ts, the `coll` table); this holds the mechanics and the wiring to it.
  */
 import { test, after } from "node:test";
+import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -17,34 +18,22 @@ import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.t
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import type { LibcOrder } from "../src/duck/libc-order.ts";
+import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-libc-"));
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const lib = (): Promise<typeof import("../src/duck/libc-order.ts")> => import("../src/duck/libc-order.ts");
 
-/** the order: first-level classes in order (each a string of the characters in it), the ignored characters' last-level
- *  classes in order, the last-level weight of the first-level characters (by class name: "high" above every ignored
- *  one, "none"), expansions */
+/** the order: `handLibcOrder`'s first-level classes, the ignored characters' last-level classes, an expansion */
 function order(): LibcOrder {
-  const MAX = 0x110000;
-  const l1 = new Uint32Array(MAX), l4 = new Uint32Array(MAX), uncovered = new Uint8Array(MAX).fill(1);
-  const cp = (c: string): number => c.codePointAt(0)!;
-  const letters = "abcdefghijklmnopqrstuvwxyz".split("").map((x) => x + x.toUpperCase() + (x === "a" ? "á" : x === "e" ? "é" : ""));
-  const first = ["$", "0", "1", ...letters, "三", "�"];
-  const ignored = ["대지가나", " ", "-", ":", "@", "~"];
-  ignored.forEach((cls, i) => { for (const c of cls) { l4[cp(c)] = 2 * (i + 1); uncovered[cp(c)] = 0; } });
-  first.forEach((cls, i) => { for (const c of cls) { l1[cp(c)] = i + 1; uncovered[cp(c)] = 0; l4[cp(c)] = c === "三" ? 0 : 2 * ignored.length + 1; } });
-  // its class is s's: the expansion makes it ss
-  l1[cp("ß")] = l1[cp("s")]!; uncovered[cp("ß")] = 0; l4[cp("ß")] = 2 * ignored.length + 1;
-  return { collate: "en_US.utf8", version: "2.41", l1, l4, uncovered, expansions: new Map([[cp("ß"), [cp("s"), cp("s")]]]) };
+  return handLibcOrder(["$", "0", "1", ...lettersOf({ a: "á", e: "é" }), "三", "�"], ["대지가나", " ", "-", ":", "@", "~"], { noLast: "三", expansions: { "ß": "ss" } });
 }
 
 test("a libc key orders as the order read says: the first level, then the last as (position, weight), a value holding an uncovered character refused", async () => {
-  const { libcKey, libcKept, encodeLibcOrder, decodeLibcOrder } = await lib();
+  const { libcKey, encodeLibcOrder, decodeLibcOrder } = await lib();
   const o = decodeLibcOrder(encodeLibcOrder(order()));
   const sorted = (xs: string[]): string[] => [...xs].sort((a, b) => {
-    // ICU's accent and case levels are DuckDB's (tested through the wire below): equal here, so they decide nothing
-    const [x, y] = [libcKey(o, a, ""), libcKey(o, b, "")];
+    const [x, y] = [libcKey(o, a), libcKey(o, b)];
     return x !== y ? (x < y ? -1 : 1) : Buffer.compare(Buffer.from(a), Buffer.from(b));
   });
   // Hangul has no first-level weight (before the letters), U+FFFD sorts after them, $ has one below them, @ none
@@ -55,9 +44,47 @@ test("a libc key orders as the order read says: the first level, then the last a
   assert.deepEqual(sorted([":三", "三", "三가", "가三"]), ["三", "가三", ":三", "三가"]);
   assert.deepEqual(sorted(["-", "가", "--", "-@", "@"]), ["가", "-", "--", "-@", "@"]);
   // ß is ss at the first level
-  assert.equal(libcKey(o, "ß", "").split(" ")[0], libcKey(o, "ss", "").split(" ")[0]);
-  assert.equal(libcKept(o, "a-b 대"), "ab");
-  assert.throws(() => libcKey(o, "é", ""), /a text being ordered holds a character Mason cannot order as the database's collation en_US\.utf8 does \(Mason gap libc-uncovered\)/);
+  assert.equal(libcKey(o, "ß").split(" ")[0], libcKey(o, "ss").split(" ")[0]);
+  assert.throws(() => libcKey(o, "e\u0301"), /a text being ordered holds a character Mason cannot order as the database's collation en_US\.utf8 does \(Mason gap libc-uncovered\)/);
+});
+
+test("what glibc's strcoll does beyond the letters, in the key: a run read backward and its skip, marks spelling an accent, contractions, what the table does not list", async () => {
+  const { libcKey, encodeLibcOrder, decodeLibcOrder, withLookups } = await lib();
+  const made = handLibcOrder(["1", "2", "$", "xX", "e" + "E", "\u0E01", "\u0E40"], [" ", "-", "\uFE0F"]);
+  const cp = (c: string): number => c.codePointAt(0)!;
+  // digits, symbols and punctuation are read backward at the second level; two marks, above BASE, backward too
+  for (const c of "12$- \uFE0F") made.back[cp(c)] = 1;
+  const [acute, grave] = [0x301, 0x300];
+  made.l2[acute] = 2; made.l2[grave] = 3;
+  for (const g of [acute, grave]) { made.l3[g] = 1; made.l4[g] = 9; made.back[g] = 1; made.uncovered[g] = 0; }
+  // é is e and the acute, at the last level one weight of its own
+  made.sequences.set(0xe9, { l1: [made.l1[cp("e")]!], l2: [1, 2], l3: [1, 1], l4: [10], back: false });
+  made.uncovered[0xe9] = 0;
+  // เก is the two swapped, one element of two last-level weights
+  const [ko, sara] = [0xe01, 0xe40];
+  made.contractions.set(sara, [{ rest: [ko], element: { l1: [made.l1[ko]!, made.l1[sara]!], l2: [1, 1], l3: [1, 1], l4: [made.l4[ko]!, made.l4[sara]!], back: false } }]);
+  // not listed: one element per byte of its UTF-8
+  for (const g of [0x378, 0xe000, 0xf0000]) { made.l4[g] = 8; made.unlisted[g] = 1; made.uncovered[g] = 0; }
+  const o = decodeLibcOrder(encodeLibcOrder(withLookups(made)));
+  const sorted = (xs: string[]): string[] => [...xs].sort((a, b) => {
+    const [x, y] = [libcKey(o, a), libcKey(o, b)];
+    return x !== y ? (x < y ? -1 : 1) : Buffer.compare(Buffer.from(a), Buffer.from(b));
+  });
+  // a run closed by a forward element skips the one before its last, so `1-X` has one BASE fewer: the case does not reach it
+  assert.deepEqual(sorted(["1x", "1-X"]), ["1-X", "1x"]);
+  assert.deepEqual(sorted(["xx", "x-X"]), ["xx", "x-X"], "no run: the case first");
+  assert.deepEqual(sorted(["12x", "1-2x"]), ["12x", "1-2x"], "the skip takes a digit from one, the hyphen from the other");
+  // read backward: the mark before the BASE of the digit it follows, and the skip takes the first of two marks
+  assert.deepEqual(sorted(["1\u0301", "1\u0300"]), ["1\u0301", "1\u0300"]);
+  assert.equal(libcKey(o, "e\u0301\u0300x").split(" ")[1], libcKey(o, "e\u0300x").split(" ")[1], "the acute is skipped");
+  // the accent, by its mark or in its letter: one sequence, told apart at the last level
+  assert.deepEqual(libcKey(o, "e\u0301").split(" ").slice(0, 3), libcKey(o, "\u00e9").split(" ").slice(0, 3));
+  // the Thai vowel sorts after its consonant, by a contraction; alone it is itself
+  assert.equal(libcKey(o, "\u0E40\u0E01").split(" ")[0], libcKey(o, "\u0E01\u0E40").split(" ")[0]);
+  assert.notEqual(libcKey(o, "\u0E40x").split(" ")[0], libcKey(o, "x\u0E40").split(" ")[0]);
+  // U+0378 is two elements, U+E000 three, U+F0000 four; the same pairs up to the shorter one's end
+  assert.deepEqual(sorted(["\u{F0000}", "\u0378", "\uE000"]), ["\u0378", "\uE000", "\u{F0000}"]);
+  assert.equal(libcKey(o, "\u0378x").split(" ")[3]!.length, 3 * 12);
 });
 
 test("the order is read from the database once, kept in the copy, and read again when its collation version moves", async () => {
@@ -72,6 +99,10 @@ test("the order is read from the database once, kept in the copy, and read again
     // an OS upgrade's glibc: the order may have moved, so it is read again
     assert.equal((await store.libcOrder("en_US.utf8", "2.42", read)).read, true);
     assert.equal(reads, 2);
+    // an order kept by a release that read fewer levels (issue 128) is read again, never decoded
+    await store.writer.run(`UPDATE _mason.libc_order SET data = '{"collate":"en_US.utf8","version":"2.42","l1":[],"l4":[],"covered":[],"expansions":[]}'`);
+    assert.equal((await store.libcOrder("en_US.utf8", "2.42", read)).read, true);
+    assert.equal(reads, 3);
   } finally { store.close(); }
 });
 
@@ -81,7 +112,7 @@ test("ORDER BY, < and min / max under a libc collation follow the order read, th
   const KEY = "k".repeat(48);
   try {
     await store.writer.run("CREATE TABLE public.coll (id INTEGER PRIMARY KEY, s VARCHAR)");
-    await store.writer.run("INSERT INTO public.coll VALUES (1, '대지'), (2, 'Animal'), (3, 'zebra'), (4, 'Dob'), (5, 'Do' || chr(65533) || 'a'), (6, '$x'), (7, '@x'), (99, 'e' || chr(769))");
+    await store.writer.run("INSERT INTO public.coll VALUES (1, '대지'), (2, 'Animal'), (3, 'zebra'), (4, 'Dob'), (5, 'Do' || chr(65533) || 'a'), (6, '$x'), (7, '@x'), (99, chr(13289))");
     const schema: PgSchema = { database: "app", tables: [{ name: "coll", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "s", type: "text" }] }] };
     const duck = await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, null, order());
     api = await startPostgresApi({

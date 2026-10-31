@@ -1978,23 +1978,17 @@
         "  PROJECTION",
         "    ORDER_BY",
         "      PROJECTION",
-        "        PROJECTION calls __mason_jsonb_key_libc, __mason_jsonb_libc_kept",
+        "        PROJECTION calls __mason_jsonb_key_libc",
         "          HASH_JOIN",
         "            TABLE_SCAN public.orders",
         "            TOP_N (1 key)",
-        "              PROJECTION calls __mason_jsonb_key_libc, __mason_jsonb_libc_kept",
-        "                PROJECTION",
-        "                  TABLE_SCAN public.orders"
+        "              PROJECTION calls __mason_jsonb_key_libc",
+        "                TABLE_SCAN public.orders"
       ],
       "calls": [
-        "__mason_jsonb_key_libc",
-        "__mason_jsonb_libc_kept"
+        "__mason_jsonb_key_libc"
       ],
       "sends": [],
-      "keys": [
-        "icu_sort_key",
-        "list_transform"
-      ],
       "delim_join": false,
       "full_sort": false
     },

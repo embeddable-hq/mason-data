@@ -1,17 +1,17 @@
 {
-  "statements": 3301,
+  "statements": 3324,
   "mason": {
-    "exact": 3133,
-    "decided": 37,
+    "exact": 3157,
+    "decided": 36,
     "refused": 131,
     "differs": 0
   },
   "duckdb": {
-    "exact": 981,
+    "exact": 982,
     "name": 732,
-    "refused": 599,
-    "value": 400,
-    "rows": 254,
+    "refused": 601,
+    "value": 408,
+    "rows": 266,
     "text": 153,
     "other": 182
   },
@@ -70,7 +70,6 @@
         "char-n-minmax": { "planted": 0, "natural": 2 },
         "float-last-digit": { "planted": 0, "natural": 3 },
         "float-overflow": { "planted": 0, "natural": 3 },
-        "libc-symbol-punctuation": { "planted": 1, "natural": 0 },
         "limit-errors": { "planted": 1, "natural": 2 },
         "limit-lateral-argument": { "planted": 0, "natural": 2 },
         "limit-lateral-filter": { "planted": 0, "natural": 2 },
@@ -85,7 +84,7 @@
       }
     },
     "everyAsk": {
-      "asked": 23861,
+      "asked": 24064,
       "refused": {
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
@@ -139,7 +138,6 @@
         "char-n-minmax": { "planted": 0, "natural": 6 },
         "float-last-digit": { "planted": 0, "natural": 8 },
         "float-overflow": { "planted": 0, "natural": 9 },
-        "libc-symbol-punctuation": { "planted": 3, "natural": 0 },
         "limit-errors": { "planted": 3, "natural": 6 },
         "limit-lateral-argument": { "planted": 0, "natural": 6 },
         "limit-lateral-filter": { "planted": 0, "natural": 8 },

@@ -17,18 +17,14 @@ import type { PgSchema } from "../src/api/postgres/schema.ts";
 import { changeUsers, keyFingerprint, listenerLogins, LiveUsers, newUserId, userPassword } from "../src/duck/users.ts";
 import { LiveRoles } from "../src/cli/roles.ts";
 import type { LibcOrder } from "../src/duck/libc-order.ts";
+import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 
 const KEY = "k".repeat(48);
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-refusal-values-"));
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-/** an order covering ASCII alone, so a value with any other character is refused */
-function asciiOrder(): LibcOrder {
-  const MAX = 0x110000;
-  const l1 = new Uint32Array(MAX), l4 = new Uint32Array(MAX), uncovered = new Uint8Array(MAX).fill(1);
-  for (let g = 1; g < 128; g++) { uncovered[g] = 0; if (/[0-9a-z]/i.test(String.fromCharCode(g))) l1[g] = g; else l4[g] = g; }
-  return { collate: "en_US.utf8", version: "2.41", l1, l4, uncovered, expansions: new Map() };
-}
+/** an order covering ASCII's letters and digits alone, so a value with any other character is refused */
+const asciiOrder = (): LibcOrder => handLibcOrder([..."0123456789", ...lettersOf()], [" "]);
 
 const MARK = "́";
 /** what a refusal must not say: the words each row's values hold */

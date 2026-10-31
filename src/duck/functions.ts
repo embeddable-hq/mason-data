@@ -13,12 +13,12 @@
 import { BIGINT, BLOB, BOOLEAN, DATE, DOUBLE, DuckDBBlobValue, DuckDBDateValue, DuckDBIntervalValue, DuckDBScalarFunction, DuckDBTimestampTZValue, DuckDBTimestampValue, INTEGER, INTERVAL, LIST, TIMESTAMP, TIMESTAMPTZ, VARCHAR, listValue, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { pgEvalSync, PgEvalError } from "./pg-eval.ts";
 import { MARKED_FUNCTIONS } from "./kept-route.ts";
-import { libcKept, libcKey, type LibcOrder } from "./libc-order.ts";
+import { libcKey, type LibcOrder } from "./libc-order.ts";
 import { formatFloat } from "../api/postgres/encode.ts";
 import { floatAsNumeric } from "./types.ts";
 import { intervalText } from "./types.ts";
 import { jsonbText, parseJson, writeJson, quoteJson, type Json } from "./jsonb.ts";
-import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbLibcKept, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
+import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
 import { compare, div, evaluateText, NumericError, numericText, parseNumeric, type NumericProgram } from "../lib/pg-numeric.ts";
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
@@ -567,16 +567,11 @@ function viaPostgres(conn: DuckDBConnection, kind: PgKind): void {
 const steps = (json: string, either: boolean): Step[] => (JSON.parse(json) as Array<string | number>)
   .map((s) => typeof s === "number" ? { index: s } : either ? { either: s } : { key: s });
 
-/** The libc order's two functions (src/duck/libc-order.ts), for the order the source was read with: the characters
- *  ICU's accent and case levels read, and the key (a value holding one not covered refuses, by name). */
+/** The libc order's functions (src/duck/libc-order.ts), for the order the source was read with: a text's key (a value
+ *  holding a character not covered refuses, by name) and jsonb's order under it (src/duck/jsonb-order.ts). */
 export function registerLibcOrder(conn: DuckDBConnection, order: LibcOrder): void {
-  scalar(conn, "__mason_libc_kept", [VARCHAR], VARCHAR, ([s]) => libcKept(order, String(s)));
-  scalar(conn, "__mason_libc_key", [VARCHAR, VARCHAR], VARCHAR, ([s, icu]) => libcKey(order, String(s), String(icu)));
-  // jsonb's order under it (src/duck/jsonb-order.ts): the characters of each string ICU's levels read, then the key
-  // from ICU's keys of them (src/duck/rewrite.ts jsonbKey hands them in)
-  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.strings, [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbLibcKept(order, String(j))));
-  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.key, [VARCHAR, LIST(VARCHAR)], BLOB,
-    ([j, keys]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order, icuKeys: icuKeysOf(keys!) })));
+  scalar(conn, "__mason_libc_key", [VARCHAR], VARCHAR, ([s]) => libcKey(order, String(s)));
+  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.key, [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order })));
 }
 
 /**
