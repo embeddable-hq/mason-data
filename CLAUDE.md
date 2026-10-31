@@ -101,6 +101,12 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   agent that built a 20 M-row table twice spent the second build on nothing new.
 - **Push early, read while CI runs.** Open the PR as soon as the first commit is green locally; read the diff and run the
   review while CI runs; land fix commits in one push, not one per finding.
+- **Every wait has a limit, and a job past it is a hang.** A background job reports only when it exits, so one that
+  deadlocks never reports: an agent ended its turn on such a job and sat two hours, shown as completed, its test at
+  0.43 s of CPU. Give every test run `--test-timeout` and every other job a limit; don't end a turn on a job with no
+  limit; and past the limit compare the job's CPU time with its elapsed time (`ps -o time,etime -p <pid>`), since a slow
+  job keeps using CPU and a hung one does not. A hang is a finding, the change's to fix, never a run to repeat. The
+  detector is issue 139: `npm test` itself has no limit yet.
 - **Nobody waits on CI.** An implementer ends at the push and reports the PR and its head; the coordinator binds the PR
   and lets the app's PR monitor bring the verdict (auto-merge, for a tooling PR already read and reviewed), and goes on
   with other work. No session sits in a wait on a run: watching CI took most of a coordinator's active time (issue 78).
