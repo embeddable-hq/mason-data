@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
+import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
 import { STAGES, deadGaps, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, verifiedDiff, wholeRunProblems, type Decision, type LegReport } from "../scripts/oracle-legs.ts";
 
 const statements = Array.from({ length: 40 }, (_, i) => ({ group: "g", name: `statement ${i}`, sql: `SELECT ${i}` }));
@@ -149,6 +150,13 @@ test("the sums and the helpers a whole run shares", () => {
   assert.deepEqual(verifiedDiff(new Set(["a", "c"]), new Map([["a", ""], ["b", ""]])), { added: ["c"], dropped: ["b"] });
   assert.ok(deadGaps({ refused: {}, decided: {} }).length > 0);
   assert.deepEqual(deadGaps(everyGap()), []);
+  // a decision that needs a libc source, on a run under C or ICU: met, or as a machineFloat
+  const libcOnly = { sql: /x/, why: "w", kind: "value", gap: "libc-rare-letter" as const, collation: "libc" as const };
+  assert.deepEqual([collationMet(libcOnly, "c", "en_US.utf8"), collationMet(libcOnly, "c", "C"), collationMet(libcOnly, "i", "en-US")], [true, false, false]);
+  assert.deepEqual([collationMet({ collation: "not-c" }, "i", "en-US"), collationMet({ collation: "not-c" }, "c", "C"), collationMet({}, "c", "C")], [true, false, true]);
+  const decided = new Set([libcOnly]);
+  assert.deepEqual(staleDecisions([libcOnly], new Set(), decided, (k) => !collationMet(k, "c", "C")), []);
+  assert.equal(staleDecisions([libcOnly], new Set(), decided, (k) => !collationMet(k, "c", "en_US.utf8")).length, 1, "under libc it must differ");
 });
 
 test("a leg names itself exactly, and refuses what reads or rewrites the whole oracle", () => {

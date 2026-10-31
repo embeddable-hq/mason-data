@@ -285,3 +285,10 @@ test("the kept order is keyed on the collation library's version now, so a glibc
   assert.equal(await collationVersion(answering(null), 180000, "2.36"), "2.36");
   assert.equal(await collationVersion({ query: async () => { throw new Error("no such function before 15"); } } as unknown as Parameters<typeof collationVersion>[0], 140000, null), null);
 });
+
+test("a symbol's closing weight: below every class its letters alone, above every class the last", async () => {
+  const { closedWeights } = await lib();
+  assert.deepEqual(closedWeights([4, 3], [10, 20, 30], 0), [4, 3]);
+  assert.deepEqual(closedWeights([4, 3], [10, 20, 30], 2), [4, 3, 20]);
+  assert.deepEqual(closedWeights([4, 3], [10, 20, 30], 3), [4, 3, 30]);
+});

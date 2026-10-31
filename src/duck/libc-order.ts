@@ -193,6 +193,13 @@ export const isPlainTable = (collate: string): boolean => /^en_[A-Za-z]{2}([.@]|
 /** code points in byte order, of each kind a collation moves: what a byte-ordering strcoll keeps in this order */
 const BYTE_ORDER_SAMPLE = [0x20, 0x21, 0x2d, 0x30, 0x41, 0x5a, 0x5f, 0x61, 0x7a, 0xc0, 0xe9, 0x100, 0x300, 0x4e00, 0xac00, 0xe000, 0xfffd, 0x1f600];
 
+/**
+ * A symbol's first level, its letters `head` and the class its last weight lies above: `lo` is the first of `classes`
+ * it sorts below, so none (0) leaves the letters alone and all of them (`classes.length`) means the last.
+ */
+export const closedWeights = (head: readonly number[], classes: readonly number[], lo: number): number[] =>
+  lo === 0 ? [...head] : [...head, classes[lo - 1]!];
+
 /** The source's order of text (its default collation), as the module's header says. */
 export async function readLibcOrder(query: SourceQuery, collate: string, version: string | null): Promise<LibcOrder> {
   const o = emptyLibcOrder(collate, version);
@@ -476,13 +483,14 @@ export async function readLibcOrder(query: SourceQuery, collate: string, version
     const stuck = proposed.flatMap(([g, e]) => {
       if (expansions.has(g) || o.sequences.has(g) || e !== String.fromCodePoint(g).normalize("NFKD").replace(/\p{M}/gu, "")) return [];
       const units = cps(e).filter((u) => o.l1[u]! > 0);
+      // (a symbol with no Han or Kana unit: findIndex's -1 is `slice(0, -1)`, and its last unit is the searched class)
       const head = units.slice(0, units.findIndex((u) => /\p{Script=Han}|\p{Script=Katakana}|\p{Script=Hiragana}/u.test(String.fromCodePoint(u))));
       return head.length > 0 && head.length < units.length ? [{ g, head }] : [];
     });
-    const lo = await searched(stuck.length, () => whole.length - 1, (open) =>
+    const lo = await searched(stuck.length, () => whole.length, (open) =>
       askedText(query, open.map(({ i, mid }): [string, string] => [String.fromCodePoint(stuck[i]!.g), str([...stuck[i]!.head, whole[mid]!])]), "s < t"));
     stuck.forEach(({ g, head }, i) => {
-      const l1 = [...head.map((u) => o.l1[u]!), o.l1[whole[Math.max(lo[i]! - 1, 0)]!]!];
+      const l1 = closedWeights(head.map((u) => o.l1[u]!), whole.map((c) => o.l1[c]!), lo[i]!);
       o.sequences.set(g, { l1, l2: l1.map(() => 1), l3: l1.map(() => 1), l4: [], back: o.back[g] === 1 });
     });
   }
@@ -793,7 +801,7 @@ function runsOf(a: Uint32Array | Uint8Array): Array<[number, number, number]> {
 const fromRuns = (a: Uint32Array | Uint8Array, runs: ReadonlyArray<[number, number, number]>): void => { for (const [g, n, v] of runs) a.fill(v, g, g + n); };
 
 /** what `encodeLibcOrder` says first: an order kept by a release that read less is read again (`isCurrentLibcOrder`) */
-const FORM = '{"form":3,';
+const FORM = '{"form":4,';
 export const isCurrentLibcOrder = (text: string): boolean => text.startsWith(FORM);
 
 /** The order as bytes, to keep in the copy. */

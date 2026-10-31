@@ -19,10 +19,20 @@ export type Decided = {
   /** its truth depends on the machine's floating-point arithmetic (its libm, its build's): where the two machines'
    *  last digits agree, it differs nowhere, and that is not stale */
   machineFloat?: true;
+  /** its truth depends on the source's collation: it can differ only under a libc locale, or under any but C. Under
+   *  another, as a `machineFloat` entry, it may differ nowhere (`collationMet`) */
+  collation?: "libc" | "not-c";
   /** what must STILL be alike where the rest differs (SHOW ALL: its fields, and the rows the session sets): a problem
    *  said, or null. With it, the rest may differ in any kind (`kind` says the one expected); without it, in `kind` only */
   holds?: (want: Answered, got: Answered) => string | null;
 };
+
+/** Whether an entry's `collation` is the run's: `provider` and `collate` as pg_database says them. */
+export function collationMet(k: Pick<Decided, "collation">, provider: string, collate: string): boolean {
+  // (src/duck/rewrite.ts isLibcCollation's words: CI's last jobs reach this file with no npm ci, so Node's builtins alone)
+  const libc = provider !== "b" && provider !== "i" && !/^(C|POSIX)([.].*)?$/i.test(collate);
+  return k.collation === undefined || libc || (k.collation === "not-c" && provider === "i");
+}
 
 /** an answer with rows, as the oracle reads one */
 export type Answered = { names: string[]; oids: number[]; rows: (string | null)[][] };
@@ -32,9 +42,10 @@ export type Answered = { names: string[]; oids: number[]; rows: (string | null)[
  * unless it is `machineFloat` and some statement asked is decided by it.
  * @param differed — the entries a statement differed by, in the kind decided
  * @param decided — the entries that decided a statement asked (the first whose pattern it matched), differing or not
+ * @param unmet — an entry whose `collation` is not this run's: as `machineFloat`
  */
-export function staleDecisions<K extends Pick<Decided, "why" | "machineFloat"> & { sql: RegExp | string }>(known: readonly K[], differed: ReadonlySet<K>, decided: ReadonlySet<K>): string[] {
-  return known.filter((k) => !differed.has(k) && !(k.machineFloat === true && decided.has(k))).map((k) => decided.has(k)
+export function staleDecisions<K extends Pick<Decided, "why" | "machineFloat"> & { sql: RegExp | string }>(known: readonly K[], differed: ReadonlySet<K>, decided: ReadonlySet<K>, unmet: (k: K) => boolean = () => false): string[] {
+  return known.filter((k) => !differed.has(k) && !((k.machineFloat === true || unmet(k)) && decided.has(k))).map((k) => decided.has(k)
     ? `${k.sql}: no longer differs (${k.why}) — remove it from KNOWN`
     : `${k.sql}: no statement asked matches it (${k.why}) — remove it from KNOWN`);
 }

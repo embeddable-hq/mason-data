@@ -5,13 +5,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A database under a glibc locale is read again on the first start, so its source must be reachable.** About 50-60 s
   on a laptop, read-only SELECTs over constants, once for a collation version. If the source cannot be reached then, the
   start exits and says so. Stored jsonb sort keys are dropped and refilled after it.
+- **The same read runs again on the first start after an OS upgrade moves the source's glibc**: the same 50-60 s, with the
+  source reachable.
 
 ## What changes
 
 - **Text under `en_*` is ordered as glibc orders it, and nothing under it is refused.** One emoji, a Thai vowel or a mark
   in a column no longer refuses the column's sort, group or dropdown, and no refusal quotes a row's value. Two rare shapes
   are listed differences (`libc-rare-letter`, `libc-mark-run-form`, in docs/SQL-SUPPORT.md); mason status's `Text order`
-  line counts them.
+  line counts them, and `source.textOrder` in `mason status --json` sits beside it.
 - **A database under tr_TR, sv_SE, cs_CZ or another locale that moves ASCII or Latin now refuses `ORDER BY`, `<`, `min`
   and `max` of text by name (`libc-locale-unread`)**, where it answered in a wrong order. Add `COLLATE "C"` or an ICU
   collation to them; everything else is served. `mason start` and mason status say so.

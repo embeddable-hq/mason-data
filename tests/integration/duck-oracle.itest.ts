@@ -60,7 +60,7 @@ import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
-import { staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
+import { collationMet, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
 import { countGap, emptyTally, fixtureTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
@@ -224,9 +224,13 @@ const KNOWN: Decided[] = [
   { sql: /^SELECT stddev\(f8\), stddev_samp\(f8\), stddev_pop\(f8\), variance\(f8\), var_samp\(f8\), var_pop\(f8\) FROM typed/, kind: "text", gap: "float-last-digit", why: "a double's variance, the 17th digit: Youngs-Cramer in Postgres, DuckDB's accumulation, apart on x86_64", machineFloat: true },
   // (log10's last digit: it differs with Postgres in a Linux container and Mason on macOS, and agrees with both on
   // Linux, as in CI, or both on macOS: the machines' math libraries decide, so `machineFloat`)
-  { sql: /^SELECT 'a6ß' > E'a\\u03086ß' FROM public\.one$/, kind: "value", gap: "libc-mark-run-form", why: "a mark's skipped run compares ß's third level with a digit's: glibc's one scale, Mason's per letter" },
-  { sql: /^SELECT 'a' < 'B'$/, kind: "value", gap: "fromless-text-order", why: "the catalog answers a SELECT of no table, in byte order (issue 141)" },
-  { sql: /^SELECT E'\\uA79A' < E'\\u00C4' FROM public\.one$/, kind: "value", gap: "libc-rare-letter", why: "a rare letter's weight no spelling of it says" },
+  // (a source of another collation meets none of these, so `collation` decides staleness, and each gap's `heldBy` is this file:
+  // Mason gap libc-mark-run-form
+  // Mason gap libc-rare-letter
+  // Mason gap fromless-text-order)
+  { sql: /^SELECT 'a6ß' > E'a\\u03086ß' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-mark-run-form", why: "a mark's skipped run compares ß's third level with a digit's: glibc's one scale, Mason's per letter" },
+  { sql: /^SELECT 'a' < 'B'$/, collation: "not-c", kind: "value", gap: "fromless-text-order", why: "the catalog answers a SELECT of no table, in byte order (issue 141)" },
+  { sql: /^SELECT E'\\uA79A' < E'\\u00C4' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-rare-letter", why: "a rare letter's weight no spelling of it says" },
   { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },
   { sql: /stddev\(DISTINCT (i4|n2)\)|stddev\(n\)/, kind: "text", gap: "numeric-stddev", why: "Postgres's numeric stddev of DISTINCT values, or of an unconstrained numeric, is exact to its scale; DuckDB's a double" },
@@ -952,7 +956,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   }
   for (const line of gapSummary(copyPhaseGaps, tallies.statements, everyAskGaps, asked)) console.log(line);
   // a filtered run or a leg asks only some statements: a decision it did not meet is not stale
-  const stale = WHOLE ? staleDecisions(KNOWN, known, decided) : [];
+  const [, runCollate = "", runProvider = ""] = /^(.*) \((.)\)$/.exec(collation) ?? [];
+  const unmet = (k: Decided): boolean => !collationMet(k, runProvider, runCollate);
+  const stale = WHOLE ? staleDecisions(KNOWN, known, decided, unmet) : [];
   assert.deepEqual(stale, [], "a decided difference that no longer differs");
   // A DEAD GAP: a refused or decided entry no statement meets (removed, or held by a test it names)
   const dead = WHOLE ? deadGaps(everyAskGaps) : [];
@@ -965,7 +971,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // A LEG'S REPORT, before the assertion below, so that a leg that differs still lets the check say what else is wrong
   if (LEG !== null) {
     const legReport: LegReport = { ...LEG, whole: [...every().map((q) => ({ id: statementId(q), name: q.name })), ...UNORDERED_LIMITS.map(unorderedStatement).map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))], asked: askedIn, stages: stageAsked, shaped, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
-      decisions: KNOWN.map((k) => ({ sql: String(k.sql), why: k.why, ...(k.machineFloat === true ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
+      decisions: KNOWN.map((k) => ({ sql: String(k.sql), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
       verified: [...verified], differences: differences.length };
     const out = process.env.IT_ORACLE_LEG_REPORT!;   // legRefused: a leg without it does not start
     fs.writeFileSync(out, JSON.stringify(legReport));
