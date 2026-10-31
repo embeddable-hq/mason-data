@@ -1,19 +1,19 @@
 {
-  "statements": 3232,
+  "statements": 3301,
   "mason": {
-    "exact": 3065,
+    "exact": 3133,
     "decided": 37,
-    "refused": 130,
+    "refused": 131,
     "differs": 0
   },
   "duckdb": {
-    "exact": 970,
-    "name": 704,
-    "refused": 582,
-    "value": 394,
-    "rows": 252,
+    "exact": 981,
+    "name": 732,
+    "refused": 599,
+    "value": 400,
+    "rows": 254,
     "text": 153,
-    "other": 177
+    "other": 182
   },
   "gaps": {
     "copyPhase": {
@@ -21,7 +21,7 @@
         "array-remove-type": { "planted": 1, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 9 },
         "bytea-forms": { "planted": 1, "natural": 0 },
-        "citext-forms": { "planted": 0, "natural": 9 },
+        "citext-forms": { "planted": 0, "natural": 10 },
         "collation-unknown": { "planted": 1, "natural": 0 },
         "div-numeric": { "planted": 1, "natural": 0 },
         "enum-forms": { "planted": 1, "natural": 0 },
@@ -85,12 +85,12 @@
       }
     },
     "everyAsk": {
-      "asked": 23399,
+      "asked": 23861,
       "refused": {
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
         "bytea-forms": { "planted": 3, "natural": 0 },
-        "citext-forms": { "planted": 0, "natural": 27 },
+        "citext-forms": { "planted": 0, "natural": 30 },
         "collation-unknown": { "planted": 3, "natural": 0 },
         "div-numeric": { "planted": 3, "natural": 0 },
         "enum-forms": { "planted": 3, "natural": 0 },

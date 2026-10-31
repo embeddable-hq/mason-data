@@ -198,6 +198,7 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["field:GROUPINGSET.kind=0", "an empty grouping set ()"],
   ["field:GROUPINGSET.kind=1", "a grouping set's column"],
   ["field:GROUPINGSET.kind=2", "ROLLUP"],
+  ["field:GROUPINGSET.kind=3", "CUBE"],
   ["field:GROUPINGSET.kind=4", "GROUPING SETS"],
   ["field:JOINEXPR.jointype=0", "INNER JOIN"],
   ["field:JOINEXPR.jointype=1", "LEFT JOIN"],

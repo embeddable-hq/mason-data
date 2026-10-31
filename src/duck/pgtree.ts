@@ -289,7 +289,8 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
       };
       const offsets = (x: TreeValue): void => {
         if (Array.isArray(x)) { x.forEach(offsets); return; }
-        if (!isNode(x)) return;
+        // (a subquery in a target is a query of its own, which registers its own offsets)
+        if (!isNode(x) || x._node === "QUERY") return;
         const loc = num(x.location);
         if (loc !== null && loc >= 0 && !found.has(loc)) found.set(loc, outputs);
         const inner = ungrouped(x, rtable);

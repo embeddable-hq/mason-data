@@ -879,7 +879,8 @@ class Rewriter {
     const held = (n: unknown): number[] => {
       if (Array.isArray(n)) return n.flatMap(held);
       if (n === null || typeof n !== "object") return [];
-      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? [x] : held(x));
+      // (a subquery's targets are its own: this SELECT's offsets alone find this SELECT's query)
+      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? [x] : k === "subselect" || k === "SelectStmt" ? [] : held(x));
     };
     const query = stars.length === 0 ? undefined : held(targets).map((l) => this.analysed.get(l - this.base)).find((q) => q !== undefined);
     const widthOf = (t: AstNode): number | null => {
@@ -925,7 +926,7 @@ class Rewriter {
       if (!hasStar(bodyOf(t).val)) return [t];
       const own = outputs.filter((o) => o.target === i);
       if (own.some((o) => o.twin)) throw this.twinRefused();
-      return own.length === 0 ? [t] : own.map((o) => ({ ResTarget: { val: o.value } }));
+      return own.length === 0 ? [t] : own.map((o) => ({ ResTarget: { name: o.name, val: o.value } }));
     });
   }
 

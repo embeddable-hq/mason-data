@@ -2165,7 +2165,8 @@ test("an output of a * is read by its number and its bare name as the column it 
     await alike("SELECT *, count(*) FROM accounts GROUP BY id ORDER BY 5, 2, 1");
     // keys that are not the *'s leading columns in order: its columns stay in their places
     await alike("SELECT * FROM accounts GROUP BY team, id ORDER BY 1");
-    await alike("SELECT * FROM accounts GROUP BY team, ip, status, id ORDER BY 1");
+    await alike("SELECT * FROM accounts GROUP BY team, ip, id ORDER BY 1");
+    await assert.rejects(c.query("SELECT * FROM accounts GROUP BY team, ip, status, id ORDER BY 1"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap citext-forms/.test(e.detail ?? ""));
     await alike("SELECT a.*, count(*) FROM accounts a GROUP BY a.id, a.team ORDER BY 1");
     await alike("SELECT * FROM accounts GROUP BY 4, 1 ORDER BY 1");
     await alike("SELECT id, * FROM accounts GROUP BY id ORDER BY 1");
@@ -2178,6 +2179,15 @@ test("an output of a * is read by its number and its bare name as the column it 
     // a DISTINCT ON compares its keys alone: a citext beside them is only read
     await alike("SELECT DISTINCT ON (1) * FROM accounts a JOIN late_c c USING (id) ORDER BY 1, 2");
     await alike("SELECT DISTINCT ON (id) id, status FROM accounts ORDER BY id");
+    // a * in a subquery of a target is its own SELECT's, whatever the outer list holds
+    await alike("SELECT o.id, (SELECT x.team FROM (SELECT * FROM accounts ORDER BY 1 LIMIT 1) x) FROM orders o ORDER BY 1");
+    await alike("SELECT o.id, (SELECT b.* FROM (SELECT team FROM accounts) b ORDER BY 1 DESC LIMIT 1) FROM orders o ORDER BY 1");
+    await alike("SELECT o.id, (SELECT count(*) FROM (SELECT *, 1 FROM (SELECT id, team FROM accounts) s GROUP BY team, id) x) FROM orders o ORDER BY 1");
+    await alike("SELECT o.id, ARRAY(SELECT x.team FROM (SELECT * FROM accounts GROUP BY team, id) x ORDER BY x.id) FROM orders o ORDER BY 1");
+    await alike("SELECT o.id, EXISTS (SELECT * FROM (SELECT * FROM accounts GROUP BY team, id) x WHERE x.id = o.id), o.id IN (SELECT x.id FROM (SELECT * FROM accounts GROUP BY team, id) x) FROM orders o ORDER BY 1");
+    await alike("SELECT o.id, CASE WHEN o.id > 1 THEN (SELECT x.team FROM (SELECT * FROM accounts GROUP BY team, id) x ORDER BY x.id LIMIT 1) END FROM orders o ORDER BY 1");
+    await alike("SELECT o.id, (SELECT x.id FROM (SELECT * FROM accounts UNION ALL SELECT * FROM accounts ORDER BY 2, 1 LIMIT 1) x) FROM orders o ORDER BY 1");
+    await alike("SELECT o.id, (SELECT x.team FROM (SELECT * FROM accounts a NATURAL JOIN (SELECT team, 1 AS k FROM accounts) b ORDER BY 2 LIMIT 1) x) FROM orders o ORDER BY 1");
     // an output named past the *: the group by its own number
     await alike("SELECT *, length(team) AS size FROM (SELECT team FROM accounts) s GROUP BY team, size ORDER BY 2 DESC, 1");
     // a name two outputs answer to, Postgres's refusal
