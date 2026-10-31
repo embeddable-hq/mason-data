@@ -53,6 +53,7 @@ import { normalise, same } from "./oracle/compare.ts";
 import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postgres-cases.ts";
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
+import { UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
 import { staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
@@ -437,7 +438,32 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       }
     }
   };
+  /** a LIMIT with no ORDER BY: what is defined of its rows, held (oracle/unordered-limit.ts); null where it holds */
+  const unorderedLimit = async (q: UnorderedLimit, source: pg.Client, mason: pg.Client): Promise<string | null> => {
+    const sql = `SELECT ${q.list} ${q.from} ${q.tail}`;
+    const [want, whole, got] = [await ask(source, sql, q.values), await ask(source, `SELECT ${q.list} ${q.whole ?? q.from}`), await ask(mason, sql, q.values)];
+    if ("code" in want || "code" in whole) return `Postgres refuses it: ${JSON.stringify("code" in want ? want : whole)}`;
+    if ("code" in got) return `refused: ${got.code} ${got.message}`;
+    const wrong = withinWhole(want, whole.rows, got);
+    if (wrong !== null || q.pages === undefined) return wrong;
+    const rows: (string | null)[][] = [];
+    for (let offset = 0; offset < whole.rows.length; offset += q.pages) {
+      const page = await ask(mason, `SELECT ${q.list} ${q.from} LIMIT ${q.pages} OFFSET ${offset}`);
+      if ("code" in page) return `page at ${offset} refused: ${page.code} ${page.message}`;
+      rows.push(...page.rows);
+    }
+    return everyRowOnce(rows, whole.rows);
+  };
+  const unorderedLimits = async (phase: string): Promise<void> => {
+    for (const q of UNORDERED_LIMITS) {
+      const name = `unordered limit: ${q.name}`;
+      if (ONLY !== null && !ONLY.test(name)) continue;
+      const wrong = await unorderedLimit(q, source, mason);
+      if (wrong !== null) differences.push({ phase, group: "unordered limit", kind: "rows", name, detail: wrong, sql: `SELECT ${q.list} ${q.from} ${q.tail}` });
+    }
+  };
   await run("after the copy");
+  await unorderedLimits("after the copy");
   alone.closeSync();
   await roleCases();
   await rowFilterCases();
@@ -447,6 +473,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     psql(dbUrl, mutations(round) + typedMutations(round));
     await sync.once();
     await run(`after changes round ${round}`);
+    await unorderedLimits(`after changes round ${round}`);
   }
   const asked = all().length * 3 + shaped;
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of
@@ -499,6 +526,10 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       { name: "a hidden column in a CASE", sql: "SELECT CASE WHEN notes IS NULL THEN 0 ELSE 1 END FROM public.orders" },
       { name: "a hidden column in a lateral's argument", sql: "SELECT x.n FROM public.orders o CROSS JOIN LATERAL (SELECT o.notes AS n) x" },
       { name: "a hidden column under a parameter", sql: "SELECT id FROM public.orders WHERE notes = $1", values: ["x"] },
+      // a LIMIT with no ORDER BY over a join reads each table again by row number: what the role may not read is refused first
+      { name: "a hidden column under a LIMIT over a join", sql: "SELECT o.notes FROM public.orders o JOIN public.customers c ON c.id = o.customer_id LIMIT 2" },
+      { name: "a hidden column in a join under a LIMIT", sql: "SELECT o.id FROM public.orders o JOIN public.customers c ON c.name = o.notes LIMIT 2" },
+      { name: "a * on a partly granted table under a LIMIT over a join", sql: "SELECT * FROM public.orders o JOIN public.customers c ON c.id = o.customer_id LIMIT 2" },
       { name: "SELECT * on a partly granted table", sql: "SELECT * FROM public.orders" },
       { name: "t.* on a partly granted table", sql: "SELECT o.* FROM public.orders o" },
       { name: "a whole-row reference", sql: "SELECT o FROM public.orders o" },
@@ -637,7 +668,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     const name = (user: string, shape: string): string => `row filter: ${user}: ${shape}`;
     const shapesOfUser = (key: string): ReadonlyArray<{ name: string; sql: string; values?: string[]; prepared?: string[] }> =>
       key === "hidden" ? HIDDEN_SHAPES : key === "tiers" ? TIER_SHAPES : key === "open" ? [...ROW_SHAPES, ...BARRIER_SHAPES, ...TIER_SHAPES] : [...ROW_SHAPES, ...BARRIER_SHAPES];
-    const users = ROWS_USERS.filter((u) => ONLY === null || [...shapesOfUser(u.key), { name: "EXPLAIN" }, { name: "SHOW ALL" }].some((q) => ONLY.test(name(u.key, q.name))));
+    const users = ROWS_USERS.filter((u) => ONLY === null || [...shapesOfUser(u.key), ...UNORDERED_ROW_SHAPES.map((x) => ({ name: `unordered limit: ${x.name}` })), { name: "EXPLAIN" }, { name: "SHOW ALL" }].some((q) => ONLY.test(name(u.key, q.name))));
     if (users.length === 0) return;
     const r = await import("../../src/cli/roles.ts");
     const file = r.parseRolesText(ROWS_ROLES, ROLE_FILE);
@@ -682,6 +713,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         const [want, got] = [await ask(source, q.sql, q.values), await ask(mason, q.sql, q.values)];
         hold(n, q.sql, want, got);
         answers.set(n, got);
+      }
+      // a LIMIT with no ORDER BY: the filter's rows alone, whichever are chosen (oracle/unordered-limit.ts)
+      if (u.key !== "hidden" && u.key !== "tiers") for (const q of UNORDERED_ROW_SHAPES) {
+        const n = name(u.key, `unordered limit: ${q.name}`);
+        if (ONLY !== null && !ONLY.test(n)) continue;
+        asked++;
+        const wrong = await unorderedLimit(q, source, mason);
+        if (wrong !== null) differences.push({ phase: "row filters", group: "row filter", kind: "rows", name: n, detail: wrong, sql: `SELECT ${q.list} ${q.from} ${q.tail}` });
       }
       // SHOW ALL: an attribute is a placeholder, listed by neither
       if (ONLY === null || ONLY.test(name(u.key, "SHOW ALL"))) {

@@ -106,6 +106,33 @@
       "full_sort": false
     },
     {
+      "name": "a LIMIT with no ORDER BY over joins: every table's columns",
+      "sql": "SELECT c.*, o.*, i.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id LEFT JOIN order_items i ON o.id = i.order_id LIMIT 100 OFFSET 0",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.orders",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.order_items",
+        "            HASH_JOIN",
+        "              TABLE_SCAN public.customers",
+        "              TOP_N (3 keys)",
+        "                PROJECTION",
+        "                  HASH_JOIN",
+        "                    HASH_JOIN",
+        "                      TABLE_SCAN public.orders",
+        "                      TABLE_SCAN public.customers",
+        "                    TABLE_SCAN public.order_items"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0",
       "sql": "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 0",
       "plan": [

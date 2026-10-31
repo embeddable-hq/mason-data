@@ -108,7 +108,9 @@ paths:
     every FROM item is a copied table (a `rowid` exists of nothing else, so a derived table, a view, a WITH query and a
     role's filtered read stay as they were), joined on conditions, none with a column named `rowid` in any case, and never over a
     whole row; a `*` is written out from the analysis, because a copy's view of its visible columns has no `rowid`. Same
-    rows; equal keys are in no defined order. ("A top N over joined tables");
+    rows; equal keys are in no defined order. A LIMIT with no ORDER BY takes the same path, sorted by the row numbers of the
+    tables read: a parallel join's rows change order each run, and an unsorted LIMIT's pages overlapped. OFFSET alone and
+    LIMIT ALL stay as they were, and `afterLimit` still needs a sort. ("A top N over joined tables");
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
   **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
   independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
