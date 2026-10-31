@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SHARDS, reportName } from "./ci-layout.ts";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import { staleDecisions } from "../tests/integration/oracle/known.ts";
@@ -55,7 +56,6 @@ export interface LegReport {
   differences: number;
 }
 
-export const reportName = (leg: number): string => `duck-oracle-leg-${leg}.json`;
 const sha = (text: string): Buffer => createHash("sha256").update(text).digest();
 
 /** a statement's identity: two of one text and one name are one id, and are counted as two */
@@ -179,9 +179,8 @@ export function foldProblems(reports: readonly LegReport[], want: number, fixtur
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const dir = process.argv[2];
   if (dir === undefined) { console.error("usage: scripts/oracle-legs.ts <folder of duck-oracle-leg-<n>.json>"); process.exit(2); }
-  const { SHARDS } = await import("./ci-shards.ts");   // when run: that file imports this one
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const reports = (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((f) => /^duck-oracle-leg-\d+\.json$/.test(f))
+  const reports = (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((f) => f === reportName(Number(/\d+/.exec(f)?.[0])))
     .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as LegReport);
   const fixture = JSON.parse(fs.readFileSync(path.join(root, "tests/fixtures/oracle-duckdb-alone.json"), "utf8")) as Pick<Tallies, "mason" | "duckdb">;
   const problems = foldProblems(reports, SHARDS.oracle, fixture, VERIFIED);

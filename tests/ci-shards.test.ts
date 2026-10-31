@@ -5,12 +5,18 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { SHARDS, coverageProblems, needsProblems, partition, shardCommand, shardFiles, testFiles, weightOf, type ShardRecord } from "../scripts/ci-shards.ts";
 import { ORACLE } from "../scripts/gate.ts";
+import { reportName } from "../scripts/ci-layout.ts";
+import { PHASES, STAGES, statementId, type LegReport } from "../scripts/oracle-legs.ts";
+import { GAPS } from "../src/duck/gaps.ts";
+import { VERIFIED } from "../src/duck/verified.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -109,4 +115,58 @@ test("the matrices are the shards scripts/ci-shards.ts counts, and no failure st
   const build = workflow.jobs.build!;
   const checked = build.steps!.filter((s) => s.name !== undefined);
   assert.ok(checked.length >= 4 && checked.every((s) => s.if === "${{ !cancelled() }}"), "every named check of build runs after a failure");
+});
+
+// CI's final jobs run these two as programs, and a fault of the program alone (a cycle's unsettled top-level await: Node's
+// exit 13, nothing printed) passes every test that imports them: so they are run here as CI runs them.
+const program = (script: string, args: string[], env: Record<string, string> = {}): { status: number | null; out: string } => {
+  const r = spawnSync(process.execPath, [path.join(ROOT, "scripts", script), ...args], { encoding: "utf8", cwd: ROOT, env: { ...process.env, ...env } });
+  return { status: r.status, out: r.stdout + r.stderr };
+};
+
+function legsFolder(t: { after(f: () => void): void }): { dir: string; reports: [LegReport, LegReport] } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-legs-"));
+  t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+  const fixture = JSON.parse(fs.readFileSync(path.join(ROOT, "tests/fixtures/oracle-duckdb-alone.json"), "utf8")) as Pick<LegReport["tallies"], "mason" | "duckdb">;
+  const statements = [1, 2].map((n) => ({ group: "g", name: `statement ${n}`, sql: `SELECT ${n}` }));
+  const whole = statements.map((q) => ({ id: statementId(q), name: q.name }));
+  const leg = (n: 1 | 2): LegReport => ({ leg: n, of: 2, whole, asked: Object.fromEntries(PHASES.map((p) => [p, [whole[n - 1]!.id]])), stages: n === 1 ? Object.fromEntries(STAGES.map((s) => [s, 1])) : {}, shaped: 0,
+    tallies: { statements: 1, mason: n === 1 ? fixture.mason : {}, duckdb: n === 1 ? fixture.duckdb : {} }, copyPhase: { refused: {}, decided: {} },
+    everyAsk: { refused: {}, decided: n === 1 ? Object.fromEntries(Object.keys(GAPS).map((id) => [id, { planted: 1, natural: 0 }])) : {} }, decisions: [], verified: n === 1 ? [...VERIFIED.keys()] : [], differences: 0 });
+  return { dir, reports: [leg(1), leg(2)] };
+}
+const write = (dir: string, reports: readonly LegReport[]): void => { for (const r of reports) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r)); };
+
+test("scripts/oracle-legs.ts run as CI runs it: exit 0 on legs that are the whole, 1 on a statement left out, 2 with no folder", (t) => {
+  const { dir, reports } = legsFolder(t);
+  write(dir, reports);
+  const good = program("oracle-legs.ts", [dir]);
+  assert.equal(good.status, 0, good.out);
+  assert.match(good.out, /oracle legs: 1 \+ 1 = 2 statements, each asked in all 3 phases by exactly one leg/);
+  reports[1].asked[PHASES[2]] = [];
+  write(dir, reports);
+  const bad = program("oracle-legs.ts", [dir]);
+  assert.equal(bad.status, 1, bad.out);
+  assert.match(bad.out, /no leg asked "statement 2"/);
+  fs.rmSync(path.join(dir, reportName(1)));
+  fs.rmSync(path.join(dir, reportName(2)));
+  const none = program("oracle-legs.ts", [dir]);
+  assert.equal(none.status, 1, none.out);
+  assert.match(none.out, /the reports are of leg\(s\) none/);
+  assert.equal(program("oracle-legs.ts", []).status, 2);
+});
+
+test("scripts/ci-shards.ts run as CI runs it: files, needs and verify each end with their exit code", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-shards-"));
+  t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+  const files = program("ci-shards.ts", ["files", "unit", "1"]);
+  assert.equal(files.status, 0, files.out);
+  assert.ok(files.out.split("\n").includes(shardFiles("unit", 1, ROOT)[0]!), files.out);
+  assert.equal(program("ci-shards.ts", ["needs"], { NEEDS: JSON.stringify({ a: { result: "success" } }) }).status, 0);
+  assert.equal(program("ci-shards.ts", ["needs"], { NEEDS: JSON.stringify({ a: { result: "skipped" } }) }).status, 1);
+  assert.equal(program("ci-shards.ts", ["verify", "rest", dir]).status, 1, "no records");
+  for (let shard = 1; shard <= SHARDS.rest; shard++) fs.writeFileSync(path.join(dir, `ran-rest-${shard}.json`), JSON.stringify({ kind: "rest", shard, files: shardFiles("rest", shard, ROOT), exit: 0 }));
+  const verified = program("ci-shards.ts", ["verify", "rest", dir]);
+  assert.equal(verified.status, 0, verified.out);
+  assert.equal(program("ci-shards.ts", ["nothing"]).status, 2);
 });

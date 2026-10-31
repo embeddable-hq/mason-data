@@ -21,10 +21,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ORACLE } from "./gate.ts";
-import { reportName } from "./oracle-legs.ts";
+import { SHARDS, reportName } from "./ci-layout.ts";
 
-/** The shards of each kind; `.github/workflows/ci.yml`'s matrices say the same (tests/ci-shards.test.ts). */
-export const SHARDS = { unit: 3, rest: 2, oracle: 2 } as const;
+export { SHARDS };
 export type Kind = keyof typeof SHARDS;
 export const isKind = (k: string | undefined): k is Kind => k === "unit" || k === "rest" || k === "oracle";
 
