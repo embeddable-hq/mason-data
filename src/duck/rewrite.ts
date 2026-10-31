@@ -4131,9 +4131,23 @@ function nameTargets(v: unknown): void {
   for (const [k, x] of Object.entries(b)) nameTargets(armOf(k, x) ?? x);
 }
 
-export function rewrite(stmt: AstNode, base: number, analysis: PgAnalysis, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(),
-  rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null,
-  wireBound = false, keyCounts: ReadonlySet<number> = new Set()):
+/** what a statement is rewritten from: `rewrite`'s one argument */
+export interface RewriteOptions {
+  stmt: AstNode;
+  base: number;
+  analysis: PgAnalysis;
+  collation: DuckCollation;
+  userTypes?: ReadonlyMap<number, string>;
+  rowTypes?: ReadonlyMap<number, readonly RowColumn[]>;
+  timeZone?: string;
+  enums?: EnumTypes;
+  kept?: KeptLookup | null;
+  wireBound?: boolean;
+  keyCounts?: ReadonlySet<number>;
+}
+
+export function rewrite({ stmt, base, analysis, collation, userTypes = new Map(), rowTypes = new Map(), timeZone = "UTC", enums = { labels: new Map(), arrays: new Map() }, kept = null,
+  wireBound = false, keyCounts = new Set() }: RewriteOptions):
   { tree: AstNode; dropLast: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
   const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, enums, kept, keyCounts);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {

@@ -7,7 +7,7 @@
  */
 import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
-import { gapRefusal, StatementError, type DuckPlan } from "../api/postgres/server.ts";
+import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
 import { describeKeys, nameUserKeys, resolvedKeys } from "./resolved.ts";
@@ -184,15 +184,34 @@ function printed(tree: Node, statement: string): string {
   throw new StatementError({ code: "0A000", message: "Mason cannot print this statement for the engine (a Mason gap: report it, with the statement)" }, statement);
 }
 
+/** what a statement is planned from: `planDuck`'s one argument */
+export interface PlanOptions {
+  catalog: (bytes: Uint8Array) => Promise<Uint8Array>;
+  text: string;
+  stmt: Node;
+  base: number;
+  paramOids: readonly number[];
+  searchPath: string;
+  timeZone: string;
+  collation: DuckCollation;
+  verified: ReadonlyMap<string, string> | null;
+  userTypes?: ReadonlyMap<string, number>;
+  copies?: () => readonly CopyState[];
+  depth?: number;
+  kept?: KeptRoutes | null;
+  wireBound?: boolean;
+  grants?: RoleGrants | null | undefined;
+  walls?: Walls | null;
+}
+
 /** A statement's plan. `wireBound`: its rows are bounded by a row count an Execute sets on the wire, which its SQL
  *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so).
  *  `grants`: the session's role (src/duck/grants.ts), held after the analysis; null for a session with no role where
  *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all.
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
-export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: Node, base: number,
-  paramOids: readonly number[], searchPath: string, timeZone: string, collation: DuckCollation, verified: ReadonlyMap<string, string> | null,
-  userTypes: ReadonlyMap<string, number> = new Map(), copies: () => readonly CopyState[] = () => [], depth = 0, kept: KeptRoutes | null = null,
-  wireBound = false, grants: RoleGrants | null | undefined = undefined, walls: Walls | null = null): Promise<DuckPlan> {
+export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
+  const { catalog, text, stmt, base, paramOids, searchPath, timeZone, collation, verified, userTypes = new Map<string, number>(), copies = () => [],
+    depth = 0, kept = null, wireBound = false, grants, walls = null } = options;
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -209,7 +228,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const expanded = await expandViews(catalog, stmt, analysis, pathSql(searchPath));
   if (expanded !== null) {
     if (depth >= MAX_VIEW_DEPTH) throw viewRefused(`Mason cannot yet answer views read through more than ${MAX_VIEW_DEPTH} other views`, "read the tables the views read");
-    try { return await planDuck(catalog, expanded.text, expanded.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, grants, walls); }
+    try { return await planDuck({ ...options, text: expanded.text, stmt: expanded.stmt, base: 0, paramOids: analysis.params, depth: depth + 1 }); }
     catch (e) {
       if (!(e instanceof StatementError)) throw e;
       const { position: _p, ...fields } = e.fields;
@@ -229,7 +248,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
     const filtered = await expandRowFilters(catalog, stmt, analysis, pathSql(searchPath), grants.rows);
     if (filtered !== null) {
       let inner: DuckPlan;
-      try { inner = await planDuck(catalog, filtered.text, filtered.stmt, 0, analysis.params, searchPath, timeZone, collation, verified, userTypes, copies, depth + 1, kept, wireBound, undefined, filtered.walls); }
+      try { inner = await planDuck({ ...options, text: filtered.text, stmt: filtered.stmt, base: 0, paramOids: analysis.params, depth: depth + 1, grants: undefined, walls: filtered.walls }); }
       catch (e) {
         if (!(e instanceof StatementError)) throw e;
         // a data exception may be a bound value's, not the statement's: `--set tenant=abc` on an integer
@@ -291,7 +310,7 @@ export async function planDuck(catalog: (bytes: Uint8Array) => Promise<Uint8Arra
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite(stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, catalogTypes, sourceRows, timeZone, enums, l, wireBound, keyCounts);
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, userTypes: catalogTypes, rowTypes: sourceRows, timeZone, enums, kept: l, wireBound, keyCounts });
   try {
     ({ tree, dropLast, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

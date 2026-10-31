@@ -24,8 +24,11 @@ import type { JsonRead } from "../../src/duck/kept-route.ts";
 import { connectSource, parseSource, readSourceFacts, type Source } from "../../src/cli/preflight.ts";
 import { PGlite } from "@electric-sql/pglite";
 import type { Node } from "libpg-query";
-import { planDuck } from "../../src/duck/plan.ts";
+import { planDuck, type PlanOptions } from "../../src/duck/plan.ts";
 import { parseSql, stopParser } from "../../src/api/postgres/parser.ts";
+
+/** planDuck over a stand-in for the stored paths (the test's keeper, or none) */
+const planKept = planDuck as (o: Omit<PlanOptions, "kept"> & { kept: unknown }) => ReturnType<typeof planDuck>;
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_djson_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -116,7 +119,7 @@ async function plannedAlone(store: DuckStore, url: string, kept: unknown, step: 
     const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
     const sql = "SELECT id, j ->> 's' AS s, j #>> '{s}' AS s2, j -> 's' AS s3, j ->> 'n' AS n, j #> '{o,a,0}' AS o, j -> 2 AS second, k -> 'k' AS kk, k ->> 'k' AS kt, k ->> 'n' AS kn " +
       "FROM docs WHERE j ->> 's' IS NOT NULL OR k ->> 'n' IS NOT NULL ORDER BY id";
-    const p = await (planDuck as (...a: unknown[]) => ReturnType<typeof planDuck>)(catalog, sql, (await parseSql(sql)).stmts![0]!.stmt as Node, 0, [], "public", "UTC", { kind: "bytes" }, null, new Map(), () => [], 0, kept);
+    const p = await planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null, kept: kept });
     await reader.run("SET search_path = 'public'");
     const plan = JSON.parse(String((await reader.runAndReadAll(`EXPLAIN (FORMAT JSON) ${p.sql.text}`)).getRowsJS()[0]![1])) as unknown;
     const cols: string[] = [];

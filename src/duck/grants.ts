@@ -22,7 +22,7 @@
  * table the role has only part of is refused, never narrowed (a narrowed `*` would change the result's columns); a
  * system column (xmin, ctid) needs the whole table.
  */
-import { StatementError } from "../api/postgres/server.ts";
+import { StatementError } from "./statement.ts";
 import { catalogRows } from "./analyze.ts";
 import type { TreeNode, TreeValue } from "./pgtree.ts";
 import type { AttributeShape, BoundFilter, RowFilter } from "./row-filter.ts";
