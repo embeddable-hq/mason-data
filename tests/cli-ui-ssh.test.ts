@@ -72,6 +72,7 @@ case "$FAKE_SSH" in
   bad-cd) echo "sh: 1: cd: can't cd to /wrong" >&2; exit 2 ;;
   other-bridge) echo 'MASON-UI-BRIDGE {"protocol":99,"version":"9.9.9","project":"shop","ticket":"x"}'; sleep 30; exit 0 ;;
   silent) sleep 30; exit 0 ;;
+  stubborn) trap '' TERM; exec sleep 30 ;;
 esac
 echo "Welcome to a server whose shell prints a banner"
 echo "a login banner, as sshd sends it" >&2
@@ -277,9 +278,10 @@ test("each failure is one report with its way out, in the failure shape, and no 
   assert.match(missing.error.fix, /OpenSSH client/);
 });
 
-test("Ctrl-C before the server answers ends ssh too, exit 0", { timeout: 60_000 }, async () => {
+// `stubborn` ignores SIGTERM: the command must wait for it and kill it, never exit with it alive
+for (const mode of ["silent", "stubborn"]) test(`Ctrl-C before the server answers ends ssh too, exit 0 (${mode})`, { timeout: 60_000 }, async () => {
   const ssh = fakeSsh();
-  const child = spawn(process.execPath, [MAIN, "ui", "--ssh", "deploy@mason.example", "--json"], { cwd: temp("laptop"), env: env(ssh.bin, { FAKE_SSH: "silent" }), stdio: ["ignore", "pipe", "ignore"] });
+  const child = spawn(process.execPath, [MAIN, "ui", "--ssh", "deploy@mason.example", "--json"], { cwd: temp("laptop"), env: env(ssh.bin, { FAKE_SSH: mode }), stdio: ["ignore", "pipe", "ignore"] });
   let out = "";
   child.stdout!.on("data", (b: Buffer) => { out += b.toString(); });
   const done = new Promise<number | null>((r) => child.on("close", (c) => r(c)));
