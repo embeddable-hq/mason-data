@@ -149,6 +149,11 @@ test("the stored value is the function's answer for every JSON shape, and the re
         `FROM (SELECT j, ${kept} AS kept FROM public.docs)`))[0] as bigint[];
       assert.equal(total, BigInt(50 * SHAPES.length + 1));
       assert.equal(wrong, 0n, `the read from the column differs from the call for ${JSON.stringify(r)}`);
+      // the turn of a write (src/duck/kept.ts), over every row: a NULL session of VARCHAR, and the stored value the call's
+      const [turnNotNull, turned] = (await rows(store,
+        `SELECT count(*) FILTER (__mason_turn(NULL, j) IS NOT NULL), count(*) FILTER (${(await import("../src/duck/kept.ts")).keptValueSql({ ...r, source: "public.docs", column: "j" }, "j")} IS DISTINCT FROM ${kept}) FROM public.docs`))[0] as bigint[];
+      assert.equal(turnNotNull, 0n, "a NULL session stays NULL through the turn, on every row");
+      assert.equal(turned, 0n, `the stored value through the turn differs from the call's for ${JSON.stringify(r)}`);
       assert.deepEqual([unset, marked], [0n, 0n], `every row of ${JSON.stringify(r)} is answered by the column alone`);
     }
     // a string beginning with a NUL is its `->` text (escaped), and its `->>` the function's on that text
@@ -264,9 +269,9 @@ test("a read is answered from its stored column only once it is ready, every rea
     assert.match(on.sql.text, new RegExp(`CASE WHEN ${route.hiddenName(s)} = chr\\(0\\) OR ${route.hiddenName(s)} = 'null' THEN NULL`), on.sql.text);
     // a qualified column is read through its qualifier, and a chain of reads off it is one stored path
     // (a row marked since it was counted exact raises, never read as its value: kept-route.ts markedError)
-    assert.match(on.sql.text, /CASE WHEN d\.(__mason_json_[0-9a-f]{12}) = \(chr\(0\) \|\| '!'\) THEN __mason_marked_value\(getvariable\('__mason_session'\), d\.\1, 'XX000', '(?:[^']|'')*'\) ELSE CASE WHEN d\.\1 = chr\(0\) THEN NULL ELSE d\.\1 END END AS first/, on.sql.text);
+    assert.match(on.sql.text, /CASE WHEN d\.(__mason_json_[0-9a-f]{12}) = \(chr\(0\) \|\| '!'\) THEN __mason_marked_value\(__mason_turn\(getvariable\('__mason_session'\), d\.\1\), d\.\1, 'XX000', '(?:[^']|'')*'\) ELSE CASE WHEN d\.\1 = chr\(0\) THEN NULL ELSE d\.\1 END END AS first/, on.sql.text);
     // and no document is named: the function and DuckDB's own read are of the stored text, never of j
-    assert.doesNotMatch(on.sql.text, /\(getvariable\('__mason_session'\), (d\.)?j,|json_type\((d\.)?j,/, on.sql.text);
+    assert.doesNotMatch(on.sql.text, /\(getvariable\('__mason_session'\), (d\.)?j[,)]|json_type\((d\.)?j,/, on.sql.text);
     assert.deepEqual(await answer(on.sql.text), await answer(off.sql.text), "the stored reads answer what the calls answer");
     // a read whose path is not ready is the call: a keeper that knows no path
     const { keeper: empty } = await keeperOver(await newStore(), kept, {});
@@ -281,7 +286,7 @@ test("a read is answered from its stored column only once it is ready, every rea
       // its text names the view (`__mason_visible`); what it calls is the plan's, the calls in its text and nothing
       // else (once read off the text, a * was a calling statement, and no timeout or cancel stopped it)
       const functions = (p.sql as unknown as { functions?: readonly string[] }).functions;
-      assert.deepEqual(functions, [...new Set(p.sql.text.match(/\b__mason_[a-z0-9_]+(?=\()/g) ?? [])].sort(), `${listing}: the functions it calls`);
+      assert.deepEqual(functions, [...new Set(p.sql.text.match(/\b__mason_(?!turn\()[a-z0-9_]+(?=\()/g) ?? [])].sort(), `${listing}: the functions it calls`);
       if (!/->>/.test(listing)) assert.deepEqual(functions, [], `${listing} calls no Mason function`);
       assert.doesNotMatch(p.sql.text, /__mason_json_[0-9a-f]{12}/, listing);
       // a top N over joins and a * over USING or NATURAL have their * written out, so no hidden column can be listed
@@ -546,7 +551,7 @@ test("a READY path is read from its stored column alone: the plan reads no docum
     const h = route.hiddenName(s);
     assert.deepEqual(keeper.ready(s), { name: h, exact: true });
     const value = (kept as unknown as { keptValueSql(p: Read, v: string): string }).keptValueSql(s, "j");
-    await store.writer.run(`INSERT INTO public.docs (id, j, k, ${ident(h)}) SELECT 900, '{"s": "x", "n": 1,}'::JSON, NULL, ${value.replace(/\bj\b/, `'{"s": "x", "n": 1,}'::JSON`)}`);
+    await store.writer.run(`INSERT INTO public.docs (id, j, k, ${ident(h)}) SELECT 900, '{"s": "x", "n": 1,}'::JSON, NULL, ${value.replace(/\bj\b/g, `'{"s": "x", "n": 1,}'::JSON`)}`);
     // before the detector counts it the read is still exact, and the mark is never read as the row's value: it raises
     const fail = async (q: string): Promise<string> => { try { await answer(q); return "answered"; } catch (e) { return (e as Error).message.replace(/\n[\s\S]*/, ""); } };
     assert.deepEqual(keeper.ready(s), { name: h, exact: true }, "not counted yet");

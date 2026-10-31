@@ -76,6 +76,16 @@ paths:
   main's time. A new long stretch of JavaScript on the worker with no loop turn beats, or the watch calls it stuck. Never
   a test that blocks the main thread: `nodeProcess` in `tests/duck-executor-harness.ts` is an async spawn. "the watch" tests
   there hold both sides: blocked main and a beating thread must not fire, the silent worker and a spinning thread must.
+- **Every vector of a Mason function passes through the turn, so one statement cannot hold the worker's loop** (issue 127:
+  a `select 1` waited 22 s beside a `to_char`, 57 s on a real deployment). Node runs a thread-safe function's queue until
+  it is empty or for 1,000 calls before the loop turns, and a statement needs about eight turns. `__mason_turn` is a
+  queue of its own that a thread passes through between two calls (`registerTurn`, src/duck/functions.ts), so the
+  running queue empties after one call per DuckDB thread. `giveTurns` (src/duck/rewrite.ts) gives every call that reads
+  a column its turn on the finished tree; SQL written by hand with a per-row call does the same (`keptValueSql`,
+  `orderKeySql`, src/duck/kept.ts). DETECTOR: `tests/duck-executor-starve.test.ts` counts small statements answered
+  beside each heavy shape, `tests/duck-functions.test.ts` holds which argument the turn takes. RESPONSE: the loop turns
+  every few calls. What it does not cover: a statement in flight holds a libuv thread, and at four of them a fifth waits
+  (issue 88). ("The turn")
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
   Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked

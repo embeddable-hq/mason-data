@@ -106,7 +106,7 @@ test("no rewrite of the corpus placed one of its nodes twice", async () => {
 // DuckDB runs, so neither a call the tree walk missed nor a name that is no call can classify a statement.
 test("every planned statement says the Mason functions it calls: exactly the calls in the text DuckDB runs", () => {
   assert.ok(planned.length > 20, `the corpus planned ${planned.length} statement(s) for DuckDB: run after the test above`);
-  const wrong = planned.filter((p) => JSON.stringify(p.functions) !== JSON.stringify([...new Set(p.text.match(/\b__mason_[a-z0-9_]+(?=\()/g) ?? [])].sort()))
+  const wrong = planned.filter((p) => JSON.stringify(p.functions) !== JSON.stringify([...new Set(p.text.match(/\b__mason_(?!turn\()[a-z0-9_]+(?=\()/g) ?? [])].sort()))
     .map((p) => `${JSON.stringify(p.functions)}: ${p.text.slice(0, 300)}`);
   assert.deepEqual(wrong, []);
   assert.ok(planned.some((p) => (p.functions?.length ?? 0) > 0) && planned.some((p) => p.functions?.length === 0), "the corpus has statements that call Mason functions and statements that call none");

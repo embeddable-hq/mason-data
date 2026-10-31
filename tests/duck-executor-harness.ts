@@ -46,8 +46,12 @@ export const schema: PgSchema = {
   tables: [
     { name: "gen", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }] },
     { name: "small", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }] },
+    { name: "wide", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "n", type: "int4" }, { name: "ts", type: "timestamptz" }, { name: "j", type: "jsonb" }] },
   ],
 };
+/** the rows of `wide`, which a statement of each per-row function reads in tests/duck-executor-starve.test.ts: more than
+ *  2,000 vectors, so a statement is over 1,000 calls of each function (src/duck/functions.ts `registerTurn`) */
+export const WIDE_ROWS = 5_000_000;
 
 /** the temp folder removed at the end, for a file that starts no server */
 export function useScratch(): void {
@@ -55,11 +59,16 @@ export function useScratch(): void {
 }
 
 /** the store, the listener and the command server, for every test of the file that calls it */
-export function useServer(o: { warm?: boolean } = {}): void {
+export function useServer(o: { warm?: boolean; wide?: boolean } = {}): void {
   before(async () => {
     store = await DuckStore.open(path.join(dir, "duck.db"), (l) => { logged.push(l); });
     await store.writer.run(`CREATE TABLE public.gen AS SELECT range::INTEGER AS id, '{"n": ' || range || ', "pad": "' || repeat('x', 40) || '"}' AS j FROM range(${ROWS})`);
     await store.writer.run("CREATE TABLE public.small AS SELECT range::INTEGER AS id FROM range(10)");
+    if (o.wide === true) {
+      await store.writer.run(`CREATE TABLE public.wide AS SELECT range::INTEGER AS id, (range % 1000)::INTEGER AS n,
+        TIMESTAMPTZ '2024-01-01 00:00:00+00' + INTERVAL (range * 13 % 63072000) SECOND AS ts,
+        '{"a": ' || (range % 50) || ', "b": "v' || (range % 7) || '", "pad": "' || repeat('x', 40) || '"}' AS j FROM range(${WIDE_ROWS})`);
+    }
     api = await startPostgresApi({
       port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
       authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },

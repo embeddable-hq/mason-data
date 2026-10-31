@@ -63,6 +63,7 @@ import { canonicalRead, EQUAL_STEPS, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isEqu
   pathText, readOfKey, VISIBLE_CATALOG,
   type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS, KEY_VERSION, libcUncovered, STORED_SUFFIX } from "./jsonb-order.ts";
+import { TURN_FUNCTION } from "./functions.ts";
 import { encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
 import type { DuckCollation } from "./rewrite.ts";
 
@@ -221,7 +222,7 @@ const tableOf = (source: string): string => { const at = source.indexOf("."); re
 /** the value a stored column takes from its JSON column's `value` (a column reference or an expression): the path's
  *  `->` answer, never NULL (a NULL document's is `KEPT_NULL` too: the column's NULL is a row not stored yet) */
 export function keptValueSql(p: Omit<JsonRead, "asText">, value: string): string {
-  return `coalesce(__mason_json_kept(NULL, ${value}, ${literal(p.steps)}, ${p.either}, ${p.canonical}, false), ${NULL_SQL})`;
+  return `coalesce(__mason_json_kept(${TURN_FUNCTION}(NULL, ${value}), ${value}, ${literal(p.steps)}, ${p.either}, ${p.canonical}, false), ${NULL_SQL})`;
 }
 
 /**
@@ -231,7 +232,7 @@ export function keptValueSql(p: Omit<JsonRead, "asText">, value: string): string
  * `KEY_RECOMPUTE_HEX` where the key raised, which its read computes (and raises) again.
  */
 export function orderKeySql(c: DuckCollation, value: string): string {
-  const call = (name: string, ...args: string[]): string => `${name}${STORED_SUFFIX}(NULL, ${args.join(", ")})`;
+  const call = (name: string, ...args: string[]): string => `${name}${STORED_SUFFIX}(${TURN_FUNCTION}(NULL, ${value}), ${args.join(", ")})`;
   const key = c.kind !== "icu" ? call(JSONB_KEY_FUNCTIONS[c.kind].key, value)
     : call(JSONB_KEY_FUNCTIONS.icu.key, value, `list_transform(${call(JSONB_KEY_FUNCTIONS.icu.strings, value)}, __mason_s -> icu_sort_key(__mason_s, ${literal(c.name)}))`);
   return `CASE WHEN (${value}) IS NULL THEN unhex('${KEY_NULL_HEX}') ELSE coalesce(${key}, unhex('${KEY_RECOMPUTE_HEX}')) END`;

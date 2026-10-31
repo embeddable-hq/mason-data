@@ -730,6 +730,15 @@ test("no string a user can see names the engine: a message, a log line or a JSON
   assert.deepEqual(hits.filter((h) => !h.startsWith("src/duck/gaps.ts:")), [], "a string names the engine: say 'the engine', 'the synced data' or 'Mason' (CLAUDE.md: nothing a user sees is named for DuckDB)");
 });
 
+// src/duck/functions.ts registers the turn through the bindings themselves: a second copy of the addon, another version
+// than the API's, would be handed the API's handles and crash at registration
+test("the bindings Mason imports are the version the engine's API depends on, in the root and in cli/", () => {
+  const read = (f: string): { dependencies: Record<string, string> } => JSON.parse(fs.readFileSync(f, "utf8")) as { dependencies: Record<string, string> };
+  const wanted = read("node_modules/@duckdb/node-api/package.json").dependencies["@duckdb/node-bindings"];
+  assert.ok(wanted !== undefined, "the API no longer declares its bindings");
+  for (const f of ["package.json", "cli/package.json"]) assert.equal(read(f).dependencies["@duckdb/node-bindings"], wanted, `${f}: @duckdb/node-bindings`);
+});
+
 test("the engine-name guard catches the real thing, and leaves the engine's own tokens alone", () => {
   assert.deepEqual(engineNamedInStrings("throw new Error(`DuckDB could not open ${f}`);\nconst a = 1;"), [1]);
   assert.deepEqual(engineNamedInStrings("const m = \"a sum past DuckDB's 38 digits\";"), [1]);

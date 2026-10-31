@@ -219,6 +219,10 @@ probe measured the event loop's longest stall during each call.
 | `closeSync` (result, connection, instance), `disconnectSync`, `destroySync` | Sync | **On the calling thread**, which in Mason is the worker. See below |
 | A `__mason_pg_*` function (`src/duck/functions.ts`, `pgEvalSync` in `src/duck/pg-eval.ts`) | Sync, `Atomics.wait` | **On the calling thread, the executor worker**, until the PGlite on the pg-eval worker answers: about 8 ms per 2,048 values. At `TIMEOUT_MS` (30 s) that worker is terminated and the statement fails. Not probed here |
 
+- **A function call's wait is bounded by the turn.** Node runs a thread-safe function's queue until it is empty or for
+  1,000 calls before the loop turns, so a statement calling on two or more threads held the worker's loop for 999 calls
+  a turn (2.2 to 3.3 s each), and a small statement needs about eight turns. `__mason_turn` empties that queue after one
+  call per DuckDB thread (`registerTurn`, `src/duck/functions.ts`; docs/DESIGN.md "The turn").
 - **The pool is small and shared.** libuv's pool is per process, four threads by default, and nothing here sets
   `UV_THREADPOOL_SIZE`. Six statements on six connections finished four together, then the rest; a `connect` beside them
   waited 1.5 s, and 3.7 s with a pool of two. So a call that looks free can be waiting behind running statements.

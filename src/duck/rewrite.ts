@@ -28,7 +28,7 @@
  */
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
-import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
+import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type Typed } from "./pgtree.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
@@ -4354,6 +4354,52 @@ const canonicalType = (n: string[]): string => { const last = (n[n.length - 1] ?
  * (src/duck/kept-route.ts), which call nothing — read as a call, every `SELECT *` over a copy with a stored path could
  * no longer be timed out or cancelled (a review finding).
  */
+/**
+ * EVERY VECTOR OF A MASON FUNCTION PASSES THROUGH THE TURN (src/duck/functions.ts `registerTurn` says why): the session,
+ * a call's first argument, becomes `__mason_turn(<the session>, <an argument>)`, so a thread leaves the running queue of
+ * calls before it computes the next vector, and one statement cannot hold the executor's loop for 1,000 calls. On the
+ * finished tree, once, so no rule of the rewrite meets it and the two copies of the argument are not one node.
+ *
+ * The argument is there to make the turn run per vector: of constants alone DuckDB would fold it once, and a call whose
+ * arguments are all constant is folded too and needs none. It is the call's own argument, whole, never a column read
+ * out of it: `f(a + b)` under `GROUP BY a + b` binds, `a` alone would not. DuckDB computes it again where it cannot share
+ * it, so the cheapest that qualifies is taken, and one that may not be repeated never is:
+ *  - a Mason call in it would run twice. A call with no other argument relies on the turn of the call inside it, which
+ *    a thread takes on the same vector;
+ *  - a subquery, a window, an `unnest` or a `COLUMNS` is work or rows of its own; a `*` no value `ANY` can type. (A bare `$n` reads no
+ *    column, so it is never chosen; a `$n` beside a column, `a = $1`, is typed by the column.)
+ * A statement with no such argument keeps its calls as they are: it reads no column, so it calls for few rows.
+ */
+export function giveTurns(tree: unknown): void {
+  const never = (n: unknown): boolean => {
+    if (Array.isArray(n)) return n.some(never);
+    if (n === null || typeof n !== "object") return false;
+    return Object.entries(n).some(([k, v]) => k === "SubLink" || k === "A_Star" || k === "over"
+      || (k === "FuncCall" && /^(unnest|columns|__mason_.*)$/.test(lastName((v as Body).funcname))) || never(v));
+  };
+  const readsColumn = (n: unknown): boolean => {
+    if (Array.isArray(n)) return n.some(readsColumn);
+    if (n === null || typeof n !== "object") return false;
+    return Object.entries(n).some(([k, v]) => k === "ColumnRef" || readsColumn(v));
+  };
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) { for (const x of n) walk(x); return; }
+    if (n === null || typeof n !== "object") return;
+    for (const [k, v] of Object.entries(n)) {
+      if (k === "FuncCall" && v !== null && typeof v === "object") {
+        const name = lastName((v as Body).funcname);
+        const [session, ...args] = ((v as Body).args ?? []) as AstNode[];
+        if (name.startsWith("__mason_") && name !== TURN_FUNCTION && lastName((session as Body | undefined)?.FuncCall?.funcname) === "getvariable") {
+          const by = args.filter((a) => readsColumn(a) && !never(a)).map((a) => ({ a, size: JSON.stringify(a).length })).sort((x, y) => x.size - y.size)[0];
+          if (by !== undefined) (v as Body).args = [{ FuncCall: { funcname: [S(TURN_FUNCTION)], args: [session, structuredClone(by.a)], funcformat: "COERCE_EXPLICIT_CALL" } }, ...args];
+        }
+      }
+      walk(v);
+    }
+  };
+  walk(tree);
+}
+
 export function masonCalls(tree: unknown): string[] {
   const found = new Set<string>();
   const walk = (n: unknown): void => {
@@ -4362,7 +4408,7 @@ export function masonCalls(tree: unknown): string[] {
     for (const [k, v] of Object.entries(n)) {
       if (k === "FuncCall" && v !== null && typeof v === "object") {
         const name = lastName((v as Body).funcname);
-        if (name.startsWith("__mason_")) found.add(name);
+        if (name.startsWith("__mason_") && name !== TURN_FUNCTION) found.add(name);
       }
       walk(v);
     }

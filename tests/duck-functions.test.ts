@@ -4,11 +4,13 @@
  * it (tests/integration/duck-oracle.itest.ts and duck-to-char.itest.ts hold every one to a live Postgres; this file pins
  * them offline).
  */
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { arrayText, floatNumericText, initcap, jsonArrayLength, jsonBuild, jsonbContains, jsonbExists, jsonElements, jsonGet, jsonMembers, jsonValue, pgCase, stringToArray } from "../src/duck/functions.ts";
 import { toCharNumber, toCharTime } from "../src/duck/to-char.ts";
-import { similarToRe2 } from "../src/duck/rewrite.ts";
+import { giveTurns, masonCalls, similarToRe2 } from "../src/duck/rewrite.ts";
+import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
+import { deparseSync } from "pgsql-deparser";
 import { padDecimals } from "../src/duck/types.ts";
 
 test("json reads: json keeps the document's text, jsonb writes it canonically; a duplicate key reads its last value", () => {
@@ -121,4 +123,41 @@ test("string_to_array as Postgres splits: '' is no element, a NULL delimiter spl
   assert.deepEqual(stringToArray("abc", null, null), ["a", "b", "c"]);
   assert.deepEqual(stringToArray("abc", "", null), ["abc"]);
   assert.deepEqual(stringToArray("a,x,b", ",", "x"), ["a", null, "b"]);
+});
+
+// EVERY VECTOR PASSES THROUGH THE TURN (src/duck/rewrite.ts `giveTurns`; what it does is tests/duck-executor-starve.test.ts)
+after(() => stopParser());
+const S = "getvariable('__mason_session')";
+const turned = async (select: string): Promise<string> => {
+  const tree = (await parseSql(`SELECT ${select} FROM t`)).stmts?.[0]?.stmt;
+  giveTurns(tree);
+  return deparseSync(tree as never, { pretty: false }).replace(/^SELECT /, "").replace(/ FROM t$/, "");
+};
+test("the turn is taken by a call that reads a column, on its cheapest argument that may be repeated", async () => {
+  assert.equal(await turned(`__mason_f(${S}, a, 'k')`), `__mason_f(__mason_turn(${S}, a), a, 'k')`);
+  // the whole argument, or `f(a + b)` under GROUP BY a + b would not bind
+  assert.equal(await turned(`__mason_f(${S}, a + b)`), `__mason_f(__mason_turn(${S}, a + b), a + b)`);
+  assert.equal(await turned(`__mason_f(${S}, lower(a) || b, c)`), `__mason_f(__mason_turn(${S}, c), lower(a) || b, c)`);
+  assert.equal(await turned(`__mason_f(${S}, sum(a))`), `__mason_f(__mason_turn(${S}, sum(a)), sum(a))`);
+  // a parameter beside a column is typed by it (run prepared in tests/duck-wire.test.ts)
+  assert.equal(await turned(`__mason_f(${S}, a = $1)`), `__mason_f(__mason_turn(${S}, a = $1), a = $1)`);
+});
+test("the turn is not taken over an argument that must not run twice, or by a call DuckDB folds", async () => {
+  assert.equal(await turned(`__mason_f(${S}, 'k', 1)`), `__mason_f(${S}, 'k', 1)`);
+  assert.equal(await turned(`__mason_f(${S}, $1)`), `__mason_f(${S}, $1)`);
+  assert.equal(await turned(`__mason_f(${S}, (SELECT max(a) FROM u))`), `__mason_f(${S}, (SELECT max(a) FROM u))`);
+  assert.equal(await turned(`__mason_f(${S}, sum(a) OVER ())`), `__mason_f(${S}, sum(a) OVER ())`);
+  assert.equal(await turned(`__mason_f(${S}, unnest(a))`), `__mason_f(${S}, unnest(a))`);
+  assert.equal(await turned(`__mason_f(${S}, t.*)`), `__mason_f(${S}, t.*)`);
+  // a call of no session is no Mason function's call, and a function of Postgres's is left alone
+  assert.equal(await turned("__mason_f(a), lower(a)"), "__mason_f(a), lower(a)");
+});
+test("a call over a Mason call relies on the turn of the call inside it, so nothing is computed twice", async () => {
+  assert.equal(await turned(`__mason_f(${S}, __mason_g(${S}, a))`), `__mason_f(${S}, __mason_g(__mason_turn(${S}, a), a))`);
+  // another argument of its own is a turn of its own, one hop more and no call more
+  assert.equal(await turned(`__mason_f(${S}, __mason_g(${S}, a), b)`), `__mason_f(__mason_turn(${S}, b), __mason_g(__mason_turn(${S}, a), a), b)`);
+});
+test("the turn is no function a statement says it calls: a statement that calls none is not cancelled as if it did", async () => {
+  const tree = (await parseSql(`SELECT __mason_turn(${S}, a), __mason_f(${S}, a) FROM t`)).stmts?.[0]?.stmt;
+  assert.deepEqual(masonCalls(tree), ["__mason_f"]);
 });

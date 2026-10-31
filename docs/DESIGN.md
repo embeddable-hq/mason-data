@@ -1816,6 +1816,48 @@ without, and none on Node 26.10.
 and `mason serve` terminates a catalog worker at every idle stop: there it is a rare abort the supervisor restarts.
 Lift the guard when a Node 24 release carries nodejs/node#66376.
 
+### The turn (2026-10-31, issue 127)
+
+**Measured** on a synthetic 17 M-row table, 10 cores: while `to_char` ran, a probe on the executor's thread saw 999 function
+calls between two turns of its loop, each turn 2.2 to 3.3 s, 9 turns in the statement's 8,301 calls; CPU equal to wall
+time. A `select 1 from small limit 1` needs about eight turns, and took 22 s (31 s beside `@>`, up to 17 s beside a
+numeric bin; a real deployment saw 37 to 57 s). The binding (`duckdb_thread_callback.h`, v2.0.0-r.1) gives each scalar
+function one thread-safe function and blocks the calling thread until the synchronous JavaScript returns; Node's
+dispatch stops at an empty queue or 1,000 calls, and with two callers the queue is never empty.
+
+**The decision:** a thread leaves the running queue between two calls, so the queue can empty. `__mason_turn` is a second
+thread-safe function, called before each vector; a thread that finished a call waits there, and that queue is served only
+after the running one returned to the loop. A turn is then one call per DuckDB thread, 999 becomes about 10, and a small
+statement's wait is about eight turns of N × a vector's time, whatever the statements running.
+
+| Small statement beside it (median / worst) | Before | After |
+|---|---|---|
+| `to_char`, 17 M rows | 22 s | 283 ms / 533 ms (843 ms / 1.8 s at load 38) |
+| jsonb `@>`, 17 M rows | 31 s | 473 ms / 1.4 s |
+| numeric bin, 17 M rows | up to 17 s | 194 ms / 319 ms |
+| `to_char`, 3 M rows, two at once | | 693 ms / 1.2 s |
+
+The heavy statement's own CPU did not move past the noise of a shared machine (`to_char` 30 s and 21 to 41 s of wall time
+alone, 5.6 and 5.4 s of CPU over 3 M rows). The body is O(1): the session handed on as a constant vector.
+
+**Rejected, measured:**
+- DuckDB `threads = 1`, the same emptied queue by another road: 20 ms beside one heavy statement, 7.4 s beside two, and
+  every native statement of the instance on one thread.
+- More threads for the functions: a scalar function runs on the thread that registered it, and a connection is a Node
+  object of the thread that made it, so a second thread cannot register on the instance. A compute pool behind the
+  call does not help: the call still waits, synchronously, on the loop's thread.
+- A priority for short statements: nothing in DuckDB or Node's dispatch to set one on; the queue is first in, first out.
+- JavaScript that yields inside a call: the binding has no asynchronous return, and Node has no way to turn a loop from
+  inside one.
+
+**Native expressions are not rejected, they are the next step** (issue 130): `strftime` took 436 ms where `to_char` took
+23 s, a decimal division 339 ms where the bin took 15 s. Each must be proved exact shape by shape first, and any function
+left in JavaScript needs the turn all the same.
+
+**What remains:** a statement in flight holds a libuv thread, so at four running statements a fifth waits for one: five
+`to_char` at once left a small statement a worst case of 28.6 s, 1.6 s with `UV_THREADPOOL_SIZE=16` and nothing else
+changed (issue 88). And a very wide document's vector still takes as long as it takes: a turn is N of them.
+
 ### Local gates (2026-10-30)
 
 **Measured**, over 117 agent transcripts: local test gates were 48 % of active time, and a third of that (13.5 of 39.7
