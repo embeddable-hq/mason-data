@@ -36,7 +36,19 @@
  * A row of the join is one row number per table, NULL where an outer join supplied none, and that NULL finds no row, so
  * its columns are NULL as they were: a row the join multiplies is a pair of its own, and a statement of one snapshot
  * reads each row number once. The rows and the order among different keys are the inner query's; rows of EQUAL keys
- * are in no defined order, here as on Postgres. Measured over a 4 M-row join with wide JSON in the last table (a 2 GB
+ * are in no defined order, here as on Postgres.
+ *
+ * A LIMIT WITH NO ORDER BY is written the same way, its keys the row numbers of the tables read (a statement with no
+ * limit in fact, OFFSET alone or LIMIT ALL, stays as it was: every row comes back, and reading each again saves
+ * nothing). It is here for the join's memory, where the last table is on the hash join's build side, and for its pages:
+ * which rows such a statement answers is defined by no one, but DuckDB's parallel join hands the same statement's rows
+ * back in another order each run, and a LIMIT over them overlaps its neighbouring pages (about a third of the rows of
+ * a join paged to its end came back twice; one thread, none; a Postgres of one plan, in practice none). The top N on row
+ * numbers costs what the streaming LIMIT does (docs/DESIGN.md "A top N over joined tables"), and its order is total
+ * over what is read: two rows of equal row numbers are the same output. `afterLimit` still needs a sort: the keys put
+ * its rows back, and a list of no key has none.
+ *
+ * Measured over a 4 M-row join with wide JSON in the last table (a 2 GB
  * limit): 12.9 s and 8.6 GiB spilled before, 0.19 s and none after; LIMIT 10,000 failed for memory before and takes 2.9 s.
  *
  * A row number is read only of a table: a derived table, a view, a WITH query and a role's filtered read (each a
@@ -150,18 +162,26 @@ export function selectListAfterLimit(tree: AstNode, analysis: TreeValue): AstNod
   return changed ? written : null;
 }
 
-/** a SELECT of the shape both forms take: sorted and limited, each row one row of its FROM; its list and its sort */
-function sortedLimited(s: Body): { targets: AstNode[]; sorts: AstNode[] } | null {
+/** a SELECT with a LIMIT, each row one row of its FROM: its list and its sort, which may be none */
+function limited(s: Body): { targets: AstNode[]; sorts: AstNode[] } | null {
   if (s.op !== undefined && s.op !== "SETOP_NONE") return null;
   for (const f of ["withClause", "distinctClause", "groupClause", "havingClause", "windowClause", "lockingClause", "intoClause", "valuesLists"]) {
     if (s[f] !== undefined && !(Array.isArray(s[f]) && (s[f] as unknown[]).length === 0)) return null;
   }
   if (s.limitCount === undefined || (s.limitOption !== undefined && s.limitOption !== "LIMIT_OPTION_COUNT" && s.limitOption !== "LIMIT_OPTION_DEFAULT")) return null;
   const targets = s.targetList as AstNode[] | undefined;
-  const sorts = s.sortClause as AstNode[] | undefined;
-  if (targets === undefined || sorts === undefined || sorts.length === 0) return null;
-  return { targets, sorts };
+  if (targets === undefined) return null;
+  return { targets, sorts: (s.sortClause as AstNode[] | undefined) ?? [] };
 }
+
+/** a limited SELECT that sorts: only one the keys alone put back in order may compute its list after the limit */
+function sortedLimited(s: Body): { targets: AstNode[]; sorts: AstNode[] } | null {
+  const shape = limited(s);
+  return shape === null || shape.sorts.length === 0 ? null : shape;
+}
+
+/** LIMIT ALL and LIMIT NULL, which limit nothing: the parser's constant NULL, cast or not */
+const noLimit = (n: unknown): boolean => kindOf(n) === "A_Const" ? bodyOf(n).isnull === true : kindOf(n) === "TypeCast" && noLimit(bodyOf(n).arg);
 
 /** each sort key as an expression over the FROM clause, or null: an ordinal or an output column's name is that
  *  output's own expression, as Postgres reads it (an output name before an input column's), and a sort by a computed
@@ -325,9 +345,11 @@ function writtenOut(targets: AstNode[], tables: ReadonlyArray<{ alias: string; c
 /** one SELECT over joined tables written with its rows chosen by row number (see above), or null where it is not so shaped */
 function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
   const s = bodyOf(select);
-  const shape = sortedLimited(s);
+  const shape = limited(s);
   if (shape === null) return null;
   const { targets, sorts } = shape;
+  // no sort and in fact no limit: every row comes back, and reading each one again saves nothing
+  if (sorts.length === 0 && noLimit(s.limitCount)) return null;
   const from = joinedTables(s.fromClause);
   if (from === null || from.length < 2) return null;
   const aliases = from.map(aliasOfTable);
@@ -356,10 +378,12 @@ function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
     return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, bare(v)]));
   };
   const fetched = from.filter((t) => written.read.has(aliasOfTable(t)));
+  // no sort of its own: the row numbers are the order, so a page of the statement is one page of one list
+  const order = (node: AstNode): AstNode => ({ SortBy: { node, sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } });
   const inner: Body = { ...s, fromClause: bare(s.fromClause), targetList: [
     ...fetched.map((t, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: rowNumber(aliasOfTable(t)) } })),
     ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
-  ], sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: keys[i] } })) };
+  ], sortClause: sorts.length > 0 ? sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: keys[i] } })) : fetched.map((t) => order(rowNumber(aliasOfTable(t)))) };
   let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
   fetched.forEach((t, i) => {
     joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg: { RangeVar: own(t) }, quals: { A_Expr: {
@@ -368,7 +392,8 @@ function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
   return { SelectStmt: {
     targetList: written.list,
     fromClause: [joined],
-    sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })),
+    sortClause: sorts.length > 0 ? sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } }))
+      : fetched.map((_t, i) => order(ref(LATE, `__mason_r${i + 1}`))),
     limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
   } };
 }

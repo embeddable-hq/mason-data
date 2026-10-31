@@ -1875,6 +1875,30 @@ it first spills (778.8 MiB of 865 free), stays that number, and failing against 
 setting; with 600 MiB taken from the disk afterwards the next sort ended in `IO Error: Could not write file …`. Lowering
 the setting under what is spilled at that moment is refused, and the statement goes on. A failed statement's files are gone at once.
 
+**The same preview with no ORDER BY** (a real deployment: `LIMIT 100 OFFSET 0`, no sort, tens of GiB spilled, a last table of
+about 100 M rows). It streams, and stops at the LIMIT, only where the wide table is probed; where the rows before it are
+the more numerous (below, 8 M narrow rows before a 3 M-row table of 4 kB JSON) the wide table is the hash join's build side,
+and every wide column is held before the first row comes out. Each cell one run, the engine's statements, a 2 GB limit:
+
+| `LIMIT 100`, no ORDER BY | before | by row number, sorted by them |
+|---|---|---|
+| outer rows one-to-many | 9.02 s, 4.21 GiB spilled | 0.27 s, none |
+| the same, `OFFSET 2,000,000` | 8.23 s, 4.12 GiB spilled | 0.37 s, none |
+| outer rows many-to-one | 6.19 s, 3.91 GiB spilled | 0.04 s, none |
+| the same, `OFFSET 2,000,000` | 6.89 s, 4.06 GiB spilled | 0.58 s, none |
+| an empty table between | 7.73 s, 3.97 GiB spilled | 2.16 s, none |
+| the same, `OFFSET 2,000,000` | 8.04 s, 4.05 GiB spilled | 3.89 s, none |
+| a small outer table, the wide one probed (no spill before) | 0.05 s | row numbers alone: 0.03 s against 0.07 s streamed |
+
+Why the row numbers are sorted, when any 100 rows of the join are a right answer: **pages**. Without a sort, DuckDB's
+parallel hash join gives the same statement's rows in another order each run, so `LIMIT n OFFSET m` over them is no page of
+one list. Paging joins of 0.7–1 M rows to their end, with a plain statement, in pages of 100,000: 222,912 to 366,176 rows came back twice and as many
+never, most pages differed when asked twice, and at `LIMIT 100` over the first 3,000 rows one of four joins already repeated
+152; one thread: none; sorted by row number, the same five joins paged: none repeated, none missed, every page alike when asked twice. Postgres promises nothing here either, but a fixed plan gives it in practice, and a tool's preview
+pages. The numbered form (`row_number() OVER ()` over the chosen rows, kept outside) cost 0.04 to 0.08 s where the sort costs
+0.04 to 0.58 s and kept that overlap, so the sort it is: the top N on row numbers is cheap because nothing but row numbers
+goes through it. `LIMIT -1` is refused 42804 where Postgres says 2201W, with or without a join: not this path's.
+
 ### First copy, and the poll's cost on the source
 
 Four tables of a real database (the largest keyed tables under 5 GiB), each copied in one transaction through the

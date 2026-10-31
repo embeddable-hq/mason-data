@@ -72,7 +72,7 @@ The extended column has a trap, the last fact below: a catalog statement runs at
    5. `keptLookup` and `distinctKeys`: what the rewrite may read from stored columns and key counts.
    6. `rewrite` (`src/duck/rewrite.ts`), below. **Refusal point**: `Unrewritable` becomes `gapRefusal`, or Postgres's
       SQLSTATE where the gap is Postgres's own.
-   7. `hideKept`, then `selectListAfterLimit` (`src/duck/late.ts`: a top N over joined tables by row number, `joinRows`, else the list after the limit).
+   7. `hideKept`, then `selectListAfterLimit` (`src/duck/late.ts`: a top N or an unsorted LIMIT over joined tables by row number, `joinRows`, else the list after the limit).
    8. **Refusal point**: every key must be in `verified`, else `gapRefusal("unverified", …)`.
    9. `deparseSync`, then `parseSql` and `treeDifference`. **Refusal point**: 0A000 when the text does not read back as
       the tree.
