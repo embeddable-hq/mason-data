@@ -10,6 +10,7 @@
  *                                 (the default: until mason sync <table>), poll <interval> or replication; an entry's
  *                                 own overrides it
  *   publication: ${PG_PUBLICATION}  the publication `replication` reads, its owner's (never altered); none: Mason's own
+ *                                   (the literal `publication: null` says so, past one an earlier start recorded)
  *   tables:
  *     orders:                     a bare name is in `public`; `billing.invoices` names its schema
  *       columns: [id, customer_id, status]
@@ -75,13 +76,28 @@ export interface SourceFile {
   sync: TableSync | null;
   /** the publication the `replication` tables are read through, its owner's: `${NAME}` (resolved by `readSource`) or
    *  its name written in the file; null: none named, so Mason makes its own (src/duck/sync.ts ensurePublication) */
-  publication: { env: string } | { literal: string } | null;
+  publication: { env: string } | { literal: string } | { own: true } | null;
   tables: TableEntry[];
 }
 
 /** The tables a file keeps current by replication, by their effective sync (`effectiveSync`): what streams. */
 export function replicatedEntries(src: Pick<SourceFile, "sync" | "tables">): TableEntry[] {
   return src.tables.filter((e) => effectiveSync(src, e).sync.mode === "replication");
+}
+
+/** Whether the file says how anything is kept current: a `sync:` at its top or on any entry. A file with none has every
+ *  table on the default, by no one's choice: what an older Mason's file looks like. */
+export function syncWritten(file: Pick<SourceFile, "sync" | "tables">): boolean {
+  return file.sync !== null || file.tables.some((e) => e.sync !== null);
+}
+
+/**
+ * A FILE THAT HAS GONE SILENT OVER A PROJECT THAT STREAMS: it names tables and no `sync:`, where the config records a
+ * slot. Silent is no decision (a file with no table has nothing left to stream). One rule for the start, whose refusal
+ * is `recordRefusal` (src/cli/replication-mode.ts), and the run's re-read (`rereadSources`).
+ */
+export function silentOverSlot(slotRecorded: boolean, file: Pick<SourceFile, "sync" | "tables">): boolean {
+  return slotRecorded && file.tables.length > 0 && !syncWritten(file);
 }
 
 /** A table's sync: its entry's, else the file's, else the default (`off`) — and which of the three said it. */
@@ -216,10 +232,14 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
 
   // the publication a replicated table is read through: a name, or ${NAME} as url: takes one (resolved by readSource)
   let publication: SourceFile["publication"] = null;
-  if (v.publication !== undefined && v.publication !== null) {
+  // the word `null`, as written: Mason's own, on purpose, past a name a start recorded (src/cli/replication-mode.ts
+  // recordRefusal). A key left with no value is a line half-written, never that decision; no line at all says nothing
+  const publicationNode = doc.get("publication", true);
+  if (v.publication === null && isScalar(publicationNode) && publicationNode.source === "null") publication = { own: true };
+  else if (v.publication !== undefined) {
     const p = typeof v.publication === "string" ? v.publication.trim() : "";
     const m = ENV_REF.exec(p);
-    if (p === "") problems.push("publication: write publication: ${PG_PUBLICATION}, or a publication's name (leave it out and Mason makes its own)");
+    if (p === "") problems.push("publication: write publication: ${PG_PUBLICATION}, or a publication's name (publication: null and Mason makes its own)");
     else if (m) publication = { env: m[1]! };
     else if (p.includes("$")) problems.push(`publication: ${JSON.stringify(p)} — write \${NAME} alone, like \${PG_PUBLICATION}, or the publication's name`);
     else publication = { literal: p };
@@ -399,12 +419,12 @@ export function readSource(folder: string, root: string, env: NodeJS.ProcessEnv 
   // the publication's name, read as url: is: ${NAME} from the same places, in the same order
   let publicationName: string | null = null;
   if (parsed.publication !== null && "literal" in parsed.publication) publicationName = parsed.publication.literal;
-  else if (parsed.publication !== null) {
+  else if (parsed.publication !== null && "env" in parsed.publication) {
     const v = parsed.publication.env;
     const p = appEnvValue(root, v, env, { shellFirst: o.shellFirst === true });
     if (p === null || p.value.trim() === "") {
       return { message: `${shownPath(root, file)}: publication: \${${v}} is not set — not in ${where}`, code: "bad_source",
-        fix: `put ${v}=<the publication's name> in ${shownPath(root, path.join(root, ENV_FILE))} (or export it), or take publication: out of the file and Mason makes its own` };
+        fix: `put ${v}=<the publication's name> in ${shownPath(root, path.join(root, ENV_FILE))} (or export it), or write publication: null and Mason makes its own` };
     }
     publicationName = p.value.trim();
   }
@@ -509,15 +529,19 @@ export interface RunSources { file: SourceFile; tables: AddedTable[]; problem: s
  * THE SOURCES FILE READ AGAIN WHILE THE RUN IS UP (mason add, mason remove): its tables now — or, when the file cannot be
  * taken as it is, the tables read before, kept (a typo never drops a copy), with what is wrong; `said` is the log line,
  * once per new problem. A `url:` that resolves to another database than the one the run copies (a .env edited) is such a
- * problem: the run's catalog is the old database's, so it is said, and mason stop && mason start reads the new one.
+ * problem: the run's catalog is the old database's, so it is said, and mason stop && mason start reads the new one. So
+ * is a file gone silent on sync: while `slot` is recorded: taken, it would retire the slot.
  */
 export function rereadSources(prev: RunSources, read: ProjectSource | Failure, runUrl: string, catalog: readonly SourceTable[], database: string, root: string,
-  o: { replicationChecked?: boolean } = {}): RunSources & { said: string | null } {
+  o: { replicationChecked?: boolean; slot?: string | null } = {}): RunSources & { said: string | null } {
   let problem: string | null = null;
   let next: AddedTable[] | null = null;
   if ("message" in read) problem = `${read.message}${read.why ? `: ${read.why.replace(/\n/g, "; ")}` : ""}`;
   else if (read.resolved !== runUrl) {
     problem = `${shownPath(root, read.file)}: url: now names ${maskedUrl(read.resolved)} (${read.from}), and this run syncs ${maskedUrl(runUrl)}: mason stop && mason start syncs from the new one`;
+  } else if (silentOverSlot((o.slot ?? null) !== null, read)) {
+    problem = `${shownPath(root, read.file)}: no sync: at its top or on an entry, and this project streams through replication slot ${o.slot}: ` +
+      "write sync: replication at its top to keep streaming, or sync: off or sync: poll <interval> to drop the slot";
   } else if (o.replicationChecked === false && replicatedEntries(read).length > 0) {
     // a table set to replication in a run that never checked the database for it (the commands' edits are checked, the
     // run server's checkReplication): kept as it was, never frozen by a slot the database cannot make
