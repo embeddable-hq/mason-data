@@ -163,7 +163,7 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 | `MASON_DUCKDB_MEMORY` | half the container's memory limit | the container's limit is not what the copy should have half of ("Memory") |
 | `MASON_SPILL_LIMIT` | half of what is free on the disk, followed as it fills | statements fail with 53400 on a disk with room to give them (never past 90% of what is free) |
 | `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |
-| `UV_THREADPOOL_SIZE` | 64 | a platform limits a process's threads: Mason needs this many and about 20 more, and Node exits with no message when it cannot start them. Each running statement holds one |
+| `UV_THREADPOOL_SIZE` | 64 | a platform limits a process's threads: Mason runs this many and about 20 to 60 more, by the CPUs, and Node exits with no message when it cannot start them. Each running statement holds one |
 | `MASON_STATEMENT_TIMEOUT` | `5min` (0 for none) | a dashboard's statement may rightly take longer, or a runaway one should stop sooner |
 | `MASON_HISTORY_DAYS` | 7 | you want Mason's history — the request log (`mason logs --requests`), the sync's events, the usage samples (`mason usage`), all kept in the copy — longer or shorter (it was `MASON_REQUEST_LOG_DAYS`, which now refuses the start) |
 | `MASON_STORE_JSON_PATHS` | `on` | you want the copy to hold only the columns you named: `off` stores no JSON path as a column, and drops what was stored at the next start |

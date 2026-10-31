@@ -1875,15 +1875,18 @@ The heavy statements' own time did not get worse, and at 2 vCPU it varied more w
 the pool. The small p50 rises because more statements really do run at once. The worst at two heavy is the same either
 way: it is not the pool.
 
-**Memory is not the limit.** A process idles at 216 MB with 4 threads, 219 MB with 64 and 222 MB with 256: a parked
-thread touches a few kilobytes of its stack.
+**Memory is not the limit.** The bench's process idles at 216 MB with 4 threads, 219 MB with 64 and 222 MB with 256: a
+parked thread touches a few kilobytes of its stack. The real image at 2 vCPU, 64 beside 4: 292 MB and 292 MB, then 298 MB
+and 269 MB after a restart, 621 MB and 563 MB after a first start. So a few tens of MB at most, within the noise of one
+sample. Peak RSS under load showed no pattern (687 to 912 MB at either size). Threads, read from the process: 81 at
+2 vCPU where a pool of 4 has 21, exactly the 60 more; 121 at 10 CPUs.
 
 **Why 64 is a number and not derived.** The size was to sit above Mason's limit on running statements, and there is no
 such limit: one statement runs per session, and `CANCEL_SLOTS` allows 4,096 sessions, past libuv's maximum of 1,024.
 Past the pool's size, libuv's queue is the admission, first in, first out. 1,024 was tried and refused: libuv starts
 every thread at the pool's first task and aborts with no message if one cannot be made, so `--pids-limit=300` ended the
-process with exit 133, where 64 ran under `--pids-limit=100` (81 threads in all), and platforms limit threads, some to
-256. 64 is many more statements than make progress on the machines measured, and leaves room for the sync's readers
+process with exit 133, where the bench's process with 64 ran under `--pids-limit=100`, and platforms limit threads, some
+to 256. 64 is many more statements than make progress on the machines measured, and leaves room for the sync's readers
 (at most 8, and the writer). An admission limit would be the one fact to derive this from; it would be new behaviour,
 so it was not added here.
 

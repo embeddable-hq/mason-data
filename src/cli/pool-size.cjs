@@ -8,7 +8,8 @@
  * session runs one at a time and CANCEL_SLOTS allows 4,096 sessions, past the 1,024 threads libuv allows, so no pool
  * sits above that limit. The 1,024 itself is refused: libuv starts every thread at once and ABORTS the process with no
  * message when one cannot be made (exit 133 under `--pids-limit=300`), and platforms limit threads, some to 256. 64 costs
- * about 3 MB of memory, 81 threads in all, and leaves room beside the sync's readers (at most 8, and the writer).
+ * no more than a few tens of MB, a real run has 81 threads at 2 vCPU and 121 at 10, and it leaves room beside the sync's
+ * readers (at most 8, and the writer).
  *
  * An operator's own UV_THREADPOOL_SIZE is left alone. An empty one counts as unset: libuv would read it as 1.
  */

@@ -26,11 +26,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A small statement no longer waits tens of seconds beside a heavy one**: a statement that computes something per row
   (`to_char`, a numeric bin, jsonb `@>`) held every other session, up to 57 s on one deployment. A small statement now
   answers in under about a second or two.
-- **Five or more heavy statements at once no longer stall a small one**: it waited 13 to 30 s beside five to eight, and
+- **Five or more heavy statements at once no longer stall a small one**: it waited 10 to 50 s beside five to eight, and
   now about a second or two, at 2 vCPU as on a larger machine. Mason now starts 64 threads for statements where Node
-  starts four, which costs about 3 MB of memory. Nothing to do on upgrade, unless your platform limits a process's threads
-  below about 85: Mason would exit with no message on its first start, so set `UV_THREADPOOL_SIZE` lower. A
-  `UV_THREADPOOL_SIZE` of your own is kept.
+  starts four, which costs a few tens of MB of memory at most. Nothing to do on upgrade, unless your platform limits a
+  process's threads: Mason now runs 80 to 120 of them, by its CPUs, and past a limit it exits with no message, so set
+  `UV_THREADPOOL_SIZE` lower. A `UV_THREADPOOL_SIZE` of your own is kept.
 
 ## Known
 
