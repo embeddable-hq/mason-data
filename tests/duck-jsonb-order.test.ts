@@ -137,7 +137,9 @@ test("every way a statement sorts, groups or compares a jsonb is answered as Pos
       // a set operation sorted by a jsonb column, by its ordinal and by its name
       "SELECT id, j FROM jo WHERE id < 10 UNION ALL SELECT id, j FROM jo WHERE id >= 10 ORDER BY 2, 1",
       "SELECT id, j FROM jo WHERE id < 10 UNION ALL SELECT id, j FROM jo WHERE id >= 10 ORDER BY j DESC, id",
-      // a * sorted by the number of a column that is no jsonb; a jsonb's containment with ANY (its own operator)
+      // a * sorted by the number or the name of a jsonb column it lists, as the column named; or by one that is no jsonb;
+      // a jsonb's containment with ANY (its own operator)
+      "SELECT * FROM (SELECT id, j FROM jo) s ORDER BY 2, 1", "SELECT s.* FROM (SELECT id, j FROM jo) s ORDER BY 2 DESC, 1", "SELECT * FROM (SELECT id, j FROM jo) s ORDER BY j DESC, id LIMIT 5",
       "SELECT * FROM (SELECT id, j FROM jo) s ORDER BY 1", "SELECT id FROM jo WHERE j @> ANY (ARRAY['{\"a\": 1}'::jsonb, '[1]']) ORDER BY id",
       // a raw scalar contains no array, an array may contain a raw scalar (JsonbDeepContains)
       "SELECT id FROM jo WHERE j @> '[1]' ORDER BY id", "SELECT id FROM jo WHERE '[1, 2, \"a\"]' @> j ORDER BY id",
@@ -197,8 +199,7 @@ test("every way a statement sorts, groups or compares a jsonb is answered as Pos
       "SELECT a.id FROM jo a JOIN jo b USING (j)", "SELECT j FROM jo UNION SELECT j FROM jo", "SELECT j FROM jo INTERSECT ALL SELECT j FROM jo", "SELECT DISTINCT * FROM (SELECT id, j FROM jo) s", "SELECT DISTINCT s.* FROM (SELECT j FROM jo) s",
       "SELECT j, count(*) FROM jo GROUP BY ROLLUP (j)", "SELECT array_agg(DISTINCT j) FROM jo", "SELECT id FROM jo ORDER BY ja", "SELECT id FROM jo WHERE ja = ARRAY['1'::jsonb]",
       "SELECT id FROM jo WHERE j = ANY (ja)", "SELECT id FROM jo WHERE j BETWEEN SYMMETRIC '10' AND '1'",
-      // a * sorted by a jsonb's column number; rows holding a jsonb compared; a jsonb array contained or searched
-      "SELECT * FROM (SELECT id, j FROM jo) s ORDER BY 2", "SELECT s.* FROM (SELECT id, j FROM jo) s ORDER BY 2 DESC",
+      // rows holding a jsonb compared; a jsonb array contained or searched
       "SELECT id FROM jo WHERE (id, j) = (2, '{\"a\": 1}')", "SELECT id FROM jo WHERE (j, id) IN (SELECT j, id FROM jo)", "SELECT id FROM jo WHERE (id, j) < (2, '1')",
       "SELECT id FROM jo WHERE ja @> ARRAY['{\"a\": 1.0}'::jsonb]", "SELECT id FROM jo WHERE ja <@ ARRAY['{\"a\": 1.0}'::jsonb]", "SELECT id FROM jo WHERE ja && ARRAY['1.0'::jsonb]",
       "SELECT array_position(ja, '1.0'::jsonb) FROM jo", "SELECT array_remove(ja, '1.0'::jsonb) FROM jo",

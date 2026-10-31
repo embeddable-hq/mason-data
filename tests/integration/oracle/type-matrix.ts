@@ -177,6 +177,14 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "CREATE TABLE public.top_r (id int PRIMARY KEY, rowid int, a_id int); INSERT INTO public.top_r VALUES (1, 70, 1), (2, 60, 2), (3, 50, 2);" +
   "CREATE TABLE public.top_rc (id int PRIMARY KEY, \"RowId\" int, a_id int); INSERT INTO public.top_rc SELECT g, 5, g % 3 + 1 FROM generate_series(1, 6) g;" +
   "CREATE VIEW public.top_v AS SELECT b.id, b.a_id, b.payload FROM public.top_b b WHERE b.id < 20;" +
+  // A SORT THROUGH A `*` (issue 112): text a collation orders otherwise than bytes, a citext and a char(n) likewise, a
+  // jsonb; star_b for a join's own columns of the same names
+  "CREATE TABLE public.star_o (id int PRIMARY KEY, n int, name text, ci citext, ch char(4), j jsonb); " +
+  "INSERT INTO public.star_o VALUES (1, 5, 'b', 'b', 'b', '2'), (2, 4, 'A', 'A', 'A', '\"a\"'), (3, 3, 'a', 'c', 'a', '[1]'), (4, 2, 'Z', 'Z', 'Z', '{\"a\": 1}'), " +
+  "(5, 1, NULL, NULL, NULL, NULL), (6, 5, 'é', 'É', 'é', '10'), (7, 7, 'a-b', 'y', 'a b', 'null'), (8, 8, 'ab', 'X', 'ab', 'true');" +
+  "CREATE TABLE public.star_b (id int PRIMARY KEY, a_id int, name text, y text); " +
+  "INSERT INTO public.star_b VALUES (1, 1, 'Q', 'b'), (2, 2, 'q', 'A'), (3, 3, 'r', 'a'), (4, 2, 'R', 'Z'), (5, 8, NULL, NULL), (6, 99, 'é', 'é');" +
+  "CREATE VIEW public.star_v AS SELECT id, name, ci, ch FROM public.star_o;" +
   // JSONB IN POSTGRES'S ORDER (JORDER above), beside a json of the same text, which has no order at all
   `CREATE TABLE public.jorder (id int PRIMARY KEY, j jsonb, js json); INSERT INTO public.jorder VALUES ${JORDER.map((v, i) => `(${i + 1}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
   // INSTANTS AT A TRUNCATION'S EDGES (date_trunc of a timestamptz, in the session's zone or a zone of its own): each side
@@ -761,6 +769,176 @@ function* matrix(): Generator<Matrixed> {
   yield q("top N over joins: two *, sorted by numbers", "SELECT a.*, b.* FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 2, 1, 6 LIMIT 5");
   yield q("top N over joins: a number past the *'s first table", "SELECT *, a.id FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 7, 1, 6 LIMIT 5");
   yield q("top N over joins: a *'s number output sorted by its name", "SELECT a.id, b.* FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY amount DESC, 1, b.id LIMIT 5");
+  // AN OUTPUT OF A `*` SORTED BY ITS NUMBER OR ITS BARE NAME (issue 112): by that column's key, as the column named is.
+  // Rows of equal keys stay apart by id, so that each answer is one order
+  yield q("star sort: by number, text", "SELECT * FROM star_o ORDER BY 3 NULLS FIRST, 1");
+  yield q("star sort: by bare name, text", "SELECT * FROM star_o ORDER BY name NULLS FIRST, id");
+  yield q("star sort: by number, a LIMIT chooses the rows", "SELECT * FROM star_o ORDER BY 3 NULLS FIRST, 1 LIMIT 4");
+  yield q("star sort: by bare name, a LIMIT chooses the rows", "SELECT * FROM star_o ORDER BY name NULLS FIRST, id LIMIT 4");
+  yield q("star sort: descending", "SELECT * FROM star_o ORDER BY 3 DESC, 1");
+  yield q("star sort: descending by name, its NULLs last, an OFFSET", "SELECT * FROM star_o ORDER BY name DESC NULLS LAST, id LIMIT 3 OFFSET 2");
+  yield q("star sort: a citext by number", "SELECT * FROM star_o ORDER BY 4, 1");
+  yield q("star sort: a citext by bare name, descending", "SELECT * FROM star_o ORDER BY ci DESC, id LIMIT 5");
+  yield q("star sort: a char(n) by number", "SELECT * FROM star_o ORDER BY 5 NULLS FIRST, 1");
+  yield q("star sort: a char(n) by bare name", "SELECT * FROM star_o ORDER BY ch DESC, id LIMIT 5");
+  yield q("star sort: a jsonb by number", "SELECT * FROM star_o ORDER BY 6, 1");
+  yield q("star sort: a jsonb by bare name", "SELECT * FROM star_o ORDER BY j DESC, id LIMIT 4");
+  yield q("star sort: a number that is an integer column", "SELECT * FROM star_o ORDER BY 2 DESC, 1");
+  yield q("star sort: t.*", "SELECT t.* FROM star_o t ORDER BY 3 NULLS FIRST, 1");
+  yield q("star sort: t.* by bare name, the table by its schema", "SELECT star_o.* FROM public.star_o ORDER BY name NULLS FIRST, id LIMIT 4");
+  yield q("star sort: a * and the same column again, by the name both answer to", "SELECT *, name FROM star_o ORDER BY name NULLS FIRST, id");
+  yield q("star sort: a target before the *", "SELECT upper(name) AS u, * FROM star_o ORDER BY 4 NULLS FIRST, 2");
+  yield q("star sort: a target after the *, by its number", "SELECT *, id FROM star_o ORDER BY 3 NULLS FIRST, 8");
+  yield q("star sort: the number of a target past the *, text", "SELECT *, name AS again FROM star_o ORDER BY 8 NULLS FIRST, 1");
+  yield q("star sort: the number of a computed target past the *", "SELECT *, lower(name) || 'x' AS low FROM star_o ORDER BY 8 NULLS FIRST, 1");
+  yield q("star sort: the second output is the *'s second column, no other target", "SELECT *, id FROM star_o ORDER BY 2, 1");
+  yield q("star sort: an output past the * by its alias", "SELECT *, name AS again FROM star_o ORDER BY again NULLS FIRST, id LIMIT 4");
+  yield q("star sort: a table's *, a target of a join", "SELECT a.*, b.y FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY 8, 1, b.id");
+  yield q("star sort: a table's *, a target of a join, the star's column first", "SELECT a.*, b.y FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY 3, 8");
+  yield q("star sort: over a join, the number of its second table's column", "SELECT a.id, b.* FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY 4, 1, 2");
+  yield q("star sort: a join's *, numbers", "SELECT * FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY 10 NULLS FIRST, 3, 8");
+  yield q("star sort: a join under a LIMIT, by number", "SELECT a.*, b.y FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY 8, 1, b.id LIMIT 2");
+  yield q("star sort: a join under a LIMIT, by bare name", "SELECT a.*, b.y FROM star_o a LEFT JOIN star_b b ON b.a_id = a.id ORDER BY ch NULLS FIRST, y NULLS FIRST, a.id LIMIT 3");
+  yield q("star sort: a join's two *, under a LIMIT", "SELECT a.*, b.* FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY 10 NULLS FIRST, 3, 8 LIMIT 3");
+  yield q("star sort: a join's jsonb by number, under a LIMIT", "SELECT a.*, b.y FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY 6, 8, b.id LIMIT 3");
+  yield q("star sort: a table's citext by number, over a join under a LIMIT", "SELECT a.*, b.y FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY 4, 8, b.id LIMIT 3");
+  yield q("star sort: a bare name both tables have (42702)", "SELECT * FROM star_o a JOIN star_b b ON b.a_id = a.id ORDER BY name");
+  yield q("star sort: a bare name a * and another target answer (42702)", "SELECT *, id AS name FROM star_o ORDER BY name");
+  yield q("star sort: a bare name a join's USING merged", "SELECT * FROM star_o a JOIN star_b b USING (name) ORDER BY name NULLS FIRST");
+  yield q("star sort: the number of a column a LEFT JOIN's USING merged", "SELECT * FROM star_o a LEFT JOIN star_b b USING (name) ORDER BY 1 NULLS FIRST, 2");
+  yield q("star sort: the number of a column a FULL JOIN's USING merged", "SELECT * FROM star_o a FULL JOIN star_b b USING (name) ORDER BY 1 NULLS FIRST, 2, 8");
+  yield q("star sort: a named join's columns", "SELECT j.* FROM (star_o a JOIN (SELECT a_id, y FROM star_b) b ON b.a_id = a.id) AS j ORDER BY 3 NULLS FIRST, 8, 1");
+  yield q("star sort: a named join's merged column", "SELECT j.* FROM (star_o a FULL JOIN (SELECT name, y FROM star_b) b USING (name)) AS j ORDER BY 1 NULLS FIRST, 2, 7");
+  yield q("star sort: an aliased column list", "SELECT * FROM star_o AS x(key, m, label) ORDER BY 3 NULLS FIRST, 1");
+  yield q("star sort: an aliased column list, by its new name", "SELECT * FROM star_o AS x(key, m, label) ORDER BY label NULLS FIRST, key LIMIT 4");
+  yield q("star sort: an aliased column list hides the old name (42703)", "SELECT * FROM star_o AS x(key, m, label) ORDER BY name");
+  yield q("star sort: a view's *", "SELECT * FROM star_v ORDER BY 2 NULLS FIRST, 1");
+  yield q("star sort: a view's * by bare name", "SELECT * FROM star_v ORDER BY name NULLS FIRST, id LIMIT 4");
+  yield q("star sort: a view's citext and char(n)", "SELECT v.* FROM star_v v ORDER BY 3, 1");
+  yield q("star sort: a CTE's *", "WITH w AS (SELECT id, name FROM star_o) SELECT * FROM w ORDER BY 2 NULLS FIRST, 1");
+  yield q("star sort: a CTE's * by bare name", "WITH w AS (SELECT * FROM star_o WHERE n > 1) SELECT * FROM w ORDER BY name NULLS FIRST, id LIMIT 4");
+  yield q("star sort: a CTE's jsonb and citext by number", "WITH w AS (SELECT * FROM star_o) SELECT w.* FROM w ORDER BY 6, 4, 1");
+  yield q("star sort: a derived table's *", "SELECT * FROM (SELECT name, id FROM star_o) s ORDER BY 1 NULLS FIRST, 2");
+  yield q("star sort: a derived table's column of byte order", "SELECT s.* FROM (SELECT id, name COLLATE \"C\" AS name FROM star_o) s ORDER BY 2 NULLS FIRST, 1");
+  yield q("star sort: a derived table's computed column", "SELECT * FROM (SELECT id, name || '!' AS shout FROM star_o) s ORDER BY shout NULLS FIRST, 1");
+  yield q("star sort: a list of VALUES", "SELECT * FROM one, (VALUES ('b'), ('A'), ('a'), ('Z')) AS v ORDER BY 2");
+  yield q("star sort: a list of VALUES, its columns named", "SELECT * FROM one, (VALUES (1, 'b'), (2, 'A'), (3, 'a'), (4, 'Z')) AS v(k, s) ORDER BY s, k");
+  yield q("star sort: a function's column", "SELECT * FROM one, unnest(ARRAY['b', 'A', 'a', 'Z']) AS u ORDER BY 2");
+  yield q("star sort: DISTINCT", "SELECT DISTINCT * FROM (SELECT name, ch FROM star_o) s ORDER BY 1 NULLS FIRST, 2");
+  yield q("star sort: DISTINCT over a table, by number", "SELECT DISTINCT id, name FROM star_o ORDER BY 2 NULLS FIRST, 1");
+  yield q("star sort: DISTINCT *, by number", "SELECT DISTINCT * FROM star_b ORDER BY 3 NULLS FIRST, 1");
+  yield q("star sort: DISTINCT *, by bare name", "SELECT DISTINCT * FROM star_b ORDER BY name NULLS FIRST, id LIMIT 4");
+  yield q("star sort: DISTINCT ON a number of the *", "SELECT DISTINCT ON (3) * FROM star_b ORDER BY 3 NULLS FIRST, 1");
+  yield q("star sort: DISTINCT ON a jsonb by its number", "SELECT DISTINCT ON (6) * FROM star_o ORDER BY 6, 1");
+  yield q("star sort: GROUP BY the key by number", "SELECT * FROM star_o GROUP BY 1 ORDER BY 3 NULLS FIRST, 1");
+  yield q("star sort: GROUP BY the key, sorted by a column it decides", "SELECT * FROM star_o GROUP BY id ORDER BY name NULLS FIRST, id LIMIT 4");
+  yield q("star sort: GROUP BY every column of a derived table by number", "SELECT * FROM (SELECT name, ch FROM star_o) s GROUP BY 1, 2 ORDER BY 1 NULLS FIRST, 2");
+  yield q("star sort: GROUP BY an output past the *", "SELECT *, upper(name) AS u FROM (SELECT name, id FROM star_o) s GROUP BY 1, 2, u ORDER BY 3 NULLS FIRST, 2");
+  // the keys not the *'s leading columns in order: its columns stay in their places (a review finding: the GROUP BY's order)
+  yield q("star sort: GROUP BY keys in another order", "SELECT * FROM star_b GROUP BY name, id ORDER BY 1");
+  yield q("star sort: GROUP BY every column in another order", "SELECT * FROM star_b GROUP BY y, a_id, name, id ORDER BY 1");
+  yield q("star sort: t.* and an aggregate, keys in another order", "SELECT b.*, count(*) FROM star_b b GROUP BY b.id, b.name ORDER BY 1");
+  yield q("star sort: GROUP BY numbers in another order", "SELECT * FROM star_b GROUP BY 3, 1 ORDER BY 1");
+  yield q("star sort: GROUP BY keys in another order, sorted by a key", "SELECT * FROM star_b GROUP BY id, name ORDER BY 3 NULLS FIRST, 1");
+  yield q("star sort: GROUP BY a join's keys, the second table's first", "SELECT * FROM star_o a JOIN star_b b ON b.a_id = a.id GROUP BY b.id, a.id ORDER BY 1, 7");
+  yield q("star sort: GROUP BY a join's keys", "SELECT * FROM star_o a JOIN star_b b ON b.a_id = a.id GROUP BY a.id, b.id ORDER BY 1, 7");
+  yield q("star sort: a target before the *, the key it names", "SELECT id, * FROM star_b GROUP BY id ORDER BY 1");
+  yield q("star sort: a target after the *, the key it names", "SELECT *, id AS again FROM star_b GROUP BY name, id ORDER BY 5");
+  yield q("star sort: two tables' *, keys of each", "SELECT b.*, a.* FROM star_o a JOIN star_b b ON b.a_id = a.id GROUP BY a.id, b.id ORDER BY 1, 5");
+  yield q("star sort: a * twice under a GROUP BY", "SELECT *, * FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 2");
+  yield q("star sort: a derived table's *, keys in another order", "SELECT * FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 1");
+  // a * in a subquery of a target: that SELECT's own outputs, never the query around it (a review finding)
+  for (const [i, sql] of [
+    "SELECT *, * FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 2",
+    "SELECT s.*, * FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 1",
+    "SELECT *, s.* FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 1",
+    "SELECT * FROM (SELECT * FROM star_b GROUP BY name, id) s ORDER BY 1",
+    "SELECT * FROM (SELECT * FROM star_b GROUP BY y, id) s ORDER BY 1",
+    "WITH w AS (SELECT * FROM star_b GROUP BY name, id) SELECT * FROM w ORDER BY 1",
+    "WITH w AS (SELECT * FROM star_b GROUP BY name, id) SELECT * FROM w GROUP BY y, name, a_id, id ORDER BY 1",
+    "SELECT id, (SELECT count(*) FROM (SELECT * FROM star_b GROUP BY name, id) s) FROM star_o GROUP BY id ORDER BY 1",
+    "SELECT o.id, (SELECT s.name FROM (SELECT * FROM star_b GROUP BY name, id) s WHERE s.id = o.id) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT name FROM (SELECT * FROM star_b GROUP BY name, id) s WHERE s.id = o.id) FROM star_o o GROUP BY o.id ORDER BY 1",
+    "SELECT o.id, (SELECT ci FROM (SELECT * FROM star_o ORDER BY 4, 1 LIMIT 1) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.ci FROM (SELECT * FROM star_o ORDER BY ci, id LIMIT 1) x) AS first_ci FROM star_o o ORDER BY 1",
+    "SELECT o.id FROM star_o o WHERE EXISTS (SELECT * FROM star_b b GROUP BY b.name, b.id HAVING b.id = o.id) ORDER BY 1",
+    "SELECT o.id FROM star_o o WHERE o.id IN (SELECT id FROM (SELECT * FROM star_b GROUP BY name, id) s) ORDER BY 1",
+    "SELECT *, upper(name) AS u FROM (SELECT id, name FROM star_b) s GROUP BY upper(name), name, id ORDER BY 1",
+    "SELECT * FROM (SELECT id, name FROM star_b) s GROUP BY GROUPING SETS ((id, name)) ORDER BY 1",
+    "SELECT * FROM (SELECT id, name FROM star_b) s GROUP BY GROUPING SETS ((name, id)) ORDER BY 1",
+    "SELECT *, count(*) FROM (SELECT id, name FROM star_b) s GROUP BY CUBE (name, id) ORDER BY 1 NULLS LAST, 2 NULLS LAST, 3",
+    "SELECT s.* FROM (SELECT id, name FROM star_b) AS s(k, v) GROUP BY v, k ORDER BY 1",
+    "SELECT * FROM (SELECT id, name FROM star_b) AS s(k, v) GROUP BY v, k ORDER BY 1",
+    "SELECT * FROM (SELECT id, name FROM star_b) s GROUP BY s.name, s.id ORDER BY 1",
+    "SELECT *, count(*) FROM (SELECT id, name FROM star_b) s GROUP BY s.name, s.id ORDER BY 1",
+    "SELECT x.* FROM (SELECT * FROM star_b GROUP BY name, id) x JOIN one_c o ON o.id = x.id GROUP BY o.id, x.id ORDER BY 1",
+    "SELECT * FROM (SELECT * FROM star_b GROUP BY name, id) x JOIN one_c o ON o.id = x.id GROUP BY o.id, x.id ORDER BY 1",
+    "SELECT * FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 1 LIMIT 2 OFFSET 1",
+    "SELECT *, (SELECT max(id) FROM star_o) FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 1",
+    "SELECT (SELECT max(id) FROM star_o), * FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 2",
+    "SELECT s, * FROM (SELECT id, name FROM star_b) s GROUP BY name, id ORDER BY 2",
+    "SELECT *, s FROM (SELECT id, name FROM star_b) s GROUP BY s, name, id ORDER BY 1",
+    "SELECT upper(name), * FROM (SELECT id, name FROM star_b) s GROUP BY upper(name), name, id ORDER BY 2",
+    "SELECT id FROM star_o GROUP BY id ORDER BY (SELECT count(*) FROM (SELECT * FROM star_b GROUP BY name, id) s), id",
+    "SELECT id, CASE WHEN id > 3 THEN (SELECT count(*) FROM (SELECT * FROM star_b GROUP BY name, id) s) END FROM star_o GROUP BY id ORDER BY 1",
+    "SELECT o.id, (SELECT b.name FROM star_b b WHERE b.id = o.id) FROM star_o o GROUP BY o.id ORDER BY 1",
+    "SELECT o.id, (SELECT count(*) FROM star_b b GROUP BY b.id HAVING b.id = o.id) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.name FROM (SELECT * FROM star_o a JOIN star_b b USING (id)) x WHERE x.id = o.id) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.n FROM (SELECT * FROM star_o a NATURAL JOIN one_c c) x WHERE x.id = o.id) FROM star_o o ORDER BY 1",
+    "SELECT * FROM (SELECT * FROM star_o a JOIN star_b b ON b.a_id = a.id LIMIT 100) s ORDER BY 1, 7",
+    "SELECT * FROM (SELECT a.*, b.* FROM star_o a JOIN star_b b ON b.a_id = a.id LIMIT 100) s ORDER BY 1, 7",
+    "SELECT o.id, (SELECT count(*) FROM (SELECT * FROM star_b) s) FROM star_o o GROUP BY o.id ORDER BY 1",
+    "SELECT o.id, (SELECT count(*) FROM (SELECT * FROM star_b GROUP BY id) s) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT count(*) FROM (SELECT * FROM star_b GROUP BY id, a_id, name, y) s) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT count(*) FROM (SELECT s.*, 1 FROM (SELECT id, name FROM star_b) s GROUP BY name, id) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT count(*) FROM (SELECT * FROM (SELECT id, name FROM star_b) s GROUP BY 2, 1) x) FROM star_o o ORDER BY 1",
+    "SELECT count(*) FROM (SELECT (SELECT max(y) FROM star_b), * FROM (SELECT id, name FROM star_b) s GROUP BY name, id) z",
+    "SELECT z.* FROM (SELECT (SELECT max(y) FROM star_b) AS m, * FROM (SELECT id, name FROM star_b) s GROUP BY name, id) z ORDER BY 2",
+    "SELECT o.id, o.n, (SELECT count(*) FROM (SELECT *, 1 FROM (SELECT id, name FROM star_b) s GROUP BY name, id) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, o.n, (SELECT x.id FROM (SELECT *, 1 AS one FROM (SELECT id, name FROM star_b) s GROUP BY name, id) x WHERE x.id = o.id) FROM star_o o ORDER BY 1",
+    "SELECT o.id, o.n, (SELECT x.name FROM (SELECT *, 1 AS one FROM (SELECT id, name FROM star_b) s GROUP BY name, id) x WHERE x.id = o.id) FROM star_o o ORDER BY 1",
+    "SELECT o.name, o.id, (SELECT x.name FROM (SELECT *, 1 AS one FROM (SELECT id, name FROM star_b) s GROUP BY name, id) x WHERE x.id = o.id) FROM star_o o ORDER BY 2",
+    "SELECT o.n, o.id, (SELECT x.id FROM (SELECT *, 1 AS one FROM star_b s GROUP BY name, id) x WHERE x.id = o.id) FROM star_o o ORDER BY 2",
+    "SELECT o.id, o.n, o.name, o.ci, (SELECT x.name FROM (SELECT *, 1 AS one FROM star_b s GROUP BY name, id) x WHERE x.id = o.id) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT max(x.ci) FROM (SELECT * FROM star_o ORDER BY 4 LIMIT 2) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, o.n, (SELECT x.ci FROM (SELECT *, 1 AS one FROM star_o ORDER BY 4, 1 LIMIT 1) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT b.name FROM star_b b WHERE b.id = o.id ORDER BY 1 LIMIT 1) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT b.* FROM (SELECT name FROM star_b) b ORDER BY 1 LIMIT 1) FROM star_o o ORDER BY 1",
+    "SELECT o.id, ARRAY(SELECT x.name FROM (SELECT * FROM star_b GROUP BY name, id) x ORDER BY x.id) FROM star_o o ORDER BY 1",
+    "SELECT o.id, EXISTS (SELECT * FROM (SELECT * FROM star_b GROUP BY name, id) x WHERE x.id = o.id) FROM star_o o ORDER BY 1",
+    "SELECT o.id, o.id IN (SELECT x.id FROM (SELECT * FROM star_b GROUP BY name, id) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.ci FROM (SELECT * FROM star_o ORDER BY ci LIMIT 1) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.name FROM (SELECT * FROM star_o ORDER BY name NULLS FIRST LIMIT 1) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.name FROM (SELECT * FROM star_o ORDER BY 3 NULLS FIRST LIMIT 1) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.name FROM (SELECT * FROM star_b ORDER BY 1 LIMIT 1) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.id FROM (SELECT * FROM star_b ORDER BY id LIMIT 1) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT DISTINCT ON (1) x.name FROM (SELECT * FROM star_b) x ORDER BY 1 LIMIT 1) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.name FROM (SELECT DISTINCT ON (3) * FROM star_b ORDER BY 3, 1) x LIMIT 1) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.name FROM (SELECT DISTINCT * FROM star_b) x ORDER BY 1 NULLS FIRST LIMIT 1) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.id FROM (SELECT * FROM star_b UNION ALL SELECT * FROM star_b ORDER BY 3 NULLS FIRST, 1 LIMIT 1) x) FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.name FROM (SELECT * FROM star_b ORDER BY 1 LIMIT 1) x) AS top, (SELECT y.name FROM (SELECT * FROM star_b ORDER BY 1 DESC LIMIT 1) y) AS bottom FROM star_o o ORDER BY 1",
+    "SELECT o.id, (SELECT x.name FROM (SELECT * FROM star_b ORDER BY 1 LIMIT 1) x), o.ci FROM star_o o ORDER BY 1",
+  ].entries()) yield q(`star sort: a subquery of a target, ${i + 1}`, sql);
+  yield q("star sort: FETCH … WITH TIES by number", "SELECT * FROM star_o ORDER BY 3 NULLS FIRST FETCH FIRST 4 ROWS WITH TIES");
+  yield q("star sort: FETCH … WITH TIES by bare name", "SELECT * FROM star_o ORDER BY ci FETCH FIRST 3 ROWS WITH TIES");
+  yield q("star sort: a UNION's *, by bare name", "SELECT * FROM star_b UNION ALL SELECT * FROM star_b ORDER BY name NULLS FIRST, id LIMIT 6");
+  yield q("star sort: a UNION's *, by number", "SELECT * FROM star_b UNION SELECT * FROM star_b ORDER BY 3 NULLS FIRST, 1");
+  yield q("star sort: a UNION's *, a number of no key", "SELECT id, name FROM star_b UNION SELECT id, name FROM star_b ORDER BY 2 NULLS FIRST, 1");
+  yield q("star sort: a UNION of two named columns, the number of a text", "SELECT id, name FROM star_b UNION ALL SELECT id, name FROM star_b ORDER BY 2 NULLS FIRST, id LIMIT 6");
+  yield q("star sort: a UNION's *, a citext by number", "SELECT * FROM star_o UNION ALL SELECT * FROM star_o ORDER BY 4, 1");
+  yield q("star sort: a UNION's *, a citext by number under a LIMIT", "WITH w AS (SELECT * FROM star_o UNION ALL SELECT * FROM star_o ORDER BY 4, 1 LIMIT 5) SELECT id, ci FROM w ORDER BY 1, 2");
+  yield q("star sort: a UNION's *, a citext by bare name", "SELECT * FROM star_o UNION ALL SELECT * FROM star_o ORDER BY ci DESC, id");
+  yield q("star sort: a UNION's *, a char(n) by number", "SELECT * FROM star_o UNION ALL SELECT * FROM star_o ORDER BY 5 NULLS FIRST, 1");
+  yield q("star sort: a UNION of named columns, a citext by number", "SELECT id, ci FROM star_o UNION ALL SELECT id, ci FROM star_o ORDER BY 2, 1");
+  yield q("star sort: a UNION of named columns, a char(n) by number", "SELECT id, ch FROM star_o UNION ALL SELECT id, ch FROM star_o ORDER BY 2 NULLS FIRST, 1");
+  yield q("star sort: a citext beside a DISTINCT ON its key, written out over USING", "SELECT DISTINCT ON (1) * FROM star_o a JOIN star_b b USING (id) ORDER BY 1, 2");
+  yield q("star sort: an inside of a subquery", "SELECT id FROM (SELECT * FROM star_o ORDER BY 3 NULLS FIRST, 1 LIMIT 4) s ORDER BY id");
+  yield q("star sort: an inet by number is the column's refusal", "SELECT * FROM (SELECT ip FROM typed) s ORDER BY 1");
+  yield q("star sort: the nulls idiom, its bare name", "SELECT * FROM star_o ORDER BY name IS NULL, name DESC, id");
+  yield q("star sort: the nulls idiom beside a number", "SELECT * FROM star_o ORDER BY name IS NULL, 3 DESC, 1 LIMIT 5");
+  yield q("star sort: a VALUES of no name", "SELECT * FROM one, (VALUES ('b'), ('A'), ('a')) ORDER BY 2");
+  yield q("star sort: a subquery of no name", "SELECT * FROM (SELECT id, name FROM star_o) ORDER BY 2 NULLS FIRST, 1");
+  yield q("star sort: a parameter-free filter on the same column", "SELECT * FROM star_o WHERE name <> 'Z' ORDER BY name NULLS FIRST, id");
   yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
   yield q("top N over joins: NATURAL and USING stay as they were", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
   yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);

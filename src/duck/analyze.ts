@@ -15,7 +15,7 @@
  * catalog statement's portal, beside another session's").
  */
 import { cstr, decodeBackend, frame, int16, int32 } from "../api/postgres/protocol.ts";
-import { parseTree, typesByLocation, type Typed, type TreeValue } from "./pgtree.ts";
+import { outputsByLocation, parseTree, typesByLocation, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
 
 export interface PgField { name: string; oid: number; typmod: number }
 export interface PgAnalysis {
@@ -25,6 +25,8 @@ export interface PgAnalysis {
   fields: PgField[] | null;
   /** every typed expression by its offset into the text */
   types: Map<number, Typed[]>;
+  /** each SELECT's output columns, by any offset its targets hold */
+  outputs: Map<number, QueryOutputs>;
   tree: TreeValue;
 }
 /** Postgres's ErrorResponse fields (M message, C code, P position, H hint, D detail …) */
@@ -69,6 +71,7 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
     params: pd?.type === "ParameterDescription" ? pd.oids : [],
     fields: rd?.type === "RowDescription" ? rd.fields.map((f) => ({ name: f.name, oid: f.typeOid, typmod: f.typeModifier })) : null,
     types: typesByLocation(tree),
+    outputs: outputsByLocation(tree),
     tree,
   };
 }

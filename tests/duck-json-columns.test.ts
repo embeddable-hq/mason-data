@@ -283,8 +283,8 @@ test("a read is answered from its stored column only once it is ready, every rea
       assert.deepEqual(functions, [...new Set(p.sql.text.match(/\b__mason_[a-z0-9_]+(?=\()/g) ?? [])].sort(), `${listing}: the functions it calls`);
       if (!/->>/.test(listing)) assert.deepEqual(functions, [], `${listing} calls no Mason function`);
       assert.doesNotMatch(p.sql.text, /__mason_json_[0-9a-f]{12}/, listing);
-      // a top N over joins reads the tables by row number and writes its * out, so no hidden column can be listed
-      if (!/JOIN docs y ON/.test(listing)) assert.match(p.sql.text, new RegExp(route.VISIBLE_CATALOG), listing);
+      // a top N over joins and a * over USING or NATURAL have their * written out, so no hidden column can be listed
+      if (!/JOIN docs y|NATURAL/.test(listing)) assert.match(p.sql.text, new RegExp(route.VISIBLE_CATALOG), listing);
       const got = await answer(p.sql.text);
       assert.equal((await reader.runAndReadAll(p.sql.text)).columnNames.length, p.fields!.length, `${listing}: DuckDB answers Postgres's columns, no more`);
       assert.ok(got.length > 0, listing);

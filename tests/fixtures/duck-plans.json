@@ -79,6 +79,29 @@
       "full_sort": true
     },
     {
+      "name": "a top N over joins: a *, sorted by a column's number",
+      "sql": "SELECT c.*, o.id FROM customers c LEFT JOIN orders o ON c.id = o.customer_id ORDER BY 1, 2 LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.orders",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.customers",
+        "            TOP_N (2 keys)",
+        "              PROJECTION",
+        "                HASH_JOIN",
+        "                  TABLE_SCAN public.orders",
+        "                  TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "a top N over joins: every table's columns",
       "sql": "SELECT c.*, o.*, i.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id LEFT JOIN order_items i ON o.id = i.order_id ORDER BY (c.created_at) IS NULL ASC, c.created_at DESC LIMIT 100 OFFSET 0",
       "plan": [

@@ -118,6 +118,12 @@ export interface Typed {
    *  name but another case (`"T"` beside `t`), which DuckDB cannot tell apart: the item's columns are renamed alike
    *  (caseTwins) */
   renamed: string | null;
+  /** a VAR as DuckDB can name it: the FROM item it is read from and the column's name there (an alias list's); a merged
+   *  column of a join by the join's name, or null for that of a join (or a VALUES, a subquery) with none, which only its
+   *  bare name reads. A join's name hides what it joins, so a column of a named join is read by that name, and `twin`
+   *  says the join has two of that name, which no name tells apart. What a `*` expands to has no text of its own to read
+   *  this from. Absent for a set operation's output, which only its arm's column names */
+  column?: { owner: string | null; name: string; twin?: true };
   /** a VAR read from a TABLE of its query's FROM (an RTE_RELATION): the catalog's OID of that table and the column's
    *  number in it — what a stored JSON path is found by (src/duck/kept.ts); absent for any other node, and for a column
    *  of a subquery, a CTE, a function or a join */
@@ -212,25 +218,7 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
     const loc = num(v.location);
     const t = exprType(v);
     if (loc !== null && loc >= 0 && t !== null) {
-      const raw = v._node === "AGGREF" || v._node === "WINDOWFUNC"
-        ? argsOf(v).map((a) => isNode(a) && a._node === "TARGETENTRY" ? a.expr ?? null : a)
-        : argsOf(v);
-      const args = raw.filter(isNode).map((a) => exprType(a) ?? { type: 0, typmod: -1 });
-      const typed: Typed = {
-        node: v._node, type: t.type, typmod: t.typmod, args,
-        oid: num(v.opno ?? v.funcid ?? v.aggfnoid ?? v.winfnoid ?? null),
-        format: num(v.funcformat ?? null),
-        collation: num(v.opcollid ?? v.funccollid ?? v.aggcollid ?? v.wincollid ?? v.varcollid ?? v.constcollid ?? v.collid ?? null) ?? 0,
-        inputCollation: num(v.inputcollid ?? null) ?? 0,
-        levelsUp: v._node === "VAR" ? num(v.varlevelsup ?? null) : null,
-        datum: v._node === "CONST" && v.constisnull !== "true" ? datumBytes(v.constvalue) : null,
-        qualifier: v._node === "VAR" ? qualifierOf(v, rtables) : null,
-        renamed: v._node === "VAR" ? renamedOf(v, rtables) : null,
-      };
-      const relation = v._node === "VAR" ? relationOf(v, rtables) : null;
-      if (relation !== null) typed.relation = relation;
-      const fromFunction = v._node === "VAR" ? functionColumnOf(v, rtables) : null;
-      if (fromFunction !== null) typed.functionColumn = fromFunction;
+      const typed = typedOf(v, t, rtables);
       const list = out.get(loc);
       if (list) list.push(typed); else out.set(loc, [typed]);
     }
@@ -240,8 +228,97 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
   return out;
 }
 
+/** one expression of a query whose range tables are `rtables`, innermost last, as `Typed` says it */
+function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: TreeNode[][]): Typed {
+  const raw = v._node === "AGGREF" || v._node === "WINDOWFUNC"
+    ? argsOf(v).map((a) => isNode(a) && a._node === "TARGETENTRY" ? a.expr ?? null : a)
+    : argsOf(v);
+  const args = raw.filter(isNode).map((a) => exprType(a) ?? { type: 0, typmod: -1 });
+  const typed: Typed = {
+    node: v._node, type: t.type, typmod: t.typmod, args,
+    oid: num(v.opno ?? v.funcid ?? v.aggfnoid ?? v.winfnoid ?? null),
+    format: num(v.funcformat ?? null),
+    collation: num(v.opcollid ?? v.funccollid ?? v.aggcollid ?? v.wincollid ?? v.varcollid ?? v.constcollid ?? v.collid ?? null) ?? 0,
+    inputCollation: num(v.inputcollid ?? null) ?? 0,
+    levelsUp: v._node === "VAR" ? num(v.varlevelsup ?? null) : null,
+    datum: v._node === "CONST" && v.constisnull !== "true" ? datumBytes(v.constvalue) : null,
+    qualifier: v._node === "VAR" ? qualifierOf(v, rtables) : null,
+    renamed: v._node === "VAR" ? renamedOf(v, rtables) : null,
+  };
+  const relation = v._node === "VAR" ? relationOf(v, rtables) : null;
+  if (relation !== null) typed.relation = relation;
+  const column = v._node === "VAR" ? columnOf(v, rtables) : null;
+  if (column !== null) typed.column = column;
+  const fromFunction = v._node === "VAR" ? functionColumnOf(v, rtables) : null;
+  if (fromFunction !== null) typed.functionColumn = fromFunction;
+  return typed;
+}
+
+/** The output columns of one query, as its `targetList` numbers them. */
+export interface QueryOutputs {
+  /** each output in order: what it reads, a grouped column as the column it groups; null for an expression */
+  columns: Array<Typed | null>;
+  /** how many columns a `t.*` lists, by the FROM item's name */
+  widths: Map<string, number>;
+}
+
+/**
+ * Each SELECT's outputs, found by any offset its targets hold. THE ORDER OF A `*` IS ITS QUERY'S `targetList`, NEVER THE
+ * ORDER ITS VARS ARE MET IN THE TREE: under a GROUP BY (Postgres 17+) a key's output is a VAR of the RTE_GROUP entry at
+ * no offset, and the column it groups is in that entry's `groupexprs`, which comes first and in the GROUP BY's order. So
+ * the offset of a star says nothing of which of its columns is which; a set operation's own outputs are left out, as
+ * they carry its first SELECT's offsets.
+ */
+export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
+  const found = new Map<number, QueryOutputs>();
+  const visit = (v: TreeValue): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    if (v._node === "QUERY" && Array.isArray(v.targetList) && !isNode(v.setOperations ?? null)) {
+      const rtable = Array.isArray(v.rtable) ? v.rtable.filter(isNode) : [];
+      const entries = v.targetList.filter(isNode).filter((t) => t.resjunk !== "true");
+      const exprs = entries.map((t) => ungrouped(t.expr ?? null, rtable));
+      const widths = new Map<string, number>();
+      for (const rte of rtable) {
+        const eref = rte.eref ?? null;
+        if (isNode(eref) && typeof eref.aliasname === "string" && !widths.has(eref.aliasname)) widths.set(eref.aliasname, strings(eref.colnames).filter((c) => c !== "").length);
+      }
+      const outputs: QueryOutputs = {
+        columns: exprs.map((e) => { const t = isNode(e) && e._node === "VAR" ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable]); }),
+        widths,
+      };
+      const offsets = (x: TreeValue): void => {
+        if (Array.isArray(x)) { x.forEach(offsets); return; }
+        // (a subquery in a target is a query of its own, which registers its own offsets)
+        if (!isNode(x) || x._node === "QUERY") return;
+        const loc = num(x.location);
+        if (loc !== null && loc >= 0 && !found.has(loc)) found.set(loc, outputs);
+        const inner = ungrouped(x, rtable);
+        if (inner !== x) { offsets(inner); return; }
+        for (const [k, y] of Object.entries(x)) if (k !== "_node") offsets(y);
+      };
+      offsets(exprs);
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return found;
+}
+
+/** an output as what it reads: a VAR of the query's RTE_GROUP is the expression it groups */
+function ungrouped(v: TreeValue, rtable: TreeNode[]): TreeValue {
+  if (!isNode(v) || v._node !== "VAR") return v;
+  const rte = rtable[(num(v.varno ?? null) ?? 0) - 1];
+  const exprs = rte !== undefined && num(rte.rtekind ?? null) === RTE_GROUP ? rte.groupexprs : undefined;
+  return Array.isArray(exprs) ? exprs[(num(v.varattno ?? null) ?? 0) - 1] ?? v : v;
+}
+
 const RTE_JOIN = 2;
+const RTE_GROUP = 9;
 const RTE_RELATION = 0;
+/** the FROM items whose name in the analysis (`unnamed_join`, `*VALUES*`, `unnamed_subquery`) no statement can say:
+ *  RTE_SUBQUERY, RTE_JOIN, RTE_VALUES */
+const UNNAMED = new Set([1, RTE_JOIN, 5]);
 
 /** Typed.relation: the table a VAR's FROM item is, by the catalog's OID, and the column's number in it */
 function relationOf(v: TreeNode, rtables: TreeNode[][]): { relid: number; attno: number } | null {
@@ -249,6 +326,19 @@ function relationOf(v: TreeNode, rtables: TreeNode[][]): { relid: number; attno:
   const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
   const relid = rte === undefined ? null : num(rte.relid ?? null);
   return rte === undefined || attno === null || attno < 1 || num(rte.rtekind ?? null) !== RTE_RELATION || relid === null || relid === 0 ? null : { relid, attno };
+}
+/** Typed.column */
+function columnOf(v: TreeNode, rtables: TreeNode[][]): NonNullable<Typed["column"]> | null {
+  const up = num(v.varlevelsup ?? null) ?? 0, varno = num(v.varnosyn ?? null), attno = num(v.varattnosyn ?? null);
+  const rte = varno === null ? undefined : rtables[rtables.length - 1 - up]?.[varno - 1];
+  if (rte === undefined || attno === null || attno < 1 || !isNode(rte.eref ?? null)) return null;
+  const eref = rte.eref as TreeNode;
+  const columns = strings(eref.colnames), name = columns[attno - 1];
+  if (name === undefined || typeof eref.aliasname !== "string" || /^\*SELECT\* \d+$/.test(eref.aliasname)) return null;
+  const kind = num(rte.rtekind ?? null) ?? -1;
+  const named = isNode(rte.alias ?? null);
+  return { owner: UNNAMED.has(kind) && !named ? null : eref.aliasname, name,
+    ...(kind === RTE_JOIN && named && columns.filter((c) => c === name).length > 1 ? { twin: true as const } : {}) };
 }
 const RTE_FUNCTION = 3;
 /** Typed.functionColumn */

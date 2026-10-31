@@ -151,6 +151,8 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   { name: "through: two levels, aggregated", sql: "SELECT count(*), sum(quantity * unit_price), count(DISTINCT order_id) FROM shop.order_items" },
   { name: "a join of two filtered tables", sql: "SELECT c.name, count(o.id), sum(o.amount) FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id GROUP BY c.name ORDER BY c.name" },
   { name: "a join of three, items through orders", sql: "SELECT o.status, count(i.id), sum(i.quantity) FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id GROUP BY o.status ORDER BY o.status NULLS FIRST" },
+  { name: "a * sorted by the number of a text column, filtered", sql: "SELECT * FROM shop.customers ORDER BY 4 NULLS FIRST, 1" },
+  { name: "a * sorted by the bare name of a text column, filtered, under a LIMIT", sql: "SELECT * FROM shop.customers ORDER BY name NULLS FIRST, id LIMIT 3" },
   { name: "a top N over a join of two filtered tables", sql: "SELECT o.*, c.* FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 5 OFFSET 1" },
   { name: "a top N over joins, items through orders", sql: "SELECT o.id, i.id, i.quantity FROM shop.orders o JOIN shop.order_items i ON i.order_id = o.id ORDER BY i.id DESC LIMIT 3" },
   { name: "IN a subquery", sql: "SELECT id FROM shop.customers WHERE id IN (SELECT customer_id FROM shop.orders WHERE status = 'paid') ORDER BY id" },
@@ -226,5 +228,7 @@ export const HIDDEN_SHAPES: ReadonlyArray<{ name: string; sql: string }> = [
   { name: "hidden: counted", sql: "SELECT count(*), count(DISTINCT region) FROM shop.customers" },
   { name: "hidden: the hidden column, refused alike", sql: "SELECT secret FROM shop.customers" },
   { name: "hidden: SELECT *, refused alike", sql: "SELECT * FROM shop.customers" },
+  { name: "hidden: SELECT * sorted by a number, refused alike", sql: "SELECT * FROM shop.customers ORDER BY 3, 1" },
+  { name: "hidden: SELECT * sorted by a bare name, refused alike", sql: "SELECT * FROM shop.customers ORDER BY name, id" },
   { name: "hidden: a table the role lacks", sql: "SELECT count(*) FROM shop.orders" },
 ];

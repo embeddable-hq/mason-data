@@ -245,6 +245,7 @@ export const nodesPlacedTwice = (): readonly string[] => PLACED_TWICE;
 
 class Rewriter {
   private readonly types: Map<number, Typed[]>;
+  private readonly analysed: PgAnalysis["outputs"];
   private readonly base: number;
   private readonly collation: DuckCollation;
   private readonly params: readonly number[];
@@ -296,7 +297,7 @@ class Rewriter {
   readonly jsonReads = new Map<string, JsonRead>();
   constructor(analysis: PgAnalysis, base: number, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC",
     enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set()) {
-    this.types = analysis.types; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone;
+    this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone;
     this.enums = enums; this.kept = kept;
     for (const at of keyCounts) this.keyCounts.add(at + base);
     this.caseMode = collation.kind === "icu" ? "icu" : collation.kind === "bytes" && collation.ascii === true ? "ascii" : "libc";
@@ -613,6 +614,12 @@ class Rewriter {
         const name = alias?.aliasname ?? (k === "RangeVar" ? b.relname : undefined);
         const names = typeof name === "string" && alias?.colnames === undefined ? this.twins.get(name) : undefined;
         if (names !== undefined) b.alias = { ...(alias ?? {}), aliasname: name, colnames: names.map(S) };
+        // a VALUES list's columns by Postgres's names, which DuckDB's are not (a `*`'s key reads them by name)
+        const rows = k === "RangeSubselect" && isNode(b.subquery) ? bodyOf(b.subquery).valuesLists as AstNode[] | undefined : undefined;
+        if (Array.isArray(rows) && rows.length > 0 && alias?.colnames === undefined) {
+          const width = (bodyOf(rows[0]!).items as unknown[]).length;
+          b.alias = { ...(alias ?? {}), aliasname: alias?.aliasname ?? "__mason_values", colnames: Array.from({ length: width }, (_, i) => S(`column${i + 1}`)) };
+        }
         return null;
       }
       default: return null;
@@ -804,17 +811,27 @@ class Rewriter {
 
   private select(b: Body): AstNode | null {
     for (const c of (b.withClause?.ctes ?? []) as AstNode[]) if (isNode(c) && typeof bodyOf(c).ctename === "string" && isNode(bodyOf(c).ctequery)) this.ctes.set(bodyOf(c).ctename, bodyOf(c).ctequery as AstNode);
+    // `x IS NULL, x DESC` as `x DESC NULLS LAST` (nullsKeyFolded): the folded key is the statement's own, its rules to
+    // run; before anything writes a key another way, as the two are told alike by their trees
+    if (Array.isArray(b.sortClause)) {
+      b.sortClause = nullsKeyFolded(b.sortClause as AstNode[], b);
+      for (const s of b.sortClause as AstNode[]) this.original.add(bodyOf(s));
+    }
+    this.namedThroughStar(b);
+    this.starWrittenOut(b);
     this.rowValues(b);
     for (const w of (b.windowClause ?? []) as AstNode[]) if (isNode(w)) this.keyedPartition(bodyOf(w));
     // a GROUP BY of an output name is grouped by its ordinal: DuckDB binds a name without regard to case, so `"Name"`
     // would be another table's `name` (the corpus run of fbbf8f08), where Postgres finds no input column of that name
     if (Array.isArray(b.groupClause) && Array.isArray(b.targetList)) {
       const targets = b.targetList as AstNode[];
+      const outputs = this.outputs(targets);
       b.groupClause = (b.groupClause as AstNode[]).map((g) => {
         const f = kindOf(g) === "ColumnRef" ? names(bodyOf(g).fields) : [];
         if (f.length !== 1 || this.typedAt(g)?.node === "VAR") return g;
-        const at = targets.findIndex((t) => bodyOf(t).name === f[0]);
-        return at >= 0 && targets.filter((t) => bodyOf(t).name === f[0]).length === 1 ? intConst(at + 1) : g;
+        const named = (o: Output): boolean => !o.star && bodyOf(targets[o.target]!).name === f[0];
+        const at = outputs.findIndex(named);
+        return at >= 0 && outputs.filter(named).length === 1 ? intConst(at + 1) : g;
       });
     }
     this.keyedGroups(b);
@@ -832,11 +849,6 @@ class Rewriter {
       }
     }
     this.decidedByKey(b);
-    // `x IS NULL, x DESC` as `x DESC NULLS LAST` (nullsKeyFolded): the folded key is the statement's own, its rules to run
-    if (Array.isArray(b.sortClause)) {
-      b.sortClause = nullsKeyFolded(b.sortClause as AstNode[], b);
-      for (const s of b.sortClause as AstNode[]) this.original.add(bodyOf(s));
-    }
     // (after decidedByKey: a DISTINCT ON a target names it as the SELECT list reads it, through any_value where it must)
     this.keyedDistinct(b);
     // the statement's own ORDER BY: an ordinal or an output name sorts by that target's expression, so its key is
@@ -846,18 +858,122 @@ class Rewriter {
       b.sortClause = (b.sortClause as AstNode[]).flatMap((s) => {
         const sb = bodyOf(s);
         this.done.add(sb);
-        // an ordinal that names a jsonb a `*` lists: DuckDB would sort that column's text
-        const n = constInt(sb.node as AstNode);
-        const starred = n === null ? null : this.starColumnType(targets, n);
-        if (starred === JSONB || starred === JSONB_ARRAY) {
-          throw new Unrewritable("ORDER BY the number of a jsonb column a * lists is not supported by Mason (Postgres orders jsonb by its own rules)", "ORDER BY the column's name", "jsonb-compare");
-        }
         return this.sortBy(sb, targets, b) ?? [s];
       });
     }
     if (Array.isArray(b.sortClause) && b.op !== undefined && b.op !== "SETOP_NONE") this.setOperationOrdinals(b);
     if (b.limitOption === "LIMIT_OPTION_WITH_TIES") return this.withTies(b);
     return null;
+  }
+
+  /**
+   * A SELECT'S OUTPUT COLUMNS, AS POSTGRES NUMBERS AND NAMES THEM (issue 112: `SELECT * FROM t ORDER BY 3` under a
+   * collation sorted by bytes, as nothing here saw the column): a target is one output, a `*` or `t.*` one per column,
+   * from Postgres's own expansion (its query's targetList, `outputsByLocation`). THE CLASS IS AN ORDER BY, GROUP BY OR DISTINCT
+   * ON OUTPUT NOT RESOLVED TO ITS COLUMN, and every reader of an output's number or name goes through here: a star's
+   * column is a ColumnRef made from that VAR, typed by it, so every rule (a collation's key, jsonb's, citext's, char(n)'s,
+   * a refusal) meets it as it meets the column named.
+   */
+  private outputs(targets: readonly AstNode[]): Output[] {
+    const stars = targets.filter((t) => hasStar(bodyOf(t).val));
+    const held = (n: unknown): number[] => {
+      if (Array.isArray(n)) return n.flatMap(held);
+      if (n === null || typeof n !== "object") return [];
+      // (a subquery's targets are its own: this SELECT's offsets alone find this SELECT's query)
+      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? [x] : k === "subselect" || k === "SelectStmt" ? [] : held(x));
+    };
+    const query = stars.length === 0 ? undefined : held(targets).map((l) => this.analysed.get(l - this.base)).find((q) => q !== undefined);
+    const widthOf = (t: AstNode): number | null => {
+      const f = bodyOf(bodyOf(t).val as AstNode).fields as AstNode[];
+      return f.length < 2 ? null : query?.widths.get(String(bodyOf(f[f.length - 2]!).sval)) ?? 0;
+    };
+    // a bare `*` lists what the named ones and the other targets leave, shared out among the bare ones
+    const bare = stars.filter((t) => widthOf(t) === null).length;
+    const rest = (query?.columns.length ?? 0) - (targets.length - stars.length) - stars.reduce((n, t) => n + (widthOf(t) ?? 0), 0);
+    const out: Output[] = [];
+    let at = 0;
+    targets.forEach((t, target) => {
+      const v = bodyOf(t).val;
+      if (!isNode(v)) return;
+      if (!hasStar(v)) { at++; out.push({ target, name: typeof bodyOf(t).name === "string" ? bodyOf(t).name : figureColname(v), value: v, star: false, twin: false }); return; }
+      const width = widthOf(t) ?? (bare === 0 ? 0 : rest / bare);
+      for (const c of query?.columns.slice(at, at + width) ?? []) {
+        const n = c?.column;
+        if (c === null || c === undefined || n === undefined) throw new Error("a column of a * is no column in Postgres's analysis: report it, with the statement");
+        const value: AstNode = { ColumnRef: { fields: [...(n.owner === null ? [] : [S(n.owner)]), S(n.name)], location: -1 } };
+        this.original.add(bodyOf(value));
+        this.synthetic.set(bodyOf(value), c);
+        out.push({ target, name: n.name, value, star: true, twin: n.twin === true });
+      }
+      at += width;
+    });
+    return out;
+  }
+
+  /**
+   * A `*` WRITTEN OUT where DuckDB's own expansion would not be Postgres's: over a JOIN … USING or a NATURAL JOIN, whose
+   * merged columns Postgres lists first and DuckDB where the left table has them (every column of the row in another
+   * place); and beside a GROUP BY, where a decided column is read through any_value one by one (decidedByKey).
+   */
+  private starWrittenOut(b: Body): void {
+    const targets = b.targetList as AstNode[] | undefined;
+    if (!Array.isArray(targets) || !targets.some((t) => hasStar(bodyOf(t).val))) return;
+    const merges = (x: unknown): boolean => isNode(x) && kindOf(x) === "JoinExpr" && (bodyOf(x).usingClause !== undefined || bodyOf(x).isNatural === true || merges(bodyOf(x).larg) || merges(bodyOf(x).rarg));
+    const grouped = Array.isArray(b.groupClause) && b.groupClause.length > 0;
+    if (!grouped && !((b.fromClause ?? []) as unknown[]).some(merges)) return;
+    const outputs = this.outputs(targets);
+    b.targetList = targets.flatMap((t, i) => {
+      if (!hasStar(bodyOf(t).val)) return [t];
+      const own = outputs.filter((o) => o.target === i);
+      if (own.some((o) => o.twin)) throw this.twinRefused();
+      return own.length === 0 ? [t] : own.map((o) => ({ ResTarget: { name: o.name, val: o.value } }));
+    });
+  }
+
+  private twinRefused(): Unrewritable {
+    return new Unrewritable("this * of a named join lists two columns of one name, and Mason cannot read one of them apart here", "name the join's columns in the SELECT, or leave the join's own name out", "star-join-twin");
+  }
+
+  /** the output a number names, or null for a number past the list */
+  private outputAt(targets: readonly AstNode[], n: number): Output | null { return n >= 1 ? this.outputs(targets)[n - 1] ?? null : null; }
+
+  /** the output an ORDER BY item reads: by its number, or by its bare name (SQL92's rule: an output before an input
+   *  column; two outputs of one name reach here only as Postgres found them equal) */
+  private outputOf(e: AstNode, targets: readonly AstNode[]): Output | null {
+    const n = constInt(e);
+    if (n !== null) return this.outputAt(targets, n);
+    if (kindOf(e) !== "ColumnRef") return null;
+    const f = names(bodyOf(e).fields);
+    return f.length !== 1 ? null : this.outputs(targets).find((o) => o.name === f[0]) ?? null;
+  }
+
+  /**
+   * An ORDER BY or GROUP BY item beside a `*` written as the column it resolves to where a table's column is what it is:
+   * so a GROUP BY's decided columns (decidedByKey) read it through their rule, and the rows of a join are chosen by it
+   * (src/duck/late.ts), neither of which can tell a star's number. Any other FROM item's keeps its number and is resolved
+   * where its key is built (sortBy): DuckDB's own name for it may be another, and a number reads the right one.
+   */
+  private namedThroughStar(b: Body): void {
+    const targets = (b.targetList ?? []) as AstNode[];
+    if ((b.op !== undefined && b.op !== "SETOP_NONE") || !targets.some((t) => hasStar(bodyOf(t).val))) return;
+    const asColumn = (e: AstNode): AstNode => {
+      const out = this.outputOf(e, targets);
+      if (out === null) return e;
+      if (out.twin) throw this.twinRefused();
+      if (out.star) return this.typed(out.value)?.relation !== undefined ? out.value : e;
+      // (a computed output stays its number: `random() AS r` is one value a row)
+      return constInt(e) !== null && kindOf(out.value) === "ColumnRef" ? this.clone(out.value) : e;
+    };
+    if (Array.isArray(b.groupClause)) b.groupClause = (b.groupClause as AstNode[]).map((g) => isNode(g) && constInt(g) !== null ? asColumn(g) : g);
+    for (const s of (b.sortClause ?? []) as AstNode[]) if (kindOf(s) === "SortBy") bodyOf(s).node = asColumn(bodyOf(s).node as AstNode);
+  }
+
+  /** whether a value's order is DuckDB's of what it holds, so its number sorts it; any other goes through the SortBy
+   *  rule, by its output's name: a key (a collation's, jsonb's), a citext's lower(), a char(n)'s rtrim(), a refusal */
+  private sortsAsStored(n: AstNode): boolean {
+    const type = this.typeOf(n);
+    const c = this.textCollation(n);
+    return (c === null || c.kind === "bytes") && type !== BPCHAR && !this.isCitext(type) && type !== INET && !(type !== null && [JSONB, JSONB_ARRAY, 1009, 1015].includes(type));
   }
 
   /**
@@ -872,28 +988,31 @@ class Rewriter {
     let arm: Body = b;
     while (arm.op !== undefined && arm.op !== "SETOP_NONE" && arm.larg !== undefined) arm = isNode(arm.larg) ? bodyOf(arm.larg) : arm.larg as Body;
     const targets = (arm.targetList ?? []) as AstNode[];
-    const outputName = (t: Body): string | null => typeof t.name === "string" ? t.name
-      : isNode(t.val) && kindOf(t.val) === "ColumnRef" ? names(bodyOf(t.val).fields).at(-1) ?? null : null;
+    const outputs = this.outputs(targets);
     for (const s of b.sortClause as AstNode[]) {
       const sb = bodyOf(s);
       const by = sb.node as AstNode;
       const f = kindOf(by) === "ColumnRef" ? names(bodyOf(by).fields) : [];
       if (f.length === 1) {
-        const named = targets.map(bodyOf).filter((t) => outputName(t) === f[0]);
-        if (named.length === 1) this.typedLike.set(bodyOf(by), named[0]!.val as AstNode);
+        const named = outputs.filter((o) => o.name === f[0]);
+        if (named.length === 1) this.typedLike.set(bodyOf(by), named[0]!.value);
         continue;
       }
       const n = constInt(by);
-      if (n === null || n < 1 || n > targets.length) continue;
-      if (targets.slice(0, n).some((t) => hasStar(bodyOf(t).val))) {
-        throw new Unrewritable("ORDER BY a column number of a set operation whose first SELECT lists * is not supported by Mason", "ORDER BY the column's name", "setop-ordinal-star");
+      const out = n === null ? null : this.outputAt(targets, n);
+      if (out === null) continue;
+      const value = out.value;
+      if (out.star) {
+        // a set operation's ORDER BY reads an output by its name alone: a column of a `*` has no other
+        if (outputs.filter((o) => o.name === out.name).length !== 1) throw new Unrewritable("ORDER BY a column number of a set operation whose first SELECT lists two columns of that name is not supported by Mason", "name the columns apart in the first SELECT", "setop-ordinal-star");
+        if (this.sortsAsStored(value)) continue;
+        const named: AstNode = { ColumnRef: { fields: [S(out.name)] } };
+        this.typedLike.set(bodyOf(named), value);
+        sb.node = named;
+        continue;
       }
-      const target = bodyOf(targets[n - 1]!);
-      const value = target.val as AstNode;
-      const c = this.textCollation(value);
-      // (a jsonb is sorted by its key whatever the collation: the SortBy rule keys the output column)
-      const keyed = this.typeOf(value) === JSONB || this.typeOf(value) === JSONB_ARRAY;
-      if (!keyed && (c === null || c.kind === "bytes")) continue;
+      const target = bodyOf(targets[out.target]!);
+      if (this.sortsAsStored(value)) continue;
       if (target.name === undefined) target.name = `__mason_sort_${n}`;
       const ref: AstNode = { ColumnRef: { fields: [S(String(target.name))] } };
       this.typedLike.set(bodyOf(ref), value);
@@ -918,7 +1037,8 @@ class Rewriter {
     const keyTargets = new Set<number>();
     for (const g of groups) {
       const n = constInt(g);
-      if (n !== null && n >= 1 && n <= targets.length) { keyTargets.add(n - 1); continue; }
+      const out = n === null ? null : this.outputAt(targets, n);
+      if (out !== null) { keyTargets.add(out.target); continue; }
       // a bare name is an output name only where it is no input column (Postgres prefers the column)
       const f = kindOf(g) === "ColumnRef" ? names(bodyOf(g).fields) : [];
       if (f.length === 1 && this.typedAt(g)?.node !== "VAR") targets.forEach((t, i) => { if (bodyOf(t).name === f[0]) keyTargets.add(i); });
@@ -1599,13 +1719,9 @@ class Rewriter {
   private sortBy(b: Body, targets: AstNode[] | null, select: Body | null): AstNode[] | null {
     let e = b.node as AstNode;
     if (targets !== null) {
-      const n = constInt(e);
-      if (n !== null && n >= 1 && n <= targets.length) e = this.clone(bodyOf(targets[n - 1]!).val as AstNode);
-      else if (kindOf(e) === "ColumnRef") {
-        const f = names(bodyOf(e).fields);
-        const named = f.length === 1 ? targets.filter((t) => bodyOf(t).name === f[0]) : [];
-        if (named.length === 1) e = this.clone(bodyOf(named[0]!).val as AstNode);
-      }
+      const out = this.outputOf(e, targets);
+      if (out?.twin === true) throw this.twinRefused();
+      if (out !== null) e = this.clone(out.value);
     }
     // a derived table's column read through `s.*` (`SELECT s.* FROM (…) AS s ORDER BY s.pod`, a tool's wrapper): Postgres
     // analysed the ORDER BY as the star's expansion, at no offset of its own, so the column has no type here — it is the
@@ -1662,7 +1778,8 @@ class Rewriter {
   private groupedExpression(g: AstNode, b: Body): AstNode {
     const targets = (b.targetList ?? []) as AstNode[];
     const n = constInt(g);
-    if (n !== null && n >= 1 && n <= targets.length) return bodyOf(targets[n - 1]!).val as AstNode;
+    const out = n === null ? null : this.outputAt(targets, n);
+    if (out !== null) return out.value;
     if (kindOf(g) === "ColumnRef") {
       const f = names(bodyOf(g).fields);
       const named = f.length === 1 && this.typed(g) === null ? targets.filter((t) => bodyOf(t).name === f[0]) : [];
@@ -1772,22 +1889,6 @@ class Rewriter {
     return ((bodyOf(n).args ?? []) as AstNode[]).some((a) => isNode(a) && (this.typeOf(a) === JSONB || this.typeOf(a) === JSONB_ARRAY || this.rowHoldsJsonb(a)));
   }
 
-  /** the type of the `n`th output column where a `*` (or `t.*`) lists it, as Postgres expanded the stars (each column's
-   *  VAR at its star's offset, in order); null where the column is a target of its own, or not known */
-  private starColumnType(targets: readonly AstNode[], n: number): number | null {
-    let at = 0;
-    for (const t of targets) {
-      const v = bodyOf(t).val as AstNode | undefined;
-      if (v === undefined || !hasStar(v) || kindOf(v) !== "ColumnRef") { at++; if (at === n) return null; continue; }
-      const loc = bodyOf(v).location;
-      const cols = typeof loc === "number" ? (this.types.get(loc - this.base) ?? []).filter((x) => x.node === "VAR") : [];
-      if (cols.length === 0) return null;
-      if (n <= at + cols.length) return cols[n - at - 1]!.type;
-      at += cols.length;
-    }
-    return null;
-  }
-
   /** a `*` (or `t.*`) whose columns hold a jsonb or a jsonb array, as Postgres expanded it (each column's VAR at the
    *  star's own offset) */
   private starHoldsJsonb(n: AstNode): boolean {
@@ -1831,14 +1932,15 @@ class Rewriter {
     const targets = (b.targetList ?? []) as AstNode[];
     const plain = b.distinctClause.length === 1 && !isNode(b.distinctClause[0]);
     const values = targets.map((t) => bodyOf(t).val).filter(isNode);
-    for (const v of values) if (this.typeOf(v) !== JSONB) this.comparable(v, "SELECT DISTINCT");
+    // (a DISTINCT ON compares its ON expressions alone: the targets beside them are only read)
+    if (plain) for (const v of values) if (this.typeOf(v) !== JSONB) this.comparable(v, "SELECT DISTINCT");
     if (!plain) {
       b.distinctClause = (b.distinctClause as AstNode[]).map((d) => {
         const n = constInt(d);
-        const ordinal = n !== null && n >= 1 && n <= targets.length;
-        const e = ordinal ? bodyOf(targets[n - 1]!).val as AstNode : d;
+        const out = n === null ? null : this.outputAt(targets, n);
+        const e = out?.value ?? d;
         if (this.typeOf(e) !== JSONB) { this.comparable(e, "SELECT DISTINCT ON"); return d; }
-        return this.equalKey(ordinal ? this.clone(e) : d);
+        return this.equalKey(out !== null ? this.clone(e) : d);
       });
       return;
     }
@@ -3101,11 +3203,8 @@ class Rewriter {
    *  name is its target's expression, and a derived table's or a CTE's column is followed to what it selects */
   private sortsByTableColumn(key: AstNode, b: Body, scope: ReadonlyMap<string, Body>): boolean {
     const targets = (b.targetList ?? []) as AstNode[];
-    const n = constInt(key);
-    if (n !== null) return n >= 1 && n <= targets.length && this.tableColumn(bodyOf(targets[n - 1]!).val as AstNode, b, scope, 0);
-    const f = kindOf(key) === "ColumnRef" ? names(bodyOf(key).fields) : [];
-    const named = f.length === 1 ? targets.filter((t) => bodyOf(t).name === f[0]) : [];
-    return this.tableColumn(named.length === 1 ? bodyOf(named[0]!).val as AstNode : key, b, scope, 0);
+    const out = this.outputOf(key, targets);
+    return constInt(key) !== null && out === null ? false : this.tableColumn(out?.value ?? key, b, scope, 0);
   }
 
   /** a column of a table, or of a derived table or CTE that selects one, sorted bare: no collation's keys, citext's
@@ -3477,6 +3576,8 @@ const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
   : isNode(v) ? kindOf(v) !== "SubLink" && ((kindOf(v) === "FuncCall" && bodyOf(v).over !== undefined) || Object.values(bodyOf(v)).some(hasWindow))
   : Object.values(v as Body).some(hasWindow);
 
+/** one output column of a SELECT (Rewriter.outputs): the target it comes from, its name, what it reads, and whether a `*` lists it */
+type Output = { target: number; name: string; value: AstNode; star: boolean; twin: boolean };
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 
 /** whether a program does what DuckDB would compute otherwise: a division, a rounding, a scale chosen per value; a
