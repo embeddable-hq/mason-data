@@ -11,6 +11,7 @@
 import { after, afterEach, test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -30,6 +31,7 @@ const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_generated_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "it-generated-"));
 const API_KEY = "k".repeat(48);
+const MAIN = path.resolve(import.meta.dirname, "..", "..", "src", "cli", "main.ts");
 
 function psql(url: string, sql: string): string {
   const r = spawnSync("psql", ["-X", "-q", "-A", "-t", "-F", "\t", "-v", "ON_ERROR_STOP=1", url, "-c", sql], { encoding: "utf8" });
@@ -311,4 +313,64 @@ test("over the stream: a batch marks what reads it, and the changes held during 
     const totals = "SELECT * FROM later_totals ORDER BY bucket";
     assert.deepEqual(await h.ask(totals), await h.truthOf(totals));
   });
+});
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as net.AddressInfo).port; s.close(() => resolve(p)); });
+    s.on("error", reject);
+  });
+}
+
+test("a real run reads the folder: built once its base is synced, served by name, in mason status --json, and a bad file refused beside it", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 600_000 }, async () => {
+  const db = `${tag}_r`, url = urlOf(db);
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  psql(url, "CREATE TABLE items (id int PRIMARY KEY, grp int); INSERT INTO items SELECT g, g % 3 FROM generate_series(1, 300) g");
+  const [health, port] = [await freePort(), await freePort()];
+  const data = path.join(dir, "run-data"), project = path.join(dir, "run-project");
+  fs.mkdirSync(data);
+  fs.mkdirSync(path.join(project, GENERATED_DIR), { recursive: true });
+  fs.writeFileSync(path.join(project, GENERATED_DIR, "totals.yml"), "kind: scheduled\ntarget_lag: 1s\nsql: SELECT grp, count(*) AS n FROM items GROUP BY 1\norder_by: grp\n");
+  fs.writeFileSync(path.join(project, GENERATED_DIR, "stale.yml"), "kind: scheduled\ntarget_lag: 1h\nsql: SELECT current_date AS today FROM items\n");
+  const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? dir, DATABASE_URL: url, MASON_API_KEY: API_KEY, MASON_DATA: data, MASON_PROJECT: project,
+    MASON_NAME: "generated", MASON_HEALTH_PORT: String(health), MASON_HEALTH_HOST: "127.0.0.1", MASON_PG_PORT: String(port) };
+  const child = spawn(process.execPath, [MAIN, "serve"], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += String(d); });
+  child.stderr.on("data", (d) => { out += String(d); });
+  const exited = new Promise<number | null>((r) => child.once("exit", r));
+  const statusOf = (): { generatedTables?: Array<{ table: string; state: string; refusals: Array<{ key: string; text: string }> }> } | null => {
+    const r = spawnSync(process.execPath, [MAIN, "status", "--json"], { cwd: data, env, encoding: "utf8" });
+    return r.status === 0 ? JSON.parse(r.stdout) as never : null;
+  };
+  try {
+    for (const end = Date.now() + 240_000; ;) {
+      assert.equal(child.exitCode, null, `mason serve exited:\n${out}`);
+      const up = await fetch(`http://127.0.0.1:${health}/healthz`).then((r) => r.status === 200, (e: Error) => { if (/fetch failed/.test(e.message)) return false; throw e; });
+      if (up) break;
+      assert.ok(Date.now() < end, `never healthy:\n${out}`);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const add = spawnSync(process.execPath, [MAIN, "add", "public.items"], { cwd: data, env, encoding: "utf8" });
+    assert.equal(add.status, 0, `mason add:\n${add.stdout}${add.stderr}`);
+    let tables: NonNullable<ReturnType<typeof statusOf>>["generatedTables"];
+    for (const end = Date.now() + 120_000; ;) {
+      tables = statusOf()?.generatedTables;
+      if (tables?.find((t) => t.table === "public.totals")?.state === "current") break;
+      assert.ok(Date.now() < end, `totals never current: ${JSON.stringify(tables)}\n${out}`);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const stale = tables?.find((t) => t.table === "public.stale");
+    assert.equal(stale?.state, "refused", JSON.stringify(tables));
+    assert.equal(stale?.refusals[0]?.key, "sql");
+    assert.match(stale?.refusals[0]?.text ?? "", /stale\.yml: sql: it reads a session/);
+    // (spawnSync above held this process: its pipe is read now)
+    for (const end = Date.now() + 10_000; !/stale\.yml: sql: it reads a session/.test(out) && Date.now() < end;) await new Promise((r) => setTimeout(r, 50));
+    assert.match(out, /stale\.yml: sql: it reads a session/, "said in the run's log");
+    const token = mintToken(API_KEY, 600).token;
+    const served = `postgresql://anyone:${token}@127.0.0.1:${port}/mason`;
+    assert.equal(psql(served, "SELECT grp, n FROM totals ORDER BY grp"), "0\t100\n1\t100\n2\t100");
+    assert.equal(psql(url, "SELECT grp, count(*) FROM items GROUP BY 1 ORDER BY 1"), psql(served, "SELECT grp, n FROM totals ORDER BY grp"));
+  } finally { child.kill("SIGTERM"); }
+  assert.equal(await exited, 0, out);
 });
