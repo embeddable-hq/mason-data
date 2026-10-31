@@ -29,7 +29,7 @@ RUN node cli/extensions.ts --node-modules node_modules && rm -rf cli
 # the mason command whole (src/cli/ and what it imports)
 COPY src/ src/
 COPY LICENSE ./
-RUN printf '#!/bin/sh\nexec node /app/src/cli/main.ts "$@"\n' > /usr/local/bin/mason && chmod 755 /usr/local/bin/mason \
+RUN printf '#!/bin/sh\nexec node /app/src/cli/mason.cjs "$@"\n' > /usr/local/bin/mason && chmod 755 /usr/local/bin/mason \
  && mkdir -p /mason/project /mason/data && chown node:node /mason/project /mason/data
 
 USER node

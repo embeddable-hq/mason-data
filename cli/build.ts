@@ -27,5 +27,5 @@ let copied = 0;
 const copy = (from: string, to: string): void => { fs.mkdirSync(path.dirname(to), { recursive: true }); fs.copyFileSync(from, to); copied++; };
 // what src/ reads beside its code (the web page, src/web/; a .yml or .html added under src/ rides along): cli/beside.ts
 for (const f of besideCode(path.join(ROOT, "src"))) copy(path.join(ROOT, "src", f), path.join(DIST, "src", f));
-fs.chmodSync(path.join(DIST, "src", "cli", "main.js"), 0o755);
+fs.chmodSync(path.join(DIST, "src", "cli", "mason.cjs"), 0o755);
 console.log(`built ${DIST}: src/ compiled, ${copied} file(s) copied beside it`);
