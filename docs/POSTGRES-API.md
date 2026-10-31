@@ -95,9 +95,10 @@ The limits, plainly:
   with no source named because none is known. Before a login the socket says nothing of the project: the certificate
   any connection is handed is `CN=mason`, and a wrong database is refused only after a good password, as Postgres does.
 
-**The login lasts for one run of `mason share`.** It is made by the command, printed once and kept nowhere: the run holds
-its SHA-256 in memory, tied to a role, and it is no row of `.mason/users.json`. It works on the share's socket alone,
-it is refused everywhere else, and a `mason user`'s password and an API token are refused on the share's socket. It goes
+**The login lasts for one run of `mason share`.** Its password is `mason_share_<48 hex digits>`, made by the command,
+printed once and kept nowhere: the run holds its SHA-256 in memory, tied to a role, and it is no row of
+`.mason/users.json`. It works on the share's socket alone, it is refused everywhere else, and a `mason user`'s password
+and an API token are refused on the share's socket, each refusal saying where the password given does work. It goes
 when the command's connection to the run goes, a `kill -9` included. The share's session is an ordinary one: the same
 role held the same way, the same request log, the user named `share_<id>`.
 

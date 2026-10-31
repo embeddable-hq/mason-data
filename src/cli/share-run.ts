@@ -12,7 +12,8 @@
  * is enough: the password is 192 random bits, nothing to guess). It is no row of `.mason/users.json`, because that file
  * outlives a process and a share must not: a run that dies takes it along.
  * Only `authenticate` below reads this list, and only the share's socket asks it: the password is refused on the
- * run's own listener by nobody knowing it, and a `mason user` or a token here by the same.
+ * run's own listener by nobody knowing it, and a `mason user` or a token here by the same; each is told so by its shape,
+ * which names what was given and where it works, and decides nothing.
  *
  * A LOGIN REFUSED HERE IS LOGGED WITH NO SOURCE: every connection through a tunnel comes from 127.0.0.1, so naming
  * one would be naming the tunnel's client. The log is written once a minute at most (a scanner's rate is anyone's), with
@@ -26,14 +27,17 @@ import type { Failure } from "./command.ts";
 import type { PgApiServer, PgToken, ShareSocket } from "../api/postgres/server.ts";
 import type { RoleGrants, RolesLive } from "../duck/grants.ts";
 import { missingAttributes } from "../duck/row-filter.ts";
+import { isToken } from "../duck/token.ts";
+import { isUserPassword, SHARE_PASSWORD_PREFIX } from "../duck/users.ts";
 import { ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE } from "./roles.ts";
 import { sameSecret } from "./security.ts";
 
 /** What the password is stored and sent as: its SHA-256, hex. */
 export const shareSecret = (password: string): string => crypto.createHash("sha256").update(password).digest("hex");
 
-/** The new password `mason share` prints once: 192 random bits, in characters every form and URL takes. */
-export const newSharePassword = (): string => crypto.randomBytes(24).toString("hex");
+/** The new password `mason share` prints once: `mason_share_` and 192 random bits as 48 hex digits, in characters every
+ *  form and URL takes. Recognisably Mason's and apart from a user's (`isUserPassword`, src/duck/users.ts) and a token's. */
+export const newSharePassword = (): string => `${SHARE_PASSWORD_PREFIX}${crypto.randomBytes(24).toString("hex")}`;
 
 /** How often a refused login is written to the log, at most: the rest are counted. */
 const REFUSED_LOG_MS = 60_000;
@@ -230,10 +234,11 @@ export class RunShares {
   }
 
   private authenticate(password: string, user: string): PgToken {
-    const given = shareSecret(password);
-    const found = [...this.held.values()].find((h) => sameSecret(h.secret, given));
+    const secret = shareSecret(password);
+    const found = [...this.held.values()].find((h) => sameSecret(h.secret, secret));
     if (found === undefined || found.user !== user) {
-      const refused = new ApiError(401, "not this share's password", "invalid_share");
+      const given = isUserPassword(password) ? "a mason user's password" : isToken(password) ? "an API token" : null;
+      const refused = new ApiError(401, given === null ? "not this share's password" : `that is ${given}: it logs in on the run's own port, never at a share's address`, "invalid_share");
       refused.userName = user;
       throw refused;
     }

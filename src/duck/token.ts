@@ -19,10 +19,15 @@ export function mintToken(apiKey: string, seconds: number, now = Date.now()): { 
   return { token: `${PREFIX}_${expiry}_${mac(apiKey, expiry)}`, expiresAt: new Date(expiry * 1000).toISOString() };
 }
 
+const TOKEN_RE = /^mason_(\d{1,12})_([A-Za-z0-9_-]{43})$/;
+
+/** Whether a password is a token by its shape, good or not. */
+export const isToken = (password: string): boolean => TOKEN_RE.test(password);
+
 /** null when the token is good; else why not, in a sentence a person reads after "password authentication failed" */
 export function tokenProblem(apiKey: string, token: string, now = Date.now()): string | null {
   if (token === apiKey) return "the API key is not a password here: mason user add <name> makes a user whose password does not expire";
-  const m = /^mason_(\d{1,12})_([A-Za-z0-9_-]{43})$/.exec(token);
+  const m = TOKEN_RE.exec(token);
   if (m === null) return "not a Mason user's password or token: mason user add <name> makes a user whose password does not expire";
   const expiry = Number(m[1]);
   const want = Buffer.from(mac(apiKey, expiry)), got = Buffer.from(m[2]!);
