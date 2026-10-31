@@ -155,7 +155,7 @@ under another transaction's write fails its commit, hence swaps on the writer's 
 - **The catalog serves a table the moment its copy commits**, on a connection no copy holds (after a restart it had been
   empty for hours behind a large copy).
 - **An enum array is read as `text[]`**: a passthrough read hands it over as one VARCHAR DuckDB cannot cast.
-- **ZSTD strings, the disk projection**: `.claude/rules/duckdb.md` "Memory and the machine" (JSON text 0.66 → 0.26 GB/M rows).
+- **ZSTD strings, the disk projection**: `.claude/rules/duck-memory.md` "Memory and the machine" (JSON text 0.66 → 0.26 GB/M rows).
 
 ## Keeping a copy current
 
@@ -260,7 +260,7 @@ refuses `mason start` too. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
 ### Logical replication
 
 **Decision.** A table whose `sync:` is `replication` is kept current from the change log (`src/duck/stream.ts`); the rules
-are `.claude/rules/duckdb.md` "Keeping a copy current". Why each is so:
+are `.claude/rules/duck-sync.md` "Keeping a copy current". Why each is so:
 
 | decision | why, with the number |
 |---|---|
@@ -1733,7 +1733,7 @@ the download moves from the first copy to `npm install`).
 
 DuckDB's limit is half the RAM (its own 80 % let the system kill the run), in one process with V8 and two PGlites; a
 wide JSON column is disk-bound past RAM (the test server, a 28 GB table: `payload->>'key' IS NOT NULL` over 22 M rows
-93.5 s, against 15 s on a ClickHouse beside it): `.claude/rules/duckdb.md` "Memory and the machine". **What a copy costs
+93.5 s, against 15 s on a ClickHouse beside it): `.claude/rules/duck-memory.md` "Memory and the machine". **What a copy costs
 the queries beside it is page-cache eviction, not CPU** (the test server, five runs of a weekly chart over 22 M rows, Q1,
 and a 7-day count over 196 M rows, Q2):
 

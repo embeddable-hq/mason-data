@@ -1,6 +1,6 @@
 /**
  * THE ORACLE'S DECIDED DIFFERENCES, and when one is stale (tests/integration/duck-oracle.itest.ts `KNOWN`;
- * .claude/rules/duckdb.md "No dead entries"): an entry that no statement still differs by is removed, not left to
+ * .claude/rules/duck-rewrite.md "No dead entries"): an entry that no statement still differs by is removed, not left to
  * mislead — except a decided difference whose truth depends on the machine's floating-point arithmetic. A double's
  * last digit is the source machine's in Postgres (its libm's for ln, log10, exp or power; its build's arithmetic for a
  * variance's accumulation) and the machine's under DuckDB in Mason, and the two agree on one pair of machines where they

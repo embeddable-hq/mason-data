@@ -172,7 +172,7 @@ export function conflictMarkers(src: string): number[] {
     .filter((n) => n > 0);
 }
 
-test("every synchronous close on the engine's thread is one read against the rule (it never waits for DuckDB's tasks: .claude/rules/duckdb.md)", () => {
+test("every synchronous close on the engine's thread is one read against the rule (it never waits for DuckDB's tasks: .claude/rules/duck-executor.md)", () => {
   // a close of an open result waits for the query's tasks, and a task inside a Mason function waits for this thread
   const closes = (file: string): string[] => fs.readFileSync(path.join(ROOT, file), "utf8").split("\n").filter((l) => /\.closeSync\(\)/.test(l)).map((l) => l.trim());
   assert.deepEqual(closes("src/duck/store.ts"), ["result?.closeSync();", "this.conn.closeSync();"]);

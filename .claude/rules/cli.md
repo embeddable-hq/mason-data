@@ -207,7 +207,7 @@ CLI lacks).
   the run alone reaches a background start as "the run stopped", its way out in a log. Keep
   `mason init` writing no key: the default stays a default.
 - **`mason user add|list|disable|enable|remove` is the login a tool keeps** (src/cli/user.ts, src/duck/users.ts, the rules
-  in .claude/rules/duckdb.md "Users"): a BI tool stores ONE password that does not expire. `add` prints the password
+  in .claude/rules/duck-users.md "Users"): a BI tool stores ONE password that does not expire. `add` prints the password
   ONCE with the URL (one builder, `connectionUrl`), when the run is up; the command needs the project, never the run (it
   edits `.mason/users.json` beside it, `mason serve`'s data folder included). "User" is the word in everything it
   prints, never "token" or "credentials". `mason connect` (a token for a day) is gone: `mason user`
@@ -294,7 +294,7 @@ CLI lacks).
   statements. A slot outlives the run: `mason stop` says it stays and holds WAL. **A publication the operator names
   (`publication:` in the sources file, else `PG_PUBLICATION`) is never created, altered or dropped** — only
   the slot goes — and a read replica needs one, refused by name before any slot is made (`readinessVerdict`;
-  `.claude/rules/duckdb.md`).
+  `.claude/rules/duck-sync.md`).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
   README's "Going to production", `mason help production` offline). Only the project folder
   travels. **`mason.yml` pins the version** the project is written for (src/lib/project-version.ts: init writes it,

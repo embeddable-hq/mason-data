@@ -3,7 +3,7 @@
  * `source`'s copy waits inside its transaction, read and not committed, so the copy cannot end before the test releases
  * it. A test that needs something to happen WHILE a copy runs holds it, rather than betting on the copy outlasting it: a
  * copy's time is the machine's (the 400,000-row copy of duck-poll's "beside the polls" once took 0.89 s on a CI runner,
- * one poll pass ran beside it, and the test failed; .claude/rules/duckdb.md "Testing").
+ * one poll pass ran beside it, and the test failed; .claude/rules/duck-testing.md "Testing").
  *
  * Held from the start (`armed`, the default) or from `hold()`, until `release()`; `held()` is true once a chunk waits
  * since the hold began — the copy's snapshot pinned by then (`beginCopy` precedes every chunk). Release it first thing
