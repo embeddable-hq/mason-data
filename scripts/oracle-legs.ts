@@ -1,17 +1,23 @@
 #!/usr/bin/env node
 /**
  * THE ORACLE IN LEGS (.github/workflows/ci.yml; tests/integration/README.md). CI runs tests/integration/duck-oracle.itest.ts
- * as two jobs, `IT_ORACLE_LEG=1/2` and `2/2`, each with its own Postgres, its own copy and both rounds of changes, each
+ * as two jobs, `IT_ORACLE_LEG=1/2` and `2/2` (`scripts/ci-shards.ts run oracle <n>`), each with its own Postgres, its own copy and both rounds of changes, each
  * asking the statements `legOf` gives it. A statement that no leg asks is a statement nobody holds to Postgres, and a
  * green run would never say so; and what a whole run asserts at its end (no stale decision, no dead gap, the allowlist
  * exactly what was verified, the tallies the fixture's) is false of a part. So a leg asserts neither, and writes a
- * report instead (`duck-oracle-leg-<n>.json`, in IT_LOG_DIR); `integration (oracle)` runs this file over the reports:
+ * report instead (`duck-oracle-leg-<n>.json`, at IT_ORACLE_LEG_REPORT); `integration (oracle)` runs this file over the
+ * reports:
  *
  *   node scripts/oracle-legs.ts <folder>    exit 0: the legs are the whole, and hold what a whole run holds; exit 1: not
  *
  * The statements are named by what each leg ASKED, recorded where it asks, against the whole list each leg computed
  * before filtering: the check does not trust `legOf`. A whole run, and everything that regenerates a file
  * (`UPDATE_VERIFIED=1`, `UPDATE_FIXTURE=1`), stays one process without IT_ORACLE_LEG; a leg refuses to run under them.
+ * So does a leg with no IT_ORACLE_LEG_REPORT: nothing would hold its report to the whole, and half the statements
+ * passing with no end-of-run assertion must never read as the oracle passing.
+ *
+ * THIS FILE AND scripts/ci-shards.ts RUN WITH NO `npm ci`, in the final jobs: what they import reaches only Node's
+ * builtins (tests/conventions.test.ts).
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -70,7 +76,8 @@ export function parseLeg(text: string | undefined): { leg: number; of: number } 
 export function legRefused(env: NodeJS.ProcessEnv): string | null {
   if (env.IT_ORACLE_LEG === undefined) return null;
   const named = ["IT_ORACLE_ONLY", "UPDATE_VERIFIED", "UPDATE_FIXTURE"].filter((k) => k === "IT_ORACLE_ONLY" ? env[k] !== undefined : env[k] === "1");
-  return named.length === 0 ? null : `IT_ORACLE_LEG=${env.IT_ORACLE_LEG} with ${named.join(", ")}: these read or rewrite the whole oracle. Unset IT_ORACLE_LEG`;
+  if (named.length > 0) return `IT_ORACLE_LEG=${env.IT_ORACLE_LEG} with ${named.join(", ")}: these read or rewrite the whole oracle. Unset IT_ORACLE_LEG`;
+  return env.IT_ORACLE_LEG_REPORT === undefined ? `IT_ORACLE_LEG=${env.IT_ORACLE_LEG} with no IT_ORACLE_LEG_REPORT: a leg is part of the oracle, its statements and none of its end-of-run assertions, and only CI's check holds its report to the whole. Unset IT_ORACLE_LEG to run the oracle` : null;
 }
 
 /** The legs against the whole: every leg present once, the same list, and in every phase each statement asked exactly
@@ -170,7 +177,7 @@ export function foldProblems(reports: readonly LegReport[], want: number, fixtur
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const dir = process.argv[2];
   if (dir === undefined) { console.error("usage: scripts/oracle-legs.ts <folder of duck-oracle-leg-<n>.json>"); process.exit(2); }
-  const { SHARDS } = await import("./ci-shards.ts");
+  const { SHARDS } = await import("./ci-shards.ts");   // when run: that file imports this one
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const reports = (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((f) => /^duck-oracle-leg-\d+\.json$/.test(f))
     .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as LegReport);

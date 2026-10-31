@@ -4,6 +4,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { STAGES, deadGaps, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, verifiedDiff, wholeRunProblems, type Decision, type LegReport } from "../scripts/oracle-legs.ts";
 
@@ -138,9 +140,17 @@ test("a leg names itself exactly, and refuses what reads or rewrites the whole o
   assert.deepEqual(parseLeg("1/2"), { leg: 1, of: 2 });
   assert.equal(parseLeg(undefined), null);
   for (const bad of ["0/2", "3/2", "1", "a/b", ""]) assert.throws(() => parseLeg(bad), /IT_ORACLE_LEG/, bad);
-  assert.equal(legRefused({ IT_ORACLE_LEG: "1/2" }), null);
+  assert.equal(legRefused({ IT_ORACLE_LEG: "1/2", IT_ORACLE_LEG_REPORT: "r" }), null);
   assert.equal(legRefused({ UPDATE_VERIFIED: "1" }), null, "a whole run regenerates");
+  assert.match(legRefused({ IT_ORACLE_LEG: "1/2" })!, /with no IT_ORACLE_LEG_REPORT: .*Unset IT_ORACLE_LEG/);
   assert.match(legRefused({ IT_ORACLE_LEG: "1/2", UPDATE_VERIFIED: "1" })!, /with UPDATE_VERIFIED: .*Unset IT_ORACLE_LEG/);
   assert.match(legRefused({ IT_ORACLE_LEG: "1/2", UPDATE_FIXTURE: "1" })!, /UPDATE_FIXTURE/);
   assert.match(legRefused({ IT_ORACLE_LEG: "1/2", IT_ORACLE_ONLY: "x" })!, /IT_ORACLE_ONLY/);
+});
+
+test("a leg left in a shell fails the oracle's file at once, before it needs a Postgres: part of it never passes as all of it", () => {
+  const { IT_ORACLE_LEG_REPORT: _report, ...env } = process.env;
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL("integration/duck-oracle.itest.ts", import.meta.url))], { encoding: "utf8", env: { ...env, IT_ORACLE_LEG: "1/2" } });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /IT_ORACLE_LEG=1\/2 with no IT_ORACLE_LEG_REPORT/);
 });

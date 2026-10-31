@@ -66,7 +66,7 @@ import { countGap, emptyTally, fixtureTally, fixtureText, gapSummary, type Met }
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
 import { GAP_MARK, GAPS, type GapId } from "../../src/duck/gaps.ts";
-import { deadGaps, FIRST_LEG_RUNS_STAGES, legOf, legRefused, movedTallies, parseLeg, PHASES, reportName, statementId, verifiedDiff, type LegReport } from "../../scripts/oracle-legs.ts";
+import { deadGaps, FIRST_LEG_RUNS_STAGES, legOf, legRefused, movedTallies, parseLeg, PHASES, statementId, verifiedDiff, type LegReport } from "../../scripts/oracle-legs.ts";
 import type { RolesLive } from "../../src/duck/grants.ts";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -922,7 +922,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     const legReport: LegReport = { ...LEG, whole: every().map((q) => ({ id: statementId(q), name: q.name })), asked: askedIn, stages: stageAsked, shaped, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
       decisions: KNOWN.map((k) => ({ sql: String(k.sql), why: k.why, ...(k.machineFloat === true ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
       verified: [...verified], differences: differences.length };
-    const out = path.join(process.env.IT_LOG_DIR ?? os.tmpdir(), reportName(LEG.leg));
+    const out = process.env.IT_ORACLE_LEG_REPORT!;   // legRefused: a leg without it does not start
     fs.writeFileSync(out, JSON.stringify(legReport));
     console.log(`duck oracle: leg ${LEG.leg} of ${LEG.of}: ${tallies.statements} of ${legReport.whole.length} statements, report in ${out}`);
   }

@@ -397,6 +397,18 @@ test("an --oracle regex that names nothing is a failure: exit 0 of an empty orac
   assert.doesNotMatch(lines.join("\n"), /PASSED/);
 });
 
+test("an inherited IT_ORACLE_LEG never reaches a step, so naming the oracle's file is never silently half of it", async () => {
+  const s = stubs();
+  const at = path.join(s.dir, "seen");
+  const lines: string[] = [];
+  process.env.IT_ORACLE_LEG = "1/2";
+  process.env.IT_ORACLE_LEG_REPORT = "stale";
+  try {
+    assert.equal(await runGate({ first: [js("x", `require("fs").writeFileSync(${JSON.stringify(at)}, String(process.env.IT_ORACLE_LEG) + String(process.env.IT_ORACLE_LEG_REPORT))`)], integration: [] }, config(s, lines)), 0);
+  } finally { delete process.env.IT_ORACLE_LEG; delete process.env.IT_ORACLE_LEG_REPORT; }
+  assert.equal(fs.readFileSync(at, "utf8"), "undefinedundefined");
+});
+
 test("an inherited IT_ORACLE_ONLY never reaches a step, so a whole oracle is never silently a subset", async () => {
   const s = stubs(); const lines: string[] = [];
   const at = path.join(s.dir, "env");

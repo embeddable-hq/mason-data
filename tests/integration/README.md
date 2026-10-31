@@ -33,6 +33,8 @@ settings) stay whole in leg 1. What only all the statements can say (a stale dec
 the fixture's tallies) is asserted by no leg: each writes a report, and `integration (oracle)` runs `scripts/oracle-legs.ts`
 over the two, which fails when the legs' counts do not sum to the whole or any statement was left out or asked twice. A
 leg refuses `IT_ORACLE_ONLY`, `UPDATE_VERIFIED=1` and `UPDATE_FIXTURE=1`: regenerating is a whole run, without `IT_ORACLE_LEG`.
+It refuses to start without `IT_ORACLE_LEG_REPORT`, which `scripts/ci-shards.ts` sets, so a leg left in a shell fails rather
+than passes as the oracle; `npm run gate` strips both.
 
 ## The ready local gate
 

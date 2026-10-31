@@ -48,10 +48,10 @@ test("a new file lands in a shard by itself, and the partition is a function of 
 });
 
 test("a shard with no file is an error: `node --test` alone would run every test in the tree", () => {
-  assert.throws(() => shardCommand("unit", 1, []), /has no file/);
-  assert.deepEqual(shardCommand("unit", 1, ["a"]), { args: ["--test", "a"], env: {} });
-  assert.deepEqual(shardCommand("rest", 2, ["a"]), { args: ["--test", "--test-concurrency=1", "a"], env: {} });
-  assert.deepEqual(shardCommand("oracle", 2, ["a"]).env, { IT_ORACLE_LEG: "2/2" });
+  assert.throws(() => shardCommand("unit", 1, [], "o"), /has no file/);
+  assert.deepEqual(shardCommand("unit", 1, ["a"], "o"), { args: ["--test", "a"], env: {} });
+  assert.deepEqual(shardCommand("rest", 2, ["a"], "o"), { args: ["--test", "--test-concurrency=1", "a"], env: {} });
+  assert.deepEqual(shardCommand("oracle", 2, ["a"], "o").env, { IT_ORACLE_LEG: "2/2", IT_ORACLE_LEG_REPORT: path.join("o", "duck-oracle-leg-2.json") });
 });
 
 test("verify fails on a file in no shard, in two, on one not in the tree, and on a shard that left no record", () => {

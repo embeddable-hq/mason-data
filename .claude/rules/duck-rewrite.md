@@ -140,7 +140,7 @@ paths:
   threadsafe-function loop runs up to a thousand calls between two turns of anything else (4.5 µs a row on the test
   server, ~9 ms a call), so a DuckDB statement of another session, a stream batch, a poll and a request-log write each
   wait about that long per round trip — in practice until the calling statement ends. The listener, the catalog, logins,
-  the commands and cancels do not (`tests/duck-executor.test.ts`). The way out is FEWER CALLS, two ways:
+  the commands and cancels do not (`tests/duck-executor-starve.test.ts`). The way out is FEWER CALLS, two ways:
   - **a `->>` / `#>>` of a COLUMN is DuckDB's own read where that read is Postgres's answer** (`jsonGet` in
     src/duck/rewrite.ts: a string value, a missing path, a JSON null; a chain of reads off one column folded into one,
     `jsonChain`), and the function answers only the rows it must (a number's digits, an object, an array, an index, a

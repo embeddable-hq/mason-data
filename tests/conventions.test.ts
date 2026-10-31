@@ -183,6 +183,49 @@ test("every synchronous close on the engine's thread is one read against the rul
   for (const f of executorFiles) assert.doesNotMatch(fs.readFileSync(path.join(ROOT, "tests", f), "utf8"), /\bspawnSync\(/, f);
 });
 
+/**
+ * What a script imports at runtime that is not Node's and not a file of the repo, following those files. A type-only
+ * import or export is erased; an import in a comment counts, which only asks for a rewording.
+ */
+export function packagesReached(entries: readonly string[], read: (file: string) => string): string[] {
+  const seen = new Set<string>(), packages = new Set<string>();
+  const walk = (file: string): void => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const named = /(?:^|\n)\s*(?:import|export)\s+(type\s+)?(?:[^"';]*?\sfrom\s+)?["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/g;
+    for (const m of read(file).matchAll(named)) {
+      if (m[1] !== undefined) continue;
+      const to = (m[2] ?? m[3])!;
+      if (to.startsWith("node:")) continue;
+      if (to.startsWith(".")) walk(path.posix.normalize(path.posix.join(path.posix.dirname(file), to)));
+      else packages.add(`${file}: ${to}`);
+    }
+  };
+  for (const e of entries) walk(e);
+  return [...packages].sort();
+}
+
+test("what CI's final jobs run needs no npm ci: scripts/ci-shards.ts and scripts/oracle-legs.ts reach only Node's builtins", () => {
+  const read = (f: string): string => fs.readFileSync(path.join(ROOT, f), "utf8");
+  assert.deepEqual(packagesReached(["scripts/ci-shards.ts", "scripts/oracle-legs.ts"], read), [], "the final jobs of ci.yml have no node_modules: move this import behind what they run, or add npm ci to them");
+  const workflow = read(".github/workflows/ci.yml");
+  for (const gate of ["checks", "integration-oracle", "integration-rest"]) {
+    const job = new RegExp(`\\n  ${gate}:\\n[\\s\\S]*?(?=\\n  [\\w-]+:\\n|$)`).exec(workflow)?.[0];
+    assert.ok(job !== undefined && job.includes("scripts/ci-shards.ts needs"), `${gate} is read here: has the job moved?`);
+    assert.ok(!job.includes("npm ci"), `${gate} runs npm ci now: this guard can go`);
+  }
+});
+
+test("the npm ci guard catches the real thing", () => {
+  const tree: Record<string, string> = {
+    "a.ts": 'import { x } from "./b.ts";\nimport type { T } from "./t.ts";\nimport * as fs from "node:fs";\nconst y = await import("./c.ts");\n',
+    "b.ts": 'import pg from "pg";\nexport { z } from "yaml";\nexport type { Q } from "./t.ts";\nimport {\n  a,\n} from "./d.ts";\n',
+    "c.ts": 'const later = await import("libpg-query");\n', "d.ts": 'import "side-effect";\n',
+  };
+  assert.deepEqual(packagesReached(["a.ts"], (f) => { const src = tree[f]; if (src === undefined) throw new Error(`read ${f}`); return src; }),
+    ["b.ts: pg", "b.ts: yaml", "c.ts: libpg-query", "d.ts: side-effect"]);
+});
+
 test("no source file carries a committed merge-conflict marker", () => {
   const hits: string[] = [];
   for (const { name, src } of scannedFiles()) {

@@ -21,6 +21,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ORACLE } from "./gate.ts";
+import { reportName } from "./oracle-legs.ts";
 
 /** The shards of each kind; `.github/workflows/ci.yml`'s matrices say the same (tests/ci-shards.test.ts). */
 export const SHARDS = { unit: 3, rest: 2, oracle: 2 } as const;
@@ -108,9 +109,9 @@ export function shardFiles(kind: Kind, shard: number, root: string): string[] {
 
 /** The `node` arguments of a shard. Integration files run one at a time (tests/integration/README.md); `--test` with no
  *  file would run every test in the tree, so an empty shard is an error, not a pass. */
-export function shardCommand(kind: Kind, shard: number, files: readonly string[]): { args: string[]; env: Record<string, string> } {
+export function shardCommand(kind: Kind, shard: number, files: readonly string[], out: string): { args: string[]; env: Record<string, string> } {
   if (files.length === 0) throw new Error(`${kind} shard ${shard} has no file: \`node --test\` would run every test in the tree`);
-  return { args: ["--test", ...(kind === "unit" ? [] : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}` } : {} };
+  return { args: ["--test", ...(kind === "unit" ? [] : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}`, IT_ORACLE_LEG_REPORT: path.join(out, reportName(shard)) } : {} };
 }
 
 /** What a shard wrote of itself */
@@ -173,12 +174,12 @@ function main(argv: string[]): number {
   if (what === "files") { for (const f of files) console.log(f); return 0; }
   const out = process.env.CI_SHARD_DIR;
   if (out === undefined) { console.error("set CI_SHARD_DIR: the folder of the shard's record"); return 2; }
-  const { args, env } = shardCommand(kind, shard, files);
+  fs.mkdirSync(out, { recursive: true });
+  const { args, env } = shardCommand(kind, shard, files, out);
   console.log(`${kind} shard ${shard} of ${SHARDS[kind]}: ${files.length} file(s), about ${files.reduce((n, f) => n + weightOf(f), 0)} s of test time`);
   const r = spawnSync(process.execPath, args, { stdio: "inherit", cwd: root, env: { ...process.env, ...env } });
   // a signal leaves status null: never a pass
   const exit = r.status ?? 1;
-  fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, recordName(kind, shard)), JSON.stringify({ kind, shard, files, exit } satisfies ShardRecord));
   return exit;
 }
