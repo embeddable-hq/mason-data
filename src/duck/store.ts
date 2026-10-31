@@ -20,7 +20,8 @@ import { DuckDBInstance, version, type DuckDBConnection, type DuckDBPreparedStat
 import { Executor, type DuckConnection } from "./executor.ts";
 import { beginStatement, cancelStatement, slotName, statementCancelled } from "./cancel.ts";
 import type { PgSession } from "../api/postgres/encode.ts";
-import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner, type DuckSession, type ExplainHow } from "../api/postgres/server.ts";
+import type { DuckAnswer, DuckOptions, DuckRunner, DuckSession, ExplainHow } from "../api/postgres/server.ts";
+import { StatementError } from "./statement.ts";
 import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from "./plan.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
@@ -229,7 +230,7 @@ export class DuckStore {
       collation: c,
       open: () => this.runner(),
       plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants) =>
-        planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null, wireBound ?? false, grants),
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath, timeZone, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants }),
       parameters: duckParameters,
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,

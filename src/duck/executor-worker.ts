@@ -15,7 +15,8 @@ import type { DuckDBConnection, DuckDBInstance, DuckDBValue } from "@duckdb/node
 import { openDuck, SessionRunner } from "./store.ts";
 import { FUNCTION_CALLS, FUNCTION_ROWS, registerLibcOrder, useCancelTable } from "./functions.ts";
 import { stopPgEval } from "./pg-eval.ts";
-import { StatementError, type DuckAnswer, type DuckSession } from "../api/postgres/server.ts";
+import type { DuckAnswer, DuckSession } from "../api/postgres/server.ts";
+import { StatementError } from "./statement.ts";
 import { STOPPING, wireError, type Reply } from "./executor.ts";
 
 const { cancels } = workerData as { cancels: Int32Array };

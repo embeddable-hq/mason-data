@@ -118,7 +118,7 @@ export const GAP_MARK = /\bMason gap ([a-z0-9-]+)/;
 
 /** The entry a runtime refusal's TEXT names (`gapMark`), or null: only for a refusal raised inside DuckDB (a Mason
  *  function's error, src/duck/functions.ts), which crosses DuckDB as its message alone (src/duck/store.ts pgErrorOf);
- *  a refusal built outside it carries its id on the error (src/api/postgres/server.ts gapRefusal). */
+ *  a refusal built outside it carries its id on the error (src/duck/statement.ts gapRefusal). */
 export function gapIn(text: string): GapId | null {
   const id = GAP_MARK.exec(text)?.[1];
   return id !== undefined && Object.hasOwn(GAPS, id) ? id as GapId : null;

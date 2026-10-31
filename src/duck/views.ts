@@ -16,7 +16,7 @@
  */
 import { deparseSync } from "pgsql-deparser";
 import type { Node } from "libpg-query";
-import { gapRefusal, type StatementError } from "../api/postgres/server.ts";
+import { gapRefusal, type StatementError } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { catalogRows, type PgAnalysis } from "./analyze.ts";
 import type { TreeValue } from "./pgtree.ts";
