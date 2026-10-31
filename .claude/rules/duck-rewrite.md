@@ -122,7 +122,10 @@ paths:
   one per column from Postgres's expansion (`Typed.column`), so every rule meets a star's column as the column named. A
   `targets[n - 1]` of a number is the wrong column beside a `*` (the class: an output not resolved to its column).
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
-  first) and beside a GROUP BY. `tests/duck-wire.test.ts`, `tests/duck-libc-order.test.ts`, the oracle's `star sort:`.
+  first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
+  VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its
+  `groupexprs` come first, in the GROUP BY's order. A rewrite over a `*` is held by a GROUP BY whose keys are not the
+  star's leading columns in order. `tests/duck-wire.test.ts`, `tests/duck-libc-order.test.ts`, the oracle's `star sort:`.
 - **A new rewrite for speed is held by the PLAN fixture too** (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`):
   its statement in the tool's own spelling, over the shop's million orders, its plan's skeleton in the fixture (the
   operators, a top N's count of sort keys, each scan's table and top-N / zone-map filter, the Mason functions, what it sorts by beyond a value —

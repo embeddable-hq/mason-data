@@ -245,6 +245,7 @@ export const nodesPlacedTwice = (): readonly string[] => PLACED_TWICE;
 
 class Rewriter {
   private readonly types: Map<number, Typed[]>;
+  private readonly analysed: PgAnalysis["outputs"];
   private readonly base: number;
   private readonly collation: DuckCollation;
   private readonly params: readonly number[];
@@ -296,7 +297,7 @@ class Rewriter {
   readonly jsonReads = new Map<string, JsonRead>();
   constructor(analysis: PgAnalysis, base: number, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC",
     enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set()) {
-    this.types = analysis.types; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone;
+    this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone;
     this.enums = enums; this.kept = kept;
     for (const at of keyCounts) this.keyCounts.add(at + base);
     this.caseMode = collation.kind === "icu" ? "icu" : collation.kind === "bytes" && collation.ascii === true ? "ascii" : "libc";
@@ -868,30 +869,42 @@ class Rewriter {
   /**
    * A SELECT'S OUTPUT COLUMNS, AS POSTGRES NUMBERS AND NAMES THEM (issue 112: `SELECT * FROM t ORDER BY 3` under a
    * collation sorted by bytes, as nothing here saw the column): a target is one output, a `*` or `t.*` one per column,
-   * from Postgres's own expansion (each column's VAR at the star's offset). THE CLASS IS AN ORDER BY, GROUP BY OR DISTINCT
+   * from Postgres's own expansion (its query's targetList, `outputsByLocation`). THE CLASS IS AN ORDER BY, GROUP BY OR DISTINCT
    * ON OUTPUT NOT RESOLVED TO ITS COLUMN, and every reader of an output's number or name goes through here: a star's
    * column is a ColumnRef made from that VAR, typed by it, so every rule (a collation's key, jsonb's, citext's, char(n)'s,
    * a refusal) meets it as it meets the column named.
    */
   private outputs(targets: readonly AstNode[]): Output[] {
+    const stars = targets.filter((t) => hasStar(bodyOf(t).val));
+    const held = (n: unknown): number[] => {
+      if (Array.isArray(n)) return n.flatMap(held);
+      if (n === null || typeof n !== "object") return [];
+      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? [x] : held(x));
+    };
+    const query = stars.length === 0 ? undefined : held(targets).map((l) => this.analysed.get(l - this.base)).find((q) => q !== undefined);
+    const widthOf = (t: AstNode): number | null => {
+      const f = bodyOf(bodyOf(t).val as AstNode).fields as AstNode[];
+      return f.length < 2 ? null : query?.widths.get(String(bodyOf(f[f.length - 2]!).sval)) ?? 0;
+    };
+    // a bare `*` lists what the named ones and the other targets leave, shared out among the bare ones
+    const bare = stars.filter((t) => widthOf(t) === null).length;
+    const rest = (query?.columns.length ?? 0) - (targets.length - stars.length) - stars.reduce((n, t) => n + (widthOf(t) ?? 0), 0);
     const out: Output[] = [];
+    let at = 0;
     targets.forEach((t, target) => {
       const v = bodyOf(t).val;
       if (!isNode(v)) return;
-      if (!hasStar(v)) { out.push({ target, name: typeof bodyOf(t).name === "string" ? bodyOf(t).name : figureColname(v), value: v, star: false, twin: false }); return; }
-      const loc = bodyOf(v).location;
-      // (a set operation in a WITH query reaches the analysis's list at this offset twice: each column once)
-      const seen = new Set<string>();
-      for (const c of typeof loc === "number" ? (this.types.get(loc - this.base) ?? []).filter((x) => x.node === "VAR") : []) {
-        // (a set operation's own outputs carry its first SELECT's offsets)
-        const n = c.column;
-        if (n === undefined || seen.has(n.at)) continue;
-        seen.add(n.at);
+      if (!hasStar(v)) { at++; out.push({ target, name: typeof bodyOf(t).name === "string" ? bodyOf(t).name : figureColname(v), value: v, star: false, twin: false }); return; }
+      const width = widthOf(t) ?? (bare === 0 ? 0 : rest / bare);
+      for (const c of query?.columns.slice(at, at + width) ?? []) {
+        const n = c?.column;
+        if (c === null || c === undefined || n === undefined) throw new Error("a column of a * is no column in Postgres's analysis: report it, with the statement");
         const value: AstNode = { ColumnRef: { fields: [...(n.owner === null ? [] : [S(n.owner)]), S(n.name)], location: -1 } };
         this.original.add(bodyOf(value));
         this.synthetic.set(bodyOf(value), c);
         out.push({ target, name: n.name, value, star: true, twin: n.twin === true });
       }
+      at += width;
     });
     return out;
   }
@@ -907,9 +920,10 @@ class Rewriter {
     const merges = (x: unknown): boolean => isNode(x) && kindOf(x) === "JoinExpr" && (bodyOf(x).usingClause !== undefined || bodyOf(x).isNatural === true || merges(bodyOf(x).larg) || merges(bodyOf(x).rarg));
     const grouped = Array.isArray(b.groupClause) && b.groupClause.length > 0;
     if (!grouped && !((b.fromClause ?? []) as unknown[]).some(merges)) return;
-    b.targetList = targets.flatMap((t) => {
+    const outputs = this.outputs(targets);
+    b.targetList = targets.flatMap((t, i) => {
       if (!hasStar(bodyOf(t).val)) return [t];
-      const own = this.outputs([t]);
+      const own = outputs.filter((o) => o.target === i);
       if (own.some((o) => o.twin)) throw this.twinRefused();
       return own.length === 0 ? [t] : own.map((o) => ({ ResTarget: { val: o.value } }));
     });
@@ -953,6 +967,14 @@ class Rewriter {
     for (const s of (b.sortClause ?? []) as AstNode[]) if (kindOf(s) === "SortBy") bodyOf(s).node = asColumn(bodyOf(s).node as AstNode);
   }
 
+  /** whether a value's order is DuckDB's of what it holds, so its number sorts it; any other goes through the SortBy
+   *  rule, by its output's name: a key (a collation's, jsonb's), a citext's lower(), a char(n)'s rtrim(), a refusal */
+  private sortsAsStored(n: AstNode): boolean {
+    const type = this.typeOf(n);
+    const c = this.textCollation(n);
+    return (c === null || c.kind === "bytes") && type !== BPCHAR && !this.isCitext(type) && type !== INET && !(type !== null && [JSONB, JSONB_ARRAY, 1009, 1015].includes(type));
+  }
+
   /**
    * A SET OPERATION'S ORDER BY of a text column (`… UNION … ORDER BY 1`, or `ORDER BY status` where the first SELECT
    * says `o.status`): Postgres sorts by its output column, which it analysed at no offset of the ORDER BY's own, so the
@@ -982,18 +1004,14 @@ class Rewriter {
       if (out.star) {
         // a set operation's ORDER BY reads an output by its name alone: a column of a `*` has no other
         if (outputs.filter((o) => o.name === out.name).length !== 1) throw new Unrewritable("ORDER BY a column number of a set operation whose first SELECT lists two columns of that name is not supported by Mason", "name the columns apart in the first SELECT", "setop-ordinal-star");
-        const c = this.textCollation(value);
-        if (this.typeOf(value) !== JSONB && this.typeOf(value) !== JSONB_ARRAY && (c === null || c.kind === "bytes")) continue;
+        if (this.sortsAsStored(value)) continue;
         const named: AstNode = { ColumnRef: { fields: [S(out.name)] } };
         this.typedLike.set(bodyOf(named), value);
         sb.node = named;
         continue;
       }
       const target = bodyOf(targets[out.target]!);
-      const c = this.textCollation(value);
-      // (a jsonb is sorted by its key whatever the collation: the SortBy rule keys the output column)
-      const keyed = this.typeOf(value) === JSONB || this.typeOf(value) === JSONB_ARRAY;
-      if (!keyed && (c === null || c.kind === "bytes")) continue;
+      if (this.sortsAsStored(value)) continue;
       if (target.name === undefined) target.name = `__mason_sort_${n}`;
       const ref: AstNode = { ColumnRef: { fields: [S(String(target.name))] } };
       this.typedLike.set(bodyOf(ref), value);
@@ -1913,7 +1931,8 @@ class Rewriter {
     const targets = (b.targetList ?? []) as AstNode[];
     const plain = b.distinctClause.length === 1 && !isNode(b.distinctClause[0]);
     const values = targets.map((t) => bodyOf(t).val).filter(isNode);
-    for (const v of values) if (this.typeOf(v) !== JSONB) this.comparable(v, "SELECT DISTINCT");
+    // (a DISTINCT ON compares its ON expressions alone: the targets beside them are only read)
+    if (plain) for (const v of values) if (this.typeOf(v) !== JSONB) this.comparable(v, "SELECT DISTINCT");
     if (!plain) {
       b.distinctClause = (b.distinctClause as AstNode[]).map((d) => {
         const n = constInt(d);

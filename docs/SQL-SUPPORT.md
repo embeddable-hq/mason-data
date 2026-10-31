@@ -24,10 +24,10 @@ each). The copy is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,213 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,232 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 3,213 statements | Mason | DuckDB alone |
+| Of 3,232 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 95% | 30% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -37,7 +37,7 @@ each sent as written to Mason and to a plain DuckDB connection over the same cop
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 12% |
 | wrong rows, or the rows in another order | — | 8% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 5% |
-| another error than Postgres's, or answered where Postgres refuses | — | 6% |
+| another error than Postgres's, or answered where Postgres refuses | — | 5% |
 
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
 statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
