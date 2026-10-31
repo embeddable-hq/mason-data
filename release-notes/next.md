@@ -35,8 +35,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   and says so at the start. A `UV_THREADPOOL_SIZE` of your own is kept, but one that does not fit, or is not a number
   from 1 to 1024, now refuses the start. On Windows, set it in the shell before `mason`: the pool otherwise stays at
   four.
+- **A LIMIT over a view, a WITH query, a tool's `SELECT * FROM (<join>) t LIMIT 100` wrapper or a derived table beside a wide
+  table no longer reads every wide column to keep 100 rows.** Such a statement took seconds and gigabytes of spill, or
+  failed for memory; it now takes a fraction of a second and spills nothing. A narrow statement of these shapes with no
+  ORDER BY now pays for the join's whole output where the join is proved bounded: a few milliseconds at a LIMIT alone, and
+  a deep OFFSET can take about twice as long. A column of an aggregated side, and a statement of a role that filters
+  rows, are read as before. Nothing to do on upgrade.
+- **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
+  raises there, sorting every row first. This is the decided difference `limit-errors` (docs/SQL-SUPPORT.md), wider.
 
 ## Known
 
-- **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows has no
-  stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY where the pages matter.
+- **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows, or over
+  an aggregated side, has no stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY
+  where the pages matter.

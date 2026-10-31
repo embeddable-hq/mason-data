@@ -11,6 +11,8 @@
  * arithmetic statement reads the ordinary rows only (an overflow is an error in both, which proves nothing), everything
  * else reads every row. A statement Postgres refuses (min(json), a % of floats) is asked too: it must be refused alike.
  */
+import { FROM_ITEM_VIEWS, FROM_ITEMS_SORTED } from "./unordered-limit.ts";
+
 
 /** the columns, by family, with the type each is declared with */
 const COLUMNS = {
@@ -233,7 +235,8 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "CREATE TABLE public.pairs (id int, line int, v text, PRIMARY KEY (id, line)); " +
   "INSERT INTO public.pairs VALUES (1, 1, 'a'), (1, 2, 'a'), (2, 1, 'A'), (2, 2, NULL), (3, 1, 'b'), (5, 1, 'none'), (5, 2, ''), (5, 3, 'c'); " +
   "CREATE TABLE public.vkeys (id varchar(8) PRIMARY KEY, label text); " +
-  "INSERT INTO public.vkeys VALUES ('a', 'one'), ('A', 'one'), ('b', NULL), ('', 'empty'), ('zz', 'two'), ('none', 'two');"
+  "INSERT INTO public.vkeys VALUES ('a', 'one'), ('A', 'one'), ('b', NULL), ('', 'empty'), ('zz', 'two'), ('none', 'two');" +
+  FROM_ITEM_VIEWS
 
 /** a round of changes the poll carries: values move, a row goes, one comes */
 export function typedMutations(round: number): string {
@@ -1225,4 +1228,4 @@ function* matrix(): Generator<Matrixed> {
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 
-export const TYPE_MATRIX: Matrixed[] = [...matrix()];
+export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone))];

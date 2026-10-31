@@ -104,14 +104,23 @@ paths:
     the plan fixture's `KEY_COUNTS` and the oracle's `count of distinct keys` / `keyed` hold it ("A count of distinct keys");
   - **a top N over joined tables chooses its rows by row number** (`joinRows`, src/duck/late.ts, issue 105): DuckDB's own
     late materialization stops at a join, so the join and the top N are run on each table's `rowid` and the sort keys, and
-    the list is read from a LEFT JOIN of each table it reads on that `rowid`, the keys sorted again outside. Only where
-    every FROM item is a copied table (a `rowid` exists of nothing else, so a derived table, a view, a WITH query and a
-    role's filtered read stay as they were), joined on conditions, none with a column named `rowid` in any case, and never over a
-    whole row; a `*` is written out from the analysis, because a copy's view of its visible columns has no `rowid`. Same
-    rows; equal keys are in no defined order. A LIMIT with no ORDER BY takes the same path: sorted by the row numbers of the
+    the list is read from a LEFT JOIN of each table it reads on that `rowid`, the keys sorted again outside. Only joined
+    on conditions, no table with a column named `rowid` in any case, and never over a whole row of a table; a `*` is
+    written out from the analysis, because a copy's view of its visible columns has no `rowid`. Same rows; equal keys
+    are in no defined order. **Every FROM item is a table, a plain derived read or carried** (issue 134, step 2): a
+    derived table, a view or a WITH query read once and not MATERIALIZED, a projection and a WHERE over one table with
+    nothing volatile (pg_proc's `provolatile`) or from outside it, exposes its row number (`__mason_rid`) and is fetched
+    in its DERIVED form without its WHERE, because a NULL row number must read NULL where `1 AS one` would read 1;
+    anything else derived (an aggregate, a window, DISTINCT, a LIMIT, a set operation, volatile, LATERAL, a WITH read twice
+    or MATERIALIZED, a join) has its read columns carried through as `__mason_c<i>`; a function or VALUES item leaves the
+    statement as it was. A query of one such FROM item over a projection and a WHERE is FOLDED into it first (`fold`: a
+    wrapper, a view of a join, a WITH of a join, a view of a view), each column read as its expression, and only as a
+    whole: a form it cannot write stays as it was. **A statement with a role's filtered read keeps its form**
+    (`tablesOnly`): the filtered read needs a review of its own (step 4). A list of a derived read now raises on the rows
+    chosen alone (`limit-errors`). A LIMIT with no ORDER BY takes the same path: sorted by the row numbers of the
     tables read ONLY where `fanOutBounded` (src/duck/distinct-key.ts) proves the join bounded, from the analysis and the
-    catalog's pg_index (every join equates a whole primary key of a table its side holds once, so a key the first join
-    repeats proves nothing the second time), because a parallel join's rows change order each run and an unsorted LIMIT's
+    catalog's pg_index (every join equates a whole primary key of a table, or of a plain read of one by a bare output
+    column, its side holds once, so a key the first join repeats proves nothing the second time), because a parallel join's rows change order each run and an unsorted LIMIT's
     pages overlap, and the sort makes the LIMIT a full join (74 s against milliseconds at 100 billion joined rows); else
     row numbers with no sort at all, which keeps the memory win and stops early, and whose pages CAN OVERLAP, as before
     PR 118. The proof decides cost and pages, never an answer, so what it cannot show goes unsorted. OFFSET alone and

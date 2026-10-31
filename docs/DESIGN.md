@@ -2118,6 +2118,33 @@ proof is no sort. A sources file's `key:` is allowed only on a table with no pri
 none, so such a copy goes unsorted too. The comma form is proved on the WHERE's conjuncts; a join's condition moved to the
 WHERE over a `CROSS JOIN` is not.
 
+
+**A join's FROM items (issue 134, step 2, 2026-10-31).** `joinRows` stopped at a table, so a view, a WITH query, a tool's
+wrapper and a derived side each carried every wide column through the join again. The issue's comment measured the shapes
+by hand; the real rewrite, through the listener, over 8 M facts, 3 M rows of about 3 kB and a 2 GB limit (minimum of three
+warm runs, a busy laptop, so compare orders of magnitude; a spill is the temp folder's peak):
+
+| Shape | Before | After |
+|---|---|---|
+| View over the join, `LIMIT 100` | 5.0 s, 7.0 GiB | 0.13 s, none |
+| View over the join, sorted | 12.2 s, 7.5 GiB | 0.15 s, none |
+| WITH over the join, sorted | 13.3 s, 7.6 GiB | 0.18 s, none |
+| Tool's wrapper, `LIMIT 100` | 10.0 s, 7.4 GiB | 0.12 s, none |
+| View as a joined side, sorted | 13.7 s, 7.6 GiB | 0.16 s, none |
+| Derived side, unsorted / sorted | 3.4 / 5.7 s, 3 GiB | 0.07 / 0.10 s, none |
+| Aggregated side beside a wide table | 1.3 s | 13 ms |
+| Narrow derived side, `LIMIT 100` | 12 ms | 12 ms |
+| Narrow derived side, `OFFSET 2,000,000` | 21 ms | 45 ms |
+
+Decided: a wrapper folds by substitution, as Postgres pulls a subquery up, because a nested form could not list a `*` of
+two columns of one name by position; the substitution is sound because nothing folded is volatile and nothing reads
+from outside it. A fetch keeps a nullable side's derived form, and DuckDB moved a computed list above the join in every
+plan measured, so a raising value on a row left out stayed unread (`limit-errors`, held by the oracle). A plain read
+counts for `fanOutBounded`, its bare outputs as its table's columns; what is carried has no row number and goes unsorted
+even where the proof holds. A statement with a role's filtered read keeps its form until step 4 reviews the barrier. A
+folded wrapper sorted by a bare computed output's name is not rewritten (`sortKeys`), while `ORDER BY t.shout` is; computed
+keys are step 3.
+
 ### First copy, and the poll's cost on the source
 
 Four tables of a real database (the largest keyed tables under 5 GiB), each copied in one transaction through the
