@@ -85,7 +85,7 @@ export function jsonbStrings(text: string): string[] {
 /** whether a jsonb's strings hold a character a libc order does not cover: what its key refuses by name
  *  (`libc-uncovered`, src/duck/libc-order.ts `libcKey`), told from any other failure of the key (src/duck/kept.ts) */
 export function libcUncovered(order: LibcOrder, text: string): boolean {
-  return jsonbStrings(text).some((s) => { for (const ch of s) if (order.uncovered[ch.codePointAt(0)!]) return true; return false; });
+  return jsonbStrings(text).some((s) => { if (order.unread) return true; for (const ch of s) if (order.uncovered[ch.codePointAt(0)!]) return true; return false; });
 }
 
 const u32 = (n: number): number[] => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];

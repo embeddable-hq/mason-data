@@ -1883,9 +1883,34 @@ code point the table does not list is one element per byte of its UTF-8 (`findid
 
 What the source is asked, by comparisons alone, so another table answers for itself, is in the header of
 `src/duck/libc-order.ts`. A spelling is proposed by Unicode's data and kept only when the source says so; a character
-whose neighbours or whose random pairs the key orders otherwise than the source is not covered, the later of the two,
-the rarer: a table this does not follow refuses, never answers otherwise. On glibc 2.41, 98 characters stay refused:
-ligatures whose first-level weights no letter has (`㏩`, 10 and a CJK weight; Arabic presentation forms such as U+FBEC).
+whose neighbours or whose random pairs the key orders otherwise than the source may go uncovered, by the verdict below.
+On glibc 2.41 under en_US, 67 characters stay refused, all symbols whose first-level weights no letter has (`㏩`, 10 and
+a CJK weight; `㊿`).
+
+The verdict of that holding (`holdLibcOrder`) is a branch, on two rounds of pairs (random, ASCII alone, Latin alone,
+neighbours of a class and of the Latin letters: 35,800 in all), every pair counted, ASCII included. The review of PR 135
+found the first form of it only uncovered characters, skipped a pair that differs in ASCII, and sampled 6,000 pairs, so
+tr_TR answered silently wrong on 493 of 20,000 ASCII pairs (`'W' < ')W'`). Now:
+
+- **`en_*` is never refused, nor a letter, a mark or a digit under it** (`isPlainTable`, by name: every glibc `en_XX` is
+  `copy "iso14651_t1"`, en_CA's capitals first being asked of the source like any other case). One seeded pair could
+  otherwise refuse `ä` for a whole column, and another glibc gives other pairs, so an OS upgrade could break a customer. A
+  difference stays covered and is recorded: the log and mason status's `Text order` line, on en_US 14 of 35,852 pairs,
+  the two decided differences `libc-rare-letter` (`Ꜳ`, `Ꞛ`, `Ꞝ`, `Ꞟ`) and `libc-mark-run-form`.
+- **Any other locale** has a rare character (at or above U+0250) that differs uncovered; a pair that differs in ASCII or
+  Latin alone leaves nothing to uncover, and the table is not followed: `libc-locale-unread`, every text ordered under it
+  refused with the way out `COLLATE "C"` or an ICU collation, the copy serving everything else, and no exit at the start.
+  A locale is not told plain by its name beyond English's, so de_DE or fr_FR, the same table, are held by measurement.
+- **A byte-ordering strcoll** (musl's, macOS's) is that, read first from eighteen code points: the collation is `bytes`.
+  A strcoll with no level of glibc's (no punctuation ignored) is not followed.
+
+Measured on Postgres 18 / glibc 2.41, each read's verdict:
+
+| locale | verdict | 40,000 random ASCII and Latin pairs after it |
+|---|---|---|
+| en_US, en_GB | followed, 14 of 35,852 recorded | 0 differ |
+| de_DE, fr_FR, th_TH | followed, 102, 102, 97 rare characters uncovered | 0 differ |
+| tr_TR, sv_SE, cs_CZ | not followed (802, 41, 26 pairs, of ASCII or Latin) | refused |
 
 Measured against that Postgres, 60,000 pairs of random strings a script, a pair mostly one edit apart, read through
 `libcKey`: Latin and marks, emoji with their selectors, skin tones and joiners, Thai, Lao, Arabic with its marks,
@@ -1895,14 +1920,12 @@ one sort, 45–55 s on the loaded test laptop, 13 s on the server; the other 190
 call where it cost two and ICU's key (1.9 µs against 2.6 µs of JavaScript alone, a value of 20 characters; the key is 16 %
 longer, its accent and case levels counted so plain letters cost one token), so issue 127's hop count fell with it.
 
-One difference is left in those scripts, about one pair in 20,000 of random text: a mark skipped in a run (mark,
-punctuation, then a letter) leaves a letter of a form of its own (`ß`, `ð`, `ſ`) beside another letter's case at the
-third level, and case is read within a letter, so across letters it has no measure.
-
-Other glibc locales, 20,000 pairs a script, the same strings: de_DE, th_TH and cs_CZ differ as en_US does, in the
-mixtures above (cs_CZ's letter contraction `ch` is not proposed, so random strings rarely meet it and it is not held).
-sv_SE differs on 13 of 20,000 Latin pairs and tr_TR on 77, with 655 refused and the unlisted code points not covered:
-those two tailorings are not followed yet, which is a known limit of this read, not a difference the registry lists.
+One difference is left in those scripts, about one pair in 20,000 of random text, decided and listed
+(`libc-mark-run-form`): a mark skipped in a run (mark, punctuation, then a letter) moves the third levels one along, so a
+letter of a form of its own (`ß`, `ð`, `æ`, COMPAT in the table) meets a digit's MIN. Case is read within a letter, and
+across letters has no measure. glibc's one scale could be read, a reference letter's variants and every other letter
+placed among them by the same binary search, but through a shifted string for each letter, a new query shape over all
+159,865 characters, for this one shape: the review's remedy of a decided difference was taken.
 
 ICU had the same class in another place: U+FE0F is ignorable there, so `x` and `x` + U+FE0F tied, and a tie is two
 strings Postgres orders by their bytes. A sort under ICU now ends in the bytes, and `<`, GREATEST, min and max compare ICU's key and the bytes.

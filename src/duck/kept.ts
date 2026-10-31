@@ -953,7 +953,7 @@ export class KeptJsonPaths implements KeptRoutes {
     }
     const of = read < marked ? ` (of the first ${read.toLocaleString("en-US")} read, of ${marked.toLocaleString("en-US")})` : "";
     const said: string[] = [];
-    if (uncovered > 0) said.push(`${uncovered.toLocaleString("en-US")} row(s) hold a character the database's libc order is not measured for, so a sort of them is refused by name (Mason gap libc-uncovered)`);
+    if (uncovered > 0) said.push(`${uncovered.toLocaleString("en-US")} row(s) hold a character the database's libc order is not measured for, so a sort of them is refused by name (Mason gap ${libc?.unread === true ? "libc-locale-unread" : "libc-uncovered"})`);
     if (read > uncovered) said.push(`${(read - uncovered).toLocaleString("en-US")} row(s) its function could not read are computed from their document when read (a Mason bug: report it, with mason logs)`);
     return said.join("; ") + of;
   }

@@ -1327,6 +1327,9 @@ test("the duration guard would catch the real thing", () => {
  */
 const REFUSAL_MAY_SAY = /^(gapMark\("[a-z0-9-]+"\)|o\.collate)$/;
 
+/** the functions whose returned { code, message } a row's refusal is said in */
+const ROW_WORDING = new Set(["postgresWording", "markedError"]);
+
 /** the interpolations of each row-time refusal in a source, that are not on the list */
 function rowInRefusals(src: string, file = "x.ts"): string[] {
   const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -1334,6 +1337,8 @@ function rowInRefusals(src: string, file = "x.ts"): string[] {
   const said = (message: ts.Node | undefined): void => {
     if (message === undefined) { out.push("a refusal with no message"); return; }
     if (ts.isStringLiteralLike(message)) return;
+    // ("a" + "b": a message written over lines)
+    if (ts.isBinaryExpression(message) && message.operatorToken.kind === ts.SyntaxKind.PlusToken) { said(message.left); said(message.right); return; }
     if (!ts.isTemplateExpression(message)) { out.push(message.getText(sf)); return; }
     for (const span of message.templateSpans) if (!REFUSAL_MAY_SAY.test(span.expression.getText(sf))) out.push(span.expression.getText(sf));
   };
@@ -1346,7 +1351,7 @@ function rowInRefusals(src: string, file = "x.ts"): string[] {
       const m = n.properties.find((p) => ts.isPropertyAssignment(p) && p.name.getText(sf) === "message");
       said(m !== undefined && ts.isPropertyAssignment(m) ? m.initializer : undefined);
     }
-    n.forEachChild((c) => visit(c, wording || (ts.isFunctionDeclaration(n) && n.name?.text === "postgresWording")));
+    n.forEachChild((c) => visit(c, wording || (ts.isFunctionDeclaration(n) && ROW_WORDING.has(n.name?.text ?? ""))));
   };
   visit(sf, false);
   return out;
@@ -1354,7 +1359,7 @@ function rowInRefusals(src: string, file = "x.ts"): string[] {
 
 test("a refusal raised at a row quotes no value of the row (issue 128)", () => {
   const bad: string[] = [];
-  for (const dir of ["src/duck", "src/lib"]) {
+  for (const dir of ["src/duck", "src/lib", "src/api", "src/api/postgres"]) {
     for (const name of fs.readdirSync(path.join(ROOT, dir))) {
       if (!name.endsWith(".ts")) continue;
       bad.push(...rowInRefusals(fs.readFileSync(path.join(ROOT, dir, name), "utf8"), name).map((x) => `${dir}/${name}: \${${x}}`));
@@ -1368,4 +1373,5 @@ test("a refusal raised at a row quotes no value of the row (issue 128)", () => {
   assert.deepEqual(rowInRefusals('function postgresWording() { return { code: "0A000", message: `a numeric ${special[1]}` }; }'), ["special[1]"]);
   assert.deepEqual(rowInRefusals('throw new PgEvalError("0A000", `words (${gapMark("x")})`); throw new PgEvalError("22P02", `Postgres quotes ${s}`);'), []);
   assert.deepEqual(rowInRefusals('function other() { return { code: "0A000", message: `a statement ${x}` }; }'), []);
+  assert.deepEqual(rowInRefusals('function markedError() { return { code: "0A000", message: "a jsonb holds " + `the string ${s}` + " (Mason gap x)" }; }'), ["s"]);
 });

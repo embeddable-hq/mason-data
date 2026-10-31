@@ -59,6 +59,8 @@ export interface RunContext {
   source: Source;
   facts: () => SourceFacts;
   warnings: string[];
+  /** what the read of a libc collation's order leaves to say (src/duck/libc-order.ts libcOrderNote), or null: mason status */
+  textOrder?: string | null;
   /** the slot and publication the run streams through NOW (src/cli/replication-mode.ts; `owned`: the publication is
    *  Mason's own, else the operator named it, only read), or null while no table's sync is replication (src/duck/sync.ts
    *  `streams`): it changes as the sources file does */
@@ -189,6 +191,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
       // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
       version: facts.versionText, standby: facts.standby, changes: repl !== null ? "replication" : "poll", name: sources.file?.name ?? null, file: sources.file?.file ?? null,
       shownFile: sources.file ? shownPath(ctx.root, sources.file.file) : null,
+      ...(ctx.textOrder ? { textOrder: ctx.textOrder } : {}),
       // every table's sync unless its entry says its own: the file's top `sync:`, or the default when it writes none
       sync: { default: syncText(sources.file?.sync ?? DEFAULT_SYNC), written: sources.file?.sync != null },
       ...(repl !== null ? { replication: { slot: repl.slot, publication: repl.publication, owned: repl.owned } } : {}) },

@@ -48,6 +48,10 @@ test("the order read compares as the source does, over random strings of each sc
   try {
     const read = await readLibcOrder(async (sql) => (await c.query({ text: sql, rowMode: "array" })).rows as Array<Array<string | null>>, collate, null);
     const o = decodeLibcOrder(encodeLibcOrder(read));
+    // the verdict, on the table CI and every RDS run: followed, and nothing of it a letter, a mark or a digit refused
+    assert.equal(o.bytes || o.unread, false);
+    for (let g = 1; g < 0x110000; g++) if (o.uncovered[g] === 1 && !(g >= 0xd800 && g <= 0xdfff)) assert.doesNotMatch(String.fromCodePoint(g), /^[\p{L}\p{M}\p{Nd}]$/u, `U+${g.toString(16)} is refused`);
+    assert.ok(o.held.differ < o.held.pairs / 1000, `${o.held.differ} of ${o.held.pairs} pairs differ`);
     for (const ch of ["\u{FE0F}", "\u{1F600}", "\u{1F3FD}", "\u{200D}", "เ", "่", "́", "َ", "͸", "", "\u{F0000}"]) assert.equal(o.uncovered[ch.codePointAt(0)!], 0, `U+${ch.codePointAt(0)!.toString(16)} is covered`);
     // a seeded generator: a run repeats
     let seed = 128;
@@ -57,7 +61,9 @@ test("the order read compares as the source does, over random strings of each sc
       x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
       return ((x ^ (x >>> 14)) >>> 0) % n;
     };
-    for (const [name, pool] of SCRIPTS) {
+    for (const [name, all] of SCRIPTS) {
+      // (a symbol of a weight of its own may be refused: the test above says which kind)
+      const pool = all.filter((g) => o.uncovered[g] === 0);
       const pick = (): number => pool[next(pool.length)]!;
       const pairs: Array<[string, string]> = [];
       for (let i = 0; i < 40_000; i++) {

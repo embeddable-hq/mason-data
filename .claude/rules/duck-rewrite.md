@@ -191,8 +191,10 @@ paths:
   (ARRAY(SELECT …) of a numeric, an array, a row: `array-subquery-element`).
 - **A libc order is read, never assumed** (`src/duck/libc-order.ts`; "A libc order, read level by level"): all four of
   glibc's levels from comparisons alone, a spelling kept only when the source says it is equal, the result held to the
-  source (`hold`: neighbours of a class, random pairs) and what differs not covered. No ICU in it: a new case the read
-  does not follow is a refusal by name, or a read of it. `tests/duck-libc-order.test.ts` holds the key's mechanics,
+  source (`holdLibcOrder`, a verdict that is a branch): an `en_*` locale is never refused, nor a letter, mark or digit
+  under it, what differs recorded (mason status); another locale loses the rare characters that differ, and is
+  `libc-locale-unread` where ASCII or Latin does. No ICU in it: a new case the read does not follow is a refusal by
+  name, a decided difference, or a read of it. `tests/duck-libc-order.test.ts` holds the key's mechanics,
   `tests/integration/duck-libc-read.itest.ts` the order against the source, the oracle's `every value` the statements.
 - **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in
   the bytes, `sortKeys`, `icuKey`, `textMinMax`.

@@ -1,7 +1,21 @@
 The next release's notes, gathered here until its `v<version>.md` is written: a `v*.md` file is itself the release.
 
+## Before you upgrade
+
+- **A database under a glibc locale is read again on the first start, so its source must be reachable.** About 50-60 s
+  on a laptop, read-only SELECTs over constants, once for a collation version. If the source cannot be reached then, the
+  start exits and says so. Stored jsonb sort keys are dropped and refilled after it.
+
 ## What changes
 
+- **Text under `en_*` is ordered as glibc orders it, every character of it.** One emoji, a Thai vowel or a mark in a
+  column no longer refuses the column's sort, group or dropdown, and no refusal quotes a row's value. A handful of
+  symbols (`㏩`, `㊿`) stay refused by name, and two rare shapes are listed differences (`libc-rare-letter`,
+  `libc-mark-run-form`, in docs/SQL-SUPPORT.md); mason status's `Text order` line counts them.
+- **A database under tr_TR, sv_SE, cs_CZ or another locale that moves ASCII or Latin now refuses `ORDER BY`, `<`, `min`
+  and `max` of text by name (`libc-locale-unread`)**, where it answered in a wrong order. Add `COLLATE "C"` or an ICU
+  collation to them; everything else is served. `mason start` and mason status say so.
+- **A Postgres whose locale sorts by bytes (macOS, musl) is followed as that**, where the start failed.
 - **`mason share`'s password now reads `mason_share_` and 48 hex digits**, where it was 48 bare hex digits, so a secret
   scanner or a person reading a saved connection can tell it is Mason's. It is as strong as before, and it logs in only
   on the share it was printed for. Nothing to do on upgrade, unless a script of yours checks the old shape.

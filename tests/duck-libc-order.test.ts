@@ -147,3 +147,112 @@ test("ORDER BY, < and min / max under a libc collation follow the order read, th
     } finally { await c.end(); }
   } finally { await api?.close(); store.close(); }
 });
+
+/** `source` as the database, comparing as `holdLibcOrder` asks */
+const asSource = (libcKey: (o: LibcOrder, s: string) => string, source: LibcOrder) => async (pairs: ReadonlyArray<[string, string]>): Promise<number[]> =>
+  pairs.map(([s, t]) => {
+    const [x, y] = [libcKey(source, s), libcKey(source, t)];
+    return x < y ? -1 : x > y ? 1 : Math.sign(Buffer.compare(Buffer.from(s), Buffer.from(t)));
+  });
+
+/** the ASCII of a column, for `collate`: `a` and `b` the other way round when `tailored` */
+function plainAscii(collate: string, tailored: boolean, rare: readonly string[] = []): LibcOrder {
+  const letters = lettersOf({ a: "ä" });
+  const [a, b] = [letters[0]!, letters[1]!];
+  const digits = "0123456789".split("");
+  return handLibcOrder([...digits, tailored ? b : a, tailored ? a : b, ...letters.slice(2), ...rare], [" ", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"], { collate });
+}
+
+test("the read's verdict is a branch: a locale that differs in ASCII is not followed, and refused by name, kept so", async () => {
+  const { holdLibcOrder, libcKey, libcOrderNote, encodeLibcOrder, decodeLibcOrder } = await lib();
+  const o = plainAscii("tr_TR.utf8", false);
+  await holdLibcOrder(o, asSource(libcKey, plainAscii("tr_TR.utf8", true)));
+  assert.equal(o.unread, true);
+  assert.throws(() => libcKey(o, "plain"), /the database's collation tr_TR\.utf8 orders text in a way Mason could not read, so text under it is not ordered \(Mason gap libc-locale-unread\)/);
+  assert.match(libcOrderNote(o)!, /Mason gap libc-locale-unread.*COLLATE "C"/);
+  assert.equal(decodeLibcOrder(encodeLibcOrder(o)).unread, true);
+});
+
+test("an English locale is never refused: what differs is recorded, a letter and a mark stay covered", async () => {
+  const { holdLibcOrder, libcKey, libcOrderNote, isPlainTable, encodeLibcOrder, decodeLibcOrder } = await lib();
+  const o = plainAscii("en_US.utf8", false);
+  await holdLibcOrder(o, asSource(libcKey, plainAscii("en_US.utf8", true)));
+  assert.equal(o.unread, false);
+  assert.ok(o.held.differ > 0 && o.held.differ <= o.held.pairs);
+  for (const ch of "aAbBä") assert.equal(o.uncovered[ch.codePointAt(0)!], 0, ch);
+  assert.match(libcOrderNote(o)!, /of [\d,]+ pairs of strings held to it order otherwise.*libc-rare-letter/);
+  assert.deepEqual(decodeLibcOrder(encodeLibcOrder(o)).held, o.held);
+  for (const name of ["en_US.utf8", "en_GB.UTF-8", "en_IE@euro", "en_ZA"]) assert.equal(isPlainTable(name), true, name);
+  for (const name of ["de_DE.utf8", "eng_US.utf8", "tr_TR.utf8", "en"]) assert.equal(isPlainTable(name), false, name);
+
+  // a symbol of a first-level weight of its own is what may go, there, and a letter or a mark of a rare script is not
+  const rare = ["\u33E9", "\u05D0", "\u0B95", "\u0966"];
+  const held = plainAscii("en_US.utf8", false, rare);
+  await holdLibcOrder(held, asSource(libcKey, plainAscii("en_US.utf8", false, [...rare].reverse())));
+  assert.equal(held.unread, false);
+  assert.equal(held.uncovered[0x33e9], 1);
+  for (const g of [0x5d0, 0xb95, 0x966]) assert.equal(held.uncovered[g], 0, g.toString(16));
+});
+
+test("another locale loses only the rare character that differs, and the order that holds is left alone", async () => {
+  const { holdLibcOrder, libcKey, libcOrderNote } = await lib();
+  const rare = ["\u05D0", "\u05D1", "\u05D2"];
+  const o = plainAscii("de_DE.utf8", false, rare);
+  await holdLibcOrder(o, asSource(libcKey, plainAscii("de_DE.utf8", false, ["\u05D1", "\u05D0", "\u05D2"])));
+  assert.equal(o.unread, false);
+  assert.equal(o.uncovered[0x5d1]! + o.uncovered[0x5d0]!, 1, "one of the two");
+  assert.equal(o.uncovered[0x5d2], 0);
+  const same = plainAscii("de_DE.utf8", false);
+  await holdLibcOrder(same, asSource(libcKey, plainAscii("de_DE.utf8", false)));
+  assert.deepEqual([same.unread, same.held.differ, libcOrderNote(same)], [false, 0, null]);
+});
+
+test("a strcoll in byte order reads as that, and one of no level glibc's has is not followed, never a failed start", async () => {
+  const { readLibcOrder } = await lib();
+  const rowsOf = (n: number, v: string): string[][] => Array.from({ length: n }, () => [v]);
+  const bytes = await readLibcOrder(async (sql) => rowsOf((sql.match(/,/g) ?? []).length ? 17 : 0, "true"), "en_US.UTF-8", null);
+  assert.deepEqual([bytes.bytes, bytes.unread], [true, false]);
+  let asked = 0;
+  const other = await readLibcOrder(async () => asked++ === 0 ? rowsOf(17, "false") : [], "en_US.UTF-8", null);
+  assert.deepEqual([other.bytes, other.unread], [false, true]);
+});
+
+test("an order not followed refuses text by Mason gap libc-locale-unread, and the way out answers", async () => {
+  const { emptyLibcOrder } = await lib();
+  const store = await DuckStore.open(path.join(dir, "unread.db"), () => undefined);
+  let api: PgApiServer | null = null;
+  const KEY = "k".repeat(48);
+  try {
+    await store.writer.run("CREATE TABLE public.coll (id INTEGER PRIMARY KEY, s VARCHAR)");
+    await store.writer.run("INSERT INTO public.coll VALUES (1, 'b'), (2, 'a'), (3, 'B')");
+    const schema: PgSchema = { database: "app", tables: [{ name: "coll", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "s", type: "text" }] }] };
+    const duck = await store.listener({ provider: "c", collate: "tr_TR.utf8", locale: null }, null, { ...emptyLibcOrder("tr_TR.utf8", null), unread: true });
+    api = await startPostgresApi({
+      port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+      authenticate: (password) => { const p = tokenProblem(KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+      schema: () => schema,
+      record: () => undefined, log: () => undefined, duck,
+    });
+    const c = new pg.Client({ host: "127.0.0.1", port: api.port, user: "me", password: mintToken(KEY, 600).token, database: "app" });
+    await c.connect();
+    try {
+      const rows = async (sql: string): Promise<unknown[][]> => (await c.query({ text: sql, rowMode: "array" })).rows;
+      for (const sql of ["SELECT s FROM coll ORDER BY s", "SELECT min(s) FROM coll", "SELECT id FROM coll WHERE s > 'a'"]) {
+        await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap libc-locale-unread/.test(e.message), sql);
+      }
+      assert.deepEqual((await rows('SELECT s FROM coll ORDER BY s COLLATE "C"')).flat(), ["B", "a", "b"]);
+      // what no order is asked of goes on
+      assert.deepEqual((await rows("SELECT count(*) FROM coll WHERE s = 'a'")).flat(), ["1"]);
+      assert.deepEqual((await rows("SELECT count(*) FROM (SELECT s FROM coll GROUP BY s) g")).flat(), ["3"]);
+    } finally { await c.end(); }
+  } finally { await api?.close(); store.close(); }
+});
+
+test("a libc locale whose order is the bytes' is served as bytes", async () => {
+  const { emptyLibcOrder } = await lib();
+  const store = await DuckStore.open(path.join(dir, "bytes.db"), () => undefined);
+  try {
+    const duck = await store.listener({ provider: "c", collate: "en_US.UTF-8", locale: null }, null, { ...emptyLibcOrder("en_US.UTF-8", null), bytes: true });
+    assert.deepEqual(duck.collation, { kind: "bytes" });
+  } finally { store.close(); }
+});

@@ -286,7 +286,9 @@ export class DuckStore {
     verified: ReadonlyMap<string, string> | null = VERIFIED, libc?: LibcOrder, copies: () => readonly CopyState[] = () => [], kept?: KeptRoutes): Promise<DuckOptions & { collation: DuckCollation }> {
     const known = new Set((await this.writer.runAndReadAll("SELECT collname FROM pragma_collations()")).getRowsJson().map((r) => String(r[0])));
     quoteDuckKeywords((await this.writer.runAndReadAll("SELECT keyword_name FROM duckdb_keywords() WHERE keyword_category <> 'unreserved'")).getRowsJson().map((r) => String(r[0])));
-    const c = collation === undefined ? { kind: "bytes" as const } : duckCollation(collation.provider, collation.collate, collation.locale, known);
+    const named = collation === undefined ? { kind: "bytes" as const } : duckCollation(collation.provider, collation.collate, collation.locale, known);
+    // (a libc locale whose strcoll is byte order, musl's or macOS's: src/duck/libc-order.ts)
+    const c: DuckCollation = named.kind === "libc" && libc?.bytes === true ? { kind: "bytes" } : named;
     if (c.kind === "libc") {
       if (libc === undefined) throw new Error(`the database orders text by the libc collation ${collation!.collate}, and its order was not read (Mason bug: report it)`);
       await this.executor.registerLibcOrder(libc);
