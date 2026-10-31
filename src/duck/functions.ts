@@ -13,12 +13,12 @@
 import { BIGINT, BLOB, BOOLEAN, DATE, DOUBLE, DuckDBBlobValue, DuckDBDateValue, DuckDBIntervalValue, DuckDBScalarFunction, DuckDBTimestampTZValue, DuckDBTimestampValue, INTEGER, INTERVAL, LIST, TIMESTAMP, TIMESTAMPTZ, VARCHAR, listValue, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { pgEvalSync, PgEvalError } from "./pg-eval.ts";
 import { MARKED_FUNCTIONS } from "./kept-route.ts";
-import { libcKept, libcKey, type LibcOrder } from "./libc-order.ts";
+import { libcKey, type LibcOrder } from "./libc-order.ts";
 import { formatFloat } from "../api/postgres/encode.ts";
 import { floatAsNumeric } from "./types.ts";
 import { intervalText } from "./types.ts";
 import { jsonbText, parseJson, writeJson, quoteJson, type Json } from "./jsonb.ts";
-import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbLibcKept, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
+import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
 import { compare, div, evaluateText, NumericError, numericText, parseNumeric, type NumericProgram } from "../lib/pg-numeric.ts";
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
@@ -501,7 +501,7 @@ export const PG_KINDS = {
       `(extract(hour FROM ${x}) * 3600000000 + extract(minute FROM ${x}) * 60000000 + extract(microseconds FROM ${x}))::int8) ELSE (${x})::text END`,
     read: (t: string): DuckDBValue => {
       const parts = t.split(" ");
-      if (parts.length !== 3) throw new PgEvalError("0A000", `an infinite interval (${t}) is not supported by Mason (Mason gap infinite-interval)`);
+      if (parts.length !== 3) throw new PgEvalError("0A000", `an infinite interval is not supported by Mason (${gapMark("infinite-interval")})`);
       return new DuckDBIntervalValue(Number(parts[0]), Number(parts[1]), BigInt(parts[2]!));
     },
   },
@@ -542,7 +542,7 @@ function viaPostgres(conn: DuckDBConnection, kind: PgKind): void {
           const tuples = [...g.tuples.values()];
           if (kind === "date" || kind === "timestamp" || kind === "timestamptz" || READS_TIME.test(g.template)) {
             const relative = tuples.flat().find((a) => a !== null && RELATIVE.test(a));
-            if (relative !== undefined) throw new PgEvalError("0A000", `the text '${relative}' read as a time is not supported by Mason: it means the transaction's start (Mason gap relative-time-literal)`);
+            if (relative !== undefined) throw new PgEvalError("0A000", `a text read as a time holding a relative word (now, today, tomorrow, yesterday) is not supported by Mason: it means the transaction's start (${gapMark("relative-time-literal")})`);
           }
           const n = tuples[0]!.length;
           const cols = Array.from({ length: n }, (_, i) => `a${i + 1}`);
@@ -567,16 +567,11 @@ function viaPostgres(conn: DuckDBConnection, kind: PgKind): void {
 const steps = (json: string, either: boolean): Step[] => (JSON.parse(json) as Array<string | number>)
   .map((s) => typeof s === "number" ? { index: s } : either ? { either: s } : { key: s });
 
-/** The libc order's two functions (src/duck/libc-order.ts), for the order the source was read with: the characters
- *  ICU's accent and case levels read, and the key (a value holding one not covered refuses, by name). */
+/** The libc order's functions (src/duck/libc-order.ts), for the order the source was read with: a text's key (a value
+ *  holding a character not covered refuses, by name) and jsonb's order under it (src/duck/jsonb-order.ts). */
 export function registerLibcOrder(conn: DuckDBConnection, order: LibcOrder): void {
-  scalar(conn, "__mason_libc_kept", [VARCHAR], VARCHAR, ([s]) => libcKept(order, String(s)));
-  scalar(conn, "__mason_libc_key", [VARCHAR, VARCHAR], VARCHAR, ([s, icu]) => libcKey(order, String(s), String(icu)));
-  // jsonb's order under it (src/duck/jsonb-order.ts): the characters of each string ICU's levels read, then the key
-  // from ICU's keys of them (src/duck/rewrite.ts jsonbKey hands them in)
-  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.strings, [VARCHAR], LIST(VARCHAR), ([j]) => listValue(jsonbLibcKept(order, String(j))));
-  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.key, [VARCHAR, LIST(VARCHAR)], BLOB,
-    ([j, keys]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order, icuKeys: icuKeysOf(keys!) })));
+  scalar(conn, "__mason_libc_key", [VARCHAR], VARCHAR, ([s]) => libcKey(order, String(s)));
+  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.key, [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order })));
 }
 
 /**
@@ -696,7 +691,11 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // an abbreviation or a POSIX zone, which Postgres reads with a fixed offset and DuckDB as another zone, refused
   scalar(conn, "__mason_zone", [VARCHAR], VARCHAR, ([z]) => {
     const read = atTimeZoneOf(String(z));
-    if ("problem" in read) throw new PgEvalError(read.sqlstate, read.sqlstate === "0A000" ? `${read.problem} (${gapMark("zone-abbreviation")})` : read.problem);
+    if ("problem" in read) {
+      // the zone is a row's here: Mason's refusal never quotes it (Postgres's own 22023 does, as Postgres does)
+      if (read.sqlstate === "0A000") throw new PgEvalError("0A000", `a time zone read from a row is an abbreviation or a POSIX zone, which Postgres reads with a fixed offset where the IANA zone of that name may move: write an IANA name (${gapMark("zone-abbreviation")})`);
+      throw new PgEvalError(read.sqlstate, read.problem);
+    }
     return read.zone;
   });
   // a division's divisor tested for zero (src/duck/rewrite.ts nonZero): Postgres's error, from a function DuckDB takes
@@ -729,7 +728,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
     const sign = s.startsWith("-") ? "-" : "";
     const [whole, frac = ""] = s.replace(/^-/, "").split(".") as [string, string?];
     const kept = frac.replace(/0+$/, "");
-    if (whole.replace(/^0+(?=\d)/, "").length > 20 || kept.length > 36) throw new PgEvalError("0A000", `the sum of the numeric ${s} is not supported by Mason (${gapMark("numeric-exact-sum")})`);
+    if (whole.replace(/^0+(?=\d)/, "").length > 20 || kept.length > 36) throw new PgEvalError("0A000", `a sum of a numeric past 20 integer or 36 fractional digits is not supported by Mason (${gapMark("numeric-exact-sum")})`);
     return part === 0 ? `${sign}${whole}.${kept.slice(0, 18) || "0"}` : `${sign}0.${kept.slice(18) || "0"}`;
   });
   // a text read as an enum (src/duck/rewrite.ts enumValue): the label, or Postgres's error for one the type lacks

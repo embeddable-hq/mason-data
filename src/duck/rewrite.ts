@@ -14,8 +14,8 @@
  *  - a regular expression is Postgres's (ARE): `.` matches a newline, `\w` and `\d` are Unicode's, `\y` is a word
  *    boundary, and a replacement's `\&` is the whole match;
  *  - a text sort key, a text comparison and a text min / max follow the SOURCE database's collation
- *    (`DuckCollation`): ICU's through DuckDB's own ICU collation, libc's through a sort key that ignores punctuation
- *    first, as glibc's locales do;
+ *    (`DuckCollation`): ICU's through DuckDB's own ICU collation, a tie by the bytes, libc's through a sort key built
+ *    from the order read of the source (src/duck/libc-order.ts);
  *  - a cast to an unconstrained `numeric` keeps the value's digits (DuckDB's `NUMERIC` is DECIMAL(18,3));
  *  - a text cast to an integer is as strict as Postgres's (`'0.3'::int` is an error, DuckDB says 0);
  *  - `extract` is the exact numeric Postgres returns (`epoch` with six decimals);
@@ -45,12 +45,8 @@ export type DuckCollation =
   | { kind: "bytes"; ascii?: boolean }
   /** ICU: DuckDB's own ICU collation of that locale gives the same order (held to Postgres by tests/integration/duck-oracle.itest.ts) */
   | { kind: "icu"; name: string }
-  /** a libc locale (glibc's en_US.UTF-8, RDS's default): ICU's order of the letters and digits, then the punctuation */
-  | { kind: "libc"; icu: string };
-
-/** the DuckDB ICU collation a collation's strings are keyed by (`icu_sort_key`): ICU's own, or the one a libc order's
- *  accent and case levels are read with */
-export const icuNameOf = (c: Exclude<DuckCollation, { kind: "bytes" }>): string => c.kind === "icu" ? c.name : c.icu;
+  /** a libc locale (glibc's en_US.UTF-8, RDS's default): the order read from the database (src/duck/libc-order.ts) */
+  | { kind: "libc" };
 
 /** Whether pg_database's collation is a libc locale's (not C or POSIX), whose order is read from the database
  *  (src/duck/libc-order.ts) for `duckCollation`'s `libc` */
@@ -72,9 +68,7 @@ export function duckCollation(provider: string, collate: string, locale: string 
     if (name === null) throw new Error(`the source database's ICU locale ${JSON.stringify(locale ?? collate)} has no collation in the engine: Mason cannot sort text as it does`);
     return { kind: "icu", name };
   }
-  const name = icuName(collate);
-  if (name === null) throw new Error(`the source database's collation ${JSON.stringify(collate)} has no collation in the engine to follow: Mason cannot sort text as it does`);
-  return { kind: "libc", icu: name };
+  return { kind: "libc" };
 }
 
 /**
@@ -1710,8 +1704,9 @@ class Rewriter {
     const plain = kindOf(e) === "CollateClause" ? bodyOf(e).arg as AstNode : e;
     switch (c.kind) {
       case "bytes": return [plain];
-      case "icu": return [collate(plain, c.name)];
-      case "libc": return libcKeys(this.cp, plain, c.icu);
+      // (ICU ignores U+FE0F, a joiner: a tie there is two strings, which Postgres orders by their bytes, as under libc)
+      case "icu": return [collate(this.cp(plain), c.name), plain];
+      case "libc": return libcKeys(this.cp, plain);
     }
   }
 
@@ -1803,7 +1798,7 @@ class Rewriter {
   /**
    * A JSONB AS ITS ORDER KEY (src/duck/jsonb-order.ts): bytes whose order and equality are Postgres's for jsonb
    * (`compareJsonbContainers`: by type, then size, then member by member; numbers as numerics; strings under the
-   * database's collation). Under C the key is one call; under ICU or a libc locale each of the document's strings
+   * database's collation). Under C or a libc locale the key is one call; under ICU each of the document's strings
    * needs DuckDB's ICU key, which a JavaScript function cannot ask for, so DuckDB makes them over the strings the
    * function lists (`list_transform` with a lambda, src/duck/store.ts `lambda_syntax`) and hands them to the key.
    */
@@ -1814,10 +1809,10 @@ class Rewriter {
   /** the key computed per row (`jsonbKey`): the functions src/duck/jsonb-order.ts `JSONB_KEY_FUNCTIONS` names */
   private jsonbKeyCall(e: AstNode): AstNode {
     const c = this.collation;
-    if (c.kind === "bytes") return fn(JSONB_KEY_FUNCTIONS.bytes.key, [e]);
+    if (c.kind !== "icu") return fn(JSONB_KEY_FUNCTIONS[c.kind].key, [e]);
     const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_s")] } });
-    const f = JSONB_KEY_FUNCTIONS[c.kind];
-    const keys = fn("list_transform", [fn(f.strings, [this.clone(e)]), op("->", each(), fn("icu_sort_key", [each(), strConst(icuNameOf(c))]))]);
+    const f = JSONB_KEY_FUNCTIONS.icu;
+    const keys = fn("list_transform", [fn(f.strings, [this.clone(e)]), op("->", each(), fn("icu_sort_key", [each(), strConst(c.name)]))]);
     return fn(f.key, [e, keys]);
   }
 
@@ -1861,7 +1856,7 @@ class Rewriter {
    * A JSONB AS ITS EQUALITY KEY: the key under C, whatever the database's collation. Postgres's default collation is
    * deterministic, so two jsonb strings are equal only when their bytes are (varstr_cmp breaks a collation's tie by
    * strcmp), and the C key's equality is exactly jsonb's — where the collation's key would refuse a value its order
-   * does not cover (a libc collation's `libc-uncovered`: an emoji's variation selector, an NFD accent) that equality
+   * does not cover (a libc collation's `libc-uncovered`) that equality
    * never needed to order. Every context that only equates (=, <>, IN, = ANY, IS DISTINCT FROM, NULLIF, CASE x WHEN,
    * GROUP BY, DISTINCT [ON], count(DISTINCT), PARTITION BY) reads this one; ORDER BY, <, >, BETWEEN read `jsonbKey`.
    */
@@ -1959,8 +1954,8 @@ class Rewriter {
 
   /** a text comparison under the collation: `a < b` compares their keys */
   private compareText(name: string, l: AstNode, r: AstNode, c: DuckCollation): AstNode {
-    if (c.kind === "icu") return op(name, collate(strip(l), c.name), collate(strip(r), c.name));
-    if (c.kind === "libc") return op(name, libcKey(this.cp, strip(l), c.icu), libcKey(this.cp, strip(r), c.icu));
+    if (c.kind === "icu") return op(name, icuKey(this.cp, strip(l), c.name), icuKey(this.cp, strip(r), c.name));
+    if (c.kind === "libc") return op(name, libcKey(this.cp, strip(l)), libcKey(this.cp, strip(r)));
     return op(name, l, r);
   }
 
@@ -1972,17 +1967,12 @@ class Rewriter {
     }
     if (t !== null) b.args = (b.args as AstNode[]).map((a, i) => this.widen(a, t.args[i]?.type));
     if (t === null || !TEXTS.has(t.type) || BYTE_COLLATIONS.has(t.inputCollation) || this.collation.kind === "bytes") return null;
-    if (this.collation.kind === "libc") {
-      // the greatest (least) of the values' keys, which end in the value's own bytes: the value is read back from them
-      const icu = this.collation.icu;
-      const keys = (b.args as AstNode[]).map((a) => libcKey(this.cp, strip(a), icu));
-      const best: AstNode = { MinMaxExpr: { ...b, args: keys } };
-      this.done.add(bodyOf(best));
-      return fn("decode", [fn("unhex", [fn("regexp_extract", [best, strConst("[^ ]*$")])])]);
-    }
-    const name = this.collation.name;
-    b.args = (b.args as AstNode[]).map((a) => collate(a, name));
-    return null;
+    // the greatest (least) of the values' keys, which end in the value's own bytes: the value is read back from them
+    const c = this.collation;
+    const keys = (b.args as AstNode[]).map((a) => c.kind === "libc" ? libcKey(this.cp, strip(a)) : icuKey(this.cp, strip(a), c.name));
+    const best: AstNode = { MinMaxExpr: { ...b, args: keys } };
+    this.done.add(bodyOf(best));
+    return fn("decode", [fn("unhex", [fn("regexp_extract", [best, strConst("[^ ]*$")])])]);
   }
 
   // --------------------------------------------------------------------------------------------- operators
@@ -2702,10 +2692,10 @@ class Rewriter {
     if (arg === undefined) return null;
     const c = this.textCollation(arg);
     if (c === null || c.kind === "bytes") return null;
-    if (c.kind === "icu") { b.args = [collate(strip(arg), c.name)]; return null; }
-    // libc: the value whose key is least (or greatest); a NULL value has no key and is skipped, as min skips it
+    // the value whose key is least (or greatest); a NULL value has no key and is skipped, as min skips it
     // (the value in three places, each its own copy: the walker rewrites a node in its first place alone)
-    const key = caseWhen([[not(isNull(this.cp(strip(arg)))), row(libcKeys(this.cp, this.cp(strip(arg)), c.icu))]], null);
+    const keys = c.kind === "icu" ? [collate(this.cp(strip(arg)), c.name), this.cp(strip(arg))] : libcKeys(this.cp, this.cp(strip(arg)));
+    const key = caseWhen([[not(isNull(this.cp(strip(arg)))), row(keys)]], null);
     return { FuncCall: { ...b, funcname: [S(name === "min" ? "arg_min" : "arg_max")], args: [strip(arg), key] } };
   }
 
@@ -3616,17 +3606,22 @@ const shapeOf = (n: AstNode): string => JSON.stringify(n, (k, v: unknown) => k =
 
 const strip = (n: AstNode): AstNode => kindOf(n) === "CollateClause" ? bodyOf(n).arg as AstNode : n;
 
-/** glibc's order, as the source was MEASURED to order text (src/duck/libc-order.ts: its levels as one text, ICU's
- *  accent and case levels over the characters of the first), then the bytes, as Postgres breaks a tie */
-function libcKeys(copy: Copy, e: AstNode, icu: string): AstNode[] {
-  return [fn("__mason_libc_key", [copy(e), fn("icu_sort_key", [fn("__mason_libc_kept", [copy(e)]), strConst(icu)])]), e];
+/** glibc's order, as the source was MEASURED to order text (src/duck/libc-order.ts: its levels as one text), then the
+ *  bytes, as Postgres breaks a tie */
+function libcKeys(copy: Copy, e: AstNode): AstNode[] {
+  return [fn("__mason_libc_key", [copy(e)]), e];
 }
 
 /** the libc keys as ONE text that orders as they do: the key, a space (below every hex digit, so a shorter key
  *  orders first), the value's own bytes in hex */
-function libcKey(copy: Copy, e: AstNode, icu: string): AstNode {
-  const [key, bytes] = libcKeys(copy, e, icu) as [AstNode, AstNode];
+function libcKey(copy: Copy, e: AstNode): AstNode {
+  const [key, bytes] = libcKeys(copy, e) as [AstNode, AstNode];
   return concat(key, strConst(" "), fn("hex", [bytes]));
+}
+
+/** a text's ICU key as ONE text that orders as Postgres does: ICU's, then, where ICU ties two strings, their bytes */
+function icuKey(copy: Copy, e: AstNode, name: string): AstNode {
+  return concat(fn("icu_sort_key", [copy(e), strConst(name)]), strConst(" "), fn("hex", [e]));
 }
 
 /** Postgres's array types whose elements are DuckDB's of these names */

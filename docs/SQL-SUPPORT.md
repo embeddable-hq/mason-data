@@ -20,14 +20,14 @@ each). The copy is read-only.
 | The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 244 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 49 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 50 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,301 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,326 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 3,301 statements | Mason | DuckDB alone |
+| Of 3,326 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 95% | 30% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -37,7 +37,7 @@ each sent as written to Mason and to a plain DuckDB connection over the same cop
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 12% |
 | wrong rows, or the rows in another order | — | 8% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 5% |
-| another error than Postgres's, or answered where Postgres refuses | — | 6% |
+| another error than Postgres's, or answered where Postgres refuses | — | 5% |
 
 A tool that reads Postgres reads the first row's answers; the rest it would have to work around, statement by
 statement. The oracle's statements are adversarial by design (NULL beside '', ties, every type's edge values), so
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (49)
+## Refused (50)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -84,7 +84,8 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `format-specifiers` | format() with a specifier other than %s (%I, %L, widths, positions) | answers | refused | concatenate with \|\|, or %s only |
 | `to-char-patterns` | to_char of an interval or a time; its TZ, SP, EEEE, RN, V, B, L patterns; a day or month name padded to 9 characters in a parse | answers | refused | the patterns listed in the hint; extract(… FROM interval) for an interval's parts |
 | `to-timestamp-format` | to_timestamp / to_date with a format that is not a literal | answers | refused | write the format as a string literal |
-| `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a combining mark (e + U+0301), a Thai or Lao vowel written before its consonant, a private-use or unassigned code point, under a libc collation | answers, in glibc's order | refused when a value holding one is ordered (the order is read from the database, and glibc orders these otherwise than Mason can follow) | normalize the text (normalize(x, NFC)), or ORDER BY x COLLATE "C" for byte order |
+| `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a character whose order under a libc collation Mason could not read: under a locale other than English's (`en_*`, where it never is, nor is anything refused), a symbol with a first-level weight of its own (`㏩`, `㊿`) or any rare character the read was held to and differed on | answers, in the collation's order | refused when a value holding one is ordered (the order is read from the database, every character held to it, and glibc's every other character is followed) | ORDER BY x COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the character out |
+| `libc-locale-unread` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) under a database whose libc collation Mason's read does not follow: a locale that tailors ASCII or Latin (tr_TR, sv_SE, cs_CZ) or another C library's. An `en_*` locale never is; the read says which at the start and mason status repeats it | answers, in the collation's order | refused whenever text is ordered; everything else is answered, equality, GROUP BY and DISTINCT of text included | add COLLATE "C" or an ICU collation (COLLATE "und-x-icu") to the comparison or the sort |
 | `percentile-text-libc` | percentile_disc / mode() WITHIN GROUP (ORDER BY text) under a libc collation | answers | refused | order by a number, or ORDER BY … LIMIT in a subquery |
 | `infinite-extract` | extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
 | `time-date-trunc` | date_trunc of a time (Postgres truncates it as an interval) | an interval | refused | date_trunc of a timestamp, or extract the parts |
@@ -113,11 +114,13 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 
 ## Answered differently
 
-16 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
+18 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
-| `libc-symbol-punctuation` | text ordered under a libc collation where punctuation or a space follows a digit or a symbol and a later letter differs only in case ('1-X' beside '1x') | the punctuation outranks the case: 1-X < 1x | the case outranks the punctuation: 1x < 1-X | ORDER BY lower(x), x when the case must not decide first |
+| `fromless-text-order` | a SELECT of no table that compares or sorts text constants (`SELECT 'a' < 'B'`) under a collation other than C | the database's collation | the catalog answers it, in byte order (issue 141) | add COLLATE "C" to say so, or select FROM a table |
+| `libc-mark-run-form` | text under a libc collation holding a combining mark written apart, then a digit or punctuation, then a letter that is a compatibility form at the third level (`ß`, `ð`, `æ`): `'a6ß'` against `'a' \|\| U+0308 \|\| '6ß'` | the mark's skipped run moves the third levels one along, and glibc compares a letter's with another's on one scale | reads each letter's third level as its own (a read of one scale asks the source of every letter), so such two values compare the other way round | ORDER BY normalize(x, NFC), which spells the mark in its letter, or COLLATE "C" |
+| `libc-rare-letter` | text under an `en_*` collation holding a rare letter or symbol whose weights no spelling of it says, against the same word's near neighbour: `Ꜳ`, `Ꞛ`, `Ꞝ`, `Ꞟ`, an Arabic presentation-form ligature, a Tamil vowel written in two, a CJK compatibility symbol (`㏩`), a circled number (`㊿`, `⑯`) | the table's own weight | the weights the read could confirm: it sorts in its letter's place, and two such neighbours may turn round. mason status says how many pairs of those the read was held to differ | COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the letter out |
 | `limit-errors` | a value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out: in the select list, where no index gives the ORDER BY; or in the argument of a LEFT JOIN of a list's rows ON TRUE (unnest(ARRAY[…, 'x'::int]), jsonb_each of a non-object), under a LIMIT with no ORDER BY | the select list's raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers); the lateral's answers: it stops at the limit | the select list's answers: a sorted, limited select list is computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does; the lateral's raises: DuckDB computes its argument for a whole vector of rows (2,048) before the limit stops it | none needed for the select list's answer; filter the bad rows out to have neither raise |
 | `limit-lateral-filter` | a LEFT JOIN of a json document's rows ON TRUE (json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, with a filter above the join that is not pushed down to the base: a WHERE on the lateral's own column (d.key <> 'n'), one holding a bound parameter ($1) in a SELECT around the join, or one in a SELECT that reads the join through a CTE | the first rows of the base, in its order, each row's members in theirs | the engine plans the lateral under such a filter as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (a filter on the base in the join's own SELECT, literal or parameter, or a literal one around it through a derived table, keeps Postgres's) | ORDER BY the base's key before the LIMIT, or filter the base in the SELECT that holds the join |
 | `limit-lateral-argument` | a LEFT JOIN of a list's rows ON TRUE (unnest, json_each, jsonb_array_elements, …) under a LIMIT, or a row count an Execute sets on the wire, and no ORDER BY, whose argument holds a subquery (unnest(ARRAY(SELECT …))), or reads two or more columns of the row and no array (CASE WHEN t.kind = 'doc' THEN t.body END) in a SELECT whose list is a bare * or inside a join with a name of its own ((a LEFT JOIN … ON TRUE) AS j) | the first rows of the base, in its order, each row's members in theirs | DuckDB plans such a lateral as a delimiter join and hands the rows back in an order of its own, so the LIMIT keeps other rows (elsewhere an argument of two columns is computed in a step of its own before the lateral, which a * would read as a column; a subquery is a delimiter join in every form) | name the columns instead of *, or ORDER BY the base's key before the LIMIT |

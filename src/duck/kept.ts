@@ -64,7 +64,7 @@ import { canonicalRead, EQUAL_STEPS, HIDDEN_PREFIX, HIDDEN_RE, hiddenName, isEqu
   type JsonRead, type KeptRoutes, type ReadyPath } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS, KEY_VERSION, libcUncovered, STORED_SUFFIX } from "./jsonb-order.ts";
 import { encodeLibcOrder, type LibcOrder } from "./libc-order.ts";
-import { icuNameOf, type DuckCollation } from "./rewrite.ts";
+import type { DuckCollation } from "./rewrite.ts";
 
 /** a path read by this many statements in the request log is stored (a larger table's also needs `KEEP_FILL_SHARE`) */
 export const KEEP_AFTER_STATEMENTS = 3;
@@ -232,8 +232,8 @@ export function keptValueSql(p: Omit<JsonRead, "asText">, value: string): string
  */
 export function orderKeySql(c: DuckCollation, value: string): string {
   const call = (name: string, ...args: string[]): string => `${name}${STORED_SUFFIX}(NULL, ${args.join(", ")})`;
-  const key = c.kind === "bytes" ? call(JSONB_KEY_FUNCTIONS.bytes.key, value)
-    : call(JSONB_KEY_FUNCTIONS[c.kind].key, value, `list_transform(${call(JSONB_KEY_FUNCTIONS[c.kind].strings, value)}, __mason_s -> icu_sort_key(__mason_s, ${literal(icuNameOf(c))}))`);
+  const key = c.kind !== "icu" ? call(JSONB_KEY_FUNCTIONS[c.kind].key, value)
+    : call(JSONB_KEY_FUNCTIONS.icu.key, value, `list_transform(${call(JSONB_KEY_FUNCTIONS.icu.strings, value)}, __mason_s -> icu_sort_key(__mason_s, ${literal(c.name)}))`);
   return `CASE WHEN (${value}) IS NULL THEN unhex('${KEY_NULL_HEX}') ELSE coalesce(${key}, unhex('${KEY_RECOMPUTE_HEX}')) END`;
 }
 
@@ -247,7 +247,7 @@ export function orderId(c: DuckCollation, libc: LibcOrder | undefined, versions 
   if (c.kind === "bytes") return `c:${versions}`;
   if (c.kind === "icu") return `icu:${c.name}:${versions}`;
   if (libc === undefined) throw new Error("a libc collation's order was not read (Mason bug: report it)");
-  return `libc:${c.icu}:${createHash("sha256").update(encodeLibcOrder(libc)).digest("hex").slice(0, 16)}:${versions}`;
+  return `libc:${createHash("sha256").update(encodeLibcOrder(libc)).digest("hex").slice(0, 16)}:${versions}`;
 }
 
 /**
@@ -953,7 +953,9 @@ export class KeptJsonPaths implements KeptRoutes {
     }
     const of = read < marked ? ` (of the first ${read.toLocaleString("en-US")} read, of ${marked.toLocaleString("en-US")})` : "";
     const said: string[] = [];
-    if (uncovered > 0) said.push(`${uncovered.toLocaleString("en-US")} row(s) hold a character the database's libc order is not measured for, so a sort of them is refused by name (Mason gap libc-uncovered)`);
+    if (uncovered > 0) said.push(libc?.unread === true
+      ? `the database's collation is one Mason could not read, so a sort of ${uncovered.toLocaleString("en-US")} row(s) is refused by name (Mason gap libc-locale-unread)`
+      : `${uncovered.toLocaleString("en-US")} row(s) hold a character the database's libc order is not measured for, so a sort of them is refused by name (Mason gap libc-uncovered)`);
     if (read > uncovered) said.push(`${(read - uncovered).toLocaleString("en-US")} row(s) its function could not read are computed from their document when read (a Mason bug: report it, with mason logs)`);
     return said.join("; ") + of;
   }
