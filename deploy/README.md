@@ -12,14 +12,20 @@ to addresses you name ([who can reach the Postgres port](#who-can-reach-the-post
 - **Your Postgres is in AWS: [EC2](aws-ecs/README.md) in the same VPC.** The database need have no public route, and a
   security group limits 5433 to the addresses you name.
 - **Your Postgres is elsewhere, or you have no cloud account: a VM with a provider firewall**, such as DigitalOcean.
-  **We have not run Mason on DigitalOcean yet**, so it has no guide here and no "yes, measured" in the table below;
-  what follows is from its documentation. A Droplet with a Cloud Firewall, which drops what no rule allows before it
+  [The guide](digitalocean/README.md) is the steps, from one real deployment. A Droplet with a Cloud Firewall, which drops what no rule allows before it
   reaches the Droplet, and the copy and every secret on a Volume, because a Droplet's local disk is not encrypted at
   rest and Volumes are. With [the compose file](mason-data/README.md) that means moving both: its named volume is in
   Docker's data directory, on the local disk unless `data-root` points at the Volume, which moves images and every
   container's writable layer too; and `.env`, which compose reads from the compose file's folder, so keep that whole
-  folder on the Volume. A Volume is network-attached block storage, which meets Mason's need for a block device; we
-  have not measured it.
+  folder on the Volume. A Volume is network-attached block storage, which meets Mason's need for a block device.
+  **A new DigitalOcean account starts on a low tier.** On 2026-10-30 a new account was refused `m-4vcpu-32gb` ("This
+  size is currently restricted, please open a ticket to increase your account tier") and any Volume over about 100 GiB
+  ("invalid size specified"), and listed nothing above 16 GB; `m-2vcpu-16gb` and a 100 GiB Volume worked. A ticket, a
+  history of invoices or a prepayment raises the tier (https://docs.digitalocean.com/platform/resource-limits/), so
+  check what your account allows before you plan the machine, and leave room in the Volume for the copy. A firewall rule on port 22 for your own address goes stale when that
+  address changes: the server is then unreachable by SSH, not down. For scale, one
+  real deployment on 2 vCPUs and 16 GB synced 52 tables, 310 M rows and about 200 GiB in Postgres, in about an hour,
+  into 64 GiB on a 100 GiB Volume. A first sync peaks above what it ends on, so leave headroom.
 - **Fly.io and Railway: for trials on non-sensitive data, or where clients can join the private network.** Neither can
   limit a public port by source address.
 
@@ -43,6 +49,7 @@ From [`deploy/mason-data/README.md`](mason-data/README.md) and `mason serve --he
 |---|---|---|
 | [Docker Compose on one machine](mason-data/README.md) | **yes, the measured one** | an m7g.xlarge with EBS gp3 is what the numbers in `docs/MEASUREMENTS.md` were taken on; one compose file |
 | [AWS: EC2 with Compose, or ECS on EC2](aws-ecs/README.md) | **yes** | an EBS volume the instance mounts, bind-mounted into the task; `minimumHealthyPercent: 0, maximumPercent: 100` stops the old task first. **Fargate: no** — ECS-managed EBS volumes are new at each task and deleted when it stops, EFS is NFS |
+| [DigitalOcean](digitalocean/README.md) | **yes** | one Droplet with Compose, the copy and every secret on an encrypted Volume; a Cloud Firewall limits 5433 |
 | [Fly.io](fly/README.md) | **yes, with no source-address limit** | a Fly Volume is NVMe on the Machine's host, one Machine per volume; a raw TCP service with no handler, which needs a dedicated IPv4 (paid) for IPv4 clients; `rolling` on one Machine is stop, update, start |
 | [Kubernetes](kubernetes/README.md) ([Helm chart](helm/mason-data/README.md)) | **yes, with a block StorageClass** | a StatefulSet of one replica recreates the pod on its PVC; a TCP LoadBalancer for 5433; a disk class (`kubectl get storageclass`), never a file-share or NFS class |
 | [Railway](railway/README.md) | **yes, with no source-address limit** | one volume per service, replicas refused with a volume, the old deployment stopped before the new one; a TCP proxy to 5433; `PORT=4140` for its health check |

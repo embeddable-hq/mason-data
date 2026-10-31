@@ -19,6 +19,9 @@ docker compose exec mason mason add public.orders
 docker compose exec mason mason user add metabase   # a user for the BI tool: the URL and its password, printed once
 ```
 
+- **The container runs as `node` (uid 1000), not root.** On a machine where you are root, such as a fresh VM, `mkdir -p
+  mason` makes a folder it cannot write, and the container restarts in a loop with `EACCES` on `/mason/project/sources`.
+  Run `chown -R 1000:1000 mason` before `docker compose up -d`.
 - **`./mason` is the project folder** (`sources/`, `mason.yml`). `mason add` adds the table to its sources file
   (`sources/<database>.yml`, written at the first start from `DATABASE_URL`); commit it.
   On a server built from your repo, mount the committed folder instead and nothing is added by hand.
@@ -98,6 +101,10 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
             memory: 8G          # the copy may use 4 GiB of it by default
   ```
 
+- **A first sync of large JSON documents can need more than the default.** A table of 20,000 rows with `jsonb` documents
+  of up to 20 MB compressed failed with an out-of-memory under a 7.8 GiB limit, even with one reader; it synced with
+  `MASON_DUCKDB_MEMORY=12GB` on a 16 GB machine, and the setting went back afterwards. The other tables go on, and the
+  failed one is retried.
 - **When it is short**: a sort, a join or an aggregate past the limit spills to disk beside the copy; what cannot spill
   fails its own statement with 53200, naming `MASON_DUCKDB_MEMORY`, and the run goes on. A `MASON_DUCKDB_MEMORY` near
   or above the container's limit is the kernel killing the container instead.
