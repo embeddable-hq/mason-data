@@ -1884,19 +1884,19 @@ code point the table does not list is one element per byte of its UTF-8 (`findid
 What the source is asked, by comparisons alone, so another table answers for itself, is in the header of
 `src/duck/libc-order.ts`. A spelling is proposed by Unicode's data and kept only when the source says so; a character
 whose neighbours or whose random pairs the key orders otherwise than the source may go uncovered, by the verdict below.
-On glibc 2.41 under en_US, 67 characters stay refused, all symbols whose first-level weights no letter has (`㏩`, 10 and
-a CJK weight; `㊿`).
+Under `en_*` nothing is refused, on any C library (the second review: Tom's rule, 2026-10-31).
 
 The verdict of that holding (`holdLibcOrder`) is a branch, on two rounds of pairs (random, ASCII alone, Latin alone,
 neighbours of a class and of the Latin letters: 35,800 in all), every pair counted, ASCII included. The review of PR 135
 found the first form of it only uncovered characters, skipped a pair that differs in ASCII, and sampled 6,000 pairs, so
 tr_TR answered silently wrong on 493 of 20,000 ASCII pairs (`'W' < ')W'`). Now:
 
-- **`en_*` is never refused, nor a letter, a mark or a digit under it** (`isPlainTable`, by name: every glibc `en_XX` is
-  `copy "iso14651_t1"`, en_CA's capitals first being asked of the source like any other case). One seeded pair could
-  otherwise refuse `ä` for a whole column, and another glibc gives other pairs, so an OS upgrade could break a customer. A
-  difference stays covered and is recorded: the log and mason status's `Text order` line, on en_US 14 of 35,852 pairs,
-  the two decided differences `libc-rare-letter` (`Ꜳ`, `Ꞛ`, `Ꞝ`, `Ꞟ`) and `libc-mark-run-form`.
+- **`en_*` is never refused** (`isPlainTable`, by name: every glibc `en_XX` is `copy "iso14651_t1"`, en_CA's capitals first
+  being asked of the source like any other case). Not a letter, a mark, a digit or a symbol, not `€` or `㏩` or a private-use
+  code point, not on a C library this read cannot follow: one seeded pair could otherwise refuse a column, and another
+  glibc gives other pairs, so an OS upgrade could break a customer. What differs stays as it was read and is recorded in
+  both rounds' counts, told into rare and common: the log and mason status's `Text order` line. Those are the decided
+  differences `libc-rare-letter` and `libc-mark-run-form`. What no level was read of falls to the first level and the bytes.
 - **Any other locale** has a rare character (at or above U+0250) that differs uncovered; a pair that differs in ASCII or
   Latin alone leaves nothing to uncover, and the table is not followed: `libc-locale-unread`, every text ordered under it
   refused with the way out `COLLATE "C"` or an ICU collation, the copy serving everything else, and no exit at the start.
@@ -1908,7 +1908,7 @@ Measured on Postgres 18 / glibc 2.41, each read's verdict:
 
 | locale | verdict | 40,000 random ASCII and Latin pairs after it |
 |---|---|---|
-| en_US, en_GB | followed, 14 of 35,852 recorded | 0 differ |
+| en_US, en_GB | followed, nothing refused, what differs recorded | 0 differ |
 | de_DE, fr_FR, th_TH | followed, 102, 102, 97 rare characters uncovered | 0 differ |
 | tr_TR, sv_SE, cs_CZ | not followed (802, 41, 26 pairs, of ASCII or Latin) | refused |
 

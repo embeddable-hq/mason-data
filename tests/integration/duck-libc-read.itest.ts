@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import pg from "pg";
-import { decodeLibcOrder, encodeLibcOrder, libcKey, readLibcOrder } from "../../src/duck/libc-order.ts";
+import { assignedCodePoints, decodeLibcOrder, encodeLibcOrder, isPlainTable, libcKey, readLibcOrder } from "../../src/duck/libc-order.ts";
 import { isLibcCollation } from "../../src/duck/rewrite.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
@@ -48,10 +48,10 @@ test("the order read compares as the source does, over random strings of each sc
   try {
     const read = await readLibcOrder(async (sql) => (await c.query({ text: sql, rowMode: "array" })).rows as Array<Array<string | null>>, collate, null);
     const o = decodeLibcOrder(encodeLibcOrder(read));
-    // the verdict, on the table CI and every RDS run: followed, and nothing of it a letter, a mark or a digit refused
+    // the verdict, on the table CI and every RDS run: followed, and no assigned code point of it refused
     assert.equal(o.bytes || o.unread, false);
-    for (let g = 1; g < 0x110000; g++) if (o.uncovered[g] === 1 && !(g >= 0xd800 && g <= 0xdfff)) assert.doesNotMatch(String.fromCodePoint(g), /^[\p{L}\p{M}\p{Nd}]$/u, `U+${g.toString(16)} is refused`);
-    assert.ok(o.held.differ < o.held.pairs / 1000, `${o.held.differ} of ${o.held.pairs} pairs differ`);
+    if (isPlainTable(collate)) for (const g of assignedCodePoints()) assert.equal(o.uncovered[g], 0, `U+${g.toString(16)} is refused`);
+    assert.deepEqual([o.held.common, o.held.differ < o.held.pairs / 200], [0, true], `${o.held.differ} of ${o.held.pairs} pairs differ, ${o.held.common} of ASCII or Latin`);
     for (const ch of ["\u{FE0F}", "\u{1F600}", "\u{1F3FD}", "\u{200D}", "เ", "่", "́", "َ", "͸", "", "\u{F0000}"]) assert.equal(o.uncovered[ch.codePointAt(0)!], 0, `U+${ch.codePointAt(0)!.toString(16)} is covered`);
     // a seeded generator: a run repeats
     let seed = 128;
@@ -61,9 +61,7 @@ test("the order read compares as the source does, over random strings of each sc
       x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
       return ((x ^ (x >>> 14)) >>> 0) % n;
     };
-    for (const [name, all] of SCRIPTS) {
-      // (a symbol of a weight of its own may be refused: the test above says which kind)
-      const pool = all.filter((g) => o.uncovered[g] === 0);
+    for (const [name, pool] of SCRIPTS) {
       const pick = (): number => pool[next(pool.length)]!;
       const pairs: Array<[string, string]> = [];
       for (let i = 0; i < 40_000; i++) {

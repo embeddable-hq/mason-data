@@ -463,10 +463,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       });
       libc = r.order;
       if (r.read) done(`Read how ${source.database} orders text (${coll.collate}): kept with the synced data, read again only when its collation version moves`);
-      // what the read leaves to say is in the log, and in mason status (`textOrder`); an order not followed is a warning
+      // what the read leaves to say is in the log and in mason status's Text order; an order not followed at the start too
       textOrder = libcOrderNote(r.order);
       if (textOrder !== null) (r.order.unread ? say : logLine)(`  ! ${textOrder}`);
-      if (r.order.unread) warnings.push(textOrder!);
     } catch (e) { fail(reading); say(`  ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
   }
   begin("Starting the Postgres listener");

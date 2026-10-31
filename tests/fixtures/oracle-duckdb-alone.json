@@ -1,17 +1,17 @@
 {
-  "statements": 3324,
+  "statements": 3326,
   "mason": {
     "exact": 3157,
-    "decided": 36,
-    "refused": 131,
+    "decided": 39,
+    "refused": 130,
     "differs": 0
   },
   "duckdb": {
     "exact": 982,
-    "name": 732,
+    "name": 733,
     "refused": 601,
-    "value": 408,
-    "rows": 266,
+    "value": 410,
+    "rows": 265,
     "text": 153,
     "other": 182
   },
@@ -37,7 +37,6 @@
         "json-rows-in-select": { "planted": 1, "natural": 0 },
         "jsonb-compare": { "planted": 1, "natural": 2 },
         "jsonb-set": { "planted": 0, "natural": 1 },
-        "libc-uncovered": { "planted": 1, "natural": 0 },
         "like-any-array": { "planted": 1, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 3 },
         "numeric-exact-sum": { "planted": 1, "natural": 0 },
@@ -70,6 +69,9 @@
         "char-n-minmax": { "planted": 0, "natural": 2 },
         "float-last-digit": { "planted": 0, "natural": 3 },
         "float-overflow": { "planted": 0, "natural": 3 },
+        "fromless-text-order": { "planted": 1, "natural": 0 },
+        "libc-mark-run-form": { "planted": 1, "natural": 0 },
+        "libc-rare-letter": { "planted": 1, "natural": 0 },
         "limit-errors": { "planted": 1, "natural": 2 },
         "limit-lateral-argument": { "planted": 0, "natural": 2 },
         "limit-lateral-filter": { "planted": 0, "natural": 2 },
@@ -84,7 +86,7 @@
       }
     },
     "everyAsk": {
-      "asked": 24064,
+      "asked": 24051,
       "refused": {
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
@@ -105,7 +107,6 @@
         "json-rows-in-select": { "planted": 3, "natural": 0 },
         "jsonb-compare": { "planted": 3, "natural": 6 },
         "jsonb-set": { "planted": 0, "natural": 3 },
-        "libc-uncovered": { "planted": 3, "natural": 0 },
         "like-any-array": { "planted": 3, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 9 },
         "numeric-exact-sum": { "planted": 3, "natural": 0 },
@@ -138,6 +139,9 @@
         "char-n-minmax": { "planted": 0, "natural": 6 },
         "float-last-digit": { "planted": 0, "natural": 8 },
         "float-overflow": { "planted": 0, "natural": 9 },
+        "fromless-text-order": { "planted": 3, "natural": 0 },
+        "libc-mark-run-form": { "planted": 3, "natural": 0 },
+        "libc-rare-letter": { "planted": 3, "natural": 0 },
         "limit-errors": { "planted": 3, "natural": 6 },
         "limit-lateral-argument": { "planted": 0, "natural": 6 },
         "limit-lateral-filter": { "planted": 0, "natural": 8 },

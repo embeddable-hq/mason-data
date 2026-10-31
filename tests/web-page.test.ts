@@ -272,6 +272,9 @@ test("a demo project's database row says it is the demo database Mason hosts, po
   assert.equal((RUNNING.source as { demo?: boolean }).demo, false);
   const rows = sourceRows(DEMO);
   assert.deepEqual(rows.find(([k]) => k === "Database"), ["Database", "the demo database Mason hosts (postgres://demo@127.0.0.1:5434/demo · Postgres 16.4)"]);
+  // what the read of a libc order left to say, the CLI's row
+  assert.equal(rows.find(([k]) => k === "Text order"), undefined);
+  assert.deepEqual(sourceRows({ ...DEMO, source: { ...DEMO.source, textOrder: "en_US.utf8 read from the database" } }).find(([k]) => k === "Text order"), ["Text order", "en_US.utf8 read from the database"]);
   assert.deepEqual(rows.find(([k]) => k === "Changes"), ["Changes", "each table as its sync: says (a SELECT of its changed rows) · sync: poll 5s for every table without its own · the demo database is checked this way only"]);
   assert.deepEqual(fn<[unknown], unknown>("sourceRows")(DEMO), rows);
 });

@@ -173,25 +173,27 @@ test("the read's verdict is a branch: a locale that differs in ASCII is not foll
   assert.equal(decodeLibcOrder(encodeLibcOrder(o)).unread, true);
 });
 
-test("an English locale is never refused: what differs is recorded, a letter and a mark stay covered", async () => {
+test("an English locale is never refused: what differs is recorded, nothing is uncovered", async () => {
   const { holdLibcOrder, libcKey, libcOrderNote, isPlainTable, encodeLibcOrder, decodeLibcOrder } = await lib();
   const o = plainAscii("en_US.utf8", false);
   await holdLibcOrder(o, asSource(libcKey, plainAscii("en_US.utf8", true)));
   assert.equal(o.unread, false);
   assert.ok(o.held.differ > 0 && o.held.differ <= o.held.pairs);
   for (const ch of "aAbBä") assert.equal(o.uncovered[ch.codePointAt(0)!], 0, ch);
-  assert.match(libcOrderNote(o)!, /of [\d,]+ pairs of strings held to it order otherwise.*libc-rare-letter/);
+  assert.match(libcOrderNote(o)!, /of [\d,]+ pairs of strings held to it order otherwise: 0 of rare characters, [\d,]+ of ASCII or Latin alone \(Mason gaps libc-rare-letter/);
+  assert.equal(o.held.common, o.held.differ);
   assert.deepEqual(decodeLibcOrder(encodeLibcOrder(o)).held, o.held);
   for (const name of ["en_US.utf8", "en_GB.UTF-8", "en_IE@euro", "en_ZA"]) assert.equal(isPlainTable(name), true, name);
   for (const name of ["de_DE.utf8", "eng_US.utf8", "tr_TR.utf8", "en"]) assert.equal(isPlainTable(name), false, name);
 
-  // a symbol of a first-level weight of its own is what may go, there, and a letter or a mark of a rare script is not
-  const rare = ["\u33E9", "\u05D0", "\u0B95", "\u0966"];
+  // nothing goes under it: a letter of a rare script, a mark, a digit, a symbol, currency
+  const rare = ["\u33E9", "\u05D0", "\u0B95", "\u0966", "\u20AC", "\uE001"];
   const held = plainAscii("en_US.utf8", false, rare);
   await holdLibcOrder(held, asSource(libcKey, plainAscii("en_US.utf8", false, [...rare].reverse())));
   assert.equal(held.unread, false);
-  assert.equal(held.uncovered[0x33e9], 1);
-  for (const g of [0x5d0, 0xb95, 0x966]) assert.equal(held.uncovered[g], 0, g.toString(16));
+  for (const ch of rare) assert.equal(held.uncovered[ch.codePointAt(0)!], 0, ch);
+  assert.ok(held.held.differ > held.held.common, "rare pairs, counted apart");
+  assert.ok(held.held.pairs > 2 * 18_000, "both rounds");
 });
 
 test("another locale loses only the rare character that differs, and the order that holds is left alone", async () => {
@@ -213,8 +215,27 @@ test("a strcoll in byte order reads as that, and one of no level glibc's has is 
   const bytes = await readLibcOrder(async (sql) => rowsOf((sql.match(/,/g) ?? []).length ? 17 : 0, "true"), "en_US.UTF-8", null);
   assert.deepEqual([bytes.bytes, bytes.unread], [true, false]);
   let asked = 0;
-  const other = await readLibcOrder(async () => asked++ === 0 ? rowsOf(17, "false") : [], "en_US.UTF-8", null);
+  const other = await readLibcOrder(async () => asked++ === 0 ? rowsOf(17, "false") : [], "fr_CA.UTF-8", null);
   assert.deepEqual([other.bytes, other.unread], [false, true]);
+  // the plain table's name is never refused, on any C library: the bytes for what was not read, and every pair recorded
+  /** the strings of the unnest's first ARRAY[...], counted through their quotes */
+  const counted = (sql: string): number => {
+    let n = 0, quoted = false;
+    for (let i = sql.indexOf("ARRAY[") + 6; i < sql.length && (quoted || sql[i] !== "]"); i++) {
+      if (sql[i] !== "'") continue;
+      if (quoted && sql[i + 1] === "'") { i++; continue; }
+      if (!quoted) n++;
+      quoted = !quoted;
+    }
+    return n;
+  };
+  let round = 0;
+  const plain = await readLibcOrder(async (sql) => round++ === 0 ? rowsOf(17, "false") : sql.includes("ARRAY[") ? rowsOf(counted(sql), "false") : [], "en_US.UTF-8", null);
+  assert.deepEqual([plain.bytes, plain.unread], [false, false]);
+  assert.ok(plain.held.differ > 0);
+  const { libcKey } = await lib();
+  assert.equal(typeof libcKey(plain, "any \u{1F600} text \uE000"), "string");
+  assert.equal(plain.uncovered["a".codePointAt(0)!], 0);
 });
 
 test("an order not followed refuses text by Mason gap libc-locale-unread, and the way out answers", async () => {
@@ -255,4 +276,12 @@ test("a libc locale whose order is the bytes' is served as bytes", async () => {
     const duck = await store.listener({ provider: "c", collate: "en_US.UTF-8", locale: null }, null, { ...emptyLibcOrder("en_US.UTF-8", null), bytes: true });
     assert.deepEqual(duck.collation, { kind: "bytes" });
   } finally { store.close(); }
+});
+
+test("the kept order is keyed on the collation library's version now, so a glibc upgrade reads it again", async () => {
+  const { collationVersion } = await import("../src/cli/preflight.ts");
+  const answering = (v: string | null) => ({ query: async () => ({ rows: [[v]] }) }) as unknown as Parameters<typeof collationVersion>[0];
+  assert.equal(await collationVersion(answering("2.41"), 180000, "2.36"), "2.41", "datcollversion stays where it was through an OS upgrade");
+  assert.equal(await collationVersion(answering(null), 180000, "2.36"), "2.36");
+  assert.equal(await collationVersion({ query: async () => { throw new Error("no such function before 15"); } } as unknown as Parameters<typeof collationVersion>[0], 140000, null), null);
 });

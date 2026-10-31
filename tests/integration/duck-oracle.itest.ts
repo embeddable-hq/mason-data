@@ -225,6 +225,7 @@ const KNOWN: Decided[] = [
   // (log10's last digit: it differs with Postgres in a Linux container and Mason on macOS, and agrees with both on
   // Linux, as in CI, or both on macOS: the machines' math libraries decide, so `machineFloat`)
   { sql: /^SELECT 'a6ß' > E'a\\u03086ß' FROM public\.one$/, kind: "value", gap: "libc-mark-run-form", why: "a mark's skipped run compares ß's third level with a digit's: glibc's one scale, Mason's per letter" },
+  { sql: /^SELECT 'a' < 'B'$/, kind: "value", gap: "fromless-text-order", why: "the catalog answers a SELECT of no table, in byte order (issue 141)" },
   { sql: /^SELECT E'\\uA79A' < E'\\u00C4' FROM public\.one$/, kind: "value", gap: "libc-rare-letter", why: "a rare letter's weight no spelling of it says" },
   { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },

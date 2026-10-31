@@ -114,6 +114,10 @@ export const COLL: Array<[number, string | null]> = [
   [84, "o\u0302\u0301"], [85, "\u1ED1"], [86, "\u0418\u0306"], [87, "\u0419"], [88, "\u0378"], [89, "\uE000x"], [90, "\u{F0000}"], [91, "a\u0378b"], [92, "ab\uE000"], [93, "1\u0301a"],
   [94, "12a"], [95, "1-2a"], [96, "$-X"], [97, "a\uFE0Fb"], [98, "\u200Bx"],
   [99, "\u33E9"],
+  // issue 128's second review: each symbol class, none refused under en_US: circled, CJK compatibility, currency, a
+  // fraction, a Roman numeral, U+FFFD, private use
+  [100, "\u2460"], [101, "\u32BF"], [102, "\u2485"], [103, "\u24EA"], [104, "\u337F"], [105, "\u33E0"], [106, "\u{1F170}"], [107, "\u20AC5"], [108, "\u00A3"], [109, "\u00A5 x"],
+  [110, "\u00BD"], [111, "\u216B"], [112, "\uFFFDx"], [113, "\uE001"], [114, "\u{F0001}"], [115, "\u{10FFFD}x"], [116, "x\uE000"],
 ];
 
 /** the instants of `instants` (as UTC text, which every zone reads alike) */
@@ -147,7 +151,7 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   // TEXT IN THE DATABASE'S ORDER (the BI-tools test of #517): what a glibc locale orders otherwise than ICU
   // and than its bytes — Hangul (no letter weight), $ and € (a letter-level weight, @ and ~ none), U+FFFD (after the
   // letters), ß = ss, CJK (no last-level weight), punctuation runs, case; from 50 issue 128's (COLL says each); 99 a
-  // ligature of a CJK weight, refused under libc (libc-uncovered)
+  // ligature of a CJK weight, sorted in place under en_US (libc-rare-letter), and on from it each class of symbol
   `CREATE TABLE public.coll (id int PRIMARY KEY, s text); INSERT INTO public.coll VALUES ${COLL.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
   // ENUMS IN THEIR DECLARED ORDER (the BI-tools test of #517): a label with a quote, an enum of another schema, an
   // array of one, NULL and empty arrays, and a text column read as the enum
@@ -621,29 +625,29 @@ function* matrix(): Generator<Matrixed> {
   yield q("text compared in the database's order", "SELECT count(*) FILTER (WHERE s < 'b'), count(*) FILTER (WHERE s > 'Dob'), count(*) FILTER (WHERE s BETWEEN 'a' AND 'z'), count(*) FILTER (WHERE s >= '가') FROM coll WHERE id < 50");
   yield q("min and max text in the database's order", "SELECT min(s), max(s) FROM coll WHERE id < 50");
   // ---- issue 128: an emoji, a Thai vowel, a mark in the value, in every form a BI tool orders by -----------------------
-  yield q("every value in the database's order", "SELECT id, s FROM coll WHERE id < 99 ORDER BY s, id");
-  yield q("every value in the database's order, descending", "SELECT s FROM coll WHERE id < 99 ORDER BY s DESC NULLS FIRST, id");
-  yield q("every value's sort by its bytes", `SELECT id FROM coll WHERE id < 99 ORDER BY s COLLATE "C", id`);
-  yield q("every value's sort under ICU", `SELECT id FROM coll WHERE id < 99 ORDER BY s COLLATE "und-x-icu", id`);
-  yield q("every value grouped, by its ordinal", "SELECT s, count(*) FROM coll WHERE id < 99 GROUP BY 1 ORDER BY 1");
-  yield q("every value grouped, by its output name", "SELECT s AS v, count(*) FROM coll WHERE id < 99 GROUP BY 1 ORDER BY v DESC");
-  yield q("every value grouped, by the qualified column", "SELECT c.s, count(*) FROM coll c WHERE id < 99 GROUP BY c.s ORDER BY c.s ASC NULLS LAST");
-  yield q("a dropdown's values", "SELECT DISTINCT s FROM coll WHERE id < 99 ORDER BY 1");
-  yield q("a dropdown's values, limited", "SELECT DISTINCT s FROM coll WHERE id < 99 ORDER BY 1 LIMIT 12");
-  yield q("a page of values", "SELECT id, s FROM coll WHERE id < 99 ORDER BY s, id LIMIT 7 OFFSET 40");
-  yield q("a field's values past the emoji, as Metabase lists them", "SELECT s FROM coll WHERE id < 99 GROUP BY s ORDER BY s DESC LIMIT 20");
-  yield q("min and max of every value", "SELECT min(s), max(s) FROM coll WHERE id < 99");
-  yield q("min and max of each group of values", "SELECT length(s), min(s), max(s) FROM coll WHERE id < 99 GROUP BY 1 ORDER BY 1");
-  yield q("every value compared with an emoji's", "SELECT id FROM coll WHERE id < 99 AND s > 'Sales \u2764\uFE0F' ORDER BY id");
-  yield q("every value compared with a Thai vowel's", "SELECT id FROM coll WHERE id < 99 AND s <= '\u0E40\u0E01' ORDER BY id");
-  yield q("every value compared with a spelled accent's", "SELECT id FROM coll WHERE id < 99 AND s >= 'e\u0301' AND s < 'f' ORDER BY id");
-  yield q("every value between two", "SELECT count(*) FILTER (WHERE s BETWEEN '\u{1F44D}' AND 'b'), count(*) FILTER (WHERE s < '\u0378'), count(*) FILTER (WHERE s > '12a') FROM coll WHERE id < 99");
+  yield q("every value in the database's order", "SELECT id, s FROM coll ORDER BY s, id");
+  yield q("every value in the database's order, descending", "SELECT s FROM coll ORDER BY s DESC NULLS FIRST, id");
+  yield q("every value's sort by its bytes", `SELECT id FROM coll ORDER BY s COLLATE "C", id`);
+  yield q("every value's sort under ICU", `SELECT id FROM coll ORDER BY s COLLATE "und-x-icu", id`);
+  yield q("every value grouped, by its ordinal", "SELECT s, count(*) FROM coll GROUP BY 1 ORDER BY 1");
+  yield q("every value grouped, by its output name", "SELECT s AS v, count(*) FROM coll GROUP BY 1 ORDER BY v DESC");
+  yield q("every value grouped, by the qualified column", "SELECT c.s, count(*) FROM coll c GROUP BY c.s ORDER BY c.s ASC NULLS LAST");
+  yield q("a dropdown's values", "SELECT DISTINCT s FROM coll ORDER BY 1");
+  yield q("a dropdown's values, limited", "SELECT DISTINCT s FROM coll ORDER BY 1 LIMIT 12");
+  yield q("a page of values", "SELECT id, s FROM coll ORDER BY s, id LIMIT 7 OFFSET 40");
+  yield q("a field's values past the emoji, as Metabase lists them", "SELECT s FROM coll GROUP BY s ORDER BY s DESC LIMIT 20");
+  yield q("min and max of every value", "SELECT min(s), max(s) FROM coll");
+  yield q("min and max of each group of values", "SELECT length(s), min(s), max(s) FROM coll GROUP BY 1 ORDER BY 1");
+  yield q("every value compared with an emoji's", "SELECT id FROM coll WHERE s > 'Sales \u2764\uFE0F' ORDER BY id");
+  yield q("every value compared with a Thai vowel's", "SELECT id FROM coll WHERE s <= '\u0E40\u0E01' ORDER BY id");
+  yield q("every value compared with a spelled accent's", "SELECT id FROM coll WHERE s >= 'e\u0301' AND s < 'f' ORDER BY id");
+  yield q("every value between two", "SELECT count(*) FILTER (WHERE s BETWEEN '\u{1F44D}' AND 'b'), count(*) FILTER (WHERE s < '\u0378'), count(*) FILTER (WHERE s > '12a') FROM coll");
   yield q("the values equal, an emoji's", "SELECT id FROM coll WHERE s IN ('Sales \u2764\uFE0F', '\u0E40\u0E01', 'e\u0301', '\u33E9') ORDER BY id");
-  yield q("every value's greatest and least", "SELECT id, greatest(s, 'Sales'), least(s, 'e\u0301') FROM coll WHERE id < 99 ORDER BY id");
-  yield q("every value ranked", "SELECT id, rank() OVER (ORDER BY s), lag(id) OVER (ORDER BY s, id) FROM coll WHERE id < 99 ORDER BY id");
-  yield q("every value as a jsonb, sorted", "SELECT id FROM coll WHERE id < 99 ORDER BY to_jsonb(s), id");
-  yield q("every value's nulls idiom", "SELECT s FROM coll WHERE id < 99 GROUP BY s ORDER BY s IS NULL, s");
-  yield q("a statement over a * ordered by every value", "SELECT * FROM coll WHERE id < 99 ORDER BY 2, 1");
+  yield q("every value's greatest and least", "SELECT id, greatest(s, 'Sales'), least(s, 'e\u0301') FROM coll ORDER BY id");
+  yield q("every value ranked", "SELECT id, rank() OVER (ORDER BY s), lag(id) OVER (ORDER BY s, id) FROM coll ORDER BY id");
+  yield q("every value as a jsonb, sorted", "SELECT id FROM coll ORDER BY to_jsonb(s), id");
+  yield q("every value's nulls idiom", "SELECT s FROM coll GROUP BY s ORDER BY s IS NULL, s");
+  yield q("a statement over a * ordered by every value", "SELECT * FROM coll ORDER BY 2, 1");
   yield q("a run of marks, of digits and of punctuation", "SELECT s FROM coll WHERE id IN (50, 51, 78, 79, 80, 81, 82, 83, 84, 85, 93, 94, 95, 96) ORDER BY s");
   // ---- the corpus rerun of fbbf8f08: what reached DuckDB and failed, and the pieces still unverified -------------------
   // a name another table has in another case: qualified with the table Postgres resolved it to

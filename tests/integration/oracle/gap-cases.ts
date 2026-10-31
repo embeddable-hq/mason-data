@@ -7,7 +7,7 @@
 import type { GapId } from "../../../src/duck/gaps.ts";
 
 export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
-  { gap: "libc-uncovered", sql: "SELECT id FROM coll ORDER BY s, id" },
+  { gap: "fromless-text-order", sql: "SELECT 'a' < 'B'" },
   { gap: "libc-mark-run-form", sql: "SELECT 'a6ß' > E'a\\u03086ß' FROM public.one" },
   { gap: "libc-rare-letter", sql: "SELECT E'\\uA79A' < E'\\u00C4' FROM public.one" },
   { gap: "explain-option", sql: "EXPLAIN (FORMAT XML) SELECT id FROM typed" },

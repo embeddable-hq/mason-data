@@ -8,10 +8,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
-- **Text under `en_*` is ordered as glibc orders it, every character of it.** One emoji, a Thai vowel or a mark in a
-  column no longer refuses the column's sort, group or dropdown, and no refusal quotes a row's value. A handful of
-  symbols (`㏩`, `㊿`) stay refused by name, and two rare shapes are listed differences (`libc-rare-letter`,
-  `libc-mark-run-form`, in docs/SQL-SUPPORT.md); mason status's `Text order` line counts them.
+- **Text under `en_*` is ordered as glibc orders it, and nothing under it is refused.** One emoji, a Thai vowel or a mark
+  in a column no longer refuses the column's sort, group or dropdown, and no refusal quotes a row's value. Two rare shapes
+  are listed differences (`libc-rare-letter`, `libc-mark-run-form`, in docs/SQL-SUPPORT.md); mason status's `Text order`
+  line counts them.
 - **A database under tr_TR, sv_SE, cs_CZ or another locale that moves ASCII or Latin now refuses `ORDER BY`, `<`, `min`
   and `max` of text by name (`libc-locale-unread`)**, where it answered in a wrong order. Add `COLLATE "C"` or an ICU
   collation to them; everything else is served. `mason start` and mason status say so.

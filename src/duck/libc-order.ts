@@ -30,16 +30,15 @@
  *
  * WHAT IS READ IS HELD, AND THE VERDICT IS A BRANCH (`holdLibcOrder`): pairs of strings, ASCII first, compared by the source and
  * by the key, counted, every pair. A locale of the plain table (`isPlainTable`: en_*, glibc's iso14651_t1 as it comes)
- * is never refused, nor a letter, a mark or a digit under it: a difference is recorded (`LibcOrder.held`: the log and
- * mason status) and the character stays covered, since one seeded pair must not refuse `ä` for a whole column, and
- * another glibc would pick another pair. Only a character with a first-level weight of its own that is none of those
- * (`㏩`, its weight read from no letter) goes uncovered there. Any other locale has what differs uncovered where it is
- * rare; a pair that differs in ASCII or Latin alone is a table this reading does not follow (tr_TR, sv_SE, cs_CZ; another
- * C library), and the whole order is `unread`.
- * REFUSED BY NAME, never an exit at the start and never another order: an `unread` order refuses every text it is asked
- * to order (`libc-locale-unread`), a character not covered the values holding it (`libc-uncovered`), and so does every
- * code point not read where a sample of them does not share one weight. A strcoll that is byte order (musl's, macOS's)
- * reads as that (`bytes`), with nothing else to read.
+ * IS NEVER REFUSED, of any character, on any C library: what differs stays as it was read, and is recorded
+ * (`LibcOrder.held`: the log and mason status), and what no level could be read of is left to the bytes. A difference
+ * there is a decided one (`libc-rare-letter`, `libc-mark-run-form`). Any other locale has what differs uncovered where it
+ * is rare; a pair that differs in ASCII or Latin alone is a table this reading does not follow (tr_TR, sv_SE, cs_CZ;
+ * another C library), and the whole order is `unread`.
+ * REFUSED BY NAME under such a locale alone, never an exit at the start and never another order: an `unread` order refuses
+ * every text it is asked to order (`libc-locale-unread`), a character not covered the values holding it
+ * (`libc-uncovered`), and so does every code point not read where a sample of them does not share one weight. A strcoll
+ * that is byte order (musl's, macOS's) reads as that (`bytes`), with nothing else to read.
  */
 import { Buffer } from "node:buffer";
 import { gapMark } from "./gaps.ts";
@@ -62,8 +61,9 @@ export interface LibcOrder {
   bytes: boolean;
   /** the read does not follow this table (`holdLibcOrder`): every text ordered under it is refused, `libc-locale-unread` */
   unread: boolean;
-  /** the last round of `holdLibcOrder`: the pairs compared, and those the key answers otherwise than the source */
-  held: { pairs: number; differ: number };
+  /** `holdLibcOrder`, both rounds: the pairs compared, those the key answers otherwise than the source, and of those the
+   *  ones of ASCII or Latin alone */
+  held: { pairs: number; differ: number; common: number };
   /** per code point, its weight at each level: 0 for none; 1 at levels 2 and 3 is the common one (BASE, MIN) */
   l1: Uint32Array;
   l2: Uint32Array;
@@ -122,7 +122,7 @@ export type SourceQuery = (sql: string) => Promise<Array<Array<string | null>>>;
 
 /** An empty order: nothing covered. */
 export function emptyLibcOrder(collate: string, version: string | null): LibcOrder {
-  return { collate, version, bytes: false, unread: false, held: { pairs: 0, differ: 0 }, l1: new Uint32Array(MAX), l2: new Uint32Array(MAX), l3: new Uint32Array(MAX), l4: new Uint32Array(MAX), back: new Uint8Array(MAX),
+  return { collate, version, bytes: false, unread: false, held: { pairs: 0, differ: 0, common: 0 }, l1: new Uint32Array(MAX), l2: new Uint32Array(MAX), l3: new Uint32Array(MAX), l4: new Uint32Array(MAX), back: new Uint8Array(MAX),
     uncovered: new Uint8Array(MAX).fill(1), unlisted: new Uint8Array(MAX), special: new Uint8Array(MAX), sequences: new Map(), contractions: new Map() };
 }
 
@@ -196,6 +196,19 @@ const BYTE_ORDER_SAMPLE = [0x20, 0x21, 0x2d, 0x30, 0x41, 0x5a, 0x5f, 0x61, 0x7a,
 /** The source's order of text (its default collation), as the module's header says. */
 export async function readLibcOrder(query: SourceQuery, collate: string, version: string | null): Promise<LibcOrder> {
   const o = emptyLibcOrder(collate, version);
+  const held = (): Promise<void> => holdLibcOrder(o, async (pairs) => {
+    const less = await askedText(query, pairs, "s < t");
+    const more = await askedText(query, pairs, "s > t");
+    return pairs.map((_, i) => less[i] ? -1 : more[i] ? 1 : 0);
+  });
+  // a strcoll with no level glibc's has, another C library's: not followed, but for the plain table's name, which is
+  // never refused: the first level where that is all there is, the bytes for the rest, and what that differs on recorded
+  const noLevels = async (): Promise<LibcOrder> => {
+    if (!isPlainTable(collate)) { o.unread = true; return o; }
+    o.uncovered.fill(0);
+    await held();
+    return o;
+  };
   const inOrder = await asked(query, BYTE_ORDER_SAMPLE.slice(1).map((g, i) => [BYTE_ORDER_SAMPLE[i]!, g]), "chr(a) < chr(b)");
   if (inOrder.every(Boolean)) return { ...o, bytes: true };
   const points = assignedCodePoints();
@@ -223,8 +236,7 @@ export async function readLibcOrder(query: SourceQuery, collate: string, version
       o.l1[g] = classes.length;
     } else noFirst.push({ g, same: same === "true" });
   }
-  // (a strcoll with no level glibc's has: another C library's)
-  if (weighted.length === 0 || noFirst.length === 0) return { ...o, unread: true };
+  if (weighted.length === 0 || noFirst.length === 0) return noLevels();
   for (const g of points) o.uncovered[g] = 0;
   /** a character's place among those the last level compares it with: its first-level class's, or all the marks */
   const ties = new Map<number, number>();
@@ -240,7 +252,7 @@ export async function readLibcOrder(query: SourceQuery, collate: string, version
     if (!same || ignoredClasses.length === 0) ignoredClasses.push(g);
     o.l4[g] = 2 * ignoredClasses.length;
   });
-  if (ignoredClasses.length === 0) return { ...o, unread: true };
+  if (ignoredClasses.length === 0) return noLevels();
 
   // the marks at the second level: in order behind a letter, each class of equal ones, and their case within
   const marks = marksRead.length === 0 ? [] : (await query(`SELECT g::text FROM unnest(${ints(marksRead)}) AS u(g) ORDER BY 'x' || chr(g)`)).map(([g]) => Number(g));
@@ -363,9 +375,9 @@ export async function readLibcOrder(query: SourceQuery, collate: string, version
   }
 
   // a ligature of several letters whose spelling the source did not confirm has first-level weights no letter has
-  // (`㏩`: 10 and a CJK weight of its own): nothing here can say them. Under the plain table a letter stays, at the one
-  // weight it sorted by (`holdLibcOrder`)
-  for (const [g, e] of proposed) if (!expansions.has(g) && e === String.fromCodePoint(g).normalize("NFKD").replace(/\p{M}/gu, "") && cps(e).filter((u) => o.l1[u]! > 0).length > 1 && mayUncover(o, g)) o.uncovered[g] = 1;
+  // (`㏩`: 10 and a CJK weight of its own): nothing here can say them. Under the plain table it stays, at the one weight
+  // it sorted by, a decided difference (`libc-rare-letter`)
+  for (const [g, e] of proposed) if (!expansions.has(g) && e === String.fromCodePoint(g).normalize("NFKD").replace(/\p{M}/gu, "") && cps(e).filter((u) => o.l1[u]! > 0).length > 1 && !isPlainTable(collate)) o.uncovered[g] = 1;
 
   // an accented letter: its NFD's parts, once they are read
   const decomposed = new Set(weighted.filter((g) => !expansions.has(g) && nfd(g).length > 1));
@@ -456,6 +468,25 @@ export async function readLibcOrder(query: SourceQuery, collate: string, version
     }
   }
 
+  // a symbol the first spelling did not confirm, under the plain table, which refuses nothing: `㏩` is 1, 0 and a weight no
+  // character has, so its letters and the class that weight lies above, found by binary search after them. Close: it
+  // sorts in its place among what a column holds (`libc-rare-letter`, the rest)
+  if (isPlainTable(collate)) {
+    const whole = classes.map((c) => c[0]!);
+    const stuck = proposed.flatMap(([g, e]) => {
+      if (expansions.has(g) || o.sequences.has(g) || e !== String.fromCodePoint(g).normalize("NFKD").replace(/\p{M}/gu, "")) return [];
+      const units = cps(e).filter((u) => o.l1[u]! > 0);
+      const head = units.slice(0, units.findIndex((u) => /\p{Script=Han}|\p{Script=Katakana}|\p{Script=Hiragana}/u.test(String.fromCodePoint(u))));
+      return head.length > 0 && head.length < units.length ? [{ g, head }] : [];
+    });
+    const lo = await searched(stuck.length, () => whole.length - 1, (open) =>
+      askedText(query, open.map(({ i, mid }): [string, string] => [String.fromCodePoint(stuck[i]!.g), str([...stuck[i]!.head, whole[mid]!])]), "s < t"));
+    stuck.forEach(({ g, head }, i) => {
+      const l1 = [...head.map((u) => o.l1[u]!), o.l1[whole[Math.max(lo[i]! - 1, 0)]!]!];
+      o.sequences.set(g, { l1, l2: l1.map(() => 1), l3: l1.map(() => 1), l4: [], back: o.back[g] === 1 });
+    });
+  }
+
   // the last level: the marks' and the letters' weights, each by binary search among the punctuation's (p||x < x exactly
   // when p's weight is below x's), two of one class and case told apart by their order; one placed below all of them has
   // none when x||chr(1) is not below chr(1)||x
@@ -525,7 +556,9 @@ export async function readLibcOrder(query: SourceQuery, collate: string, version
     });
   }
 
-  // what was not read: what the table does not list, one weight at the last level, when a sample says so; else not covered
+  // what was not read: what the table does not list, one weight at the last level, when a sample says so; else not
+  // covered, but under the plain table, where it is that all the same and the sample's differences are recorded
+  let unreadDiffer = 0, unreadPairs = 0;
   {
     const read = new Set(points);
     const unread: number[] = [];
@@ -537,25 +570,20 @@ export async function readLibcOrder(query: SourceQuery, collate: string, version
     const sample = unread.filter((_, i) => i % UNREAD_SAMPLE === 0).map((g): [number, number] => [g, firstOf.get(utf8Length(g))!]);
     const alike = await asked(query, sample, `(chr(a) || 'y' > chr(b) || 'x') AND (chr(b) || 'y' > chr(a) || 'x') AND (chr(a) || 'X' > chr(b) || 'x') AND (chr(b) || 'X' > chr(a) || 'x')
       AND (chr(a) || chr(${q}) > chr(b) || chr(${p})) AND (chr(b) || chr(${q}) > chr(a) || chr(${p}))`);
-    if (alike.every(Boolean) && o.l1[UNLISTED] === 0) {
+    const plain = isPlainTable(collate);
+    if (plain) { unreadPairs = alike.length; unreadDiffer = alike.filter((x) => !x).length; }
+    if (plain || (alike.every(Boolean) && o.l1[UNLISTED] === 0)) {
       const weight = o.l4[UNLISTED]!;
-      for (const { g } of noFirst) if (o.l4[g] === weight) o.unlisted[g] = 1;
+      if (weight > 0) for (const { g } of noFirst) if (o.l4[g] === weight) o.unlisted[g] = 1;
       for (const g of unread) { o.l4[g] = weight; o.back[g] = o.back[UNLISTED]!; o.unlisted[g] = 1; o.uncovered[g] = 0; }
     } else o.uncovered[UNLISTED] = 1;
   }
 
   withLookups(o);
-  await holdLibcOrder(o, async (pairs) => {
-    const less = await askedText(query, pairs, "s < t");
-    const more = await askedText(query, pairs, "s > t");
-    return pairs.map((_, i) => less[i] ? -1 : more[i] ? 1 : 0);
-  });
+  await held();
+  o.held = { ...o.held, pairs: o.held.pairs + unreadPairs, differ: o.held.differ + unreadDiffer };
   return o;
 }
-
-/** whether a character may go uncovered: anywhere but under the plain table, only one of its own first-level weight there */
-const mayUncover = (o: LibcOrder, g: number): boolean =>
-  !isPlainTable(o.collate) || (o.l1[g]! > 0 && !/[\p{L}\p{M}\p{Nd}]/u.test(String.fromCodePoint(g)));
 
 /** Pairs of strings of the covered characters, near each other as a column's values are, by `seed`. */
 function heldPairs(o: LibcOrder, seed: number): Array<[string, string]> {
@@ -611,23 +639,28 @@ const COMMON = 0x250;
 
 /**
  * WHAT WAS READ IS HELD, the verdict a branch (the module's header), in two rounds on two sets of pairs, every pair
- * counted. A pair that differs has its rarest character uncovered where `mayUncover` lets it and the character is not a
- * common one (with it not covered, the other still is and the pair is gone). A pair that leaves nothing to uncover is
- * recorded under the plain table, and is a table not followed under any other: a difference in ASCII or Latin alone is
- * no rare character's, and would be in every column.
+ * counted. The plain table only records. Under any other locale a pair that differs has its rarest character uncovered
+ * when one is not common (with it not covered, the other still is and the pair is gone), and a pair of common characters
+ * alone leaves nothing to uncover, so the table is not followed: a difference in ASCII or Latin is in every column.
  */
 export async function holdLibcOrder(o: LibcOrder, compare: (pairs: ReadonlyArray<[string, string]>) => Promise<number[]>): Promise<void> {
   const plain = isPlainTable(o.collate);
+  const held = { pairs: 0, differ: 0, common: 0 };
   for (const seed of [0x9e3779b9, 0x51ed270b]) {
     const pairs = heldPairs(o, seed);
     const said = await compare(pairs);
     const differ = pairs.filter(([s, t], i) => keyOrder(o)(s, t) !== said[i]);
-    o.held = { pairs: pairs.length, differ: differ.length };
+    held.pairs += pairs.length;
+    held.differ += differ.length;
     for (const [s, t] of differ) {
-      const told = [...cps(s).filter((x) => !cps(t).includes(x)), ...cps(t).filter((x) => !cps(s).includes(x))].filter((x) => x >= (plain ? 0x80 : COMMON) && mayUncover(o, x));
-      if (told.length > 0) o.uncovered[Math.max(...told)] = 1;
-      else if (!plain) o.unread = true;
+      const told = [...cps(s).filter((x) => !cps(t).includes(x)), ...cps(t).filter((x) => !cps(s).includes(x))];
+      const rare = told.filter((x) => x >= COMMON);
+      if (rare.length === 0) held.common++;
+      if (plain) continue;
+      if (rare.length > 0) o.uncovered[Math.max(...rare)] = 1;
+      else o.unread = true;
     }
+    o.held = held;
     if (o.unread) return;
   }
 }
@@ -639,14 +672,16 @@ const keyOrder = (o: LibcOrder) => (s: string, t: string): number => {
 };
 
 /**
- * What an order's read leaves to say, for mason status and the log: an order not followed, or the pairs that still differ
- * (rare characters, `libc-rare-letter`, `libc-mark-run-form`: the detector of a glibc that moved them). Null: nothing.
+ * What an order's read leaves to say, for mason status and the log: an order not followed, or the pairs that differ,
+ * told into rare characters and common ones (the detector of a glibc that moved them). Null: nothing.
  */
 export function libcOrderNote(o: LibcOrder): string | null {
   if (o.bytes) return null;
   if (o.unread) return `${o.collate} orders text in a way Mason could not read, so ORDER BY, <, min and max of text are refused (Mason gap libc-locale-unread); add COLLATE "C" or an ICU collation to them`;
   if (o.held.differ === 0) return null;
-  return `${o.collate} read from the database; ${o.held.differ.toLocaleString("en-US")} of ${o.held.pairs.toLocaleString("en-US")} pairs of strings held to it order otherwise, all of rare characters (Mason gaps libc-rare-letter, libc-mark-run-form)`;
+  const rare = o.held.differ - o.held.common;
+  return `${o.collate} read from the database; ${o.held.differ.toLocaleString("en-US")} of ${o.held.pairs.toLocaleString("en-US")} pairs of strings held to it order otherwise: ` +
+    `${rare.toLocaleString("en-US")} of rare characters, ${o.held.common.toLocaleString("en-US")} of ASCII or Latin alone (Mason gaps libc-rare-letter, libc-mark-run-form)`;
 }
 
 /** The refusal of every text under an order `holdLibcOrder` did not follow: by the gap and the collation, as `libc-uncovered`'s. */
@@ -769,7 +804,7 @@ export function encodeLibcOrder(o: LibcOrder): string {
 
 export function decodeLibcOrder(text: string): LibcOrder {
   type Runs = Array<[number, number, number]>;
-  const v = JSON.parse(text) as { collate: string; version: string | null; bytes: boolean; unread: boolean; held: { pairs: number; differ: number }; l1: Runs; l2: Runs; l3: Runs; l4: Runs; back: Runs; uncovered: Runs; unlisted: Runs;
+  const v = JSON.parse(text) as { collate: string; version: string | null; bytes: boolean; unread: boolean; held: { pairs: number; differ: number; common: number }; l1: Runs; l2: Runs; l3: Runs; l4: Runs; back: Runs; uncovered: Runs; unlisted: Runs;
     sequences: Array<[number, LibcElement]>; contractions: Array<[number, Array<{ rest: number[]; element: LibcElement }>]> };
   const o = { ...emptyLibcOrder(v.collate, v.version), bytes: v.bytes, unread: v.unread, held: v.held };
   o.uncovered.fill(0);
