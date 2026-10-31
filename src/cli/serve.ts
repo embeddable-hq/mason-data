@@ -26,7 +26,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
 import { failed, parseCommand, type CommandSpec, type Failure } from "./command.ts";
-import { heldText, portHolder } from "./ports.ts";
+import { DEFAULT_UI_PORT, heldText, portHolder } from "./ports.ts";
 import { pgListenerAddress } from "../api/postgres/listener.ts";
 import { dev } from "./dev.ts";
 import { parseSource } from "./preflight.ts";
@@ -74,7 +74,7 @@ export const SERVE: CommandSpec = {
                             the two must agree when both are set)
     MASON_HEALTH_PORT       /healthz's and /metrics' port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
     MASON_UI_PORT           the web page's and the commands' port, on 127.0.0.1 alone: no setting moves the address, and
-                            mason ui --ssh <user@server> opens the page from your machine (default 4039, or the next
+                            mason ui --ssh <user@server> opens the page from your machine (default ${DEFAULT_UI_PORT}, or the next
                             free one; a port named here is that port, or the start is refused)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
@@ -109,9 +109,6 @@ export interface ServeSettings {
   /** the port of the page and the commands; `named`: MASON_UI_PORT said it, so it is that port or a refusal */
   ui: { port: number; named: boolean };
 }
-
-/** The port of the page and the commands when MASON_UI_PORT says none (src/cli/doctor.ts PORTS has it too). */
-export const DEFAULT_UI_PORT = 4039;
 
 const MIN_API_KEY = 32;
 

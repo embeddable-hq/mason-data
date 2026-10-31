@@ -63,7 +63,8 @@ export const UI: CommandSpec & { needs: "run" } = {
   --timeout <s>        how long ssh and the server have to answer (default ${DEFAULT_TIMEOUT_S}): a passphrase or a touch counts
   --bridge             the server's end of --ssh, on stdin and stdout
   --local-port <n>     the port the browser names, for --bridge: the laptop's
-  --json               as data: { url (with this run's token; with --ssh a ticket for one use), port, server, project,
+  --json               as data: { url (with this run's token; with --ssh a ticket for one use; null when Ctrl-C came
+                       before the server answered, as port is, exit 0), port, server, project,
                        version (with --ssh: the server's Mason, for what its answer may lack) }, next; it never opens a
                        browser. With --ssh it then holds the tunnel: the end is on stderr, exit 0 for Ctrl-C or SIGTERM, 1 otherwise
 `,
@@ -115,8 +116,14 @@ async function overSsh(target: string, mason: string, timeoutMs: number, open: b
     process.once("SIGINT", heard); process.once("SIGTERM", heard);
   });
   const t = await openSshTunnel({ target, mason, timeoutMs, interactive: !json && process.stdin.isTTY === true, stopped: signal });
-  if ("message" in t) return signalled !== null ? 0 : failed("ui", t, { json });
   const next: readonly NextStep[] = [[`mason ui --ssh ${target}`, "again, once this one is closed: a new port and a new ticket"]];
+  if ("message" in t) {
+    if (signalled === null) return failed("ui", t, { json });
+    // stopped on purpose, exit 0: under --json still the one object every answer is, its url null as nothing opened
+    if (json) out(jsonText(UI, { url: null, port: null, server: target }, next));
+    else say(`stopped before ${target} answered: nothing was left open`);
+    return 0;
+  }
   if (json) out(jsonText(UI, { url: t.url, port: t.port, server: target, project: t.project, version: t.serverVersion }, next));
   else {
     const couldNot = open ? await openBrowser(t.url) : null;

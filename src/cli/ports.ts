@@ -13,6 +13,9 @@ import * as net from "node:net";
 import type { Problem } from "./command.ts";
 import { DEFAULT_PG_PORT, pgListenerAddress } from "../api/postgres/listener.ts";
 
+/** The port the commands and the web page reach a run on, unless a flag or a setting says another. */
+export const DEFAULT_UI_PORT = 4039;
+
 export const PROBE_ADDRESSES = ["127.0.0.1", "0.0.0.0", "::", "::1"] as const;
 
 /** Who holds a port: the address a bind was refused on, and the error (EADDRINUSE, or EACCES for a port needing root). */

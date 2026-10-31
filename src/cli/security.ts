@@ -33,8 +33,9 @@
  * names at ITS port are added, for as long as it lasts. A DNS-rebinding page still names itself, and is refused by that
  * name. The run's token never crosses: the laptop gets a TICKET, one use and minutes old, because the URL a browser is
  * opened at is on a command line; the first request trades it for a cookie holding the tunnel's own SESSION, named for
- * the laptop's port, which dies with the tunnel. So nothing that reaches the laptop outlives it, and the commands' Bearer
- * is refused on this path: a tunnel carries a browser, never a command.
+ * the laptop's port, which dies with the tunnel. So nothing that reaches the laptop outlives it. The tunnel itself is raw
+ * TCP to this server, so a client chooses its path by the Host it sends: Bearer is refused by a tunnel's Host, and by the
+ * server's own Host it is the commands' path, which needs the token, which never crosses.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
 

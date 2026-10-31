@@ -201,9 +201,12 @@ export interface SshTunnel {
   stop(): Promise<void>;
 }
 
+/** What a Mason that lacks `--bridge` prints: its parser's refusal of the flag, or its usage. */
+const OLDER_MASON = /unknown option\b.*--bridge|^usage: mason ui\b/im;
+
 /** The report for an ssh that exited before the bridge said hello, by what its exit means. */
-export function exitFailure(o: { target: string; mason: string; code: number | null; signal: NodeJS.Signals | null; said: string }): Failure {
-  const { target, mason, code, signal, said } = o;
+export function exitFailure(o: { target: string; mason: string; code: number | null; signal: NodeJS.Signals | null; said: string; stderr: string }): Failure {
+  const { target, mason, code, signal, said, stderr } = o;
   const how = signal !== null ? `ssh was ended (${signal})` : `ssh exited ${code}`;
   const why = said === "" ? how : `${how}: ${said}`;
   const here: NextStep = [`ssh ${target} true`, "whether ssh reaches it on its own"];
@@ -212,8 +215,9 @@ export function exitFailure(o: { target: string; mason: string; code: number | n
     return { message: `${JSON.stringify(mason)} is not a command on ${target}`, code: "not_found", why,
       fix: `--mason says how to run Mason there: --mason "docker exec -i <container> mason" for a container (docker ps names it), or --mason "/path/to/mason" where a shell ssh opens lacks it on its PATH`, next: [here] };
   }
-  // 2 is a wrong command line: this Mason is older than the flag
-  if (code === 2) {
+  // 2 alone proves nothing (a shell exits 2 when its cd fails): an older Mason says so in its own words, read from the
+  // whole of stderr, as what it prints after that line pushes it out of `said`
+  if (code === 2 && OLDER_MASON.test(stderr)) {
     return { message: `the Mason on ${target} does not know mason ui --bridge`, code: "refused", why, fix: "it is older than mason ui --ssh: upgrade the server's Mason to this one's version", next: [["mason --version", "this machine's"]] };
   }
   if (code === 255) {
@@ -308,7 +312,7 @@ export function openSshTunnel(o: { target: string; mason: string; timeoutMs: num
         // read after a moment: a Ctrl-C reaches ssh and this process together, and `stop` says which end it was
         setTimeout(() => {
           const last = lastLines(said, null);
-          if (!settled) { fail(exitFailure({ target: o.target, mason: o.mason, code, signal, said: last })); return; }
+          if (!settled) { fail(exitFailure({ target: o.target, mason: o.mason, code, signal, said: last, stderr: said })); return; }
           if (stopping) return;
           link?.end();
           local.close();

@@ -6,7 +6,7 @@
  */
 import { failed, jsonText, nextBlock, parseCommand, type CommandSpec, type NextStep } from "./command.ts";
 import { out as styleOut, wrap, type Style } from "./style.ts";
-import { heldPgPort, namedPgPort, portHolder, type PortHolder } from "./ports.ts";
+import { DEFAULT_UI_PORT, heldPgPort, namedPgPort, portHolder, type PortHolder } from "./ports.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { readiness, type RunState } from "./commands.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem, type ConnectContext } from "./preflight.ts";
@@ -56,7 +56,7 @@ export const DOCTOR: CommandSpec = {
 export interface Check { name: string; ok: boolean | null; detail: string }
 
 /** The ports a mason start takes by default, and what listens on each. */
-export const PORTS: ReadonlyArray<[port: number, what: string]> = [[4039, "the mason commands"], [DEFAULT_PG_PORT, "the Postgres API"]];
+export const PORTS: ReadonlyArray<[port: number, what: string]> = [[DEFAULT_UI_PORT, "the mason commands"], [DEFAULT_PG_PORT, "the Postgres API"]];
 
 /** Node's version against the package's floor, major then minor. */
 export function nodeCheck(version: string = process.versions.node): Check {

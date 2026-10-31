@@ -239,6 +239,9 @@ listens, and every browser connection crosses that one ssh connection as frames 
 - **The server need not allow TCP forwarding**, and nobody needs to know the page's port. `MASON_UI_PORT` (default
   4039, the next free one when it is held) names it where another service wants that port; a port named is that port,
   or the start is refused.
+- **Another page's cookie crosses too.** A browser keeps cookies by host, not port, so a local `mason start`'s cookie for
+  127.0.0.1 is sent through the tunnel in the Cookie header. Each cookie is named for its port, and the server reads
+  only the one for the Host it was asked by, so that one is ignored, though it does reach the server.
 - **Your access is your SSH access**, then the guard below. There is no new password or login, and ssh carries the
   encryption, so the page needs no TLS of its own.
 
@@ -249,7 +252,9 @@ port, and the address loses it. When the tunnel closes, the session is gone, and
 
 **The guard takes no Host it was not told of.** A tunnel adds `127.0.0.1:<your port>` and `localhost:<your port>`, for as
 long as its connection lasts; a DNS-rebinding page still names itself, and is refused by that name. Every change is
-checked against that same Origin, and a command's `Authorization` is refused on this path: a tunnel carries a browser.
+checked against that same Origin. The tunnel carries raw TCP to the run's command server, and the guard is what protects
+that server: a client chooses its path by the Host it sends, so `Authorization` is refused under a tunnel's Host, and
+under the server's own Host it needs the run's token, which never reaches your machine.
 
 **What the page does on a server.** Everything it does under `mason start`, with these differences:
 
@@ -264,7 +269,10 @@ checked against that same Origin, and a command's `Authorization` is refused on 
 
 **When it does not connect**, it says so in one report with the way out: `ssh` missing here, the server unreachable (a
 firewall rule that names your old IP address is the common cause), `mason` not a command there (`--mason`), a server
-older than `--ssh`, no project where ssh lands, Mason not running, or two ends whose bridges differ.
+older than `--ssh`, no project where ssh lands, Mason not running, or two ends whose bridges differ. Two more show as
+`ssh could not reach`, with ssh's own words, and neither is Mason's to change: a `RemoteCommand` in your `~/.ssh/config`
+for that Host (ssh refuses it beside a command: give the tunnel a Host without one), and a host-key failure (`Host key
+verification failed`: run `ssh <user@server>` once on its own, and check the key before you accept it).
 
 **Unverified:** so far this has been run only with a stand-in for `ssh` on one machine, never over a real SSH connection or
 to a real container. Routes that are `ssh` to your `~/.ssh/config` should work without Mason knowing, and **none has

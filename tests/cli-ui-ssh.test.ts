@@ -67,7 +67,8 @@ echo $$ > "${pid}"
 case "$FAKE_SSH" in
   unreachable) echo "ssh: connect to host mason.example port 22: Operation timed out" >&2; exit 255 ;;
   no-mason) echo "sh: 1: mason: not found" >&2; exit 127 ;;
-  old) echo "mason ui: unknown option --bridge" >&2; exit 2 ;;
+  old) echo "✗ mason ui: Unknown option '--bridge'. To specify a positional argument, use --" >&2; for i in 1 2 3 4 5 6; do echo "  a line of what follows" >&2; done; exit 2 ;;
+  bad-cd) echo "sh: 1: cd: can't cd to /wrong" >&2; exit 2 ;;
   other-bridge) echo 'MASON-UI-BRIDGE {"protocol":99,"version":"9.9.9","project":"shop","ticket":"x"}'; sleep 30; exit 0 ;;
   silent) sleep 30; exit 0 ;;
 esac
@@ -243,6 +244,11 @@ test("each failure is one report with its way out, in the failure shape, and no 
     assert.equal(old.error.message, "the Mason on deploy@mason.example does not know mason ui --bridge");
     assert.match(old.error.fix!, /upgrade the server's Mason/);
 
+    // a shell exits 2 too, when its cd fails: no word of an older Mason, so the report repeats what it said
+    const lost = await refused(ssh.bin, s.root, { FAKE_SSH: "bad-cd" });
+    assert.equal(lost.error.message, "the bridge on deploy@mason.example ended before it answered");
+    assert.equal(lost.error.why, "ssh exited 2: sh: 1: cd: can't cd to /wrong");
+
     const other = await refused(ssh.bin, s.root, { FAKE_SSH: "other-bridge" });
     assert.match(other.error.message, /^the Mason on deploy@mason\.example \(9\.9\.9\) and this one \(.+\) speak different bridges$/);
     assert.equal(other.code, 1);
@@ -263,12 +269,16 @@ test("each failure is one report with its way out, in the failure shape, and no 
 
 test("Ctrl-C before the server answers ends ssh too, exit 0", { timeout: 60_000 }, async () => {
   const ssh = fakeSsh();
-  const child = spawn(process.execPath, [MAIN, "ui", "--ssh", "deploy@mason.example", "--json"], { cwd: temp("laptop"), env: env(ssh.bin, { FAKE_SSH: "silent" }), stdio: "ignore" });
+  const child = spawn(process.execPath, [MAIN, "ui", "--ssh", "deploy@mason.example", "--json"], { cwd: temp("laptop"), env: env(ssh.bin, { FAKE_SSH: "silent" }), stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout!.on("data", (b: Buffer) => { out += b.toString(); });
   const done = new Promise<number | null>((r) => child.on("close", (c) => r(c)));
   for (let i = 0; i < 200 && !fs.existsSync(ssh.pid); i++) await new Promise((r) => setTimeout(r, 25));
   await new Promise((r) => setTimeout(r, 200));
   child.kill("SIGINT");
   assert.equal(await done, 0);
+  assert.deepEqual(JSON.parse(out), { url: null, port: null, server: "deploy@mason.example",
+    next: [{ command: "mason ui --ssh deploy@mason.example", what: "again, once this one is closed: a new port and a new ticket" }] });
   assert.ok(isGone(Number(fs.readFileSync(ssh.pid, "utf8"))), "no ssh left");
 });
 
@@ -314,7 +324,7 @@ test("the ssh line: the target after --, never a forward nor a shared connection
   assert.ok(a.includes("ControlPath=none"), "a master that persists would be an ssh left behind");
   assert.ok(!a.includes("BatchMode=yes"));
   assert.ok(sshArgs("x", "y", false).includes("BatchMode=yes"), "nobody to answer: fail, never wait");
-  assert.match(exitFailure({ target: "x", mason: "mason", code: 3, signal: null, said: "" }).message, /^the bridge on x ended before it answered$/);
+  assert.match(exitFailure({ target: "x", mason: "mason", code: 3, signal: null, said: "", stderr: "" }).message, /^the bridge on x ended before it answered$/);
 });
 
 test("the frames survive any chunking, both ways, and a stream that is not frames is said", async () => {
