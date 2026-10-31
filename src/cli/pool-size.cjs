@@ -1,6 +1,6 @@
 /**
  * THE SIZE OF LIBUV'S POOL (issue 88). A statement in flight holds one of its threads for as long as DuckDB computes
- * (docs/FLOWS.md "What waits, and where"), and at Node's four a fifth statement waits behind four heavy ones: 13 s to 30 s
+ * (docs/FLOWS.md "What waits, and where"), and at Node's four a fifth statement waits behind four heavy ones: 10 s to 50 s
  * for a `SELECT 1`. libuv reads UV_THREADPOOL_SIZE once, when the first task reaches the pool, so this must run before
  * anything uses it: CommonJS, loaded synchronously, by src/cli/mason.cjs and as main.ts's FIRST import.
  *
