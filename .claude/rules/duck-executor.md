@@ -5,7 +5,7 @@ paths:
   - "src/duck/executor.ts"
   - "src/duck/functions.ts"
   - "src/duck/store.ts"
-  - "tests/duck-executor.test.ts"
+  - "tests/duck-executor*.ts"
   - "tests/duck-runner-signal.test.ts"
   - "tests/duck-wire.test.ts"
 ---
@@ -50,8 +50,9 @@ paths:
   same, and the watch below catches a deadlock). Time is no proof: no call for 50 ms proved nothing, a vector's native
   work outlasts any window. A connection's close (`conn.close`, src/duck/executor-worker.ts) interrupts its own calls and
   waits for them. A new synchronous call into DuckDB on the worker is read against this rule (`tests/conventions.test.ts`
-  lists the closes). `tests/duck-executor.test.ts` "a vector slower than any quiet window", "a call-free statement closed
-  inside a slow vector", "a connection closed under its own", "cancelling a function-calling statement again and again"
+  lists the closes). `tests/duck-executor-slow-vector.test.ts` "a vector slower than any quiet window",
+  `tests/duck-executor.test.ts` "a call-free statement closed inside a slow vector", "a connection closed under its own",
+  `tests/duck-executor-cancel-stress.test.ts` "cancelling a function-calling statement again and again"
   hold it. Any statement on a session's connection waits for `releasing` first: DuckDB would refuse it. ("The watch")
   **Its log line does not wait for that close** (`say`, src/duck/store.ts): a statement's line is posted before its client
   is told it ended, in the worker port's order, so a statement's own line is before its answer and no earlier statement
@@ -73,7 +74,7 @@ paths:
   shared memory), since a calling statement holds the worker's loop a thousand calls at a time with no pong (a 20 kB
   document: 999 × 322 ms). What is left is a thread that neither turned its loop nor ran a row of a function for 60 s of
   main's time. A new long stretch of JavaScript on the worker with no loop turn beats, or the watch calls it stuck. Never
-  a test that blocks the main thread: `nodeProcess` in `tests/duck-executor.test.ts` is an async spawn. "the watch" tests
+  a test that blocks the main thread: `nodeProcess` in `tests/duck-executor-harness.ts` is an async spawn. "the watch" tests
   there hold both sides: blocked main and a beating thread must not fire, the silent worker and a spinning thread must.
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a

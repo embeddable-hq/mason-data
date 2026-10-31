@@ -261,7 +261,8 @@ export async function runGate(plan: Plan, cfg: Config): Promise<number> {
   const grace = cfg.graceMs ?? BOUNDS.grace;
   const logs = fs.mkdtempSync(path.join(os.tmpdir(), "mason-gate-"));
   const name = `mason-gate-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
-  const { IT_ORACLE_ONLY: _inherited, ...inherited } = process.env; // only --oracle sets it: a stale one would subset silently
+  // only --oracle sets the first, and only CI's shards the rest: a stale one would make the whole oracle silently a part
+  const { IT_ORACLE_ONLY: _only, IT_ORACLE_LEG: _leg, IT_ORACLE_LEG_REPORT: _report, ...inherited } = process.env;
   const env = { ...inherited, PATH: `${cfg.nodeBin}${path.delimiter}${process.env.PATH ?? ""}` };
   const failures: string[] = [];
   let current: ChildProcess | null = null;
