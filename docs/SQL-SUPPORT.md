@@ -24,12 +24,12 @@ each). The copy is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,090 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,127 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 3,090 statements | Mason | DuckDB alone |
+| Of 3,127 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 95% | 30% |
+| answered exactly as Postgres: the rows, their text, the column names | 95% | 31% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 23% |

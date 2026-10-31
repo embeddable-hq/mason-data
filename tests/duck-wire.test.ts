@@ -16,7 +16,7 @@ import pg from "pg";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
 import { DuckDBInstance } from "@duckdb/node-api";
-import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes, pgErrorOf, spillCeiling } from "../src/duck/store.ts";
+import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes, pgErrorOf } from "../src/duck/store.ts";
 import { startPostgresApi, StatementError, type PgApiServer } from "../src/api/postgres/server.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 import { wireColumn } from "../src/duck/types.ts";
@@ -870,6 +870,8 @@ test("a statement past DuckDB's memory fails alone, 53200 with the way out, and 
 // ISSUE 105: a sort's spill took every free byte of a volume. Measured on a small volume: DuckDB's own ceiling is 90% of
 // what was free when it first spilled, read once, so a disk that fills afterwards ends in its IO error, XX000 with a path
 test("what statements may spill is half of what is free, followed as the disk fills, and never all of it", async () => {
+  // read here, so the file loads at a commit without it and this test fails by name (scripts/fails-without.ts)
+  const { spillCeiling } = await import("../src/duck/store.ts");
   const GiB = 2 ** 30;
   assert.equal(spillCeiling(20 * GiB, 0, null), 10 * GiB, "half of what is free");
   assert.equal(spillCeiling(10 * GiB, 4 * GiB, null), 9 * GiB, "what is spilled is not taken from the half: it is on the disk already");

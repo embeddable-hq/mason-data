@@ -1867,7 +1867,8 @@ filters did not help: the LEFT JOIN is planned RIGHT, `a` on the build side, so 
 | LIMIT 100 OFFSET 2,000,000 | 53200 after 2.9 s | 0.38 s, none |
 | the three ids alone | 0.06 s | 0.04 s |
 
-Each row is one run of a warm page cache, the engine's statements only, not through the listener. The fetch by `rowid`
+Each row is one run of a warm page cache, the engine's statements only. Through the real listener, the first row as the
+tool spells it: 14.06 s, 8.54 GiB spilled, 2.59 GiB RSS before; 1.19 s, none, 1.38 GiB after, a first statement's cold catalog included. The fetch by `rowid`
 is cheap because the join's filter on `rowid` skips row groups. No limit on N is needed, and no width test: the narrow
 statement costs nothing. Spill's ceiling, measured on a 1.4 GB volume: DuckDB's `90% of available disk space` is read when
 it first spills (778.8 MiB of 865 free), stays that number, and failing against it is an `Out of Memory` error naming the
