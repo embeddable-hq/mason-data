@@ -40,7 +40,7 @@
  * limit): 12.9 s and 8.6 GiB spilled before, 0.19 s and none after; LIMIT 10,000 failed for memory before and takes 2.9 s.
  *
  * A row number is read only of a table: a derived table, a view, a WITH query and a role's filtered read (each a
- * subquery by now) stay as they were, and so does a table with a column named `rowid`, which DuckDB reads instead. A `*`
+ * subquery by now) stay as they were, and so does a table with a column named `rowid` in any case, which DuckDB reads instead. A `*`
  * is written out from Postgres's own list of the table's columns, so the tables can be read themselves (a copy's view
  * of its visible columns, src/duck/kept-route.ts, has no row numbers); a whole row is not listed, and stays as it was.
  */
@@ -273,6 +273,11 @@ function joinedTables(from: unknown): Body[] | null {
 const aliasOfTable = (t: Body): string => isObject(t.alias) ? String(t.alias.aliasname) : String(t.relname);
 const rowNumber = (alias: string): AstNode => ref(alias, "rowid");
 
+const hasStarTarget = (t: AstNode): boolean => {
+  const val = kindOf(t) === "ResTarget" ? bodyOf(t).val : null;
+  return kindOf(val) === "ColumnRef" && kindOf((bodyOf(val).fields as unknown[]).at(-1)) === "A_Star";
+};
+
 /** the select list with every `*` written out; the tables it reads by name; null where it reads a whole row, or holds what the list after the limit may not */
 function writtenOut(targets: AstNode[], tables: ReadonlyArray<{ alias: string; columns: string[] }>): { list: AstNode[]; read: Set<string> } | null {
   const aliases = new Set(tables.map((t) => t.alias));
@@ -331,9 +336,14 @@ function joinRows(select: AstNode, relations: Relation[][]): AstNode | null {
   const named = relations.filter((r) => r.length === aliases.length && r.every((t, i) => t?.alias === aliases[i]));
   const tables = named[0] as Array<{ alias: string; columns: string[] }> | undefined;
   if (tables === undefined || named.some((r) => JSON.stringify(r) !== JSON.stringify(tables))) return null;
-  if (tables.some((t) => t.columns.includes("rowid") || t.columns.includes(""))) return null;
+  // DuckDB binds a name without regard to case: "RowId" hides the row number as rowid does
+  if (tables.some((t) => t.columns.some((c) => c === "" || c.toLowerCase() === "rowid"))) return null;
   const written = writtenOut(targets, tables);
   if (written === null || written.read.size === 0) return null;
+  // a column number or a bare name beside a `*` is an output the rewrite never saw as a column: under a collation its
+  // sort reads the output's own key there, which the column read here would not
+  const starred = targets.some((t) => hasStarTarget(t));
+  if (starred && sorts.some((sort) => { const n = bodyOf(sort).node; return kindOf(n) === "A_Const" || (kindOf(n) === "ColumnRef" && (bodyOf(n).fields as unknown[]).length === 1); })) return null;
   const keys = sortKeys(targets, sorts);
   if (keys === null) return null;
   // each table read itself, both times: a row number is no column of a copy's view, and nothing here lists a column

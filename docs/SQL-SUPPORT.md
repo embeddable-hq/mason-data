@@ -24,15 +24,15 @@ each). The copy is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,127 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 3,134 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 3,127 statements | Mason | DuckDB alone |
+| Of 3,134 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 95% | 31% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 4% | — |
-| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 23% |
+| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 22% |
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 18% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 12% |
 | wrong rows, or the rows in another order | — | 7% |
@@ -145,7 +145,7 @@ Not about one statement: what the prototype cannot do yet.
 | `numeric-over-38-digits` | a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside Mason's arithmetic or a WHERE | exact | a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact | numeric(p, s) with p ≤ 38 |
 | `numeric-array` | an unconstrained numeric[] column | exact elements | double precision elements (15 digits), said in the log | numeric(p, s)[] |
 | `numeric-parameter` | a numeric parameter ($1) compared in a WHERE | exact | a double (exact to 15 digits) | a literal |
-| `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53100 past half of what is free on the disk (or MASON_SPILL_LIMIT), so the sync keeps room to write | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
+| `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
 ## What is verified (996)

@@ -177,7 +177,7 @@ names the tables the server syncs, and its url: names the variable that holds th
    was about a fifth of its tables in Postgres (10.1 GiB to 1.8 GiB, on a 15 GiB machine); mason status says yours.
    To set it, MASON_DUCKDB_MEMORY=4GB with the container's limit about twice that. A statement past it fails alone
    (53200) and the run goes on; a value near the container's limit is an OOM kill. What spills past memory takes at most
-   half of what is free on the disk (MASON_SPILL_LIMIT sets it); a statement past that fails alone (53100).
+   half of what is free on the disk (MASON_SPILL_LIMIT sets it); a statement past that fails alone (53400).
    CPU: memory first, then cores. The benchmark's machine (4 vCPU Graviton3, 15 GiB) answered 32 clients at 10 M rows,
    12 statements a second at a p95 of 3.5 s, as many a second as at 8 clients: more clients waited longer. A first sync's
    readers take about a core each while it runs (MASON_COPY_PARALLEL, default 3). The image is arm64 (the measured

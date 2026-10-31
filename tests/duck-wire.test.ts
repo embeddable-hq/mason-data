@@ -104,6 +104,8 @@ const DDL = [
   "CREATE TABLE public.late (id INTEGER PRIMARY KEY, j JSON, k INTEGER, c INTEGER)",
   "INSERT INTO public.late SELECT range::INTEGER, json_object('n', CASE WHEN range = 2000 THEN 'x' ELSE range::VARCHAR END), (2000 - range)::INTEGER, (range % 50)::INTEGER FROM range(1, 2001)",
   "CREATE TABLE public.late_c (id INTEGER PRIMARY KEY, name VARCHAR)",
+  'CREATE TABLE public.rowid_cased (id INTEGER PRIMARY KEY, "RowId" INTEGER)',
+  'INSERT INTO public.rowid_cased SELECT range::INTEGER, 5 FROM range(1, 7)',
   "INSERT INTO public.late_c SELECT range::INTEGER, 'c' || range FROM range(50)",
   "CREATE TABLE public.jdocs (id INTEGER PRIMARY KEY, b JSON, j JSON)",
   jdocsInsert(jsonbText),
@@ -150,6 +152,8 @@ const PG_DDL = [
   "CREATE TABLE public.late (id integer PRIMARY KEY, j jsonb, k integer, c integer)",
   "INSERT INTO public.late SELECT g, jsonb_build_object('n', CASE WHEN g = 2000 THEN 'x' ELSE g::text END), 2000 - g, g % 50 FROM generate_series(1, 2000) g",
   "CREATE TABLE public.late_c (id integer PRIMARY KEY, name text)",
+  'CREATE TABLE public.rowid_cased (id integer PRIMARY KEY, "RowId" integer)',
+  'INSERT INTO public.rowid_cased SELECT g, 5 FROM generate_series(1, 6) g',
   "INSERT INTO public.late_c SELECT g, 'c' || g FROM generate_series(0, 49) g",
   "CREATE TABLE public.jdocs (id integer PRIMARY KEY, b jsonb, j json)",
   jdocsInsert((doc) => doc),
@@ -199,6 +203,7 @@ const schema: PgSchema = {
     { name: "late", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }, { name: "k", type: "int4" }, { name: "c", type: "int4" }] },
     { name: "late_c", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "name", type: "text" }] },
+    { name: "rowid_cased", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "RowId", type: "int4" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
@@ -343,7 +348,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -874,7 +879,12 @@ test("what statements may spill is half of what is free, followed as the disk fi
   const { spillCeiling } = await import("../src/duck/store.ts");
   const GiB = 2 ** 30;
   assert.equal(spillCeiling(20 * GiB, 0, null), 10 * GiB, "half of what is free");
-  assert.equal(spillCeiling(10 * GiB, 4 * GiB, null), 9 * GiB, "what is spilled is not taken from the half: it is on the disk already");
+  assert.equal(spillCeiling(10 * GiB, 4 * GiB, null), 7 * GiB, "half of the room: the free bytes exclude what is spilled");
+  // a sort that keeps spilling, read again and again, stays at half of the room it started with, never the whole disk
+  let spilled = 0;
+  for (let i = 0; i < 40; i++) spilled = Math.min(spillCeiling(23 * GiB - spilled, spilled, null), spilled + GiB);
+  assert.equal(spilled, 11.5 * GiB);
+  assert.equal(spillCeiling(10 * GiB, 10 * GiB, 40 * GiB), 18 * GiB, "the operator's amount, never past 90% of the room");
   assert.equal(spillCeiling(20 * GiB, 0, 4 * GiB), 4 * GiB, "the operator's amount");
   assert.equal(spillCeiling(20 * GiB, 0, 40 * GiB), 18 * GiB, "the operator's amount, never past 90% of what is free");
   assert.equal(spillCeiling(0, 0, null), 2 ** 20, "a full disk: a ceiling all the same, DuckDB reads none as its default");
@@ -893,6 +903,19 @@ test("what statements may spill is half of what is free, followed as the disk fi
     await own.keepSpillCeiling();
     assert.equal(own.spillLimitBytes, GiB);
     assert.deepEqual(lines.filter((l) => /ceiling/.test(l)), []);
+    // a connection that failed is said, and asked for again, never kept as the answer
+    const fresh = await DuckStore.open(path.join(dir, "spill-lane.db"), (l) => lines.push(l), { memoryLimit: "64MiB", diskFree: () => free });
+    try {
+      const executor = (fresh as unknown as { executor: { connect(): Promise<unknown> } }).executor;
+      const connect = executor.connect.bind(executor);
+      executor.connect = () => Promise.reject(new Error("no connection"));
+      free = 4 * GiB;
+      await fresh.keepSpillCeiling();
+      assert.ok(lines.some((l) => /ceiling was not moved: no connection/.test(l)));
+      executor.connect = connect;
+      await fresh.keepSpillCeiling();
+      assert.equal(fresh.spillLimitBytes, 2 * GiB);
+    } finally { await fresh.close(); }
   } finally { await own.close(); }
   await own.keepSpillCeiling();   // closed: nothing to move, and no failure
   const set = await DuckStore.open(path.join(dir, "spill-set.db"), () => undefined, { memoryLimit: "64MiB", spillLimit: "1GiB", diskFree: () => 8 * GiB });
@@ -900,22 +923,26 @@ test("what statements may spill is half of what is free, followed as the disk fi
   await assert.rejects(DuckStore.open(path.join(dir, "bad-spill.db"), () => undefined, { spillLimit: "lots" }), /MASON_SPILL_LIMIT="lots" is not an amount of disk: write it as 40GB or 512MiB/);
 });
 
-test("no room to spill is 53100 with the way out, naming no engine and no path", () => {
-  for (const [text, message] of [
-    ["Out of Memory Error: failed to offload data block of size 256.0 KiB (95.1 MiB/95.3 MiB used).\nThis limit was set by the 'max_temp_directory_size' setting.", /more room on disk than statements may take/],
-    ['IO Error: Could not write file "/data/.mason/duck.db.tmp/duckdb_temp_1.tmp": No space left on device', /No space left on device/],
+test("past what may spill is 53400 and a full disk 53100, each with the way out, naming no engine and no path", () => {
+  for (const [text, code, message] of [
+    ["Out of Memory Error: failed to offload data block of size 256.0 KiB (95.1 MiB/95.3 MiB used).\nThis limit was set by the 'max_temp_directory_size' setting.", "53400", /more room on disk than statements may take/],
+    ['IO Error: Could not write file "/data/.mason/duck.db.tmp/duckdb_temp_1.tmp": No space left on device', "53100", /No space left on device/],
   ] as const) {
     const e = pgErrorOf(new Error(text), "SELECT 1");
-    assert.equal(e.fields.code, "53100");
+    assert.equal(e.fields.code, code);
     assert.equal(e.gap, "spill-limit");
     assert.match(e.fields.message, message);
     assert.match(e.fields.hint ?? "", /MASON_SPILL_LIMIT/);
     assert.doesNotMatch(JSON.stringify(e.fields), /duckdb|duck\.db|max_temp|\/data|the engine/i);
   }
   assert.equal(pgErrorOf(new Error("Out of Memory Error: could not allocate block of size 256 KiB"), "SELECT 1").fields.code, "53200", "memory stays memory");
+  // a statement's literal holding the engine's words is that statement's error
+  assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'max_temp_directory_size' to INT32"), "SELECT 1").fields.code, "22P02");
+  assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'This limit was set by the 'max_temp_directory_size' setting' to INT32"), "SELECT 1").fields.code, "22P02");
+  assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'No space left on device' to INT32"), "SELECT 1").fields.code, "22P02");
 });
 
-test("a statement past what may spill fails alone, 53100, and the session goes on", async () => {
+test("a statement past what may spill fails alone, 53400, and the session goes on", async () => {
   const memory = String((await store.writer.runAndReadAll("SELECT current_setting('memory_limit')")).getRows()[0]![0]);
   const spill = String((await store.writer.runAndReadAll("SELECT current_setting('max_temp_directory_size')")).getRows()[0]![0]);
   const c = await client();
@@ -923,7 +950,7 @@ test("a statement past what may spill fails alone, 53100, and the session goes o
     await store.writer.run("SET memory_limit = '40MB'");
     await store.writer.run("SET GLOBAL max_temp_directory_size = '2MiB'");
     await assert.rejects(c.query("SELECT v || repeat('x', 300) AS w FROM big ORDER BY w DESC"),
-      (e: pg.DatabaseError) => e.code === "53100" && /room on disk/.test(e.message) && /MASON_SPILL_LIMIT/.test(e.hint ?? "") && !/duckdb|\.tmp/i.test(`${e.message} ${e.detail ?? ""}`));
+      (e: pg.DatabaseError) => e.code === "53400" && /room on disk/.test(e.message) && /MASON_SPILL_LIMIT/.test(e.hint ?? "") && !/duckdb|\.tmp/i.test(`${e.message} ${e.detail ?? ""}`));
   } finally {
     await store.writer.run(`SET memory_limit = '${memory.replace(" ", "")}'`);
     await store.writer.run(`SET GLOBAL max_temp_directory_size = '${spill.replace(" ", "")}'`);
@@ -2130,7 +2157,7 @@ test("a top N over joined tables chooses its rows by row number and reads the co
   try {
     const answered = ["SELECT l.*, c.* FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.id DESC LIMIT 4",
       "SELECT * FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.k, l.id LIMIT 3 OFFSET 2",
-      "SELECT l.id AS key, *, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000 ORDER BY key LIMIT 2",
+      "SELECT l.id AS key, *, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000 ORDER BY l.id LIMIT 2",
       "SELECT l.j, c.name FROM late_c c LEFT JOIN late l ON l.c = c.id AND l.id < 3 ORDER BY c.id, l.id NULLS FIRST LIMIT 5",
       "SELECT x.id, y.id, y.j FROM late x JOIN late y ON y.id = x.id + 1 ORDER BY x.id DESC LIMIT 2",
       "SELECT l.id, c.name FROM late l, late_c c WHERE c.id = l.c ORDER BY l.id DESC LIMIT 2 OFFSET 100000"];
@@ -2147,12 +2174,19 @@ test("a top N over joined tables chooses its rows by row number and reads the co
     for (const sql of ["SELECT l.id, c.name FROM late l JOIN (SELECT * FROM late_c) c ON c.id = l.c ORDER BY l.id LIMIT 2",
       "WITH w AS (SELECT * FROM late_c) SELECT l.id, w.name FROM late l JOIN w ON w.id = l.c ORDER BY l.id LIMIT 2",
       "SELECT l.id, name FROM late l JOIN late_c USING (id) ORDER BY l.id LIMIT 2",
+      // a column number or a bare name beside a *: an output, numbered after the * is expanded
+      "SELECT l.*, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3, 1 LIMIT 3",
+      "SELECT l.*, c.* FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3 DESC, 1 LIMIT 3",
+      "SELECT *, l.id FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 DESC LIMIT 3",
+      "SELECT *, l.k AS last FROM late l JOIN late_c c ON c.id = l.c ORDER BY 7, 1 LIMIT 3",
+      "SELECT l.*, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY name DESC, k LIMIT 3",
+      'SELECT r.id, r."RowId", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.id DESC LIMIT 2',
       "SELECT l.id * 2 AS d, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY d LIMIT 2",
       "SELECT l.id FROM late l ORDER BY l.id LIMIT 2",
       "SELECT DISTINCT l.c, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 LIMIT 2",
       "SELECT l.c, count(*) FROM late l JOIN late_c c ON c.id = l.c GROUP BY 1 ORDER BY 1 LIMIT 2",
       "SELECT l.id, row_number() OVER (ORDER BY l.id) FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 LIMIT 2"]) {
-      assert.doesNotMatch(await sent(sql), /rowid/, sql);
+      assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
       assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
     }
     // TIES: l.c repeats. Which tied rows are kept is defined by no one, but they are rows of the top keys, whole

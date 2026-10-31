@@ -175,6 +175,7 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "CREATE TABLE public.top_c (id int PRIMARY KEY, b_id int, doc json, label text); " +
   "INSERT INTO public.top_c SELECT g, g % 7 + 1, json_build_object('n', g, 'wide', repeat('d', 200)), CASE WHEN g % 5 = 0 THEN NULL ELSE 'l' || g % 3 END FROM generate_series(1, 40) g;" +
   "CREATE TABLE public.top_r (id int PRIMARY KEY, rowid int, a_id int); INSERT INTO public.top_r VALUES (1, 70, 1), (2, 60, 2), (3, 50, 2);" +
+  "CREATE TABLE public.top_rc (id int PRIMARY KEY, \"RowId\" int, a_id int); INSERT INTO public.top_rc SELECT g, 5, g % 3 + 1 FROM generate_series(1, 6) g;" +
   "CREATE VIEW public.top_v AS SELECT b.id, b.a_id, b.payload FROM public.top_b b WHERE b.id < 20;" +
   // JSONB IN POSTGRES'S ORDER (JORDER above), beside a json of the same text, which has no order at all
   `CREATE TABLE public.jorder (id int PRIMARY KEY, j jsonb, js json); INSERT INTO public.jorder VALUES ${JORDER.map((v, i) => `(${i + 1}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
@@ -754,6 +755,12 @@ function* matrix(): Generator<Matrixed> {
   yield q("top N over joins: a view among the tables stays as it was", "SELECT a.id, a.note, v.id, v.payload FROM top_a a JOIN top_v v ON a.id = v.a_id ORDER BY v.id DESC LIMIT 5");
   yield q("top N over joins: a derived table and a WITH query stay as they were", "WITH w AS (SELECT * FROM top_b WHERE id > 5) SELECT a.note, w.payload, s.doc FROM top_a a JOIN w ON a.id = w.a_id JOIN (SELECT * FROM top_c) s ON s.b_id = w.id ORDER BY w.id, s.id LIMIT 5");
   yield q("top N over joins: a table of a column named rowid stays as it was", "SELECT r.*, a.note FROM top_r r JOIN top_a a ON a.id = r.a_id ORDER BY r.rowid DESC LIMIT 2");
+  yield q("top N over joins: a column named rowid in another case stays as it was", "SELECT r.id, r.\"RowId\", a.note FROM top_rc r JOIN top_a a ON a.id = r.a_id ORDER BY r.id DESC LIMIT 2");
+  yield q("top N over joins: a *, sorted by a column number", "SELECT a.*, b.seen FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 2, 1, b.id LIMIT 5");
+  yield q("top N over joins: a * first, sorted by its first column", "SELECT *, a.id FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 1 DESC, 6 LIMIT 5");
+  yield q("top N over joins: two *, sorted by numbers", "SELECT a.*, b.* FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 2, 1, 6 LIMIT 5");
+  yield q("top N over joins: a number past the *'s first table", "SELECT *, a.id FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 7, 1, 6 LIMIT 5");
+  yield q("top N over joins: a *'s number output sorted by its name", "SELECT a.id, b.* FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY amount DESC, 1, b.id LIMIT 5");
   yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
   yield q("top N over joins: NATURAL and USING stay as they were", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
   yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);

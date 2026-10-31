@@ -104,18 +104,20 @@ export const DEFAULT_MEMORY_LIMIT = defaultMemoryLimit(machineMemoryBytes());
 /**
  * WHAT STATEMENTS MAY SPILL (issue 105: a 100-row preview's sort took every free byte of a volume, and the sync's room
  * with it). DuckDB's default ceiling is "90% of available disk space", and what it answered when the disk ran out first
- * was `XX000` with a path. Here the ceiling is what is spilled now plus HALF of what is free where the copy is, so the
- * sync's writes keep the other half whatever statements do, and it follows the disk (`DuckStore.keepSpillCeiling`,
- * every `SPILL_REFRESH_MS`): a copy that grows narrows it. `MASON_SPILL_LIMIT` sets the amount instead, never past 90%
- * of what is free. Spilled files are shared by the statements running, so two at once share the ceiling. Past it the
- * statement that needed the room fails alone, 53100 with the way out (pgErrorOf), and its files are gone with it.
- * A sizing decision reads `store.spillLimitBytes`, as it reads `store.memoryLimitBytes`.
+ * was `XX000` with a path. Here the ceiling is HALF of the room statements have, what is free where the copy is and what
+ * they have spilled there (the disk's free bytes exclude the spill, so a ceiling of the free bytes alone would grow with
+ * each read as the spill grows, and end near the whole disk). The sync's writes keep the other half whatever statements
+ * do, and it follows the disk (`DuckStore.keepSpillCeiling`, every `SPILL_REFRESH_MS`): a copy that grows narrows it.
+ * `MASON_SPILL_LIMIT` sets the amount instead, never past 90% of that room. Spilled files are shared by the statements
+ * running, so two at once share the ceiling. Past it the statement that needed the room fails alone, 53400 as past
+ * Postgres's temp_file_limit, with the way out (pgErrorOf), and its files are gone with it; a disk that is really full
+ * is 53100. A sizing decision reads `store.spillLimitBytes`, as it reads `store.memoryLimitBytes`.
  */
 const SPILL_FREE_SHARE = 0.5, SPILL_FREE_MOST = 0.9;
 const SPILL_REFRESH_MS = 15_000;
 export function spillCeiling(freeBytes: number, spilledBytes: number, setBytes: number | null): number {
-  const most = spilledBytes + freeBytes * SPILL_FREE_MOST;
-  return Math.max(2 ** 20, Math.floor(setBytes === null ? spilledBytes + freeBytes * SPILL_FREE_SHARE : Math.min(setBytes, most)));
+  const room = freeBytes + spilledBytes;
+  return Math.max(2 ** 20, Math.floor(setBytes === null ? room * SPILL_FREE_SHARE : Math.min(setBytes, room * SPILL_FREE_MOST)));
 }
 /** the bytes free where `dir` is: the one reading of it (the sync's disk check, the spill's ceiling) */
 export function freeBytesAt(dir: string): number { const st = fs.statfsSync(dir); return st.bavail * st.bsize; }
@@ -233,7 +235,10 @@ export class DuckStore {
     return this.spillKept;
   }
   private async spillTurn(): Promise<void> {
-    const c = await (this.spillLane ??= this.executor.connect());
+    let c: DuckConnection;
+    // a connection that failed is asked for again next turn, never kept as the answer
+    try { c = await (this.spillLane ??= this.executor.connect()); }
+    catch (e) { this.spillLane = null; throw e; }
     const spilled = Number((await c.runAndReadAll("SELECT coalesce(sum(size), 0) FROM duckdb_temporary_files()")).getRowsJS()[0]![0]);
     const next = spillCeiling(this.diskFree(path.dirname(path.resolve(this.file))), spilled, this.spillSet);
     if (Math.abs(next - this.spillLimitBytes) < this.spillLimitBytes * 0.01) return;
@@ -339,9 +344,10 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   const message = full.replace(/^[A-Za-z ]+ Error: /, "").replace(/\n\n?LINE \d+:[\s\S]*$/, "").trim();
   // NO ROOM TO SPILL (issue 105): the ceiling, or the disk itself before it. Postgres's class for a full disk, in
   // Mason's words: the engine's text names a path and a setting no client of Mason has, so it stays out of the answer
-  const ceiling = /max_temp_directory_size/.test(full);
-  if (ceiling || /No space left on device/.test(full)) {
-    return new StatementError({ code: "53100", message: ceiling ? "could not write to temporary file: this statement needs more room on disk than statements may take"
+  // Read by the engine's own kind and sentence: a statement's literal may hold the same words in any other error
+  const ceiling = kind === "Out of Memory" && /This limit was set by the 'max_temp_directory_size' setting/.test(full);
+  if (ceiling || (kind === "IO" && /No space left on device/.test(full))) {
+    return new StatementError({ code: ceiling ? "53400" : "53100", message: ceiling ? "could not write to temporary file: this statement needs more room on disk than statements may take"
       : "could not write to temporary file: No space left on device",
     hint: "ask for less at once (a filter, a LIMIT, fewer or narrower columns, a coarser GROUP BY), free disk where the synced data is, or raise MASON_SPILL_LIMIT (40GB; by default half of what is free) and start mason again; nothing else stopped" }, sql, "spill-limit");
   }

@@ -97,7 +97,7 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
     late materialization stops at a join, so the join and the top N are run on each table's `rowid` and the sort keys, and
     the list is read from a LEFT JOIN of each table it reads on that `rowid`, the keys sorted again outside. Only where
     every FROM item is a copied table (a `rowid` exists of nothing else, so a derived table, a view, a WITH query and a
-    role's filtered read stay as they were), joined on conditions, none with a column named `rowid`, and never over a
+    role's filtered read stay as they were), joined on conditions, none with a column named `rowid` in any case, and never over a
     whole row; a `*` is written out from the analysis, because a copy's view of its visible columns has no `rowid`. Same
     rows; equal keys are in no defined order. ("A top N over joined tables");
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
@@ -448,10 +448,10 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
   conservative; on a laptop a large copy and a BI query starve each other. What cannot spill fails ITS statement with
   53200 and a hint naming the variable; the run goes on.
 - **What statements spill has a ceiling under the free disk, and it follows the disk** (`spillCeiling`, `keepSpillCeiling`,
-  `src/duck/store.ts`, issue 105): what is spilled now plus half of what is free, or `MASON_SPILL_LIMIT`, never past 90% of
-  what is free; re-read every 15 s. DuckDB's own is 90% of what was free at its first spill, read once (measured on a
-  small volume: a disk that fills after that ends in its IO error). Past it, or on a full disk, the statement fails alone:
-  53100, no path and no engine in the answer, gap `spill-limit` on its request-log row. A sizing decision reads
+  `src/duck/store.ts`, issue 105): half of what is free plus what is spilled (the free bytes exclude the spill: half of the
+  free bytes on top of it converges on the whole disk), or `MASON_SPILL_LIMIT`, never past 90% of that; re-read every 15 s. DuckDB's own is 90% of what was free at its first spill, read once (measured on a
+  small volume: a disk that fills after that ends in its IO error). Past it (53400, as past Postgres's temp_file_limit) or on a full disk (53100) the statement fails alone:
+  no path and no engine in the answer, gap `spill-limit` on its request-log row. A sizing decision reads
   `store.spillLimitBytes`. ("A top N over joined tables")
 - **A sizing decision reads `store.memoryLimitBytes`**, never `os.totalmem()` or a constant: the operator may have set
   the limit. (The copy needs none since it has no sort, "The copy"; its chunks are sized in pages, by time.)
