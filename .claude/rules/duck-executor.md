@@ -1,5 +1,7 @@
 ---
 paths:
+  - "src/cli/mason.cjs"
+  - "src/cli/pool-size.cjs"
   - "src/duck/cancel.ts"
   - "src/duck/executor-worker.ts"
   - "src/duck/executor.ts"
@@ -84,8 +86,14 @@ paths:
   a column its turn on the finished tree; SQL written by hand with a per-row call does the same (`keptValueSql`,
   `orderKeySql`, src/duck/kept.ts). DETECTOR: `tests/duck-executor-starve.test.ts` counts small statements answered
   beside each heavy shape, `tests/duck-functions.test.ts` holds which argument the turn takes. RESPONSE: the loop turns
-  every few calls. What it does not cover: a statement in flight holds a libuv thread, and at four of them a fifth waits
-  (issue 88). ("The turn")
+  every few calls. ("The turn")
+- **Libuv's pool is sized before anything uses it, by the entry, in one file** (issue 88: a statement in flight holds a
+  libuv thread, and at Node's four a fifth waited 13 to 30 s; the pool is read once, at its first task, and Node 22 has
+  started it before an ES entry's first line). `src/cli/pool-size.cjs` sets it, `src/cli/mason.cjs` loads that before
+  the command, and a new way of starting Mason starts THAT file. An operator's `UV_THREADPOOL_SIZE` is respected.
+  DETECTOR: `tests/cli-pool-size.test.ts` (a real pool counted, every entry named), `tests/integration/duck-pool.itest.ts`
+  (a real run's threads). RESPONSE: a start around the entry fails them. Past the pool's size a statement still waits:
+  nothing admits a fixed number of statements. ("The pool")
 - **Nothing ends the worker's JavaScript while DuckDB has work in flight on it** (a test file under load aborted at
   exit, `libc++abi: … Napi::Error`: its close outlasted the grace and the executor terminated the worker under a
   Mason function call; a 1 ms grace reproduced it 6 times in 6). A worker given up on (the grace, the silence) is asked

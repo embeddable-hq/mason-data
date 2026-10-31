@@ -7,7 +7,7 @@
   "repository": { "type": "git", "url": "git+https://github.com/embeddable-hq/mason-data.git", "directory": "cli" },
   "license": "Apache-2.0",
   "type": "module",
-  "bin": { "mason": "dist/src/cli/main.js" },
+  "bin": { "mason": "dist/src/cli/mason.cjs" },
   "files": ["dist", "README.md", "LICENSE"],
   "engines": { "node": ">=22.13" },
   "scripts": {

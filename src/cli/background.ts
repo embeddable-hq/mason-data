@@ -32,7 +32,7 @@ import { out as styleOut, stepRenderer } from "./style.ts";
 import { postgresLink, withoutPlaceholders, type PostgresLink } from "./pg-url.ts";
 
 const say = (m: string): void => { process.stdout.write(`${m}\n`); };
-const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "main.ts");
+const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "mason.cjs");
 const SUPERVISE = path.join(path.dirname(fileURLToPath(import.meta.url)), "supervise.ts");
 
 /** The commands to run next, as `mason start` prints them once the run is up: one a line, what each does beside it

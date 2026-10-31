@@ -89,6 +89,8 @@ export const SERVE: CommandSpec = {
     MASON_STORE_JSON_PATHS  on (the default) stores the JSON paths statements keep reading as columns; off stores none
     MASON_COPY_PARALLEL     a first sync's chunks read at once, each a backend on the database (1 to 8, default 3)
     MASON_COPY_CHUNK_SECONDS   how long each chunk takes to read, at the rate measured (1 to 300, default 12)
+    UV_THREADPOOL_SIZE      threads for running statements, one each (default 64; lower it where a platform limits
+                            threads: Node exits with no message when it cannot start them)
 
   --json   a refusal to start as data: { error, next }; once it serves, its output is its log
 

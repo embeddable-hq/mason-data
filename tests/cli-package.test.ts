@@ -21,7 +21,7 @@ const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "cli", "package.json"), "
 
 test("the package: `mason`, built from src/cli/main.ts, Apache-2.0, with the dependencies the service imports", () => {
   assert.equal(pkg.name, "@mason-data/cli");
-  assert.deepEqual(pkg.bin, { mason: "dist/src/cli/main.js" });
+  assert.deepEqual(pkg.bin, { mason: "dist/src/cli/mason.cjs" });
   assert.ok(fs.existsSync(path.join(ROOT, "src", "cli", "main.ts")));
   assert.match(fs.readFileSync(path.join(ROOT, "src", "cli", "main.ts"), "utf8"), /^#!\/usr\/bin\/env node\n/);
   assert.equal(pkg.license, "Apache-2.0");
