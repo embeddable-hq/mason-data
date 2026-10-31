@@ -17,7 +17,7 @@ story behind each rule is in docs/DESIGN.md, under the section it names. -->
 A Postgres wire-protocol listener in the `mason start` process (BI tools connect to Mason as to a read replica). A
 tool sends the SQL it sends Postgres and reads the answer as Postgres's, so every rule here is a way a wire answer could
 differ from Postgres — the engine's own rules (what is answered, what is refused, the allowlist) are
-`.claude/rules/duckdb.md`.
+`.claude/rules/duck-rewrite.md`.
 
 - **What this module owns is the SESSION** (`server.ts`): the handshake, the password, the parameters a tool sets,
   the prepared statements and portals, the catalog Postgres beside it, and the bytes of every answer (`encode.ts`). A
@@ -175,7 +175,7 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   that carries statistics through `try` fails the SELECT test, and the wall's form changes. Nothing new
   may print the engine's plan or scanned tables for a plan with `rowFilters`.
 - **Every statement answered and every refusal is a row of the request log** (`recordRequest` → `RequestLedger`,
-  src/duck/requests.ts; `.claude/rules/duckdb.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
+  src/duck/requests.ts; `.claude/rules/duck-request-log.md` "The request log"): SQLSTATE, message, DETAIL, HINT, rows, session,
   `application_name`, a token's NAME (never the token) or the user's name, and the registry entry that refused it
   (`gap`, from `PgError.gap`: the error's own field, never the text the client was sent). A refused statement is recorded in
   `Session.refuse` alone, the one sender of a statement's ErrorResponse, so no refusal can go unrecorded.

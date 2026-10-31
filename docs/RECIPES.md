@@ -85,7 +85,7 @@ removed. `tests/web-page.test.ts` if the page shows it.
 
 ## Add a rewrite rule
 
-Read `.claude/rules/duckdb.md` "A statement" and "What is not supported". The map is `docs/FLOWS.md` "The plan". Copy
+Read `.claude/rules/duck-rewrite.md` "A statement" and "What is not supported". The map is `docs/FLOWS.md` "The plan". Copy
 `truncInstant` for a form computed natively, `textMinMax` for a function with collation, `regexpMatch` for a function
 whose forms are refused by name.
 
@@ -110,7 +110,7 @@ whose forms are refused by name.
 `IT_ORACLE_ONLY`; run the full oracle once. `tests/integration/oracle/shapes.ts` asks each statement again as a subquery, a
 CTE, a UNION, with parameters, by name and ordered, so those need no statement of their own.
 
-**The shapes the brief must name** are `.claude/rules/duckdb.md`'s, under "A statement": "in the shapes a BI tool sends".
+**The shapes the brief must name** are `.claude/rules/duck-rewrite.md`'s, under "A statement": "in the shapes a BI tool sends".
 
 **Reviews caught:**
 - A strict function not strict: `date_trunc` with a NULL zone answered the instant (d95fda6).
