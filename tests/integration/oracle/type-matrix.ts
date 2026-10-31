@@ -176,6 +176,9 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "INSERT INTO public.top_c SELECT g, g % 7 + 1, json_build_object('n', g, 'wide', repeat('d', 200)), CASE WHEN g % 5 = 0 THEN NULL ELSE 'l' || g % 3 END FROM generate_series(1, 40) g;" +
   "CREATE TABLE public.top_r (id int PRIMARY KEY, rowid int, a_id int); INSERT INTO public.top_r VALUES (1, 70, 1), (2, 60, 2), (3, 50, 2);" +
   "CREATE TABLE public.top_rc (id int PRIMARY KEY, \"RowId\" int, a_id int); INSERT INTO public.top_rc SELECT g, 5, g % 3 + 1 FROM generate_series(1, 6) g;" +
+  // no primary key: the copy is keyed by a UNIQUE over NOT NULL columns, as a sources file's `key:` keys it, and the
+  // catalog declares no key (oracle's `added`; src/cli/sources.ts addedTables)
+  "CREATE TABLE public.top_n (a int NOT NULL, b int NOT NULL, note text, UNIQUE (a, b)); INSERT INTO public.top_n SELECT g % 3 + 1, g % 2, 'n' || g FROM generate_series(1, 6) g;" +
   "CREATE VIEW public.top_v AS SELECT b.id, b.a_id, b.payload FROM public.top_b b WHERE b.id < 20;" +
   // A SORT THROUGH A `*` (issue 112): text a collation orders otherwise than bytes, a citext and a char(n) likewise, a
   // jsonb; star_b for a join's own columns of the same names

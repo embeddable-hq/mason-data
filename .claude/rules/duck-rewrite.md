@@ -108,9 +108,15 @@ paths:
     every FROM item is a copied table (a `rowid` exists of nothing else, so a derived table, a view, a WITH query and a
     role's filtered read stay as they were), joined on conditions, none with a column named `rowid` in any case, and never over a
     whole row; a `*` is written out from the analysis, because a copy's view of its visible columns has no `rowid`. Same
-    rows; equal keys are in no defined order. A LIMIT with no ORDER BY takes the same path, sorted by the row numbers of the
-    tables read: a parallel join's rows change order each run, and an unsorted LIMIT's pages overlapped. OFFSET alone and
-    LIMIT ALL stay as they were, and `afterLimit` still needs a sort. ("A top N over joined tables");
+    rows; equal keys are in no defined order. A LIMIT with no ORDER BY takes the same path: sorted by the row numbers of the
+    tables read ONLY where `fanOutBounded` (src/duck/distinct-key.ts) proves the join bounded, from the analysis and the
+    catalog's pg_index (every join equates a whole primary key of a table its side holds once, so a key the first join
+    repeats proves nothing the second time), because a parallel join's rows change order each run and an unsorted LIMIT's
+    pages overlap, and the sort makes the LIMIT a full join (74 s against milliseconds at 100 billion joined rows); else
+    row numbers with no sort at all, which keeps the memory win and stops early, and whose pages CAN OVERLAP, as before
+    PR 118. The proof decides cost and pages, never an answer, so what it cannot show goes unsorted. OFFSET alone and
+    LIMIT ALL stay as they were, and `afterLimit` still needs a sort. `tests/duck-distinct-key.test.ts` holds the proof,
+    the plan fixture and `tests/duck-wire.test.ts` each side, `oracle/unordered-limit.ts` the rows. ("A top N over joined tables");
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
   **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
   independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the

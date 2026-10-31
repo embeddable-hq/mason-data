@@ -9,7 +9,8 @@
  * every row of the join once. Postgres promises no such thing (its documentation warns that a LIMIT's rows follow the
  * plan), but its fixed plan does it in practice, and a tool paging a preview counts on it; Mason's rows are one list
  * by row number (src/duck/late.ts), which is what keeps a parallel join's pages from overlapping. Tables this small
- * hold the rows, not the parallelism: tests/duck-wire.test.ts holds the plan's order.
+ * hold the rows, not the parallelism: tests/duck-wire.test.ts holds the plan's order. ONLY A JOIN PROVED BOUNDED HAS
+ * `pages` (fanOutBounded, src/duck/distinct-key.ts): the rest have no sort, and their pages may overlap, as is decided.
  *
  * These are asked apart from `all()`: such a statement can verify nothing for src/duck/verified.ts, whose statements
  * are answered alike, and they may not weaken the verdict the others are held to.
@@ -26,10 +27,10 @@ export const UNORDERED_LIMITS: UnorderedLimit[] = [
   u("a LEFT join whose right side is empty of matches", "a.id, b.id AS b, b.payload", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id + 1000", "LIMIT 5"),
   u("a RIGHT join", "a.id, a.note, b.id AS b, b.payload", "FROM top_a a RIGHT JOIN top_b b ON a.id = b.a_id", "LIMIT 6 OFFSET 2", { pages: 6 }),
   u("a FULL join", "a.id, a.note, b.id AS b, b.amount", "FROM top_a a FULL JOIN top_b b ON a.id = b.a_id", "LIMIT 9", { pages: 9 }),
-  u("a FULL join with nothing matching", "a.id, b.id AS b", "FROM top_a a FULL JOIN top_b b ON a.id = b.a_id + 1000", "LIMIT 9 OFFSET 3", { pages: 9 }),
+  u("a FULL join with nothing matching", "a.id, b.id AS b", "FROM top_a a FULL JOIN top_b b ON a.id = b.a_id + 1000", "LIMIT 9 OFFSET 3"),
   u("an inner join", "a.id, b.id AS b, b.payload ->> 'k' AS k", "FROM top_a a JOIN top_b b ON a.id = b.a_id", "LIMIT 6", { pages: 6 }),
   u("a comma join", "b.id, c.id AS c, c.label", "FROM top_b b, top_c c WHERE c.b_id = b.id", "LIMIT 6"),
-  u("a cross join's pairs", "x.id, y.id AS y, x.note, y.note AS n", "FROM top_a x, top_a y", "LIMIT 9 OFFSET 4", { pages: 9 }),
+  u("a cross join's pairs", "x.id, y.id AS y, x.note, y.note AS n", "FROM top_a x, top_a y", "LIMIT 9 OFFSET 4"),
   u("a join that multiplies, one table read", "a.note", "FROM top_a a JOIN top_b b ON a.id = b.a_id", "LIMIT 11"),
   u("rows alike the join repeats", "c.label", "FROM top_c c JOIN top_b b ON c.b_id = b.id", "LIMIT 11", { pages: 11 }),
   u("a table joined to itself", "x.id, x.name, p.id AS parent, g.name AS g", "FROM top_a x LEFT JOIN top_a p ON p.id = x.parent LEFT JOIN top_a g ON g.id = p.parent", "LIMIT 4"),
@@ -47,6 +48,35 @@ export const UNORDERED_LIMITS: UnorderedLimit[] = [
   u("a view among the tables stays as it was", "a.id, v.id AS v, v.payload", "FROM top_a a JOIN top_v v ON a.id = v.a_id", "LIMIT 5"),
   u("a view alone with a table's *", "a.*, v.*", "FROM top_a a LEFT JOIN top_v v ON a.id = v.a_id", "LIMIT 5 OFFSET 2"),
   u("a table of a column named rowid stays as it was", "r.*, a.note", "FROM top_r r JOIN top_a a ON a.id = r.a_id", "LIMIT 2"),
+  // THE FAN-OUT GUARD (src/duck/distinct-key.ts fanOutBounded), held to count, rows and multiplicity on both sides.
+  // Not proved, no sort: many to many under each join kind, a table joined to itself, every column read
+  u("many to many", "x.id, y.id AS y, x.note, y.note AS n", "FROM top_b b JOIN top_b b2 ON b.a_id = b2.a_id JOIN top_a x ON x.id = b.id JOIN top_a y ON y.id = b2.id", "LIMIT 7"),
+  u("many to many, a table joined to itself", "x.id, y.id AS y, x.payload", "FROM top_b x JOIN top_b y ON x.a_id = y.a_id", "LIMIT 13 OFFSET 3"),
+  u("many to many, LEFT", "x.id, y.id AS y, y.payload", "FROM top_b x LEFT JOIN top_b y ON x.a_id = y.a_id", "LIMIT 13 OFFSET 3"),
+  u("many to many, RIGHT", "x.id, y.id AS y, x.payload", "FROM top_b x RIGHT JOIN top_b y ON x.a_id = y.a_id", "LIMIT 13 OFFSET 3"),
+  u("many to many, FULL", "x.id, y.id AS y, x.amount", "FROM top_b x FULL JOIN top_b y ON x.a_id = y.a_id", "LIMIT 13 OFFSET 3"),
+  u("many to many, a row repeated", "x.a_id", "FROM top_b x JOIN top_b y ON x.a_id = y.a_id", "LIMIT 40"),
+  u("many to many, a * and a page past the end", "*", "FROM top_b x JOIN top_b y ON x.a_id = y.a_id", "LIMIT 5 OFFSET 100000"),
+  u("a chasm: a key equated twice, the first join repeating it", "a.id, b.id AS b, c.id AS c", "FROM top_a a JOIN top_b b ON b.a_id = a.id JOIN top_b c ON c.a_id = a.id", "LIMIT 11"),
+  u("a chasm of LEFT joins", "a.note, b.payload, c.payload AS p", "FROM top_a a LEFT JOIN top_b b ON b.a_id = a.id LEFT JOIN top_b c ON c.a_id = a.id", "LIMIT 11 OFFSET 2"),
+  u("a composite key in part", "k.id, p.line, p.v", "FROM keyed k JOIN pairs p ON p.id = k.part", "LIMIT 5"),
+  u("a composite key in part, LEFT", "k.id, p.line, p.v", "FROM keyed k LEFT JOIN pairs p ON p.id = k.part", "LIMIT 8 OFFSET 2"),
+  u("a partial unique index that is no key", "k.id, r.id AS r, r.code", "FROM keyed k JOIN keyed r ON r.part = k.part", "LIMIT 6"),
+  u("a UNIQUE that is no key", "k.id, r.id AS r, r.code", "FROM keyed k LEFT JOIN keyed r ON r.code = k.ref", "LIMIT 6"),
+  u("a composite UNIQUE that is no key", "k.id, r.id AS r", "FROM keyed k JOIN keyed r ON r.a = k.a AND r.b = k.b", "LIMIT 6"),
+  u("a table with no primary key, copied by its key", "b.id, n.note", "FROM top_b b JOIN top_n n ON n.a = b.a_id AND n.b = b.a_id", "LIMIT 2"),
+  u("a table with no primary key, joined to itself by its key", "n.b, m.note", "FROM top_n n JOIN top_n m ON m.a = n.a AND m.b = n.b", "LIMIT 4"),
+  u("an OR in the ON", "a.id, b.id AS b, b.payload", "FROM top_a a JOIN top_b b ON a.id = b.a_id OR a.id = b.id", "LIMIT 9"),
+  u("an OR in a LEFT join's ON", "a.id, b.id AS b, b.payload", "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id OR b.id = 1", "LIMIT 9 OFFSET 2"),
+  // proved, sorted: a key on each side, a composite key whole, each outer join, pages one list
+  u("the key on the right", "b.id, a.note", "FROM top_b b JOIN top_a a ON a.id = b.a_id", "LIMIT 6", { pages: 6 }),
+  u("the key on the left of a RIGHT join", "b.id, a.note", "FROM top_a a RIGHT JOIN top_b b ON b.a_id = a.id", "LIMIT 6", { pages: 6 }),
+  u("the key of a FULL join, on the right", "b.id, a.note", "FROM top_b b FULL JOIN top_a a ON a.id = b.a_id", "LIMIT 6", { pages: 6 }),
+  u("a composite key, whole", "x.id, x.line, y.v", "FROM pairs x JOIN pairs y ON y.id = x.id AND y.line = x.line", "LIMIT 3", { pages: 3 }),
+  u("a composite key, whole, LEFT with no match", "x.id, y.line, y.v", "FROM pairs x LEFT JOIN pairs y ON y.id = x.id + 1 AND y.line = x.line", "LIMIT 3"),
+  u("a star of keys", "b.id, a.note, c.label", "FROM top_c c JOIN top_b b ON b.id = c.b_id JOIN top_a a ON a.id = b.a_id", "LIMIT 6", { pages: 6 }),
+  u("a comma join on a key", "c.id, b.payload", "FROM top_c c, top_b b WHERE b.id = c.b_id", "LIMIT 6", { pages: 6 }),
+  u("a varchar key from a text column", "k.id, v.label", "FROM keyed k LEFT JOIN vkeys v ON v.id = k.ref", "LIMIT 3", { pages: 3 }),
   u("a derived table of the join", "s.id, s.b", "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id LIMIT 3) s", "LIMIT 2", { whole: "FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON a.id = b.a_id) s" }),
 ];
 

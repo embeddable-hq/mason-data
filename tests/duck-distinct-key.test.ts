@@ -15,6 +15,7 @@ import { test, after, before } from "node:test";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import type { Node } from "libpg-query";
+import type { TreeNode } from "../src/duck/pgtree.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
 import type { PgSchema } from "../src/api/postgres/schema.ts";
 import { analyze, catalogRows } from "../src/duck/analyze.ts";
@@ -94,6 +95,107 @@ test("the uniqueness is the catalog's primary key alone: never a UNIQUE index th
   const plain = await analyze(catalog, "SELECT count(o.id), count(*) FROM orders o", []);
   assert.ok(!("refused" in plain));
   assert.deepEqual(distinctCountTables(plain.tree), []);
+});
+
+/** whether the statement's own query is proved bounded: the fan-out guard of a LIMIT with no ORDER BY (src/duck/late.ts) */
+async function bounded(sql: string): Promise<boolean> {
+  const { fanOutBounded, fanOutTables, primaryKeysOf, uniqueColumnsSql } = await import("../src/duck/distinct-key.ts");
+  const a = await analyze(catalog, sql, []);
+  assert.ok(!("refused" in a), `Postgres refused ${sql}: ${JSON.stringify("refused" in a ? a.refused : null)}`);
+  const relids = fanOutTables(a.tree);
+  const keys = relids.length === 0 ? new Map() : primaryKeysOf(await catalogRows(catalog, uniqueColumnsSql(relids)));
+  const query = (Array.isArray(a.tree) ? a.tree[0] : a.tree) as TreeNode;
+  assert.equal(query._node, "QUERY");
+  return fanOutBounded(query, keys);
+}
+
+test("a join's rows are bounded where every join equates a whole primary key its side holds once", async () => {
+  for (const [why, sql] of [
+    ["many to one", "SELECT 1 FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 1"],
+    ["the key on the left", "SELECT 1 FROM customers c JOIN orders o ON o.customer_id = c.id LIMIT 1"],
+    ["the operands either way round", "SELECT 1 FROM customers c JOIN orders o ON c.id = o.customer_id LIMIT 1"],
+    ["LEFT", "SELECT 1 FROM customers c LEFT JOIN orders o ON c.id = o.customer_id LIMIT 1"],
+    ["RIGHT", "SELECT 1 FROM customers c RIGHT JOIN orders o ON c.id = o.customer_id LIMIT 1"],
+    ["FULL", "SELECT 1 FROM customers c FULL JOIN orders o ON c.id = o.customer_id LIMIT 1"],
+    ["a chain down the keys", "SELECT 1 FROM tenants t JOIN customers c ON c.tenant_id = t.id JOIN orders o ON o.customer_id = c.id LIMIT 1"],
+    ["a star: each dimension's key", "SELECT 1 FROM orders o JOIN customers c ON c.id = o.customer_id JOIN tenants t ON t.id = o.tenant_id LIMIT 1"],
+    ["a join on the right of a join", "SELECT 1 FROM tenants t JOIN (customers c JOIN orders o ON o.customer_id = c.id) ON c.tenant_id = t.id LIMIT 1"],
+    ["a table joined to itself on its key", "SELECT 1 FROM orders x JOIN orders y ON y.id = x.customer_id LIMIT 1"],
+    ["a composite key, whole", "SELECT 1 FROM lines x JOIN lines y ON y.order_id = x.order_id AND y.line = x.line LIMIT 1"],
+    ["a composite key, its columns from one side's two tables", "SELECT 1 FROM orders o JOIN lines x ON x.order_id = o.id AND x.line = o.id::int JOIN lines l ON l.order_id = o.id AND l.line = x.line LIMIT 1"],
+    ["another conjunct only filters", "SELECT 1 FROM orders o JOIN customers c ON c.id = o.customer_id AND (c.email = 'x' OR o.status = 'y') LIMIT 1"],
+    ["a varchar key from a text column", "SELECT 1 FROM orders o JOIN codes k ON k.code = o.status LIMIT 1"],
+    ["a comma join on the WHERE", "SELECT 1 FROM orders o, customers c WHERE c.id = o.customer_id LIMIT 1"],
+    ["three by commas", "SELECT 1 FROM orders o, customers c, tenants t WHERE c.id = o.customer_id AND t.id = o.tenant_id AND o.status = 'x' LIMIT 1"],
+  ] as const) assert.equal(await bounded(sql), true, `${why}: ${sql}`);
+});
+
+test("what the proof cannot show falls to the safe side, whatever the join's rows in fact are", async () => {
+  for (const [why, sql] of [
+    ["many to many", "SELECT 1 FROM orders a JOIN orders b ON a.tenant_id = b.tenant_id LIMIT 1"],
+    ["many to many, LEFT", "SELECT 1 FROM orders a LEFT JOIN customers c ON c.tenant_id = a.tenant_id LIMIT 1"],
+    ["many to many, RIGHT", "SELECT 1 FROM orders a RIGHT JOIN customers c ON c.tenant_id = a.tenant_id LIMIT 1"],
+    ["many to many, FULL", "SELECT 1 FROM orders a FULL JOIN customers c ON c.tenant_id = a.tenant_id LIMIT 1"],
+    ["a cross join", "SELECT 1 FROM orders a CROSS JOIN customers c LIMIT 1"],
+    ["ON TRUE", "SELECT 1 FROM orders a JOIN customers c ON true LIMIT 1"],
+    ["a comma with no condition", "SELECT 1 FROM orders a, customers c LIMIT 1"],
+    // A KEY EQUATED TWICE IS NOT A KEY THE SECOND TIME: the first join repeats its table, a chasm between two fact tables
+    ["a chasm", "SELECT 1 FROM customers c JOIN orders a ON a.customer_id = c.id JOIN orders b ON b.customer_id = c.id LIMIT 1"],
+    ["a chasm, LEFT", "SELECT 1 FROM customers c LEFT JOIN orders a ON a.customer_id = c.id LEFT JOIN orders b ON b.customer_id = c.id LIMIT 1"],
+    ["a chasm by commas", "SELECT 1 FROM customers c, orders a, orders b WHERE a.customer_id = c.id AND b.customer_id = c.id LIMIT 1"],
+    ["a composite key in part", "SELECT 1 FROM orders o JOIN lines l ON l.order_id = o.customer_id LIMIT 1"],
+    ["a composite key's other part", "SELECT 1 FROM orders o JOIN lines l ON l.line = o.customer_id LIMIT 1"],
+    ["a composite key's second part from its own table", "SELECT 1 FROM orders o JOIN lines l ON l.order_id = o.customer_id AND l.line = l.line LIMIT 1"],
+    ["a UNIQUE index that is not the key", "SELECT 1 FROM orders o JOIN customers c ON c.email = o.status LIMIT 1"],
+    ["no primary key: a key: entry's columns", "SELECT 1 FROM orders o JOIN events e ON e.tenant_id = o.tenant_id AND e.id = o.customer_id LIMIT 1"],
+    ["an OR in the ON", "SELECT 1 FROM orders o JOIN customers c ON c.id = o.customer_id OR c.id = o.id LIMIT 1"],
+    ["an OR of the key and a constant", "SELECT 1 FROM orders o LEFT JOIN customers c ON c.id = o.customer_id OR o.status = 'x' LIMIT 1"],
+    ["a NOT", "SELECT 1 FROM orders o JOIN customers c ON NOT (c.id <> o.customer_id) LIMIT 1"],
+    ["IS NOT DISTINCT FROM", "SELECT 1 FROM orders o JOIN customers c ON c.id IS NOT DISTINCT FROM o.customer_id LIMIT 1"],
+    ["an inequality", "SELECT 1 FROM orders o JOIN customers c ON c.id < o.customer_id LIMIT 1"],
+    ["an expression", "SELECT 1 FROM orders o JOIN customers c ON c.id = o.customer_id + 1 LIMIT 1"],
+    ["the key cast", "SELECT 1 FROM orders o JOIN customers c ON c.id::text = o.status LIMIT 1"],
+    ["a constant", "SELECT 1 FROM orders o JOIN customers c ON c.id = 1 LIMIT 1"],
+    ["the key equal to its own table's column", "SELECT 1 FROM orders o JOIN customers c ON c.id = c.id LIMIT 1"],
+    ["another collation", "SELECT 1 FROM orders o JOIN tenants t ON t.id = o.tenant_id COLLATE \"C\" LIMIT 1"],
+    ["the condition in a WHERE over a cross join", "SELECT 1 FROM orders o CROSS JOIN customers c WHERE c.id = o.customer_id LIMIT 1"],
+    ["one bad join among good ones", "SELECT 1 FROM orders o JOIN customers c ON c.id = o.customer_id JOIN tenants t ON t.name = c.email LIMIT 1"],
+    ["a derived table", "SELECT 1 FROM orders o JOIN (SELECT * FROM customers) c ON c.id = o.customer_id LIMIT 1"],
+  ] as const) assert.equal(await bounded(sql), false, `${why}: ${sql}`);
+});
+
+test("the keys of a statement are read only where a LIMIT with no sort reads two tables, and whole", async () => {
+  const { fanOutTables, primaryKeysOf, uniqueColumnsSql } = await import("../src/duck/distinct-key.ts");
+  const tables = async (sql: string): Promise<number> => {
+    const a = await analyze(catalog, sql, []);
+    assert.ok(!("refused" in a));
+    return fanOutTables(a.tree).length;
+  };
+  assert.equal(await tables("SELECT 1 FROM orders a JOIN lines l ON l.order_id = a.id LIMIT 1"), 2);
+  assert.equal(await tables("SELECT 1 FROM orders a JOIN lines l ON l.order_id = a.id ORDER BY 1 LIMIT 1"), 0, "a sort reads the whole join in every form");
+  assert.equal(await tables("SELECT 1 FROM orders a JOIN lines l ON l.order_id = a.id"), 0, "no limit");
+  assert.equal(await tables("SELECT 1 FROM orders a LIMIT 1"), 0, "one table");
+  const a = await analyze(catalog, "SELECT 1 FROM orders a JOIN lines l ON l.order_id = a.id LIMIT 1", []);
+  assert.ok(!("refused" in a));
+  const rows = await catalogRows(catalog, uniqueColumnsSql(fanOutTables(a.tree)));
+  assert.deepEqual([...primaryKeysOf(rows).values()].map((k) => k.size).sort(), [1, 2], "orders' one column, lines' two");
+  assert.equal(primaryKeysOf(rows.filter((r) => r[4] !== "2" || r[1] !== rows.find((x) => x[4] === "2")![1])).size, 1, "a key not read whole is no key");
+});
+
+test("the keys are read only for a statement the list after the limit may write: an aggregate over a join with a LIMIT asks the catalog nothing", async () => {
+  const { selectListAfterLimit } = await import("../src/duck/late.ts");
+  const reads = async (sql: string): Promise<number> => {
+    const a = await analyze(catalog, sql, []);
+    assert.ok(!("refused" in a), sql);
+    let n = 0;
+    await selectListAfterLimit({}, a.tree, async () => { n++; return new Map(); });
+    return n;
+  };
+  for (const sql of ["SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 2000",
+    "SELECT row_number() OVER () FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3",
+    "SELECT generate_series(1, 2) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3",
+    "SELECT (SELECT 1) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3"]) assert.equal(await reads(sql), 0, sql);
+  assert.equal(await reads("SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3"), 1, "a row-wise statement reads them once");
 });
 
 test("a count(DISTINCT x) of a primary key over its table alone is count(x): filtered, grouped, in HAVING, with a FILTER, in a subquery", async () => {

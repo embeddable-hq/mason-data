@@ -1931,6 +1931,39 @@ min of 3 warm runs:
 
 `LIMIT -1` is refused 42804 where Postgres says 2201W, with or without a join: not this path's.
 
+**The sort only where the join is proved bounded (issue 134, 2026-10-31).** That price was measured on joins that do not
+multiply. Where a join multiplies, the top N over row numbers runs the entire join, and a statement that used to stop in
+milliseconds runs for minutes. So the row numbers are sorted only where `fanOutBounded` (src/duck/distinct-key.ts) proves
+the join's rows linear in its tables: every join equates a whole primary key of a table its side holds at most once, from
+the analysis and the catalog's `pg_index`. Elsewhere they are not sorted at all, inside or out. An EXPLAIN's estimate
+would cost about 8 ms and can be wrong; the proof costs one catalog read, only for such a statement, and cannot.
+
+The key must be unique in its SIDE, not only in its table: `a JOIN b ON a.id = b.a_id JOIN c ON a.id = c.a_id` equates a's
+key twice, yet an `a` of a thousand `b`s and a thousand `c`s is a million rows, because the first join repeats `a`. A join
+therefore passes on as held once only the tables of a side whose every row it matches at most once.
+
+A million-row table and a 500,000-row one of 3.2 kB text (which compresses well), ten values of the join column, 2 GB
+limit, through the listener. After: minimum of 3 warm runs. Before: minimum of 3 warm runs on a machine under load 15 to
+50, so read the orders of magnitude.
+
+| `LIMIT 100`, no ORDER BY | before (sorted row numbers) | after (row numbers, no sort) | plain join |
+|---|---|---|---|
+| many-to-many, 100 billion joined rows, two ids | 72.1 s | 16 ms | not measured |
+| the same, reading a text column | 66.9 s | 16 ms | 14 ms |
+| many-to-many over the wide table, 50 billion rows, reading it | 37.6 s | 10 ms | 135 ms |
+| proved many-to-one, wide on the build side: unchanged, sorted | 37 ms | 37 ms | not measured |
+
+The unsorted form holds the issue's measurement: it costs what the plain join does, and it still leaves wide columns out of
+the join, where reading them through it was slower.
+
+**What is given up.** A join the proof does not bound can overlap its pages again, as before PR 118: `LIMIT n OFFSET m` over
+a many-to-many join, a cross join, a key in part, a table with no primary key, or a key equated with an expression can
+show a row twice and miss another. A tool paging such a join to its end sees that. Each answer is still rows of the join,
+each as often as the join holds it, so the proof decides cost and pages, never an answer, and the safe side of a failed
+proof is no sort. A sources file's `key:` is allowed only on a table with no primary key, and the catalog then declares
+none, so such a copy goes unsorted too. The comma form is proved on the WHERE's conjuncts; a join's condition moved to the
+WHERE over a `CROSS JOIN` is not.
+
 ### First copy, and the poll's cost on the source
 
 Four tables of a real database (the largest keyed tables under 5 GiB), each copied in one transaction through the
