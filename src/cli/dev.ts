@@ -29,7 +29,7 @@ import * as path from "node:path";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
-import { createRunServer, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
+import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import type { RunMetrics } from "./metrics.ts";
 import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, syncWritten, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
@@ -64,6 +64,8 @@ import { BIG_TABLE_ROWS, syncText, type TableSync } from "../lib/table-sync.ts";
 export interface DevOptions {
   /** the port the commands reach the run on (src/cli/run-server.ts), or the next free one */
   port: number;
+  /** `port` was named by a setting (MASON_UI_PORT): that port, never the next free one (src/cli/serve.ts checks it first) */
+  exactPort?: boolean;
   version: string;
   /** --self-signed-tls: the Postgres listener serves a certificate made for the project in .mason/ (src/cli/pg-tls.ts) */
   selfSignedTls: boolean;
@@ -547,15 +549,15 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       }
     },
   });
-  const setupPort = await freePort(o.port, chosen);
+  const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
     source, facts: () => facts, warnings,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
     replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,
-    // the web page (mason ui) is mason start's alone: mason serve's run serves none (src/cli/run-server.ts RunContext.page)
-    page: o.serve === undefined,
+    // the web page (mason ui): on loopback alone, so mason serve's is reached through mason ui --ssh
+    page: true, served: o.serve !== undefined,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl },
     // the roles as the listener holds them: their row filters checked by its catalog (a filter Postgres refuses is a problem)
@@ -588,7 +590,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const server = createRunServer(runCtx);
   // a sample is /api/state's facts at its moment (src/cli/run-server.ts usageFacts): one computation of each
   usage.start(() => usageFacts(runCtx));
-  await new Promise<void>((resolve) => server.listen(setupPort, "127.0.0.1", resolve));
+  await listenOnLoopback(server, setupPort);
   const refreshFacts = setInterval(() => {
     void (async () => {
       const c = await connectSource(source);

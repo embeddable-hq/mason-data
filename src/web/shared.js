@@ -292,6 +292,18 @@ export function failureOf(status, text) {
     next: [{ command: "mason status", what: "whether Mason runs, and why it stopped" }, { command: "mason start", what: "start it" }, { command: "mason ui", what: "this page, for the Mason that is running" }] };
 }
 
+/**
+ * A FAILURE AS IT IS ON A SERVER'S PAGE (`/api/state` `served`: read through `mason ui --ssh`): the two the page words
+ * itself name the commands of a run on this machine, and here what stopped answering is the tunnel, opened from the
+ * person's own machine. Every other failure is the run's, and stands.
+ */
+export function overTunnel(f) {
+  if (f.code !== "unreachable" && f.message !== "this page's cookie is not the running Mason's") return f;
+  return { code: f.code, message: "the tunnel to this server has closed", why: f.why,
+    fix: "mason ui --ssh <user@server>, on your own machine, opens this page again: each tunnel has its own address",
+    next: [{ command: "mason ui --ssh <user@server>", what: "this page, through a new tunnel" }] };
+}
+
 /** A part of a page written from one read: its body rendered, its Failure said where it shows when `says` (not the
  *  page's first read's: that is the banner), or that it is being asked. */
 export function readPart(ctx, path, render, says) {
@@ -471,15 +483,19 @@ export const USERS_HASH = "#users";
  * place. `first` (nothing has asked Mason anything yet) leads with what the URL is for. Nothing from a run that does
  * not say it.
  */
-export function renderConnect(pg, { first = false, table = null } = {}) {
+export function renderConnect(pg, { first = false, table = null, served = false } = {}) {
   if (!pg || typeof pg.shown !== "string") return "";
   // a first statement to type that the request log lists (one that reads a copied table: UNLISTED_STATEMENTS)
   const tryIt = first && table ? `<dt>Then try</dt><dd>${copyable("connect-try", `select count(*) from ${entryName(table)};`)} <span class="dim">it shows on Queries</span></dd>` : "";
   return `<div class="connect${first ? " first" : ""}"><p class="connect-title">${first ? "Connect your first tool" : "Connect"}</p>` +
     (first ? `<p class="lead">Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
     `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd>${tryIt}</dl>` +
+    (served ? `<p class="tip">${serverHostNote(pg)}</p>` : "") +
     `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p></div>`;
 }
+
+/** On a server's page the Postgres URL's host is the server's own view of itself: said beside it, as a tool elsewhere needs the server's address. */
+export const serverHostNote = (pg) => `This is the address on the server: from elsewhere a tool connects to the server's own address, in place of ${code(pg.host ?? "localhost")}.`;
 
 /** Nothing to show, quietly: a title and a line under it (`hintHtml`: HTML, a command in code()). */
 export const empty = (title, hintHtml = "") => `<div class="empty"><p class="empty-title">${esc(title)}</p>${hintHtml ? `<p>${hintHtml}</p>` : ""}</div>`;

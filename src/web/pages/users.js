@@ -3,7 +3,7 @@
  * POST /api/users/<name>/disable and /enable, DELETE /api/users/<name>. An added user's password lives in this page's memory until the person dismisses it, never in
  * storage, a URL or a log line.
  */
-import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, status, utcMinute } from "../shared.js";
+import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute } from "../shared.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
 const USERS = "/api/users?lastUsed=1";
@@ -97,12 +97,13 @@ export function renderUsers(list, confirming = null, now = Date.now(), refused =
  * state), and a user's password is copied only from the card shown once when it is added (`renderAdded`). "" when the
  * run did not say.
  */
-export function renderUsersConnect(pg) {
+export function renderUsersConnect(pg, served = false) {
   if (!pg || typeof pg.shown !== "string") return "";
   const rows = [["Host", pg.host, "users-connect-host"], ["Port", String(pg.port), "users-connect-port"], ["Database", pg.database, "users-connect-database"],
     ["SSL mode", pg.sslmode ?? "disable", "users-connect-sslmode"], ["URL", pg.shown, "users-connect-url"], ["psql", pg.psql, "users-connect-psql"]];
   return `<div class="connect"><p class="connect-title">Connect</p>` +
     `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${copyable(id, v)}</dd>`).join("")}</dl>` +
+    (served ? `<p class="tip">${serverHostNote(pg)}</p>` : "") +
     `<p class="tip">A user's name and password go in place of ${code("<user>")} and ${code("<password>")}. The password is shown once, when the user is added: lost, remove the user and add it again.</p></div>`;
 }
 
@@ -192,7 +193,7 @@ export const page = {
         return {
           // the roles file's state is the run's (/api/state roles): a file that cannot be read refuses every user held to it
           users: u ? renderUsers(u, m.confirming, ctx.now().getTime(), m.refused, ctx.read(STATE)?.body?.roles ?? null) : "",
-          "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres),
+          "users-connect": renderUsersConnect(ctx.read(STATE)?.body?.postgres, ctx.read(STATE)?.body?.served === true),
           added: m.added ? renderAdded(m.added) : "",
           action: m.actionFailure ? renderFailure(m.actionFailure) : "",
         };

@@ -15,7 +15,11 @@
  * THE WEB PAGE (src/web/, `mason ui`, docs/WEB-UI.md): under `mason start` it also serves one page and its files (the
  * shell, its pages' modules, the stylesheet), from an allowlist read when it starts (`pageFiles`), and the users the
  * page manages (`/api/users`, the functions `mason user` calls). The page reads the same JSON the commands read; a refusal carries `failure`, the CLI's Failure
- * shape (message, why, fix, next), so the page says it as the command would. `mason serve`'s run serves no page.
+ * shape (message, why, fix, next), so the page says it as the command would. Under `mason serve` it serves the same page,
+ * on loopback alone, to a browser on another machine through `mason ui --ssh` (src/cli/ui-ssh.ts, `openTunnel` below).
+ *
+ * LOOPBACK BY CONSTRUCTION: `listenOnLoopback` is how this server listens, and it takes no address. No setting names
+ * one, and a container's page is reached from inside the container, never published (docs/WEB-UI.md).
  */
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -23,7 +27,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readBody, sendJson } from "../lib/http-json.ts";
 import { projectFingerprint } from "../lib/project-files.ts";
-import { guard, SECURITY_HEADERS } from "./security.ts";
+import { guard, newTunnel, SECURITY_HEADERS, type PageTunnel } from "./security.ts";
 import { maskedUrl, type Source, type SourceFacts } from "./preflight.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type SyncTotals } from "./readiness.ts";
@@ -61,9 +65,11 @@ export interface RunContext {
   replication: () => { slot: string; publication: string; owned: boolean } | null;
   port: number;
   token: string;
-  /** the web page (src/web/, `mason ui`): `mason start`'s run serves it, `mason serve`'s never (its guard is loopback's
-   *  Host and cookie; off loopback the page would need TLS and a login, which are not designed) */
+  /** the web page (src/web/, `mason ui`): both runs serve it, on loopback alone (`listenOnLoopback`); false in a test
+   *  of the commands' server */
   page: boolean;
+  /** this is `mason serve`'s run: the page is read through `mason ui --ssh`, and says what that changes */
+  served?: boolean;
   /** the project's database is the demo database this run hosts (`mason init demo`, src/cli/demo.ts): mason status says so */
   demo?: boolean;
   /** the project's users (src/cli/user.ts): what `/api/users` lists and changes, with the functions `mason user` calls —
@@ -172,8 +178,13 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // what mason wait waits on and mason status prints last (src/cli/readiness.ts): said by the run, so the page and the
     // commands say one thing
     readiness: readiness({ tables }),
-    // the run serves the web page (mason ui): mason status prints its URL
+    // the run serves the web page (mason ui): mason status prints its URL, or on a server how it is opened
     ui: ctx.page,
+    // mason serve's run: the page's words for a tunnel that closed, and for the Postgres URL's host, follow from it
+    served: ctx.served === true,
+    // why the page offers no Add or Remove, or null: a server's project folder may be mounted read-only, and a control
+    // that can only fail is not offered
+    sourcesReadOnly: sourcesReadOnly(ctx, sources.file?.file ?? null),
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
       version: facts.versionText, standby: facts.standby, changes: repl !== null ? "replication" : "poll", name: sources.file?.name ?? null, file: sources.file?.file ?? null,
@@ -210,6 +221,13 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
     ...(stream !== null ? { stream } : {}),
   };
+}
+
+/** Why the run could not write its sources file now, or null: `mason start`'s is the developer's, and always offered. */
+function sourcesReadOnly(ctx: RunContext, file: string | null): string | null {
+  if (ctx.served !== true || file === null) return null;
+  try { fs.accessSync(file, fs.constants.W_OK); return null; }
+  catch (e) { return `the sources file cannot be written on this server (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}): commit a change to it, and deploy`; }
 }
 
 /** a file's size, or null where it cannot be read (the run's own DuckDB file: it exists while the run does) */
@@ -530,17 +548,48 @@ async function openShare(ctx: RunContext, req: http.IncomingMessage, res: http.S
   res.write(`${JSON.stringify(opened)}\n`);
 }
 
+/**
+ * `POST /api/ui/tunnel` { port }: a tunnel to the page (src/cli/security.ts, src/cli/ui-ssh.ts), its ticket in the first
+ * line of JSON and THE ANSWER LEFT OPEN, as a share's is: the connection is the tunnel, so its bridge gone by any means
+ * takes the Host, the ticket and the cookie with it. A process holding the run's token asks; a page's cookie cannot.
+ */
+async function openTunnel(ctx: RunContext, tunnels: PageTunnel[], req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (req.headers.authorization === undefined) { sendFailure(res, 403, { message: "a tunnel is asked for with the run's token: mason ui --ssh does", code: "refused" }); return; }
+  if (!ctx.page) { sendFailure(res, 404, { message: "this Mason serves no web page", code: "not_found" }); return; }
+  const body = JSON.parse(await readBody(req, 1024)) as { port?: unknown };
+  const port = body.port;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) throw new Refusal(400, "send { port }: the local port the browser names");
+  // its Host would be this server's own, whose cookie is the run's token: rare, and a new local port is one run away
+  if (port === ctx.port) { sendFailure(res, 409, { message: `local port ${port} is this server's own port on the server`, code: "refused", fix: "run it again: another local port is chosen" }); return; }
+  const tunnel = newTunnel(port);
+  tunnels.push(tunnel);
+  res.once("close", () => {
+    tunnels.splice(tunnels.indexOf(tunnel), 1);
+    ctx.log(`web page: the tunnel from local port ${port} closed`);
+  });
+  ctx.log(`web page: a tunnel opened from local port ${port}`);
+  res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+  res.write(`${JSON.stringify({ ticket: tunnel.ticket })}\n`);
+}
+
+/** How the run's server listens: on 127.0.0.1, and there is no other way (the header says why). */
+export function listenOnLoopback(server: http.Server, port: number): Promise<void> {
+  return new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+}
+
 export function createRunServer(ctx: RunContext): http.Server {
   const saidErrors = new Set<string>();
   // the last day's and week's statements, read at most once every SUMMARY_TTL_MS for every page and command that asks
   const summary = timedCache(() => ctx.duck.requests.summary(), SUMMARY_TTL_MS);
-  // read once, here: nothing a request names is ever read from disk (mason serve's run serves no page)
+  // the tunnels open now (`openTunnel`): the only Hosts the guard takes beside this server's own
+  const tunnels: PageTunnel[] = [];
+  // read once, here: nothing a request names is ever read from disk
   const page = ctx.page ? pageFiles() : new Map<string, PageFile>();
   return http.createServer((req, res) => {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
-    const v = guard({ method: req.method ?? "GET", url: req.url ?? "/", host: req.headers.host, origin: req.headers.origin, cookie: req.headers.cookie, authorization: req.headers.authorization }, ctx.port, ctx.token);
+    const v = guard({ method: req.method ?? "GET", url: req.url ?? "/", host: req.headers.host, origin: req.headers.origin, cookie: req.headers.cookie, authorization: req.headers.authorization }, ctx.port, ctx.token, tunnels);
     if (!v.ok) {
-      if (v.status === 303) { res.writeHead(303, { Location: v.location, "Set-Cookie": v.setCookie }).end(); return; }
+      if (v.status === 303) { res.writeHead(303, { Location: v.location, ...(v.setCookie !== undefined ? { "Set-Cookie": v.setCookie } : {}) }).end(); return; }
       res.writeHead(v.status, { "Content-Type": "text/plain; charset=utf-8" }).end(`${v.reason}\n`);
       return;
     }
@@ -642,6 +691,8 @@ export function createRunServer(ctx: RunContext): http.Server {
             ctx.sourcesChanged();
             sendJson(res, 200, { ...r, state: await state(ctx) });
           }
+        } else if (req.method === "POST" && url.pathname === "/api/ui/tunnel") {
+          await openTunnel(ctx, tunnels, req, res);
         } else if (req.method === "POST" && url.pathname === "/api/share") {
           await openShare(ctx, req, res);
         } else if (req.method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {

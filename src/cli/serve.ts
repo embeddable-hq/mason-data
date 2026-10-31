@@ -17,12 +17,17 @@
  *     (counts, lag, ages, sizes) for the same reason: never a table's, a user's or a host's name, never a statement.
  *   - A CLEAN STOP ON SIGTERM: the run's own stop (a copy in flight interrupted and rolled back, DuckDB closed).
  *
+ *   - ITS WEB PAGE ON LOOPBACK ALONE (src/cli/run-server.ts `listenOnLoopback`): the run's server, MASON_UI_PORT, reached
+ *     from a developer's machine with `mason ui --ssh`, never published. No setting moves it to another address.
+ *
  * The commands beside it work as on a laptop, in the data folder: `docker compose exec mason mason add orders`.
  */
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
 import { failed, parseCommand, type CommandSpec, type Failure } from "./command.ts";
+import { heldText, portHolder } from "./ports.ts";
+import { pgListenerAddress } from "../api/postgres/listener.ts";
 import { dev } from "./dev.ts";
 import { parseSource } from "./preflight.ts";
 import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
@@ -68,6 +73,9 @@ export const SERVE: CommandSpec = {
     MASON_PG_DATABASE       the database name a tool connects with, for a sources file with no database: (default mason;
                             the two must agree when both are set)
     MASON_HEALTH_PORT       /healthz's and /metrics' port (default 4140), on MASON_HEALTH_HOST (default 0.0.0.0)
+    MASON_UI_PORT           the web page's and the commands' port, on 127.0.0.1 alone: no setting moves the address, and
+                            mason ui --ssh <user@server> opens the page from your machine (default 4039, or the next
+                            free one; a port named here is that port, or the start is refused)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -98,9 +106,20 @@ export interface ServeSettings {
   data: string;
   selfSignedTls: boolean;
   health: { host: string; port: number };
+  /** the port of the page and the commands; `named`: MASON_UI_PORT said it, so it is that port or a refusal */
+  ui: { port: number; named: boolean };
 }
 
+/** The port of the page and the commands when MASON_UI_PORT says none (src/cli/doctor.ts PORTS has it too). */
+export const DEFAULT_UI_PORT = 4039;
+
 const MIN_API_KEY = 32;
+
+/** The Postgres API's port as the settings say it; null while MASON_PG_PORT is wrong, which the run's own check says. */
+function pgPortOf(env: Readonly<Record<string, string | undefined>>): number | null {
+  const a = pgListenerAddress(env, "127.0.0.1");
+  return "problem" in a ? null : a.port;
+}
 
 /** THE SETTINGS, OR EVERY ONE MISSING OR WRONG AT ONCE: a platform's deploy is slow, and one variable a deploy wastes it. */
 export function serveSettings(env: Readonly<Record<string, string | undefined>>, cwd: string): ServeSettings | Failure {
@@ -131,6 +150,13 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   const portText = env.MASON_HEALTH_PORT || "4140";
   const port = Number(portText);
   if (!/^\d+$/.test(portText) || port < 1 || port > 65_535) wrong.push(`MASON_HEALTH_PORT=${JSON.stringify(portText)}: a port number, 1-65535`);
+  const uiText = env.MASON_UI_PORT || String(DEFAULT_UI_PORT);
+  const uiPort = Number(uiText);
+  if (!/^\d+$/.test(uiText) || uiPort < 1 || uiPort > 65_535) wrong.push(`MASON_UI_PORT=${JSON.stringify(uiText)}: a port number, 1-65535`);
+  else if (env.MASON_UI_PORT && uiPort === port) wrong.push(`MASON_UI_PORT=${uiText} is MASON_HEALTH_PORT too: two ports`);
+  else if (env.MASON_UI_PORT && uiPort === pgPortOf(env)) wrong.push(`MASON_UI_PORT=${uiText} is the Postgres API's port too (MASON_PG_PORT): two ports`);
+  // a host would only be believed: the page has no address but loopback, and running on while one is asked for would hide that
+  if (env.MASON_UI_HOST) wrong.push("MASON_UI_HOST is set, and the web page has no address but 127.0.0.1: remove it (mason ui --ssh <user@server> opens the page from your machine)");
   if (wrong.length) {
     return { message: `${wrong.length === 1 ? "a setting is" : `${wrong.length} settings are`} missing or wrong: ${wrong.join("; ")}`, code: "bad_config",
       why: "mason serve reads its settings from the environment, and asks nothing",
@@ -141,6 +167,7 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
     name, apiKey, selfSignedTls: selfSigned === "1",
     project, data,
     health: { host: env.MASON_HEALTH_HOST || "0.0.0.0", port },
+    ui: { port: uiPort, named: !!env.MASON_UI_PORT },
   };
 }
 
@@ -355,6 +382,9 @@ export async function serve(argv: string[]): Promise<number> {
     return failed("serve", { message: `the state cannot be written to ${path.join(s.data, STATE_DIR)}: ${(e as Error).message}`, code: "refused",
       fix: "MASON_DATA names a folder this user can write: the volume's mount point" }, { json });
   }
+  // a port named is that port: said here, before anything listens, as the next free one would hide the setting
+  const held = s.ui.named ? await portHolder(s.ui.port) : null;
+  if (held !== null) return failed("serve", { message: `MASON_UI_PORT: ${heldText(s.ui.port, held)}`, code: "refused", fix: "name another port, or leave MASON_UI_PORT unset for the next free one" }, { json });
   const startedAt = Date.now();
   let state: ServePhase = { phase: "starting" };
   const health = healthServer(() => state, startedAt);
@@ -376,7 +406,7 @@ export async function serve(argv: string[]): Promise<number> {
   process.chdir(s.data);
   let code: number;
   try {
-    code = await dev({ port: 4039, version: version(), selfSignedTls: s.selfSignedTls,
+    code = await dev({ port: s.ui.port, exactPort: s.ui.named, version: version(), selfSignedTls: s.selfSignedTls,
       serve: { log: say, ready: (run) => { state = { phase: "ready", tables: run.tables, metrics: run.metrics }; }, stopping: () => { state = { phase: "stopping" }; } } });
   } finally {
     // a platform's health check may hold a keep-alive connection open, which close() alone would wait for

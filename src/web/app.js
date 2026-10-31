@@ -52,7 +52,7 @@
  * A page is registered by its import and its place in PAGES below, its route in PAGE_ROUTES, and its section in
  * index.html.
  */
-import { esc, badge, icon, createAsk, renderFailure, updatedText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
+import { esc, badge, icon, createAsk, overTunnel, renderFailure, updatedText, placePops, RANGES, DEFAULT_RANGE, rangeOf, rangeOffered, isLive, POLL_MS } from "./shared.js";
 import { createCharts } from "./charts.js";
 import { page as statusPage } from "./pages/status.js";
 import { page as tablesPage } from "./pages/tables.js";
@@ -176,9 +176,14 @@ function renderWhere(s) {
  * `view()` is the HTML of every part of the page, from what it knows now. Nothing here touches a document.
  */
 export function createApp(fetchFn, now = () => new Date(), shown = "status") {
-  const ask = createAsk(fetchFn);
+  const asked = createAsk(fetchFn);
   // what was read, by path: the last body, this read's failure (null when it answered), when it was asked
   const store = new Map();
+  // every answer passes here: on a server's page a failure the page words itself is the tunnel's (`overTunnel`)
+  const ask = async (path, init) => {
+    const r = await asked(path, init);
+    return "failure" in r && store.get("/api/state")?.body?.served === true ? { failure: overTunnel(r.failure) } : r;
+  };
   const first = parseHash(shown);
   const m = { shown: first.id, range: rangeOf(first.params.range), pollFailure: null, updatedAt: null, rangeReadAt: null };
   const put = (path, at, r) => {
