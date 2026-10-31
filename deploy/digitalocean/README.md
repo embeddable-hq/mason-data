@@ -58,7 +58,7 @@ doctl compute size list --format Slug,VCPUs,Memory,Disk,PriceMonthly
 doctl compute region list --format Slug,Available
 ```
 
-The size list can be partial: a size in a region's list may still be refused. The real test is step 5.
+`doctl compute size list` shows what the account may use, and a region's own list can name more. The real test is step 5.
 
 ## 4. Write the first-boot script
 
@@ -73,6 +73,9 @@ mountpoint -q /mnt/mason || { echo "volume not mounted" >&2; exit 1; }
 install -d -m 700 /mnt/mason/deploy /mnt/mason/docker
 install -d -m 755 /etc/docker
 printf '{ "data-root": "/mnt/mason/docker" }\n' > /etc/docker/daemon.json
+# Docker must never start before the Volume, or it writes to the local disk after a reboot
+install -d -m 755 /etc/systemd/system/docker.service.d
+printf '[Unit]\nRequiresMountsFor=/mnt/mason\n' > /etc/systemd/system/docker.service.d/mount.conf
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y docker.io docker-compose-v2
@@ -93,9 +96,10 @@ VOL=$(doctl compute volume create mason --region $REGION --size ${VOLUME_GB}GiB 
 DROP=$(doctl compute droplet create mason --region $REGION --size $SIZE --image ubuntu-24-04-x64 \
   --ssh-keys "$KEY" --volumes "$VOL" --tag-name mason --enable-monitoring \
   --user-data-file cloud-init.sh --wait --format ID --no-header)
-doctl compute firewall create --name mason --droplet-ids "$DROP" \
+FW=$(doctl compute firewall create --name mason --droplet-ids "$DROP" \
   --inbound-rules "protocol:tcp,ports:5433,address:203.0.113.10/32 protocol:tcp,ports:22,address:$MY_IP/32" \
-  --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0 protocol:icmp,address:0.0.0.0/0,address:::/0"
+  --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0 protocol:icmp,address:0.0.0.0/0,address:::/0" \
+  --format ID --no-header)
 IP=$(doctl compute droplet get "$DROP" --format PublicIPv4 --no-header)
 ```
 
@@ -107,6 +111,13 @@ Wait for the first boot, then check that the Volume is mounted and Docker's data
 
 ```bash
 ssh root@$IP 'cloud-init status --wait; df -h /mnt/mason | tail -1; docker info --format "{{.DockerRootDir}}"'
+ssh root@$IP reboot
+```
+
+Reboot once now, while nothing is on it, and check again when it is back. `DockerRootDir` must still say `/mnt/mason/docker`:
+
+```bash
+ssh root@$IP 'df -h /mnt/mason | tail -1; docker info --format "{{.DockerRootDir}}"'
 ```
 
 ## 6. Put Mason on the Volume
@@ -115,12 +126,13 @@ Everything goes in `/mnt/mason/deploy`, so `.env` is on the Volume too. **`mason
 container runs as `node`.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/embeddable-hq/mason-data/main/deploy/mason-data/compose.yml \
+TAG=0.8.0     # the release you run
+curl -fsSL https://raw.githubusercontent.com/embeddable-hq/mason-data/v$TAG/deploy/mason-data/compose.yml \
   | ssh root@$IP 'umask 077; cd /mnt/mason/deploy; cat > compose.yml; mkdir -p mason; chown 1000:1000 mason; chmod 755 mason
-    { printf "MASON_API_KEY=%s\n" "$(openssl rand -hex 24)"; printf "MASON_PG_SELF_SIGNED_TLS=1\nMASON_TAG=<the release>\n"; } > .env'
+    { printf "MASON_API_KEY=%s\n" "$(openssl rand -hex 24)"; printf "MASON_PG_SELF_SIGNED_TLS=1\nMASON_TAG='$TAG'\n"; } > .env'
 ```
 
-`MASON_TAG` pins the release you run. Then send the database's URL straight to the server, so it never appears in your
+Then send the database's URL straight to the server, so it never appears in your
 terminal, your shell history or a chat. For a URL with no `?` in it:
 
 ```bash
@@ -171,10 +183,16 @@ umask 077; docker compose exec -T mason mason user add <tool> --json > <tool>.cr
 From a machine that is **not** on the list, the Postgres port must not answer:
 
 ```bash
-nc -z -G 6 -w 6 $IP 5433; echo $?       # 1: blocked, as it should be
+nc -z -w 6 $IP 5433; echo $?            # 1: blocked, as it should be (on a Mac, add -G 6)
 ```
 
-Then check a login from the server itself, over TLS, with the `url` in that file.
+Then check a login from the server itself, over TLS, with the `url` in that file:
+
+```bash
+U=$(python3 -c "import json;print(json.load(open('<tool>.credentials'))['url'])")
+docker run --rm --network host -e U="$U" postgres:17-alpine sh -c 'psql "$U" -XAt -c "select current_setting(\$\$ssl\$\$)"'
+unset U                                 # prints on
+```
 
 ## 10. Connect the tool
 
@@ -190,7 +208,7 @@ certificate is self-signed: it encrypts, and proves nothing about whose server i
 ## 11. Close up
 
 ```bash
-doctl compute firewall remove-rules <firewall-id> --inbound-rules "protocol:tcp,ports:22,address:$MY_IP/32"
+doctl compute firewall remove-rules $FW --inbound-rules "protocol:tcp,ports:22,address:$MY_IP/32"
 ```
 
 Add it back when you need to log in. Revoke the `doctl` token, and keep a note of what `.env` and the Volume hold.
@@ -203,10 +221,11 @@ Add it back when you need to log in. Revoke the `doctl` token, and keep a note o
 | `failed to create volume: invalid size specified` | Usually the tier again, not the format: a new account stopped at about 100 GiB | Create it at 100 GiB, and resize when the tier rises |
 | The container restarts, with `EACCES: permission denied, mkdir '/mason/project/sources'` | `mason/` belongs to root | `chown -R 1000:1000 /mnt/mason/deploy/mason`, then `docker compose up -d` |
 | `Out of Memory Error: failed to allocate data …` on one table in a first sync | Large JSON documents hold more than the engine's limit, which is half the machine. Fewer readers may not help | Add `MASON_DUCKDB_MEMORY=12GB` to `.env` on a 16 GB machine, `docker compose up -d`, and remove it when the table is in. The other tables carry on meanwhile |
+| After a reboot, tables are gone or a new copy starts | Docker started before the Volume mounted, and is writing to the local disk | Stop Docker, empty `/mnt/mason` on the local disk once the Volume is unmounted, add the `RequiresMountsFor` line from [step 4](#4-write-the-first-boot-script), and reboot |
 | SSH times out, and the Droplet shows `active` | Your own address changed, so the firewall blocks you | `curl -s https://checkip.amazonaws.com`, then add a rule for it and remove the old one |
 | A tool gets `3D000 database … does not exist` | The database name is `mason`, not your source's | Connect with `mason`, or write `database: <name>` at the top of the sources file |
 | A tool gets `28000` asking for TLS, or a certificate error | It connected without TLS, or verifies the certificate | Use `sslmode=require`. node-postgres needs `uselibpqcompat=true&sslmode=require` |
-| A table is missing from `mason add` | It has no primary key | `mason add <table> --key <columns>` |
+| `mason add` refuses a table: no primary key | Mason needs to tell its rows apart | `mason add <table> --key <columns>`, one table at a time |
 | A column is missing from a table | It looks like a secret, and was left out | `mason add <table> --include <column>` |
-| Free disk swings by gigabytes during a sync | A big table's temporary data | Watch the trend, not one reading. Grow the Volume if it stays low: `doctl compute volume-action resize <volume-id> --size <GiB> --region <region>`, then `resize2fs /dev/sda` on the server |
-| Tables go stale with no error | Their `sync:` is `off`, which is the default | [Step 8](#8-say-how-each-table-stays-current), or `mason sync <table>` from cron |
+| Free disk swings by gigabytes during a sync | A big table's temporary data | Watch the trend, not one reading. Grow the Volume if it stays low: `doctl compute volume-action resize <volume-id> --size <GiB> --region <region>`, then `resize2fs /dev/disk/by-id/scsi-0DO_Volume_mason` on the server |
+| Tables go stale with no error | Their `sync:` is `off`, which is the default | [Step 8](#8-say-how-each-table-stays-current), or from cron on the server: `cd /mnt/mason/deploy && docker compose exec -T mason mason sync <table>` |
