@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { normalise, same } from "./integration/oracle/compare.ts";
+import { everyRowOnce, withinWhole } from "./integration/oracle/unordered-limit.ts";
 
 test("same: integers compare by their digits, exactly; a non-integer to one part in 10^12", () => {
   // Found in review of #389: a 1e-9 relative tolerance on every number let a 13-digit id be off by 1,000, and an
@@ -34,4 +35,21 @@ test("same: a double printed with an exponent is a number, its last digit anothe
 test("normalise: a text column's value is text, whatever its digits", () => {
   assert.equal(same(normalise("01", true), normalise("1", true)), false);
   assert.equal(same(normalise("01"), normalise("1")), true);
+});
+
+test("a LIMIT with no ORDER BY is held to what is defined of it: its count, rows of the whole join, each as often as the join holds it", () => {
+  const fields = { names: ["a", "b"], oids: [23, 25] };
+  const whole: (string | null)[][] = [["1", "x"], ["1", "x"], ["2", null], ["3", "z"]];
+  const want = { ...fields, rows: [["1", "x"], ["2", null]] };
+  assert.equal(withinWhole(want, whole, { ...fields, rows: [["3", "z"], ["1", "x"]] }), null, "any rows of the join, in any order");
+  assert.equal(withinWhole(want, whole, { ...fields, rows: [["1", "x"], ["1", "x"]] }), null, "a row the join repeats, as often as it does");
+  assert.match(withinWhole(want, [["1", "x"], ["2", null]], { ...fields, rows: [["1", "x"], ["1", "x"]] })!, /more often/);
+  assert.match(withinWhole(want, whole, { ...fields, rows: [["1", "x"], ["2", "x"]] })!, /no row of the whole join/, "two rows' columns mixed");
+  assert.match(withinWhole(want, whole, { ...fields, rows: [["1", "x"], ["3", "1.50"]] })!, /no row of the whole join/, "another text of a value");
+  assert.match(withinWhole(want, whole, { ...fields, rows: [["1", "x"]] })!, /1 row\(s\) where Postgres has 2/);
+  assert.match(withinWhole(want, whole, { names: ["a", "c"], oids: [23, 25], rows: want.rows })!, /fields/);
+  assert.match(withinWhole(want, whole, { names: ["a", "b"], oids: [20, 25], rows: want.rows })!, /fields/);
+  assert.equal(everyRowOnce([["3", "z"], ["1", "x"], ["2", null], ["1", "x"]], whole), null);
+  assert.match(everyRowOnce([["3", "z"], ["1", "x"], ["2", null]], whole)!, /in no page/);
+  assert.match(everyRowOnce([["3", "z"], ["3", "z"], ["1", "x"], ["2", null]], whole)!, /more often/);
 });

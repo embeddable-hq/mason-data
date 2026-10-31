@@ -2244,6 +2244,88 @@ test("a top N over joined tables chooses its rows by row number and reads the co
   } finally { await c.end(); }
 });
 
+// ISSUE 105, the same preview with no ORDER BY: which rows a LIMIT keeps is defined by no one, so what is held is what
+// is defined: how many, each a row of the whole join, none more often than the join holds it, and a page of one list
+test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number, and they are rows of the join", async () => {
+  const c = await client();
+  const one = (v: unknown): unknown => typeof v === "string" ? v.replaceAll('": ', '":') : v;
+  const key = (r: unknown[]): string => JSON.stringify(r.map(one));
+  const sent = async (sql: string, values?: unknown[]): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql, values as unknown[]);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  /** the rows, each taken from what the whole join holds; what is left of it */
+  const within = (rows: unknown[][], whole: unknown[][], sql: string): Map<string, number> => {
+    const left = new Map<string, number>();
+    for (const r of whole) left.set(key(r), (left.get(key(r)) ?? 0) + 1);
+    for (const r of rows) {
+      const n = left.get(key(r));
+      assert.ok(n !== undefined, `${sql}: ${key(r)} is no row of the join`);
+      assert.ok(n > 0, `${sql}: ${key(r)} more often than the join holds it`);
+      left.set(key(r), n - 1);
+    }
+    return left;
+  };
+  const JOINS = "FROM late l JOIN late_c c ON c.id = l.c";
+  const held = async (list: string, from: string, tail: string, values?: unknown[]): Promise<void> => {
+    const sql = `SELECT ${list} ${from} ${tail}`;
+    const [got, limited, whole] = [await answer(c, sql, values), await postgres(sql, values), await postgres(`SELECT ${list} ${from}`)];
+    assert.deepEqual(got.fields, limited.fields, sql);
+    assert.equal(got.rows.length, limited.rows.length, sql);
+    within(got.rows, whole.rows, sql);
+    assert.match(await sent(sql, values), /rowid AS __mason_r1.* ORDER BY \w+\.rowid.*\) AS __mason_late LEFT JOIN .*ORDER BY __mason_late\.__mason_r1/, sql);
+  };
+  try {
+    await held("l.*, c.*", JOINS, "LIMIT 7 OFFSET 0");
+    await held("l.id, l.j, c.name", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 40", "LIMIT 2000");
+    await held("l.id, c.id AS c, c.name", "FROM late l RIGHT JOIN late_c c ON c.id = l.c AND l.id < 20", "LIMIT 60");
+    await held("l.id, c.id AS c, c.name", "FROM late l FULL JOIN late_c c ON c.id = l.c + 40 AND l.id < 20", "LIMIT 2000 OFFSET 1990");
+    await held("l.id, c.name", "FROM late l, late_c c WHERE c.id = l.c", "LIMIT 3");
+    await held("l.id, c.name", "FROM late l, late_c c", "LIMIT 5 OFFSET 7"); // every pair
+    await held("l.id, y.id AS y, y.c", "FROM late l JOIN late y ON y.c = l.c", "LIMIT 9"); // a self-join that multiplies
+    await held("c.name", JOINS, "LIMIT 2000"); // a row number repeated, one table read
+    await held("l.id, c.name", JOINS, "LIMIT 0");
+    await held("l.id, c.name", JOINS, "LIMIT 3 OFFSET 100000");
+    await held("l.id, c.name", `${JOINS} WHERE c.name = 'c7'`, "LIMIT 3");
+    await held("upper(c.name) AS u, l.j ->> 'n' AS n", JOINS, "LIMIT 3");
+    await held("*", "FROM late l LEFT JOIN late_c c ON c.id = l.c + 1000", "LIMIT 3");
+    await held("l.id, c.name", JOINS, "FETCH FIRST 2 ROWS ONLY");
+    await held("l.id, c.name", JOINS, "LIMIT $1 OFFSET $2", [3, 1]);
+    // a prepared statement, run again with another LIMIT and after a SET
+    const prepared = { name: "unsorted", text: `SELECT l.id, c.name ${JOINS} LIMIT $1`, rowMode: "array" as const };
+    assert.equal((await c.query({ ...prepared, values: [2] })).rows.length, 2);
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.equal((await c.query({ ...prepared, values: [5] })).rows.length, 5);
+    // PAGES: a statement run page by page reads every row of the join once
+    const whole = (await postgres(`SELECT l.id, c.name ${JOINS}`)).rows;
+    const pages: unknown[][] = [];
+    for (let offset = 0; offset < whole.length; offset += 300) pages.push(...(await answer(c, `SELECT l.id, c.name ${JOINS} LIMIT 300 OFFSET ${offset}`)).rows);
+    assert.equal(pages.length, whole.length);
+    assert.deepEqual([...within(pages, whole, "the pages").values()].filter((n) => n !== 0), [], "every row of the join read once");
+    // ONE LIST OF ROWS, the page of it asked for: every table read in the order, each row number once more outside. On
+    // tables this small DuckDB's join is in order whatever the plan, so the plan is what is held
+    assert.match(await sent(`SELECT l.j, c.name ${JOINS} LIMIT 3 OFFSET 2`), /ORDER BY l\.rowid, c\.rowid LIMIT 3 OFFSET 2 \) AS __mason_late .*ORDER BY __mason_late\.__mason_r1, __mason_late\.__mason_r2/);
+    assert.match(await sent(`SELECT c.name ${JOINS} LIMIT 3`), /ORDER BY c\.rowid LIMIT 3 \) AS __mason_late .*ORDER BY __mason_late\.__mason_r1/, "a table unread is no key: its rows read alike");
+    // a row number exists of a table alone, and a statement with no limit in fact has nothing to choose
+    for (const sql of [`SELECT l.id, c.name ${JOINS}`, `SELECT l.id, c.name ${JOINS} OFFSET 1990`, `SELECT l.id, c.name ${JOINS} LIMIT ALL`, `SELECT l.id, c.name ${JOINS} LIMIT NULL`,
+      `SELECT l.id, c.name ${JOINS} LIMIT NULL::int OFFSET 1990`, "SELECT l.id, l.j ->> 'n' FROM late l LIMIT 3", "SELECT l.id, c.name FROM late l JOIN (SELECT * FROM late_c) c ON c.id = l.c LIMIT 3",
+      "SELECT l.id, name FROM late l JOIN late_c USING (id) LIMIT 3", `SELECT DISTINCT l.c ${JOINS} LIMIT 3`, `SELECT 1 ${JOINS} LIMIT 3`]) {
+      assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
+      assert.equal((await answer(c, sql)).rows.length, (await postgres(sql)).rows.length, sql);
+    }
+    // the list after the limit keeps its sort: with none, nothing puts the kept rows back
+    assert.doesNotMatch(await sent(`SELECT upper(l.j ->> 'n') FROM late l LIMIT 3`), /__mason_late/);
+    // what Postgres refuses is refused (by another SQLSTATE, as a LIMIT -1 of one table is)
+    for (const sql of [`SELECT l.id ${JOINS} LIMIT -1`, `SELECT l.id ${JOINS} LIMIT 1 OFFSET -1`]) {
+      const refused = async (ask: Promise<unknown>): Promise<string> => { try { await ask; return "answered"; } catch (e) { return (e as { code: string }).code; } };
+      assert.notEqual(await refused(answer(c, sql)), "answered", sql);
+    }
+  } finally { await c.end(); }
+});
+
 // A `->>` OF A COLUMN IS DUCKDB'S OWN READ (the test server: every JSON read was a hop to the main thread per
 // vector, 98 s over 22 M rows with every other session waiting). Where DuckDB's reader answers as Postgres does (a string,
 // a missing path, a JSON null) the statement never reaches the function; the rest (a number's digits, an object, an

@@ -139,6 +139,7 @@ const REWRITTEN: Shape[] = [
   // joinRows (src/duck/late.ts, issue 105): a table preview over joined tables, its rows chosen by row number
   { name: "a top N over joins: a *, sorted by a column's number", sql: "SELECT c.*, o.id FROM customers c LEFT JOIN orders o ON c.id = o.customer_id ORDER BY 1, 2 LIMIT 100" },
   { name: "a top N over joins: every table's columns", sql: "SELECT c.*, o.*, i.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id LEFT JOIN order_items i ON o.id = i.order_id ORDER BY (c.created_at) IS NULL ASC, c.created_at DESC LIMIT 100 OFFSET 0" },
+  { name: "a LIMIT with no ORDER BY over joins: every table's columns", sql: "SELECT c.*, o.*, i.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id LEFT JOIN order_items i ON o.id = i.order_id LIMIT 100 OFFSET 0" },
   // leftLateral: the "expand the JSON" preview, over jsonb and json, guarded to objects as the tool guards it
   { name: "LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", sql: "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 0" },
   { name: "LEFT lateral preview: json_each, LIMIT 100 OFFSET 200", sql: "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN json_each(CASE WHEN substring(ltrim(q.meta::text), 1, 1) = '{' THEN q.meta::json ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 200" },
