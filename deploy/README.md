@@ -24,7 +24,8 @@ to addresses you name ([who can reach the Postgres port](#who-can-reach-the-post
   size is currently restricted, please open a ticket to increase your account tier") and any Volume over about 100 GiB
   ("invalid size specified"), and listed nothing above 16 GB; `m-2vcpu-16gb` and a 100 GiB Volume worked. A ticket, a
   history of invoices or a prepayment raises the tier (https://docs.digitalocean.com/platform/resource-limits/), so
-  check what your account allows before you plan the machine, and leave room in the Volume for the copy. For scale, one
+  check what your account allows before you plan the machine, and leave room in the Volume for the copy. A firewall rule on port 22 for your own address goes stale when that
+  address changes: the server is then unreachable by SSH, not down. For scale, one
   real deployment on 2 vCPUs and 16 GB synced 52 tables, 310 M rows and about 200 GiB in Postgres, in about an hour,
   into 64 GiB on a 100 GiB Volume. A first sync peaks above what it ends on, so leave headroom.
 - **Fly.io and Railway: for trials on non-sensitive data, or where clients can join the private network.** Neither can

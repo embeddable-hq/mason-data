@@ -49,7 +49,7 @@ kubectl get service mason-pg                        # EXTERNAL-IP: the address a
 - **Two Services.** `mason-pg`, a LoadBalancer on 5433: a cloud's default is a TCP (layer 4) load balancer, which is
   what the Postgres protocol needs; Mason's own TLS is the TLS. An HTTP Ingress cannot carry it; a TCP-capable ingress
   (ingress-nginx's `tcp-services`, for one) can, with the Service as ClusterIP. `loadBalancerSourceRanges` restricts
-  who connects. `mason-health`, a ClusterIP on 4140, is `/healthz` and `/metrics` for the cluster (annotated for a Prometheus that
+  who connects where the provider honours it ([which do](../README.md#who-can-reach-the-postgres-port)). `mason-health`, a ClusterIP on 4140, is `/healthz` and `/metrics` for the cluster (annotated for a Prometheus that
   scrapes by `prometheus.io/*`; numbers only, no secret: [Metrics](../README.md#metrics)), and the StatefulSet's `serviceName`.
 - **Probes**: a startup probe of 30 × 10 s allows the first start 5 minutes (it takes ~15 s on an idle node, minutes on
   a loaded one; liveness and readiness run only after it has succeeded once); readiness every 10 s, liveness every
