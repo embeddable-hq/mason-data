@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as security from "../src/cli/security.ts";
-import { cookieOf, guard, newToken, sameSecret, setCookieHeader, SECURITY_HEADERS } from "../src/cli/security.ts";
+import { cookieName, cookieOf, guard, newToken, newTunnel, sameSecret, setCookieHeader, SECURITY_HEADERS, TICKET_MS, type GuardRequest } from "../src/cli/security.ts";
 
 const token = newToken();
 const port = 4039;
@@ -18,7 +18,7 @@ test("the token in the URL is traded for an HttpOnly, SameSite=Strict cookie, an
   assert.ok(!v.ok && v.status === 303);
   if (!v.ok && v.status === 303) {
     assert.equal(v.location, "/x?a=1");
-    assert.match(v.setCookie, /^mason_dev_4039=[0-9a-f]{64}; HttpOnly; SameSite=Strict; Path=\/$/);
+    assert.match(v.setCookie!, /^mason_dev_4039=[0-9a-f]{64}; HttpOnly; SameSite=Strict; Path=\/$/);
   }
   assert.equal(setCookieHeader("x", 4039), "mason_dev_4039=x; HttpOnly; SameSite=Strict; Path=/");
 });
@@ -82,5 +82,58 @@ test("two runs on one machine keep a cookie each: the browser sends both to eith
   const one = guard({ method: "GET", url: `/?token=${a}`, host: "127.0.0.1:4039" }, 4039, a);
   const two = guard({ method: "GET", url: `/?token=${b}`, host: "127.0.0.1:4040" }, 4040, b);
   assert.ok(!one.ok && one.status === 303 && !two.ok && two.status === 303);
-  if (!one.ok && one.status === 303 && !two.ok && two.status === 303) assert.notEqual(one.setCookie.split("=")[0], two.setCookie.split("=")[0], "each run sets a cookie of its own name");
+  if (!one.ok && one.status === 303 && !two.ok && two.status === 303) assert.notEqual(one.setCookie!.split("=")[0], two.setCookie!.split("=")[0], "each run sets a cookie of its own name");
+});
+
+test("a tunnel adds its port's two loopback names and nothing else, for as long as it is open", () => {
+  const token = "r".repeat(64);
+  const t = newTunnel(51000, 1000);
+  const ticket = t.ticket!;
+  const at = (req: Partial<GuardRequest>, now = 2000): ReturnType<typeof guard> => guard({ method: "GET", url: "/", ...req }, 4039, token, [t], now);
+  // any other Host stays refused: a rebinding page names itself, whatever the port
+  for (const host of ["evil.example:51000", "51000", "127.0.0.1", "127.0.0.1:51001", "127.0.0.1.evil.example:51000", "[::1]:51000"]) {
+    const v = at({ host, url: `/?ticket=${ticket}` });
+    assert.ok(!v.ok && v.status === 421, host);
+  }
+  assert.equal(t.ticket, ticket, "a refused Host spends no ticket");
+  // past its time, a ticket is refused
+  const late = at({ host: "127.0.0.1:51000", url: `/?ticket=${ticket}` }, 1000 + TICKET_MS);
+  assert.ok(!late.ok && late.status === 403);
+  // a POST never spends it
+  const posted = at({ method: "POST", host: "127.0.0.1:51000", url: `/?ticket=${ticket}`, origin: "http://127.0.0.1:51000" });
+  assert.ok(!posted.ok && posted.status === 403);
+  // the trade: once, by either name, the cookie named for the tunnel's port and holding its session, never the token
+  const v = at({ host: "LOCALHOST:51000", url: `/x?a=1&ticket=${ticket}` });
+  assert.ok(!v.ok && v.status === 303);
+  if (!v.ok && v.status === 303) {
+    assert.equal(v.location, "/x?a=1");
+    assert.equal(v.setCookie, setCookieHeader(t.session, 51000));
+    assert.ok(!v.setCookie!.includes(token));
+  }
+  assert.equal(t.ticket, null);
+  const cookie = `${cookieName(51000)}=${t.session}`;
+  // the same URL again: refused, but a browser that holds the cookie (a reload of it) is sent on, with nothing new
+  const again = at({ host: "127.0.0.1:51000", url: `/?ticket=${ticket}` });
+  assert.ok(!again.ok && again.status === 403);
+  const reload = at({ host: "127.0.0.1:51000", url: `/?ticket=${ticket}`, cookie });
+  assert.ok(!reload.ok && reload.status === 303 && reload.setCookie === undefined);
+  assert.deepEqual(at({ host: "127.0.0.1:51000", url: "/api/state", cookie }), { ok: true });
+  assert.deepEqual(at({ host: "localhost:51000", url: "/api/state", cookie }), { ok: true });
+  // a change: its own Origin only
+  assert.deepEqual(at({ method: "POST", host: "127.0.0.1:51000", cookie, origin: "http://127.0.0.1:51000" }), { ok: true });
+  for (const origin of [undefined, "http://evil.example", "http://127.0.0.1:4039", "https://127.0.0.1:51000"]) {
+    const o = at({ method: "POST", host: "127.0.0.1:51000", cookie, origin });
+    assert.ok(!o.ok && o.status === 403, String(origin));
+  }
+  // the run's cookie and Bearer are no good here, and the tunnel's cookie is none on the run's own Host
+  const bearer = at({ host: "127.0.0.1:51000", authorization: `Bearer ${token}` });
+  assert.ok(!bearer.ok && bearer.status === 403);
+  const own = at({ host: "127.0.0.1:51000", cookie: `${cookieName(51000)}=${token}` });
+  assert.ok(!own.ok && own.status === 403);
+  const crossed = at({ host: "127.0.0.1:4039", cookie: `${cookieName(4039)}=${t.session}` });
+  assert.ok(!crossed.ok && crossed.status === 403);
+  // the run's own server is as it was, and with the tunnel gone its Host is refused again
+  assert.deepEqual(at({ host: "127.0.0.1:4039", authorization: `Bearer ${token}` }), { ok: true });
+  const gone = guard({ method: "GET", url: "/", host: "127.0.0.1:51000", cookie }, 4039, token, []);
+  assert.ok(!gone.ok && gone.status === 421);
 });

@@ -1,6 +1,6 @@
 # The web page (`mason ui`)
 
-`mason start` serves a web page beside the commands, in a browser tab: a left sidebar of pages (Overview, Tables,
+`mason start` and `mason serve` serve a web page beside the commands, in a browser tab: a left sidebar of pages (Overview, Tables,
 Users, and the Observability group's three views: Queries, Usage and Sync events) over the state `mason status`, `mason tables`,
 `mason user`, `mason usage` and `mason logs` read.
 
@@ -8,6 +8,8 @@ Users, and the Observability group's three views: Queries, Usage and Sync events
 mason ui              # opens the page in your browser
 mason ui --no-open    # prints its URL only
 mason ui --json       # { url, port, next }
+
+mason ui --ssh deploy@mason.example.com    # a server's page, from your machine ("On a server", below)
 ```
 
 ## What it shows
@@ -211,8 +213,78 @@ Origin. Each `mason start` makes a new token: after a restart the page says so, 
 `mason start` prints `Web UI  mason ui` and `mason status` the page's URL without the token; the token is written
 nowhere else.
 
-The page is `mason start`'s alone: `mason serve` serves none. Its guard is the loopback interface and a token printed
-to the person at the machine; a page reached from other machines would need TLS and a login, which are not designed.
+## On a server
+
+`mason serve` serves the same page, on the server's loopback and nowhere else: nothing about it is public, and no
+firewall rule is added for it. From your own machine:
+
+```bash
+mason ui --ssh deploy@mason.example.com
+mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 mason"   # in a container
+mason ui --ssh deploy@mason.example.com --mason "cd /var/lib/mason && mason"           # a folder, or another path
+```
+
+It runs your own `ssh`, so your `~/.ssh/config`, keys and SSO apply, and it needs no project on your machine. It opens a
+free local port, starts `mason ui --bridge` on the server, opens your browser at `http://127.0.0.1:<port>/`, and stays
+in the foreground: **Ctrl-C closes the tunnel**. A dropped connection is reported, exit 1. `--no-open` prints the URL,
+and `--json` prints `{ url, port, server, project, version, next }` once and holds the tunnel, the end on stderr.
+
+**How it is built.** The tunnel is ssh's stdin and stdout, not `ssh -L`. A process beside the run reaches the page where it
+listens, and every browser connection crosses that one ssh connection as frames (`src/cli/ui-ssh.ts`). So:
+
+- **A container is the same route as a host.** Docker publishes a port to the container's own network address, never
+  its loopback, so `-L` would need the page to listen off loopback. It never does: the run has one way to listen
+  (`listenOnLoopback`), which takes no address, no setting names one, and `MASON_UI_HOST` set refuses the start. So
+  **publish nothing for the page**: `deploy/mason-data/compose.yml` needs no change.
+- **The server need not allow TCP forwarding**, and nobody needs to know the page's port. `MASON_UI_PORT` (default
+  4039, the next free one when it is held) names it where another service wants that port; a port named is that port,
+  or the start is refused.
+- **Another page's cookie crosses too.** A browser keeps cookies by host, not port, so a local `mason start`'s cookie for
+  127.0.0.1 is sent through the tunnel in the Cookie header. Each cookie is named for its port, and the server reads
+  only the one for the Host it was asked by, so that one is ignored, though it does reach the server.
+- **Your access is your SSH access**, then the guard below. There is no new password or login, and ssh carries the
+  encryption, so the page needs no TLS of its own.
+
+**The run's token stays on the server.** The bridge reads it as any command there does, opens the tunnel with it, and
+sends your machine a ticket: one use, good for 5 minutes, and all the URL carries, because the URL a browser is opened
+at is on a command line. The first visit trades it for a cookie holding the tunnel's own session, named for your local
+port, and the address loses it. When the tunnel closes, the session is gone, and so is what the guard allowed.
+
+**The guard takes no Host it was not told of.** A tunnel adds `127.0.0.1:<your port>` and `localhost:<your port>`, for as
+long as its connection lasts; a DNS-rebinding page still names itself, and is refused by that name. Every change is
+checked against that same Origin. The tunnel carries raw TCP to the run's command server, and the guard is what protects
+that server: a client chooses its path by the Host it sends, so `Authorization` is refused under a tunnel's Host, and
+under the server's own Host it needs the run's token, which never reaches your machine.
+
+**What the page does on a server.** Everything it does under `mason start`, with these differences:
+
+- **Add, Columns…, Name its key… and Remove are absent when the sources file cannot be written** (a project folder
+  mounted read-only: `/api/state` `sourcesReadOnly` says why, and the page says it too). Sync now, cancelling a
+  statement and the users work as they do on your machine.
+- **A closed tunnel says `mason ui --ssh`**, never `mason start`.
+- **Connect says what its URL's host is**: the Postgres API's address as the server sees it, often `localhost`, which a
+  tool elsewhere replaces with the server's own address.
+
+`mason ui` on the server itself is refused, naming `--ssh`: nobody sits at a browser there. `mason status` says the same line.
+
+**When it does not connect**, it says so in one report with the way out: `ssh` missing here, the server unreachable (a
+firewall rule that names your old IP address is the common cause), `mason` not a command there (`--mason`), a server
+older than `--ssh`, no project where ssh lands, Mason not running, or two ends whose bridges differ. Two more show as
+`ssh could not reach`, with ssh's own words, and neither is Mason's to change: a `RemoteCommand` in your `~/.ssh/config`
+for that Host (ssh refuses it beside a command: give the tunnel a Host without one), and a host-key failure (`Host key
+verification failed`: run `ssh <user@server>` once on its own, and check the key before you accept it).
+
+**What has been run.** Real OpenSSH to a real sshd, both on one machine: a key, a login banner and a shell profile that
+prints on stdout and stderr, with `AllowTcpForwarding no`, a browser through it, and Mason in a container reached with
+`docker exec -i`, its page on that container's loopback. Killing ssh ended the bridge on the server.
+
+**Unverified:** it has not been run across a real network or to a cloud server, and not with a passphrase or a hardware
+key, where ssh prompts. Routes that are `ssh` to your `~/.ssh/config` should work without Mason knowing, and **none has
+been tried**: SSM Session Manager on EC2, IAP on Compute Engine, Azure Bastion. Port 22 need not be open on those, if
+that holds.
+
+Kubernetes has no SSH, and Fargate, Cloud Run, Azure Container Apps, Fly and Railway have tooling of their own: none is
+covered.
 
 ## Building it out
 

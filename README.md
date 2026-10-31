@@ -507,6 +507,7 @@ tool, and shows the setup for Claude Desktop.
 | `mason usage` | What Mason did over time, from a sample every minute: the queries and their p95, the rows and bytes sent, the synced data's size, the stalest table, the replication lag and the memory. |
 | `mason status` | Each synced table and how up to date it is. The last day's and week's queries: their results, their p50 and p95 times, and the rows and bytes sent. Then the slow and refused queries, each with its reason. |
 | `mason ui` | All of this in your browser, on four tabs: Overview, Tables, Users, and Observability (queries, usage and sync events). You can also add and remove tables, sync one now, add and disable users, and cancel a running query. Its fonts and icons are bundled, so it works with no internet. |
+| `mason ui --ssh <user@server>` | The same page for a `mason serve` server, from your machine, with nothing public: your own `ssh` carries it, until Ctrl-C. Not yet run across a real network ([`docs/WEB-UI.md`](docs/WEB-UI.md#on-a-server)). |
 | `EXPLAIN` | For each table a query reads: its rows and how up to date it is, next to the SQL Mason runs. |
 
 ### A CLI for coding agents

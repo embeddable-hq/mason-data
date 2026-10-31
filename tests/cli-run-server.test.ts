@@ -330,7 +330,7 @@ test("the web page: /, /app.js, /app.css, /shared.js and each page's module from
   assert.equal((await call("GET", "/vendor/README.md")).headers["cache-control"], "no-store", "the vendor folder's README is no pinned release");
 });
 
-test("mason serve's run serves no page: / is the 404 it was, and the users are still the commands'", async () => {
+test("a run with page: false serves no page: / is the 404 it was, and the users are still the commands'", async () => {
   const serveCtx: RunContext = { ...ctx, page: false };
   const served = createRunServer(serveCtx);
   await new Promise<void>((r) => served.listen(0, "127.0.0.1", () => r()));

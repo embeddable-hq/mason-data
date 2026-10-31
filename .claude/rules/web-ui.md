@@ -8,7 +8,7 @@ paths:
 
 # The web page (`src/web/`, `mason ui`, docs/WEB-UI.md)
 
-`mason start`'s run serves one web page, with six pages in it, from its command server (src/cli/run-server.ts): a SHELL (`src/web/app.js`: a left
+A run (`mason start`'s, `mason serve`'s) serves one web page, with six pages in it, from its command server (src/cli/run-server.ts): a SHELL (`src/web/app.js`: a left
 sidebar — the project, a nav of links with icons (`renderNav`, `NAV_ICONS`), when it was updated and the version — and one section per page, the one shown chosen by the URL's hash, `#overview` the default) over a module
 per page (`src/web/pages/<id>.js`): the OVERVIEW (`status.js`: what `mason status` says), TABLES (what `mason tables`,
 `mason add` and `mason remove` do), USERS (what `mason user` does), and OBSERVABILITY's three views, QUERIES, USAGE and
@@ -90,9 +90,15 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
   read neither `location` — but its hash, the page shown, which never carries the token —, `document.cookie` nor
   storage: `tests/web-page.test.ts`), and no change to the guard
   without `tests/cli-security.test.ts` and `tests/cli-run-server.test.ts`.
-- **`mason start`'s only, never `mason serve`'s** (`RunContext.page`): the guard's model is loopback, the Host header
-  and a cookie from a token printed to the person at the machine. Off loopback the page would need TLS and a login,
-  which are not designed; `mason ui` refuses a run that serves no page, by asking it.
+- **On loopback alone, under both runs**: the page listens only through `listenOnLoopback` (src/cli/run-server.ts), which
+  takes no address, because off loopback it would need TLS and a login, which are not designed; `MASON_UI_HOST` set
+  refuses `mason serve`. `mason serve`'s page is reached with `mason ui --ssh` (src/cli/ui-ssh.ts, docs/WEB-UI.md "On a
+  server"): a bridge beside the run, over ssh's stdio, never `ssh -L` and never a published port. **A `PageTunnel`
+  opened with the run's token (`POST /api/ui/tunnel`, its connection IS the tunnel) is the guard's only way to add a
+  Host**: its port's two loopback names, while it lasts, never a wider rule; the laptop gets a one-use ticket, never the
+  token. Detectors: tests/cli-ui-ssh.test.ts, tests/cli-security.test.ts. Under `mason serve` a control that could only
+  fail is absent (`sourcesReadOnly`) and a failure the page words itself says `mason ui --ssh` (`overTunnel`).
+  `mason ui` refuses a run that serves no page, by asking it, and refuses on a server, naming `--ssh`.
 - **Polling, not server-sent events, until a page needs fresher than 2 s** (`POLL_MS`): a poll is a request the guard
   already judges. ONLY THE PAGE SHOWN is asked (and, beside a page that does not read it, the state the sidebar names the project from, once a minute: `SHELL_STATE`), each of its reads at its own rate (`reads()`: `{ path, everyMs }`, the
   rate its data moves; `POLL_MS` or less, every poll), so a page nobody looks at costs the run nothing. A read that

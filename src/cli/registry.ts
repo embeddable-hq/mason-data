@@ -12,6 +12,7 @@ import { ADD, LOGS, REMOVE, STATUS, STOP, TABLES, WAIT, add, logs, remove, statu
 import { USER, user } from "./user.ts";
 import { MCP, mcp } from "./mcp.ts";
 import { SHARE, share } from "./share.ts";
+import { DEFAULT_UI_PORT } from "./ports.ts";
 import { UI, ui } from "./ui.ts";
 import { GUIDES, guideText, type Guide } from "./guides.ts";
 import { DOCTOR, NODE_MIN, doctor } from "./doctor.ts";
@@ -80,7 +81,7 @@ export const DEV: CommandSpec & { needs: "project" } = {
   --attach            stay in the foreground (Ctrl-C stops Mason)
   --self-signed-tls   the Postgres API requires TLS, from a certificate made for this project in .mason/ (kept and
                       served again by every later start with the flag); not with MASON_PG_TLS_CERT / _KEY
-  --port <n>          the port the mason commands reach it on (default 4039, or the next free one)
+  --port <n>          the port the mason commands reach it on (default ${DEFAULT_UI_PORT}, or the next free one)
   --json              as data, once it is up: { running, pid, postgres: { url, host, port, database, sslmode }, next }
 `,
   options: {
@@ -104,7 +105,7 @@ async function runDev(argv: string[]): Promise<number> {
     // the database is the project's now: a URL here is the old habit, answered with the new way
     return failed("start", { message: "it takes no database URL: the project has one", code: "usage", why: "mason init <url> made it; .mason/config.json holds it", usage: DEV.usage }, { json: v.json });
   }
-  const port = v.port === undefined ? 4039 : Number(v.port);
+  const port = v.port === undefined ? DEFAULT_UI_PORT : Number(v.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) return failed("start", { message: `--port must be a port number (1-65535), not ${JSON.stringify(v.port)}`, code: "usage" }, { json: v.json });
   if (!v.attach) return devInBackground(argv, { json: v.json, selfSignedTls: v["self-signed-tls"] });
   return dev({ port, version: version(), selfSignedTls: v["self-signed-tls"] });

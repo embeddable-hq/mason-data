@@ -168,6 +168,8 @@ names the tables the server syncs, and its url: names the variable that holds th
      MASON_PG_PLAIN=1 behind a TLS proxy of your own
    Docker Compose: ${REPO}/deploy/mason-data/README.md. One container per volume, never two: the synced data lets one process
    write its file, so run one replica, with no autoscaling, and stop the old container before the new one starts.
+   THE WEB PAGE stays on the server's loopback, so publish nothing for it: mason ui --ssh <user@server> on your machine
+   opens it through your own ssh (--mason "docker exec -i <container> mason" for a container), until Ctrl-C.
    GET /healthz on MASON_HEALTH_PORT (4140) answers 503 while it starts and 200 once it serves; the first start takes
    about 15 seconds before that, then syncs the tables. GET /metrics on the same port is for Prometheus: numbers only
    (tables by phase, lag, ages, sizes, statements), never a table's or a user's name, so it needs no secret.

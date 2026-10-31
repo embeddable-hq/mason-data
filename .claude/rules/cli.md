@@ -109,7 +109,7 @@ CLI lacks).
 - **The commands ask the run's command server** (`src/cli/control.ts` → src/cli/run-server.ts: `/api/state?columns=1` (the page polls it lean), `/api/slow`,
   `/api/refused`, `/api/unsupported`, `/api/requests`, `/api/queries`, `/api/running`, `/api/events`, `/api/usage`, `/api/logs`, `/api/users`, `POST /api/pick|remove|sync|cancel`), with the run's token as `Authorization:
   Bearer` from the project's `.mason/config.json` (0600). It listens on 127.0.0.1 only and checks the `Host` header.
-  Under `mason start` it serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), whose users are
+  It serves the web page too (`mason ui`, src/web/; `.claude/rules/web-ui.md`), under `mason serve` as well, listening only through `listenOnLoopback`, which takes no address, a `PageTunnel` opened with the run's token (`mason ui --ssh`, src/cli/ui-ssh.ts) being the guard's only way to add a Host; its users are
   `mason user`'s own functions (`addUser`, `listUsers`, `removeUser`, `disableUser`, `enableUser`), so the page and the CLI cannot disagree.
   **The request log's filters are read by ONE parser** (`requestFilter`, src/cli/request-filter.ts) at both entrances
   — `mason logs --requests`' options and `/api/requests`' query string — so a filter means one thing and a mistake is

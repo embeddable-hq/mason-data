@@ -114,8 +114,12 @@ export interface RunState {
   jsonPaths?: KeptPathStatus[];
   /** what mason wait waits on (src/cli/readiness.ts), said by the run: a run from before it has none */
   readiness?: Readiness;
-  /** the run serves the web page (`mason ui`): mason start's does, mason serve's never; a run from before it has none */
+  /** the run serves the web page (`mason ui`): a run from before it has none */
   ui?: boolean;
+  /** this is `mason serve`'s run: `mason ui --ssh` opens its page from another machine */
+  served?: boolean;
+  /** why the page offers no Add or Remove (a server's sources file cannot be written), or null */
+  sourcesReadOnly?: string | null;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
   roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[];
@@ -360,7 +364,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            newest last: mason logs --events), error (why they could not be read, or null), queries: [{ requestId,
            startedAt, outcome, sqlstate, message, query, … }] (the latest statements refused, failed or cancelled, newest
            last, as mason logs --requests --json shows each: mason logs --requests --failed), queriesError (or null) },
-           readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), next }.
+           readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), served (this is
+           mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove, or
+           null), next }.
            Each table's kept is how it is kept current now (absent for a table the sync does not hold):
            { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
            else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
@@ -408,7 +414,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly",
     "roles", "share", "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -484,7 +490,7 @@ export async function status(argv: string[]): Promise<number> {
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
       ...shareRows(s.share),
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
-      ...(s.ui === true ? [["Web UI", `${run.control.url}/  (mason ui opens it)`] as [string, string]] : []),
+      ...(s.ui === true ? [["Web UI", s.served === true ? "from your machine: mason ui --ssh <user@server>" : `${run.control.url}/  (mason ui opens it)`] as [string, string]] : []),
       // the roles file as the listener reads it now (mason user add --role): its roles, or what is wrong with it
       ...(s.roles && s.roles.file !== null
         ? [["Roles", s.roles.problem !== null ? st.red(`${s.roles.problem} (every statement of a user with a role is refused until it is fixed)`)

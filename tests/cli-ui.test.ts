@@ -71,14 +71,29 @@ test("mason ui --no-open: the URL for the person at this terminal, and nothing o
   } finally { p.close(); }
 });
 
-test("mason ui, a run that serves no page (mason serve's): refused with the way out, and no URL printed", async () => {
+test("mason ui, a run that serves no page (one from before it): refused with the way out, and no URL printed", async () => {
   const p = await upProject(false);
   try {
     const a = await runMason(p.root, ["ui", "--json"], matrixEnv());
     assert.equal(a.code, 1);
     assert.deepEqual(JSON.parse(a.stdout), { error: { code: "refused", message: "Mason for shop serves no web page",
-      why: "the page is mason start's: this is mason serve's run, or a run started by a Mason from before the page",
-      fix: "on your machine, mason stop && mason start runs it with the page; a server's Mason is read with mason status" },
+      why: "this run was started by a Mason from before the page",
+      fix: "mason stop && mason start runs it with the page" },
+      next: [{ command: "mason status", what: "what it is doing, in this terminal" }] });
+    assert.ok(!a.stdout.includes(TOKEN));
+  } finally { p.close(); }
+});
+
+test("mason ui on a server (mason serve's project): refused with mason ui --ssh, and no token printed", async () => {
+  const p = await upProject(true);
+  try {
+    const file = path.join(p.root, ".mason", "config.json");
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), served: true }), { mode: 0o600 });
+    const a = await runMason(p.root, ["ui", "--json"], matrixEnv());
+    assert.equal(a.code, 1);
+    assert.deepEqual(JSON.parse(a.stdout), { error: { code: "refused", message: "Mason for shop runs on this server: its page is opened from your own machine",
+      why: "the page listens on this machine's loopback alone, and a browser on a server has no one in front of it",
+      fix: "on your machine, mason ui --ssh <user@server> (mason ui --help: for a container, --mason)" },
       next: [{ command: "mason status", what: "what it is doing, in this terminal" }] });
     assert.ok(!a.stdout.includes(TOKEN));
   } finally { p.close(); }

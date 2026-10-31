@@ -55,7 +55,7 @@ test("the settings: every one missing or wrong said at once, each with what to s
   const s = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv");
   assert.ok(!("message" in s));
   assert.deepEqual(s, { name: "mason", apiKey: KEY, selfSignedTls: false, project: "/srv/mason", data: "/srv",
-    health: { host: "0.0.0.0", port: 4140 } });
+    health: { host: "0.0.0.0", port: 4140 }, ui: { port: 4039, named: false } });
   const t = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_PROJECT: "/mason/project", MASON_DATA: "/mason/data", MASON_NAME: "shop",
     MASON_PG_SELF_SIGNED_TLS: "1", MASON_HEALTH_PORT: "8080", MASON_HEALTH_HOST: "127.0.0.1" }, "/srv");
   assert.ok(!("message" in t));

@@ -517,6 +517,55 @@ test("a run that stopped, or a cookie of an earlier run: a plain Failure that sa
   assert.deepEqual(failureOf(400, JSON.stringify({ error: own.message, failure: own })), own);
 });
 
+test("a server's page, through a tunnel: what it words itself names mason ui --ssh, what the run says stands", async () => {
+  const overTunnel = fn<[Failure], Failure>("overTunnel");
+  const failureOf = fn<[number | null, string], Failure>("failureOf");
+  const closed = overTunnel(failureOf(null, "fetch failed"));
+  assert.equal(closed.message, "the tunnel to this server has closed");
+  assert.match(closed.fix!, /^mason ui --ssh <user@server>, on your own machine, opens this page again/);
+  assert.deepEqual(closed.next!.map((s) => s.command), ["mason ui --ssh <user@server>"], "never mason start, on a server's page");
+  assert.deepEqual(overTunnel(failureOf(403, "no")).next!.map((s) => s.command), ["mason ui --ssh <user@server>"]);
+  const own = { code: "refused", message: "the run's own refusal", next: [] };
+  assert.deepEqual(overTunnel(own), own);
+  // the app does it for every read once the state says served, and a run on this machine keeps its words
+  for (const [served, command] of [[true, "mason ui --ssh <user@server>"], [false, "mason status"]] as const) {
+    let up = true;
+    const fetchFn = async (): Promise<{ ok: boolean; status: number; text(): Promise<string> }> => {
+      if (!up) throw new Error("fetch failed");
+      return { ok: true, status: 200, text: async () => JSON.stringify({ served }) };
+    };
+    const app = fn<[unknown], { poll(): Promise<void>; model: { pollFailure: Failure | null } }>("createApp")(fetchFn);
+    await app.poll();
+    up = false;
+    await app.poll();
+    assert.equal(app.model.pollFailure?.next?.[0]?.command, command);
+  }
+});
+
+test("a sources file the server cannot write: no Add, Columns…, Name its key… or Remove, and the page says why; Sync stays", () => {
+  const renderTables = fn<[unknown], string>("renderTables");
+  assert.match(textOf(renderTables(CATALOG_STATE)), /Remove/);
+  const why = "the sources file cannot be written on this server (EROFS): commit a change to it, and deploy";
+  const html = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, served: true });
+  for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
+  assert.match(html, /data-sync-table/);
+  assert.ok(textOf(html).includes(`Tables are not added or removed from this page: ${why}.`));
+  // no table added yet: nothing says Add
+  const none = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, tables: CATALOG_STATE.tables.map((t) => ({ ...t, added: false, copy: null })) });
+  assert.ok(!textOf(none).includes("Add one from the list"));
+});
+
+test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {
+  const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
+  const { renderUsersConnect } = await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown, served?: boolean) => string };
+  const pg = { host: "localhost", port: 5433, database: "shop", shown: "postgresql://<user>:<password>@localhost:5433/shop", psql: "psql x" };
+  const note = /from elsewhere a tool connects to the server's own address, in place of localhost/;
+  assert.match(textOf(renderConnect(pg, { served: true })), note);
+  assert.match(textOf(renderUsersConnect(pg, true)), note);
+  assert.doesNotMatch(textOf(renderConnect(pg)), note);
+  assert.doesNotMatch(textOf(renderUsersConnect(pg)), note);
+});
+
 // ------------------------------------------------------------------ the app, over a fake fetch
 
 /** A fake run: its answers by method and path, and every request the page made. */
