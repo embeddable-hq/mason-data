@@ -22,7 +22,12 @@ import { matrixEnv, runMason } from "./cli-matrix.ts";
 
 const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const made: string[] = [];
-after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
+// a test that fails while a tunnel is held leaves its command running: ended here, or the suite would wait on it for ever
+const held = new Set<ChildProcess>();
+after(() => {
+  for (const c of held) c.kill("SIGKILL");
+  for (const d of made) fs.rmSync(d, { recursive: true, force: true });
+});
 const temp = (name: string): string => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `mason-${name}-`)); made.push(d); return d; };
 
 const TOKEN = "t".repeat(64);
@@ -82,12 +87,16 @@ interface Held { child: ChildProcess; first: { url: string; port: number; server
 /** `mason ui --ssh … --json`, held: its one JSON object read, the process left running. */
 async function hold(root: string, bin: string, cwd = temp("laptop")): Promise<Held> {
   const child = spawn(process.execPath, [MAIN, "ui", "--ssh", "deploy@mason.example", "--mason", remote(root), "--json", "--timeout", "30"], { cwd, env: env(bin), stdio: ["ignore", "pipe", "pipe"] });
+  held.add(child);
+  child.unref();
   let out = "", err = "";
   child.stderr!.on("data", (b: Buffer) => { err += b.toString(); });
-  const done = new Promise<number | null>((r) => child.on("close", (c) => r(c)));
+  const done = new Promise<number | null>((r) => child.on("close", (c) => { held.delete(child); r(c); }));
   const first = await new Promise<Held["first"]>((resolve, reject) => {
     child.stdout!.on("data", (b: Buffer) => { out += b.toString(); try { resolve(JSON.parse(out) as Held["first"]); } catch { /* not whole yet: the next chunk */ } });
     void done.then((c) => reject(new Error(`it ended (${c}): ${out}${err}`)));
+    // stdout that never parses (something printed beside the object) is a failure, never a wait
+    setTimeout(() => reject(new Error(`no one JSON object on stdout in 20 s: ${out}${err}`)), 20_000).unref();
   });
   return { child, first, out: () => out, err: () => err, done };
 }
@@ -108,7 +117,7 @@ function ask(port: number, o: { path?: string; method?: string; headers?: Record
 
 const isGone = (pid: number): boolean => { try { process.kill(pid, 0); return false; } catch { return true; } };
 
-test("through the tunnel: the ticket trades once for a cookie, the guard holds, Ctrl-C leaves nothing, and the token is nowhere", async () => {
+test("through the tunnel: the ticket trades once for a cookie, the guard holds, Ctrl-C leaves nothing, and the token is nowhere", { timeout: 60_000 }, async () => {
   const s = await server();
   const ssh = fakeSsh();
   try {
@@ -185,7 +194,7 @@ test("through the tunnel: the ticket trades once for a cookie, the guard holds, 
   } finally { s.close(); }
 });
 
-test("a dropped connection is reported, exit 1, with the way back: on stderr, stdout staying one document", async () => {
+test("a dropped connection is reported, exit 1, with the way back: on stderr, stdout staying one document", { timeout: 60_000 }, async () => {
   const s = await server();
   const ssh = fakeSsh();
   try {
@@ -200,7 +209,7 @@ test("a dropped connection is reported, exit 1, with the way back: on stderr, st
   } finally { s.close(); }
 });
 
-test("the run going away ends the tunnel: said, not silent", async () => {
+test("the run going away ends the tunnel: said, not silent", { timeout: 60_000 }, async () => {
   const s = await server();
   const ssh = fakeSsh();
   const h = await hold(s.root, ssh.bin);
@@ -252,7 +261,7 @@ test("each failure is one report with its way out, in the failure shape, and no 
   assert.match(missing.error.fix, /OpenSSH client/);
 });
 
-test("Ctrl-C before the server answers ends ssh too, exit 0", async () => {
+test("Ctrl-C before the server answers ends ssh too, exit 0", { timeout: 60_000 }, async () => {
   const ssh = fakeSsh();
   const child = spawn(process.execPath, [MAIN, "ui", "--ssh", "deploy@mason.example", "--json"], { cwd: temp("laptop"), env: env(ssh.bin, { FAKE_SSH: "silent" }), stdio: "ignore" });
   const done = new Promise<number | null>((r) => child.on("close", (c) => r(c)));
