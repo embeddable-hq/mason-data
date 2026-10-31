@@ -101,6 +101,14 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   agent that built a 20 M-row table twice spent the second build on nothing new.
 - **Push early, read while CI runs.** Open the PR as soon as the first commit is green locally; read the diff and run the
   review while CI runs; land fix commits in one push, not one per finding.
+- **Every wait has a limit, and a job past it is a hang**, because a background job reports only when it exits and a
+  deadlocked one never does (docs/DESIGN.md "Local gates"). `npm run gate` bounds each step already. A bare test run
+  names it before the files, `node --test --test-timeout=<ms> <file>`: after them Node ignores it, so `npm test` and
+  `npm run check` cannot take it until issue 139, the rule's detector. Never end a turn on an unbounded job: a queued
+  gate is watched in a bounded wait on its output, whose `waiting for a slot` lines say it is queued. Past the limit,
+  compare CPU with elapsed time on the test's own process, not the wrapper (`pgrep -P <pid>` down to it, then
+  `ps -o time,etime -p <pid>`): a hung test uses none, though nor does one waiting on I/O. A hang is the change's to
+  fix, or a flake as "Local gates" says, never a run to repeat.
 - **Nobody waits on CI.** An implementer ends at the push and reports the PR and its head; the coordinator binds the PR
   and lets the app's PR monitor bring the verdict (auto-merge, for a tooling PR already read and reviewed), and goes on
   with other work. No session sits in a wait on a run: watching CI took most of a coordinator's active time (issue 78).

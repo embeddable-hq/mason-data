@@ -1861,6 +1861,11 @@ session in a sandbox. `fails-without` copies into a linked `git worktree`, becau
 `git ls-files` and a plain copy would fail it on both sides. A killed run's test runner reports failures by name, which
 read as a proof, so an interrupted run now has no verdict.
 
+**A wait with no limit (2026-10-31).** An agent ended its turn on a background unit suite and waited for the
+notification; one test had deadlocked, so the job never exited and nothing came. It sat for 2h07 with 0.43 s of CPU,
+shown as completed. Across that day's agents, about 31 of 115 agent-hours were idle until a notification or message
+arrived and about 11 went on sleep loops, against about 4 running the oracle.
+
 ## Measurements
 
 ### A top N over joined tables (issue 105, 2026-10-31)
