@@ -20,7 +20,8 @@ import { DuckDBInstance, version, type DuckDBConnection, type DuckDBPreparedStat
 import { Executor, type DuckConnection } from "./executor.ts";
 import { beginStatement, cancelStatement, slotName, statementCancelled } from "./cancel.ts";
 import type { PgSession } from "../api/postgres/encode.ts";
-import { StatementError, type DuckAnswer, type DuckOptions, type DuckRunner, type DuckSession, type ExplainHow } from "../api/postgres/server.ts";
+import type { DuckAnswer, DuckOptions, DuckRunner, DuckSession, ExplainHow } from "../api/postgres/server.ts";
+import { StatementError } from "./statement.ts";
 import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from "./plan.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
@@ -100,6 +101,28 @@ export function machineMemoryBytes(read: (file: string) => string = (f) => fs.re
   return limit;
 }
 export const DEFAULT_MEMORY_LIMIT = defaultMemoryLimit(machineMemoryBytes());
+
+/**
+ * WHAT STATEMENTS MAY SPILL (issue 105: a 100-row preview's sort took every free byte of a volume, and the sync's room
+ * with it). DuckDB's default ceiling is "90% of available disk space", and what it answered when the disk ran out first
+ * was `XX000` with a path. Here the ceiling is HALF of the room statements have, what is free where the copy is and what
+ * they have spilled there (the disk's free bytes exclude the spill, so a ceiling of the free bytes alone would grow with
+ * each read as the spill grows, and end near the whole disk). The sync's writes keep the other half whatever statements
+ * do, and it follows the disk (`DuckStore.keepSpillCeiling`, every `SPILL_REFRESH_MS`): a copy that grows narrows it.
+ * `MASON_SPILL_LIMIT` sets the amount instead, never past 90% of that room. Spilled files are shared by the statements
+ * running, so two at once share the ceiling. Past it the statement that needed the room fails alone, 53400 as past
+ * Postgres's temp_file_limit, with the way out (pgErrorOf), and its files are gone with it; a disk that is really full
+ * is 53100. A sizing decision reads `store.spillLimitBytes`, as it reads `store.memoryLimitBytes`.
+ */
+const SPILL_FREE_SHARE = 0.5, SPILL_FREE_MOST = 0.9;
+const SPILL_REFRESH_MS = 15_000;
+export function spillCeiling(freeBytes: number, spilledBytes: number, setBytes: number | null): number {
+  const room = freeBytes + spilledBytes;
+  return Math.max(2 ** 20, Math.floor(setBytes === null ? room * SPILL_FREE_SHARE : Math.min(setBytes, room * SPILL_FREE_MOST)));
+}
+/** the bytes free where `dir` is: the one reading of it (the sync's disk check, the spill's ceiling) */
+export function freeBytesAt(dir: string): number { const st = fs.statfsSync(dir); return st.bavail * st.bsize; }
+const spillSetting = (bytes: number): string => `${Math.floor(bytes / 2 ** 20)}MiB`;
 export const MEMORY_LIMIT_RE = /^\s*(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB|KiB|MiB|GiB|TiB)\s*$/i;
 
 /** DuckDB's memory limit in bytes, as DuckDB reads the text: KB / MB / GB / TB are powers of 1000, KiB / MiB / GiB / TiB of 1024 */
@@ -145,13 +168,24 @@ export class DuckStore {
   readonly file: string;
   /** the memory limit every connection shares, in bytes */
   readonly memoryLimitBytes: number;
+  /** what statements may spill now, in bytes (`spillCeiling`): it follows the disk */
+  spillLimitBytes: number;
+  private readonly spillSet: number | null;
+  private readonly diskFree: (dir: string) => number;
+  private readonly spillTimer: NodeJS.Timeout;
+  private spillLane: Promise<DuckConnection> | null = null;
+  private spillKept: Promise<void> | null = null;
+  private readonly log: (line: string) => void;
   private readonly executor: Executor;
   private closed: Promise<void> | null = null;
   private readonly closeGraceMs: number | undefined;
   /** where the copy's extensions come from: Mason's package for this platform, or DuckDB's install (src/duck/extensions.ts) */
   readonly extensions: Extensions;
-  private constructor(file: string, executor: Executor, memoryLimit: number, extensions: Extensions, closeGraceMs?: number) {
+  private constructor(file: string, executor: Executor, memoryLimit: number, extensions: Extensions, spill: { limit: number; set: number | null; diskFree: (dir: string) => number }, log: (line: string) => void, closeGraceMs?: number) {
     this.file = file; this.executor = executor; this.memoryLimitBytes = memoryLimit; this.extensions = extensions; this.closeGraceMs = closeGraceMs;
+    this.spillLimitBytes = spill.limit; this.spillSet = spill.set; this.diskFree = spill.diskFree; this.log = log;
+    this.spillTimer = setInterval(() => { void this.keepSpillCeiling(); }, SPILL_REFRESH_MS);
+    this.spillTimer.unref();
     this.writer = executor.writer();
     this.instance = { connect: () => executor.connect() };
   }
@@ -159,11 +193,15 @@ export class DuckStore {
   /** `silentMs` and `closeGraceMs`: the executor's bounds (src/duck/executor.ts SILENT_MS, CLOSE_GRACE_MS), shorter only
    *  in a test; `workerFile`, the executor worker's module, another only in a test; `extensions`, this machine's
    *  (`findExtensions`) unless a test names a package */
-  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions } = {}): Promise<DuckStore> {
+  static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; spillLimit?: string; diskFree?: (dir: string) => number; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions } = {}): Promise<DuckStore> {
     const extensions = options.extensions ?? findExtensions();
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
     if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(`MASON_DUCKDB_MEMORY=${JSON.stringify(memoryLimit)} is not an amount of memory: write it as 8GB or 512MiB (unset, half the machine's RAM: ${DEFAULT_MEMORY_LIMIT})`);
+    if (options.spillLimit !== undefined && !MEMORY_LIMIT_RE.test(options.spillLimit)) throw new Error(`MASON_SPILL_LIMIT=${JSON.stringify(options.spillLimit)} is not an amount of disk: write it as 40GB or 512MiB (unset, half of what is free on the disk)`);
+    const spillSet = options.spillLimit === undefined ? null : memoryLimitBytes(options.spillLimit);
+    const diskFree = options.diskFree ?? freeBytesAt;
     const where = path.resolve(file);
+    const spillLimit = spillCeiling(diskFree(path.dirname(where)), 0, spillSet);
     const before = opened.get(where);
     if (before !== undefined && before.closed === null) throw new Error(`Mason could not open the synced data ${file}: this process has it open already (Mason bug: report it)`);
     // a copy whose thread was given up on may still hold the file: a second instance of it would lose writes
@@ -174,15 +212,44 @@ export class DuckStore {
     try {
       if (before !== undefined) await before.closed;
       // every connection's, the sync's and each session's
-      executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, ...extensionSettings(extensions), memory_limit: memoryLimit, temp_directory: `${file}.tmp` }, log,
+      executor = await Executor.start({ file, settings: { ...INSTANCE_SETTINGS, ...extensionSettings(extensions), memory_limit: memoryLimit, temp_directory: `${file}.tmp`, max_temp_directory_size: spillSetting(spillLimit) }, log,
         ...(options.silentMs !== undefined ? { silentMs: options.silentMs } : {}), ...(options.workerFile !== undefined ? { workerFile: options.workerFile } : {}) });
     } catch (e) { if (opened.get(where) === mine) opened.delete(where); throw e; }
-    const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), extensions, options.closeGraceMs);
+    const store = new DuckStore(file, executor, memoryLimitBytes(memoryLimit), extensions, { limit: spillLimit, set: spillSet, diskFree }, log, options.closeGraceMs);
     // closed: the file may be opened again — unless its thread was given up on (`abandoned`), which keeps it here
     store.closing = (p) => { mine.closed = p; void p.then(() => { if (executor.abandoned !== null) mine.abandoned = executor.abandoned; else if (opened.get(where) === mine) opened.delete(where); }); };
     return store;
   }
   private closing: (p: Promise<void>) => void = () => undefined;
+
+  /**
+   * THE SPILL'S CEILING MOVED WITH THE DISK (`spillCeiling`): the bytes free and spilled now, set on the instance on a
+   * connection of its own, never the writer's. One at a time; a move under 1 % is none. DuckDB refuses a ceiling under
+   * what is spilled at that moment (more may have spilled since the read): it stays where it was until the next turn.
+   * Any other failure is said; the ceiling stands, which is the last one set.
+   */
+  keepSpillCeiling(): Promise<void> {
+    if (this.closed !== null) return Promise.resolve();
+    this.spillKept ??= this.spillTurn().catch((e: unknown) => {
+      if (this.closed === null) this.log(`the spill's ceiling was not moved: ${e instanceof Error ? e.message : String(e)}`);
+    }).finally(() => { this.spillKept = null; });
+    return this.spillKept;
+  }
+  private async spillTurn(): Promise<void> {
+    let c: DuckConnection;
+    // a connection that failed is asked for again next turn, never kept as the answer
+    try { c = await (this.spillLane ??= this.executor.connect()); }
+    catch (e) { this.spillLane = null; throw e; }
+    const spilled = Number((await c.runAndReadAll("SELECT coalesce(sum(size), 0) FROM duckdb_temporary_files()")).getRowsJS()[0]![0]);
+    const next = spillCeiling(this.diskFree(path.dirname(path.resolve(this.file))), spilled, this.spillSet);
+    if (Math.abs(next - this.spillLimitBytes) < this.spillLimitBytes * 0.01) return;
+    try { await c.run(`SET GLOBAL max_temp_directory_size = '${spillSetting(next)}'`); }
+    catch (e) {
+      if (e instanceof Error && e.message.includes("failed to adjust")) return;
+      throw e;
+    }
+    this.spillLimitBytes = next;
+  }
 
   /** called once if the engine's thread dies while the run uses it (src/duck/executor.ts): the run exits with the reason */
   onCrash(f: (reason: string) => void): void { this.executor.onCrash(f); }
@@ -229,7 +296,7 @@ export class DuckStore {
       collation: c,
       open: () => this.runner(),
       plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants) =>
-        planDuck(catalog, text, stmt, base, paramOids, searchPath, timeZone, c, verified, userTypes, copies, 0, kept ?? null, wireBound ?? false, grants),
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath, timeZone, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants }),
       parameters: duckParameters,
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
@@ -242,6 +309,7 @@ export class DuckStore {
    *  (a second open of the file waits for it), or once the executor's grace has passed whatever the thread does
    *  (src/duck/executor.ts CLOSE_GRACE_MS); never rejects — a failure is said in the log. */
   close(): Promise<void> {
+    clearInterval(this.spillTimer);
     if (this.closed === null) { this.closed = this.executor.close(this.closeGraceMs); this.closing(this.closed); }
     return this.closed;
   }
@@ -275,6 +343,15 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   const full = err instanceof Error ? err.message : String(err);
   const kind = /^([A-Za-z ]+) Error: /.exec(full)?.[1] ?? "";
   const message = full.replace(/^[A-Za-z ]+ Error: /, "").replace(/\n\n?LINE \d+:[\s\S]*$/, "").trim();
+  // NO ROOM TO SPILL (issue 105): the ceiling, or the disk itself before it. Postgres's class for a full disk, in
+  // Mason's words: the engine's text names a path and a setting no client of Mason has, so it stays out of the answer
+  // Read by the engine's own kind and sentence: a statement's literal may hold the same words in any other error
+  const ceiling = kind === "Out of Memory" && /This limit was set by the 'max_temp_directory_size' setting/.test(full);
+  if (ceiling || (kind === "IO" && /No space left on device/.test(full))) {
+    return new StatementError({ code: ceiling ? "53400" : "53100", message: ceiling ? "could not write to temporary file: this statement needs more room on disk than statements may take"
+      : "could not write to temporary file: No space left on device",
+    hint: "ask for less at once (a filter, a LIMIT, fewer or narrower columns, a coarser GROUP BY), free disk where the synced data is, or raise MASON_SPILL_LIMIT (40GB; by default half of what is free) and start mason again; nothing else stopped" }, sql, "spill-limit");
+  }
   const pg = postgresWording(kind, message);
   // a refusal raised inside DuckDB (a Mason function's, the rewrite's error() call) crossed it as its text alone: the
   // entry its text names (gapIn), read here, the one place that text becomes a statement's error

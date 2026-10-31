@@ -153,7 +153,7 @@ test("a FROM that may repeat a row of the counted table keeps the DISTINCT: a no
 /** the DuckDB SQL a statement is planned to (src/duck/plan.ts), over the catalog, nothing verified */
 async function sent(sql: string): Promise<string> {
   const stmt = (await parseSql(sql)).stmts![0]!.stmt as Node;
-  return (await planDuck(catalog, sql, stmt, 0, [], "public", "UTC", { kind: "bytes" }, null)).sql.text;
+  return (await planDuck({ catalog, text: sql, stmt, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null })).sql.text;
 }
 
 test("the SQL sent counts the key without DISTINCT, its FILTER kept, and an ORDER BY repeating it in its own SELECT alike", async () => {

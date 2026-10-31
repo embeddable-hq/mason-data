@@ -164,6 +164,19 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
   "CREATE TABLE public.late (id int PRIMARY KEY, j jsonb, k int, c int); " +
   "INSERT INTO public.late SELECT g, jsonb_build_object('n', CASE WHEN g = 2000 THEN 'x' ELSE g::text END, 'd', jsonb_build_object('os', 'ios' || g % 7)), 2000 - g, g % 50 FROM generate_series(1, 2000) g; " +
   "CREATE TABLE public.late_c (id int PRIMARY KEY, name text); INSERT INTO public.late_c SELECT g, 'c' || g FROM generate_series(0, 49) g;" +
+  // A TOP N OVER JOINED TABLES (issue 105), its rows chosen by row number (src/duck/late.ts joinRows): a row with no
+  // match, a key NULL on either side, a row the join multiplies, ties (made repeats), a table joined to itself, the
+  // strings a collation orders otherwise than bytes, a view, and a table whose own column is named rowid
+  "CREATE TABLE public.top_a (id int PRIMARY KEY, made timestamptz, name text, parent int, note text); " +
+  "INSERT INTO public.top_a VALUES (1, '2024-03-10 23:30:00+00', 'b', NULL, repeat('n', 300)), (2, '2024-03-11 01:00:00+00', 'A', 1, NULL), (3, NULL, 'a', 1, 'x'), (4, '2024-03-11 01:00:00+00', 'é', 2, 'y'), " +
+  "(5, NULL, 'Z', 9, 'z'), (6, '2024-01-01 00:00:00+00', NULL, 2, 'w'), (7, '2024-03-11 01:00:00+00', 'z', 4, 'v');" +
+  "CREATE TABLE public.top_b (id int PRIMARY KEY, a_id int, payload jsonb, amount numeric(10,2), seen date); " +
+  "INSERT INTO public.top_b SELECT g, CASE WHEN g % 11 = 0 THEN NULL ELSE g % 4 + 1 END, jsonb_build_object('k', 'v' || g, 'n', g, 'wide', repeat('w', 200)), g * 1.25, CASE WHEN g % 3 = 0 THEN NULL ELSE date '2024-01-01' + g END FROM generate_series(1, 30) g;" +
+  "CREATE TABLE public.top_c (id int PRIMARY KEY, b_id int, doc json, label text); " +
+  "INSERT INTO public.top_c SELECT g, g % 7 + 1, json_build_object('n', g, 'wide', repeat('d', 200)), CASE WHEN g % 5 = 0 THEN NULL ELSE 'l' || g % 3 END FROM generate_series(1, 40) g;" +
+  "CREATE TABLE public.top_r (id int PRIMARY KEY, rowid int, a_id int); INSERT INTO public.top_r VALUES (1, 70, 1), (2, 60, 2), (3, 50, 2);" +
+  "CREATE TABLE public.top_rc (id int PRIMARY KEY, \"RowId\" int, a_id int); INSERT INTO public.top_rc SELECT g, 5, g % 3 + 1 FROM generate_series(1, 6) g;" +
+  "CREATE VIEW public.top_v AS SELECT b.id, b.a_id, b.payload FROM public.top_b b WHERE b.id < 20;" +
   // JSONB IN POSTGRES'S ORDER (JORDER above), beside a json of the same text, which has no order at all
   `CREATE TABLE public.jorder (id int PRIMARY KEY, j jsonb, js json); INSERT INTO public.jorder VALUES ${JORDER.map((v, i) => `(${i + 1}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
   // INSTANTS AT A TRUNCATION'S EDGES (date_trunc of a timestamptz, in the session's zone or a zone of its own): each side
@@ -209,7 +222,7 @@ const ORDINARY = "id < 100";
 const OPS = ["=", "<>", "<", "<=", ">", ">="];
 const pairs = <T>(xs: readonly T[]): Array<[T, T]> => xs.flatMap((a) => xs.map((b): [T, T] => [a, b]));
 /** a statement of the matrix; `zone`, the session's TimeZone it is asked in (UTC where none is said) */
-export interface Matrixed { name: string; sql: string; zone?: string }
+export interface Matrixed { name: string; sql: string; zone?: string; inOrder?: boolean }
 const q = (name: string, sql: string, zone?: string): Matrixed => ({ name: `type matrix: ${name}`, sql, ...(zone === undefined ? {} : { zone }) });
 
 /** a literal of each family to compare a column with */
@@ -715,6 +728,48 @@ function* matrix(): Generator<Matrixed> {
   yield q("a select list after its limit and offset, sorted by an output's name and an ordinal", "SELECT l.id AS key, upper(c.name), l.j ->> 'n' FROM late l JOIN late_c c ON c.id = l.c ORDER BY c.name DESC, key LIMIT 4 OFFSET 3");
   yield q("a select list after its limit, the bad row kept", "SELECT l.id, (l.j ->> 'n')::int, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.id DESC LIMIT 3");
   yield q("a select list after its limit, sorted by an ordinal, filtered through the join", "SELECT l.id, (l.j ->> 'n')::int FROM late l JOIN late_c c ON c.id = l.c WHERE c.name = 'c7' ORDER BY 1 LIMIT 2");
+  // A TOP N OVER JOINED TABLES (issue 105). Every order total, so Postgres's row order is the answer, but where ties are the point
+  const JOINED = "FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON b.id = c.b_id";
+  const TOTAL = "a.id, b.id NULLS FIRST, c.id NULLS FIRST";
+  yield q("top N over joins: the tool's preview, every table's columns", `SELECT a.*, b.*, c.* ${JOINED} ORDER BY (a.made) IS NULL ASC, a.made DESC, ${TOTAL} LIMIT 12 OFFSET 0`);
+  yield q("top N over joins: a *", `SELECT * ${JOINED} ORDER BY (a.made) IS NULL ASC, a.made DESC, ${TOTAL} LIMIT 12 OFFSET 5`);
+  yield q("top N over joins: a * beside named columns", `SELECT a.id AS key, *, c.label ${JOINED} ORDER BY ${TOTAL} LIMIT 9`);
+  yield q("top N over joins: no match, a key NULL on the side the join supplies", `SELECT a.id, b.id, c.id, c.label, c.doc ${JOINED} ORDER BY c.label NULLS FIRST, ${TOTAL} LIMIT 15`);
+  yield q("top N over joins: NULLs last in a descending key", `SELECT a.name, b.payload, c.doc ->> 'n' ${JOINED} ORDER BY c.id DESC NULLS LAST, b.id, a.id LIMIT 8`);
+  yield q("top N over joins: OFFSET past the end", `SELECT a.*, c.* ${JOINED} ORDER BY ${TOTAL} LIMIT 10 OFFSET 100000`);
+  yield q("top N over joins: LIMIT 0", `SELECT a.*, c.* ${JOINED} ORDER BY ${TOTAL} LIMIT 0`);
+  yield q("top N over joins: a row the join multiplies", "SELECT b.id, c.id, b.payload ->> 'k', c.doc FROM top_b b JOIN top_c c ON c.b_id = b.id WHERE b.id = 2 ORDER BY c.id DESC LIMIT 4 OFFSET 1");
+  yield q("top N over joins: a cross join's multiples, the same row twice in a row's pair", "SELECT x.id, y.id, x.note, y.note FROM top_a x, top_a y WHERE x.id <= 3 AND y.id <= 3 ORDER BY x.id DESC, y.id LIMIT 7");
+  yield q("top N over joins: a table joined to itself", "SELECT x.id, x.name, p.id AS parent, p.note, g.name FROM top_a x LEFT JOIN top_a p ON p.id = x.parent LEFT JOIN top_a g ON g.id = p.parent ORDER BY x.id DESC LIMIT 5");
+  yield q("top N over joins: RIGHT and FULL joins", "SELECT a.id, a.note, b.id, b.payload FROM top_a a RIGHT JOIN top_b b ON a.id = b.a_id ORDER BY b.id DESC, a.id LIMIT 6");
+  yield q("top N over joins: a FULL join", "SELECT a.id, a.note, b.id, b.amount FROM top_a a FULL JOIN top_b b ON a.id = b.a_id ORDER BY a.id NULLS FIRST, b.id NULLS FIRST LIMIT 9");
+  yield q("top N over joins: an expression over a wide column, and exact numerics", "SELECT a.id, upper(a.note), length(c.doc::text), (b.payload ->> 'n')::int + 1 AS n, b.amount / 3, round(b.amount * 1.1, 1) " + `${JOINED} ORDER BY ${TOTAL} LIMIT 10`);
+  yield q("top N over joins: a sort by an expression, an ordinal and an output's name", `SELECT a.id AS key, b.id, c.label AS tag, b.payload ${JOINED} ORDER BY lower(a.name) NULLS FIRST, 1, tag NULLS FIRST, 2 NULLS FIRST, c.id NULLS FIRST LIMIT 11`);
+  yield q("top N over joins: a sort by a computed output is left as it was", "SELECT a.id, b.id, b.id * 2 AS twice, c.doc FROM top_a a JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON c.b_id = b.id ORDER BY twice DESC, 1, c.id LIMIT 5");
+  yield q("top N over joins: bare names", "SELECT note, payload, doc, label FROM top_a a JOIN top_b b ON a.id = b.a_id JOIN top_c c ON b.id = c.b_id ORDER BY made DESC NULLS LAST, c.id LIMIT 6");
+  yield q("top N over joins: a jsonb key and a filter on the wide column", `SELECT a.id, b.payload, c.id ${JOINED} WHERE b.payload ->> 'k' <> 'v3' ORDER BY b.payload, ${TOTAL} LIMIT 7`);
+  yield q("top N over joins: a date's text, a timestamptz in a session's zone", `SELECT a.made, b.seen, to_char(a.made, 'YYYY-MM-DD HH24') ${JOINED} ORDER BY date_trunc('day', a.made) DESC NULLS LAST, ${TOTAL} LIMIT 12`, "America/New_York");
+  yield q("top N over joins: under the database's collation", `SELECT a.name, a.id, b.id, c.doc ${JOINED} ORDER BY a.name NULLS FIRST, ${TOTAL} LIMIT 14`);
+  yield q("top N over joins: under C", `SELECT a.name, a.id, b.id, c.doc ${JOINED} ORDER BY a.name COLLATE "C" DESC NULLS LAST, ${TOTAL} LIMIT 14`);
+  yield q("top N over joins: under an ICU collation", `SELECT a.name, a.id, b.id, c.doc ${JOINED} ORDER BY a.name COLLATE "unicode", ${TOTAL} LIMIT 14`);
+  yield q("top N over joins: a view among the tables stays as it was", "SELECT a.id, a.note, v.id, v.payload FROM top_a a JOIN top_v v ON a.id = v.a_id ORDER BY v.id DESC LIMIT 5");
+  yield q("top N over joins: a derived table and a WITH query stay as they were", "WITH w AS (SELECT * FROM top_b WHERE id > 5) SELECT a.note, w.payload, s.doc FROM top_a a JOIN w ON a.id = w.a_id JOIN (SELECT * FROM top_c) s ON s.b_id = w.id ORDER BY w.id, s.id LIMIT 5");
+  yield q("top N over joins: a table of a column named rowid stays as it was", "SELECT r.*, a.note FROM top_r r JOIN top_a a ON a.id = r.a_id ORDER BY r.rowid DESC LIMIT 2");
+  yield q("top N over joins: a column named rowid in another case stays as it was", "SELECT r.id, r.\"RowId\", a.note FROM top_rc r JOIN top_a a ON a.id = r.a_id ORDER BY r.id DESC LIMIT 2");
+  yield q("top N over joins: a *, sorted by a column number", "SELECT a.*, b.seen FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 2, 1, b.id LIMIT 5");
+  yield q("top N over joins: a * first, sorted by its first column", "SELECT *, a.id FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 1 DESC, 6 LIMIT 5");
+  yield q("top N over joins: two *, sorted by numbers", "SELECT a.*, b.* FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 2, 1, 6 LIMIT 5");
+  yield q("top N over joins: a number past the *'s first table", "SELECT *, a.id FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 7, 1, 6 LIMIT 5");
+  yield q("top N over joins: a *'s number output sorted by its name", "SELECT a.id, b.* FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY amount DESC, 1, b.id LIMIT 5");
+  yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
+  yield q("top N over joins: NATURAL and USING stay as they were", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
+  yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);
+  yield q("top N over joins: GROUP BY takes another path", `SELECT a.id, count(c.id), max(c.label) ${JOINED} GROUP BY a.id ORDER BY 2 DESC, 1 LIMIT 4`);
+  yield q("top N over joins: a window takes another path", `SELECT a.id, b.id, row_number() OVER (PARTITION BY a.id ORDER BY b.id, c.id) ${JOINED} ORDER BY a.id, b.id NULLS FIRST, c.id NULLS FIRST LIMIT 6`);
+  yield q("top N over joins: a subquery in the list takes another path", "SELECT a.id, (SELECT count(*) FROM top_b x WHERE x.a_id = a.id) FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
+  // TIES: which of equal rows a LIMIT keeps is defined by neither, so the limit falls where the tie ends (three rows
+  // of made = 01:00, four with the NULLs below them), and the rows are held as a set
+  yield { ...q("top N over joins: ties, the limit where they end", "SELECT a.id, a.note, p.note FROM top_a a LEFT JOIN top_a p ON p.id = a.parent WHERE a.made IS NOT NULL ORDER BY a.made DESC LIMIT 3"), inOrder: false };
   yield q("a view", "SELECT * FROM happy ORDER BY id");
   yield q("a view's columns qualified by its schema (Metabase)", "SELECT \"public\".\"happy\".\"id\" AS \"id\", \"public\".\"happy\".\"m\" AS \"m\" FROM \"public\".\"happy\" WHERE \"public\".\"happy\".\"m\" > 'ok' ORDER BY \"public\".\"happy\".\"id\" ASC LIMIT 2000");
   yield q("a view of another schema, its columns renamed", "SELECT * FROM other.typed_summary ORDER BY flag NULLS FIRST");

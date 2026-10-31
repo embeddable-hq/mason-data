@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DuckStore } from "../src/duck/store.ts";
-import { StatementError } from "../src/api/postgres/server.ts";
+import { StatementError } from "../src/duck/statement.ts";
 import { explainOptions } from "../src/api/postgres/explain.ts";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-duck-signal-"));

@@ -155,7 +155,7 @@ under another transaction's write fails its commit, hence swaps on the writer's 
 - **The catalog serves a table the moment its copy commits**, on a connection no copy holds (after a restart it had been
   empty for hours behind a large copy).
 - **An enum array is read as `text[]`**: a passthrough read hands it over as one VARCHAR DuckDB cannot cast.
-- **ZSTD strings, the disk projection**: `.claude/rules/duckdb.md` "Memory and the machine" (JSON text 0.66 → 0.26 GB/M rows).
+- **ZSTD strings, the disk projection**: `.claude/rules/duck-memory.md` "Memory and the machine" (JSON text 0.66 → 0.26 GB/M rows).
 
 ## Keeping a copy current
 
@@ -260,7 +260,7 @@ refuses `mason start` too. **Where.** `src/cli/registry.ts`, `src/cli/serve.ts`,
 ### Logical replication
 
 **Decision.** A table whose `sync:` is `replication` is kept current from the change log (`src/duck/stream.ts`); the rules
-are `.claude/rules/duckdb.md` "Keeping a copy current". Why each is so:
+are `.claude/rules/duck-sync.md` "Keeping a copy current". Why each is so:
 
 | decision | why, with the number |
 |---|---|
@@ -1733,7 +1733,7 @@ the download moves from the first copy to `npm install`).
 
 DuckDB's limit is half the RAM (its own 80 % let the system kill the run), in one process with V8 and two PGlites; a
 wide JSON column is disk-bound past RAM (the test server, a 28 GB table: `payload->>'key' IS NOT NULL` over 22 M rows
-93.5 s, against 15 s on a ClickHouse beside it): `.claude/rules/duckdb.md` "Memory and the machine". **What a copy costs
+93.5 s, against 15 s on a ClickHouse beside it): `.claude/rules/duck-memory.md` "Memory and the machine". **What a copy costs
 the queries beside it is page-cache eviction, not CPU** (the test server, five runs of a weekly chart over 22 M rows, Q1,
 and a 7-day count over 196 M rows, Q2):
 
@@ -1850,6 +1850,30 @@ session in a sandbox. `fails-without` copies into a linked `git worktree`, becau
 read as a proof, so an interrupted run now has no verdict.
 
 ## Measurements
+
+### A top N over joined tables (issue 105, 2026-10-31)
+
+A table preview over three tables (`a` 17 k rows, `b` 1.4 M, `c` 2.8 M with 4 kB of JSON, 4 M joined rows, synthetic, on a
+laptop with DuckDB's limit at 2 GB) sent DuckDB carries every selected column through the join and the top N: its plan is
+two hash joins under the Top N, every row group of `c` read. DuckDB's late materialization stops at a join. Its pushed
+filters did not help: the LEFT JOIN is planned RIGHT, `a` on the build side, so the top N's filter arrives after the build.
+
+| Selected, same join, LIMIT 100 | before | by row number |
+|---|---|---|
+| `a.*, b.*, c.*`, sorted by `a` | 12.9 s, 8.6 GiB spilled, 2.2 GiB RSS | 0.19 s, none, 0.5 GiB |
+| the same, winners scattered through `c` | 18.5 s, 8.6 GiB spilled | 0.25 s, none, 0.7 GiB |
+| LIMIT 10,000 | 53200 after 1.0 s | 2.9 s, none |
+| LIMIT 200,000 | 53200 after 2.4 s | 3.8 s, none |
+| LIMIT 100 OFFSET 2,000,000 | 53200 after 2.9 s | 0.38 s, none |
+| the three ids alone | 0.06 s | 0.04 s |
+
+Each row is one run of a warm page cache, the engine's statements only. Through the real listener, the first row as the
+tool spells it: 14.06 s, 8.54 GiB spilled, 2.59 GiB RSS before; 1.19 s, none, 1.38 GiB after, a first statement's cold catalog included. The fetch by `rowid`
+is cheap because the join's filter on `rowid` skips row groups. No limit on N is needed, and no width test: the narrow
+statement costs nothing. Spill's ceiling, measured on a 1.4 GB volume: DuckDB's `90% of available disk space` is read when
+it first spills (778.8 MiB of 865 free), stays that number, and failing against it is an `Out of Memory` error naming the
+setting; with 600 MiB taken from the disk afterwards the next sort ended in `IO Error: Could not write file …`. Lowering
+the setting under what is spilled at that moment is refused, and the statement goes on. A failed statement's files are gone at once.
 
 ### First copy, and the poll's cost on the source
 

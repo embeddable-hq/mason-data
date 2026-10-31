@@ -72,7 +72,7 @@ The extended column has a trap, the last fact below: a catalog statement runs at
    5. `keptLookup` and `distinctKeys`: what the rewrite may read from stored columns and key counts.
    6. `rewrite` (`src/duck/rewrite.ts`), below. **Refusal point**: `Unrewritable` becomes `gapRefusal`, or Postgres's
       SQLSTATE where the gap is Postgres's own.
-   7. `hideKept`, then `selectListAfterLimit` (`src/duck/late.ts`).
+   7. `hideKept`, then `selectListAfterLimit` (`src/duck/late.ts`: a top N over joined tables by row number, `joinRows`, else the list after the limit).
    8. **Refusal point**: every key must be in `verified`, else `gapRefusal("unverified", …)`.
    9. `deparseSync`, then `parseSql` and `treeDifference`. **Refusal point**: 0A000 when the text does not read back as
       the tree.
@@ -122,7 +122,7 @@ one place a statement's ErrorResponse goes out: it logs, calls `recordRequest` a
 a block is open. The extended path also sets `skipToSync`.
 
 A cancel or timeout aborts the statement's `AbortController` (`armTimeout`, `Server.interrupt`). The cancel table and the
-close path are `.claude/rules/duckdb.md` "A statement".
+close path are `.claude/rules/duck-executor.md`.
 
 ## `Sync`
 
@@ -202,7 +202,7 @@ one of its inputs moves, or a table is left neither streamed nor copied.
 - **`stop`** sets `stopped`, interrupts every lane in flight every 50 ms, waits for the stream, the pass, the rebuild and the
   keeper, then closes the catalog and rebuilder connections.
 - **Stored JSON paths** (`src/duck/kept.ts`) take writer's turns through the `onWriter` it is handed. The rules are in
-  `.claude/rules/duckdb.md` "Stored JSON paths".
+  `.claude/rules/duck-stored-json.md` "Stored JSON paths".
 
 ## Facts agents had to work out
 
@@ -244,7 +244,7 @@ arranges that a close has nothing to wait for, and `tests/conventions.test.ts` l
 Most closes cost nothing: a result's `closeSync` took 0-2 ms in every shape the probe tried, and the probe did not manage to
 catch one waiting. The wait is real when a task of the result is mid-vector: PR 75 measured 17.9 s for a call-free statement,
 with every session behind it. For a statement that calls a Mason function it is a deadlock, because the task waits for the
-thread the close is holding (`.claude/rules/duckdb.md` "The worker's thread never waits for DuckDB's tasks").
+thread the close is holding (`.claude/rules/duck-executor.md` "The worker's thread never waits for DuckDB's tasks").
 
 ### A catalog statement runs at its Bind
 

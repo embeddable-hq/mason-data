@@ -104,6 +104,7 @@ export const GAPS = {
   "numeric-over-38-digits": { kind: "limit", what: "a numeric of more than 38 digits, or holding NaN or Infinity: a column, or a constant ('1e400'::numeric) inside Mason's arithmetic or a WHERE", postgres: "exact", mason: "a double (15 digits), said in the log for a column; a constant the outermost SELECT answers is exact", wayOut: "numeric(p, s) with p ≤ 38" },
   "numeric-array": { kind: "limit", what: "an unconstrained numeric[] column", postgres: "exact elements", mason: "double precision elements (15 digits), said in the log", wayOut: "numeric(p, s)[]" },
   "numeric-parameter": { kind: "limit", what: "a numeric parameter ($1) compared in a WHERE", postgres: "exact", mason: "a double (exact to 15 digits)", wayOut: "a literal" },
+  "spill-limit": { kind: "limit", what: "a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit", postgres: "spills up to temp_file_limit, or until the disk is full", mason: "fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100", wayOut: "ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT" },
   "log-literals": { kind: "limit", what: ".mason/mason.log's statement lines", postgres: "-", mason: "each statement DuckDB ran, whole, literals included", wayOut: "keep the log private" },
 } as const satisfies Record<string, Gap>;
 
@@ -118,7 +119,7 @@ export const GAP_MARK = /\bMason gap ([a-z0-9-]+)/;
 
 /** The entry a runtime refusal's TEXT names (`gapMark`), or null: only for a refusal raised inside DuckDB (a Mason
  *  function's error, src/duck/functions.ts), which crosses DuckDB as its message alone (src/duck/store.ts pgErrorOf);
- *  a refusal built outside it carries its id on the error (src/api/postgres/server.ts gapRefusal). */
+ *  a refusal built outside it carries its id on the error (src/duck/statement.ts gapRefusal). */
 export function gapIn(text: string): GapId | null {
   const id = GAP_MARK.exec(text)?.[1];
   return id !== undefined && Object.hasOwn(GAPS, id) ? id as GapId : null;

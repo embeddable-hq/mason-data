@@ -73,6 +73,8 @@ export const SERVE: CommandSpec = {
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
     MASON_DUCKDB_MEMORY     the engine's memory, 4GB or 512MiB (default half the container's memory limit, else half the
                             machine's RAM; mason doctor says it); a statement past it fails alone with 53200
+    MASON_SPILL_LIMIT       what statements may spill to disk, 40GB or 512MiB (default half of what is free, followed as
+                            the disk fills; never past 90% of it); a statement past it fails alone with 53400
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)
     MASON_HISTORY_DAYS      how many days Mason keeps its history: the request log, the sync's events, the usage
                             samples and the synced tables' sizes (default 7)
