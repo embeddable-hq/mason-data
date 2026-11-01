@@ -58,6 +58,9 @@ const INSTANTS: Array<[number, string | null]> = [
   [17, "2026-01-04 23:59:59+00"], [18, "2026-01-05 00:00:00+00"], [19, "2026-07-01 12:34:56.123456+00"], [20, "infinity"], [21, "-infinity"], [22, null],
   [23, "1999-12-31 23:59:59.999999+00"], [24, "2262-04-11 23:47:16+00"],
 ];
+/** times of day on each side of New York's clock changes (02:00 local): midnight, the repeated hour's, the skipped
+ *  hour's, the afternoon's and the last minute (issue 162) */
+const CLOCK_TIMES = "INSERT INTO public.clock_times VALUES (1, '00:00:00'), (2, '01:30:00'), (3, '02:30:00'), (4, '12:30:00.5'), (5, '23:59:00')";
 const instantsInsert = `INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")}`;
 /** a nullable column of each kind a sort meets, NULLs among the values and ties beside them */
 const NULLISH = "INSERT INTO public.nullish VALUES (1, '2026-01-02 03:04:05', 'b', 3), (2, NULL, NULL, NULL), (3, '2025-12-31 00:00:00', 'a', 1), (4, '2026-01-02 03:04:05', NULL, 3), " +
@@ -65,6 +68,8 @@ const NULLISH = "INSERT INTO public.nullish VALUES (1, '2026-01-02 03:04:05', 'b
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-wire-"));
 let store: DuckStore;
 let api: PgApiServer;
+/** the listener's clock when a test fixes it (`clock` of startPostgresApi): the transaction's start every plan reads */
+let fixedNow: number | undefined;
 const truth = new PGlite({ extensions: { citext } });
 
 // one table in public, one in a schema of its own, as the copy lands them (<schema>.<table>, the key as the source's)
@@ -120,6 +125,8 @@ const DDL = [
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
   "CREATE TABLE public.instants (id INTEGER PRIMARY KEY, \"at\" TIMESTAMPTZ)",
   instantsInsert,
+  "CREATE TABLE public.clock_times (id INTEGER PRIMARY KEY, tm TIME)",
+  CLOCK_TIMES,
   "CREATE TABLE public.nullish (id INTEGER PRIMARY KEY, ts TIMESTAMP, t VARCHAR, n INTEGER)",
   NULLISH,
 ];
@@ -171,6 +178,8 @@ const PG_DDL = [
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
   "CREATE TABLE public.instants (id integer PRIMARY KEY, at timestamptz)",
   instantsInsert,
+  "CREATE TABLE public.clock_times (id integer PRIMARY KEY, tm time)",
+  CLOCK_TIMES,
   "CREATE TABLE public.nullish (id integer PRIMARY KEY, ts timestamp, t text, n integer)",
   NULLISH,
   "ANALYZE public.late",
@@ -225,6 +234,7 @@ const schema: PgSchema = {
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
+    { name: "clock_times", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "tm", type: "timestamptz", spelled: "time" }] },
     { name: "nullish", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp" }, { name: "t", type: "text" }, { name: "n", type: "int4" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
@@ -267,6 +277,7 @@ before(async () => {
     schema: () => schema,
     record: (r) => { recorded.push(r); }, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: await store.listener(undefined, undefined, undefined, () => copies),
+    clock: () => fixedNow ?? Date.now(),
   });
 });
 after(async () => {
@@ -1072,6 +1083,45 @@ test("a timestamptz before year 1 is written in UTC as Postgres does, and refuse
     await c.query("SET TimeZone = 'Europe/Rome'");
     await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap bc-timestamptz-zone/.test(`${e.message} ${e.detail ?? ""}`));
   } finally { await c.end(); }
+});
+
+// A TIME AS A TIMETZ takes the session zone's offset on the transaction's date, in that zone, at the value's own time
+// of day (time_timetz: GetCurrentDateTime, DetermineTimeZoneOffset), never the current instant's (issue 162: on
+// 2026-11-01 at 00:31 EDT the oracle's 12:30 was answered -04 where Postgres has -05). The listener's clock is fixed, so
+// the answer is the same on every day the test runs; each day mixes two offsets, which one offset for every row (the
+// current instant's, whatever it is) never answers. The expected texts are Postgres's rule: a repeated hour's second
+// (standard) half, a skipped hour at the offset before the change with its own time kept.
+test("a time as a timetz takes the offset of the transaction's date at the value's own time (issue 162)", async () => {
+  const c = await client();
+  const cases: Array<[string, string, string[]]> = [
+    // 00:31 EDT, before the clocks go back at 02:00
+    ["2026-11-01T04:31:00Z", "America/New_York", ["00:00:00-04", "01:30:00-05", "02:30:00-05", "12:30:00.5-05", "23:59:00-05"]],
+    // 01:00 EST, before they go forward at 02:00 (02:30 does not exist that day)
+    ["2026-03-08T06:00:00Z", "America/New_York", ["00:00:00-05", "01:30:00-05", "02:30:00-05", "12:30:00.5-04", "23:59:00-04"]],
+    // 20:00 PDT on 31 October: the date is the zone's, not UTC's (Los Angeles goes back at 09:00 UTC on 1 November)
+    ["2026-11-01T03:00:00Z", "America/Los_Angeles", ["00:00:00-07", "01:30:00-07", "02:30:00-07", "12:30:00.5-07", "23:59:00-07"]],
+    ["2026-11-01T04:31:00Z", "Asia/Kolkata", ["00:00:00+05:30", "01:30:00+05:30", "02:30:00+05:30", "12:30:00.5+05:30", "23:59:00+05:30"]],
+  ];
+  try {
+    for (const [now, zone, times] of cases) {
+      fixedNow = Date.parse(now);
+      await c.query(`SET TimeZone = '${zone}'`);
+      const what = `at ${now} in ${zone}`;
+      assert.deepEqual(await answer(c, "SELECT id, tm::timetz FROM clock_times ORDER BY id"),
+        { fields: [["id", 23], ["tm", 1266]], rows: times.map((t, i) => [String(i + 1), t]) }, what);
+      assert.deepEqual((await answer(c, "SELECT id, CAST(tm AS time with time zone) FROM clock_times WHERE id = 4")).rows, [["4", times[3]]], what);
+    }
+    // planned once (at its Parse, in Kolkata) and executed under a later SET TimeZone and clock: the execution's date and zone
+    const prepared = { name: "tm_timetz", text: "SELECT tm::timetz FROM clock_times WHERE id = $1", values: [4], rowMode: "array", types: raw } as pg.QueryConfig;
+    assert.deepEqual((await c.query(prepared)).rows, [["12:30:00.5+05:30"]]);
+    fixedNow = Date.parse("2026-03-08T06:00:00Z");
+    await c.query("SET TimeZone = 'America/New_York'");
+    assert.deepEqual((await c.query(prepared)).rows, [["12:30:00.5-04"]], "a prepared statement executed after a SET TimeZone");
+  } finally {
+    fixedNow = undefined;
+    await c.query("SET TimeZone = 'UTC'");
+    await c.end();
+  }
 });
 
 // DATE_TRUNC OF A TIMESTAMPTZ IS THE INSTANT'S OWN ARITHMETIC where that is Postgres's answer (src/duck/rewrite.ts

@@ -2921,6 +2921,23 @@ class Rewriter {
     return caseWhen([[fn("isfinite", [this.cp(x)]), op("+", this.cp(x), fn("to_microseconds", [op("-", rounded, e())]))]], x);
   }
 
+  /**
+   * A TIME AS A TIMETZ (time_timetz, function 2047, and the cast): the session zone's offset on the transaction's date
+   * in that zone AT THE VALUE'S OWN TIME OF DAY (GetCurrentDateTime, then DetermineTimeZoneOffset). DuckDB's own cast
+   * takes the offset of the current instant, which differs on a day the clocks change (issue 162: 12:30 answered -04
+   * at 00:31 EDT on 2026-11-01, where Postgres has -05). The offset is the wall time less the instant it names in the
+   * session's zone, which resolves a repeated hour to its second (standard) half and a skipped one to the offset before
+   * the change, keeping the value's own time (02:30-05 on 2026-03-08 in New York), as DetermineTimeZoneOffset does;
+   * the instant's own timetz would be 03:30-04 there. The date and the zone are the execution's (`now("exec")` read in
+   * DuckDB's session zone), as CURRENT_DATE's.
+   */
+  private timeAsTimetz(x: AstNode): AstNode {
+    const wall = (v: AstNode): AstNode => op("+", cast(this.now("exec"), ["date"]), v);
+    const instant = (v: AstNode): AstNode => cast(wall(v), ["timestamptz"]);
+    const offset = op("-", fn("epoch_us", [wall(x)]), fn("epoch_us", [instant(this.cp(x))]));
+    return fn("timezone", [fn("to_microseconds", [offset]), cast(instant(this.cp(x)), ["timetz"])]);
+  }
+
   /** a text read as `type` (with `typmod`) by Postgres's own input function, a chunk at a time (`__mason_pg_*`,
    *  src/duck/functions.ts), under the zone DuckDB's session has; null for a type DuckDB reads as Postgres does */
   pgInput(arg: AstNode, type: number, typmod: number): AstNode | null {
@@ -2965,6 +2982,7 @@ class Rewriter {
     // only Postgres's input function reads a text as one, and it is the session's offset where the text has none
     if (t !== null && t.type === TIMETZ && from !== null && TEXTS.has(from)) throw new Unrewritable("a text read as a timetz is not supported by Mason", "compare the text, or write a literal", "held-type-compare");
     if (t !== null && t.type === TIMETZ && t.typmod >= 0) throw new Unrewritable("a timetz(n) of a value is not supported by Mason", "cast to timetz with no precision", "held-type-compare");
+    if (t !== null && t.type === TIMETZ && from === TIME) return this.timeAsTimetz(arg);
     // to an enum (or an array of one): a label, a text read by Postgres's rules, or the enum it already is
     if (t !== null && (this.enums.labels.has(t.type) || this.enums.arrays.has(t.type))) {
       if (from === t.type) return arg;
