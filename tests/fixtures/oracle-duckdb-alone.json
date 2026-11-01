@@ -1,19 +1,19 @@
 {
-  "statements": 6391,
+  "statements": 6422,
   "mason": {
-    "exact": 5890,
+    "exact": 5919,
     "decided": 51,
-    "refused": 450,
+    "refused": 452,
     "differs": 0
   },
   "duckdb": {
     "exact": 1783,
     "name": 1236,
-    "refused": 1248,
-    "value": 834,
-    "rows": 545,
+    "refused": 1272,
+    "value": 836,
+    "rows": 548,
     "text": 171,
-    "other": 574
+    "other": 576
   },
   "gaps": {
     "copyPhase": {
@@ -51,7 +51,7 @@
         "regexp-functions": { "planted": 1, "natural": 0 },
         "regexp-matches-forms": { "planted": 1, "natural": 0 },
         "relative-time-literal": { "planted": 1, "natural": 0 },
-        "row-value": { "planted": 1, "natural": 1 },
+        "row-value": { "planted": 1, "natural": 4 },
         "set-config-forms": { "planted": 1, "natural": 0 },
         "setop-ordinal-star": { "planted": 1, "natural": 0 },
         "similar-to-forms": { "planted": 1, "natural": 0 },
@@ -65,7 +65,6 @@
         "volatile-window": { "planted": 1, "natural": 0 },
         "width-bucket-forms": { "planted": 1, "natural": 0 },
         "with-ordinality": { "planted": 1, "natural": 0 },
-        "with-ties-distinct": { "planted": 1, "natural": 0 },
         "zone-abbreviation": { "planted": 0, "natural": 2 }
       },
       "decided": {
@@ -91,7 +90,7 @@
       }
     },
     "everyAsk": {
-      "asked": 44021,
+      "asked": 44215,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -127,7 +126,7 @@
         "regexp-functions": { "planted": 3, "natural": 0 },
         "regexp-matches-forms": { "planted": 3, "natural": 0 },
         "relative-time-literal": { "planted": 3, "natural": 0 },
-        "row-value": { "planted": 3, "natural": 7 },
+        "row-value": { "planted": 3, "natural": 16 },
         "set-config-forms": { "planted": 3, "natural": 0 },
         "setop-ordinal-star": { "planted": 3, "natural": 0 },
         "similar-to-forms": { "planted": 3, "natural": 0 },
@@ -141,7 +140,6 @@
         "volatile-window": { "planted": 3, "natural": 0 },
         "width-bucket-forms": { "planted": 3, "natural": 0 },
         "with-ordinality": { "planted": 3, "natural": 0 },
-        "with-ties-distinct": { "planted": 3, "natural": 0 },
         "zone-abbreviation": { "planted": 0, "natural": 6 }
       },
       "decided": {
