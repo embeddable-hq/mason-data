@@ -188,7 +188,7 @@ test("what a table cannot store is refused by name at its key, before anything i
     await w.sync.generated.review();
     const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
     for (const name of ["money", "avg"]) { assert.equal(r(name).state, "refused"); refusedAt(r(name).refusals, "sql", /column (total|mean) divides a numeric, which the engine computes as a double/); }
-    assert.ok(r("money").refusals[0]!.options.some((o) => o.includes("::double precision")), JSON.stringify(r("money").refusals));
+    assert.ok(r("money").refusals[0]!.options.some((o) => o.includes("AS double precision)")), JSON.stringify(r("money").refusals));
     refusedAt(r("unnamed").refusals, "sql", /has no name/);
     refusedAt(r("twice").refusals, "sql", /names column id twice/);
     refusedAt(r("arrays").refusals, "sql", /of type bigint\[\], which a generated table can't store yet/);
@@ -1075,10 +1075,10 @@ test("a numeric the types don't fix is refused with its own reason: a division, 
       refusedAt(r(name).refusals, "sql", message);
       assert.ok(r(name).refusals[0]!.options.some((o) => o.includes(option)), `${name}: ${JSON.stringify(r(name).refusals)}`);
     };
-    says("mean", /^column mean divides a numeric, which the engine computes as a double$/, "count(");
+    says("mean", /^column mean divides a numeric, which the engine computes as a double$/, "CAST(avg(n) AS double precision) AS mean");
     says("wide", /^column total has 30 decimals, more than the 18 a stored numeric keeps$/, "round(");
-    says("texts", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/, "::numeric(20,4)");
-    says("larger", /^column top is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones$/, "::numeric(12,2)");
+    says("texts", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/, "sum(CAST(payload ->> 'a' AS numeric(20, 4))) AS total");
+    says("larger", /^column top is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones$/, "CAST(GREATEST(amount, 1) AS numeric(38, 2)) AS top");
     says("spread", /^column sd is a stddev, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double$/, "CAST(stddev(amount) AS double precision) AS sd");
     says("varied", /^column v is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "CAST(variance(amount) AS double precision) AS v");
     for (const [name, col] of [["idwide", "a"], ["bigwide", "b"], ["timeswide", "m"], ["negwide", "n"]]) says(name!, new RegExp(`^column ${col} has 30 decimals, more than the 18`), "round(");
@@ -1232,8 +1232,8 @@ test("a generated table's run reads the session variables as a session does: a J
 test("a numeric's refusal is said from its form: a JSON number's text, the variance family in one wording, sqrt and its round; each way out is stored", async () => {
   const lag = "kind: scheduled\ntarget_lag: 1h\n";
   const files: Record<string, [string, RegExp, string]> = {
-    jsonbare: ["SELECT id, (payload ->> 'a')::numeric AS x FROM events", /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\), which keeps the decimals each value's text has/, "(x)::numeric(20,4) AS x"],
-    jsonround: ["SELECT round((payload ->> 'a')::numeric, 2) AS x FROM events", /^column x is a numeric read from text/, "(x)::numeric(20,4) AS x"],
+    jsonbare: ["SELECT id, (payload ->> 'a')::numeric AS x FROM events", /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\), which keeps the decimals each value's text has/, "CAST(payload ->> 'a' AS numeric(20, 4)) AS x"],
+    jsonround: ["SELECT round((payload ->> 'a')::numeric, 2) AS x FROM events", /^column x is a numeric read from text/, "round(CAST(payload ->> 'a' AS numeric(20, 4)), 2) AS x"],
     var1: ["SELECT variance(amount) AS x FROM ledger", /^column x is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "CAST(variance(amount) AS double precision) AS x"],
     var2: ["SELECT stddev(n) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "CAST(stddev(n) AS double precision) AS x"],
     var3: ["SELECT stddev(big) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "CAST(stddev(big) AS double precision) AS x"],
@@ -1319,31 +1319,31 @@ const PICKS = /^column x is whichever value a GREATEST, LEAST, COALESCE or CASE 
 const DOUBLE = /^column x is a numeric cast from a double precision value/;
 const REASONS: Record<string, [string, RegExp, string]> = {
   // (the variance family, sqrt and its kin, and a cast from a double: round 6's table, which holds each way out whole)
-  tbare: ["SELECT (payload ->> 'a')::numeric AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
-  top: ["SELECT (payload ->> 'a')::numeric + 1 AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
-  tco: ["SELECT coalesce((payload ->> 'a')::numeric, 0) AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
-  tround: ["SELECT trunc((payload ->> 'a')::numeric, 2) AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
-  tmax: ["SELECT max((payload ->> 'a')::numeric) AS x FROM events", TEXT, "max((x)::numeric(20,4)) AS x"],
-  tmin: ["SELECT min((payload ->> 'a')::numeric) AS x FROM events", TEXT, "min((x)::numeric(20,4)) AS x"],
-  tsum: ["SELECT sum((payload ->> 'a')::numeric) AS x FROM events", ROWS, "sum(x::numeric(20,4)) AS x"],
-  dbare: ["SELECT amount / 3 AS x FROM ledger", DIV, "count("],
-  dop: ["SELECT amount / 3 + 1 AS x FROM ledger", DIV, "count("],
-  dco: ["SELECT coalesce(amount / 3, 0) AS x FROM ledger", DIV, "count("],
-  dround: ["SELECT round(amount / 3, 2) AS x FROM ledger", DIV, "count("],
-  dtyp: ["SELECT (amount / 3)::numeric(10,2) AS x FROM ledger", DIV, "count("],
-  dsum: ["SELECT sum(amount / 3) AS x FROM ledger", DIV, "count("],
-  dmax: ["SELECT max(amount / 3) AS x FROM ledger", DIV, "count("],
-  davg: ["SELECT avg(amount) AS x FROM ledger", DIV, "count("],
+  tbare: ["SELECT (payload ->> 'a')::numeric AS x FROM events", TEXT, "CAST(payload ->> 'a' AS numeric(20, 4)) AS x"],
+  top: ["SELECT (payload ->> 'a')::numeric + 1 AS x FROM events", TEXT, "CAST(payload ->> 'a' AS numeric(20, 4)) + 1 AS x"],
+  tco: ["SELECT coalesce((payload ->> 'a')::numeric, 0) AS x FROM events", TEXT, "COALESCE(CAST(payload ->> 'a' AS numeric(20, 4)), 0) AS x"],
+  tround: ["SELECT trunc((payload ->> 'a')::numeric, 2) AS x FROM events", TEXT, "trunc(CAST(payload ->> 'a' AS numeric(20, 4)), 2) AS x"],
+  tmax: ["SELECT max((payload ->> 'a')::numeric) AS x FROM events", TEXT, "max(CAST(payload ->> 'a' AS numeric(20, 4))) AS x"],
+  tmin: ["SELECT min((payload ->> 'a')::numeric) AS x FROM events", TEXT, "min(CAST(payload ->> 'a' AS numeric(20, 4))) AS x"],
+  tsum: ["SELECT sum((payload ->> 'a')::numeric) AS x FROM events", ROWS, "sum(CAST(payload ->> 'a' AS numeric(20, 4))) AS x"],
+  dbare: ["SELECT amount / 3 AS x FROM ledger", DIV, "AS double precision)"],
+  dop: ["SELECT amount / 3 + 1 AS x FROM ledger", DIV, "AS double precision)"],
+  dco: ["SELECT coalesce(amount / 3, 0) AS x FROM ledger", DIV, "AS double precision)"],
+  dround: ["SELECT round(amount / 3, 2) AS x FROM ledger", DIV, "AS double precision)"],
+  dtyp: ["SELECT (amount / 3)::numeric(10,2) AS x FROM ledger", DIV, "AS double precision)"],
+  dsum: ["SELECT sum(amount / 3) AS x FROM ledger", DIV, "AS double precision)"],
+  dmax: ["SELECT max(amount / 3) AS x FROM ledger", DIV, "AS double precision)"],
+  davg: ["SELECT avg(amount) AS x FROM ledger", DIV, "AS double precision)"],
   sop: ["SELECT wide + 1 AS x FROM ledger", SCALE(30), "round("],
   sco: ["SELECT coalesce(wide * 1, wide) AS x FROM ledger", SCALE(30), "round("],
   styp: ["SELECT (wide + 1)::numeric(40,20) AS x FROM ledger", SCALE(20), "round("],
   ssum: ["SELECT sum(wide) AS x FROM ledger", SCALE(30), "round("],
-  rop: ["SELECT sum((payload ->> 'a')::numeric) + 1 AS x FROM events", ROWS, "::numeric(20,4)"],
-  rco: ["SELECT coalesce(sum((payload ->> 'a')::numeric), 0) AS x FROM events", ROWS, "::numeric(20,4)"],
-  rround: ["SELECT round(sum((payload ->> 'a')::numeric), 2) AS x FROM events", HELD(36), "::numeric(20,4)"],
-  kbare: ["SELECT greatest(amount, 1) AS x FROM ledger", PICKS, "::numeric(12,2)"],
-  kop: ["SELECT greatest(amount, 1) + 1 AS x FROM ledger", PICKS, "::numeric(12,2)"],
-  kco: ["SELECT coalesce(amount, 0) AS x FROM ledger", PICKS, "::numeric(12,2)"],
+  rop: ["SELECT sum((payload ->> 'a')::numeric) + 1 AS x FROM events", ROWS, "AS numeric(20, 4))"],
+  rco: ["SELECT coalesce(sum((payload ->> 'a')::numeric), 0) AS x FROM events", ROWS, "AS numeric(20, 4))"],
+  rround: ["SELECT round(sum((payload ->> 'a')::numeric), 2) AS x FROM events", HELD(36), "AS numeric(20, 4))"],
+  kbare: ["SELECT greatest(amount, 1) AS x FROM ledger", PICKS, "AS numeric(38, 2)) AS x"],
+  kop: ["SELECT greatest(amount, 1) + 1 AS x FROM ledger", PICKS, "AS numeric(38, 2)) AS x"],
+  kco: ["SELECT coalesce(amount, 0) AS x FROM ledger", PICKS, "AS numeric(38, 2)) AS x"],
 };
 // each way out, written over the same columns as the user would: stored
 const WAYS_OUT: Record<string, string> = {
@@ -1416,8 +1416,8 @@ const R6: Record<string, [string, RegExp, string | null]> = {
   dsum: ["sum(ln(abs(amount))::float8)::numeric", DOUBLE, "sum(ln(abs(amount))::float8)"],
   dgreatest: ["greatest(amount / 3, amount::float8)::numeric", DOUBLE, "greatest(amount / 3, amount::float8)"],
   dcoalesce: ["coalesce(stddev(big), max(amount)::float8)::numeric", DOUBLE, "coalesce(stddev(big), max(amount)::float8)"],
-  // a count over a double is a bigint, and what divides it is an exact division
-  dcount: ["count(amount::float8)::numeric / 3", DIV, null],
+  // a count over a double is a bigint, and what divides it is an exact division (round 7: its way out, the user's own)
+  dcount: ["count(amount::float8)::numeric / 3", DIV, "(count(amount::float8)::numeric / 3)::double precision"],
   // sqrt and its kin over an exact numeric: the cast on the function, the aggregate and the wrapper kept
   psum: ["sum(sqrt(abs(amount)))", PER("sqrt"), "sum(sqrt(abs(amount))::double precision)"],
   pmax: ["max(ln(abs(amount)))", PER("ln"), "max(ln(abs(amount))::double precision)"],
@@ -1490,5 +1490,88 @@ test("round 6: a numeric field overflow says Postgres's DETAIL on every path: th
     for (const [name, sql] of Object.entries(files)) w.write(name, `kind: scheduled\ntarget_lag: 1h\nsql: ${sql}\n`);
     for (const name of Object.keys(files)) await w.until((s) => s.state === "failed", `public.${name}`);
     for (const name of Object.keys(files)) assert.match(w.status(`public.${name}`).error ?? "", words, name);
+  });
+});
+
+// review round 7 of PR 202, class A: the walk follows a column's value wherever the analysis says it comes from (a scalar
+// sublink's subselect, a CTE's query, each arm of a set operation, a subquery in FROM under any node), and a way out never
+// names the output column as if its source had it: the column's own expression with the cast moved, or the query of the
+// statement the cast belongs in, named in the user's words and given whole. Class B: the text, divides and picks forms,
+// and the rows over a text form, give the user's own expression too, never a placeholder; a numeric read from text says
+// what the analysis typed the text as. Each case: the reason, every option exactly, and each way out built and stored
+const DBL = "store it as a double if it need not be exact: ", ORDBL = `or ${DBL}`;
+const AT_READ = "or compute it in the statement that reads the synced table";
+const DIV_READ = "or store what it divides, and divide in the statement that reads the table";
+const ONE = "give it one scale: ";
+const TEXT_DOUBLE = /^column x is a numeric read from text \(the text of a double precision value, cast to numeric\), which keeps the decimals each value's text has$/;
+const TEXT_TEXT = /^column x is a numeric read from text \(a text value cast to numeric\), which keeps the decimals each value's text has$/;
+const TEXT_JSON = /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\), which keeps the decimals each value's text has$/;
+// [the definition, its reason, its options exactly, the statements its ways out describe where they are not the column's
+// own expression (`SELECT <way> AS x FROM <its table>` otherwise)]
+const R7: Record<string, [string, RegExp, [string, string], string[]?]> = {
+  asub: ["SELECT (SELECT stddev(big) FROM ledger) AS x FROM ledger", VAR("stddev"),
+    [`${DBL}(SELECT CAST(stddev(big) AS double precision) FROM ledger) AS x`, AT_READ]],
+  anested: ["SELECT (SELECT (SELECT stddev(big) FROM ledger) FROM ledger LIMIT 1) AS x FROM ledger", VAR("stddev"),
+    [`${DBL}(SELECT (SELECT CAST(stddev(big) AS double precision) FROM ledger) FROM ledger LIMIT 1) AS x`, AT_READ]],
+  acte: ["WITH t AS (SELECT sqrt(abs(amount)) AS v FROM ledger) SELECT sum(v) AS x FROM t", PER("sqrt"),
+    [`${DBL}write the WITH query t as SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger`, AT_READ],
+    ["WITH t AS (SELECT sqrt(abs(amount))::double precision AS v FROM ledger) SELECT sum(v) AS x FROM t"]],
+  avar: ["WITH t AS (SELECT stddev(big) AS v FROM ledger) SELECT v AS x FROM t", VAR("stddev"),
+    [`${DBL}write the WITH query t as SELECT CAST(stddev(big) AS double precision) AS v FROM ledger`, AT_READ],
+    ["WITH t AS (SELECT stddev(big)::double precision AS v FROM ledger) SELECT v AS x FROM t"]],
+  avarround: ["WITH t AS (SELECT var_samp(amount) AS v FROM ledger) SELECT round(v, 2) AS x FROM t", VAR("var_samp"),
+    [`${DBL}CAST(round(v, 2) AS double precision) AS x`, AT_READ],
+    ["WITH t AS (SELECT var_samp(amount) AS v FROM ledger) SELECT round(v, 2)::double precision AS x FROM t"]],
+  afrom: ["SELECT sum(v) AS x FROM (SELECT sqrt(abs(amount)) AS v FROM ledger) AS s", PER("sqrt"),
+    [`${DBL}write the subquery s as SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger`, AT_READ],
+    ["SELECT sum(v) AS x FROM (SELECT sqrt(abs(amount))::double precision AS v FROM ledger) AS s"]],
+  aunion: ["SELECT sqrt(abs(amount)) AS x FROM ledger UNION ALL SELECT amount FROM ledger", PER("sqrt"),
+    [`${DBL}write the UNION ALL as SELECT CAST(sqrt(abs(amount)) AS double precision) AS x FROM ledger UNION ALL SELECT amount FROM ledger`, AT_READ],
+    ["SELECT sqrt(abs(amount))::double precision AS x FROM ledger UNION ALL SELECT amount FROM ledger"]],
+  ajson: ["SELECT (payload ->> 'a')::numeric AS x FROM events UNION ALL SELECT (payload ->> 'b')::numeric FROM events", TEXT_JSON,
+    [`${ONE}write the UNION ALL as SELECT CAST(payload ->> 'a' AS numeric(20, 4)) AS x FROM events UNION ALL SELECT CAST(payload ->> 'b' AS numeric(20, 4)) FROM events`,
+      `${ORDBL}write the UNION ALL as SELECT CAST(payload ->> 'a' AS double precision) AS x FROM events UNION ALL SELECT CAST(payload ->> 'b' AS double precision) FROM events`],
+    ["SELECT (payload ->> 'a')::numeric(20,4) AS x FROM events UNION ALL SELECT (payload ->> 'b')::numeric(20,4) FROM events",
+      "SELECT (payload ->> 'a')::double precision AS x FROM events UNION ALL SELECT (payload ->> 'b')::double precision FROM events"]],
+  tjson: ["SELECT (payload ->> 'a')::numeric + 1 AS x FROM events", TEXT_JSON,
+    [`${ONE}CAST(payload ->> 'a' AS numeric(20, 4)) + 1 AS x`, `${ORDBL}CAST(payload ->> 'a' AS double precision) + 1 AS x`]],
+  tjsonmax: ["SELECT max((payload ->> 'a')::numeric) AS x FROM events", TEXT_JSON,
+    [`${ONE}max(CAST(payload ->> 'a' AS numeric(20, 4))) AS x`, `${ORDBL}max(CAST(payload ->> 'a' AS double precision)) AS x`]],
+  tdouble: ["SELECT (amount::float8::numeric)::text::numeric AS x FROM ledger", TEXT_DOUBLE,
+    [`${ONE}CAST(CAST(CAST(amount::float8 AS numeric) AS text) AS numeric(20, 4)) AS x`, `${ORDBL}CAST(CAST(CAST(amount::float8 AS numeric) AS text) AS double precision) AS x`]],
+  ttext: ["SELECT n::numeric AS x FROM events", TEXT_TEXT,
+    [`${ONE}CAST(n AS numeric(20, 4)) AS x`, `${ORDBL}CAST(n AS double precision) AS x`]],
+  rjson: ["SELECT sum((payload ->> 'a')::numeric) AS x FROM events", ROWS,
+    ["give the values one scale first: sum(CAST(payload ->> 'a' AS numeric(20, 4))) AS x", `${ORDBL}sum(CAST(payload ->> 'a' AS double precision)) AS x`]],
+  djson: ["SELECT avg((payload ->> 'a')::numeric) AS x FROM events", DIV,
+    [`${DBL}CAST(avg(CAST(payload ->> 'a' AS numeric)) AS double precision) AS x`, DIV_READ]],
+  dbare: ["SELECT amount / 3 AS x FROM ledger", DIV, [`${DBL}CAST(amount / 3 AS double precision) AS x`, DIV_READ]],
+  dround: ["SELECT round(avg(amount), 2) AS x FROM ledger", DIV, [`${DBL}CAST(round(avg(amount), 2) AS double precision) AS x`, DIV_READ]],
+  kbare: ["SELECT greatest(amount, 1) + 1 AS x FROM ledger", PICKS,
+    [`${ONE}CAST(GREATEST(amount, 1) + 1 AS numeric(38, 2)) AS x`, `${ORDBL}CAST(GREATEST(amount, 1) + 1 AS double precision) AS x`]],
+  kjson: ["SELECT coalesce((payload ->> 'a')::numeric(20,4), 0) AS x FROM events", PICKS,
+    [`${ONE}CAST(COALESCE(CAST(payload ->> 'a' AS numeric(20, 4)), 0) AS numeric(38, 4)) AS x`, `${ORDBL}CAST(COALESCE(CAST(payload ->> 'a' AS numeric(20, 4)), 0) AS double precision) AS x`]],
+};
+test("round 7: the walk follows a sublink, a CTE, a set operation's arms and a subquery, and every form's way out is the user's own expression, and stores", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  // each way out as a statement: the ones given, else the column's own expression over the definition's table
+  const builds = Object.entries(R7).flatMap(([name, [sql, , options, given]]) => (given ?? options.flatMap((o) => {
+    const way = /: (.+ AS x)$/.exec(o)?.[1];
+    return way === undefined ? [] : [`SELECT ${way} FROM ${/FROM (\w+)$/.exec(sql)![1]}`];
+  })).map((b, i) => [`w${name}${i}`, b] as const));
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(R7)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const name of Object.keys(R7)) await w.until((s) => s.state === "refused" || s.serving, `public.${name}`);
+    const wrong: string[] = [];
+    for (const [name, [sql, reason, options]] of Object.entries(R7)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      const said = refusals.map((r) => `${r.message}\n      ${r.options.join("\n      ")}`).join(" || ");
+      if (refusals.length !== 1 || !reason.test(refusals[0]!.message) || JSON.stringify(refusals[0]!.options) !== JSON.stringify(options)) wrong.push(`${name}: ${sql}\n    ${said || "(not refused)"}`);
+    }
+    assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
+    // one at a time: 26 files written at once once left a run "stuck inside the engine" (#224), and one at a time is faster
+    for (const [name, sql] of builds) { w.write(name, `${lag}sql: ${sql}\n`); await w.until(served(w.logged), `public.${name}`); }
+    for (const [name, sql] of builds) assert.deepEqual((await typed(w, `SELECT x FROM ${name}`)).fields.map(([, oid]) => oid), [/double precision/.test(sql) ? 701 : 1700], `${name}: ${sql}`);
   });
 });

@@ -49,15 +49,23 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   node decides, read, never inferred from a name. A node Postgres types as a double is a double whatever its kind
   (`sqrt(float8)`, `avg(float8)`, `float8 / n`, `coalesce(numeric, float8)`, `sqrt(int)`), and a numeric cast from one
   is "cast from a double"; only a numeric over exact inputs is said by its kind (a variance, sqrt and its kin, avg or
-  `/`, a text read as a numeric), and a name only chooses those words. Each node passes up the form below it (a round,
-  a trunc or a typmod marks it fixed, an aggregate names itself). The way out is the user's own expression, deparsed,
+  `/`, a text read as a numeric, said by what the analysis typed the text as: a JSON value's, a double's, any text),
+  and a name only chooses those words. Each node passes up the form below it (a round, a trunc or a typmod marks it
+  fixed), and a division, a variance or sqrt and its kin over a text read as a numeric is said by its own kind. **The
+  walk follows the value wherever the analysis says it comes from**: a scalar sublink's subselect, a CTE's query, each
+  arm of a set operation (the reason any arm's, the way out in every arm of that form) and a subquery in FROM, under any
+  node (`outputExpressions` hangs what a VAR reads on it as `followed`). The way out is the user's own SQL, deparsed,
   with only the cast moved (`sum(sqrt(abs(x))::double precision)`, `round(log(x), 2)::double precision`, a numeric cast
-  from a double taken away), every aggregate and wrapper kept. Where the engine computes a value, its engine type says
-  only that it is not stored; why is the form's, and a variance, sqrt and its kin, or a double outranks a scale the
-  program saw around it. Never a reason from an engine type, a node's own kind over a double, the outermost node or a
-  constant: a raw-tree walk guessing types from names gave a false reason in six rounds. Detector:
-  tests/duck-generated.test.ts "round 5: every reason against every wrapper" and "round 6: a numeric's reason is the
-  type each node computes", each reason with its way out held exactly, built and stored.
+  from a double taken away, a text's cast given `numeric(20,4)`), every aggregate and wrapper kept, for EVERY form and
+  for the program's reasons too (a pick's column cast whole to the scale its values hold); where the cast lands in
+  another query of the statement it is that query, named in the user's words and given whole (`write the WITH query t
+  as …`, `the subquery s`, `the UNION ALL`), and never the output column named as if its source had it (`x::double
+  precision` was). Where the engine computes a value, its engine type says only that it is not stored; why is the
+  form's, and a variance, sqrt and its kin, or a double outranks a scale the program saw around it. Never a reason from
+  an engine type, a node's own kind over a double, the outermost node or a constant: a raw-tree walk guessing types
+  from names gave a false reason in six rounds. Detector: tests/duck-generated.test.ts "round 5: every reason against
+  every wrapper", "round 6: a numeric's reason is the type each node computes" and "round 7: the walk follows a
+  sublink, a CTE, a set operation's arms and a subquery", each reason with its way out held exactly, built and stored.
 - **The run's connection is a session's, set up by the ONE set-up** (src/duck/store.ts `SessionSetup`: the session
   variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`
   reads), never by hand: a connection without `__mason_session` answers NULL from every Mason function (DuckDB's NULL in,

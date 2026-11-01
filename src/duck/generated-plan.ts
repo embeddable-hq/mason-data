@@ -65,6 +65,9 @@ export interface DefinitionPlan {
    *  through every wrapper over it, with its way out in the user's own expression (`formsOf`), else null: what a
    *  refusal's reason and way out are said from wherever the engine computes the value */
   forms: Array<Form | null>;
+  /** each output column's own expression as the user wrote it (the raw tree's), else null (a set operation's): what a
+   *  way out that casts the whole column is written over */
+  roots: unknown[];
 }
 
 /**
@@ -74,17 +77,27 @@ export interface DefinitionPlan {
  * `float8 / n`, `coalesce(numeric, float8)`), and a numeric cast from one is "double"; only a node Postgres types as an
  * exact numeric over exact inputs is said by its own kind (a variance; sqrt, exp, ln, log or power; avg or `/`; a text
  * read as a numeric). A name never decides a type here: it only chooses the words, once the type has said what the value
- * is (`fn` the user's own function, `fixed` that a round, a trunc, floor, ceil or a typmod is over it, `agg` the aggregate
- * over it). `at` is the node's offset in the statement's text, where the way out is written (`wayOut`).
+ * is (`fn` the user's own function, `fixed` that a round, a trunc, floor, ceil or a typmod is over it, `from` what a text
+ * read as a numeric was, as the analysis typed it). The walk follows the value wherever the analysis says it comes from
+ * (a sublink's subselect, a CTE, each arm of a set operation, a subquery: src/duck/pgtree.ts `outputExpressions`), and
+ * `sites` says where its node is: its offset in the statement's text (`at`), with the offsets of the VARs followed to
+ * it, the column's own first (`vars`); a set operation's arms of the same form are each a site. `way` and `scaled` are
+ * its ways out in the user's own SQL (`wayOf`): as a double, and for a text read as a numeric, given one scale.
  */
-export type Form = { why: "variance" | "per-value" | "text" | "divides" | "double"; fn: string; fixed: boolean; agg: string | null; at: number; way: string | null };
+export type Form = { why: "variance" | "per-value" | "text" | "divides" | "double"; fn: string; fixed: boolean; from: TextFrom | null; sites: Site[]; way: Way | null; scaled: Way | null };
 type Seen = Form | "double" | null;
+/** what a text read as a numeric was: a JSON value's text (an operator or function over json or jsonb), a double's, any other */
+type TextFrom = "json" | "double" | "text";
+type Site = { at: number; vars: number[] };
+/** a way out in the user's own SQL: the column's own expression rewritten, or each query of the statement it belongs in,
+ *  named in the user's words and given whole */
+export type Way = { expr: string } | { places: Array<{ place: string; select: string }> };
 
 const PER_VALUE = new Set(["sqrt", "exp", "ln", "log", "log10", "power", "pow"]);
 const FIXES = new Set(["round", "trunc", "floor", "ceil", "ceiling"]);
-const AGGREGATES = new Set(["sum", "min", "max"]);
 const DOUBLES = new Set([700, 701]);
 const TEXTS = new Set([25, 1042, 1043]);
+const JSONS = new Set([114, 3802]);
 const rec = (v: unknown): Record<string, unknown> => typeof v === "object" && v !== null ? v as Record<string, unknown> : {};
 const lastName = (names: unknown): string => {
   const list = Array.isArray(names) ? names as unknown[] : [];
@@ -96,12 +109,31 @@ const isTree = (v: TreeValue | undefined): v is TreeNode => v !== undefined && v
 const int = (v: TreeValue | undefined): number => typeof v === "string" && /^-?\d+$/.test(v) ? Number(v) : -1;
 
 /** the nodes whose values an analysed node computes from: a call's or an operator's arguments, an aggregate's, the
- *  results of a CASE (never its conditions), a coercion's argument */
+ *  results of a CASE (never its conditions), a coercion's argument, a scalar sublink's subselect's column, what a VAR
+ *  reads (`followed`: a subquery's, a CTE's or each set operation arm's column) */
 function inputsOf(n: TreeNode): TreeNode[] {
   if (n._node === "AGGREF") return (Array.isArray(n.args) ? n.args : []).map((e) => isTree(e) && isTree(e.expr) ? e.expr : null).filter(isTree);
   if (n._node === "CASEEXPR") return [...(Array.isArray(n.args) ? n.args : []).map((w) => isTree(w) ? w.result : null), n.defresult].filter(isTree);
+  if (n._node === "SUBLINK") {
+    const q = n.subselect, first = isTree(q) && Array.isArray(q.targetList) ? q.targetList.find((e) => isTree(e) && e.resjunk !== "true") : undefined;
+    return isTree(first) && isTree(first.expr) ? [first.expr] : [];
+  }
+  if (n._node === "VAR") return Array.isArray(n.followed) ? n.followed.filter(isTree) : [];
   if (Array.isArray(n.args)) return n.args.filter(isTree);
   return isTree(n.arg) ? [n.arg] : [];
+}
+
+/** what the text a numeric is read from was, as the analysis typed it: down through its casts, a double's text, a JSON
+ *  value's (an operator or a function over json or jsonb: `->>`, `json_extract_path_text`), or any other text */
+function textFrom(n: TreeNode): TextFrom {
+  for (let x: TreeNode | undefined = n; x !== undefined;) {
+    if (DOUBLES.has(exprType(x)?.type ?? -1)) return "double";
+    const args: TreeNode[] = Array.isArray(x.args) ? x.args.filter(isTree) : [];
+    if ((x._node === "OPEXPR" || x._node === "FUNCEXPR") && args[0] !== undefined && JSONS.has(exprType(args[0])?.type ?? -1)) return "json";
+    const cast: boolean = x._node === "FUNCEXPR" && (int(x.funcformat) === 1 || int(x.funcformat) === 2);
+    x = x._node === "COERCEVIAIO" || x._node === "RELABELTYPE" ? (isTree(x.arg) ? x.arg : undefined) : cast ? args[0] : x._node === "VAR" ? inputsOf(x)[0] : undefined;
+  }
+  return "text";
 }
 
 /** the walk: each node's type first (a double is a double, anything but a numeric carries nothing), then the form below
@@ -112,7 +144,10 @@ function seen(n: TreeNode, names: ReadonlyMap<string, string>): Seen {
   if (t === null || t.type !== NUMERIC_OID) return null;
   const inputs = inputsOf(n), below = inputs.map((x) => seen(x, names));
   const inner = below.find(isForm) ?? null, at = int(n.location);
-  const born = (why: Form["why"], fn: string): Form => ({ why, fn, fixed: false, agg: null, at, way: null });
+  const born = (why: Form["why"], fn: string, from: TextFrom | null = null): Form => ({ why, fn, fixed: false, from, sites: [{ at, vars: [] }], way: null, scaled: null });
+  // a text read as a numeric is the one form a node over it outranks: one scale for the text would not store a division,
+  // a variance or sqrt and its kin over it, so that node is the reason
+  const under = (outranks: boolean): Form | null => inner !== null && !(outranks && inner.why === "text") ? inner : null;
   switch (n._node) {
     case "FUNCEXPR": {
       const cast = int(n.funcformat) === 1 || int(n.funcformat) === 2, typmod = t.typmod >= 0;
@@ -121,19 +156,29 @@ function seen(n: TreeNode, names: ReadonlyMap<string, string>): Seen {
         if (below[0] === "double") return { ...born("double", ""), fixed: typmod };
         return inner === null || (inner.why === "text" && typmod) ? null : { ...inner, fixed: inner.fixed || typmod };
       }
-      const name = names.get(`f${int(n.funcid)}`) ?? "";
-      if (inner !== null) return { ...inner, fixed: inner.fixed || FIXES.has(name) };
+      const name = names.get(`f${int(n.funcid)}`) ?? "", kept = under(PER_VALUE.has(name) || name === "div");
+      if (kept !== null) return { ...kept, fixed: kept.fixed || FIXES.has(name) };
       return PER_VALUE.has(name) ? born("per-value", name) : name === "div" ? born("divides", name) : null;
     }
     case "AGGREF": {
       const name = names.get(`f${int(n.aggfnoid)}`) ?? "";
-      if (inner !== null) return { ...inner, agg: inner.agg ?? (AGGREGATES.has(name) ? name : null) };
-      return VARIANCES.has(name) ? born("variance", name) : name === "avg" ? born("divides", name) : null;
+      return under(VARIANCES.has(name) || name === "avg") ?? (VARIANCES.has(name) ? born("variance", name) : name === "avg" ? born("divides", name) : null);
     }
-    case "OPEXPR": return inner ?? (names.get(`o${int(n.opno)}`) === "/" ? born("divides", "/") : null);
+    case "OPEXPR": {
+      const divides = names.get(`o${int(n.opno)}`) === "/";
+      return under(divides) ?? (divides ? born("divides", "/") : null);
+    }
     // a text read as a numeric keeps the decimals each value's text has
-    case "COERCEVIAIO": return inputs[0] !== undefined && TEXTS.has(exprType(inputs[0])?.type ?? -1) ? born("text", "") : inner;
-    // a coalesce, a greatest or least, a CASE's results, a relabel: the value it takes
+    case "COERCEVIAIO": return inputs[0] !== undefined && TEXTS.has(exprType(inputs[0])?.type ?? -1) ? born("text", "", textFrom(inputs[0])) : inner;
+    // a column read from a subquery, a CTE or a set operation: the first arm's form says the reason, and every arm of
+    // that form is a site of the way out, reached through this VAR
+    case "VAR": {
+      const forms = below.filter(isForm), first = forms[0];
+      if (first === undefined) return null;
+      const sites = forms.filter((f) => f.why === first.why).flatMap((f) => f.sites).map((s) => ({ at: s.at, vars: at >= 0 ? [at, ...s.vars] : s.vars }));
+      return { ...first, sites };
+    }
+    // a coalesce, a greatest or least, a CASE's results, a relabel, a sublink: the value it takes
     default: return inner;
   }
 }
@@ -148,56 +193,110 @@ function oidsOf(v: TreeValue | undefined, out: { f: Set<number>; o: Set<number> 
   for (const [k, x] of Object.entries(v)) if (k !== "_node") oidsOf(x, out);
 }
 
-/** the user's own expression of each output column (the raw tree's targets: under an `order_by:`, the shell's subquery's) */
-function rawTargets(stmt: unknown): unknown[] | null {
+/** the user's own top SELECT's body (under an `order_by:` shell, the shell's subquery's) */
+function userTop(stmt: unknown): Record<string, unknown> {
   const body = rec(rec(stmt).SelectStmt), targets = body.targetList;
-  if (!Array.isArray(targets)) return null;
   const from = Array.isArray(body.fromClause) ? body.fromClause as unknown[] : [];
   const sub = rec(rec(from[0]).RangeSubselect);
-  const star = rec(rec(rec(rec(targets[0]).ResTarget).val).ColumnRef).fields;
-  if (targets.length === 1 && from.length === 1 && rec(sub.alias).aliasname === SHELL_ALIAS && Array.isArray(star) && "A_Star" in rec(star[0])) return rawTargets(sub.subquery);
-  return targets.map((t) => rec(rec(t).ResTarget).val);
+  const star = Array.isArray(targets) ? rec(rec(rec(rec(targets[0]).ResTarget).val).ColumnRef).fields : undefined;
+  if (Array.isArray(targets) && targets.length === 1 && from.length === 1 && rec(sub.alias).aliasname === SHELL_ALIAS && Array.isArray(star) && "A_Star" in rec(star[0])) return userTop(sub.subquery);
+  return body;
+}
+/** the user's own expression of each output column (the raw tree's targets), null for a set operation's */
+function rawTargets(stmt: unknown): unknown[] | null {
+  const targets = userTop(stmt).targetList;
+  return Array.isArray(targets) ? targets.map((t) => rec(rec(t).ResTarget).val) : null;
 }
 
-const DOUBLE_TYPE = { names: [{ String: { sval: "pg_catalog" } }, { String: { sval: "float8" } }], typemod: -1 };
+const typeName = (name: string, typmods: readonly number[] = []): unknown => ({ names: [{ String: { sval: "pg_catalog" } }, { String: { sval: name } }],
+  ...(typmods.length === 0 ? {} : { typmods: typmods.map((m) => ({ A_Const: { ival: { ival: m } } })) }), typemod: -1 });
+const DOUBLE_TYPE = typeName("float8");
+/** the one scale a way out gives a text read as a numeric */
+const ONE_SCALE = typeName("numeric", [20, 4]);
 const isNumericCast = (n: unknown): boolean => "TypeCast" in rec(n) && lastName(rec(rec(rec(n).TypeCast).typeName).names) === "numeric";
+const isFixer = (n: unknown): boolean => isNumericCast(n) || ("FuncCall" in rec(n) && FIXES.has(lastName(rec(rec(n).FuncCall).funcname)));
+const castTo = (n: unknown, type: unknown): unknown => ({ TypeCast: { arg: n, typeName: type } });
+/** a cast made a cast to `type` (a call such as `numeric(x)`: its argument cast) */
+const retyped = (n: unknown, type: unknown): unknown => "TypeCast" in rec(n) ? { TypeCast: { ...rec(rec(n).TypeCast), typeName: type } }
+  : castTo((rec(rec(n).FuncCall).args as unknown[] | undefined)?.[0], type);
+/** an expression of the raw tree, as the deparser writes it */
+const exprText = (val: unknown): string =>
+  deparseSync({ SelectStmt: { targetList: [{ ResTarget: { val } }], limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } } as unknown as Node, { pretty: false }).replace(/^SELECT /, "");
 
-/**
- * THE WAY OUT IN THE USER'S OWN WORDS: their expression with only the cast moved, every aggregate and wrapper kept. The
- * value is cast to double precision at the node the engine can't store (`at`), or above the outermost round, trunc, floor,
- * ceil or numeric cast over it (a round of a double takes no decimals, and a numeric cast would make it a numeric again):
- * a numeric cast there is made the cast to double, and a numeric cast from a double, with nothing over it, is taken away.
- * Null where the node is not found in the user's text.
- */
-function wayOut(root: unknown, at: number): string | null {
-  const path: unknown[] = [];
-  const find = (v: unknown): boolean => {
-    if (Array.isArray(v)) return v.some(find);
+/** a step of the path from the statement's root to a node of its raw tree: the object, and the key it is under */
+type Step = { key: string; node: Record<string, unknown> };
+function pathTo(root: unknown, hit: (o: Record<string, unknown>) => boolean): Step[] | null {
+  const path: Step[] = [];
+  const find = (v: unknown, key: string): boolean => {
+    if (Array.isArray(v)) return v.some((x) => find(x, key));
     if (typeof v !== "object" || v === null) return false;
-    const o = v as Record<string, unknown>;
-    const kind = ["FuncCall", "TypeCast", "A_Expr"].find((k) => k in o);
-    path.push(v);
-    if (kind !== undefined && rec(o[kind]).location === at) return true;
-    if (Object.values(o).some(find)) return true;
+    const node = v as Record<string, unknown>;
+    path.push({ key, node });
+    if (hit(node) || Object.entries(node).some(([k, x]) => find(x, k))) return true;
     path.pop();
     return false;
   };
-  if (!find(root)) return null;
-  const nodes = path.filter((v) => !Array.isArray(v) && ["FuncCall", "TypeCast", "A_Expr", "CoalesceExpr", "MinMaxExpr", "CaseExpr"].some((k) => k in rec(v)));
-  const target = nodes[nodes.length - 1]!;
-  const fixer = nodes.slice(0, -1).find((n) => isNumericCast(n) || ("FuncCall" in rec(n) && FIXES.has(lastName(rec(rec(n).FuncCall).funcname))));
-  const asDouble = (n: unknown): unknown => ({ TypeCast: { arg: n, typeName: DOUBLE_TYPE } });
-  const [at2, replacement] = fixer !== undefined
-    ? [fixer, isNumericCast(fixer) ? { TypeCast: { ...rec(rec(fixer).TypeCast), typeName: DOUBLE_TYPE } } : asDouble(fixer)]
-    : [target, isNumericCast(target) ? rec(rec(target).TypeCast).arg : asDouble(target)];
-  const swap = (v: unknown): unknown => v === at2 ? replacement : Array.isArray(v) ? v.map(swap)
-    : typeof v === "object" && v !== null ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, swap(x)])) : v;
-  const text = deparseSync({ SelectStmt: { targetList: [{ ResTarget: { val: swap(root) } }], limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } } as unknown as Node, { pretty: false });
-  return text.replace(/^SELECT /, "");
+  return find(root, "") ? path : null;
+}
+const located = (kinds: readonly string[], at: number) => (o: Record<string, unknown>): boolean => kinds.some((k) => k in o && rec(o[k]).location === at);
+
+/**
+ * WHERE A WAY OUT IS WRITTEN, for a path to a node of the raw tree: the output column's own expression (its ResTarget,
+ * `name` null; a scalar sublink is inside it), or the query of the statement the node is in, named in the user's words
+ * (`the WITH query t`, `the subquery s`, `the UNION ALL`: an arm of a set operation is written as the whole of it).
+ * Undefined where that query has no name the user wrote.
+ */
+function placeOf(path: readonly Step[], top: Record<string, unknown>): { key: unknown; name: string | null } | undefined {
+  const i = path.findIndex((s) => "ResTarget" in s.node);
+  if (i < 1) return undefined;
+  if (path[i - 1]!.node === top) return { key: path[i]!.node, name: null };
+  let r = i - 1;
+  while (r > 0 && (path[r]!.key === "larg" || path[r]!.key === "rarg")) r--;
+  const body = path[r]!.node;
+  if (body === top) return { key: body, name: `the ${String(body.op).replace(/^SETOP_/, "")}${body.all === true ? " ALL" : ""}` };
+  const wrapper = path[r - 1], parent = path[r - 2], alias = rec(parent?.node.alias).aliasname;
+  if (wrapper?.key === "ctequery" && parent?.key === "CommonTableExpr") return { key: body, name: `the WITH query ${String(parent.node.ctename)}` };
+  if (wrapper?.key === "subquery" && parent?.key === "RangeSubselect" && typeof alias === "string") return { key: body, name: `the subquery ${alias}` };
+  return undefined;
 }
 
-/** each output column's form (`DefinitionPlan.forms`), read from its analysed expression, with its way out written over
- *  the user's own: null where it has none */
+/**
+ * THE WAY OUT IN THE USER'S OWN WORDS (`Form.way`, `Form.scaled`): their SQL with only the cast moved, every aggregate and
+ * wrapper kept, at each of the form's sites. As a double (`double`), the value is cast to double precision at the node
+ * the engine can't store, or above the outermost round, trunc, floor, ceil or numeric cast over it, through every query
+ * the walk followed it across (a round of a double takes no decimals, and a numeric cast would make it a numeric again):
+ * a numeric cast there is made the cast to double, a numeric cast from a double with nothing over it is taken away, and a
+ * text's cast to numeric is made the cast to double. Given one scale (`scale`, a text read as a numeric), the text's cast
+ * is given `numeric(20,4)`. Written where the cast lands (`placeOf`); null where a node is not found in the user's text.
+ */
+function wayOf(stmt: unknown, f: Form, mode: "double" | "scale"): Way | null {
+  const top = userTop(stmt), swaps = new Map<unknown, unknown>(), places = new Map<unknown, string | null>();
+  for (const site of f.sites) {
+    const born = pathTo(stmt, located(["FuncCall", "TypeCast", "A_Expr"], site.at));
+    if (born === null) return null;
+    const target = born[born.length - 1]!.node;
+    // the expressions over the node within each query, the column's own first, through each VAR the walk followed
+    const segments = [...site.vars.map((v) => pathTo(stmt, located(["ColumnRef"], v))).filter((p): p is Step[] => p !== null), born];
+    const over = (p: Step[]): Step | undefined => p.slice(p.findIndex((s) => "ResTarget" in s.node) + 1, -1).find((s) => isFixer(s.node));
+    const fixed = mode === "scale" ? undefined : segments.map((p) => ({ p, s: over(p) })).find((x) => x.s !== undefined);
+    const [node, path] = fixed?.s !== undefined ? [fixed.s.node, fixed.p] : [target, born];
+    swaps.set(node, mode === "scale" ? retyped(target, ONE_SCALE)
+      : fixed !== undefined ? (isNumericCast(node) ? retyped(node, DOUBLE_TYPE) : castTo(node, DOUBLE_TYPE))
+      : !isNumericCast(target) ? castTo(target, DOUBLE_TYPE) : f.why === "double" ? rec(rec(target).TypeCast).arg : retyped(target, DOUBLE_TYPE));
+    const place = placeOf(path, top);
+    if (place === undefined) return null;
+    places.set(place.key, place.name);
+  }
+  const swap = (v: unknown): unknown => swaps.has(v) ? swaps.get(v) : Array.isArray(v) ? v.map(swap)
+    : typeof v === "object" && v !== null ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, swap(x)])) : v;
+  const all = [...places];
+  if (all.length === 1 && all[0]![1] === null) return { expr: exprText(swap(rec(rec(all[0]![0]).ResTarget).val)) };
+  if (all.some(([, name]) => name === null)) return null;
+  return { places: all.map(([body, name]) => ({ place: name!, select: deparseSync({ SelectStmt: swap(body) } as unknown as Node, { pretty: false }) })) };
+}
+
+/** each output column's form (`DefinitionPlan.forms`), read from its analysed expression, with its ways out written over
+ *  the user's own SQL: null where it has none */
 async function formsOf(rows: Planner["rows"], outputs: ReadonlyArray<TreeNode | null> | undefined, stmt: unknown, n: number): Promise<Array<Form | null>> {
   if (outputs === undefined || outputs.length !== n) return Array<Form | null>(n).fill(null);
   const oids = { f: new Set<number>(), o: new Set<number>() };
@@ -205,12 +304,11 @@ async function formsOf(rows: Planner["rows"], outputs: ReadonlyArray<TreeNode | 
   const names = new Map<string, string>(oids.f.size + oids.o.size === 0 ? [] : (await rows(
     `SELECT 'f' || oid::text, proname::text FROM pg_proc WHERE oid IN (${[0, ...oids.f].join(", ")}) UNION ALL SELECT 'o' || oid::text, oprname::text FROM pg_operator WHERE oid IN (${[0, ...oids.o].join(", ")})`))
     .map(([k, name]) => [k!, name!] as const));
-  const raw = rawTargets(stmt);
-  return outputs.map((e, i) => {
+  return outputs.map((e) => {
     const s = e === null ? null : seen(e, names);
     if (!isForm(s)) return null;
-    const root = raw !== null && raw.length === n ? raw[i] : undefined;
-    return { ...s, way: root === undefined || s.at < 0 ? null : wayOut(root, s.at) };
+    const found = s.sites.every((x) => x.at >= 0);
+    return { ...s, way: found ? wayOf(stmt, s, "double") : null, scaled: found && s.why === "text" ? wayOf(stmt, s, "scale") : null };
   });
 }
 
@@ -385,7 +483,7 @@ function columnProblem(f: { name: string; oid: number }, typeName: string, kind:
 const asAnswered = (oid: number, kind: string | undefined): boolean => oid === NUMERIC_OID || kind === "e" || kind === "citext";
 
 /** why a numeric is not stored (`storedNumeric`, `storedColumns`): each its own refusal, with ways out that hold */
-type NotStored = { why: "divides" | "rows" | "picks" | "text" | "engine" } | { why: "scale" | "held"; scale: number } | { why: "other"; what: string };
+type NotStored = { why: "divides" | "rows" | "text" | "engine" } | { why: "scale" | "held" | "picks"; scale: number } | { why: "other"; what: string };
 
 /** the variance family: Postgres computes each of a numeric exactly, at decimals it picks by the value's size */
 const VARIANCES = new Set(["variance", "var_samp", "var_pop", "stddev", "stddev_samp", "stddev_pop"]);
@@ -512,71 +610,83 @@ function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly Ce
   }
 }
 
-/** a stored numeric's verdict, where all that is around it is known: null where it is stored */
+/** a stored numeric's verdict, where all that is around it is known: null where it is stored (a picked value's `scale`:
+ *  the most decimals any value it picks from holds, which one scale for it keeps) */
 function verdict(s: Stored): NotStored | null {
   if (s.scale === "text") return { why: "text" };
   if (s.engine || s.scale === "value") return { why: "engine" };
   if (s.scale === "rows") return { why: "rows" };
-  if (s.scale === "picks") return { why: "picks" };
+  if (s.scale === "picks") return { why: "picks", scale: s.held };
   if (s.scale > MAX_STORED_SCALE) return { why: "scale", scale: s.scale };
   if (s.peak > MAX_STORED_SCALE) return { why: "held", scale: s.peak };
   return null;
 }
 
+/** what a text read as a numeric was, in the words of its refusal */
+const TEXT_WORDS: Record<TextFrom, string> = { json: "a JSON number's ->> cast to numeric", double: "the text of a double precision value, cast to numeric", text: "a text value cast to numeric" };
+
 /**
  * A numeric not stored, said by its own reason, with ways out that hold. Where the engine computes the value
  * ("engine"), and for a numeric read from text, the reason and the way out are its FORM's (`formsOf`), in the user's own
- * function's name; the scale's reasons are the program's walk's (`verdict`). Nothing here reads a reason from an engine
- * type, the outermost node or a constant.
+ * function's name; the scale's reasons are the program's walk's (`verdict`). Every way out is the user's own SQL
+ * (`Form.way`, `Form.scaled`, or the column's own expression, `root`, cast whole), never a placeholder, and never the
+ * output column named as if its source had it. Nothing here reads a reason from an engine type, the outermost node or a
+ * constant.
  */
-function notStoredRefusal(name: string, n: NotStored, f: Form | null): GeneratedRefusal {
-  const double = `or read it as ${name}::double precision if it need not be exact`;
+function notStoredRefusal(name: string, n: NotStored, f: Form | null, root: unknown): GeneratedRefusal {
   const atRead = "or compute it in the statement that reads the synced table";
-  // the user's own expression as a double (`Form.way`), or where it is not found in their text, the column read as one
-  const asDouble = (way: string | null): string => way === null ? double : `store it as a double if it need not be exact: ${way} AS ${name}`;
-  // a value the engine computes (a variance, sqrt and its kin, a double) is its form's reason, whatever the program saw around it
-  // (a sum of sqrt's texts is "the rows decide" to the program, and no scale given to its rows would store it)
-  const why = n.why === "engine" ? f?.why ?? "engine" : n.why === "text" ? "text" : f !== null && (f.why === "variance" || f.why === "per-value" || f.why === "double") ? f.why : null;
+  const written = (w: Way): string => "expr" in w ? `${w.expr} AS ${name}` : w.places.map((p) => `write ${p.place} as ${p.select}`).join("; and ");
+  // the column's own expression cast whole, where the user wrote one (a set operation's column has none)
+  const whole = (type: unknown): Way | null => root === null || root === undefined ? null : { expr: exprText(castTo(root, type)) };
+  const doubleWay = f?.way ?? whole(DOUBLE_TYPE);
+  const asDouble = (or: boolean): string => `${or ? "or " : ""}store it as a double if it need not be exact: ${doubleWay === null ? "cast it to double precision where it is computed" : written(doubleWay)}`;
+  const scaled = (words: string, fallback: string): string => `${words}: ${f?.why === "text" && f.scaled !== null ? written(f.scaled) : fallback}`;
+  // a value the engine computes (a variance, sqrt and its kin, a double) is its form's reason, whatever the program saw
+  // around it (a sum of sqrt's texts is "the rows decide" to the program, and no scale given to its rows would store
+  // it); a division over a text read as a numeric is the division's, since one scale for the text would not store it
+  const strong = f !== null && (f.why === "variance" || f.why === "per-value" || f.why === "double");
+  const why = n.why === "engine" ? f?.why ?? "engine" : strong ? f.why : n.why === "text" ? (f?.why === "divides" ? "divides" : "text") : null;
   switch (why) {
     case "variance": return { key: "sql",
       message: `column ${name} is a ${f!.fn}, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double`,
       why: "A stored numeric keeps one scale for every row, and a stored double holds neither Postgres's digits nor its type.",
-      options: [asDouble(f!.way), atRead] };
+      options: [asDouble(false), atRead] };
     case "per-value": return f!.fixed
       ? { key: "sql", message: `column ${name} rounds or casts a numeric Postgres computes for each row at decimals it picks (${f!.fn}), which the engine computes as a double`, why: "Postgres's digits for it are worked out when a statement is answered, and a stored column skips that step.",
-        options: [asDouble(f!.way), atRead] }
+        options: [asDouble(false), atRead] }
       : { key: "sql", message: `column ${name} is a numeric whose decimals Postgres picks by the size of each value (${f!.fn})`, why: "A stored numeric keeps one scale for every row.",
-        options: [asDouble(f!.way), atRead] };
-    case "text": {
-      const agg = f?.why === "text" ? f.agg : null;
-      return { key: "sql", message: `column ${name} is a numeric read from text (a JSON number's ->> cast to numeric), which keeps the decimals each value's text has`, why: "A stored numeric keeps one scale for every row.",
-        options: [`give it one scale: ${agg === null ? "(x)::numeric(20,4)" : `${agg}((x)::numeric(20,4))`} AS ${name}`, double] };
-    }
-    case "divides": return divides(name, double);
+        options: [asDouble(false), atRead] };
+    case "text": return { key: "sql", message: `column ${name} is a numeric read from text (${TEXT_WORDS[f?.why === "text" && f.from !== null ? f.from : "text"]}), which keeps the decimals each value's text has`,
+      why: "A stored numeric keeps one scale for every row.",
+      options: [scaled("give it one scale", "cast the text to numeric(20,4) where it is read"), asDouble(true)] };
+    case "divides": return divides(name, asDouble(false));
     case "double": return { key: "sql", message: `column ${name} is a numeric cast from a double precision value (x::float8::numeric)`, why: "Postgres writes such a numeric from the double's digits when a statement is answered, a step a stored column skips.",
-      options: [f?.way === null || f?.way === undefined ? `read it as ${name}::double precision` : `store the double it is: ${f.way} AS ${name}`, atRead] };
+      options: [`store the double it is: ${f?.way === null || f?.way === undefined ? "take its cast to numeric away" : written(f.way)}`, atRead] };
     case "engine": return { key: "sql", message: `column ${name} is a numeric the engine computes as a double, where Postgres computes it exactly`, why: "A stored double would hold neither Postgres's digits nor its type.",
-      options: [double, atRead] };
+      options: [asDouble(false), atRead] };
     case null: break;
   }
   switch (n.why) {
-    case "divides": return divides(name, double);
+    case "divides": return divides(name, asDouble(false));
     case "scale": return { key: "sql", message: `column ${name} has ${n.scale} decimals, more than the ${MAX_STORED_SCALE} a stored numeric keeps`, why: "A sum at that scale could overflow the 38 digits a stored numeric has.",
-      options: [`round it to fewer: round(sum(x), 2) AS ${name}`, double] };
+      options: [`round it to fewer: round(sum(x), 2) AS ${name}`, asDouble(true)] };
     case "held": return { key: "sql", message: `column ${name} is computed at ${n.scale} decimals on the way to its own, more than the ${MAX_STORED_SCALE} a stored numeric keeps (a sum of numbers read from text is added at 36)`, why: "A value at that scale could overflow the 38 digits a stored numeric has before it is rounded.",
-      options: [`give the values fewer decimals first: sum((x)::numeric(20,4)) AS ${name}`, double] };
+      options: [scaled("give the values fewer decimals first", "cast each value to numeric(20,4) before it is summed or rounded"), asDouble(true)] };
     case "rows": return { key: "sql", message: `column ${name} sums values Postgres keeps at differing scales, so the rows decide its decimals`, why: "A stored numeric keeps one scale for every row.",
-      options: [`give the values one scale first: sum(x::numeric(20,4)) AS ${name}`, double] };
-    case "picks": return { key: "sql", message: `column ${name} is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones`, why: "A stored numeric keeps one scale for every row.",
-      options: [`give it one scale: greatest(x, 1)::numeric(12,2) AS ${name}, or give each value the same decimals`, double] };
+      options: [scaled("give the values one scale first", "cast each value to numeric(20,4) before it is summed"), asDouble(true)] };
+    case "picks": {
+      const one = whole(typeName("numeric", [38, n.scale]));
+      return { key: "sql", message: `column ${name} is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones`, why: "A stored numeric keeps one scale for every row.",
+        options: [`give it one scale: ${one === null ? `cast it to numeric(38,${n.scale}) where it is computed` : written(one)}`, asDouble(true)] };
+    }
     case "other": return { key: "sql", message: `column ${name} computes a numeric from ${n.what}, which Mason can't store exactly yet`, why: null,
-      options: [`compute it in the statement that reads the table`, double] };
+      options: [`compute it in the statement that reads the table`, asDouble(true)] };
     default: throw new Error(`a numeric not stored with no reason said: ${n.why}`);
   }
 }
 const divides = (name: string, double: string): GeneratedRefusal => ({ key: "sql", message: `column ${name} divides a numeric, which the engine computes as a double`,
   why: "Postgres divides a numeric exactly (an average is a division), so a stored double would not hold its digits.",
-  options: ["store what it divides and divide where you read the table: sum(x) AS total, count(x) AS n", double] });
+  options: [double, "or store what it divides, and divide in the statement that reads the table"] });
 
 /** a numeric output column, as the catalog spells its type */
 export const isNumeric = (c: { type: string }): boolean => /^numeric\b/.test(c.type);
@@ -593,7 +703,7 @@ export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns:
   for (const { column, program, cells } of d.numerics) {
     const name = d.columns[column]!.name, stored = storedNumeric(program, types, cells);
     const no = "why" in stored ? stored : verdict(stored);
-    if (no !== null) refused.push(notStoredRefusal(name, no, d.forms[column] ?? null));
+    if (no !== null) refused.push(notStoredRefusal(name, no, d.forms[column] ?? null, d.roots[column]));
     else exprs.set(column, (stored as Stored).sql);
   }
   d.columns.forEach((c, i) => {
@@ -601,7 +711,7 @@ export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns:
     const type = types.get(`#${i}`);
     if (type !== undefined && (DECIMAL_TYPE.test(type) || type === "HUGEINT")) return;
     if (type !== undefined && INTEGER_TYPES.has(type)) exprs.set(i, `CAST(__mason_output.__mason_c${i} AS HUGEINT)`);
-    else refused.push(notStoredRefusal(c.name, type === "DOUBLE" || type === "FLOAT" ? { why: "engine" } : { why: "other", what: `a value the engine holds as ${type ?? "nothing it names"}` }, d.forms[i] ?? null));
+    else refused.push(notStoredRefusal(c.name, type === "DOUBLE" || type === "FLOAT" ? { why: "engine" } : { why: "other", what: `a value the engine holds as ${type ?? "nothing it names"}` }, d.forms[i] ?? null, d.roots[i]));
   });
   if (refused.length > 0) return { refused };
   return { columns: d.columns.map((c, i) => { const expr = exprs.get(i); return expr === undefined ? c : { ...c, duck: null, expr }; }) };
@@ -688,6 +798,7 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   }
   if (refused.length > 0) return { refused };
   const definition: DefinitionPlan = { plan, bases, warnings: statement.warnings, numerics, forms: await formsOf(p.rows, plan.outputs, statement.stmt, fields.length),
+    roots: ((raw) => fields.map((_, i) => raw !== null && raw.length === fields.length ? raw[i] : null))(rawTargets(statement.stmt)),
     columns: fields.map((f, i) => ({ name: f.name, type: typeNames.get(i)!, duck: numerics.some((n) => n.column === i) ? null : STORED_TYPES.get(f.oid) ?? null })) };
   if (describe === undefined || !definition.columns.some(isNumeric)) return { definition };
   const stored = storedColumns(definition, await describe(plan.sql.text));

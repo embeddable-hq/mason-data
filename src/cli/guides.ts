@@ -70,16 +70,17 @@ ${keys}
     its min or max, a sum (of a bigint too), and + - * of those, negated, abs, mod, round(x, n) and trunc(x, n) (n
     below 0 too), floor, ceil, a cast to numeric(p,s) (of a JSON number's text too), and a CASE, GREATEST, LEAST or
     COALESCE whose values have one scale, up to 18 decimals; a sign is stored too. Refused, each with its reason and
-    the way out: a division (avg is one: store sum and count, divide where you read), a variance or stddev, which
+    the way out: a division (avg is one: store it as a double, or divide where you read), a variance or stddev, which
     Postgres computes exactly at decimals it picks per value, rounded or not (store it as a double), a sqrt, exp, ln,
     log or power, whose decimals Postgres picks per value, rounded or not (store it as a double), a JSON number's text
     cast to numeric with no scale (cast it to numeric(p,s)), more than 18 decimals, at the end or on the way
     (round it, or give the values fewer decimals first), a sum whose decimals the rows decide (cast the values to one
     scale first), a CASE, GREATEST, LEAST or COALESCE of values with differing decimals (cast it to numeric(p,s)), and a
-    numeric cast from a double (read it as a double). Each is said as Postgres types the value (sqrt or avg of a double
-    is a double, so cast to numeric it is a cast from a double) wherever it sits in the column (under an operator, a
-    coalesce, a round, a cast or an aggregate), its way out your own expression with the cast moved, the aggregate
-    kept: sum(sqrt(x)::double precision). A run that fails (a value
+    numeric cast from a double (store the double it is). Each is said as Postgres types the value (sqrt or avg of a
+    double is a double, so cast to numeric it is a cast from a double) wherever it sits in the column (under an
+    operator, a coalesce, a round, a cast or an aggregate, or in a scalar subquery, a WITH query, a subquery in FROM or
+    a UNION's arm), its way out your own SQL with the cast moved, the aggregate kept: sum(sqrt(x)::double precision),
+    or the WITH query, subquery or UNION the cast belongs in, given whole. A run that fails (a value
     past 38 digits, bigint out of range, a division by zero) says Postgres's error and SQLSTATE, and is tried again.
     An enum and a citext are stored as themselves:
     an enum sorts in its declared order, a citext compares without case.
