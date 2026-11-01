@@ -1642,6 +1642,22 @@
       "full_sort": false
     },
     {
+      "name": "BI shape: jsonb #>> array[…] grouped",
+      "sql": "SELECT o.meta #>> array['status'] AS s, count(*) AS n FROM orders o GROUP BY o.meta #>> array['status'] ORDER BY s",
+      "plan": [
+        "ORDER_BY",
+        "  HASH_GROUP_BY",
+        "    PROJECTION calls __mason_json_get, __mason_turn",
+        "      TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_get"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
       "name": "BI shape: jsonb @>",
       "sql": "SELECT o.id, o.meta @> '{\"status\": \"paid\"}' AS paid FROM orders o ORDER BY o.id LIMIT 20",
       "plan": [

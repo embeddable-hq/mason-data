@@ -281,7 +281,7 @@ test("a read is answered from its stored column only once it is ready, every rea
     await empty.stop();
     // a statement that lists the columns without naming them: the view, and the reads computed
     for (const listing of ["SELECT * FROM docs ORDER BY id", "SELECT d.*, j ->> 's' FROM docs d ORDER BY id", "SELECT x.* FROM docs x JOIN docs y USING (id) ORDER BY 1", "SELECT x.*, y.id FROM docs x JOIN docs y ON y.id = x.id LIMIT 5", "SELECT x.*, y.id FROM docs x JOIN docs y ON y.id = x.id ORDER BY x.id LIMIT 5", "SELECT * FROM docs x JOIN docs y ON y.id = x.id ORDER BY x.id DESC LIMIT 5",
-      "SELECT *, j ->> 's' FROM public.docs NATURAL JOIN (SELECT 1 AS id) x", "WITH w AS (SELECT * FROM docs) SELECT * FROM w ORDER BY id"]) {
+      "SELECT *, j ->> 's' FROM public.docs NATURAL JOIN (SELECT 1 AS id) x", "WITH w AS (SELECT * FROM docs) SELECT * FROM w ORDER BY id", "(SELECT *, j ->> 's' FROM docs ORDER BY id) UNION ALL (SELECT *, j ->> 's' FROM docs ORDER BY id)"]) {
       const p = await plan(listing);
       // its text names the view (`__mason_visible`); what it calls is the plan's, the calls in its text and nothing
       // else (once read off the text, a * was a calling statement, and no timeout or cancel stopped it)
@@ -1120,7 +1120,9 @@ test("a path's spellings and its -> and ->> are ONE stored column, each read fro
     const hidden = (text: string): string[] => [...new Set(text.match(/__mason_json_[0-9a-f]{12}/g) ?? [])].sort();
     const path = (steps: string, either: boolean, asText: boolean, column = "j", canonical = true): Read => ({ source: "public.docs", column, steps, either, canonical, asText });
     // one path, four reads: #>> and #> of {o,a,b}, and the same keys by -> and ->> (a chain of -> is one read)
-    const one = ["j #>> '{o,a,b}'", "j #> '{o,a,b}'", "j -> 'o' -> 'a' ->> 'b'", "j -> 'o' -> 'a' -> 'b'"];
+    // …and every spelling of its path: an array, cast or not, and the functions' (issue 130)
+    const one = ["j #>> '{o,a,b}'", "j #> '{o,a,b}'", "j -> 'o' -> 'a' ->> 'b'", "j -> 'o' -> 'a' -> 'b'", "j #>> ARRAY['o', 'a', 'b']", "j #> ARRAY['o', 'a', 'b']::text[]", "j #>> '{o,a,b}'::text[]",
+      "jsonb_extract_path_text(j, 'o'::text, 'a', 'b')", "jsonb_extract_path(j, VARIADIC ARRAY['o', 'a', 'b'])", "jsonb_extract_path_text(j, VARIADIC '{o,a,b}')"];
     const names = new Set([path('["o","a","b"]', true, true), path('["o","a","b"]', true, false), path('["o","a","b"]', false, true), path('["o","a","b"]', false, false)].map(route.hiddenName));
     assert.equal(names.size, 1, "one hidden column for the path, whatever the spelling and -> or ->>");
     for (const sql of [`SELECT id, ${one.map((r, i) => `${r} AS r${i}`).join(", ")} FROM docs ORDER BY id`, "SELECT id, k -> 'n' AS a, k ->> 'n' AS b, k #>> '{n}' AS c FROM docs ORDER BY id"]) {
@@ -1128,9 +1130,11 @@ test("a path's spellings and its -> and ->> are ONE stored column, each read fro
       assert.equal(hidden(on.sql.text).length, 1, `every read of ${sql} is read from one column: ${on.sql.text}`);
       assert.deepEqual(await answer(on.sql.text), await answer((await plan(sql, null)).sql.text), `${sql}: each read answers what its call answers`);
     }
+    // each spelling alone: its own read of the column, none of them the function's
+    for (const read of one) assert.equal(hidden((await plan(`SELECT ${read} FROM docs`, keeper)).sql.text).length, 1, read);
     // {arr,0}: on an array its first element; -> 'arr' ->> '0' a key, NULL there. Two paths, two answers, each right
     assert.notEqual(route.hiddenName(path('["arr","0"]', true, true)), route.hiddenName(path('["arr","0"]', false, true)));
-    const twoSql = "SELECT id, j #>> '{arr,0}' AS by_index, j -> 'arr' ->> '0' AS by_key FROM docs ORDER BY id";
+    const twoSql = "SELECT id, j #>> '{arr,0}' AS by_index, j -> 'arr' ->> '0' AS by_key, j #>> ARRAY['arr', '0'] AS array_index FROM docs ORDER BY id";
     const two = await plan(twoSql, keeper);
     assert.equal(hidden(two.sql.text).length, 2, two.sql.text);
     const got = await answer(two.sql.text);

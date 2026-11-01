@@ -256,7 +256,8 @@ export function exposes(tree: unknown): boolean {
     if (!isObject(v)) return false;
     const k = kindOf(v);
     const b = k === null ? v : bodyOf(v);
-    if (k === "SelectStmt" && Array.isArray(b.targetList) && directTables(b.fromClause).length > 0
+    // (an arm of a set operation is a SelectStmt with no wrapper of its own: k is null)
+    if ((k === "SelectStmt" || k === null) && Array.isArray(b.targetList) && directTables(b.fromClause).length > 0
       && b.targetList.some((t) => kindOf(t) === "ResTarget" && star(bodyOf(t).val))) return true;
     if (k === "JoinExpr" && b.isNatural === true && directTables([b.larg, b.rarg]).length > 0) return true;
     if (k === "ColumnRef" && Array.isArray(b.fields)) {
