@@ -95,7 +95,7 @@ test("merge-head: a merge pinned to its head, and other gh commands, are allowed
   assertAllowed("merge-head", "gh pr merge 12 --merge --match-head-commit=36c6ea8f");
   assertAllowed("merge-head", "gh pr view 12 --json headRefOid --jq .headRefOid");
   assertAllowed("merge-head", "git merge origin/main");
-  // withdrawing a queued merge takes no head: gh refuses --match-head-commit beside --disable-auto
+  // withdrawing a queued merge lands no commit, so there is no head to pin (gh ignores one given on a disable)
   assertAllowed("merge-head", "gh pr merge 12 --disable-auto");
 });
 
@@ -176,6 +176,9 @@ test("wake-up: a background wait still running after the merge or the message, o
     // a trigger in an EARLIER turn was that turn's to resolve, or to be warned of
     [prompt("merge 12"), assistant(MERGE), result("t1"), prompt("now the other thing"), assistant(use("t8", "Bash", { command: "ls" }))],
     [assistant(SEND), prompt([{ type: "text", text: "next" }])],
+    [assistant(MERGE), prompt([{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBO" } }, { type: "text", text: "next" }])],
+    // another connector's send_message (an email) is no lead at work
+    [assistant(use("t10", "mcp__0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0__send_message", { to: "x@example.com", body: "x" }))],
   ]) {
     const r = stop(t, entries);
     assert.deepEqual([r.code, r.stdout, r.stderr], [0, "", ""], JSON.stringify(entries));

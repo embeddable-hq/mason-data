@@ -143,7 +143,7 @@ rule says what detects it, or why nothing does: most are habits that only a sess
 reads. Some detectors are Claude Code hooks, wired in `.claude/settings.json` from `scripts/hooks/`
 (`tests/hooks.test.ts`): a PreToolUse hook blocks the command, and its one-line message says what to run instead; the
 Stop hook only warns. They resolve against `$CLAUDE_PROJECT_DIR`, the main checkout even from a worktree, so a main
-checkout on a branch without `scripts/hooks/` prints a hook error on each Bash call (not a block).
+checkout on a branch without `scripts/hooks/` prints a hook error on each Bash call and each turn's end (not a block).
 
 - **While working, the tests nearest the change**: `node --test <file>`, with `--test-name-pattern` for one test, and
   `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. **A full integration run is not an iteration tool**,

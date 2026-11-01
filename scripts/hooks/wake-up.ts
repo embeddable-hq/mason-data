@@ -3,7 +3,7 @@
  * Stop hook: a coordinator leaves a wake-up for what it waits on (CLAUDE.md "A coordinator never ends a turn without a
  * wake-up for what it waits on"). It reads the CURRENT turn of the session's transcript (JSONL), the tool uses after
  * the last prompt a person typed: when the last merge queued (`gh pr merge … --auto`) or message sent to another
- * session (a session's `…__send_message`) has no background job started after it that is still running, it WARNS. A
+ * session (`mcp__ccd_session_mgmt__send_message`) has no background job started after it that is still running, it WARNS. A
  * SendMessage to a sub-agent is no trigger: a sub-agent's end wakes the session. A background job is a Bash call with
  * run_in_background or a Monitor; it is still running until a `<task-notification>` names its tool use.
  *
@@ -19,14 +19,21 @@ interface ToolUse { id: string; name: string; input: Record<string, unknown>; li
 
 interface Entry { type?: unknown; isMeta?: unknown; message?: { content?: unknown } }
 
-/** A prompt a person typed, which starts a turn: not a tool's result, a task's notification or a harness's note. */
+/**
+ * A prompt a person typed, which starts a turn: a string, or blocks with at least one `text` and no `tool_result` (an
+ * image may ride beside the text); never a harness's note (isMeta) or a task's notification.
+ */
 function isPrompt(entry: Entry): boolean {
   if (entry.type !== "user" || entry.isMeta === true) return false;
   const content = entry.message?.content;
-  const blocks = Array.isArray(content) ? content as { type?: unknown; text?: unknown }[] : undefined;
-  const text = typeof content === "string" ? content
-    : blocks !== undefined && blocks.every((b) => b.type === "text") ? blocks.map((b) => String(b.text ?? "")).join("")
-      : undefined;
+  let text: string | undefined;
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    const blocks = content as { type?: unknown; text?: unknown }[];
+    const texts = blocks.filter((b) => b.type === "text");
+    if (texts.length > 0 && !blocks.some((b) => b.type === "tool_result")) text = texts.map((b) => String(b.text ?? "")).join("");
+  }
   return text !== undefined && !text.trimStart().startsWith("<task-notification>");
 }
 
@@ -54,6 +61,8 @@ function toolUses(lines: string[]): ToolUse[] {
   return uses;
 }
 
+/** A message to another session; another connector's `…__send_message` (an email) is no lead at work. */
+const SESSION_SEND = "mcp__ccd_session_mgmt__send_message";
 const QUEUED_MERGE = /\bgh\s+pr\s+merge\b[^;&|\n]*--auto\b/;
 
 /** What the session waits on with nothing to wake it, or undefined. */
@@ -63,7 +72,7 @@ function unwatched(lines: string[]): string | undefined {
   for (const use of uses) {
     if (use.name === "Bash" && typeof use.input["command"] === "string" && QUEUED_MERGE.test(use.input["command"])) {
       trigger = { use, what: "a merge is queued" };
-    } else if (use.name.endsWith("__send_message")) {
+    } else if (use.name === SESSION_SEND) {
       trigger = { use, what: "a lead is working" };
     }
   }
