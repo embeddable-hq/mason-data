@@ -121,10 +121,19 @@
  *
  * A SORT BY A COMPUTED OUTPUT OF ONE TABLE STAYS AS IT WAS: it computes that output for every row anyway (`afterLimit`).
  *
- * WHAT IS GIVEN UP: a raising expression of a derived list now runs on the chosen rows alone (`limit-errors`). A role's
- * filtered read (src/duck/row-filter.ts) is no plain read and stays as it was: a statement with one keeps exactly its
- * form here (`tablesOnly`, computed keys and merged columns too), because its barrier and its statistics wall need a
- * review of their own.
+ * WHAT IS GIVEN UP: a raising expression of a derived list now runs on the chosen rows alone (`limit-errors`).
+ *
+ * A ROLE'S FILTERED READ IS A FOURTH KIND, WALLED (issue 134, step 4; src/duck/row-filter.ts): `(SELECT * FROM (SELECT *
+ * FROM t WHERE <the role's filter> LIMIT <the barrier>) AS <the wall>) AS t`, the outer `*` the statistics wall once the
+ * plan is done. It is no plain read (its LIMIT is the barrier), so it is never folded, flattened or carried: its row
+ * numbers are chosen INSIDE it, the barrier's own select exposing `t.rowid AS __mason_rid` beside its `*`, so the wall's
+ * `try` passes it on like any column and the statement's WHERE, join conditions and keys run where they ran before, above
+ * the barrier, on the rows the filter keeps. The rows are FETCHED THROUGH THE SAME WALLED READ, filter, barrier and wall,
+ * never the bare table: a list expression then meets only the rows the filter keeps and none of the table's statistics,
+ * and runs on the chosen rows alone. A plain derived read of a walled read (a view, a derived table, a WITH query over a
+ * filtered table) is fetched the same way, through it. Each walled read fetched is one more wall in the statement: the
+ * plan's count of them (`wallStatistics`) is told so by `LateContext.wall`. A walled read whose filter holds a volatile
+ * function stays as it was: read twice, it could keep other rows.
  */
 import type { TreeNode, TreeValue } from "./pgtree.ts";
 import { fanOutBounded, projectionOnly } from "./distinct-key.ts";
@@ -220,10 +229,10 @@ function overLate(n: unknown, columns: Map<string, string>): unknown {
 }
 
 /** what the plan knows beside the statement: which of a statement's functions are volatile (the catalog's pg_proc), and
- *  whether it holds a role's filtered reads */
-export interface LateContext { volatile: (functions: number[]) => Promise<ReadonlySet<number>>; tablesOnly: boolean }
+ *  the name of a role's walled reads (src/duck/row-filter.ts `Walls`), with how many more of them the rewrite wrote */
+export interface LateContext { volatile: (functions: number[]) => Promise<ReadonlySet<number>>; wall: { alias: string; added: number } | null }
 /** with no catalog to ask, every function is volatile: nothing is read twice */
-const UNKNOWN: LateContext = { volatile: async (functions) => new Set(functions), tablesOnly: false };
+const UNKNOWN: LateContext = { volatile: async (functions) => new Set(functions), wall: null };
 
 /**
  * The statement with every sorted, limited SELECT written with its select list computed after its limit (see above),
@@ -233,11 +242,16 @@ const UNKNOWN: LateContext = { volatile: async (functions) => new Set(functions)
  */
 export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, keys: () => Promise<PrimaryKeys>, context: LateContext = UNKNOWN): Promise<AstNode | null> {
   const strict = rowWiseStatement(analysis);
-  if (!strict && (context.tablesOnly || !rowWiseAround(analysis))) return null;
-  const volatile = context.tablesOnly ? new Set<number>() : await context.volatile(derivedFunctions(analysis));
-  const relations = relationsOf(analysis, await keys(), volatile, context.tablesOnly);
+  if (!strict && !rowWiseAround(analysis)) return null;
+  const volatile = await context.volatile(derivedFunctions(analysis));
+  const wall = context.wall;
+  const relations = relationsOf(analysis, await keys(), volatile, wall?.alias ?? null);
   let changed = false;
-  const written = (select: AstNode): AstNode | null => joinRows(select, relations, context.tablesOnly) ?? (strict ? afterLimit(select) : null);
+  const written = (select: AstNode): AstNode | null => {
+    const rows = joinRows(select, relations, wall?.alias ?? null);
+    if (rows !== null) { if (wall !== null) wall.added += rows.walls; return rows.select; }
+    return strict ? afterLimit(select) : null;
+  };
   // bottom up: a SELECT's derived tables and WITH queries first, then the SELECT (never what it was written as)
   const visit = (n: unknown): unknown => {
     if (Array.isArray(n)) return n.map(visit);
@@ -363,8 +377,10 @@ interface Table { kind: "table"; alias: string; columns: string[] }
  *  and a WHERE with nothing volatile or from outside it; null, its columns are carried. `cte` names a WITH query that
  *  may stand in its place */
 interface Derived { kind: "derived"; alias: string; columns: string[]; read: Query | null; cte: string | null }
-/** a FROM item; null for one that is neither (a function, a VALUES list) */
-type Relation = Table | Derived | null;
+/** a role's filtered read, behind its barrier and its wall (see above): fetched by its row number, through itself */
+interface Walled { kind: "walled"; alias: string; columns: string[] }
+/** a FROM item; null for one that is none of these (a function, a VALUES list) */
+type Relation = Table | Derived | Walled | null;
 const RTE_RELATION = "0", RTE_SUBQUERY = "1", RTE_JOIN = "2", RTE_CTE = "6";
 /** Postgres's first OID for an object not of its own (FirstNormalObjectId): below it, a catalog table, no copy */
 const FIRST_USER_OID = 16384;
@@ -427,8 +443,18 @@ function holdsVolatile(v: TreeValue | undefined, volatile: ReadonlySet<number>):
 /** a query that may be read twice: a projection and a WHERE, nothing volatile, nothing of a query outside it */
 function readTwice(q: TreeNode, volatile: ReadonlySet<number>): boolean {
   if (!projectionOnly(q) || holdsVolatile(q, volatile)) return false;
+  // a column of a query outside it: a VAR whose levels up pass the queries it sits in below `q` (a role's `through:`
+  // filter reads its own row from its EXISTS, one level up, and that is inside)
   let ok = true;
-  walkTree(q, (n) => { if (n._node === "VAR" && Number(n.varlevelsup ?? 0) > 0) ok = false; });
+  const walk = (v: TreeValue | undefined, depth: number): void => {
+    if (!ok) return;
+    if (Array.isArray(v)) { for (const x of v) walk(x, depth); return; }
+    if (!isTreeNode(v)) return;
+    if (v._node === "VAR" && Number(v.varlevelsup ?? 0) > depth) { ok = false; return; }
+    const below = v._node === "QUERY" && v !== q ? depth + 1 : depth;
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") walk(x, below);
+  };
+  walk(q, 0);
   return ok;
 }
 
@@ -490,7 +516,14 @@ function mergedColumns(q: TreeNode): Pick<Query, "merged" | "joins"> {
   return { merged: [...merged].map(([name, m]) => [name, m.read]), joins };
 }
 
-function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlySet<number>, tablesOnly: boolean): Query[] {
+/** a query that is a role's walled read, as Postgres analysed it: one item, the barrier's select by the wall's name */
+function walledQuery(q: TreeNode, wall: string): boolean {
+  const rtable = treeList(q.rtable);
+  const [e] = rtable;
+  return rtable.length === 1 && isTreeNode(e) && e.rtekind === RTE_SUBQUERY && isTreeNode(e.eref) && e.eref.aliasname === wall;
+}
+
+function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlySet<number>, wall: string | null): Query[] {
   const out: Query[] = [];
   const queryOf = (q: TreeNode, enclosing: readonly TreeValue[][]): Query => {
     const scopes = [treeList(q.cteList), ...enclosing];
@@ -499,7 +532,9 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
       if (typeof ref?.aliasname !== "string" || !Array.isArray(ref.colnames)) return null;
       const alias = ref.aliasname, columns = ref.colnames.filter((c): c is string => typeof c === "string");
       if (e.rtekind === RTE_RELATION) return e.relkind === "r" && Number(e.relid) >= FIRST_USER_OID ? { kind: "table", alias, columns } : null;
-      if (tablesOnly) return null;
+      if (wall !== null && e.rtekind === RTE_SUBQUERY && isTreeNode(e.subquery) && walledQuery(e.subquery, wall)) {
+        return holdsVolatile(e.subquery, volatile) ? null : { kind: "walled", alias, columns };
+      }
       if (e.rtekind === RTE_SUBQUERY && isTreeNode(e.subquery)) {
         return { kind: "derived", alias, columns, cte: null, read: e.lateral !== "true" && readTwice(e.subquery, volatile) ? queryOf(e.subquery, scopes) : null };
       }
@@ -556,14 +591,6 @@ function joinCount(from: unknown): number {
   let joins = 0;
   mapFrom(from as unknown[], (n) => n, (b) => { joins++; return b; });
   return joins;
-}
-
-/** whether a FROM clause merges columns */
-function merges(n: unknown): boolean {
-  if (Array.isArray(n)) return n.some(merges);
-  if (kindOf(n) !== "JoinExpr") return false;
-  const b = bodyOf(n);
-  return b.isNatural === true || b.usingClause !== undefined || merges(b.larg) || merges(b.rarg);
 }
 
 /** whether a FROM clause holds a NATURAL JOIN the rewrite left as written (src/duck/rewrite.ts `naturalWritten`) */
@@ -702,7 +729,7 @@ function both(a: unknown, b: unknown): unknown {
 function fold(s: Body, sub: Body, item: Derived): Body | null {
   const inner = item.read;
   if (inner === null || !projection(sub)) return null;
-  const items = inner.items.filter((r): r is Table | Derived => r !== null);
+  const items = inner.items.filter((r): r is Table | Derived | Walled => r !== null);
   if (items.length !== inner.items.length) return null;
   const expanded = writtenOut(sub.targetList as AstNode[], items);
   if (expanded === null || expanded.list.length !== item.columns.length) return null;
@@ -765,11 +792,37 @@ function unwrapped(s: Body, query: Query, withs: Withs): { s: Body; query: Query
   }
 }
 
-/** a plain derived read as the join reads it: `body` with `read` as the projection, over its one table */
-interface PlainSide { body: Body; table: Body; list: AstNode[] }
+/** a plain derived read as the join reads it: `body` with `read` as the projection, over its one table or walled read
+ *  (`source`, the FROM item as it was), whose row number is `id` and which `walled` says is a walled read */
+interface PlainSide { body: Body; source: AstNode; id: AstNode; walled: boolean; list: AstNode[] }
 
-/** a derived item that is a plain read of one table in the tree too (the rewrite may have written it otherwise), or null */
-function plainSide(item: AstNode, relation: Derived, withs: Withs): PlainSide | null {
+/** the select behind a walled read's barrier, and the table it reads: null where the tree is not the walled form */
+function barrierOf(item: AstNode, wall: string | null): { barrier: Body; table: Body } | null {
+  if (wall === null || kindOf(item) !== "RangeSubselect") return null;
+  const outer = bodyOf(item).subquery;
+  if (kindOf(outer) !== "SelectStmt") return null;
+  const o = bodyOf(outer), from = o.fromClause as unknown[] | undefined, list = o.targetList as AstNode[] | undefined;
+  if (from?.length !== 1 || kindOf(from[0]) !== "RangeSubselect" || !isObject(bodyOf(from[0]).alias) || (bodyOf(from[0]).alias as Body).aliasname !== wall) return null;
+  if (list?.length !== 1 || !hasStarTarget(list[0]!) || (bodyOf(bodyOf(list[0]!).val).fields as unknown[]).length !== 1 || o.whereClause !== undefined) return null;
+  const inner = bodyOf(from[0]).subquery;
+  if (kindOf(inner) !== "SelectStmt") return null;
+  const b = bodyOf(inner), tables = b.fromClause as unknown[] | undefined, own = b.targetList as AstNode[] | undefined;
+  if (tables?.length !== 1 || kindOf(tables[0]) !== "RangeVar" || b.limitCount === undefined || own?.length !== 1 || !hasStarTarget(own[0]!)) return null;
+  return { barrier: b, table: bodyOf(tables[0]) };
+}
+
+/** a walled read exposing its row number as `__mason_rid`: chosen behind its barrier, passed on by its wall's `*` */
+function walledExposed(item: AstNode, wall: string): AstNode {
+  const copy = structuredClone(item);
+  const { barrier, table } = barrierOf(copy, wall)!;
+  barrier.targetList = [...barrier.targetList as AstNode[], { ResTarget: { name: ROW_ID, val: rowNumber(aliasOfTable(table)) } }];
+  barrier.fromClause = [ownTable(table)];
+  return copy;
+}
+
+/** a derived item that is a plain read of one table or one walled read in the tree too (the rewrite may have written it
+ *  otherwise), or null */
+function plainSide(item: AstNode, relation: Derived, withs: Withs, wall: string | null): PlainSide | null {
   if (relation.read === null || kindOf(item) !== "RangeSubselect") return null;
   const sub = bodyOf(item).subquery;
   if (kindOf(sub) !== "SelectStmt" || bodyOf(item).lateral === true) return null;
@@ -778,24 +831,27 @@ function plainSide(item: AstNode, relation: Derived, withs: Withs): PlainSide | 
   const opened = unwrapped(bodyOf(sub), relation.read, trial);
   if (opened === null || !projection(opened.s)) return null;
   const [table] = opened.query.items, from = opened.s.fromClause as unknown[];
-  if (opened.query.items.length !== 1 || table?.kind !== "table" || from.length !== 1 || kindOf(from[0]) !== "RangeVar") return null;
+  if (opened.query.items.length !== 1 || from.length !== 1 || table === null || table === undefined) return null;
+  const walled = table.kind === "walled" && barrierOf(from[0] as AstNode, wall) !== null && aliasOfItem(from[0] as AstNode) === table.alias;
+  if (!walled && (table.kind !== "table" || kindOf(from[0]) !== "RangeVar")) return null;
   if (table.columns.some((c) => c === "" || c.toLowerCase() === "rowid")) return null;
   const written = writtenOut(opened.s.targetList as AstNode[], [table]);
   // a whole row in the WHERE lists what a read of the table itself shows and its view of visible columns does not
   if (written === null || !writtenOut([{ ResTarget: { val: opened.s.whereClause ?? { A_Const: { isnull: true } } } }], [table])) return null;
   for (const name of trial.used) withs.used.add(name);
-  return { body: opened.s, table: bodyOf(from[0]), list: written.list };
+  return { body: opened.s, source: from[0] as AstNode, id: walled ? ref(table.alias, ROW_ID) : rowNumber(aliasOfTable(bodyOf(from[0]))), walled, list: written.list };
 }
 
 /** a table read itself: a row number is no column of a copy's view, and nothing here lists a column that is not named */
 function ownTable(t: Body): AstNode { const { catalogname: _c, ...rest } = t; return { RangeVar: structuredClone(rest) }; }
 
-/** a plain side as a FROM item: the query it was, each row exposing its row number */
-function exposed(side: PlainSide, alias: Body, where: boolean): AstNode {
+/** a plain side as a FROM item: the query it was, each row exposing its row number; a walled read it reads keeps its
+ *  filter, its barrier and its wall, whether or not the side keeps its own WHERE */
+function exposed(side: PlainSide, alias: Body, where: boolean, wall: string | null): AstNode {
   const { whereClause, ...rest } = side.body;
   return { RangeSubselect: { alias: structuredClone(alias), subquery: { SelectStmt: structuredClone({ ...rest,
-    targetList: [...side.list, { ResTarget: { name: ROW_ID, val: rowNumber(aliasOfTable(side.table)) } }],
-    fromClause: [ownTable(side.table)],
+    targetList: [...side.list, { ResTarget: { name: ROW_ID, val: side.id } }],
+    fromClause: [side.walled ? walledExposed(side.source, wall!) : ownTable(bodyOf(side.source))],
     ...(where && whereClause !== undefined ? { whereClause } : {}) }) } } };
 }
 
@@ -817,14 +873,12 @@ function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string
 }
 
 /** one SELECT over joined FROM items written with its rows chosen by row number (see above), or null where it is not so shaped */
-function joinRows(select: AstNode, relations: Query[], tablesOnly: boolean): AstNode | null {
+function joinRows(select: AstNode, relations: Query[], wall: string | null): { select: AstNode; walls: number } | null {
   const written0 = bodyOf(select);
-  const shape0 = limited(written0, !tablesOnly);
+  const shape0 = limited(written0, true);
   if (shape0 === null) return null;
   // no sort and in fact no limit: every row comes back, and reading each one again saves nothing
   if (shape0.sorts.length === 0 && noLimit(written0.limitCount)) return null;
-  // a statement of a role's filtered reads keeps its form: no merged column, no number beside a `*`, no computed key
-  if (tablesOnly && (merges(written0.fromClause) || (shape0.targets.some((t) => hasStarTarget(t)) && shape0.sorts.some((sort) => kindOf(bodyOf(sort).node) === "A_Const")))) return null;
   const items0 = fromItems(written0.fromClause);
   if (items0 === null) return null;
   const aliases0 = items0.map(aliasOfItem);
@@ -840,12 +894,14 @@ function joinRows(select: AstNode, relations: Query[], tablesOnly: boolean): Ast
   if (items.length < 2) return null;
   const aliases = items.map(aliasOfItem);
   if (new Set(aliases).size !== aliases.length) return null;
-  const relation = query.items as Array<Table | Derived | null>;
+  const relation = query.items;
   if (relation.some((r) => r === null)) return null;
-  const listed = relation as Array<Table | Derived>;
+  const listed = relation as Array<Table | Derived | Walled>;
   // DuckDB binds a name without regard to case: "RowId" hides the row number as rowid does
-  if (listed.some((t) => t.kind === "table" && t.columns.some((c) => c === "" || c.toLowerCase() === "rowid"))) return null;
-  const sides = items.map((n, i) => { const r = listed[i]!; return r.kind === "derived" ? plainSide(n, r, withs) : null; });
+  if (listed.some((t) => t.kind !== "derived" && t.columns.some((c) => c === "" || c.toLowerCase() === "rowid"))) return null;
+  // a walled read is the walled form in the tree too, or nothing is written
+  if (listed.some((t, i) => t.kind === "walled" && barrierOf(items[i]!, wall) === null)) return null;
+  const sides = items.map((n, i) => { const r = listed[i]!; return r.kind === "derived" ? plainSide(n, r, withs, wall) : null; });
   // what a list reads of a derived item is read by name: two of one name (in any case) cannot be told apart
   const carried = listed.filter((r, i) => r.kind === "derived" && sides[i] === null);
   if (listed.some((r) => r.kind === "derived" && new Set(r.columns.map((c) => c.toLowerCase())).size !== r.columns.length)) return null;
@@ -854,7 +910,7 @@ function joinRows(select: AstNode, relations: Query[], tablesOnly: boolean): Ast
   if (outputs === null) return null;
   const sorts = (s.sortClause as AstNode[] | undefined) ?? [];
   // the keys are read from the outputs as the join reads them: a bare merged column is the join's, inside
-  const shown = tablesOnly ? null : new Map<number, number>();
+  const shown = new Map<number, number>();
   const keys = sortKeys(outputs.list, sorts, shown);
   if (keys === null) return null;
   // ONE VALUE: a volatile output a sort reads is read from its key, and a key a written form cannot show stays as it was
@@ -874,13 +930,14 @@ function joinRows(select: AstNode, relations: Query[], tablesOnly: boolean): Ast
     return { ResTarget: { ...bodyOf(t), val: at !== undefined ? ref(LATE, `__mason_o${at + 1}`) : mergedOver(bodyOf(t).val, merged, carriedMerge) } };
   }), listed, tablesAlone);
   if (written === null) return null;
-  const isFetched = (i: number): boolean => written.read.has(aliases[i]!) && (listed[i]!.kind === "table" || sides[i] !== null);
+  const isFetched = (i: number): boolean => written.read.has(aliases[i]!) && (listed[i]!.kind !== "derived" || sides[i] !== null);
   const fetched = items.flatMap((n, i) => isFetched(i) ? [{ node: n, at: i, alias: aliases[i]!, id: listed[i]!.kind === "table" ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID) }] : []);
   if (fetched.length === 0) return null;
   const list = written.list.map((t) => ({ ResTarget: { ...bodyOf(t), val: overCarried(bodyOf(t).val, carried, columns) } }));
   const from = mapFrom(s.fromClause as unknown[], (n, i) => {
     const side = sides[i];
-    if (side !== null && side !== undefined) return isFetched(i) ? exposed(side, bodyOf(n).alias as Body, true) : { RangeSubselect: { ...bodyOf(n), subquery: { SelectStmt: side.body } } };
+    if (side !== null && side !== undefined) return isFetched(i) ? exposed(side, bodyOf(n).alias as Body, true, wall) : { RangeSubselect: { ...bodyOf(n), subquery: { SelectStmt: side.body } } };
+    if (listed[i]!.kind === "walled") return isFetched(i) ? walledExposed(n, wall!) : n;
     return kindOf(n) === "RangeVar" && listed[i]!.kind === "table" ? ownTable(bodyOf(n)) : n;
   });
   // no sort of its own: the row numbers are the order where the join is proved bounded, so a page of the statement is
@@ -898,16 +955,21 @@ function joinRows(select: AstNode, relations: Query[], tablesOnly: boolean): Ast
   // (a volatile key is sorted by the output that holds it: said twice, it would be two values)
   ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: volatileKeys ? ref(`__mason_o${i + 1}`) : keys[i] } })) } : pagedInOrder ? { sortClause: fetched.map((t) => order(structuredClone(t.id))) } : {}) };
   let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
+  // the fetch reads a walled read through itself again, filter, barrier and wall: one more wall each
+  let walls = 0;
   fetched.forEach((t, i) => {
     const side = sides[t.at];
-    joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg: side !== null && side !== undefined ? exposed(side, bodyOf(t.node).alias as Body, false) : ownTable(bodyOf(t.node)), quals: { A_Expr: {
+    const walled = listed[t.at]!.kind === "walled";
+    if (walled || side?.walled === true) walls++;
+    const rarg = side !== null && side !== undefined ? exposed(side, bodyOf(t.node).alias as Body, false, wall) : walled ? walledExposed(t.node, wall!) : ownTable(bodyOf(t.node));
+    joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg, quals: { A_Expr: {
       kind: "AEXPR_OP", name: [S("=")], lexpr: structuredClone(t.id), rexpr: ref(LATE, `__mason_r${i + 1}`) } } } };
   });
-  return { SelectStmt: {
+  return { walls, select: { SelectStmt: {
     targetList: list,
     fromClause: [joined],
     ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })) }
       : pagedInOrder ? { sortClause: fetched.map((_t, i) => order(ref(LATE, `__mason_r${i + 1}`))) } : {}),
     limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
-  } };
+  } } };
 }

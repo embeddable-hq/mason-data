@@ -196,36 +196,74 @@ async function expressionAboveTheFilter(wall: boolean): Promise<void> {
 }
 test("the engine's plan of what is sent: the statement's expression is above the role's filter and in no scan's own filters, the wall in the text", () => expressionAboveTheFilter(true));
 
-// ISSUE 134: a role's filtered read is no plain read (a barrier and a statistics wall stand in it, and fetching its rows
-// again needs a review of its own, step 4), and a statement holding one keeps its form: src/duck/late.ts `tablesOnly`
-test("a filtered role's statement does not change form: no row number of a filtered read, a derived read beside it, a wrapper or a WITH query", async () => {
-  const reads = ["SELECT o.id, d.qty FROM orders o JOIN (SELECT order_id, qty, 1 AS one FROM order_items) d ON d.order_id = o.id ORDER BY o.id LIMIT 3",
-    "SELECT o.id, d.qty FROM orders o JOIN (SELECT order_id, qty FROM order_items) d ON d.order_id = o.id LIMIT 3",
-    "SELECT * FROM (SELECT o.id, i.qty FROM orders o JOIN order_items i ON i.order_id = o.id) t ORDER BY id LIMIT 3",
-    "WITH w AS (SELECT order_id, qty FROM order_items) SELECT o.id, w.qty FROM orders o JOIN w ON w.order_id = o.id ORDER BY o.id LIMIT 3",
-    "WITH j AS (SELECT o.id, i.qty FROM orders o JOIN order_items i ON i.order_id = o.id) SELECT * FROM j LIMIT 3",
-    "SELECT m.id, i.qty FROM marked m JOIN order_items i ON i.order_id = m.id ORDER BY m.id LIMIT 3",
-    "SELECT o.id, s.n FROM orders o JOIN (SELECT order_id, count(*) AS n FROM order_items GROUP BY order_id) s ON s.order_id = o.id ORDER BY o.id LIMIT 3",
-    // beside a table it filters nothing of: anything but `tablesOnly` would carry the filtered read and fetch the table
-    "SELECT l.label, o.id FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY o.id LIMIT 3",
-    "SELECT l.label, o.id FROM labels l JOIN orders o ON o.tenant_id = l.id LIMIT 3",
-    "SELECT * FROM (SELECT l.label, o.id FROM labels l JOIN orders o ON o.tenant_id = l.id) t ORDER BY id LIMIT 3",
-    "SELECT l.label, d.id FROM labels l JOIN (SELECT id, tenant_id FROM orders) d ON d.tenant_id = l.id ORDER BY d.id LIMIT 3",
-    "WITH w AS (SELECT id, label FROM labels) SELECT w.label, o.id FROM orders o JOIN w ON w.id = o.tenant_id ORDER BY o.id LIMIT 3",
-    // issue 134, step 3: a computed key by each spelling, a number beside a `*`, USING and NATURAL
-    "SELECT l.label, o.id, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY twice LIMIT 3",
-    "SELECT l.label, o.id, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY 3 DESC LIMIT 3",
-    "SELECT *, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY twice, 1 LIMIT 3",
-    "SELECT o.id, i.qty FROM orders o JOIN (SELECT order_id AS id, qty FROM order_items) i USING (id) ORDER BY id LIMIT 3",
-    "SELECT o.id, i.qty FROM orders o NATURAL JOIN (SELECT order_id AS id, qty FROM order_items) i ORDER BY id LIMIT 3"];
-  for (const user of ["scalar", "list"]) {
-    for (const sql of reads) {
+// ISSUE 134, STEP 4: a role's filtered read is a walled read (src/duck/late.ts): its row numbers are chosen behind its
+// barrier and its wall, and its rows fetched THROUGH THE SAME FILTERED READ, never the bare table. What is held, per
+// statement and user: the answer is the one the same statement gives over the filter written by hand (each row, in
+// order where the statement orders it; a row of the full answer where it does not); the rows are chosen by row number
+// (`__mason_r1`); every walled read has its barrier and its wall, and one more of each is there for each walled read
+// fetched, so no read of a filtered table meets the bare table; a list expression that raises on a hidden row answers.
+// `fetched` is how many walled reads are fetched, a derived read of a `through:` read among them: its parent's filter
+// reads the row of its own query, which is no column from outside (src/duck/late.ts `readTwice`)
+const R134 = RAISES("o.marker");
+const WALLED: ReadonlyArray<{ sql: string; fetched: number }> = [
+  { sql: "SELECT o.id, d.qty FROM orders o JOIN (SELECT order_id, qty, 1 AS one FROM order_items) d ON d.order_id = o.id ORDER BY o.id LIMIT 3", fetched: 2 },
+  { sql: "SELECT o.id, d.qty FROM orders o JOIN (SELECT order_id, qty FROM order_items) d ON d.order_id = o.id LIMIT 3", fetched: 2 },
+  { sql: "SELECT * FROM (SELECT o.id, i.qty FROM orders o JOIN order_items i ON i.order_id = o.id) t ORDER BY id LIMIT 3", fetched: 2 },
+  { sql: "WITH w AS (SELECT order_id, qty FROM order_items) SELECT o.id, w.qty FROM orders o JOIN w ON w.order_id = o.id ORDER BY o.id LIMIT 3", fetched: 2 },
+  { sql: "WITH j AS (SELECT o.id, i.qty FROM orders o JOIN order_items i ON i.order_id = o.id) SELECT * FROM j ORDER BY id DESC LIMIT 3", fetched: 2 },
+  // a view of a filtered table: a plain read of a walled read, fetched through it
+  { sql: "SELECT m.id, m.marker, i.qty FROM marked m JOIN order_items i ON i.order_id = m.id ORDER BY m.id LIMIT 3", fetched: 2 },
+  // an aggregated side is carried; the filtered table beside it is fetched
+  { sql: "SELECT o.id, o.marker, s.n FROM orders o JOIN (SELECT order_id, count(*) AS n FROM order_items GROUP BY order_id) s ON s.order_id = o.id ORDER BY o.id LIMIT 3", fetched: 1 },
+  { sql: "SELECT l.label, o.id, o.marker FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY o.id LIMIT 3", fetched: 1 },
+  { sql: "SELECT l.label, o.id, o.marker FROM labels l JOIN orders o ON o.tenant_id = l.id LIMIT 3", fetched: 1 },
+  { sql: "SELECT l.label, d.id FROM labels l JOIN (SELECT id, tenant_id FROM orders) d ON d.tenant_id = l.id ORDER BY d.id LIMIT 3", fetched: 1 },
+  // the list's expression raises on a hidden row's marker: it runs on chosen rows, all visible
+  { sql: `SELECT o.id, ${R134} AS r, i.qty FROM orders o JOIN order_items i ON i.order_id = o.id ORDER BY o.id LIMIT 3`, fetched: 2 },
+  { sql: `SELECT o.id, ${R134} AS r, i.qty FROM orders o LEFT JOIN order_items i ON i.order_id = o.id ORDER BY o.id DESC LIMIT 3 OFFSET 2`, fetched: 2 },
+  { sql: `SELECT o.id, ${R134} AS r, i.qty FROM orders o RIGHT JOIN order_items i ON i.order_id = o.id ORDER BY i.id LIMIT 3`, fetched: 2 },
+  { sql: `SELECT o.id, ${R134} AS r, i.qty FROM orders o FULL JOIN order_items i ON i.order_id = o.id ORDER BY i.id, o.id LIMIT 3`, fetched: 2 },
+  { sql: `SELECT o.id, ${R134} AS r, l.label FROM orders o, labels l WHERE l.id = o.tenant_id ORDER BY o.id LIMIT 3`, fetched: 1 },
+  // a join that multiplies, and a table joined to itself
+  { sql: `SELECT l.label, o.id, ${R134} AS r FROM orders o JOIN labels l ON l.id <= o.tenant_id LIMIT 3`, fetched: 1 },
+  { sql: `SELECT l.label, o.id, ${R134} AS r FROM orders o JOIN labels l ON l.id <= o.tenant_id ORDER BY o.id DESC, l.label LIMIT 3`, fetched: 1 },
+  { sql: `SELECT a.id, ${RAISES("b.marker")} AS r FROM orders a JOIN orders b ON b.id = a.id ORDER BY a.id DESC LIMIT 3`, fetched: 2 },
+  // a computed key by each spelling, a number beside a `*`, USING and NATURAL
+  { sql: "SELECT l.label, o.id, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY twice LIMIT 3", fetched: 1 },
+  { sql: "SELECT l.label, o.id, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY 3 DESC LIMIT 3", fetched: 1 },
+  { sql: "SELECT *, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY twice, 1 LIMIT 3", fetched: 1 },
+  { sql: `SELECT id, ${R134} AS r, i.qty FROM orders o JOIN (SELECT order_id AS id, qty FROM order_items) i USING (id) ORDER BY id LIMIT 3`, fetched: 2 },
+  { sql: "SELECT o.id, i.qty FROM orders o NATURAL JOIN (SELECT order_id AS id, qty FROM order_items) i ORDER BY id LIMIT 3", fetched: 2 },
+];
+/** the statement over the filter written by hand, as the engine runs it: views of tenant 1's rows, which both users
+ *  here see alone (the list user's tenant 2 has none) */
+const byHand = (sql: string): string => sql.replace(/\bmarked\b/g, "hand_marked").replace(/\border_items\b/g, "hand_order_items").replace(/\borders\b/g, "hand_orders").replace(/\blabels\b/g, "public.labels");
+test("a filtered role's top N chooses its rows by row number behind the wall, and fetches them through the same filtered read", async () => {
+  const { BARRIER, STATISTICS_WALL } = await import("../src/duck/row-filter.ts");
+  await store.writer.run("CREATE OR REPLACE VIEW hand_orders AS SELECT * FROM public.orders WHERE tenant_id = 1");
+  await store.writer.run("CREATE OR REPLACE VIEW hand_order_items AS SELECT * FROM public.order_items WHERE order_id IN (SELECT id FROM hand_orders)");
+  await store.writer.run("CREATE OR REPLACE VIEW hand_marked AS SELECT id, marker FROM hand_orders");
+  const count = (s: string, of: string): number => s.split(of).length - 1;
+  const text = (r: unknown[][]): string[] => r.map((row) => row.map((v) => v === null ? "" : String(v)).join("|"));
+  for (const { sql, fetched } of WALLED) {
+    const reference = byHand(sql);
+    const unlimited = reference.replace(/ LIMIT 3( OFFSET 2)?$/, "");
+    const all = text((await store.writer.runAndReadAll(unlimited)).getRowsJS());
+    const ordered = text((await store.writer.runAndReadAll(reference)).getRowsJS());
+    for (const user of ["scalar", "list"]) {
       logged.length = 0;
-      assert.equal((await rows(user, sql)).length, 3, sql);
+      const got = (await rows(user, sql)).map((r) => r.map((v) => v ?? "").join("|"));
+      if (/ORDER BY/.test(sql)) assert.deepEqual(got, ordered, `${user}: ${sql}`);
+      else {
+        assert.equal(got.length, 3, `${user}: ${sql}`);
+        for (const r of got) assert.ok(all.includes(r), `${user}: ${sql}: ${r} is a row of the statement's whole answer`);
+      }
       const line = logged.findLast((l) => l.startsWith("statement: "));
       assert.ok(line !== undefined, sql);
-      assert.match(line, /try\(COLUMNS\(\*\)\)/, `${sql}: the wall in place`);
-      assert.doesNotMatch(line, /__mason_r(id|\d)|__mason_c\d/, sql);
+      assert.match(line, /__mason_r1/, `${user}: ${sql}: chosen by row number`);
+      const walls = count(line, STATISTICS_WALL), barriers = count(line, BARRIER);
+      assert.equal(walls, barriers, `${user}: ${sql}: each barrier walled: ${line}`);
+      assert.ok(walls >= fetched * 2, `${user}: ${sql}: each fetched filtered read read through its filter again (${walls} walls): ${line}`);
     }
   }
 });
