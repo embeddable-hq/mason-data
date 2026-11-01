@@ -138,7 +138,7 @@ const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: str
       "SELECT mood, count(*) AS n FROM kinds GROUP BY mood ORDER BY mood DESC",
       "SELECT id FROM kinds WHERE mood = 'sad' ORDER BY id",
       "SELECT id, name FROM kinds WHERE name = 'ALICE' ORDER BY id",
-      "SELECT count(*) AS n FROM kinds GROUP BY name ORDER BY n",
+      "SELECT lower(name) AS who, count(*) AS n FROM kinds GROUP BY lower(name) ORDER BY who",
     ] },
   // CHAINS (stage 2a): a child over a parent, held to Postgres running the child's SQL over the parent's view, which holds
   // the parent's rows; each after its parent, as Postgres's views must be made

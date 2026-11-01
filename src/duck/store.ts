@@ -437,6 +437,63 @@ function postgresWording(kind: string, message: string): { code: string; message
   return null;
 }
 
+/**
+ * THE ONE SET-UP OF A CONNECTION THAT RUNS A PLAN'S SQL as a session: a wire session's (`SessionRunner`) and a generated
+ * table's run (src/duck/sync.ts, the generated lane), never a hand-made copy of it. The rewrite's SQL reads the
+ * connection's state: every Mason function's first argument is `getvariable('__mason_session')` (src/duck/functions.ts
+ * "every call carries its session"), `current_setting` reads `__mason_settings` (src/duck/rewrite.ts `settingRead`), and
+ * an ORDER BY, a timestamptz and a bare name mean what they mean under the null order, zone and search_path set here. A
+ * connection without the session variable answered NULL from every Mason function (DuckDB's NULL in, NULL out): a
+ * generated table stored NULL for a JSON number's cast, with no error (PR 202's review round 4).
+ */
+/** what the set-up runs on: a DuckDB connection, the executor's or node-api's own */
+interface SetUpConnection { run(sql: string): Promise<unknown>; runAndReadAll(sql: string): Promise<{ getRowsJS(): unknown[][] }> }
+
+export class SessionSetup {
+  private readonly conn: SetUpConnection;
+  private zone: string | null = null;
+  private path: string | null = null;
+  private settings: string | null = null;
+  private constructor(conn: SetUpConnection) { this.conn = conn; }
+
+  /** `name`: what the Mason functions are passed as the session: a slot of the cancel table (`s<n>`, src/duck/cancel.ts)
+   *  for a wire session; any other name is never cancelled through the table (a run is interrupted instead). Set up as a
+   *  session with no role is: UTC, under `public`, no settings, until `settle` says otherwise. */
+  static async open(conn: SetUpConnection, name: string): Promise<SessionSetup> {
+    // NULLs sort as Postgres sorts them: last ascending, FIRST descending (DuckDB's default is last both ways). An
+    // integer division is the rewrite's `//` where Postgres's operator is integer division (src/duck/rewrite.ts), so
+    // DuckDB's `/` stays the float division every other `/` is
+    await conn.run("SET default_null_order = 'nulls_last_on_asc_first_on_desc'");
+    // every Mason function's first argument (src/duck/functions.ts "every call carries its session")
+    await conn.run(`SET VARIABLE ${SESSION_VARIABLE} = ${quoteLiteral(name)}`);
+    const setup = new SessionSetup(conn);
+    await setup.settle(NO_ROLE_SESSION);
+    return setup;
+  }
+
+  /** the session's zone, search_path and settings, each set when it changed: before each statement */
+  async settle(session: DuckSession): Promise<void> {
+    if (session.timeZone !== this.zone) { await this.conn.run(`SET TimeZone = ${quoteLiteral(session.timeZone)}`); this.zone = session.timeZone; }
+    // Postgres skips a schema of the path that does not exist; DuckDB refuses the SET (and with it every statement):
+    // the path is the schemas DuckDB has (a table added later in a new schema is found at the next statement)
+    const have = new Set(((await this.conn.runAndReadAll("SELECT schema_name FROM duckdb_schemas() WHERE database_name = current_database()")).getRowsJS() as [string][]).map(([n]) => n));
+    const wanted = duckSearchPath(session.searchPath).split(",").filter((n) => have.has(n));
+    const path = (wanted.length > 0 ? wanted : ["main"]).join(",");
+    if (path !== this.path) { await this.conn.run(`SET search_path = ${quoteLiteral(path)}`); this.path = path; }
+    // what `current_setting(name)` reads (src/duck/rewrite.ts `settingRead`): the session's settings, as one map
+    const settings = JSON.stringify(session.settings);
+    if (settings !== this.settings) {
+      const entries = Object.entries(session.settings).map(([k, v]) => `${quoteLiteral(k)}: ${quoteLiteral(v)}`).join(", ");
+      await this.conn.run(`SET VARIABLE ${SETTINGS_VARIABLE} = MAP {${entries}}::MAP(VARCHAR, VARCHAR)`);
+      this.settings = settings;
+    }
+  }
+}
+
+/** a session with no role, as a generated table is planned and run (src/duck/generated-plan.ts): UTC, under `public`, no
+ *  settings (what reads one is refused there: `current_setting` is "it reads a session") */
+export const NO_ROLE_SESSION: DuckSession = { timeZone: "UTC", searchPath: "public", settings: {} };
+
 /** when the wait for a statement to end is said in the log */
 const ENDING_SLOW_MS = 5_000;
 
@@ -457,41 +514,18 @@ export class SessionRunner implements DuckRunner {
   private openAnswer: (() => void) | null = null;
   private readonly conn: DuckDBConnection;
   private readonly log: (line: string) => void;
-  private zone: string | null = null;
-  private path: string | null = null;
-  private settings: string | null = null;
-  private constructor(conn: DuckDBConnection, log: (line: string) => void, slot: number, cancels: Int32Array) {
-    this.conn = conn; this.log = log; this.slot = slot; this.cancels = cancels;
+  private readonly setup: SessionSetup;
+  private constructor(conn: DuckDBConnection, log: (line: string) => void, slot: number, cancels: Int32Array, setup: SessionSetup) {
+    this.conn = conn; this.log = log; this.slot = slot; this.cancels = cancels; this.setup = setup;
   }
 
   /** a connection for one Postgres session, in the cancel table's `slot` */
   static async open(instance: DuckDBInstance, log: (line: string) => void, slot: number, cancels: Int32Array): Promise<SessionRunner> {
     const conn = await instance.connect();
-    // NULLs sort as Postgres sorts them: last ascending, FIRST descending (DuckDB's default is last both ways). An
-    // integer division is the rewrite's `//` where Postgres's operator is integer division (src/duck/rewrite.ts), so
-    // DuckDB's `/` stays the float division every other `/` is
-    await conn.run("SET default_null_order = 'nulls_last_on_asc_first_on_desc'");
-    // every Mason function's first argument (src/duck/functions.ts "every call carries its session")
-    await conn.run(`SET VARIABLE ${SESSION_VARIABLE} = ${quoteLiteral(slotName(slot))}`);
-    return new SessionRunner(conn, log, slot, cancels);
+    return new SessionRunner(conn, log, slot, cancels, await SessionSetup.open(conn, slotName(slot)));
   }
 
-  private async settle(session: DuckSession): Promise<void> {
-    if (session.timeZone !== this.zone) { await this.conn.run(`SET TimeZone = ${quoteLiteral(session.timeZone)}`); this.zone = session.timeZone; }
-    // Postgres skips a schema of the path that does not exist; DuckDB refuses the SET (and with it every statement):
-    // the path is the schemas DuckDB has (a table added later in a new schema is found at the next statement)
-    const have = new Set(((await this.conn.runAndReadAll("SELECT schema_name FROM duckdb_schemas() WHERE database_name = current_database()")).getRowsJS() as [string][]).map(([n]) => n));
-    const wanted = duckSearchPath(session.searchPath).split(",").filter((n) => have.has(n));
-    const path = (wanted.length > 0 ? wanted : ["main"]).join(",");
-    if (path !== this.path) { await this.conn.run(`SET search_path = ${quoteLiteral(path)}`); this.path = path; }
-    // what `current_setting(name)` reads (src/duck/rewrite.ts `settingRead`): the session's settings, as one map
-    const settings = JSON.stringify(session.settings);
-    if (settings !== this.settings) {
-      const entries = Object.entries(session.settings).map(([k, v]) => `${quoteLiteral(k)}: ${quoteLiteral(v)}`).join(", ");
-      await this.conn.run(`SET VARIABLE ${SETTINGS_VARIABLE} = MAP {${entries}}::MAP(VARCHAR, VARCHAR)`);
-      this.settings = settings;
-    }
-  }
+  private async settle(session: DuckSession): Promise<void> { await this.setup.settle(session); }
 
   private async prepare(sql: string): Promise<DuckDBPreparedStatement> {
     try { return await this.conn.prepare(sql); }

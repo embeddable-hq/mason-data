@@ -14,6 +14,7 @@ import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { stopParser } from "../src/api/postgres/parser.ts";
 import { GENERATED_DIR, GENERATED_KEYS, parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import type { AddedTable } from "../src/duck/sync.ts";
+import * as generatedModule from "../src/duck/generated.ts";
 import { REVIEW_MS, withoutValues, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
 import { definitionStatement, refusalText, type GeneratedRefusal } from "../src/duck/generated-plan.ts";
 import { parseLag, parseSync } from "../src/lib/table-sync.ts";
@@ -1076,8 +1077,8 @@ test("a numeric the types don't fix is refused with its own reason: a division, 
     says("wide", /^column total has 30 decimals, more than the 18 a stored numeric keeps$/, "round(");
     says("texts", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/, "::numeric(20,4)");
     says("larger", /^column top is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones$/, "::numeric(12,2)");
-    says("spread", /^column sd is a numeric whose decimals Postgres picks by the size of each value \(a variance, a standard deviation, sqrt, exp, ln or power\)$/, "::double precision");
-    says("varied", /^column v is a numeric whose decimals Postgres picks by the size of each value/, "::double precision");
+    says("spread", /^column sd is a stddev, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double$/, "stddev(x)::double precision");
+    says("varied", /^column v is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "variance(x)::double precision");
     for (const [name, col] of [["idwide", "a"], ["bigwide", "b"], ["timeswide", "m"], ["negwide", "n"]]) says(name!, new RegExp(`^column ${col} has 30 decimals, more than the 18`), "round(");
     says("floated", /^column d is a numeric cast from a double precision value/, "::double precision");
     for (const name of Object.keys(refusedFiles)) assert.doesNotMatch(JSON.stringify(r(name).refusals), name === "mean" ? /no fixed scale|can't store exactly yet/ : /no fixed scale|can't store exactly yet|divides a numeric/, name);
@@ -1154,7 +1155,7 @@ test("a numeric the engine answers itself is held to its engine type: a variance
     for (const name of ["sb", "vw"]) await w.until((s) => s.state === "refused", `public.${name}`);
     for (const [name, col] of [["sb", "sb"], ["vw", "vw"]] as const) {
       const refusals = w.status(`public.${name}`).refusals;
-      refusedAt(refusals, "sql", new RegExp(`^column ${col} is a numeric (the engine computes as a double|whose decimals Postgres picks by the size of each value)`));
+      refusedAt(refusals, "sql", new RegExp(`^column ${col} is a (stddev|variance), which Postgres computes as an exact numeric at decimals it picks`));
       assert.ok(refusals[0]!.options.some((o) => o.includes("::double precision")), JSON.stringify(refusals));
     }
   });
@@ -1172,7 +1173,7 @@ test("a numeric's refusal says its true reason: sqrt, exp, ln and power pick the
     grown: ["SELECT exp(amount) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
     logged: ["SELECT ln(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
     rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks/],
-    sdround: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks/],
+    sdround: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/],
     textround: ["SELECT round(sum((payload ->> 'a')::numeric), 2) AS x FROM events", /^column x is computed at 36 decimals on the way to its own, more than the 18/],
   };
   await overLedger({ counts: COUNTS }, async (w, restarted) => {
@@ -1199,5 +1200,98 @@ test("a numeric that overflows the stored numeric at the write fails naming its 
     assert.deepEqual(s.refusals, [], "data-dependent: a failure, not a refusal of the definition");
     assert.match(s.error ?? "", /^a numeric it computes has more than the 38 digits a stored numeric holds\. Cast it to double precision if it need not be exact/);
     assert.ok(s.retryAt !== null, "run again on the back-off");
+  });
+});
+
+// review round 4 of PR 202, finding 1: the run's connection is a session's, set up by the ONE set-up (src/duck/store.ts
+// `SessionSetup`). Every Mason function reads `__mason_session` (its first argument), and answered NULL on a connection
+// without it: a JSON number's cast stored NULL in every row, with no error. `current_setting` reads `__mason_settings`,
+// which a generated table has no session to give: refused by its plan ("it reads a session")
+test("a generated table's run reads the session variables as a session does: a JSON number's cast, sum and round are stored, a session setting is refused", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({
+    bytenant: `${lag}sql: SELECT tenant_id, sum((payload ->> 'a')::numeric(20,4)) AS x FROM events GROUP BY tenant_id\norder_by: tenant_id\n`,
+    jsontotal: `${lag}sql: SELECT sum((payload ->> 'a')::numeric(20,4)) AS x, round(sum((payload ->> 'a')::numeric(20,4)), 2) AS r FROM events\n`,
+    jsoncast: `${lag}sql: SELECT id, (payload ->> 'a')::numeric(20,4) AS x, ((payload ->> 'a')::numeric)::numeric(20,4) AS y, (payload ->> 'a')::int AS i FROM events\norder_by: id\n`,
+  }, async (w, restarted) => {
+    assert.deepEqual((await typed(w, "SELECT tenant_id, x FROM bytenant ORDER BY tenant_id")).rows, [[1, "1.0000"], [2, "2.0000"]]);
+    assert.deepEqual((await typed(w, "SELECT x, r FROM jsontotal")).rows, [["3.0000", "3.00"]]);
+    assert.deepEqual((await typed(w, "SELECT id, x, y, i FROM jsoncast ORDER BY id")).rows,
+      [["1", "1.0000", "1.0000", 1], ["2", null, null, null], ["3", "2.0000", "2.0000", 2], ["4", null, null, null]]);
+    if (restarted) return;
+    w.write("setting", `${lag}sql: SELECT id, current_setting('TimeZone') AS z FROM events\n`);
+    await w.until((s) => s.state === "refused", "public.setting");
+    refusedAt(w.status("public.setting").refusals, "sql", /^it reads a session/);
+  });
+});
+
+// review round 4 of PR 202, finding 2: a refusal's reason and way out come from the FORM that was seen, carried with it,
+// never from a type several forms share: every reason against every form that reaches it, and each way out stored
+test("a numeric's refusal is said from its form: a JSON number's text, the variance family in one wording, sqrt and its round; each way out is stored", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  const files: Record<string, [string, RegExp, string]> = {
+    jsonbare: ["SELECT id, (payload ->> 'a')::numeric AS x FROM events", /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\), which keeps the decimals each value's text has/, "(x)::numeric(20,4) AS x"],
+    jsonround: ["SELECT round((payload ->> 'a')::numeric, 2) AS x FROM events", /^column x is a numeric read from text/, "(x)::numeric(20,4) AS x"],
+    var1: ["SELECT variance(amount) AS x FROM ledger", /^column x is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "variance(x)::double precision AS x"],
+    var2: ["SELECT stddev(n) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
+    var3: ["SELECT stddev(big) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
+    var4: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
+    root: ["SELECT sqrt(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value \(sqrt, exp, ln, log or power\)/, "sqrt(x)::double precision AS x"],
+    rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks \(sqrt, exp, ln, log or power\)/, "sqrt(x)::double precision AS x"],
+  };
+  // each way out, written over the same columns: stored
+  const ways: Record<string, string> = {
+    wayjson: "SELECT id, (payload ->> 'a')::numeric(20,4) AS x FROM events",
+    wayvar: "SELECT variance(amount)::double precision AS x, stddev(n)::double precision AS y, stddev(big)::double precision AS z FROM ledger",
+    wayroot: "SELECT sqrt(abs(amount))::double precision AS x FROM ledger",
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(files)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const [name, sql] of Object.entries(ways)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const name of Object.keys(files)) await w.until((s) => s.state === "refused", `public.${name}`);
+    for (const [name, [, message, way]] of Object.entries(files)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      refusedAt(refusals, "sql", message);
+      assert.equal(refusals.length, 1, name);
+      assert.ok(refusals[0]!.options.some((o) => o.includes(way)), `${name}: ${JSON.stringify(refusals[0]!.options)}`);
+      if (!name.startsWith("root")) assert.doesNotMatch(refusals[0]!.message + refusals[0]!.options.join(), /sqrt/, name);
+      if (name.startsWith("var")) assert.doesNotMatch(refusals[0]!.message, /picks by the size of each value \(/, name);
+    }
+    for (const name of Object.keys(ways)) await w.until(served(w.logged), `public.${name}`);
+    assert.deepEqual((await typed(w, "SELECT id, x FROM wayjson ORDER BY id")).rows, [["1", "1.0000"], ["2", null], ["3", "2.0000"], ["4", null]]);
+    assert.deepEqual((await typed(w, "SELECT x FROM wayroot")).fields.map(([, oid]) => oid), [701]);
+    assert.deepEqual((await typed(w, "SELECT x, y, z FROM wayvar")).fields.map(([, oid]) => oid), [701, 701, 701]);
+  });
+});
+
+// review round 4 of PR 202, finding 3: what a run's failure records names nothing of the engine: every DECIMAL overflow
+// spelling DuckDB gives is said in the user's words, and no hidden column's name (`__mason_cell_0`) reaches the record
+test("a run's failure says a cast's overflow in the user's words, and no recorded failure carries an engine name", async () => {
+  const spellings = [
+    'Conversion Error: Casting value "12345678901234567890.123456789" to type DECIMAL(5,2) failed: value is out of range! when casting from source column __mason_cell_0',
+    "Out of Range Error: Overflow in multiplication of DECIMAL(38) (99999999999999999999999999999999999999 * 10). You might want to add an explicit cast to a decimal with a smaller scale.",
+    "Out of Range Error: Overflow in ROUND of DECIMAL(38)",
+    "Out of Range Error: Overflow in HUGEINT multiplication: 99999999999999999999999999999999999999 * 3",
+    'Conversion Error: Could not convert string "NaN" to DECIMAL(20,4)',
+    "Conversion Error: Could not cast value 1e40 to DECIMAL(38,0)",
+    "Binder Error: Referenced column __mason_cell_3 not found",
+  ];
+  // read through the module, so the file loads where the function is missing and this test fails by name (fails-without)
+  const failureWords = (generatedModule as { failureWords?: (message: string) => string }).failureWords;
+  assert.ok(failureWords !== undefined, "the one function a run's failure is said through");
+  for (const m of spellings) {
+    const said = failureWords(m);
+    assert.doesNotMatch(said, /__mason_|DECIMAL|HUGEINT/, `${m} -> ${said}`);
+  }
+  assert.match(failureWords(spellings[0]!), /^a numeric it computes has more than the 3 digits before the point its numeric\(5,2\) holds \(Postgres: numeric field overflow\)/);
+  await overLedger({ nums: NUMS }, async (w, restarted) => {
+    if (restarted) return;
+    w.write("narrow", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT big::numeric(5,2) AS c FROM ledger\n");
+    await w.until((s) => s.state === "failed", "public.narrow");
+    const s = w.status("public.narrow");
+    assert.match(s.error ?? "", /numeric\(5,2\) holds \(Postgres: numeric field overflow\)/);
+    assert.doesNotMatch(s.error ?? "", /__mason_|DECIMAL/);
+    assert.ok(!w.logged.some((l) => l.includes("public.narrow") && /__mason_/.test(l)), "the log names no hidden column");
   });
 });

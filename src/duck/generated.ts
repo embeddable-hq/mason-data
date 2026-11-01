@@ -159,8 +159,11 @@ interface Entry {
 /** What the table needs of the sync (src/duck/sync.ts `Sync`). */
 export interface GeneratedHost {
   onWriter<T>(f: () => Promise<T>): Promise<T>;
-  /** the run's own connection, opened and closed by the sync so `stop` interrupts it */
+  /** the run's own connection, opened and closed by the sync so `stop` interrupts it, and set up as a session is
+   *  (src/duck/store.ts `SessionSetup`: the session variable every Mason function reads, the null order, UTC) */
   connection(): DuckConnection;
+  /** the run's connection settled as a session with no role is (UTC, under `public` once it exists): before a plan */
+  settle(): Promise<void>;
   /** a run of it, queued in the one rebuild queue (it comes back through `run`) */
   enqueue(name: string): void;
   /** `f` as `Sync.interruptible` runs a long statement on the run's connection: `stop` ends it, thrown as Stopping */
@@ -199,8 +202,27 @@ class RefusedAtWrite extends Error {
   constructor(entry: Entry, refused: GeneratedRefusal[]) { super(refused.map((r) => r.message).join("; ")); this.entry = entry; this.refused = refused; }
 }
 
-/** DuckDB's words for a DECIMAL past its 38 digits, at an operation or a cast */
-const NUMERIC_OVERFLOW = /Overflow in (?:addition|subtraction|multiplication) of DECIMAL|out of range for (?:the desired )?DECIMAL|Could not cast value .* to DECIMAL/i;
+/**
+ * A RUN'S FAILURE IN THE USER'S WORDS, never the engine's (CLAUDE.md "Nothing a user sees is named for DuckDB"): every
+ * spelling DuckDB gives a DECIMAL past its digits, each said with its cause and way out, and no name Mason keeps for
+ * itself (`__mason_cell_0`, a hidden column of the plan) in what is recorded. What else fails is said without its values
+ * (`withoutValues`). The spellings: an operation's (`Overflow in multiplication of DECIMAL(38)`, `Overflow in ROUND of
+ * DECIMAL(38)`), a sum's (`Overflow in HUGEINT addition`), a cast's at the write or a typmod (`Casting value … to type
+ * DECIMAL(5,2) failed: value is out of range! when casting from source column __mason_cell_0`, `… out of range for the
+ * desired DECIMAL`, `Could not cast value … to DECIMAL`), and a text read as one (`Could not convert string … to DECIMAL`).
+ */
+export function failureWords(message: string): string {
+  const typmod = /to type DECIMAL\((\d+),(\d+)\) failed: value is out of range/i.exec(message);
+  const words = typmod !== null && Number(typmod[1]) < 38
+    ? `a numeric it computes has more than the ${Number(typmod[1]) - Number(typmod[2])} digits before the point its numeric(${typmod[1]},${typmod[2]}) holds (Postgres: numeric field overflow). ` +
+      "Give the cast more digits, cast it to double precision if it need not be exact, or compute it in the statement that reads the synced table"
+    : /Could not convert string .* to DECIMAL/i.test(message)
+      ? "a numeric it reads from text does not fit the numeric it is cast to: past its digits, or NaN or Infinity, which a stored numeric does not hold. " +
+        "Give the cast more digits, or cast it to double precision if it need not be exact"
+      : NUMERIC_OVERFLOW.test(message) ? OVERFLOW_WORDS : withoutValues(message);
+  return words.replace(/ when casting from source column __mason_\w+/g, "").replace(/__mason_\w+/g, "a value it computes");
+}
+const NUMERIC_OVERFLOW = /Overflow in (?:\w+ )?(?:addition|subtraction|multiplication|negation|ROUND|cast)\b.*DECIMAL|Overflow in HUGEINT \w+|out of range for (?:the desired )?DECIMAL|to type DECIMAL\(\d+,\d+\) failed: value is out of range|Could not cast value .* to DECIMAL/i;
 const OVERFLOW_WORDS = "a numeric it computes has more than the 38 digits a stored numeric holds. " +
   "Cast it to double precision if it need not be exact, or compute it in the statement that reads the synced table";
 
@@ -253,10 +275,8 @@ export class GeneratedTables {
     }
     const left = (await w.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = current_database() AND ends_with(table_name, '${SIDE_SUFFIX}')`)).getRowsJS() as Array<[string, string]>;
     for (const [schema, table] of left) await w.run(`DROP TABLE ${ident(schema)}.${ident(table)}`);
-    const c = this.host.connection();
-    // what a session sets (src/duck/store.ts SessionRunner): a plan means what it means under these
-    await c.run("SET default_null_order = 'nulls_last_on_asc_first_on_desc'");
-    await c.run("SET TimeZone = 'UTC'");
+    // the run's connection was set up as a session is, by the one set-up (src/duck/store.ts `SessionSetup`)
+    await this.host.settle();
   }
 
   /** a base's last sync, ms; null: not known */
@@ -514,7 +534,7 @@ export class GeneratedTables {
     e.seen = { json, schema };
     try {
       const c = this.host.connection();
-      await this.searchPath(c);
+      await this.host.settle();
       const r = await planDefinition(planner, def.sql, def.orderBy, undefined, (sql) => engineTypes(c, sql));
       e.waitingFor = null;
       e.warnings = "refused" in r ? [] : r.definition.warnings;
@@ -745,7 +765,7 @@ export class GeneratedTables {
         plans.push({ e: m, b, plan: planned.definition, target: `${ident(d.schema)}.${ident(d.table)}`, side: `${ident(d.schema)}.${ident(`${d.table}${SIDE_SUFFIX}`)}` });
       }
       at = members[0]!;
-      await this.searchPath(c);
+      await this.host.settle();
       for (const s of new Set(plans.map((p) => p.b.definition.schema))) await c.run(`CREATE SCHEMA IF NOT EXISTS ${ident(s)}`);
       await c.run("BEGIN TRANSACTION");
       open = true;
@@ -834,7 +854,7 @@ export class GeneratedTables {
       const fields = x instanceof StatementError ? x.fields.message : x instanceof Error ? x.message : String(x);
       // a numeric past the 38 digits a stored DECIMAL holds is the data's, not the definition's: said with its way out,
       // and run again on the back-off, since a change to the rows can bring it back within them
-      at.error = NUMERIC_OVERFLOW.test(fields) ? OVERFLOW_WORDS : withoutValues(fields);
+      at.error = failureWords(fields);
       const m = `its re-run failed (it serves what it last held; tried again after ${new Date(at.retryAt).toISOString()}): ${at.error}`;
       this.host.log(`${at.name}: ${m}`);
       this.host.event({ kind: "generated_failed", table: at.name, message: m });
@@ -854,12 +874,6 @@ export class GeneratedTables {
       if (built.includes(e) || !e.deployed?.bases.includes(name)) continue;
       if (e.dirtySince === null || at < e.dirtySince) e.dirtySince = at;
     }
-  }
-
-  /** the search_path a definition is planned under (`public`), once that schema exists */
-  private async searchPath(c: DuckConnection): Promise<void> {
-    const there = (await c.runAndReadAll("SELECT count(*) FROM duckdb_schemas() WHERE database_name = current_database() AND schema_name = 'public'")).getRowsJS()[0]![0] as bigint;
-    await c.run(`SET search_path = '${there > 0n ? "public" : "main"}'`);
   }
 
   /** THE SWAP, ON THE WRITER'S TURN, as a copy's is: every side table of the run replaces its table, with its ledger

@@ -40,10 +40,21 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   engine type** (`storedColumns`): a program's cells, and a numeric the engine answers itself (no program, a passthrough
   among them: a DECIMAL stored, an integer as HUGEINT, a double refused, never stored as a double under a numeric's
   name). A scale is a number or what decides it per row ("value", "rows", "picks"), never unknown: a null that meant both
-  let 30 decimals through. What is not stored says ITS OWN reason (`verdict`, `notStoredRefusal`: a division, a variance,
-  sqrt, exp, ln or power picking decimals per value (a round over one says what still stands), a scale past 18 at the end
-  or on the way, a scale a sum's rows or a picked value decide, a cast from a double), and the guide and the release
-  note name the same shapes: one refusal's reason for every shape was a false one, three times. A refusal at the write
+  let 30 decimals through. What is not stored says ITS OWN reason (`verdict`, `notStoredRefusal`: a division; the
+  variance family in ONE wording, whichever path saw it (a program, or the engine's double, told by the column's
+  outermost function, `DefinitionPlan.forms`); sqrt, exp, ln, log or power picking decimals per value (a round over one
+  says what still stands); a JSON number's text with no scale; a scale past 18 at the end or on the way; a scale a sum's
+  rows or a picked value decide; a cast from a double), and the guide and the release note name the same shapes: one
+  refusal's reason for every shape was a false one, four times. **A reason and its way out come from the FORM seen,
+  carried with it** (a text cell's `CellConv`: "parsed" for a text read as a numeric, stored under a typmod, "text" for
+  a function the catalog's Postgres computes; a variance program's name), never from a type several forms share (a
+  VARCHAR cell is both). Each reason is tested against each form that reaches it, and each way out is tested stored.
+- **The run's connection is a session's, set up by the ONE set-up** (src/duck/store.ts `SessionSetup`: the session
+  variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`
+  reads), never by hand: a connection without `__mason_session` answers NULL from every Mason function (DuckDB's NULL in,
+  NULL out), and a JSON number's cast stored NULL in every row with no error. What reads a session's settings is refused
+  at the plan ("it reads a session"). A run's failure is said in the user's words (`failureWords`): every DECIMAL
+  overflow spelling mapped, and no `__mason_` name in what is recorded. A refusal at the write
   is the table's refusal with its options; a value past 38 digits fails the run naming its cause, on the back-off.
   A made type is judged by the catalog's type of its NAME, never the field's OID, which is the source's (and an oid
   is a string in Postgres's JSON: a number from the entrance, `readSourceFacts`). `dropLast` is refused. A

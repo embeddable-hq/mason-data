@@ -68,10 +68,12 @@ ${keys}
     A daily table in one zone doesn't serve a dashboard in another.
     A numeric column is stored exactly, with Postgres's digits, wherever its types fix the scale: one passed through,
     its min or max, a sum (of a bigint too), and + - * of those, negated, abs, mod, round(x, n) and trunc(x, n) (n
-    below 0 too), floor, ceil, a cast to numeric(p,s), and a CASE, GREATEST, LEAST or COALESCE whose values have one
-    scale, up to 18 decimals; a sign is stored too. Refused, each with its reason and the way out: a division (avg is
-    one: store sum and count, divide where you read), a variance, stddev, sqrt, exp, ln or power, whose decimals
-    Postgres picks per value, rounded or not (store it as a double), more than 18 decimals, at the end or on the way
+    below 0 too), floor, ceil, a cast to numeric(p,s) (of a JSON number's text too), and a CASE, GREATEST, LEAST or
+    COALESCE whose values have one scale, up to 18 decimals; a sign is stored too. Refused, each with its reason and
+    the way out: a division (avg is one: store sum and count, divide where you read), a variance or stddev, which
+    Postgres computes exactly at decimals it picks per value, rounded or not (store it as a double), a sqrt, exp, ln,
+    log or power, whose decimals Postgres picks per value, rounded or not (store it as a double), a JSON number's text
+    cast to numeric with no scale (cast it to numeric(p,s)), more than 18 decimals, at the end or on the way
     (round it, or give the values fewer decimals first), a sum whose decimals the rows decide (cast the values to one
     scale first), a CASE, GREATEST, LEAST or COALESCE of values with differing decimals (cast it to numeric(p,s)), and a
     numeric cast from a double (read it as a double). A value past 38 digits fails its run, saying so.

@@ -605,8 +605,9 @@ function icuKeysOf(v: DuckDBValue): string[] {
  * deadlock under load). The table is shared memory: the listener's thread writes it
  * while this one is busy with the statement's calls. The rewrite (src/duck/rewrite.ts `fn`) passes
  * `getvariable('__mason_session')` as every `__mason_*` function's first argument, which DuckDB folds to the session's
- * literal at bind time; the session runner sets the variable on its connection (its slot, `s<n>`). A connection without
- * it (the writer, a copy's) passes NULL: never cancelled this way.
+ * literal at bind time; the one set-up of a session's connection sets it (src/duck/store.ts `SessionSetup`: a wire
+ * session's slot, `s<n>`, or a generated table's run). A connection without it passes NULL, and every Mason function
+ * answers NULL for it (DuckDB's NULL in, NULL out): a plan's SQL runs only on a connection `SessionSetup` set up.
  */
 export const SESSION_VARIABLE = "__mason_session";
 /** the function a thread passes through before a Mason function's vector (`registerTurn`) */

@@ -53,7 +53,11 @@
  * Read-only on the source (CLAUDE.md): only SELECTs, through a READ_ONLY attachment.
  */
 import type { DuckStore } from "./store.ts";
-import { freeBytesAt, MASON_SCHEMA } from "./store.ts";
+import { freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, SessionSetup } from "./store.ts";
+
+/** the session the generated tables' run passes the Mason functions: no slot of the cancel table (src/duck/cancel.ts
+ *  `slotOf`), so never cancelled through it; a stop interrupts the run's connection instead */
+const GENERATED_SESSION = "generated";
 import { GeneratedTables, type GeneratedOptions } from "./generated.ts";
 import { KeptJsonPaths, type KeptOptions } from "./kept.ts";
 import type { Source, SourceColumnInfo, SourceTable, SourceView } from "../cli/preflight.ts";
@@ -937,6 +941,8 @@ export class Sync {
   readonly generated: GeneratedTables;
   /** the connection their runs read and write on (`open`), set up as a session: what `stop` interrupts */
   private generatedLane: Lane | null = null;
+  /** the generated lane's session set-up: settled before each plan and run (`GeneratedHost.settle`) */
+  private generatedSession: SessionSetup | null = null;
 
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
@@ -976,6 +982,10 @@ export class Sync {
     this.generated = new GeneratedTables(store, {
       onWriter: (f) => this.onWriter(f),
       connection: () => generatedLane().conn,
+      settle: async () => {
+        if (this.generatedSession === null) throw new Error("the generated tables' connection is not open (Mason bug: report it)");
+        await this.generatedSession.settle(NO_ROLE_SESSION);
+      },
       enqueue: (name) => this.enqueue(name, { kind: "generated" }),
       interruptible: (f) => this.interruptible(generatedLane(), f),
       added: (name) => this.tables.has(name) ? (this.states.get(name)?.phase === "copied" ? "copied" : "adding") : this.views.some((v) => `${v.schema ?? "public"}.${v.name}` === name) ? "view" : null,
@@ -1065,7 +1075,10 @@ export class Sync {
     this.removeStageLeftovers();
     // the stored JSON paths, before the catalog serves anything: each served copy's view, what the file holds
     await this.kept.open();
-    this.generatedLane = { conn: await this.store.instance.connect(), inFlight: false };
+    // the run's connection is a session's, set up by the one set-up (src/duck/store.ts `SessionSetup`): a plan's SQL reads it
+    const conn = await this.store.instance.connect();
+    this.generatedSession = await SessionSetup.open(conn, GENERATED_SESSION);
+    this.generatedLane = { conn, inFlight: false };
     await this.generated.open();
     this.catalog = await this.store.instance.connect();
     await this.rebuildSchema();
@@ -1573,6 +1586,7 @@ export class Sync {
     this.rebuilderLane = null;
     this.generatedLane?.conn.closeSync();
     this.generatedLane = null;
+    this.generatedSession = null;
   }
 
   /** a poll asked of a table while it is rebuilt or not yet caught up: refused, by name (it is caught up when that ends) */

@@ -26,6 +26,7 @@ import { describeKeys } from "./resolved.ts";
 import { treeDifference } from "./rewrite.ts";
 import { StatementError, type DuckPlan } from "./statement.ts";
 import type { NumericProgram } from "../lib/pg-numeric.ts";
+import type { CellConv } from "./types.ts";
 
 /** A refusal of a generated table: its key in the file (null: the file itself), what is wrong, why, and the ways out. */
 export interface GeneratedRefusal { key: string | null; message: string; why: string | null; options: string[] }
@@ -58,7 +59,10 @@ export interface DefinitionPlan {
   warnings: string[];
   /** each numeric column computed after the engine's answer (`DuckPlan.exact`): its `expr` is written over the engine
    *  types the plan's SQL has (`storedColumns`), at the check where a `describe` is given and at the write */
-  numerics: Array<{ column: number; program: NumericProgram }>;
+  numerics: Array<{ column: number; program: NumericProgram; cells: readonly CellConv[] }>;
+  /** each output column's outermost function, as written (`stddev`), else null: the FORM a refusal's reason and way out
+   *  are said from where nothing else carries it (a numeric the engine answers itself, `storedColumns`) */
+  forms: Array<string | null>;
 }
 
 /** What a plan is asked of: the listener's catalog (src/api/postgres/server.ts `planner`). */
@@ -232,21 +236,27 @@ function columnProblem(f: { name: string; oid: number }, typeName: string, kind:
 const asAnswered = (oid: number, kind: string | undefined): boolean => oid === NUMERIC_OID || kind === "e" || kind === "citext";
 
 /** why a numeric is not stored (`storedNumeric`, `storedColumns`): each its own refusal, with ways out that hold */
-type NotStored = { why: "divides" | "per-value" | "computed" | "rows" | "picks" | "double" | "engine-double" } | { why: "scale" | "held"; scale: number } | { why: "other"; what: string };
+type NotStored = { why: "divides" | "per-value" | "computed" | "rows" | "picks" | "double" | "text" } | { why: "scale" | "held"; scale: number } | { why: "other"; what: string }
+  | { why: "variance"; fn: string } | { why: "engine-double"; fn: string | null };
+
+/** the variance family: Postgres computes each of a numeric exactly, at decimals it picks by the value's size */
+const VARIANCES = new Set(["variance", "var_samp", "var_pop", "stddev", "stddev_samp", "stddev_pop"]);
 
 /** the decimals Postgres's types give a value: a number, or what decides them per row, never unknown. "value": Postgres
  *  picks them by each value's size (a variance, sqrt, exp, ln, power); "rows": a sum's rows (`rescale`); "picks": the
- *  value a GREATEST, LEAST, COALESCE or CASE took. A round, a trunc, a typmod, floor or ceil fixes a number again. */
-type Scale = number | "picks" | "rows" | "value";
+ *  value a GREATEST, LEAST, COALESCE or CASE took; "text": a numeric read from text, at the decimals each value's text
+ *  has (its `sql` is that text: only a typmod reads it). A round, a trunc, a typmod, floor or ceil fixes a number again. */
+type Scale = number | "picks" | "rows" | "value" | "text";
 
 /**
  * A numeric as the engine's DECIMAL arithmetic: `sql`, what DuckDB holds it at (`held`, the scale of its DECIMAL), the most
  * decimals any step on the way holds (`peak`), the decimals Postgres's types give it (`scale`), and what makes its digits
  * not Postgres's whatever its scale (`blocked`): "double", a cell the engine holds as a double (a float cast to numeric);
- * "computed", a value Postgres computes for each row at its own decimals (a text cell of sqrt, exp, ln or power, which
- * the catalog's Postgres computes when a statement is answered, or a variance's program).
+ * "variance", a variance or a standard deviation's program (`fn` its name); "computed", a value Postgres computes for
+ * each row at its own decimals (a text cell of sqrt, exp, ln, log or power, which the catalog's Postgres computes when a
+ * statement is answered). Each carries the FORM it came from, so a refusal says that form's reason and way out.
  */
-type Stored = { sql: string; held: number; peak: number; scale: Scale; blocked: "double" | "computed" | null };
+type Stored = { sql: string; held: number; peak: number; scale: Scale; blocked: "double" | "variance" | "computed" | null; fn?: string };
 
 /** the engine type of each column of a plan's SQL, as DuckDB says it computes it (a prepared statement's): by name, and
  *  by position as `#<i>` (an output column's own name may be any) */
@@ -257,11 +267,14 @@ const DECIMAL_TYPE = /^DECIMAL\((\d+),(\d+)\)$/;
 
 /** the scale of values combined: what decides it per row, by precedence, else `numbers` of the numbers */
 const scaleOf = (xs: readonly Stored[], numbers: (n: number[]) => number): Scale => {
-  for (const k of ["value", "rows", "picks"] as const) if (xs.some((x) => x.scale === k)) return k;
+  for (const k of ["text", "value", "rows", "picks"] as const) if (xs.some((x) => x.scale === k)) return k;
   return numbers(xs.map((x) => x.scale as number));
 };
-const blockedOf = (xs: readonly Stored[]): Stored["blocked"] => xs.some((x) => x.blocked === "double") ? "double" : xs.some((x) => x.blocked === "computed") ? "computed" : null;
-const made = (sql: string, held: number, scale: Scale, from: readonly Stored[]): Stored => ({ sql, held, scale, peak: Math.max(held, ...from.map((x) => x.peak)), blocked: blockedOf(from) });
+const blockedOf = (xs: readonly Stored[]): Stored["blocked"] => (["double", "variance", "computed"] as const).find((b) => xs.some((x) => x.blocked === b)) ?? null;
+const made = (sql: string, held: number, scale: Scale, from: readonly Stored[]): Stored => {
+  const fn = from.find((x) => x.fn !== undefined)?.fn;
+  return { sql, held, scale, peak: Math.max(held, ...from.map((x) => x.peak)), blocked: blockedOf(from), ...(fn === undefined ? {} : { fn }) };
+};
 
 /**
  * A NUMERIC COMPUTED AT THE RESULT'S EDGE (`ExactColumn`), WRITTEN AS THE ENGINE'S DECIMAL ARITHMETIC over the plan's cells
@@ -275,15 +288,16 @@ const made = (sql: string, held: number, scale: Scale, from: readonly Stored[]):
  * rounds. A GREATEST, LEAST, COALESCE or CASE is the value it takes, each argument cast to the most decimals any holds so
  * none loses a digit. Not stored here: a division (the engine divides a numeric as a double; an average is one).
  */
-function storedNumeric(p: NumericProgram, types: EngineTypes): Stored | NotStored {
+function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[]): Stored | NotStored {
+  // a numeric read from text is its text until a typmod gives it a scale: nothing else computes over it
   const all = (args: readonly NumericProgram[]): Stored[] | NotStored => {
     const out: Stored[] = [];
-    for (const a of args) { const x = storedNumeric(a, types); if ("why" in x) return x; out.push(x); }
+    for (const a of args) { const x = storedNumeric(a, types, cells); if ("why" in x) return x; if (x.scale === "text") return { why: "text" }; out.push(x); }
     return out;
   };
   const one = (arg: NumericProgram, make: (x: Stored) => Stored): Stored | NotStored => {
-    const x = storedNumeric(arg, types);
-    return "why" in x ? x : make(x);
+    const x = storedNumeric(arg, types, cells);
+    return "why" in x ? x : x.scale === "text" ? { why: "text" } : make(x);
   };
   // a scale the types fix again: the value cast to it
   const fixed = (x: Stored, sql: string, scale: number, precision = 38): Stored => made(`CAST(${sql} AS DECIMAL(${precision},${scale}))`, scale, scale, [x]);
@@ -296,6 +310,9 @@ function storedNumeric(p: NumericProgram, types: EngineTypes): Stored | NotStore
       const d = type === undefined ? null : DECIMAL_TYPE.exec(type);
       if (d !== null) return { sql, held: Number(d[2]), peak: Number(d[2]), scale: Number(d[2]), blocked: null };
       if (type !== undefined && INTEGER_TYPES.has(type)) return { sql: `CAST(${sql} AS DECIMAL(38,0))`, held: 0, peak: 0, scale: 0, blocked: null };
+      // a text cell, by the form it came from: a numeric read from text (stored under a typmod, which rounds it as
+      // numeric_in does, half away from zero), or a function the catalog's Postgres computes (never stored)
+      if (type === "VARCHAR" && cells[Number(p.key)] === "parsed") return { sql, held: 0, peak: 0, scale: "text", blocked: null };
       if (type === "VARCHAR") return { sql: "NULL", held: 0, peak: 0, scale: "value", blocked: "computed" };
       if (type === "DOUBLE" || type === "FLOAT") return { sql, held: 0, peak: 0, scale: "value", blocked: "double" };
       return { why: "other", what: `a value the engine holds as ${type ?? "nothing it names"}` };
@@ -321,14 +338,17 @@ function storedNumeric(p: NumericProgram, types: EngineTypes): Stored | NotStore
     case "round": return toPlace("round", p.arg, p.scale);
     case "trunc": return toPlace("trunc", p.arg, p.scale);
     // numeric(p, s) past 38 digits holds what DECIMAL(38, s) does, for a value the engine computed
-    case "typmod": return one(p.arg, (x) => fixed(x, x.sql, p.scale, Math.min(38, p.precision)));
+    case "typmod": {
+      const x = storedNumeric(p.arg, types, cells);
+      return "why" in x ? x : fixed(x, x.sql, p.scale, Math.min(38, p.precision));
+    }
     // past MAX_STORED_SCALE the cast could overflow: the value as held, its scale the types' (refused at the top, unless
     // a round or a cast above fixes a smaller one); a scale decided per row stays so (a pad is at least, never at)
     case "pad": return one(p.arg, (x) => typeof x.scale !== "number" ? x : p.scale <= MAX_STORED_SCALE ? fixed(x, x.sql, p.scale) : { ...x, scale: p.scale });
     case "greatest": case "least": case "coalesce": case "pick": {
       // a sum of numbers read from text (src/duck/rewrite.ts `summed`): its exact sum, or the double's NaN or Infinity,
       // which no stored numeric holds; the exact sum's refusal is the form's true reason
-      if (p.op === "pick" && p.args[0]?.op === "rescale") return storedNumeric(p.args[0], types);
+      if (p.op === "pick" && p.args[0]?.op === "rescale") return storedNumeric(p.args[0], types, cells);
       const xs = all(p.args);
       if (!Array.isArray(xs)) return xs;
       const held = Math.max(0, ...xs.map((x) => x.held));
@@ -337,20 +357,22 @@ function storedNumeric(p: NumericProgram, types: EngineTypes): Stored | NotStore
       const scale: Scale = scales.size === 1 ? [...scales][0]! : scaleOf(xs, () => -1) === -1 ? "picks" : scaleOf(xs, () => -1);
       // (differing numbers: the value taken decides, "picks"; a scale decided per row stays so)
       if (p.op !== "pick") return made(`${p.op}(${args.join(", ")})`, held, scale, xs);
-      const index = storedNumeric(p.index, types);
+      const index = storedNumeric(p.index, types, cells);
       if ("why" in index) return index;
       return made(`(CASE CAST(${index.sql} AS BIGINT) ${args.map((a, i) => `WHEN ${i} THEN ${a}`).join(" ")} END)`, held, scale, [...xs, index]);
     }
     case "div": return { why: "divides" };
     // a variance's digits: a square root Postgres takes at decimals it picks by the value's size
-    case "stddev": return { sql: "NULL", held: 0, peak: 0, scale: "value", blocked: "computed" };
+    case "stddev": return { sql: "NULL", held: 0, peak: 0, scale: "value", blocked: "variance", fn: p.variance ? (p.sample ? "variance" : "var_pop") : (p.sample ? "stddev" : "stddev_pop") };
     case "rescale": return one(p.arg, (x) => ({ ...x, scale: typeof x.scale === "number" ? "rows" : x.scale }));
   }
 }
 
 /** a stored numeric's verdict, where all that is around it is known: null where it is stored */
 function verdict(s: Stored): NotStored | null {
+  if (s.scale === "text") return { why: "text" };
   if (s.blocked === "double") return { why: "double" };
+  if (s.blocked === "variance") return { why: "variance", fn: s.fn ?? "stddev" };
   if (s.scale === "value") return { why: "per-value" };
   if (s.scale === "rows") return { why: "rows" };
   if (s.scale === "picks") return { why: "picks" };
@@ -364,16 +386,25 @@ function verdict(s: Stored): NotStored | null {
 function notStoredRefusal(name: string, n: NotStored): GeneratedRefusal {
   const double = `or read it as ${name}::double precision if it need not be exact`;
   const asDouble = `store it as a double if it need not be exact: sqrt(x)::double precision AS ${name}`;
+  // the variance family, one wording whichever path saw it (a program, or the engine's double)
+  const variance = (fn: string): GeneratedRefusal => ({ key: "sql",
+    message: `column ${name} is a ${fn}, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double`,
+    why: "A stored numeric keeps one scale for every row, and a stored double holds neither Postgres's digits nor its type.",
+    options: [`store it as a double if it need not be exact: ${fn}(x)::double precision AS ${name}`, atRead] });
   const atRead = "or compute it in the statement that reads the synced table";
   switch (n.why) {
     case "divides": return { key: "sql", message: `column ${name} divides a numeric, which the engine computes as a double`, why: "Postgres divides a numeric exactly (an average is a division), so a stored double would not hold its digits.",
       options: ["store what it divides and divide where you read the table: sum(x) AS total, count(x) AS n", double] };
-    case "per-value": return { key: "sql", message: `column ${name} is a numeric whose decimals Postgres picks by the size of each value (a variance, a standard deviation, sqrt, exp, ln or power)`, why: "A stored numeric keeps one scale for every row.",
+    case "variance": return variance(n.fn);
+    case "per-value": return { key: "sql", message: `column ${name} is a numeric whose decimals Postgres picks by the size of each value (sqrt, exp, ln, log or power)`, why: "A stored numeric keeps one scale for every row.",
       options: [asDouble, atRead] };
-    case "computed": return { key: "sql", message: `column ${name} rounds or casts a numeric Postgres computes for each row at decimals it picks (a variance, a standard deviation, sqrt, exp, ln or power), which the engine computes as a double`, why: "Postgres's digits for it are worked out when a statement is answered, and a stored column skips that step.",
+    case "computed": return { key: "sql", message: `column ${name} rounds or casts a numeric Postgres computes for each row at decimals it picks (sqrt, exp, ln, log or power), which the engine computes as a double`, why: "Postgres's digits for it are worked out when a statement is answered, and a stored column skips that step.",
       options: [asDouble, atRead] };
-    case "engine-double": return { key: "sql", message: `column ${name} is a numeric the engine computes as a double (a variance or a standard deviation of a numeric), where Postgres computes it exactly`, why: "A stored double would hold neither Postgres's digits nor its type.",
-      options: [`store it as a double if it need not be exact: stddev(x)::double precision AS ${name}`, atRead] };
+    case "engine-double": return n.fn !== null && VARIANCES.has(n.fn) ? variance(n.fn) : { key: "sql",
+      message: `column ${name} is a numeric the engine computes as a double${n.fn === null ? "" : ` (${n.fn})`}, where Postgres computes it exactly`, why: "A stored double would hold neither Postgres's digits nor its type.",
+      options: [`store it as a double if it need not be exact: ${n.fn ?? "x"}(…)::double precision AS ${name}`, atRead] };
+    case "text": return { key: "sql", message: `column ${name} is a numeric read from text (a JSON number's ->> cast to numeric), which keeps the decimals each value's text has`, why: "A stored numeric keeps one scale for every row.",
+      options: [`give it one scale: (x)::numeric(20,4) AS ${name}`, double] };
     case "scale": return { key: "sql", message: `column ${name} has ${n.scale} decimals, more than the ${MAX_STORED_SCALE} a stored numeric keeps`, why: "A sum at that scale could overflow the 38 digits a stored numeric has.",
       options: [`round it to fewer: round(sum(x), 2) AS ${name}`, double] };
     case "held": return { key: "sql", message: `column ${name} is computed at ${n.scale} decimals on the way to its own, more than the ${MAX_STORED_SCALE} a stored numeric keeps (a sum of numbers read from text is added at 36)`, why: "A value at that scale could overflow the 38 digits a stored numeric has before it is rounded.",
@@ -389,6 +420,21 @@ function notStoredRefusal(name: string, n: NotStored): GeneratedRefusal {
   }
 }
 
+/** each output column's outermost function, as written (`DefinitionPlan.forms`): null where it is none, or the columns
+ *  are not one target each (a star, a set operation) */
+function formsOf(stmt: unknown, n: number): Array<string | null> {
+  const rec = (v: unknown): Record<string, unknown> => typeof v === "object" && v !== null ? v as Record<string, unknown> : {};
+  const top = rec(rec(stmt).SelectStmt);
+  const targets = Array.isArray(top.targetList) ? top.targetList as unknown[] : [];
+  if (targets.length !== n) return Array<string | null>(n).fill(null);
+  return targets.map((t) => {
+    const call = rec(rec(rec(rec(t).ResTarget).val).FuncCall);
+    const names = Array.isArray(call.funcname) ? call.funcname as unknown[] : [];
+    const last = rec(rec(names[names.length - 1]).String).sval;
+    return typeof last === "string" ? last.toLowerCase() : null;
+  });
+}
+
 /** a numeric output column, as the catalog spells its type */
 export const isNumeric = (c: { type: string }): boolean => /^numeric\b/.test(c.type);
 
@@ -401,8 +447,8 @@ export const isNumeric = (c: { type: string }): boolean => /^numeric\b/.test(c.t
  */
 export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns: GeneratedColumn[] } | { refused: GeneratedRefusal[] } {
   const refused: GeneratedRefusal[] = [], exprs = new Map<number, string>();
-  for (const { column, program } of d.numerics) {
-    const name = d.columns[column]!.name, stored = storedNumeric(program, types);
+  for (const { column, program, cells } of d.numerics) {
+    const name = d.columns[column]!.name, stored = storedNumeric(program, types, cells);
     const no = "why" in stored ? stored : verdict(stored);
     if (no !== null) refused.push(notStoredRefusal(name, no));
     else exprs.set(column, (stored as Stored).sql);
@@ -412,7 +458,7 @@ export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns:
     const type = types.get(`#${i}`);
     if (type !== undefined && (DECIMAL_TYPE.test(type) || type === "HUGEINT")) return;
     if (type !== undefined && INTEGER_TYPES.has(type)) exprs.set(i, `CAST(__mason_output.__mason_c${i} AS HUGEINT)`);
-    else refused.push(notStoredRefusal(c.name, type === "DOUBLE" || type === "FLOAT" ? { why: "engine-double" } : { why: "other", what: `a value the engine holds as ${type ?? "nothing it names"}` }));
+    else refused.push(notStoredRefusal(c.name, type === "DOUBLE" || type === "FLOAT" ? { why: "engine-double", fn: d.forms[i] ?? null } : { why: "other", what: `a value the engine holds as ${type ?? "nothing it names"}` }));
   });
   if (refused.length > 0) return { refused };
   return { columns: d.columns.map((c, i) => { const expr = exprs.get(i); return expr === undefined ? c : { ...c, duck: null, expr }; }) };
@@ -495,10 +541,10 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
       refused.push({ key: "sql", message: `column ${f.name} is the text of a numeric computed when a statement is answered, which a generated table can't store yet`, why: "Postgres's digits for it are worked out when a statement is answered, and a stored column skips that step.", options: [`store the numeric, and write its text in the statement that reads the table`] });
       continue;
     }
-    numerics.push({ column: e.column, program: e.program });
+    numerics.push({ column: e.column, program: e.program, cells: e.cells });
   }
   if (refused.length > 0) return { refused };
-  const definition: DefinitionPlan = { plan, bases, warnings: statement.warnings, numerics,
+  const definition: DefinitionPlan = { plan, bases, warnings: statement.warnings, numerics, forms: formsOf(statement.stmt, fields.length),
     columns: fields.map((f, i) => ({ name: f.name, type: typeNames.get(i)!, duck: numerics.some((n) => n.column === i) ? null : STORED_TYPES.get(f.oid) ?? null })) };
   if (describe === undefined || !definition.columns.some(isNumeric)) return { definition };
   const stored = storedColumns(definition, await describe(plan.sql.text));

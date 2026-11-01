@@ -30,6 +30,7 @@ import { HELD, heldType, isHeldArray, ZONED_HELD } from "./held-types.ts";
 import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
+import type { CellConv } from "./types.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type QueryOutputs, type Typed } from "./pgtree.ts";
@@ -85,7 +86,7 @@ export interface ExactColumn {
   column: number;
   program: NumericProgram;
   /** each cell's value: exact digits, or a float as Postgres's float8 / float4 → numeric casts write it */
-  cells: Array<"exact" | "float8" | "float4" | "text">;
+  cells: Array<CellConv>;
   /** the column is the program's text (`(x / 3)::text`) */
   text: boolean;
 }
@@ -1174,7 +1175,7 @@ class Rewriter {
       const n = constInt(g);
       return shapeOf(n !== null && n >= 1 && n <= targets.length ? bodyOf(targets[n - 1]!).val as AstNode : g);
     }));
-    const cells: Array<{ node: AstNode; conv: "exact" | "float8" | "float4" | "text"; shape: string }> = [];
+    const cells: Array<{ node: AstNode; conv: CellConv; shape: string }> = [];
     const out: ExactColumn[] = [];
     targets.forEach((target, i) => {
       const field = fields[i]!;
@@ -1184,7 +1185,7 @@ class Rewriter {
       if (TEXTS.has(field.oid) && (field.typmod ?? -1) < 0 && kindOf(node) === "TypeCast" && this.typeOf(bodyOf(node).arg as AstNode) === NUMERIC) { node = bodyOf(node).arg as AstNode; text = true; }
       else if (field.oid !== NUMERIC) return;
       const mine: typeof cells = [];
-      const cell = (n: AstNode, conv: "exact" | "float8" | "float4" | "text" = "exact"): NumericProgram => {
+      const cell = (n: AstNode, conv: CellConv = "exact"): NumericProgram => {
         if (grouped && !this.validGrouped(n, groupShapes)) throw NOT_EXACT;
         const shape = `${conv}:${shapeOf(n)}`;
         let at = mine.findIndex((c) => c.shape === shape);
@@ -1355,7 +1356,7 @@ class Rewriter {
 
   /** An expression as a program over cells (`cell` makes one), or null where it is not a numeric Postgres's rules
    *  decide here; `kind` int where the value is an integer (integer arithmetic is DuckDB's, one cell). */
-  private exactOf(n: AstNode, cell: (n: AstNode, conv?: "exact" | "float8" | "float4" | "text") => NumericProgram): Built | null {
+  private exactOf(n: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): Built | null {
     const k = kindOf(n), b = bodyOf(n);
     const type = this.typeOf(n);
     const asCell = (): Built | null => type !== null && INTEGERS.has(type) ? { p: cell(n), kind: "int" } : type === NUMERIC ? { p: this.padded(n, cell(n)), kind: "numeric" } : null;
@@ -1389,7 +1390,7 @@ class Rewriter {
         const from = this.typeOf(arg);
         const inner: Built | null = from !== null && FLOATS.has(from) ? numeric(cell(arg, from === FLOAT4 ? "float4" : "float8"))
           // a text: the digits Postgres's numeric_in reads (`1.50` keeps its scale, `1_000.5` is 1000.5)
-          : from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(arg) === null ? numeric(cell(pgCall("text", "a1::numeric", [this.clone(arg)]), "text"))
+          : from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(arg) === null ? numeric(cell(pgCall("text", "a1::numeric", [this.clone(arg)]), "parsed"))
           : sub(arg);
         if (inner === null) return null;
         const mods = ((b.typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m));
@@ -1406,7 +1407,7 @@ class Rewriter {
         const whens = (b.args ?? []) as AstNode[];
         const index = (): AstNode => ({ CaseExpr: { ...(b.arg === undefined ? {} : { arg: this.clone(b.arg) }),
           args: whens.map((w, i) => ({ CaseWhen: { expr: this.clone(bodyOf(w).expr), result: intConst(i) } })), defresult: intConst(whens.length) } });
-        const onItsRows = (i: number) => (m: AstNode, conv?: "exact" | "float8" | "float4" | "text"): NumericProgram =>
+        const onItsRows = (i: number) => (m: AstNode, conv?: CellConv): NumericProgram =>
           cell(kindOf(m) === "ColumnRef" || !holdsKind(m, "ColumnRef") ? m : caseWhen([[op("=", index(), intConst(i)), m]], null), conv);
         const results = [...whens.map((w) => bodyOf(w).result), ...(b.defresult === undefined ? [] : [b.defresult])];
         const arms = results.map((r, i) => isNode(r) ? this.exactOf(r, onItsRows(i)) : null);
@@ -1540,7 +1541,7 @@ class Rewriter {
    * window. Not of DISTINCT values: of 5 and 5.0 Postgres keeps one, and which is its sort's
    * (docs/SQL-SUPPORT.md `mixed-scale-numeric`)
    */
-  private summed(agg: Body, x: AstNode, sum: AstNode, cell: (n: AstNode, conv?: "exact" | "float8" | "float4" | "text") => NumericProgram): NumericProgram {
+  private summed(agg: Body, x: AstNode, sum: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): NumericProgram {
     if (this.displayScale(x) !== null || agg.agg_distinct === true) return this.padded(sum, cell(sum));
     // a text read as an unconstrained numeric (Metabase's every JSON number), an ln or a sqrt: DuckDB holds it as a
     // double, so it is summed as Postgres computes it (`pgNumeric`), in two exact DECIMAL(38,18) parts (a value they cannot hold refused, `numeric-exact-sum`), at the
@@ -1624,13 +1625,13 @@ class Rewriter {
   /** a numeric's exact text, row by row: its program (exactOf) evaluated by DuckDB over its cells' texts
    *  (`__mason_numeric_program`, src/duck/functions.ts); null where there is none, or it reads a parameter */
   private exactText(n: AstNode): AstNode | null {
-    const cells: Array<{ node: AstNode; conv: "exact" | "float8" | "float4" | "text" }> = [];
+    const cells: Array<{ node: AstNode; conv: CellConv }> = [];
     let built: Built | null;
     try { built = this.exactOf(n, (m, conv = "exact") => { cells.push({ node: m, conv }); return { op: "cell", key: String(cells.length - 1) }; }); }
     catch (e) { if (e === NOT_EXACT) return null; throw e; }
     if (built === null || cellsOfProgram(built.p).some((k) => k.startsWith("$"))) return null;
     if (cells.some((c) => c.conv === "exact" && !this.duckExact(c.node))) return null;
-    const texts = cells.map((c) => c.conv === "text" ? this.clone(c.node) : c.conv === "exact" ? cast(this.clone(c.node), ["varchar"])
+    const texts = cells.map((c) => c.conv === "text" || c.conv === "parsed" ? this.clone(c.node) : c.conv === "exact" ? cast(this.clone(c.node), ["varchar"])
       : fn("__mason_float_numeric_text", [cast(this.clone(c.node), ["double"]), boolConst(c.conv === "float4")]));
     return fn("__mason_numeric_program", [strConst(JSON.stringify(built.p)), ...texts]);
   }
