@@ -16,6 +16,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "star-join-twin", sql: "SELECT j.* FROM (star_o a FULL JOIN star_b b USING (name)) AS j ORDER BY 1 NULLS FIRST, 2, 8" },
   { gap: "setop-ordinal-star", sql: "SELECT *, t FROM (SELECT id, t FROM typed) s UNION SELECT id, t, t FROM typed ORDER BY 2, 1" },
   { gap: "setop-numeric-ties", sql: "SELECT b.amount / 3 AS x FROM top_b b UNION ALL SELECT 1 ORDER BY 1 NULLS FIRST FETCH FIRST 1 ROWS WITH TIES" },
+  { gap: "rewrite-name", sql: "SELECT __mason_late.id, b.payload FROM top_a AS __mason_late JOIN top_b b ON b.a_id = __mason_late.id ORDER BY __mason_late.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES" },
+  { gap: "rewrite-name", sql: "SELECT s.third FROM (SELECT b.id AS __mason_cell_0, b.amount / 3 AS third FROM top_b b) s ORDER BY 1 NULLS FIRST" },
   { gap: "with-ties-distinct", sql: "SELECT DISTINCT i4 FROM typed ORDER BY i4 FETCH FIRST 2 ROWS WITH TIES" },
   { gap: "with-ties-distinct", sql: "SELECT DISTINCT ON (i4) i4, id FROM typed ORDER BY i4, id FETCH FIRST 2 ROWS WITH TIES" },
   { gap: "collation-unknown", sql: "SELECT id FROM typed ORDER BY t COLLATE \"en_US.utf8\", id" },

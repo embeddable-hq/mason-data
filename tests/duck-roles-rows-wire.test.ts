@@ -591,21 +591,23 @@ test("a filtered read's first line and JSON tables are the statement's, with no 
   assert.match(full, /Scan on public\.orders/, "an operator reads the full plan as a user with no row filter");
   assert.doesNotMatch(full, /Note: the engine's plan is not shown|__mason_barrier/);
   assert.match((await rows(open, "EXPLAIN ANALYZE SELECT count(*) FROM orders")).map((r) => r[0]).join("\n"), /actual rows=/);
-  // a statement of its own, whatever it names its subquery: its text is not Mason's filtered read
-  const own = (await rows(open, "EXPLAIN SELECT a FROM (SELECT id AS a FROM orders) AS __mason_barrier")).map((r) => r[0]).join("\n");
-  assert.doesNotMatch(own, /try\(/);
-  assert.deepEqual(await rows(c, "SELECT count(a) FROM (SELECT id AS a FROM products p, (VALUES (1)) v(id)) AS __mason_barrier"), [["3"]], "as a filtered user, a statement reading no filtered table");
-  // ... and as a filtered user, over the filtered table: Postgres's rows, the wall named by what the statement does not hold
-  const visible = [["10"], ["11"], ["13"], ["16"]];
+  // a statement of its own that names its subquery as the wall is refused by name, never taken for Mason's filtered read
+  // (`__mason_` is Mason's namespace: rewrite-name, PR 233 probe 4), for a user with no filter and one with
+  const named = async (client: pg.Client, sql: string): Promise<string> => client.query(sql).then(() => "answered", (e: pg.DatabaseError) => `${e.code} ${/rewrite-name/.test(e.detail ?? "") ? "rewrite-name" : e.message}`);
+  assert.equal(await named(open, "EXPLAIN SELECT a FROM (SELECT id AS a FROM orders) AS __mason_barrier"), "0A000 rewrite-name");
+  assert.equal(await named(c, "SELECT count(a) FROM (SELECT id AS a FROM products p, (VALUES (1)) v(id)) AS __mason_barrier"), "0A000 rewrite-name", "as a filtered user, a statement reading no filtered table");
+  // ... and as a filtered user, over the filtered table: refused by name in every spelling of the name
   for (const [form, sql] of [
     ["a list of its own", "SELECT a FROM (SELECT id AS a FROM orders) AS __mason_barrier ORDER BY a"],
     ["a *", "SELECT * FROM (SELECT id FROM orders) AS __mason_barrier ORDER BY 1"],
     ["a * of a *", "SELECT id FROM (SELECT * FROM (SELECT id FROM orders) AS __mason_barrier) AS __mason_barrier_1 ORDER BY 1"],
     ["a unicode escape of the name", `SELECT a FROM (SELECT id AS a FROM orders) AS U&"__mason\\005fbarrier" ORDER BY a`],
-    ["the name as a literal", "SELECT id FROM orders WHERE '__mason_barrier' <> '' ORDER BY id"],
     ["as a WITH query", "WITH __mason_barrier AS (SELECT id FROM orders) SELECT id FROM __mason_barrier ORDER BY id"],
-  ] as const) assert.deepEqual(await rows(c, sql), visible, form);
-  const sent = (await rows(c, "EXPLAIN SELECT a FROM (SELECT id AS a FROM orders) AS __mason_barrier")).map((r) => r[0]).join("\n");
+  ] as const) assert.equal(await named(c, sql), "0A000 rewrite-name", form);
+  // a literal is no name: Postgres's rows, the wall named by what the statement does not hold
+  const visible = [["10"], ["11"], ["13"], ["16"]];
+  assert.deepEqual(await rows(c, "SELECT id FROM orders WHERE '__mason_barrier' <> '' ORDER BY id"), visible, "the name as a literal");
+  const sent = (await rows(c, "EXPLAIN SELECT id FROM orders WHERE '__mason_barrier' <> ''")).map((r) => r[0]).join("\n");
   assert.match(sent, /AS __mason_barrier_1\b/, "the wall takes a name the statement does not hold");
 });
 

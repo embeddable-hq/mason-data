@@ -216,6 +216,12 @@ paths:
   also write** (PR 233: an output named `__mason_row` was read as the row's place, and one named `__mason_rank` hid the
   rank): the wrapper's alias list names every column it reads, Postgres's outputs, the cells and the rank, and
   src/duck/ties.ts ranks under those names. Detector: the wire test of outputs named `__mason_*` under WITH TIES.
+- **`__mason_` is Mason's namespace: every FROM item and column the rewrite writes is named in it, and a statement that
+  names a FROM item or a column of one so is refused by name** (`rewrite-name`; PR 233 probe 4: a table aliased
+  `__mason_late` was shadowed by the fetch after the rank). Read from Postgres's analysis at every depth, without case
+  (pgtree.ts `rewriteNamed`, in plan.ts before the role's rows are expanded); the statement's own outputs stay the user's,
+  read by place. Never a name of the rewrite's outside the prefix. Detector: the wire test of FROM items and columns
+  named `__mason_*`, and the gap case.
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
   past a 300 ms timeout): `PlannedSql.functions`, the `__mason_*` calls of the rewritten tree (`masonCalls`,

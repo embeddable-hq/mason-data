@@ -183,6 +183,10 @@ test("what a table cannot store is refused by name at its key, before anything i
     today: `${lag}sql: SELECT id FROM events WHERE started_at < 'today'::timestamptz\n`,
     // WITH TIES, read from Postgres's analysis (issue 192), never a side effect of the rewrite
     ties: `${lag}sql: SELECT id, tenant_id FROM events ORDER BY tenant_id FETCH FIRST 2 ROWS WITH TIES\n`,
+    // Mason's namespace (rewrite-name, PR 233 probe 4): the shell an order_by wraps the SQL in is Mason's; a FROM item the
+    // SQL names so, inside the shell or with no order_by, is the user's and refused
+    named: `${lag}sql: SELECT g.id FROM events AS __mason_generated, events g WHERE g.id = __mason_generated.id\norder_by: id\n`,
+    named2: `${lag}sql: SELECT __mason_generated.id FROM events AS __mason_generated\n`,
   }, async (w) => {
     await w.sync.generated.review();
     const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
@@ -201,6 +205,7 @@ test("what a table cannot store is refused by name at its key, before anything i
     refusedAt(r("events").refusals, null, /is a table the sources file syncs/);
     refusedAt(r("self").refusals, "sql", /^it reads public\.self, itself$/);
     refusedAt(r("ties").refusals, "sql", /^it ends in FETCH … WITH TIES$/);
+    for (const name of ["named", "named2"]) refusedAt(r(name).refusals, "sql", /names a FROM item "__mason_generated": names beginning with __mason_ are the ones Mason's rewrite gives its own/);
     refusedAt(r("today").refusals, "sql", /relative literal/);
     assert.deepEqual(w.sync.generated.status().filter((s) => s.serving), [], "nothing was built");
     assert.deepEqual(await w.rows("SELECT table_name FROM duckdb_tables() WHERE schema_name = 'public' AND table_name <> 'events'"), []);

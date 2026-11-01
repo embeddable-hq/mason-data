@@ -9,7 +9,7 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { heldName, heldType, isHeldArray } from "./held-types.ts";
-import type { TreeValue } from "./pgtree.ts";
+import { REWRITE_PREFIX, rewriteNamed, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -282,6 +282,10 @@ export interface PlanOptions {
   walls?: Walls | null;
   /** a generated table's run (src/duck/generated.ts): `schema.table` → the table read in its place, in the same schema */
   relations?: ReadonlyMap<string, string>;
+  /** the FROM items Mason itself named in `text` before Postgres's analysis, at its top (a generated table's shell,
+   *  src/duck/generated-plan.ts): the namespace check (`rewriteNamed`) passes them, and their columns, which are the
+   *  statement's own outputs */
+  own?: readonly string[];
 }
 
 /** The catalog declares a type the source made with nothing over it (`PgColumn.made`), so what its analysis says is not
@@ -318,7 +322,7 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const { catalog, text, stmt, base, paramOids, searchPath, timeZone, collation, verified, userTypes = new Map<string, number>(), copies = () => [],
-    depth = 0, kept = null, wireBound = false, grants, walls = null, relations } = options;
+    depth = 0, kept = null, wireBound = false, grants, walls = null, relations, own = [] } = options;
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -354,6 +358,15 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // before the rewrite (a role's refusal before a Mason gap's). The reads stay on the plan: an Execute under a role
   // given or taken since the Parse is held to them again (src/api/postgres/server.ts)
   const reads = grants === undefined ? undefined : await enforceGrants(catalog, analysis.tree, grants);
+  // MASON'S NAMESPACE (pgtree.ts `rewriteNamed`): a FROM item or a column of one the statement names `__mason_*` would
+  // share a scope with a name the rewrite writes, so it is refused by name, after the role's refusal. Not where `walls`
+  // is set: that text is the role's filtered reads Mason wrote (`__mason_parent<n>`), its user's names held here before;
+  // nor the FROM items Mason wrote at the top before the analysis (`own`: a generated table's shell)
+  const named = walls === null ? rewriteNamed(analysis.tree, new Set(own)) : null;
+  if (named !== null) {
+    throw gapRefusal("rewrite-name", `Mason cannot answer a statement that names a ${named.what} ${JSON.stringify(named.name)}${named.of === null ? "" : ` (of ${JSON.stringify(named.of)})`}: names beginning with ${REWRITE_PREFIX} are the ones Mason's rewrite gives its own`,
+      `rename it with AS${named.what === "column" ? " (a subquery's column: AS in its SELECT list, or a column alias list AS t(a, b))" : ""}`, text);
+  }
   // THE ROLE'S ROWS (src/duck/row-filter.ts): every read of a table the role filters becomes its filtered read, and that
   // statement is planned from the start — analysed by Postgres, rewritten and verified as any other (one grammar), held
   // to nothing more (the grants were held above, on the statement as written: a filter may read a column the role

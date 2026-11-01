@@ -1072,8 +1072,8 @@ test("every caller of duck.plan passes the session's grants: a statement planned
   // nothing; `planner` plans a generated table's SQL, which no user runs, and a user reads that table through a role.
   // Named whole, so any other call without them, a second of either kind included, fails here
   assert.deepEqual(planned.flatMap((f) => planCallsWithoutGrants(f.src).map((c) => `${f.name}: ${c}`)),
-    ['src/api/postgres/server.ts: duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null, relations)',
-      'src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined)']);
+    ['src/api/postgres/server.ts: duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null, relations, own)',
+      'src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined, undefined, FILTER_PROBE_OWN)']);
 });
 
 test("the duck.plan guard would catch the real thing", () => {

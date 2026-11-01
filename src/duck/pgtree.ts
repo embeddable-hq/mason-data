@@ -594,6 +594,49 @@ export function caseTwins(tree: TreeValue): Map<string, string[]> {
   return out;
 }
 
+/** the prefix of every name Mason's rewrite gives a FROM item or a column it writes (`__mason_late`, `__mason_r1`, …) */
+export const REWRITE_PREFIX = "__mason_";
+
+/**
+ * A NAME THE STATEMENT GIVES A FROM ITEM, OR A COLUMN OF ONE, IN MASON'S OWN NAMESPACE (the class "a rewrite's name in the
+ * user's namespace", PR 233): the rewrite writes FROM items and columns named `__mason_*` beside the statement's own and
+ * reads them back by name (`__mason_late.__mason_r1`, `s.__mason_cell_0`), so a FROM item or a column the statement named
+ * so would be taken for Mason's, or Mason's for it. Read from Postgres's analysis, at every depth: each FROM item's name
+ * as it is known (`eref`: its alias, else the table's, the CTE's or the function's name) and each of its columns (a
+ * table's, a subquery's or a CTE's outputs, a column alias list's), and each CTE's name, compared without case as the
+ * engine compares identifiers. Not a name the statement cannot say (an RTE_GROUP's, a set operation's arms `*SELECT* n`,
+ * whose columns are the set operation's outputs) nor an output of the statement itself, which the rewrite reads by place,
+ * nor a FROM item of the top query that `own` names: one Mason wrote into the text before the analysis (a generated
+ * table's shell around the statement, whose columns are its outputs). Null when none is.
+ */
+export function rewriteNamed(tree: TreeValue, own: ReadonlySet<string> = new Set()): { what: "FROM item" | "column"; name: string; of: string | null } | null {
+  const masons = (s: unknown): s is string => typeof s === "string" && s.toLowerCase().startsWith(REWRITE_PREFIX);
+  let found: { what: "FROM item" | "column"; name: string; of: string | null } | null = null;
+  // the top query's own FROM items, which `own` may name
+  const query = Array.isArray(tree) ? tree[0] ?? null : tree;
+  const top = new Set<TreeValue>(isNode(query) && query._node === "QUERY" && Array.isArray(query.rtable) ? query.rtable : []);
+  const visit = (v: TreeValue): void => {
+    if (found !== null) return;
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    if (v._node === "RANGETBLENTRY" && isNode(v.eref ?? null) && num(v.rtekind ?? null) !== RTE_GROUP) {
+      const eref = v.eref as TreeNode;
+      const alias = typeof eref.aliasname === "string" ? eref.aliasname : null;
+      const written = top.has(v) && alias !== null && own.has(alias);
+      if (!written && (alias === null || !/^\*SELECT\* \d+$/.test(alias))) {
+        if (masons(alias)) { found = { what: "FROM item", name: alias, of: null }; return; }
+        const column = strings(eref.colnames).find(masons);
+        if (column !== undefined) { found = { what: "column", name: column, of: alias }; return; }
+      }
+    }
+    // a CTE's name, where it is defined and where a FROM item reads it under another name
+    if (masons(v.ctename)) { found = { what: "FROM item", name: v.ctename, of: null }; return; }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return found;
+}
+
 /**
  * Whether a JOIN … USING or a NATURAL JOIN of the analysed tree joins on a column of one of `types` (jsonb, jsonb[]):
  * Postgres equates the columns by that type's `=`, which DuckDB's USING would not (it compares the text). The join's

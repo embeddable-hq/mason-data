@@ -3171,17 +3171,15 @@ test("FETCH … WITH TIES reads its rank, its row's place and its cells by posit
   try {
     const differ: string[] = [];
     for (const sql of [
-      // (an offset inside a tie drops rows Postgres picks as it reads them: counted there, or the order made total)
-      "SELECT count(*) FROM (SELECT l.id AS __mason_row, l.c FROM late l ORDER BY l.c OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      // (an offset inside a tie drops rows Postgres picks as it reads them: the order made total. Read through a subquery,
+      // each output is a column of a FROM item, refused by name since probe 4: the next test)
       "SELECT l.id AS __mason_row, l.c FROM late l ORDER BY l.c, l.id OFFSET 1 FETCH FIRST 1 ROWS WITH TIES",
       "SELECT l.id AS __mason_rank, l.c FROM late l ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES",
       "SELECT l.c AS __mason_rank, l.id AS __mason_row FROM late l ORDER BY 1 DESC, 2 OFFSET 2 FETCH FIRST 1 ROWS WITH TIES",
-      "SELECT count(*) FROM (SELECT l.id AS __mason_row, l.c AS __mason_rank FROM late l ORDER BY 2 OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
       // the names the wrapper and the set operation give their columns, and an exact cell's
       "SELECT l.k / 7.0 AS __mason_cell_0, l.id AS __mason_t1, l.c AS __mason_t2 FROM late l ORDER BY l.c, l.id FETCH FIRST 2 ROWS WITH TIES",
       "SELECT l.id AS __mason_rank, l.c AS __mason_t1 FROM late l WHERE l.id < 10 UNION ALL SELECT l.id, l.c FROM late l WHERE l.id > 1990 ORDER BY 2, 1 OFFSET 1 FETCH FIRST 1 ROWS WITH TIES",
       // over a join (the fetch after the rank)
-      "SELECT count(*) FROM (SELECT l.id AS __mason_rank, c.name AS __mason_row FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
       "SELECT l.id AS __mason_rank, c.name AS __mason_row FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c, l.id OFFSET 1 FETCH FIRST 2 ROWS WITH TIES",
       "SELECT l.id AS __mason_rank, l.k / 7.0 AS __mason_cell_0, c.name AS __mason_t1 FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
     ]) { const d = await tiesAlike(c, sql); if (d !== null) differ.push(d); }
@@ -3189,6 +3187,58 @@ test("FETCH … WITH TIES reads its rank, its row's place and its cells by posit
     const P = "SELECT l.id AS __mason_rank, l.c AS __mason_row FROM late l ORDER BY l.c, l.id OFFSET $2 FETCH FIRST $1 ROWS WITH TIES";
     for (const values of [[1, 1], [2, null]]) { const d = await tiesAlike(c, P, values); if (d !== null) differ.push(d); }
     assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+  } finally { await c.end(); }
+});
+
+// MASON'S NAMESPACE (the class "rewrite-name-in-user-namespace", PR 233 probe 4, its second case): the fetch after the
+// rank joins `(…) AS __mason_late` beside the statement's own FROM items, so a table the user aliased __mason_late was
+// shadowed (42703: Values list "__mason_late" does not have a column named "id"), as a subquery's output named
+// __mason_cell_0 was read for Mason's cell. Every name the rewrite writes begins with __mason_, so a FROM item or a column
+// of one the statement names so, at any depth and in any case, is refused by name (rewrite-name), read from Postgres's
+// analysis (src/duck/pgtree.ts `rewriteNamed`); the statement's own outputs, read by place, stay the user's
+test("a FROM item or a column of one named __mason_* is refused by name; the statement's outputs so named are answered (PR 233 probe 4)", async () => {
+  const c = await client();
+  try {
+    const wrong: string[] = [];
+    for (const sql of [
+      // the fetch after the rank: a table, a CTE, a derived table, a join aliased __mason_late, in any case
+      "SELECT __mason_late.id, c.name FROM late AS __mason_late JOIN late_c c ON c.id = __mason_late.c ORDER BY __mason_late.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT x.id, __mason_late.name FROM late x JOIN late_c AS __mason_late ON __mason_late.id = x.c ORDER BY x.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT x.id, \"__MASON_LATE\".name FROM late x JOIN late_c AS \"__MASON_LATE\" ON \"__MASON_LATE\".id = x.c ORDER BY x.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "WITH __mason_late AS (SELECT id, name FROM late_c) SELECT l.id, __mason_late.name FROM late l JOIN __mason_late ON __mason_late.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "WITH __mason_late AS (SELECT id, name FROM late_c) SELECT l.id, w.name FROM late l JOIN __mason_late w ON w.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, __mason_late.name FROM late l JOIN (SELECT id, name FROM late_c WHERE id > 1) __mason_late ON __mason_late.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT j.id, j.name FROM (late l JOIN late_c c ON c.id = l.c) AS __mason_late, late_c j WHERE j.id = __mason_late.c ORDER BY __mason_late.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      // the same under LIMIT (the base's: the fetch after the sort joins the same name)
+      "SELECT __mason_late.id, c.name FROM late AS __mason_late JOIN late_c c ON c.id = __mason_late.c ORDER BY __mason_late.c DESC, 1 LIMIT 3",
+      // every other FROM item the rewrite names: the rank's, the bound's, the guard's, the wrapper's, the set operation's
+      "SELECT __mason_lr.id, c.name FROM late AS __mason_lr JOIN late_c c ON c.id = __mason_lr.c ORDER BY __mason_lr.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT __mason_ranked.id FROM late AS __mason_ranked ORDER BY __mason_ranked.c DESC OFFSET 1 FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT __mason_bound.id, (SELECT count(*) FROM (SELECT l.id FROM late l ORDER BY l.c OFFSET __mason_bound.id FETCH FIRST 1 ROWS WITH TIES) x) FROM late_c AS __mason_bound WHERE __mason_bound.id < 3",
+      "SELECT __mason_ties.id, (SELECT count(*) FROM (SELECT l.id FROM late l WHERE l.c = __mason_ties.id ORDER BY l.k FETCH FIRST 1 ROWS WITH TIES) x) FROM late_c AS __mason_ties WHERE __mason_ties.id < 3",
+      "SELECT s.id FROM late AS __mason_set, late_c s WHERE s.id = __mason_set.c AND __mason_set.id < 3 UNION ALL SELECT 7 ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT n.id, l.id FROM generate_series(1, 2) AS __mason_lr(id) JOIN late l ON l.c = __mason_lr.id, late_c n WHERE n.id = l.c ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES",
+      // a column of a FROM item: a subquery's output (an exact cell's name read through it, the counted spellings of the
+      // test above), a column alias list, a CTE's columns
+      "SELECT s.q FROM (SELECT l.id AS __mason_cell_0, l.k / 7.0 AS q FROM late l ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 1 LIMIT 3",
+      "SELECT s.q FROM (SELECT l.id AS __mason_cell_0, l.k / 7.0 AS q FROM late l ORDER BY l.c LIMIT 3) s ORDER BY 1",
+      "SELECT count(*) FROM (SELECT l.id AS __mason_row, l.c FROM late l ORDER BY l.c OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.id AS __mason_row, l.c AS __mason_rank FROM late l ORDER BY 2 OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.id AS __mason_rank, c.name AS __mason_row FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      "SELECT l.id, d.name FROM late l LEFT JOIN (SELECT id, name, 1 FROM late_c WHERE id > 1) d(id, name, __mason_rid) ON d.id = l.c ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES",
+      "WITH w(id, __mason_o1) AS (SELECT id, name FROM late_c) SELECT l.id, w.__mason_o1 FROM late l JOIN w ON w.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
+    ]) {
+      const pg = await postgres(sql).then(() => null, (e: Error) => e.message);
+      const got = await answer(c, sql).then(() => "answered", (e: pg.DatabaseError) => e.code === "0A000" && /rewrite-name/.test(e.detail ?? "") ? null : `${e.code}: ${e.message}`);
+      if (pg !== null || got !== null) wrong.push(`${sql}\n  Postgres: ${pg ?? "answers"}\n  Mason:    ${got ?? "refused by name"}`);
+    }
+    // the statement's own outputs so named, at the top, grouped, in a sublink, a set operation's: read by place, answered
+    for (const sql of [
+      "SELECT l.c AS __mason_rank, count(*) AS __mason_row FROM late l GROUP BY 1 ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT count(*) FROM late WHERE id IN (SELECT l.id AS __mason_rank FROM late l ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES)",
+      "SELECT l.id AS __mason_late, c.name AS __mason_r1 FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
+    ]) { const d = await tiesAlike(c, sql); if (d !== null) wrong.push(d); }
+    assert.deepEqual(wrong, [], `each of these answers unlike the decision:\n${wrong.join("\n")}`);
   } finally { await c.end(); }
 });
 

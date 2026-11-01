@@ -24,6 +24,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `DISTINCT ON` it is still refused by name, and over a set operation whose numeric column has no one scale (a quotient
   beside an integer, numerics of different scales without `ALL`); over a filtered table or a view it is still refused.
 
+- **A table, alias, WITH query or subquery column named `__mason_…` is refused by name** (`rewrite-name`, SQLSTATE
+  0A000; rename it with `AS`). Mason names what it adds to a statement so, and a FROM item or column of the statement's
+  own with such a name was shadowed by Mason's (an error) or read in its place (a wrong value). A statement's own output
+  columns may still be named so.
+
 - **A `UNION`, `INTERSECT` or `EXCEPT` sorts and compares its column as the type Postgres gives it over every SELECT.**
   A `citext` column beside a `text` one is `text`, so it is no longer sorted or tied without regard to case, and a
   `UNION` without `ALL` of the two is answered instead of refused; a `COLLATE` written in a later SELECT is the column's.

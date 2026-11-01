@@ -52,7 +52,7 @@ export interface DefinitionPlan {
 /** What a plan is asked of: the listener's catalog (src/api/postgres/server.ts `planner`). */
 export interface Planner {
   /** a statement planned as a session with no role, in UTC under `public`, would be: a StatementError where it is refused */
-  plan(text: string, stmt: Node, relations?: ReadonlyMap<string, string>): Promise<DuckPlan>;
+  plan(text: string, stmt: Node, relations?: ReadonlyMap<string, string>, own?: readonly string[]): Promise<DuckPlan>;
   /** rows of a read of the catalog */
   rows(sql: string): Promise<(string | null)[][]>;
 }
@@ -256,7 +256,7 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   const statement = await definitionStatement(sql, orderBy);
   if ("refused" in statement) return { refused: [statement.refused] };
   let plan: DuckPlan;
-  try { plan = await p.plan(statement.text, statement.stmt, relations); }
+  try { plan = await p.plan(statement.text, statement.stmt, relations, orderBy === null ? [] : [SHELL_ALIAS]); }
   catch (e) {
     // a statement refused for what Mason has not verified (`current_time`, a timetz) that also reads a session is refused
     // for the session, with the line to write: verifying it would not make it a table's to hold

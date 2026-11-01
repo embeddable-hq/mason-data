@@ -355,6 +355,8 @@ function refused(message: string, hint: string): StatementError {
 export const BARRIER = "LIMIT 9223372036854775807";
 /** the name of the select around the barrier, unless the statement holds it (`wallsOf`) */
 const WALL = "__mason_barrier";
+/** the FROM item `filterProbe`'s read names at its top, Mason's own: the namespace check passes it (plan.ts `own`) */
+export const FILTER_PROBE_OWN: readonly string[] = [WALL];
 /** the select list's call of `try(col)` on every column, as the engine reads it; `AS "\0"` keeps each column's name */
 export const STATISTICS_WALL = "try(COLUMNS(*))";
 /** FOR TESTS ALONE (tests/duck-roles-barrier-wire.test.ts): `statistics` false leaves `try` out, so the LIMIT is shown to

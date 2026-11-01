@@ -69,7 +69,7 @@ import { canonicalZone } from "../../lib/timezone.ts";
 import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
 import { asRole, asSession, catalogPolicies, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
 import { wrongDatabaseHint } from "../../lib/database-name.ts";
-import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
+import { attributeSetting, bindFilter, FILTER_PROBE_OWN, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
@@ -204,7 +204,7 @@ export interface DuckOptions {
   /** `grants`: the session's role, held after Postgres's analysis (src/duck/grants.ts): a 42501 StatementError where
    *  it reads what the role may not; null for a session with no role beside roles; undefined where no roles exist */
   plan(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: NonNullable<RawStmt["stmt"]>, base: number, paramOids: readonly number[], searchPath: string,
-    timeZone: string, userTypes: ReadonlyMap<string, number>, wireBound?: boolean, grants?: RoleGrants | null, relations?: ReadonlyMap<string, string>): Promise<DuckPlan>;
+    timeZone: string, userTypes: ReadonlyMap<string, number>, wireBound?: boolean, grants?: RoleGrants | null, relations?: ReadonlyMap<string, string>, own?: readonly string[]): Promise<DuckPlan>;
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], timeZone: string): Promise<(string | null)[]>;
@@ -2730,7 +2730,7 @@ class Server {
     if (duck === undefined) throw new Error("a generated table needs the listener's engine (Mason bug: report it)");
     const catalog = (b: Uint8Array): Promise<Uint8Array> => this.catalog.run(b);
     return {
-      plan: (text, stmt, relations) => { this.schema(); return duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null, relations); },
+      plan: (text, stmt, relations, own) => { this.schema(); return duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null, relations, own); },
       rows: (sql) => { this.schema(); return catalogRows(catalog, sql); },
     };
   }
@@ -2773,7 +2773,7 @@ class Server {
             const probe = filterProbe(f, r.types, g.attributes ?? new Map());
             const stmt = (await parseSql(probe)).stmts?.[0]?.stmt;
             if (stmt === undefined) throw new Error(`a filter's read does not parse: ${probe}`);
-            try { await this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined); }
+            try { await this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined, undefined, FILTER_PROBE_OWN); }
             catch (e) {
               if (!(e instanceof StatementError)) throw e;
               problems.push(`${f.at}.where: ${e.fields.message}${e.fields.hint !== undefined ? ` (${e.fields.hint})` : ""} — the predicate is read as SELECT 1 FROM ${f.table} WHERE ${f.where.text}`);

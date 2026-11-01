@@ -20,7 +20,7 @@ each). The copy is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 256 functions, 387 operators, 95 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 57 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 58 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (57)
+## Refused (58)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -68,6 +68,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `star-join-twin` | a `*` of a named join (`(a JOIN b …) AS j`) with two columns of one name, sorted by an output of the two, or written out over USING, NATURAL or a GROUP BY | answers | refused (no name tells the two apart) | name the join's columns in the SELECT, or leave the join's own name out |
 | `setop-ordinal-star` | ORDER BY a column number of a UNION / INTERSECT / EXCEPT whose first SELECT lists two columns of that name by a * | sorts by that column | refused | name the columns apart in the first SELECT |
 | `setop-numeric-ties` | FETCH FIRST … WITH TIES over a UNION, INTERSECT or EXCEPT whose numeric column has no declared scale Mason prints as Postgres does: a quotient or average beside an integer or a constant SELECT, numerics of different scales without ALL (or beside another column the set operation casts) | each value at its own scale, with every digit | refused (without WITH TIES it is answered at one scale per column: mixed-scale-numeric) | cast the column to numeric(p, s) in every SELECT, or round(x, s) |
+| `rewrite-name` | a table, an alias, a CTE or a column of a FROM item (a table's, a subquery's output, a column alias) whose name begins with `__mason_`, the names Mason's rewrite gives what it writes | answers | refused by name (one of Mason's own FROM items or columns would be read in its place, or it in Mason's) | rename it with AS (a subquery's column: AS in its SELECT list, or a column alias list AS t(a, b)) |
 | `with-ties-distinct` | FETCH FIRST … WITH TIES over SELECT DISTINCT or DISTINCT ON | answers | refused (DuckDB has no WITH TIES; Mason's rank over DISTINCT is not Postgres's) | select the DISTINCT rows in a subquery and FETCH … WITH TIES from it |
 | `collation-unknown` | COLLATE with a collation other than C, POSIX, default or an ICU locale the engine has | sorts and compares under it | refused | COLLATE "C" for byte order, or no COLLATE for the database's |
 | `like-any-array` | LIKE / ILIKE ANY (or ALL) over an array that is not written out | answers | refused | write the patterns as ARRAY['…', '…'], or OR the LIKEs |
