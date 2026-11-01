@@ -1282,6 +1282,10 @@ function* matrix(): Generator<Matrixed> {
   yield { ...q("with ties: a char(n) arm beside a text is the set operation's text", "SELECT * FROM (SELECT s.name AS x FROM star_o s UNION ALL SELECT s.ch FROM star_o s ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) u"), inOrder: false };
   yield q("set operation: a char(n) arm beside a text printed unpadded", "SELECT s.name AS x FROM star_o s UNION ALL SELECT s.ch FROM star_o s ORDER BY 1 NULLS FIRST");
   yield q("set operation: a char(n) arm beside a text, without ALL", "SELECT x || '|' AS y FROM (SELECT s.name AS x FROM star_o s UNION SELECT s.ch FROM star_o s) u ORDER BY 1 NULLS FIRST");
+  // a first SELECT that is only a `*` the cast writes out keeps the set operation's types (setop-star-written-loses-location, PR 233 review r2)
+  yield q("set operation: a first * written out for the cast, ordered", "SELECT * FROM (SELECT x.i4, x.id FROM typed x) s UNION ALL SELECT x.f8, x.id FROM typed x ORDER BY 2, 1 NULLS FIRST");
+  yield q("set operation: a first * of a date beside a timestamptz, ordered", "SELECT * FROM (SELECT x.d, x.id FROM typed x) s UNION ALL SELECT x.tz, x.id FROM typed x ORDER BY 2, 1 NULLS FIRST");
+  yield q("with ties: a first * written out for the cast", "SELECT count(*) FROM (SELECT * FROM (SELECT x.i4, x.id FROM typed x) s UNION ALL SELECT x.f8, x.id FROM typed x ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) u");
   yield q("with ties: its rank in no row (a derived table beside a column)", `SELECT s.*, 1 AS one FROM (${TIES_A}) s ORDER BY s.id`);
   yield q("with ties: joined after", `SELECT s.id, s.made, b.id AS b FROM (${TIES_A}) s JOIN top_b b ON b.a_id = s.id ORDER BY 1, 3`);
   yield q("with ties: in a CTE read beside a column", `WITH t AS (${TIES_A}) SELECT t.*, t.id * 2 AS twice FROM t ORDER BY t.id`);

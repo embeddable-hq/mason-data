@@ -1,19 +1,19 @@
 {
-  "statements": 6391,
+  "statements": 6449,
   "mason": {
-    "exact": 5890,
+    "exact": 5944,
     "decided": 51,
-    "refused": 450,
+    "refused": 454,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1783,
-    "name": 1236,
-    "refused": 1248,
+    "exact": 1784,
+    "name": 1237,
+    "refused": 1300,
     "value": 834,
-    "rows": 545,
-    "text": 171,
-    "other": 574
+    "rows": 547,
+    "text": 172,
+    "other": 575
   },
   "gaps": {
     "copyPhase": {
@@ -51,8 +51,10 @@
         "regexp-functions": { "planted": 1, "natural": 0 },
         "regexp-matches-forms": { "planted": 1, "natural": 0 },
         "relative-time-literal": { "planted": 1, "natural": 0 },
+        "rewrite-name": { "planted": 2, "natural": 0 },
         "row-value": { "planted": 1, "natural": 1 },
         "set-config-forms": { "planted": 1, "natural": 0 },
+        "setop-numeric-ties": { "planted": 1, "natural": 0 },
         "setop-ordinal-star": { "planted": 1, "natural": 0 },
         "similar-to-forms": { "planted": 1, "natural": 0 },
         "star-join-twin": { "planted": 1, "natural": 0 },
@@ -65,7 +67,7 @@
         "volatile-window": { "planted": 1, "natural": 0 },
         "width-bucket-forms": { "planted": 1, "natural": 0 },
         "with-ordinality": { "planted": 1, "natural": 0 },
-        "with-ties-distinct": { "planted": 1, "natural": 0 },
+        "with-ties-distinct": { "planted": 2, "natural": 0 },
         "zone-abbreviation": { "planted": 0, "natural": 2 }
       },
       "decided": {
@@ -91,7 +93,7 @@
       }
     },
     "everyAsk": {
-      "asked": 44021,
+      "asked": 44414,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -127,8 +129,10 @@
         "regexp-functions": { "planted": 3, "natural": 0 },
         "regexp-matches-forms": { "planted": 3, "natural": 0 },
         "relative-time-literal": { "planted": 3, "natural": 0 },
+        "rewrite-name": { "planted": 6, "natural": 7 },
         "row-value": { "planted": 3, "natural": 7 },
         "set-config-forms": { "planted": 3, "natural": 0 },
+        "setop-numeric-ties": { "planted": 3, "natural": 0 },
         "setop-ordinal-star": { "planted": 3, "natural": 0 },
         "similar-to-forms": { "planted": 3, "natural": 0 },
         "star-join-twin": { "planted": 3, "natural": 0 },
@@ -141,7 +145,7 @@
         "volatile-window": { "planted": 3, "natural": 0 },
         "width-bucket-forms": { "planted": 3, "natural": 0 },
         "with-ordinality": { "planted": 3, "natural": 0 },
-        "with-ties-distinct": { "planted": 3, "natural": 0 },
+        "with-ties-distinct": { "planted": 6, "natural": 0 },
         "zone-abbreviation": { "planted": 0, "natural": 6 }
       },
       "decided": {

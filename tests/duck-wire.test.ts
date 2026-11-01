@@ -3101,6 +3101,30 @@ test("each arm of a set operation is cast to the set operation's column type: a 
   } finally { await c.end(); }
 });
 
+// A FIRST ARM THAT IS ONLY A `*` WRITTEN OUT FOR THE SET OPERATION'S CAST (the class
+// "setop-star-written-loses-location", PR 233 review r2): the set operation's analysed types were found by the first
+// SELECT's offsets, which the written-out `*` no longer holds, so its ORDER BY was refused. They are read once, before
+// any rewrite: every cast a `*` arm takes (int to float8, int2 to int4, date to timestamptz), x.* and *, with a LIMIT, a
+// DISTINCT union, under WITH TIES and read through a derived table
+test("a set operation whose first SELECT is a `*` the cast writes out keeps Postgres's types for its ORDER BY (PR 233 review r2)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    const F = "SELECT l.k::float8, l.id FROM late l";
+    for (const [sql, inOrder] of [
+      [`SELECT * FROM (SELECT l.c, l.id FROM late l) x UNION ALL ${F} ORDER BY 2, 1 LIMIT 6`, true],
+      [`SELECT x.* FROM (SELECT l.c, l.id FROM late l) x UNION ALL ${F} ORDER BY 2, 1 LIMIT 6`, true],
+      [`SELECT * FROM (SELECT l.c::int2 AS c, l.id FROM late l) x UNION ALL SELECT l.k, l.id FROM late l ORDER BY 2, 1 LIMIT 6`, true],
+      [`SELECT * FROM (SELECT DATE '2020-01-01' + l.c AS d, l.id FROM late l) x UNION ALL SELECT TIMESTAMPTZ '2020-01-01 12:00+00' + l.c * INTERVAL '1 day', l.id FROM late l ORDER BY 2, 1 LIMIT 6`, true],
+      [`SELECT * FROM (SELECT l.c FROM late l) x UNION SELECT l.k::float8 / 1 FROM late l ORDER BY 1 NULLS FIRST LIMIT 6`, true],
+      [`SELECT * FROM (SELECT * FROM (SELECT l.c, l.id FROM late l) x UNION ALL ${F} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 2, 1`, true],
+      [`SELECT * FROM (SELECT l.c, l.id FROM late l) x UNION ALL ${F} ORDER BY 1 DESC FETCH FIRST 2 ROWS WITH TIES`, false],
+      [`SELECT count(*) FROM (SELECT * FROM (SELECT l.c, l.id FROM late l) x UNION ALL ${F} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s`, true],
+    ] as const) { const d = await tiesAlike(c, sql, undefined, inOrder); if (d !== null) differ.push(d); }
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+  } finally { await c.end(); }
+});
+
 // A SET OPERATION'S NUMERIC UNDER WITH TIES (the class "setop-numeric-engine-scale", PR 233 review r1): the engine
 // prints one DECIMAL scale per column, or a quotient's double, where Postgres's set-operation numeric keeps each value's
 // own. Under WITH TIES (which the base crashed on) such a column is answered only where the one decider of a union's

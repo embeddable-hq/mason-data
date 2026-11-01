@@ -313,9 +313,11 @@ class Rewriter {
 
   /** each set operation's columns as Postgres resolved them over every arm, by its first SELECT's offsets (pgtree.ts) */
   private readonly setColumns: Map<number, Array<Array<Typed | null>>>;
-  /** each set operation that is a query of Postgres's own (`markSetOperations`): how many such enclose it on its first
-   *  arms' path, which is its place among the queries `setColumns` lists at those offsets */
-  private readonly setDepth = new WeakMap<Body, number>();
+  /** each set operation that is a query of Postgres's own (`markSetOperations`): its columns as Postgres's analysis of
+   *  it has them (null where not found), read ONCE, by its first SELECT's offsets, before anything rewrites a target
+   *  list: a `*` written out, or a target replaced, holds no offset of Postgres's (the class
+   *  "setop-star-written-loses-location", PR 233 review r2) */
+  private readonly setTypes = new WeakMap<Body, Array<Typed | null> | null>();
 
   /**
    * Before anything rewrites a set operation: each one Postgres analyses as a query of its own (the statement's, a
@@ -330,7 +332,7 @@ class Rewriter {
       const setop = b.op !== undefined && b.op !== "SETOP_NONE";
       if (!setop) { for (const x of Object.values(b)) visit(x); return; }
       const query = root || own(b);
-      if (query) this.setDepth.set(b, depth);
+      if (query) this.setTypes.set(b, this.analysedSetTypes(b, depth));
       for (const [k, x] of Object.entries(b)) {
         if (k === "larg") { const l = arm(x); if (l !== null) spine(l, query ? depth + 1 : depth, false); }
         // (a later arm's first SELECT is another, its offsets its own)
@@ -348,10 +350,15 @@ class Rewriter {
   }
 
   /** a set operation's columns as Postgres's analysis of the set operation has them, in order (a `*`'s columns counted),
-   *  or null where it is not found: the one authority for a set operation's column type and collation */
+   *  or null where it is not found: the one authority for a set operation's column type and collation, recorded by
+   *  `markSetOperations` before any rewrite */
   private setOperationTypes(b: Body): Array<Typed | null> | null {
-    const depth = this.setDepth.get(b);
-    if (depth === undefined) return null;
+    return this.setTypes.get(b) ?? null;
+  }
+
+  /** the set operation's columns read from Postgres's analysis by its first SELECT's offsets as that SELECT was written:
+   *  only `markSetOperations` calls it, before any target list is rewritten */
+  private analysedSetTypes(b: Body, depth: number): Array<Typed | null> | null {
     let first: Body = b;
     while (first.op !== undefined && first.op !== "SETOP_NONE" && first.larg !== undefined) first = isNode(first.larg) ? bodyOf(first.larg) : first.larg as Body;
     const held = (n: unknown): number[] => {
@@ -633,9 +640,8 @@ class Rewriter {
     // and one typed as another (decidedByKey's any_value): a grouped ORDER BY 1 over a jsonb is keyed over its copy
     const like = isNode(v) ? this.typedLike.get(bodyOf(v)) : undefined;
     if (like !== undefined) this.typedLike.set(bodyOf(out as AstNode), like);
-    // and a set operation its place among Postgres's (`setOperationTypes`): a union arm's trial reads its columns' types
-    const depth = this.setDepth.get(v as Body);
-    if (depth !== undefined) this.setDepth.set(out, depth);
+    // and a set operation its columns as Postgres's analysis has them (`setOperationTypes`): a union arm's trial reads them
+    if (this.setTypes.has(v as Body)) this.setTypes.set(out, this.setTypes.get(v as Body) ?? null);
     return out as T;
   }
 
