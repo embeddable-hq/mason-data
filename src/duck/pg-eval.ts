@@ -19,10 +19,12 @@ const TIMEOUT_MS = 30_000;
 
 export class PgEvalError extends Error {
   readonly code: string;
-  constructor(code: string, message: string) { super(message); this.code = code; }
+  /** Postgres's DETAIL, where it gave one */
+  readonly detail: string | undefined;
+  constructor(code: string, message: string, detail?: string) { super(message); this.code = code; this.detail = detail; }
 }
 
-type Reply = { ok: true; rows: Array<Array<string | null>> } | { ok: false; code: string; message: string };
+type Reply = { ok: true; rows: Array<Array<string | null>> } | { ok: false; code: string; message: string; detail?: string };
 
 let current: { worker: Worker; port: MessagePort; signal: Int32Array } | null = null;
 
@@ -52,7 +54,7 @@ export function pgEvalSync(sql: string, params: unknown[], timeZone: string): Ar
     throw new PgEvalError("57014", `Postgres's function did not answer within ${TIMEOUT_MS / 1000} s (Mason computes it on its own Postgres)`);
   }
   const r = got.message as Reply;
-  if (!r.ok) throw new PgEvalError(r.code, r.message);
+  if (!r.ok) throw new PgEvalError(r.code, r.message, r.detail);
   return r.rows;
 }
 

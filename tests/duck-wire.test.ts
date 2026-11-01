@@ -31,6 +31,10 @@ import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
+import { catalogDdl } from "../src/api/postgres/catalog.ts";
+import { planDuck } from "../src/duck/plan.ts";
+import { parseSql } from "../src/api/postgres/parser.ts";
+import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -610,6 +614,107 @@ test("the corpus rerun: a relative time literal is the transaction's start at th
     assert.equal(b[0], a[0], "the literal is the Parse's");
     assert.notEqual(b[1], a[1], "now() is each execution's");
   } finally { await c.end(); }
+});
+
+// review round 9 of PR 202: a WITH query's exact programs are derived once and given to every reader. The first UNION
+// ALL arm that read it took its cells, a later reader got none, the arms disagreed and the whole union was the double
+test("round 9: a WITH query read by one, two or three UNION ALL arms, directly or through a query, answers Postgres's digits", async () => {
+  const c = await client();
+  try {
+    // the rows' order is the engine's (no ORDER BY, as the case was met): the multiset is held, each value's text exactly
+    const sorted = (rows: unknown[][]): unknown[][] => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    // every case is run and each that differs named, so one wrong case does not hide the next
+    const wrong: Array<{ sql: string; mine: unknown; postgres: unknown; held: string[] }> = [];
+    const same = async (sql: string, column: string[]): Promise<void> => {
+      const [mine, theirs] = [await answer(c, sql), await postgres(sql)];
+      const [m, p] = [{ fields: mine.fields, rows: sorted(mine.rows) }, { fields: theirs.fields, rows: sorted(theirs.rows) }];
+      if (!util.isDeepStrictEqual(m, p) || !util.isDeepStrictEqual(m.rows.map((r) => r[0]), [...column].sort())) wrong.push({ sql, mine: m, postgres: p, held: column });
+    };
+    const THIRDS = ["14.0000000000000000", "26.8333333333333333", "40.0000000000000000"];
+    const SEVENTHS = ["11.5000000000000000", "17.1428571428571429", "6.0000000000000000"];
+    const T = "WITH t AS (SELECT amount / 3 AS v FROM orders) ";
+    // t read by one arm, beside the same program
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT amount / 3 FROM orders`, [...THIRDS, ...THIRDS]);
+    // t read by two arms (the second after an arm that does not read it)
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT amount / 3 FROM orders UNION ALL SELECT v FROM t`, [...THIRDS, ...THIRDS, ...THIRDS]);
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM t`, [...THIRDS, ...THIRDS]);
+    // t read by three arms
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM t UNION ALL SELECT v FROM t`, [...THIRDS, ...THIRDS, ...THIRDS]);
+    // t read through a subquery in FROM, and directly
+    await same(`${T}SELECT v AS x FROM (SELECT * FROM t) s UNION ALL SELECT v FROM t`, [...THIRDS, ...THIRDS]);
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM (SELECT * FROM t) s`, [...THIRDS, ...THIRDS]);
+    // a WITH query read through another WITH query, and directly (either first)
+    await same("WITH t AS (SELECT amount / 7 AS v FROM orders), u AS (SELECT v FROM t) SELECT v AS x FROM u UNION ALL SELECT v FROM t", [...SEVENTHS, ...SEVENTHS]);
+    await same("WITH t AS (SELECT amount / 7 AS v FROM orders), u AS (SELECT v FROM t) SELECT v AS x FROM t UNION ALL SELECT v FROM u", [...SEVENTHS, ...SEVENTHS]);
+    // t with a stored column, read by two arms: the column's own digits
+    const AMOUNTS = ["120.00", "42.00", "80.50"];
+    await same("WITH t AS (SELECT amount AS v FROM orders) SELECT v AS x FROM t UNION ALL SELECT v FROM t", [...AMOUNTS, ...AMOUNTS]);
+    // the round-8 shape: one arm reads a CTE's sqrt, the other computes the same sqrt
+    const ROOTS = ["10.954451150103322", "6.480740698407860", "8.972179222463180"];
+    await same("WITH t AS (SELECT sqrt(abs(amount)) AS v FROM orders) SELECT v AS x FROM t UNION ALL SELECT sqrt(abs(amount)) FROM orders", [...ROOTS, ...ROOTS]);
+    assert.deepEqual(wrong, []);
+  } finally {
+    await c.end();
+  }
+});
+
+// review round 10 of PR 202: round 9 gave a WITH query's later readers the programs its first read derived, but derived
+// their FIELDS again, from the WITH query as the first read had left it (its cells appended), which cannot be typed: the
+// later reader answered none, the arms disagreed, and the union was the engine's double. Everything a later reader is
+// given, its fields too, is the one derivation's. Held in every wrapper the oracle puts a statement in (CI's red was its
+// union shape), each value's text exactly, Postgres's (the multiset: the rows' order is the engine's where none is asked)
+test("round 10: a WITH query read again, through another or in a wrapper, answers Postgres's digits", async () => {
+  const c = await client();
+  try {
+    const sorted = (rows: unknown[][]): unknown[][] => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const wrong: Array<{ sql: string; mine: unknown; postgres: unknown; held: string[] }> = [];
+    const same = async (sql: string, column: string[]): Promise<void> => {
+      const [mine, theirs] = [await answer(c, sql), await postgres(sql)];
+      const [m, p] = [{ fields: mine.fields, rows: sorted(mine.rows) }, { fields: theirs.fields, rows: sorted(theirs.rows) }];
+      if (!util.isDeepStrictEqual(m, p) || !util.isDeepStrictEqual(m.rows.map((r) => r[0]), [...column].sort())) wrong.push({ sql, mine: m, postgres: p, held: column });
+    };
+    const THIRDS = ["14.0000000000000000", "26.8333333333333333", "40.0000000000000000"];
+    const SEVENTHS = ["11.5000000000000000", "17.1428571428571429", "6.0000000000000000"];
+    const ROOTS = ["10.954451150103322", "6.480740698407860", "8.972179222463180"];
+    const times = (column: string[], n: number): string[] => Array.from({ length: n }, () => column).flat();
+    const T = "WITH t AS (SELECT amount / 3 AS v FROM orders) ";
+    const TU = "WITH t AS (SELECT amount / 7 AS v FROM orders), u AS (SELECT v FROM t) ";
+    const S = "WITH t AS (SELECT sqrt(abs(amount)) AS v FROM orders) ";
+    const round10: Array<[string, string[]]> = [
+      // a WITH query read through another, the other read twice; then with the first between; then through a third
+      [`${TU}SELECT v AS x FROM u UNION ALL SELECT v FROM u`, times(SEVENTHS, 2)],
+      [`${TU}SELECT v AS x FROM u UNION ALL SELECT v FROM t UNION ALL SELECT v FROM u`, times(SEVENTHS, 3)],
+      ["WITH t AS (SELECT amount / 7 AS v FROM orders), u AS (SELECT v FROM t), w AS (SELECT * FROM u) SELECT v AS x FROM w UNION ALL SELECT v FROM u UNION ALL SELECT v FROM t", times(SEVENTHS, 3)],
+      // a WITH query's sqrt (a text cell) read by two arms
+      [`${S}SELECT v AS x FROM t UNION ALL SELECT v FROM t`, times(ROOTS, 2)],
+    ];
+    const round9: Array<[string, string[]]> = [
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT amount / 3 FROM orders`, times(THIRDS, 2)],
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT amount / 3 FROM orders UNION ALL SELECT v FROM t`, times(THIRDS, 3)],
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM t`, times(THIRDS, 2)],
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM t UNION ALL SELECT v FROM t`, times(THIRDS, 3)],
+      [`${T}SELECT v AS x FROM (SELECT * FROM t) s UNION ALL SELECT v FROM t`, times(THIRDS, 2)],
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM (SELECT * FROM t) s`, times(THIRDS, 2)],
+      [`${TU}SELECT v AS x FROM u UNION ALL SELECT v FROM t`, times(SEVENTHS, 2)],
+      [`${TU}SELECT v AS x FROM t UNION ALL SELECT v FROM u`, times(SEVENTHS, 2)],
+      ["WITH t AS (SELECT amount AS v FROM orders) SELECT v AS x FROM t UNION ALL SELECT v FROM t", times(["120.00", "42.00", "80.50"], 2)],
+      [`${S}SELECT v AS x FROM t UNION ALL SELECT sqrt(abs(amount)) FROM orders`, times(ROOTS, 2)],
+    ];
+    for (const [sql, column] of round10) await same(sql, column);
+    // every statement as written with the oracle's ORDER BY x, and in the oracle's wrappers (tests/integration/oracle/shapes.ts)
+    for (const [plain, column] of [...round10, ...round9]) {
+      const sql = `${plain} ORDER BY x`;
+      await same(sql, column);
+      await same(`(${sql}) UNION ALL (${sql})`, times(column, 2));
+      await same(`SELECT * FROM (${sql}) AS mason_shape`, column);
+      await same(`WITH mason_shape AS (${sql}) SELECT * FROM mason_shape`, column);
+      await same(`SELECT mason_shape."x" FROM (${sql}) AS mason_shape`, column);
+      await same(`SELECT * FROM (${sql}) AS mason_shape ORDER BY mason_shape."x"`, column);
+    }
+    assert.deepEqual(wrong.map((w) => w.sql), [], util.inspect(wrong, { depth: 5 }));
+  } finally {
+    await c.end();
+  }
 });
 
 test("the corpus rerun: what reached DuckDB and failed, answered as Postgres answers", async () => {
@@ -5288,4 +5393,30 @@ test("a grouped collated output ordered by number, name or expression is its col
       "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY n ORDER BY n DESC, min(a.id) LIMIT 8",
     ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
   } finally { await c.end(); await libc.close(); }
+});
+
+// review round 14 of PR 202: the plan of every wire statement computed the generated planner's followed outputs, a walk
+// that copied a column's followed expression into each reference to it, so a statement whose levels each read the level
+// below more than once grew 3^depth (depth 12 took 880 ms, 16 about 70 s) on the planning thread every session waits
+// on, whatever the column's type. The class: work on the wire's path for a reader only another path has, with no bound
+// on its size. The decision: the wire never computes what only a generated table reads, and the walk is linear in the
+// analysed tree. (An int8: a numeric carried through every level grows in the rewrite's exact program, as on main, issue
+// 244)
+test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
+  const catalogDb = new PGlite();
+  try {
+    for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
+    const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null });
+    // a first plan pays the catalog's and the parser's start: untimed
+    await plan("SELECT 1::numeric AS a");
+    for (const depth of DEEP_DEPTHS) for (const [shape, sql] of Object.entries(deepChains("1::int8", depth))) {
+      const started = performance.now();
+      const planned = await plan(sql);
+      const ms = performance.now() - started;
+      assert.equal(planned.outputs, undefined, `${shape}: the wire's plan holds the generated planner's outputs`);
+      assert.ok(ms < 500, `${shape}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
+    }
+  } finally { await catalogDb.close(); }
 });

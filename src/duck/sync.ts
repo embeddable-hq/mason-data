@@ -53,7 +53,11 @@
  * Read-only on the source (CLAUDE.md): only SELECTs, through a READ_ONLY attachment.
  */
 import type { DuckStore } from "./store.ts";
-import { freeBytesAt, MASON_SCHEMA } from "./store.ts";
+import { freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, SessionSetup } from "./store.ts";
+
+/** the session the generated tables' run passes the Mason functions: no slot of the cancel table (src/duck/cancel.ts
+ *  `slotOf`), so never cancelled through it; a stop interrupts the run's connection instead */
+const GENERATED_SESSION = "generated";
 import { GeneratedTables, type GeneratedOptions } from "./generated.ts";
 import { KeptJsonPaths, type KeptOptions } from "./kept.ts";
 import type { Source, SourceColumnInfo, SourceTable, SourceView } from "../cli/preflight.ts";
@@ -937,6 +941,10 @@ export class Sync {
   readonly generated: GeneratedTables;
   /** the connection their runs read and write on (`open`), set up as a session: what `stop` interrupts */
   private generatedLane: Lane | null = null;
+  /** the generated lane's session set-up: settled before each plan and run (`GeneratedHost.settle`) */
+  private generatedSession: SessionSetup | null = null;
+  /** the review's check's own connection and its set-up, never the run's (`GeneratedHost.checkConnection`) */
+  private generatedCheck: { conn: DuckConnection; setup: SessionSetup } | null = null;
 
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
@@ -976,6 +984,18 @@ export class Sync {
     this.generated = new GeneratedTables(store, {
       onWriter: (f) => this.onWriter(f),
       connection: () => generatedLane().conn,
+      settle: async () => {
+        if (this.generatedSession === null) throw new Error("the generated tables' connection is not open (Mason bug: report it)");
+        await this.generatedSession.settle(NO_ROLE_SESSION);
+      },
+      checkConnection: () => {
+        if (this.generatedCheck === null) throw new Error("the generated tables' check connection is not open (Mason bug: report it)");
+        return this.generatedCheck.conn;
+      },
+      settleCheck: async () => {
+        if (this.generatedCheck === null) throw new Error("the generated tables' check connection is not open (Mason bug: report it)");
+        await this.generatedCheck.setup.settle(NO_ROLE_SESSION);
+      },
       enqueue: (name) => this.enqueue(name, { kind: "generated" }),
       interruptible: (f) => this.interruptible(generatedLane(), f),
       added: (name) => this.tables.has(name) ? (this.states.get(name)?.phase === "copied" ? "copied" : "adding") : this.views.some((v) => `${v.schema ?? "public"}.${v.name}` === name) ? "view" : null,
@@ -1065,7 +1085,12 @@ export class Sync {
     this.removeStageLeftovers();
     // the stored JSON paths, before the catalog serves anything: each served copy's view, what the file holds
     await this.kept.open();
-    this.generatedLane = { conn: await this.store.instance.connect(), inFlight: false };
+    // the run's connection is a session's, set up by the one set-up (src/duck/store.ts `SessionSetup`): a plan's SQL reads it
+    const conn = await this.store.instance.connect();
+    this.generatedSession = await SessionSetup.open(conn, GENERATED_SESSION);
+    this.generatedLane = { conn, inFlight: false };
+    const checkConn = await this.store.instance.connect();
+    this.generatedCheck = { conn: checkConn, setup: await SessionSetup.open(checkConn, GENERATED_SESSION) };
     await this.generated.open();
     this.catalog = await this.store.instance.connect();
     await this.rebuildSchema();
@@ -1573,6 +1598,10 @@ export class Sync {
     this.rebuilderLane = null;
     this.generatedLane?.conn.closeSync();
     this.generatedLane = null;
+    this.generatedSession = null;
+    // after `generated.stop`, which waited for the review and so for any check on it
+    this.generatedCheck?.conn.closeSync();
+    this.generatedCheck = null;
   }
 
   /** a poll asked of a table while it is rebuilt or not yet caught up: refused, by name (it is caught up when that ends) */
@@ -3494,12 +3523,17 @@ export class Sync {
         ...(uniqueKeys.length ? { uniqueKeys } : {}),
         ...(t.rowTypeOid !== undefined && columns.length === cols.length ? { rowTypeOid: t.rowTypeOid } : {}) });
     }
+    // ONE SOURCE OF AN ENUM'S LABELS, the synced table's ENUM: a generated table stores the ENUM it was built with, which
+    // a value added since (ALTER TYPE … ADD VALUE, re-copied) is not in, so its column declares the type by the synced
+    // labels; its own only where no synced column has the type
+    const synced = new Map(tables.flatMap((t) => t.columns.flatMap((x) => x.enumLabels !== undefined && x.spelled !== undefined ? [[x.spelled.replace(/\[\]$/, ""), x.enumLabels] as const] : [])));
     // each generated table served, as a copy of its output's types: no key, no joins
     for (const g of this.generated.served()) {
       const types = await c.prepare(`SELECT * FROM ${ident(g.schema)}.${ident(g.table)} LIMIT 0`);
       const duckTypes = new Map(Array.from({ length: types.columnCount }, (_, i) => [types.columnName(i), types.columnType(i)] as const));
       types.destroySync();
-      const columns = g.columns.filter((x) => duckTypes.has(x.name)).map((x) => pgColumn({ name: x.name, type: x.type, notNull: false, comment: null }, duckTypes.get(x.name)!, undefined));
+      const columns = g.columns.filter((x) => duckTypes.has(x.name)).map((x) => pgColumn({ name: x.name, type: x.type, notNull: false, comment: null }, duckTypes.get(x.name)!, undefined))
+        .map((x) => { const labels = x.enumLabels !== undefined && x.spelled !== undefined ? synced.get(x.spelled.replace(/\[\]$/, "")) : undefined; return labels === undefined ? x : { ...x, enumLabels: labels }; });
       tables.push({ name: g.table, schema: g.schema, primaryKey: [], columns, joins: [], ...(g.comment !== null ? { description: g.comment } : {}) });
     }
     const views = this.views;
@@ -3561,7 +3595,8 @@ function pgColumn(c: SourceColumnInfo, duck: DuckDBType, now: SourceColumnInfo |
   return { name: c.name, type, spelled, ...(c.comment ? { description: c.comment } : {}), ...(labels !== null ? { enumLabels: labels } : {}), ...(made !== undefined ? { made } : {}),
     ...(facts.notNull ? { notNull: true } : {}), ...(facts.default !== undefined ? { default: facts.default } : {}),
     ...(facts.identity !== undefined ? { identity: facts.identity } : {}), ...(facts.sequence !== undefined ? { sequence: facts.sequence } : {}),
-    ...(c.typeOid !== undefined && double === null ? { typeOid: c.typeOid, ...(c.typeArrayOid !== undefined ? { typeArrayOid: c.typeArrayOid } : {}) } : {}) };
+    // a number, whatever spelling the column's record kept (an oid is a string in Postgres's JSON, and a copy's columns are JSON)
+    ...(c.typeOid !== undefined && double === null ? { typeOid: Number(c.typeOid), ...(c.typeArrayOid !== undefined ? { typeArrayOid: Number(c.typeArrayOid) } : {}) } : {}) };
 }
 
 /** a span as the stream's line says it: `2.1 s`, `3 min`, `2 h` */

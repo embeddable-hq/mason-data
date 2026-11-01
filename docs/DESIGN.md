@@ -477,6 +477,51 @@ clean. So `pr-loop.js` gained six phases and changed its rounds twice:
   correct; and CI is read beside each review, a red run going back with the review's findings in the same fix. Beside
   a clean review there is no fix round to join, and the CI stage reads the failure again after Learn.
 
+**Only a blocking finding sends a PR back (Tom, 2026-11-01).** PR 202 took eight review rounds. Rounds 1 to 4 and 8
+found real wrong answers or a crash; rounds 5 to 7 found only the quality of refusal messages (a reason, a HINT, a
+DETAIL), about two hours of rounds on a PR whose answers were by then right, and PR 207 spent rounds the same way. The
+owner's words: "It's super important that we don't let any real correctness or security bugs get through. But if you
+determine that the feedback items don't block the current PR and instead go into a new issue, that feels like a good
+way to move forwards." So every finding the probe and the review report carries a severity (the `FINDINGS` schema in
+`pr-loop.js` requires it). Blocking: `wrong-answer` (where Mason answers, it answers differently from Postgres: rows,
+text, types or OIDs, order, SQLSTATE), `crash` (a crash, a hang, a stuck state such as a table left `building`),
+`data-loss`, `security`, `regression` (what the base got right is now wrong or refused), and a red CI. Not blocking:
+`message` (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is
+right), `over-refusal` (Mason refuses where Postgres answers and the base refused too: safe, and a gap), `docs`,
+`quality`. When the reviewer is unsure, the finding is blocking, and so is a finding with no severity or one the
+script does not know: the line errs toward a fix round, never toward a wrong answer merged. Only the PR's blocking
+findings make a fix or probe-fix round, count toward the class rule and are learnt; a round with only non-blocking
+findings is clean. The others are filed at the run's exit beside the base's, one issue per class, each saying it was
+met in the PR's review and deferred, and listed in the Review record's `deferred`; `scripts/review-stats.ts` counts a
+first review as passed when it found nothing blocking, and reads a record written before severity as all blocking,
+since every finding then made a round.
+
+**A review runs statements at scale (Tom, 2026-11-01).** An A/B on issue 192 (WITH TIES): a review that only read
+the code passed an implementation clean. Three later checks ran 300 to 500 statements each against Postgres 18 and
+Mason side by side, with the base beside them, and found two regressions and about four new wrong answers in that same
+implementation. What found them was not the feature's own syntax but forms nobody wrote — `TABLE t` for `SELECT * FROM
+t`, a VALUES arm first in a set operation, an empty input under a bound, a `char(n)` arm beside a text arm, a negative
+or NULL count or offset, a quotient in a numeric arm beside an integer arm, an exact numeric read through a derived
+table or a CTE — and a sweep of the PLAIN form of each code path the diff touched: the regression was `SELECT * FROM t
+UNION ALL TABLE t ORDER BY 1 LIMIT 2`, which has no new syntax at all. Each check cost about what the reading review
+did in tokens (172k to 250k, against 197k), because its statements were batched: one `scripts/duck-repro.ts` call
+runs dozens, its output goes to a file, and only the differences are read. The cost is wall time, two to three times.
+So the probe and every review in `pr-loop.js` run their statements that way, at the head and the base: the forms are one
+list (`VARIANT_FORMS`, over synthetic tables), a full review aims for hundreds and a re-check for a narrower set, and
+a statement the base matched and the head does not is a `regression`, blocking. Each reports `statementsRun` and
+`statementsMatched`, which the Review record sums and `scripts/review-stats.ts` prints. Statements are what the
+engine's and the listener's paths owe, and only theirs: PR 245's second round found every PR made to run SQL, so a PR
+of the CLI, the web page, a script, a workflow or docs could never pass. So the evidence is read from the diff's paths,
+which the review reports (`changedPaths`): a path in `STATEMENT_PATHS` (the `paths:` of `.claude/rules/duck-*.md`
+and `postgres-api.md`, held equal by `tests/workflows.test.ts`, and `src/cdc/`) owes statements, and every other
+path owes checks, what it changed run at the head and the base (`checksRun`: a `mason` command, a script, a test
+file; never SQL). A review or re-check that showed none of what it owed, or gave no valid count, or did not say its
+paths, is never a clean round: the run stops `unreviewed`, saying what to install or run (`psql`
+on PATH, Docker or `itEnv` for statements; the command, script or tests for checks), issue-loop goes no further, and
+the record counts the round as no review (PR 245's first review found such a round passing as reviewed); a probe that
+showed none is noted, as a failed probe is. The statements' Postgres is the file the `itEnv` argument names, or a
+throwaway `postgres:18` container of the stage's own, removed when done, whose URL no prompt prints.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:

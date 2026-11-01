@@ -14,12 +14,16 @@ import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { stopParser } from "../src/api/postgres/parser.ts";
 import { GENERATED_DIR, GENERATED_KEYS, parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import type { AddedTable } from "../src/duck/sync.ts";
-import { REVIEW_MS, withoutValues, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
-import { definitionStatement, refusalText, type GeneratedRefusal } from "../src/duck/generated-plan.ts";
+import * as generatedModule from "../src/duck/generated.ts";
+import { REVIEW_MS, withoutValues, type GeneratedHost, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
+import { definitionStatement, planDefinition, refusalText, type EngineTypes, type GeneratedRefusal } from "../src/duck/generated-plan.ts";
+import { deparseSync } from "pgsql-deparser";
+import { parseSql } from "../src/api/postgres/parser.ts";
 import { parseLag, parseSync } from "../src/lib/table-sync.ts";
 import { generatedLines } from "../src/cli/commands.ts";
 import { guideText } from "../src/cli/guides.ts";
 import { built, COUNTS, plain, refusedAt, served, withWorld } from "./duck-generated-world.ts";
+import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
 
 after(() => stopParser());
 
@@ -166,7 +170,7 @@ test("the swap waits for the writer's turn: a write holding the turn keeps the o
 test("what a table cannot store is refused by name at its key, before anything is built", async () => {
   const lag = "kind: scheduled\ntarget_lag: 1h\n";
   await withWorld({
-    money: `${lag}sql: SELECT sum(amount) AS total FROM events\n`,
+    money: `${lag}sql: SELECT sum(amount) / 3 AS total FROM events\n`,
     avg: `${lag}sql: SELECT avg(tenant_id) AS mean FROM events\n`,
     unnamed: `${lag}sql: SELECT id + 1 FROM events\n`,
     twice: `${lag}sql: SELECT id, tenant_id AS id FROM events\n`,
@@ -185,8 +189,8 @@ test("what a table cannot store is refused by name at its key, before anything i
   }, async (w) => {
     await w.sync.generated.review();
     const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
-    for (const name of ["money", "avg"]) { assert.equal(r(name).state, "refused"); refusedAt(r(name).refusals, "sql", /is numeric, which a generated table can't store yet/); }
-    assert.ok(r("money").refusals[0]!.options.some((o) => o.includes("::double precision")), JSON.stringify(r("money").refusals));
+    for (const name of ["money", "avg"]) { assert.equal(r(name).state, "refused"); refusedAt(r(name).refusals, "sql", /column (total|mean) divides a numeric, which the engine computes as a double/); }
+    assert.ok(r("money").refusals[0]!.options.some((o) => o.includes("AS double precision)")), JSON.stringify(r("money").refusals));
     refusedAt(r("unnamed").refusals, "sql", /has no name/);
     refusedAt(r("twice").refusals, "sql", /names column id twice/);
     refusedAt(r("arrays").refusals, "sql", /of type bigint\[\], which a generated table can't store yet/);
@@ -498,6 +502,15 @@ test("the guide lists every key the reader takes", async () => {
   for (const k of ["kind", "sql", "target_lag", "order_by", "comment"]) assert.match(text, new RegExp(`\\n {4}${k} +`));
   assert.match(text, /mason\/generated_tables\//);
   assert.doesNotMatch(text, /DuckDB/);
+});
+
+test("the guide, the rules file and the release note name the numeric forms the plan stores and refuses, and no false reason", async () => {
+  const docs = { guide: (await guideText("generated")).replace(/\s+/g, " "), rules: fs.readFileSync(".claude/rules/duck-generated.md", "utf8").replace(/\s+/g, " "),
+    notes: fs.readFileSync("release-notes/next.md", "utf8").replace(/\s+/g, " ") };
+  for (const [doc, text] of Object.entries(docs)) {
+    for (const said of [/trunc/, /mod/, /GREATEST/, /COALESCE/, /variance/i, /sqrt/, /18 decimals|past 18/, /double/, /read back from its text|survives every conversion/]) assert.match(text, said, `${doc}: ${said}`);
+    assert.doesNotMatch(text, /CASE, GREATEST, COALESCE, mod or trunc over a numeric/, doc);
+  }
 });
 
 test("a top-level ORDER BY with no LIMIT is said, once, pointing at order_by, and refuses nothing; a column the copy leaves out says how to sync it", async () => {
@@ -942,5 +955,902 @@ test("a child is held to the target_lag its parent runs at: a parent refused in 
     const slow = w.status("public.slow");
     assert.deepEqual(slow.refusals, [], "held to the 5m public.counts runs at, not its refused file's 1h");
     assert.notEqual(slow.state, "refused");
+  });
+});
+
+// stage 3 (issue 175): a numeric, an enum and a citext stored as the engine answers them, as a copy of the column holds them
+const LEDGER_COLUMNS = [{ name: "id", type: "bigint" }, { name: "n", type: "integer" }, { name: "small", type: "smallint" }, { name: "amount", type: "numeric(12,2)" },
+  { name: "big", type: "numeric" }, { name: "wide", type: "numeric(65,30)" }, { name: "mood", type: "mood", typeKind: "e" }, { name: "name", type: "citext" }].map((c) => ({ ...c, notNull: false, comment: null }));
+const ledger: AddedTable = { source: "public.ledger", schema: "public", table: "ledger", key: ["id"], columns: LEDGER_COLUMNS, foreignKeys: [], bytes: 0, rows: 4 };
+const LEDGER_SEED = [
+  "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')",
+  "CREATE TABLE public.ledger (id BIGINT, n INTEGER, small SMALLINT, amount DECIMAL(12,2), big DECIMAL(38,9), wide DECIMAL(38,2), mood mood, name VARCHAR)",
+  "INSERT INTO public.ledger VALUES (1, 10, 1, 1.10, 12345678901234567890.123456789, 1.25, 'happy', 'Alice'), (9223372036854775806, 2147483647, 2, -2.50, -0.000000001, -0.50, 'sad', 'alice'), " +
+    "(3, NULL, 3, NULL, NULL, NULL, 'ok', 'Bob'), (9223372036854775807, 2147483647, 32767, 4.00, 1.100000000, 2.00, 'sad', 'BOB')",
+  `INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.ledger', 'copied', 4, 0, 1.0, now(), NULL, '${JSON.stringify(LEDGER_COLUMNS)}')`,
+  `INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES ('public.ledger', '100:100:', now(), 'off')`,
+];
+const NUMS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, amount, big FROM ledger\norder_by: id\n";
+const SUMS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT mood, sum(small) AS s2, sum(n) AS s4, sum(id) AS s8, sum(amount) AS sa, max(big) AS mb FROM ledger GROUP BY mood\n";
+const KINDS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, mood, name FROM ledger\n";
+/** a world over `ledger`: the base made in a first world, the tables declared in the second, `use`d there and after a restart */
+async function overLedger(files: Record<string, string>, use: (w: Parameters<Parameters<typeof withWorld>[1]>[0], restarted: boolean) => Promise<void>, columns: readonly object[] = LEDGER_COLUMNS): Promise<void> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-numeric-"));
+  try {
+    await withWorld({}, async (w) => { for (const sql of LEDGER_SEED) await w.store.writer.run(sql.replace(JSON.stringify(LEDGER_COLUMNS), JSON.stringify(columns))); }, { dir });
+    // served, not built (#205): `use` queries each table over the wire at once
+    await withWorld(files, async (w) => { for (const name of Object.keys(files)) await w.until(served(w.logged), `public.${name}`); await use(w, false); }, { dir, again: true, tables: [{ ...ledger, columns } as AddedTable] });
+    await withWorld({}, async (w) => { for (const name of Object.keys(files)) assert.ok(built(w.status(`public.${name}`))); await use(w, true); }, { dir, again: true, tables: [{ ...ledger, columns } as AddedTable] });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+const typed = async (w: { client(): Promise<pg.Client> }, sql: string): Promise<{ fields: Array<[string, number, number]>; rows: unknown[][] }> => {
+  const c = await w.client();
+  try { const r = await c.query({ text: sql, rowMode: "array" }); return { fields: r.fields.map((f) => [f.name, f.dataTypeID, f.dataTypeModifier]), rows: r.rows }; } finally { await c.end(); }
+};
+
+test("a numeric output is stored and read back exactly, across a restart: its scale's trailing zeros, its sign, a NULL, digits past a double's", async () => {
+  await overLedger({ nums: NUMS }, async (w) => {
+    const r = await typed(w, "SELECT id, amount, big FROM nums ORDER BY id");
+    assert.deepEqual(r.fields, [["id", 20, -1], ["amount", 1700, (12 << 16) + 2 + 4], ["big", 1700, -1]]);
+    assert.deepEqual(r.rows, [["1", "1.10", "12345678901234567890.123456789"], ["3", null, null], ["9223372036854775806", "-2.50", "-0.000000001"], ["9223372036854775807", "4.00", "1.100000000"]]);
+    assert.deepEqual((await typed(w, "SELECT round(amount, 1) AS r FROM nums WHERE amount < 2 AND big = 12345678901234567890.123456789 ORDER BY amount DESC NULLS LAST")).rows, [["1.1"]]);
+  });
+});
+
+test("the sum forms' stored types: sum(int2) and sum(int4) as bigint, sum(int8) and sum(numeric) as numeric, past bigint's range", async () => {
+  await overLedger({ sums: SUMS }, async (w, restarted) => {
+    const r = await typed(w, "SELECT * FROM sums ORDER BY mood");
+    assert.deepEqual(r.fields.map(([n, oid]) => [n, oid]).slice(1), [["s2", 20], ["s4", 20], ["s8", 1700], ["sa", 1700], ["mb", 1700]]);
+    assert.deepEqual(r.rows, [["sad", "32769", "4294967294", "18446744073709551613", "1.50", "1.100000000"], ["ok", "3", null, "3", null, null], ["happy", "1", "10", "1", "1.10", "12345678901234567890.123456789"]]);
+    if (restarted) return;
+    const stored = await w.rows("SELECT column_name, data_type FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = 'sums' AND column_name <> 'mood' ORDER BY column_index");
+    assert.deepEqual(stored, [["s2", "BIGINT"], ["s4", "BIGINT"], ["s8", "HUGEINT"], ["sa", "DECIMAL(38,2)"], ["mb", "DECIMAL(38,9)"]]);
+  });
+});
+
+test("an enum and a citext are stored and read back: the enum's declared order and type, the citext's case-blind equality", async () => {
+  await overLedger({ kinds: KINDS }, async (w) => {
+    const r = await typed(w, "SELECT id, mood, name FROM kinds ORDER BY mood, id");
+    const oids = (await typed(w, "SELECT 'mood'::regtype::oid::int, 'citext'::regtype::oid::int")).rows[0];
+    assert.deepEqual([r.fields[1]![1], r.fields[2]![1]], oids, "the catalog's own types");
+    assert.deepEqual(r.rows.map((x) => x[1]), ["sad", "sad", "ok", "happy"], "the declared order, not the alphabet's");
+    assert.deepEqual((await typed(w, "SELECT count(*) FROM kinds WHERE mood = 'sad'")).rows, [["2"]]);
+    assert.deepEqual((await typed(w, "SELECT id FROM kinds WHERE name = 'ALICE' ORDER BY id")).rows, [["1"], ["9223372036854775806"]]);
+  });
+});
+
+// review round 1 of PR 202 (docs/the PR's "Review round"): ONE source of an enum's labels, the synced table's
+test("a value added to a base's enum is the synced table's at once, whatever a generated table built before it stored, which answers as a stale table", async () => {
+  await overLedger({ kinds: KINDS }, async (w, restarted) => {
+    if (restarted) return;
+    // as a re-copy after ALTER TYPE mood ADD VALUE 'meh' BEFORE 'ok' leaves it: the synced ENUM with the new label, and a row of it
+    await w.store.writer.run("CREATE OR REPLACE TABLE public.ledger AS SELECT id, n, small, amount, big, wide, CAST(CAST(mood AS VARCHAR) AS ENUM('sad', 'meh', 'ok', 'happy')) AS mood, name FROM public.ledger");
+    await w.store.writer.run("INSERT INTO public.ledger VALUES (7, 1, 1, 1.00, 1.000000000, 1.00, 'meh', 'Mia')");
+    await (w.sync as unknown as { rebuildSchema(): Promise<void> }).rebuildSchema();
+    const stored = await w.rows("SELECT data_type FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = 'kinds' AND column_name = 'mood'");
+    assert.doesNotMatch(String(stored[0]![0]), /meh/, "the generated table holds the ENUM it was built with: declared after the synced table, it does not decide the labels");
+    assert.deepEqual((await typed(w, "SELECT count(*) FROM ledger WHERE mood = 'meh'")).rows, [["1"]]);
+    assert.deepEqual((await typed(w, "SELECT 'meh'::mood AS m")).rows, [["meh"]]);
+    assert.deepEqual((await typed(w, "SELECT enumlabel FROM pg_enum WHERE enumtypid = 'mood'::regtype ORDER BY enumsortorder")).rows, [["sad"], ["meh"], ["ok"], ["happy"]]);
+    assert.deepEqual((await typed(w, "SELECT id FROM kinds WHERE mood = 'meh'")).rows, [], "stale, as Postgres over a table built before the change");
+    assert.deepEqual((await typed(w, "SELECT mood FROM kinds ORDER BY mood, id")).rows.map((x) => x[0]), ["sad", "sad", "ok", "happy"]);
+  });
+});
+
+const COMPUTED = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, -amount AS neg, amount + 1 AS plus, abs(amount) AS size, amount::numeric(10,3) AS widened FROM ledger\norder_by: id\n";
+const TOTALS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT sum(amount) * 2 AS twice, round(sum(amount), 1) AS r, floor(sum(amount)) AS f, round(sum(wide), 2) AS w FROM ledger\n";
+
+test("a numeric whose scale the types fix is stored with Postgres's digits: negated, added to, multiplied, rounded, cast to a typmod", async () => {
+  await overLedger({ computed: COMPUTED, totals: TOTALS }, async (w) => {
+    const r = await typed(w, "SELECT * FROM computed ORDER BY id");
+    assert.deepEqual(r.fields.map(([n, oid, mod]) => [n, oid, n === "widened" ? mod : null]), [["id", 20, null], ["neg", 1700, null], ["plus", 1700, null], ["size", 1700, null], ["widened", 1700, (10 << 16) + 3 + 4]]);
+    assert.deepEqual(r.rows, [["1", "-1.10", "2.10", "1.10", "1.100"], ["3", null, null, null, null], ["9223372036854775806", "2.50", "-1.50", "2.50", "-2.500"], ["9223372036854775807", "-4.00", "5.00", "4.00", "4.000"]]);
+    assert.deepEqual((await typed(w, "SELECT * FROM totals")).rows, [["5.20", "2.6", "2", "2.75"]]);
+  });
+});
+
+test("a numeric the types don't fix is refused with its own reason: a division, a variance, a scale past 18, a scale the rows or a picked value decide, a double's", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  const refusedFiles: Record<string, string> = {
+    mean: "SELECT avg(n) AS mean FROM ledger",
+    wide: "SELECT sum(wide) AS total FROM ledger",
+    texts: "SELECT sum((payload ->> 'a')::numeric) AS total FROM events",
+    larger: "SELECT greatest(amount, 1) AS top FROM ledger",
+    spread: "SELECT stddev(amount) AS sd FROM ledger",
+    varied: "SELECT variance(amount) AS v FROM ledger",
+    // review round 2, finding 2: an integer's scale is 0, never "unknown", so the 30 decimals are seen
+    idwide: "SELECT sum(id) + sum(wide) AS a FROM ledger",
+    bigwide: "SELECT sum(big) + sum(wide) AS b FROM ledger",
+    timeswide: "SELECT sum(wide) * sum(id) AS m FROM ledger",
+    negwide: "SELECT -sum(wide) AS n FROM ledger",
+    floated: "SELECT sum(n::float8)::numeric AS d FROM ledger",
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, sql] of Object.entries(refusedFiles)) w.write(name, `${lag}sql: ${sql}\n`);
+    w.write("mixed", `${lag}sql: SELECT sum(amount) + sum(big) AS combined FROM ledger\n`);
+    w.write("spreadout", `${lag}sql: SELECT stddev(amount)::double precision AS sd FROM ledger\n`);
+    w.write("picked", `${lag}sql: SELECT round(sum(id) + sum(wide), 2) AS a, greatest(sum(amount), 1)::numeric(12,2) AS g FROM ledger\n`);
+    // each file read and planned, under load too: a review already in flight when they were written may not have read them
+    for (const name of Object.keys(refusedFiles)) await w.until((s) => s.state === "refused", `public.${name}`);
+    const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
+    const says = (name: string, message: RegExp, option: string): void => {
+      refusedAt(r(name).refusals, "sql", message);
+      assert.ok(r(name).refusals[0]!.options.some((o) => o.includes(option)), `${name}: ${JSON.stringify(r(name).refusals)}`);
+    };
+    says("mean", /^column mean divides a numeric, which the engine computes as a double$/, "CAST(avg(n) AS double precision) AS mean");
+    says("wide", /^column total has 30 decimals, more than the 18 a stored numeric keeps$/, "round(");
+    says("texts", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/, "sum(CAST(payload ->> 'a' AS numeric(20, 4))) AS total");
+    says("larger", /^column top is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones$/, "CAST(GREATEST(amount, 1) AS numeric(38, 2)) AS top");
+    says("spread", /^column sd is a stddev, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double$/, "CAST(stddev(amount) AS double precision) AS sd");
+    says("varied", /^column v is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "CAST(variance(amount) AS double precision) AS v");
+    for (const [name, col] of [["idwide", "a"], ["bigwide", "b"], ["timeswide", "m"], ["negwide", "n"]]) says(name!, new RegExp(`^column ${col} has 30 decimals, more than the 18`), "round(");
+    says("floated", /^column d is a numeric cast from a double precision value/, "store the double it is: sum(n::float8) AS d");
+    for (const name of Object.keys(refusedFiles)) assert.doesNotMatch(JSON.stringify(r(name).refusals), name === "mean" ? /no fixed scale|can't store exactly yet/ : /no fixed scale|can't store exactly yet|divides a numeric/, name);
+    // each refusal's way out is stored: a sum of an unconstrained numeric's synced column is one cell at the scale its
+    // DECIMAL holds; a stddev as a double; the 30 decimals rounded; a picked value given one scale (#205: `served`, not `built`)
+    for (const name of ["mixed", "spreadout", "picked"]) await w.until(served(w.logged), `public.${name}`);
+    assert.deepEqual((await typed(w, "SELECT combined FROM mixed")).rows, [["12345678901234567893.823456788"]]);
+    assert.equal((await typed(w, "SELECT sd FROM spreadout")).fields[0]![1], 701);
+    assert.deepEqual((await typed(w, "SELECT a, g FROM picked")).rows, [["18446744073709551619.75", "2.60"]]);
+  });
+});
+
+// review round 2 of PR 202, finding 1: a numeric Postgres types from integers, under any function, is stored from the
+// engine type DuckDB says it computes (a sum of int8 is a HUGEINT, whose floor is a double's), never an assumed one
+const INTEGRAL = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT floor(sum(id)) AS f, ceil(sum(id)) AS c, floor(sum(id) + sum(n)) AS fn, abs(-sum(id)) AS a, " +
+  "round(sum(id), -1) AS r, sum(id) * 2 AS m, mod(sum(id), 10) AS md, trunc(sum(id), -2) AS t, greatest(sum(id), 1) AS g FROM ledger\n";
+
+test("an integer Postgres types as numeric is stored with its digits under any function: floor, ceil, abs, round, mod, trunc, greatest of sum(int8)", async () => {
+  await overLedger({ integral: INTEGRAL }, async (w) => {
+    const r = await typed(w, "SELECT * FROM integral");
+    assert.deepEqual(r.fields.map(([, oid]) => oid), Array(9).fill(1700));
+    assert.deepEqual(r.rows, [["18446744073709551617", "18446744073709551617", "18446744078004518921", "18446744073709551617", "18446744073709551620",
+      "36893488147419103234", "7", "18446744073709551600", "18446744073709551617"]]);
+  });
+});
+
+// review round 2 of PR 202, finding 3: each form stored, or refused for its own reason (the PR's "Review round 2" table)
+const FORMS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, round(amount * 10, -1) AS r1, round(amount, -1) AS r0, trunc(amount, 1) AS t, trunc(amount * 10, -1) AS t1, " +
+  "amount::numeric(40,2) AS w, mod(amount, 3) AS md, coalesce(amount, 0.00) AS co, greatest(amount, 1.00) AS g, CASE WHEN amount > 0 THEN amount ELSE 0.00 END AS k, " +
+  "greatest(amount, 1)::numeric(12,2) AS gc, -amount * n AS mi FROM ledger\norder_by: id\n";
+const AGGREGATES = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT min(amount) AS lo, max(amount) AS hi, sum(amount) AS s, round(sum(amount), 5) AS r5, round(max(big), 4) AS rb FROM ledger\n";
+
+test("each numeric form whose scale the types fix is stored with Postgres's digits: round to tens, trunc, mod, a typmod past 38, COALESCE, GREATEST, CASE of one scale", async () => {
+  await overLedger({ forms: FORMS, aggregates: AGGREGATES }, async (w) => {
+    const r = await typed(w, "SELECT * FROM forms ORDER BY id");
+    assert.equal(r.fields.find(([n]) => n === "w")![2], (40 << 16) + 2 + 4, "numeric(40,2) on the wire");
+    assert.deepEqual(r.rows.map((x) => x.slice(1)), [
+      ["10", "0", "1.1", "10", "1.10", "1.10", "1.10", "1.10", "1.10", "1.10", "-11.00"],
+      [null, null, null, null, null, null, "0.00", "1.00", "0.00", "1.00", null],
+      ["-30", "0", "-2.5", "-20", "-2.50", "-2.50", "-2.50", "1.00", "0.00", "1.00", "5368709117.50"],
+      ["40", "0", "4.0", "40", "4.00", "1.00", "4.00", "4.00", "4.00", "4.00", "-8589934588.00"],
+    ]);
+    assert.deepEqual((await typed(w, "SELECT * FROM aggregates")).rows, [["-2.50", "4.00", "2.60", "2.60000", "12345678901234567890.1235"]]);
+  });
+});
+
+// review round 3 of PR 202, F3: a made type's OID, as a REAL run spells it. The source's catalog read gives an oid as a
+// STRING (Postgres's JSON writes only the int, float and numeric types as numbers), and a field carries the SOURCE's OID
+// for a made type, which the catalog's pg_type does not have: the enum and the citext were refused by type in a real run
+const SOURCE_OIDS = LEDGER_COLUMNS.map((c) => c.name === "mood" ? { ...c, typeOid: "5974240", typeArrayOid: "5974239" } : c.name === "name" ? { ...c, typeOid: "5974250", typeArrayOid: "5974249" } : c);
+
+test("an enum and a citext over a source's own type OIDs, spelled as the source's JSON spells them, are stored, not refused by type", async () => {
+  await overLedger({ kinds: KINDS }, async (w) => {
+    assert.deepEqual(w.status("public.kinds").refusals, []);
+    const r = await typed(w, "SELECT id, mood, name FROM kinds ORDER BY mood, id");
+    assert.deepEqual([r.fields[1]![1], r.fields[2]![1]], [5974240, 5974250], "the source's OIDs on the wire, as a synced column sends");
+    assert.deepEqual(r.rows.map((x) => x[1]), ["sad", "sad", "ok", "happy"], "the declared order");
+    assert.deepEqual((await typed(w, "SELECT id FROM kinds WHERE name = 'ALICE' ORDER BY id")).rows, [["1"], ["9223372036854775806"]]);
+  }, SOURCE_OIDS);
+});
+
+// review round 3 of PR 202, F1: a numeric the engine answers itself (no exact program, "as the engine answers it") is
+// held to the engine type DuckDB says it computes: a DECIMAL stored, an integer stored as HUGEINT, a double refused
+test("a numeric the engine answers itself is held to its engine type: a variance it computes as a double is refused, a sign is stored as HUGEINT", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({ signs: `${lag}sql: SELECT id, sign(amount) AS s FROM ledger\norder_by: id\n` }, async (w, restarted) => {
+    const r = await typed(w, "SELECT id, s FROM signs ORDER BY id");
+    assert.deepEqual(r.fields.map(([, oid]) => oid), [20, 1700]);
+    assert.deepEqual(r.rows.map((x) => x[1]), ["1", null, "-1", "1"]);
+    if (restarted) return;
+    assert.deepEqual(await w.rows("SELECT data_type FROM duckdb_columns() WHERE table_name = 'signs' AND column_name = 's'"), [["HUGEINT"]]);
+    w.write("sb", `${lag}sql: SELECT stddev(big) AS sb FROM ledger\n`);
+    w.write("vw", `${lag}sql: SELECT variance(wide) AS vw FROM ledger\n`);
+    for (const name of ["sb", "vw"]) await w.until((s) => s.state === "refused", `public.${name}`);
+    for (const [name, col] of [["sb", "sb"], ["vw", "vw"]] as const) {
+      const refusals = w.status(`public.${name}`).refusals;
+      refusedAt(refusals, "sql", new RegExp(`^column ${col} is a (stddev|variance), which Postgres computes as an exact numeric at decimals it picks`));
+      assert.ok(refusals[0]!.options.some((o) => o.includes("AS double precision) AS")), JSON.stringify(refusals));
+    }
+  });
+});
+
+// review round 3 of PR 202, F2: each refusal says its true reason. A sqrt, exp, ln or power is computed by the catalog's
+// Postgres at decimals it picks per value, never "a double"; one an outer round fixes says what still stands in the way;
+// a JSON number's sum an outer round fixes is held at 36 decimals on the way, never "the rows decide its decimals"
+test("a numeric's refusal says its true reason: sqrt, exp, ln and power pick their decimals per value; a round over them, or over a JSON number's sum, says what still stands", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  const files: Record<string, [string, RegExp]> = {
+    root: ["SELECT sqrt(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    squared: ["SELECT power(amount, 2) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    squaredsum: ["SELECT power(sum(id), 2) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    grown: ["SELECT exp(amount) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    logged: ["SELECT ln(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks/],
+    sdround: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/],
+    textround: ["SELECT round(sum((payload ->> 'a')::numeric), 2) AS x FROM events", /^column x is computed at 36 decimals on the way to its own, more than the 18/],
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(files)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const name of Object.keys(files)) await w.until((s) => s.state === "refused", `public.${name}`);
+    for (const [name, [, message]] of Object.entries(files)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      refusedAt(refusals, "sql", message);
+      assert.doesNotMatch(JSON.stringify(refusals), /holds as a double|sync the value as a numeric|rows decide/, name);
+    }
+  });
+});
+
+// review round 3 of PR 202, F4: a numeric past the 38 digits a stored numeric holds, at the write, is a failure that names
+// its cause and its way out, run again on the back-off (a change to the rows can bring it back within them), never a
+// DuckDB message alone
+test("a numeric that overflows the stored numeric at the write fails naming its cause and its way out, on the back-off", async () => {
+  await overLedger({ nums: NUMS }, async (w, restarted) => {
+    if (restarted) return;
+    w.write("squares", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT sum(big) * sum(big) AS sq FROM ledger\n");
+    await w.until((s) => s.state === "failed", "public.squares");
+    const s = w.status("public.squares");
+    assert.deepEqual(s.refusals, [], "data-dependent: a failure, not a refusal of the definition");
+    assert.match(s.error ?? "", /^numeric field overflow \(SQLSTATE 22003\)\. The value has more than the 38 digits .* cast it to double precision if it need not be exact/);
+    assert.ok(s.retryAt !== null, "run again on the back-off");
+  });
+});
+
+// review round 4 of PR 202, finding 1: the run's connection is a session's, set up by the ONE set-up (src/duck/store.ts
+// `SessionSetup`). Every Mason function reads `__mason_session` (its first argument), and answered NULL on a connection
+// without it: a JSON number's cast stored NULL in every row, with no error. `current_setting` reads `__mason_settings`,
+// which a generated table has no session to give: refused by its plan ("it reads a session")
+test("a generated table's run reads the session variables as a session does: a JSON number's cast, sum and round are stored, a session setting is refused", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({
+    bytenant: `${lag}sql: SELECT tenant_id, sum((payload ->> 'a')::numeric(20,4)) AS x FROM events GROUP BY tenant_id\norder_by: tenant_id\n`,
+    jsontotal: `${lag}sql: SELECT sum((payload ->> 'a')::numeric(20,4)) AS x, round(sum((payload ->> 'a')::numeric(20,4)), 2) AS r FROM events\n`,
+    jsoncast: `${lag}sql: SELECT id, (payload ->> 'a')::numeric(20,4) AS x, ((payload ->> 'a')::numeric)::numeric(20,4) AS y, (payload ->> 'a')::int AS i FROM events\norder_by: id\n`,
+  }, async (w, restarted) => {
+    assert.deepEqual((await typed(w, "SELECT tenant_id, x FROM bytenant ORDER BY tenant_id")).rows, [[1, "1.0000"], [2, "2.0000"]]);
+    assert.deepEqual((await typed(w, "SELECT x, r FROM jsontotal")).rows, [["3.0000", "3.00"]]);
+    assert.deepEqual((await typed(w, "SELECT id, x, y, i FROM jsoncast ORDER BY id")).rows,
+      [["1", "1.0000", "1.0000", 1], ["2", null, null, null], ["3", "2.0000", "2.0000", 2], ["4", null, null, null]]);
+    if (restarted) return;
+    w.write("setting", `${lag}sql: SELECT id, current_setting('TimeZone') AS z FROM events\n`);
+    await w.until((s) => s.state === "refused", "public.setting");
+    refusedAt(w.status("public.setting").refusals, "sql", /^it reads a session/);
+  });
+});
+
+// review round 4 of PR 202, finding 2: a refusal's reason and way out come from the FORM that was seen, carried with it,
+// never from a type several forms share: every reason against every form that reaches it, and each way out stored
+test("a numeric's refusal is said from its form: a JSON number's text, the variance family in one wording, sqrt and its round; each way out is stored", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  const files: Record<string, [string, RegExp, string]> = {
+    jsonbare: ["SELECT id, (payload ->> 'a')::numeric AS x FROM events", /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\), which keeps the decimals each value's text has/, "CAST(payload ->> 'a' AS numeric(20, 4)) AS x"],
+    jsonround: ["SELECT round((payload ->> 'a')::numeric, 2) AS x FROM events", /^column x is a numeric read from text/, "round(CAST(payload ->> 'a' AS numeric(20, 4)), 2) AS x"],
+    var1: ["SELECT variance(amount) AS x FROM ledger", /^column x is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "CAST(variance(amount) AS double precision) AS x"],
+    var2: ["SELECT stddev(n) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "CAST(stddev(n) AS double precision) AS x"],
+    var3: ["SELECT stddev(big) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "CAST(stddev(big) AS double precision) AS x"],
+    var4: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "CAST(round(stddev(amount), 2) AS double precision) AS x"],
+    root: ["SELECT sqrt(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value \(sqrt\)/, "CAST(sqrt(abs(amount)) AS double precision) AS x"],
+    rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks \(sqrt\)/, "CAST(round(sqrt(abs(amount)), 4) AS double precision) AS x"],
+  };
+  // each way out, written over the same columns: stored
+  const ways: Record<string, string> = {
+    wayjson: "SELECT id, (payload ->> 'a')::numeric(20,4) AS x FROM events",
+    wayvar: "SELECT variance(amount)::double precision AS x, stddev(n)::double precision AS y, stddev(big)::double precision AS z FROM ledger",
+    wayroot: "SELECT sqrt(abs(amount))::double precision AS x FROM ledger",
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(files)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const [name, sql] of Object.entries(ways)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const name of Object.keys(files)) await w.until((s) => s.state === "refused", `public.${name}`);
+    for (const [name, [, message, way]] of Object.entries(files)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      refusedAt(refusals, "sql", message);
+      assert.equal(refusals.length, 1, name);
+      assert.ok(refusals[0]!.options.some((o) => o.includes(way)), `${name}: ${JSON.stringify(refusals[0]!.options)}`);
+      if (!name.startsWith("root")) assert.doesNotMatch(refusals[0]!.message + refusals[0]!.options.join(), /sqrt/, name);
+      if (name.startsWith("var")) assert.doesNotMatch(refusals[0]!.message, /picks by the size of each value \(/, name);
+    }
+    for (const name of Object.keys(ways)) await w.until(served(w.logged), `public.${name}`);
+    assert.deepEqual((await typed(w, "SELECT id, x FROM wayjson ORDER BY id")).rows, [["1", "1.0000"], ["2", null], ["3", "2.0000"], ["4", null]]);
+    assert.deepEqual((await typed(w, "SELECT x FROM wayroot")).fields.map(([, oid]) => oid), [701]);
+    assert.deepEqual((await typed(w, "SELECT x, y, z FROM wayvar")).fields.map(([, oid]) => oid), [701, 701, 701]);
+  });
+});
+
+// review round 4 of PR 202, finding 3: what a run's failure records names nothing of the engine: every DECIMAL overflow
+// spelling DuckDB gives is said in the user's words, and no hidden column's name (`__mason_cell_0`) reaches the record
+test("a run's failure says a cast's overflow in the user's words, and no recorded failure carries an engine name", async () => {
+  const spellings = [
+    'Conversion Error: Casting value "12345678901234567890.123456789" to type DECIMAL(5,2) failed: value is out of range! when casting from source column __mason_cell_0',
+    "Out of Range Error: Overflow in multiplication of DECIMAL(38) (99999999999999999999999999999999999999 * 10). You might want to add an explicit cast to a decimal with a smaller scale.",
+    "Out of Range Error: Overflow in ROUND of DECIMAL(38)",
+    "Out of Range Error: Overflow in HUGEINT multiplication: 99999999999999999999999999999999999999 * 3",
+    'Conversion Error: Could not convert string "NaN" to DECIMAL(20,4)',
+    "Conversion Error: Could not cast value 1e40 to DECIMAL(38,0)",
+    "Binder Error: Referenced column __mason_cell_3 not found",
+    // review round 5: what is not a DECIMAL is said through the same one mapping
+    "Out of Range Error: Overflow in multiplication of INT64 (9223372036854775807 * 2)!",
+    "Invalid Input Error: Division by zero in expression (10 // 0). Use TRY(...) or SET error_on_division_by_zero",
+    'Invalid Input Error: mason[22P02]: invalid input syntax for type integer: "abc"',
+  ];
+  // read through the module, so the file loads where the function is missing and this test fails by name (fails-without)
+  const failureWords = (generatedModule as { failureWords?: (error: unknown) => string }).failureWords;
+  assert.ok(failureWords !== undefined, "the one function a run's failure is said through");
+  for (const m of spellings) {
+    const said = failureWords(m);
+    assert.doesNotMatch(said, /__mason_|DECIMAL|HUGEINT|INT64|Overflow in|TRY\(|mason\[|Error:|abc/, `${m} -> ${said}`);
+    assert.match(said, /\(SQLSTATE [0-9A-Z]{5}\)/, `${m} -> ${said}`);
+  }
+  assert.match(failureWords(spellings[0]!), /^numeric field overflow \(SQLSTATE 22003\)\. A field with precision 5, scale 2 must round to an absolute value less than 10\^3\./);
+  await overLedger({ nums: NUMS }, async (w, restarted) => {
+    if (restarted) return;
+    w.write("narrow", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT big::numeric(5,2) AS c FROM ledger\n");
+    await w.until((s) => s.state === "failed", "public.narrow");
+    const s = w.status("public.narrow");
+    assert.match(s.error ?? "", /^numeric field overflow \(SQLSTATE 22003\)\. A field with precision 5, scale 2 must round/);
+    assert.doesNotMatch(s.error ?? "", /__mason_|DECIMAL/);
+    assert.ok(!w.logged.some((l) => l.includes("public.narrow") && /__mason_/.test(l)), "the log names no hidden column");
+  });
+});
+
+// review round 5 of PR 202, class A: a refusal's reason and way out come from the form the walk carried up, through any
+// wrapper (an operator, a coalesce, a round or trunc, a cast with a typmod, an aggregate), never from the engine type,
+// the outermost node or a constant: every reason against every wrapper that reaches it, the way out naming the user's
+// own function, and each way out built and stored
+const VAR = (fn: string): RegExp => new RegExp(`^column x is a ${fn}, which Postgres computes as an exact numeric at decimals it picks`);
+const PER = (fn: string): RegExp => new RegExp(`^column x is a numeric whose decimals Postgres picks by the size of each value \\(${fn}\\)`);
+const PERFIX = (fn: string): RegExp => new RegExp(`^column x rounds or casts a numeric Postgres computes for each row at decimals it picks \\(${fn}\\)`);
+const TEXT = /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\)/;
+const DIV = /^column x divides a numeric, which the engine computes as a double$/;
+const SCALE = (n: number): RegExp => new RegExp(`^column x has ${n} decimals, more than the 18`);
+const HELD = (n: number): RegExp => new RegExp(`^column x is computed at ${n} decimals on the way to its own`);
+const ROWS = /^column x sums values Postgres keeps at differing scales, so the rows decide its decimals$/;
+const PICKS = /^column x is whichever value a GREATEST, LEAST, COALESCE or CASE takes/;
+const DOUBLE = /^column x is a numeric cast from a double precision value/;
+const REASONS: Record<string, [string, RegExp, string]> = {
+  // (the variance family, sqrt and its kin, and a cast from a double: round 6's table, which holds each way out whole)
+  tbare: ["SELECT (payload ->> 'a')::numeric AS x FROM events", TEXT, "CAST(payload ->> 'a' AS numeric(20, 4)) AS x"],
+  top: ["SELECT (payload ->> 'a')::numeric + 1 AS x FROM events", TEXT, "CAST(payload ->> 'a' AS numeric(20, 4)) + 1 AS x"],
+  tco: ["SELECT coalesce((payload ->> 'a')::numeric, 0) AS x FROM events", TEXT, "COALESCE(CAST(payload ->> 'a' AS numeric(20, 4)), 0) AS x"],
+  tround: ["SELECT trunc((payload ->> 'a')::numeric, 2) AS x FROM events", TEXT, "trunc(CAST(payload ->> 'a' AS numeric(20, 4)), 2) AS x"],
+  tmax: ["SELECT max((payload ->> 'a')::numeric) AS x FROM events", TEXT, "max(CAST(payload ->> 'a' AS numeric(20, 4))) AS x"],
+  tmin: ["SELECT min((payload ->> 'a')::numeric) AS x FROM events", TEXT, "min(CAST(payload ->> 'a' AS numeric(20, 4))) AS x"],
+  tsum: ["SELECT sum((payload ->> 'a')::numeric) AS x FROM events", ROWS, "sum(CAST(payload ->> 'a' AS numeric(20, 4))) AS x"],
+  dbare: ["SELECT amount / 3 AS x FROM ledger", DIV, "AS double precision)"],
+  dop: ["SELECT amount / 3 + 1 AS x FROM ledger", DIV, "AS double precision)"],
+  dco: ["SELECT coalesce(amount / 3, 0) AS x FROM ledger", DIV, "AS double precision)"],
+  dround: ["SELECT round(amount / 3, 2) AS x FROM ledger", DIV, "AS double precision)"],
+  dtyp: ["SELECT (amount / 3)::numeric(10,2) AS x FROM ledger", DIV, "AS double precision)"],
+  dsum: ["SELECT sum(amount / 3) AS x FROM ledger", DIV, "AS double precision)"],
+  dmax: ["SELECT max(amount / 3) AS x FROM ledger", DIV, "AS double precision)"],
+  davg: ["SELECT avg(amount) AS x FROM ledger", DIV, "AS double precision)"],
+  sop: ["SELECT wide + 1 AS x FROM ledger", SCALE(30), "round("],
+  sco: ["SELECT coalesce(wide * 1, wide) AS x FROM ledger", SCALE(30), "round("],
+  styp: ["SELECT (wide + 1)::numeric(40,20) AS x FROM ledger", SCALE(20), "round("],
+  ssum: ["SELECT sum(wide) AS x FROM ledger", SCALE(30), "round("],
+  rop: ["SELECT sum((payload ->> 'a')::numeric) + 1 AS x FROM events", ROWS, "AS numeric(20, 4))"],
+  rco: ["SELECT coalesce(sum((payload ->> 'a')::numeric), 0) AS x FROM events", ROWS, "AS numeric(20, 4))"],
+  rround: ["SELECT round(sum((payload ->> 'a')::numeric), 2) AS x FROM events", HELD(36), "AS numeric(20, 4))"],
+  kbare: ["SELECT greatest(amount, 1) AS x FROM ledger", PICKS, "AS numeric(38, 2)) AS x"],
+  kop: ["SELECT greatest(amount, 1) + 1 AS x FROM ledger", PICKS, "AS numeric(38, 2)) AS x"],
+  kco: ["SELECT coalesce(amount, 0) AS x FROM ledger", PICKS, "AS numeric(38, 2)) AS x"],
+};
+// each way out, written over the same columns as the user would: stored
+const WAYS_OUT: Record<string, string> = {
+  wtext: "SELECT max((payload ->> 'a')::numeric(20,4)) AS x, min((payload ->> 'a')::numeric(20,4)) AS y FROM events",
+  wtextop: "SELECT id, (payload ->> 'a')::numeric(20,4) + 1 AS x, coalesce((payload ->> 'a')::numeric(20,4), 0.0000) AS y FROM events",
+  wdiv: "SELECT sum(amount) AS total, count(amount) AS n FROM ledger",
+  wscale: "SELECT round(sum(wide), 2) AS x FROM ledger",
+  wrows: "SELECT sum((payload ->> 'a')::numeric(20,4)) + 1 AS x FROM events",
+  wpicks: "SELECT greatest(amount, 1)::numeric(12,2) AS x FROM ledger",
+};
+// every function a way out may name: one the user did not write is never named
+const FUNCTIONS = ["stddev", "var_pop", "var_samp", "variance", "sqrt", "exp", "ln", "log", "power", "max", "min"];
+test("round 5: every reason against every wrapper says the form's reason and a way out naming the user's own function, and each way out is stored", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(REASONS)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const [name, sql] of Object.entries(WAYS_OUT)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const name of Object.keys(REASONS)) await w.until((s) => s.state === "refused" || s.serving, `public.${name}`);
+    const wrong: string[] = [];
+    for (const [name, [sql, reason, way]] of Object.entries(REASONS)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      const said = refusals.map((r) => `${r.message} | ${r.options.join(" | ")}`).join(" || ");
+      const strays = FUNCTIONS.filter((f) => !sql.includes(`${f}(`) && new RegExp(`\\b${f}\\(`).test(said));
+      if (refusals.length !== 1 || !reason.test(refusals[0]!.message) || !refusals[0]!.options.some((o) => o.includes(way)) || strays.length > 0
+        || /engine computes as a double \(|\(…\)|holds as a double/.test(said)) wrong.push(`${name}: ${sql}\n    ${said || "(not refused)"}`);
+    }
+    assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
+    for (const name of Object.keys(WAYS_OUT)) await w.until(served(w.logged), `public.${name}`);
+    assert.deepEqual((await typed(w, "SELECT x, y FROM wtext")).rows, [["2.0000", "1.0000"]]);
+  });
+});
+
+// review round 5 of PR 202, class B: a run's failure is said through the ONE mapping a statement on the wire gets
+// (src/duck/store.ts `pgErrorOf`): Postgres's message and SQLSTATE, never the engine's words or Mason's own marker
+test("round 5: a run's failure is Postgres's error, by the wire's one mapping: an integer's overflow, a division by zero, a text that is not a number", async () => {
+  const files: Record<string, [string, RegExp]> = {
+    i8: ["SELECT id * 2 AS x FROM ledger", /^bigint out of range \(SQLSTATE 22003\)/],
+    i4: ["SELECT n * 2 AS x FROM ledger", /^integer out of range \(SQLSTATE 22003\)/],
+    zero: ["SELECT 10 / (id - 1) AS x FROM ledger", /^division by zero \(SQLSTATE 22012\)/],
+    tnum: ["SELECT kind::numeric(10,3) AS x FROM events", /^invalid input syntax for type numeric: … \(SQLSTATE 22P02\)/],
+    tint: ["SELECT kind::int AS x FROM events", /^invalid input syntax for type integer: … \(SQLSTATE 22P02\)/],
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(files)) w.write(name, `kind: scheduled\ntarget_lag: 1h\nsql: ${sql}\n`);
+    for (const name of Object.keys(files)) await w.until((s) => s.state === "failed", `public.${name}`);
+    for (const [name, [, words]] of Object.entries(files)) {
+      const error = w.status(`public.${name}`).error ?? "";
+      assert.match(error, words, name);
+      assert.doesNotMatch(error, /Overflow in|INT64|INT32|TRY\(|error_on_division|mason\[|Invalid Input|Conversion Error|DECIMAL|__mason_|query/, `${name}: ${error}`);
+    }
+  });
+});
+
+// review round 6 of PR 202, class A: the reason is what each node computes AS POSTGRES TYPES IT (a node over a double is a
+// double, whatever its kind; a name the statement resolves only to a double-returning function is one), and the way out
+// is the user's own expression with only the cast moved, every aggregate and wrapper kept: each case's reason, its way
+// out exactly (compared as Postgres reads it back), and each way out written as a table and held stored (round 5's
+// variance, sqrt-and-kin and double rows moved here, where the way out is held whole)
+const R6: Record<string, [string, RegExp, string | null]> = {
+  // a double carried up from below: whatever the node's own kind, Postgres computes a double, and the numeric is its cast
+  davg: ["avg(amount::float8)::numeric", DOUBLE, "avg(amount::float8)"],
+  ddiv: ["(amount::float8 / 2)::numeric", DOUBLE, "amount::float8 / 2"],
+  dsqrt: ["sqrt(amount::float8)::numeric", DOUBLE, "sqrt(amount::float8)"],
+  dresolved: ["sqrt(n)::numeric", DOUBLE, "sqrt(n)"],
+  dstddev: ["stddev(big)::float8::numeric", DOUBLE, "stddev(big)::float8"],
+  dvariance: ["variance(amount::float8)::numeric(20,4)", DOUBLE, "variance(amount::float8)"],
+  dround: ["round(exp(amount::float8)::numeric, 2)", DOUBLE, "round(exp(amount::float8)::numeric, 2)::double precision"],
+  dsum: ["sum(ln(abs(amount))::float8)::numeric", DOUBLE, "sum(ln(abs(amount))::float8)"],
+  dgreatest: ["greatest(amount / 3, amount::float8)::numeric", DOUBLE, "greatest(amount / 3, amount::float8)"],
+  dcoalesce: ["coalesce(stddev(big), max(amount)::float8)::numeric", DOUBLE, "coalesce(stddev(big), max(amount)::float8)"],
+  // a count over a double is a bigint, and what divides it is an exact division (round 7: its way out, the user's own)
+  dcount: ["count(amount::float8)::numeric / 3", DIV, "(count(amount::float8)::numeric / 3)::double precision"],
+  // sqrt and its kin over an exact numeric: the cast on the function, the aggregate and the wrapper kept
+  psum: ["sum(sqrt(abs(amount)))", PER("sqrt"), "sum(sqrt(abs(amount))::double precision)"],
+  pmax: ["max(ln(abs(amount)))", PER("ln"), "max(ln(abs(amount))::double precision)"],
+  psumround: ["round(sum(sqrt(abs(amount))), 2)", PERFIX("sqrt"), "round(sum(sqrt(abs(amount))), 2)::double precision"],
+  pbare: ["sqrt(abs(amount))", PER("sqrt"), "sqrt(abs(amount))::double precision"],
+  pexp: ["exp(amount)", PER("exp"), "exp(amount)::double precision"],
+  pop: ["ln(abs(amount)) + 1", PER("ln"), "ln(abs(amount))::double precision + 1"],
+  pco: ["coalesce(sqrt(abs(amount)), 0)", PER("sqrt"), "coalesce(sqrt(abs(amount))::double precision, 0)"],
+  ppow: ["power(amount, 2)", PER("power"), "power(amount, 2)::double precision"],
+  plog: ["log(10, abs(amount))", PER("log"), "log(10, abs(amount))::double precision"],
+  pround: ["round(log(abs(amount)), 2)", PERFIX("log"), "round(log(abs(amount)), 2)::double precision"],
+  ptyp: ["exp(amount)::numeric(10,2)", PERFIX("exp"), "exp(amount)::double precision"],
+  // the variance family over an exact numeric
+  vbare: ["stddev(big)", VAR("stddev"), "stddev(big)::double precision"],
+  vop: ["stddev(big) * 2", VAR("stddev"), "stddev(big)::double precision * 2"],
+  vco: ["coalesce(stddev(big), 0)", VAR("stddev"), "coalesce(stddev(big)::double precision, 0)"],
+  vround: ["round(stddev(big), 2)", VAR("stddev"), "round(stddev(big), 2)::double precision"],
+  vtyp: ["stddev(big)::numeric(20,4)", VAR("stddev"), "stddev(big)::double precision"],
+  vop2: ["var_pop(amount) + 1", VAR("var_pop"), "var_pop(amount)::double precision + 1"],
+  vco2: ["coalesce(var_samp(amount), 0)", VAR("var_samp"), "coalesce(var_samp(amount)::double precision, 0)"],
+  // a numeric cast from a double: the cast taken away, a round over it kept with the cast to double above it
+  fbare: ["amount::float8::numeric", DOUBLE, "amount::float8"],
+  fop: ["amount::float8::numeric + 1", DOUBLE, "amount::float8 + 1"],
+  fco: ["coalesce(amount::float8::numeric, 0)", DOUBLE, "coalesce(amount::float8, 0)"],
+  fround: ["round(amount::float8::numeric, 2)", DOUBLE, "round(amount::float8::numeric, 2)::double precision"],
+  ftyp: ["amount::float8::numeric(10,2)", DOUBLE, "amount::float8"],
+  fsum: ["sum(n::float8)::numeric", DOUBLE, "sum(n::float8)"],
+  fmax: ["max(amount::float8::numeric)", DOUBLE, "max(amount::float8)"],
+};
+/** an expression as Postgres reads it back: one spelling for `::float8`, `CAST(… AS double precision)` and the rest; a
+ *  text that is not SQL is itself, and so never equal to the way out */
+const asRead = async (expr: string): Promise<string> => {
+  try { return deparseSync((await parseSql(`SELECT ${expr} AS x`)).stmts![0]!.stmt!, { pretty: false }); }
+  catch { return `not SQL: ${expr}`; }
+};
+test("round 6: a numeric's reason is the type each node computes as Postgres types it, and its way out is the user's own expression, aggregate kept, and stores", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(R6)) w.write(name, `${lag}sql: SELECT ${sql} AS x FROM ledger\n`);
+    for (const name of Object.keys(R6)) await w.until((s) => s.state === "refused" || s.serving, `public.${name}`);
+    const wrong: string[] = [];
+    for (const [name, [sql, reason, way]] of Object.entries(R6)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      const said = refusals.map((r) => `${r.message} | ${r.options.join(" | ")}`).join(" || ");
+      const given = refusals[0]?.options.map((o) => /: (.+) AS x$/.exec(o)?.[1]).find((o) => o !== undefined);
+      const ok = refusals.length === 1 && reason.test(refusals[0]!.message)
+        && (way === null || (given !== undefined && await asRead(given) === await asRead(way)));
+      if (!ok) wrong.push(`${name}: ${sql}\n    ${said || "(not refused)"}`);
+    }
+    assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
+    // each way out, as the refusal gives it: stored, as a double
+    const ways = Object.entries(R6).filter(([, [, , way]]) => way !== null);
+    for (const [name, [, , way]] of ways) w.write(`w${name}`, `${lag}sql: SELECT ${way} AS x FROM ledger\n`);
+    for (const [name] of ways) await w.until(served(w.logged), `public.w${name}`);
+    for (const [name] of ways) assert.deepEqual((await typed(w, `SELECT x FROM w${name}`)).fields.map(([, oid]) => oid), [701], name);
+  });
+});
+
+// review round 6 of PR 202, class B: a numeric field overflow is ONE wording, Postgres's message and DETAIL, whichever path
+// raises it: the engine's DECIMAL cast, and a Mason function's error carried as mason[22003]
+test("round 6: a numeric field overflow says Postgres's DETAIL on every path: the engine's cast, and a cast a Mason function computes", async () => {
+  const words = /^numeric field overflow \(SQLSTATE 22003\)\. A field with precision 10, scale 3 must round to an absolute value less than 10\^7\. Give the value/;
+  const files: Record<string, string> = {
+    oengine: "SELECT (id::text || '00000000000')::numeric(10,3) AS x FROM ledger",
+    ofunction: "SELECT (id::text || '00000000000')::numeric(10,3)::double precision AS x FROM ledger",
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, sql] of Object.entries(files)) w.write(name, `kind: scheduled\ntarget_lag: 1h\nsql: ${sql}\n`);
+    for (const name of Object.keys(files)) await w.until((s) => s.state === "failed", `public.${name}`);
+    for (const name of Object.keys(files)) assert.match(w.status(`public.${name}`).error ?? "", words, name);
+  });
+});
+
+// review round 7 of PR 202, class A: the walk follows a column's value wherever the analysis says it comes from (a scalar
+// sublink's subselect, a CTE's query, each arm of a set operation, a subquery in FROM under any node), and a way out never
+// names the output column as if its source had it: the column's own expression with the cast moved, or the query of the
+// statement the cast belongs in, named in the user's words and given whole. Class B: the text, divides and picks forms,
+// and the rows over a text form, give the user's own expression too, never a placeholder; a numeric read from text says
+// what the analysis typed the text as. Each case: the reason, every option exactly, and each way out built and stored
+const DBL = "store it as a double if it need not be exact: ", ORDBL = `or ${DBL}`;
+const AT_READ = "or compute it in the statement that reads the synced table";
+const DIV_READ = "or store what it divides, and divide in the statement that reads the table";
+const ONE = "give it one scale: ";
+const TEXT_DOUBLE = /^column x is a numeric read from text \(the text of a double precision value, cast to numeric\), which keeps the decimals each value's text has$/;
+const TEXT_TEXT = /^column x is a numeric read from text \(a text value cast to numeric\), which keeps the decimals each value's text has$/;
+const TEXT_JSON = /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\), which keeps the decimals each value's text has$/;
+// [the definition, its reason, its options exactly, the statements its ways out describe where they are not the column's
+// own expression (`SELECT <way> AS x FROM <its table>` otherwise)]
+const R7: Record<string, [string, RegExp, [string, string], string[]?]> = {
+  asub: ["SELECT (SELECT stddev(big) FROM ledger) AS x FROM ledger", VAR("stddev"),
+    [`${DBL}(SELECT CAST(stddev(big) AS double precision) FROM ledger) AS x`, AT_READ]],
+  anested: ["SELECT (SELECT (SELECT stddev(big) FROM ledger) FROM ledger LIMIT 1) AS x FROM ledger", VAR("stddev"),
+    [`${DBL}(SELECT (SELECT CAST(stddev(big) AS double precision) FROM ledger) FROM ledger LIMIT 1) AS x`, AT_READ]],
+  acte: ["WITH t AS (SELECT sqrt(abs(amount)) AS v FROM ledger) SELECT sum(v) AS x FROM t", PER("sqrt"),
+    [`${DBL}write the WITH query t as SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger`, AT_READ],
+    ["WITH t AS (SELECT sqrt(abs(amount))::double precision AS v FROM ledger) SELECT sum(v) AS x FROM t"]],
+  avar: ["WITH t AS (SELECT stddev(big) AS v FROM ledger) SELECT v AS x FROM t", VAR("stddev"),
+    [`${DBL}write the WITH query t as SELECT CAST(stddev(big) AS double precision) AS v FROM ledger`, AT_READ],
+    ["WITH t AS (SELECT stddev(big)::double precision AS v FROM ledger) SELECT v AS x FROM t"]],
+  avarround: ["WITH t AS (SELECT var_samp(amount) AS v FROM ledger) SELECT round(v, 2) AS x FROM t", VAR("var_samp"),
+    [`${DBL}CAST(round(v, 2) AS double precision) AS x`, AT_READ],
+    ["WITH t AS (SELECT var_samp(amount) AS v FROM ledger) SELECT round(v, 2)::double precision AS x FROM t"]],
+  afrom: ["SELECT sum(v) AS x FROM (SELECT sqrt(abs(amount)) AS v FROM ledger) AS s", PER("sqrt"),
+    [`${DBL}write the subquery s as SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger`, AT_READ],
+    ["SELECT sum(v) AS x FROM (SELECT sqrt(abs(amount))::double precision AS v FROM ledger) AS s"]],
+  aunion: ["SELECT sqrt(abs(amount)) AS x FROM ledger UNION ALL SELECT amount FROM ledger", PER("sqrt"),
+    [`${DBL}write the UNION ALL as SELECT CAST(sqrt(abs(amount)) AS double precision) AS x FROM ledger UNION ALL SELECT amount FROM ledger`, AT_READ],
+    ["SELECT sqrt(abs(amount))::double precision AS x FROM ledger UNION ALL SELECT amount FROM ledger"]],
+  ajson: ["SELECT (payload ->> 'a')::numeric AS x FROM events UNION ALL SELECT (payload ->> 'b')::numeric FROM events", TEXT_JSON,
+    [`${ONE}write the UNION ALL as SELECT CAST(payload ->> 'a' AS numeric(20, 4)) AS x FROM events UNION ALL SELECT CAST(payload ->> 'b' AS numeric(20, 4)) FROM events`,
+      `${ORDBL}write the UNION ALL as SELECT CAST(payload ->> 'a' AS double precision) AS x FROM events UNION ALL SELECT CAST(payload ->> 'b' AS double precision) FROM events`],
+    ["SELECT (payload ->> 'a')::numeric(20,4) AS x FROM events UNION ALL SELECT (payload ->> 'b')::numeric(20,4) FROM events",
+      "SELECT (payload ->> 'a')::double precision AS x FROM events UNION ALL SELECT (payload ->> 'b')::double precision FROM events"]],
+  tjson: ["SELECT (payload ->> 'a')::numeric + 1 AS x FROM events", TEXT_JSON,
+    [`${ONE}CAST(payload ->> 'a' AS numeric(20, 4)) + 1 AS x`, `${ORDBL}CAST(payload ->> 'a' AS double precision) + 1 AS x`]],
+  tjsonmax: ["SELECT max((payload ->> 'a')::numeric) AS x FROM events", TEXT_JSON,
+    [`${ONE}max(CAST(payload ->> 'a' AS numeric(20, 4))) AS x`, `${ORDBL}max(CAST(payload ->> 'a' AS double precision)) AS x`]],
+  // a double the statement computes keeps its form through the text (round 12); a stored double's text is a text's
+  tdouble: ["SELECT (amount::float8::numeric)::text::numeric AS x FROM ledger", DOUBLE,
+    ["store the double it is: CAST(CAST(CAST(amount::float8 AS numeric) AS text) AS double precision) AS x", AT_READ]],
+  tdoublestored: ["SELECT ('1.5'::float8)::text::numeric AS x FROM ledger", TEXT_DOUBLE,
+    [`${ONE}CAST(CAST('1.5'::float8 AS text) AS numeric(20, 4)) AS x`, `${ORDBL}CAST(CAST('1.5'::float8 AS text) AS double precision) AS x`]],
+  ttext: ["SELECT n::numeric AS x FROM events", TEXT_TEXT,
+    [`${ONE}CAST(n AS numeric(20, 4)) AS x`, `${ORDBL}CAST(n AS double precision) AS x`]],
+  rjson: ["SELECT sum((payload ->> 'a')::numeric) AS x FROM events", ROWS,
+    ["give the values one scale first: sum(CAST(payload ->> 'a' AS numeric(20, 4))) AS x", `${ORDBL}sum(CAST(payload ->> 'a' AS double precision)) AS x`]],
+  djson: ["SELECT avg((payload ->> 'a')::numeric) AS x FROM events", DIV,
+    [`${DBL}CAST(avg(CAST(payload ->> 'a' AS numeric)) AS double precision) AS x`, DIV_READ]],
+  dbare: ["SELECT amount / 3 AS x FROM ledger", DIV, [`${DBL}CAST(amount / 3 AS double precision) AS x`, DIV_READ]],
+  dround: ["SELECT round(avg(amount), 2) AS x FROM ledger", DIV, [`${DBL}CAST(round(avg(amount), 2) AS double precision) AS x`, DIV_READ]],
+  kbare: ["SELECT greatest(amount, 1) + 1 AS x FROM ledger", PICKS,
+    [`${ONE}CAST(GREATEST(amount, 1) + 1 AS numeric(38, 2)) AS x`, `${ORDBL}CAST(GREATEST(amount, 1) + 1 AS double precision) AS x`]],
+  kjson: ["SELECT coalesce((payload ->> 'a')::numeric(20,4), 0) AS x FROM events", PICKS,
+    [`${ONE}CAST(COALESCE(CAST(payload ->> 'a' AS numeric(20, 4)), 0) AS numeric(38, 4)) AS x`, `${ORDBL}CAST(COALESCE(CAST(payload ->> 'a' AS numeric(20, 4)), 0) AS double precision) AS x`]],
+};
+test("round 7: the walk follows a sublink, a CTE, a set operation's arms and a subquery, and every form's way out is the user's own expression, and stores", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  // each way out as a statement: the ones given, else the column's own expression over the definition's table
+  const builds = Object.entries(R7).flatMap(([name, [sql, , options, given]]) => (given ?? options.flatMap((o) => {
+    const way = /: (.+ AS x)$/.exec(o)?.[1];
+    return way === undefined ? [] : [`SELECT ${way} FROM ${/FROM (\w+)$/.exec(sql)![1]}`];
+  })).map((b, i) => [`w${name}${i}`, b] as const));
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(R7)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const name of Object.keys(R7)) await w.until((s) => s.state === "refused" || s.serving, `public.${name}`);
+    const wrong: string[] = [];
+    for (const [name, [sql, reason, options]] of Object.entries(R7)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      const said = refusals.map((r) => `${r.message}\n      ${r.options.join("\n      ")}`).join(" || ");
+      if (refusals.length !== 1 || !reason.test(refusals[0]!.message) || JSON.stringify(refusals[0]!.options) !== JSON.stringify(options)) wrong.push(`${name}: ${sql}\n    ${said || "(not refused)"}`);
+    }
+    assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
+    // one at a time: 26 files written at once once left a run "stuck inside the engine" (#224), and one at a time is faster
+    for (const [name, sql] of builds) { w.write(name, `${lag}sql: ${sql}\n`); await w.until(served(w.logged), `public.${name}`); }
+    for (const [name, sql] of builds) assert.deepEqual((await typed(w, `SELECT x FROM ${name}`)).fields.map(([, oid]) => oid), [/double precision/.test(sql) ? 701 : 1700], `${name}: ${sql}`);
+  });
+});
+
+// review round 8 of PR 202: a definition that crashed the review instead of reaching a verdict. A UNION ALL whose arm
+// reads a CTE built a program whose arms had different column counts, the engine threw, the review threw and ran again
+// for ever, and the table stayed `building` with no reason. The class: no definition leaves the review without a verdict
+const R8_CTE_UNION = "WITH t AS (SELECT sqrt(abs(amount)) AS v FROM ledger) SELECT v AS x FROM t UNION ALL SELECT sqrt(abs(amount)) FROM ledger";
+test("round 8: a numeric over a UNION ALL arm that reads a CTE reaches a verdict, refused by its own reason, never left building", async () => {
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    w.write("cteunion", `kind: scheduled\ntarget_lag: 1h\nsql: ${R8_CTE_UNION}\n`);
+    w.write("cteplain", "kind: scheduled\ntarget_lag: 1h\nsql: WITH t AS (SELECT amount AS v FROM ledger) SELECT v AS x FROM t UNION ALL SELECT amount FROM ledger\n");
+    const s = await w.until((x) => x.state === "refused" || x.serving, "public.cteunion");
+    assert.equal(s.refusals.length, 1, JSON.stringify(s.refusals));
+    assert.match(s.refusals[0]!.message, PER("sqrt"));
+    assert.deepEqual(s.refusals[0]!.options, [`${DBL}write the WITH query t as SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger; and write the UNION ALL as ` +
+      "WITH t AS (SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger) SELECT v AS x FROM t UNION ALL SELECT CAST(sqrt(abs(amount)) AS double precision) FROM ledger", AT_READ]);
+    assert.ok(!w.logged.some((l) => /review failed/.test(l)), w.logged.join("\n"));
+    // the statement on the wire, whose plan the definition's is: every arm as wide as the others
+    assert.equal((await typed(w, R8_CTE_UNION)).rows.length, 8);
+    await w.until(served(w.logged), "public.cteplain");
+    assert.deepEqual((await typed(w, "SELECT x FROM cteplain ORDER BY x")).rows, [["-2.50"], ["-2.50"], ["1.10"], ["1.10"], ["4.00"], ["4.00"], [null], [null]]);
+    // its way out is built and stored as a double
+    w.write("cteway", "kind: scheduled\ntarget_lag: 1h\nsql: WITH t AS (SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger) SELECT v AS x FROM t UNION ALL SELECT CAST(sqrt(abs(amount)) AS double precision) FROM ledger\n");
+    await w.until(served(w.logged), "public.cteway");
+    const way = await typed(w, "SELECT x FROM cteway WHERE x = 2 ORDER BY x");
+    assert.deepEqual([way.fields.map(([, oid]) => oid), way.rows], [[701], [[2], [2]]]);
+  });
+});
+
+test("round 8: a definition whose check throws unexpectedly is refused in readable words, and the other tables of the review are still built", async () => {
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    const real = w.api.planner();
+    const planner: typeof real = { ...real, plan: (text, stmt, relations) => /boom/.test(text) ? Promise.reject(new Error("Binder Error: something the engine said")) : real.plan(text, stmt, relations) };
+    // the throwing table first in the review, so a review that stops at it never reaches the other
+    w.write("aboom", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id AS boom FROM ledger\n");
+    w.write("zfine", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id FROM ledger\n");
+    await w.sync.generated.start(() => readGenerated(w.folder, w.dir), planner);
+    const s = await w.until((x) => x.state === "refused" || x.serving, "public.aboom");
+    assert.equal(s.state, "refused");
+    assert.equal(s.refusals.length, 1, JSON.stringify(s.refusals));
+    const r = s.refusals[0]!;
+    assert.doesNotMatch(`${r.message} ${r.why ?? ""} ${r.options.join(" ")}`, /Binder|engine|duck/i);
+    assert.match(r.message, /Mason could not check/);
+    assert.ok(r.options.length > 0);
+    await w.until(served(w.logged), "public.zfine");
+    assert.equal(w.status("public.zfine").refusals.length, 0);
+  });
+});
+
+// review round 11 of PR 202: a stddev under a typmod cast was stored from the engine's double, because storing read
+// whether the rewrite made a program (PR 207's `programNeeded`, which makes none for `stddev(x)::numeric(p,s)`) where the
+// analysis said "a variance". The class: one fact with two authorities. The decision: storing reads the analysis alone,
+// so every node it says the engine computes as a double, bare, under a bare `::numeric` and under a typmod, over an input
+// with a typmod and without, is refused by round 6's reason, whatever the rewrite made of it (no exact program carries any)
+type R11Node = { fn: string; agg: boolean; sql: (x: string) => string; reason: (column: string, fixed: boolean) => RegExp };
+const R11_VARIANCE = (fn: string): R11Node => ({ fn, agg: true, sql: (x) => `${fn}(${x})`,
+  reason: (c) => new RegExp(`^column ${c} is a ${fn}, which Postgres computes as an exact numeric at decimals it picks`) });
+const R11_DIVIDES = (fn: string, agg: boolean, sql: (x: string) => string): R11Node => ({ fn, agg, sql,
+  reason: (c) => new RegExp(`^column ${c} divides a numeric, which the engine computes as a double$`) });
+const R11_PER_VALUE = (fn: string, sql: (x: string) => string): R11Node => ({ fn, agg: false, sql,
+  reason: (c, fixed) => fixed ? new RegExp(`^column ${c} rounds or casts a numeric Postgres computes for each row at decimals it picks \\(${fn}\\)`)
+    : new RegExp(`^column ${c} is a numeric whose decimals Postgres picks by the size of each value \\(${fn}\\)`) });
+const R11_NODES: R11Node[] = [
+  ...["stddev", "stddev_samp", "stddev_pop", "variance", "var_samp", "var_pop"].map(R11_VARIANCE),
+  R11_DIVIDES("avg", true, (x) => `avg(${x})`), R11_DIVIDES("quotient", false, (x) => `${x} / 3`),
+  R11_PER_VALUE("sqrt", (x) => `sqrt(abs(${x}))`), R11_PER_VALUE("exp", (x) => `exp(${x})`), R11_PER_VALUE("ln", (x) => `ln(abs(${x}))`),
+  R11_PER_VALUE("log", (x) => `log(abs(${x}))`), R11_PER_VALUE("power", (x) => `power(${x}, 2)`),
+];
+/** each input: `amount numeric(12,2)`, `big numeric` and `wide numeric(65,30)`, and the typmod a cast gives it */
+const R11_INPUTS: Record<string, string> = { amount: "numeric(20,4)", big: "numeric(20,4)", wide: "numeric(38,20)" };
+const R11_WRAPPERS: Record<string, (e: string, typmod: string) => string> = { bare: (e) => e, cast: (e) => `(${e})::numeric`, typmod: (e, t) => `(${e})::${t}` };
+test("round 11: every node the analysis says the engine computes as a double is refused by its form's reason, under any cast, over any input's typmod", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  // a table per wrapper, input and kind (an aggregate and a value per row can't share a SELECT), a column per node
+  const tables: Array<{ name: string; wrapper: string; input: string; nodes: R11Node[] }> = [];
+  for (const wrapper of Object.keys(R11_WRAPPERS)) for (const input of Object.keys(R11_INPUTS)) for (const agg of [true, false]) {
+    tables.push({ name: `r11_${wrapper}_${input}_${agg ? "agg" : "row"}`, wrapper, input, nodes: R11_NODES.filter((n) => n.agg === agg) });
+  }
+  const written = (t: (typeof tables)[number], n: R11Node): string => R11_WRAPPERS[t.wrapper]!(n.sql(t.input), R11_INPUTS[t.input]!);
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const t of tables) w.write(t.name, `${lag}sql: SELECT ${t.nodes.map((n) => `${written(t, n)} AS x_${n.fn}`).join(", ")} FROM ledger\n`);
+    for (const t of tables) await w.until((s) => s.state === "refused" || s.state === "failed" || s.serving, `public.${t.name}`);
+    const wrong: string[] = [];
+    let cases = 0;
+    for (const t of tables) {
+      const s = w.status(`public.${t.name}`);
+      for (const n of t.nodes) {
+        cases++;
+        const column = `x_${n.fn}`, said = s.refusals.filter((r) => r.message.startsWith(`column ${column} `));
+        if (said.length !== 1 || !n.reason(column, t.wrapper === "typmod").test(said[0]!.message)) {
+          wrong.push(`${written(t, n)}: ${said.map((r) => r.message).join(" || ") || `not refused (${s.state}${typeof s.error === "string" ? `: ${s.error}` : ""})`}`);
+        }
+      }
+    }
+    assert.equal(cases, 117, "13 nodes x 3 wrappers x 3 inputs");
+    assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
+  });
+});
+
+// review round 12 of PR 202: a cast through text stored the engine's double under a numeric's name.
+// `((stddev(wide))::text)::numeric(38,18)` was stored as 1.282900359861721000 where Postgres has …721035, because the walk
+// made every text read as a numeric "a text" and threw the form beneath it away, and a typmod over that text was "no
+// form", so storing fell back to the engine type. The class is round 11's: the analysis is the authority, and its form
+// forgot the node at a text boundary. The decision: a value's form survives every conversion, so a text read as a numeric
+// keeps the form of what the text was made from, through every spelling of the text step. Each node the engine computes
+// as a double, over an input with a typmod and without, inside the text bare, under `::numeric` and under a typmod, read
+// back by a typmod (and, bare, by a bare `::numeric`), is refused by its node's reason, and its way out stores a double
+type R12Node = { fn: string; agg: boolean; sql: (x: string) => string; reason: (column: string, fixed: boolean) => RegExp };
+const R12_DOUBLE: R12Node = { fn: "float8", agg: false, sql: (x) => `${x}::float8`, reason: (c) => new RegExp(`^column ${c} is a numeric cast from a double precision value`) };
+const R12_NODES: R12Node[] = [
+  ...R11_NODES.filter((n) => n.agg),
+  R11_DIVIDES("sum3", true, (x) => `sum(${x}) / 3`), { ...R11_PER_VALUE("sqrt", (x) => `sqrt(abs(sum(${x})))`), agg: true, fn: "sqrtsum" },
+  R11_DIVIDES("quotient", false, (x) => `${x} / 3`), R11_PER_VALUE("sqrt", (x) => `sqrt(abs(${x}))`), R11_PER_VALUE("exp", (x) => `exp(${x})`),
+  R11_PER_VALUE("ln", (x) => `ln(abs(${x}) + 1)`), R11_PER_VALUE("log", (x) => `log(abs(${x}) + 1)`), R11_PER_VALUE("power", (x) => `power(${x}, 2)`), R12_DOUBLE,
+];
+/** each spelling of the text step, over a value `e`; a WITH column's is its CTE's (`with`) */
+const R12_SPELLINGS: Record<string, (e: string) => string> = {
+  text: (e) => `(${e})::text`, varchar: (e) => `(${e})::varchar`, varchar40: (e) => `(${e})::varchar(40)`,
+  concat: (e) => `((${e})::text || '')`, json: (e) => `(jsonb_build_object('s', ${e}) ->> 's')`, with: (e) => `(${e})::text`,
+};
+const R12_INPUTS: Record<string, string> = { amount: "numeric(20,4)", wide: "numeric(38,20)" };
+/** inside the text: the node bare, under `::numeric`, under a typmod; then read back by `::numeric(38,18)`, or (`r`) the
+ *  node bare read back by a bare `::numeric` */
+const R12_WRAPPERS: Record<string, { inner: (e: string, typmod: string) => string; read: string; fixed: boolean }> = {
+  b: { inner: (e) => e, read: "numeric(38,18)", fixed: true }, n: { inner: (e) => `(${e})::numeric`, read: "numeric(38,18)", fixed: true },
+  t: { inner: (e, t) => `(${e})::${t}`, read: "numeric(38,18)", fixed: true }, r: { inner: (e) => e, read: "numeric", fixed: false },
+};
+test("round 12: a text read as a numeric keeps the form of what it was made from: every node the engine computes as a double, by every spelling of the text step, is refused by its node's reason, and its way out stores", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  type Column = { name: string; node: R12Node; fixed: boolean; text: string; read: string };
+  const tables: Array<{ name: string; spelling: string; columns: Column[] }> = [];
+  for (const spelling of Object.keys(R12_SPELLINGS)) for (const agg of [true, false]) {
+    const columns: Column[] = [];
+    for (const input of Object.keys(R12_INPUTS)) for (const [w, wrap] of Object.entries(R12_WRAPPERS)) {
+      R12_NODES.filter((n) => n.agg === agg).forEach((node, i) => {
+        const text = R12_SPELLINGS[spelling]!(wrap.inner(node.sql(input), R12_INPUTS[input]!));
+        columns.push({ name: `c_${input}_${w}_${node.fn}_${i}`, node, fixed: wrap.fixed, text, read: wrap.read });
+      });
+    }
+    tables.push({ name: `r12_${spelling}_${agg ? "agg" : "row"}`, spelling, columns });
+  }
+  // a WITH column: the text in the WITH query, read back in the outer one
+  const statement = (t: (typeof tables)[number], select: (c: Column, i: number) => string): string => t.spelling === "with"
+    ? `WITH t AS (SELECT ${t.columns.map((c, i) => `${c.text} AS v${i}`).join(", ")} FROM ledger) SELECT ${t.columns.map(select).join(", ")} FROM t`
+    : `SELECT ${t.columns.map(select).join(", ")} FROM ledger`;
+  const read = (t: (typeof tables)[number]) => (c: Column, i: number): string => `(${t.spelling === "with" ? `v${i}` : c.text})::${c.read} AS ${c.name}`;
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const t of tables) w.write(t.name, `${lag}sql: ${statement(t, read(t))}\n`);
+    // the controls: a stored numeric column's text and a JSON number's text, each under a typmod, are stored (round 7)
+    w.write("r12_column", `${lag}sql: SELECT id, amount::text::numeric(20,4) AS a, amount::varchar::numeric(20,4) AS b FROM ledger\n`);
+    w.write("r12_json", `${lag}sql: SELECT id, (payload ->> 'a')::numeric(20,4) AS j FROM events\n`);
+    w.write("r12_jsonbare", `${lag}sql: SELECT (payload ->> 'a')::numeric AS x FROM events\n`);
+    for (const t of tables) await w.until((s) => s.state === "refused" || s.state === "failed" || s.serving, `public.${t.name}`);
+    const wrong: string[] = [], ways = new Map<string, string[]>();
+    let cases = 0;
+    for (const t of tables) {
+      const s = w.status(`public.${t.name}`), built: string[] = [];
+      t.columns.forEach((c, i) => {
+        cases++;
+        const said = s.refusals.filter((r) => r.message.startsWith(`column ${c.name} `));
+        const way = said[0]?.options.map((o) => new RegExp(`(?:double if it need not be exact|store the double it is): (.+ AS ${c.name})$`).exec(o)?.[1]).find((o) => o !== undefined);
+        if (said.length !== 1 || !c.node.reason(c.name, c.fixed).test(said[0]!.message) || way === undefined) {
+          wrong.push(`${read(t)(c, i)}: ${said.map((r) => `${r.message} | ${r.options.join(" | ")}`).join(" || ") || `not refused (${s.state}${typeof s.error === "string" ? `: ${s.error}` : ""})`}`);
+        } else built.push(way);
+      });
+      ways.set(t.name, built);
+    }
+    assert.equal(cases, 6 * 2 * 4 * R12_NODES.length, "6 spellings x 2 inputs x 4 wrappers x every node");
+    assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
+    const bare = await w.until((s) => s.state === "refused" || s.serving, "public.r12_jsonbare");
+    assert.match(bare.refusals[0]?.message ?? "", TEXT_JSON);
+    await w.until(served(w.logged), "public.r12_column");
+    await w.until(served(w.logged), "public.r12_json");
+    assert.deepEqual((await typed(w, "SELECT a, b FROM r12_column ORDER BY id")).rows, [["1.1000", "1.1000"], [null, null], ["-2.5000", "-2.5000"], ["4.0000", "4.0000"]]);
+    assert.deepEqual((await typed(w, "SELECT j FROM r12_json WHERE j IS NOT NULL ORDER BY j LIMIT 1")).fields.map(([, oid]) => oid), [1700]);
+    // each way out, as the refusals give it: a table per definition, every column stored as a double
+    for (const t of tables) {
+      const given = ways.get(t.name)!;
+      w.write(`w${t.name}`, `${lag}sql: ${statement(t, (_c, i) => given[i]!)}\n`);
+      await w.until(served(w.logged), `public.w${t.name}`);
+      const fields = (await typed(w, `SELECT * FROM w${t.name}`)).fields.map(([, oid]) => oid);
+      assert.deepEqual(fields, t.columns.map(() => 701), `w${t.name}: ${given.join(", ")}`);
+    }
+  });
+});
+
+// review round 13 of PR 202: the review's check ran its settle and its prepare on the RUN'S connection, unserialised with
+// a build that holds that connection in a transaction across awaits (its snapshot, its writer's turn, its steps), so a
+// check landed inside the build's transaction and between its statements; CI's stream test stalled, and a reviewer's
+// unit world stuck in the engine from `SessionSetup.settle` under `GeneratedTables.check` (#224's class). The decision:
+// the check has a connection of its own, so nothing a review asks reaches the connection a run holds
+test("round 13: a check while a run holds its transaction open never touches the run's connection, and gives its verdict", async () => {
+  let hold: Promise<void> | null = null;
+  await withWorld({ counts: COUNTS }, async (w) => {
+    const first = await w.until(built);
+    let release = (): void => undefined;
+    hold = new Promise<void>((r) => { release = r; });
+    try {
+      w.reached.length = 0;
+      await w.store.writer.run("INSERT INTO public.events VALUES (11, 7, 'query', 'ok', '11', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+      w.sync.generated.changed("public.events");
+      await w.sync.generated.review();
+      for (const end = Date.now() + 10_000; !w.reached.includes("snapshot") && Date.now() < end;) { await new Promise((r) => setTimeout(r, 10)); await w.sync.generated.review(); }
+      assert.ok(w.reached.includes("snapshot"), "the run holds its transaction open at its snapshot");
+      // every call on the run's connection from here until the release is the check's, since the run is held
+      const run = (w.sync as unknown as { generatedLane: { conn: Record<string, unknown> } }).generatedLane.conn;
+      const touched: string[] = [];
+      for (const m of ["run", "runAndReadAll", "prepare"]) {
+        const f = run[m] as (...a: unknown[]) => unknown;
+        run[m] = (...a: unknown[]) => { touched.push(`${m}: ${String(a[0]).slice(0, 60)}`); return f.apply(run, a); };
+      }
+      try {
+        w.write("checked", scheduled("SELECT kind, count(*) AS n FROM events GROUP BY kind"));
+        w.write("wrong", scheduled("SELECT nope FROM events"));
+        // bounded: a check stuck behind the run is a failure here, never a hang
+        let bound: NodeJS.Timeout | undefined;
+        const said = await Promise.race([w.sync.generated.review().then(() => "reviewed"), new Promise((r) => { bound = setTimeout(() => r("stuck"), 20_000); })]);
+        clearTimeout(bound);
+        assert.equal(said, "reviewed");
+        assert.equal(w.status("public.wrong").state, "refused", JSON.stringify(w.status("public.wrong")));
+        assert.deepEqual(w.status("public.checked").refusals, []);
+        assert.deepEqual(touched, [], "the check reached the run's connection");
+      } finally { for (const m of ["run", "runAndReadAll", "prepare"]) delete run[m]; }
+    } finally { hold = null; release(); }
+    await w.until((s) => s.lastRun?.at !== first.lastRun?.at);
+    await w.until(built, "public.checked");
+  }, { onStep: (s, n) => s === "snapshot" && n === "public.counts" ? hold ?? undefined : undefined });
+});
+
+// review round 14 of PR 202: the walk of a column's analysed expression copied, into each column reference, the whole
+// followed expression of the column it reads, so a statement whose levels each read the level below more than once grew
+// 3^depth (depth 12 took 880 ms, 16 about 70 s), on the wire's plan of every statement and in a definition's check. The
+// decision: the walk is linear in the analysed tree (a reference shares what it reads, each node's form and each text's
+// making are found once), and only the generated planner asks for it. Each shape at depth 16 reaches its verdict within
+// the bound: an int8 stored; a text read as a numeric at the top refused by the form the text was made from, sqrt's, met
+// at the bottom of every path; and with no form below, every path walked to the bottom, refused as a text. (A numeric
+// carried through every level grows in the rewrite's exact program, as on main: issue 244, not this walk's)
+type R14Case = { bottom: string; op: string; top: (chain: string) => string; verdict: RegExp | null };
+const R14_CASES: R14Case[] = [
+  { bottom: "1::int8", op: "+", top: (c) => c, verdict: null },
+  { bottom: "sqrt(2::numeric)::text", op: "||", top: (c) => `SELECT a::numeric AS a FROM (${c}) top`, verdict: /^column a is a numeric whose decimals Postgres picks by the size of each value \(sqrt\)/ },
+  { bottom: "'1'::text", op: "||", top: (c) => `SELECT a::numeric AS a FROM (${c}) top`, verdict: /^column a is a numeric read from text \(a text value cast to numeric\), which keeps the decimals each value's text has/ },
+];
+test("round 14: a definition whose every level reads the level below three times is checked within the bound, nested, as a WITH chain and as a UNION ALL chain", async () => {
+  await withWorld({}, async (w) => {
+    const planner = w.api.planner();
+    // the review's own check: its connection, set up, and the engine's types as DuckDB prepares the plan's SQL there
+    // (src/duck/generated.ts `review`, `engineTypes`)
+    const host = (w.sync.generated as unknown as { host: GeneratedHost }).host;
+    const describe = async (sql: string): Promise<EngineTypes> => {
+      const p = await host.checkConnection().prepare(sql);
+      try { return new Map(Array.from({ length: p.columnCount }, (_, i) => { const type = p.columnType(i).toString(); return [[p.columnName(i), type], [`#${i}`, type]] as const; }).flat()); }
+      finally { p.destroySync(); }
+    };
+    const check = async (sql: string) => { await host.settleCheck(); return planDefinition(planner, sql, null, undefined, describe); };
+    // a first check pays the planner's start (the catalog, the parser): untimed
+    assert.ok("definition" in await check("SELECT 1::numeric AS a"));
+    for (const c of R14_CASES) for (const depth of DEEP_DEPTHS) for (const [shape, chain] of Object.entries(deepChains(c.bottom, depth, c.op))) {
+      const sql = c.top(chain), started = performance.now();
+      const r = await check(sql);
+      const ms = performance.now() - started, at = `${shape} over ${c.bottom} at depth ${depth}`;
+      assert.ok(ms < 500, `${at}: checked in ${ms.toFixed(0)} ms`);
+      if (c.verdict === null) assert.ok("definition" in r, `${at}: ${JSON.stringify("refused" in r ? r.refused : null)}`);
+      else {
+        assert.ok("refused" in r, `${at}: stored`);
+        assert.deepEqual(r.refused.map((x) => c.verdict!.test(x.message)), [true], `${at}: ${JSON.stringify(r.refused)}`);
+        assert.ok(r.refused[0]!.options.length > 0, `${at}: no way out`);
+      }
+    }
   });
 });

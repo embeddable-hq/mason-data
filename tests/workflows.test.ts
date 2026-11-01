@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import ts from "typescript";
-import { parseRecords, recordsOfComment, stats, type ReviewRecord } from "../scripts/review-stats.ts";
+import { BLOCKING, DEFERRED, parseRecords, recordsOfComment, render, stats, type ReviewRecord } from "../scripts/review-stats.ts";
 
 // The coordinator's Workflow scripts, .claude/workflows/pr-loop.js and issue-loop.js, run CLAUDE.md "The loop" with
 // agents. Nothing else reads them before a run, and a run costs hours, so this is their detector: each is loaded as the
@@ -82,7 +82,14 @@ async function run(name: string, args: Record<string, unknown>, answers: Answers
     const d = name === "pr-loop" ? DEFAULTS.find(([re]) => re.test(opts.label)) : undefined;
     assert.ok(opts.label in answers || d, `${name}: no stub answer for the agent labelled "${opts.label}"`);
     const a = opts.label in answers ? answers[opts.label] : d![1];
-    return typeof a === "function" ? (a as (c: Call) => unknown)({ prompt, opts }) : a;
+    const v = await (typeof a === "function" ? (a as (c: Call) => unknown)({ prompt, opts }) : a);
+    // a probe or review stub that does not say otherwise read an engine diff and ran a statement: a review that showed
+    // none of the evidence it owed stops the run, and the tests of that give the key (0, a non-count, or undefined)
+    if (name === "pr-loop" && /^(probe \d+|review r\d+)$/.test(opts.label) && v && typeof v === "object") {
+      const ran: Record<string, unknown> = { changedPaths: ["src/duck/plan.ts"], statementsRun: 1, statementsMatched: 1, checksRun: 0 };
+      return { ...Object.fromEntries(Object.entries(ran).filter(([k]) => !(k in v))), ...v };
+    }
+    return v;
   };
   // the harness's parallel(): every thunk started at once. The harness resolves a thunk that throws to null; here a
   // throw is a stub's assertion failing, so it fails the test instead of reading as an agent that returned nothing.
@@ -108,7 +115,7 @@ async function run(name: string, args: Record<string, unknown>, answers: Answers
 
 const sha = (c: string) => c.repeat(40);
 const finding = (o: Partial<Record<string, string>>) => ({
-  input: "SELECT 1", expected: "1", actual: "2", atBase: "1", origin: "this-pr", classKey: "some-class", classWhy: "why", where: "plan.ts:1", ...o,
+  input: "SELECT 1", expected: "1", actual: "2", atBase: "1", origin: "this-pr", severity: "wrong-answer", classKey: "some-class", classWhy: "why", where: "plan.ts:1", ...o,
 });
 const clean = { findings: [], judgedCorrect: [] };
 const PR = { issue: 301, parent: 300, title: "300 · a piece", base: "main", branch: "issue-300-a-piece", stackedOn: "", context: "the scope" };
@@ -117,7 +124,7 @@ const START: Answers = {
   implement: { pr: 900, head: sha("a"), summary: "done" },
 };
 const pushed = (c: string) => ({ pr: 900, head: sha(c), summary: "fixed" });
-const RESULT_KEYS = ["classes", "designRounds", "filed", "fromBase", "head", "pr", "probeRounds", "rounds", "status"];
+const RESULT_KEYS = ["classes", "deferred", "designRounds", "filed", "fromBase", "head", "pr", "probeRounds", "rounds", "status"];
 const shapeOf = (r: Result) => Object.keys(r).sort();
 const NOTE = {
   decision: "the kind is read from Postgres's analysis",
@@ -167,7 +174,7 @@ test("pr-loop: a finding the base has is filed once and never fixed, never count
     "CI fix 1": { ...pushed("c"), flake: false },
     "review r3": clean,
     "CI 2": { state: "green", detail: "" },
-    file: { issues: [{ classKey: "base-class", issue: 950, action: "filed" }] },
+    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
   });
   assert.deepEqual(labels, [
     "brief", "design d1", "design review d1", "implement", "link", "probe 1", "review r1", "CI read r1", "fix r1",
@@ -243,7 +250,7 @@ test("pr-loop: each trigger of the class rule makes the next fix a class round, 
 test("pr-loop: every exit returns one shape, and the base's findings are filed at every exit", async () => {
   const base = finding({ origin: "base", classKey: "b", input: "SELECT on_base FROM t" });
   // MAX_ROUNDS: four reviews with findings, three fixes, then a stop that still files
-  const many: Answers = { ...START, file: { issues: [{ classKey: "b", issue: 951, action: "filed" }] } };
+  const many: Answers = { ...START, file: { issues: [{ classKey: "b", source: "base", issue: 951, action: "filed" }] } };
   for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [base] : [])], judgedCorrect: [] };
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
   let r = await run("pr-loop", { ...PR }, many);
@@ -438,7 +445,7 @@ test("pr-loop: a probe runs before every review, two rounds a push at most, neve
     "probe fix 1": pushed("b"),
     "probe 2": { findings: [finding({ classKey: "y", input: "p2" })], judgedCorrect: [] },
     "probe fix 2": pushed("c"),
-    "review r1": clean, "CI 1": green, file: { issues: [{ classKey: "on-base", issue: 960, action: "filed" }] },
+    "review r1": clean, "CI 1": green, file: { issues: [{ classKey: "on-base", source: "base", issue: 960, action: "filed" }] },
   });
   assert.deepEqual(r.labels.slice(4, 10), ["link", "probe 1", "probe fix 1", "probe 2", "probe fix 2", "review r1"]);
   assert.ok(r.prompt("review r1").includes(`diff origin/main ${sha("c")}`), "the review reads the last probe fix");
@@ -504,8 +511,10 @@ test("pr-loop: learn turns every finding of the PR into a review probe, before C
   assert.match(r.prompt("CI 1"), new RegExp(`at head ${"f".repeat(7)}`), "CI waits on learn's commit");
   const rec = parseRecords(r.prompt("record"))[0]!;
   assert.deepEqual(rec.findings, [
-    { round: 1, stage: "design", classKey: "type-from-syntax" }, { round: 1, stage: "probe", classKey: "p" }, { round: 1, stage: "review", classKey: "a" },
+    { round: 1, stage: "design", classKey: "type-from-syntax" }, { round: 1, stage: "probe", classKey: "p", severity: "wrong-answer" },
+    { round: 1, stage: "review", classKey: "a", severity: "wrong-answer" },
   ]);
+  assert.deepEqual(rec.deferred, []);
   assert.deepEqual([rec.designRounds, rec.probeRounds, rec.reviewRounds], [2, 3, 2]);
 
   // no finding anywhere: nothing to learn
@@ -697,4 +706,496 @@ test("pr-loop: the author is told to run the rules' review probes before every p
     ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green,
   });
   for (const l of ["implement", "fix r1", "CI fix 1"]) assert.match(r.prompt(l), /Before the push, run the `## What review probes`/, l);
+});
+
+// ---------------------------------------------------------------- only a blocking finding sends a PR back (Tom,
+// 2026-11-01; CLAUDE.md "The loop" step 4): a wrong answer, a crash, lost data, security, a regression, or a red CI.
+// A refusal's wording, an over-refusal, docs and quality are filed, one issue per class, and the PR goes on.
+
+/** A script's one-line `const <name> = [...]`. */
+function listOf(name: string, constName: string): string[] {
+  const m = new RegExp(`^const ${constName} = (\\[[^\\n]*\\])$`, "m").exec(source(name));
+  assert.ok(m, `${name}: ${constName} is declared on one line`);
+  return new Function(`return (${m[1]})`)() as string[];
+}
+const later = (o: Partial<Record<string, string>>) => finding({ severity: "message", classKey: "wording", ...o });
+
+test("pr-loop: every finding must carry a severity, blocking or not, and the two lists are review-stats' own", async () => {
+  // a script cannot import: its lists are held equal to the ones review-stats reads records with
+  assert.deepEqual(listOf("pr-loop", "BLOCKING"), [...BLOCKING]);
+  assert.deepEqual(listOf("pr-loop", "DEFERRED"), [...DEFERRED]);
+  assert.deepEqual([...BLOCKING], ["wrong-answer", "crash", "data-loss", "security", "regression"]);
+  assert.deepEqual([...DEFERRED], ["message", "over-refusal", "docs", "quality"]);
+  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1"]) {
+    const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as
+      { properties: { findings: { items: { required: string[]; properties: Record<string, { enum?: string[]; description?: string }> } } } };
+    const item = schema.properties.findings.items;
+    assert.ok(item.required.includes("severity"), `${l}: the schema requires a severity`);
+    assert.deepEqual(item.properties["severity"]!.enum, [...BLOCKING, ...DEFERRED], `${l}: the nine kinds`);
+    assert.match(item.properties["severity"]!.description!, /When unsure, a blocking severity/, `${l}: the schema says when unsure, blocking`);
+    // the prompt states the line in one paragraph: each kind, and that unsure is blocking
+    for (const k of [...BLOCKING, ...DEFERRED]) assert.ok(r.prompt(l).includes(k), `${l}: the prompt names ${k}`);
+    assert.match(r.prompt(l), /When you are unsure, the finding is blocking/, l);
+  }
+});
+
+test("pr-loop: a round with only non-blocking findings of the PR's is clean: filed as deferred, recorded, never fixed or learnt", async () => {
+  const a = later({ input: "SELECT wording_a FROM t" });
+  const b = later({ input: "SELECT wording_b FROM t" }); // the same class twice: no class round, since none is fixed
+  const o = later({ input: "SELECT refused FROM t", severity: "over-refusal", classKey: "gap" });
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [a, b, o], judgedCorrect: [] }, "CI 1": green,
+    file: (c: Call) => {
+      assert.ok(c.prompt.includes("source 'deferred'") && !c.prompt.includes("source 'base'"), "only the deferred section");
+      return { issues: [{ classKey: "wording", source: "deferred", issue: 970, action: "filed" }, { classKey: "gap", source: "deferred", issue: 971, action: "filed" }] };
+    },
+  });
+  assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "file"], "no fix round, no learn");
+  assert.ok(!r.labels.includes("learn"));
+  assert.match(String(r.result["status"]), /^reviewed, no open blocking finding of this PR, CI green.*3 non-blocking finding\(s\) of this PR filed \(#970, #971\), not fixed/);
+  assert.doesNotMatch(String(r.result["status"]), /NOT filed/);
+  assert.deepEqual(r.result["classes"], {}, "a non-blocking class is never counted toward the class rule");
+  assert.equal((r.result["deferred"] as unknown[]).length, 3);
+  assert.deepEqual(r.result["fromBase"], []);
+  const file = r.prompt("file");
+  for (const s of [a.input, b.input, o.input, "deferred as non-blocking", "met in PR 900's review", "met in review r1", "message", "over-refusal"]) assert.ok(file.includes(s), `the filing says ${s}`);
+  // the record lists them apart, and review-stats reads the PR as passing its first review
+  const rec = parseRecords(r.prompt("record"))[0]!;
+  assert.deepEqual(rec.findings, []);
+  assert.deepEqual(rec.deferred, [
+    { round: 1, stage: "review", classKey: "wording", severity: "message" }, { round: 1, stage: "review", classKey: "wording", severity: "message" },
+    { round: 1, stage: "review", classKey: "gap", severity: "over-refusal" },
+  ]);
+  assert.match(r.prompt("record"), /review 1: 0 finding\(s\); 3 non-blocking, deferred/);
+  assert.match(r.prompt("record"), /#970 \(wording, deferred, filed\)/);
+  assert.equal(stats([rec]).firstPass, 1);
+
+  // a red CI still blocks: beside a non-blocking-only review it goes to the CI stage and a CI fix
+  const redRun = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [a], judgedCorrect: [] }, "CI read r1": red, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: false },
+    "review r2": clean, "CI 2": green, file: { issues: [] },
+  });
+  assert.deepEqual(core(redRun.labels), ["brief", "implement", "review r1", "CI 1", "CI fix 1", "review r2", "CI 2", "file"]);
+});
+
+test("pr-loop: only a blocking finding of the PR's is fixed and counts toward a class round; the others never reach a fix", async () => {
+  const k = later({ classKey: "k", input: "SELECT k_wording FROM t" });
+  const r = await run("pr-loop", { ...PR }, {
+    ...START,
+    // a probe's non-blocking finding: no probe fix, and the review reads the head unchanged
+    "probe 1": { findings: [later({ classKey: "p", input: "SELECT probe_wording FROM t", severity: "docs" })], judgedCorrect: [] },
+    // round 1: one blocking of j, two non-blocking of k (which would make a class round if they counted)
+    "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), k, { ...k, input: "SELECT k_wording2 FROM t" }], judgedCorrect: [] },
+    "fix r1": pushed("b"),
+    // round 2: a blocking finding of k, the class round 1 met only as non-blocking; and k's first input met again
+    "review r2": { findings: [finding({ classKey: "k", input: "SELECT k_wrong FROM t", severity: "crash" }), k], judgedCorrect: [] },
+    "fix r2": pushed("c"),
+    "review r3": clean, "CI 1": green, file: { issues: [] },
+  });
+  assert.ok(!r.labels.some((l) => l.startsWith("probe fix")), "a probe's non-blocking finding gets no probe fix");
+  assert.deepEqual(r.labels.filter((l) => /^fix/.test(l)), ["fix r1", "fix r2"], "no class round: k's earlier findings did not block");
+  for (const l of ["fix r1", "fix r2", "learn"]) {
+    for (const s of ["SELECT probe_wording FROM t", "SELECT k_wording FROM t", "SELECT k_wording2 FROM t"]) assert.ok(!r.prompt(l).includes(s), `"${l}" was handed the non-blocking ${s}`);
+  }
+  assert.ok(r.prompt("fix r1").includes("SELECT j_wrong FROM t") && r.prompt("fix r2").includes("SELECT k_wrong FROM t"));
+  assert.deepEqual(Object.fromEntries(Object.entries(r.result["classes"] as Record<string, { count: number }>).map(([c, v]) => [c, v.count])), { j: 1, k: 1 });
+  // a later round is told what is already deferred, and an input met twice is filed once
+  assert.ok(r.prompt("review r2").includes("Already deferred as non-blocking") && r.prompt("review r2").includes("SELECT k_wording FROM t"));
+  assert.equal(r.prompt("file").split("SELECT k_wording FROM t").length - 1, 1);
+  assert.equal((r.result["deferred"] as unknown[]).length, 3);
+  const rec = parseRecords(r.prompt("record"))[0]!;
+  assert.deepEqual(rec.findings.map((f) => [f.stage, f.round, f.classKey, f.severity]), [["review", 1, "j", "wrong-answer"], ["review", 2, "k", "crash"]]);
+  assert.deepEqual(rec.deferred!.map((f) => [f.stage, f.round, f.classKey]), [["probe", 1, "p"], ["review", 1, "k"], ["review", 1, "k"]]);
+});
+
+test("pr-loop: a finding with no severity, or one the script does not know, blocks; a base finding is the base's whatever its severity", async () => {
+  for (const severity of [undefined, "cosmetic"]) {
+    const { severity: _, ...bare } = finding({ input: "SELECT unsure FROM t" });
+    const r = await run("pr-loop", { ...PR }, {
+      ...START, "review r1": { findings: [severity ? { ...bare, severity } : bare], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+    });
+    assert.ok(r.labels.includes("fix r1"), `severity ${severity}: blocking`);
+    assert.ok(!r.labels.includes("file"));
+  }
+  const base = later({ origin: "base", input: "SELECT base_wording FROM t" });
+  const mine = later({ input: "SELECT mine_wording FROM t" });
+  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [base, mine], judgedCorrect: [] }, "CI 1": green, file: { issues: [] } });
+  const file = r.prompt("file");
+  const [onBase, ofPr] = [file.indexOf("## source 'base'"), file.indexOf("## source 'deferred'")];
+  assert.ok(onBase >= 0 && ofPr > onBase, "two sections, kept apart");
+  assert.ok(file.indexOf(base.input) > onBase && file.indexOf(base.input) < ofPr, "the base's finding is filed as the base's");
+  assert.ok(file.indexOf(mine.input) > ofPr, "the PR's own is filed as deferred");
+  assert.deepEqual((r.result["fromBase"] as Array<{ input: string }>).map((g) => g.input), [base.input]);
+  assert.deepEqual((r.result["deferred"] as Array<{ input: string }>).map((g) => g.input), [mine.input]);
+});
+
+test("pr-loop: an input deferred once and found blocking later is fixed, never filed; a failed filing never says filed", async () => {
+  const w = later({ input: "SELECT later_blocking FROM t" });
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), w], judgedCorrect: [] }, "fix r1": pushed("b"),
+    "review r2": { findings: [{ ...w, severity: "regression" }], judgedCorrect: [] }, "fix r2": pushed("c"), "review r3": clean, "CI 1": green,
+  });
+  assert.ok(r.prompt("fix r2").includes(w.input), "the blocking re-report is fixed");
+  assert.deepEqual(r.result["deferred"], [], "and no longer deferred");
+  assert.ok(!r.labels.includes("file"), "so nothing is filed");
+
+  const lost = await run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": green, file: null });
+  assert.match(String(lost.result["status"]), /filing failed: the findings are in fromBase and deferred/);
+  assert.doesNotMatch(String(lost.result["status"]), /filed, not fixed/);
+});
+
+test("pr-loop: a deferred input is RUN again by every later probe and review, and re-reported when a fix made it block", async () => {
+  // round 1 defers a refusal's wording; fix r1 (for j) turns that refusal into a wrong answer. A reviewer that does
+  // what its prompt says reports it again only if the prompt asks for it: the stub holds the prompt to that.
+  const x = later({ input: "SELECT x FROM t" });
+  const told = (c: Call) => {
+    assert.ok(c.prompt.includes("SELECT x FROM t"), `"${c.opts.label}" is told the deferred input`);
+    assert.match(c.prompt, /RUN each of them again at this head/, `"${c.opts.label}" is told to run it again`);
+    assert.match(c.prompt, /report it again with that blocking severity/, `"${c.opts.label}" is told to re-report it when it blocks`);
+    assert.doesNotMatch(c.prompt, /do NOT report again/i, `"${c.opts.label}" is never told not to report it, whatever it now answers`);
+    assert.doesNotMatch(c.prompt, /deferred as non-blocking and filed/, `"${c.opts.label}" is not told it is filed: nothing is filed before finish`);
+  };
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), x], judgedCorrect: [] }, "fix r1": pushed("b"),
+    "probe 2": (c: Call) => { told(c); return clean; },
+    "review r2": (c: Call) => { told(c); return { findings: [{ ...x, severity: "wrong-answer" }], judgedCorrect: [] }; },
+    "fix r2": pushed("c"), "review r3": clean, "CI 1": green,
+  });
+  assert.ok(r.prompt("fix r2").includes("SELECT x FROM t"), "the re-report is this PR's to fix");
+  assert.deepEqual(r.result["deferred"], []);
+  assert.ok(!r.labels.includes("file"), "and it is not filed");
+});
+
+test("pr-loop: 'filed' is read from the issues the File stage returns, class by class and source by source", async () => {
+  const w = later({ input: "SELECT w FROM t" });
+  const g = later({ input: "SELECT g FROM t", severity: "over-refusal", classKey: "gap" });
+  const b = later({ origin: "base", input: "SELECT b FROM t", classKey: "on-base" });
+  const go = (issues: unknown[]) => run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [w, g, b], judgedCorrect: [] }, "CI 1": green, file: { issues } });
+  const status = async (issues: unknown[]) => String((await go(issues)).result["status"]);
+
+  // nothing returned: nothing is said filed, and every class is named as not filed
+  let s = await status([]);
+  assert.doesNotMatch(s, /non-blocking finding\(s\) of this PR filed/, s);
+  assert.match(s, /non-blocking class\(es\) of this PR NOT filed: wording, gap: in deferred/, s);
+  assert.match(s, /the base's class\(es\) NOT filed: on-base: in fromBase/, s);
+  // some classes filed, others not: only the filed ones are said filed, with their issue
+  s = await status([{ classKey: "wording", source: "deferred", issue: 980, action: "filed" }]);
+  assert.match(s, /1 non-blocking finding\(s\) of this PR filed \(#980\), not fixed/, s);
+  assert.match(s, /NOT filed: gap: in deferred/, s);
+  // an issue of the other source does not file a class: 'base' issues for the deferred classes, and the reverse
+  s = await status([
+    { classKey: "wording", source: "base", issue: 981, action: "filed" }, { classKey: "gap", source: "base", issue: 982, action: "filed" },
+    { classKey: "on-base", source: "deferred", issue: 983, action: "filed" },
+  ]);
+  assert.match(s, /NOT filed: wording, gap: in deferred/, s);
+  assert.match(s, /the base's class\(es\) NOT filed: on-base/, s);
+  // every class filed under its own source: nothing said not filed
+  s = await status([
+    { classKey: "wording", source: "deferred", issue: 984, action: "filed" }, { classKey: "gap", source: "deferred", issue: 985, action: "commented" },
+    { classKey: "on-base", source: "base", issue: 986, action: "filed" },
+  ]);
+  assert.match(s, /2 non-blocking finding\(s\) of this PR filed \(#984, #985\), not fixed/, s);
+  assert.doesNotMatch(s, /NOT filed/, s);
+});
+
+test("pr-loop: a fixer is told a severity it was not given, or one not known, is read as blocking", async () => {
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [finding({ input: "SELECT odd FROM t", severity: "cosmetic" }), finding({ input: "SELECT known FROM t", classKey: "other" })], judgedCorrect: [] },
+    "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+  });
+  assert.match(r.prompt("fix r1"), /\[class: some-class; cosmetic: not a known severity, read as blocking\]/);
+  assert.match(r.prompt("fix r1"), /\[class: other; wrong-answer\]/);
+});
+
+test("pr-loop: a run that stops still files its deferred findings", async () => {
+  const w = later({ input: "SELECT stop_deferred FROM t" });
+  const many: Answers = { ...START, file: { issues: [] } };
+  for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [w] : [])], judgedCorrect: [] };
+  for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
+  const exits: Array<[string, Answers, RegExp]> = [
+    ["MAX_ROUNDS", many, /^still 1 finding\(s\) after 4 rounds/],
+    ["a review that fails", { ...START, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": null, file: { issues: [] } }, /^review r2 failed/],
+    ["a fix that pushes nothing", { ...START, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("a"), file: { issues: [] } }, /pushed nothing/],
+    ["CI that never finishes", { ...START, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": { state: "timeout", detail: "" }, file: { issues: [] } }, /^CI not finished/],
+  ];
+  for (const [name, answers, stop] of exits) {
+    const r = await run("pr-loop", { ...PR }, answers);
+    assert.match(String(r.result["status"]), stop, name);
+    assert.deepEqual(r.labels.slice(-2), ["file", "record"], `${name}: the File call happens, then the record`);
+    assert.ok(r.prompt("file").includes(w.input), `${name}: the deferred finding is in the filing`);
+    assert.match(String(r.result["status"]), /NOT filed: wording: in deferred/, `${name}: and an empty return is said not filed`);
+  }
+});
+
+test("review-stats: a first review passes when it found nothing blocking; a finding with no severity (a record older than severity) blocks", () => {
+  const rec = (o: Partial<ReviewRecord>): ReviewRecord => ({ pr: 1, designRounds: 1, probeRounds: 1, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed", ...o });
+  const block = (r: unknown) => "```json mason-review-record\n" + JSON.stringify(r) + "\n```";
+  const s = stats([
+    // only a non-blocking finding in round 1: passed the first review
+    rec({ pr: 1, findings: [{ round: 1, stage: "review", classKey: "w", severity: "message" }] }),
+    // the same, written apart as pr-loop writes it
+    rec({ pr: 2, deferred: [{ round: 1, stage: "review", classKey: "w", severity: "over-refusal" }] }),
+    // a blocking one: not passed
+    rec({ pr: 3, reviewRounds: 2, findings: [{ round: 1, stage: "review", classKey: "j", severity: "regression" }, { round: 2, stage: "review", classKey: "j", severity: "regression" }] }),
+    // a legacy record: no severity, so blocking; its round 2 was clean, so passed by the second
+    rec({ pr: 4, reviewRounds: 2, findings: [{ round: 1, stage: "review", classKey: "j" }] }),
+  ]);
+  assert.equal(s.firstPass, 2 / 4, "PRs 1 and 2");
+  assert.equal(s.bySecond, 3 / 4, "PRs 1, 2 and 4");
+  // a severity is one of the nine, and a deferred finding is a non-blocking one
+  assert.throws(() => parseRecords(block(rec({ findings: [{ round: 1, stage: "review", classKey: "k", severity: "cosmetic" as never }] }))), /severity is not one of/);
+  assert.throws(() => parseRecords(block(rec({ deferred: [{ round: 1, stage: "review", classKey: "k", severity: "crash" }] }))), /deferred finding is not of a non-blocking severity/);
+  assert.throws(() => parseRecords(block({ ...rec({}), deferred: {} })), /deferred is not an array/);
+  assert.equal(parseRecords(block(rec({}))).length, 1, "a record with no deferred field still reads");
+});
+
+// ---------------------------------------------------------------- the review and the probe RUN statements at scale
+// (Tom, 2026-11-01; docs/DESIGN.md "The independent review"): on issue 192, a review that only read the code passed an
+// implementation that three checks of 300 to 500 statements each, run against Postgres and Mason side by side with the
+// base beside them, found two regressions and about four new wrong answers in. They found them with forms nobody
+// wrote and a sweep of the plain forms of each path the diff touched, batched through scripts/duck-repro.ts.
+
+/** A script's `const <name> = [` … `]`, over several lines, evaluated. */
+function arrayOf(name: string, constName: string): string[] {
+  const m = new RegExp(`^const ${constName} = (\\[\\n[\\s\\S]*?\\n\\])$`, "m").exec(source(name));
+  assert.ok(m, `${name}: ${constName} is declared as an array, one item a line`);
+  return new Function(`return (${m[1]})`)() as string[];
+}
+
+test("pr-loop: one list of variant forms, each concrete synthetic SQL, reaches the probe and the full review", async () => {
+  const forms = arrayOf("pr-loop", "VARIANT_FORMS");
+  assert.ok(forms.length >= 7, "the forms issue 192's checks ran, at least");
+  // every form issue 192's checks found wrong answers with
+  const all = forms.join("\n");
+  for (const re of [/\bTABLE t\b/, /UNION ALL TABLE t ORDER BY 1 LIMIT 2/, /`VALUES \([^`]*\) UNION/, /WHERE false/, /char\(\d+\)/, /LIMIT NULL/, /LIMIT -1/, /OFFSET -1/,
+    /c \/ \d+ FROM t UNION ALL SELECT a FROM t/, /FROM \(SELECT c \/ \d+ AS x FROM t\) s/, /WITH q AS \(SELECT c \/ \d+ AS x FROM t\)/]) {
+    assert.match(all, re, `a variant form matches ${re}`);
+  }
+  for (const v of forms) {
+    // concrete SQL: each form gives at least one statement, in backticks
+    const sql = [...v.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
+    assert.ok(sql.length > 0 && sql.every((s) => /^(SELECT|TABLE|VALUES|WITH|\()/.test(s)), `"${v}" gives its statements in backticks`);
+    // synthetic: only the tables the prompt declares (t, the empty e) and a CTE q, never another name
+    for (const s of sql) {
+      for (const m of s.matchAll(/\b(?:FROM|TABLE|JOIN)\s+([a-z_][a-z0-9_.]*)/gi)) assert.ok(["t", "e", "q"].includes(m[1]!), `"${s}" reads ${m[1]}, not a synthetic table`);
+    }
+  }
+  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1", "probe 2", "review r2"]) {
+    const p = r.prompt(l);
+    for (const v of forms) assert.ok(p.includes(v), `"${l}" is given the variant form ${v}`);
+    // the synthetic tables they run over, with the key duck-repro needs to sync a table
+    assert.match(p, /t \(id int PRIMARY KEY, a int, b text, c numeric\(10,2\), d char\(4\)\)/, l);
+    assert.match(p, /an empty table/, l);
+  }
+});
+
+test("pr-loop: the probe and every review run their statements batched through duck-repro, at the head and the base, with a regression sweep", async () => {
+  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1", "review r2"]) {
+    const p = r.prompt(l);
+    assert.match(p, /node scripts\/duck-repro\.ts <ddl\.sql> <statements\.sql>/, `${l}: statements go through duck-repro`);
+    assert.match(p, /lines holding only `--`/, `${l}: in files, as duck-repro reads them`);
+    assert.match(p, /> <out> 2>&1/, `${l}: the output goes to a file`);
+    assert.match(p, /grep -c '\^SAME'/, `${l}: and only the counts and the differences are read`);
+    assert.match(p, /grep -A2 '\^DIFFER'/, l);
+    assert.match(p, /at the head and at the base/, l);
+    assert.match(p, /REGRESSION SWEEP/, `${l}: the regression sweep`);
+    assert.match(p, /WITHOUT the new feature/, l);
+    assert.match(p, /SAME at the base and DIFFER at the head is blocking: severity regression/, l);
+    assert.match(p, /never more than \d+ tool calls/, `${l}: the work has a bound`);
+  }
+  assert.match(r.prompt("review r1"), /hundreds of statements/, "a full review aims for hundreds");
+  assert.match(r.prompt("review r2"), /a narrower set/, "a re-check runs a narrower set");
+  assert.doesNotMatch(r.prompt("review r2"), /hundreds of statements/);
+  assert.doesNotMatch(r.prompt("review r1"), /About 40 tool calls/, "the reading review's bound is raised to fit");
+});
+
+test("pr-loop: the probe's and the review's schema count the statements run and matched, and the Review record carries them", async () => {
+  const r = await run("pr-loop", { ...PR }, {
+    ...START,
+    "probe 1": { ...f("p"), statementsRun: 120, statementsMatched: 117 }, "probe fix 1": pushed("b"),
+    "probe 2": { ...clean, statementsRun: 40, statementsMatched: 40 },
+    "review r1": { ...f("a"), statementsRun: 340, statementsMatched: 331 }, "fix r1": pushed("c"),
+    "probe 3": { ...clean, statementsRun: 60, statementsMatched: 60 },
+    "review r2": { ...clean, statementsRun: 80, statementsMatched: 80 }, "CI 1": green,
+  });
+  for (const l of ["probe 1", "review r1"]) {
+    const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[]; properties: Record<string, { type: string }> };
+    for (const k of ["statementsRun", "statementsMatched"]) {
+      assert.ok(schema.required.includes(k), `${l}: the schema requires ${k}`);
+      assert.equal(schema.properties[k]!.type, "integer", `${l}: ${k} is a count`);
+    }
+  }
+  const rec = parseRecords(r.prompt("record"))[0]!;
+  assert.deepEqual([rec.statementsRun, rec.statementsMatched], [120 + 40 + 340 + 60 + 80, 117 + 40 + 331 + 60 + 80]);
+  assert.match(r.prompt("record"), /review 1: 1 finding\(s\): c-a[^\n]*; 340 statement\(s\) run, 331 matched/);
+});
+
+test("pr-loop: a review that ran no statement, or gave no valid count, is never a clean round: the run stops unreviewed, and issue-loop goes no further", async () => {
+  const none = (o: Record<string, unknown> = {}) => ({ ...clean, statementsRun: 0, statementsMatched: 0, ...o });
+  // the first review ran nothing (no psql, no Docker): no CI wait, no learn, a stop that says what to install
+  let r = await run("pr-loop", { ...PR }, { ...START, "review r1": none({ judgedCorrect: ["psql: command not found"] }) });
+  const status = String(r.result["status"]);
+  assert.match(status, /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts \(it said: psql: command not found\)/);
+  assert.doesNotMatch(status, /^reviewed/);
+  for (const s of ["`psql` on PATH", "brew install libpq", "postgresql-client", "Docker running", "itEnv"]) assert.ok(status.includes(s), `the stop says what to install: ${s}`);
+  assert.deepEqual(r.labels.slice(-2), ["CI read r1", "record"], "nothing after the review but its record");
+  const rec = parseRecords(r.prompt("record"))[0]!;
+  assert.equal(rec.status, status);
+  assert.equal(rec.reviewRounds, 0, "an unrun round is no review round");
+  assert.deepEqual([stats([rec]).reviewed, stats([rec]).neverReviewed, stats([rec]).firstPass], [0, 1, 0], "and review-stats never reads it as passed");
+
+  // no valid count at all: missing, or not a count
+  for (const bad of [undefined, "many", -1, 2.5]) {
+    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...clean, statementsRun: bad, statementsMatched: 0 } });
+    assert.match(String(r.result["status"]), /^unreviewed: review r1 reported no valid count of the statements it ran/, String(bad));
+  }
+  // a re-check that ran nothing after a fix: the fix is unchecked, so no clean round either
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": none() });
+  assert.match(String(r.result["status"]), /^unreviewed: review r2 ran no statement for src\/duck\/plan\.ts, so head bbbbbbb was read and never run/);
+  const rec2 = parseRecords(r.prompt("record"))[0]!;
+  assert.equal(rec2.reviewRounds, 1);
+  assert.equal(stats([rec2]).bySecond, 0, "round 2 ran nothing, so the PR did not pass by the second");
+
+  // issue-loop reads the stop as a stop
+  const stop = await run("issue-loop", { issue: 300, tasks: TASKS }, SETUP, [() => ({ status, pr: 401, classes: {} })]);
+  assert.equal(stop.flowCalls.length, 1, "the next task is not run");
+  assert.match(String(stop.result["status"]), /^stopped at task 1: unreviewed/);
+
+  // a probe is the author's check: one that ran nothing, or gave no count, is noted with what to install, and the review goes on
+  r = await run("pr-loop", { ...PR }, { ...START, "probe 1": none(), "review r1": clean, "CI 1": green });
+  assert.match(String(r.result["status"]), /^reviewed.*probe 1 ran no statement for src\/duck\/plan\.ts: it read the code only \(scripts\/duck-repro\.ts needs `psql` on PATH/);
+  r = await run("pr-loop", { ...PR }, { ...START, "probe 1": { ...clean, statementsRun: undefined }, "review r1": clean, "CI 1": green });
+  assert.match(String(r.result["status"]), /^reviewed.*probe 1 reported no valid count/);
+});
+
+// PR 245, round 2: the evidence a review owes is read from its diff's paths. The engine's and the listener's owe SQL
+// statements; every other path (the CLI, the web page, a script, a workflow, docs) owes checks, what it changed run.
+test("pr-loop: the evidence a review owes is read from its diff's paths: statements for the engine's, checks for every other", async () => {
+  const cli = { ...clean, changedPaths: ["src/cli/command.ts", "tests/cli-commands.test.ts"], statementsRun: 0, statementsMatched: 0, checksRun: 6 };
+  // a CLI-only diff, checked and with no statement: a clean review, reviewed and green
+  let r = await run("pr-loop", { ...PR }, { ...START, "probe 1": cli, "review r1": cli, "CI 1": green });
+  assert.match(String(r.result["status"]), /^reviewed, no open blocking finding/);
+  assert.doesNotMatch(String(r.result["status"]), /ran no|read the code only/);
+  let rec = parseRecords(r.prompt("record"))[0]!;
+  assert.deepEqual([rec.reviewRounds, rec.statementsRun, rec.checksRun], [1, 0, 12]);
+  assert.equal(stats([rec]).firstPass, 1);
+  // so are a workflow-only diff (this PR) and a docs-only one
+  for (const changedPaths of [[".claude/workflows/pr-loop.js", "scripts/review-stats.ts", "tests/workflows.test.ts"], ["docs/DESIGN.md", "CLAUDE.md"]]) {
+    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths }, "CI 1": green });
+    assert.match(String(r.result["status"]), /^reviewed/, changedPaths.join(" "));
+  }
+  // a CLI-only diff that ran nothing is still no review, and the stop says what to run
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, checksRun: 0 } });
+  assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no check for src\/cli\/command\.ts and 1 more path\(s\).*run what the diff changed at the head and the base: the `mason` command/);
+  assert.doesNotMatch(String(r.result["status"]), /psql/, "a diff that owes no statement is not told to install psql");
+  // an engine diff with checks but no statement still stops unreviewed
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: ["src/duck/plan.ts"], checksRun: 9 } });
+  assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts.*`psql` on PATH/);
+  rec = parseRecords(r.prompt("record"))[0]!;
+  assert.equal(rec.reviewRounds, 0);
+  // the listener, the source's reader and an engine test owe statements too; a diff of both kinds owes both
+  for (const p of ["src/api/postgres/server.ts", "src/cdc/poll.ts", "src/cli/dev.ts", "tests/duck-wire.test.ts", "docs/POSTGRES-API.md"]) {
+    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: [p] } });
+    assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement/, p);
+  }
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: ["src/duck/plan.ts", "src/cli/command.ts"], statementsRun: 300, statementsMatched: 300, checksRun: 0 } });
+  assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no check for src\/cli\/command\.ts/);
+  // the paths not said: what was owed is not known, so no review
+  for (const changedPaths of [undefined, [], "src/cli/command.ts"]) {
+    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths } });
+    assert.match(String(r.result["status"]), /^unreviewed: review r1 did not report the paths its diff changed/, JSON.stringify(changedPaths));
+  }
+  // the schema asks for both, and the prompt states both kinds and the paths that owe statements
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1"]) {
+    const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[]; properties: Record<string, { type: string; description?: string }> };
+    for (const k of ["checksRun", "changedPaths"]) assert.ok(schema.required.includes(k), `${l}: the schema requires ${k}`);
+    assert.equal(schema.properties["checksRun"]!.type, "integer");
+    assert.match(schema.properties["checksRun"]!.description!, /SQL statements are never counted here/);
+    assert.match(r.prompt(l), /STATEMENTS, for a changed path matching any of [^\n]*`src\/duck\/\*\*`/, l);
+    assert.match(r.prompt(l), /CHECKS, for every other changed path: RUN what it changed, at the head and at the base/, l);
+  }
+});
+
+test("pr-loop: the paths that owe statements are the `paths:` of the engine's and the listener's rules files, and src/cdc/", () => {
+  const listed = arrayOf("pr-loop", "STATEMENT_PATHS");
+  const dir = path.join(ROOT, ".claude", "rules");
+  const globsOf = (f: string) => {
+    const front = /^---\n([\s\S]*?)\n---/.exec(fs.readFileSync(path.join(dir, f), "utf8"));
+    assert.ok(front, `${f} has front matter`);
+    return [...front[1]!.matchAll(/^\s+- "([^"]+)"$/gm)].map((m) => m[1]!);
+  };
+  const files = fs.readdirSync(dir).filter((f) => /^duck-.*\.md$|^postgres-api\.md$/.test(f));
+  assert.ok(files.length >= 10, "the engine's rules files and the listener's");
+  const authority = new Set([...files.flatMap(globsOf), "src/cdc/**"]);
+  // the same glob reading as the script's
+  const re = (g: string) => new RegExp(`^${g.split("**").map((p) => p.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*")).join(".*")}$`);
+  for (const g of authority) assert.ok(listed.some((l) => g === l || re(l).test(g)), `${g} (a rules file's path) owes statements, but STATEMENT_PATHS does not cover it`);
+  for (const l of listed) assert.ok(authority.has(l), `${l} is in STATEMENT_PATHS but in no engine or listener rules file`);
+  // and nothing of the CLI's or the web page's own owes statements
+  for (const f of ["cli.md", "web-ui.md"]) {
+    for (const g of globsOf(f).filter((g) => !authority.has(g))) {
+      assert.ok(!listed.some((l) => re(l).test(g)), `${g} (${f}) is made to owe statements`);
+    }
+  }
+});
+
+test("review-stats: it reads and prints the checks run on other paths, and a record without them still reads", () => {
+  const rec = (o: Partial<ReviewRecord>): ReviewRecord => ({ pr: 1, designRounds: 1, probeRounds: 1, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed", ...o });
+  const block = (r: unknown) => "```json mason-review-record\n" + JSON.stringify(r) + "\n```";
+  const [a] = parseRecords(block(rec({ pr: 2, statementsRun: 0, statementsMatched: 0, checksRun: 7 })));
+  const [legacy] = parseRecords(block(rec({ pr: 3 })));
+  assert.equal(a!.checksRun, 7);
+  assert.throws(() => parseRecords(block({ ...rec({}), checksRun: 1.5 })), /checksRun is not a count/);
+  const s = stats([a!, legacy!]);
+  assert.deepEqual([s.checksRun, s.withChecks], [7, 1]);
+  assert.match(render(s, 0, 0), /checks run on other paths: 7 over 1 PR\(s\) that counted them/);
+  assert.match(render(stats([legacy!]), 0, 0), /checks run on other paths: none counted/);
+});
+
+test("review-stats: it reads and prints the statements run and matched, and a record without them still reads", () => {
+  const rec = (o: Partial<ReviewRecord>): ReviewRecord => ({ pr: 1, designRounds: 1, probeRounds: 1, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed", ...o });
+  const block = (r: unknown) => "```json mason-review-record\n" + JSON.stringify(r) + "\n```";
+  const [withCounts] = parseRecords(block(rec({ pr: 2, statementsRun: 400, statementsMatched: 390 })));
+  assert.deepEqual([withCounts!.statementsRun, withCounts!.statementsMatched], [400, 390]);
+  const [legacy] = parseRecords(block(rec({ pr: 3 })));
+  assert.equal(legacy!.statementsRun, undefined, "a record older than the counts reads, without them");
+  assert.throws(() => parseRecords(block({ ...rec({}), statementsRun: "many" })), /statementsRun is not a count/);
+  assert.throws(() => parseRecords(block({ ...rec({}), statementsRun: 10, statementsMatched: 11 })), /statementsMatched is more than statementsRun/);
+  assert.throws(() => parseRecords(block({ ...rec({}), statementsMatched: 3 })), /statementsMatched without statementsRun/);
+
+  const s = stats([withCounts!, legacy!, rec({ pr: 4, statementsRun: 100, statementsMatched: 100 })]);
+  assert.deepEqual([s.statementsRun, s.statementsMatched, s.withStatements], [500, 490, 2], "summed over the PRs whose record has them");
+  const text = render(s, 0, 0);
+  assert.match(text, /statements run by probes and reviews: 500 over 2 PR\(s\) that counted them, 490 matched Postgres \(98%\)/);
+  assert.match(render(stats([legacy!]), 0, 0), /statements run by probes and reviews: none counted/);
+});
+
+test("pr-loop: Postgres for the statements is the itEnv file when given, else a throwaway postgres:18 of the stage's own, and its URL is never printed", async () => {
+  const src = source("pr-loop");
+  assert.match(src, /^\/\/ args: \{[^}\n]*\bitEnv\?/m, "the args line names itEnv");
+  assert.match(src, /^\/\/ {3}itEnv: [^\n]*IT_POSTGRES_URL/m, "and the header says what it is");
+  const ownPg = [/postgres:18/, /wal_level=logical/, /-e POSTGRES_PASSWORD /, /openssl rand -hex/, /127\.0\.0\.1:0:5432/, /docker rm -f -v "\$n"/, /docker inspect "\$n"` must fail/];
+  const without = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1"]) {
+    const p = without.prompt(l);
+    for (const re of ownPg) assert.match(p, re, `${l}: without itEnv, a throwaway Postgres of its own (${re})`);
+    assert.match(p, /Never print, echo or log the URL or its password/, l);
+  }
+  const given = await run("pr-loop", { ...PR, itEnv: "/srv/it.env" }, { ...START, "review r1": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1"]) {
+    const p = given.prompt(l);
+    assert.match(p, /`\. \/srv\/it\.env`/, `${l}: the file is sourced`);
+    assert.doesNotMatch(p, /docker run/, `${l}: and no container is started`);
+    assert.match(p, /Never print, echo or log the URL or its password/, l);
+  }
+  // issue-loop passes it on to each pr-loop, as it does repo
+  const { flowCalls } = await run("issue-loop", { issue: 300, tasks: TASKS, itEnv: "/srv/it.env" }, SETUP, [
+    () => ({ status: "reviewed", pr: 401, classes: {} }), () => ({ status: "reviewed", pr: 402, classes: {} }),
+  ]);
+  assert.deepEqual(flowCalls.map((c) => c.args["itEnv"]), ["/srv/it.env", "/srv/it.env"]);
+  assert.match(source("issue-loop"), /^\/\/ args: \{[^}\n]*\bitEnv\?/m, "issue-loop's args line names it too");
 });

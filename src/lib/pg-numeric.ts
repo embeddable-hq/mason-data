@@ -40,6 +40,17 @@ export class NumericError extends Error {
   constructor(message: string, sqlstate: string, gap: GapId | null = null, detail: string | null = null) { super(message); this.sqlstate = sqlstate; this.gap = gap; this.detail = detail; }
 }
 
+/**
+ * A NUMERIC FIELD OVERFLOW IN POSTGRES'S WORDS (22003), the one place they are written: its message, and its DETAIL as
+ * `apply_typmod` gives it, for every path that raises one (this module's typmod, the engine's DECIMAL cast in
+ * src/duck/store.ts `postgresWording`). An infinite value has its own DETAIL (Postgres 14+).
+ */
+export function fieldOverflow(precision: number, scale: number, infinite = false): { message: string; detail: string } {
+  const digits = precision - scale;
+  return { message: "numeric field overflow", detail: infinite ? `A field with precision ${precision}, scale ${scale} cannot hold an infinite value.`
+    : `A field with precision ${precision}, scale ${scale} must round to an absolute value less than ${digits === 0 ? "1" : `10^${digits}`}.` };
+}
+
 /** Postgres's limits on a numeric's scale (numeric.h): a quotient's scale is held between these */
 const NUMERIC_MIN_SIG_DIGITS = 16;
 const NUMERIC_MAX_DISPLAY_SCALE = 1000;
@@ -238,7 +249,8 @@ export function withTypmod(a: PgNumeric, precision: number, scale: number): PgNu
   const maxDigits = precision - scale;
   const digits = r.unscaled === 0n ? null : abs(r.unscaled).toString().length - r.scale;
   if (digits !== null && digits > maxDigits) {
-    throw new NumericError("numeric field overflow", "22003", null, `A field with precision ${precision}, scale ${scale} must round to an absolute value less than ${maxDigits === 0 ? "1" : `10^${maxDigits}`}.`);
+    const o = fieldOverflow(precision, scale);
+    throw new NumericError(o.message, "22003", null, o.detail);
   }
   return r;
 }
@@ -445,7 +457,7 @@ function specialOf(p: NumericProgram, row: Readonly<Record<string, unknown>>): s
   }
   if (p.op === "typmod") {
     const v = specialOf(p.arg, row);
-    if (v !== undefined && v !== "NaN") throw new NumericError("numeric field overflow", "22003");
+    if (v !== undefined && v !== "NaN") { const o = fieldOverflow(p.precision, p.scale, true); throw new NumericError(o.message, "22003", null, o.detail); }
     return v;
   }
   for (const key of cellsOf(p)) {
