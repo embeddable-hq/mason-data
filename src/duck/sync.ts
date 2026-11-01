@@ -3494,12 +3494,17 @@ export class Sync {
         ...(uniqueKeys.length ? { uniqueKeys } : {}),
         ...(t.rowTypeOid !== undefined && columns.length === cols.length ? { rowTypeOid: t.rowTypeOid } : {}) });
     }
+    // ONE SOURCE OF AN ENUM'S LABELS, the synced table's ENUM: a generated table stores the ENUM it was built with, which
+    // a value added since (ALTER TYPE … ADD VALUE, re-copied) is not in, so its column declares the type by the synced
+    // labels; its own only where no synced column has the type
+    const synced = new Map(tables.flatMap((t) => t.columns.flatMap((x) => x.enumLabels !== undefined && x.spelled !== undefined ? [[x.spelled.replace(/\[\]$/, ""), x.enumLabels] as const] : [])));
     // each generated table served, as a copy of its output's types: no key, no joins
     for (const g of this.generated.served()) {
       const types = await c.prepare(`SELECT * FROM ${ident(g.schema)}.${ident(g.table)} LIMIT 0`);
       const duckTypes = new Map(Array.from({ length: types.columnCount }, (_, i) => [types.columnName(i), types.columnType(i)] as const));
       types.destroySync();
-      const columns = g.columns.filter((x) => duckTypes.has(x.name)).map((x) => pgColumn({ name: x.name, type: x.type, notNull: false, comment: null }, duckTypes.get(x.name)!, undefined));
+      const columns = g.columns.filter((x) => duckTypes.has(x.name)).map((x) => pgColumn({ name: x.name, type: x.type, notNull: false, comment: null }, duckTypes.get(x.name)!, undefined))
+        .map((x) => { const labels = x.enumLabels !== undefined && x.spelled !== undefined ? synced.get(x.spelled.replace(/\[\]$/, "")) : undefined; return labels === undefined ? x : { ...x, enumLabels: labels }; });
       tables.push({ name: g.table, schema: g.schema, primaryKey: [], columns, joins: [], ...(g.comment !== null ? { description: g.comment } : {}) });
     }
     const views = this.views;

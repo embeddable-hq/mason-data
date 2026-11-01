@@ -15,9 +15,9 @@
  * the table is answered by the very path that answers one over a copy. A `numeric`, an enum and a citext are stored as
  * the engine answers them (`duck: null`), which is what a copy of that column holds: a numeric's DECIMAL, whose display
  * scale the catalog's typmod pads on read; an enum's ENUM, in its declared order; a citext's text (stage 3, issue 175). A
- * numeric whose digits a statement computes at the result's edge (`DuckPlan.exact`) is stored only where they are one
- * engine cell at a scale the types fix (`storedCell`): a sum of a numeric(p, s) column, s up to 18. Any other type is
- * refused by name.
+ * numeric whose digits a statement computes at the result's edge (`DuckPlan.exact`) is stored where Postgres's types fix
+ * its scale, written as the engine's DECIMAL arithmetic (`storedNumeric`); one they don't is refused with its own reason
+ * (`notStoredRefusal`). Any other type is refused by name.
  */
 import { deparseSync } from "pgsql-deparser";
 import type { Node } from "libpg-query";
@@ -25,7 +25,6 @@ import { parseSql, PostgresSyntaxError } from "../api/postgres/parser.ts";
 import { describeKeys } from "./resolved.ts";
 import { treeDifference } from "./rewrite.ts";
 import { StatementError, type DuckPlan } from "./statement.ts";
-import type { ExactColumn } from "./rewrite.ts";
 import type { NumericProgram } from "../lib/pg-numeric.ts";
 
 /** A refusal of a generated table: its key in the file (null: the file itself), what is wrong, why, and the ways out. */
@@ -46,9 +45,9 @@ const SHELL_ALIAS = "__mason_generated";
 const SHELL_KEYS = new Set(["targetList", "fromClause", "sortClause", "limitOption", "op"]);
 
 /** An output column: its name, its type as the catalog spells it, as a copy stores it (null: as the engine answers it,
- *  a numeric's DECIMAL, an enum's ENUM, a citext's text), and the plan's cell it is read from where that is not its own
- *  output column (a numeric's exact digits, `storedCell`). */
-export interface GeneratedColumn { name: string; type: string; duck: string | null; cell?: string }
+ *  a numeric's DECIMAL, an enum's ENUM, a citext's text), and what it is computed as where that is not its own output
+ *  column (a numeric's exact digits, the engine's DECIMAL arithmetic over the plan's cells, `storedNumeric`). */
+export interface GeneratedColumn { name: string; type: string; duck: string | null; expr?: string }
 /** A definition that can be stored: what `src/duck/generated.ts` runs. */
 export interface DefinitionPlan {
   plan: DuckPlan;
@@ -229,22 +228,83 @@ function columnProblem(f: { name: string; oid: number }, typeName: string, kind:
 /** a column stored as the engine answers it (`GeneratedColumn.duck` null): a numeric, an enum (`typtype` e), a citext */
 const asAnswered = (oid: number, kind: string | undefined): boolean => oid === NUMERIC_OID || kind === "e" || kind === "citext";
 
+/** why a computed numeric is not stored (`storedNumeric`): each its own refusal, with ways out that hold */
+type NotStored = { why: "divides" | "rows" | "other" } | { why: "scale"; scale: number };
+
 /**
- * Where a numeric's digits are computed at the result's edge (`ExactColumn`), the cell a table can store in their place:
- * the program is one exact cell, or one padded to a scale the types fix (a sum of a numeric(p, s) column), stored as
- * DECIMAL(38, s) so every value has Postgres's s decimals. Null: the digits need the program (an average, a division, a
- * scale the rows decide), which no plain write computes.
+ * A NUMERIC COMPUTED AT THE RESULT'S EDGE (`ExactColumn`), WRITTEN AS THE ENGINE'S DECIMAL ARITHMETIC over the plan's cells
+ * (`__mason_output."__mason_cell_<key>"`, src/duck/rewrite.ts): stored where Postgres's TYPES fix its scale, since DuckDB's
+ * DECIMAL keeps the scale Postgres's numeric does for `+ - *` (the larger; the sum), a negation and `abs` (its own), and
+ * an explicit one for `round(x, n)`, a cast to numeric(p, s), `floor` and `ceil`, each rounded half away from zero as
+ * Postgres rounds. A `pad` is a scale the types fix over a cell held with fewer decimals: cast to it. `scale` is the
+ * result's, null where a bare cell's own (an integer's, a numeric passed through). Not stored, with the reason: a division
+ * (the engine divides a numeric as a double; an average is one), a scale the rows decide (`rescale`), a scale past
+ * `MAX_STORED_SCALE`, and what has no translation yet (a CASE, GREATEST, COALESCE, mod, trunc, a stddev).
  */
-function storedCell(e: ExactColumn): { cell: string; duck: string | null } | null {
-  if (e.text || e.cells.some((c) => c !== "exact")) return null;
-  const p = e.program;
-  // a cell is the plan's output column `__mason_cell_<key>` (src/duck/rewrite.ts), beside the statement's own
-  const column = (q: NumericProgram): string | null => q.op === "cell" && /^\d+$/.test(q.key) ? `__mason_cell_${q.key}` : null;
-  const own = column(p);
-  if (own !== null) return { cell: own, duck: null };
-  const padded = p.op === "pad" && p.scale <= MAX_STORED_SCALE ? column(p.arg) : null;
-  if (padded !== null && p.op === "pad") return { cell: padded, duck: `DECIMAL(38,${p.scale})` };
-  return null;
+function storedNumeric(p: NumericProgram): { sql: string; scale: number | null } | NotStored {
+  const decimal = (sql: string, scale: number): { sql: string; scale: number } => ({ sql: `CAST(${sql} AS DECIMAL(38,${scale}))`, scale });
+  const two = (args: [NumericProgram, NumericProgram], join: (a: string, b: string) => string, scale: (a: number, b: number) => number): ReturnType<typeof storedNumeric> => {
+    const [a, b] = args.map(storedNumeric) as [ReturnType<typeof storedNumeric>, ReturnType<typeof storedNumeric>];
+    if ("why" in a) return a;
+    if ("why" in b) return b;
+    return { sql: join(a.sql, b.sql), scale: a.scale === null || b.scale === null ? null : scale(a.scale, b.scale) };
+  };
+  const one = (arg: NumericProgram, make: (x: { sql: string; scale: number | null }) => { sql: string; scale: number | null }): ReturnType<typeof storedNumeric> => {
+    const x = storedNumeric(arg);
+    return "why" in x ? x : make(x);
+  };
+  switch (p.op) {
+    case "cell": return /^\d+$/.test(p.key) ? { sql: `__mason_output.${JSON.stringify(`__mason_cell_${p.key}`)}`, scale: null } : { why: "other" };
+    case "literal": {
+      const m = /^-?(\d+)(?:\.(\d*))?$/.exec(p.text);
+      if (m === null) return { why: "other" };
+      const scale = m[2]?.length ?? 0;
+      return { sql: `CAST('${p.text}' AS DECIMAL(${Math.min(38, Math.max(1, m[1]!.length + scale))},${scale}))`, scale };
+    }
+    case "add": case "sub": return two(p.args, (a, b) => `(${a} ${p.op === "add" ? "+" : "-"} ${b})`, Math.max);
+    case "mul": return two(p.args, (a, b) => `(${a} * ${b})`, (a, b) => a + b);
+    case "neg": return one(p.arg, (x) => ({ sql: `(-${x.sql})`, scale: x.scale }));
+    case "abs": return one(p.arg, (x) => ({ sql: `abs(${x.sql})`, scale: x.scale }));
+    case "floor": case "ceil": return one(p.arg, (x) => decimal(`${p.op}(${x.sql})`, 0));
+    case "round": return p.scale < 0 ? { why: "other" } : one(p.arg, (x) => decimal(`round(${x.sql}, ${p.scale})`, p.scale));
+    case "typmod": return p.precision > 38 ? { why: "other" } : one(p.arg, (x) => ({ sql: `CAST(${x.sql} AS DECIMAL(${p.precision},${p.scale}))`, scale: p.scale }));
+    // past MAX_STORED_SCALE the cast could overflow: the value as held, its scale the types' (refused at the top, unless
+    // a round or a cast above fixes a smaller one)
+    case "pad": return one(p.arg, (x) => p.scale <= MAX_STORED_SCALE ? decimal(x.sql, p.scale) : { sql: x.sql, scale: p.scale });
+    case "div": case "stddev": return { why: "divides" };
+    case "rescale": return { why: "rows" };
+    // a CASE, GREATEST, COALESCE, mod, trunc: no translation yet, but a division or a rows' scale within is the reason
+    default: return { why: reasonWithin(p) };
+  }
+}
+
+/** the reason a program is not stored, by what it holds: a division first, then a scale the rows decide */
+function reasonWithin(p: NumericProgram): "divides" | "rows" | "other" {
+  const ops = new Set<string>();
+  const walk = (q: NumericProgram): void => {
+    ops.add(q.op);
+    if ("args" in q) (q.args as NumericProgram[]).forEach(walk);
+    if ("arg" in q) walk(q.arg);
+    if (q.op === "rescale") walk(q.scale);
+    if (q.op === "pick") walk(q.index);
+  };
+  walk(p);
+  return ops.has("div") || ops.has("stddev") ? "divides" : ops.has("rescale") ? "rows" : "other";
+}
+
+/** a computed numeric not stored, said by its own reason, with ways out that hold */
+function notStoredRefusal(name: string, n: NotStored): GeneratedRefusal {
+  const double = `or read it as ${name}::double precision if it need not be exact`;
+  switch (n.why) {
+    case "divides": return { key: "sql", message: `column ${name} divides a numeric, which the engine computes as a double`, why: "Postgres divides a numeric exactly (an average is a division), so a stored double would not hold its digits.",
+      options: ["store what it divides and divide where you read the table: sum(x) AS total, count(x) AS n", double] };
+    case "scale": return { key: "sql", message: `column ${name} has ${n.scale} decimals, more than the ${MAX_STORED_SCALE} a stored numeric keeps`, why: "A sum at that scale could overflow the 38 digits a stored numeric has.",
+      options: [`round it to fewer: round(sum(x), 2) AS ${name}`, double] };
+    case "rows": return { key: "sql", message: `column ${name} sums values Postgres keeps at differing scales, so the rows decide its decimals`, why: "A stored numeric keeps one scale for every row.",
+      options: [`give the values one scale first: sum(x::numeric(20,4)) AS ${name}`, double] };
+    case "other": return { key: "sql", message: `column ${name} computes a numeric in a way Mason can't store exactly yet (a CASE, GREATEST, COALESCE, mod or trunc over a numeric)`, why: null,
+      options: [`compute it in the statement that reads the table`, double] };
+  }
 }
 
 /** the tables a definition's SQL names, by name alone (`schema.table`, a bare name `public`'s): what a cycle is told
@@ -312,21 +372,28 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   const kinds = new Map(made.length === 0 ? [] : (await p.rows(`SELECT oid::text, CASE WHEN typname = 'citext' AND typtype = 'b' THEN 'citext' ELSE typtype::text END FROM pg_type WHERE oid IN (${made.map((f) => Math.trunc(f.oid)).join(", ")})`))
     .map(([oid, kind]) => [Number(oid), kind!] as const));
   fields.forEach((f, i) => { const bad = columnProblem(f, typeNames.get(i) ?? String(f.oid), kinds.get(f.oid)); if (bad !== null) refused.push(bad); });
-  // a numeric computed after the engine's answer (an average, `x / 3`): stored only where one cell holds its digits
-  const cells = new Map<number, { cell: string; duck: string | null }>();
+  // a numeric computed after the engine's answer: stored as DECIMAL arithmetic where the types fix its scale
+  const exprs = new Map<number, string>();
   for (const e of refused.length === 0 ? plan.exact ?? [] : []) {
-    const stored = storedCell(e);
-    if (stored !== null) { cells.set(e.column, stored); continue; }
     const f = fields[e.column]!;
-    refused.push(e.text
-      ? { key: "sql", message: `column ${f.name} is the text of a numeric computed when a statement is answered, which a generated table can't store yet`, why: "Postgres's digits for a numeric are worked out when a statement is answered, and a stored column skips that step.", options: [`compute it over double precision: (x::double precision / 3)::text`] }
-      : { key: "sql", message: `column ${f.name} has no fixed scale, so it can't be stored exactly`, why: "Postgres chooses the digits of an average, a division or a sum over values of differing scales from the values themselves.",
-        options: [`read ${f.name}::double precision if it need not be exact`, `or cast it to an integer type if it holds whole numbers: ${f.name}::bigint`] });
+    if (e.text) {
+      refused.push({ key: "sql", message: `column ${f.name} is the text of a numeric computed when a statement is answered, which a generated table can't store yet`, why: "Postgres's digits for it are worked out when a statement is answered, and a stored column skips that step.", options: [`store the numeric, and write its text in the statement that reads the table`] });
+      continue;
+    }
+    const stored = storedNumeric(e.program);
+    if ("why" in stored) { refused.push(notStoredRefusal(f.name, stored)); continue; }
+    if (e.cells.some((c) => c !== "exact")) {
+      refused.push({ key: "sql", message: `column ${f.name} is a numeric computed from a value the engine holds as a double (a JSON number's text, ln, sqrt)`, why: "Postgres computes it exactly from the value's text, which a stored column does not keep.",
+        options: [`read it as ${f.name}::double precision if it need not be exact`, "or sync the value as a numeric column of its table"] });
+      continue;
+    }
+    if (stored.scale !== null && stored.scale > MAX_STORED_SCALE) refused.push(notStoredRefusal(f.name, { why: "scale", scale: stored.scale }));
+    else exprs.set(e.column, stored.sql);
   }
   if (refused.length > 0) return { refused };
   return { definition: { plan, bases, warnings: statement.warnings, columns: fields.map((f, i) => {
-    const cell = cells.get(i);
-    return { name: f.name, type: typeNames.get(i)!, duck: cell !== undefined ? cell.duck : STORED_TYPES.get(f.oid) ?? null, ...(cell !== undefined ? { cell: cell.cell } : {}) };
+    const expr = exprs.get(i);
+    return { name: f.name, type: typeNames.get(i)!, duck: expr !== undefined ? null : STORED_TYPES.get(f.oid) ?? null, ...(expr !== undefined ? { expr } : {}) };
   }) } };
 }
 

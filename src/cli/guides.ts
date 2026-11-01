@@ -66,10 +66,12 @@ ${keys}
     table already built keeps serving and being re-run from what it was built with. A table has no session, so SQL that
     reads a time zone or a setting is refused: name the zone (t AT TIME ZONE 'UTC', date_trunc('day', t, 'UTC')).
     A daily table in one zone doesn't serve a dashboard in another.
-    A numeric column is stored exactly, with Postgres's digits: one passed through, its min or max, a sum of an integer
-    or of a numeric(p,s) column (s up to 18). One whose digits Postgres works out from the values (avg, a division, a sum
-    of values of differing scales) is refused: cast it, avg(x)::double precision, or sum whole numbers. An enum and a
-    citext are stored as themselves: an enum sorts in its declared order, a citext compares without case.
+    A numeric column is stored exactly, with Postgres's digits, wherever its types fix the scale: one passed through,
+    its min or max, a sum, and + - * of those, negated, abs, round(x, n), floor, ceil or cast to numeric(p,s), up to 18
+    decimals. Refused, each with its reason and the way out: a division (avg is one: store sum and count, divide where
+    you read), more than 18 decimals (round it), a sum whose decimals the rows decide (cast the values to one scale
+    first), and a CASE, GREATEST, COALESCE, mod or trunc over a numeric. An enum and a citext are stored as themselves:
+    an enum sorts in its declared order, a citext compares without case.
     Not available yet: kind: live, and a domain or a composite type's column.
 
   WHO READS IT

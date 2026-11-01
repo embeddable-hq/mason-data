@@ -184,7 +184,7 @@ test("what a table cannot store is refused by name at its key, before anything i
   }, async (w) => {
     await w.sync.generated.review();
     const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
-    for (const name of ["money", "avg"]) { assert.equal(r(name).state, "refused"); refusedAt(r(name).refusals, "sql", /column (total|mean) has no fixed scale, so it can't be stored exactly/); }
+    for (const name of ["money", "avg"]) { assert.equal(r(name).state, "refused"); refusedAt(r(name).refusals, "sql", /column (total|mean) divides a numeric, which the engine computes as a double/); }
     assert.ok(r("money").refusals[0]!.options.some((o) => o.includes("::double precision")), JSON.stringify(r("money").refusals));
     refusedAt(r("unnamed").refusals, "sql", /has no name/);
     refusedAt(r("twice").refusals, "sql", /names column id twice/);
@@ -950,13 +950,13 @@ test("a child is held to the target_lag its parent runs at: a parent refused in 
 
 // stage 3 (issue 175): a numeric, an enum and a citext stored as the engine answers them, as a copy of the column holds them
 const LEDGER_COLUMNS = [{ name: "id", type: "bigint" }, { name: "n", type: "integer" }, { name: "small", type: "smallint" }, { name: "amount", type: "numeric(12,2)" },
-  { name: "big", type: "numeric" }, { name: "mood", type: "mood", typeKind: "e" }, { name: "name", type: "citext" }].map((c) => ({ ...c, notNull: false, comment: null }));
+  { name: "big", type: "numeric" }, { name: "wide", type: "numeric(65,30)" }, { name: "mood", type: "mood", typeKind: "e" }, { name: "name", type: "citext" }].map((c) => ({ ...c, notNull: false, comment: null }));
 const ledger: AddedTable = { source: "public.ledger", schema: "public", table: "ledger", key: ["id"], columns: LEDGER_COLUMNS, foreignKeys: [], bytes: 0, rows: 4 };
 const LEDGER_SEED = [
   "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')",
-  "CREATE TABLE public.ledger (id BIGINT, n INTEGER, small SMALLINT, amount DECIMAL(12,2), big DECIMAL(38,9), mood mood, name VARCHAR)",
-  "INSERT INTO public.ledger VALUES (1, 10, 1, 1.10, 12345678901234567890.123456789, 'happy', 'Alice'), (9223372036854775806, 2147483647, 2, -2.50, -0.000000001, 'sad', 'alice'), " +
-    "(3, NULL, 3, NULL, NULL, 'ok', 'Bob'), (9223372036854775807, 2147483647, 32767, 4.00, 1.100000000, 'sad', 'BOB')",
+  "CREATE TABLE public.ledger (id BIGINT, n INTEGER, small SMALLINT, amount DECIMAL(12,2), big DECIMAL(38,9), wide DECIMAL(38,2), mood mood, name VARCHAR)",
+  "INSERT INTO public.ledger VALUES (1, 10, 1, 1.10, 12345678901234567890.123456789, 1.25, 'happy', 'Alice'), (9223372036854775806, 2147483647, 2, -2.50, -0.000000001, -0.50, 'sad', 'alice'), " +
+    "(3, NULL, 3, NULL, NULL, NULL, 'ok', 'Bob'), (9223372036854775807, 2147483647, 32767, 4.00, 1.100000000, 2.00, 'sad', 'BOB')",
   `INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.ledger', 'copied', 4, 0, 1.0, now(), NULL, '${JSON.stringify(LEDGER_COLUMNS)}')`,
   `INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES ('public.ledger', '100:100:', now(), 'off')`,
 ];
@@ -1005,5 +1005,59 @@ test("an enum and a citext are stored and read back: the enum's declared order a
     assert.deepEqual(r.rows.map((x) => x[1]), ["sad", "sad", "ok", "happy"], "the declared order, not the alphabet's");
     assert.deepEqual((await typed(w, "SELECT count(*) FROM kinds WHERE mood = 'sad'")).rows, [["2"]]);
     assert.deepEqual((await typed(w, "SELECT id FROM kinds WHERE name = 'ALICE' ORDER BY id")).rows, [["1"], ["9223372036854775806"]]);
+  });
+});
+
+// review round 1 of PR 202 (docs/the PR's "Review round"): ONE source of an enum's labels, the synced table's
+test("a value added to a base's enum is the synced table's at once, whatever a generated table built before it stored, which answers as a stale table", async () => {
+  await overLedger({ kinds: KINDS }, async (w, restarted) => {
+    if (restarted) return;
+    // as a re-copy after ALTER TYPE mood ADD VALUE 'meh' BEFORE 'ok' leaves it: the synced ENUM with the new label, and a row of it
+    await w.store.writer.run("CREATE OR REPLACE TABLE public.ledger AS SELECT id, n, small, amount, big, wide, CAST(CAST(mood AS VARCHAR) AS ENUM('sad', 'meh', 'ok', 'happy')) AS mood, name FROM public.ledger");
+    await w.store.writer.run("INSERT INTO public.ledger VALUES (7, 1, 1, 1.00, 1.000000000, 1.00, 'meh', 'Mia')");
+    await (w.sync as unknown as { rebuildSchema(): Promise<void> }).rebuildSchema();
+    const stored = await w.rows("SELECT data_type FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = 'kinds' AND column_name = 'mood'");
+    assert.doesNotMatch(String(stored[0]![0]), /meh/, "the generated table holds the ENUM it was built with: declared after the synced table, it does not decide the labels");
+    assert.deepEqual((await typed(w, "SELECT count(*) FROM ledger WHERE mood = 'meh'")).rows, [["1"]]);
+    assert.deepEqual((await typed(w, "SELECT 'meh'::mood AS m")).rows, [["meh"]]);
+    assert.deepEqual((await typed(w, "SELECT enumlabel FROM pg_enum WHERE enumtypid = 'mood'::regtype ORDER BY enumsortorder")).rows, [["sad"], ["meh"], ["ok"], ["happy"]]);
+    assert.deepEqual((await typed(w, "SELECT id FROM kinds WHERE mood = 'meh'")).rows, [], "stale, as Postgres over a table built before the change");
+    assert.deepEqual((await typed(w, "SELECT mood FROM kinds ORDER BY mood, id")).rows.map((x) => x[0]), ["sad", "sad", "ok", "happy"]);
+  });
+});
+
+const COMPUTED = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, -amount AS neg, amount + 1 AS plus, abs(amount) AS size, amount::numeric(10,3) AS widened FROM ledger\norder_by: id\n";
+const TOTALS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT sum(amount) * 2 AS twice, round(sum(amount), 1) AS r, floor(sum(amount)) AS f, round(sum(wide), 2) AS w FROM ledger\n";
+
+test("a numeric whose scale the types fix is stored with Postgres's digits: negated, added to, multiplied, rounded, cast to a typmod", async () => {
+  await overLedger({ computed: COMPUTED, totals: TOTALS }, async (w) => {
+    const r = await typed(w, "SELECT * FROM computed ORDER BY id");
+    assert.deepEqual(r.fields.map(([n, oid, mod]) => [n, oid, n === "widened" ? mod : null]), [["id", 20, null], ["neg", 1700, null], ["plus", 1700, null], ["size", 1700, null], ["widened", 1700, (10 << 16) + 3 + 4]]);
+    assert.deepEqual(r.rows, [["1", "-1.10", "2.10", "1.10", "1.100"], ["3", null, null, null, null], ["9223372036854775806", "2.50", "-1.50", "2.50", "-2.500"], ["9223372036854775807", "-4.00", "5.00", "4.00", "4.000"]]);
+    assert.deepEqual((await typed(w, "SELECT * FROM totals")).rows, [["5.20", "2.6", "2", "2.75"]]);
+  });
+});
+
+test("a numeric the types don't fix is refused with its own reason: a division, a scale past 18; a sum of differing columns' scales is stored", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    w.write("mean", `${lag}sql: SELECT avg(n) AS mean FROM ledger\n`);
+    w.write("wide", `${lag}sql: SELECT sum(wide) AS total FROM ledger\n`);
+    w.write("mixed", `${lag}sql: SELECT sum(amount) + sum(big) AS combined FROM ledger\n`);
+    w.write("texts", `${lag}sql: SELECT sum((payload ->> 'a')::numeric) AS total FROM events\n`);
+    w.write("larger", `${lag}sql: SELECT greatest(amount, 1) AS top FROM ledger\n`);
+    await w.sync.generated.review();
+    const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
+    refusedAt(r("mean").refusals, "sql", /^column mean divides a numeric, which the engine computes as a double$/);
+    assert.ok(r("mean").refusals[0]!.options.some((o) => o.includes("count(")), JSON.stringify(r("mean").refusals));
+    refusedAt(r("wide").refusals, "sql", /^column total has 30 decimals, more than the 18 a stored numeric keeps$/);
+    assert.ok(r("wide").refusals[0]!.options.some((o) => o.includes("round(")), JSON.stringify(r("wide").refusals));
+    refusedAt(r("texts").refusals, "sql", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/);
+    refusedAt(r("larger").refusals, "sql", /^column top computes a numeric in a way Mason can't store exactly yet/);
+    for (const name of ["mean", "wide", "texts", "larger"]) assert.doesNotMatch(JSON.stringify(r(name).refusals), /no fixed scale/);
+    // case 2f: the sum of an unconstrained numeric's synced column is one cell at the scale its DECIMAL holds, so it is stored
+    await w.until(built, "public.mixed");
+    assert.deepEqual((await typed(w, "SELECT combined FROM mixed")).rows, [["12345678901234567893.823456788"]]);
   });
 });

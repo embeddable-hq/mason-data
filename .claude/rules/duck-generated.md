@@ -32,9 +32,15 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   holds it over a generated table. A numeric, an enum and a citext are stored as the engine answers them (`duck: null`),
   which is what a copy of the column holds, so the catalog's typmod pads a numeric's scale on read and an enum keeps its
   declared order (stage 3, issue 175). A numeric the plan computes after the engine's answer (`DuckPlan.exact`) is stored
-  only where ONE exact cell holds its digits, padded to a scale the types fix of at most 18 (`storedCell`: a sum of a
-  numeric(p, s)); anything else (an average, a division, a scale the rows decide) and `dropLast` are refused, because a
-  plain write would store another value. A domain and a composite stay refused by name.
+  where Postgres's TYPES fix its scale, its program written as the engine's DECIMAL arithmetic (`storedNumeric`: `+ - *`,
+  negation, abs, round, a typmod, floor, ceil, a pad), at most 18 decimals. What is not stored says ITS OWN reason
+  (`notStoredRefusal`: a division, a scale past 18, a scale the rows decide, no translation yet), and the guide and the
+  release note name the same shapes: one refusal's reason for every shape was a false one. `dropLast` is refused. A
+  domain and a composite stay refused by name. Detector: tests/duck-generated.test.ts, a test per shape.
+- **One source of an enum's labels, the synced table's ENUM.** A generated table stores the ENUM it was built with; a
+  value added since is declared by the synced column (`schemaBuilt` hands the generated column its labels; `catalogDdl`
+  keeps the first declaration). Such a table answers as a stale table until the re-copy's mark runs it. Detector: the
+  enum test of tests/duck-generated.test.ts.
 - **A run takes its snapshot and its marks on ONE writer's turn**: a commit is in the snapshot or marked for the next
   run, never neither. DuckDB's snapshot is a transaction's first read of a table, never its BEGIN, so the run reads the
   ledger there. A commit that changes a base marks it AFTER that commit, on that writer's turn, in memory, adding nothing
