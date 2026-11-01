@@ -171,6 +171,13 @@ paths:
   `groupOutput`), and a key bound to an output IS that output: a jsonb's, citext's or collation's key built over it,
   and a key bound by equality to a computed output written as its ordinal, never a second evaluation of a volatile
   one. Detector: tests/duck-wire.test.ts "a key bound to an output is that output …".
+  Its fifth (issue 192): FETCH … WITH TIES's rank window read a number by a rule of its own, so one beside a `*` was a
+  constant. Its keys are bound by `keysBound` too (a set operation's by number or name, all Postgres takes there), and a
+  key bound to an output reads that output's COLUMN by its place (`withTies`: the statement is a derived table whose
+  columns are named by place), never its expression again, so a window's, a set-returning function's or a volatile
+  output is one value; a key no output is is computed once, as a column of its own. A set operation's column is typed
+  as Postgres resolved it (`setOperationOutputs`, src/duck/pgtree.ts: `citext UNION ALL text` is text), never as its
+  first SELECT's. Detector: tests/duck-wire.test.ts "FETCH … WITH TIES answers as Postgres does …".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its

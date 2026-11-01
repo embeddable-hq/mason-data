@@ -456,6 +456,51 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
   return found;
 }
 
+/**
+ * EACH SET OPERATION'S OWN OUTPUTS, AS POSTGRES RESOLVED THEM: a column's type, typmod and collation are the set
+ * operation's (`SELECT <citext> … UNION ALL SELECT <text> …` is text, its first SELECT's is citext), never its first
+ * SELECT's. Each is known by the SELECTs it combines, in order: the offsets their outputs hold (a SELECT that is a set
+ * operation of its own, with an ORDER BY or a LIMIT, is one of them, by its first SELECT's). Each column is typed as
+ * no table's column: what is known of it is the set operation's alone.
+ */
+export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; columns: Array<Typed | null> }> {
+  const found: Array<{ arms: number[][]; columns: Array<Typed | null> }> = [];
+  const held = (x: TreeValue | undefined): number[] => {
+    if (Array.isArray(x)) return x.flatMap(held);
+    // (a subquery in an output is a query of its own)
+    if (x === undefined || !isNode(x) || x._node === "QUERY") return [];
+    const loc = num(x.location);
+    return [...(loc !== null && loc >= 0 ? [loc] : []), ...Object.entries(x).flatMap(([k, y]) => k === "_node" ? [] : held(y))];
+  };
+  const visit = (v: TreeValue): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    if (v._node === "QUERY" && isNode(v.setOperations ?? null) && Array.isArray(v.targetList)) {
+      const rtable = Array.isArray(v.rtable) ? v.rtable : [];
+      const arms: number[][] = [];
+      const leaves = (s: TreeValue | undefined): void => {
+        if (s === undefined || !isNode(s)) return;
+        if (s._node === "SETOPERATIONSTMT") { leaves(s.larg); leaves(s.rarg); return; }
+        const rte = s._node === "RANGETBLREF" ? rtable[(num(s.rtindex ?? null) ?? 0) - 1] : undefined;
+        const q = isNode(rte ?? null) ? (rte as TreeNode).subquery ?? null : null;
+        arms.push(isNode(q) && Array.isArray(q.targetList) ? held(q.targetList.filter((t) => isNode(t) && t.resjunk !== "true").map((t) => (t as TreeNode).expr ?? null)) : []);
+      };
+      leaves(v.setOperations);
+      const columns = v.targetList.filter(isNode).filter((t) => t.resjunk !== "true").map((t) => {
+        const e = t.expr ?? null;
+        const type = isNode(e) ? exprType(e) : null;
+        if (!isNode(e) || type === null) return null;
+        const { relation: _r, column: _c, functionColumn: _f, ...own } = typedOf(e, type, [rtable.filter(isNode)]);
+        return { ...own, qualifier: null, renamed: null };
+      });
+      found.push({ arms, columns });
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return found;
+}
+
 /** an output as what it reads: a VAR of the query's RTE_GROUP is the expression it groups */
 function ungrouped(v: TreeValue, rtable: TreeNode[]): TreeValue {
   if (!isNode(v) || v._node !== "VAR") return v;

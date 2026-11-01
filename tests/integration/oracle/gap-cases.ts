@@ -15,7 +15,6 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "set-config-forms", sql: "SELECT set_config('application_name', 'gap-case', true) FROM public.one" },
   { gap: "star-join-twin", sql: "SELECT j.* FROM (star_o a FULL JOIN star_b b USING (name)) AS j ORDER BY 1 NULLS FIRST, 2, 8" },
   { gap: "setop-ordinal-star", sql: "SELECT *, t FROM (SELECT id, t FROM typed) s UNION SELECT id, t, t FROM typed ORDER BY 2, 1" },
-  { gap: "with-ties-distinct", sql: "SELECT DISTINCT i4 FROM typed ORDER BY i4 FETCH FIRST 2 ROWS WITH TIES" },
   { gap: "collation-unknown", sql: "SELECT id FROM typed ORDER BY t COLLATE \"en_US.utf8\", id" },
   { gap: "like-any-array", sql: "SELECT id FROM typed WHERE t LIKE ANY (at) ORDER BY id" },
   { gap: "similar-to-forms", sql: "SELECT id FROM typed WHERE t SIMILAR TO vc ORDER BY id" },

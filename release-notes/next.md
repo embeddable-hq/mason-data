@@ -117,6 +117,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   are made distinct on the key (and the other tables' listed columns), and that table's wide columns read for the rows
   the limit keeps. Such a query spilled 29 GiB and failed for memory after five minutes; it now answers in under a
   second. Nothing to do on upgrade.
+- **`FETCH FIRST n ROWS WITH TIES` answers as Postgres does wherever it is written.** These were wrong and are now right:
+  a sort by the number of a computed column beside a `*` (`SELECT t.*, x % 5 AS m … ORDER BY 5`) kept every row; a
+  `UNION`, `INTERSECT` or `EXCEPT` with `WITH TIES` failed with an internal error; inside an `IN`, a scalar subquery,
+  `ARRAY(…)` or an arm of a `UNION` it failed with "returns 2 columns", and `SELECT s.*, 1 AS x` over it read the wrong
+  last column; a count of `NULL` kept no row and a negative one answered nothing, where Postgres keeps every row and
+  raises `2201W` (a negative `OFFSET` now raises Postgres's `2201X`); a fractional count was not rounded; a numeric
+  column under it lost its decimals. A sort by a window function's or a set-returning function's column or by
+  `random()`, and `SELECT DISTINCT` or `DISTINCT ON` with `WITH TIES`, now answer where they were refused or failed. Over
+  a table a user's role filters it is refused by name (`roles`), with the way out. Nothing to do on upgrade.
 
 ## Known
 
