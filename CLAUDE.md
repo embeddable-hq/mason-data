@@ -105,9 +105,10 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
 - **Every wait has a limit, and a job past it is a hang**, because a background job reports only when it exits and a
   deadlocked one never does (docs/DESIGN.md "Local gates"). `npm run gate` bounds each step already. A bare test run
   names it before the files, `node --test --test-timeout=<ms> <file>`: after them Node ignores it, so `npm test` and
-  `npm run check` cannot take it until issue 139, the rule's detector. Never end a turn on an unbounded job: a queued
-  gate is watched in a bounded wait on its output, whose `waiting for a slot` lines say it is queued. Past the limit,
-  compare CPU with elapsed time on the test's own process, not the wrapper (`pgrep -P <pid>` down to it, then
+  `npm run check` cannot take it until issue 139. Detector: the hook `scripts/hooks/test-timeout.ts` blocks a
+  `node --test` without the limit before its files, and `npm test`; it is part of issue 139's detector, which still
+  owns the suite's own scripts. Never end a turn on an unbounded job: a queued gate is watched in a bounded wait on
+  its output, whose `waiting for a slot` lines say it is queued. Past the limit, compare CPU with elapsed time on the test's own process, not the wrapper (`pgrep -P <pid>` down to it, then
   `ps -o time,etime -p <pid>`): a hung test uses none, though nor does one waiting on I/O. A hang is the change's to
   fix, or a flake as "Local gates" says, never a run to repeat.
 - **Nobody waits on CI.** An implementer ends at the push and reports the PR and its head; the coordinator binds the PR
@@ -121,7 +122,9 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   green run or a merge) and another session's report may not; a sub-agent's end does. When its bound passes with
   nothing changed, look, and leave another. Such a job costs nothing while it runs, unlike a wait in the foreground.
   Two turns ended without one left both leads idle half of the seven hours read (docs/DESIGN.md "Local gates").
-  Nothing detects it; a transcript's gaps did.
+  Detector: the Stop hook `scripts/hooks/wake-up.ts` warns when a turn ends after a queued merge or a message to a lead
+  with no background job started since and still running; a warning, never a block, because it reads the transcript
+  by heuristic.
 - **Delegate when it is faster, but merge nothing you have not read.** Independent pieces go to sub-agents, each in a
   worktree of its own; the one who merges reads each diff in full, verifies it (CI on its last commit; a local gate for a
   reason, "Local gates"), and merges it. A sub-agent's report is its claim, not the evidence. Two
@@ -137,7 +140,9 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
 One laptop is shared by every session, and one gate fills it: gates are the largest single use of a session's time
 (docs/DESIGN.md "Local gates" has the measurements). **CI is the full gate**, and a local gate runs for a reason. Each
 rule says what detects it, or why nothing does: most are habits that only a session's transcript shows, which no test
-reads.
+reads. Some detectors are Claude Code hooks, wired in `.claude/settings.json` from `scripts/hooks/`
+(`tests/hooks.test.ts`): a PreToolUse hook blocks the command, and its one-line message says what to run instead; the
+Stop hook only warns.
 
 - **While working, the tests nearest the change**: `node --test <file>`, with `--test-name-pattern` for one test, and
   `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. **A full integration run is not an iteration tool**,
@@ -177,11 +182,13 @@ reads.
   Detector: the merge is refused, and the `push` run on main after it.
 - **Who merges what.** A PR that changes nothing under `src/` merges without the owner's word once its Fable review has
   no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release,
-  merge on the owner's word. Once that is so, `gh pr merge <n> --auto --merge` queues it for the checks still running,
-  and a push after it needs reading again. PR 89 had not merged itself some while after its last check went green and
-  was merged by hand, so confirm a PR landed.
+  merge on the owner's word. Once that is so, `gh pr merge <n> --auto --merge --match-head-commit <sha>` queues it for
+  the checks still running, pinned to the head that was read, and a push after it needs reading again. Detector: the
+  hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`. PR 89 had not merged itself
+  some while after its last check went green and was merged by hand, so confirm a PR landed.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
-  to fix, or it is a flake, the next rule. Nothing detects it; the gate could compare the tree's hash, and does not.
+  to fix, or it is a flake, the next rule. Detector: the hook `scripts/hooks/no-rerun.ts` blocks `gh run rerun`; a
+  local gate run again on an unchanged tree, nothing detects (the gate could compare the tree's hash, and does not).
 - **A flaky test met during other work is quarantined with an issue, not fixed in that PR**: a flake's fix costs more
   than the PR it interrupts, and its review is its own. A flake here is a test the change cannot have touched, failing
   on timing or load. The skip goes in its own commit, `test("…", { skip: "quarantined: #<issue>" }, …)`, and the issue
