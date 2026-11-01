@@ -31,7 +31,9 @@ import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
-import { catalogDdl, masonAggregatesSql } from "../src/api/postgres/catalog.ts";
+import { catalogDdl } from "../src/api/postgres/catalog.ts";
+// by the namespace, so this file loads where the module has no such list (scripts/fails-without.ts at an older commit)
+import * as catalogModule from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
 import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
@@ -304,7 +306,7 @@ before(async () => {
   await truth.exec("SET TimeZone = 'UTC'");
   for (const s of PG_DDL) await truth.exec(s);
   // the aggregates Mason adds (`latest`), declared as the catalog declares them
-  for (const s of masonAggregatesSql()) await truth.exec(s);
+  for (const s of (catalogModule as { masonAggregatesSql?: () => string[] }).masonAggregatesSql?.() ?? []) await truth.exec(s);
   // the "source's" OID for citext is the truth's: what the copy records (SourceColumnInfo.typeOid) and the wire sends
   const citextOid = Number((await truth.query<{ oid: number }>("SELECT oid FROM pg_type WHERE typname = 'citext'")).rows[0]!.oid);
   schema.tables[2]!.columns[1]!.typeOid = citextOid;
