@@ -2855,8 +2855,30 @@ test("a key bound to an output is that output: by alias, number or an equal expr
       "SELECT a.status AS s, a.id FROM accounts a ORDER BY a.status DESC, a.id",
       "SELECT t.s COLLATE \"und-x-icu\" AS s, t.id FROM texts t ORDER BY s, t.id",
       "SELECT t.s COLLATE \"und-x-icu\" AS x, t.id FROM texts t ORDER BY t.s COLLATE \"und-x-icu\" DESC, t.id",
+      // EVERY READER OF THE SORT LIST reads a key as the SELECT's ORDER BY does, by name, number or equal expression:
+      // WITH TIES's rank window (an ordinal there is a constant, every row a tie), late.ts's fetch under a join
+      // (with an OFFSET: withTies read the offset node in two places, the detector below)
+      ...["m", "1", "l.k % 5", "l.k % 5 + 0 DESC", "m DESC, 2"].flatMap((key) => [
+        `SELECT count(*) FROM (SELECT l.k % 5 AS m, l.id FROM late l ORDER BY ${key} FETCH FIRST 3 ROWS WITH TIES) s`,
+        `SELECT count(*) FROM (SELECT l.k % 5 AS m, l.id FROM late l ORDER BY ${key} OFFSET 2 FETCH FIRST 3 ROWS WITH TIES) s`,
+        `SELECT l.k % 5 AS m, l.id, lc.name FROM late l JOIN late_c lc ON lc.id = l.c ORDER BY ${key}, l.id LIMIT 6`,
+      ]),
+      "SELECT count(*) FROM (SELECT l.k, l.id FROM late l ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.k % 5 AS m, count(*) AS n FROM late l GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 2 ROWS WITH TIES) s",
+      // a key built over a grouped output: the collation's keys read the grouped value, by number, name or expression
+      "SELECT t.s COLLATE \"und-x-icu\" AS x, count(*) AS n FROM texts t GROUP BY 1 ORDER BY 1",
+      "SELECT t.s COLLATE \"und-x-icu\" AS x, count(*) AS n FROM texts t GROUP BY x ORDER BY x DESC",
+      "SELECT t.s COLLATE \"und-x-icu\" AS x, count(*) AS n FROM texts t GROUP BY 1 ORDER BY t.s COLLATE \"und-x-icu\" DESC",
+      "SELECT t.s AS x, count(*) AS n FROM texts t GROUP BY t.s ORDER BY t.s COLLATE \"und-x-icu\" DESC",
+      "SELECT q.v -> 'k' AS k, count(*) AS n FROM jq q GROUP BY k ORDER BY k DESC",
     ]) await alike(sql);
     assert.deepEqual(differ, [], "each of these answers unlike Postgres");
+    // a citext output grouped and ordered by its number or name: Postgres's answer, or refused as the citext it is
+    for (const sql of ["SELECT a.status AS s, count(*) AS n FROM accounts a GROUP BY 1 ORDER BY 1", "SELECT a.status AS s, count(*) AS n FROM accounts a GROUP BY s ORDER BY s DESC"]) {
+      const got = await answer(c, sql).catch((e: pg.DatabaseError) => e);
+      if (got instanceof Error) assert.ok((got as pg.DatabaseError).code === "0A000" && /citext-forms/.test((got as pg.DatabaseError).detail ?? ""), `${sql}: ${got.message}`);
+      else assert.deepEqual(got, await postgres(sql), sql);
+    }
     // a citext output named by its alias in DISTINCT ON: refused as the citext it is, never DISTINCT by its text
     await assert.rejects(answer(c, "SELECT DISTINCT ON (s) a.status AS s, a.id FROM accounts a ORDER BY s, a.id"), (e: pg.DatabaseError) => e.code === "0A000" && /citext-forms/.test(e.detail ?? ""));
     // a volatile output: a key bound to it by equality is it, one value a row, so what is shown is what was sorted

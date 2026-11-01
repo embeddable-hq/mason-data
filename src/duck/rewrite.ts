@@ -877,6 +877,9 @@ class Rewriter {
           if (out?.twin !== true && (bound[i]!.constant ?? this.typed(out !== null ? out.value : sb.node as AstNode)?.constant) === true) return [];
         }
         // (a key bound by equality is built over its own expression, which is the output's and carries its own typing)
+        // (a collated key bound by equality to a grouped output: its collation's keys read the grouped value, as a key
+        // named by the output's number or name does, `overGroups`)
+        if (bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(sb.node) && kindOf(sb.node as AstNode) === "CollateClause") sb.node = this.overGroups(sb.node as AstNode, b);
         const as = sb.node;
         // (a key bound by equality has no analysed node of its own where Postgres's tree reads it as the entry: it is
         // typed as the output it is, so a jsonb's, a citext's or a collation's key is built for it)
@@ -1235,7 +1238,19 @@ class Rewriter {
     const offset = b.limitOffset as AstNode | undefined;
     delete b.limitOffset;
     const rankName = "__mason_rank";
-    const sortCopy = order.map((o) => this.clone(o));
+    // EVERY READER OF THE SORT LIST READS A KEY AS THE SELECT'S ORDER BY DOES (the class "an output not resolved to its
+    // column"): a number or an output name there is that output, and a window's ORDER BY has no outputs (DuckDB reads
+    // `rank() OVER (ORDER BY 1)` as a constant, every row a tie), so the window's key is the output's expression
+    const targets = (b.targetList as AstNode[] | undefined) ?? [];
+    const starred = targets.some((t) => hasStar(bodyOf(t).val));
+    const asOutput = (n: AstNode): AstNode => {
+      const at = kindOf(n) === "A_Const" ? constInt(n) : null;
+      const name = kindOf(n) === "ColumnRef" && names(bodyOf(n).fields).length === 1 ? names(bodyOf(n).fields)[0] : undefined;
+      const target = at !== null ? (starred ? undefined : targets[at - 1])
+        : name !== undefined ? targets.find((t) => !hasStar(bodyOf(t).val) && bodyOf(t).name === name) : undefined;
+      return target !== undefined && isNode(bodyOf(target).val) ? evaluated(this.clone(bodyOf(target).val as AstNode)) : this.clone(n);
+    };
+    const sortCopy = order.map((o) => kindOf(o) === "SortBy" && isNode(bodyOf(o).node) ? { SortBy: { ...bodyOf(this.clone(o)), node: asOutput(bodyOf(o).node as AstNode) } } : this.clone(o));
     for (const s of sortCopy) this.done.add(bodyOf(s));
     // (every key a constant, none is left: every row ties, rank() OVER () is 1 for each)
     const rank: AstNode = { FuncCall: { funcname: [S("rank")], over: { ...(sortCopy.length > 0 ? { orderClause: sortCopy } : {}), frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } };
@@ -1243,7 +1258,8 @@ class Rewriter {
     b.targetList = [...(b.targetList as AstNode[]), { ResTarget: { name: rankName, val: rank } }];
     const inner: AstNode = { SelectStmt: b };
     // the rank of the first row past the offset is offset + 1; a row is kept while its rank is within offset + n
-    const bound = offset === undefined ? count : op("+", offset, count);
+    // (the offset is read twice, here and as the outer LIMIT's OFFSET: one copy each)
+    const bound = offset === undefined ? count : op("+", this.clone(offset), count);
     const outer: Body = {
       targetList: [{ ResTarget: { val: { ColumnRef: { fields: [{ A_Star: {} }] } } } }],
       fromClause: [{ RangeSubselect: { subquery: inner, alias: { aliasname: "__mason_ties" } } }],
@@ -1863,7 +1879,7 @@ class Rewriter {
       // (the output the one resolver bound the key to, where the caller has it: `keysBound`)
       const out = bound !== undefined ? bound : this.outputOf(e, targets);
       if (out?.twin === true) throw this.twinRefused();
-      if (out !== null) e = this.clone(out.value);
+      if (out !== null) e = this.overGroups(this.clone(out.value), select);
     }
     // a derived table's column read through `s.*` (`SELECT s.* FROM (…) AS s ORDER BY s.pod`, a tool's wrapper): Postgres
     // analysed the ORDER BY as the star's expansion, at no offset of its own, so the column has no type here — it is the
@@ -1886,6 +1902,37 @@ class Rewriter {
     if (this.typeOf(e) === BPCHAR) { e = fn("rtrim", [e]); this.typedLike.set(bodyOf(e), b.node as AstNode); b.node = e; }
     if (c === null || (c.kind === "bytes" && kindOf(b.node as AstNode) !== "CollateClause")) return null;
     return this.sortKeys(e, c).map((k) => ({ SortBy: { ...b, node: k } }));
+  }
+
+  /**
+   * AN OUTPUT'S EXPRESSION AS A KEY BUILT OVER IT READS IT IN A GROUPED SELECT (the class "an output not resolved to its
+   * column"): a collation's keys, citext's lower() or jsonb's order key are built over the value under the output's
+   * COLLATE, which is no grouped expression when the GROUP BY groups the output itself (`t.s COLLATE "und-x-icu" AS x
+   * … GROUP BY 1 ORDER BY 1`: DuckDB refused t.s, "must appear in the GROUP BY clause"). Every row of a group holds one
+   * such value, so it is read through any_value. A grouped expression itself, or one holding an aggregate or a window,
+   * stays as it is.
+   */
+  private overGroups(e: AstNode, select: Body | null): AstNode {
+    const groups = (select?.groupClause ?? []) as AstNode[];
+    if (select === null || groups.length === 0 || groups.some((g) => kindOf(g) === "GroupingSet")) return e;
+    const collated = kindOf(e) === "CollateClause" && isNode(bodyOf(e).arg);
+    const value = collated ? bodyOf(e).arg as AstNode : e;
+    // (DuckDB groups `t.s COLLATE …` as that expression: the bare t.s under it is not grouped)
+    const grouped = new Set(groups.map((g) => shapeOf(this.groupedExpression(g, select))));
+    if (grouped.has(shapeOf(value)) || kindOf(value) === "A_Const") return e;
+    const aggregated = (v: unknown): boolean => {
+      if (Array.isArray(v)) return v.some(aggregated);
+      if (v === null || typeof v !== "object") return false;
+      if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || ["any_value", "count"].includes(lastName(bodyOf(v).funcname)))) return true;
+      if (isNode(v) && kindOf(v) === "SubLink") return true;
+      return Object.values(isNode(v) ? bodyOf(v) : v as Body).some(aggregated);
+    };
+    if (aggregated(value)) return e;
+    const read = fn("any_value", [value]);
+    this.typedLike.set(bodyOf(read), value);
+    if (!collated) return read;
+    bodyOf(e).arg = read;
+    return e;
   }
 
   /** the target a derived table's column names (`s.pod`, or `pod` where one derived table is read): the subquery's or
