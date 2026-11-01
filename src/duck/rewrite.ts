@@ -1252,6 +1252,14 @@ class Rewriter {
     };
     const sortCopy = order.map((o) => kindOf(o) === "SortBy" && isNode(bodyOf(o).node) ? { SortBy: { ...bodyOf(this.clone(o)), node: asOutput(bodyOf(o).node as AstNode) } } : this.clone(o));
     for (const s of sortCopy) this.done.add(bodyOf(s));
+    // A VOLATILE VALUE EVALUATED TWICE (the class): the window's key would be a second random(), never the one shown, and
+    // DuckDB refuses a volatile window key raw (42804). Refused by name, as a window ordered by one is
+    const calls = (x: unknown): boolean => Array.isArray(x) ? x.some(calls) : x !== null && typeof x === "object"
+      && ((isNode(x) && kindOf(x) === "FuncCall" && VOLATILE.has(lastName(bodyOf(x).funcname))) || Object.values(isNode(x) ? bodyOf(x) : x as Body).some(calls));
+    if (calls(sortCopy)) {
+      throw new Unrewritable("FETCH … WITH TIES ordered by random() (or another volatile function) is not supported by Mason: its ties are ranked by a window, which would draw the value again",
+        "compute it in a subquery and order by its column: SELECT … FROM (SELECT *, random() AS r FROM t) AS s ORDER BY r FETCH FIRST n ROWS WITH TIES", "volatile-window");
+    }
     // (every key a constant, none is left: every row ties, rank() OVER () is 1 for each)
     const rank: AstNode = { FuncCall: { funcname: [S("rank")], over: { ...(sortCopy.length > 0 ? { orderClause: sortCopy } : {}), frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } };
     this.done.add(bodyOf(rank));
