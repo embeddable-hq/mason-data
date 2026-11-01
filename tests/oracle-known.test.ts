@@ -62,6 +62,14 @@ test("a class is decided over every shape whose construction reaches it, by one 
   // two kinds of one group and pattern are two keys, so one cannot hide the other's staleness behind a merge
   const rows = shapesDecided(CHAR_ARMS, { sql: ANY, kind: "rows", issue: 247, why: "a row kept" }), value = shapesDecided(CHAR_ARMS, { sql: ANY, kind: "value", issue: 247, why: "padding" });
   assert.notEqual(decisionKey(rows), decisionKey(value));
+  // two classes of one shape and kind over one base (CI run 41353796825: #252's value over every base listed ahead of
+  // #267's over json): the narrower decides whatever the order, so neither is stale for the other's being first
+  const broad = shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS], { sql: ANY, kind: "value", issue: 252, why: "a numeric rounded" });
+  const narrow = shapesDecided(VALUES_ARMS, { sql: /json|\bip\b|array_agg/, kind: "value", issue: 267, why: "jsonb text" });
+  const jsonBase = "SELECT id, j::jsonb FROM typed ORDER BY id";
+  assert.equal(shapeDecision([broad, narrow], "values-arm", jsonBase, "", "value").decides, narrow);
+  assert.equal(shapeDecision([narrow, broad], "values-arm", jsonBase, "", "value").decides, narrow);
+  assert.equal(shapeDecision([broad, narrow], "values-arm", base, "", "value").decides, broad, "a base the narrower misses: the broad one");
   assert.equal(decisionKey({ sql: "/[\\s\\S]/", shape: "char-arm, char-arm-first", kind: "rows" }), decisionKey(rows), "a leg report's decision, its group joined, keys as the entry does");
 });
 

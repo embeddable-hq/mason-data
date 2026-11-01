@@ -56,7 +56,9 @@ export const decidedShapes = (k: { shape?: string | readonly string[] | undefine
  */
 export function shapeDecision<K extends { shape?: string | readonly string[] | undefined; sql: RegExp; kind: string }>(known: readonly K[], shape: string, base: string, text: string, kind: string | null): { matched: K[]; decides: K | undefined } {
   const own = known.filter((k) => decidedShapes(k).includes(shape) && k.sql.test(base));
-  if (own.length > 0) return { matched: own, decides: own.find((k) => k.kind === kind) };
+  // a narrower class ahead of one over every base (`ANY`), whatever their order in KNOWN: PR 261 put #252's value entry
+  // over every base ahead of #267's over json, inet and arrays, and #267 decided nothing and was said stale
+  if (own.length > 0) return { matched: own, decides: own.find((k) => k.kind === kind && k.sql !== ANY) ?? own.find((k) => k.kind === kind) };
   const plain = known.find((k) => k.shape === undefined && k.sql.test(text));
   return { matched: plain === undefined ? [] : [plain], decides: plain };
 }
