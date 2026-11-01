@@ -26,6 +26,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   or of a parent refused before it was ever built, is not run, and `mason status` says why; a parent refused after an edit
   to its file keeps re-running from the SQL it was last built from, and carries its children, so `mason status` shows the
   parent refused and the child current until the file is fixed.
+  A generated table holds a numeric exactly, with Postgres's digits, wherever its types fix the scale: a column passed
+  through, its min or max, a sum of an integer (`bigint` for a `smallint` or `integer`, `numeric` for a `bigint`) or of a
+  `numeric(p,s)`, and `+ - *`, negation, `abs`, `mod`, `round(x, n)` and `trunc(x, n)` (`n` below 0 too), `floor`,
+  `ceil`, a cast to `numeric(p,s)`, or a `CASE`, `GREATEST`, `LEAST` or `COALESCE` of one scale, over those.
+  A value added to an enum is answered by the synced table at once, though a generated table built before it still
+  holds the old type until its next run. It holds an enum,
+  sorted in its declared order, and a citext, compared without case.
   A table's lag is measured against the base across its chain: a child is behind from the moment a base below its parent
   changes, not from its parent's run, in `mason status`, `--json`'s `behindSeconds` and `behindSince`, and after a
   restart. A child's `target_lag` shorter than a parent's is refused by name, with the way out: it can be no fresher than
@@ -147,7 +154,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Known
 
-- **A generated table can't yet hold a numeric or one of your own types**, and `kind: live` is refused. Each is refused by file and key, with the way out, before anything is built.
+- **A generated table can't yet hold a numeric that divides (an average is one); is a variance or a standard deviation, which Postgres computes exactly at decimals it picks per value, rounded, cast to numeric(p,s) or not; is a sqrt, exp, ln, log or power, whose decimals Postgres picks per value, rounded, cast to numeric(p,s) or not, whatever the decimals of what it is computed from; is a JSON number's text cast to numeric with no scale (cast to numeric(p,s), it is stored); has more than 18 decimals, at the end or on the way; sums values whose decimals the rows decide; is a CASE, GREATEST, LEAST or COALESCE of values with differing decimals; or is cast from a double; nor a domain or a composite**, and `kind: live` is refused. Each is refused by file and key before anything is built, said as Postgres types the value (a sqrt or an average of a double is a double, so cast to numeric it is a cast from a double), wherever it sits in the column (under an operator, a coalesce, a round, a cast or an aggregate, or in a scalar subquery, a `WITH` query, a subquery in `FROM` or a `UNION`'s arm), with the way out your own SQL with the cast moved and the aggregate kept (`sum(sqrt(x)::double precision)`), or the `WITH` query, subquery or `UNION` the cast belongs in, given whole. Each of these keeps its reason read back from its text (`::text`, `::varchar`, `|| ''`, a jsonb's `->>`, a `WITH` column), cast to numeric(p,s) or not, so a typmod over a variance's text never stores an approximation; only a stored column's or a JSON number's text read as a numeric is said as a text: a JSON number's, a stored double's or any other. A run that fails (a value past 38 digits, `bigint out of range`, `division by zero`) records Postgres's error, SQLSTATE and DETAIL (`numeric field overflow` says the precision and scale it must fit, on every path), and is tried again after its back-off.
 - **`mason status` shows generated tables; the web page doesn't yet.**
 - **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows, or over
   an aggregated side, has no stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY

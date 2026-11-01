@@ -585,6 +585,109 @@ export function joinsUsing(tree: TreeValue, types: ReadonlySet<number>): boolean
   return visit(tree);
 }
 
+/**
+ * The analysed expression of each output column, in order (resjunk ones left out): what computes its value, every node
+ * with the type Postgres gave it, FOLLOWED wherever the analysis says a value comes from. A VAR that reads a FROM
+ * subquery (a generated table's `order_by:` shell among them), a CTE, a set operation's arms (each arm's column), a join's
+ * alias column or a grouped key carries what it reads as `followed`, itself followed; a sublink's subselect is followed
+ * as a query of its own, its VARs read against the queries around it. A recursive CTE's reading of itself is not
+ * followed again. Null for no query.
+ *
+ * LINEAR IN THE ANALYSED TREE, NEVER IN ITS EXPANSION (PR 202 round 14): a VAR's `followed` is the ONE followed node of
+ * what it reads, by reference, shared by every VAR that reads it (`Follow`), so the result is a graph whose shared nodes
+ * a reader visits once (src/duck/generated-plan.ts memoises by node). A copy per VAR grew 3^depth for a statement whose
+ * levels each read the level below three times: 880 ms at depth 12, about 70 s at 16. The generated planner alone asks
+ * for this (src/duck/plan.ts `PlanOptions.outputs`); a wire statement never pays for it.
+ */
+export function outputExpressions(tree: TreeValue): Array<TreeNode | null> | null {
+  if (!isNode(tree) || tree._node !== "QUERY" || !Array.isArray(tree.targetList)) return null;
+  const top = tree, list: TreeValue[] = tree.targetList, walk = new Follow();
+  // a set operation's own column is a VAR of its leftmost arm's: it reads every arm's, and its location is the leftmost
+  // arm's expression's, no column reference of its own (-1)
+  const own = (e: TreeNode): TreeNode => isNode(top.setOperations ?? null)
+    ? { ...e.expr as TreeNode, location: "-1", followed: walk.outputOf(top, num(e.resno ?? null) ?? 0, []) } : walk.followed(e.expr as TreeNode, [top]) as TreeNode;
+  return list.filter((e): e is TreeNode => isNode(e) && e.resjunk !== "true").map((e) => isNode(e.expr ?? null) ? own(e) : null);
+}
+
+/** the followed walk of one analysed tree (`outputExpressions`): each analysed node followed ONCE and each query's output
+ *  column found once, memoised by the analysed node, every VAR that reads one sharing the result. A node's stack (the
+ *  queries around it) is where it stands in the tree, so one result serves every path to it; `open` is the queries being
+ *  followed, so a recursive CTE's reading of itself reads nothing */
+class Follow {
+  private readonly nodes = new Map<TreeNode, TreeValue>();
+  private readonly columns = new Map<TreeNode, Map<number, TreeNode[]>>();
+  private readonly open = new Set<TreeNode>();
+
+  /** `v` with every VAR it holds followed; `stack` the queries around it, its own last */
+  followed(v: TreeValue, stack: readonly TreeNode[]): TreeValue {
+    if (Array.isArray(v)) return v.map((x) => this.followed(x, stack));
+    if (!isNode(v)) return v;
+    const done = this.nodes.get(v);
+    if (done !== undefined) return done;
+    const result = this.follow(v, stack);
+    this.nodes.set(v, result);
+    return result;
+  }
+
+  private follow(v: TreeNode, stack: readonly TreeNode[]): TreeNode {
+    const inner = v._node === "QUERY" ? [...stack, v] : stack;
+    const out = Object.fromEntries(Object.entries(v).map(([k, x]) => [k, k === "_node" ? x : this.followed(x, inner)])) as TreeNode;
+    if (v._node !== "VAR") return out;
+    const up = num(v.varlevelsup ?? null) ?? 0, attno = num(v.varattno ?? null);
+    const base = stack.slice(0, stack.length - up), q = base[base.length - 1];
+    if (q === undefined || attno === null || attno < 1 || !Array.isArray(q.rtable)) return out;
+    const rte = q.rtable[(num(v.varno ?? null) ?? 0) - 1];
+    if (rte === undefined || !isNode(rte)) return out;
+    const kind = num(rte.rtekind ?? null);
+    let reads: TreeNode[] = [];
+    if (kind === RTE_SUBQUERY && isNode(rte.subquery ?? null)) reads = this.outputOf(rte.subquery as TreeNode, attno, base);
+    else if (kind === RTE_CTE) {
+      // the CTE of the query `ctelevelsup` above, read with that query's own outer queries around it
+      const levels = num(rte.ctelevelsup ?? null) ?? 0, owner = base[base.length - 1 - levels];
+      const cte = owner !== undefined && Array.isArray(owner.cteList) ? owner.cteList.find((c) => isNode(c) && c.ctename === rte.ctename) : undefined;
+      if (cte !== undefined && isNode(cte) && isNode(cte.ctequery ?? null)) reads = this.outputOf(cte.ctequery as TreeNode, attno, base.slice(0, base.length - levels));
+    } else if (kind === RTE_JOIN || kind === RTE_GROUP) {
+      const list = kind === RTE_JOIN ? rte.joinaliasvars : rte.groupexprs;
+      const e = Array.isArray(list) ? list[attno - 1] : undefined;
+      if (e !== undefined && isNode(e)) reads = [this.followed(e, base) as TreeNode];
+    }
+    return reads.length === 0 ? out : { ...out, followed: reads };
+  }
+
+  /** what output column `attno` of query `q` computes, followed: one expression, or a set operation's, one per arm */
+  outputOf(q: TreeNode, attno: number, outer: readonly TreeNode[]): TreeNode[] {
+    if (this.open.has(q)) return [];
+    const known = this.columns.get(q)?.get(attno);
+    if (known !== undefined) return known;
+    this.open.add(q);
+    let found: TreeNode[];
+    try { found = this.outputFound(q, attno, [...outer, q]); } finally { this.open.delete(q); }
+    const byColumn = this.columns.get(q) ?? new Map<number, TreeNode[]>();
+    this.columns.set(q, byColumn.set(attno, found));
+    return found;
+  }
+
+  private outputFound(q: TreeNode, attno: number, stack: readonly TreeNode[]): TreeNode[] {
+    if (isNode(q.setOperations ?? null)) {
+      const leaves: number[] = [];
+      const walk = (s: TreeValue | undefined): void => {
+        if (s === undefined || !isNode(s)) return;
+        if (s._node === "RANGETBLREF") leaves.push(num(s.rtindex ?? null) ?? 0);
+        else { walk(s.larg); walk(s.rarg); }
+      };
+      walk(q.setOperations);
+      return leaves.flatMap((i) => {
+        const rte = Array.isArray(q.rtable) ? q.rtable[i - 1] : undefined;
+        return rte !== undefined && isNode(rte) && isNode(rte.subquery ?? null) ? this.outputOf(rte.subquery as TreeNode, attno, stack) : [];
+      });
+    }
+    const entry = Array.isArray(q.targetList) ? q.targetList.find((t) => isNode(t) && num(t.resno ?? null) === attno) : undefined;
+    return entry !== undefined && isNode(entry) && isNode(entry.expr ?? null) ? [this.followed(entry.expr as TreeNode, stack) as TreeNode] : [];
+  }
+}
+const RTE_SUBQUERY = 1;
+const RTE_CTE = 6;
+
 /** The analysed query's output columns, in order (resjunk ones, which a sort may add, left out): their types. */
 export function outputTypes(tree: TreeValue): Array<{ name: string | null; type: number; typmod: number }> | null {
   if (!isNode(tree) || tree._node !== "QUERY" || !Array.isArray(tree.targetList)) return null;

@@ -473,7 +473,7 @@ function scalar(conn: DuckDBConnection, name: string, params: Array<typeof VARCH
       } catch (e) {
         // Postgres's own message where the function raises one (src/duck/store.ts postgresWording reads the prefix), and
         // its SQLSTATE where the function says it
-        info.setError(e instanceof PgEvalError ? `mason[${e.code}]: ${e.message}` : `mason: ${(e as Error).message}`);
+        info.setError(raised(e));
       }
     },
   }));
@@ -563,7 +563,7 @@ function viaPostgres(conn: DuckDBConnection, kind: PgKind): void {
         out.flush();
       } catch (e) {
         // Postgres's SQLSTATE and words (src/duck/store.ts postgresWording reads them back)
-        info.setError(e instanceof PgEvalError ? `mason[${e.code}]: ${e.message}` : `mason: ${(e as Error).message}`);
+        info.setError(raised(e));
       }
     },
   }));
@@ -609,8 +609,9 @@ function icuKeysOf(v: DuckDBValue): string[] {
  * deadlock under load). The table is shared memory: the listener's thread writes it
  * while this one is busy with the statement's calls. The rewrite (src/duck/rewrite.ts `fn`) passes
  * `getvariable('__mason_session')` as every `__mason_*` function's first argument, which DuckDB folds to the session's
- * literal at bind time; the session runner sets the variable on its connection (its slot, `s<n>`). A connection without
- * it (the writer, a copy's) passes NULL: never cancelled this way.
+ * literal at bind time; the one set-up of a session's connection sets it (src/duck/store.ts `SessionSetup`: a wire
+ * session's slot, `s<n>`, or a generated table's run). A connection without it passes NULL, and every Mason function
+ * answers NULL for it (DuckDB's NULL in, NULL out): a plan's SQL runs only on a connection `SessionSetup` set up.
  */
 export const SESSION_VARIABLE = "__mason_session";
 /** the function a thread passes through before a Mason function's vector (`registerTurn`) */
@@ -619,6 +620,10 @@ export const TURN_FUNCTION = "__mason_turn";
  *  `duckSession`): set on a session's connection before each statement that finds them changed (src/duck/store.ts
  *  `settle`), read by the rewrite's `settingRead` (src/duck/rewrite.ts) */
 export const SETTINGS_VARIABLE = "__mason_settings";
+/** a Mason function's error as DuckDB carries it: Postgres's SQLSTATE, message and DETAIL where the function says them
+ *  (src/duck/store.ts postgresWording reads the prefix and the DETAIL's line), else its message */
+const raised = (e: unknown): string => e instanceof PgEvalError
+  ? `mason[${e.code}]: ${e.message}${e.detail === undefined ? "" : `\nDETAIL: ${e.detail}`}` : `mason: ${(e as Error).message}`;
 export const CANCELLED = "mason[57014]: canceling statement due to user request";
 /** how many vectors each function was called with (a call is a hop to the main thread): what a test or a measurement
  *  reads to know whether a statement reached a function at all (the rewrite answers a `->>` natively where it can) */

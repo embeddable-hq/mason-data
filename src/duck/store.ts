@@ -33,7 +33,7 @@ import { dataRow } from "../api/postgres/protocol.ts";
 import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } from "./types.ts";
 import type { ExactColumn } from "./rewrite.ts";
 import { gapIn, gapMark, type GapId } from "./gaps.ts";
-import { cellsOf, evaluateText, NumericError } from "../lib/pg-numeric.ts";
+import { cellsOf, evaluateText, fieldOverflow, NumericError } from "../lib/pg-numeric.ts";
 import { explainJson, explainText, planNodes, profiled, qualifiedName, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode, type TableName } from "./explain.ts";
 import type { PlannedSql } from "./plan.ts";
 import * as fs from "node:fs";
@@ -298,8 +298,8 @@ export class DuckStore {
     return {
       collation: c,
       open: () => this.runner(),
-      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants, relations) =>
-        planDuck({ catalog, text, stmt, base, paramOids, searchPath, timeZone, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }) }),
+      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants, relations, outputs) =>
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath, timeZone, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
       parameters: duckParameters,
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
@@ -416,13 +416,21 @@ function postgresWording(kind: string, message: string): { code: string; message
   // make_date / make_timestamp of a field out of range
   const field = /^Date out of range: (.*)$/.exec(message);
   if (field) return { code: "22008", message: `date field value out of range: ${field[1]}` };
-  // a cast to numeric(p, s) of a value with more than p - s integer digits
-  // (and of a number constant that does not fit: `12345::numeric(3)`, DuckDB's "Could not cast value 12345 to DECIMAL(3,0)")
-  if (/Casting value "[^"]*" to type DECIMAL\(\d+,\s*\d+\) failed: value is out of range|^Could not cast value \S+ to DECIMAL\(\d+,\s*\d+\)$/.test(message)) return { code: "22003", message: "numeric field overflow" };
   // an exact sum past DuckDB's 38 digits (a text read as numeric is summed as a DECIMAL(38,18), src/duck/rewrite.ts summed)
   if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past the engine's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
   // a numeric(p, s) read from a text holding NaN or Infinity (src/duck/rewrite.ts pgInput): DuckDB's decimal has none
   if (/Could not convert string ['"](NaN|-?Infinity)['"] to DECIMAL/.test(message)) return { code: "0A000", message: `a numeric NaN or Infinity read from a text is not supported by Mason (${gapMark("numeric-special")})`, gap: "numeric-special" };
+  // A NUMERIC PAST ITS DIGITS, in every spelling the engine gives (a generated table's run stores one, src/duck/generated.ts
+  // failureWords): a cast to numeric(p, s), of a value or a text, with more than p - s digits before the point, said
+  // with Postgres's DETAIL (and a number constant that does not fit: `12345::numeric(3)`, DuckDB's "Could not cast value
+  // 12345 to DECIMAL(3,0)"); past the 38 digits the engine computes a numeric with, by an operation, a ROUND or a cast
+  const typmod = /(?:Casting value "[^"]*" to type|Could not convert string ['"].*['"] to|^Could not cast value \S+ to) DECIMAL\((\d+),\s*(\d+)\)/.exec(message);
+  if (typmod !== null && Number(typmod[1]) < 38) {
+    return { code: "22003", ...fieldOverflow(Number(typmod[1]), Number(typmod[2])) };
+  }
+  if (typmod !== null || /Overflow in (?:\w+ )?(?:addition|subtraction|multiplication|negation|ROUND|cast)\b.*DECIMAL|Overflow in HUGEINT \w+|out of range for (?:the desired )?DECIMAL|Could not cast value .* to DECIMAL/i.test(message)) {
+    return { code: "22003", message: "numeric field overflow", detail: "The value has more than the 38 digits Mason's engine computes a numeric with." };
+  }
   const conv = /Could not convert string '((?:[^']|'')*)' to (INT16|INT32|INT64|DOUBLE|FLOAT|DATE|TIMESTAMP|UUID|BOOL)/.exec(message);
   if (conv) {
     const t = { INT16: "smallint", INT32: "integer", INT64: "bigint", DOUBLE: "double precision", FLOAT: "real", DATE: "date", TIMESTAMP: "timestamp", UUID: "uuid", BOOL: "boolean" }[conv[2] as "INT16"];
@@ -430,6 +438,7 @@ function postgresWording(kind: string, message: string): { code: string; message
   }
   // a Mason function's own error (src/duck/functions.ts): Postgres's words after the prefix
   // Postgres's own error, from its own function (src/duck/pg-eval.ts): its SQLSTATE, said
+  // (and its DETAIL on a line of its own, src/duck/functions.ts `raised`)
   const pg = /^mason\[([0-9A-Z]{5})\]: (.*?)(?:\nDETAIL: (.*))?$/s.exec(message);
   if (pg) return { code: pg[1]!, message: pg[2]!, ...(pg[3] === undefined ? {} : { detail: pg[3] }) };
   const own = /^mason: (.*)$/s.exec(message);
@@ -438,6 +447,63 @@ function postgresWording(kind: string, message: string): { code: string; message
   if (kind === "Invalid Input" && /^invalid input syntax for type /.test(message)) return { code: "22P02", message };
   return null;
 }
+
+/**
+ * THE ONE SET-UP OF A CONNECTION THAT RUNS A PLAN'S SQL as a session: a wire session's (`SessionRunner`) and a generated
+ * table's run (src/duck/sync.ts, the generated lane), never a hand-made copy of it. The rewrite's SQL reads the
+ * connection's state: every Mason function's first argument is `getvariable('__mason_session')` (src/duck/functions.ts
+ * "every call carries its session"), `current_setting` reads `__mason_settings` (src/duck/rewrite.ts `settingRead`), and
+ * an ORDER BY, a timestamptz and a bare name mean what they mean under the null order, zone and search_path set here. A
+ * connection without the session variable answered NULL from every Mason function (DuckDB's NULL in, NULL out): a
+ * generated table stored NULL for a JSON number's cast, with no error (PR 202's review round 4).
+ */
+/** what the set-up runs on: a DuckDB connection, the executor's or node-api's own */
+interface SetUpConnection { run(sql: string): Promise<unknown>; runAndReadAll(sql: string): Promise<{ getRowsJS(): unknown[][] }> }
+
+export class SessionSetup {
+  private readonly conn: SetUpConnection;
+  private zone: string | null = null;
+  private path: string | null = null;
+  private settings: string | null = null;
+  private constructor(conn: SetUpConnection) { this.conn = conn; }
+
+  /** `name`: what the Mason functions are passed as the session: a slot of the cancel table (`s<n>`, src/duck/cancel.ts)
+   *  for a wire session; any other name is never cancelled through the table (a run is interrupted instead). Set up as a
+   *  session with no role is: UTC, under `public`, no settings, until `settle` says otherwise. */
+  static async open(conn: SetUpConnection, name: string): Promise<SessionSetup> {
+    // NULLs sort as Postgres sorts them: last ascending, FIRST descending (DuckDB's default is last both ways). An
+    // integer division is the rewrite's `//` where Postgres's operator is integer division (src/duck/rewrite.ts), so
+    // DuckDB's `/` stays the float division every other `/` is
+    await conn.run("SET default_null_order = 'nulls_last_on_asc_first_on_desc'");
+    // every Mason function's first argument (src/duck/functions.ts "every call carries its session")
+    await conn.run(`SET VARIABLE ${SESSION_VARIABLE} = ${quoteLiteral(name)}`);
+    const setup = new SessionSetup(conn);
+    await setup.settle(NO_ROLE_SESSION);
+    return setup;
+  }
+
+  /** the session's zone, search_path and settings, each set when it changed: before each statement */
+  async settle(session: DuckSession): Promise<void> {
+    if (session.timeZone !== this.zone) { await this.conn.run(`SET TimeZone = ${quoteLiteral(session.timeZone)}`); this.zone = session.timeZone; }
+    // Postgres skips a schema of the path that does not exist; DuckDB refuses the SET (and with it every statement):
+    // the path is the schemas DuckDB has (a table added later in a new schema is found at the next statement)
+    const have = new Set(((await this.conn.runAndReadAll("SELECT schema_name FROM duckdb_schemas() WHERE database_name = current_database()")).getRowsJS() as [string][]).map(([n]) => n));
+    const wanted = duckSearchPath(session.searchPath).split(",").filter((n) => have.has(n));
+    const path = (wanted.length > 0 ? wanted : ["main"]).join(",");
+    if (path !== this.path) { await this.conn.run(`SET search_path = ${quoteLiteral(path)}`); this.path = path; }
+    // what `current_setting(name)` reads (src/duck/rewrite.ts `settingRead`): the session's settings, as one map
+    const settings = JSON.stringify(session.settings);
+    if (settings !== this.settings) {
+      const entries = Object.entries(session.settings).map(([k, v]) => `${quoteLiteral(k)}: ${quoteLiteral(v)}`).join(", ");
+      await this.conn.run(`SET VARIABLE ${SETTINGS_VARIABLE} = MAP {${entries}}::MAP(VARCHAR, VARCHAR)`);
+      this.settings = settings;
+    }
+  }
+}
+
+/** a session with no role, as a generated table is planned and run (src/duck/generated-plan.ts): UTC, under `public`, no
+ *  settings (what reads one is refused there: `current_setting` is "it reads a session") */
+export const NO_ROLE_SESSION: DuckSession = { timeZone: "UTC", searchPath: "public", settings: {} };
 
 /** when the wait for a statement to end is said in the log */
 const ENDING_SLOW_MS = 5_000;
@@ -459,41 +525,18 @@ export class SessionRunner implements DuckRunner {
   private openAnswer: (() => void) | null = null;
   private readonly conn: DuckDBConnection;
   private readonly log: (line: string) => void;
-  private zone: string | null = null;
-  private path: string | null = null;
-  private settings: string | null = null;
-  private constructor(conn: DuckDBConnection, log: (line: string) => void, slot: number, cancels: Int32Array) {
-    this.conn = conn; this.log = log; this.slot = slot; this.cancels = cancels;
+  private readonly setup: SessionSetup;
+  private constructor(conn: DuckDBConnection, log: (line: string) => void, slot: number, cancels: Int32Array, setup: SessionSetup) {
+    this.conn = conn; this.log = log; this.slot = slot; this.cancels = cancels; this.setup = setup;
   }
 
   /** a connection for one Postgres session, in the cancel table's `slot` */
   static async open(instance: DuckDBInstance, log: (line: string) => void, slot: number, cancels: Int32Array): Promise<SessionRunner> {
     const conn = await instance.connect();
-    // NULLs sort as Postgres sorts them: last ascending, FIRST descending (DuckDB's default is last both ways). An
-    // integer division is the rewrite's `//` where Postgres's operator is integer division (src/duck/rewrite.ts), so
-    // DuckDB's `/` stays the float division every other `/` is
-    await conn.run("SET default_null_order = 'nulls_last_on_asc_first_on_desc'");
-    // every Mason function's first argument (src/duck/functions.ts "every call carries its session")
-    await conn.run(`SET VARIABLE ${SESSION_VARIABLE} = ${quoteLiteral(slotName(slot))}`);
-    return new SessionRunner(conn, log, slot, cancels);
+    return new SessionRunner(conn, log, slot, cancels, await SessionSetup.open(conn, slotName(slot)));
   }
 
-  private async settle(session: DuckSession): Promise<void> {
-    if (session.timeZone !== this.zone) { await this.conn.run(`SET TimeZone = ${quoteLiteral(session.timeZone)}`); this.zone = session.timeZone; }
-    // Postgres skips a schema of the path that does not exist; DuckDB refuses the SET (and with it every statement):
-    // the path is the schemas DuckDB has (a table added later in a new schema is found at the next statement)
-    const have = new Set(((await this.conn.runAndReadAll("SELECT schema_name FROM duckdb_schemas() WHERE database_name = current_database()")).getRowsJS() as [string][]).map(([n]) => n));
-    const wanted = duckSearchPath(session.searchPath).split(",").filter((n) => have.has(n));
-    const path = (wanted.length > 0 ? wanted : ["main"]).join(",");
-    if (path !== this.path) { await this.conn.run(`SET search_path = ${quoteLiteral(path)}`); this.path = path; }
-    // what `current_setting(name)` reads (src/duck/rewrite.ts `settingRead`): the session's settings, as one map
-    const settings = JSON.stringify(session.settings);
-    if (settings !== this.settings) {
-      const entries = Object.entries(session.settings).map(([k, v]) => `${quoteLiteral(k)}: ${quoteLiteral(v)}`).join(", ");
-      await this.conn.run(`SET VARIABLE ${SETTINGS_VARIABLE} = MAP {${entries}}::MAP(VARCHAR, VARCHAR)`);
-      this.settings = settings;
-    }
-  }
+  private async settle(session: DuckSession): Promise<void> { await this.setup.settle(session); }
 
   private async prepare(sql: string): Promise<DuckDBPreparedStatement> {
     try { return await this.conn.prepare(sql); }
