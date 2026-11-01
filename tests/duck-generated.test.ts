@@ -1047,7 +1047,8 @@ test("a numeric the types don't fix is refused with its own reason: a division, 
     w.write("mixed", `${lag}sql: SELECT sum(amount) + sum(big) AS combined FROM ledger\n`);
     w.write("texts", `${lag}sql: SELECT sum((payload ->> 'a')::numeric) AS total FROM events\n`);
     w.write("larger", `${lag}sql: SELECT greatest(amount, 1) AS top FROM ledger\n`);
-    await w.sync.generated.review();
+    // each file read and planned, under load too: a review already in flight when they were written may not have read them
+    for (const name of ["mean", "wide", "texts", "larger"]) await w.until((s) => s.state === "refused", `public.${name}`);
     const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
     refusedAt(r("mean").refusals, "sql", /^column mean divides a numeric, which the engine computes as a double$/);
     assert.ok(r("mean").refusals[0]!.options.some((o) => o.includes("count(")), JSON.stringify(r("mean").refusals));
