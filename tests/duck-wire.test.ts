@@ -593,6 +593,48 @@ test("the corpus rerun: a relative time literal is the transaction's start at th
   } finally { await c.end(); }
 });
 
+// review round 9 of PR 202: a WITH query's exact programs are derived once and given to every reader. The first UNION
+// ALL arm that read it took its cells, a later reader got none, the arms disagreed and the whole union was the double
+test("round 9: a WITH query read by one, two or three UNION ALL arms, directly or through a query, answers Postgres's digits", async () => {
+  const c = await client();
+  try {
+    // the rows' order is the engine's (no ORDER BY, as the case was met): the multiset is held, each value's text exactly
+    const sorted = (rows: unknown[][]): unknown[][] => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    // every case is run and each that differs named, so one wrong case does not hide the next
+    const wrong: Array<{ sql: string; mine: unknown; postgres: unknown; held: string[] }> = [];
+    const same = async (sql: string, column: string[]): Promise<void> => {
+      const [mine, theirs] = [await answer(c, sql), await postgres(sql)];
+      const [m, p] = [{ fields: mine.fields, rows: sorted(mine.rows) }, { fields: theirs.fields, rows: sorted(theirs.rows) }];
+      if (!util.isDeepStrictEqual(m, p) || !util.isDeepStrictEqual(m.rows.map((r) => r[0]), [...column].sort())) wrong.push({ sql, mine: m, postgres: p, held: column });
+    };
+    const THIRDS = ["14.0000000000000000", "26.8333333333333333", "40.0000000000000000"];
+    const SEVENTHS = ["11.5000000000000000", "17.1428571428571429", "6.0000000000000000"];
+    const T = "WITH t AS (SELECT amount / 3 AS v FROM orders) ";
+    // t read by one arm, beside the same program
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT amount / 3 FROM orders`, [...THIRDS, ...THIRDS]);
+    // t read by two arms (the second after an arm that does not read it)
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT amount / 3 FROM orders UNION ALL SELECT v FROM t`, [...THIRDS, ...THIRDS, ...THIRDS]);
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM t`, [...THIRDS, ...THIRDS]);
+    // t read by three arms
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM t UNION ALL SELECT v FROM t`, [...THIRDS, ...THIRDS, ...THIRDS]);
+    // t read through a subquery in FROM, and directly
+    await same(`${T}SELECT v AS x FROM (SELECT * FROM t) s UNION ALL SELECT v FROM t`, [...THIRDS, ...THIRDS]);
+    await same(`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM (SELECT * FROM t) s`, [...THIRDS, ...THIRDS]);
+    // a WITH query read through another WITH query, and directly (either first)
+    await same("WITH t AS (SELECT amount / 7 AS v FROM orders), u AS (SELECT v FROM t) SELECT v AS x FROM u UNION ALL SELECT v FROM t", [...SEVENTHS, ...SEVENTHS]);
+    await same("WITH t AS (SELECT amount / 7 AS v FROM orders), u AS (SELECT v FROM t) SELECT v AS x FROM t UNION ALL SELECT v FROM u", [...SEVENTHS, ...SEVENTHS]);
+    // t with a stored column, read by two arms: the column's own digits
+    const AMOUNTS = ["120.00", "42.00", "80.50"];
+    await same("WITH t AS (SELECT amount AS v FROM orders) SELECT v AS x FROM t UNION ALL SELECT v FROM t", [...AMOUNTS, ...AMOUNTS]);
+    // the round-8 shape: one arm reads a CTE's sqrt, the other computes the same sqrt
+    const ROOTS = ["10.954451150103322", "6.480740698407860", "8.972179222463180"];
+    await same("WITH t AS (SELECT sqrt(abs(amount)) AS v FROM orders) SELECT v AS x FROM t UNION ALL SELECT sqrt(abs(amount)) FROM orders", [...ROOTS, ...ROOTS]);
+    assert.deepEqual(wrong, []);
+  } finally {
+    await c.end();
+  }
+});
+
 test("the corpus rerun: what reached DuckDB and failed, answered as Postgres answers", async () => {
   const c = await client();
   try {

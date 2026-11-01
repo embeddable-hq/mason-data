@@ -858,6 +858,16 @@ function* matrix(): Generator<Matrixed> {
     "SELECT v AS x FROM t UNION ALL SELECT sqrt(abs(n2)) FROM typed WHERE n2 BETWEEN -1000 AND 1000 ORDER BY x");
   yield q("a CTE's numeric column read by one UNION ALL arm, beside the same column", "WITH t AS (SELECT n2 AS v FROM typed WHERE n2 BETWEEN -1000 AND 1000) " +
     "SELECT v AS x FROM t UNION ALL SELECT n2 FROM typed WHERE n2 BETWEEN -1000 AND 1000 ORDER BY x");
+  // a CTE's exact quotient read by one, two or three UNION ALL arms, directly, through a subquery or through another
+  // CTE: its programs are derived once and every arm is given them; a later arm once got none, and the whole union
+  // was the engine's double (PR 202 round 9)
+  const T3 = "WITH t AS (SELECT n2 / 3 AS v FROM typed WHERE id < 100) ";
+  yield q("a CTE's quotient read by one UNION ALL arm, beside the same quotient", `${T3}SELECT v AS x FROM t UNION ALL SELECT n2 / 3 FROM typed WHERE id < 100 ORDER BY x`);
+  yield q("a CTE's quotient read by two UNION ALL arms, a third beside them", `${T3}SELECT v AS x FROM t UNION ALL SELECT n2 / 3 FROM typed WHERE id < 100 UNION ALL SELECT v FROM t ORDER BY x`);
+  yield q("a CTE's quotient read by three UNION ALL arms", `${T3}SELECT v AS x FROM t UNION ALL SELECT v FROM t UNION ALL SELECT v FROM t ORDER BY x`);
+  yield q("a CTE's quotient read through a subquery and directly", `${T3}SELECT v AS x FROM (SELECT * FROM t) s UNION ALL SELECT v FROM t ORDER BY x`);
+  yield q("a CTE's quotient read through another CTE and directly", "WITH t AS (SELECT n2 / 7 AS v FROM typed WHERE id < 100), u AS (SELECT v FROM t) " +
+    "SELECT v AS x FROM u UNION ALL SELECT v FROM t ORDER BY x");
   // a text read as an unconstrained numeric, summed: Postgres's exact sum at the most decimals a row's text has
   // (Metabase's JSON numbers), a NaN or an infinity as Postgres adds them
   const FINITE = "id BETWEEN 71 AND 78 AND id NOT IN (74, 76)";

@@ -1295,7 +1295,8 @@ class Rewriter {
     const b = bodyOf(stmt);
     if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.distinctClause !== undefined || b.limitOption === "LIMIT_OPTION_WITH_TIES") return [];
     const targets = (b.targetList ?? []) as AstNode[];
-    // a query that selects cells already (a CTE two arms of a UNION ALL read): its cells are not appended twice
+    // a query that selects cells already is never given them twice. No WITH query read twice reaches here: its programs
+    // are derived once and every later reader is given them (`exactThrough`'s `derived`), never this empty answer
     if (targets.some((t) => typeof bodyOf(t).name === "string" && (bodyOf(t).name as string).startsWith("__mason_cell_"))) return [];
     if (targets.length !== fields.length || targets.some((t) => hasStar(bodyOf(t).val))) return [];
     const grouped = (Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val));
@@ -1345,11 +1346,22 @@ class Rewriter {
    */
   exactThrough(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }> | null): ExactColumn[] {
     if (fields === null || kindOf(stmt) !== "SelectStmt") return [];
+    // DERIVED ONCE: a query read again (a WITH query two arms of a UNION ALL read, directly or through another query)
+    // is given the programs its first read derived, whichever arm read it first. Derived again, it selected its cells
+    // already and answered none, so the arms disagreed and the union was the engine's double (PR 202 round 9)
+    const known = this.derived.get(bodyOf(stmt));
+    if (known !== undefined) return known.map((e) => ({ ...e }));
     // the query's CTEs are visible to every query inside it (`WITH base AS (…) SELECT b.x FROM (SELECT * FROM base) b`)
     const ctes = bodyOf(stmt).withClause?.recursive === true ? [] : ((bodyOf(stmt).withClause?.ctes ?? []) as AstNode[]);
     this.cteScope.push(ctes);
-    try { return this.exactThroughIn(stmt, fields); } finally { this.cteScope.pop(); }
+    let out: ExactColumn[];
+    try { out = this.exactThroughIn(stmt, fields); } finally { this.cteScope.pop(); }
+    this.derived.set(bodyOf(stmt), out);
+    return out.map((e) => ({ ...e }));
   }
+
+  /** each query's exact columns as `exactThrough` first derived them, by the query (a trial's copy is its own query) */
+  private readonly derived = new WeakMap<object, ExactColumn[]>();
 
   /** the CTEs of the queries `exactThrough` is inside, outermost first (a recursive WITH's are none: never read whole) */
   private readonly cteScope: AstNode[][] = [];
