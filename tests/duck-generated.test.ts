@@ -15,14 +15,15 @@ import { stopParser } from "../src/api/postgres/parser.ts";
 import { GENERATED_DIR, GENERATED_KEYS, parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import type { AddedTable } from "../src/duck/sync.ts";
 import * as generatedModule from "../src/duck/generated.ts";
-import { REVIEW_MS, withoutValues, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
-import { definitionStatement, refusalText, type GeneratedRefusal } from "../src/duck/generated-plan.ts";
+import { REVIEW_MS, withoutValues, type GeneratedHost, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
+import { definitionStatement, planDefinition, refusalText, type EngineTypes, type GeneratedRefusal } from "../src/duck/generated-plan.ts";
 import { deparseSync } from "pgsql-deparser";
 import { parseSql } from "../src/api/postgres/parser.ts";
 import { parseLag, parseSync } from "../src/lib/table-sync.ts";
 import { generatedLines } from "../src/cli/commands.ts";
 import { guideText } from "../src/cli/guides.ts";
 import { built, COUNTS, plain, refusedAt, served, withWorld } from "./duck-generated-world.ts";
+import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
 
 after(() => stopParser());
 
@@ -1807,4 +1808,47 @@ test("round 13: a check while a run holds its transaction open never touches the
     await w.until((s) => s.lastRun?.at !== first.lastRun?.at);
     await w.until(built, "public.checked");
   }, { onStep: (s, n) => s === "snapshot" && n === "public.counts" ? hold ?? undefined : undefined });
+});
+
+// review round 14 of PR 202: the walk of a column's analysed expression copied, into each column reference, the whole
+// followed expression of the column it reads, so a statement whose levels each read the level below more than once grew
+// 3^depth (depth 12 took 880 ms, 16 about 70 s), on the wire's plan of every statement and in a definition's check. The
+// decision: the walk is linear in the analysed tree (a reference shares what it reads, each node's form and each text's
+// making are found once), and only the generated planner asks for it. Each shape at depth 16 reaches its verdict within
+// the bound: an int8 stored; a text read as a numeric at the top refused by the form the text was made from, sqrt's, met
+// at the bottom of every path; and with no form below, every path walked to the bottom, refused as a text. (A numeric
+// carried through every level grows in the rewrite's exact program, as on main: a finding of its own, not this walk's)
+type R14Case = { bottom: string; op: string; top: (chain: string) => string; verdict: RegExp | null };
+const R14_CASES: R14Case[] = [
+  { bottom: "1::int8", op: "+", top: (c) => c, verdict: null },
+  { bottom: "sqrt(2::numeric)::text", op: "||", top: (c) => `SELECT a::numeric AS a FROM (${c}) top`, verdict: /^column a is a numeric whose decimals Postgres picks by the size of each value \(sqrt\)/ },
+  { bottom: "'1'::text", op: "||", top: (c) => `SELECT a::numeric AS a FROM (${c}) top`, verdict: /^column a is a numeric read from text \(a text value cast to numeric\), which keeps the decimals each value's text has/ },
+];
+test("round 14: a definition whose every level reads the level below three times is checked within the bound, nested, as a WITH chain and as a UNION ALL chain", async () => {
+  await withWorld({}, async (w) => {
+    const planner = w.api.planner();
+    // the review's own check: its connection, set up, and the engine's types as DuckDB prepares the plan's SQL there
+    // (src/duck/generated.ts `review`, `engineTypes`)
+    const host = (w.sync.generated as unknown as { host: GeneratedHost }).host;
+    const describe = async (sql: string): Promise<EngineTypes> => {
+      const p = await host.checkConnection().prepare(sql);
+      try { return new Map(Array.from({ length: p.columnCount }, (_, i) => { const type = p.columnType(i).toString(); return [[p.columnName(i), type], [`#${i}`, type]] as const; }).flat()); }
+      finally { p.destroySync(); }
+    };
+    const check = async (sql: string) => { await host.settleCheck(); return planDefinition(planner, sql, null, undefined, describe); };
+    // a first check pays the planner's start (the catalog, the parser): untimed
+    assert.ok("definition" in await check("SELECT 1::numeric AS a"));
+    for (const c of R14_CASES) for (const depth of DEEP_DEPTHS) for (const [shape, chain] of Object.entries(deepChains(c.bottom, depth, c.op))) {
+      const sql = c.top(chain), started = performance.now();
+      const r = await check(sql);
+      const ms = performance.now() - started, at = `${shape} over ${c.bottom} at depth ${depth}`;
+      assert.ok(ms < 500, `${at}: checked in ${ms.toFixed(0)} ms`);
+      if (c.verdict === null) assert.ok("definition" in r, `${at}: ${JSON.stringify("refused" in r ? r.refused : null)}`);
+      else {
+        assert.ok("refused" in r, `${at}: stored`);
+        assert.deepEqual(r.refused.map((x) => c.verdict!.test(x.message)), [true], `${at}: ${JSON.stringify(r.refused)}`);
+        assert.ok(r.refused[0]!.options.length > 0, `${at}: no way out`);
+      }
+    }
+  });
 });

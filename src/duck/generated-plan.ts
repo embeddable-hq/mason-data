@@ -137,38 +137,75 @@ const bornAt = (why: Form["why"], fn: string, at: number, from: TextFrom | null 
  * exactly computed numeric's among them). Any other type stops the walk: an integer's, a date's or a boolean's text is
  * exact whatever made it.
  */
-function textFrom(n: TreeNode, names: ReadonlyMap<string, string>): { form: Form | null; from: TextFrom } {
-  let from: TextFrom | null = null;
-  const walk = (x: TreeNode): Form | null => {
-    const type = exprType(x)?.type ?? -1, at = int(x.location);
-    if (x._node === "VAR" && inputsOf(x).length > 0) {
-      // a column read from a subquery, a CTE or a set operation: the first arm's form, every arm of it a site, through this VAR
-      const forms = inputsOf(x).map(walk).filter((f): f is Form => f !== null), first = forms[0];
-      if (first === undefined) return null;
-      return { ...first, sites: forms.filter((f) => f.why === first.why).flatMap((f) => f.sites).map((s) => ({ at: s.at, vars: at >= 0 ? [at, ...s.vars] : s.vars })) };
-    }
-    if (DOUBLES.has(type)) {
-      if (x._node === "VAR" || x._node === "CONST") { from ??= "double"; return null; }
-      return bornAt("double", "", at);
-    }
-    if (type === NUMERIC_OID) { const s = seen(x, names); return isForm(s) ? s : null; }
-    if (!TEXTS.has(type) && !JSONS.has(type)) return null;
-    const args: TreeNode[] = Array.isArray(x.args) ? x.args.filter(isTree) : [];
-    if ((x._node === "OPEXPR" || x._node === "FUNCEXPR") && args[0] !== undefined && JSONS.has(exprType(args[0])?.type ?? -1)) from ??= "json";
-    for (const i of inputsOf(x)) { const f = walk(i); if (f !== null) return f; }
-    return null;
-  };
-  const form = walk(n);
-  return { form, from: from ?? "text" };
+function textFrom(n: TreeNode, w: Walk): { form: Form | null; from: TextFrom } {
+  const made = madeOf(n, w);
+  return { form: made.form, from: made.from ?? "text" };
 }
+/** what a node of a text was made from (`textFrom`), once per node (`Walk.made`): its form, and the first of what the
+ *  text was that the walk met, in the walk's order, up to the form */
+type Made = { form: Form | null; from: TextFrom | null };
+function madeOf(x: TreeNode, w: Walk): Made {
+  const done = w.made.get(x);
+  if (done !== undefined) return done;
+  const made = madeAt(x, w);
+  w.made.set(x, made);
+  return made;
+}
+function madeAt(x: TreeNode, w: Walk): Made {
+  const type = exprType(x)?.type ?? -1, at = int(x.location);
+  if (x._node === "VAR" && inputsOf(x).length > 0) {
+    // a column read from a subquery, a CTE or a set operation: the first arm's form, every arm of it a site, through this VAR
+    const made = inputsOf(x).map((i) => madeOf(i, w)), from = made.find((m) => m.from !== null)?.from ?? null;
+    return { form: throughVar(made.map((m) => m.form), at), from };
+  }
+  if (DOUBLES.has(type)) {
+    if (x._node === "VAR" || x._node === "CONST") return { form: null, from: "double" };
+    return { form: bornAt("double", "", at), from: null };
+  }
+  if (type === NUMERIC_OID) { const s = seen(x, w); return { form: isForm(s) ? s : null, from: null }; }
+  if (!TEXTS.has(type) && !JSONS.has(type)) return { form: null, from: null };
+  const args: TreeNode[] = Array.isArray(x.args) ? x.args.filter(isTree) : [];
+  let from: TextFrom | null = (x._node === "OPEXPR" || x._node === "FUNCEXPR") && args[0] !== undefined && JSONS.has(exprType(args[0])?.type ?? -1) ? "json" : null;
+  for (const i of inputsOf(x)) {
+    const m = madeOf(i, w);
+    from ??= m.from;
+    if (m.form !== null) return { form: m.form, from };
+  }
+  return { form: null, from };
+}
+
+/** the most sites a form's way out is written at: a statement whose set operations each read the level below in two
+ *  arms doubles them at every level, so past this the reason stands and the way out is the column's whole (round 14) */
+const MAX_SITES = 64;
+/** a column read from a subquery, a CTE or a set operation (a VAR at `at`): the first arm's form says the reason, and
+ *  every arm of that form is a site of the way out, reached through this VAR; at most one past `MAX_SITES` kept */
+function throughVar(below: ReadonlyArray<Seen>, at: number): Form | null {
+  const forms = below.filter(isForm), first = forms[0];
+  if (first === undefined) return null;
+  const sites = forms.filter((f) => f.why === first.why).flatMap((f) => f.sites).slice(0, MAX_SITES + 1)
+    .map((s) => ({ at: s.at, vars: at >= 0 ? [at, ...s.vars] : s.vars }));
+  return { ...first, sites };
+}
+
+/** ONE WALK OF A STATEMENT'S ANALYSED OUTPUTS (PR 202 round 14): the outputs are a graph whose shared nodes every VAR
+ *  that reads them holds by reference (src/duck/pgtree.ts `outputExpressions`), so each node's form and what its text was
+ *  made from are found once and given to every reader; `names` the functions' and operators' names */
+type Walk = { names: ReadonlyMap<string, string>; seen: Map<TreeNode, Seen>; made: Map<TreeNode, Made> };
 
 /** the walk: each node's type first (a double is a double, anything but a numeric carries nothing), then the form below
  *  it passed up, marked by what is over it; `names` the functions' and operators' names, by `f<oid>` and `o<oid>` */
-function seen(n: TreeNode, names: ReadonlyMap<string, string>): Seen {
-  const t = exprType(n);
+function seen(n: TreeNode, w: Walk): Seen {
+  const done = w.seen.get(n);
+  if (done !== undefined) return done;
+  const s = seenAt(n, w);
+  w.seen.set(n, s);
+  return s;
+}
+function seenAt(n: TreeNode, w: Walk): Seen {
+  const names = w.names, t = exprType(n);
   if (t !== null && DOUBLES.has(t.type)) return "double";
   if (t === null || t.type !== NUMERIC_OID) return null;
-  const inputs = inputsOf(n), below = inputs.map((x) => seen(x, names));
+  const inputs = inputsOf(n), below = inputs.map((x) => seen(x, w));
   const inner = below.find(isForm) ?? null, at = int(n.location);
   const born = (why: Form["why"], fn: string, from: TextFrom | null = null): Form => bornAt(why, fn, at, from);
   // a text read as a numeric is the one form a node over it outranks: one scale for the text would not store a division,
@@ -198,30 +235,26 @@ function seen(n: TreeNode, names: ReadonlyMap<string, string>): Seen {
     // stored the engine's double); where nothing beneath has one, it keeps the decimals each value's text has
     case "COERCEVIAIO": {
       if (inputs[0] === undefined || !TEXTS.has(exprType(inputs[0])?.type ?? -1)) return inner;
-      const made = textFrom(inputs[0], names);
+      const made = textFrom(inputs[0], w);
       return made.form ?? born("text", "", made.from);
     }
     // a column read from a subquery, a CTE or a set operation: the first arm's form says the reason, and every arm of
     // that form is a site of the way out, reached through this VAR
-    case "VAR": {
-      const forms = below.filter(isForm), first = forms[0];
-      if (first === undefined) return null;
-      const sites = forms.filter((f) => f.why === first.why).flatMap((f) => f.sites).map((s) => ({ at: s.at, vars: at >= 0 ? [at, ...s.vars] : s.vars }));
-      return { ...first, sites };
-    }
+    case "VAR": return throughVar(below, at);
     // a coalesce, a greatest or least, a CASE's results, a relabel, a sublink: the value it takes
     default: return inner;
   }
 }
 
 /** the functions and operators of analysed expressions, as `f<oid>` and `o<oid>` */
-function oidsOf(v: TreeValue | undefined, out: { f: Set<number>; o: Set<number> }): void {
-  if (Array.isArray(v)) { for (const x of v) oidsOf(x, out); return; }
-  if (!isTree(v)) return;
+function oidsOf(v: TreeValue | undefined, out: { f: Set<number>; o: Set<number> }, met = new Set<TreeNode>()): void {
+  if (Array.isArray(v)) { for (const x of v) oidsOf(x, out, met); return; }
+  if (!isTree(v) || met.has(v)) return;
+  met.add(v);
   if (v._node === "FUNCEXPR" && int(v.funcid) > 0) out.f.add(int(v.funcid));
   if (v._node === "AGGREF" && int(v.aggfnoid) > 0) out.f.add(int(v.aggfnoid));
   if (v._node === "OPEXPR" && int(v.opno) > 0) out.o.add(int(v.opno));
-  for (const [k, x] of Object.entries(v)) if (k !== "_node") oidsOf(x, out);
+  for (const [k, x] of Object.entries(v)) if (k !== "_node") oidsOf(x, out, met);
 }
 
 /** the user's own top SELECT's body (under an `order_by:` shell, the shell's subquery's) */
@@ -335,10 +368,11 @@ async function formsOf(rows: Planner["rows"], outputs: ReadonlyArray<TreeNode | 
   const names = new Map<string, string>(oids.f.size + oids.o.size === 0 ? [] : (await rows(
     `SELECT 'f' || oid::text, proname::text FROM pg_proc WHERE oid IN (${[0, ...oids.f].join(", ")}) UNION ALL SELECT 'o' || oid::text, oprname::text FROM pg_operator WHERE oid IN (${[0, ...oids.o].join(", ")})`))
     .map(([k, name]) => [k!, name!] as const));
+  const w: Walk = { names, seen: new Map(), made: new Map() };
   return outputs.map((e) => {
-    const s = e === null ? null : seen(e, names);
+    const s = e === null ? null : seen(e, w);
     if (!isForm(s)) return null;
-    const found = s.sites.every((x) => x.at >= 0);
+    const found = s.sites.length <= MAX_SITES && s.sites.every((x) => x.at >= 0);
     return { ...s, way: found ? wayOf(stmt, s, "double") : null, scaled: found && s.why === "text" ? wayOf(stmt, s, "scale") : null };
   });
 }

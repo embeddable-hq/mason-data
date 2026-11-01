@@ -31,6 +31,10 @@ import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
+import { catalogDdl } from "../src/api/postgres/catalog.ts";
+import { planDuck } from "../src/duck/plan.ts";
+import { parseSql } from "../src/api/postgres/parser.ts";
+import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -5155,4 +5159,30 @@ test("a grouped collated output ordered by number, name or expression is its col
       "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY n ORDER BY n DESC, min(a.id) LIMIT 8",
     ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
   } finally { await c.end(); await libc.close(); }
+});
+
+// review round 14 of PR 202: the plan of every wire statement computed the generated planner's followed outputs, a walk
+// that copied a column's followed expression into each reference to it, so a statement whose levels each read the level
+// below more than once grew 3^depth (depth 12 took 880 ms, 16 about 70 s) on the planning thread every session waits
+// on, whatever the column's type. The class: work on the wire's path for a reader only another path has, with no bound
+// on its size. The decision: the wire never computes what only a generated table reads, and the walk is linear in the
+// analysed tree. (An int8: a numeric carried through every level grows in the rewrite's exact program, as on main, a
+// finding of its own)
+test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
+  const catalogDb = new PGlite();
+  try {
+    for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
+    const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null });
+    // a first plan pays the catalog's and the parser's start: untimed
+    await plan("SELECT 1::numeric AS a");
+    for (const depth of DEEP_DEPTHS) for (const [shape, sql] of Object.entries(deepChains("1::int8", depth))) {
+      const started = performance.now();
+      const planned = await plan(sql);
+      const ms = performance.now() - started;
+      assert.equal(planned.outputs, undefined, `${shape}: the wire's plan holds the generated planner's outputs`);
+      assert.ok(ms < 500, `${shape}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
+    }
+  } finally { await catalogDb.close(); }
 });

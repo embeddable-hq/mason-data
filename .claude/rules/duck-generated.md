@@ -67,7 +67,14 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   stored column's or a JSON number's text is "a text". Detector: tests/duck-generated.test.ts "round 12". **The
   walk follows the value wherever the analysis says it comes from**: a scalar sublink's subselect, a CTE's query, each
   arm of a set operation (the reason any arm's, the way out in every arm of that form) and a subquery in FROM, under any
-  node (`outputExpressions` hangs what a VAR reads on it as `followed`). The way out is the user's own SQL, deparsed,
+  node (`outputExpressions` hangs what a VAR reads on it as `followed`). **The walk is the generated planner's alone,
+  and linear in the analysed tree** (PR 202 round 14): only it asks for the outputs (src/duck/plan.ts
+  `PlanOptions.outputs`), never a wire statement's plan; a VAR's `followed` is the ONE followed node it reads, shared by
+  reference (pgtree.ts `Follow`), and `seen`, `textFrom` and `oidsOf` memoise by node (`Walk`), so each analysed node is
+  visited once. A copy per VAR grew 3^depth for levels each reading the level below three times (880 ms at depth 12, on
+  the wire's thread for every statement); a form's sites are capped (`MAX_SITES`), past which the way out is the
+  column cast whole. Detector: tests/duck-wire.test.ts and tests/duck-generated.test.ts "round 14", each shape at depth
+  16 within 500 ms. The way out is the user's own SQL, deparsed,
   with only the cast moved (`sum(sqrt(abs(x))::double precision)`, `round(log(x), 2)::double precision`, a numeric cast
   from a double taken away, a text's cast given `numeric(20,4)`), every aggregate and wrapper kept, for EVERY form and
   for the program's reasons too (a pick's column cast whole to the scale its values hold); where the cast lands in
