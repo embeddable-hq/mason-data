@@ -496,6 +496,51 @@ met in the PR's review and deferred, and listed in the Review record's `deferred
 first review as passed when it found nothing blocking, and reads a record written before severity as all blocking,
 since every finding then made a round.
 
+### Issue labels (Tom, 2026-11-01)
+
+**Decision.** Every open issue carries `bug` or `enhancement`, and every bug exactly one of four `severity:` labels
+(CLAUDE.md "What a session finds"). The labels' descriptions on GitHub carry the one-line form of each severity.
+
+**Why.** On 2026-11-01, 3 of the 100 open issues carried either label. Nearly all had been filed by sessions under "What
+a session finds, it acts on", each one well written, but none said how much it mattered. A silent wrong answer
+sat in the list beside a test's fixed sleep and a harness prompt's wording, and only reading all of them told them
+apart. The blocking rule above already sorts a review's findings by severity. The backlog had no such order, and
+it is where the deferred findings now go.
+
+**How the lines were drawn.**
+- **An over-refusal of a shape never answered is a feature, a regression a bug.** The same split the blocking rule
+  makes (`over-refusal` against `regression`): a refusal is safe, and what the base answered is a promise.
+- **Harness and tooling defects are bugs.** A harness that drops a finding, misreads its origin or prints DIFFER for a
+  statement with no ORDER BY lets a wrong answer through, or wastes a run, as surely as a test that hangs.
+- **Data staler than Mason reports is high.** Two issues measured on real deployments made the case:
+  - a table frozen for hours while `mason status` called it ready;
+  - tables written `poll 15m` polled about hourly.
+
+  No row is wrong, but the reader cannot tell the data is old. That is the same harm as a silent wrong answer, in time.
+- **A loud failure is medium, whatever its cause.** A wrong SQLSTATE, the engine's error, or a refusal where Postgres
+  answers is a failure the reader sees and can route around. A silent one is never below high.
+
+**COMMON takes evidence.** The first pass rated severity by judgement, and one issue was rated critical: a numeric
+quotient that leaves the engine as a double in several readers, judged common because numeric division is everyday BI.
+The second pass asked for evidence and moved it to high. The BI shapes the oracle ranks already hold a quotient exact
+under DISTINCT, beside a numeric arm in a UNION ALL, and as a cast to text. The readers still wrong (an integer arm,
+USING, `length()` of the text, a cast subquery) are in neither the corpus nor the BI shapes, and no deployment met
+them. "Common" was the one judgement the two passes disagreed on, so it now names its source:
+- the recorded corpus or the ranked BI shapes;
+- a named tool, ORM or agent that writes the shape by default;
+- a real deployment.
+
+The source is a shape, not a condition. One issue's statements, `initcap` and a text percentile, are among the BI
+shapes, but they differ only on a source under an ICU collation. No source records how common that is, so that issue
+stayed high, and that call was reported to the owner.
+
+**The triage's result.** It closed three duplicates and closed nothing as fixed. Two candidates were checked against
+main and each kept a done criterion still unmet. After the second pass, of 100 open issues: 71 bugs (35 high, 34
+medium, 2 low, none critical) and 29 features.
+
+**Detector.** None yet: a session reads the labels. A script listing open issues without `bug` or `enhancement`, or
+a bug without exactly one severity, would make it one; it is not built.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
