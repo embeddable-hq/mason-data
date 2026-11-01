@@ -151,7 +151,7 @@ reads.
 - **A wait on CI is a `gh pr checks <n>` loop with a deadline**, without `--watch`: it exits 0 when all passed, 8 while
   any is pending, 1 on a failure, and also 1 with "no checks reported" just after a push, which is a wait, not a
   failure. `--watch` exits on that at once, and an alarm `exec`'d into `gh` (a Go program) is ignored, so neither bounds
-  it. Nothing detects it; three such waits, each wrong a different way, did.
+  it. Nothing detects it; three waits, each wrong a different way, were found by reading the transcript.
 - **One full `npm run check`, before a PR's first push.** A fix round after a review or a merge of main gets
   `npm run typecheck`, `node --test tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
   change, and CI carries the full suite: the few real catches a full local run made in another file were all such fast
