@@ -2320,18 +2320,18 @@ class Rewriter {
         if (arms.some((a) => a === null)) return asCell();
         return numeric({ op: "pick", index: cell(index()), args: arms.map((a) => a!.p) });
       }
-      // a scalar subquery whose column is its own aggregate and that has no GROUP BY (one row, the same for every copy,
-      // whatever its LIMIT, OFFSET, HAVING or DISTINCT then keep): its column's program, each cell the same subquery
-      // selecting that cell (`scalarCell`), so a value kept at its row's scale (latest, min / max of a coalesce) leaves
-      // the subquery as it leaves a SELECT list. Guarded by the column's own NULL (no row kept, or no row aggregated):
-      // the program over NULL cells need not be NULL (coalesce(NULL, 0) is 0). A GROUP BY could make the copies read
-      // other groups' rows: the engine's value, as before
+      // a scalar subquery: its column's program, each cell the same subquery selecting that cell (`scalarCell`), so a
+      // value kept at its row's scale (latest, min / max of a coalesce, a coalesce) or computed (a quotient) leaves the
+      // subquery as it leaves a SELECT list. Every copy reads the same row: the subquery's rows are one or none (the
+      // engine refuses a second, as Postgres does), unless a LIMIT or an OFFSET picks among more, which only a column
+      // that is the subquery's own aggregate with no GROUP BY (one row) is safe under; else the engine's value, as
+      // before. Guarded by the column's own NULL (no row, or none aggregated): the program over NULL cells need not be
+      // NULL (coalesce(NULL, 0) is 0)
       case "SubLink": {
         const target = scalarTarget(n);
         const q = isNode(b.subselect) ? bodyOf(b.subselect) : {};
-        const agg = target === null ? null : this.typed(target);
-        if (type !== NUMERIC || target === null || agg?.node !== "AGGREF"
-          || (Array.isArray(q.groupClause) && q.groupClause.length > 0)) return asCell();
+        const oneRow = target !== null && this.typed(target)?.node === "AGGREF" && !(Array.isArray(q.groupClause) && q.groupClause.length > 0);
+        if (type !== NUMERIC || target === null || ((q.limitCount !== undefined || q.limitOffset !== undefined) && !oneRow)) return asCell();
         const built = this.exactOf(target, (m, conv) => cell(this.scalarCell(n, m), conv));
         if (built === null || built.p.op === "cell" || (built.p.op === "pad" && built.p.arg.op === "cell")) return asCell();
         const kept = caseWhen([[isNotNull(this.clone(target)), intConst(0)]], null);

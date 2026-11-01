@@ -1951,6 +1951,8 @@ test("latest(x ORDER BY …) is the x of the row that sorts last, by Postgres's 
       // there too (PR 274's review, round 2)
       ["SELECT o.status, (SELECT latest(coalesce(CASE WHEN i.qty > 1 THEN i.amount END, 0) ORDER BY i.id) FROM orders i WHERE i.status = o.status) FROM orders o GROUP BY 1 ORDER BY 1", tuple],
       ["SELECT o.id, (SELECT latest(CASE WHEN i.qty > 1 THEN i.amount ELSE 0 END ORDER BY i.id DESC) FROM orders i WHERE i.id > o.id + 1) AS l FROM orders o ORDER BY 1", sorted],
+      // a subquery in a subquery, one with a GROUP BY, one with no aggregate, one with a LIMIT over its one row
+      ["SELECT o.id, (SELECT (SELECT latest(coalesce(CASE WHEN i.qty > 1 THEN i.amount END, 0) ORDER BY i.id) FROM orders i WHERE i.status = o.status GROUP BY i.status)), (SELECT coalesce(CASE WHEN i.qty > 1 THEN i.amount END, 0) FROM orders i WHERE i.id = o.id), (SELECT latest(CASE WHEN i.qty > 1 THEN i.amount ELSE 0 END ORDER BY i.id) FROM orders i WHERE i.id <= o.id LIMIT 1) FROM orders o ORDER BY 1", tuple],
       ["SELECT status, to_json(latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id)), concat('v', latest(CASE WHEN qty < 5 THEN amount ELSE 0 END ORDER BY id)), latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id DESC) || '' FROM orders GROUP BY 1 ORDER BY 1", sorted],
     ];
     // of ties the keys leave open, any tied row's value, at that row's scale (ids 1 and 2 are both 'paid')
