@@ -11,7 +11,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
-import { STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
+import { emptyShapeCount, NEW_SHAPES, shapeProblems, sumShapeTallies, type ShapeTally } from "./integration/oracle/shape-names.ts";
+import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import type { GapTally } from "./integration/oracle/gap-tally.ts";
@@ -297,4 +298,60 @@ test("--write <run-id> takes only a finished run of the commit checked out: anot
   assert.match(runProblems({ headSha: "b".repeat(40), status: "completed", conclusion: "success" }, head).join("\n"), /the run is of commit b{40}, where this checkout is at a{40}/);
   assert.match(runProblems({ headSha: head, status: "in_progress", conclusion: null }, head).join("\n"), /has not finished \(in_progress\)/);
   assert.equal(runProblems({}, head).length, 2, "a view that says nothing is refused");
+});
+
+test("the shapes' tallies are summed across the legs: a dead or misspelt new shape fails by name, a shape decision merges apart from a base one", () => {
+  const live = (): NonNullable<LegReport["shapeTally"]> => Object.fromEntries(Object.entries(NEW_SHAPES).map(([s, spec]) => [s, { ...emptyShapeCount(), asked: 2,
+    ...(spec.life === "answer" ? { answeredAlike: 1 } : { refusedAlike: { [spec.may[0]!]: 1 }, postgresRefused: { [spec.may[0]!]: 1 } }) }]));
+  const [a, b] = legs();
+  assert.deepEqual(staleOrDead([{ ...a, shapeTally: live() }, { ...b, shapeTally: {} }]), [], "alive in one leg is alive");
+  const dead = { ...live(), "char-arm": { ...emptyShapeCount(), asked: 40, refusedByGap: 40 } };
+  assert.match(staleOrDead([{ ...a, shapeTally: dead }, { ...b, shapeTally: {} }]).join("\n"), /the shape char-arm is dead/);
+  const misspelt = { ...live(), "values-arm": { ...emptyShapeCount(), asked: 30, refusedAlike: { "42804": 30 }, postgresRefused: { "42804": 30 } } };
+  const said = staleOrDead([{ ...a, shapeTally: misspelt }, { ...b, shapeTally: {} }]).join("\n");
+  assert.match(said, /the shape values-arm is dead/);
+  assert.match(said, /the shape values-arm is misspelt: Postgres refused it 30 time\(s\) with 42804/);
+  assert.deepEqual(staleOrDead([{ ...a, shapeTally: dead, measured: { ...measured, shapes: false } }, { ...b, shapeTally: {}, measured: { ...measured, shapes: false } }]), [], "shapes off: no shape check");
+  assert.match(staleOrDead([{ ...a, shapeTally: live() }, b]).join("\n"), /leg\(s\) 2 has no shape tally where another has/);
+  // a base entry /x/ and a shape entry of the same pattern are two decisions: the shape's, differing in neither leg, is stale
+  const withShape = (r: LegReport, differed: boolean): LegReport => ({ ...r, shapeTally: r.leg === 1 ? live() : {}, decisions: [...r.decisions, { sql: "/x/", shape: "integer-arm", kind: "text", why: "a scale", differed, decided: true }] });
+  assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, true)]), [], "the shape entry differed in leg 2");
+  assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, false)]), ["a decided difference that no longer differs: [integer-arm] text /x/: no longer differs (a scale) — remove it from KNOWN"]);
+  // PR 261's merged run: one group and pattern, two kinds (#247's padding as a value and as a kept row). The rows entry
+  // no longer differs on the merged tree; keyed by its kind it is said stale, never hidden behind the value entry
+  const kinds = (r: LegReport): LegReport => ({ ...r, shapeTally: r.leg === 1 ? live() : {}, decisions: [...r.decisions,
+    { sql: "/[\\s\\S]/", shape: "char-arm, char-arm-first", kind: "value", issue: 247, why: "padding", differed: true, decided: true },
+    { sql: "/[\\s\\S]/", shape: "char-arm, char-arm-first", kind: "rows", issue: 247, why: "a row kept", differed: false, decided: true }] });
+  assert.deepEqual(staleOrDead([kinds(a), kinds(b)]), ["a decided difference that no longer differs: [char-arm, char-arm-first] rows /[\\s\\S]/: no longer differs (a row kept) — remove it from KNOWN, and say on #247 that it no longer differs (on this tree: main may have fixed it)"]);
+});
+
+test("every shape's liveness can be reached by deciding a difference the base already has: a refusal shape lives by a decided refusal under its SQLSTATE, an answer shape by no refusal", () => {
+  const live = (): ShapeTally => Object.fromEntries(Object.entries(NEW_SHAPES).map(([s, spec]) => [s, { ...emptyShapeCount(), asked: 2,
+    ...(spec.life === "answer" ? { answeredAlike: 1 } : { refusedAlike: { [spec.may[0]!]: 1 }, postgresRefused: { [spec.may[0]!]: 1 } }) }]));
+  // issue 119's base difference: Postgres refuses a negative LIMIT 2201W and a negative OFFSET 2201X, Mason both 42804
+  const base: ShapeTally = { ...live(),
+    "count-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201W": 3 }, differs: 3 },
+    "offset-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201X": 3 }, differs: 3 } };
+  assert.deepEqual(shapeProblems(base).map((p) => p.split(":")[0]), ["the shape count-negative is dead", "the shape offset-negative is dead"], "undecided, they are dead");
+  assert.match(shapeProblems(base)[0]!, /recorded in KNOWN with `shape` and `issue`/, "the message names the response a PR may take");
+  // decided (KNOWN with `shape` and `issue: 119`): the itest counts each under Postgres's SQLSTATE, and they live
+  const decided: ShapeTally = { ...live(),
+    "count-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201W": 3 }, decided: 3, decidedRefused: { "2201W": 3 } },
+    "offset-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201X": 3 }, decided: 3, decidedRefused: { "2201X": 3 } } };
+  assert.deepEqual(shapeProblems(decided), []);
+  // across legs: the decided refusals are summed by SQLSTATE
+  assert.deepEqual(sumShapeTallies([decided, decided])["count-negative"]!.decidedRefused, { "2201W": 6 });
+  // a decided refusal under ANOTHER SQLSTATE keeps no refusal shape alive, and a decided refusal keeps no answer shape alive
+  const other: ShapeTally = { ...decided, "count-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201W": 3 }, decided: 3, decidedRefused: { "2201X": 3 } } };
+  assert.match(shapeProblems(other).join("\n"), /the shape count-negative is dead/);
+  const refusedOnly: ShapeTally = { ...live(), "table-arm": { ...emptyShapeCount(), asked: 2, postgresRefused: { "42883": 2 }, decided: 2, decidedRefused: { "42883": 2 } } };
+  assert.match(shapeProblems(refusedOnly).join("\n"), /the shape table-arm is dead/);
+  // an answer shape whose every ask Postgres answered and Mason differed from by a decided difference lives
+  assert.deepEqual(shapeProblems({ ...live(), "integer-arm": { ...emptyShapeCount(), asked: 2, decided: 2 } }), []);
+  // count-null computes every row: a row past the base's bound Postgres cannot compute (22P02, PR 261's first run) is
+  // what its text means, not a misspelling; a syntax error still is
+  const unbounded = (code: string): ShapeTally => ({ ...live(), "count-null": { ...emptyShapeCount(), asked: 3, answeredAlike: 2, refusedAlike: { [code]: 1 }, postgresRefused: { [code]: 1 } } });
+  assert.deepEqual(shapeProblems(unbounded("22P02")), []);
+  assert.deepEqual(shapeProblems(unbounded("22012")), []);
+  assert.match(shapeProblems(unbounded("42601")).join("\n"), /the shape count-null is misspelt: Postgres refused it 1 time\(s\) with 42601/);
 });

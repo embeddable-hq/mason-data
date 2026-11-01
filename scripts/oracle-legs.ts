@@ -40,8 +40,9 @@ import { fileURLToPath } from "node:url";
 import { SHARDS, reportName } from "./ci-layout.ts";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
-import { staleDecisions } from "../tests/integration/oracle/known.ts";
+import { decisionKey, staleDecisions } from "../tests/integration/oracle/known.ts";
 import { fixtureTally, fixtureText, type GapCounts, type GapTally } from "../tests/integration/oracle/gap-tally.ts";
+import { shapeProblems, sumShapeTallies, type ShapeTally } from "../tests/integration/oracle/shape-names.ts";
 
 /** the three times every statement is asked; the shapes and the DuckDB-alone pass belong to the first */
 export const PHASES = ["after the copy", "after changes round 1", "after changes round 2"] as const;
@@ -51,7 +52,8 @@ export const STAGES = ["roles", "row filters", "settings", "setting scripts"] as
 export const FIRST_LEG_RUNS_STAGES = 1;
 
 export type Tallies = { statements: number; mason: Record<string, number>; duckdb: Record<string, number> };
-export interface Decision { sql: string; why: string; machineFloat?: true; differed: boolean; decided: boolean }
+/** a decided difference as a leg met it; `shape` and `kind`: a group's, its shapes joined (oracle/known.ts decisionKey keys it apart) */
+export interface Decision { sql: string; shape?: string; kind?: string; issue?: number; why: string; machineFloat?: true; differed: boolean; decided: boolean }
 /** what the fixture says the DuckDB-alone tallies were measured on */
 export interface Measured { what: string; machine: string; postgres: string; collation: string; shapes: boolean }
 export interface LegReport {
@@ -64,6 +66,8 @@ export interface LegReport {
   asked: Record<string, string[]>;
   stages: Partial<Record<(typeof STAGES)[number], number>>;
   shaped: number;
+  /** what each shape met (oracle/shape-names.ts): absent only in a report from before the tally */
+  shapeTally?: ShapeTally;
   tallies: Tallies;
   copyPhase: GapTally;
   everyAsk: GapTally;
@@ -180,13 +184,20 @@ export function staleOrDead(reports: readonly LegReport[]): string[] {
   const problems: string[] = [];
   const decisions = new Map<string, Decision>();
   for (const r of reports) for (const d of r.decisions) {
-    const was = decisions.get(d.sql);
-    decisions.set(d.sql, was === undefined ? { ...d } : { ...was, differed: was.differed || d.differed, decided: was.decided || d.decided });
+    const was = decisions.get(decisionKey(d));
+    decisions.set(decisionKey(d), was === undefined ? { ...d } : { ...was, differed: was.differed || d.differed, decided: was.decided || d.decided });
   }
   const all = [...decisions.values()];
   problems.push(...staleDecisions(all, new Set(all.filter((d) => d.differed)), new Set(all.filter((d) => d.decided))).map((s) => `a decided difference that no longer differs: ${s}`));
   const dead = deadGaps(sumTally(reports.map((r) => r.everyAsk)));
   if (dead.length > 0) problems.push(`src/duck/gaps.ts entries no oracle statement meets: ${dead.join(", ")}. Add a statement that does (oracle/gap-cases.ts), or remove the entry`);
+  // A DEAD OR MISSPELT SHAPE, of the legs' tallies summed, when the shapes ran (oracle/shape-names.ts shapeProblems). A
+  // report with no tally predates it; one leg with and one without cannot be summed, and is said
+  if (reports.some((r) => r.measured?.shapes === true)) {
+    const without = reports.filter((r) => r.shapeTally === undefined).map((r) => r.leg);
+    if (without.length > 0 && without.length < reports.length) problems.push(`the report of leg(s) ${without.join(", ")} has no shape tally where another has: the legs ran different trees`);
+    else if (without.length === 0) problems.push(...shapeProblems(sumShapeTallies(reports.map((r) => r.shapeTally!))));
+  }
   return problems;
 }
 
