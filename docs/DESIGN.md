@@ -397,7 +397,7 @@ table (and the source password) through the attachment. Others, each fixed with 
 ### The independent review (2026-10-28)
 
 **Decision.** Every PR is read for wrong answers by a reader in a fresh context before a person sees it, and its
-findings go back to the author in one message (CLAUDE.md "How work is done here").
+findings go back to the author in one message (CLAUDE.md "How work is done here", "The loop").
 
 **Why.** Three PRs landed in one day — three rewrites for a BI tool's slow shapes (date_trunc of a timestamptz, a
 LEFT lateral of json rows, the nulls idiom), jsonb's order and equality, and that order stored as a column — each by an
@@ -414,6 +414,20 @@ rounds took 44 minutes and 1 h 28 (three batches of findings, three cycles); CI 
 mostly overlapped. The batch landed in a little over three hours: the slowest implementation, one review cycle, and the
 CI runs that gated the merges — not the sum of the parts. Where time was spent on nothing new: each agent ran the full
 oracle several times while iterating, and one built a 20 M-row dataset twice.
+
+**A finding is a failure, never a patch (2026-11-01).** PR 170 (key-first GROUP BY, issue 134) took five findings of
+one class in four rounds: a sort key written as a constant, which the engine reads as an ordinal or refuses. The CI
+oracle found a text literal; then a second statement of the same shape; a re-check found a chain of casts and a
+derived table's `1 AS one` read through the table around it; the next a cast of a typed literal (`2147483648::int`,
+which Postgres evaluates at planning and refuses); the next a regression of that fix (`1.5::numeric`, now kept and
+written as a bare `1.5`). Every round the coordinator forwarded the reviewer's suggested edit as the fix, in 20 to 30
+calls, and the author applied it, correctly; the reviewer had named the class in round three ("the constant is decided
+from syntax where it should be decided from the analysis", CLAUDE.md's "a fact derived in several places") and the
+class was never the round's task. Neither the size of the pieces nor the agents' effort explained it: an author handed
+a patch applies the patch. So a finding goes back as the statement, Postgres's answer and Mason's, with its class; and
+the second finding of a class on one PR turns the next round into a class round, which writes the class's cases down
+first, tests each against Postgres, then fixes the decision. Its first such round ran at high effort, to see whether
+effort changes the count.
 
 ### The plan fixture (2026-10-28)
 
