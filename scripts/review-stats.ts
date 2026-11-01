@@ -10,7 +10,13 @@
  *     undo it); a finding the run deferred as non-blocking (a refusal's wording, an over-refusal, docs, quality: filed,
  *     never fixed in the PR, CLAUDE.md "The loop" step 4) does not count against it;
  *   - passed by the second: round 1 found nothing blocking, or a round 2 ran and found nothing blocking;
- *   - the mean review and probe rounds, and the classes met most.
+ *   - the mean review and probe rounds, and the classes met most;
+ *   - the statements the probes and reviews ran at the PRs' heads (`statementsRun`) and how many of them Mason answered
+ *     as Postgres did (`statementsMatched`), summed over the records that count them: a review that runs no statement
+ *     only read the code, which on issue 192 passed an implementation that 300 to 500 statements a check did not.
+ *     A record written before the counts (2026-11-01) has neither, reads as it did, and is left out of the sum;
+ *   - the checks they ran on the paths that owe no SQL (`checksRun`: a `mason` command, a script, a test file), summed
+ *     the same way: statementsRun counts SQL statements only.
  * The runs that never reached a review (a stop at the link check, a failed brief or review) are counted apart, never
  * as passing.
  *
@@ -41,10 +47,19 @@ export type ReviewRecord = {
   /** this PR's non-blocking findings, filed and not fixed; records written before severity have none */
   deferred?: RecordFinding[];
   ciFixes: number; status: string;
+  /** the statements every probe and review ran at the head, and of those the ones Mason answered as Postgres did;
+   * records written before the counts have neither */
+  statementsRun?: number; statementsMatched?: number;
+  /** the checks run on changed paths that owe no SQL statement; records written before it have none */
+  checksRun?: number;
 };
 export type Stats = {
   prs: number; reviewed: number; neverReviewed: number; firstPass: number; bySecond: number;
   meanReviewRounds: number; meanProbeRounds: number; topClasses: Array<{ classKey: string; count: number }>;
+  /** summed over the PRs whose record counts them (`withStatements` of them) */
+  statementsRun: number; statementsMatched: number; withStatements: number;
+  /** summed over the PRs whose record counts them (`withChecks` of them) */
+  checksRun: number; withChecks: number;
 };
 
 const OPEN = "```json mason-review-record";
@@ -61,6 +76,10 @@ function problemOf(v: unknown): string | null {
   if (typeof r["status"] !== "string") return "status is not a string";
   if (!Array.isArray(r["findings"])) return "findings is not an array";
   if (r["deferred"] !== undefined && !Array.isArray(r["deferred"])) return "deferred is not an array";
+  const count = (k: string) => r[k] === undefined || (Number.isInteger(r[k]) && (r[k] as number) >= 0);
+  for (const k of ["statementsRun", "statementsMatched", "checksRun"]) if (!count(k)) return `${k} is not a count`;
+  if (r["statementsMatched"] !== undefined && r["statementsRun"] === undefined) return "statementsMatched without statementsRun";
+  if ((r["statementsMatched"] as number | undefined ?? 0) > (r["statementsRun"] as number | undefined ?? 0)) return "statementsMatched is more than statementsRun";
   for (const f of [...r["findings"] as unknown[], ...(r["deferred"] as unknown[] | undefined ?? [])]) {
     const g = f as Record<string, unknown> | null;
     if (!g || typeof g["round"] !== "number" || typeof g["classKey"] !== "string" || !STAGES.has(String(g["stage"]))) {
@@ -128,6 +147,7 @@ export function stats(records: readonly ReviewRecord[], top = 10): Stats {
   for (const r of all) for (const f of r.findings) counts.set(f.classKey, (counts.get(f.classKey) ?? 0) + 1);
   const share = (p: (r: ReviewRecord) => boolean) => (n ? rs.filter(p).length / n : 0);
   const mean = (k: "reviewRounds" | "probeRounds") => (n ? rs.reduce((s, r) => s + r[k], 0) / n : 0);
+  const counted = all.filter((r) => r.statementsRun !== undefined);
   return {
     prs: all.length,
     reviewed: n,
@@ -138,10 +158,28 @@ export function stats(records: readonly ReviewRecord[], top = 10): Stats {
     meanProbeRounds: mean("probeRounds"),
     topClasses: [...counts].map(([classKey, count]) => ({ classKey, count }))
       .sort((a, b) => b.count - a.count || a.classKey.localeCompare(b.classKey)).slice(0, top),
+    statementsRun: counted.reduce((s, r) => s + r.statementsRun!, 0),
+    statementsMatched: counted.reduce((s, r) => s + (r.statementsMatched ?? 0), 0),
+    withStatements: counted.length,
+    checksRun: all.reduce((s, r) => s + (r.checksRun ?? 0), 0),
+    withChecks: all.filter((r) => r.checksRun !== undefined).length,
   };
 }
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
+
+/** The numbers as a person reads them. */
+export function render(s: Stats, quoted: number, malformed: number): string {
+  return `${s.prs} PR(s) with a review record: ${s.reviewed} reached a review, ${s.neverReviewed} stopped before one`
+    + `${quoted ? `; ${quoted} record(s) quoted on another PR, left out` : ""}${malformed ? `; ${malformed} malformed, left out` : ""}\n`
+    + `of those reviewed, passed the first review: ${pct(s.firstPass)}; by the second: ${pct(s.bySecond)}\n`
+    + `mean review rounds ${s.meanReviewRounds.toFixed(2)}, mean probe rounds ${s.meanProbeRounds.toFixed(2)}\n`
+    + `statements run by probes and reviews: ${s.withStatements
+      ? `${s.statementsRun} over ${s.withStatements} PR(s) that counted them, ${s.statementsMatched} matched Postgres (${pct(s.statementsRun ? s.statementsMatched / s.statementsRun : 0)})`
+      : "none counted"}\n`
+    + `checks run on other paths: ${s.withChecks ? `${s.checksRun} over ${s.withChecks} PR(s) that counted them` : "none counted"}\n`
+    + `top classes:\n${s.topClasses.map((c) => `  ${c.count}  ${c.classKey}`).join("\n") || "  (none)"}\n`;
+}
 
 function main(argv: string[]): number {
   let repo = "{owner}/{repo}";
@@ -179,13 +217,7 @@ function main(argv: string[]): number {
   }
   const s = stats(records);
   if (json) process.stdout.write(`${JSON.stringify({ ...s, quoted, malformed })}\n`);
-  else {
-    process.stdout.write(`${s.prs} PR(s) with a review record: ${s.reviewed} reached a review, ${s.neverReviewed} stopped before one`
-      + `${quoted ? `; ${quoted} record(s) quoted on another PR, left out` : ""}${malformed ? `; ${malformed} malformed, left out` : ""}\n`);
-    process.stdout.write(`of those reviewed, passed the first review: ${pct(s.firstPass)}; by the second: ${pct(s.bySecond)}\n`);
-    process.stdout.write(`mean review rounds ${s.meanReviewRounds.toFixed(2)}, mean probe rounds ${s.meanProbeRounds.toFixed(2)}\n`);
-    process.stdout.write(`top classes:\n${s.topClasses.map((c) => `  ${c.count}  ${c.classKey}`).join("\n") || "  (none)"}\n`);
-  }
+  else process.stdout.write(render(s, quoted, malformed));
   return malformed ? 1 : 0;
 }
 

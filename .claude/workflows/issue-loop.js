@@ -9,8 +9,10 @@ export const meta = {
   ],
 }
 
-// args: { issue, base = 'main', prLoop?, tasks?, knownClasses?, from?, prev?, repo? }
+// args: { issue, base = 'main', prLoop?, tasks?, knownClasses?, from?, prev?, repo?, itEnv? }
 //   repo: the main checkout's path, passed on to pr-loop. Without it each agent finds the repository itself (WHERE).
+//   itEnv: a path to a shell file that exports IT_POSTGRES_URL, passed on to pr-loop for the statements its probes and
+//   reviews run; without it, each starts a throwaway Postgres of its own (pr-loop's header).
 //   prLoop: a path to a pr-loop script to run instead of the named workflow `pr-loop` (.claude/workflows/pr-loop.js).
 //   Without `tasks`: plan only, and return the tasks. The coordinator reads them (and may edit them) before a run: a
 //   split is a design decision, and a run of several PRs is expensive to redo.
@@ -85,7 +87,7 @@ for (let i = from; i < tasks.length; i++) {
     issue: t.subIssue, parent: A.issue, title: t.title,
     base: stackedOn ? stackedOn.branch : BASE, branch: t.branch,
     stackedOn: stackedOn ? String(stackedOn.pr) : '',
-    context: t.scope, ...(A.repo ? { repo: A.repo } : {}), readFirst: t.readFirst, knownClasses: classes,
+    context: t.scope, ...(A.repo ? { repo: A.repo } : {}), ...(A.itEnv ? { itEnv: A.itEnv } : {}), readFirst: t.readFirst, knownClasses: classes,
   })
   done.push({ task: i, subIssue: t.subIssue, ...(r || { status: 'pr-loop returned nothing' }) })
   if (!r || !String(r.status).startsWith('reviewed')) {
