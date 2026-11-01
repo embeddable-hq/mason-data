@@ -196,6 +196,28 @@ paths:
   that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
   Postgres's order under C, ICU and libc, and the oracle's `jorder` every form. ("jsonb's order")
 
+## What a column is
+
+- **A column is the source's type, whatever the copy holds** (`src/duck/held-types.ts`, the only place that says what the
+  copy holds, issues 126 and 129): the catalog declares `format_type`'s spelling and the wire sends its OID, so Postgres's
+  analysis decides every statement; a type that is not `NATIVE` is held as its text (`c::text`, an array as `c::text[]`),
+  a type added to Postgres or made by a user included, so nothing falls through to what DuckDB's reader made of it.
+  The one exception is a numeric past DuckDB's DECIMAL, double on the catalog and the wire (`numeric-over-38-digits`).
+  `tests/duck-held-types.test.ts` holds `HELD` to pg_type, so a Postgres type nobody decided fails it, and the oracle's
+  `MAPPED` (`oracle/type-matrix.ts`) reads each column every way a tool does. A new held type gets a column there.
+- **What needs the type's own value of a held column is refused by name, in one place** (`heldRefusal` in src/duck/plan.ts over
+  `heldUses`, src/duck/resolved.ts: an operator but `=` / `<>` of a `textEqual` type, a function, a cast to another type, a
+  subscript), and a sort in the rewrite (`held-type-compare`). It is held after the analysis because the oracle runs with
+  the allowlist off: "unverified" alone would have answered `length(lseg)` as the length of its text.
+- **A literal or a parameter of a held type is Postgres's text of it** (`pgEvalSync`, `readParameters`), so `'0800.2b01.0203'`
+  equals the column. A money's text is the source's lc_monetary's, which no other Postgres writes, so its literal
+  is refused (`literal: false`).
+- **A type a database made is declared in the catalog under its name, with nothing over it** (`PgColumn.made`, `catalogDdl`):
+  a tool reads its name, and what Postgres's analysis cannot find over it is the gap, never Postgres's 42883
+  (`madeTypeRefusal`). All such types are one allowlist key (`made`). A domain's column is its base type (`domain-column`).
+- **A value written in the session's zone is written where it is sent** (`ZONED_HELD`): a tstzrange's stored text is the zone it
+  was read in; the wire and `x::text` ask Postgres's own output under the session's zone at the Execute.
+
 ## What is not supported, and how the list stays true
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in

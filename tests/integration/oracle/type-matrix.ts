@@ -122,6 +122,76 @@ export const COLL: Array<[number, string | null]> = [
   [110, "\u00BD"], [111, "\u216B"], [112, "\uFFFDx"], [113, "\uE001"], [114, "\u{F0001}"], [115, "\u{10FFFD}x"], [116, "x\uE000"],
 ];
 
+/**
+ * EVERY TYPE THE COPY HOLDS AS ANOTHER (src/duck/held-types.ts, issues 126 and 129): one column of `mapped` each, read
+ * every way a tool reads a column. Each value list is [id 1 … id 5] with id 1 and id 3 equal, id 6 NULL; `eq` is a value's
+ * literal, in another spelling of it where the type has one. A statement Postgres refuses is refused alike; one Mason
+ * cannot answer names its gap, or the oracle fails.
+ */
+const MAPPED: Record<string, { type: string; values: string[]; eq?: string }> = {
+  tz: { type: "timetz", values: ["'12:30:00+02'", "'00:00:00-05:30'", "'12:30:00+02'", "'10:30:00+00'", "'23:59:59.999999+14:15:30'"], eq: "'12:30+2'" },
+  tz3: { type: "timetz(3)", values: ["'12:30:00.1234+02'", "'24:00:00-15:59:59'", "'12:30:00.1234+02'", "'00:00:00+15:59:59'", "'01:00:00+00'"], eq: "'12:30:00.123+02'" },
+  tza: { type: "timetz[]", values: ["'{12:30:00+02,NULL}'", "'{}'", "'{12:30:00+02,NULL}'", "'{01:00:00+00}'", "'{\"23:59:59.5-03:30\"}'"] },
+  ivy: { type: "interval year to month", values: ["'1 year 2 mons'", "'1 mon'", "'1 year 2 mons'", "'2 years'", "'-1 mon'"], eq: "'14 mons'" },
+  ta3: { type: "time(3)[]", values: ["'{01:00:00}'", "'{}'", "'{01:00:00}'", "'{02:00:00,03:00:00.5}'", "'{NULL}'"] },
+  pt: { type: "point", values: ["'(1,2)'", "'(1.5,-2.5)'", "'(1,2)'", "'(0,0)'", "'(1e300,-0)'"], eq: "'1,2'" },
+  ln: { type: "line", values: ["'{1,2,3}'", "'{0,1,5}'", "'{1,2,3}'", "'{1,-1,0}'", "'{2,4,6}'"], eq: "'{1,2,3}'" },
+  ls: { type: "lseg", values: ["'[(0,0),(1,1)]'", "'[(1,2),(3,4)]'", "'[(0,0),(1,1)]'", "'[(5,5),(6,6)]'", "'[(1,1),(0,0)]'"], eq: "'[(0,0),(1,1)]'" },
+  bx: { type: "box", values: ["'(1,1),(0,0)'", "'(3,4),(1,2)'", "'(1,1),(0,0)'", "'(9,9),(8,8)'", "'(0,0),(1,1)'"], eq: "'(1,1),(0,0)'" },
+  pa: { type: "path", values: ["'((0,0),(1,1))'", "'[(0,0),(1,1),(2,0)]'", "'((0,0),(1,1))'", "'[(5,5),(6,6)]'", "'[(0,0),(1,1)]'"], eq: "'((0,0),(1,1))'" },
+  pg: { type: "polygon", values: ["'((0,0),(1,1),(1,0))'", "'((0,0),(2,2),(2,0))'", "'((0,0),(1,1),(1,0))'", "'((5,5),(6,6),(7,5))'", "'((0,0),(0,1),(1,1))'"], eq: "'((0,0),(1,1),(1,0))'" },
+  ci: { type: "circle", values: ["'<(1,2),3>'", "'<(0,0),1>'", "'<(1,2),3>'", "'<(5,5),2>'", "'<(0,0),3>'"], eq: "'<(1,2),3>'" },
+  mn: { type: "money", values: ["'12.50'", "'-3.00'", "'12.50'", "'1000000.99'", "'0'"], eq: "'12.5'" },
+  bi: { type: "bit(8)", values: ["B'10101010'", "B'00000001'", "B'10101010'", "B'11111111'", "B'00000000'"], eq: "B'10101010'" },
+  vb: { type: "varbit", values: ["B'101'", "B'1'", "B'101'", "B''", "B'1010'"], eq: "B'101'" },
+  mc: { type: "macaddr", values: ["'08:00:2b:01:02:03'", "'00:00:00:00:00:01'", "'08:00:2b:01:02:03'", "'ff:ff:ff:ff:ff:ff'", "'0a:00:2b:01:02:03'"], eq: "'0800.2b01.0203'" },
+  m8: { type: "macaddr8", values: ["'08:00:2b:01:02:03:04:05'", "'00:00:00:00:00:00:00:01'", "'08:00:2b:01:02:03:04:05'", "'ff:ff:ff:ff:ff:ff:ff:ff'", "'0a:00:2b:01:02:03:04:05'"], eq: "'0800-2b01-0203-0405'" },
+  cd: { type: "cidr", values: ["'10.0.0.0/8'", "'192.168.1.0/24'", "'10.0.0.0/8'", "'::/0'", "'2001:db8::/32'"], eq: "'10/8'" },
+  tv: { type: "tsvector", values: ["'a b c'", "'fat:1 cat:2'", "'a b c'", "''", "'c b a b'"], eq: "'c b a'" },
+  tq: { type: "tsquery", values: ["'a & b'", "'c | d'", "'a & b'", "'!e'", "'b & a'"], eq: "'a & b'" },
+  xm: { type: "xml", values: ["'<a>1</a>'", "'<b/>'", "'<a>1</a>'", "'text'", "'<a x=\"1\"/>'"] },
+  oi: { type: "oid", values: ["1", "2", "1", "4294967295", "10"], eq: "1" },
+  rc: { type: "regclass", values: ["'pg_class'", "'pg_type'", "'pg_class'", "'pg_proc'", "'pg_attribute'"], eq: "'pg_class'" },
+  rt: { type: "regtype", values: ["'int4'", "'text'", "'int4'", "'bool'", "'numeric'"], eq: "'integer'" },
+  xi: { type: "xid", values: ["'1'", "'2'", "'1'", "'3'", "'10'"], eq: "'1'" },
+  x8: { type: "xid8", values: ["'1'", "'2'", "'1'", "'3'", "'10'"], eq: "'1'" },
+  ct: { type: "cid", values: ["'1'", "'2'", "'1'", "'3'", "'10'"], eq: "'1'" },
+  ti: { type: "tid", values: ["'(0,1)'", "'(1,2)'", "'(0,1)'", "'(3,4)'", "'(0,10)'"], eq: "'(0,1)'" },
+  lsn: { type: "pg_lsn", values: ["'0/16B3748'", "'1/0'", "'0/16B3748'", "'FFFFFFFF/FFFFFFFF'", "'0/9'"], eq: "'0/16b3748'" },
+  ch1: { type: '"char"', values: ["'a'", "'b'", "'a'", "'Z'", "'~'"], eq: "'a'" },
+  nm: { type: "name", values: ["'abc'", "'B'", "'abc'", "'z'", "'é'"], eq: "'abc'" },
+  r4: { type: "int4range", values: ["'[1,5)'", "'[2,3)'", "'[1,4]'", "'empty'", "'(,5)'"], eq: "'(0,5)'" },
+  r8: { type: "int8range", values: ["'[1,5)'", "'[2,3)'", "'[1,5)'", "'empty'", "'[10,)'"], eq: "'[1,4]'" },
+  rn: { type: "numrange", values: ["'[1.5,5)'", "'[2,3]'", "'[1.50,5.0)'", "'empty'", "'(,1)'"], eq: "'[1.5,5)'" },
+  rd: { type: "daterange", values: ["'[2026-01-01,2026-02-01)'", "'[2026-03-01,)'", "'[2026-01-01,2026-02-01)'", "'empty'", "'(,2026-01-01]'"], eq: "'[2026-01-01,2026-01-31]'" },
+  rs: { type: "tsrange", values: ["'[2026-01-01,2026-02-01)'", "'[2026-03-01,)'", "'[2026-01-01,2026-02-01)'", "'empty'", "'(,2026-01-01 12:00]'"], eq: "'[2026-01-01,2026-02-01)'" },
+  rz: { type: "tstzrange", values: ["'[2026-01-01 00:00+00,2026-07-01 00:00+00)'", "'[2026-03-01 12:00+05,)'", "'[2026-01-01 00:00+00,2026-07-01 00:00+00)'", "'empty'", "'(,2026-01-01 12:00+00]'"], eq: "'[2026-01-01 00:00+00,2026-07-01 00:00+00)'" },
+  m4: { type: "int4multirange", values: ["'{[1,5)}'", "'{[1,2),[3,4)}'", "'{[1,3),[3,5)}'", "'{}'", "'{(,1)}'"], eq: "'{[1,4]}'" },
+  mz: { type: "tstzmultirange", values: ["'{[2026-01-01 00:00+00,2026-07-01 00:00+00)}'", "'{}'", "'{[2026-01-01 00:00+00,2026-07-01 00:00+00)}'", "'{(,2026-01-01 00:00+00)}'", "'{[2026-07-01 00:00+00,)}'"] },
+  jp: { type: "jsonpath", values: ["'$.a'", "'$.b[0]'", "'$.a'", "'$'", "'$.a.b ? (@ > 1)'"] },
+  ps: { type: "pair", values: ["'(1,a)'", "'(2,b)'", "'(1,a)'", "'(3,)'", "'(,)'"], eq: "'(1,a)'" },
+  ur: { type: "shop_range", values: ["'[1,5)'", "'[2,3)'", "'[1,5)'", "'empty'", "'[3,)'"], eq: "'[1,5)'" },
+  di: { type: "shop_count", values: ["1", "2", "1", "30", "4"], eq: "1" },
+  dt: { type: "shop_label", values: ["'a'", "'b'", "'a'", "'C'", "'é'"], eq: "'a'" },
+  dz: { type: "shop_clock", values: ["'12:30:00+02'", "'01:00:00+00'", "'12:30:00+02'", "'02:00:00+01'", "'23:00:00-05'"], eq: "'12:30+2'" },
+  dp: { type: "shop_place", values: ["'(1,2)'", "'(0,0)'", "'(1,2)'", "'(3,4)'", "'(5,6)'"] },
+  pta: { type: "point[]", values: ["ARRAY['(1,2)'::point]", "'{}'", "ARRAY['(1,2)'::point]", "ARRAY['(0,0)'::point,'(3,4)'::point]", "ARRAY[NULL::point]"] },
+  mna: { type: "money[]", values: ["'{12.50}'", "'{}'", "'{12.50}'", "'{1,2}'", "'{NULL}'"] },
+  maa: { type: "macaddr[]", values: ["'{08:00:2b:01:02:03}'", "'{}'", "'{08:00:2b:01:02:03}'", "'{00:00:00:00:00:01}'", "'{NULL}'"] },
+  cda: { type: "cidr[]", values: ["'{10.0.0.0/8}'", "'{}'", "'{10.0.0.0/8}'", "'{192.168.1.0/24,10.0.0.0/8}'", "'{NULL}'"] },
+  bia: { type: "bit(3)[]", values: ["'{101}'", "'{}'", "'{101}'", "'{000,111}'", "'{NULL}'"] },
+  tva: { type: "tsvector[]", values: ["ARRAY['a b'::tsvector]", "'{}'", "ARRAY['a b'::tsvector]", "ARRAY['c'::tsvector]", "'{NULL}'"] },
+  ra: { type: "int4range[]", values: ["'{\"[1,5)\"}'", "'{}'", "'{\"[1,5)\"}'", "'{\"[2,3)\",empty}'", "'{NULL}'"] },
+  oia: { type: "oid[]", values: ["'{1,2}'", "'{}'", "'{1,2}'", "'{3}'", "'{NULL}'"] },
+};
+const MAPPED_TABLE = "CREATE TYPE pair AS (a int, b text); CREATE TYPE shop_range AS RANGE (subtype = int4); CREATE DOMAIN shop_count AS integer CHECK (VALUE > 0); " +
+  "CREATE DOMAIN shop_label AS varchar(5); CREATE DOMAIN shop_clock AS timetz; CREATE DOMAIN shop_place AS point; " +
+  `CREATE TABLE public.mapped (id int PRIMARY KEY, ${Object.entries(MAPPED).map(([c, m]) => `${c} ${m.type}`).join(", ")}); ` +
+  [0, 1, 2, 3, 4].map((i) => `INSERT INTO public.mapped VALUES (${i + 1}, ${Object.values(MAPPED).map((m) => m.values[i]).join(", ")});`).join(" ") +
+  " INSERT INTO public.mapped (id) VALUES (6);" +
+  // issue 126: a grouped `*`'s outputs are named, for the query that reads them
+  " CREATE TABLE public.grouped (id int PRIMARY KEY, name text, y int, a_id int); INSERT INTO public.grouped VALUES (1, 'a', 2, 3), (2, 'b', NULL, 4), (3, 'a', 2, NULL);";
+
 /** the instants of `instants` (as UTC text, which every zone reads alike) */
 const INSTANTS: Array<[number, string | null]> = [
   [1, "2026-03-29 00:59:59.999999+00"], [2, "2026-03-29 01:00:00+00"], [3, "2026-03-29 01:30:00+00"], [4, "2026-10-25 00:30:00+00"],
@@ -134,7 +204,7 @@ const INSTANTS: Array<[number, string | null]> = [
 
 /** the table and its rows (the oracle's TimeZone is UTC: a timestamptz literal's offset is folded into UTC); beside it,
  *  `typed_arrays` holds the array types the review found sent as text[] */
-export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public.typed (id int PRIMARY KEY, ${ALL.map((c) => `${c} ${COLUMNS[c]}`).join(", ")}); ` +
+export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public.typed (id int PRIMARY KEY, ${ALL.map((c) => `${c} ${COLUMNS[c]}`).join(", ")}); ` +
   `INSERT INTO public.typed VALUES ${ROWS.map((r) => `(${[...r, ...EXTRA[r[0]!]!].join(", ")})`).join(", ")}; ` +
   // an unbounded numeric beside an extension's arrays: the copy reads the table through postgres_query (the corpus
   // run of fbbf8f08: a citext[] arrived as one text, and the table could not be copied)
@@ -240,6 +310,12 @@ export const TYPED = `CREATE EXTENSION IF NOT EXISTS citext; CREATE TABLE public
 
 /** a round of changes the poll carries: values move, a row goes, one comes */
 export function typedMutations(round: number): string {
+  // a row of each mapped type read by the poll, as the copy read the first (a round's text, and a whole-table read)
+  const mapped = `INSERT INTO public.mapped VALUES (${10 + round}, ${Object.values(MAPPED).map((m) => m.values[round % 5]).join(", ")}); UPDATE public.mapped SET id = id WHERE id = 2;`;
+  return mapped + typedRows(round);
+}
+
+function typedRows(round: number): string {
   return round === 1
     ? "UPDATE public.typed SET i4 = i4 + 1, f8 = f8 * 2, n = n + 0.01, t = t || 'x', tz = tz + interval '1 hour', jb = jb || '{\"r\": 1}', ai = ai || 9, ci = upper(ci), ip = '10.3.6.46' WHERE id IN (2, 4); UPDATE public.typed SET f8 = 'NaN', t = 'é2' WHERE id = 103; DELETE FROM public.typed WHERE id = 7; " +
       "INSERT INTO public.typed (id, i2, i4, i8, f8, n, t, d, tz, iv, jb, ai, at) VALUES (11, 11, 11, 11, 11.5, 11.25, 'new', '2026-10-24', '2026-10-24 12:00:00+00', '11 minutes', '{\"n\": 11}', '{11}', '{new}')"
@@ -264,6 +340,97 @@ const LITERALS: Partial<Record<Col, string[]>> = {
   // a jsonb by its own order: an object equal to two of typed's at another scale, a raw scalar, an empty array
   jb: ["'{\"a\": 1.00}'", "'1.5'", "'[]'"],
 };
+
+/** each column of `mapped`, every way a tool reads one (the issue's list: the statement a BI tool's fingerprint, breakout
+ *  and filter send) */
+function* mappedTypes(): Generator<Matrixed> {
+  for (const [c, m] of Object.entries(MAPPED)) {
+    const name = `mapped ${m.type}`;
+    yield q(`${name}: rows`, `SELECT id, ${c} FROM mapped ORDER BY id`);
+    yield q(`${name}: its NULL`, `SELECT id, ${c} IS NULL, ${c} IS NOT NULL FROM mapped ORDER BY id`);
+    yield q(`${name}: counts`, `SELECT count(*), count(${c}) FROM mapped`);
+    yield q(`${name}: pg_typeof`, `SELECT pg_typeof(${c}), pg_typeof(${c})::text FROM mapped ORDER BY id LIMIT 1`);
+    yield q(`${name}: information_schema`, `SELECT column_name, data_type, udt_name, datetime_precision, character_maximum_length FROM information_schema.columns WHERE table_name = 'mapped' AND column_name = '${c}'`);
+    yield q(`${name}: pg_attribute`, `SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'mapped'::regclass AND attname = '${c}'`);
+    if (m.eq !== undefined) {
+      yield q(`${name}: =`, `SELECT id FROM mapped WHERE ${c} = ${m.eq} ORDER BY id`);
+      yield q(`${name}: <>`, `SELECT id FROM mapped WHERE ${c} <> ${m.eq} ORDER BY id`);
+      yield q(`${name}: IN`, `SELECT id FROM mapped WHERE ${c} IN (${m.eq}) ORDER BY id`);
+      // (a cast to a domain is refused by Postgres's catalog here: the gap domain-column)
+      if (!m.type.startsWith("shop_")) yield q(`${name}: =, as a cast`, `SELECT id FROM mapped WHERE ${c} = ${m.eq}::${m.type} ORDER BY id`);
+    }
+    yield q(`${name}: grouped, by the count`, `SELECT ${c}::text AS v, count(*) FROM mapped GROUP BY ${c} ORDER BY 2, ${c}::text COLLATE "C"`);
+    yield q(`${name}: grouped, ORDER BY the column`, `SELECT ${c}, count(*) FROM mapped GROUP BY ${c} ORDER BY ${c}`);
+    yield q(`${name}: grouped, ORDER BY ordinal`, `SELECT ${c}, count(*) FROM mapped GROUP BY 1 ORDER BY 1`);
+    yield q(`${name}: grouped, ORDER BY its output name`, `SELECT ${c} AS v, count(*) FROM mapped GROUP BY v ORDER BY v`);
+    yield q(`${name}: grouped, ORDER BY the qualified column`, `SELECT m.${c}, count(*) FROM mapped m GROUP BY m.${c} ORDER BY m.${c} DESC NULLS LAST`);
+    yield q(`${name}: the nulls idiom`, `SELECT id FROM mapped ORDER BY ${c} IS NULL, ${c}, id`);
+    yield q(`${name}: DISTINCT`, `SELECT v FROM (SELECT DISTINCT ${c}::text AS v FROM mapped) s ORDER BY v COLLATE "C"`);
+    yield q(`${name}: DISTINCT of the column`, `SELECT count(*) FROM (SELECT DISTINCT ${c} FROM mapped) s`);
+    yield q(`${name}: DISTINCT ON`, `SELECT DISTINCT ON (${c}) id FROM mapped ORDER BY ${c}, id`);
+    yield q(`${name}: count(DISTINCT)`, `SELECT count(DISTINCT ${c}) FROM mapped`);
+    yield q(`${name}: min, max`, `SELECT min(${c}), max(${c}) FROM mapped`);
+    yield q(`${name}: text, length`, `SELECT id, length(${c}::text) FROM mapped ORDER BY id`);
+    yield q(`${name}: text, substring`, `SELECT id, substring(${c}::text, 1, 3), substring(${c}::text, 1, 1234) FROM mapped ORDER BY id`);
+    yield q(`${name}: text, contains`, `SELECT id FROM mapped WHERE ${c}::text LIKE '%1%' ORDER BY id`);
+    yield q(`${name}: text, ILIKE`, `SELECT id FROM mapped WHERE ${c}::text ILIKE '%a%' ORDER BY id`);
+    yield q(`${name}: as written, substring`, `SELECT substring(${c}, 1, 3) FROM mapped ORDER BY id`);
+    yield q(`${name}: as written, length`, `SELECT length(${c}) FROM mapped ORDER BY id`);
+    yield q(`${name}: as written, LIKE`, `SELECT id FROM mapped WHERE ${c} LIKE '%1%' ORDER BY id`);
+    // each collation kind: a text compared and sorted under the default (the database's), C and ICU
+    yield q(`${name}: its text sorted`, `SELECT id, ${c}::text FROM mapped ORDER BY ${c}::text, id`);
+    yield q(`${name}: its text sorted, C`, `SELECT id FROM mapped ORDER BY ${c}::text COLLATE "C", id`);
+    yield q(`${name}: its text sorted, ICU`, `SELECT id FROM mapped ORDER BY ${c}::text COLLATE "und-x-icu", id`);
+    yield q(`${name}: its text compared`, `SELECT id FROM mapped WHERE ${c}::text > '1' ORDER BY id`);
+    yield q(`${name}: its text compared, C`, `SELECT id FROM mapped WHERE ${c}::text COLLATE "C" > '1' ORDER BY id`);
+    yield q(`${name}: its text compared, ICU`, `SELECT id FROM mapped WHERE ${c}::text COLLATE "und-x-icu" > '1' ORDER BY id`);
+    yield q(`${name}: in a subquery`, `SELECT s.${c} FROM (SELECT id, ${c} FROM mapped) s ORDER BY s.id`);
+    yield q(`${name}: beside a *`, `SELECT m.${c}, m.* FROM mapped m WHERE m.id = 1`);
+    yield q(`${name}: a parameter of its type`, `SELECT id, COALESCE(${c}, NULL) FROM mapped ORDER BY id`);
+  }
+  yield q("mapped: every column", "SELECT * FROM mapped ORDER BY id");
+  yield q("a grouped star read by name", "WITH w AS (SELECT * FROM grouped GROUP BY name, id) SELECT * FROM w GROUP BY y, name, a_id, id ORDER BY id");
+  yield q("a grouped star read in a subquery", "SELECT o.id FROM public.one o WHERE o.id IN (SELECT id FROM (SELECT * FROM grouped GROUP BY name, id) s)");
+  yield q("a grouped star, a column read from it", "SELECT s.y FROM (SELECT * FROM grouped GROUP BY name, id) s ORDER BY s.id");
+  yield q("mapped: a row's text", "SELECT m::text FROM mapped m WHERE id = 1");
+  yield q("mapped: a joined value", "SELECT a.id, b.id FROM mapped a JOIN mapped b ON a.mc = b.mc ORDER BY 1, 2");
+  yield q("mapped: an element", "SELECT id, maa[1], cda[1], tza[1], oia[1] FROM mapped ORDER BY id");
+  yield q("mapped: an array unnested", "SELECT id, x FROM mapped, unnest(cda) AS x ORDER BY id, x::text");
+  yield q("mapped: an array's length", "SELECT id, cardinality(maa), array_length(tza, 1) FROM mapped ORDER BY id");
+  yield q("mapped: a composite's field", "SELECT id, (ps).a FROM mapped ORDER BY id");
+  yield q("mapped: a range's bound", "SELECT id, lower(r4), upper(r4), isempty(r4) FROM mapped ORDER BY id");
+  yield q("mapped: a range contains", "SELECT id FROM mapped WHERE r4 @> 3 ORDER BY id");
+  yield q("mapped: a point's x", "SELECT id, pt[0] FROM mapped ORDER BY id");
+  yield q("mapped: money as a number", "SELECT id, mn::numeric FROM mapped ORDER BY id");
+  yield q("mapped: money summed", "SELECT sum(mn) FROM mapped");
+  yield q("mapped: a tsvector matched", "SELECT id FROM mapped WHERE tv @@ 'a'::tsquery ORDER BY id");
+  yield q("mapped: a cidr contains", "SELECT id FROM mapped WHERE cd >> '10.1.0.0/16' ORDER BY id");
+  yield q("mapped: a regclass as its oid", "SELECT id, rc::oid FROM mapped ORDER BY id");
+  yield q("mapped: a text read as a held type", "SELECT id, t::macaddr FROM typed WHERE false");
+  yield q("mapped: an oid compared", "SELECT id FROM mapped WHERE oi > 1 ORDER BY id");
+  yield q("mapped: an oid as a bigint", "SELECT id, oi::bigint FROM mapped ORDER BY id");
+  // a timetz: read in zones with daylight saving and a half-hour offset, compared by its instant and then its zone
+  for (const zone of ["UTC", "America/New_York", "Asia/Kolkata"]) {
+    yield q(`mapped timetz in ${zone}: rows`, "SELECT id, tz, tz3, tz::text FROM mapped ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: sorted`, "SELECT id FROM mapped ORDER BY tz, id", zone);
+    yield q(`mapped timetz in ${zone}: compared`, "SELECT id FROM mapped WHERE tz < '12:00:00+00' ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: every comparison`, "SELECT id, tz <= tz3, tz > tz3, tz >= tz3, tz < tz3, tz BETWEEN '01:00:00+00' AND '12:00:00+00' FROM mapped ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: at a zone with daylight saving`, "SELECT id, tz AT TIME ZONE 'America/New_York', timezone('Asia/Kolkata', tz3) FROM mapped ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: an hour back`, "SELECT id, tz - interval '1 hour', interval '25 hours' + tz FROM mapped ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: a column cast to a precision`, "SELECT id, tz::timetz(1) FROM mapped ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: a text read as one`, "SELECT id, t::timetz FROM typed WHERE false", zone);
+    yield q(`mapped timetz in ${zone}: a literal with no zone`, "SELECT id FROM mapped WHERE tz = '12:30:00' ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: a literal's value`, "SELECT '12:30:00'::timetz::text = ('12:30:00'::timetz)::text, '12:30:00+01'::timetz, id FROM mapped WHERE id = 1", zone);
+    yield q(`mapped timetz in ${zone}: min, max, grouped`, "SELECT min(tz), max(tz), tz IS NULL FROM mapped GROUP BY 3 ORDER BY 3", zone);
+    yield q(`mapped timetz in ${zone}: its parts`, "SELECT id, extract(hour FROM tz), extract(timezone FROM tz), extract(minute FROM tz) FROM mapped WHERE tz IS NOT NULL ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: as a time`, "SELECT id, tz::time FROM mapped ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: at a zone`, "SELECT id, tz AT TIME ZONE 'UTC' FROM mapped ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: an hour on`, "SELECT id, tz + interval '1 hour' FROM mapped ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: a time as one`, "SELECT id, tm::timetz FROM typed WHERE id < 3 ORDER BY id", zone);
+    yield q(`mapped timetz in ${zone}: a timestamptz as one`, "SELECT id, tz::timetz FROM typed WHERE id < 3 ORDER BY id", zone);
+    yield q(`mapped tstzrange in ${zone}: rows`, "SELECT id, rz, mz, rz::text, length(mz::text) FROM mapped ORDER BY id", zone);
+  }
+}
 
 function* matrix(): Generator<Matrixed> {
   // ---- every column: its text, its order, its groups, its NULLs, its aggregates, its casts to text ----------------
@@ -1228,4 +1395,4 @@ function* matrix(): Generator<Matrixed> {
   yield q("window frames", "SELECT id, sum(i4) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND CURRENT ROW), count(*) OVER (ORDER BY ts RANGE BETWEEN interval '1 day' PRECEDING AND interval '1 day' FOLLOWING), sum(i4) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), max(i4) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW), sum(i4) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW), sum(i4) OVER (ORDER BY id RANGE UNBOUNDED PRECEDING) FROM typed WHERE id < 100 ORDER BY id");
 }
 
-export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone))];
+export const TYPE_MATRIX: Matrixed[] = [...matrix(), ...mappedTypes(), ...FROM_ITEMS_SORTED.map((f) => q(f.name, f.sql, f.zone))];

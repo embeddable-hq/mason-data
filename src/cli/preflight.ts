@@ -169,7 +169,13 @@ export interface UniqueKey {
   nullsNotDistinct: boolean;
 }
 export interface SourceColumnInfo {
-  name: string; type: string; notNull: boolean; comment: string | null;
+  name: string;
+  /** as `format_type` spells it; a domain's column its base type's (`domain`) */
+  type: string; notNull: boolean; comment: string | null;
+  /** pg_type.typtype of the type, or of an array's element (`b`, `e`, `c`, `r`, `m`, `d`): src/duck/held-types.ts */
+  typeKind?: string;
+  /** a column of a domain, read and declared as its base type (gap `domain-column`) */
+  domain?: true;
   /** the type's OID in the SOURCE (pg_type), for a type an extension made (citext): the wire sends the source's OID,
    *  which differs between databases; absent for a built-in type, and in copies recorded before it was read */
   typeOid?: number;
@@ -248,13 +254,18 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
       -- nothing: never declared to the catalog, never a key: Mason accepts
       WHERE i.indrelid = c.oid AND i.indisunique AND i.indisvalid AND NOT i.indisprimary AND i.indpred IS NULL AND i.indexprs IS NULL
         AND i.indnkeyatts = i.indnatts) AS unique_keys,
-    (SELECT coalesce(json_agg(json_build_object('name', a.attname, 'type', format_type(a.atttypid, a.atttypmod),
-        'not_null', a.attnotnull, 'comment', col_description(c.oid, a.attnum), 'type_oid', a.atttypid,
-        'type_array_oid', (SELECT typarray FROM pg_type WHERE oid = a.atttypid),
+    (SELECT coalesce(json_agg(json_build_object('name', a.attname, 'type', format_type(b.oid, b.mod), 'domain', b.oid <> a.atttypid,
+        'not_null', a.attnotnull, 'comment', col_description(c.oid, a.attnum), 'type_oid', b.oid,
+        'type_array_oid', (SELECT typarray FROM pg_type WHERE oid = b.oid),
+        'type_kind', (SELECT coalesce(e.typtype, t.typtype) FROM pg_type t LEFT JOIN pg_type e ON e.typarray = t.oid WHERE t.oid = b.oid),
         'default', pg_get_expr(d.adbin, d.adrelid), 'identity', a.attidentity, 'generated', a.attgenerated,
         -- the sequence a serial or identity column owns: asked only of a column with a default or an identity
         'sequence', CASE WHEN d.adbin IS NOT NULL OR a.attidentity <> '' THEN pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname) END) ORDER BY a.attnum), '[]'::json)
       FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+      -- a domain's column is read and declared as its base type (a domain of a domain too)
+      CROSS JOIN LATERAL (WITH RECURSIVE base(oid, mod) AS (SELECT a.atttypid, a.atttypmod UNION ALL
+          SELECT t.typbasetype, t.typtypmod FROM base JOIN pg_type t ON t.oid = base.oid WHERE t.typtype = 'd')
+        SELECT base.oid, base.mod FROM base JOIN pg_type t ON t.oid = base.oid WHERE t.typtype <> 'd') b
       WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped) AS columns,
     (SELECT coalesce(json_agg(json_build_object('column', a.attname, 'target', tn.nspname || '.' || tc.relname, 'target_column', ta.attname)), '[]'::json)
       FROM pg_constraint f
@@ -271,7 +282,7 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
 interface TableRow {
   schema: string; table: string; oid: number; row_type_oid: number; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
-  columns: Array<{ name: string; type: string; not_null: boolean; comment: string | null; type_oid: number; type_array_oid: number;
+  columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; comment: string | null; type_oid: number; type_array_oid: number;
     default: string | null; identity: string; generated: string; sequence: string | null }>;
   foreign_keys: Array<{ column: string; target: string; target_column: string }>;
 }
@@ -304,7 +315,7 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
     }
     tables.push({
       source: `${t.schema}.${t.table}`, schema: t.schema, table: t.table, key: t.key, rows: count, bytes: Number(t.bytes), comment: t.comment,
-      columns: t.columns.map((c) => ({ name: c.name, type: c.type, notNull: c.not_null, comment: c.comment,
+      columns: t.columns.map((c) => ({ name: c.name, type: c.type, typeKind: c.type_kind, ...(c.domain ? { domain: true as const } : {}), notNull: c.not_null, comment: c.comment,
         ...(c.type_oid >= 16384 ? { typeOid: c.type_oid, ...(c.type_array_oid > 0 ? { typeArrayOid: c.type_array_oid } : {}) } : {}),
         // a generated column's pg_attrdef row is its expression, never a default
         ...(c.default !== null && c.generated === "" ? { default: c.default } : {}), ...(c.identity === "a" || c.identity === "d" ? { identity: c.identity } : {}),
