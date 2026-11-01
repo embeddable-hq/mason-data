@@ -378,6 +378,18 @@ export function unwrapRole(frames: ReadonlyArray<{ type: string; frame: Buffer }
 export const SESSION_SETTINGS = `mason_${randomBytes(8).toString("hex")}.session`;
 
 /**
+ * LATEST(x ORDER BY k…), THE AGGREGATE MASON ADDS: the x of the row its ORDER BY sorts last, by Postgres's sort rules.
+ * Declared in the catalog so that Postgres's analysis types and names it (an AGGREF of its argument's type), and by the
+ * oracle's real Postgres from this ONE definition, so the two compare like with like. Its transition keeps the latest
+ * row's value, a NULL included (not STRICT); over no rows it is NULL. In pg_catalog, so no search_path hides it. The
+ * engine never runs this: src/duck/rewrite.ts `latest` rewrites it, and refuses it without an ORDER BY (`latest-order`).
+ */
+export const LATEST_SQL: readonly string[] = [
+  "CREATE OR REPLACE FUNCTION pg_catalog.mason_latest_step(anyelement, anyelement) RETURNS anyelement LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT $2 $$",
+  "CREATE OR REPLACE AGGREGATE pg_catalog.latest(anyelement) (SFUNC = pg_catalog.mason_latest_step, STYPE = anyelement)",
+];
+
+/**
  * THE CATALOG'S `current_setting(name[, missing_ok])` IS THE SESSION'S (GitHub issue 40: after `SET TimeZone` it answered
  * the catalog's UTC, where `SHOW TimeZone` answered the session's): the value the session holds under that name, from
  * the request's `SESSION_SETTINGS` (`asSession`: every parameter the listener's `sessionSetting` answers), else

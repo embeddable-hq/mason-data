@@ -91,6 +91,10 @@ export function parseTree(text: string): TreeValue {
   return v;
 }
 
+/** Postgres's first OID for an object not of its own (FirstNormalObjectId): below it, Postgres's catalog; past it, a
+ *  table copied, a type an extension made, or what the catalog Postgres made itself (catalog.ts LATEST_SQL) */
+export const FIRST_USER_OID = 16384;
+
 const isNode = (v: TreeValue): v is TreeNode => v !== null && typeof v === "object" && !Array.isArray(v);
 const num = (v: TreeValue | undefined): number | null => typeof v === "string" && /^-?\d+$/.test(v) ? Number(v) : null;
 

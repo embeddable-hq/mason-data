@@ -20,7 +20,7 @@ each). The copy is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 256 functions, 387 operators, 95 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 55 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 57 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (55)
+## Refused (57)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -96,6 +96,8 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `jsonb-set` | jsonb_set, jsonb_insert, the #- operator, jsonb - of a text[] or an index | answers | refused | build the value with jsonb_build_object |
 | `jsonb-compare` | a jsonb compared by GREATEST / LEAST, WITHIN GROUP (ORDER BY …), IN or = ANY of a subquery or of an array not written out, BETWEEN SYMMETRIC, JOIN … USING or NATURAL JOIN, UNION / INTERSECT / EXCEPT (but UNION ALL), SELECT DISTINCT *, GROUPING SETS / ROLLUP / CUBE, or an aggregate's DISTINCT but count's; ORDER BY the number of a jsonb column a * lists; a row holding a jsonb compared, grouped or sorted; a jsonb[] sorted, grouped, compared, contained (@>, <@, &&) or searched (array_position, array_remove) | answers, by jsonb's own order and equality | refused (ORDER BY, GROUP BY, DISTINCT [ON], =, <, >, IN (…), = ANY (ARRAY[…]), BETWEEN, IS DISTINCT FROM, NULLIF, CASE x WHEN, PARTITION BY and count(DISTINCT …) of a jsonb are answered in its order) | compare the jsonb in one of the answered forms, a member (j ->> 'k'), or j::text for the canonical text |
 | `text-array-order` | ORDER BY, GROUP BY, DISTINCT, min, max or <, > over a text[] under the database's collation | compares the elements under the collation | refused | sort by an element (a[1]), or by array_to_string(a, ',') |
+| `latest-order` | latest(x) with no ORDER BY of its own (or only constant keys), or latest as a window function (OVER) | answers the value of whichever row it happens to read last | refused: the row latest() answers is the one its ORDER BY sorts last | latest(x ORDER BY k, id) in a GROUP BY, its keys ending in a unique column |
+| `latest-quotient` | latest() of a numeric quotient or average (`latest(a / b ORDER BY …)`) | answers the exact value | refused (the engine holds a quotient as a double) | latest(a ORDER BY …) / latest(b ORDER BY …) |
 | `sum-real` | sum() of a real (float4), as an aggregate or a window | accumulates in single precision | refused (DuckDB accumulates in double precision) | sum(x::double precision) |
 | `interval-aggregates` | sum() or avg() of an interval | adds months, days and time apart | refused | sum(extract(epoch FROM x)) for the seconds |
 | `bc-timestamptz-zone` | a timestamptz before year 1 written in a zone other than UTC | the zone's local mean time | refused when a row holds one | SET TimeZone = 'UTC', or filter those rows out |

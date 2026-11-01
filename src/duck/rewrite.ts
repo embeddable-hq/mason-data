@@ -33,7 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { analysedQueries, caseTwins, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
+import { analysedQueries, caseTwins, FIRST_USER_OID, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
@@ -2783,7 +2783,8 @@ class Rewriter {
       }
       case "FuncCall": {
         const args = (b.args ?? []) as AstNode[];
-        if (!["sum", "min", "max"].includes(lastName(b.funcname)) || args.length !== 1 || b.agg_star === true || b.agg_within_group === true) return null;
+        // (latest, Mason's, answers one row's value: its scale is its argument's)
+        if (!["sum", "min", "max", "latest"].includes(lastName(b.funcname)) || args.length !== 1 || b.agg_star === true || b.agg_within_group === true) return null;
         return this.displayScale(args[0]!);
       }
       case "TypeCast": {
@@ -3501,6 +3502,51 @@ class Rewriter {
     if (w !== undefined && Array.isArray(w.partitionClause)) w.partitionClause = (w.partitionClause as AstNode[]).map((p) => isNode(p) ? this.exactKey(p) ?? this.equated(p, "PARTITION BY") : p);
   }
 
+  /**
+   * LATEST(x ORDER BY k…): the x of the row the ORDER BY sorts last. Each key is sorted as an ORDER BY sorts it (`sortBy`:
+   * a collation's keys, jsonb's order key, a char(n) trimmed, a citext folded, and its refusals). Every key ascending
+   * with its NULLs last (Postgres's default) is arg_max_null over the keys as ONE row value — a row even of one key, as
+   * arg_max_null skips a row whose key is NULL where Postgres sorts it last and it wins, and a row's NULL field sorts
+   * after every value. Any other direction or NULLS, or a key a row cannot carry (an ICU collation, which a row's
+   * comparison drops), is the engine's last(x ORDER BY …), its NULLs placed as written or by the session's
+   * default_null_order, which is Postgres's (src/duck/store.ts). A tie is any of the tied rows, as Postgres's sort leaves
+   * it. With no ORDER BY (or only constant keys) the row is whichever is read last, so it is refused, as is a window's.
+   * DISTINCT may order only by x, so its last row's x is the last distinct x: it is dropped.
+   */
+  private latest(b: Body, args: AstNode[]): null {
+    if (b.over !== undefined) throw new Unrewritable("latest() as a window function is not supported by Mason", "latest(x ORDER BY k, id) in a GROUP BY", "latest-order");
+    if (!Array.isArray(b.agg_order) || args.length !== 1) {
+      throw new Unrewritable("latest(x) needs an ORDER BY of its own that is not constant: the row it answers is the one that ORDER BY sorts last",
+        "latest(x ORDER BY k, id), its keys ending in a unique column", "latest-order");
+    }
+    // a numeric the engine holds as a double (a quotient, an avg) would be answered with its digits: its operands are
+    // each latest'd instead, which the way out says
+    if (this.typeOf(args[0]!) === NUMERIC && !this.duckExact(args[0]!)) {
+      throw new Unrewritable("latest() of a numeric quotient or average is not supported by Mason (Postgres answers its exact value, which the engine holds as a double)",
+        "latest(a ORDER BY …) / latest(b ORDER BY …)", "latest-quotient");
+    }
+    delete b.agg_distinct;
+    const sorted: AstNode[] = [];
+    for (const s of b.agg_order as AstNode[]) {
+      const sb = bodyOf(s);
+      // each key's rule runs here, once: the walker skips it (`done`)
+      this.done.add(sb);
+      sorted.push(...(kindOf(s) === "SortBy" ? this.sortBy(sb, null, null) ?? [s] : [s]));
+    }
+    const lastIsGreatest = sorted.every((s) => kindOf(s) === "SortBy" && bodyOf(s).useOp === undefined && isNode(bodyOf(s).node)
+      && ["SORTBY_DEFAULT", "SORTBY_ASC"].includes(bodyOf(s).sortby_dir as string) && ["SORTBY_NULLS_DEFAULT", "SORTBY_NULLS_LAST"].includes(bodyOf(s).sortby_nulls as string)
+      && kindOf(bodyOf(s).node as AstNode) !== "CollateClause");
+    if (lastIsGreatest) {
+      b.funcname = [S("arg_max_null")];
+      b.args = [args[0]!, row(sorted.map((s) => bodyOf(s).node as AstNode))];
+      delete b.agg_order;
+    } else {
+      b.funcname = [S("last")];
+      b.agg_order = sorted;
+    }
+    return null;
+  }
+
   private funcCall(b: Body): AstNode | AstNode[] | null {
     const name = lastName(b.funcname);
     this.keyedPartition(b.over as Body | undefined);
@@ -3560,6 +3606,9 @@ class Rewriter {
       });
       if ((b.agg_order as AstNode[]).length === 0) delete b.agg_order;
     }
+    // latest(x ORDER BY …), Mason's aggregate (src/api/postgres/catalog.ts LATEST_SQL): known by Postgres's analysis, an
+    // aggregate or window function the catalog made (an OID past the built-ins), never by its name alone
+    if (name === "latest" && t !== null && (t.node === "AGGREF" || t.node === "WINDOWFUNC") && (t.oid ?? 0) >= FIRST_USER_OID) return this.latest(b, args);
     // an aggregate over DISTINCT values sorts them to find the duplicates, so Postgres's string_agg / array_agg (DISTINCT)
     // lists them in that order (the argument's, under its collation); DuckDB's in any order. A constant argument is one
     // value, and would be a constant key (above)
@@ -4893,7 +4942,7 @@ const NOT_EXACT = new Error("not exact");
 /** the engine's integer types, as the rewrite casts to them (`duckExact`: an integer is exact) */
 const DUCK_INTEGER_NAMES = new Set(["tinyint", "smallint", "integer", "int", "bigint", "hugeint", "int2", "int4", "int8"]);
 /** the functions whose value is one of their first argument's (or its sum), in its own type (`duckExact`) */
-const VALUE_KEEPING = new Set(["sum", "min", "max", "any_value", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
+const VALUE_KEEPING = new Set(["sum", "min", "max", "latest", "any_value", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
 /** the numeric functions the walk writes as an exact DECIMAL or integer (`duckExact`): count, extract (`extract`: as
  *  the exact numeric Postgres returns), div of integers */
 const WRITTEN_EXACT = new Set(["count", "extract", "div"]);

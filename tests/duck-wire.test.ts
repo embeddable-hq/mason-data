@@ -21,6 +21,9 @@ import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes
 import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.ts";
 import { StatementError } from "../src/duck/statement.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
+// (as a namespace: a tree before latest has no LATEST_SQL, and this file still loads there, for scripts/fails-without.ts)
+import * as catalogModule from "../src/api/postgres/catalog.ts";
+const LATEST_SQL: readonly string[] = (catalogModule as { LATEST_SQL?: readonly string[] }).LATEST_SQL ?? [];
 import { wireColumn } from "../src/duck/types.ts";
 import { TABLES_SQL } from "../src/cli/preflight.ts";
 import { jsonbText } from "../src/duck/jsonb.ts";
@@ -303,6 +306,8 @@ before(async () => {
   // a session starts in UTC on this API, as on a server whose TimeZone is UTC
   await truth.exec("SET TimeZone = 'UTC'");
   for (const s of PG_DDL) await truth.exec(s);
+  // latest(x ORDER BY …), Mason's aggregate, declared on the truth from the catalog's own definition
+  for (const s of LATEST_SQL) await truth.exec(s);
   // the "source's" OID for citext is the truth's: what the copy records (SourceColumnInfo.typeOid) and the wire sends
   const citextOid = Number((await truth.query<{ oid: number }>("SELECT oid FROM pg_type WHERE typname = 'citext'")).rows[0]!.oid);
   schema.tables[2]!.columns[1]!.typeOid = citextOid;
@@ -5473,4 +5478,49 @@ test("round 14: a wire statement's plan computes no generated table's outputs, a
       assert.ok(ms < 500, `${shape}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
     }
   } finally { await catalogDb.close(); }
+});
+
+test("latest(x ORDER BY …) answers the x of the row its ORDER BY sorts last: arg_max_null over a row of keys when every key is ascending with NULLs last, last(x ORDER BY …) otherwise, refused without an ORDER BY", async () => {
+  const c = await client();
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    return logged.findLast((l) => l.startsWith("statement: ")) ?? "";
+  };
+  // a key with NULLs (every 7th k) and ties (c groups 40 rows): each tie broken by id, as Postgres defines no pick
+  const key = "nullif(k % 7, 0)";
+  try {
+    for (const [order, form] of [
+      [`${key}, id`, /arg_max_null\(.*ROW\(/],
+      [`${key} ASC NULLS LAST, id ASC`, /arg_max_null\(.*ROW\(/],
+      // one key is a row too: a NULL key skipped by arg_max_null(x, k) sorts last in Postgres, and wins
+      [key, /arg_max_null\(.*ROW\(/],
+      [`${key} DESC, id`, /\blast\(.*ORDER BY .* DESC/],
+      [`${key} NULLS FIRST, id`, /\blast\(.*ORDER BY .*NULLS FIRST/],
+      [`${key} DESC NULLS LAST, id DESC`, /\blast\(.*ORDER BY .*NULLS LAST/],
+      [`${key}, id DESC`, /\blast\(.*ORDER BY/],
+    ] as const) {
+      // under a single key the tied rows' pick is open: the statement asks for the key itself, which a tie does not change
+      const value = order === key ? key : "id";
+      for (const sql of [`SELECT c, latest(${value} ORDER BY ${order}) FROM late GROUP BY c ORDER BY c`,
+        `SELECT c, latest(${value} ORDER BY ${order}) FILTER (WHERE id % 3 = 0) * 2 FROM late WHERE c < 5 GROUP BY c ORDER BY c`]) {
+        assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+        assert.match(await sent(sql), form, sql);
+      }
+    }
+    // no row: NULL; a numeric keeps its column's scale, read through coalesce
+    for (const sql of ["SELECT latest(id ORDER BY k, id) FROM late WHERE false",
+      "SELECT coalesce(latest(amount ORDER BY qty, id), 0), coalesce(latest(amount ORDER BY qty, id) FILTER (WHERE false), 0) FROM orders"]) {
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+    // refused, each with a way out answered above: no ORDER BY, a constant one, a window, a quotient
+    for (const [sql, gap] of [["SELECT latest(id) FROM late", "latest-order"], ["SELECT latest(id ORDER BY 1) FROM late", "latest-order"],
+      ["SELECT id, latest(id) OVER (ORDER BY id) FROM late ORDER BY id LIMIT 2", "latest-order"], ["SELECT latest(amount / 3 ORDER BY id) FROM orders", "latest-quotient"]]) {
+      await assert.rejects(c.query(sql!), (e: pg.DatabaseError) => e.code === "0A000" && `${e.message} ${e.detail ?? ""}`.includes(gap!) && /latest\(.*ORDER BY/.test(e.hint ?? ""), sql);
+    }
+    // the engine's functions stay the engine's: a client naming one meets Postgres's 42883
+    for (const sql of ["SELECT arg_max_null(id, k) FROM late", "SELECT last(id ORDER BY k) FROM late"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "42883", sql);
+    }
+  } finally { await c.end(); }
 });

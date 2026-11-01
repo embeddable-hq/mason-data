@@ -15,6 +15,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`latest(x ORDER BY …)`, an aggregate Mason adds, in any statement.** It answers the `x` of the row its ORDER BY
+  sorts last, by Postgres's sort rules (NULLs last ascending, first descending, `NULLS FIRST/LAST` as written, a text
+  key's collation): `SELECT customer_id, latest(status ORDER BY updated_at, id) FROM orders GROUP BY customer_id`. End
+  the keys in a unique column, since tied rows have no defined pick. Without an ORDER BY, as a window function, or of a
+  numeric quotient it is refused with the way out (`latest-order`, `latest-quotient` in docs/SQL-SUPPORT.md).
+
 - **Generated tables: a table declared in SQL, kept current by Mason.** One file per table in `mason/generated_tables/`,
   committed beside the sources file, with `kind: scheduled`, `target_lag:` and `sql:`; `mason help generated` is the
   guide. A table re-runs its whole SQL once a base has changed and its target comes due, inside Mason, reading nothing from
