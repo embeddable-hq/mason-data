@@ -29,7 +29,8 @@
  *   child after it in the same transaction, each child planned over its parents' SIDE tables (src/duck/plan.ts
  *   swapRelations), never the served ones, so parent and child are one snapshot; they swap in on ONE writer's turn. A
  *   child that comes due while a parent has changes not in it hands its run to that parent (`rootOf`). A child of a
- *   parent refused or failed is not run, and says why (`blocker`). A cycle is refused by name: from the SQL's names when
+ *   parent failed, or refused with nothing deployed, is not run, and says why (`blocker`); a deployed parent refused in its
+ *   file is re-run from what it was built from, and its children with it. A cycle is refused by name: from the SQL's names when
  *   the folder is read (`findCycles`), else from the plan's reads at the check.
  */
 import { createHash } from "node:crypto";
@@ -211,16 +212,17 @@ export class GeneratedTables {
       Array<[string, string, string, string | null, string, bigint, string | null, string, string, string, number | bigint, number | bigint, bigint, number, string | null]>;
     for (const [name, file, sql, orderBy, every, seconds, comment, fingerprint, columns, bases, snapshotAt, builtAt, count, took, basesSynced] of rows) {
       const at = name.indexOf(".");
-      const entry = this.entry(name);
-      const snapshot = Number(snapshotAt);
-      entry.deployed = { definition: { name, schema: name.slice(0, at), table: name.slice(at + 1), file, sql, orderBy, targetLag: { every, seconds: Number(seconds) }, comment },
-        fingerprint, columns: JSON.parse(columns) as GeneratedColumn[], bases: JSON.parse(bases) as string[], basesSynced: basesSynced === null ? {} : JSON.parse(basesSynced) as Record<string, number | null>, snapshotAt: snapshot, builtAt: Number(builtAt), rows: Number(count), seconds: took };
-      // marks die with a run: a base whose last sync is not the one the snapshot saw may have changed since. Never "synced
-      // after the snapshot": a poll's time is its start, so one that began before the snapshot and committed after it would
-      // be missed
-      const was = entry.deployed.basesSynced;
-      const since = entry.deployed.bases.some((b) => { const s = this.syncedMs(b); return s === null || was[b] === undefined || was[b] !== s; });
-      if (since) entry.dirtySince = snapshot;
+      this.entry(name).deployed = { definition: { name, schema: name.slice(0, at), table: name.slice(at + 1), file, sql, orderBy, targetLag: { every, seconds: Number(seconds) }, comment },
+        fingerprint, columns: JSON.parse(columns) as GeneratedColumn[], bases: JSON.parse(bases) as string[], basesSynced: basesSynced === null ? {} : JSON.parse(basesSynced) as Record<string, number | null>, snapshotAt: Number(snapshotAt), builtAt: Number(builtAt), rows: Number(count), seconds: took };
+    }
+    // marks die with a run: a base whose last sync is not the one the snapshot saw may have changed since. Never "synced
+    // after the snapshot": a poll's time is its start, so one that began before the snapshot and committed after it would
+    // be missed. A generated base's "last sync" is its own snapshot (`baseSynced`): a parent swapped in alone since the
+    // child's run, a new definition's included, leaves the child stale; one built with the child leaves it current
+    for (const entry of this.entries.values()) {
+      const d = entry.deployed;
+      if (d === null) continue;
+      if (d.bases.some((b) => { const s = this.baseSynced(b); return s === null || d.basesSynced[b] === undefined || d.basesSynced[b] !== s; })) entry.dirtySince = d.snapshotAt;
     }
     const left = (await w.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = current_database() AND ends_with(table_name, '${SIDE_SUFFIX}')`)).getRowsJS() as Array<[string, string]>;
     for (const [schema, table] of left) await w.run(`DROP TABLE ${ident(schema)}.${ident(table)}`);
@@ -232,6 +234,13 @@ export class GeneratedTables {
 
   /** a base's last sync, ms; null: not known */
   private syncedMs(base: string): number | null { const s = this.host.syncedAt(base); return s === null ? null : Date.parse(s); }
+
+  /** what a child's ledger row records of a base: a synced table's last sync, a generated table's snapshot (ms, as served
+   *  now); null: not known */
+  private baseSynced(base: string): number | null {
+    const p = this.host.added(base) === null ? this.entries.get(base) : undefined;
+    return p === undefined ? this.syncedMs(base) : p.deployed?.snapshotAt ?? null;
+  }
 
   /** From here on the folder is read (`read`) and each definition held to the listener's catalog (`planner`). Resolves once
    *  they have been looked at, so a start can say what is refused. */
@@ -397,7 +406,9 @@ export class GeneratedTables {
   private readsOf(n: string, names: ReadonlySet<string>): string[] {
     const e = this.entries.get(n);
     if (e === undefined) return [];
-    return [...new Set([...e.reads, ...(e.checked?.bases ?? []), ...(e.wanted === null ? e.deployed?.bases ?? [] : [])])].filter((x) => names.has(x));
+    // what the plan read, only while `wanted` is the definition it planned: an edit's reads are its names until checked
+    const planned = e.checked !== null && e.wanted !== null && e.seen?.json === JSON.stringify(e.wanted) ? e.checked.bases : [];
+    return [...new Set([...e.reads, ...planned, ...(e.wanted === null ? e.deployed?.bases ?? [] : [])])].filter((x) => names.has(x));
   }
 
   /** the shortest way from `self` through what each reads back to `self`, as the tables in order (self first and last) */
@@ -480,11 +491,12 @@ export class GeneratedTables {
    *  table */
   private names(self: string): Set<string> { return new Set([...this.entries.keys(), self].filter((n) => n !== "" && this.host.added(n) === null)); }
 
-  /** why a parent blocks what reads it: refused, or its last run failed; null: neither */
+  /** why a parent blocks what reads it: refused with nothing deployed, or its last run failed; null: neither. A parent
+   *  refused in its file but deployed is re-run from what it was built from, and feeds its children from that */
   private refusedOrFailed(name: string): string | null {
     const p = this.entries.get(name);
     if (p === undefined) return null;
-    if (p.fileRefused !== null || p.refusals.length > 0) return "is refused";
+    if ((p.fileRefused !== null || p.refusals.length > 0) && p.deployed === null) return "is refused";
     return p.error === null ? null : "failed its last run";
   }
 
@@ -531,12 +543,13 @@ export class GeneratedTables {
   }
 
   /** what a run of `root` builds, parents before children: `root`, then every table that reads one of them whose other
-   *  parents are built and blocked by nothing. Not the children of a table refused or of a new definition: theirs is a
-   *  plan over what the catalog says once it is swapped in */
+   *  parents are built and blocked by nothing. Not the children of a new definition: theirs is a plan over what the
+   *  catalog says once it is swapped in. A parent refused in its file runs its deployed definition, and carries them */
   private unitOf(root: Entry): Entry[] {
     const now = Date.now(), set = new Map([[root.name, root]]);
-    // a table of this run feeds its children unless refused (its own failure is what this run tries again)
-    const feeds = (p: Entry): boolean => p.fileRefused === null && p.refusals.length === 0 && p.deployed !== null && p.deployed.fingerprint === this.buildable(p)?.fingerprint;
+    // a table of this run feeds its children unless it is a new definition: refused in its file, it is re-run from what it
+    // was built from, which the catalog and its children already hold (its own failure is what this run tries again)
+    const feeds = (p: Entry): boolean => p.deployed !== null && p.deployed.fingerprint === this.buildable(p)?.fingerprint;
     for (let grew = true; grew;) {
       grew = false;
       for (const c of this.entries.values()) {
@@ -622,17 +635,21 @@ export class GeneratedTables {
   private async build(members: Entry[], planner: Planner): Promise<Entry | null> {
     const started = Date.now();
     let open = false, at = members[0]!;
+    // what each builds, read now, before anything awaits: a sources file reloaded while it plans changes nothing of this
+    // run. One with nothing to build now (its name taken since the run was asked): nothing is built, the review looks again
+    const buildables = members.map((m) => this.buildable(m));
+    if (buildables.some((b) => b === null)) return null;
     const c = this.host.connection();
     for (const m of members) m.running = true;
     try {
       const sides = new Map<string, string>();
       const plans: Array<{ e: Entry; b: NonNullable<ReturnType<GeneratedTables["buildable"]>>; plan: DefinitionPlanOf; target: string; side: string }> = [];
-      for (const m of members) {
+      for (const [i, m] of members.entries()) {
         at = m;
-        const b = this.buildable(m)!, d = b.definition;
+        const b = buildables[i]!, d = b.definition;
         // planned now, for what it reads as of now (a stored JSON path may have come or gone since it was checked), a
         // parent built in this run read as its side table
-        const relations = new Map(this.parentsOf(m).filter((x) => sides.has(x)).map((x) => [x, sides.get(x)!]));
+        const relations = new Map(b.bases.filter((x) => sides.has(x)).map((x) => [x, sides.get(x)!]));
         const planning = planDefinition(planner, d.sql, d.orderBy, relations);
         this.planning = planning;
         const planned = await planning.finally(() => { if (this.planning === planning) this.planning = null; });
@@ -653,7 +670,9 @@ export class GeneratedTables {
       const clock = await this.host.onWriter(async () => {
         await c.runAndReadAll(`SELECT count(*) FROM ${GENERATED_LEDGER}`);
         for (const m of members) { m.taken = m.dirtySince; m.dirtySince = null; }
-        return { at: Date.now(), synced: Object.fromEntries(bases.map((x) => [x, this.syncedMs(x)])) };
+        // a parent of this run is recorded at this snapshot, one served at its own, read on this turn as its swap is
+        const now = Date.now();
+        return { at: now, synced: Object.fromEntries(bases.map((x) => [x, members.some((m) => m.name === x) ? now : this.baseSynced(x)])) };
       });
       for (const m of members) await this.onStep("snapshot", m.name);
       const written: Array<{ e: Entry; n: Deployed; side: string; target: string }> = [];
@@ -685,10 +704,11 @@ export class GeneratedTables {
       }
       for (const m of members) await this.onStep("swapped", m.name);
       for (const w of written) {
-        const e = w.e, was = e.error, before = e.deployed?.fingerprint;
+        const e = w.e, was = e.error;
         e.deployed = w.n; e.taken = null; e.error = null; e.failures = 0; e.retryAt = 0; e.blocked = null;
-        // a new definition swapped in alone: what reads it is built again over it
-        if (before !== w.n.fingerprint) this.changedGenerated(e.name, members);
+        // what reads it and was not built with it is behind it, whatever its definition: a new one, a child this run
+        // left out, or one whose own build failed and was taken out of the run (its marks were the parent's)
+        this.changedGenerated(e.name, members);
         if (was !== null) this.host.event({ kind: "recovered", table: e.name, message: `its re-run succeeded (it had failed: ${was})` });
       }
       await this.host.rebuildCatalog();

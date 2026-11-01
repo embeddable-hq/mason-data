@@ -725,3 +725,81 @@ test("the swap of a chain is one writer's turn: when the parent is swapped in, s
     assert.deepEqual(seen, [[[3n]]], "the child held the new tenant once the parent was swapped in");
   }, { onStep: async (s, n) => { if (armed && s === "swapped" && n === "public.counts") seen.push(await rows!("SELECT count(*) FROM public.doubled")); } });
 });
+
+// ------------------------------------------------------------------------------- chains: PR 163's review round
+
+test("a child whose own build fails in its parent's run stays behind its parent, so it is tried again after its back-off", async () => {
+  await withWorld({ parent: scheduled("SELECT id, n FROM events", "id"), child: scheduled("SELECT sum(n::integer) AS total FROM parent") }, async (w) => {
+    await w.until(built, "public.child");
+    await w.store.writer.run("INSERT INTO public.events VALUES (9, 1, 'query', 'ok', 'not-a-number', NULL, NULL, NULL, NULL)");
+    w.sync.generated.changed("public.events");
+    await w.sync.generated.run("public.parent");
+    assert.deepEqual(await ask(w, "SELECT count(*) FROM parent"), [["5"]], "the parent swapped in alone");
+    const child = w.status("public.child");
+    assert.equal(child.state, "failed");
+    assert.ok(child.behindSeconds > 0, "the child does not hold the parent it reads: it is due again once its back-off is over");
+    assert.equal(w.status("public.parent").behindSeconds, 0);
+  });
+});
+
+test("after a restart a chain built together is current, and a parent swapped in alone since leaves its child behind", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-chain-keep-"));
+  const files = { counts: COUNTS, doubled: scheduled("SELECT tenant_id, requests * 2 AS doubled FROM counts", "tenant_id") };
+  try {
+    let child: string | undefined;
+    await withWorld(files, async (w) => { child = (await w.until(built, "public.doubled")).lastRun?.at; }, { dir });
+    await withWorld({}, async (w) => {
+      await w.sync.generated.review();
+      const s = w.status("public.doubled");
+      assert.equal(s.lastRun?.at, child);
+      assert.equal(s.behindSeconds, 0, "its parent is the one it was built over");
+      assert.equal(s.missingTarget, false);
+      // the parent swapped in alone just before a crash (a new definition, say): its mark lived only in memory
+      await w.store.writer.run(`UPDATE ${MASON_SCHEMA}.generated_tables SET snapshot_at = snapshot_at + INTERVAL 1 SECOND WHERE name = 'public.counts'`);
+    }, { dir, again: true });
+    await withWorld({}, async (w) => {
+      assert.ok(w.status("public.doubled").behindSeconds > 0 || w.status("public.doubled").lastRun?.at !== child, "a parent swapped in since its build leaves it behind");
+      assert.equal(w.status("public.counts").behindSeconds, 0);
+      // and it is built again over the parent it reads (waited for, so the world never ends with a run going)
+      await w.until((s) => s.lastRun?.at !== child, "public.doubled");
+    }, { dir, again: true });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a child that reads its parent by a schema-qualified column is built in its parent's run", async () => {
+  await withWorld({ counts: COUNTS, tenants: scheduled("SELECT public.counts.tenant_id FROM public.counts", "tenant_id") }, async (w) => {
+    await w.until(built, "public.tenants");
+    await w.store.writer.run("INSERT INTO public.events VALUES (7, 3, 'query', 'ok', '7', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+    w.sync.generated.changed("public.events");
+    await w.sync.generated.run("public.counts");
+    assert.equal(w.status("public.tenants").error, null);
+    assert.deepEqual(await ask(w, "SELECT tenant_id FROM tenants ORDER BY 1"), [[1], [2], [3]]);
+  });
+});
+
+test("a parent refused in its file is re-run from what it was built from, and carries its children", async () => {
+  await withWorld({ counts: COUNTS, total: scheduled("SELECT sum(requests)::bigint AS total FROM counts") }, async (w) => {
+    await w.until(built, "public.total");
+    w.write("counts", "kind: scheduled\ntarget_lag: 1s\nsql: SELECT date_trunc('day', started_at) AS day FROM events\n");
+    await w.until((s) => s.state === "refused");
+    await w.store.writer.run("INSERT INTO public.events VALUES (7, 5, 'query', 'ok', '7', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+    w.sync.generated.changed("public.events");
+    await w.sync.generated.run("public.counts");
+    assert.deepEqual(await ask(w, "SELECT sum(requests) FROM counts"), [["5"]]);
+    assert.deepEqual(await ask(w, "SELECT total FROM total"), [["5"]], "the child is built over the parent it reads");
+    const child = w.status("public.total");
+    assert.equal(child.state, "current");
+    assert.equal(child.waitingFor, null);
+  });
+});
+
+test("two files rewritten in one round into a chain the other way round are no cycle", async () => {
+  await withWorld({ a: scheduled("SELECT one FROM b"), b: scheduled("SELECT count(*) AS one FROM events") }, async (w) => {
+    await w.until(built, "public.a");
+    w.write("a", scheduled("SELECT count(*) AS one FROM events"));
+    w.write("b", scheduled("SELECT one FROM a"));
+    await w.sync.generated.review();
+    assert.deepEqual([w.status("public.a").refusals, w.status("public.b").refusals], [[], []]);
+    assert.ok(!w.logged.some((l) => /reads itself/.test(l)), w.logged.join("\n"));
+  });
+});

@@ -231,6 +231,15 @@ function swapRelations(tree: unknown, relations: ReadonlyMap<string, string>, sc
       if (to !== undefined) { r.alias ??= { aliasname: r.relname }; r.relname = to; met.add(key); }
       return;
     }
+    // a column by the table's schema-qualified name (`public.counts.tenant_id`, valid Postgres): the swapped table is
+    // read under its own name as an alias, which binds no schema, so the column is named by that alias alone
+    const fields = (o.ColumnRef as { fields?: unknown[] } | undefined)?.fields;
+    if (fields !== undefined && fields.length >= 3) {
+      const sval = (x: unknown): string | undefined => (x as { String?: { sval?: string } } | undefined)?.String?.sval;
+      const schema = sval(fields[fields.length - 3]), table = sval(fields[fields.length - 2]);
+      if (schema !== undefined && table !== undefined && relations.has(`${schema}.${table}`)) (o.ColumnRef as { fields: unknown[] }).fields = fields.slice(-2);
+      return;
+    }
     const list = (o.withClause as { ctes?: Array<{ CommonTableExpr?: { ctename?: string } }> } | undefined)?.ctes;
     const scope = list === undefined ? ctes : new Set([...ctes, ...list.map((c) => c.CommonTableExpr?.ctename ?? "")]);
     for (const x of Object.values(o)) walk(x, scope);
