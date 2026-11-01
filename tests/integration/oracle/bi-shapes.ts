@@ -178,8 +178,10 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "a bound key: DISTINCT ON a derived table's jsonb column by an alias", sql: "SELECT DISTINCT ON (k) s.t AS k, s.id FROM (SELECT o.meta -> 'tags' AS t, o.id FROM orders o) s ORDER BY k DESC, s.id" },
   { name: "a bound key: a grouped jsonb output, ORDER BY its expression", sql: "SELECT o.meta -> 'tags' AS k, count(*) AS n FROM orders o GROUP BY 1 ORDER BY o.meta -> 'tags' DESC" },
   { name: "a bound key: a collated output ORDER BY its expression", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, c.id FROM customers c ORDER BY c.name COLLATE \"und-x-icu\" DESC, c.id LIMIT 8" },
-  { name: "a bound key: a collated output grouped and ordered by number", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, count(*) AS k FROM customers c GROUP BY 1 ORDER BY 1 DESC LIMIT 8" },
-  { name: "a bound key: a collated output grouped and ordered by name and expression", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, count(*) AS k FROM customers c GROUP BY n ORDER BY c.name COLLATE \"und-x-icu\", n LIMIT 8" },
+  // (a last key that is no output, min(c.id), deciding nothing as n is one a group: the statement's own order is held,
+  // and the "[ordered]" shape, whose outer sort by the derived collated column is #213's, is not made of it)
+  { name: "a bound key: a collated output grouped and ordered by number", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, count(*) AS k FROM customers c GROUP BY 1 ORDER BY 1 DESC, min(c.id) LIMIT 8" },
+  { name: "a bound key: a collated output grouped and ordered by name and expression", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, count(*) AS k FROM customers c GROUP BY n ORDER BY c.name COLLATE \"und-x-icu\", n, min(c.id) LIMIT 8" },
   { name: "a bound key: a citext output grouped and ordered by number", sql: "SELECT lower(c.email)::citext AS e, count(*) AS k FROM customers c GROUP BY 1 ORDER BY 1 LIMIT 8" },
   { name: "a bound key: WITH TIES by an expression equal to an output", sql: "SELECT count(*) FROM (SELECT o.id % 5 AS m, o.id FROM orders o ORDER BY o.id % 5 FETCH FIRST 3 ROWS WITH TIES) s" },
   { name: "a bound key: WITH TIES by a user's own number", sql: "SELECT count(*) FROM (SELECT o.tenant_id, o.id FROM orders o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s" },
