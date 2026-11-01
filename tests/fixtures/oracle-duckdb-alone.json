@@ -1,19 +1,19 @@
 {
-  "statements": 6455,
+  "statements": 6492,
   "mason": {
-    "exact": 5952,
+    "exact": 5987,
     "decided": 51,
-    "refused": 452,
+    "refused": 454,
     "differs": 0
   },
   "duckdb": {
     "exact": 1785,
     "name": 1236,
-    "refused": 1287,
+    "refused": 1321,
     "value": 836,
     "rows": 550,
     "text": 182,
-    "other": 579
+    "other": 582
   },
   "gaps": {
     "copyPhase": {
@@ -39,6 +39,8 @@
         "json-rows-in-select": { "planted": 1, "natural": 0 },
         "jsonb-compare": { "planted": 1, "natural": 2 },
         "jsonb-set": { "planted": 0, "natural": 1 },
+        "latest-computed-numeric": { "planted": 1, "natural": 0 },
+        "latest-without-order": { "planted": 1, "natural": 0 },
         "like-any-array": { "planted": 1, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 5 },
         "numeric-exact-sum": { "planted": 1, "natural": 0 },
@@ -90,7 +92,7 @@
       }
     },
     "everyAsk": {
-      "asked": 44417,
+      "asked": 44649,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -114,6 +116,8 @@
         "json-rows-in-select": { "planted": 3, "natural": 0 },
         "jsonb-compare": { "planted": 3, "natural": 6 },
         "jsonb-set": { "planted": 0, "natural": 3 },
+        "latest-computed-numeric": { "planted": 3, "natural": 0 },
+        "latest-without-order": { "planted": 3, "natural": 0 },
         "like-any-array": { "planted": 3, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 17 },
         "numeric-exact-sum": { "planted": 3, "natural": 0 },
