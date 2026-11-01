@@ -199,6 +199,8 @@ export class GeneratedTables {
   /** a run's planning in flight: it plans on the listener's catalog, so a stop waits for it before the listener closes */
   private planning: Promise<unknown> | null = null;
   private stopped = false;
+  /** the run in flight, ended or not (`run`): the next starts after it */
+  private runs: Promise<void> = Promise.resolve();
 
   constructor(store: DuckStore, host: GeneratedHost, options: GeneratedOptions = {}) {
     this.store = store; this.host = host; this.reviewMs = options.reviewMs ?? REVIEW_MS; this.onStep = options.onStep ?? (() => undefined);
@@ -605,8 +607,18 @@ export class GeneratedTables {
 
   /** ONE RUN, in the rebuild queue: never throws but `Stopping`; its failure is its own to say. A run of a table is its
    *  chain's: a parent's builds its children after it, and a child's is its dirty parent's (`rootOf`, `unitOf`). A table
-   *  that fails takes the tables built from it out of the run, which is tried again without them. */
-  async run(name: string): Promise<void> {
+   *  that fails takes the tables built from it out of the run, which is tried again without them.
+   *  ONE RUN AT A TIME, whoever asks: a run asked while another is in flight waits for it to end. `rootOf` and `unitOf`
+   *  leave out a table a run has (`running`), so a run beside another would build a parent and leave its child over the
+   *  old one; the rebuild queue asks one at a time, and this holds it for any other caller too (issue 195). */
+  run(name: string): Promise<void> {
+    const ran = this.runs.then(() => this.runAlone(name));
+    // the next waits for this one's end, not its outcome: its Stopping is its caller's
+    this.runs = ran.then(() => undefined, () => undefined);
+    return ran;
+  }
+
+  private async runAlone(name: string): Promise<void> {
     const asked = this.entries.get(name), planner = this.planner;
     if (asked === undefined) return;
     asked.queued = false;
