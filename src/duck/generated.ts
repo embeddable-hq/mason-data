@@ -210,7 +210,7 @@ export class GeneratedTables {
       const since = entry.deployed.bases.some((b) => { const s = this.syncedMs(b); return s === null || was[b] === undefined || was[b] !== s; });
       if (since) entry.dirtySince = snapshot;
     }
-    const left = (await w.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = current_database() AND table_name LIKE '%${SIDE_SUFFIX}'`)).getRowsJS() as Array<[string, string]>;
+    const left = (await w.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = current_database() AND ends_with(table_name, '${SIDE_SUFFIX}')`)).getRowsJS() as Array<[string, string]>;
     for (const [schema, table] of left) await w.run(`DROP TABLE ${ident(schema)}.${ident(table)}`);
     const c = this.host.connection();
     // what a session sets (src/duck/store.ts SessionRunner): a plan means what it means under these

@@ -350,6 +350,22 @@ test("a side table no ledger row names is dropped, and blocks nothing", async ()
   });
 });
 
+test("a start drops a side table left behind, and only one: a table whose name the suffix's LIKE would match survives", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-suffix-"));
+  try {
+    await withWorld({}, async (w) => {
+      // `_` in LIKE is any one character: each of these matches '%__mason_generated', and none is a side table
+      await w.store.writer.run("CREATE TABLE public.report_mason_generated AS SELECT 1 AS x");
+      await w.store.writer.run("CREATE TABLE public.xy_masonXgenerated AS SELECT 1 AS x");
+      await w.store.writer.run("CREATE TABLE public.counts__mason_generated AS SELECT 1 AS x");
+    }, { dir });
+    await withWorld({}, async (w) => {
+      const names = (await w.rows("SELECT table_name FROM duckdb_tables() WHERE schema_name = 'public' AND table_name LIKE '%generated' ORDER BY 1")).map((r) => r[0]);
+      assert.deepEqual(names, ["report_mason_generated", "xy_masonXgenerated"]);
+    }, { dir, again: true });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 /**
  * A CRASH AT EACH STEP OF A RUN, by a real SIGKILL in a process of its own (tests/duck-generated-crash-child.ts), the file
  * then opened again: the table serves what it held and agrees with its ledger row, nothing is left beside it, and the
