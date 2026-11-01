@@ -2072,8 +2072,16 @@ The same day the waits that replaced those gaps were found late twice over. They
 one on a PR sent back for a fix watched only for its branch's next head, so its CI's red oracle was seen only when the
 next push woke it. And two PRs queued to auto-merge at a reviewed head were found still queued at a later, unread
 head: GitHub keeps a queued auto-merge across a push by someone with write access, and `--match-head-commit` is checked
-only when the merge is queued. The waits became one `gh pr checks --watch --fail-fast` per PR, and a PR sent back has
-its merge withdrawn.
+only when the merge is queued. The first replacement, `gh pr checks --watch --fail-fast` bounded by a perl alarm, was
+wrong twice more: `--watch` exits at once, as a failure, on a PR whose checks have not registered yet (just after a
+push), and the alarm, `exec`'d into `gh`, is caught and ignored by Go's runtime, so the bound bounded nothing (a 3 s
+alarm still running at 67 s). The waits became a loop of `gh pr checks` with a deadline, reading its exit code (0
+passed, 8 pending, 1 failed or no checks yet), and a PR sent back has its merge withdrawn.
+
+Five findings of one class took four rounds on PR 170 (key-first GROUP BY), each patch written by the coordinator
+("The independent review", "A finding is a failure, never a patch"). A brief names the shapes its tests must hold
+because the first fix round of every earlier PR was for a shape its brief had left out, and the tests its runs use
+because one issue's agents spent 36 min proving a whole slow file twice.
 
 ## A libc order, read level by level
 
