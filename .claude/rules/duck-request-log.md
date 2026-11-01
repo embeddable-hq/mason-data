@@ -46,3 +46,10 @@ paths:
   The copy's memory is `duckdb_memory()`; a copy's bytes are its distinct blocks from `pragma_storage_info`
   (metadata only, but it grows with rows × columns, so never per request; docs/DESIGN.md "Observability" has the
   measurement). `mason usage` and `GET /api/usage` read them.
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- None recorded yet; the harness's Learn step adds them.
