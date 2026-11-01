@@ -162,6 +162,11 @@ paths:
   EXPRESSIONS (`'1.5'::numeric` to `1.5::numeric AS v`) leaves no node at its offset, so whether such a key is constant is
   read by one resolver, `keysConstant` (src/duck/constant-key.ts), from the analysis's own sort lists (`Keys`,
   src/duck/pgtree.ts), never from a syntactic match. Detector: tests/duck-wire.test.ts "a key equal to an output …".
+  Its third (PR 170, the fourth round): the binding decides how a key is WRITTEN, not only whether it is constant. Every
+  ORDER BY and DISTINCT ON key, by name, number or equal expression, is bound by `Rewriter.keysBound` (GROUP BY's by
+  `groupOutput`), and a key bound to an output IS that output: a jsonb's, citext's or collation's key built over it,
+  and a key bound by equality to a computed output written as its ordinal, never a second evaluation of a volatile
+  one. Detector: tests/duck-wire.test.ts "a key bound to an output is that output …".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its

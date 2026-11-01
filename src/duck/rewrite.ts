@@ -33,7 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type Keys, type QueryOutputs, type Typed } from "./pgtree.ts";
-import { evaluated, keysConstant, type Unbound } from "./constant-key.ts";
+import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
@@ -867,16 +867,29 @@ class Rewriter {
       const targets = b.targetList as AstNode[];
       // (a key bound to an output or another clause's key by equality, spelled unlike it: by the one resolver)
       const sorts = b.sortClause as AstNode[];
-      const constant = this.keysConstant(sorts.map((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined), this.analysedQuery(targets)?.keys, "sorted", targets);
+      const bound = this.keysBound(sorts.map((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined), this.analysedQuery(targets)?.keys, "sorted", targets);
+      const starred = targets.some((t) => hasStar(bodyOf(t).val));
       b.sortClause = sorts.flatMap((s, i) => {
         const sb = bodyOf(s);
         this.done.add(sb);
+        const out = bound[i]!.output;
         if (kindOf(s) === "SortBy" && sb.useOp === undefined) {
-          const out = this.outputOf(sb.node as AstNode, targets);
-          if (out?.twin !== true && (constant[i] ?? this.typed(out !== null ? out.value : sb.node as AstNode)?.constant) === true) return [];
+          if (out?.twin !== true && (bound[i]!.constant ?? this.typed(out !== null ? out.value : sb.node as AstNode)?.constant) === true) return [];
+        }
+        // (a key bound by equality is built over its own expression, which is the output's and carries its own typing)
+        const as = sb.node;
+        // (a key bound by equality has no analysed node of its own where Postgres's tree reads it as the entry: it is
+        // typed as the output it is, so a jsonb's, a citext's or a collation's key is built for it)
+        if (bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(as) && this.typeOf(as as AstNode) === null && this.typeOf(out.value) !== null) this.typedLike.set(bodyOf(as as AstNode), out.value);
+        const built = this.sortBy(sb, targets, b, bound[i]!.equal ? null : out);
+        // a key bound to a computed output by EQUALITY, written as it is, is that output: its ordinal, so DuckDB reads
+        // the one value the list shows (`ORDER BY random()` beside `random() AS r` is r, never a second random()). A
+        // list with a * keeps its key: its outputs' numbers are Postgres's expansion
+        if (built === null && sb.node === as && bound[i]!.equal && out !== null && !starred && kindOf(out.value) !== "ColumnRef" && kindOf(s) === "SortBy" && sb.useOp === undefined) {
+          sb.node = { A_Const: { ival: { ival: out.target + 1 } } };
         }
         // (an integer the rewrite wrote is an ordinal it meant; any other bare literal DuckDB would refuse)
-        const written = this.sortBy(sb, targets, b) ?? [s];
+        const written = built ?? [s];
         for (const w of written) {
           const n = kindOf(w) === "SortBy" ? bodyOf(w).node as AstNode | undefined : undefined;
           if (n !== undefined && kindOf(n) === "A_Const" && bodyOf(n).ival === undefined) bodyOf(w).node = evaluated(n);
@@ -993,9 +1006,6 @@ class Rewriter {
     return new Unrewritable("this * of a named join lists two columns of one name, and Mason cannot read one of them apart here", "name the join's columns in the SELECT, or leave the join's own name out", "star-join-twin");
   }
 
-  /** the output a number names, or null for a number past the list */
-  private outputAt(targets: readonly AstNode[], n: number): Output | null { return n >= 1 ? this.outputs(targets)[n - 1] ?? null : null; }
-
   /** the output an ORDER BY item reads: by its number, or by its bare name (SQL92's rule: an output before an input
    *  column; two outputs of one name reach here only as Postgres found them equal) */
   private outputOf(e: AstNode, targets: readonly AstNode[]): Output | null {
@@ -1020,8 +1030,22 @@ class Rewriter {
    * null for a key it cannot tell (the analysis not found, a way that does not fit), whose own reading stands.
    */
   private keysConstant(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<boolean | null> {
-    if (keys === undefined) return nodes.map(() => null);
+    return this.keysBound(nodes, keys, clause, targets).map((k) => k.constant);
+  }
+
+  /**
+   * EACH KEY OF A SELECT'S ORDER BY OR DISTINCT ON, AS POSTGRES BOUND IT: THE ONE RESOLVER (the class "an output not
+   * resolved to its column", its fourth round: the binding decides how a key is WRITTEN, not only whether it is
+   * constant). A key bound to an output, by its number, its output name (an alias that is also an input column
+   * included: ORDER BY and DISTINCT ON take the output) or an expression EQUAL to it (findTargetlistEntrySQL99), IS that
+   * output, and every writer of a key writes it through `output`: a key built over the output's expression, or, for a
+   * key bound by equality and written as it is, the output itself (`equal`: its ordinal), never a second evaluation of a
+   * volatile one. `constant` as `keysConstant`. With no analysis, the number or name alone binds.
+   */
+  private keysBound(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<{ output: Output | null; constant: boolean | null; equal: boolean }> {
     const outputs = targets === undefined ? [] : this.outputs(targets);
+    const named = (n: AstNode | undefined): Output | null => n === undefined || !isNode(n) ? null : outputs[this.outputIndex(n, outputs)] ?? null;
+    if (keys === undefined) return nodes.map((n) => ({ output: named(n), constant: null, equal: false }));
     const offsets = (n: AstNode): number[] => {
       const b = bodyOf(n);
       const own = typeof b.location === "number" && b.location >= 0 ? [b.location - this.base] : [];
@@ -1043,8 +1067,26 @@ class Rewriter {
       return { reads: text.includes("\"SubLink\"") ? null : text.includes("\"ColumnRef\""), constant: t === null ? null : t.constant === true } satisfies Unbound;
     });
     // (a key no entry can be told for leaves the clause's reading to each key's own)
-    if (known.includes(-1)) return nodes.map(() => null);
-    return keysConstant(keys, clause, known);
+    if (known.includes(-1)) return nodes.map((n) => ({ output: named(n), constant: null, equal: false }));
+    return keysBound(keys, clause, known).map((k, i) => {
+      const by = named(nodes[i]);
+      if (by !== null) return { output: by, constant: k.constant, equal: false };
+      // (an entry Postgres made an output is the output at its place: it lists the outputs first, a *'s columns each one)
+      const output = k.entry !== null && keys.entries[k.entry]?.output === true ? outputs[k.entry] ?? null : null;
+      return { output, constant: k.constant, equal: output !== null };
+    });
+  }
+
+  /**
+   * THE OUTPUT A GROUP BY ITEM NAMES (the one resolver's GROUP BY reading): its number, or its bare name where Postgres
+   * read no input column of that name (GROUP BY prefers the column, the opposite of ORDER BY), or null.
+   */
+  private groupOutput(g: AstNode, targets: readonly AstNode[]): Output | null {
+    if (constInt(g) !== null) return this.outputOf(g, targets);
+    if (kindOf(g) !== "ColumnRef" || this.typedAt(g)?.node === "VAR") return null;
+    // (a *'s column is an input column by that name: never an output name here)
+    const out = this.outputOf(g, targets);
+    return out?.star === true ? null : out;
   }
 
   /**
@@ -1099,7 +1141,7 @@ class Rewriter {
         continue;
       }
       const n = constInt(by);
-      const out = n === null ? null : this.outputAt(targets, n);
+      const out = n === null ? null : this.outputOf(by, targets);
       if (out === null) continue;
       const value = out.value;
       if (out.star) {
@@ -1135,13 +1177,10 @@ class Rewriter {
     const targets = (b.targetList ?? []) as AstNode[];
     // a target the GROUP BY names by its ordinal or its output name is a key itself, and DuckDB reads it there: untouched
     const keyTargets = new Set<number>();
+    // (by the one resolver's GROUP BY reading: a number, or a bare name that is no input column)
     for (const g of groups) {
-      const n = constInt(g);
-      const out = n === null ? null : this.outputAt(targets, n);
-      if (out !== null) { keyTargets.add(out.target); continue; }
-      // a bare name is an output name only where it is no input column (Postgres prefers the column)
-      const f = kindOf(g) === "ColumnRef" ? names(bodyOf(g).fields) : [];
-      if (f.length === 1 && this.typedAt(g)?.node !== "VAR") targets.forEach((t, i) => { if (bodyOf(t).name === f[0]) keyTargets.add(i); });
+      const out = this.groupOutput(g, targets);
+      if (out !== null) keyTargets.add(out.target);
     }
     const grouped = new Set([...groups.map(shapeOf), ...[...keyTargets].map((i) => shapeOf(bodyOf(targets[i]!).val as AstNode))]);
     // `depth`: the subqueries between here and this query (a correlated subquery's column of this query is levelsUp 1)
@@ -1818,10 +1857,11 @@ class Rewriter {
   }
 
   /** a SortBy: its expression's sort keys under its collation (several under a libc one), each with its direction */
-  private sortBy(b: Body, targets: AstNode[] | null, select: Body | null): AstNode[] | null {
+  private sortBy(b: Body, targets: AstNode[] | null, select: Body | null, bound?: Output | null): AstNode[] | null {
     let e = b.node as AstNode;
     if (targets !== null) {
-      const out = this.outputOf(e, targets);
+      // (the output the one resolver bound the key to, where the caller has it: `keysBound`)
+      const out = bound !== undefined ? bound : this.outputOf(e, targets);
       if (out?.twin === true) throw this.twinRefused();
       if (out !== null) e = this.clone(out.value);
     }
@@ -1880,16 +1920,7 @@ class Rewriter {
 
   /** a GROUP BY item as the expression it groups: an ordinal or an output name is that target's */
   private groupedExpression(g: AstNode, b: Body): AstNode {
-    const targets = (b.targetList ?? []) as AstNode[];
-    const n = constInt(g);
-    const out = n === null ? null : this.outputAt(targets, n);
-    if (out !== null) return out.value;
-    if (kindOf(g) === "ColumnRef") {
-      const f = names(bodyOf(g).fields);
-      const named = f.length === 1 && this.typed(g) === null ? targets.filter((t) => bodyOf(t).name === f[0]) : [];
-      if (named.length === 1) return bodyOf(named[0]!).val as AstNode;
-    }
-    return g;
+    return this.groupOutput(g, (b.targetList ?? []) as AstNode[])?.value ?? g;
   }
 
   /** a value Mason cannot sort, group or compare as Postgres does: a jsonb where it is not keyed (`compared` keys it),
@@ -2047,15 +2078,15 @@ class Rewriter {
       // is no key; with none left every row is one set, so one key the engine evaluates, which divides nothing either
       // (a key bound to an output or the ORDER BY's key by equality, spelled unlike it: by the one resolver)
       const ons = b.distinctClause as AstNode[];
-      const constant = this.keysConstant(ons.map((d) => isNode(d) ? d : undefined), this.analysedQuery(targets)?.keys, "distinct", targets);
-      const keys = ons.filter((d, i) => {
-        const out = isNode(d) ? this.outputOf(d, targets) : null;
-        return !isNode(d) || out?.twin === true || (constant[i] ?? this.typed(out !== null ? out.value : d)?.constant) !== true;
+      // (a key bound to an output, by its number, its name or an equal expression, is that output: the one resolver;
+      // a jsonb's equality key is built over the output's expression, a key named by its alias included)
+      const bound = this.keysBound(ons.map((d) => isNode(d) ? d : undefined), this.analysedQuery(targets)?.keys, "distinct", targets);
+      const keys = ons.flatMap((d, i) => {
+        const out = bound[i]!.output;
+        return !isNode(d) || out?.twin === true || (bound[i]!.constant ?? this.typed(out !== null ? out.value : d)?.constant) !== true ? [{ d, out }] : [];
       });
       if (keys.length === 0) { b.distinctClause = [evaluated(strConst("one set"))]; return; }
-      b.distinctClause = keys.map((d) => {
-        const n = constInt(d);
-        const out = n === null ? null : this.outputAt(targets, n);
+      b.distinctClause = keys.map(({ d, out }) => {
         const e = out?.value ?? d;
         if (this.typeOf(e) !== JSONB) { this.comparable(e, "SELECT DISTINCT ON"); return d; }
         return this.equalKey(out !== null ? this.clone(e) : d);

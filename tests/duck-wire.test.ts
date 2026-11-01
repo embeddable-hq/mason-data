@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as net from "node:net";
 import * as path from "node:path";
+import * as util from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import pg from "pg";
 import { PGlite } from "@electric-sql/pglite";
@@ -47,6 +48,13 @@ const JDOCS: Array<[number, string | null, string | null]> = [
   [6, '["x", "y", "z"]', '["x", "y", "z"]'],
   [7, '{"1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}', '{"1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}'],
 ];
+/** jq's documents: a key `k` of every jsonb kind, three of them equal numbers spelled apart (1, 1.0, 1.00), a string
+ *  twice and once in another case, a JSON null, an empty object, and a NULL row (the class "an output not resolved to
+ *  its column": a DISTINCT ON or ORDER BY key named by an alias of `v -> 'k'` is jsonb's equality and order) */
+const JQ: Array<[number, string | null]> = [[1, '{"k": 1}'], [2, '{"k": "a"}'], [3, '{"k": 1.0}'], [4, '{"k": [1]}'], [5, '{"k": null}'],
+  [6, '{"k": "a"}'], [7, '{"k": {"a": 1}}'], [8, '{"k": {}}'], [9, '{"k": true}'], [10, '{"k": "A"}'], [11, '{"k": 2}'], [12, null],
+  [13, '{"k": 1.00}'], [14, '{"k": "b"}']];
+const jqInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jq VALUES ${JQ.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${asHeld(v)}'`})`).join(", ")}`;
 const jdocsInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jdocs VALUES ${JDOCS.map(([id, b, j]) => `(${id}, ${b === null ? "NULL" : `'${asHeld(b)}'`}, ${j === null ? "NULL" : `'${j}'`})`).join(", ")}`;
 /** instants a truncation meets at its edges: each side of a daylight-saving change (Europe/Berlin's 2026-03-29 02:00
  *  and 2026-10-25 03:00, America/New_York's), a repeated hour's two halves, before 1970, a zone's local mean time
@@ -122,6 +130,8 @@ const DDL = [
   'CREATE TABLE public.rowid_cased (id INTEGER PRIMARY KEY, "RowId" INTEGER)',
   'INSERT INTO public.rowid_cased SELECT range::INTEGER, 5 FROM range(1, 7)',
   "INSERT INTO public.late_c SELECT range::INTEGER, 'c' || range FROM range(50)",
+  "CREATE TABLE public.jq (id INTEGER PRIMARY KEY, v JSON)",
+  jqInsert(jsonbText),
   "CREATE TABLE public.jdocs (id INTEGER PRIMARY KEY, b JSON, j JSON)",
   jdocsInsert(jsonbText),
   // a jsonb column whose name is jdocs.b's in another case: a bare "B" beside b is ambiguous to DuckDB
@@ -176,6 +186,8 @@ const PG_DDL = [
   "INSERT INTO public.late_p SELECT g % 50, g / 50, 'n' || g FROM generate_series(0, 199) g",
   "CREATE TABLE public.late_n (id integer, c integer)",
   "INSERT INTO public.late_n SELECT g, g % 50 FROM generate_series(0, 49) g",
+  "CREATE TABLE public.jq (id integer PRIMARY KEY, v jsonb)",
+  jqInsert((doc) => doc),
   "CREATE TABLE public.jdocs (id integer PRIMARY KEY, b jsonb, j json)",
   jdocsInsert((doc) => doc),
   "CREATE TABLE public.jcase (id integer PRIMARY KEY, \"B\" jsonb)",
@@ -236,6 +248,7 @@ const schema: PgSchema = {
     { name: "late_n", primaryKey: [], joins: [], columns: [{ name: "id", type: "int4" }, { name: "c", type: "int4" }] },
     { name: "late_d", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "w", type: "text" }] },
     { name: "rowid_cased", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "RowId", type: "int4" }] },
+    { name: "jq", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "jsonb" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
@@ -407,7 +420,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -2801,6 +2814,68 @@ test("a volatile value a sort reads is one value: the rows shown are in the orde
     const now = `SELECT now() AS t, l.id ${FROM} ORDER BY t, l.id LIMIT 3`;
     assert.equal(new Set((await c.query({ text: now, rowMode: "array", types: raw } as pg.QueryConfig)).rows.map((r: unknown[]) => r[0])).size, 1);
     assert.match(await sent(now), /__mason_r1/);
+  } finally { await c.end(); }
+});
+
+// THE CLASS "AN OUTPUT NOT RESOLVED TO ITS COLUMN", its fourth round: a key bound to an output, by its alias, its number,
+// an equal expression, an alias that is also an input column, or over a derived table, IS that output, written through
+// the one binding in every clause (src/duck/rewrite.ts `keysBound`)
+test("a key bound to an output is that output: by alias, number or an equal expression, in DISTINCT ON and ORDER BY", async () => {
+  const c = await client();
+  try {
+    // (every statement is run, and those that differ named together: one report of the class, not its first case)
+    const differ: string[] = [];
+    const alike = async (sql: string): Promise<void> => {
+      const [got, want] = [await answer(c, sql).catch((e: Error) => e.message), await postgres(sql)];
+      if (!util.isDeepStrictEqual(got, want)) differ.push(sql);
+    };
+    // a jsonb output: DISTINCT ON is jsonb's equality (1, 1.0 and 1.00 one row), ORDER BY its order, however named
+    const ON = "SELECT DISTINCT ON (k) q.v -> 'k' AS k, q.id FROM jq q";
+    for (const sql of [
+      `${ON} ORDER BY k, q.id LIMIT 8`,
+      `${ON} ORDER BY k DESC, q.id`,
+      `${ON} ORDER BY q.v -> 'k', q.id`,
+      `${ON} ORDER BY 1, 2`,
+      "SELECT DISTINCT ON (1) q.v -> 'k' AS k, q.id FROM jq q ORDER BY k, q.id",
+      "SELECT DISTINCT ON (q.v -> 'k') q.v -> 'k' AS k, q.id FROM jq q ORDER BY k DESC, q.id",
+      // an alias that is also an input column: an ORDER BY's and a DISTINCT ON's bare name is the output first
+      "SELECT DISTINCT ON (v) q.v -> 'k' AS v, q.id FROM jq q ORDER BY v, q.id",
+      "SELECT q.v -> 'k' AS v, q.id FROM jq q ORDER BY v DESC, q.id",
+      "SELECT q.id % 3 AS id, q.id AS n FROM jq q ORDER BY id DESC, n",
+      "SELECT DISTINCT ON (id) q.id % 3 AS id, q.id AS n FROM jq q ORDER BY id, n DESC",
+      // GROUP BY's bare name is the input column, its ORDER BY's the output; and an expression equal to an output
+      "SELECT q.id % 3 AS id, count(*) AS n FROM jq q GROUP BY id ORDER BY id DESC, n",
+      "SELECT q.id % 3 AS g, count(*) AS n FROM jq q GROUP BY q.id % 3 ORDER BY q.id % 3 DESC",
+      "SELECT q.v -> 'k' AS k, count(*) AS n FROM jq q GROUP BY 1 ORDER BY q.v -> 'k' DESC",
+      // over a derived table
+      "SELECT DISTINCT ON (s.k) s.k, s.id FROM (SELECT v -> 'k' AS k, id FROM jq) s ORDER BY s.k, s.id",
+      "SELECT DISTINCT ON (k) s.k AS k, s.id FROM (SELECT v -> 'k' AS k, id FROM jq) s ORDER BY k DESC, s.id",
+      // a citext output and a collated one, named by alias and by an equal expression
+      "SELECT a.status AS s, a.id FROM accounts a ORDER BY s, a.id",
+      "SELECT a.status AS s, a.id FROM accounts a ORDER BY a.status DESC, a.id",
+      "SELECT t.s COLLATE \"und-x-icu\" AS s, t.id FROM texts t ORDER BY s, t.id",
+      "SELECT t.s COLLATE \"und-x-icu\" AS x, t.id FROM texts t ORDER BY t.s COLLATE \"und-x-icu\" DESC, t.id",
+    ]) await alike(sql);
+    assert.deepEqual(differ, [], "each of these answers unlike Postgres");
+    // a citext output named by its alias in DISTINCT ON: refused as the citext it is, never DISTINCT by its text
+    await assert.rejects(answer(c, "SELECT DISTINCT ON (s) a.status AS s, a.id FROM accounts a ORDER BY s, a.id"), (e: pg.DatabaseError) => e.code === "0A000" && /citext-forms/.test(e.detail ?? ""));
+    // a volatile output: a key bound to it by equality is it, one value a row, so what is shown is what was sorted
+    for (const sql of [
+      "SELECT random() AS r, l.id FROM late l ORDER BY random() LIMIT 5",
+      "SELECT random() AS r, l.id FROM late l ORDER BY random() DESC LIMIT 5",
+      "SELECT random() AS r, l.id FROM late l ORDER BY random(), l.id LIMIT 5",
+      "SELECT DISTINCT random() AS r FROM late l ORDER BY random() LIMIT 5",
+      "SELECT s.r FROM (SELECT random() AS r, l.id FROM late l ORDER BY random() LIMIT 5) s",
+    ]) {
+      const shown = (await c.query({ text: sql, rowMode: "array" })).rows.map((r: unknown[]) => r[0] as number);
+      assert.equal(shown.length, 5, sql);
+      assert.deepEqual(shown, [...shown].sort((a, b) => sql.includes("DESC") ? b - a : a - b), `${sql}: the value shown is the value sorted`);
+    }
+    // said once: the key is the output's number
+    logged.length = 0;
+    await c.query("SELECT random() AS r, l.id FROM late l ORDER BY random() LIMIT 5");
+    const line = logged.findLast((l) => l.startsWith("statement: ")) ?? "";
+    assert.equal(line.match(/random\(\)/g)?.length, 1, line);
   } finally { await c.end(); }
 });
 
