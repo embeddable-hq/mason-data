@@ -22,8 +22,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   role with `tables: all` reads it, and a role with a list reads it once it names it. Nothing changes if you add no file.
   A generated table may read another: parents are built first, a change to a base re-runs the whole chain above it at
   one snapshot, and the chain is swapped in at one moment, so a child never shows rows its parent doesn't. A table that
-  reads itself, directly or through others, is refused with the tables of the cycle; a child of a parent that is refused
-  or whose run failed is not run, and `mason status` says why.
+  reads itself, directly or through others, is refused with the tables of the cycle. A child of a parent whose run failed,
+  or of a parent refused before it was ever built, is not run, and `mason status` says why; a parent refused after an edit
+  to its file keeps re-running from the SQL it was last built from, and carries its children, so `mason status` shows the
+  parent refused and the child current until the file is fixed.
 - **A column is reported as the source's type, whatever Mason holds.** `information_schema`, `pg_attribute`, `pg_typeof`
   and the wire's type OID now say `timetz` (1266), `point`, `money`, `bit`, `macaddr` and the rest where they said `text`,
   so a BI tool stops sending text functions at them. If a saved question or a script of yours read one of these columns as
