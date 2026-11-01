@@ -83,10 +83,23 @@ export interface OpenedShare { user: string; port: number; fingerprint: string; 
 /** `/api/state` `share`, `mason status`: nothing in it logs anyone in. */
 export interface ShareState {
   port: number; fingerprint: string; sessions: number; refusedLogins: number; droppedConnections: number;
-  shares: Array<{ user: string; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; endsAt: string | null; state: string }>;
+  /** `from`: who opened it and holds it, `mason share` (its connection) or the web page (its beats, src/cli/page-share.ts) */
+  shares: Array<{ user: string; from: ShareFrom; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; endsAt: string | null; state: string }>;
 }
 
-interface Held { user: string; secret: string; role: string | null; reads: string; openedAt: string; tunnel: ShareTunnel; ended: ((why: string) => void) | null }
+/** Who opened a share and holds it: `mason share`, or the web page's Connect from anywhere (src/cli/page-share.ts). */
+export type ShareFrom = "command" | "page";
+
+/** The last share that ended, and why: `/api/state` `shareEnded`, so a page that held it says why it is gone. */
+export interface ShareEnded { user: string; from: ShareFrom; why: string; at: string }
+
+interface Held { user: string; from: ShareFrom; secret: string; role: string | null; reads: string; openedAt: string; tunnel: ShareTunnel; ended: ((why: string) => void) | null }
+
+/** How each holder ends its share, as a refusal names it. */
+const HOW_TO_END: Record<ShareFrom, [string, string]> = {
+  command: ["mason share", "Ctrl-C in the terminal running mason share ends it"],
+  page: ["the web page", "Stop sharing on the web page's Overview ends it (mason ui opens the page)"],
+};
 
 export interface ShareDeps {
   /** `checkRoles`: the roles as the listener holds them, each row filter read by the catalog, as `mason start` says them */
@@ -192,16 +205,23 @@ export class RunShares {
   private dropped = 0;
   private lastSaid = -Infinity;
   private unsaid = 0;
+  private lastEnded: ShareEnded | null = null;
 
   constructor(deps: ShareDeps) { this.deps = deps; }
 
   /** Opens a share: the socket when none is open, and a login of its own. Refused: the failure, with the choices when a role is what is missing. */
-  async open(ask: { secret: string; role?: string | undefined }): Promise<OpenedShare | { failure: Failure; choices?: ShareChoice[] }> {
+  async open(ask: { secret: string; role?: string | undefined; from?: ShareFrom }): Promise<OpenedShare | { failure: Failure; choices?: ShareChoice[] }> {
+    const from = ask.from ?? "command";
+    const busy = this.busy(from);
+    if (busy !== null) return { failure: busy };
     const role = shareRole(ask.role, await this.deps.listener.checkRoles());
     if ("failure" in role) return role;
+    // asked again after the wait: a share opened meanwhile is one too many
+    const raced = this.busy(from);
+    if (raced !== null) return { failure: raced };
     const user = `share_${crypto.randomBytes(3).toString("hex")}`;
     // in the list before the first wait, so a share ending meanwhile does not close the socket under this one
-    this.held.set(user, { user, secret: ask.secret, role: role.role, reads: role.reads, openedAt: new Date().toISOString(), tunnel: { state: "opening" }, ended: null });
+    this.held.set(user, { user, from, secret: ask.secret, role: role.role, reads: role.reads, openedAt: new Date().toISOString(), tunnel: { state: "opening" }, ended: null });
     let socket: ShareSocket, fingerprint: string;
     try {
       const made = this.socket ?? this.openSocket();
@@ -218,6 +238,32 @@ export class RunShares {
     this.deps.log(`share: ${user} opened, reading ${role.role === null ? "every synced table (no roles file)" : `as the role ${role.role}`}, TLS required on 127.0.0.1:${socket.port}`);
     return { user, port: socket.port, fingerprint, database: this.deps.database, role: role.role, reads: role.reads };
   }
+
+  /**
+   * ONE SHARE AT A TIME BETWEEN THE PAGE AND THE COMMAND: the page's share is refused while any share is open, and any
+   * share while the page's is (two `mason share`s still meet one socket, as before). The refusal names the share open
+   * and how its holder ends it. null: it may open.
+   */
+  private busy(from: ShareFrom): Failure | null {
+    const open = [...this.held.values()].find((h) => from === "page" || h.from === "page");
+    if (open === undefined) return null;
+    const [who, how] = HOW_TO_END[open.from];
+    return { message: `a share is open already: ${open.user}, opened by ${who}${open.tunnel.host !== undefined ? ` at ${open.tunnel.host}:${open.tunnel.port}` : ""}`, code: "refused",
+      why: "one share at a time between the web page and mason share: each is a public address someone must be watching", fix: `${how}, then share again`,
+      next: [["mason status", "the share open now"]] };
+  }
+
+  /** What a share with no role named reads (`shareRole`'s answer, the one authority): the web page asks it before it asks
+   *  the person, to offer the roles as `mason share` would. */
+  async choices(): Promise<{ role: string | null; reads: string } | { failure: Failure; choices?: ShareChoice[] }> {
+    return shareRole(undefined, await this.deps.listener.checkRoles());
+  }
+
+  /** Who holds a share: null when none is open by that name. */
+  fromOf(user: string): ShareFrom | null { return this.held.get(user)?.from ?? null; }
+
+  /** The last share that ended, and why (`/api/state` `shareEnded`). */
+  get ended(): ShareEnded | null { return this.lastEnded; }
 
   private openSocket(): { opening: Promise<ShareSocket>; fingerprint: string } | Failure {
     const cert = this.deps.certificate();
@@ -285,6 +331,7 @@ export class RunShares {
     const h = this.held.get(user);
     if (h === undefined) return;
     this.held.delete(user);
+    this.lastEnded = { user, from: h.from, why, at: new Date().toISOString() };
     const opening = this.socket?.opening;
     if (opening === undefined) return;
     const socket = await opening;
@@ -307,7 +354,7 @@ export class RunShares {
   state(): ShareState | null {
     if (this.socket === null || this.live === null) return null;
     return { port: this.live.port, fingerprint: this.socket.fingerprint, sessions: this.live.sessions, refusedLogins: this.refused, droppedConnections: this.dropped,
-      shares: [...this.held.values()].map((h) => ({ user: h.user, role: h.role, reads: h.reads, openedAt: h.openedAt, via: h.tunnel.via ?? null, host: h.tunnel.host ?? null, port: h.tunnel.port ?? null,
+      shares: [...this.held.values()].map((h) => ({ user: h.user, from: h.from, role: h.role, reads: h.reads, openedAt: h.openedAt, via: h.tunnel.via ?? null, host: h.tunnel.host ?? null, port: h.tunnel.port ?? null,
         endsAt: h.tunnel.endsAt ?? null, state: h.tunnel.state ?? "opening" })) };
   }
 }

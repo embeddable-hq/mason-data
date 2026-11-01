@@ -121,3 +121,101 @@ test("the browser is the platform's: open on macOS, start on Windows, xdg-open e
   assert.deepEqual(openCommand!("linux", u), ["xdg-open", [u]]);
   assert.deepEqual(openCommand!("freebsd", u), ["xdg-open", [u]]);
 });
+
+// ------------------------------------------------------------------ Connect from anywhere: the page's share endpoint
+
+const { RunShares } = await import("../src/cli/share-run.ts");
+const { PageShares } = await import("../src/cli/page-share.ts" as string).catch(() => ({})) as typeof import("../src/cli/page-share.ts");
+const { NO_ROLES } = await import("../src/duck/grants.ts");
+
+/** A run's command server with the page's share over a fake socket and a fake tunnel (`served`: mason serve's, none). */
+async function shareServer(served: boolean) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-ui-share-"));
+  made.push(root);
+  const logged: string[] = [];
+  let tunnels = 0, stops = 0;
+  const shares = new RunShares({ listener: { openShare: async () => ({ port: 40001, sessions: 0, endSessions: () => 0, close: async () => undefined }), checkRoles: async () => NO_ROLES }, database: "shop", log: (l) => logged.push(l),
+    stopTunnel: () => undefined, certificate: () => ({ cert: Buffer.from("c"), key: Buffer.from("k"), fingerprint: "AA:BB" }) });
+  const pageShares = new PageShares({ shares, home: root, log: (l) => logged.push(l), probe: async () => "same",
+    start: async () => { tunnels++; return { host: "relay.example", port: 41234, endsAt: null, pid: 4242, ended: new Promise<string>(() => undefined), stop: () => { stops++; } }; } });
+  const ctx = { source, port: 0, token: TOKEN, page: true, served, root, home: path.join(root, ".mason"), log: (l: string) => logged.push(l), ...(served ? {} : { shares, pageShares }) } as unknown as RunContext;
+  const server = createRunServer(ctx);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = ctx.port = (server.address() as { port: number }).port;
+  const ask = async (method: string, p: string, o: { body?: unknown; origin?: string | null; cookie?: string | null } = {}) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const cookie = o.cookie === undefined ? `mason_dev_${port}=${TOKEN}` : o.cookie;
+    if (cookie !== null) headers.Cookie = cookie;
+    const origin = o.origin === undefined ? `http://127.0.0.1:${port}` : o.origin;
+    if (origin !== null) headers.Origin = origin;
+    const r = await fetch(`http://127.0.0.1:${port}${p}`, { method, headers, ...(o.body !== undefined ? { body: JSON.stringify(o.body) } : {}) });
+    return { status: r.status, text: await r.text() };
+  };
+  return { shares, logged, ask, tunnels: () => tunnels, stops: () => stops, close: () => server.close() };
+}
+
+const OPEN = { from: "page", confirmed: true };
+
+test("the page's share endpoint behind the guard: another Origin, none, no cookie, another run's cookie, and no confirmation are each refused, nothing opened", async () => {
+  const s = await shareServer(false);
+  try {
+    for (const [what, o] of [["another Origin", { origin: "http://evil.example" }], ["no Origin", { origin: null }], ["no cookie", { cookie: null }], ["another run's cookie", { cookie: `mason_dev_1=${"x".repeat(64)}` }]] as const) {
+      const r = await s.ask("POST", "/api/share", { body: OPEN, ...o });
+      assert.equal(r.status, 403, `${what}: ${r.text}`);
+    }
+    const unconfirmed = await s.ask("POST", "/api/share", { body: { from: "page" } });
+    assert.equal(unconfirmed.status, 400);
+    assert.equal(JSON.parse(unconfirmed.text).failure.message, "nothing was shared: a temporary public address is opened only once the person said yes to it");
+    assert.equal(s.tunnels(), 0, "no tunnel started");
+    assert.equal(s.shares.state(), null, "no share open");
+    // a forged beat or stop, from elsewhere, reaches nothing either
+    assert.equal((await s.ask("DELETE", "/api/share/share_abcdef", { origin: "http://evil.example" })).status, 403);
+  } finally { s.close(); }
+});
+
+test("the page's share opened: its password in the one answer and no log line; a beat holds it; Stop sharing ends it and its tunnel; a beat after says it ended and why", async () => {
+  const s = await shareServer(false);
+  try {
+    const choices = await s.ask("GET", "/api/share/choices");
+    assert.deepEqual(JSON.parse(choices.text), { choices: [], role: null, reads: "every synced table" });
+    const opened = await s.ask("POST", "/api/share", { body: OPEN });
+    assert.equal(opened.status, 200, opened.text);
+    const r = JSON.parse(opened.text) as { user: string; password: string; host: string; port: number; sslmode: string; beatMs: number; boundMs: number };
+    assert.match(r.password, /^mason_share_[0-9a-f]{48}$/);
+    assert.deepEqual([r.host, r.port, r.sslmode, r.beatMs, r.boundMs], ["relay.example", 41234, "require", 15_000, 120_000]);
+    assert.ok(!s.logged.join("\n").includes(r.password), "no log line carries it");
+    assert.ok(!JSON.stringify(s.shares.state()).includes(r.password));
+    const second = await s.ask("POST", "/api/share", { body: OPEN });
+    assert.equal(second.status, 409);
+    assert.match(JSON.parse(second.text).failure.message, new RegExp(`a share is open already: ${r.user}, opened by the web page at relay.example:41234`));
+    assert.equal((await s.ask("POST", `/api/share/${r.user}/beat`)).status, 200);
+    assert.equal((await s.ask("DELETE", `/api/share/${r.user}`)).status, 200);
+    assert.equal(s.stops(), 1, "the tunnel's client stopped");
+    assert.equal(s.shares.state(), null);
+    const late = await s.ask("POST", `/api/share/${r.user}/beat`);
+    assert.equal(late.status, 404);
+    assert.equal(JSON.parse(late.text).failure.message, `the share ${r.user} is not open; it ended: Stop sharing, on the web page`);
+    // a share of mason share's is its command's to end
+    const cmd = await s.shares.open({ secret: "a".repeat(64) });
+    assert.ok("user" in cmd);
+    const refused = await s.ask("DELETE", `/api/share/${cmd.user}`);
+    assert.equal(refused.status, 409);
+    assert.match(JSON.parse(refused.text).failure.message, /is mason share's: Ctrl-C in its terminal ends it/);
+    await s.shares.closeAll("the test");
+  } finally { s.close(); }
+});
+
+test("under mason serve the page's share is refused by the endpoint, in the CLI's Failure, whatever is asked", async () => {
+  const s = await shareServer(true);
+  try {
+    for (const [method, p, body] of [["POST", "/api/share", OPEN], ["GET", "/api/share/choices", undefined], ["POST", "/api/share/share_abcdef/beat", undefined], ["DELETE", "/api/share/share_abcdef", undefined]] as const) {
+      const r = await s.ask(method, p, body === undefined ? {} : { body });
+      assert.equal(r.status, 409, `${method} ${p}: ${r.text}`);
+      const f = JSON.parse(r.text).failure as { code: string; message: string; next: Array<{ command: string }> };
+      assert.equal(f.code, "refused");
+      assert.equal(f.message, "this run is on a server, and has an address of its own: mason share is for a run on a laptop");
+      assert.deepEqual(f.next.map((n) => n.command), ["mason help production"]);
+    }
+    assert.equal(s.tunnels(), 0);
+  } finally { s.close(); }
+});

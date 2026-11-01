@@ -48,6 +48,7 @@ import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, Unsuppo
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import { tunnelReport, type RunShares } from "./share-run.ts";
+import type { PageShares } from "./page-share.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
@@ -84,6 +85,8 @@ export interface RunContext {
   roles?: () => RolesLive;
   /** what `mason share` opens (src/cli/share-run.ts): mason start's run alone; a server has an address of its own */
   shares?: RunShares;
+  /** the web page's Connect from anywhere (src/cli/page-share.ts): the same shares, held by the page's beats; absent with `shares` */
+  pageShares?: PageShares;
   /** the project's folder (sources/, mason.yml) */
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
@@ -225,6 +228,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     ...(ctx.roles ? { roles: rolesState(ctx.roles()) } : {}),
     // the share open now (mason share): where, who, and what was refused there; nothing in it logs anyone in
     share: ctx.shares?.state() ?? null,
+    // the last share that ended and why: a page that held it says so (null before any, and on a server)
+    shareEnded: ctx.shares?.ended ?? null,
     // replication mode: where the stream is, its lag and what it applied (mason status and wait render it, streamLines)
     ...(stream !== null ? { stream } : {}),
   };
@@ -539,7 +544,8 @@ async function openShare(ctx: RunContext, req: http.IncomingMessage, res: http.S
     return;
   }
   const shares = ctx.shares;
-  const body = JSON.parse(await readBody(req, 64 * 1024)) as { secret?: unknown; role?: unknown };
+  const body = JSON.parse(await readBody(req, 64 * 1024)) as { secret?: unknown; role?: unknown; from?: unknown; confirmed?: unknown };
+  if (body.from === "page") { await openPageShare(ctx, body, res); return; }
   if (typeof body.secret !== "string" || !/^[0-9a-f]{64}$/.test(body.secret)) throw new Refusal(400, "send { secret, role? }: the password's SHA-256 in hex");
   if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "role is a role's name, or left out");
   let gone = false;
@@ -553,6 +559,26 @@ async function openShare(ctx: RunContext, req: http.IncomingMessage, res: http.S
   shares.onEnd(opened.user, (why) => { res.end(`${JSON.stringify({ ended: why })}\n`); });
   res.writeHead(200, { "Content-Type": "application/x-ndjson" });
   res.write(`${JSON.stringify(opened)}\n`);
+}
+
+/** The refusal of a page's share where there is none to open (`mason serve`): the command's own words. */
+const SERVED_SHARE: Failure = { message: "this run is on a server, and has an address of its own: mason share is for a run on a laptop", code: "refused", next: [["mason help production", "reaching a server's Postgres API"]] };
+
+/**
+ * `POST /api/share` { from: "page", confirmed: true, role? }: the web page's Connect from anywhere (src/cli/page-share.ts),
+ * answered ONCE with the share and its password, which nothing here keeps; the page's beats hold it from then on.
+ * `confirmed` is the person's yes to a public address, which the page asks for: a body without it opens nothing.
+ */
+async function openPageShare(ctx: RunContext, body: { role?: unknown; confirmed?: unknown }, res: http.ServerResponse): Promise<void> {
+  if (ctx.pageShares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
+  if (body.confirmed !== true) {
+    sendFailure(res, 400, { message: "nothing was shared: a temporary public address is opened only once the person said yes to it", code: "usage", fix: "send { from: \"page\", confirmed: true, role? }: the page's Connect from anywhere asks first" });
+    return;
+  }
+  if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "role is a role's name, or left out");
+  const r = await ctx.pageShares.open({ role: body.role as string | undefined });
+  if ("failure" in r) { sendFailure(res, statusOf(r.failure), r.failure, r.choices ? { choices: r.choices } : {}); return; }
+  sendJson(res, 200, r);
 }
 
 /**
@@ -702,6 +728,25 @@ export function createRunServer(ctx: RunContext): http.Server {
           await openTunnel(ctx, tunnels, req, res);
         } else if (req.method === "POST" && url.pathname === "/api/share") {
           await openShare(ctx, req, res);
+        } else if (req.method === "GET" && url.pathname === "/api/share/choices") {
+          // what a share with no role named reads, or the roles to choose from: the page asks before it asks the person
+          if (ctx.pageShares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
+          const r = await ctx.pageShares.choices();
+          if ("failure" in r && r.choices === undefined) { sendFailure(res, statusOf(r.failure), r.failure); return; }
+          sendJson(res, 200, "failure" in r ? { choices: r.choices } : { choices: [], role: r.role, reads: r.reads });
+        } else if ((req.method === "POST" && /^\/api\/share\/[^/]+\/beat$/.test(url.pathname)) || (req.method === "DELETE" && /^\/api\/share\/[^/]+$/.test(url.pathname))) {
+          // the page's share: a beat holds it, a DELETE is Stop sharing; a share of mason share's is its command's to end
+          if (ctx.pageShares === undefined || ctx.shares === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
+          let user: string;
+          try { user = decodeURIComponent(url.pathname.split("/")[3]!); }
+          catch { throw new Refusal(400, `${url.pathname} does not name a share`); }
+          const from = ctx.shares.fromOf(user);
+          if (from === "command") { sendFailure(res, 409, { message: `the share ${user} is mason share's: Ctrl-C in its terminal ends it`, code: "refused" }); return; }
+          const ended = ctx.shares.ended;
+          const why = ended?.user === user ? `: ${ended.why}` : "";
+          const ok = req.method === "DELETE" ? await ctx.pageShares.stop(user) : ctx.pageShares.beat(user);
+          if (!ok) { sendFailure(res, 404, { message: `the share ${user} is not open${why === "" ? "" : `; it ended${why}`}`, code: "not_found", fix: "Connect from anywhere opens a new one, with a new address and password" }); return; }
+          sendJson(res, 200, { ok: true });
         } else if (req.method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
           // what the command knows of its tunnel, as it knows it: mason status says it, and the run stops the client
           const body = tunnelReport(JSON.parse(await readBody(req, 64 * 1024)));

@@ -15,6 +15,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Connect from anywhere, on the web page.** The Overview's Connect card opens what `mason share` opens — a temporary
+  public address, TLS required, a password shown once — after asking once, with a role picker where `mason/roles.yml`
+  has several roles, and Stop sharing beside it. The share lasts while the page is open: two minutes after it closes or
+  sleeps, the share and its tunnel end. One share at a time between the page and `mason share`. Not offered under
+  `mason serve`.
 - **Generated tables: a table declared in SQL, kept current by Mason.** One file per table in `mason/generated_tables/`,
   committed beside the sources file, with `kind: scheduled`, `target_lag:` and `sql:`; `mason help generated` is the
   guide. A table re-runs its whole SQL once a base has changed and its target comes due, inside Mason, reading nothing from
