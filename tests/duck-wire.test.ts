@@ -136,6 +136,9 @@ const DDL = [
   'CREATE TABLE public.rowid_cased (id INTEGER PRIMARY KEY, "RowId" INTEGER)',
   'INSERT INTO public.rowid_cased SELECT range::INTEGER, 5 FROM range(1, 7)',
   "INSERT INTO public.late_c SELECT range::INTEGER, 'c' || range FROM range(50)",
+  // a char(5) as the copy holds it: Postgres's text of it, padded
+  "CREATE TABLE public.chars (id INTEGER PRIMARY KEY, ch VARCHAR)",
+  "INSERT INTO public.chars VALUES (1, 'a b  '), (2, 'c0   '), (3, 'c1   ')",
   "CREATE TABLE public.jq (id INTEGER PRIMARY KEY, v JSON)",
   jqInsert(jsonbText),
   "CREATE TABLE public.jdocs (id INTEGER PRIMARY KEY, b JSON, j JSON)",
@@ -192,6 +195,8 @@ const PG_DDL = [
   'CREATE TABLE public.rowid_cased (id integer PRIMARY KEY, "RowId" integer)',
   'INSERT INTO public.rowid_cased SELECT g, 5 FROM generate_series(1, 6) g',
   "INSERT INTO public.late_c SELECT g, 'c' || g FROM generate_series(0, 49) g",
+  "CREATE TABLE public.chars (id integer PRIMARY KEY, ch char(5))",
+  "INSERT INTO public.chars VALUES (1, 'a b'), (2, 'c0'), (3, 'c1')",
   "CREATE TABLE public.late_p (c integer, line integer, note text, PRIMARY KEY (c, line))",
   "INSERT INTO public.late_p SELECT g % 50, g / 50, 'n' || g FROM generate_series(0, 199) g",
   "CREATE TABLE public.late_n (id integer, c integer)",
@@ -256,6 +261,7 @@ const schema: PgSchema = {
     { name: "late", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }, { name: "k", type: "int4" }, { name: "c", type: "int4" }] },
     { name: "late_c", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "name", type: "text" }] },
+    { name: "chars", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "ch", type: "text", spelled: "character(5)" }] },
     { name: "late_p", primaryKey: ["c", "line"], joins: [], columns: [{ name: "c", type: "int4" }, { name: "line", type: "int4" }, { name: "note", type: "text" }] },
     { name: "late_n", primaryKey: [], joins: [], columns: [{ name: "id", type: "int4" }, { name: "c", type: "int4" }] },
     { name: "late_d", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "w", type: "text" }] },
@@ -433,7 +439,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -3070,6 +3076,83 @@ test("a set operation's ORDER BY sorts its column as Postgres resolved it, and a
   } finally { await c.end(); }
 });
 
+/** each statement's answer against Postgres's (PGlite's), or the error each raises as `code: message`; `bag` compares the
+ *  rows as a set, where ties leave their order to each engine; the statements that differ, with both answers */
+async function unlike(c: pg.Client, statements: ReadonlyArray<readonly [string, "ordered" | "bag"]>): Promise<string[]> {
+  const differ: string[] = [];
+  for (const [sql, how] of statements) {
+    const as = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: how === "bag" ? r.rows.map((x) => JSON.stringify(x)).sort() : r.rows });
+    const got = await answer(c, sql).then(as, (e: pg.DatabaseError) => `${e.code}: ${e.message}`);
+    const want = await postgres(sql).then(as, (e: { code: string; message: string }) => `${e.code}: ${e.message}`);
+    if (!util.isDeepStrictEqual(got, want)) differ.push(`${sql}\n    mason:    ${JSON.stringify(got).slice(0, 300)}\n    postgres: ${JSON.stringify(want).slice(0, 300)}`);
+  }
+  return differ;
+}
+
+test("a TABLE statement is found in Postgres's analysis: under FETCH … WITH TIES, and as a set operation's SELECT", async () => {
+  const c = await client();
+  try {
+    // `TABLE t` writes its `*` at no offset: its query is told by what it reads and its own limits
+    assert.deepEqual(await unlike(c, [
+      ["TABLE late_c ORDER BY name FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT count(*) FROM (TABLE late ORDER BY c FETCH FIRST 1 ROWS WITH TIES) s", "ordered"],
+      ["SELECT count(*), min(s.id) FROM (TABLE late ORDER BY c FETCH FIRST 1 ROWS WITH TIES) s UNION ALL SELECT count(*), min(s.id) FROM (TABLE late ORDER BY c DESC FETCH FIRST 2 ROWS WITH TIES) s", "bag"],
+      ["SELECT * FROM late_c UNION ALL TABLE late_c ORDER BY 1 LIMIT 3", "ordered"],
+      ["SELECT * FROM late_c UNION ALL TABLE late_c ORDER BY 2 DESC LIMIT 3", "ordered"],
+      ["TABLE late_c UNION ALL TABLE late_c ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT * FROM late_c UNION ALL TABLE late_c ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT count(*) FROM (TABLE late_c UNION ALL TABLE late_c ORDER BY name FETCH FIRST 3 ROWS WITH TIES) s", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("a set operation's SELECTs are the column Postgres resolved: a char(n) beside a text, an integer beside a quotient", async () => {
+  const c = await client();
+  try {
+    // a char(5) of a text column is its text without the padding, for the ties, a UNION, a GROUP BY and the text; an
+    // integer of a numeric column beside a quotient keeps the quotient's every digit
+    assert.deepEqual(await unlike(c, [
+      ["SELECT lc.name AS x FROM late_c lc WHERE lc.id < 3 UNION ALL SELECT ch.ch FROM chars ch ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT lc.name AS x FROM late_c lc WHERE lc.id < 3 UNION ALL SELECT ch.ch FROM chars ch ORDER BY 1, 1 DESC", "ordered"],
+      ["SELECT s.x, count(*) FROM (SELECT lc.name AS x FROM late_c lc WHERE lc.id < 3 UNION ALL SELECT ch.ch FROM chars ch) s GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT count(*) FROM (SELECT lc.name AS x FROM late_c lc WHERE lc.id < 3 UNION SELECT ch.ch FROM chars ch) s", "ordered"],
+      ["SELECT lc.name AS x FROM late_c lc WHERE lc.id < 3 INTERSECT SELECT ch.ch FROM chars ch ORDER BY 1", "ordered"],
+      ["SELECT r.a / r.b AS q FROM ratios r UNION ALL SELECT r.n FROM ratios r ORDER BY 1 NULLS FIRST", "bag"],
+      ["SELECT r.a / r.b AS q FROM ratios r UNION ALL SELECT 1 ORDER BY 1 NULLS FIRST FETCH FIRST 2 ROWS WITH TIES", "bag"],
+      // read outside the union, compared by its exact value (two quotients equal to 17 digits are two)
+      ["SELECT DISTINCT u.q FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT 0) u", "bag"],
+      // (an integer equal to a quotient is one group with it, shown in either spelling: `mixed-scale-numeric`)
+      ["SELECT u.q, count(*) FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT b.id + 10 FROM bigdec b) u GROUP BY 1", "bag"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("FETCH … WITH TIES reads its count and offset where no row is: a negative one raises", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT l.id FROM late l WHERE false ORDER BY l.c FETCH FIRST -1 ROWS WITH TIES", "ordered"],
+      ["SELECT l.id FROM late l WHERE false ORDER BY l.c OFFSET -1 FETCH FIRST 2 ROWS WITH TIES", "ordered"],
+      ["SELECT l.id FROM late l WHERE false ORDER BY l.c FETCH FIRST (SELECT -1) ROWS WITH TIES", "ordered"],
+      ["SELECT l.id FROM late l WHERE l.c > 1000 ORDER BY l.c FETCH FIRST (SELECT min(l2.c) - 5 FROM late l2) ROWS WITH TIES", "ordered"],
+      ["SELECT count(*) FROM (SELECT l.id FROM late l WHERE false ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES) s", "ordered"],
+      ["SELECT count(*) FROM (SELECT l.id FROM late l WHERE false ORDER BY l.c FETCH FIRST (SELECT NULL::int) ROWS WITH TIES) s", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("FETCH … WITH TIES over a derived table or a WITH query read by a * keeps the exact numbers' cells it passes through", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT * FROM (SELECT r.id, r.a / r.b AS q FROM ratios r) s ORDER BY 2 DESC, 1 FETCH FIRST 2 ROWS WITH TIES", "bag"],
+      ["SELECT * FROM (SELECT r.id, r.a / r.b AS q FROM ratios r) s ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES", "bag"],
+      ["WITH s AS (SELECT r.id, r.a / r.b AS q FROM ratios r) SELECT * FROM s ORDER BY 2 DESC, 1 FETCH FIRST 2 ROWS WITH TIES", "bag"],
+      ["SELECT * FROM (SELECT r.id, avg(r.a) AS m FROM ratios r GROUP BY 1) s ORDER BY 2 NULLS FIRST, 1 OFFSET 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("a computed key and a merged column in a prepared statement run after a SET, and in two session zones", async () => {
   const c = await client();
   try {
@@ -3655,8 +3738,8 @@ test("every way out a numeric refusal names answers as Postgres does; a numeric 
         "SELECT count(*) FROM (VALUES ('1e-37'::numeric), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0"],
       ["SELECT count(*) FROM (VALUES (1 / 3.0), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0", /compute the value in the query that compares it/,
         "SELECT count(*) FROM (VALUES (1, 3.0), (0, 1)) v(a, b), ratios r WHERE r.id = 1 AND v.a / v.b = 0"],
-      ["SELECT DISTINCT u.q FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT 0) u", /compute the value in the query that compares it/,
-        "SELECT DISTINCT u.x / 1 AS q FROM (SELECT b.x FROM bigdec b UNION ALL SELECT 0) u"],
+      // (a UNION ALL of a quotient beside an integer carries the quotient exactly, PR 231: its DISTINCT is answered, in
+      // "a set operation's SELECTs are the column Postgres resolved …")
       // a value compared where no exact key can be placed
       ["SELECT b.x / 1 AS q FROM bigdec b UNION SELECT 0 / 1.0", /SELECT DISTINCT over the UNION ALL/,
         "SELECT DISTINCT u.q FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT 0 / 1.0) u"],

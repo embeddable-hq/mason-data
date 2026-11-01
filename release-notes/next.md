@@ -149,13 +149,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `UNION`, `INTERSECT` or `EXCEPT` with `WITH TIES` failed with an internal error; inside an `IN`, a scalar subquery,
   `ARRAY(…)` or an arm of a `UNION` it failed with "returns 2 columns", and `SELECT s.*, 1 AS x` over it read the wrong
   last column; a count of `NULL` kept no row and a negative one answered nothing, where Postgres keeps every row and
-  raises `2201W` (a negative `OFFSET` now raises Postgres's `2201X`); a fractional count was not rounded; a numeric
-  column under it lost its decimals. A sort by a window function's or a set-returning function's column or by
+  raises `2201W` (a negative `OFFSET` now raises Postgres's `2201X`), also where no row matches; a fractional count was
+  not rounded; a numeric column under it lost its decimals, also through `SELECT * FROM (…) s` or a `WITH` query. A
+  `TABLE t` statement under it, or as a `SELECT` of a `UNION` with an `ORDER BY`, now answers. A sort by a window
+  function's or a set-returning function's column or by
   `random()`, and `SELECT DISTINCT` or `DISTINCT ON` with `WITH TIES`, now answer where they were refused or failed. Over
   a table a user's role filters it is refused by name (`roles`), with the way out. Nothing to do on upgrade.
 - **A sort by a `UNION`'s column or by a row column answers as Postgres does, or is refused.** In a `UNION`,
   `INTERSECT` or `EXCEPT`, a `citext` column beside a `text` one is `text`, and `ORDER BY` now sorts it as text, where
-  it was sorted without regard to case as the first `SELECT`'s `citext`. A sort by a column that is a row (`SELECT
+  it was sorted without regard to case as the first `SELECT`'s `citext`. A `char(n)` beside a `text` is its text
+  without the padding (`'a b'`, never `'a b  '`), so a `UNION`, a `GROUP BY` and the text read one value, as Postgres
+  does. A numeric division beside an integer (`SELECT a / 3 … UNION ALL SELECT 1`) shows Postgres's digits, where it
+  showed a rounded number. A sort by a column that is a row (`SELECT
   ROW(a, b) AS r … ORDER BY r`, `SELECT t … ORDER BY 1`) sorted by the row's text (`(0,100)` before `(0,50)`): it is
   now refused by name (`row-value`), with the way out, as `ORDER BY ROW(a, b)` already was. Sort by the row's columns
   instead. Nothing to do on upgrade.

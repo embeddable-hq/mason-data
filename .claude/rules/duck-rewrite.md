@@ -196,6 +196,17 @@ paths:
   to a ROW output is refused by `row-value` (`rowKey`), as a row written as a key is: the list writes a row as its
   text, which sorts unlike the row. Detector: tests/duck-wire.test.ts "FETCH … WITH TIES answers as Postgres does …"
   and "a set operation's ORDER BY sorts its column as Postgres resolved it …".
+  PR 231's second round named three more decisions. First, **a part of the statement is found in Postgres's analysis by
+  the evidence both hold, never by an offset alone** (`picked`). `TABLE t` writes its `*` at no offset, so its query is
+  told by the FROM it reads and its limits' offsets, and a set operation of it by its arms where they hold offsets.
+  Second, **a set operation's SELECTs are its column as Postgres resolved it** (`castArms`, before anything reads the
+  arms): a char(n) arm of a text column is cast to text, so its padding is gone from the union, the ties and the text;
+  an integer arm of a numeric column is exact as it is (`exactArms`). Third, **FETCH … WITH TIES reads its count and
+  offset where no row is**: the bound is a materialized WITH query, and the ranked rows are UNIONed with the bound's own
+  row where its count is negative (never, past its CASE), so DuckDB cannot skip the bound when the rows are none (2201W
+  over `WHERE false`). The cells a lone `*` passes through (`exposedCells`) ride the wrapper after its outputs.
+  Detector: tests/duck-wire.test.ts "a TABLE statement is found …", "a set operation's SELECTs are the column Postgres
+  resolved …", "… reads its count and offset where no row is …" and "… keeps the exact numbers' cells it passes through".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its

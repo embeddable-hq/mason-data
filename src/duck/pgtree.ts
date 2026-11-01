@@ -415,7 +415,18 @@ export interface QueryOutputs {
  * they carry its first SELECT's offsets.
  */
 export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
+  return analysedQueries(tree).byOffset;
+}
+
+/**
+ * Each SELECT's outputs, by any offset its targets hold (`outputsByLocation`), and those of each SELECT whose outputs hold
+ * none: `TABLE t`, whose `*` the grammar writes at no offset, so Postgres's expansion of it is at none either. Such a
+ * one is known by the FROM items it reads, by the names its range table gives them (`eref`), in order, and by the
+ * offsets its own LIMIT and OFFSET hold (`limits`).
+ */
+export function analysedQueries(tree: TreeValue): { byOffset: Map<number, QueryOutputs>; unplaced: Array<{ from: string[]; limits: number[]; outputs: QueryOutputs }> } {
   const found = new Map<number, QueryOutputs>();
+  const unplaced: Array<{ from: string[]; limits: number[]; outputs: QueryOutputs }> = [];
   const visit = (v: TreeValue): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x); return; }
     if (!isNode(v)) return;
@@ -438,33 +449,50 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
         joins,
         keys: keysOf(v.targetList, v.sortClause, v.distinctClause, rtable),
       };
+      let placed = false;
       const offsets = (x: TreeValue): void => {
         if (Array.isArray(x)) { x.forEach(offsets); return; }
         // (a subquery in a target is a query of its own, which registers its own offsets)
         if (!isNode(x) || x._node === "QUERY") return;
         const loc = num(x.location);
-        if (loc !== null && loc >= 0 && !found.has(loc)) found.set(loc, outputs);
+        if (loc !== null && loc >= 0) { placed = true; if (!found.has(loc)) found.set(loc, outputs); }
         const inner = ungrouped(x, rtable);
         if (inner !== x) { offsets(inner); return; }
         for (const [k, y] of Object.entries(x)) if (k !== "_node") offsets(y);
       };
       offsets(exprs);
+      if (!placed) {
+        const from = rtable.filter((rte) => num(rte.rtekind ?? null) !== RTE_JOIN).map((rte) => { const eref = rte.eref ?? null; return isNode(eref) && typeof eref.aliasname === "string" ? eref.aliasname : ""; });
+        unplaced.push({ from, limits: limitOffsets(v), outputs });
+      }
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };
   visit(tree);
-  return found;
+  return { byOffset: found, unplaced };
+}
+
+/** the offsets a query's own LIMIT and OFFSET hold (a count of `FETCH FIRST ROW` the grammar writes at none) */
+function limitOffsets(q: TreeNode): number[] {
+  const held = (x: TreeValue | undefined): number[] => {
+    if (Array.isArray(x)) return x.flatMap(held);
+    if (x === undefined || !isNode(x) || x._node === "QUERY") return [];
+    const loc = num(x.location);
+    return [...(loc !== null && loc >= 0 ? [loc] : []), ...Object.entries(x).flatMap(([k, y]) => k === "_node" ? [] : held(y))];
+  };
+  return [...held(q.limitCount), ...held(q.limitOffset)];
 }
 
 /**
  * EACH SET OPERATION'S OWN OUTPUTS, AS POSTGRES RESOLVED THEM: a column's type, typmod and collation are the set
  * operation's (`SELECT <citext> … UNION ALL SELECT <text> …` is text, its first SELECT's is citext), never its first
  * SELECT's. Each is known by the SELECTs it combines, in order: the offsets their outputs hold (a SELECT that is a set
- * operation of its own, with an ORDER BY or a LIMIT, is one of them, by its first SELECT's). Each column is typed as
- * no table's column: what is known of it is the set operation's alone.
+ * operation of its own, with an ORDER BY or a LIMIT, is one of them, by its first SELECT's; a `TABLE t` by none, as
+ * its outputs hold none), and the offsets its own LIMIT and OFFSET hold. Each column is typed as no table's column:
+ * what is known of it is the set operation's alone.
  */
-export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; columns: Array<Typed | null> }> {
-  const found: Array<{ arms: number[][]; columns: Array<Typed | null> }> = [];
+export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null> }> {
+  const found: Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null> }> = [];
   const held = (x: TreeValue | undefined): number[] => {
     if (Array.isArray(x)) return x.flatMap(held);
     // (a subquery in an output is a query of its own)
@@ -497,7 +525,7 @@ export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; 
         const { relation: _r, column: _c, functionColumn: _f, ...own } = typedOf(e, type, [rtable.filter(isNode)]);
         return { ...own, qualifier: null, renamed: null };
       });
-      found.push({ arms, columns });
+      found.push({ arms, limits: limitOffsets(v), columns });
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };

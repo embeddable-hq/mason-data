@@ -32,7 +32,7 @@ import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { caseTwins, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
+import { analysedQueries, caseTwins, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
@@ -496,7 +496,52 @@ class Rewriter {
     if (Array.isArray(v)) { for (const x of v) this.adopt(x); return; }
     if (v === null || typeof v !== "object") return;
     if (isNode(v)) this.original.add(bodyOf(v));
+    if (isNode(v) && kindOf(v) === "SelectStmt") this.unplacedSelect(bodyOf(v));
     for (const [k, x] of Object.entries(isNode(v) ? bodyOf(v) : v as Body)) this.adopt(armOf(k, x) ?? x);
+  }
+
+  /** a SELECT whose targets hold no offset (`TABLE t`): what else knows its query in Postgres's analysis
+   *  (`analysedQuery`), by its targets, which the rewrite keeps as they are (a list made anew holds the same targets) */
+  private readonly unplacedTargets = new WeakMap<Body, { from: string[]; limits: number[] }>();
+
+  private unplacedSelect(b: Body): void {
+    const targets = b.targetList;
+    if (!Array.isArray(targets) || targets.length === 0 || this.offsetsIn(targets).length > 0) return;
+    if (!targets.every((t) => isNode(t) && hasStar(bodyOf(t).val))) return;
+    const from = ((b.fromClause ?? []) as AstNode[]).map((f) => kindOf(f) === "RangeVar" ? String(bodyOf(f).alias?.aliasname ?? bodyOf(f).relname) : null);
+    if (from.length === 0 || from.some((f) => f === null)) return;
+    for (const t of targets as AstNode[]) this.unplacedTargets.set(bodyOf(t), { from: from as string[], limits: this.offsetsIn([b.limitCount, b.limitOffset]) });
+  }
+
+  /** the offsets a part of the statement holds, as Postgres's analysis numbers them (a subquery's are its own) */
+  private offsetsIn(n: unknown): number[] {
+    if (Array.isArray(n)) return n.flatMap((x) => this.offsetsIn(x));
+    if (n === null || typeof n !== "object") return [];
+    return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? (x >= 0 ? [x - this.base] : []) : k === "subselect" || k === "SelectStmt" ? [] : this.offsetsIn(x));
+  }
+
+  /**
+   * WHICH OF POSTGRES'S ANALYSED QUERIES A PART OF THE STATEMENT IS (the class "a fact looked up by an offset the parse
+   * does not hold", PR 231: `TABLE t` writes its `*` at none, so its query, and a set operation of it, were found by
+   * nothing): each candidate is scored by the evidence both sides hold, a side that holds none no evidence either way;
+   * one that holds some is that many points where it agrees and out where it does not. The best are the one where they
+   * are what is read of them alike (`same`: two `TABLE t` of one table are one expansion); else none is.
+   */
+  private picked<T>(candidates: readonly T[], evidence: (c: T) => Array<{ parse: number[]; analysed: number[] }>, same: (c: T) => string): T | undefined {
+    const scored = candidates.map((c) => {
+      let score = 0;
+      for (const e of evidence(c)) {
+        if (e.parse.length === 0 || e.analysed.length === 0) continue;
+        if (!e.parse.some((o) => e.analysed.includes(o))) return { c, score: -1 };
+        score++;
+      }
+      return { c, score };
+    }).filter((s) => s.score >= 0);
+    const best = Math.max(...scored.map((s) => s.score));
+    const top = scored.filter((s) => s.score === best);
+    if (top.length === 0) return undefined;
+    const first = same(top[0]!.c);
+    return top.every((s) => same(s.c) === first) ? top[0]!.c : undefined;
   }
 
   /** `clone` for the helpers outside the class */
@@ -978,16 +1023,19 @@ class Rewriter {
     return out;
   }
 
-  /** a SELECT's query in Postgres's analysis, found by an offset its targets hold, or undefined for a list with none */
+  /** a SELECT's query in Postgres's analysis, found by an offset its targets hold (a subquery's targets are its own);
+   *  one whose targets hold none (`TABLE t`) by the FROM it reads and its own limits' offsets (`picked`); else undefined */
   private analysedQuery(targets: readonly AstNode[]): QueryOutputs | undefined {
-    const held = (n: unknown): number[] => {
-      if (Array.isArray(n)) return n.flatMap(held);
-      if (n === null || typeof n !== "object") return [];
-      // (a subquery's targets are its own: this SELECT's offsets alone find this SELECT's query)
-      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? [x] : k === "subselect" || k === "SelectStmt" ? [] : held(x));
-    };
-    return held(targets).map((l) => this.analysed.get(l - this.base)).find((q) => q !== undefined);
+    const held = this.offsetsIn(targets);
+    if (held.length > 0) return held.map((l) => this.analysed.get(l)).find((q) => q !== undefined);
+    const unplaced = targets.length === 0 ? undefined : this.unplacedTargets.get(bodyOf(targets[0]!));
+    if (unplaced === undefined) return undefined;
+    this.unplaced ??= analysedQueries(this.analysisTree).unplaced;
+    const candidates = this.unplaced.filter((q) => q.from.length === unplaced.from.length && q.from.every((f, i) => f === unplaced.from[i]));
+    return this.picked(candidates, (q) => [{ parse: unplaced.limits, analysed: q.limits }],
+      (q) => JSON.stringify([q.outputs.columns, [...q.outputs.widths], q.outputs.joins, q.outputs.keys]))?.outputs;
   }
+  private unplaced: ReturnType<typeof analysedQueries>["unplaced"] | undefined;
 
   /**
    * A NATURAL JOIN WRITTEN AS THE COLUMNS POSTGRES MERGED, in every statement: `USING (<them>)`, or `ON true` where it
@@ -1220,7 +1268,7 @@ class Rewriter {
     // citext beside a text is text; a row is refused, as any row key is: `rowKey`)
     let resolved: Array<Typed | null> | undefined;
     const typeAs = (key: AstNode, out: Output): void => {
-      resolved ??= this.setOperationColumns(b);
+      resolved ??= this.setOperationColumns(b) ?? [];
       const own = resolved[out.at] ?? null;
       if (own === null) { this.typedLike.set(bodyOf(key), out.value); return; }
       this.rowKey({ ...out, row: own.node === "ROWEXPR" || (own.node === "VAR" && this.isRowType(own.type)) });
@@ -1412,8 +1460,12 @@ class Rewriter {
     delete b.limitCount;
     delete b.limitOffset;
     b.limitOption = "LIMIT_OPTION_DEFAULT";
+    // the hidden cells a lone `*` passes through from the FROM item it reads (`exactThrough`), after its columns: the
+    // statement's own after its outputs, so the exact programs read them where the store looks (`exposedCells`)
+    const lone = !setOperation && targets.length === 1 && hasStar(bodyOf(targets[0]!).val);
+    const cells = Array.from({ length: lone ? this.exposedCells({ SelectStmt: b }) : 0 }, (_c, j) => `__mason_cell_${j}`);
     if (hidden.length > 0) b.targetList = [...(b.targetList as AstNode[]), ...hidden.map((h, j) => ({ ResTarget: { name: `__mason_ties_k${j + 1}`, val: h } }))];
-    const columns = [...outputs.map((o) => COLUMN(o.at)), ...hidden.map((_h, j) => `__mason_ties_k${j + 1}`)];
+    const columns = [...outputs.map((o) => COLUMN(o.at)), ...cells, ...hidden.map((_h, j) => `__mason_ties_k${j + 1}`)];
     const plain = (body: Body): AstNode => ({ SelectStmt: { ...body, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } });
     const read = (...f: string[]): AstNode => ({ ColumnRef: { fields: f.map(S) } });
     const target = (val: AstNode, name?: string): AstNode => ({ ResTarget: { ...(name !== undefined ? { name } : {}), val } });
@@ -1421,6 +1473,7 @@ class Rewriter {
     const ranked = plain({
       targetList: [
         ...outputs.map((o) => target(read(COLUMN(o.at)))),
+        ...cells.map((c) => target(read(c))),
         target({ FuncCall: { funcname: [S("rank")], over: { name: W, frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } }, RANK),
         target({ FuncCall: { funcname: [S("row_number")], over: { name: W, frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } }, ROW),
       ],
@@ -1438,46 +1491,97 @@ class Rewriter {
       fromClause: [{ RangeSubselect: { subquery: given, alias: { aliasname: "v" } } }],
     });
     const [n, o] = [(): AstNode => read(BOUND, "n"), (): AstNode => read(BOUND, "o")];
+    // THE LIMITS ARE READ WHETHER OR NOT A ROW IS (Postgres raises 2201W over no rows too): beside the ranked rows, the
+    // bound's own row where its count is negative, which it never is past its CASE — so DuckDB reads the bound even
+    // where it knows the rows are none (`WHERE false`). The bound is a WITH query of its own, materialized, so the
+    // count and the offset are read once for both
+    const check = plain({
+      targetList: [...outputs, ...cells, RANK, ROW].map((): AstNode => target({ A_Const: { isnull: true } })),
+      fromClause: [{ RangeVar: { relname: BOUND, inh: true, relpersistence: "p" } }],
+      whereClause: op("<", n(), intConst(0)),
+    });
+    const ranks: AstNode = { SelectStmt: { op: "SETOP_UNION", all: true, larg: bodyOf(ranked), rarg: bodyOf(check), limitOption: "LIMIT_OPTION_DEFAULT" } };
     const outer = plain({
-      targetList: outputs.map((out) => target(read(TIES, COLUMN(out.at)), out.name)),
-      fromClause: [{ RangeSubselect: { subquery: ranked, alias: { aliasname: TIES } } }, { RangeSubselect: { subquery: limits, alias: { aliasname: BOUND } } }],
+      withClause: { ctes: [{ CommonTableExpr: { ctename: BOUND, ctematerialized: "CTEMaterializeAlways", ctequery: limits } }] },
+      targetList: [...outputs.map((out) => target(read(TIES, COLUMN(out.at)), out.name)), ...cells.map((c) => target(read(TIES, c), c))],
+      fromClause: [{ RangeSubselect: { subquery: ranks, alias: { aliasname: TIES } } }, { RangeVar: { relname: BOUND, inh: true, relpersistence: "p" } }],
       whereClause: and([op(">", read(TIES, ROW), o()), or([isNull(n()), and([op(">", n(), intConst(0)), op("<=", op("-", read(TIES, RANK), o()), n())])])]),
       sortClause: [{ SortBy: { node: read(TIES, ROW), sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }],
     });
-    for (const x of [outer, ranked, given, limits]) this.done.add(bodyOf(x));
+    for (const x of [outer, ranked, given, limits, check, ranks]) this.done.add(bodyOf(x));
     this.wroteTies = true;
     return outer;
   }
 
-  /**
-   * A SET OPERATION'S COLUMNS AS POSTGRES RESOLVED THEM (`setOperationOutputs`, src/duck/pgtree.ts): its analysis, known
-   * by the SELECTs it combines, each by the offsets its outputs hold. Its arms are told as Postgres's analysis tells
-   * them: an arm that is a set operation of its own is one SELECT where it has an ORDER BY, a LIMIT, a lock or a WITH.
-   */
-  private setOperationColumns(b: Body): Array<Typed | null> {
-    const unwrapped = (x: unknown): Body => isNode(x) ? bodyOf(x) : x as Body;
-    const setOp = (s: Body): boolean => s.op !== undefined && s.op !== "SETOP_NONE";
+  /** a set operation's SELECTs as Postgres's analysis tells them: an arm that is a set operation of its own is one
+   *  SELECT where it has an ORDER BY, a LIMIT, a lock or a WITH (libpg-query writes the arms unwrapped) */
+  private setOperationArms(b: Body): Body[] {
     const arms: Body[] = [];
     const leaves = (s: Body): void => {
       const own = ["sortClause", "limitCount", "limitOffset", "lockingClause", "withClause"].some((k) => s[k] !== undefined);
-      if (setOp(s) && (s === b || !own)) { leaves(unwrapped(s.larg)); leaves(unwrapped(s.rarg)); return; }
+      if (isSetOp(s) && (s === b || !own)) { leaves(unwrappedArm(s.larg)); leaves(unwrappedArm(s.rarg)); return; }
       arms.push(s);
     };
     leaves(b);
-    const held = (n: unknown): number[] => {
-      if (Array.isArray(n)) return n.flatMap(held);
-      if (n === null || typeof n !== "object") return [];
-      // (a subquery's outputs are its own)
-      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" && x >= 0 ? [x - this.base] : k === "subselect" || k === "SelectStmt" ? [] : held(x));
-    };
-    // (a VALUES is known by its rows, as Postgres's analysis knows it)
-    const offsets = arms.map((a) => { let first = a; while (setOp(first)) first = unwrapped(first.larg); return held(first.targetList ?? first.valuesLists ?? []); });
+    return arms;
+  }
+
+  /**
+   * A SET OPERATION'S COLUMNS AS POSTGRES RESOLVED THEM (`setOperationOutputs`, src/duck/pgtree.ts): its analysis, known
+   * by the SELECTs it combines (`setOperationArms`), each by the offsets its outputs hold (a VALUES by its rows'; a
+   * `TABLE t` by none), and by the offsets its own limits hold, the one the most of them agree on (`picked`). A rewrite
+   * that cannot be written without them refuses to guess (`required`); one that only reads them where they are found
+   * (`castArms`) is given null.
+   */
+  private setOperationColumns(b: Body, required = true): Array<Typed | null> | null {
+    const arms = this.setOperationArms(b);
+    const offsets = arms.map((a) => { let first = a; while (isSetOp(first)) first = unwrappedArm(first.larg); return this.offsetsIn(first.targetList ?? first.valuesLists ?? []); });
+    const limits = this.offsetsIn([b.limitCount, b.limitOffset]);
     this.setOps ??= setOperationOutputs(this.analysisTree);
-    const found = this.setOps.filter((q) => q.arms.length === offsets.length && q.arms.every((at, i) => offsets[i]!.some((o) => at.includes(o))));
-    if (found.length !== 1) throw new Error("a set operation is not in Postgres's analysis, or twice: report it, with the statement");
-    return found[0]!.columns;
+    const found = this.picked(this.setOps.filter((q) => q.arms.length === offsets.length),
+      (q) => [...q.arms.map((at, i) => ({ parse: offsets[i]!, analysed: at })), { parse: limits, analysed: q.limits }],
+      (q) => JSON.stringify(q.columns));
+    if (found === undefined && required) throw new Error("a set operation is not in Postgres's analysis, or twice: report it, with the statement");
+    return found?.columns ?? null;
   }
   private setOps: ReturnType<typeof setOperationOutputs> | undefined;
+
+  /**
+   * EACH ARM'S COLUMN AS THE SET OPERATION'S (the class "a set operation's column read as an arm's type", PR 231):
+   * Postgres resolves one type for each column and coerces every arm's value to it, where DuckDB unifies the arms by its
+   * own rules. A char(n) arm of a text column is its text WITHOUT its padding (`'a b  '` is `'a b'`, so a UNION, a
+   * GROUP BY, a sort's ties and the text all read one value): it is written as the cast Postgres makes, through the
+   * cast's own rule (`typeCast`), typed as the column Postgres resolved (`setOperationColumns`). Before anything reads
+   * the arms (the exact numerics' cells, the walk). An integer arm of a numeric column is exact as it is (`exactArms`).
+   * A set operation Postgres's analysis does not tell is left as it is written.
+   */
+  castArms(v: unknown, inner: WeakSet<Body> = new WeakSet()): void {
+    if (Array.isArray(v)) { for (const x of v) this.castArms(x, inner); return; }
+    if (v === null || typeof v !== "object") return;
+    const b = isNode(v) ? bodyOf(v) : v as Body;
+    if (isNode(v) && kindOf(v) === "SelectStmt" && isSetOp(b) && !inner.has(b)) {
+      // (a set operation inside it that is no SELECT of its own is part of this one)
+      const mark = (s: Body): void => { if (isSetOp(s) && s !== b && ["sortClause", "limitCount", "limitOffset", "lockingClause", "withClause"].every((k) => s[k] === undefined)) inner.add(s); if (isSetOp(s)) { mark(unwrappedArm(s.larg)); mark(unwrappedArm(s.rarg)); } };
+      mark(b);
+      const resolved = this.setOperationColumns(b, false);
+      if (resolved !== null) for (const arm of this.setOperationArms(b)) {
+        const targets = arm.targetList as AstNode[] | undefined;
+        if (isSetOp(arm) || !Array.isArray(targets) || targets.some((t) => hasStar(bodyOf(t).val))) continue;
+        targets.forEach((t, i) => {
+          const tb = bodyOf(t), column = resolved[i] ?? null;
+          const own = isNode(tb.val) ? this.typed(tb.val as AstNode) : null;
+          if (own === null || column === null || own.type !== BPCHAR || (column.type !== TEXT && column.type !== VARCHAR)) return;
+          const to: AstNode = { TypeCast: { arg: tb.val, typeName: { names: [S("pg_catalog"), S(column.type === TEXT ? "text" : "varchar")], typemod: -1 }, location: -1 } };
+          this.synthetic.set(bodyOf(to), { ...column, node: "FUNCEXPR", format: 2, oid: null, args: [{ type: own.type, typmod: own.typmod }] });
+          this.original.add(bodyOf(to));
+          // (the column keeps its name: the cast's would be `text`)
+          if (tb.name === undefined) tb.name = figureColname(tb.val as AstNode);
+          tb.val = to;
+        });
+      }
+    }
+    for (const [k, x] of Object.entries(b)) this.castArms(armOf(k, x) ?? x, inner);
+  }
 
   /** whether a FETCH … WITH TIES was written (a generated table refuses one: src/duck/generated-plan.ts) */
   wroteTies = false;
@@ -1915,8 +2019,10 @@ class Rewriter {
       else arms.push(n);
     };
     flatten({ SelectStmt: b });
-    // an arm typed otherwise than the union (an integer arm of a numeric column) is cast by Postgres: not this program
-    if (arms.some((a) => { const f = this.outputFields(a); return f === null || f.some((x, i) => x.oid !== fields[i]?.oid); })) return [];
+    // an arm typed otherwise than the union is cast by Postgres: not this program; but an integer arm of a numeric
+    // column, which Postgres casts exactly to the integer's digits (`castArms`): its value is the engine's exact one
+    const castExactly = (oid: number, to: number | undefined): boolean => oid === to || (to === NUMERIC && INTEGERS.has(oid));
+    if (arms.some((a) => { const f = this.outputFields(a); return f === null || f.some((x, i) => !castExactly(x.oid, fields[i]?.oid)); })) return [];
     const trial = arms.map((a) => { const clone = this.clone(a); const made = this.exactThrough(clone, fields); return { made, listed: ((bodyOf(clone).targetList ?? []) as AstNode[]).length }; });
     const first = JSON.stringify(trial[0]!.made);
     if (trial[0]!.made.length > 0 && trial.every((t) => JSON.stringify(t.made) === first)) return arms.map((a) => this.exactThrough(a, fields))[0]!;
@@ -4774,6 +4880,12 @@ function stripCasts(n: AstNode): AstNode {
   return kindOf(n) === "TypeCast" && isNode(bodyOf(n).arg) ? stripCasts(bodyOf(n).arg as AstNode) : n;
 }
 
+/** whether a SELECT is a set operation (UNION, INTERSECT, EXCEPT) */
+function isSetOp(s: Body): boolean { return s.op !== undefined && s.op !== "SETOP_NONE"; }
+
+/** a set operation's arm as a SelectStmt's body (libpg-query writes the arms unwrapped) */
+function unwrappedArm(x: unknown): Body { return isNode(x) ? bodyOf(x) : x as Body; }
+
 /** a hidden cell riding beside a FROM item's columns, read outside it (`carry`, `exactThrough`): `s.__mason_cell_0` */
 function isCellRef(n: AstNode): boolean {
   if (kindOf(n) !== "ColumnRef") return false;
@@ -5519,6 +5631,7 @@ export function rewrite({ stmt, base, analysis, collation, userTypes = new Map()
   r.repeatedKeyCounts(own);
   r.scopeColumns(own);
   r.refuseExactRows(own);
+  r.castArms(own);
   const exact = r.exactThrough(own, analysis.fields);
   r.carryAll(own);
   r.markBounds(own, wireBound);

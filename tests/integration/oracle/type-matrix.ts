@@ -1268,6 +1268,24 @@ function* matrix(): Generator<Matrixed> {
   yield q("a row output as a key: by number, a LIMIT", "SELECT ROW(o.n, o.id) AS r FROM star_o o ORDER BY 1 LIMIT 3");
   yield q("a row output as a key: by name, WITH TIES", "SELECT ROW(o.n, o.id) AS r FROM star_o o ORDER BY r DESC FETCH FIRST 2 ROWS WITH TIES");
   yield q("a row output as a key: a set operation's", "SELECT ROW(o.n, o.id) AS r FROM star_o o UNION ALL SELECT ROW(o.id, o.n) FROM star_o o ORDER BY 1 LIMIT 3");
+  // A TABLE STATEMENT (PR 231): its `*` is at no offset, so its query is told by what it reads and its limits; under
+  // WITH TIES, and as a set operation's SELECT with a plain LIMIT and with WITH TIES
+  yield q("a TABLE statement: under WITH TIES", "SELECT * FROM (TABLE star_b ORDER BY a_id FETCH FIRST 2 ROWS WITH TIES) s ORDER BY id");
+  yield q("a TABLE statement: a set operation's SELECT, a plain LIMIT", "SELECT * FROM star_b UNION ALL TABLE star_b ORDER BY 1, 3 NULLS FIRST LIMIT 3");
+  yield q("a TABLE statement: a set operation's SELECT, WITH TIES", "SELECT * FROM (TABLE star_b UNION ALL TABLE star_b ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 1");
+  // A SET OPERATION'S SELECTS ARE ITS COLUMN AS POSTGRES RESOLVED IT (PR 231): a char(n) of a text column is its text,
+  // unpadded (ties, a UNION, a GROUP BY, the text); an integer of a numeric column beside a quotient keeps its digits
+  yield q("a set operation's SELECTs: a char(n) beside a text, WITH TIES", "SELECT * FROM (SELECT o.name AS x FROM star_o o UNION ALL SELECT o.ch FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s ORDER BY 1");
+  yield q("a set operation's SELECTs: a char(n) beside a text, its text and a GROUP BY", "SELECT s.x, count(*) FROM (SELECT o.name AS x FROM star_o o UNION ALL SELECT o.ch FROM star_o o) s GROUP BY 1 ORDER BY 1 NULLS FIRST");
+  yield q("a set operation's SELECTs: a char(n) beside a text, UNION", "SELECT o.name AS x FROM star_o o UNION SELECT o.ch FROM star_o o ORDER BY 1 NULLS FIRST");
+  yield q("a set operation's SELECTs: an integer beside a quotient, WITH TIES", "SELECT * FROM (SELECT o.n::numeric / 3 AS q FROM star_o o UNION ALL SELECT o.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s ORDER BY 1");
+  // FETCH … WITH TIES READS ITS LIMITS WHERE NO ROW IS (PR 231): a negative one raises over none
+  yield q("WITH TIES over no rows: a negative count", "SELECT o.id FROM star_o o WHERE false ORDER BY o.n FETCH FIRST -1 ROWS WITH TIES");
+  yield q("WITH TIES over no rows: a negative offset", "SELECT o.id FROM star_o o WHERE false ORDER BY o.n OFFSET -1 FETCH FIRST 2 ROWS WITH TIES");
+  yield q("WITH TIES over no rows: a negative count a subquery reads", "SELECT o.id FROM star_o o WHERE o.n > 100 ORDER BY o.n FETCH FIRST (SELECT min(b.a_id) - 5 FROM star_b b) ROWS WITH TIES");
+  // AN EXACT NUMBER PASSED THROUGH A `*` (PR 231): the cells ride the WITH TIES as they ride the statement
+  yield q("WITH TIES over a * of a derived table: an exact quotient", "SELECT * FROM (SELECT o.id, o.n::numeric / 7 AS q FROM star_o o) s ORDER BY 2 DESC, 1 FETCH FIRST 2 ROWS WITH TIES");
+  yield q("WITH TIES over a * of a WITH query: an exact quotient", "WITH s AS (SELECT o.id, o.n::numeric / 7 AS q FROM star_o o) SELECT * FROM s ORDER BY 2, 1 FETCH FIRST 2 ROWS WITH TIES");
   yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
   yield q("top N over joins: USING of two tables, a *", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
   yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);
