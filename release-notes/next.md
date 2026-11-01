@@ -110,6 +110,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   are made distinct on the key (and the other tables' listed columns), and that table's wide columns read for the rows
   the limit keeps. Such a query spilled 29 GiB and failed for memory after five minutes; it now answers in under a
   second. Nothing to do on upgrade.
+- **`SELECT DISTINCT ON` with a `LIMIT` no longer fills the disk when the list shows wide columns**: the row kept for
+  each group is chosen on the sort's columns alone, and the wide columns read for the rows the limit keeps. Such a query
+  spilled 25 GiB and failed for memory after twenty minutes. One
+  thing changes: a value in the list that cannot be computed (`'x'::int`) in a row that is not its group's first no
+  longer fails the query. Nothing to do on upgrade.
 
 ## Known
 

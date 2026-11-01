@@ -152,6 +152,16 @@ paths:
     `tests/duck-wire.test.ts`
     holds each side over `late`, `late_p` (the composite and partial keys) and `late_d`; `oracle/bi-shapes.ts` the rows
     ("Key-first grouping", docs/DESIGN.md).
+  - **a DISTINCT ON with a LIMIT chooses its kept rows by row number** (`joinRows`, src/duck/late.ts, issue 134, task E):
+    a DISTINCT ON keeps ONE WHOLE ROW of its FROM per group, so the inner query keeps the DISTINCT ON (its ordinals and
+    output names resolved to clones of the outputs' expressions, as the sort keys are), the ORDER BY and the LIMIT, and
+    lists each FROM item's row number; the list is read from the kept rows. It is exact for ANY ON expressions, a key or
+    not, so no primary key is asked and never `any_value` (which would answer an arbitrary row of the group for another
+    table's columns). One table is written so too. `keyFirst` refuses it (`first.distinct` is false), so the two never
+    both write one SELECT. What stays as it was: no LIMIT in fact, an aggregate, window or set-returning function, a
+    GROUP BY, a volatile ON expression (`volatileOn`), a column named `rowid`, WITH TIES (`with-ties-distinct`). A test
+    statement compared row for row ends its sort in a key total within the group, or lists the ON table's columns alone;
+    any other is counted. `tests/duck-wire.test.ts` "task E", `oracle/bi-shapes.ts` "key-first DISTINCT ON:".
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
   **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
   independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
