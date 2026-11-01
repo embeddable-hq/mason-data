@@ -32,7 +32,7 @@ import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { caseTwins, joinsUsing, type Keys, type QueryOutputs, type Typed } from "./pgtree.ts";
+import { caseTwins, joinsUsing, setOperationColumns, type Keys, type QueryOutputs, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
@@ -308,6 +308,71 @@ class Rewriter {
     for (const at of keyCounts) this.keyCounts.add(at + base);
     this.caseMode = collation.kind === "icu" ? "icu" : collation.kind === "bytes" && collation.ascii === true ? "ascii" : "libc";
     this.twins = caseTwins(analysis.tree);
+    this.setColumns = setOperationColumns(analysis.tree);
+  }
+
+  /** each set operation's columns as Postgres resolved them over every arm, by its first SELECT's offsets (pgtree.ts) */
+  private readonly setColumns: Map<number, Array<Array<Typed | null>>>;
+  /** each set operation that is a query of Postgres's own (`markSetOperations`): how many such enclose it on its first
+   *  arms' path, which is its place among the queries `setColumns` lists at those offsets */
+  private readonly setDepth = new WeakMap<Body, number>();
+
+  /**
+   * Before anything rewrites a set operation: each one Postgres analyses as a query of its own (the statement's, a
+   * subquery's, a WITH query's, a sublink's, or an arm with its own ORDER BY, LIMIT, WITH or locking) is given its
+   * place among the set operations whose first SELECT it shares, outermost first, as `setOperationColumns` lists them.
+   */
+  markSetOperations(v: unknown): void {
+    const own = (b: Body): boolean => b.sortClause !== undefined || b.limitCount !== undefined || b.limitOffset !== undefined
+      || b.withClause !== undefined || b.lockingClause !== undefined || (b.limitOption !== undefined && b.limitOption !== "LIMIT_OPTION_DEFAULT");
+    const arm = (x: unknown): Body | null => isNode(x) ? bodyOf(x) : x !== null && typeof x === "object" ? x as Body : null;
+    const spine = (b: Body, depth: number, root: boolean): void => {
+      const setop = b.op !== undefined && b.op !== "SETOP_NONE";
+      if (!setop) { for (const x of Object.values(b)) visit(x); return; }
+      const query = root || own(b);
+      if (query) this.setDepth.set(b, depth);
+      for (const [k, x] of Object.entries(b)) {
+        if (k === "larg") { const l = arm(x); if (l !== null) spine(l, query ? depth + 1 : depth, false); }
+        // (a later arm's first SELECT is another, its offsets its own)
+        else if (k === "rarg") { const r = arm(x); if (r !== null) spine(r, 0, false); }
+        else visit(x);
+      }
+    };
+    const visit = (x: unknown): void => {
+      if (Array.isArray(x)) { for (const y of x) visit(y); return; }
+      if (x === null || typeof x !== "object") return;
+      if (isNode(x) && kindOf(x) === "SelectStmt") { spine(bodyOf(x), 0, true); return; }
+      for (const y of Object.values(isNode(x) ? bodyOf(x) : x as Body)) visit(y);
+    };
+    visit(v);
+  }
+
+  /** a set operation's columns as Postgres's analysis of the set operation has them, in order (a `*`'s columns counted),
+   *  or null where it is not found: the one authority for a set operation's column type and collation */
+  private setOperationTypes(b: Body): Array<Typed | null> | null {
+    const depth = this.setDepth.get(b);
+    if (depth === undefined) return null;
+    let first: Body = b;
+    while (first.op !== undefined && first.op !== "SETOP_NONE" && first.larg !== undefined) first = isNode(first.larg) ? bodyOf(first.larg) : first.larg as Body;
+    const held = (n: unknown): number[] => {
+      if (Array.isArray(n)) return n.flatMap(held);
+      if (n === null || typeof n !== "object") return [];
+      // (a subquery's offsets are its own)
+      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? [x] : k === "subselect" || k === "SelectStmt" ? [] : held(x));
+    };
+    for (const l of held(first.targetList ?? [])) {
+      const lists = this.setColumns.get(l - this.base);
+      if (lists !== undefined) return lists[depth] ?? null;
+    }
+    return null;
+  }
+
+  /** a node the rewrite reads a set operation's column by: typed as Postgres's set operation types it (no constant) */
+  private setColumn(n: AstNode, t: Typed | null | undefined): AstNode {
+    if (t === null || t === undefined) throw new Unrewritable("this ORDER BY of a set operation is not supported by Mason: its column's type is not found in Postgres's analysis", "order by a column of a subquery: SELECT * FROM (… UNION …) s ORDER BY 1", "unverified");
+    const { constant: _c, ...typed } = t;
+    this.synthetic.set(bodyOf(n), { ...typed, node: "VAR" });
+    return n;
   }
 
   /** the subqueries and CTEs whose columns have twins in another case, by the name the query calls them (caseTwins) */
@@ -849,13 +914,20 @@ class Rewriter {
       let first: Body = b;
       while (first.larg !== undefined) first = first.larg as Body;
       const what = `${String(b.op).replace("SETOP_", "")}${b.all === true ? " ALL" : " (without ALL)"} of`;
-      for (const t of (first.targetList ?? []) as AstNode[]) {
+      // (each column as the set operation types it, over every arm: citext beside text is text)
+      const firstTargets = (first.targetList ?? []) as AstNode[];
+      const firstOutputs = this.outputs(firstTargets);
+      const types = this.setOperationTypes(b);
+      firstTargets.forEach((t, ti) => {
         const v = bodyOf(t).val;
-        if (!isNode(v)) continue;
+        if (!isNode(v)) return;
         if (this.starHoldsJsonb(v)) throw new Unrewritable(`${what} a * holding a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)`, JSONB_WAY_OUT, "jsonb-compare");
+        const at = firstOutputs.findIndex((o) => !o.star && o.target === ti);
+        const typed = at < 0 ? undefined : types?.[at];
+        const c = typed === undefined || typed === null || typed.type === this.typeOf(v) ? v : this.setColumn({ ColumnRef: { fields: [S(`__mason_set_column_${at + 1}`)] } }, typed);
         // (INTERSECT ALL and EXCEPT ALL: jsonb's equality alone, which is not its text's; the rest as before)
-        if (b.all !== true || this.typeOf(v) === JSONB || this.typeOf(v) === JSONB_ARRAY) this.comparable(v, what);
-      }
+        if (b.all !== true || this.typeOf(c) === JSONB || this.typeOf(c) === JSONB_ARRAY) this.comparable(c, what);
+      });
       // a numeric decided exactly, in any arm: the rows are compared whole, where no exact key can be placed
       const arms: Body[] = [];
       const armsOf = (x: Body): void => { if (x.op !== undefined && x.op !== "SETOP_NONE" && x.larg !== undefined && x.rarg !== undefined) { armsOf(x.larg as Body); armsOf(x.rarg as Body); } else arms.push(x); };
@@ -1199,32 +1271,29 @@ class Rewriter {
     while (arm.op !== undefined && arm.op !== "SETOP_NONE" && arm.larg !== undefined) arm = isNode(arm.larg) ? bodyOf(arm.larg) : arm.larg as Body;
     const targets = (arm.targetList ?? []) as AstNode[];
     const outputs = this.outputs(targets);
+    // (typed as the set operation's column, which Postgres resolved over every arm: never the first SELECT's)
+    const types = this.setOperationTypes(b);
     for (const s of b.sortClause as AstNode[]) {
       const sb = bodyOf(s);
       const by = sb.node as AstNode;
       const at = setOperationOutput(by, outputs);
       if (kindOf(by) === "ColumnRef") {
-        if (at >= 0) this.typedLike.set(bodyOf(by), outputs[at]!.value);
+        if (at >= 0) this.setColumn(by, types?.[at]);
         continue;
       }
       const n = constInt(by);
       const out = n === null ? null : outputs[at] ?? null;
       if (out === null) continue;
-      const value = out.value;
-      if (out.star) {
+      if (out.star && outputs.filter((o) => o.name === out.name).length !== 1) {
         // a set operation's ORDER BY reads an output by its name alone: a column of a `*` has no other
-        if (outputs.filter((o) => o.name === out.name).length !== 1) throw new Unrewritable("ORDER BY a column number of a set operation whose first SELECT lists two columns of that name is not supported by Mason", "name the columns apart in the first SELECT", "setop-ordinal-star");
-        if (this.sortsAsStored(value)) continue;
-        const named: AstNode = { ColumnRef: { fields: [S(out.name)] } };
-        this.typedLike.set(bodyOf(named), value);
-        sb.node = named;
-        continue;
+        throw new Unrewritable("ORDER BY a column number of a set operation whose first SELECT lists two columns of that name is not supported by Mason", "name the columns apart in the first SELECT", "setop-ordinal-star");
       }
       const target = bodyOf(targets[out.target]!);
-      if (this.sortsAsStored(value)) continue;
-      if (target.name === undefined) target.name = `__mason_sort_${n}`;
-      const ref: AstNode = { ColumnRef: { fields: [S(String(target.name))] } };
-      this.typedLike.set(bodyOf(ref), value);
+      const named = out.star || target.name !== undefined;
+      const ref = this.setColumn({ ColumnRef: { fields: [S(out.star ? out.name : named ? String(target.name) : `__mason_sort_${n}`)] } }, types?.[at]);
+      // (a value sorted as it is stored keeps its number; any other is sorted by its name, given one where it has none)
+      if (this.sortsAsStored(ref)) continue;
+      if (!named) target.name = `__mason_sort_${n}`;
       sb.node = ref;
     }
   }
@@ -1346,11 +1415,10 @@ class Rewriter {
     // (Postgres's outputs: the first SELECT's list less the exact cells recorded after them)
     const armTargets = (arm.targetList ?? []) as AstNode[];
     const outputs = this.outputs(armTargets.slice(0, armTargets.length - (this.cellsAfter.get(arm)?.listed ?? 0)));
+    // (the set operation's column: typed as Postgres resolved it over every arm, never as the first SELECT's)
+    const types = this.setOperationTypes(b);
     const column = (i: number): AstNode => {
-      const n: AstNode = { ColumnRef: { fields: [S(SET), S(`__mason_t${i + 1}`)] } };
-      const t = this.typed(outputs[i]!.value);
-      // (the set operation's column: typed as the first SELECT's, but no constant, whatever that SELECT's is)
-      if (t !== null) { const { constant: _c, ...typed } = t; this.synthetic.set(bodyOf(n), { ...typed, node: "VAR" }); }
+      const n = this.setColumn({ ColumnRef: { fields: [S(SET), S(`__mason_t${i + 1}`)] } }, types?.[i]);
       this.original.add(bodyOf(n));
       return n;
     };
@@ -5454,6 +5522,7 @@ export function rewrite({ stmt, base, analysis, collation, userTypes = new Map()
   const own = JSON.parse(JSON.stringify(stmt)) as AstNode;
   volatileWindows(own);
   r.adopt(own);
+  r.markSetOperations(own);
   nameTargets(own);
   r.indexShapes(own);
   r.repeatedKeyCounts(own);

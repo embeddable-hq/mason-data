@@ -456,6 +456,36 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
   return found;
 }
 
+/**
+ * EACH SET OPERATION'S COLUMNS AS POSTGRES RESOLVED THEM OVER EVERY ARM (the class "setop-column-typed-by-first-arm", PR
+ * 233): the type, typmod and collation of its query's outputs (citext beside text is text, an explicit COLLATE in a later
+ * arm wins, numeric(10,3) beside numeric(12,2) is an unconstrained numeric), never its first SELECT's. Found by the
+ * offsets its outputs carry, which are its first SELECT's (transformSetOperationStmt): so one offset may hold several,
+ * a parenthesised set operation inside another's first arm, listed outermost first, as the tree nests them.
+ */
+export function setOperationColumns(tree: TreeValue): Map<number, Array<Array<Typed | null>>> {
+  const found = new Map<number, Array<Array<Typed | null>>>();
+  const visit = (v: TreeValue): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    if (v._node === "QUERY" && Array.isArray(v.targetList) && isNode(v.setOperations ?? null)) {
+      const rtable = Array.isArray(v.rtable) ? v.rtable.filter(isNode) : [];
+      const exprs = v.targetList.filter(isNode).filter((t) => t.resjunk !== "true").map((t) => t.expr ?? null);
+      const columns = exprs.map((e) => { const t = isNode(e) ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable]); });
+      for (const e of exprs) {
+        const loc = isNode(e) ? num(e.location) : null;
+        if (loc === null || loc < 0) continue;
+        const at = found.get(loc) ?? [];
+        if (!at.includes(columns)) at.push(columns);
+        found.set(loc, at);
+      }
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return found;
+}
+
 /** an output as what it reads: a VAR of the query's RTE_GROUP is the expression it groups */
 function ungrouped(v: TreeValue, rtable: TreeNode[]): TreeValue {
   if (!isNode(v) || v._node !== "VAR") return v;

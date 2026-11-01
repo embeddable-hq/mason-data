@@ -3019,6 +3019,75 @@ test("FETCH … WITH TIES answers as Postgres at every depth: one resolver for i
   } finally { await c.end(); }
 });
 
+// A SET OPERATION'S COLUMN TYPED BY ITS FIRST SELECT (the class "setop-column-typed-by-first-arm", PR 233 probe 2): a
+// set operation's column is the type and collation Postgres resolved over EVERY arm (citext beside text is text; an
+// explicit COLLATE in a later arm wins), so its sort and its ties follow that, never its first SELECT's. And its numeric
+// column ("setop-numeric-engine-scale"): typmod -1 where the arms differ, each value at its own scale, never the engine's
+// one DECIMAL scale. Every spelling (by number, by name), depth (bare, counted, nested, three arms, a parenthesised
+// WITH TIES arm) and operation, WITH TIES and a plain ORDER BY alike
+test("a set operation's column is typed by Postgres's analysis of the set operation, never its first SELECT (PR 233)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    const A = "SELECT a.status FROM accounts a WHERE a.id < 4";
+    for (const [sql, inOrder] of [
+      [`${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      ["SELECT a.status FROM accounts a UNION ALL SELECT t.s FROM texts t ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES", false],
+      ["SELECT a.status AS s FROM accounts a WHERE a.id < 4 UNION ALL SELECT 'finalizeD'::text ORDER BY s FETCH FIRST 1 ROWS WITH TIES", false],
+      [`SELECT 'finalizeD'::text AS s UNION ALL ${A} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`SELECT count(*) FROM (${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s`, false],
+      [`${A} UNION SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`${A} INTERSECT SELECT 'FINALIZED'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`${A} EXCEPT SELECT 'FINALIZED'::text ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`${A} UNION ALL SELECT 'x'::text UNION ALL SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`(${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) UNION ALL SELECT 'zzz' ORDER BY 1`, true],
+      ["SELECT t.s FROM texts t UNION ALL SELECT t.s COLLATE \"C\" FROM texts t ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES", false],
+      // a plain ORDER BY of the same columns: the order inside Postgres's own text order
+      [`${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1`, true],
+      [`${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 LIMIT 2`, true],
+      ["SELECT t.s FROM texts t UNION ALL SELECT t.s COLLATE \"C\" FROM texts t ORDER BY 1", true],
+      // a set operation of one type throughout keeps its rule: citext, jsonb and the database's collation, by number,
+      // by name and through a *; and inside a CTE, an IN and a scalar subquery
+      ["SELECT a.id, a.status FROM accounts a UNION ALL SELECT a.id, a.status FROM accounts a ORDER BY 2, 1", true],
+      ["SELECT * FROM accounts a UNION ALL SELECT * FROM accounts a ORDER BY 2, 1", true],
+      ["SELECT q.id, q.v FROM jq q UNION ALL SELECT q.id, q.v FROM jq q ORDER BY 2, 1", true],
+      ["SELECT t.id, t.s FROM texts t UNION ALL SELECT t.id, t.s FROM texts t ORDER BY s, id", true],
+      [`WITH u AS (${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) SELECT count(*) FROM u`, false],
+      [`SELECT count(*) FROM accounts WHERE status::text IN (${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES)`, false],
+      [`SELECT (${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 DESC LIMIT 1)`, false],
+    ] as const) { const d = await tiesAlike(c, sql, undefined, inOrder); if (d !== null) differ.push(d); }
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+    // a set operation's numeric column under WITH TIES is the set operation's own, as the same set operation answers it
+    // with no WITH TIES: its scale where the arms' differ is the registered mixed-scale-numeric (#227), a quotient
+    // beside an integer arm is the base's double (#218), both on the base and filed there
+    for (const [ties, plain] of [
+      ["SELECT i.id, i.total FROM sales.invoices i UNION ALL SELECT o.id, o.amount FROM orders o ORDER BY 2 DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES",
+        "SELECT i.id, i.total FROM sales.invoices i UNION ALL SELECT o.id, o.amount FROM orders o ORDER BY 2 DESC NULLS LAST LIMIT 1"],
+      ["SELECT l.id::int AS x FROM late l WHERE l.id < 3 UNION ALL SELECT 1.5 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+        "SELECT l.id::int AS x FROM late l WHERE l.id < 3 UNION ALL SELECT 1.5 ORDER BY 1 DESC LIMIT 1"],
+      ["SELECT l.k / 7.0 AS x FROM late l WHERE l.id IN (1, 2) UNION ALL SELECT l.id FROM late l WHERE l.id < 3 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+        "SELECT l.k / 7.0 AS x FROM late l WHERE l.id IN (1, 2) UNION ALL SELECT l.id FROM late l WHERE l.id < 3 ORDER BY 1 DESC LIMIT 1"],
+    ] as const) assert.deepEqual((await answer(c, ties)).rows, (await answer(c, plain)).rows, ties);
+  } finally { await c.end(); }
+});
+
+// THE BRANCH BEHIND MAIN (PR 233 probe 2): main carried an exact numeric through a derived table (PR 207) after this
+// branch left it; the merge keeps it, a WITH TIES body's cells (the one record, `cellsAfter`) beside main's carry
+test("an exact numeric read through a derived table stays exact after main's merge, LIMIT and WITH TIES alike (PR 233)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    for (const sql of [
+      "SELECT s.q * 2 AS d FROM (SELECT l.id, l.k / 7.0 AS q FROM late l ORDER BY l.c LIMIT 3) s ORDER BY 1",
+      "SELECT s.q * 2 AS d FROM (SELECT l.id, l.k / 7.0 AS q FROM late l) s ORDER BY 1 LIMIT 3",
+      "SELECT c.id, s.q FROM late_c c LEFT JOIN (SELECT l.id, l.c, l.k / 7.0 AS q FROM late l ORDER BY l.c LIMIT 3) s ON s.c = c.id ORDER BY c.id, s.id LIMIT 3",
+      "SELECT s.q * 2 AS d FROM (SELECT l.id, l.k / 7.0 AS q FROM late l ORDER BY l.c, l.id FETCH FIRST 3 ROWS WITH TIES) s ORDER BY 1",
+      "SELECT s.q * 2 AS d FROM (SELECT l.id, l.k / 7.0 AS q FROM late l) s ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES",
+    ]) { const d = await tiesAlike(c, sql, undefined, true); if (d !== null) differ.push(d); }
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+  } finally { await c.end(); }
+});
+
 // A REWRITE'S COLUMN READ BY A NAME THE USER CAN WRITE (the class "rewrite-name-in-user-namespace", PR 233): the rank,
 // the row's place and the cells were read back by `__mason_*` names beside the user's outputs, so an output the user named
 // so took their place (the offset kept every row; the wrapper found no rank). Each is read by its position now.

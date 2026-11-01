@@ -23,6 +23,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   of carrying every column through the ranking (a top 100 over a wide join spilled 20 GiB). Under `DISTINCT` or
   `DISTINCT ON` it is still refused by name; over a filtered table it is answered (the docs said refused).
 
+- **A `UNION`, `INTERSECT` or `EXCEPT` sorts and compares its column as the type Postgres gives it over every SELECT.**
+  A `citext` column beside a `text` one is `text`, so it is no longer sorted or tied without regard to case, and a
+  `UNION` without `ALL` of the two is answered instead of refused; a `COLLATE` written in a later SELECT is the column's.
+
 - **Generated tables: a table declared in SQL, kept current by Mason.** One file per table in `mason/generated_tables/`,
   committed beside the sources file, with `kind: scheduled`, `target_lag:` and `sql:`; `mason help generated` is the
   guide. A table re-runs its whole SQL once a base has changed and its target comes due, inside Mason, reading nothing from

@@ -1273,6 +1273,11 @@ function* matrix(): Generator<Matrixed> {
   yield q("with ties: UNION ALL by number", "SELECT count(*) FROM (SELECT a.id % 3 AS m, a.id FROM top_a a UNION ALL SELECT b.id % 3, b.id FROM top_b b ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) s");
   yield q("with ties: UNION by a text output's name, the database's collation", "SELECT count(*) FROM (SELECT name FROM star_o UNION SELECT name FROM star_b ORDER BY name NULLS FIRST FETCH FIRST 2 ROWS WITH TIES) s");
   yield q("with ties: EXCEPT by number DESC", "SELECT count(*) FROM (SELECT b.a_id FROM top_b b EXCEPT SELECT a.parent FROM top_a a ORDER BY 1 DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES) s");
+  // a set operation's column is Postgres's over every arm, never its first SELECT's (setop-column-typed-by-first-arm, PR 233)
+  yield q("with ties: a citext beside a text is the set operation's text", "SELECT count(*) FROM (SELECT x.ci FROM typed x UNION ALL SELECT x.t FROM typed x ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s");
+  yield q("with ties: a later arm's COLLATE \"C\" is the set operation's", "SELECT count(*) FROM (SELECT x.t FROM typed x UNION ALL SELECT x.vc COLLATE \"C\" FROM typed x ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) s");
+  yield q("set operation: a citext beside a text sorted as text", "SELECT x.ci FROM typed x UNION ALL SELECT x.t FROM typed x ORDER BY 1 NULLS FIRST");
+  yield q("set operation: a citext UNION a text, without ALL", "SELECT count(*) FROM (SELECT x.ci FROM typed x UNION SELECT x.t FROM typed x) s");
   yield q("with ties: its rank in no row (a derived table beside a column)", `SELECT s.*, 1 AS one FROM (${TIES_A}) s ORDER BY s.id`);
   yield q("with ties: joined after", `SELECT s.id, s.made, b.id AS b FROM (${TIES_A}) s JOIN top_b b ON b.a_id = s.id ORDER BY 1, 3`);
   yield q("with ties: in a CTE read beside a column", `WITH t AS (${TIES_A}) SELECT t.*, t.id * 2 AS twice FROM t ORDER BY t.id`);
