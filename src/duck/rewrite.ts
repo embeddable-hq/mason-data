@@ -1997,7 +1997,16 @@ class Rewriter {
     // (a DISTINCT ON compares its ON expressions alone: the targets beside them are only read)
     if (plain) for (const v of values) if (this.typeOf(v) !== JSONB) this.comparable(v, "SELECT DISTINCT");
     if (!plain) {
-      b.distinctClause = (b.distinctClause as AstNode[]).map((d) => {
+      // A CONSTANT KEY (the class, issue 134: a constant key written into the engine as a bare literal, in any clause;
+      // src/duck/constant-key.ts): a DISTINCT ON key the analysis put a Const, after its output name or number is
+      // resolved, divides no rows, and written as the bare literal the engine refuses it (42804) or reads an ordinal. It
+      // is no key; with none left every row is one set, so one key the engine evaluates, which divides nothing either
+      const keys = (b.distinctClause as AstNode[]).filter((d) => {
+        const out = isNode(d) ? this.outputOf(d, targets) : null;
+        return !isNode(d) || out?.twin === true || this.typed(out !== null ? out.value : d)?.constant !== true;
+      });
+      if (keys.length === 0) { b.distinctClause = [evaluated(strConst("one set"))]; return; }
+      b.distinctClause = keys.map((d) => {
         const n = constInt(d);
         const out = n === null ? null : this.outputAt(targets, n);
         const e = out?.value ?? d;
@@ -2409,9 +2418,20 @@ class Rewriter {
       const type = duckTypeOf(t.type, t.typmod);
       if (type !== null && !(t.type === NUMERIC && t.typmod < 0)) return cast(args[0]!, type);
     }
+    // A CONSTANT KEY of an aggregate's ORDER BY (the class, issue 134; src/duck/constant-key.ts): a key the analysis put
+    // a Const orders nothing, and written as the bare literal the engine refuses it (42804, reported as 42803). It is no
+    // key, and with none left no ORDER BY. An ordered-set aggregate's key is its VALUE, so it stays (`withinGroup`)
+    if (b.agg_within_group !== true && Array.isArray(b.agg_order)) {
+      b.agg_order = (b.agg_order as AstNode[]).filter((s) => {
+        const sb = bodyOf(s);
+        return !(kindOf(s) === "SortBy" && sb.useOp === undefined && isNode(sb.node) && this.typed(sb.node as AstNode)?.constant === true);
+      });
+      if ((b.agg_order as AstNode[]).length === 0) delete b.agg_order;
+    }
     // an aggregate over DISTINCT values sorts them to find the duplicates, so Postgres's string_agg / array_agg (DISTINCT)
-    // lists them in that order (the argument's, under its collation); DuckDB's in any order
-    if (b.agg_distinct === true && b.agg_order === undefined && args[0] !== undefined && ["string_agg", "array_agg", "json_agg", "jsonb_agg"].includes(name)) {
+    // lists them in that order (the argument's, under its collation); DuckDB's in any order. A constant argument is one
+    // value, and would be a constant key (above)
+    if (b.agg_distinct === true && b.agg_order === undefined && args[0] !== undefined && this.typed(args[0])?.constant !== true && ["string_agg", "array_agg", "json_agg", "jsonb_agg"].includes(name)) {
       b.agg_order = [{ SortBy: { node: this.clone(args[0]), sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }];
       this.original.add(bodyOf((b.agg_order as AstNode[])[0]!));
     }
@@ -2781,6 +2801,14 @@ class Rewriter {
     // a jsonb's position in its order, or its most frequent value: DuckDB would pick by its text
     if (key !== undefined && (this.typeOf(key) === JSONB || this.typeOf(key) === JSONB_ARRAY)) {
       throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY a jsonb) is not supported by Mason (Postgres orders jsonb by its own rules)`, "ORDER BY the value … LIMIT 1 OFFSET n in a subquery", "jsonb-compare");
+    }
+    // a key the analysis put a Const (the class, issue 134; src/duck/constant-key.ts) is the value aggregated, and written
+    // as the bare literal the engine's WITHIN GROUP refuses it (42804): every row holds it, so mode() and percentile_disc
+    // take it as an argument, which the engine evaluates (NULL where no row is aggregated, as Postgres's)
+    if (key !== undefined && order.length === 1 && this.typed(key)?.constant === true && (name === "mode" || name === "percentile_disc")) {
+      const args = (b.args ?? []) as AstNode[];
+      if (name === "mode") return { FuncCall: { ...b, args: [this.clone(key)], agg_order: undefined, agg_within_group: undefined } };
+      if (args.length === 1) return { FuncCall: { ...b, funcname: [S("quantile_disc")], args: [this.clone(key), args[0]!], agg_order: undefined, agg_within_group: undefined } };
     }
     const c = key === undefined ? null : this.textCollation(key);
     if (c === null || c.kind === "bytes") return null;
