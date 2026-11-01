@@ -165,7 +165,10 @@ the base already has is filed the same way, at whatever exit the run takes, and 
 toward its class rule: a PR that chases a class it did not make grows each round. Classes carry across a stack, so a class met on the PR below counts
 on the one above. A teammate needs Claude Code with the Workflow tool, the Opus and Fable models, and `gh`
 authenticated with the `project` scope for the board. Why: docs/DESIGN.md "The independent review". Detector:
-`tests/workflows.test.ts`.
+`tests/workflows.test.ts`. Two experimental processes are raced against each other on issue 176 (Tom, 2026-11-01),
+both keeping pr-loop's review word for word: `.claude/skills/pr-persistent/SKILL.md`, where the coordinator keeps ONE
+Opus implementer alive and sends it each review's findings by SendMessage, and `.claude/workflows/pr-loop-slim.js`,
+pr-loop without its design review and probe, whose fix agents carry the implementer's context in a `## Handoff`.
 
 **The board says where each piece is**, so the owner reads progress there instead of asking: the [Mason work
 board](https://github.com/orgs/embeddable-hq/projects/4). An issue split into pieces has one sub-issue per PR
