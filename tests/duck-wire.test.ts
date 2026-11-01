@@ -3184,6 +3184,62 @@ test("a * of two columns of one name is never written out by name; a set operati
   } finally { await c.end(); }
 });
 
+// A SET OPERATION NESTED IN ANOTHER'S ARM COMPARES AT ITS OWN TYPE (the class "setop-arm-cast-dropped", PR 233 probe 6,
+// a class round): Postgres's analysis gives every set operation its columns (a nested one's SETOPERATIONSTMT colTypes),
+// so the char(n) refusal is decided at each, and an arm is cast through each set operation from it out; a cast that can
+// make unequal values equal is never written below what compares them first, at any depth
+test("a set operation nested in another's arm compares at its own analysed type, or is refused by name (PR 233 probe 6)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    const CMP = "SELECT c.c FROM chars c UNION SELECT c.t FROM chars c", F = "SELECT 1.5::float8 AS f";
+    for (const [sql, inOrder] of [
+      // a char(n) of one length compared inside, then trimmed by the text column around it; a char(n) never compared
+      ["SELECT c.t FROM chars c UNION ALL (SELECT c.c FROM chars c UNION SELECT c.c FROM chars c) ORDER BY 1 NULLS FIRST", true],
+      ["SELECT c.t FROM chars c UNION ALL (SELECT c.c FROM chars c UNION ALL SELECT c.c FROM chars c) ORDER BY 1 NULLS FIRST", true],
+      ["(SELECT c.c FROM chars c UNION SELECT c.c FROM chars c) UNION ALL SELECT c.t FROM chars c ORDER BY 1 NULLS FIRST", false],
+      // a cast that keeps equality, below what compares: an integer made a double, a date a timestamptz
+      [`${F} UNION ALL (SELECT l.c FROM late l UNION SELECT l.k FROM late l WHERE l.id < 5) ORDER BY 1`, true],
+      [`${F} UNION ALL (SELECT l.c FROM late l WHERE l.id < 9 UNION ALL SELECT l.k FROM late l WHERE l.id < 3 ORDER BY 1 LIMIT 3) ORDER BY 1`, true],
+      ["SELECT i.at FROM instants i UNION ALL (SELECT r.d FROM ratios r UNION SELECT r.d FROM ratios r) ORDER BY 1 NULLS FIRST", true],
+      // a cast that may not, where nothing compares first, or at the outer type already, or through a subquery
+      [`${F} UNION ALL (SELECT b.x FROM bigdec b UNION ALL SELECT b.y FROM bigdec b) ORDER BY 1`, true],
+      [`${F} UNION ALL (SELECT b.x::float8 FROM bigdec b UNION SELECT 2.5::float8) ORDER BY 1`, true],
+      [`${F} UNION ALL SELECT * FROM (SELECT b.x FROM bigdec b UNION SELECT b.y FROM bigdec b) s ORDER BY 1`, true],
+      [`${F} UNION ALL SELECT b.x FROM bigdec b GROUP BY b.x, b.id ORDER BY 1`, true],
+    ] as const) { const d = await tiesAlike(c, sql, undefined, inOrder); if (d !== null) differ.push(d); }
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+    for (const [sql, gap] of [
+      // a char(n) compared beside a text arm, nested: either arm, any depth, under a sort, WITH TIES, a subquery, IN
+      [`SELECT c.t FROM chars c UNION ALL (${CMP}) ORDER BY 1 NULLS FIRST`, "setop-char-compare"],
+      [`(${CMP}) UNION ALL SELECT c.t FROM chars c ORDER BY 1 NULLS FIRST`, "setop-char-compare"],
+      [`SELECT c.t FROM chars c UNION ALL (${CMP})`, "setop-char-compare"],
+      [`SELECT count(*) FROM (SELECT c.t FROM chars c UNION ALL (${CMP})) s`, "setop-char-compare"],
+      [`SELECT s.t FROM (SELECT c.t FROM chars c UNION ALL (${CMP})) s ORDER BY 1 NULLS FIRST`, "setop-char-compare"],
+      ["SELECT c.t FROM chars c UNION ALL (SELECT c.c FROM chars c INTERSECT SELECT c.v FROM chars c)", "setop-char-compare"],
+      ["SELECT c.t FROM chars c UNION ALL (SELECT c.t FROM chars c UNION ALL (SELECT c.c FROM chars c EXCEPT SELECT c.t FROM chars c))", "setop-char-compare"],
+      [`SELECT c.t FROM chars c UNION ALL (${CMP}) ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, "setop-char-compare"],
+      [`SELECT count(*) FROM chars c2 WHERE c2.t IN (SELECT c.t FROM chars c UNION ALL (${CMP}))`, "setop-char-compare"],
+      [`WITH w AS (SELECT c.t FROM chars c UNION ALL (${CMP})) SELECT * FROM w`, "setop-char-compare"],
+      // a cast to a float (from a numeric, a bigint) or a timestamptz (from a timestamp) below what compares first
+      [`${F} UNION ALL (SELECT b.x FROM bigdec b UNION SELECT b.y FROM bigdec b) ORDER BY 1`, "setop-cast-below-compare"],
+      [`(SELECT b.x FROM bigdec b UNION SELECT b.y FROM bigdec b) UNION ALL ${F} ORDER BY 1`, "setop-cast-below-compare"],
+      [`${F} UNION ALL (SELECT l.id + 9007199254740991::int8 FROM late l WHERE l.id < 3 UNION SELECT 1::int8) ORDER BY 1`, "setop-cast-below-compare"],
+      [`${F} UNION ALL SELECT DISTINCT b.x FROM bigdec b ORDER BY 1`, "setop-cast-below-compare"],
+      [`${F} UNION ALL SELECT b.x FROM bigdec b GROUP BY 1 ORDER BY 1`, "setop-cast-below-compare"],
+      [`${F} UNION ALL SELECT b.x AS q FROM bigdec b GROUP BY q ORDER BY 1`, "setop-cast-below-compare"],
+      [`${F} UNION ALL (SELECT b.x FROM bigdec b ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) ORDER BY 1`, "setop-cast-below-compare"],
+      [`${F} UNION ALL (SELECT b.x FROM bigdec b UNION ALL SELECT b.y FROM bigdec b ORDER BY 1 LIMIT 2) ORDER BY 1`, "setop-cast-below-compare"],
+      [`${F} UNION ALL (SELECT b.x FROM bigdec b INTERSECT ALL SELECT b.x FROM bigdec b)`, "setop-cast-below-compare"],
+      [`SELECT count(*) FROM (${F} UNION ALL (SELECT b.x FROM bigdec b UNION SELECT b.y FROM bigdec b) ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) s`, "setop-cast-below-compare"],
+      ["SELECT i.at FROM instants i UNION ALL (SELECT n.ts FROM nullish n UNION SELECT n.ts FROM nullish n)", "setop-cast-below-compare"],
+    ] as const) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && new RegExp(`Mason gap ${gap}`).test(e.detail ?? ""), sql);
+      await postgres(sql);
+    }
+  } finally { await c.end(); }
+});
+
 // A SET OPERATION'S NUMERIC UNDER WITH TIES (the class "setop-numeric-engine-scale", PR 233 review r1): the engine
 // prints one DECIMAL scale per column, or a quotient's double, where Postgres's set-operation numeric keeps each value's
 // own. Under WITH TIES (which the base crashed on) such a column is answered only where the one decider of a union's

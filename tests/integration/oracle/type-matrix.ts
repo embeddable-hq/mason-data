@@ -1289,6 +1289,11 @@ function* matrix(): Generator<Matrixed> {
   yield q("set operation: a first * of two columns of one name, sent as written", "SELECT count(*) FROM (SELECT * FROM (SELECT x.i4 AS id, x.id FROM typed x) s UNION ALL SELECT x.i4, x.id FROM typed x) u");
   yield { ...q("with ties: a char(n) * arm beside a text, ALL", "SELECT * FROM (SELECT s.ch, s.id FROM star_o s) x UNION ALL SELECT s.name, s.id FROM star_o s ORDER BY 1 NULLS FIRST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
   yield q("set operation: a char(n) of one length, without ALL", "SELECT s.ch FROM star_o s UNION SELECT s.ch FROM star_o s ORDER BY 1 NULLS FIRST");
+  // a set operation nested in another's arm compares at its own type, the outer's cast written through it (PR 233 probe 6)
+  yield q("set operation: a nested char(n) UNION of one length under a text", "SELECT s.name FROM star_o s UNION ALL (SELECT s.ch FROM star_o s UNION SELECT s.ch FROM star_o s) ORDER BY 1 NULLS FIRST");
+  yield q("set operation: a nested integer UNION under a double", "SELECT x.f8 FROM typed x UNION ALL (SELECT x.i4 FROM typed x UNION SELECT x.i2 FROM typed x) ORDER BY 1 NULLS FIRST");
+  yield q("set operation: a nested numeric UNION ALL under a double", "SELECT x.f8 FROM typed x UNION ALL (SELECT x.n2 FROM typed x UNION ALL SELECT x.i8 FROM typed x) ORDER BY 1 NULLS FIRST");
+  yield q("set operation: a nested date UNION under a timestamptz", "SELECT x.tz FROM typed x UNION ALL (SELECT x.d FROM typed x UNION SELECT x.d FROM typed x) ORDER BY 1 NULLS FIRST");
   yield q("with ties: a char(n) * arm beside a text, without ALL", "SELECT * FROM (SELECT s.ch, s.id FROM star_o s) x UNION SELECT s.name, s.id FROM star_o s ORDER BY 1 NULLS FIRST FETCH FIRST 1 ROWS WITH TIES");
   yield q("with ties: a * of two columns of one name, cast for the set operation", "SELECT * FROM (SELECT x.i4 AS id, x.id FROM typed x) s UNION ALL SELECT x.f8, x.id FROM typed x ORDER BY 2 DESC FETCH FIRST 2 ROWS WITH TIES");
   yield q("with ties: a first * written out for the cast", "SELECT count(*) FROM (SELECT * FROM (SELECT x.i4, x.id FROM typed x) s UNION ALL SELECT x.f8, x.id FROM typed x ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) u");

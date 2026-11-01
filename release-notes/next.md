@@ -32,6 +32,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A `UNION`, `INTERSECT` or `EXCEPT` sorts and compares its column as the type Postgres gives it over every SELECT.**
   A `citext` column beside a `text` one is `text`, so it is no longer sorted or tied without regard to case, and a
   `UNION` without `ALL` of the two is answered instead of refused; a `COLLATE` written in a later SELECT is the column's.
+  A set operation nested in another's SELECT compares at its own column type: one whose `char(n)` column has a `text`
+  or `varchar` beside it is refused by name (`setop-char-compare`), and one that compares a `bigint`, `numeric` or
+  `timestamp` column which the set operation around it makes a float or a `timestamptz` is refused by name
+  (`setop-cast-below-compare`; cast it in each SELECT inside, or read the inner part as a subquery).
 
 - **Generated tables: a table declared in SQL, kept current by Mason.** One file per table in `mason/generated_tables/`,
   committed beside the sources file, with `kind: scheduled`, `target_lag:` and `sql:`; `mason help generated` is the

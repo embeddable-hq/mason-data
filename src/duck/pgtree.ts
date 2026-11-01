@@ -463,9 +463,30 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
  * arm wins, numeric(10,3) beside numeric(12,2) is an unconstrained numeric), never its first SELECT's. Found by the
  * offsets its outputs carry, which are its first SELECT's (transformSetOperationStmt): so one offset may hold several,
  * a parenthesised set operation inside another's first arm, listed outermost first, as the tree nests them.
+ * Each comes with the set operations NESTED in its arms that are no query of their own (`a UNION ALL (b UNION c)`: the
+ * inner UNION is a SETOPERATIONSTMT, a leaf a RANGETBLREF), each with ITS columns as Postgres resolved them over its own
+ * arms (colTypes, colTypmods, colCollations): the type it compares its rows at, which may not be the outer's (the class
+ * "setop-arm-cast-dropped", PR 233 probe 6).
  */
-export function setOperationColumns(tree: TreeValue): Map<number, Array<Array<Typed | null>>> {
-  const found = new Map<number, Array<Array<Typed | null>>>();
+export interface SetShape {
+  columns: Array<Typed | null>;
+  /** the set operation that arm is, or null for a leaf (a SELECT, or a set operation that is a query of its own) */
+  larg: SetShape | null;
+  rarg: SetShape | null;
+}
+export function setOperationColumns(tree: TreeValue): Map<number, SetShape[]> {
+  const found = new Map<number, SetShape[]>();
+  const nested = (n: TreeValue | undefined): SetShape | null => {
+    if (n === undefined || !isNode(n) || n._node !== "SETOPERATIONSTMT") return null;
+    // (an OID or int list prints as `(o 1042 25)` / `(i -1 -1)`: its tag, then its values)
+    const list = (v: TreeValue | undefined): Array<number | null> => Array.isArray(v) ? v.slice(1).map((x) => num(x)) : [];
+    const types = list(n.colTypes), typmods = list(n.colTypmods), collations = list(n.colCollations);
+    const columns = types.map((type, i): Typed | null => type === null ? null : {
+      node: "SETOPERATIONSTMT", type, typmod: typmods[i] ?? -1, args: [], oid: null, format: null,
+      collation: collations[i] ?? 0, inputCollation: 0, levelsUp: null, datum: null, qualifier: null, renamed: null,
+    });
+    return { columns, larg: nested(n.larg), rarg: nested(n.rarg) };
+  };
   const visit = (v: TreeValue): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x); return; }
     if (!isNode(v)) return;
@@ -473,11 +494,13 @@ export function setOperationColumns(tree: TreeValue): Map<number, Array<Array<Ty
       const rtable = Array.isArray(v.rtable) ? v.rtable.filter(isNode) : [];
       const exprs = v.targetList.filter(isNode).filter((t) => t.resjunk !== "true").map((t) => t.expr ?? null);
       const columns = exprs.map((e) => { const t = isNode(e) ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable]); });
+      const top = v.setOperations as TreeNode;
+      const shape: SetShape = { columns, larg: nested(top.larg), rarg: nested(top.rarg) };
       for (const e of exprs) {
         const loc = isNode(e) ? num(e.location) : null;
         if (loc === null || loc < 0) continue;
         const at = found.get(loc) ?? [];
-        if (!at.includes(columns)) at.push(columns);
+        if (!at.includes(shape)) at.push(shape);
         found.set(loc, at);
       }
     }

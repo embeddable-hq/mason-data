@@ -32,7 +32,7 @@ import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { caseTwins, joinsUsing, setOperationColumns, type Keys, type QueryOutputs, type Typed } from "./pgtree.ts";
+import { caseTwins, joinsUsing, setOperationColumns, type Keys, type QueryOutputs, type SetShape, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
@@ -118,6 +118,18 @@ const MONOTONIC = new Set(["year", "years", "decade", "decades", "century", "cen
 /** an interval field's numeric scale: a second's is 6, a millisecond's 3, an epoch's 6 */
 const INTERVAL_SCALE: Record<string, string> = { second: "6", seconds: "6", millisecond: "3", milliseconds: "3", epoch: "6" };
 const NUMBER_TYPES = new Set([INT2, INT4, INT8, FLOAT4, FLOAT8, NUMERIC]);
+/** whether a set operation's implicit cast of a column (`widen`'s) keeps two unequal values unequal, so writing it
+ *  below what compares them first changes nothing: a char(n) trimmed (char(n)'s equality ignores the trailing spaces),
+ *  a date at midnight, an integer widened or made exactly a double. A bigint or numeric made a float, an integer a
+ *  real, or a timestamp a timestamptz (two wall-clock times of a zone's skipped hour are one instant) can make two
+ *  values one (setOperationCast, PR 233 probe 6) */
+const castKeepsEquality = (from: number, to: number): boolean => from === to
+  || (from === BPCHAR && (to === TEXT || to === VARCHAR))
+  || (from === DATE && (to === TIMESTAMP || to === TIMESTAMPTZ))
+  || (from === INT2 && NUMBER_TYPES.has(to))
+  || (from === INT4 && (to === INT8 || to === FLOAT8 || to === NUMERIC))
+  || (from === INT8 && to === NUMERIC)
+  || (from === FLOAT4 && to === FLOAT8);
 /** an array type's element (the numbers', where an IN list's element type decides a comparison) */
 const NUMBER_ELEMENT: Record<number, number> = { 1005: INT2, 1007: INT4, 1016: INT8, 1021: FLOAT4, 1022: FLOAT8, 1231: NUMERIC };
 const TEXTS = new Set([TEXT, VARCHAR, BPCHAR, NAME, UNKNOWN]);
@@ -312,9 +324,13 @@ class Rewriter {
   }
 
   /** each set operation's columns as Postgres resolved them over every arm, by its first SELECT's offsets (pgtree.ts) */
-  private readonly setColumns: Map<number, Array<Array<Typed | null>>>;
-  /** each set operation that is a query of Postgres's own (`markSetOperations`): its columns as Postgres's analysis of
-   *  it has them (null where not found), read ONCE, by its first SELECT's offsets, before anything rewrites a target
+  private readonly setColumns: Map<number, SetShape[]>;
+  /** each set operation no other set operation holds as an arm: the one whose `setOperationCast` writes every arm's
+   *  cast, through every set operation nested in it */
+  private readonly castRoots = new WeakSet<Body>();
+  /** each set operation of the statement (`markSetOperations`), a query of Postgres's own or one nested in another's
+   *  arm: its columns as Postgres's analysis of it has them (null where not found), read ONCE, by its first SELECT's
+   *  offsets or its place in the analysed set operation around it, before anything rewrites a target
    *  list: a `*` written out, or a target replaced, holds no offset of Postgres's (the class
    *  "setop-star-written-loses-location", PR 233 review r2) */
   private readonly setTypes = new WeakMap<Body, Array<Typed | null> | null>();
@@ -328,22 +344,29 @@ class Rewriter {
     const own = (b: Body): boolean => b.sortClause !== undefined || b.limitCount !== undefined || b.limitOffset !== undefined
       || b.withClause !== undefined || b.lockingClause !== undefined || (b.limitOption !== undefined && b.limitOption !== "LIMIT_OPTION_DEFAULT");
     const arm = (x: unknown): Body | null => isNode(x) ? bodyOf(x) : x !== null && typeof x === "object" ? x as Body : null;
-    const spine = (b: Body, depth: number, root: boolean): void => {
+    // `shape`: what Postgres's analysis of the set operation around says of this arm (undefined: no set operation around,
+    // or this arm is a query of its own; null: the analysis has a leaf here, which a raw set operation is not)
+    const spine = (b: Body, depth: number, root: boolean, shape: SetShape | null | undefined): void => {
       const setop = b.op !== undefined && b.op !== "SETOP_NONE";
       if (!setop) { for (const x of Object.values(b)) visit(x); return; }
       const query = root || own(b);
-      if (query) this.setTypes.set(b, this.analysedSetTypes(b, depth));
+      // a query's set operation is found by its first SELECT's offsets; one nested in its arms, by its place in the
+      // analysed set operation's tree (larg to larg, rarg to rarg); either is recorded, every set operation of the
+      // statement, so each one's own types decide what it compares (setop-arm-cast-dropped, PR 233 probe 6)
+      const mine = query ? this.analysedSetShape(b, depth) : shape ?? null;
+      this.setTypes.set(b, mine?.columns ?? null);
+      if (root) this.castRoots.add(b);
       for (const [k, x] of Object.entries(b)) {
-        if (k === "larg") { const l = arm(x); if (l !== null) spine(l, query ? depth + 1 : depth, false); }
+        if (k === "larg") { const l = arm(x); if (l !== null) spine(l, query ? depth + 1 : depth, false, own(l) ? undefined : mine?.larg ?? null); }
         // (a later arm's first SELECT is another, its offsets its own)
-        else if (k === "rarg") { const r = arm(x); if (r !== null) spine(r, 0, false); }
+        else if (k === "rarg") { const r = arm(x); if (r !== null) spine(r, 0, false, own(r) ? undefined : mine?.rarg ?? null); }
         else visit(x);
       }
     };
     const visit = (x: unknown): void => {
       if (Array.isArray(x)) { for (const y of x) visit(y); return; }
       if (x === null || typeof x !== "object") return;
-      if (isNode(x) && kindOf(x) === "SelectStmt") { spine(bodyOf(x), 0, true); return; }
+      if (isNode(x) && kindOf(x) === "SelectStmt") { spine(bodyOf(x), 0, true, undefined); return; }
       for (const y of Object.values(isNode(x) ? bodyOf(x) : x as Body)) visit(y);
     };
     visit(v);
@@ -358,7 +381,7 @@ class Rewriter {
 
   /** the set operation's columns read from Postgres's analysis by its first SELECT's offsets as that SELECT was written:
    *  only `markSetOperations` calls it, before any target list is rewritten */
-  private analysedSetTypes(b: Body, depth: number): Array<Typed | null> | null {
+  private analysedSetShape(b: Body, depth: number): SetShape | null {
     let first: Body = b;
     while (first.op !== undefined && first.op !== "SETOP_NONE" && first.larg !== undefined) first = isNode(first.larg) ? bodyOf(first.larg) : first.larg as Body;
     const held = (n: unknown): number[] => {
@@ -381,25 +404,52 @@ class Rewriter {
    * arm's column whose own type differs is written as that cast, by the one rule of an implicit cast (`widen`), at every
    * arm however deep (a cast of each arm is the cast of the union); a `*`'s column so cast is written out first. The
    * first SELECT's column keeps Postgres's name, which the cast's call would replace in the engine.
+   * A SET OPERATION NESTED IN AN ARM (the same class, PR 233 probe 6) has columns of its own in Postgres's analysis
+   * (`setOperationTypes`, recorded for every set operation): an arm under it is cast to ITS type first, then to each
+   * one's around it, outermost last (Postgres casts a nested set operation's result, not its arms, to the outer type).
+   * So this runs once, at the set operation no other holds as an arm (`castRoots`), each arm through its path. A cast
+   * is written below whatever compares the value at the type before it (a nested UNION, INTERSECT or EXCEPT without
+   * ALL, or INTERSECT / EXCEPT ALL; a set operation's or an arm's own ORDER BY or LIMIT; an arm's DISTINCT or GROUP
+   * BY), so a cast there that can make two unequal values equal (`castKeepsEquality`) is refused by name.
    */
   private setOperationCast(b: Body): void {
     const types = this.setOperationTypes(b);
     if (types === null) return;
     const unwrap = (x: unknown): Body => isNode(x) ? bodyOf(x) : x as Body;
-    const leaves: Body[] = [];
-    const leavesOf = (x: Body): void => {
-      if (x.op !== undefined && x.op !== "SETOP_NONE" && x.larg !== undefined && x.rarg !== undefined) { leavesOf(unwrap(x.larg)); leavesOf(unwrap(x.rarg)); } else leaves.push(x);
+    const setop = (x: Body): boolean => x.op !== undefined && x.op !== "SETOP_NONE" && x.larg !== undefined && x.rarg !== undefined;
+    const limited = (x: Body): boolean => x.sortClause !== undefined || x.limitCount !== undefined || x.limitOffset !== undefined
+      || (x.limitOption !== undefined && x.limitOption !== "LIMIT_OPTION_DEFAULT");
+    // whether a set operation, or an arm, compares its rows by the column (`setop`'s: its op; an arm's: its own clauses,
+    // a GROUP BY only by an output's number or name, which the engine reads as the output, cast; any other groups the
+    // value before the SELECT list casts it)
+    const outputNamed = (x: Body, g: unknown): boolean => {
+      if (!isNode(g)) return false;
+      if (kindOf(g) === "A_Const") return true;
+      const f = kindOf(g) === "ColumnRef" ? names(bodyOf(g).fields) : [];
+      return f.length === 1 && ((x.targetList ?? []) as AstNode[]).some((t) => bodyOf(t).name === f[0]);
     };
-    leavesOf(b);
-    leaves.forEach((leaf, li) => {
+    const compares = (x: Body): boolean => setop(x)
+      ? x.op !== "SETOP_UNION" || x.all !== true || limited(x)
+      : limited(x) || x.distinctClause !== undefined || ((x.groupClause ?? []) as unknown[]).some((g) => outputNamed(x, g));
+    // each arm, with the set operations from it to `b`, innermost first, each one's columns as Postgres has them
+    const leaves: Array<{ leaf: Body; path: Array<{ node: Body; types: Array<Typed | null> | null }> }> = [];
+    const leavesOf = (x: Body, path: Array<{ node: Body; types: Array<Typed | null> | null }>): void => {
+      if (!setop(x)) { leaves.push({ leaf: x, path }); return; }
+      const here = [{ node: x, types: x === b ? types : this.setOperationTypes(x) }, ...path];
+      leavesOf(unwrap(x.larg), here); leavesOf(unwrap(x.rarg), here);
+    };
+    leavesOf(b, []);
+    leaves.forEach(({ leaf, path }, li) => {
       const all = (leaf.targetList ?? []) as AstNode[];
       const cells = this.cellsAfter.get(leaf);
       const own = all.slice(0, all.length - (cells?.listed ?? 0));
       const outputs = this.outputs(own);
       if (outputs.length !== types.length) return;
+      // (each column's types from the arm out: a set operation whose columns the analysis lost is passed by)
+      const steps = (i: number): number[] => path.flatMap((p) => p.types?.length === types.length && p.types[i] !== null && p.types[i] !== undefined ? [p.types[i]!.type] : []);
       const want = (i: number): number | undefined => types[i]?.type;
       // (a `*` holding a column the cast changes is written out, its columns each one target)
-      const starCast = outputs.some((o, i) => o.star && want(i) !== undefined && this.widensText(o.value, want(i)!));
+      const starCast = outputs.some((o, i) => o.star && steps(i).some((t) => this.widensText(o.value, t)));
       if (starCast) {
         if (outputs.some((o) => o.twin)) throw this.twinRefused();
         // (a `*` that carries an inner query's exact cells would lose them when written out)
@@ -412,11 +462,24 @@ class Rewriter {
       }
       const written = this.outputs((leaf.targetList as AstNode[]).slice(0, (leaf.targetList as AstNode[]).length - (cells?.listed ?? 0)));
       written.forEach((o, i) => {
-        const t = want(i);
-        if (o.star || t === undefined) return;
+        if (o.star || want(i) === undefined) return;
         const target = bodyOf((leaf.targetList as AstNode[])[o.target]!);
         const v = target.val as AstNode;
-        const cast = this.widen(v, t);
+        // through each set operation from the arm out, at its type: compared at the type before a cast that keeps no
+        // equality, the cast is refused
+        let cast = v, compared = compares(leaf);
+        for (const p of path) {
+          const t = p.types?.length === types.length ? p.types[i]?.type : undefined;
+          if (t === undefined) continue;
+          const from = this.typeOf(cast);
+          const next = this.widen(cast, t);
+          if (next !== cast && compared && from !== null && !castKeepsEquality(from, t)) {
+            throw new Unrewritable(`this ${String(p.node.op).replace("SETOP_", "")} casts a column to ${t === TIMESTAMPTZ ? "timestamptz" : "a float"} that a set operation or a SELECT inside it compares first (a DISTINCT, GROUP BY, ORDER BY or LIMIT, or a UNION, INTERSECT or EXCEPT without ALL): this is not supported by Mason (Postgres compares the values before the cast)`,
+              "cast the column to the outer type in each SELECT inside (x::float8), or read the inner part as a subquery: SELECT * FROM (…) s", "setop-cast-below-compare");
+          }
+          cast = next;
+          compared ||= compares(p.node);
+        }
         if (cast === v) return;
         if (li === 0 && typeof target.name !== "string") target.name = o.name;
         target.val = cast;
@@ -642,6 +705,7 @@ class Rewriter {
     if (like !== undefined) this.typedLike.set(bodyOf(out as AstNode), like);
     // and a set operation its columns as Postgres's analysis has them (`setOperationTypes`): a union arm's trial reads them
     if (this.setTypes.has(v as Body)) this.setTypes.set(out, this.setTypes.get(v as Body) ?? null);
+    if (this.castRoots.has(v as Body)) this.castRoots.add(out);
     return out as T;
   }
 
@@ -978,7 +1042,8 @@ class Rewriter {
     }
     this.keyedGroups(b);
     // each arm's column as the set operation's (a char(n) beside a varchar is its text, unpadded): before anything reads it
-    if (b.op !== undefined && b.op !== "SETOP_NONE") this.setOperationCast(b);
+    // (once, at the set operation no other holds as an arm: each arm through every set operation nested around it)
+    if (b.op !== undefined && b.op !== "SETOP_NONE" && this.castRoots.has(b)) this.setOperationCast(b);
     // a set operation compares its rows (without ALL, and INTERSECT ALL / EXCEPT ALL count them by equality)
     if (b.op !== undefined && b.op !== "SETOP_NONE" && (b.all !== true || b.op !== "SETOP_UNION")) {
       let first: Body = b;
@@ -991,7 +1056,8 @@ class Rewriter {
       // a char(n) column whose arms disagree (a text or varchar arm, another length: no typmod in Postgres's analysis)
       // is compared as bpchar, without the trailing spaces, and no cast the engine has is that: each column, a `*`'s
       // included, as the set operation's analysis types it (setop-arm-cast-dropped, PR 233 review r3). One length is
-      // padded alike in every arm, and compared as Postgres compares it
+      // padded alike in every arm, and compared as Postgres compares it. Every set operation is here, one nested in
+      // another's arm too, with its own analysed types (`markSetOperations`, PR 233 probe 6)
       for (const typed of types ?? []) {
         if (typed?.type === BPCHAR && typed.typmod < 0) throw new Unrewritable(`${what} a char(n) column beside a text, a varchar or a char of another length is not supported by Mason (Postgres compares it without its trailing spaces)`, "cast the char(n) column to text in the first SELECT (x::text), or UNION ALL", "setop-char-compare");
       }

@@ -16,6 +16,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "star-join-twin", sql: "SELECT j.* FROM (star_o a FULL JOIN star_b b USING (name)) AS j ORDER BY 1 NULLS FIRST, 2, 8" },
   { gap: "star-join-twin", sql: "SELECT * FROM (SELECT x.i4 AS id, x.id FROM typed x) s UNION ALL SELECT x.f8, x.id FROM typed x ORDER BY 2, 1 NULLS FIRST" },
   { gap: "setop-char-compare", sql: "SELECT s.ch FROM star_o s UNION SELECT s.name FROM star_o s ORDER BY 1 NULLS FIRST" },
+  { gap: "setop-char-compare", sql: "SELECT s.name FROM star_o s UNION ALL (SELECT s.ch FROM star_o s UNION SELECT s.name FROM star_o s) ORDER BY 1 NULLS FIRST" },
+  { gap: "setop-cast-below-compare", sql: "SELECT x.f8 FROM typed x UNION ALL (SELECT x.n2 FROM typed x UNION SELECT x.i8 FROM typed x) ORDER BY 1 NULLS FIRST" },
   { gap: "setop-ordinal-star", sql: "SELECT *, t FROM (SELECT id, t FROM typed) s UNION SELECT id, t, t FROM typed ORDER BY 2, 1" },
   { gap: "setop-numeric-ties", sql: "SELECT b.amount / 3 AS x FROM top_b b UNION ALL SELECT 1 ORDER BY 1 NULLS FIRST FETCH FIRST 1 ROWS WITH TIES" },
   { gap: "rewrite-name", sql: "SELECT __mason_late.id, b.payload FROM top_a AS __mason_late JOIN top_b b ON b.a_id = __mason_late.id ORDER BY __mason_late.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES" },
