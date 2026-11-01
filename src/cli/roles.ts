@@ -256,6 +256,9 @@ export interface CopiedTable {
   foreignKeys?: ReadonlyArray<{ column: string; target: string; targetColumn: string }>;
   /** its primary key's columns, when known: what an explicit `through: { orders: order_id }` with no foreign key compares */
   key?: readonly string[];
+  /** a generated table not built yet (src/duck/generated.ts): its columns are not known, so a role's `columns:` are not
+   *  held to them yet, and it reads nothing of it */
+  pending?: true;
 }
 
 /**
@@ -312,7 +315,8 @@ export function roleProblems(roles: RolesFile, copied: readonly CopiedTable[]): 
         const th = throughColumns(t, at, copied);
         if (typeof th === "string") problems.push(th);
       }
-      if (c.columns === null) continue;
+      // a generated table not built yet: its columns are not known, and the role reads nothing of it until they are
+      if (c.columns === null || c.pending === true) continue;
       const have = c.columns.map((x) => x.name);
       for (const [key, list] of [["columns", t.columns ?? []], ["exclude", t.exclude]] as const) {
         for (const col of list.filter((x) => !have.includes(x))) problems.push(`${at}.${key}: the synced ${t.table} has no column ${col}${didYouMean(col, have)} (its columns: ${have.join(", ")})`);

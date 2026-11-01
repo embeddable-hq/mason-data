@@ -15,6 +15,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Generated tables: a table declared in SQL, kept current by Mason.** One file per table in `mason/generated_tables/`,
+  committed beside the sources file, with `kind: scheduled`, `target_lag:` and `sql:`; `mason help generated` is the
+  guide. A table re-runs its whole SQL once a base has changed and its target comes due, inside Mason, reading nothing from
+  your database, and nothing runs over idle bases. A statement reads it by name; `mason status` shows its state and lag. A
+  role with `tables: all` reads it, and a role with a list reads it once it names it. Nothing changes if you add no file.
 - **A column is reported as the source's type, whatever Mason holds.** `information_schema`, `pg_attribute`, `pg_typeof`
   and the wire's type OID now say `timetz` (1266), `point`, `money`, `bit`, `macaddr` and the rest where they said `text`,
   so a BI tool stops sending text functions at them. If a saved question or a script of yours read one of these columns as
@@ -88,9 +93,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   path uncut or failed. Cast it to `text[]`.
 - **`SELECT *` in an arm of a UNION no longer lists a stored JSON path's hidden column**, which failed or added a column
   once a table had one stored. Nothing to do on upgrade.
+- **A `time` cast to `timetz` takes the session zone's offset for today at the value's own time of day**, as Postgres
+  does. On a day the clocks change it took the offset of the moment the query ran, so before the change `12:30` was
+  answered `-04` in New York where Postgres has `-05`. Nothing to do on upgrade.
 
 ## Known
 
+- **A generated table can't yet hold a numeric or one of your own types, or read another generated table**, and `kind:
+  live` is refused. Each is refused by file and key, with the way out, before anything is built.
+- **`mason status` shows generated tables; the web page doesn't yet.**
 - **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows, or over
   an aggregated side, has no stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY
   where the pages matter.

@@ -427,6 +427,9 @@ names the agent. Its tools say over this wire what a bare SQL tool would leave a
   (`pg_constraint`, so a tool's "relationships" view and ER diagram draw them).
 - **The source's views** over copied tables, answered by their definitions as Postgres's rewriter answers them; a view
   over a table not copied is left out, said once in the log.
+- **Each generated table** (`mason help generated`), under the name its file gives it, as a plain table of its output's
+  columns with no keys. It appears once its first build ends; until then a statement naming it is refused by name
+  (`generated-not-built`), saying what the table is doing. EXPLAIN says how it is kept current on its first line.
 - **The catalog is a Postgres**: `pg_catalog` and `information_schema` are answered by the embedded Postgres (PGlite:
   Postgres 18.6 compiled to WebAssembly) that holds exactly these tables, so whatever a tool asks of the catalog —
   `psql`'s `\d`, pgjdbc's `getColumns`, Metabase's sync — is answered as Postgres answers it. It starts on the first

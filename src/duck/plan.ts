@@ -13,7 +13,7 @@ import type { TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
-import { describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
+import { argumentTypes, describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { pgTyplen } from "./types.ts";
@@ -270,6 +270,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     const f = analysis.refused;
     // a table the catalog does not hold: where its copy is, or the `mason add` away
     const missing = f.C === "42P01" ? /^relation "([^"]+)" does not exist$/.exec(f.M ?? "")?.[1] : undefined;
+    // a generated table not built yet (src/duck/generated.ts): by name, and what it is doing
+    const unbuilt = missing === undefined ? undefined : copies().find((c) => c.kept?.by === "generated" && c.phase !== "copied" && (c.source === missing || c.source === `public.${missing}`));
+    if (unbuilt?.kept?.by === "generated") throw gapRefusal("generated-not-built", `the generated table ${unbuilt.source} is not built yet: ${unbuilt.kept.text}`, "mason status says how far it is", text);
     const hint = missing !== undefined ? missingRelationHint(missing, copies()) : f.H;
     const made = await madeTypeRefusal(catalog, f.C, f.M, text);
     if (made !== null) throw made;
@@ -428,7 +431,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}) } as unknown as PlannedSql;
-  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, dropLast, ...(exact.length > 0 ? { exact } : {}), resolved: keys,
+  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, dropLast, ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
     timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
 }

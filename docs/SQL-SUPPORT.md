@@ -20,7 +20,7 @@ each). The copy is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 256 functions, 387 operators, 95 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 54 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 55 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
@@ -55,12 +55,13 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (54)
+## Refused (55)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
+| `generated-not-built` | a read of a generated table before its first build ended | a materialized view exists from its CREATE | refused with what the table is doing: being built, waiting for a table to sync, failed or refused | read it once it is built; mason status says how far it is |
 | `unverified` | a function, operator, cast, type or construct Mason has not yet verified against Postgres | answers | refused, naming each piece | write the statement without it; report it to have it verified |
 | `explain-option` | EXPLAIN (FORMAT XML), (FORMAT YAML), (GENERIC_PLAN) | the plan in XML or YAML; a plan for unbound parameters | refused by name: EXPLAIN is DuckDB's plan, in Postgres's text or JSON (docs/DESIGN.md) | FORMAT TEXT or FORMAT JSON; bind the parameters' values and EXPLAIN that |
 | `set-config-forms` | set_config() anywhere but alone in a SELECT of no table with literal arguments: beside other columns or a FROM, in a subquery, with an expression, a parameter or NULL, under EXPLAIN | sets the parameter (for the transaction, under is_local) and answers its value | refused (SELECT set_config('name', 'value', false) alone is the session's SET, and with true its SET LOCAL, answered with its value as SHOW answers it) | SET name = 'value', or SELECT set_config('name', 'value', false) on its own |

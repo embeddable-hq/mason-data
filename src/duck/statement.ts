@@ -41,6 +41,8 @@ export interface DuckPlan {
   exact?: ExactColumn[];
   /** what Postgres resolved the statement to (src/duck/resolved.ts): each one verified, or the statement was refused */
   resolved: readonly string[];
+  /** each function it calls with each argument's type (src/duck/resolved.ts `argumentTypes`) */
+  argumentTypes?: readonly string[];
   /** the copied tables' JSON paths it reads by literal steps (src/duck/kept-route.ts readKey): the request log's
    *  `json_reads`, which decide the paths Mason stores (src/duck/kept.ts) */
   jsonReads?: readonly string[];

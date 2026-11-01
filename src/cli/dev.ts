@@ -31,6 +31,7 @@ import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
 import { createRunServer, listenOnLoopback, metricsFacts, usageFacts, type RunContext } from "./run-server.ts";
 import type { RunMetrics } from "./metrics.ts";
+import { readGenerated } from "./generated-files.ts";
 import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, syncWritten, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { liveRun } from "./runs.ts";
@@ -376,7 +377,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const rolesRead = readRoles(folder, project.root);
   if (rolesRead !== null && "message" in rolesRead) return failed("start", rolesRead, { json: false });
   if (rolesRead !== null) {
-    const resolved = resolveRoles(rolesRead, firstTables, project.root);
+    // a role may name a generated table, whose columns the catalog knows only once it is built (src/duck/generated.ts)
+    const generatedFiles = readGenerated(folder, project.root);
+    const generatedNames = [...generatedFiles.definitions, ...generatedFiles.refused].map((g) => ({ source: g.name, columns: [], pending: true as const }));
+    const resolved = resolveRoles(rolesRead, [...firstTables, ...generatedNames], project.root);
     if ("message" in resolved) return failed("start", resolved, { json: false });
   }
 
@@ -436,12 +440,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (move.action !== "same") { cfg.sourceServer = { systemIdentifier: facts.systemIdentifier, database: source.database }; writeConfig(home, cfg); }
   // the views first: setting the tables rebuilds the catalog, which reads them. The sources file read again: a mistake in it
   // keeps the tables read before (a typo never drops a copy), said in the log and by mason status
-  const added = (): void => {
+  const added = (): Promise<void> => {
     const r = rereadSources(sources, readSources(), src.resolved, facts.tables, source.database, project.root, { replicationChecked, slot: cfg.replication?.slot ?? null });
     if (r.said !== null) logLine(`[sync] ${r.said}`);
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(facts.views ?? []);
-    void sync.setTables(sources.tables);
+    return sync.setTables(sources.tables);
   };
 
   if (pg.said) say(`  ${pg.said}`);
@@ -489,7 +493,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   try { usage = await UsageSampler.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Starting the Postgres listener"); say(`  the usage samples (${USAGE_TABLE}) could not be opened: ${(e as Error).message}`); await requests.close(); await sync.stop(); await events.close(); await store.close(); return 1; }
   let duckListener;
-  try { duckListener = await store.listener(facts.collation, undefined, libc, () => sync.state(), sync.kept.enabled ? sync.kept : undefined); }
+  try { duckListener = await store.listener(facts.collation, undefined, libc, () => [...sync.state(), ...sync.generated.copies()], sync.kept.enabled ? sync.kept : undefined); }
   catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
   logLine(`[engine] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
   // THE USERS (src/duck/users.ts): `mason user` edits the file beside this process; the listener re-reads it at every
@@ -497,7 +501,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const users = new LiveUsers(path.join(home, USERS_FILE), cfg.apiKey);
   // THE ROLES (src/cli/roles.ts): the file read again when it or the copied tables change; a session with a role is
   // held to it at every statement, and the catalog is rebuilt with the roles (src/api/postgres/server.ts)
-  const liveRoles = new LiveRoles(folder, project.root, () => sources.tables);
+  const liveRoles = new LiveRoles(folder, project.root, () => [...sources.tables, ...sync.generated.named()]);
   let api: PgApiServer;
   try {
     api = await startPostgresApi({
@@ -570,7 +574,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     roles: () => api.roles(),
     ...(shares !== undefined ? { shares } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
-    sources: () => sources, sourcesChanged: () => { added(); }, readSource: readSources, runUrl: src.resolved,
+    sources: () => sources, sourcesChanged: () => { void added(); }, readSource: readSources, runUrl: src.resolved,
     // a table set to sync: replication while the run is up, in a run that never checked the database for it: the
     // start's own checks, now, and the edit refused when they fail (src/cli/run-server.ts /api/pick)
     checkReplication: async (file) => {
@@ -591,7 +595,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     // the statements running now, and a cancel of one: the listener's own (a CancelRequest's path)
     listener: api,
     duck: { copies: () => sync.state(), file: duckFile, poll: (sources) => sync.pollNow(sources), stream: (o) => sync.streamStatus(o), measured: (table) => sync.measured(table), disk: () => sync.diskStatus(), requests, events, usage,
-      restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status() },
+      restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status(), generated: () => sync.generated.status() },
   };
   const server = createRunServer(runCtx);
   // a sample is /api/state's facts at its moment (src/cli/run-server.ts usageFacts): one computation of each
@@ -604,13 +608,18 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       try { facts = await readSourceFacts(c.pg); } finally { c.pg.close(); }
     })().catch((e: unknown) => logLine(`catalog refresh failed: ${(e as Error).message}`));
   }, 10_000);
-  added();
+  const tablesSet = added();
   cfg.running = { pid: process.pid, controlUrl: `http://127.0.0.1:${setupPort}`, token, postgresUrl, postgresListener: pgTls.listener };
   cfg.lastRun = new Date().toISOString();
   writeConfig(home, cfg);
   done(`Mason is up: ${sync.state().length} table(s) added, kept current: ${syncMode === "poll" ? `as each table's sync: says${syncCounts(sources.tables)}` +
       `${sync.streams() ? `; replicated tables streamed as they change (logical replication: slot ${repl.slot}, publication ${repl.publication}${repl.owned ? "" : ", read as it is"})` : ""}`
     : `each table read again whole every ${PASS_RETRY_MS / 1000} s (MASON_DUCK_SYNC=recopy)`}`);
+  // THE GENERATED TABLES (src/duck/generated.ts): the folder read and each file held to the catalog, what is refused said
+  // here too; a refusal stops nothing, and their SQL is checked again as the tables they read are copied
+  await tablesSet;
+  await sync.generated.start(() => readGenerated(folder, project.root), api.planner());
+  for (const g of sync.generated.status()) for (const r of g.refusals) say(textEntry("  ! ", r.text).trimEnd());
   // THE FILE'S DEFAULT, SAID ONCE (issue 33: nothing Mason does to your database is a hidden default)
   const defaultLine = syncDefaultLine(sources.file, shownPath(project.root, sources.file.file), syncMode === "poll" ? copiedBefore : 0);
   say(`  ${defaultLine}`);
@@ -652,6 +661,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       void (async () => {
         // before the listener: a share's command is told why, and its tunnel client stopped
         try { await shares?.closeAll("Mason is stopping"); } catch (e) { say(`  closing the share: ${(e as Error).message}`); }
+        // before the listener: a generated table's review plans on its catalog, so it ends first
+        try { await sync.generated.stop(); } catch (e) { say(`  stopping the generated tables: ${(e as Error).message}`); }
         try { await api.close(); } catch (e) { say(`  closing the listener: ${(e as Error).message}`); }
         // after the listener: its last statements' rows are written before the file closes
         try { await requests.close(); } catch (e) { say(`  closing the request log: ${(e as Error).message}`); }

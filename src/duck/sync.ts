@@ -54,6 +54,7 @@
  */
 import type { DuckStore } from "./store.ts";
 import { freeBytesAt, MASON_SCHEMA } from "./store.ts";
+import { GeneratedTables, type GeneratedOptions } from "./generated.ts";
 import { KeptJsonPaths, type KeptOptions } from "./kept.ts";
 import type { Source, SourceColumnInfo, SourceTable, SourceView } from "../cli/preflight.ts";
 import { DuckDBEnumType, DuckDBListType, type DuckDBType } from "@duckdb/node-api";
@@ -202,7 +203,8 @@ export type KeptCurrent =
   | { by: "poll"; sync: PolledSync; syncedAt: string | null; nextAt: string | null; pending?: string }
   | { by: "recopy"; copiedAt: string | null; pending?: string }
   | { by: "replication"; slot: string; state: StreamTableStatus["state"]; why: string | null; position: string; lastCommit: string | null;
-    notRunning: string | null; syncedAt: string | null };
+    notRunning: string | null; syncedAt: string | null }
+  | { by: "generated"; text: string };
 
 /**
  * WHERE THE STREAM IS, for `mason status`, `mason wait` and their `--json` (`Sync.streamStatus`; the test server's
@@ -765,10 +767,13 @@ interface Lane { readonly conn: DuckConnection; inFlight: boolean }
 
 /** a rebuild waiting its turn (`enqueue`): a whole copy, or the one poll that catches a table up before it is kept
  *  current again */
-type RebuildKind = "copy" | "catch-up";
+/** a rebuild of a copied table */
+type TableRebuild = "copy" | "catch-up";
+type RebuildKind = TableRebuild | "generated";
 interface Rebuild { kind: RebuildKind }
-/** the order the queue takes them in: a catch-up is one poll that makes a copied table current */
-const REBUILD_ORDER: readonly RebuildKind[] = ["catch-up", "copy"];
+/** the order the queue takes them in: a catch-up is one poll that makes a copied table current; a generated table's
+ *  re-run reads what the copies hold, so it goes behind them */
+const REBUILD_ORDER: readonly RebuildKind[] = ["catch-up", "copy", "generated"];
 
 export class Sync {
   private readonly store: DuckStore;
@@ -877,7 +882,7 @@ export class Sync {
   private writerTurn: Promise<void> = Promise.resolve();
   /** the rebuilds waiting, by source; the one running and its loop (`drainRebuilds`) */
   private readonly queued = new Map<string, Rebuild>();
-  private rebuildingNow: { source: string; kind: RebuildKind } | null = null;
+  private rebuildingNow: { source: string; kind: TableRebuild } | null = null;
   private rebuilding: Promise<void> | null = null;
   /** the source attached for this many users (a pass, a rebuild): DETACHed when the last ends (`detach`) */
   private sourceUsers = 0;
@@ -928,11 +933,15 @@ export class Sync {
   private dbPositionRead: Promise<void> | null = null;
   /** THE STORED JSON PATHS (src/duck/kept.ts): every write below computes them; the plans read them */
   readonly kept: KeptJsonPaths;
+  /** THE GENERATED TABLES (src/duck/generated.ts): every commit that changes a copy marks them, the rebuild queue runs them */
+  readonly generated: GeneratedTables;
+  /** the connection their runs read and write on (`open`), set up as a session: what `stop` interrupts */
+  private generatedLane: Lane | null = null;
 
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
     options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
-      json?: Partial<KeptOptions>; onReplication?: (made: boolean) => void;
+      json?: Partial<KeptOptions>; generated?: GeneratedOptions; onReplication?: (made: boolean) => void;
       /** each failure and notable event of the sync, as it happens (src/duck/events.ts): the run records them */
       onEvent?: (e: SyncEventInput) => void } = {}) {
     this.store = store; this.source = source; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
@@ -960,6 +969,24 @@ export class Sync {
       rebuilding: (source) => this.rebuildingNow?.source === source,
       log: (line) => this.log(line),
     }, { enabled: options.json?.enabled ?? true, ...options.json });
+    const generatedLane = (): Lane => {
+      if (this.generatedLane === null) throw new Error("the generated tables' connection is not open (Mason bug: report it)");
+      return this.generatedLane;
+    };
+    this.generated = new GeneratedTables(store, {
+      onWriter: (f) => this.onWriter(f),
+      connection: () => generatedLane().conn,
+      enqueue: (name) => this.enqueue(name, { kind: "generated" }),
+      interruptible: (f) => this.interruptible(generatedLane(), f),
+      added: (name) => this.tables.has(name) ? (this.states.get(name)?.phase === "copied" ? "copied" : "adding") : this.views.some((v) => `${v.schema ?? "public"}.${v.name}` === name) ? "view" : null,
+      syncedAt: (base) => this.synced.get(base)?.at ?? null,
+      rebuildCatalog: () => this.rebuildSchema(),
+      schema: () => this.currentSchema,
+      retryDelayMs: copyRetryDelayMs,
+      stopping: (e) => e instanceof Stopping,
+      log: (line) => this.log(line),
+      event: (e) => this.event(e),
+    }, options.generated ?? {});
   }
 
   /** the rebuilds' connection: open from `open` until `stop` */
@@ -1038,6 +1065,8 @@ export class Sync {
     this.removeStageLeftovers();
     // the stored JSON paths, before the catalog serves anything: each served copy's view, what the file holds
     await this.kept.open();
+    this.generatedLane = { conn: await this.store.instance.connect(), inFlight: false };
+    await this.generated.open();
     this.catalog = await this.store.instance.connect();
     await this.rebuildSchema();
   }
@@ -1527,12 +1556,12 @@ export class Sync {
     if (this.reportTimer !== null) { clearInterval(this.reportTimer); this.reportTimer = null; }
     // the stream, the pass and the rebuild end together: a batch waiting for the writer's turn behind a poll must not
     // wait for that poll, so each connection's long statement is interrupted from the start
-    const interrupt = (): void => { for (const lane of [this.writerLane, this.rebuilderLane, ...this.copyLanes]) if (lane?.inFlight) lane.conn.interrupt(); };
+    const interrupt = (): void => { for (const lane of [this.writerLane, this.rebuilderLane, this.generatedLane, ...this.copyLanes]) if (lane?.inFlight) lane.conn.interrupt(); };
     const again = setInterval(interrupt, 50);
     interrupt();
     try {
       // none of them rejects: each says its own failure
-      await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop()]);
+      await Promise.all([this.stream?.stop(), this.running, this.rebuilding, this.kept.stop(), this.generated.stop()]);
       await this.writerTurn;
     } finally { clearInterval(again); }
     this.stream = null;
@@ -1542,6 +1571,8 @@ export class Sync {
     this.catalog = null;
     this.rebuilderLane?.conn.closeSync();
     this.rebuilderLane = null;
+    this.generatedLane?.conn.closeSync();
+    this.generatedLane = null;
   }
 
   /** a poll asked of a table while it is rebuilt or not yet caught up: refused, by name (it is caught up when that ends) */
@@ -2145,6 +2176,8 @@ export class Sync {
     let moved = false;
     for (const [name, changes] of batch) {
       if (!this.tables.has(name)) continue;
+      // committed: a generated table over it is behind from here (nothing of this is in the transaction above)
+      if (changes.truncated || changes.keys.size > 0) this.generated.changed(name);
       for (const into of [this.appliedCounts, this.sinceLine]) {
         const c = into.get(name) ?? noCounts();
         addCounts(c, changes.counts);
@@ -2489,9 +2522,15 @@ export class Sync {
         const next = [...this.queued].sort(([sa, a], [sb, b]) => REBUILD_ORDER.indexOf(a.kind) - REBUILD_ORDER.indexOf(b.kind) || (size.get(sa) ?? 0) - (size.get(sb) ?? 0))[0];
         if (next === undefined) return;
         this.queued.delete(next[0]);
+        // a generated table's run reads no source: nothing is attached and no table is marked as rebuilt
+        const kind = next[1].kind;
+        if (kind === "generated") {
+          await this.generated.run(next[0]).catch((e: unknown) => { if (!(e instanceof Stopping)) throw e; });
+          continue;
+        }
         const t = this.tables.get(next[0]);
         // a catch-up that found a numeric wider than the copy: copied again, next
-        if (t !== undefined && await this.rebuild(t, next[1]) === "copy again") this.enqueue(t.source, { kind: "copy" });
+        if (t !== undefined && await this.rebuild(t, kind) === "copy again") this.enqueue(t.source, { kind: "copy" });
         // still needing a copy or a catch-up: a pass now, or when its back-off ends
         else this.followUp(next[0]);
         // removed while it was rebuilt: the pass that removal kicked left it for this one to drop
@@ -2510,9 +2549,9 @@ export class Sync {
    * ONE REBUILD, beside the stream and the polls: the table marked as rebuilt on the writer's turn (from then on no poll
    * starts on it), then its copy on the rebuilds' connection, then — a table left behind by it — its catch-up.
    */
-  private async rebuild(t: AddedTable, r: Rebuild): Promise<"copy again" | null> {
+  private async rebuild(t: AddedTable, kind: TableRebuild): Promise<"copy again" | null> {
     await this.onWriter(async () => {
-      this.rebuildingNow = { source: t.source, kind: r.kind };
+      this.rebuildingNow = { source: t.source, kind };
       this.refreshStreamed();
     });
     let attached = false;
@@ -2521,13 +2560,13 @@ export class Sync {
       catch (e) {
         // the next pass says the same of every table, and queues it again
         const m = `could not attach the database: ${e instanceof Error ? e.message : String(e)}`;
-        this.log(`${r.kind} of ${t.source} waits: ${m}`);
-        this.event({ kind: "source_unreachable", table: t.source, message: `its ${r.kind} waits: ${m}` });
+        this.log(`${kind} of ${t.source} waits: ${m}`);
+        this.event({ kind: "source_unreachable", table: t.source, message: `its ${kind} waits: ${m}` });
         const st = this.states.get(t.source)!;
         await this.onWriter(() => this.record({ ...st, phase: st.phase === "copied" ? "copied" : "failed", error: m }));
         return null;
       }
-      if (r.kind === "copy") await this.copy(t);
+      if (kind === "copy") await this.copy(t);
       // the whole read is over, whatever comes next: what the table is said to be doing from here (`notStreamedReason`,
       // `refuseRebuilding`, `state`'s `rebuilding`)
       this.rebuildingNow = { source: t.source, kind: "catch-up" };
@@ -2661,6 +2700,8 @@ export class Sync {
       await w.run("ROLLBACK");
       throw e;
     }
+    // committed: a new copy, so a generated table over it is behind from here
+    this.generated.changed(t.source);
     // the copy's view of its visible columns, made again (its own transaction: DuckDB writes one database a transaction)
     await this.kept.swapped(t.source);
     if (o.snapshot !== null) {
@@ -2839,6 +2880,8 @@ export class Sync {
     } finally {
       for (const { stage } of pieced) await w.run(`DROP TABLE IF EXISTS ${stage}`);
     }
+    // committed: a generated table over a table that changed is behind from here
+    for (const f of found) if (f.changed > 0 || f.deleted > 0) this.generated.changed(f.table);
     return found;
   }
 
@@ -3450,6 +3493,14 @@ export class Sync {
       tables.push({ name: t.table, schema: t.schema, primaryKey: t.primaryKey ?? t.key, columns, joins,
         ...(uniqueKeys.length ? { uniqueKeys } : {}),
         ...(t.rowTypeOid !== undefined && columns.length === cols.length ? { rowTypeOid: t.rowTypeOid } : {}) });
+    }
+    // each generated table served, as a copy of its output's types: no key, no joins
+    for (const g of this.generated.served()) {
+      const types = await c.prepare(`SELECT * FROM ${ident(g.schema)}.${ident(g.table)} LIMIT 0`);
+      const duckTypes = new Map(Array.from({ length: types.columnCount }, (_, i) => [types.columnName(i), types.columnType(i)] as const));
+      types.destroySync();
+      const columns = g.columns.filter((x) => duckTypes.has(x.name)).map((x) => pgColumn({ name: x.name, type: x.type, notNull: false, comment: null }, duckTypes.get(x.name)!, undefined));
+      tables.push({ name: g.table, schema: g.schema, primaryKey: [], columns, joins: [], ...(g.comment !== null ? { description: g.comment } : {}) });
     }
     const views = this.views;
     const key = JSON.stringify([tables, views]);

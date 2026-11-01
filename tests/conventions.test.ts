@@ -945,8 +945,9 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   // catalog's own settings)
   const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
   const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
-  // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request)
-  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "showAll", "showStatement", "validateElsewhere"].sort(),
+  // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request;
+  // planner: a generated table's SQL, planned as no session, and refused where it reads a session's setting)
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "showAll", "showStatement", "validateElsewhere"].sort(),
     "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
@@ -1067,10 +1068,12 @@ const planCallsWithoutGrants = (source: string): string[] => {
 test("every caller of duck.plan passes the session's grants: a statement planned without them reads no role's filter and no role's columns", () => {
   const planned = scannedFiles().filter((f) => f.name.endsWith(".ts") && /\bduck\.plan\(/.test(f.src));
   assert.ok(planned.some((f) => f.name === "src/api/postgres/server.ts"), `the guard reads the listener: ${planned.map((f) => f.name).join(", ")}`);
-  // one call has no session: `checkRoles` plans a filter's own read (`filterProbe`), no user's statement, and answers
-  // nothing. Named whole, so any other call without them, a second of its kind included, fails here
+  // two calls have no session: `checkRoles` plans a filter's own read (`filterProbe`), no user's statement, and answers
+  // nothing; `planner` plans a generated table's SQL, which no user runs, and a user reads that table through a role.
+  // Named whole, so any other call without them, a second of either kind included, fails here
   assert.deepEqual(planned.flatMap((f) => planCallsWithoutGrants(f.src).map((c) => `${f.name}: ${c}`)),
-    ['src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined)']);
+    ['src/api/postgres/server.ts: duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null)',
+      'src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined)']);
 });
 
 test("the duck.plan guard would catch the real thing", () => {

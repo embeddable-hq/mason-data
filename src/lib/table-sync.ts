@@ -67,26 +67,35 @@ export function intervalOf(seconds: number): string {
   return s % 3600 === 0 ? `${s / 3600}h` : s % 60 === 0 ? `${s / 60}m` : `${s}s`;
 }
 
-/** an interval (`<n>s|m|h`) read, or why it is not one, with the interval to write when there is one */
-function parseInterval(v: string): { every: string; seconds: number } | { problem: string } {
+/** an interval (`<n>s|m|h`) read, or why it is not one, with the interval to write when there is one. ONE grammar with two
+ *  entrances, each worded as it is written: a `sync:`'s `poll <interval>`, and a generated table's `target_lag:` */
+function parseInterval(v: string, write = "poll "): { every: string; seconds: number } | { problem: string } {
   const m = /^(\d+(?:\.\d+)?)\s*([a-z]+)$/i.exec(v);
-  const how = `an interval is <n>s, <n>m or <n>h, a whole number, at least ${MIN_POLL_SECONDS}s (${EXAMPLES})`;
+  const examples = write === "" ? "5s, 5m or 1h" : EXAMPLES;
+  const how = `an interval is <n>s, <n>m or <n>h, a whole number, at least ${MIN_POLL_SECONDS}s (${examples})`;
   if (m === null) return { problem: `${JSON.stringify(v)} is not an interval: ${how}` };
   const n = Number(m[1]), word = m[2]!.toLowerCase();
-  if (word === "ms") return { problem: `${v} is under the shortest interval, ${MIN_POLL_SECONDS}s (a poll scans the table whole on your database): write poll ${MIN_POLL_SECONDS}s or longer` };
+  if (word === "ms") return { problem: `${v} is under the shortest interval, ${MIN_POLL_SECONDS}s${write === "" ? "" : " (a poll scans the table whole on your database)"}: write ${write}${MIN_POLL_SECONDS}s or longer` };
   const unit = UNIT_WORDS[word];
   if (unit === undefined) {
-    const days = /^(d|day|days)$/.test(word) ? `: write poll ${intervalOf(n * 86_400)}` : "";
+    const days = /^(d|day|days)$/.test(word) ? `: write ${write}${intervalOf(n * 86_400)}` : "";
     return { problem: `${v}: ${word} is not a unit of an interval — ${days ? `days are hours${days}` : how}` };
   }
   const seconds = n * UNIT_SECONDS[unit];
-  if (!Number.isInteger(n)) return { problem: `${v}: an interval is a whole number — write poll ${intervalOf(seconds)}` };
-  if (seconds < MIN_POLL_SECONDS) return { problem: `${v} is under the shortest interval, ${MIN_POLL_SECONDS}s: write poll ${MIN_POLL_SECONDS}s or longer` };
-  if (seconds > MAX_POLL_SECONDS) return { problem: `${v} is over the longest interval, ${intervalOf(MAX_POLL_SECONDS)}: write poll ${intervalOf(MAX_POLL_SECONDS)}, or off with mason sync <table> run by a scheduler` };
+  if (!Number.isInteger(n)) return { problem: `${v}: an interval is a whole number — write ${write}${intervalOf(seconds)}` };
+  if (seconds < MIN_POLL_SECONDS) return { problem: `${v} is under the shortest interval, ${MIN_POLL_SECONDS}s: write ${write}${MIN_POLL_SECONDS}s or longer` };
+  if (seconds > MAX_POLL_SECONDS) return { problem: `${v} is over the longest interval, ${intervalOf(MAX_POLL_SECONDS)}: write ${write}${intervalOf(MAX_POLL_SECONDS)}${write === "" ? "" : ", or off with mason sync <table> run by a scheduler"}` };
   // the number as a number is written (`05s` is `5s`): two spellings of one interval would read as a change of sync
   const canonical = `${n}${unit}`;
-  if (canonical !== v) return { problem: `${JSON.stringify(v)}: write poll ${canonical}` };
+  if (canonical !== v) return { problem: `${JSON.stringify(v)}: write ${write}${canonical}` };
   return { every: canonical, seconds };
+}
+
+/** A generated table's `target_lag:` read (src/cli/generated-files.ts): an interval alone, in the grammar and the range a
+ *  poll's takes, or what is wrong with it in the words a person fixes it from. */
+export function parseLag(v: unknown): { every: string; seconds: number } | { problem: string } {
+  if (typeof v !== "string" || v.trim() === "") return { problem: `is ${v === null || v === undefined ? "nothing" : typeof v === "number" ? `the number ${String(v)}` : "not an interval"}: write how far behind the table may be, like 30s, 5m or 1h` };
+  return parseInterval(v.trim(), "");
 }
 
 /**

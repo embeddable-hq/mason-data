@@ -109,6 +109,29 @@ export function resolvedKeys(tree: TreeValue): Set<string> {
   return keys;
 }
 
+/** Each function, aggregate and window function an analysed tree calls, with the type of each argument it is given, as
+ *  `<function oid>:<type oid>` (the catalog's OIDs): what a function marked stable only for its arguments' text reads
+ *  (src/duck/generated-plan.ts `sessionReads`). */
+export function argumentTypes(tree: TreeValue): string[] {
+  const out = new Set<string>();
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    const r = RESOLVED[v._node];
+    const oid = r === undefined || r[1] === "operator" ? undefined : v[r[0]];
+    if (typeof oid === "string" && Array.isArray(v.args)) {
+      for (const a of v.args) {
+        const e = isNode(a) && a._node === "TARGETENTRY" ? a.expr : a;
+        const t = isNode(e) ? exprType(e) : null;
+        if (t !== null && t.type !== 0) out.add(`${oid}:${String(t.type)}`);
+      }
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return [...out];
+}
+
 /** What a statement does with a value the copy holds as its text (src/duck/held-types.ts): what the text cannot answer
  *  as the type would. Each is `operator:<oid>`, `function:<oid>` … as a key; the planner reads an operator's name. */
 export function heldUses(tree: TreeValue): Array<{ kind: "operator" | "function" | "cast"; oid: string; type: number }> {

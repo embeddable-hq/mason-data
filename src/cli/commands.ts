@@ -28,6 +28,7 @@ import { logEntries, logLineText } from "../lib/log-buffer.ts";
 import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
+import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
 import { copyingText, copyProgress, duration, msText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
@@ -114,6 +115,8 @@ export interface RunState {
   sessions?: SessionsOpen;
   /** the JSON paths stored as columns of the copies (src/duck/kept.ts): a run from before them has none */
   jsonPaths?: KeptPathStatus[];
+  /** the generated tables (src/duck/generated.ts): a run from before them has none */
+  generatedTables?: GeneratedStatus[];
   /** what mason wait waits on (src/cli/readiness.ts), said by the run: a run from before it has none */
   readiness?: Readiness;
   /** the run serves the web page (`mason ui`): a run from before it has none */
@@ -390,7 +393,10 @@ const STATUS_USAGE = `usage: mason status [--json]
            fill: { rows, bytesPerRow, seconds, basis (measured: from the last fill of its column; disk or text: modelled from
            the column's bytes a row on disk, or its text's before it is on disk), rowsPerSecond } (the fill's estimate it
            was decided on), filled: { rows, seconds } (what its own fill measured), queued (a backfill waiting for the fill
-           under way), keptAt, readyAt, why }]. roles (a run with a roles file, mason/roles.yml: what a user added
+           under way), keptAt, readyAt, why }]. generatedTables: [{ table, file, kind, method (whole: its SQL run again),
+           state (refused, waiting, building, failed, current, behind), targetLag, behindSeconds, missingTarget, serving,
+           lastRun: { at, seconds, rows }, error (the last run's, no value of a row in it), retryAt,
+           refusals: [{ key, message, why, options, text }], waitingFor, warnings }]. roles (a run with a roles file, mason/roles.yml: what a user added
            with --role may read): { file, roles: [name], problem (what is wrong with the file now, every statement of a
            user with a role refused while there is; null), default (the role of a user added without --role; null: the
            file names none, and such a user reads nothing), all (the roles of tables: all) }
@@ -415,7 +421,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   summary: "what Mason is doing: the database, each synced table, the Postgres API, its statements and errors",
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
-  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "queries", "slowQueries", "refusedQueries",
+  json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
     "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly",
     "roles", "share", "lastRun", "lastStop", "hung", "next"],
 };
@@ -515,6 +521,7 @@ export async function status(argv: string[]): Promise<number> {
     for (const l of syncErrorLines(recentErrors, st)) out(l);
     for (const l of queryErrorLines(recentErrors, st)) out(l);
     for (const l of jsonPathLines(s.jsonPaths ?? [], st)) out(l);
+    for (const l of generatedLines(s.generatedTables ?? [], st)) out(l);
     for (const l of queryLines(queries, st)) out(l);
     for (const l of slowLines(slowReply.status === 200 ? slow : { error: String(slowReply.body.error ?? slowReply.status) }, st)) out(l);
     for (const l of refusedLines(refusedReply.status === 200 ? { refused, total: refusedTotal } : { error: String(refusedReply.body.error ?? refusedReply.status) }, st)) out(l);
@@ -571,6 +578,34 @@ export function jsonPathLines(paths: readonly KeptPathStatus[], st: Style): stri
     lines.push(`  ${p.table}  ${pathText(p)}  ${state}  ${st.dim(p.why)}`);
   }
   if (dropped) lines.push(`  ${st.dim(`${dropped} dropped (mason status --json says why)`)}`);
+  return lines;
+}
+
+/** a generated table's state in the words mason status prints: how it is kept, how far behind, its last run */
+function generatedWords(g: GeneratedStatus): string {
+  const how = `${g.kind ?? "?"} ${g.method}, target ${g.targetLag ?? "?"}`;
+  const last = g.lastRun === null ? "" : `; last re-run ${duration(g.lastRun.seconds)}, ${n(g.lastRun.rows)} row${g.lastRun.rows === 1 ? "" : "s"}`;
+  if (g.state === "waiting") return `${how}, waiting for ${g.waitingFor ?? "a table"} to sync`;
+  if (g.state === "building") return `${how}, being built`;
+  if (g.state === "refused") return g.serving ? `${how}, its file is refused; it keeps serving what it was built from${last}` : "refused";
+  const lag = g.behindSeconds === 0 ? "nothing behind" : `${duration(g.behindSeconds)} behind`;
+  const missed = g.missingTarget ? ", past its target" : "";
+  const failed = g.error === null ? "" : `; its last run failed, tried again at ${g.retryAt ?? "?"}: ${g.error}`;
+  return `${how}, ${lag}${missed}${last}${failed}`;
+}
+
+/** mason status's generated tables: a line each, and a refused one's reasons and ways out under it, whole */
+export function generatedLines(tables: readonly GeneratedStatus[], st: Style): string[] {
+  if (tables.length === 0) return [];
+  const width = Math.max(...tables.map((g) => entryName(g.table).length));
+  const lines = [`\n${st.bold("Generated tables")} ${st.dim("(tables declared in SQL; mason help generated)")}:`];
+  for (const g of tables) {
+    const words = generatedWords(g);
+    const paint = g.state === "refused" || g.state === "failed" || g.missingTarget ? st.red : g.state === "current" ? st.green : g.state === "behind" ? (x: string): string => x : st.yellow;
+    lines.push(`  ${entryName(g.table).padEnd(width)}  ${paint(words)}`);
+    for (const r of g.refusals) lines.push(...r.text.split("\n").map((l) => `    ${l}`));
+    for (const w of g.warnings) lines.push(`    ${st.yellow(w)}`);
+  }
   return lines;
 }
 

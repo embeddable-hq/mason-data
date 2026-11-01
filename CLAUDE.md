@@ -271,6 +271,7 @@ code, read its rules file:**
   - `duck-stored-json.md` — stored JSON paths and a jsonb's stored keys.
   - `duck-copy.md` — the copy in heap order with no index and in chunks that resume.
   - `duck-sync.md` — the poll and the stream, what the sync records.
+  - `duck-generated.md` — tables declared in SQL: what is refused at load, a run, the marks, lag.
   - `duck-memory.md` — memory, spill and the disk.
   - `duck-request-log.md` — `_mason.requests` and usage over time.
   - `duck-users.md` — `mason user`.
