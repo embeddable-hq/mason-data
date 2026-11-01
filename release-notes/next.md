@@ -179,6 +179,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   subquery. Without an `ORDER BY`, as a window function, or over a computed numeric such as a division it is refused
   with what to write instead (`latest-without-order`, `latest-computed-numeric`). Mason's API only: your database has
   no `latest`.
+- **A numeric read out of a scalar subquery, or written by `to_json`, `concat`, `format` or `||`, now has Postgres's
+  digits.** `(SELECT coalesce(amount, 0) FROM … WHERE id = o.id)` printed `0.00` where Postgres prints `0`, and a
+  subquery's `(SELECT avg(amount) FROM …)` or a division in one printed a rounded number; `to_json(sum(CASE WHEN … THEN
+  amount ELSE 0 END))` and `concat(min(coalesce(amount, 0)), …)` printed the column's scale. Nothing to do on upgrade.
 
 ## Known
 
