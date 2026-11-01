@@ -150,6 +150,7 @@
 import type { TreeNode, TreeValue } from "./pgtree.ts";
 import { distinctGrouping, fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
+import { constantKey } from "./constant-key.ts";
 
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
@@ -598,6 +599,8 @@ function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, num
       target = named[0];
     }
     const computed = (t: AstNode): boolean => rowWise(bodyOf(t).val).computes;
+    // an output a folded derived table made a constant (`one`, or `2`, over the subquery's `1 AS one`): no key, as fold
+    if (target !== undefined && constantKey(bodyOf(target).val)) continue;
     sorts.push(sort);
     if (target !== undefined) {
       if (computed(target)) {
@@ -1071,10 +1074,14 @@ function fold(s: Body, sub: Body, item: Derived): Body | null {
   }
   // an output's number or bare name is read by `sortKeys` from the list; any other key is over the wrapper's columns
   const outputs = new Set(targets.map(outputName));
-  const sorts = ((s.sortClause as AstNode[] | undefined) ?? []).map((sort) => {
+  // A SORT KEY WRITTEN AS A BARE LITERAL: a key over the derived table's column that folds to its constant (`s.one`,
+  // the subquery's `1 AS one`) orders nothing, and as the literal 1 it would be read as an ordinal: it is no key
+  const sorts = ((s.sortClause as AstNode[] | undefined) ?? []).flatMap((sort) => {
     const node = bodyOf(sort).node;
     const bare = kindOf(node) === "ColumnRef" && (bodyOf(node).fields as unknown[]).length === 1 ? fieldNames(bodyOf(node))[0] : null;
-    return kindOf(node) === "A_Const" || (bare !== null && bare !== undefined && outputs.has(bare)) ? sort : { SortBy: { ...bodyOf(sort), node: over(node) } };
+    if (kindOf(node) === "A_Const" || (bare !== null && bare !== undefined && outputs.has(bare))) return [sort];
+    const folded = over(node);
+    return constantKey(folded) ? [] : [{ SortBy: { ...bodyOf(sort), node: folded } }];
   });
   const where = over(s.whereClause);
   if (!whole) return null;
