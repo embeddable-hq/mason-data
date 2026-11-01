@@ -14,7 +14,9 @@
  *   - the statements the probes and reviews ran at the PRs' heads (`statementsRun`) and how many of them Mason answered
  *     as Postgres did (`statementsMatched`), summed over the records that count them: a review that runs no statement
  *     only read the code, which on issue 192 passed an implementation that 300 to 500 statements a check did not.
- *     A record written before the counts (2026-11-01) has neither, reads as it did, and is left out of the sum.
+ *     A record written before the counts (2026-11-01) has neither, reads as it did, and is left out of the sum;
+ *   - the checks they ran on the paths that owe no SQL (`checksRun`: a `mason` command, a script, a test file), summed
+ *     the same way: statementsRun counts SQL statements only.
  * The runs that never reached a review (a stop at the link check, a failed brief or review) are counted apart, never
  * as passing.
  *
@@ -48,12 +50,16 @@ export type ReviewRecord = {
   /** the statements every probe and review ran at the head, and of those the ones Mason answered as Postgres did;
    * records written before the counts have neither */
   statementsRun?: number; statementsMatched?: number;
+  /** the checks run on changed paths that owe no SQL statement; records written before it have none */
+  checksRun?: number;
 };
 export type Stats = {
   prs: number; reviewed: number; neverReviewed: number; firstPass: number; bySecond: number;
   meanReviewRounds: number; meanProbeRounds: number; topClasses: Array<{ classKey: string; count: number }>;
   /** summed over the PRs whose record counts them (`withStatements` of them) */
   statementsRun: number; statementsMatched: number; withStatements: number;
+  /** summed over the PRs whose record counts them (`withChecks` of them) */
+  checksRun: number; withChecks: number;
 };
 
 const OPEN = "```json mason-review-record";
@@ -71,7 +77,7 @@ function problemOf(v: unknown): string | null {
   if (!Array.isArray(r["findings"])) return "findings is not an array";
   if (r["deferred"] !== undefined && !Array.isArray(r["deferred"])) return "deferred is not an array";
   const count = (k: string) => r[k] === undefined || (Number.isInteger(r[k]) && (r[k] as number) >= 0);
-  for (const k of ["statementsRun", "statementsMatched"]) if (!count(k)) return `${k} is not a count`;
+  for (const k of ["statementsRun", "statementsMatched", "checksRun"]) if (!count(k)) return `${k} is not a count`;
   if (r["statementsMatched"] !== undefined && r["statementsRun"] === undefined) return "statementsMatched without statementsRun";
   if ((r["statementsMatched"] as number | undefined ?? 0) > (r["statementsRun"] as number | undefined ?? 0)) return "statementsMatched is more than statementsRun";
   for (const f of [...r["findings"] as unknown[], ...(r["deferred"] as unknown[] | undefined ?? [])]) {
@@ -155,6 +161,8 @@ export function stats(records: readonly ReviewRecord[], top = 10): Stats {
     statementsRun: counted.reduce((s, r) => s + r.statementsRun!, 0),
     statementsMatched: counted.reduce((s, r) => s + (r.statementsMatched ?? 0), 0),
     withStatements: counted.length,
+    checksRun: all.reduce((s, r) => s + (r.checksRun ?? 0), 0),
+    withChecks: all.filter((r) => r.checksRun !== undefined).length,
   };
 }
 
@@ -169,6 +177,7 @@ export function render(s: Stats, quoted: number, malformed: number): string {
     + `statements run by probes and reviews: ${s.withStatements
       ? `${s.statementsRun} over ${s.withStatements} PR(s) that counted them, ${s.statementsMatched} matched Postgres (${pct(s.statementsRun ? s.statementsMatched / s.statementsRun : 0)})`
       : "none counted"}\n`
+    + `checks run on other paths: ${s.withChecks ? `${s.checksRun} over ${s.withChecks} PR(s) that counted them` : "none counted"}\n`
     + `top classes:\n${s.topClasses.map((c) => `  ${c.count}  ${c.classKey}`).join("\n") || "  (none)"}\n`;
 }
 

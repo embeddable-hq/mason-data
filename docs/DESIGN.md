@@ -509,11 +509,18 @@ runs dozens, its output goes to a file, and only the differences are read. The c
 So the probe and every review in `pr-loop.js` run their statements that way, at the head and the base: the forms are one
 list (`VARIANT_FORMS`, over synthetic tables), a full review aims for hundreds and a re-check for a narrower set, and
 a statement the base matched and the head does not is a `regression`, blocking. Each reports `statementsRun` and
-`statementsMatched`, which the Review record sums and `scripts/review-stats.ts` prints. A review or re-check that ran
-none, or gave no valid count, is never a clean round: the run stops `unreviewed`, saying what to install (`psql` on
-PATH, Docker or `itEnv`), issue-loop goes no further, and the record counts the round as no review (PR 245's first
-review found such a round passing as reviewed); a probe that ran none is noted, as a failed probe is. Their Postgres is the file the `itEnv` argument names, or a throwaway `postgres:18`
-container of the stage's own, removed when done, whose URL no prompt prints.
+`statementsMatched`, which the Review record sums and `scripts/review-stats.ts` prints. Statements are what the
+engine's and the listener's paths owe, and only theirs: PR 245's second round found every PR made to run SQL, so a PR
+of the CLI, the web page, a script, a workflow or docs could never pass. So the evidence is read from the diff's paths,
+which the review reports (`changedPaths`): a path in `STATEMENT_PATHS` (the `paths:` of `.claude/rules/duck-*.md`
+and `postgres-api.md`, held equal by `tests/workflows.test.ts`, and `src/cdc/`) owes statements, and every other
+path owes checks, what it changed run at the head and the base (`checksRun`: a `mason` command, a script, a test
+file; never SQL). A review or re-check that showed none of what it owed, or gave no valid count, or did not say its
+paths, is never a clean round: the run stops `unreviewed`, saying what to install or run (`psql`
+on PATH, Docker or `itEnv` for statements; the command, script or tests for checks), issue-loop goes no further, and
+the record counts the round as no review (PR 245's first review found such a round passing as reviewed); a probe that
+showed none is noted, as a failed probe is. The statements' Postgres is the file the `itEnv` argument names, or a
+throwaway `postgres:18` container of the stage's own, removed when done, whose URL no prompt prints.
 
 ### The plan fixture (2026-10-28)
 

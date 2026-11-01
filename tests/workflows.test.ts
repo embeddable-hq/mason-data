@@ -83,10 +83,11 @@ async function run(name: string, args: Record<string, unknown>, answers: Answers
     assert.ok(opts.label in answers || d, `${name}: no stub answer for the agent labelled "${opts.label}"`);
     const a = opts.label in answers ? answers[opts.label] : d![1];
     const v = await (typeof a === "function" ? (a as (c: Call) => unknown)({ prompt, opts }) : a);
-    // a probe or review stub that says nothing of its statements ran some: a review that ran none stops the run, and
-    // the tests of that give the key (0, a non-count, or undefined) themselves
-    if (name === "pr-loop" && /^(probe \d+|review r\d+)$/.test(opts.label) && v && typeof v === "object" && !("statementsRun" in v)) {
-      return { ...v, statementsRun: 1, statementsMatched: 1 };
+    // a probe or review stub that does not say otherwise read an engine diff and ran a statement: a review that showed
+    // none of the evidence it owed stops the run, and the tests of that give the key (0, a non-count, or undefined)
+    if (name === "pr-loop" && /^(probe \d+|review r\d+)$/.test(opts.label) && v && typeof v === "object") {
+      const ran: Record<string, unknown> = { changedPaths: ["src/duck/plan.ts"], statementsRun: 1, statementsMatched: 1, checksRun: 0 };
+      return { ...Object.fromEntries(Object.entries(ran).filter(([k]) => !(k in v))), ...v };
     }
     return v;
   };
@@ -1037,7 +1038,7 @@ test("pr-loop: a review that ran no statement, or gave no valid count, is never 
   // the first review ran nothing (no psql, no Docker): no CI wait, no learn, a stop that says what to install
   let r = await run("pr-loop", { ...PR }, { ...START, "review r1": none({ judgedCorrect: ["psql: command not found"] }) });
   const status = String(r.result["status"]);
-  assert.match(status, /^unreviewed: review r1 ran no statement \(it said: psql: command not found\)/);
+  assert.match(status, /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts \(it said: psql: command not found\)/);
   assert.doesNotMatch(status, /^reviewed/);
   for (const s of ["`psql` on PATH", "brew install libpq", "postgresql-client", "Docker running", "itEnv"]) assert.ok(status.includes(s), `the stop says what to install: ${s}`);
   assert.deepEqual(r.labels.slice(-2), ["CI read r1", "record"], "nothing after the review but its record");
@@ -1053,7 +1054,7 @@ test("pr-loop: a review that ran no statement, or gave no valid count, is never 
   }
   // a re-check that ran nothing after a fix: the fix is unchecked, so no clean round either
   r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": none() });
-  assert.match(String(r.result["status"]), /^unreviewed: review r2 ran no statement, so head bbbbbbb was read and never run/);
+  assert.match(String(r.result["status"]), /^unreviewed: review r2 ran no statement for src\/duck\/plan\.ts, so head bbbbbbb was read and never run/);
   const rec2 = parseRecords(r.prompt("record"))[0]!;
   assert.equal(rec2.reviewRounds, 1);
   assert.equal(stats([rec2]).bySecond, 0, "round 2 ran nothing, so the PR did not pass by the second");
@@ -1065,9 +1066,94 @@ test("pr-loop: a review that ran no statement, or gave no valid count, is never 
 
   // a probe is the author's check: one that ran nothing, or gave no count, is noted with what to install, and the review goes on
   r = await run("pr-loop", { ...PR }, { ...START, "probe 1": none(), "review r1": clean, "CI 1": green });
-  assert.match(String(r.result["status"]), /^reviewed.*probe 1 ran no statement: it read the code only \(scripts\/duck-repro\.ts needs `psql` on PATH/);
+  assert.match(String(r.result["status"]), /^reviewed.*probe 1 ran no statement for src\/duck\/plan\.ts: it read the code only \(scripts\/duck-repro\.ts needs `psql` on PATH/);
   r = await run("pr-loop", { ...PR }, { ...START, "probe 1": { ...clean, statementsRun: undefined }, "review r1": clean, "CI 1": green });
   assert.match(String(r.result["status"]), /^reviewed.*probe 1 reported no valid count/);
+});
+
+// PR 245, round 2: the evidence a review owes is read from its diff's paths. The engine's and the listener's owe SQL
+// statements; every other path (the CLI, the web page, a script, a workflow, docs) owes checks, what it changed run.
+test("pr-loop: the evidence a review owes is read from its diff's paths: statements for the engine's, checks for every other", async () => {
+  const cli = { ...clean, changedPaths: ["src/cli/command.ts", "tests/cli-commands.test.ts"], statementsRun: 0, statementsMatched: 0, checksRun: 6 };
+  // a CLI-only diff, checked and with no statement: a clean review, reviewed and green
+  let r = await run("pr-loop", { ...PR }, { ...START, "probe 1": cli, "review r1": cli, "CI 1": green });
+  assert.match(String(r.result["status"]), /^reviewed, no open blocking finding/);
+  assert.doesNotMatch(String(r.result["status"]), /ran no|read the code only/);
+  let rec = parseRecords(r.prompt("record"))[0]!;
+  assert.deepEqual([rec.reviewRounds, rec.statementsRun, rec.checksRun], [1, 0, 12]);
+  assert.equal(stats([rec]).firstPass, 1);
+  // so are a workflow-only diff (this PR) and a docs-only one
+  for (const changedPaths of [[".claude/workflows/pr-loop.js", "scripts/review-stats.ts", "tests/workflows.test.ts"], ["docs/DESIGN.md", "CLAUDE.md"]]) {
+    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths }, "CI 1": green });
+    assert.match(String(r.result["status"]), /^reviewed/, changedPaths.join(" "));
+  }
+  // a CLI-only diff that ran nothing is still no review, and the stop says what to run
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, checksRun: 0 } });
+  assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no check for src\/cli\/command\.ts and 1 more path\(s\).*run what the diff changed at the head and the base: the `mason` command/);
+  assert.doesNotMatch(String(r.result["status"]), /psql/, "a diff that owes no statement is not told to install psql");
+  // an engine diff with checks but no statement still stops unreviewed
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: ["src/duck/plan.ts"], checksRun: 9 } });
+  assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts.*`psql` on PATH/);
+  rec = parseRecords(r.prompt("record"))[0]!;
+  assert.equal(rec.reviewRounds, 0);
+  // the listener, the source's reader and an engine test owe statements too; a diff of both kinds owes both
+  for (const p of ["src/api/postgres/server.ts", "src/cdc/poll.ts", "src/cli/dev.ts", "tests/duck-wire.test.ts", "docs/POSTGRES-API.md"]) {
+    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: [p] } });
+    assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement/, p);
+  }
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: ["src/duck/plan.ts", "src/cli/command.ts"], statementsRun: 300, statementsMatched: 300, checksRun: 0 } });
+  assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no check for src\/cli\/command\.ts/);
+  // the paths not said: what was owed is not known, so no review
+  for (const changedPaths of [undefined, [], "src/cli/command.ts"]) {
+    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths } });
+    assert.match(String(r.result["status"]), /^unreviewed: review r1 did not report the paths its diff changed/, JSON.stringify(changedPaths));
+  }
+  // the schema asks for both, and the prompt states both kinds and the paths that owe statements
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1"]) {
+    const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[]; properties: Record<string, { type: string; description?: string }> };
+    for (const k of ["checksRun", "changedPaths"]) assert.ok(schema.required.includes(k), `${l}: the schema requires ${k}`);
+    assert.equal(schema.properties["checksRun"]!.type, "integer");
+    assert.match(schema.properties["checksRun"]!.description!, /SQL statements are never counted here/);
+    assert.match(r.prompt(l), /STATEMENTS, for a changed path matching any of [^\n]*`src\/duck\/\*\*`/, l);
+    assert.match(r.prompt(l), /CHECKS, for every other changed path: RUN what it changed, at the head and at the base/, l);
+  }
+});
+
+test("pr-loop: the paths that owe statements are the `paths:` of the engine's and the listener's rules files, and src/cdc/", () => {
+  const listed = arrayOf("pr-loop", "STATEMENT_PATHS");
+  const dir = path.join(ROOT, ".claude", "rules");
+  const globsOf = (f: string) => {
+    const front = /^---\n([\s\S]*?)\n---/.exec(fs.readFileSync(path.join(dir, f), "utf8"));
+    assert.ok(front, `${f} has front matter`);
+    return [...front[1]!.matchAll(/^\s+- "([^"]+)"$/gm)].map((m) => m[1]!);
+  };
+  const files = fs.readdirSync(dir).filter((f) => /^duck-.*\.md$|^postgres-api\.md$/.test(f));
+  assert.ok(files.length >= 10, "the engine's rules files and the listener's");
+  const authority = new Set([...files.flatMap(globsOf), "src/cdc/**"]);
+  // the same glob reading as the script's
+  const re = (g: string) => new RegExp(`^${g.split("**").map((p) => p.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*")).join(".*")}$`);
+  for (const g of authority) assert.ok(listed.some((l) => g === l || re(l).test(g)), `${g} (a rules file's path) owes statements, but STATEMENT_PATHS does not cover it`);
+  for (const l of listed) assert.ok(authority.has(l), `${l} is in STATEMENT_PATHS but in no engine or listener rules file`);
+  // and nothing of the CLI's or the web page's own owes statements
+  for (const f of ["cli.md", "web-ui.md"]) {
+    for (const g of globsOf(f).filter((g) => !authority.has(g))) {
+      assert.ok(!listed.some((l) => re(l).test(g)), `${g} (${f}) is made to owe statements`);
+    }
+  }
+});
+
+test("review-stats: it reads and prints the checks run on other paths, and a record without them still reads", () => {
+  const rec = (o: Partial<ReviewRecord>): ReviewRecord => ({ pr: 1, designRounds: 1, probeRounds: 1, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed", ...o });
+  const block = (r: unknown) => "```json mason-review-record\n" + JSON.stringify(r) + "\n```";
+  const [a] = parseRecords(block(rec({ pr: 2, statementsRun: 0, statementsMatched: 0, checksRun: 7 })));
+  const [legacy] = parseRecords(block(rec({ pr: 3 })));
+  assert.equal(a!.checksRun, 7);
+  assert.throws(() => parseRecords(block({ ...rec({}), checksRun: 1.5 })), /checksRun is not a count/);
+  const s = stats([a!, legacy!]);
+  assert.deepEqual([s.checksRun, s.withChecks], [7, 1]);
+  assert.match(render(s, 0, 0), /checks run on other paths: 7 over 1 PR\(s\) that counted them/);
+  assert.match(render(stats([legacy!]), 0, 0), /checks run on other paths: none counted/);
 });
 
 test("review-stats: it reads and prints the statements run and matched, and a record without them still reads", () => {

@@ -128,6 +128,20 @@ const NEVER_PRINT = 'Never print, echo or log the URL or its password: no `cat` 
 const PG_ACCESS = A.itEnv
   ? `Postgres: \`${A.itEnv}\` exports IT_POSTGRES_URL; source it in the same shell call as duck-repro (\`. ${A.itEnv}\`). ${NEVER_PRINT}`
   : `Postgres: start a throwaway one of your own, and remove it when done. \`umask 077; n=mason-review-$(openssl rand -hex 4); pw=$(openssl rand -hex 16); POSTGRES_PASSWORD=$pw docker run -d --rm --name "$n" -e POSTGRES_PASSWORD -p 127.0.0.1:0:5432 --entrypoint timeout postgres:18 --kill-after=30 7200 docker-entrypoint.sh postgres -c wal_level=logical\`; its port is \`docker port "$n" 5432/tcp\`; in that same call, write \`export IT_POSTGRES_URL=postgres://postgres:$pw@127.0.0.1:<port>/postgres\` to an env file under the system temp dir, and source it (\`. <env file>\`) in each call that runs duck-repro. It is ready when \`docker exec "$n" pg_isready -h 127.0.0.1 -U postgres\` says so, within 60 seconds. When done: \`docker rm -f -v "$n"\`, then \`docker inspect "$n"\` must fail, and delete the env file. ${NEVER_PRINT}`
+// Which evidence a review owes is decided by the diff's paths (PR 245, round 2: every review was made to run SQL, and a
+// PR that changes only the CLI, the web page, a script, a workflow or docs has no statement that reaches its code).
+// A path the engine or the listener answers through owes STATEMENTS against Postgres: the `paths:` of every
+// .claude/rules/duck-*.md and postgres-api.md, which already map paths to those subsystems, and src/cdc/**, the source's
+// reader, which no rules file covers and CLAUDE.md "Local gates" counts with the engine. tests/workflows.test.ts holds
+// this list equal to those files' `paths:`. Every other path owes CHECKS: what it changed, run.
+const STATEMENT_PATHS = [
+  'docs/POSTGRES-API.md', 'src/api/**', 'src/cdc/**', 'src/cli/dev.ts', 'src/cli/generated-files.ts', 'src/cli/mason.cjs', 'src/cli/pool-size.cjs', 'src/duck/**',
+  'tests/duck-*.test.ts', 'tests/duck-executor*.ts', 'tests/duck-generated*.ts', 'tests/integration/duck-*.itest.ts', 'tests/postgres-api/**',
+]
+// a `paths:` glob as Claude Code reads it: `**` any run of characters, `*` any within one path segment
+const globRe = (g) => new RegExp(`^${g.split('**').map((part) => part.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*')}$`)
+const STATEMENT_RES = STATEMENT_PATHS.map(globRe)
+const owesStatements = (path) => STATEMENT_RES.some((re) => re.test(path))
 // How the statements are run: in files, dozens a call, at the head and at the base, the output to a file, and only the
 // counts and the differences read. `scale` says how many.
 const BATCH = (scale) => `RUN statements; never judge by reading alone. ${PG_ACCESS}
@@ -136,6 +150,13 @@ Run every one of these VARIANT FORMS that reaches the code the diff touches, eac
 ${VARIANT_FORMS.map((v) => `- ${v}`).join('\n')}
 And a REGRESSION SWEEP: for each code path the diff touches (each function, branch or rewrite it changes), the statements that reach that path in their PLAIN form, WITHOUT the new feature, in the variant forms above, at the head and at the base. Issue 192's regression was \`SELECT * FROM t UNION ALL TABLE t ORDER BY 1 LIMIT 2\`, which has no new syntax at all. A statement SAME at the base and DIFFER at the head is blocking: severity regression, origin this-pr.
 Aim for ${scale}. Report statementsRun (the statements you ran at the head, each once) and statementsMatched (of those, the ones SAME at the head).`
+// what a non-engine path owes: what the diff changed, run at the head and the base
+const CHECKS = `RUN what it changed, at the head and at the base, and compare; never judge by reading alone: for src/cli/ or cli/, the \`mason\` command it changed in a project of its own under the system temp dir (\`node <tree>/src/cli/main.ts <command>\`, with and without --json, in each state it can meet); for src/web/, the page's JSON from the run's command server; for scripts/ or .claude/, the script or workflow with the inputs it reads, or the test that loads it (tests/workflows.test.ts for a workflow); for docs, each claim checked against the code it names, and tests/conventions.test.ts; and the change's own test files, bounded (\`node --test --test-timeout=120000 <file>\`). A check whose result the base gave right and the head does not is blocking: severity regression. Report checksRun: the checks you ran at the head, each once (a command, a script, a test file).`
+// The evidence a probe or review owes, both kinds stated, since only its diff says which applies
+const EVIDENCE = (scale) => `Report changedPaths: every path \`git diff --no-renames --name-only\` prints for the diff you read; the evidence you owe is decided from them.
+STATEMENTS, for a changed path matching any of ${STATEMENT_PATHS.map((g) => `\`${g}\``).join(', ')} (the engine and the listener): ${BATCH(scale)}
+CHECKS, for every other changed path: ${CHECKS}
+A diff with both owes both. A review that owed statements and ran none, or owed checks and ran none, is no review: the run stops unreviewed.`
 
 const BRIEF = { type: 'object', required: ['brief', 'shapes', 'tests'], properties: {
   brief: { type: 'string', description: 'what to build, where, and the decision it takes' },
@@ -194,7 +215,7 @@ const DEFERRED = ['message', 'over-refusal', 'docs', 'quality']
 const blocks = (f) => !DEFERRED.includes(f.severity)
 // the line, as the review and the probe are told it
 const SEVERITY_RULE = "Give each finding its SEVERITY. Blocking, and sent back for a fix: wrong-answer (where Mason answers, it answers differently from Postgres: rows, text, types or OIDs, order, or SQLSTATE), crash (a crash, a hang, or a stuck state such as a table left `building`), data-loss (synced data lost or corrupted), security, regression (what the base got right is now wrong or refused). Not blocking, filed as an issue while the PR goes on: message (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is right), over-refusal (Mason refuses where Postgres answers, and the base refused it too: safe, and a gap), docs, quality (code quality, or a missing test of a shape already answered right). When you are unsure, the finding is blocking: give the blocking severity it would be."
-const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'statementsRun', 'statementsMatched'], properties: {
+const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'statementsRun', 'statementsMatched', 'checksRun', 'changedPaths'], properties: {
   findings: { type: 'array', items: { type: 'object', required: ['input', 'expected', 'actual', 'atBase', 'origin', 'severity', 'classKey', 'classWhy', 'where'], properties: {
     input: { type: 'string', description: 'the failing statement or input, exactly, with the table it runs over' },
     expected: { type: 'string', description: "Postgres's answer (or the right one)" },
@@ -209,6 +230,8 @@ const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'stat
   judgedCorrect: { type: 'array', items: { type: 'string' } },
   statementsRun: { type: 'integer', minimum: 0, description: 'the statements run at the head through scripts/duck-repro.ts, each counted once (not their runs at the base)' },
   statementsMatched: { type: 'integer', minimum: 0, description: "of those, the ones duck-repro printed SAME: Mason's answer equal to Postgres's" },
+  checksRun: { type: 'integer', minimum: 0, description: 'the checks run at the head on the changed paths that owe no statements: each command, script or test file once; SQL statements are never counted here' },
+  changedPaths: { type: 'array', items: { type: 'string' }, description: 'every path git diff --no-renames --name-only printed for the diff read, exactly' },
 } }
 const FILED = { type: 'object', required: ['issues'], properties: {
   issues: { type: 'array', items: { type: 'object', required: ['classKey', 'source', 'issue', 'action'], properties: {
@@ -323,18 +346,41 @@ ${FIX_GATES} Come back in ONE push. The commit ends with \`${coAuthor(on)}\`. Re
 // scripts/review-stats.ts reads. `findings` are this PR's blocking ones (a probe's and a review's with their severity;
 // a design finding has none); `deferred` the PR's non-blocking ones, filed and not fixed.
 const sev = (f) => (f.severity ? { severity: f.severity } : {})
-// a round's statement counts, when its agent gave them (the schema requires them). An answer with none, or with no
-// valid count, ran nothing anyone can see: a review's round is then UNRUN and stops the run as `unreviewed`, which
-// issue-loop does not read as passed; a probe's is noted, as a failed probe is (PR 245, round 1: a review that ran
-// nothing was a clean round, so "never judge by reading alone" was asserted and never enforced)
+// A round's counts, when its agent gave them (the schema requires them). The evidence it OWED is read from its diff's
+// paths (STATEMENT_PATHS): statements for the engine's and the listener's, checks for every other. A round that owed
+// evidence and shows none, or no valid count of it, or that did not say its paths (so what it owed is not known), ran
+// nothing anyone can see: a review's round is then UNRUN and stops the run as `unreviewed`, which issue-loop does not
+// read as passed; a probe's is noted, as a failed probe is (PR 245, round 1: a review that ran nothing was a clean
+// round, so "never judge by reading alone" was asserted and never enforced)
 const isCount = (x) => Number.isInteger(x) && x >= 0
-const countsOf = (a) => (isCount(a.statementsRun) ? { statementsRun: a.statementsRun, statementsMatched: isCount(a.statementsMatched) ? Math.min(a.statementsMatched, a.statementsRun) : 0 } : {})
-const unrun = (a) => !isCount(a.statementsRun) || a.statementsRun === 0
-const unrunText = (label, a) => `${label} ${isCount(a.statementsRun) ? 'ran no statement' : 'reported no valid count of the statements it ran'}${Array.isArray(a.judgedCorrect) && a.judgedCorrect[0] ? ` (it said: ${String(a.judgedCorrect[0]).slice(0, 200)})` : ''}`
-// what the statements need, said wherever a stage that ran none is reported
+const countsOf = (a) => ({
+  ...(isCount(a.statementsRun) ? { statementsRun: a.statementsRun, statementsMatched: isCount(a.statementsMatched) ? Math.min(a.statementsMatched, a.statementsRun) : 0 } : {}),
+  ...(isCount(a.checksRun) ? { checksRun: a.checksRun } : {}),
+})
+// what the statements need, said wherever a stage that ran none of them is reported
 const NEEDS = 'scripts/duck-repro.ts needs `psql` on PATH (the Postgres client: `brew install libpq` and its bin on PATH, or the `postgresql-client` package) and a Postgres: Docker running, for a throwaway postgres:18, or itEnv naming a file that exports IT_POSTGRES_URL'
+const RUN_CHECKS = 'run what the diff changed at the head and the base: the `mason` command in a project of its own, the script, the change\'s test files'
+// what the round failed to show, or null when it showed all it owed
+function missingEvidence(a) {
+  const paths = a.changedPaths
+  if (!Array.isArray(paths) || paths.length === 0 || !paths.every((x) => typeof x === 'string' && x)) return { text: 'did not report the paths its diff changed, so the evidence it owed is not known', needs: `report changedPaths, and ${RUN_CHECKS}; ${NEEDS}` }
+  const engine = paths.filter(owesStatements)
+  const other = paths.filter((x) => !owesStatements(x))
+  const miss = []
+  const needs = []
+  if (engine.length && !(isCount(a.statementsRun) && a.statementsRun > 0)) {
+    miss.push(`${isCount(a.statementsRun) ? 'ran no statement' : 'reported no valid count of the statements it ran'} for ${engine[0]}${engine.length > 1 ? ` and ${engine.length - 1} more engine path(s)` : ''}`)
+    needs.push(NEEDS)
+  }
+  if (other.length && !(isCount(a.checksRun) && a.checksRun > 0)) {
+    miss.push(`${isCount(a.checksRun) ? 'ran no check' : 'reported no valid count of the checks it ran'} for ${other[0]}${other.length > 1 ? ` and ${other.length - 1} more path(s)` : ''}`)
+    needs.push(RUN_CHECKS)
+  }
+  return miss.length ? { text: miss.join(', and '), needs: needs.join('; ') } : null
+}
+const saidText = (a) => (Array.isArray(a.judgedCorrect) && a.judgedCorrect[0] ? ` (it said: ${String(a.judgedCorrect[0]).slice(0, 200)})` : '')
 const sumOf = (k) => [...probeRounds, ...rounds].reduce((s, e) => s + (e[k] || 0), 0)
-// reviewRounds counts only the rounds that ran statements: an unrun round is no review, so review-stats never reads it
+// reviewRounds counts only the rounds that showed their evidence: an unrun round is no review, so review-stats never reads it
 // as a clean one (a run whose first review was unrun is counted as never reviewed); its findings keep their round
 const recordOf = (status) => ({
   pr: last.pr, designRounds: designRounds.length, probeRounds: probeRounds.length, reviewRounds: rounds.filter((r) => !r.unrun).length,
@@ -345,9 +391,9 @@ const recordOf = (status) => ({
   ],
   deferred: deferred.map((f) => ({ round: f.round, stage: f.stage, classKey: f.classKey, severity: f.severity })),
   ciFixes, status,
-  statementsRun: sumOf('statementsRun'), statementsMatched: sumOf('statementsMatched'),
+  statementsRun: sumOf('statementsRun'), statementsMatched: sumOf('statementsMatched'), checksRun: sumOf('checksRun'),
 })
-const ranText = (e) => (isCount(e.statementsRun) ? `; ${e.statementsRun} statement(s) run, ${e.statementsMatched} matched` : '')
+const ranText = (e) => `${isCount(e.statementsRun) ? `; ${e.statementsRun} statement(s) run, ${e.statementsMatched} matched` : ''}${e.checksRun ? `; ${e.checksRun} check(s) run` : ''}${e.unrun ? '; showed none of the evidence it owed: no review' : ''}`
 const roundLine = (name, n, fs, later = 0, e = {}) => `- ${name} ${n}: ${fs.length} finding(s)${fs.length ? `: ${[...new Set(fs)].join(', ')}` : ''}${later ? `; ${later} non-blocking, deferred` : ''}${ranText(e)}`
 const laterOf = (stage, n) => deferred.filter((f) => f.stage === stage && f.round === n).length
 const recordBody = (status) => `${signed(ON.record)}
@@ -355,7 +401,7 @@ const recordBody = (status) => `${signed(ON.record)}
 
 PR ${last.pr}: ${status}
 
-${designRounds.length} design round(s), ${probeRounds.length} probe round(s), ${rounds.length} review round(s), ${ciFixes} CI fix(es); ${sumOf('statementsRun')} statement(s) run at the head by the probes and reviews, ${sumOf('statementsMatched')} matching Postgres.
+${designRounds.length} design round(s), ${probeRounds.length} probe round(s), ${rounds.length} review round(s), ${ciFixes} CI fix(es); ${sumOf('statementsRun')} statement(s) run at the head by the probes and reviews, ${sumOf('statementsMatched')} matching Postgres; ${sumOf('checksRun')} check(s) run on other paths.
 ${designRounds.map((d) => roundLine('design', d.round, d.findings.map((f) => f.class))).join('\n')}
 ${probeRounds.map((p) => roundLine('probe', p.round, p.findings.map((f) => f.classKey), laterOf('probe', p.round), p)).join('\n')}
 ${rounds.map((r) => roundLine('review', r.round, r.findings.map((f) => f.classKey), laterOf('review', r.round), r)).join('\n')}
@@ -434,7 +480,7 @@ async function probeAndFix(base) {
     const probe = await agent(
       `${WHERE}Probe PR ${last.pr} of embeddable-hq/mason-data at head ${last.head} for wrong answers, before its review, as its reviewer will: you have no stake in this code. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff --name-only ${base} ${last.head}\`. For each .claude/rules/*.md file whose \`paths:\` covers a changed path, read its \`## What review probes\` section at the head (\`git -C ${REPO} show ${last.head}:.claude/rules/<file>\`): each bullet is a probe shape, the class it catches, and where it was met. Run EVERY probe that applies to this change, and these, which reviews ran and authors did not: ${PROBE_SHAPES}. Run the design note's shapes too:
 ${design ? design.shapes.map((s) => `- ${s.input} (${s.where})`).join('\n') : '(no note)'}
-Compare with a real Postgres, ${PROBE_TREES}. ${BATCH("a hundred statements or more: the rules' probes, the note's shapes and these, each in the variant forms, and the regression sweep")}
+Run what you check ${PROBE_TREES}. ${EVIDENCE("a hundred statements or more: the rules' probes, the note's shapes and these, each in the variant forms, and the regression sweep")}
 Do not edit or push. For each wrong answer give the failing input, Postgres's answer, Mason's at the head, and Mason's at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible. origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
   ${knownList()}
 Give no fix. List what you ran and judged correct. About 50 tool calls, never more than 70 tool calls.`,
@@ -445,7 +491,8 @@ Give no fix. List what you ran and judged correct. About 50 tool calls, never mo
     }
     const { mine, later, repeated } = tally(probe.findings, { round: p, stage: 'probe', label: `probe ${p}` })
     const entry = { round: p, label: `probe ${p}`, head: last.head, findings: mine, deferred: later.length, base: probe.findings.length - mine.length - later.length, judgedCorrect: probe.judgedCorrect, classRound: repeated.length > 0, ...countsOf(probe) }
-    if (unrun(probe)) notes.push(`${unrunText(`probe ${p}`, probe)}: it read the code only (${NEEDS})`)
+    const probeMissing = missingEvidence(probe)
+    if (probeMissing) notes.push(`probe ${p} ${probeMissing.text}${saidText(probe)}: it read the code only (${probeMissing.needs})`)
     probeRounds.push(entry)
     history.push(entry)
     log(`probe ${p}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base`)
@@ -482,7 +529,7 @@ async function reviewAndFix(start) {
     const judged = history.flatMap((x) => x.judgedCorrect)
     const [review, ciNow] = await parallel([
       () => agent(
-        `${WHERE}First run \`${BOARD('In review')}\`. ${kind === 'full' ? 'Review' : 'Narrowly re-check the latest fix of'} PR ${last.pr} of embeddable-hq/mason-data at head ${last.head}, for wrong answers. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff ${base} ${last.head}\`, and read the whole touched files at that head with \`git show\`. Read the .claude/rules/ file of the subsystem. Never take the author's report as evidence. Probe against a real Postgres, ${PROBE_TREES}. ${BATCH(kind === 'full'
+        `${WHERE}First run \`${BOARD('In review')}\`. ${kind === 'full' ? 'Review' : 'Narrowly re-check the latest fix of'} PR ${last.pr} of embeddable-hq/mason-data at head ${last.head}, for wrong answers. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff ${base} ${last.head}\`, and read the whole touched files at that head with \`git show\`. Read the .claude/rules/ file of the subsystem. Never take the author's report as evidence. Run what you check ${PROBE_TREES}.${EVIDENCE(kind === 'full'
   ? "hundreds of statements (300 or more): the brief's shapes, each in every variant form, and the regression sweep of every path the diff touches"
   : "a narrower set: the fix's statements in the variant forms that reach the code it changed, and the regression sweep of that code; dozens, not a full review's count")}
 Do not edit or push.
@@ -499,13 +546,15 @@ Give no fix and no patch. Also list what you judged correct.`,
     if (!ciNow || ciNow.state === 'timeout') log(`CI beside review r${round}: ${ciNow ? 'not finished' : 'no answer'}; the CI stage reads it`)
     const { mine, later, repeated } = tally(review.findings, { round, stage: 'review', label: `review r${round}` })
     const classRound = repeated.length > 0
-    const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound, unrun: unrun(review), ...countsOf(review) }
+    const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound, unrun: false, ...countsOf(review) }
+    const missing = missingEvidence(review)
+    entry.unrun = missing !== null
     rounds.push(entry)
     history.push(entry)
     log(`round ${round}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base${ciFailure ? ', CI red' : ''}${classRound ? `; CLASS round next (${repeated.join(', ')})` : ''}`)
     // a full review or a re-check that ran nothing is never a clean round, whatever it found by reading: the run stops
     // `unreviewed`, saying what to install
-    if (entry.unrun) return `unreviewed: ${unrunText(`review r${round}`, review)}, so head ${last.head.slice(0, 7)} was read and never run, and a review that runs nothing is no review. ${NEEDS}: install what is missing and run the review again, or the coordinator decides`
+    if (missing) return `unreviewed: review r${round} ${missing.text}${saidText(review)}, so head ${last.head.slice(0, 7)} was read and never run, and a review that runs nothing is no review. ${missing.needs}: install what is missing and run the review again, or the coordinator decides`
     // nothing blocking of this PR's is a clean round, whatever was deferred. A clean review with a red CI: the CI stage
     // reads that failure next and sends it to a CI fix
     if (mine.length === 0) return null
