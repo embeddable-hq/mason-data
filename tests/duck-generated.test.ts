@@ -166,7 +166,7 @@ test("the swap waits for the writer's turn: a write holding the turn keeps the o
 test("what a table cannot store is refused by name at its key, before anything is built", async () => {
   const lag = "kind: scheduled\ntarget_lag: 1h\n";
   await withWorld({
-    money: `${lag}sql: SELECT sum(amount) AS total FROM events\n`,
+    money: `${lag}sql: SELECT sum(amount) / 3 AS total FROM events\n`,
     avg: `${lag}sql: SELECT avg(tenant_id) AS mean FROM events\n`,
     unnamed: `${lag}sql: SELECT id + 1 FROM events\n`,
     twice: `${lag}sql: SELECT id, tenant_id AS id FROM events\n`,
@@ -184,7 +184,7 @@ test("what a table cannot store is refused by name at its key, before anything i
   }, async (w) => {
     await w.sync.generated.review();
     const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
-    for (const name of ["money", "avg"]) { assert.equal(r(name).state, "refused"); refusedAt(r(name).refusals, "sql", /is numeric, which a generated table can't store yet/); }
+    for (const name of ["money", "avg"]) { assert.equal(r(name).state, "refused"); refusedAt(r(name).refusals, "sql", /column (total|mean) has no fixed scale, so it can't be stored exactly/); }
     assert.ok(r("money").refusals[0]!.options.some((o) => o.includes("::double precision")), JSON.stringify(r("money").refusals));
     refusedAt(r("unnamed").refusals, "sql", /has no name/);
     refusedAt(r("twice").refusals, "sql", /names column id twice/);
@@ -945,5 +945,65 @@ test("a child is held to the target_lag its parent runs at: a parent refused in 
     const slow = w.status("public.slow");
     assert.deepEqual(slow.refusals, [], "held to the 5m public.counts runs at, not its refused file's 1h");
     assert.notEqual(slow.state, "refused");
+  });
+});
+
+// stage 3 (issue 175): a numeric, an enum and a citext stored as the engine answers them, as a copy of the column holds them
+const LEDGER_COLUMNS = [{ name: "id", type: "bigint" }, { name: "n", type: "integer" }, { name: "small", type: "smallint" }, { name: "amount", type: "numeric(12,2)" },
+  { name: "big", type: "numeric" }, { name: "mood", type: "mood", typeKind: "e" }, { name: "name", type: "citext" }].map((c) => ({ ...c, notNull: false, comment: null }));
+const ledger: AddedTable = { source: "public.ledger", schema: "public", table: "ledger", key: ["id"], columns: LEDGER_COLUMNS, foreignKeys: [], bytes: 0, rows: 4 };
+const LEDGER_SEED = [
+  "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')",
+  "CREATE TABLE public.ledger (id BIGINT, n INTEGER, small SMALLINT, amount DECIMAL(12,2), big DECIMAL(38,9), mood mood, name VARCHAR)",
+  "INSERT INTO public.ledger VALUES (1, 10, 1, 1.10, 12345678901234567890.123456789, 'happy', 'Alice'), (9223372036854775806, 2147483647, 2, -2.50, -0.000000001, 'sad', 'alice'), " +
+    "(3, NULL, 3, NULL, NULL, 'ok', 'Bob'), (9223372036854775807, 2147483647, 32767, 4.00, 1.100000000, 'sad', 'BOB')",
+  `INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.ledger', 'copied', 4, 0, 1.0, now(), NULL, '${JSON.stringify(LEDGER_COLUMNS)}')`,
+  `INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES ('public.ledger', '100:100:', now(), 'off')`,
+];
+const NUMS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, amount, big FROM ledger\norder_by: id\n";
+const SUMS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT mood, sum(small) AS s2, sum(n) AS s4, sum(id) AS s8, sum(amount) AS sa, max(big) AS mb FROM ledger GROUP BY mood\n";
+const KINDS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, mood, name FROM ledger\n";
+/** a world over `ledger`: the base made in a first world, the tables declared in the second, `use`d there and after a restart */
+async function overLedger(files: Record<string, string>, use: (w: Parameters<Parameters<typeof withWorld>[1]>[0], restarted: boolean) => Promise<void>): Promise<void> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-numeric-"));
+  try {
+    await withWorld({}, async (w) => { for (const sql of LEDGER_SEED) await w.store.writer.run(sql); }, { dir });
+    await withWorld(files, async (w) => { for (const name of Object.keys(files)) await w.until(built, `public.${name}`); await use(w, false); }, { dir, again: true, tables: [ledger] });
+    await withWorld({}, async (w) => { for (const name of Object.keys(files)) assert.ok(built(w.status(`public.${name}`))); await use(w, true); }, { dir, again: true, tables: [ledger] });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+const typed = async (w: { client(): Promise<pg.Client> }, sql: string): Promise<{ fields: Array<[string, number, number]>; rows: unknown[][] }> => {
+  const c = await w.client();
+  try { const r = await c.query({ text: sql, rowMode: "array" }); return { fields: r.fields.map((f) => [f.name, f.dataTypeID, f.dataTypeModifier]), rows: r.rows }; } finally { await c.end(); }
+};
+
+test("a numeric output is stored and read back exactly, across a restart: its scale's trailing zeros, its sign, a NULL, digits past a double's", async () => {
+  await overLedger({ nums: NUMS }, async (w) => {
+    const r = await typed(w, "SELECT id, amount, big FROM nums ORDER BY id");
+    assert.deepEqual(r.fields, [["id", 20, -1], ["amount", 1700, (12 << 16) + 2 + 4], ["big", 1700, -1]]);
+    assert.deepEqual(r.rows, [["1", "1.10", "12345678901234567890.123456789"], ["3", null, null], ["9223372036854775806", "-2.50", "-0.000000001"], ["9223372036854775807", "4.00", "1.100000000"]]);
+    assert.deepEqual((await typed(w, "SELECT round(amount, 1) AS r FROM nums WHERE amount < 2 AND big = 12345678901234567890.123456789 ORDER BY amount DESC NULLS LAST")).rows, [["1.1"]]);
+  });
+});
+
+test("the sum forms' stored types: sum(int2) and sum(int4) as bigint, sum(int8) and sum(numeric) as numeric, past bigint's range", async () => {
+  await overLedger({ sums: SUMS }, async (w, restarted) => {
+    const r = await typed(w, "SELECT * FROM sums ORDER BY mood");
+    assert.deepEqual(r.fields.map(([n, oid]) => [n, oid]).slice(1), [["s2", 20], ["s4", 20], ["s8", 1700], ["sa", 1700], ["mb", 1700]]);
+    assert.deepEqual(r.rows, [["sad", "32769", "4294967294", "18446744073709551613", "1.50", "1.100000000"], ["ok", "3", null, "3", null, null], ["happy", "1", "10", "1", "1.10", "12345678901234567890.123456789"]]);
+    if (restarted) return;
+    const stored = await w.rows("SELECT column_name, data_type FROM duckdb_columns() WHERE schema_name = 'public' AND table_name = 'sums' AND column_name <> 'mood' ORDER BY column_index");
+    assert.deepEqual(stored, [["s2", "BIGINT"], ["s4", "BIGINT"], ["s8", "HUGEINT"], ["sa", "DECIMAL(38,2)"], ["mb", "DECIMAL(38,9)"]]);
+  });
+});
+
+test("an enum and a citext are stored and read back: the enum's declared order and type, the citext's case-blind equality", async () => {
+  await overLedger({ kinds: KINDS }, async (w) => {
+    const r = await typed(w, "SELECT id, mood, name FROM kinds ORDER BY mood, id");
+    const oids = (await typed(w, "SELECT 'mood'::regtype::oid::int, 'citext'::regtype::oid::int")).rows[0];
+    assert.deepEqual([r.fields[1]![1], r.fields[2]![1]], oids, "the catalog's own types");
+    assert.deepEqual(r.rows.map((x) => x[1]), ["sad", "sad", "ok", "happy"], "the declared order, not the alphabet's");
+    assert.deepEqual((await typed(w, "SELECT count(*) FROM kinds WHERE mood = 'sad'")).rows, [["2"]]);
+    assert.deepEqual((await typed(w, "SELECT id FROM kinds WHERE name = 'ALICE' ORDER BY id")).rows, [["1"], ["9223372036854775806"]]);
   });
 });

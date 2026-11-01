@@ -29,8 +29,12 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   marks stable for its arguments' text alone (one over `"any"` or a polymorphic type: `jsonb_build_object`, `concat`) is
   judged by each argument's type's output function (`textReads`, from the plan's `argumentTypes`).
 - **Only what a stored cell gives back as Postgres's text is stored** (`STORED_TYPES`): a type goes on it once the oracle
-  holds it over a generated table. A cell the plan fills after the engine's answer (`DuckPlan.exact`, `dropLast`) is
-  refused, because a plain write would store another value.
+  holds it over a generated table. A numeric, an enum and a citext are stored as the engine answers them (`duck: null`),
+  which is what a copy of the column holds, so the catalog's typmod pads a numeric's scale on read and an enum keeps its
+  declared order (stage 3, issue 175). A numeric the plan computes after the engine's answer (`DuckPlan.exact`) is stored
+  only where ONE exact cell holds its digits, padded to a scale the types fix of at most 18 (`storedCell`: a sum of a
+  numeric(p, s)); anything else (an average, a division, a scale the rows decide) and `dropLast` are refused, because a
+  plain write would store another value. A domain and a composite stay refused by name.
 - **A run takes its snapshot and its marks on ONE writer's turn**: a commit is in the snapshot or marked for the next
   run, never neither. DuckDB's snapshot is a transaction's first read of a table, never its BEGIN, so the run reads the
   ledger there. A commit that changes a base marks it AFTER that commit, on that writer's turn, in memory, adding nothing

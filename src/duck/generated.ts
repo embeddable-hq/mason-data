@@ -747,7 +747,7 @@ export class GeneratedTables {
         const params: string[] = [];
         if (plan.clock?.exec !== undefined) params[plan.clock.exec - 1] = new Date(clock.at).toISOString();
         const aliases = columns.map((_, i) => `__mason_c${i}`);
-        const sql = `CREATE OR REPLACE TABLE ${p.side} (${columns.map((x) => ident(x.name)).join(", ")}) AS SELECT ${columns.map((x, i) => `CAST(${aliases[i]!} AS ${x.duck})`).join(", ")} ` +
+        const sql = `CREATE OR REPLACE TABLE ${p.side} (${columns.map((x) => ident(x.name)).join(", ")}) AS SELECT ${columns.map((x, i) => { const v = x.cell !== undefined ? `__mason_output.${ident(x.cell)}` : aliases[i]!; return x.duck === null ? v : `CAST(${v} AS ${x.duck})`; }).join(", ")} ` +
           `FROM (${plan.sql.text}) AS __mason_output(${aliases.join(", ")})`;
         const { rowsChanged } = await this.host.interruptible(() => c.run(sql, params.length > 0 ? params : undefined));
         await this.onStep("written", p.e.name);

@@ -12,8 +12,12 @@
  * is marked stable and reads none of it, the zone being in the SQL by then. `now()` and its kin are instants, the run's.
  *
  * WHAT IS STORED IS WHAT A COPY OF THAT TYPE HOLDS (`STORED_TYPES`): the column's own Postgres type, so a statement over
- * the table is answered by the very path that answers one over a copy. A type with no entry is refused by name: `numeric`
- * too, whose digits a statement computes at the result's edge (`DuckPlan.exact`), so no plain write stores them.
+ * the table is answered by the very path that answers one over a copy. A `numeric`, an enum and a citext are stored as
+ * the engine answers them (`duck: null`), which is what a copy of that column holds: a numeric's DECIMAL, whose display
+ * scale the catalog's typmod pads on read; an enum's ENUM, in its declared order; a citext's text (stage 3, issue 175). A
+ * numeric whose digits a statement computes at the result's edge (`DuckPlan.exact`) is stored only where they are one
+ * engine cell at a scale the types fix (`storedCell`): a sum of a numeric(p, s) column, s up to 18. Any other type is
+ * refused by name.
  */
 import { deparseSync } from "pgsql-deparser";
 import type { Node } from "libpg-query";
@@ -21,6 +25,8 @@ import { parseSql, PostgresSyntaxError } from "../api/postgres/parser.ts";
 import { describeKeys } from "./resolved.ts";
 import { treeDifference } from "./rewrite.ts";
 import { StatementError, type DuckPlan } from "./statement.ts";
+import type { ExactColumn } from "./rewrite.ts";
+import type { NumericProgram } from "../lib/pg-numeric.ts";
 
 /** A refusal of a generated table: its key in the file (null: the file itself), what is wrong, why, and the ways out. */
 export interface GeneratedRefusal { key: string | null; message: string; why: string | null; options: string[] }
@@ -31,14 +37,18 @@ const STORED_TYPES: ReadonlyMap<number, string> = new Map([
   [1082, "DATE"], [1083, "TIME"], [1114, "TIMESTAMP"], [1184, "TIMESTAMPTZ"], [1186, "INTERVAL"], [2950, "UUID"], [3802, "JSON"],
 ]);
 const NUMERIC_OID = 1700;
+/** the most decimals a stored DECIMAL(38, s) may keep: past it a sum could overflow its 38 digits and fail the write */
+const MAX_STORED_SCALE = 18;
 /** the Postgres name `?column?` is an expression no one named, and a table's column needs one */
 const UNNAMED = "?column?";
 /** what the subquery of a definition with an `order_by:` is called: its output's columns are all it can read */
 const SHELL_ALIAS = "__mason_generated";
 const SHELL_KEYS = new Set(["targetList", "fromClause", "sortClause", "limitOption", "op"]);
 
-/** An output column: its name, its type as the catalog spells it, as a copy stores it. */
-export interface GeneratedColumn { name: string; type: string; duck: string }
+/** An output column: its name, its type as the catalog spells it, as a copy stores it (null: as the engine answers it,
+ *  a numeric's DECIMAL, an enum's ENUM, a citext's text), and the plan's cell it is read from where that is not its own
+ *  output column (a numeric's exact digits, `storedCell`). */
+export interface GeneratedColumn { name: string; type: string; duck: string | null; cell?: string }
 /** A definition that can be stored: what `src/duck/generated.ts` runs. */
 export interface DefinitionPlan {
   plan: DuckPlan;
@@ -207,16 +217,34 @@ const textRefusal = (reads: readonly string[]): GeneratedRefusal => ({
 });
 
 /** the reason a table's column cannot be stored, with its ways out; null: it can */
-function columnProblem(f: { name: string; oid: number }, typeName: string): GeneratedRefusal | null {
+function columnProblem(f: { name: string; oid: number }, typeName: string, kind: string | undefined): GeneratedRefusal | null {
   const it = `column ${f.name}`;
   if (f.name === UNNAMED) return { key: "sql", message: "an output column has no name", why: "A table's columns are named, and Postgres has no name for an expression.", options: ["give it one: count(*) + 1 AS total"] };
   if (f.name.startsWith("__mason")) return { key: "sql", message: `${it} has a name Mason keeps for itself`, why: null, options: ["rename it with AS"] };
-  if (f.oid === NUMERIC_OID) {
-    return { key: "sql", message: `${it} is numeric, which a generated table can't store yet`, why: "Postgres's digits for a numeric are worked out when a statement is answered, and a stored column skips that step.",
-      options: [`read ${f.name}::double precision if it need not be exact`, `or cast it to an integer type if it holds whole numbers: ${f.name}::bigint`] };
-  }
-  if (STORED_TYPES.has(f.oid)) return null;
+  if (STORED_TYPES.has(f.oid) || asAnswered(f.oid, kind)) return null;
+  if (kind === "d") return { key: "sql", message: `${it} is of type ${typeName}, a domain, which a generated table can't store yet`, why: null, options: [`cast it to the domain's own type, or to text: ${f.name}::text`] };
   return { key: "sql", message: `${it} is of type ${typeName}, which a generated table can't store yet`, why: null, options: [`cast it to a type it can store: ${f.name}::text`] };
+}
+
+/** a column stored as the engine answers it (`GeneratedColumn.duck` null): a numeric, an enum (`typtype` e), a citext */
+const asAnswered = (oid: number, kind: string | undefined): boolean => oid === NUMERIC_OID || kind === "e" || kind === "citext";
+
+/**
+ * Where a numeric's digits are computed at the result's edge (`ExactColumn`), the cell a table can store in their place:
+ * the program is one exact cell, or one padded to a scale the types fix (a sum of a numeric(p, s) column), stored as
+ * DECIMAL(38, s) so every value has Postgres's s decimals. Null: the digits need the program (an average, a division, a
+ * scale the rows decide), which no plain write computes.
+ */
+function storedCell(e: ExactColumn): { cell: string; duck: string | null } | null {
+  if (e.text || e.cells.some((c) => c !== "exact")) return null;
+  const p = e.program;
+  // a cell is the plan's output column `__mason_cell_<key>` (src/duck/rewrite.ts), beside the statement's own
+  const column = (q: NumericProgram): string | null => q.op === "cell" && /^\d+$/.test(q.key) ? `__mason_cell_${q.key}` : null;
+  const own = column(p);
+  if (own !== null) return { cell: own, duck: null };
+  const padded = p.op === "pad" && p.scale <= MAX_STORED_SCALE ? column(p.arg) : null;
+  if (padded !== null && p.op === "pad") return { cell: padded, duck: `DECIMAL(38,${p.scale})` };
+  return null;
 }
 
 /** the tables a definition's SQL names, by name alone (`schema.table`, a bare name `public`'s): what a cycle is told
@@ -279,14 +307,27 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   if (twice !== undefined) refused.push({ key: "sql", message: `it names column ${twice.name} twice`, why: "A table's columns have one name each.", options: ["rename one with AS"] });
   const typeNames = new Map((await p.rows(fields.length === 0 ? "SELECT 0, ''" : `SELECT v.i::text, format_type(v.oid, v.typmod) FROM (VALUES ${fields.map((f, i) => `(${i}, ${Math.trunc(f.oid)}::oid, ${Math.trunc(f.typmod)})`).join(", ")}) AS v(i, oid, typmod)`))
     .map(([i, name]) => [Number(i), name!]));
-  fields.forEach((f, i) => { const bad = columnProblem(f, typeNames.get(i) ?? String(f.oid)); if (bad !== null) refused.push(bad); });
-  // a column computed after the engine's answer (`(x / 3)::text`): what a plain write would store is not Postgres's
-  if (refused.length === 0 && (plan.exact?.length ?? 0) > 0) {
-    const f = fields[plan.exact![0]!.column]!;
-    refused.push({ key: "sql", message: `column ${f.name} is computed from a numeric, which a generated table can't store yet`, why: "Postgres's digits for a numeric are worked out when a statement is answered, and a stored column skips that step.", options: [`compute it over double precision: (x::double precision / 3)::text`] });
+  // a type a user or an extension made: an enum (`e`) and a citext are stored, a domain and a composite are not
+  const made = fields.filter((f) => !STORED_TYPES.has(f.oid) && f.oid !== NUMERIC_OID);
+  const kinds = new Map(made.length === 0 ? [] : (await p.rows(`SELECT oid::text, CASE WHEN typname = 'citext' AND typtype = 'b' THEN 'citext' ELSE typtype::text END FROM pg_type WHERE oid IN (${made.map((f) => Math.trunc(f.oid)).join(", ")})`))
+    .map(([oid, kind]) => [Number(oid), kind!] as const));
+  fields.forEach((f, i) => { const bad = columnProblem(f, typeNames.get(i) ?? String(f.oid), kinds.get(f.oid)); if (bad !== null) refused.push(bad); });
+  // a numeric computed after the engine's answer (an average, `x / 3`): stored only where one cell holds its digits
+  const cells = new Map<number, { cell: string; duck: string | null }>();
+  for (const e of refused.length === 0 ? plan.exact ?? [] : []) {
+    const stored = storedCell(e);
+    if (stored !== null) { cells.set(e.column, stored); continue; }
+    const f = fields[e.column]!;
+    refused.push(e.text
+      ? { key: "sql", message: `column ${f.name} is the text of a numeric computed when a statement is answered, which a generated table can't store yet`, why: "Postgres's digits for a numeric are worked out when a statement is answered, and a stored column skips that step.", options: [`compute it over double precision: (x::double precision / 3)::text`] }
+      : { key: "sql", message: `column ${f.name} has no fixed scale, so it can't be stored exactly`, why: "Postgres chooses the digits of an average, a division or a sum over values of differing scales from the values themselves.",
+        options: [`read ${f.name}::double precision if it need not be exact`, `or cast it to an integer type if it holds whole numbers: ${f.name}::bigint`] });
   }
   if (refused.length > 0) return { refused };
-  return { definition: { plan, bases, warnings: statement.warnings, columns: fields.map((f, i) => ({ name: f.name, type: typeNames.get(i)!, duck: STORED_TYPES.get(f.oid)! })) } };
+  return { definition: { plan, bases, warnings: statement.warnings, columns: fields.map((f, i) => {
+    const cell = cells.get(i);
+    return { name: f.name, type: typeNames.get(i)!, duck: cell !== undefined ? cell.duck : STORED_TYPES.get(f.oid) ?? null, ...(cell !== undefined ? { cell: cell.cell } : {}) };
+  }) } };
 }
 
 /** A refusal said to a person: the file, the key, then the reason and the ways out a line each (issue 124's shape). */

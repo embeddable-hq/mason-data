@@ -26,6 +26,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   or of a parent refused before it was ever built, is not run, and `mason status` says why; a parent refused after an edit
   to its file keeps re-running from the SQL it was last built from, and carries its children, so `mason status` shows the
   parent refused and the child current until the file is fixed.
+  A generated table holds a numeric exactly, with Postgres's digits: a column passed through, its min or max, a sum of
+  an integer (`bigint` for a `smallint` or `integer`, `numeric` for a `bigint`) or of a `numeric(p,s)`. It holds an enum,
+  sorted in its declared order, and a citext, compared without case.
   A table's lag is measured against the base across its chain: a child is behind from the moment a base below its parent
   changes, not from its parent's run, in `mason status`, `--json`'s `behindSeconds` and `behindSince`, and after a
   restart. A child's `target_lag` shorter than a parent's is refused by name, with the way out: it can be no fresher than
@@ -112,7 +115,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Known
 
-- **A generated table can't yet hold a numeric or one of your own types**, and `kind: live` is refused. Each is refused by file and key, with the way out, before anything is built.
+- **A generated table can't yet hold an average or another numeric whose digits Postgres works out from the values, a domain or a composite**, and `kind: live` is refused. Each is refused by file and key, with the way out, before anything is built.
 - **`mason status` shows generated tables; the web page doesn't yet.**
 - **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows, or over
   an aggregated side, has no stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY

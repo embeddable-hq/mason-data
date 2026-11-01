@@ -69,7 +69,13 @@ const SEED = "CREATE TABLE customers (id int PRIMARY KEY, name text NOT NULL, re
   "INSERT INTO customers VALUES (1, 'Ada', 'eu'), (2, 'bob', NULL), (3, 'Cleo', 'us'); " +
   "INSERT INTO orders SELECT g, 1 + g % 3, (ARRAY['paid', 'Open', 'failed', NULL])[1 + g % 4], (g * 7) % 11, g / 8.0, g % 5 = 0, " +
   "timestamptz '2026-01-01 22:00:00+00' + g * interval '5 hours', g * interval '90 seconds', ('00000000-0000-0000-0000-' || lpad(g::text, 12, '0'))::uuid, " +
-  "CASE WHEN g % 6 = 0 THEN NULL ELSE jsonb_build_object('k', g % 2, 'name', 'x' || g) END FROM generate_series(1, 60) g ORDER BY (g * 37) % 101";
+  "CASE WHEN g % 6 = 0 THEN NULL ELSE jsonb_build_object('k', g % 2, 'name', 'x' || g) END FROM generate_series(1, 60) g ORDER BY (g * 37) % 101; " +
+  // stage 3 (issue 175): numerics, an enum and a citext. An unconstrained numeric's values share one scale: the synced
+  // table answers every value at the most decimals any has (src/duck/sync.ts), a divergence of the copy's, not this one's
+  "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy'); CREATE EXTENSION IF NOT EXISTS citext; " +
+  "CREATE TABLE ledger (id bigint PRIMARY KEY, n int, small smallint, amount numeric(12,2), big numeric, mood mood, name citext); " +
+  "INSERT INTO ledger VALUES (1, 10, 1, 1.10, 12345678901234567890.123456789, 'happy', 'Alice'), (9223372036854775806, 2147483647, 2, -2.50, -0.000000001, 'sad', 'alice'), " +
+  "(3, NULL, 3, NULL, NULL, 'ok', 'Bob'), (9223372036854775807, 2147483647, 32767, 4.00, 1.100000000, 'sad', 'BOB'), (5, -7, -4, 0.00, 0.000000000, 'happy', 'bob')";
 
 /** each file's SQL, and what is asked of the table: the truth is a view of that same SQL */
 const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: string; orderBy: string | null; statements: string[] }> = [
@@ -93,6 +99,35 @@ const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: str
       "SELECT id, status FROM joined ORDER BY status NULLS FIRST, id LIMIT 9",
       "SELECT id, payload ->> 'k' AS k, payload_name FROM joined WHERE payload ->> 'k' = '1' ORDER BY id LIMIT 5",
       "SELECT on_day, utc::text AS utc, created_at::text AS created_at, taken::text AS taken, ref::text AS ref FROM joined WHERE id < 5 ORDER BY id",
+    ] },
+  // NUMERICS AND USER TYPES (stage 3, issue 175): stored as a copy of the column holds them, held to Postgres's text
+  { name: "nums", schema: "public", table: "nums",
+    sql: "SELECT id, amount, big, small, mood FROM ledger",
+    orderBy: "id",
+    statements: [
+      "SELECT * FROM nums ORDER BY id",
+      "SELECT id, amount FROM nums WHERE amount = 4 OR amount < 0 ORDER BY id",
+      "SELECT id, amount, round(amount, 1) AS r, round(big, 1) AS rb FROM nums ORDER BY amount DESC NULLS LAST, id",
+      "SELECT big FROM nums WHERE big > 1 ORDER BY big DESC NULLS LAST",
+    ] },
+  { name: "sums", schema: "public", table: "sums",
+    sql: "SELECT mood, sum(small) AS s2, sum(n) AS s4, sum(id) AS s8, sum(amount) AS sa, max(big) AS mb, min(amount) AS lo FROM ledger GROUP BY mood",
+    orderBy: null,
+    statements: [
+      "SELECT * FROM sums ORDER BY mood",
+      "SELECT mood, sa FROM sums ORDER BY sa DESC NULLS LAST, mood",
+      "SELECT s8 > 9223372036854775807 AS past, sum(sa) AS total, sum(s4) AS s4 FROM sums GROUP BY 1 ORDER BY 1",
+      "SELECT mood, s2 + s4 AS both FROM sums WHERE sa = 1.50 ORDER BY mood",
+    ] },
+  { name: "kinds", schema: "public", table: "kinds",
+    sql: "SELECT id, mood, name FROM ledger",
+    orderBy: null,
+    statements: [
+      "SELECT mood, id FROM kinds ORDER BY mood, id",
+      "SELECT mood, count(*) AS n FROM kinds GROUP BY mood ORDER BY mood DESC",
+      "SELECT id FROM kinds WHERE mood = 'sad' ORDER BY id",
+      "SELECT id, name FROM kinds WHERE name = 'ALICE' ORDER BY id",
+      "SELECT count(*) AS n FROM kinds GROUP BY name ORDER BY n",
     ] },
   // CHAINS (stage 2a): a child over a parent, held to Postgres running the child's SQL over the parent's view, which holds
   // the parent's rows; each after its parent, as Postgres's views must be made
@@ -173,7 +208,7 @@ async function withHarness(db: string, mode: "poll" | "replication", use: (h: Ha
   await truth.connect();
   try {
     await sync.open();
-    sync.setTables(await tablesOf(source, ["public.orders", "public.customers"]));
+    sync.setTables(await tablesOf(source, ["public.orders", "public.customers", "public.ledger"]));
     await sync.once();
     if (mode === "replication") await sync.caughtUp();
     const copies = (): CopyState[] => [...sync.state(), ...sync.generated.copies()];
@@ -299,7 +334,7 @@ test("over a poll: built, held to Postgres, re-run after each kind of change, id
     // A COPY MADE AGAIN marks what reads it, here because its columns changed
     psql(url, "ALTER TABLE customers ADD COLUMN tier text; INSERT INTO customers VALUES (4, 'Dee', 'eu', 'gold'); INSERT INTO orders VALUES (5, 4, 'paid', 2, 0.5, false, '2026-03-04 00:00:00+00', '1 minute', NULL, NULL)");
     const before = h.status("public.joined").lastRun?.at;
-    h.sync.setTables(await tablesOf(source, ["public.orders", "public.customers"]));
+    h.sync.setTables(await tablesOf(source, ["public.orders", "public.customers", "public.ledger"]));
     await h.sync.once();
     await h.sync.once();
     await h.until("public.joined", (s) => s.lastRun?.at !== before && s.lastRun?.rows === 5);
@@ -335,7 +370,7 @@ test("over the stream: a batch marks what reads it, and the changes held during 
     const writing = spawn("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", url, "-c",
       "DO $$ BEGIN FOR i IN 1..60 LOOP UPDATE later SET v = v + 1 WHERE id = 1 + i; COMMIT; PERFORM pg_sleep(0.05); END LOOP; END $$"], { stdio: ["ignore", "ignore", "pipe"] });
     const ended = new Promise<number | null>((r) => { writing.on("close", r); });
-    h.sync.setTables(await tablesOf(source, ["public.orders", "public.customers", "public.later"]));
+    h.sync.setTables(await tablesOf(source, ["public.orders", "public.customers", "public.ledger", "public.later"]));
     await h.sync.once();
     assert.equal(await ended, 0, "the app's writes ran");
     await h.sync.caughtUp();
