@@ -61,9 +61,9 @@ import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { refusedAsNamed, SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
-import { ANY, collationMet, shapeDecision, shapesDecided, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
+import { ANY, collationMet, decidedShapes, shapeDecision, shapesDecided, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
-import { emptyShapeCount, say as sayShape, shapeProblems, type ShapeCount, type ShapeName, type ShapeTally } from "./oracle/shape-names.ts";
+import { CHAR_ARMS, emptyShapeCount, NUMERIC_READERS, say as sayShape, SET_OPERATION_ARMS, shapeProblems, VALUES_ARMS, type ShapeCount, type ShapeName, type ShapeTally } from "./oracle/shape-names.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
 import { countGap, emptyTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
@@ -208,29 +208,27 @@ const KNOWN: Decided[] = [
   // filed, and decided so the shape is still asked and lives by it (oracle/shape-names.ts)
   { shape: "count-negative", sql: /LIMIT|FETCH/i, kind: "sqlstate", issue: 119, why: "a negative LIMIT: Postgres's 2201W, Mason's 42804" },
   { shape: "offset-negative", sql: /[\s\S]/, kind: "sqlstate", issue: 119, why: "a negative OFFSET: Postgres's 2201X, Mason's 42804" },
-  // What the first run of the variant shapes met (PR 261, CI run 41349260740, both legs: 3788 differences, every one
-  // a defect main already has), one class an issue, one entry a shape and kind (oracle/known.ts shapeDecision). An
-  // entry over every base (`ANY`) is a class the shape meets by its construction, wherever its output type is reached.
-  // a `*` over a FETCH … WITH TIES derived table, as a set operation's arm: 42804, the arms' column counts differ
-  ...shapesDecided(["null-arm", "null-arm-first", "integer-arm", "integer-arm-first", "char-arm", "char-arm-first", "values-arm", "values-arm-first"],
-    { sql: /WITH TIES/, kind: "refused", issue: 265, why: "a star over a WITH TIES derived table in a set operation: the engine's 42804 column count" }),
+  // What the variant shapes meet on the head MERGED WITH MAIN (PR 261: CI run 41351366200, refs/pull/261/merge at main
+  // 80ebcd9, both legs; the first run's 3788 differences were each a defect main already had), one class an issue, each
+  // over the group of shapes whose construction reaches it (oracle/shape-names.ts), one entry a group and kind
+  // (oracle/known.ts shapeDecision). An entry over every base (`ANY`) is a class the group meets by its construction,
+  // wherever its output type is reached. (Main fixed #265, a star over a WITH TIES derived table as an arm, and #268,
+  // TABLE t's sort, before the merge: neither is decided.)
   // a char(n) arm in a text set operation keeps its padding (`"A  "`), and so keeps a row Postgres's UNION dedupes
-  ...shapesDecided(["char-arm", "char-arm-first"], { sql: ANY, kind: "value", issue: 247, why: "a char(n) arm in a text set operation keeps its trailing spaces" }),
-  ...shapesDecided(["char-arm", "char-arm-first"], { sql: ANY, kind: "rows", issue: 247, why: "a char(n) arm's padding keeps a row Postgres's UNION dedupes" }),
+  shapesDecided(CHAR_ARMS, { sql: ANY, kind: "value", issue: 247, why: "a char(n) arm in a text set operation keeps its trailing spaces" }),
+  shapesDecided(CHAR_ARMS, { sql: ANY, kind: "rows", issue: 247, why: "a char(n) arm's padding keeps a row Postgres's UNION dedupes" }),
   // an exact numeric leaves the exact path in a set operation's arm (its first arm's scale, a quotient's digits, a
   // float4's numeric), under a CTE's aggregates, and in its ::text and ORDER BY over a derived quotient (#252's class)
-  ...shapesDecided(["char-arm-first", "integer-arm", "integer-arm-first", "null-arm", "null-arm-first", "values-arm", "values-arm-first", "numeric-aggregate", "numeric-text", "numeric-ordered"],
+  shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS],
     { sql: ANY, kind: "text", issue: 252, why: "an exact numeric in a set operation, a CTE's aggregate or a derived quotient's text loses Postgres's scale or digits" }),
-  ...shapesDecided(["integer-arm", "integer-arm-first", "numeric-aggregate"], { sql: /sum\(s::numeric\)/, kind: "refused", issue: 252, why: "a numeric sum past the engine's 38 digits, in a set operation or a CTE: 22003" }),
-  // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
-  ...shapesDecided(["values-arm", "values-arm-first"], { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
-  // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text
-  ...shapesDecided(["values-arm", "values-arm-first"], { sql: /json|\bip\b|array_agg/, kind: "value", issue: 267, why: "a set operation's inet, jsonb or array output loses Postgres's text" }),
-  ...shapesDecided(["integer-arm", "integer-arm-first", "values-arm", "values-arm-first", "numeric-aggregate"],
+  shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS],
     { sql: ANY, kind: "value", issue: 252, why: "an exact numeric in a set operation or a CTE's aggregate is rounded, or read through a double" }),
-  // TABLE t ORDER BY … is not sorted as SELECT * FROM t ORDER BY … is (the source's collation, ordinals, WITH TIES)
-  ...shapesDecided(["table"], { sql: /FROM (star_o|coll)\b/, kind: "rows", issue: 268, collation: "libc", why: "TABLE t's sort is not the source's collation" }),
-  ...shapesDecided(["table"], { sql: /FROM (star_o|coll)\b/, kind: "value", issue: 268, collation: "libc", why: "TABLE t's sort under a bound is not the source's collation" }),
+  // (main answers a set operation's 1e30 arm since PR 231; a CTE's sum still overflows)
+  shapesDecided(NUMERIC_READERS, { sql: /sum\(s::numeric\)/, kind: "refused", issue: 252, why: "a numeric sum past the engine's 38 digits, in a CTE: 22003" }),
+  // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
+  shapesDecided(VALUES_ARMS, { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
+  // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text
+  shapesDecided(VALUES_ARMS, { sql: /json|\bip\b|array_agg/, kind: "value", issue: 267, why: "a set operation's inet, jsonb or array output loses Postgres's text" }),
   // a domain's column is its base type's: the wire and data_type say so on Postgres too, pg_typeof and format_type do not
   { sql: /pg_typeof\(d[itzp]\)|attname = 'd[itzp]'/, kind: "value", gap: "domain-column", why: "a domain's column is read and declared as its base type" },
   // SHOW ALL (Postico sends it at every connection): the listener's settings — its catalog Postgres's, the session's
@@ -1049,7 +1047,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // A LEG'S REPORT, before the assertion below, so that a leg that differs still lets the check say what else is wrong
   if (LEG !== null) {
     const legReport: LegReport = { ...LEG, whole: [...every().map((q) => ({ id: statementId(q), name: q.name })), ...UNORDERED_LIMITS.map(unorderedStatement).map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))], asked: askedIn, stages: stageAsked, shaped, shapeTally, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
-      decisions: KNOWN.map((k) => ({ sql: String(k.sql), ...(k.shape === undefined ? {} : { shape: k.shape }), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
+      decisions: KNOWN.map((k) => ({ sql: String(k.sql), ...(k.shape === undefined ? {} : { shape: decidedShapes(k).join(", "), kind: k.kind }), ...(k.issue === undefined ? {} : { issue: k.issue }), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
       verified: [...verified], names: Object.fromEntries(await describeKeys(async (sql) => (await source.query({ text: sql, rowMode: "array" })).rows as (string | null)[][], verified)),
       asks: asked, measured, differences: differences.length };
     const out = process.env.IT_ORACLE_LEG_REPORT!;   // legRefused: a leg without it does not start

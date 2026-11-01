@@ -6,9 +6,9 @@
  */
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { stopParser } from "../src/api/postgres/parser.ts";
+import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { shapes, type SourceAnswer, type TypeOf } from "./integration/oracle/shapes.ts";
-import { NEW_SHAPES, shapeProblems, sumShapeTallies, emptyShapeCount, type ShapeCount } from "./integration/oracle/shape-names.ts";
+import { CHAR_ARMS, NEW_SHAPES, NUMERIC_READERS, SET_OPERATION_ARMS, VALUES_ARMS, shapeProblems, sumShapeTallies, emptyShapeCount, type ShapeCount } from "./integration/oracle/shape-names.ts";
 
 after(async () => { await stopParser(); });
 
@@ -167,4 +167,30 @@ test("a dead or misspelt new shape is said by name; the first six are not held t
   const legA = { ...all, "char-arm": alive({ answeredAlike: 0 }) }, legB = { "char-arm": alive({ answeredAlike: 1 }) };
   assert.deepEqual(shapeProblems(sumShapeTallies([legA, legB])), []);
   assert.deepEqual(shapeProblems({ ...all, subquery: alive({ answeredAlike: 0, postgresRefused: { "42601": 1 } }) }), [], "the first six are tallied, not held");
+});
+
+test("the groups a decision names are what shapes() builds: each set operation arm, VALUES arm, char arm and numeric reader parses as one", async () => {
+  // oracle/shape-names.ts: a class of the base's is decided over the group whose construction reaches it, so a group
+  // must hold every shape built that way (PR 261: a list read from one run missed char-arm). Read from Postgres's parse.
+  const star = "SELECT * FROM order_items ORDER BY id LIMIT 5";
+  const { r } = await of(star, answer(["id", "sku", "unit_price"], [20, 25, 1700], [["1", "a", "2.50"]]));
+  type Sel = { op?: string; all?: boolean; larg?: { valuesLists?: unknown }; rarg?: { valuesLists?: unknown }; withClause?: unknown; fromClause?: Array<{ RangeSubselect?: unknown }> };
+  const built = new Map<string, Set<string>>();
+  for (const s of r.shaped) {
+    if (!(s.shape in NEW_SHAPES)) continue;
+    const q = ((await parseSql(s.sql)).stmts![0]!.stmt as { SelectStmt?: Sel }).SelectStmt!;
+    const setop = q.op !== undefined && q.op !== "SETOP_NONE";
+    const forms = new Set<string>();
+    if (setop) forms.add("set");
+    if (q.larg?.valuesLists !== undefined || q.rarg?.valuesLists !== undefined) forms.add("values");
+    if (q.op === "SETOP_UNION" && q.all !== true) forms.add("union");
+    if (!setop && (q.withClause !== undefined || q.fromClause?.[0]?.RangeSubselect !== undefined)) forms.add("reader");
+    built.set(s.shape, forms);
+  }
+  for (const s of [...SET_OPERATION_ARMS, ...NUMERIC_READERS, "table", "empty", "count-zero"]) assert.ok(built.has(s), `the base reaches ${s}`);
+  const holds = (form: string): string[] => [...built].filter(([, f]) => f.has(form)).map(([s]) => s).sort();
+  assert.deepEqual(holds("set"), [...SET_OPERATION_ARMS].sort(), "SET_OPERATION_ARMS: every set operation built over the base");
+  assert.deepEqual(holds("values"), [...VALUES_ARMS].sort(), "VALUES_ARMS");
+  assert.deepEqual(holds("union"), [...CHAR_ARMS].sort(), "CHAR_ARMS: the UNION (distinct) arms");
+  assert.deepEqual(holds("reader"), [...NUMERIC_READERS].sort(), "NUMERIC_READERS: a derived table or CTE over the base");
 });

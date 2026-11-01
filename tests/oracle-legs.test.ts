@@ -314,9 +314,15 @@ test("the shapes' tallies are summed across the legs: a dead or misspelt new sha
   assert.deepEqual(staleOrDead([{ ...a, shapeTally: dead, measured: { ...measured, shapes: false } }, { ...b, shapeTally: {}, measured: { ...measured, shapes: false } }]), [], "shapes off: no shape check");
   assert.match(staleOrDead([{ ...a, shapeTally: live() }, b]).join("\n"), /leg\(s\) 2 has no shape tally where another has/);
   // a base entry /x/ and a shape entry of the same pattern are two decisions: the shape's, differing in neither leg, is stale
-  const withShape = (r: LegReport, differed: boolean): LegReport => ({ ...r, shapeTally: r.leg === 1 ? live() : {}, decisions: [...r.decisions, { sql: "/x/", shape: "integer-arm", why: "a scale", differed, decided: true }] });
+  const withShape = (r: LegReport, differed: boolean): LegReport => ({ ...r, shapeTally: r.leg === 1 ? live() : {}, decisions: [...r.decisions, { sql: "/x/", shape: "integer-arm", kind: "text", why: "a scale", differed, decided: true }] });
   assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, true)]), [], "the shape entry differed in leg 2");
-  assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, false)]), ["a decided difference that no longer differs: [integer-arm] /x/: no longer differs (a scale) — remove it from KNOWN"]);
+  assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, false)]), ["a decided difference that no longer differs: [integer-arm] text /x/: no longer differs (a scale) — remove it from KNOWN"]);
+  // PR 261's merged run: one group and pattern, two kinds (#247's padding as a value and as a kept row). The rows entry
+  // no longer differs on the merged tree; keyed by its kind it is said stale, never hidden behind the value entry
+  const kinds = (r: LegReport): LegReport => ({ ...r, shapeTally: r.leg === 1 ? live() : {}, decisions: [...r.decisions,
+    { sql: "/[\\s\\S]/", shape: "char-arm, char-arm-first", kind: "value", issue: 247, why: "padding", differed: true, decided: true },
+    { sql: "/[\\s\\S]/", shape: "char-arm, char-arm-first", kind: "rows", issue: 247, why: "a row kept", differed: false, decided: true }] });
+  assert.deepEqual(staleOrDead([kinds(a), kinds(b)]), ["a decided difference that no longer differs: [char-arm, char-arm-first] rows /[\\s\\S]/: no longer differs (a row kept) — remove it from KNOWN, and say on #247 that it no longer differs (on this tree: main may have fixed it)"]);
 });
 
 test("every shape's liveness can be reached by deciding a difference the base already has: a refusal shape lives by a decided refusal under its SQLSTATE, an answer shape by no refusal", () => {

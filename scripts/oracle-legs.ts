@@ -52,8 +52,8 @@ export const STAGES = ["roles", "row filters", "settings", "setting scripts"] as
 export const FIRST_LEG_RUNS_STAGES = 1;
 
 export type Tallies = { statements: number; mason: Record<string, number>; duckdb: Record<string, number> };
-/** a decided difference as a leg met it; `shape`: one shape's (oracle/known.ts decisionKey keys it apart) */
-export interface Decision { sql: string; shape?: string; why: string; machineFloat?: true; differed: boolean; decided: boolean }
+/** a decided difference as a leg met it; `shape` and `kind`: a group's, its shapes joined (oracle/known.ts decisionKey keys it apart) */
+export interface Decision { sql: string; shape?: string; kind?: string; issue?: number; why: string; machineFloat?: true; differed: boolean; decided: boolean }
 /** what the fixture says the DuckDB-alone tallies were measured on */
 export interface Measured { what: string; machine: string; postgres: string; collation: string; shapes: boolean }
 export interface LegReport {

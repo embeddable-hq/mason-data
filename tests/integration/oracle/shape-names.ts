@@ -50,6 +50,22 @@ export type NewShapeName = keyof typeof NEW_SHAPES;
 export type ShapeName = (typeof FIRST_SHAPES)[number] | NewShapeName;
 export const isNewShape = (s: string): s is NewShapeName => Object.hasOwn(NEW_SHAPES, s);
 
+/*
+ * THE GROUPS A DECISION NAMES (oracle/known.ts shapesDecided), each by how its shapes are built (oracle/shapes.ts;
+ * tests/oracle-shapes.test.ts holds each to the parse of what shapes() builds). A class of the base's is decided over
+ * the group whose construction reaches it, never over the shapes one run happened to show it in: a defect one shape
+ * meets first can mask another (PR 261: main fixed a char(n) arm's padding, and the char arm's numeric text, the
+ * class every other arm was already decided for, turned the oracle red).
+ */
+/** a set operation with the base as one arm */
+export const SET_OPERATION_ARMS = ["table-arm", "values-arm", "values-arm-first", "null-arm", "null-arm-first", "char-arm", "char-arm-first", "integer-arm", "integer-arm-first"] as const satisfies readonly NewShapeName[];
+/** of those, an arm that is a VALUES list of the first row's values cast with format_type */
+export const VALUES_ARMS = ["values-arm", "values-arm-first"] as const satisfies readonly NewShapeName[];
+/** of those, a UNION (distinct) beside a character(n) or text literal */
+export const CHAR_ARMS = ["char-arm", "char-arm-first"] as const satisfies readonly NewShapeName[];
+/** a derived table or a CTE over the base, reading its numeric outputs */
+export const NUMERIC_READERS = ["numeric-distinct", "numeric-text", "numeric-aggregate", "numeric-ordered"] as const satisfies readonly NewShapeName[];
+
 /** what one shape met over a run: every ask, how both sides answered it, and the statements it could not be spelt for */
 export interface ShapeCount {
   asked: number;
