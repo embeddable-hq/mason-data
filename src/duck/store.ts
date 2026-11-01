@@ -687,7 +687,7 @@ export class SessionRunner implements DuckRunner {
       timing.duckdbMs += performance.now() - t1;
       const r = result;
       if (fields !== null && r.columnCount < fields.length) throw new StatementError({ code: "XX000", message: `the engine answered ${r.columnCount} column(s) where Postgres's analysis has ${fields.length}: report it (Mason's rewrite)` }, sql);
-      // Postgres's columns where its analysis gave them (a WITH TIES rank DuckDB adds after them is not sent)
+      // Postgres's columns where its analysis gave them (the exact numerics' cells DuckDB answers after them are not sent)
       const columns = fields !== null
         ? fields.map((f, i) => pgTypedColumn(f.name, f.oid, r.columnType(i), f.typmod))
         : Array.from({ length: r.columnCount }, (_, i) => wireColumn(r.columnName(i), r.columnType(i)));

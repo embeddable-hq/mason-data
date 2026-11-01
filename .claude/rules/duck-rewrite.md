@@ -186,6 +186,36 @@ paths:
   `groupOutput`), and a key bound to an output IS that output: a jsonb's, citext's or collation's key built over it,
   and a key bound by equality to a computed output written as its ordinal, never a second evaluation of a volatile
   one. Detector: tests/duck-wire.test.ts "a key bound to an output is that output …".
+  Its fifth (issue 192): FETCH … WITH TIES's rank window read a number by a rule of its own, so one beside a `*` was a
+  constant. Its keys are bound by `keysBound` too (a set operation's by number or name, all Postgres takes there), and a
+  key bound to an output reads that output's COLUMN by its place (`withTies`: the statement is a derived table whose
+  columns are named by place), never its expression again, so a window's, a set-returning function's or a volatile
+  output is one value; a key no output is is computed once, as a column of its own. A set operation's key, under WITH
+  TIES or a plain ORDER BY, is typed as Postgres resolved the column (`setOperationColumns` over
+  `setOperationOutputs`, src/duck/pgtree.ts: `citext UNION ALL text` is text), never as its first SELECT's. A key bound
+  to a ROW output is refused by `row-value` (`rowKey`), as a row written as a key is: the list writes a row as its
+  text, which sorts unlike the row. Detector: tests/duck-wire.test.ts "FETCH … WITH TIES answers as Postgres does …"
+  and "a set operation's ORDER BY sorts its column as Postgres resolved it …".
+  PR 231's second round named three more decisions. First, **a part of the statement is found in Postgres's analysis by
+  the evidence both hold, never by an offset alone** (`picked`). `TABLE t` writes its `*` at no offset, so its query is
+  told by the FROM it reads and its limits' offsets, and a set operation of it by its arms where they hold offsets.
+  Second, **a set operation's SELECTs are its column as Postgres resolved it** (`castArms`, before anything reads the
+  arms): a char(n) arm of a text column is cast to text, so its padding is gone from the union, the ties and the text;
+  an integer arm of a numeric column is exact as it is (`exactArms`). Third, **FETCH … WITH TIES reads its count and
+  offset where no row is**: the bound is a materialized WITH query, and the ranked rows are UNIONed with the bound's own
+  row where its count is negative (never, past its CASE), so DuckDB cannot skip the bound when the rows are none (2201W
+  over `WHERE false`).
+  Detector: tests/duck-wire.test.ts "a TABLE statement is found …", "a set operation's SELECTs are the column Postgres
+  resolved …", "… reads its count and offset where no row is …" and "… keeps the exact numbers' cells it passes through".
+  Its third round named two more. **WITH TIES ties on the statement's own ORDER BY** (`writtenKeys`, marked before any
+  rule runs): Postgres's sortClause is the ORDER BY written (a DISTINCT ON's keys go to its distinctClause), so a key a
+  rule adds for its own sort (`distinctOnSorted`, which a DISTINCT over an exact numeric reaches) never reaches the rank.
+  **The cells a statement's exact columns read are one record** (`cellsOf`, `exactThrough`'s `derived`): the wrapper
+  passes that many through, whether its list writes them or a `*` passes them (a FROM item, a WITH query, a set
+  operation's arms, nested), and never counts them; a pass-through that carries no exact column selects none, and a
+  UNION ALL arm's record is what `exactArms` makes it select. A UNION ALL of its own WITH, ORDER BY or limit is one arm
+  of the UNION ALL around it (`ownClauses`), as `setOperationArms` reads it. Detector: tests/duck-wire.test.ts
+  "… carries every cell its exact numbers have …" and "… ties on the ORDER BY Postgres sorts by …".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its
