@@ -3215,7 +3215,9 @@ test("the Overview, nothing asked yet: Connect your first tool under the cards â
   assert.match(text, new RegExp(`Connect your first tool Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL\\. ` +
     `URL ${SHOP_PG.shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy psql ${SHOP_PG.psql.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy ` +
     "Then try select count\\(\\*\\) from customers; Copy it shows on Queries " +
-    "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. Mason Source "));
+    "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. " +
+    // and beside the local connection, Connect from anywhere (mason share, from the page)
+    "Connect from anywhere Connect from anywhere For a tool in the cloud, which cannot reach this machine: a temporary public address and a password, as mason share opens\\. TLS is required of every connection\\. Mason Source "));
   assert.match(html, /<code id="connect-try">select count\(\*\) from customers;<\/code> <button type="button" class="small" data-copy="connect-try" data-room="Press âŒ˜C">Copy<\/button>/,
     "a first statement that the request log lists: one that reads a copied table (the first copied), never a select 1 it does not");
   // first under the cards, before the facts: the most important thing on a fresh install is how to reach it
