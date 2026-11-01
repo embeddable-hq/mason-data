@@ -122,7 +122,9 @@ docs/DESIGN.md ("The independent review", "Local gates").
    working, leave one bounded background job per thing, which exits when it changes: a loop on `gh pr checks` ("Local
    gates"), `gh pr view --json state` for a merge, `git ls-remote` for a lead's new head. Its exit wakes the session,
    where an auto-merge and another session's report may not; when its bound passes with nothing changed, look, and
-   leave another.
+   leave another. Detector: the Stop hook `scripts/hooks/wake-up.ts` warns when a turn ends after a queued merge or a
+   message to a lead with no background job started since and still running; a warning, never a block, because it
+   reads the transcript by heuristic.
 
 **The board says where each piece is**, so the owner reads progress there instead of asking: the [Mason work
 board](https://github.com/orgs/embeddable-hq/projects/4). An issue split into pieces has one sub-issue per PR
@@ -138,13 +140,17 @@ piece is, and **Done** with its last.
 One laptop is shared by every session, and one gate fills it: gates are the largest single use of a session's time
 (docs/DESIGN.md "Local gates" has the measurements). **CI is the full gate**, and a local gate runs for a reason. Each
 rule says what detects it, or why nothing does: most are habits that only a session's transcript shows, which no test
-reads.
+reads. Some detectors are Claude Code hooks, wired in `.claude/settings.json` from `scripts/hooks/`
+(`tests/hooks.test.ts`): a PreToolUse hook blocks the command, and its one-line message says what to run instead; the
+Stop hook only warns. They resolve against `$CLAUDE_PROJECT_DIR`, the main checkout even from a worktree, so a main
+checkout on a branch without `scripts/hooks/` prints a hook error on each Bash call and each turn's end (not a block).
 
 - **While working, the tests nearest the change**: `node --test --test-timeout=<ms> <file>`, with
   `--test-name-pattern` for one test, and `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. The
-  timeout goes BEFORE the files, since Node ignores it after them, so `npm test` cannot take one (issue 139). **A full
+  timeout goes BEFORE the files, since Node ignores it after them, so `npm test` cannot take one (issue 139); the hook
+  `scripts/hooks/test-timeout.ts` blocks a `node --test` without it before its files, and `npm test`. **A full
   integration run is not an iteration tool**, and neither is the full oracle. A measurement's dataset is built once and
-  kept until the PR is pushed. Nothing detects it; a transcript found it.
+  kept until the PR is pushed. Nothing detects that; a transcript found it.
 - **A test past its bound is read, not repeated.** Compare CPU with elapsed time on the test's own process, not the
   wrapper (`pgrep -P <pid>` down to it, then `ps -o time,etime -p <pid>`): a hung test uses none, though nor does one
   waiting on I/O. A hang is the change's to fix, or a flake (below).
@@ -189,8 +195,11 @@ reads.
   no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release,
   merge on the owner's word. It is queued pinned, as "The loop" step 5 says, and its landing is confirmed, never
   assumed: PR 89 had not merged itself some while after its last check went green, and was merged by hand.
+  Detector: the hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`, and lets
+  `gh pr merge <n> --disable-auto` through.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
-  to fix, or it is a flake, the next rule. Nothing detects it; the gate could compare the tree's hash, and does not.
+  to fix, or it is a flake, the next rule. Detector: the hook `scripts/hooks/no-rerun.ts` blocks `gh run rerun`; a
+  local gate run again on an unchanged tree, nothing detects (the gate could compare the tree's hash, and does not).
 - **A flaky test met during other work is quarantined with an issue, not fixed in that PR**: a flake's fix costs more
   than the PR it interrupts, and its review is its own. A flake here is a test the change cannot have touched, failing
   on timing or load. The skip goes in its own commit, `test("…", { skip: "quarantined: #<issue>" }, …)`, and the issue
