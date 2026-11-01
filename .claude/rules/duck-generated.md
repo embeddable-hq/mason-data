@@ -24,7 +24,8 @@ scheduled` re-runs the whole SELECT. `kind: live` is refused until its write pat
 - **A table has no session.** What reads one (a time zone, a setting, a role, `'now'`) is refused from what Postgres
   RESOLVED, by `pg_proc.provolatile` and the cast's functions, never a list of names (`sessionReads`). `now()` is the run's
   own clock, and a stable function that reads no session goes on `NOT_THE_SESSION`; one marked immutable that reads the
-  zone goes on `READS_ZONE_ANYWAY`.
+  zone goes on `READS_ZONE_ANYWAY`. A statement the allowlist refuses (`current_time`'s timetz) that also reads a session
+  is refused for the session, with its way out: verifying it would not make it a table's to hold.
 - **Only what a stored cell gives back as Postgres's text is stored** (`STORED_TYPES`): a type goes on it once the oracle
   holds it over a generated table. A cell the plan fills after the engine's answer (`DuckPlan.exact`, `dropLast`) is
   refused, because a plain write would store another value.

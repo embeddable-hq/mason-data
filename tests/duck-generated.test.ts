@@ -60,6 +60,11 @@ test("an idle base is never run again, and lag is the oldest change not reflecte
     await w.store.writer.run("INSERT INTO public.events VALUES (5, 3, 'query', 'ok', '5', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
     w.sync.generated.changed("public.events");
     assert.equal(w.status().state, "behind");
+    // no review runs between these reads, so nothing is queued: the lag is the change's age, and grows with it
+    const b1 = w.status().behindSeconds;
+    await new Promise((r) => setTimeout(r, 150));
+    const b2 = w.status().behindSeconds;
+    assert.ok(b2 > b1 && b2 >= 0.1, `lag grows after a base change: ${b1} then ${b2}`);
     const after = await w.until((s) => s.lastRun?.at !== first.lastRun?.at);
     assert.equal(after.lastRun?.rows, 3);
     assert.equal(after.behindSeconds, 0);
@@ -84,6 +89,9 @@ test("now() is the run's, and reads as of the run; the session's zone is refused
   await withWorld({
     stamped: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, now() AS at_run, date_trunc('day', started_at, 'UTC') AS day FROM events\n",
     today: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, current_date AS today FROM events\n",
+    clock: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, current_time AS t FROM events\n",
+    local: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, localtime AS t FROM events\n",
+    localstamp: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, localtimestamp AS t FROM events\n",
     zone: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT date_trunc('day', started_at) AS day FROM events\n",
     later: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT started_at + interval '1 day' AS later FROM events\n",
     named: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT current_setting('TimeZone') AS who FROM events\n",
@@ -96,7 +104,7 @@ test("now() is the run's, and reads as of the run; the session's zone is refused
     assert.equal(s.lastRun?.rows, 4);
     const at = (await w.rows("SELECT DISTINCT epoch_ms(at_run) FROM public.stamped"))[0]![0];
     assert.ok(Math.abs(Number(at) - Date.parse(s.lastRun!.at)) < 10_000, `${String(at)} as of the run ${s.lastRun!.at}`);
-    for (const name of ["today", "zone", "later", "named", "day", "older", "text"]) {
+    for (const name of ["today", "clock", "local", "localstamp", "zone", "later", "named", "day", "older", "text"]) {
       const r = w.status(`public.${name}`);
       assert.equal(r.state, "refused", `${name}: ${JSON.stringify(r)}`);
       refusedAt(r.refusals, "sql", /reads a session/);
@@ -105,6 +113,53 @@ test("now() is the run's, and reads as of the run; the session's zone is refused
     }
     await w.until(built, "public.utc");
   });
+});
+
+test("a run reads times as a Postgres session in UTC would, whatever zone the engine's other connections are in", async () => {
+  await withWorld({}, async (w) => {
+    // a zone every connection opened from here on would take, and the run's connection is told otherwise
+    await w.store.writer.run("SET GLOBAL TimeZone = 'Asia/Kolkata'");
+    try {
+      // a timestamptz literal with no zone is read in the plan's zone, UTC: 03:00 UTC holds the first day's two rows, and
+      // 03:00 at +05:30 none of them
+      w.write("early", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, started_at FROM events WHERE started_at < '2026-01-01 03:00'\norder_by: id\n");
+      const s = await w.until(built, "public.early");
+      assert.equal(s.lastRun?.rows, 2);
+      assert.deepEqual(await w.rows("SELECT id, strftime(started_at AT TIME ZONE 'UTC', '%Y-%m-%d %H:%M:%S') FROM public.early ORDER BY id"), [[1n, "2026-01-01 00:00:00"], [2n, "2026-01-01 00:00:05"]]);
+    } finally { await w.store.writer.run("SET GLOBAL TimeZone = 'UTC'"); }
+  });
+});
+
+test("the swap waits for the writer's turn: a write holding the turn keeps the old table served until it ends", async () => {
+  let hold: (() => Promise<void>) | null = null;
+  await withWorld({ counts: COUNTS }, async (w) => {
+    const first = await w.until(built);
+    const sync = w.sync as unknown as { onWriter<T>(f: () => Promise<T>): Promise<T> };
+    let release = (): void => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    let turn: Promise<void> | null = null;
+    // once the run's table is written and committed, a write takes the writer's turn and keeps it
+    hold = async () => { turn = sync.onWriter(() => held); };
+    await w.store.writer.run("INSERT INTO public.events VALUES (13, 9, 'query', 'ok', '13', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+    w.sync.generated.changed("public.events");
+    w.reached.length = 0;
+    try {
+      for (const end = Date.now() + 10_000; !w.reached.includes("committed") && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
+      assert.ok(w.reached.includes("committed"), "the run wrote and committed its table");
+      await new Promise((r) => setTimeout(r, 200));
+      assert.ok(!w.reached.includes("swapped"), "and has not swapped it in while the writer's turn is held");
+      assert.deepEqual(await w.rows("SELECT count(*) FROM public.counts"), [[2n]], "the old table serves");
+      assert.equal(w.status().lastRun?.at, first.lastRun?.at);
+    } finally {
+      // a stop waits for the writer's turn: released whatever was found, so a failure here fails and never hangs
+      hold = null;
+      release();
+    }
+    await turn;
+    const after = await w.until((s) => s.lastRun?.at !== first.lastRun?.at);
+    assert.equal(after.lastRun?.rows, 3);
+    assert.deepEqual(w.reached.slice(-2), ["committed", "swapped"]);
+  }, { onStep: (s) => s === "committed" ? hold?.() : undefined });
 });
 
 test("what a table cannot store is refused by name at its key, before anything is built", async () => {

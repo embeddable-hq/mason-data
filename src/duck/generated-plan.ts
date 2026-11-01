@@ -164,6 +164,10 @@ export async function sessionReads(rows: Planner["rows"], keys: readonly string[
   return [...new Set(out.map((k) => names.get(k) ?? k))];
 }
 
+/** a definition that reads a session, `session` what it reads as a person reads each */
+const sessionRefusal = (session: readonly string[]): GeneratedRefusal =>
+  ({ key: "sql", message: `it reads a session: ${session.slice(0, 5).join("; ")}`, why: THE_SESSION_WHY, options: THE_SESSION_WAYS });
+
 /** the reason a table's column cannot be stored, with its ways out; null: it can */
 function columnProblem(f: { name: string; oid: number }, typeName: string): GeneratedRefusal | null {
   const it = `column ${f.name}`;
@@ -191,13 +195,23 @@ export function readsGenerated(what: string): GeneratedRefusal {
 export async function planDefinition(p: Planner, sql: string, orderBy: string | null, generated: ReadonlySet<string>): Promise<{ definition: DefinitionPlan } | { refused: GeneratedRefusal[] }> {
   const statement = await definitionStatement(sql, orderBy);
   if ("refused" in statement) return { refused: [statement.refused] };
-  const plan = await p.plan(statement.text, statement.stmt);
+  let plan: DuckPlan;
+  try { plan = await p.plan(statement.text, statement.stmt); }
+  catch (e) {
+    // a statement refused for what Mason has not verified (`current_time`, a timetz) that also reads a session is refused
+    // for the session, with the line to write: verifying it would not make it a table's to hold
+    if (!(e instanceof StatementError) || e.gap !== "unverified") throw e;
+    const keys = (/: ([^]*)$/.exec(e.fields.detail ?? "")?.[1] ?? "").split(", ").filter((k) => k !== "");
+    const session = await sessionReads(p.rows, keys);
+    if (session.length === 0) throw e;
+    return { refused: [sessionRefusal(session)] };
+  }
   const bases = [...new Set((plan.reads ?? []).map((r) => r.table))].sort();
   const refused: GeneratedRefusal[] = [];
   const chained = bases.filter((b) => generated.has(b));
   if (chained.length > 0) refused.push(readsGenerated(chained.join(" and ")));
   const session = await sessionReads(p.rows, plan.resolved);
-  if (session.length > 0) refused.push({ key: "sql", message: `it reads a session: ${session.slice(0, 5).join("; ")}`, why: THE_SESSION_WHY, options: THE_SESSION_WAYS });
+  if (session.length > 0) refused.push(sessionRefusal(session));
   if (plan.clock?.parse !== undefined) refused.push({ key: "sql", message: "it reads a relative literal ('now', 'today')", why: THE_SESSION_WHY, options: ["use now(), as of the run, with the zone named if it reads a day: (now() AT TIME ZONE 'UTC')::date"] });
   if (plan.dropLast) refused.push({ key: "sql", message: "it ends in FETCH … WITH TIES", why: "That row count isn't a table's to keep.", options: ["use LIMIT, with an ORDER BY that decides every row"] });
   const fields = plan.fields ?? [];
