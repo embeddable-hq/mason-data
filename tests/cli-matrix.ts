@@ -58,6 +58,8 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
 export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[]>>> = {
   user: [["disable", "no_such_user"], ["enable", "no_such_user"]],
   logs: [["--events"], ["--running"], ["--requests"]],
+  // a generated table named: below a run the state's answer, with one no such table
+  wait: [["no_such_table", "--timeout", "1"]],
 };
 
 /** Further lines a command is run with in every state, beside MATRIX_ARGS's (a flag of its own that must refuse

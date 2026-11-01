@@ -1226,7 +1226,15 @@ read-back as any plan). The whole chain is one transaction on the run's connecti
 snapshot, and one swap transaction on one writer's turn. A parent's new definition swaps in alone: its children's plans
 need the catalog to say its columns first.
 
-**Not yet**, by stage: a child's target against its parent's, lag across a chain and `mason wait` (2b), numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
+**Lag across a chain (stage 2b)** is the oldest base change anywhere below a table not yet in its rows: a parent's
+pending change is not in its child either, so the child's lag is the minimum of its own mark and its parents', taken
+recursively. A parent swapped in without its child marks the child at the oldest base change the swap brought, not at
+the swap, so lag stays measured against the base. Nothing new is stored: a restart's marks come back from the ledger's
+`basesSynced` as before, and the chain's from its parents'. A child's `target_lag` shorter than a parent's is refused
+(the issue: it could be no fresher than its parent). `mason wait <table>` reads `behindSince`, the oldest such change's
+time, and is done when it is null or after the wait began.
+
+**Not yet**, by stage: numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
 
 ## The Postgres API
 
