@@ -1278,6 +1278,10 @@ function* matrix(): Generator<Matrixed> {
   yield q("with ties: a later arm's COLLATE \"C\" is the set operation's", "SELECT count(*) FROM (SELECT x.t FROM typed x UNION ALL SELECT x.vc COLLATE \"C\" FROM typed x ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) s");
   yield q("set operation: a citext beside a text sorted as text", "SELECT x.ci FROM typed x UNION ALL SELECT x.t FROM typed x ORDER BY 1 NULLS FIRST");
   yield q("set operation: a citext UNION a text, without ALL", "SELECT count(*) FROM (SELECT x.ci FROM typed x UNION SELECT x.t FROM typed x) s");
+  // each arm cast to the set operation's column: a char(n) arm after a text one is its text, unpadded (setop-arm-cast-dropped, PR 233)
+  yield { ...q("with ties: a char(n) arm beside a text is the set operation's text", "SELECT * FROM (SELECT s.name AS x FROM star_o s UNION ALL SELECT s.ch FROM star_o s ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) u"), inOrder: false };
+  yield q("set operation: a char(n) arm beside a text printed unpadded", "SELECT s.name AS x FROM star_o s UNION ALL SELECT s.ch FROM star_o s ORDER BY 1 NULLS FIRST");
+  yield q("set operation: a char(n) arm beside a text, without ALL", "SELECT x || '|' AS y FROM (SELECT s.name AS x FROM star_o s UNION SELECT s.ch FROM star_o s) u ORDER BY 1 NULLS FIRST");
   yield q("with ties: its rank in no row (a derived table beside a column)", `SELECT s.*, 1 AS one FROM (${TIES_A}) s ORDER BY s.id`);
   yield q("with ties: joined after", `SELECT s.id, s.made, b.id AS b FROM (${TIES_A}) s JOIN top_b b ON b.a_id = s.id ORDER BY 1, 3`);
   yield q("with ties: in a CTE read beside a column", `WITH t AS (${TIES_A}) SELECT t.*, t.id * 2 AS twice FROM t ORDER BY t.id`);

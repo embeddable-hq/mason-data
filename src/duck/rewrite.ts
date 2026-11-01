@@ -367,6 +367,65 @@ class Rewriter {
     return null;
   }
 
+  /**
+   * AN ARM'S COLUMN AS THE SET OPERATION'S TYPE (the class "setop-arm-cast-dropped", PR 233 probe 3): Postgres casts each
+   * arm's column to the type it resolved over every arm (`setOperationTypes`), so a char(n) arm beside a varchar is its
+   * text, unpadded, before it is compared, sorted, tied or printed; the engine took each arm's value as it was. Each
+   * arm's column whose own type differs is written as that cast, by the one rule of an implicit cast (`widen`), at every
+   * arm however deep (a cast of each arm is the cast of the union); a `*`'s column so cast is written out first. The
+   * first SELECT's column keeps Postgres's name, which the cast's call would replace in the engine.
+   */
+  private setOperationCast(b: Body): void {
+    const types = this.setOperationTypes(b);
+    if (types === null) return;
+    const unwrap = (x: unknown): Body => isNode(x) ? bodyOf(x) : x as Body;
+    const leaves: Body[] = [];
+    const leavesOf = (x: Body): void => {
+      if (x.op !== undefined && x.op !== "SETOP_NONE" && x.larg !== undefined && x.rarg !== undefined) { leavesOf(unwrap(x.larg)); leavesOf(unwrap(x.rarg)); } else leaves.push(x);
+    };
+    leavesOf(b);
+    leaves.forEach((leaf, li) => {
+      const all = (leaf.targetList ?? []) as AstNode[];
+      const cells = this.cellsAfter.get(leaf);
+      const own = all.slice(0, all.length - (cells?.listed ?? 0));
+      const outputs = this.outputs(own);
+      if (outputs.length !== types.length) return;
+      const want = (i: number): number | undefined => types[i]?.type;
+      // (a `*` holding a column the cast changes is written out, its columns each one target)
+      const starCast = outputs.some((o, i) => o.star && want(i) !== undefined && this.widensText(o.value, want(i)!));
+      if (starCast) {
+        if (outputs.some((o) => o.twin)) throw this.twinRefused();
+        // (a `*` that carries an inner query's exact cells would lose them when written out)
+        if ((cells?.count ?? 0) > (cells?.listed ?? 0)) throw new Unrewritable("this * of a set operation's SELECT, whose column the set operation casts, is not supported by Mason", "name the columns in each SELECT", "unverified");
+        leaf.targetList = [...own.flatMap((t, i) => {
+          if (!hasStar(bodyOf(t).val)) return [t];
+          const mine = outputs.filter((o) => o.target === i);
+          return mine.length === 0 ? [t] : mine.map((o) => ({ ResTarget: { name: o.name, val: o.value } }));
+        }), ...all.slice(own.length)];
+      }
+      const written = this.outputs((leaf.targetList as AstNode[]).slice(0, (leaf.targetList as AstNode[]).length - (cells?.listed ?? 0)));
+      written.forEach((o, i) => {
+        const t = want(i);
+        if (o.star || t === undefined) return;
+        const target = bodyOf((leaf.targetList as AstNode[])[o.target]!);
+        const v = target.val as AstNode;
+        const cast = this.widen(v, t);
+        if (cast === v) return;
+        if (li === 0 && typeof target.name !== "string") target.name = o.name;
+        target.val = cast;
+      });
+    });
+  }
+
+  /** whether `widen` writes a value of this type as another value for `want` (a cast, a trimmed char(n)) */
+  private widensText(n: AstNode, want: number): boolean {
+    const own = this.typeOf(n);
+    if (own === null || own === want) return false;
+    if ((want === TEXT || want === VARCHAR) && own === BPCHAR) return true;
+    if (want === TIMESTAMPTZ || want === TIMESTAMP) return own === DATE || own === TIMESTAMP || own === TIMESTAMPTZ;
+    return want !== NUMERIC && NUMBER_TYPES.has(want) && NUMBER_TYPES.has(own);
+  }
+
   /** a node the rewrite reads a set operation's column by: typed as Postgres's set operation types it (no constant) */
   private setColumn(n: AstNode, t: Typed | null | undefined): AstNode {
     if (t === null || t === undefined) throw new Unrewritable("this ORDER BY of a set operation is not supported by Mason: its column's type is not found in Postgres's analysis", "order by a column of a subquery: SELECT * FROM (… UNION …) s ORDER BY 1", "unverified");
@@ -912,6 +971,8 @@ class Rewriter {
       });
     }
     this.keyedGroups(b);
+    // each arm's column as the set operation's (a char(n) beside a varchar is its text, unpadded): before anything reads it
+    if (b.op !== undefined && b.op !== "SETOP_NONE") this.setOperationCast(b);
     // a set operation compares its rows (without ALL, and INTERSECT ALL / EXCEPT ALL count them by equality)
     if (b.op !== undefined && b.op !== "SETOP_NONE" && (b.all !== true || b.op !== "SETOP_UNION")) {
       let first: Body = b;

@@ -93,6 +93,9 @@ const DDL = [
   "INSERT INTO public.accounts VALUES (1, 'finalized', '10.3.6.45/32', ''), (2, 'FINALIZED', '10.0.0.0/8', ' alpha'), (3, 'Finalized', '::1/128', '10'), (4, 'draft', NULL, 'Beta')",
   // the corpus rerun: text Postgres's input functions read, names in two cases, a large answer
   "CREATE TABLE public.texts (id INTEGER PRIMARY KEY, s VARCHAR)",
+  // (a char(n) is held as Postgres writes it, padded)
+  "CREATE TABLE public.chars (id INTEGER PRIMARY KEY, c VARCHAR, v VARCHAR, t VARCHAR)",
+  "INSERT INTO public.chars VALUES (1, 'a  ', 'a ', 'a'), (2, 'a  ', 'b', 'a '), (3, 'B  ', 'A', 'b'), (4, NULL, 'c', NULL)",
   "INSERT INTO public.texts VALUES (1, '01/02/2026'), (2, 'January 3, 2026'), (3, ' yes '), (4, '1_000'), (5, 'P1DT2H'), (6, 'NaN'), (7, '12.5')",
   "CREATE TABLE public.ua (id INTEGER PRIMARY KEY, \"givenName\" VARCHAR, email VARCHAR)",
   "INSERT INTO public.ua VALUES (1, 'ann', 'a@x'), (2, 'bob', 'b@x'), (3, 'Ann', NULL)",
@@ -161,6 +164,8 @@ const PG_DDL = [
   "CREATE TABLE public.accounts (id integer PRIMARY KEY, status citext, ip inet, team text)",
   "INSERT INTO public.accounts VALUES (1, 'finalized', '10.3.6.45', ''), (2, 'FINALIZED', '10.0.0.0/8', ' alpha'), (3, 'Finalized', '::1', '10'), (4, 'draft', NULL, 'Beta')",
   "CREATE TABLE public.texts (id integer PRIMARY KEY, s text)",
+  "CREATE TABLE public.chars (id integer PRIMARY KEY, c char(3), v varchar(5), t text)",
+  "INSERT INTO public.chars VALUES (1, 'a', 'a ', 'a'), (2, 'a  ', 'b', 'a '), (3, 'B', 'A', 'b'), (4, NULL, 'c', NULL)",
   "INSERT INTO public.texts VALUES (1, '01/02/2026'), (2, 'January 3, 2026'), (3, ' yes '), (4, '1_000'), (5, 'P1DT2H'), (6, 'NaN'), (7, '12.5')",
   "CREATE TABLE public.ua (id integer PRIMARY KEY, \"givenName\" text, email text)",
   "INSERT INTO public.ua VALUES (1, 'ann', 'a@x'), (2, 'bob', 'b@x'), (3, 'Ann', NULL)",
@@ -230,6 +235,7 @@ const schema: PgSchema = {
     { name: "accounts", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "status", type: "text", spelled: "citext" }, { name: "ip", type: "text", spelled: "inet" }, { name: "team", type: "text" }] },
     { name: "texts", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "s", type: "text" }] },
+    { name: "chars", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "c", type: "text", spelled: "char(3)" }, { name: "v", type: "text", spelled: "varchar(5)" }, { name: "t", type: "text" }] },
     { name: "ua", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "givenName", type: "text" }, { name: "email", type: "text" }] },
     { name: "ga", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "Email", type: "text" }, { name: "name", type: "text" }] },
     { name: "big", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "text" }] },
@@ -433,7 +439,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -3055,6 +3061,41 @@ test("a set operation's column is typed by Postgres's analysis of the set operat
       [`WITH u AS (${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) SELECT count(*) FROM u`, false],
       [`SELECT count(*) FROM accounts WHERE status::text IN (${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES)`, false],
       [`SELECT (${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 DESC LIMIT 1)`, false],
+    ] as const) { const d = await tiesAlike(c, sql, undefined, inOrder); if (d !== null) differ.push(d); }
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+  } finally { await c.end(); }
+});
+
+// AN ARM'S COLUMN NOT CAST TO THE SET OPERATION'S TYPE (the class "setop-arm-cast-dropped", PR 233 probe 3): Postgres
+// casts each arm's column to the set operation's (a char(n) beside a varchar loses its padding) before it compares,
+// sorts, ties or prints it. Every arm's place (first, later, three arms, nested), every operation, a `*` arm, WITH TIES
+// and a plain ORDER BY, at the top and read through a derived table
+test("each arm of a set operation is cast to the set operation's column type: a char(n) beside a varchar is unpadded (PR 233)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    const V = "SELECT c.v AS x FROM chars c", C = "SELECT c.c FROM chars c";
+    for (const [sql, inOrder] of [
+      [`SELECT * FROM (${V} UNION ALL ${C} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s`, false],
+      [`${V} UNION ALL ${C} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      ["SELECT c.v AS x, c.id FROM chars c UNION ALL SELECT c.c, c.id FROM chars c ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES", false],
+      [`${V} UNION ${C} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`SELECT count(*) FROM (${V} UNION ALL ${C} ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES) s`, false],
+      [`${V} INTERSECT ${C} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`${V} EXCEPT ${C} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`${V} UNION ALL SELECT c.t FROM chars c UNION ALL ${C} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`(${V} UNION ALL ${C}) UNION ALL SELECT 'zz'::varchar ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`SELECT c.t FROM chars c UNION ALL ${C} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      [`SELECT c.v, c.id FROM chars c UNION ALL SELECT * FROM (SELECT c.c, c.id FROM chars c) s ORDER BY 1, 2 FETCH FIRST 2 ROWS WITH TIES`, false],
+      ["SELECT c.id, c.t, c.v, c.t FROM chars c UNION ALL SELECT * FROM chars c ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES", false],
+      ["SELECT c.id, c.t, c.v, c.t FROM chars c UNION ALL SELECT x.* FROM chars x ORDER BY 2, 1", true],
+      // without WITH TIES: the printed text, its order, a DISTINCT union, a derived table and a CTE
+      [`${V} UNION ALL ${C} ORDER BY 1 NULLS FIRST, 1`, true],
+      [`SELECT c.v, c.id FROM chars c UNION ALL SELECT c.c, c.id FROM chars c ORDER BY 1, 2`, true],
+      [`SELECT x, length(x) FROM (${V} UNION ${C}) s ORDER BY 1`, true],
+      [`WITH u AS (${V} UNION ALL ${C}) SELECT u.x || '|' AS y FROM u ORDER BY 1`, true],
+      // the char(n) arm first: the column is char(n), each value as it is
+      [`${C} UNION ALL ${V} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
     ] as const) { const d = await tiesAlike(c, sql, undefined, inOrder); if (d !== null) differ.push(d); }
     assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
   } finally { await c.end(); }
