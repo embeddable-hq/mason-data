@@ -112,10 +112,10 @@ docs/DESIGN.md ("The independent review", "Local gates").
    first: at most two rounds a push, never counted as review rounds. A probe that fails is noted, never a stop.
 3. **Review**, by Fable (the coordinating session or a Fable agent, never Opus: the reader must outread the author),
    in a fresh context given the diff and the code, never the author's report. Its ONE report gives, for each finding,
-   the failing input and the two answers (for the engine: the statement, Postgres's answer and Mason's) and the
-   finding's class; and what it judged correct, so nobody checks that twice. Each confirmed finding becomes a test and,
-   for the engine, an oracle statement. CI is read beside it: a red run goes back with the review's findings, and
-   beside a clean review it is read again by the CI stage.
+   the failing input and the two answers (for the engine: the statement, Postgres's answer and Mason's), the
+   finding's class and its severity (step 4: blocking or not); and what it judged correct, so nobody checks that
+   twice. Each confirmed blocking finding becomes a test and, for the engine, an oracle statement. CI is read beside
+   it: a red run goes back with the review's findings, and beside a clean review it is read again by the CI stage.
 4. **Fix.** **Only a blocking finding sends the PR back**: a wrong answer (where Mason answers, its rows, text, types
    or OIDs, order or SQLSTATE differ from Postgres's), a crash, hang or stuck state, synced data lost or corrupted, a
    security hole, a regression (what the base got right is now wrong or refused), or a red CI; when the reviewer is

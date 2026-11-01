@@ -182,7 +182,9 @@ const CHANGED = { type: 'object', required: ['files'], properties: {
 } }
 const POSTED = { type: 'object', required: ['url'], properties: { url: { type: 'string', description: "the comment's URL" } } }
 
-const asFailures = (fs) => fs.map((f, i) => `${i + 1}. [class: ${f.classKey}; ${f.severity || 'no severity: blocking'}] ${f.classWhy}\n   input: ${f.input}\n   expected (Postgres): ${f.expected}\n   actual (Mason): ${f.actual}\n   at: ${f.where}`).join('\n')
+// a severity the script does not know, or none, is said to be read as blocking, so the fixer is not left to guess
+const severityText = (s) => (!s ? 'no severity: read as blocking' : BLOCKING.includes(s) || DEFERRED.includes(s) ? s : `${s}: not a known severity, read as blocking`)
+const asFailures = (fs) => fs.map((f, i) => `${i + 1}. [class: ${f.classKey}; ${severityText(f.severity)}] ${f.classWhy}\n   input: ${f.input}\n   expected (Postgres): ${f.expected}\n   actual (Mason): ${f.actual}\n   at: ${f.where}`).join('\n')
 const asDesignFindings = (fs) => fs.map((f, i) => `${i + 1}. [class: ${f.class}; ${f.principle}] ${f.problem}`).join('\n')
 // the classes of THIS PR's findings and the stack's (knownClasses), never the base's: a class the base has is filed,
 // and counting it here would make a class round of a class this PR did not make
@@ -224,9 +226,11 @@ const designOpen = () => {
   const d = designRounds[designRounds.length - 1]
   return d && d.verdict === 'revise' ? d.findings : []
 }
-// a later probe or review is told what is already filed as non-blocking, so it is not met again round after round
+// A later probe or review is told what is already deferred, so it is not reported again round after round at the same
+// severity; and it is told to RUN each again, since a fix can turn a deferred refusal into a wrong answer, and tally()
+// takes an input back from deferred only when it is reported again as blocking. Nothing is filed before finish.
 const alreadyDeferred = () => deferred.length
-  ? ` Already deferred as non-blocking and filed, so do NOT report again: ${deferred.map((f) => `${f.classKey} (${f.severity}): ${f.input}`).join('; ')}.`
+  ? ` Already deferred as non-blocking (to be filed as issues when this run ends, not fixed in this PR): ${deferred.map((f) => `${f.classKey} (${f.severity}): ${f.input}`).join('; ')}. Do not report one of these again at a non-blocking severity. But RUN each of them again at this head: if one now blocks (a fix turned its refusal into a wrong answer, a crash, or anything else blocking), report it again with that blocking severity, as it is then this PR's to fix.`
   : ''
 const historyText = (hs) => hs.length
   ? hs.map((h) => `### ${h.label} (head ${h.head.slice(0, 7)})\nFindings of this PR:\n${h.findings.length ? asFailures(h.findings) : '(none)'}\nJudged correct: ${h.judgedCorrect.join('; ') || '(none listed)'}`).join('\n\n')
@@ -285,7 +289,7 @@ const recordOf = (status) => ({
   deferred: deferred.map((f) => ({ round: f.round, stage: f.stage, classKey: f.classKey, severity: f.severity })),
   ciFixes, status,
 })
-const roundLine = (name, n, fs, later = 0) => `- ${name} ${n}: ${fs.length} finding(s)${fs.length ? `: ${[...new Set(fs)].join(', ')}` : ''}${later ? `; ${later} non-blocking, filed` : ''}`
+const roundLine = (name, n, fs, later = 0) => `- ${name} ${n}: ${fs.length} finding(s)${fs.length ? `: ${[...new Set(fs)].join(', ')}` : ''}${later ? `; ${later} non-blocking, deferred` : ''}`
 const laterOf = (stage, n) => deferred.filter((f) => f.stage === stage && f.round === n).length
 const recordBody = (status) => `${signed(ON.record)}
 ## Review record
@@ -310,6 +314,10 @@ const byClass = (fs) => {
   for (const f of fs) (out[f.classKey] = out[f.classKey] || []).push(f)
   return Object.entries(out).map(([k, gs]) => `### ${k}: ${gs[0].classWhy}\n${asFailures(gs)}`).join('\n\n')
 }
+// the classes of `fs` that no returned issue of `source` names, and the issues that name the classes of `fs`
+const isIssue = (i, source, k) => i.source === source && i.classKey === k && Number.isInteger(i.issue) && i.issue > 0
+const unfiled = (source, fs) => [...new Set(fs.map((f) => f.classKey))].filter((k) => !filed.some((i) => isIssue(i, source, k)))
+const issuesOf = (source, fs) => [...new Set(filed.filter((i) => fs.some((f) => isIssue(i, source, f.classKey))).map((i) => `#${i.issue}`))].join(', ')
 async function finish(status) {
   if (fromBase.length || deferred.length) {
     phase('File')
@@ -326,7 +334,14 @@ ${byClass(deferred.map((f) => ({ ...f, classWhy: `${f.classWhy} (met in ${f.labe
       { label: 'file', phase: 'File', ...ON.file, schema: FILED })
     if (r) {
       filed.push(...r.issues)
-      if (deferred.length) status = `${status}; ${deferred.length} non-blocking finding(s) of this PR filed, not fixed: in deferred`
+      // "filed" is read from the issues returned, class by class and source by source, never from the call returning:
+      // a class with no issue of its own source is said not filed, whatever the agent returned beside it
+      const onBase = unfiled('base', fromBase)
+      const mineLater = unfiled('deferred', deferred)
+      const filedLater = deferred.filter((f) => !mineLater.includes(f.classKey))
+      if (filedLater.length) status = `${status}; ${filedLater.length} non-blocking finding(s) of this PR filed (${issuesOf('deferred', filedLater)}), not fixed: in deferred`
+      if (mineLater.length) status = `${status}; non-blocking class(es) of this PR NOT filed: ${mineLater.join(', ')}: in deferred`
+      if (onBase.length) status = `${status}; the base's class(es) NOT filed: ${onBase.join(', ')}: in fromBase`
     } else status = `${status}; filing failed: the findings are in fromBase and deferred`
     log(`filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.source}, ${i.action})`).join(', ') || 'nothing'}`)
   }
@@ -372,7 +387,7 @@ Give no fix. List what you ran and judged correct. About 30 tool calls.`,
     const entry = { round: p, label: `probe ${p}`, head: last.head, findings: mine, deferred: later.length, base: probe.findings.length - mine.length - later.length, judgedCorrect: probe.judgedCorrect, classRound: repeated.length > 0 }
     probeRounds.push(entry)
     history.push(entry)
-    log(`probe ${p}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (filed), ${entry.base} of the base`)
+    log(`probe ${p}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base`)
     if (mine.length === 0) return
     const fixed = await agent(fixPrompt(`Probe fix ${p}`, ON.probeFix, entry, repeated, null),
       { label: `probe fix ${p}${entry.classRound ? ' (class)' : ''}`, phase: 'Probe', ...ON.probeFix, schema: PUSHED })
@@ -423,7 +438,7 @@ Give no fix and no patch. Also list what you judged correct.`,
     const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound }
     rounds.push(entry)
     history.push(entry)
-    log(`round ${round}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (filed), ${entry.base} of the base${ciFailure ? ', CI red' : ''}${classRound ? `; CLASS round next (${repeated.join(', ')})` : ''}`)
+    log(`round ${round}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base${ciFailure ? ', CI red' : ''}${classRound ? `; CLASS round next (${repeated.join(', ')})` : ''}`)
     // nothing blocking of this PR's is a clean round, whatever was deferred. A clean review with a red CI: the CI stage
     // reads that failure next and sends it to a CI fix
     if (mine.length === 0) return null

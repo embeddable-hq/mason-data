@@ -746,7 +746,8 @@ test("pr-loop: a round with only non-blocking findings of the PR's is clean: fil
   });
   assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "file"], "no fix round, no learn");
   assert.ok(!r.labels.includes("learn"));
-  assert.match(String(r.result["status"]), /^reviewed, no open blocking finding of this PR, CI green.*3 non-blocking finding\(s\) of this PR filed, not fixed/);
+  assert.match(String(r.result["status"]), /^reviewed, no open blocking finding of this PR, CI green.*3 non-blocking finding\(s\) of this PR filed \(#970, #971\), not fixed/);
+  assert.doesNotMatch(String(r.result["status"]), /NOT filed/);
   assert.deepEqual(r.result["classes"], {}, "a non-blocking class is never counted toward the class rule");
   assert.equal((r.result["deferred"] as unknown[]).length, 3);
   assert.deepEqual(r.result["fromBase"], []);
@@ -759,7 +760,7 @@ test("pr-loop: a round with only non-blocking findings of the PR's is clean: fil
     { round: 1, stage: "review", classKey: "wording", severity: "message" }, { round: 1, stage: "review", classKey: "wording", severity: "message" },
     { round: 1, stage: "review", classKey: "gap", severity: "over-refusal" },
   ]);
-  assert.match(r.prompt("record"), /review 1: 0 finding\(s\); 3 non-blocking, filed/);
+  assert.match(r.prompt("record"), /review 1: 0 finding\(s\); 3 non-blocking, deferred/);
   assert.match(r.prompt("record"), /#970 \(wording, deferred, filed\)/);
   assert.equal(stats([rec]).firstPass, 1);
 
@@ -835,6 +836,89 @@ test("pr-loop: an input deferred once and found blocking later is fixed, never f
   const lost = await run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": green, file: null });
   assert.match(String(lost.result["status"]), /filing failed: the findings are in fromBase and deferred/);
   assert.doesNotMatch(String(lost.result["status"]), /filed, not fixed/);
+});
+
+test("pr-loop: a deferred input is RUN again by every later probe and review, and re-reported when a fix made it block", async () => {
+  // round 1 defers a refusal's wording; fix r1 (for j) turns that refusal into a wrong answer. A reviewer that does
+  // what its prompt says reports it again only if the prompt asks for it: the stub holds the prompt to that.
+  const x = later({ input: "SELECT x FROM t" });
+  const told = (c: Call) => {
+    assert.ok(c.prompt.includes("SELECT x FROM t"), `"${c.opts.label}" is told the deferred input`);
+    assert.match(c.prompt, /RUN each of them again at this head/, `"${c.opts.label}" is told to run it again`);
+    assert.match(c.prompt, /report it again with that blocking severity/, `"${c.opts.label}" is told to re-report it when it blocks`);
+    assert.doesNotMatch(c.prompt, /do NOT report again/i, `"${c.opts.label}" is never told not to report it, whatever it now answers`);
+    assert.doesNotMatch(c.prompt, /deferred as non-blocking and filed/, `"${c.opts.label}" is not told it is filed: nothing is filed before finish`);
+  };
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), x], judgedCorrect: [] }, "fix r1": pushed("b"),
+    "probe 2": (c: Call) => { told(c); return clean; },
+    "review r2": (c: Call) => { told(c); return { findings: [{ ...x, severity: "wrong-answer" }], judgedCorrect: [] }; },
+    "fix r2": pushed("c"), "review r3": clean, "CI 1": green,
+  });
+  assert.ok(r.prompt("fix r2").includes("SELECT x FROM t"), "the re-report is this PR's to fix");
+  assert.deepEqual(r.result["deferred"], []);
+  assert.ok(!r.labels.includes("file"), "and it is not filed");
+});
+
+test("pr-loop: 'filed' is read from the issues the File stage returns, class by class and source by source", async () => {
+  const w = later({ input: "SELECT w FROM t" });
+  const g = later({ input: "SELECT g FROM t", severity: "over-refusal", classKey: "gap" });
+  const b = later({ origin: "base", input: "SELECT b FROM t", classKey: "on-base" });
+  const go = (issues: unknown[]) => run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [w, g, b], judgedCorrect: [] }, "CI 1": green, file: { issues } });
+  const status = async (issues: unknown[]) => String((await go(issues)).result["status"]);
+
+  // nothing returned: nothing is said filed, and every class is named as not filed
+  let s = await status([]);
+  assert.doesNotMatch(s, /non-blocking finding\(s\) of this PR filed/, s);
+  assert.match(s, /non-blocking class\(es\) of this PR NOT filed: wording, gap: in deferred/, s);
+  assert.match(s, /the base's class\(es\) NOT filed: on-base: in fromBase/, s);
+  // some classes filed, others not: only the filed ones are said filed, with their issue
+  s = await status([{ classKey: "wording", source: "deferred", issue: 980, action: "filed" }]);
+  assert.match(s, /1 non-blocking finding\(s\) of this PR filed \(#980\), not fixed/, s);
+  assert.match(s, /NOT filed: gap: in deferred/, s);
+  // an issue of the other source does not file a class: 'base' issues for the deferred classes, and the reverse
+  s = await status([
+    { classKey: "wording", source: "base", issue: 981, action: "filed" }, { classKey: "gap", source: "base", issue: 982, action: "filed" },
+    { classKey: "on-base", source: "deferred", issue: 983, action: "filed" },
+  ]);
+  assert.match(s, /NOT filed: wording, gap: in deferred/, s);
+  assert.match(s, /the base's class\(es\) NOT filed: on-base/, s);
+  // every class filed under its own source: nothing said not filed
+  s = await status([
+    { classKey: "wording", source: "deferred", issue: 984, action: "filed" }, { classKey: "gap", source: "deferred", issue: 985, action: "commented" },
+    { classKey: "on-base", source: "base", issue: 986, action: "filed" },
+  ]);
+  assert.match(s, /2 non-blocking finding\(s\) of this PR filed \(#984, #985\), not fixed/, s);
+  assert.doesNotMatch(s, /NOT filed/, s);
+});
+
+test("pr-loop: a fixer is told a severity it was not given, or one not known, is read as blocking", async () => {
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [finding({ input: "SELECT odd FROM t", severity: "cosmetic" }), finding({ input: "SELECT known FROM t", classKey: "other" })], judgedCorrect: [] },
+    "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+  });
+  assert.match(r.prompt("fix r1"), /\[class: some-class; cosmetic: not a known severity, read as blocking\]/);
+  assert.match(r.prompt("fix r1"), /\[class: other; wrong-answer\]/);
+});
+
+test("pr-loop: a run that stops still files its deferred findings", async () => {
+  const w = later({ input: "SELECT stop_deferred FROM t" });
+  const many: Answers = { ...START, file: { issues: [] } };
+  for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [w] : [])], judgedCorrect: [] };
+  for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
+  const exits: Array<[string, Answers, RegExp]> = [
+    ["MAX_ROUNDS", many, /^still 1 finding\(s\) after 4 rounds/],
+    ["a review that fails", { ...START, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": null, file: { issues: [] } }, /^review r2 failed/],
+    ["a fix that pushes nothing", { ...START, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("a"), file: { issues: [] } }, /pushed nothing/],
+    ["CI that never finishes", { ...START, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": { state: "timeout", detail: "" }, file: { issues: [] } }, /^CI not finished/],
+  ];
+  for (const [name, answers, stop] of exits) {
+    const r = await run("pr-loop", { ...PR }, answers);
+    assert.match(String(r.result["status"]), stop, name);
+    assert.deepEqual(r.labels.slice(-2), ["file", "record"], `${name}: the File call happens, then the record`);
+    assert.ok(r.prompt("file").includes(w.input), `${name}: the deferred finding is in the filing`);
+    assert.match(String(r.result["status"]), /NOT filed: wording: in deferred/, `${name}: and an empty return is said not filed`);
+  }
 });
 
 test("review-stats: a first review passes when it found nothing blocking; a finding with no severity (a record older than severity) blocks", () => {
