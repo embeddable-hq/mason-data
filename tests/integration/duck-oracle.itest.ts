@@ -54,7 +54,7 @@ import { Sync } from "../../src/duck/sync.ts";
 import { startPostgresApi, type PgApiServer } from "../../src/api/postgres/server.ts";
 import { connectSource, parseSource, readSourceFacts } from "../../src/cli/preflight.ts";
 import { mutations, KEY_OF, SCHEMA, STAMPING, seed, TABLES } from "./oracle/data.ts";
-import { normalise, same } from "./oracle/compare.ts";
+import { askedAs, normalise, same } from "./oracle/compare.ts";
 import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postgres-cases.ts";
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
@@ -385,8 +385,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     ...CASES.map((c) => ({ group: "dialect", name: c, sql: `SELECT ${c} FROM public.one` })),
     ...QUERY_CASES.map((q) => ({ group: "query case", name: q.slice(0, 80), sql: throughOne(q) })),
     ...REFUSED_CASES.map((q) => ({ group: "refused case", name: q.sql.slice(0, 80), sql: throughOne(q.sql) })),
-    ...BI_SHAPES.map((q) => ({ group: "BI shape", name: q.name, sql: q.sql })),
-    ...TYPE_MATRIX.map((q) => ({ group: "type matrix", name: q.name, sql: q.sql, ...(q.zone === undefined ? {} : { zone: q.zone }) })),
+    // (a declared statement's whole shape, its order and its zone with it: oracle/compare.ts `askedAs`)
+    ...BI_SHAPES.map((q) => askedAs("BI shape", q)),
+    ...TYPE_MATRIX.map((q) => askedAs("type matrix", q)),
     ...GAP_CASES.map((q) => ({ group: "gap case", name: `gap case: ${q.gap}`, sql: q.sql })),
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },
   ];

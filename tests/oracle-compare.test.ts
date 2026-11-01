@@ -4,7 +4,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalise, same } from "./integration/oracle/compare.ts";
+import * as fs from "node:fs";
+import { askedAs, normalise, same } from "./integration/oracle/compare.ts";
+import { TYPE_MATRIX } from "./integration/oracle/type-matrix.ts";
 import { everyRowOnce, withinWhole } from "./integration/oracle/unordered-limit.ts";
 
 test("same: integers compare by their digits, exactly; a non-integer to one part in 10^12", () => {
@@ -52,4 +54,23 @@ test("a LIMIT with no ORDER BY is held to what is defined of it: its count, rows
   assert.equal(everyRowOnce([["3", "z"], ["1", "x"], ["2", null], ["1", "x"]], whole), null);
   assert.match(everyRowOnce([["3", "z"], ["1", "x"], ["2", null]], whole)!, /in no page/);
   assert.match(everyRowOnce([["3", "z"], ["3", "z"], ["1", "x"], ["2", null]], whole)!, /more often/);
+});
+
+// AN OPTION DECLARED ON AN ORACLE STATEMENT REACHES verdict() (PR 233: the runner copied a type-matrix statement's name,
+// text and zone, and dropped its `inOrder: false`, so a WITH TIES statement's ties were compared in order)
+test("askedAs: an oracle statement is asked with its whole declared shape, its order and its zone among it", () => {
+  const unordered = TYPE_MATRIX.filter((q) => q.inOrder === false);
+  assert.ok(unordered.length > 0, "the type matrix declares statements compared as sets");
+  for (const q of TYPE_MATRIX) assert.deepEqual(askedAs("type matrix", q), { ...q, group: "type matrix" }, q.name);
+  assert.deepEqual(askedAs("g", { name: "n", sql: "SELECT 1", zone: "UTC", inOrder: false }), { group: "g", name: "n", sql: "SELECT 1", zone: "UTC", inOrder: false });
+  // the runner asks every declared statement through `askedAs`, and compares each by its declared order
+  const runner = fs.readFileSync(new URL("./integration/duck-oracle.itest.ts", import.meta.url), "utf8");
+  for (const source of ["TYPE_MATRIX", "BI_SHAPES"]) assert.match(runner, new RegExp(`\\.\\.\\.${source}\\.map\\(\\(q\\) => askedAs\\(`), source);
+  assert.doesNotMatch(runner, /name: q\.name, sql: q\.sql, \.\.\.\(q\.zone/, "a statement's fields copied one by one drop the rest");
+  const verdicts = runner.match(/verdict\(want, [^;]*q\.inOrder[^;]*\)/g) ?? [];
+  assert.equal(verdicts.length, 2, "the statements of all() are compared by their declared order, alone and through the listener");
+  // (a statement list that declares an order of its own is one `all()` asks, or its runner reads it: none other does yet)
+  const dir = new URL("./integration/oracle/", import.meta.url);
+  const declaring = fs.readdirSync(dir).filter((f) => f.endsWith(".ts") && /\binOrder\b/.test(fs.readFileSync(new URL(f, dir), "utf8")));
+  assert.deepEqual(declaring.sort(), ["compare.ts", "shapes.ts", "type-matrix.ts"], "a new list declaring inOrder: ask it through `askedAs`, or read its order where it is compared");
 });

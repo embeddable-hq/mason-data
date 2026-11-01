@@ -109,7 +109,7 @@ paths:
     written out from the analysis, because a copy's view of its visible columns has no `rowid`. Same rows; equal keys
     are in no defined order. **FETCH … WITH TIES takes the same form with a rank for its bound** (issue 192): the inner
     query ranks the row numbers by the keys the sort pass wrote (`rank() OVER`), keeps the rows the one bound of
-    src/duck/ties.ts allows, and the fetch adds `__mason_rank` last; only where the analysis's QUERY says WITH TIES, and
+    src/duck/ties.ts allows, and the fetch adds the rank last, read by its place; only where the analysis's QUERY says WITH TIES, and
     a grouped one or one over one table keeps the rank form (`tiesRanked`). **Every FROM item is a table, a plain derived read or carried** (issue 134, step 2): a
     derived table, a view or a WITH query read once and not MATERIALIZED, a projection and a WHERE over one table with
     nothing volatile (pg_proc's `provolatile`) or from outside it, exposes its row number (`__mason_rid`) and is fetched
@@ -197,6 +197,10 @@ paths:
   TIES rank read by `*` reached a row at every depth): a column the rewrite adds stays inside a wrapper that lists the
   outputs by name, and the cells are recorded by the one appender (`Rewriter.cellsAfter`, `appendCells`). Detector: the
   store's `columnCount === fields.length + PlannedSql.cells` (XX000 otherwise) and the WITH TIES wire tests at depth.
+- **A column the rewrite adds beside the user's outputs is read by its PLACE, never by a `__mason_*` name the user can
+  also write** (PR 233: an output named `__mason_row` was read as the row's place, and one named `__mason_rank` hid the
+  rank): the wrapper's alias list names every column it reads, Postgres's outputs, the cells and the rank, and
+  src/duck/ties.ts ranks under those names. Detector: the wire test of outputs named `__mason_*` under WITH TIES.
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
   past a 300 ms timeout): `PlannedSql.functions`, the `__mason_*` calls of the rewritten tree (`masonCalls`,

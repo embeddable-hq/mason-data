@@ -43,3 +43,13 @@ export function same(a: Norm, b: Norm): boolean {
   if (x !== null && y !== null && "n" in x && "n" in y) return same(x, y);
   return false;
 }
+
+/** what a statement of the oracle declares: its name, its text and how it is compared (its zone, its order) */
+export interface Declared { name: string; sql: string; zone?: string; inOrder?: boolean }
+
+/**
+ * A STATEMENT AS THE ORACLE ASKS IT: its group and its WHOLE declared shape, never a copy of some of its fields (the
+ * class "an option declared on an oracle statement, dropped on the way to verdict()", PR 233: `inOrder: false` was
+ * dropped, and a statement whose ties have no order was compared in order)
+ */
+export const askedAs = <Q extends Declared>(group: string, q: Q): Q & { group: string } => ({ ...q, group });

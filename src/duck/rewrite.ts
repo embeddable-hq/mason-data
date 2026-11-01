@@ -1271,7 +1271,11 @@ class Rewriter {
         ...outputs.map((o, i) => ({ ResTarget: { name: o.name, val: { ColumnRef: { fields: [S(TIES), S(`__mason_t${i + 1}`)] } } } })),
         ...Array.from({ length: cells.count }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: { ColumnRef: { fields: [S(TIES), S(`__mason_cell_${j}`)] } } } })),
       ],
-      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname: TIES, colnames: outputs.map((_o, i) => S(`__mason_t${i + 1}`)) } } }],
+      // EVERY COLUMN OF THE BODY NAMED BY ITS PLACE (the class "a rewrite's column read by a name the user can write"):
+      // Postgres's outputs, the cells, then the rank, which src/duck/ties.ts and src/duck/late.ts write last; an output
+      // the user named `__mason_rank` or `__mason_cell_0` is renamed here with every other, never read in its place
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname: TIES, colnames: [
+        ...outputs.map((_o, i) => S(`__mason_t${i + 1}`)), ...Array.from({ length: cells.count }, (_, j) => S(`__mason_cell_${j}`)), S(TIES_RANK)] } } }],
       sortClause: [{ SortBy: { node: { ColumnRef: { fields: [S(TIES), S(TIES_RANK)] } }, sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }],
       limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
     };
@@ -1319,7 +1323,9 @@ class Rewriter {
         ...outputs.map((o, i) => ({ ResTarget: { name: o.name, val: column(i) } })),
         ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: { ColumnRef: { fields: [S(SET), S(`__mason_cell_${j}`)] } } } })),
       ],
-      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname: SET, colnames: outputs.map((_o, i) => S(`__mason_t${i + 1}`)) } } }],
+      // (the cells named by their place too, as the outputs are: an arm's output may be named `__mason_cell_0`)
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname: SET, colnames: [
+        ...outputs.map((_o, i) => S(`__mason_t${i + 1}`)), ...Array.from({ length: cells }, (_, j) => S(`__mason_cell_${j}`))] } } }],
       ...(sorts.length > 0 ? { sortClause: sorts } : {}),
       limitCount, ...(limitOffset !== undefined ? { limitOffset } : {}), limitOption: "LIMIT_OPTION_WITH_TIES", op: "SETOP_NONE",
     };

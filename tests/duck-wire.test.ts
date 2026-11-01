@@ -3006,6 +3006,35 @@ test("FETCH … WITH TIES answers as Postgres at every depth: one resolver for i
   } finally { await c.end(); }
 });
 
+// A REWRITE'S COLUMN READ BY A NAME THE USER CAN WRITE (the class "rewrite-name-in-user-namespace", PR 233): the rank,
+// the row's place and the cells were read back by `__mason_*` names beside the user's outputs, so an output the user named
+// so took their place (the offset kept every row; the wrapper found no rank). Each is read by its position now.
+test("FETCH … WITH TIES reads its rank, its row's place and its cells by position: an output named __mason_* is the user's (PR 233)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    for (const sql of [
+      // (an offset inside a tie drops rows Postgres picks as it reads them: counted there, or the order made total)
+      "SELECT count(*) FROM (SELECT l.id AS __mason_row, l.c FROM late l ORDER BY l.c OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      "SELECT l.id AS __mason_row, l.c FROM late l ORDER BY l.c, l.id OFFSET 1 FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id AS __mason_rank, l.c FROM late l ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.c AS __mason_rank, l.id AS __mason_row FROM late l ORDER BY 1 DESC, 2 OFFSET 2 FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT count(*) FROM (SELECT l.id AS __mason_row, l.c AS __mason_rank FROM late l ORDER BY 2 OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      // the names the wrapper and the set operation give their columns, and an exact cell's
+      "SELECT l.k / 7.0 AS __mason_cell_0, l.id AS __mason_t1, l.c AS __mason_t2 FROM late l ORDER BY l.c, l.id FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.id AS __mason_rank, l.c AS __mason_t1 FROM late l WHERE l.id < 10 UNION ALL SELECT l.id, l.c FROM late l WHERE l.id > 1990 ORDER BY 2, 1 OFFSET 1 FETCH FIRST 1 ROWS WITH TIES",
+      // over a join (the fetch after the rank)
+      "SELECT count(*) FROM (SELECT l.id AS __mason_rank, c.name AS __mason_row FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      "SELECT l.id AS __mason_rank, c.name AS __mason_row FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c, l.id OFFSET 1 FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.id AS __mason_rank, l.k / 7.0 AS __mason_cell_0, c.name AS __mason_t1 FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
+    ]) { const d = await tiesAlike(c, sql); if (d !== null) differ.push(d); }
+    // a parameter's count: the guard reads the rows kept beside the bound
+    const P = "SELECT l.id AS __mason_rank, l.c AS __mason_row FROM late l ORDER BY l.c, l.id OFFSET $2 FETCH FIRST $1 ROWS WITH TIES";
+    for (const values of [[1, 1], [2, null]]) { const d = await tiesAlike(c, P, values); if (d !== null) differ.push(d); }
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+  } finally { await c.end(); }
+});
+
 // THE FETCH AFTER THE RANK (issue 134 step 7): a WITH TIES over joined tables carried every wide column through its
 // window; ranked on row numbers and keys alone, the list fetched for the rows kept (src/duck/late.ts `rankedRows`)
 test("FETCH … WITH TIES over joined tables ranks on row numbers and keys, the list fetched after (issue 134, task F)", async () => {

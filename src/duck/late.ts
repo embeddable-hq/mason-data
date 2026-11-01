@@ -37,7 +37,8 @@
  * its window carried every wide column of the join, 20 GiB spilled for a top 100): the inner query has no sort or limit,
  * its rows ranked by the keys the rewrite wrote (`rank() OVER (ORDER BY <them>) AS __mason_rank`, and the row's place
  * where there is an offset) and kept by the one bound of src/duck/ties.ts, then fetched as above, the rank last for the
- * rewrite's wrapper to order by. Only where Postgres's analysis says the query is WITH TIES, and its keys as written:
+ * rewrite's wrapper to order by, which reads it by its place (the inner query's names are all Mason's; the fetch's list
+ * holds the user's, so a list output named `__mason_rank` never stands for the rank). Only where Postgres's analysis says the query is WITH TIES, and its keys as written:
  *
  *   SELECT <the list as written>, __mason_late.__mason_rank FROM (
  *     SELECT __mason_lr.* FROM (SELECT a.rowid AS __mason_r1, …, <each key> AS __mason_o<i>,

@@ -88,16 +88,17 @@ const RANKED = "__mason_ranked";
 
 /**
  * EVERY WITH TIES BODY LEFT, RANKED IN PLACE: `SELECT __mason_ranked.* FROM (<the body, no ORDER BY or limit>,
- * rank() OVER (ORDER BY <its keys>) AS __mason_rank[, row_number() … AS __mason_row]) AS __mason_ranked,
- * <the bound> WHERE <the filter>`. The rewrite's wrapper around it lists Postgres's columns and orders by the rank.
+ * rank() OVER (ORDER BY <its keys>)[, row_number() …]) AS __mason_ranked(<every column by its place>), <the bound>
+ * WHERE <the filter>`. A body is read only as the rewrite's wrapper reads it (`FROM (<body>) AS __mason_ties(<its
+ * columns, the cells, the rank>)`, src/duck/rewrite.ts `withTies`), whose alias names every column by its place: the
+ * ranked rows take those names, and the row's place one more, so the rank and the place are read by a name no output of
+ * the user's can hold (the class "a rewrite's column read by a name the user can write", PR 233).
  * Throws where one is left, which would be DuckDB's LIMIT (no ties): a report, never another answer.
  */
 export function tiesRanked(tree: AstNode): void {
-  const visit = (v: unknown): void => {
-    if (Array.isArray(v)) { v.forEach(visit); return; }
-    if (!isObject(v)) return;
-    for (const x of Object.values(v)) visit(x);
-    if (!isTies(v)) return;
+  const rank = (v: Body, colnames: unknown): void => {
+    const names = Array.isArray(colnames) ? colnames.map((c) => isObject(c) && isObject(c.String) ? String(c.String.sval) : "") : [];
+    if (names.at(-1) !== TIES_RANK) throw new Error("a FETCH … WITH TIES was read other than by Mason's wrapper, which names its rank last: report it, with the statement");
     const { sortClause, limitCount, limitOffset, limitOption: _l, ...rest } = v;
     const bound = tiesBound(limitCount, limitOffset, RANKED);
     const inner: Body = { ...rest, targetList: [...((rest.targetList ?? []) as AstNode[]),
@@ -106,10 +107,17 @@ export function tiesRanked(tree: AstNode): void {
     for (const k of Object.keys(v)) delete v[k];
     Object.assign(v, tiesGuarded({
       targetList: [{ ResTarget: { val: { ColumnRef: { fields: [S(RANKED), { A_Star: {} }] } } } }],
-      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: RANKED } } }, bound.item],
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: RANKED, colnames: [...names, ...(bound.row ? [TIES_ROW] : [])].map(S) } } }, bound.item],
       whereClause: bound.filter,
       limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
     }, limitCount, limitOffset));
+  };
+  const visit = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (!isObject(v)) return;
+    for (const x of Object.values(v)) visit(x);
+    const sub = isObject(v.RangeSubselect) && isObject(v.RangeSubselect.subquery) ? v.RangeSubselect.subquery.SelectStmt : undefined;
+    if (isObject(sub) && isTies(sub)) rank(sub, isObject(v.RangeSubselect) && isObject(v.RangeSubselect.alias) ? v.RangeSubselect.alias.colnames : undefined);
   };
   visit(tree);
   const left = (v: unknown): boolean => Array.isArray(v) ? v.some(left) : isObject(v) && (isTies(v) || Object.values(v).some(left));
