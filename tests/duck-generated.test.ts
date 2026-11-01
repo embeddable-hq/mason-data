@@ -645,7 +645,8 @@ const ask = async (w: { client(): Promise<pg.Client> }, sql: string): Promise<un
 
 test("a chain of three is built parents first, each over what its parent holds", async () => {
   await withWorld({ counts: COUNTS, totals: scheduled("SELECT count(*) AS tenants, max(requests) AS most FROM counts"), top: scheduled("SELECT tenants * 10 AS t, most FROM totals") }, async (w) => {
-    await w.until(built, "public.top");
+    // serving comes before the run's log line (the catalog is rebuilt between them): wait for the line the order is read from
+    await w.until((s) => built(s) && w.logged.some((l) => l.startsWith("generated public.top:")), "public.top");
     const order = w.logged.filter((l) => l.startsWith("generated ")).map((l) => /^generated (\S+):/.exec(l)![1]);
     assert.deepEqual(order, ["public.counts", "public.totals", "public.top"]);
     assert.deepEqual(await ask(w, "SELECT t, most FROM top"), [["20", "2"]]);
