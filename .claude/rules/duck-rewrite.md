@@ -136,6 +136,15 @@ paths:
     PR 118. The proof decides cost and pages, never an answer, so what it cannot show goes unsorted. OFFSET alone and
     LIMIT ALL stay as they were, and `afterLimit` still needs a sort. `tests/duck-distinct-key.test.ts` holds the proof,
     the plan fixture and `tests/duck-wire.test.ts` each side, `oracle/unordered-limit.ts` the rows. ("A top N over joined tables");
+  - **a grouped top N on a whole primary key reads its table's columns after the LIMIT** (`keyFirst`, src/duck/late.ts,
+    issue 134, step 6): where the analysis proves a table's WHOLE primary key grouped (`keyGrouped`, pg_index's primary
+    key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and
+    only then is each kept group's row of that table fetched by its row number, so no wide value goes through the hash
+    aggregate. It groups by the key, never by `rowid`: a key the copy holds twice for a moment is one group. What stays
+    as it was: grouping sets, DISTINCT, a row lock, no LIMIT, a partial key or no key, a walled read or any FROM item
+    that is not a plain table, a table with a column named `rowid`, and a `*` in the list. `tests/duck-wire.test.ts`
+    holds each side over `late`, `late_p` (the composite and partial keys) and `late_d`; `oracle/bi-shapes.ts` the rows
+    ("Key-first grouping", docs/DESIGN.md).
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
   **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
   independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
