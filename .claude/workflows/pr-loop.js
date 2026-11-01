@@ -18,12 +18,16 @@ export const meta = {
   ],
 }
 
-// args: { issue, parent, title, base, branch, stackedOn, context, readFirst?, knownClasses?, repo? }
+// args: { issue, parent, title, base, branch, stackedOn, context, readFirst?, knownClasses?, repo?, itEnv? }
 //   repo: the main checkout's path. Without it each agent finds the repository itself (WHERE), so the script runs for
 //   anyone on the team, from any checkout: no path of one machine is written here.
 //   knownClasses: { slug: { count, why } } carried from the PRs this one is stacked on (or the issue's earlier PRs), so
 //   a class met on PR 170 counts on PR 207 too. The run returns its classes in the same shape, for the next run: only
 //   the classes of blocking findings a PR made, never the base's nor a non-blocking one, which are filed instead.
+//   itEnv: a path to a shell file that exports IT_POSTGRES_URL, the Postgres the probe and the review run their
+//   statements against through scripts/duck-repro.ts (a database of its own is made there and dropped). Without it, each
+//   probe and review starts a throwaway postgres:18 container of its own (wal_level=logical, a random password, a free
+//   loopback port) and removes it when done. No prompt prints the URL.
 // Every exit returns one shape, result(status):
 //   { status, pr, head, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds }.
 const A = args
@@ -95,6 +99,44 @@ const PROBE_TREES = `in two worktrees of your own under the system temp dir (\`g
 // the probes every review ran that PR 202's author never did; each rules file's "## What review probes" adds its own
 const PROBE_SHAPES = "wrap the expression (`* 2`, coalesce, round), nest it, change the input type, put the table on an outer join's nullable side, pass it as a parameter, prepare before a SET, and run the real run (`mason start` and the listener over a synced table), not only the unit world"
 
+// A probe and a review RUN statements, Postgres and Mason side by side with the base beside them, and never judge by
+// reading alone (Tom, 2026-11-01). On issue 192 (WITH TIES) a review that only read the code passed an implementation;
+// three checks of 300 to 500 statements each then found two regressions and about four new wrong answers in it, for
+// about the tokens of a reading review (172k to 250k each, against 197k), because the statements were batched through
+// scripts/duck-repro.ts and only the differences read; they took two to three times the wall time.
+// The synthetic tables every variant form runs over; duck-repro syncs only a table with a key.
+const REPRO_TABLES = "`t (id int PRIMARY KEY, a int, b text, c numeric(10,2), d char(4))`, holding NULLs, duplicate values and ties in every column but id, and `e`, an empty table of the same shape"
+// The forms nobody wrote that found issue 192's wrong answers, generalised: each a concrete statement over REPRO_TABLES.
+// Run every form that reaches the code the diff touches, with the feature under test and, for the regression sweep,
+// without it. One list, for the probe and every review.
+const VARIANT_FORMS = [
+  "TABLE t in place of SELECT * FROM t, alone and as a set operation's arm: `TABLE t ORDER BY 1 LIMIT 2`; `SELECT * FROM t UNION ALL TABLE t ORDER BY 1 LIMIT 2`",
+  "a VALUES arm first in a set operation: `VALUES (0, 0, 'v', 0.5, 'v') UNION ALL SELECT * FROM t ORDER BY 1 LIMIT 3`; `VALUES (1), (NULL) EXCEPT SELECT a FROM t`",
+  "an empty input under each bound and aggregate: `SELECT a FROM t WHERE false ORDER BY a LIMIT 2`; `SELECT * FROM e ORDER BY 1 OFFSET 1`; `SELECT count(*), sum(c), max(b) FROM t WHERE false`",
+  "a char(4) arm (d) beside a text arm (b): `SELECT d FROM t UNION SELECT b FROM t ORDER BY 1`; `SELECT b FROM t UNION ALL SELECT d FROM t ORDER BY 1 LIMIT 3`",
+  "each count and offset zero, negative, NULL and an expression: `SELECT a FROM t ORDER BY a LIMIT NULL`; `SELECT a FROM t ORDER BY a LIMIT -1`; `SELECT a FROM t ORDER BY a OFFSET -1`; `SELECT a FROM t ORDER BY a LIMIT 0`; `SELECT a FROM t ORDER BY a LIMIT 1 + 1 OFFSET NULL`",
+  "a quotient in a numeric arm beside an integer arm: `SELECT c / 3 FROM t UNION ALL SELECT a FROM t ORDER BY 1`; `SELECT a / 3 FROM t UNION SELECT c / 7 FROM t ORDER BY 1`",
+  "an exact numeric read through a derived table or a CTE: `SELECT x FROM (SELECT c / 3 AS x FROM t) s ORDER BY 1`; `WITH q AS (SELECT c / 7 AS x FROM t) SELECT sum(x), max(x) FROM q`",
+  "NULLs and ties at the bound: `SELECT a FROM t ORDER BY a NULLS FIRST LIMIT 2`; `SELECT a FROM t ORDER BY a DESC LIMIT 3`",
+  "a set operation's arm with a bound of its own, parenthesised: `(SELECT a FROM t ORDER BY a LIMIT 1) UNION ALL (SELECT a FROM t ORDER BY a DESC LIMIT 1) ORDER BY 1`",
+]
+// Where duck-repro's Postgres comes from: the itEnv file, or a container of the stage's own that it removes. The
+// password is passed by the environment, never argv (`ps` shows argv), and the container ends itself after two hours
+// should the agent die first (as scripts/gate.ts's does); a shell's variables do not outlive a tool call, so the URL
+// is kept in a file only its owner reads (umask 077).
+const NEVER_PRINT = 'Never print, echo or log the URL or its password: no `cat` of the env file, no `env`, no `set -x`. If no Postgres can be had, report statementsRun 0 and say why first in judgedCorrect; never reason out an answer in place of running it.'
+const PG_ACCESS = A.itEnv
+  ? `Postgres: \`${A.itEnv}\` exports IT_POSTGRES_URL; source it in the same shell call as duck-repro (\`. ${A.itEnv}\`). ${NEVER_PRINT}`
+  : `Postgres: start a throwaway one of your own, and remove it when done. \`umask 077; n=mason-review-$(openssl rand -hex 4); pw=$(openssl rand -hex 16); POSTGRES_PASSWORD=$pw docker run -d --rm --name "$n" -e POSTGRES_PASSWORD -p 127.0.0.1:0:5432 --entrypoint timeout postgres:18 --kill-after=30 7200 docker-entrypoint.sh postgres -c wal_level=logical\`; its port is \`docker port "$n" 5432/tcp\`; in that same call, write \`export IT_POSTGRES_URL=postgres://postgres:$pw@127.0.0.1:<port>/postgres\` to an env file under the system temp dir, and source it (\`. <env file>\`) in each call that runs duck-repro. It is ready when \`docker exec "$n" pg_isready -h 127.0.0.1 -U postgres\` says so, within 60 seconds. When done: \`docker rm -f -v "$n"\`, then \`docker inspect "$n"\` must fail, and delete the env file. ${NEVER_PRINT}`
+// How the statements are run: in files, dozens a call, at the head and at the base, the output to a file, and only the
+// counts and the differences read. `scale` says how many.
+const BATCH = (scale) => `RUN statements; never judge by reading alone. ${PG_ACCESS}
+Give each tree its dependencies: link \`${REPO}/node_modules\` into it when its package-lock.json is the same as the main checkout's (\`cmp\`), else \`npm ci\` there. Write a DDL file over the synthetic tables ${REPRO_TABLES} (never a real database's names or rows), and statement files under the system temp dir, statements separated by lines holding only \`--\`, as scripts/duck-repro.ts reads them. Run each file at the head and at the base, dozens of statements a call: \`(. <env file> && cd <tree> && node scripts/duck-repro.ts <ddl.sql> <statements.sql>) > <out> 2>&1\`, the Bash tool's timeout set to 600000. Then read only the counts and the differences: \`grep -c '^SAME' <out>\`, \`grep -c '^DIFFER' <out>\`, \`grep -A2 '^DIFFER' <out> | head -150\`, and \`grep -m5 'NOT COPIED\\|Error' <out>\` (a table not synced: fix the DDL, and count none of its statements); never the whole file. Read a statement that differs at the head beside its line at the base. A statement whose order Postgres leaves open (ties under a LIMIT, no ORDER BY) can differ by chance: order by every column before calling it a difference.
+Run every one of these VARIANT FORMS that reaches the code the diff touches, each spelt over the shapes under test:
+${VARIANT_FORMS.map((v) => `- ${v}`).join('\n')}
+And a REGRESSION SWEEP: for each code path the diff touches (each function, branch or rewrite it changes), the statements that reach that path in their PLAIN form, WITHOUT the new feature, in the variant forms above, at the head and at the base. Issue 192's regression was \`SELECT * FROM t UNION ALL TABLE t ORDER BY 1 LIMIT 2\`, which has no new syntax at all. A statement SAME at the base and DIFFER at the head is blocking: severity regression, origin this-pr.
+Aim for ${scale}. Report statementsRun (the statements you ran at the head, each once) and statementsMatched (of those, the ones SAME at the head).`
+
 const BRIEF = { type: 'object', required: ['brief', 'shapes', 'tests'], properties: {
   brief: { type: 'string', description: 'what to build, where, and the decision it takes' },
   shapes: { type: 'array', items: { type: 'string' }, description: 'every shape the tests and oracle must hold, each a concrete SQL statement or input' },
@@ -152,7 +194,7 @@ const DEFERRED = ['message', 'over-refusal', 'docs', 'quality']
 const blocks = (f) => !DEFERRED.includes(f.severity)
 // the line, as the review and the probe are told it
 const SEVERITY_RULE = "Give each finding its SEVERITY. Blocking, and sent back for a fix: wrong-answer (where Mason answers, it answers differently from Postgres: rows, text, types or OIDs, order, or SQLSTATE), crash (a crash, a hang, or a stuck state such as a table left `building`), data-loss (synced data lost or corrupted), security, regression (what the base got right is now wrong or refused). Not blocking, filed as an issue while the PR goes on: message (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is right), over-refusal (Mason refuses where Postgres answers, and the base refused it too: safe, and a gap), docs, quality (code quality, or a missing test of a shape already answered right). When you are unsure, the finding is blocking: give the blocking severity it would be."
-const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect'], properties: {
+const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'statementsRun', 'statementsMatched'], properties: {
   findings: { type: 'array', items: { type: 'object', required: ['input', 'expected', 'actual', 'atBase', 'origin', 'severity', 'classKey', 'classWhy', 'where'], properties: {
     input: { type: 'string', description: 'the failing statement or input, exactly, with the table it runs over' },
     expected: { type: 'string', description: "Postgres's answer (or the right one)" },
@@ -165,6 +207,8 @@ const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect'], prop
     where: { type: 'string', description: 'file:line' },
   } } },
   judgedCorrect: { type: 'array', items: { type: 'string' } },
+  statementsRun: { type: 'integer', minimum: 0, description: 'the statements run at the head through scripts/duck-repro.ts, each counted once (not their runs at the base)' },
+  statementsMatched: { type: 'integer', minimum: 0, description: "of those, the ones duck-repro printed SAME: Mason's answer equal to Postgres's" },
 } }
 const FILED = { type: 'object', required: ['issues'], properties: {
   issues: { type: 'array', items: { type: 'object', required: ['classKey', 'source', 'issue', 'action'], properties: {
@@ -279,6 +323,10 @@ ${FIX_GATES} Come back in ONE push. The commit ends with \`${coAuthor(on)}\`. Re
 // scripts/review-stats.ts reads. `findings` are this PR's blocking ones (a probe's and a review's with their severity;
 // a design finding has none); `deferred` the PR's non-blocking ones, filed and not fixed.
 const sev = (f) => (f.severity ? { severity: f.severity } : {})
+// a round's statement counts, when its agent gave them (the schema requires them; an answer without is counted as none)
+const isCount = (x) => Number.isInteger(x) && x >= 0
+const countsOf = (a) => (isCount(a.statementsRun) ? { statementsRun: a.statementsRun, statementsMatched: isCount(a.statementsMatched) ? Math.min(a.statementsMatched, a.statementsRun) : 0 } : {})
+const sumOf = (k) => [...probeRounds, ...rounds].reduce((s, e) => s + (e[k] || 0), 0)
 const recordOf = (status) => ({
   pr: last.pr, designRounds: designRounds.length, probeRounds: probeRounds.length, reviewRounds: rounds.length,
   findings: [
@@ -288,18 +336,20 @@ const recordOf = (status) => ({
   ],
   deferred: deferred.map((f) => ({ round: f.round, stage: f.stage, classKey: f.classKey, severity: f.severity })),
   ciFixes, status,
+  statementsRun: sumOf('statementsRun'), statementsMatched: sumOf('statementsMatched'),
 })
-const roundLine = (name, n, fs, later = 0) => `- ${name} ${n}: ${fs.length} finding(s)${fs.length ? `: ${[...new Set(fs)].join(', ')}` : ''}${later ? `; ${later} non-blocking, deferred` : ''}`
+const ranText = (e) => (isCount(e.statementsRun) ? `; ${e.statementsRun} statement(s) run, ${e.statementsMatched} matched` : '')
+const roundLine = (name, n, fs, later = 0, e = {}) => `- ${name} ${n}: ${fs.length} finding(s)${fs.length ? `: ${[...new Set(fs)].join(', ')}` : ''}${later ? `; ${later} non-blocking, deferred` : ''}${ranText(e)}`
 const laterOf = (stage, n) => deferred.filter((f) => f.stage === stage && f.round === n).length
 const recordBody = (status) => `${signed(ON.record)}
 ## Review record
 
 PR ${last.pr}: ${status}
 
-${designRounds.length} design round(s), ${probeRounds.length} probe round(s), ${rounds.length} review round(s), ${ciFixes} CI fix(es).
+${designRounds.length} design round(s), ${probeRounds.length} probe round(s), ${rounds.length} review round(s), ${ciFixes} CI fix(es); ${sumOf('statementsRun')} statement(s) run at the head by the probes and reviews, ${sumOf('statementsMatched')} matching Postgres.
 ${designRounds.map((d) => roundLine('design', d.round, d.findings.map((f) => f.class))).join('\n')}
-${probeRounds.map((p) => roundLine('probe', p.round, p.findings.map((f) => f.classKey), laterOf('probe', p.round))).join('\n')}
-${rounds.map((r) => roundLine('review', r.round, r.findings.map((f) => f.classKey), laterOf('review', r.round))).join('\n')}
+${probeRounds.map((p) => roundLine('probe', p.round, p.findings.map((f) => f.classKey), laterOf('probe', p.round), p)).join('\n')}
+${rounds.map((r) => roundLine('review', r.round, r.findings.map((f) => f.classKey), laterOf('review', r.round), r)).join('\n')}
 Deferred as non-blocking: ${deferred.map((f) => `${f.classKey} (${f.severity}, ${f.label})`).join(', ') || 'none'}
 Issues filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.source}, ${i.action})`).join(', ') || 'none'}
 
@@ -375,16 +425,18 @@ async function probeAndFix(base) {
     const probe = await agent(
       `${WHERE}Probe PR ${last.pr} of embeddable-hq/mason-data at head ${last.head} for wrong answers, before its review, as its reviewer will: you have no stake in this code. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff --name-only ${base} ${last.head}\`. For each .claude/rules/*.md file whose \`paths:\` covers a changed path, read its \`## What review probes\` section at the head (\`git -C ${REPO} show ${last.head}:.claude/rules/<file>\`): each bullet is a probe shape, the class it catches, and where it was met. Run EVERY probe that applies to this change, and these, which reviews ran and authors did not: ${PROBE_SHAPES}. Run the design note's shapes too:
 ${design ? design.shapes.map((s) => `- ${s.input} (${s.where})`).join('\n') : '(no note)'}
-Compare with a real Postgres as the tests do, ${PROBE_TREES}. Do not edit or push. For each wrong answer give the failing input, Postgres's answer, Mason's at the head, and Mason's at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible. origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
+Compare with a real Postgres, ${PROBE_TREES}. ${BATCH("a hundred statements or more: the rules' probes, the note's shapes and these, each in the variant forms, and the regression sweep")}
+Do not edit or push. For each wrong answer give the failing input, Postgres's answer, Mason's at the head, and Mason's at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible. origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
   ${knownList()}
-Give no fix. List what you ran and judged correct. About 30 tool calls.`,
+Give no fix. List what you ran and judged correct. About 50 tool calls, never more than 70 tool calls.`,
       { label: `probe ${p}`, phase: 'Probe', ...ON.probe, schema: FINDINGS })
     if (!probe) {
       notes.push(`probe ${p} failed: the review read head ${last.head.slice(0, 7)} unprobed`)
       return
     }
     const { mine, later, repeated } = tally(probe.findings, { round: p, stage: 'probe', label: `probe ${p}` })
-    const entry = { round: p, label: `probe ${p}`, head: last.head, findings: mine, deferred: later.length, base: probe.findings.length - mine.length - later.length, judgedCorrect: probe.judgedCorrect, classRound: repeated.length > 0 }
+    const entry = { round: p, label: `probe ${p}`, head: last.head, findings: mine, deferred: later.length, base: probe.findings.length - mine.length - later.length, judgedCorrect: probe.judgedCorrect, classRound: repeated.length > 0, ...countsOf(probe) }
+    if (probe.statementsRun === 0) notes.push(`probe ${p} ran no statement: it read the code only`)
     probeRounds.push(entry)
     history.push(entry)
     log(`probe ${p}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base`)
@@ -421,8 +473,11 @@ async function reviewAndFix(start) {
     const judged = history.flatMap((x) => x.judgedCorrect)
     const [review, ciNow] = await parallel([
       () => agent(
-        `${WHERE}First run \`${BOARD('In review')}\`. ${kind === 'full' ? 'Review' : 'Narrowly re-check the latest fix of'} PR ${last.pr} of embeddable-hq/mason-data at head ${last.head}, for wrong answers. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff ${base} ${last.head}\`, and read the whole touched files at that head with \`git show\`. Read the .claude/rules/ file of the subsystem. Never take the author's report as evidence. Probe against a real Postgres as the tests do, ${PROBE_TREES}. Do not edit or push.
-${kind === 'full' ? `The shapes the brief named:\n${brief.shapes.map((s) => '- ' + s).join('\n')}\nLook beyond them too. About 40 tool calls.` : `${what}${probeFixed ? `\nThe commits since ${probedFrom.slice(0, 7)} fix what a probe found; check them the same way.` : ''}\nLook for what the fix broke, in the code it changed only. Already judged correct, so do NOT re-check: ${judged.join('; ') || '(nothing yet)'}. About 20 tool calls.`}
+        `${WHERE}First run \`${BOARD('In review')}\`. ${kind === 'full' ? 'Review' : 'Narrowly re-check the latest fix of'} PR ${last.pr} of embeddable-hq/mason-data at head ${last.head}, for wrong answers. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff ${base} ${last.head}\`, and read the whole touched files at that head with \`git show\`. Read the .claude/rules/ file of the subsystem. Never take the author's report as evidence. Probe against a real Postgres, ${PROBE_TREES}. ${BATCH(kind === 'full'
+  ? "hundreds of statements (300 or more): the brief's shapes, each in every variant form, and the regression sweep of every path the diff touches"
+  : "a narrower set: the fix's statements in the variant forms that reach the code it changed, and the regression sweep of that code; dozens, not a full review's count")}
+Do not edit or push.
+${kind === 'full' ? `The shapes the brief named:\n${brief.shapes.map((s) => '- ' + s).join('\n')}\nLook beyond them too. About 80 tool calls, never more than 120 tool calls.` : `${what}${probeFixed ? `\nThe commits since ${probedFrom.slice(0, 7)} fix what a probe found; check them the same way.` : ''}\nLook for what the fix broke, in the code it changed only. Already judged correct, so do NOT re-check: ${judged.join('; ') || '(nothing yet)'}. About 30 tool calls, never more than 45 tool calls.`}
 For each confirmed finding give the failing input, Postgres's answer, Mason's answer at the head, and Mason's answer at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible (CLAUDE.md "Fix the class, not the symptom"). origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
   ${knownList()}
 Give no fix and no patch. Also list what you judged correct.`,
@@ -435,7 +490,8 @@ Give no fix and no patch. Also list what you judged correct.`,
     if (!ciNow || ciNow.state === 'timeout') log(`CI beside review r${round}: ${ciNow ? 'not finished' : 'no answer'}; the CI stage reads it`)
     const { mine, later, repeated } = tally(review.findings, { round, stage: 'review', label: `review r${round}` })
     const classRound = repeated.length > 0
-    const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound }
+    const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound, ...countsOf(review) }
+    if (review.statementsRun === 0) notes.push(`review r${round} ran no statement: it read the code only`)
     rounds.push(entry)
     history.push(entry)
     log(`round ${round}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base${ciFailure ? ', CI red' : ''}${classRound ? `; CLASS round next (${repeated.join(', ')})` : ''}`)

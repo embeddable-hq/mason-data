@@ -496,6 +496,23 @@ met in the PR's review and deferred, and listed in the Review record's `deferred
 first review as passed when it found nothing blocking, and reads a record written before severity as all blocking,
 since every finding then made a round.
 
+**A review runs statements at scale (Tom, 2026-11-01).** An A/B on issue 192 (WITH TIES): a review that only read
+the code passed an implementation clean. Three later checks ran 300 to 500 statements each against Postgres 18 and
+Mason side by side, with the base beside them, and found two regressions and about four new wrong answers in that same
+implementation. What found them was not the feature's own syntax but forms nobody wrote — `TABLE t` for `SELECT * FROM
+t`, a VALUES arm first in a set operation, an empty input under a bound, a `char(n)` arm beside a text arm, a negative
+or NULL count or offset, a quotient in a numeric arm beside an integer arm, an exact numeric read through a derived
+table or a CTE — and a sweep of the PLAIN form of each code path the diff touched: the regression was `SELECT * FROM t
+UNION ALL TABLE t ORDER BY 1 LIMIT 2`, which has no new syntax at all. Each check cost about what the reading review
+did in tokens (172k to 250k, against 197k), because its statements were batched: one `scripts/duck-repro.ts` call
+runs dozens, its output goes to a file, and only the differences are read. The cost is wall time, two to three times.
+So the probe and every review in `pr-loop.js` run their statements that way, at the head and the base: the forms are one
+list (`VARIANT_FORMS`, over synthetic tables), a full review aims for hundreds and a re-check for a narrower set, and
+a statement the base matched and the head does not is a `regression`, blocking. Each reports `statementsRun` and
+`statementsMatched`, which the Review record sums and `scripts/review-stats.ts` prints; a probe or review that ran
+none is said in the run's status. Their Postgres is the file the `itEnv` argument names, or a throwaway `postgres:18`
+container of the stage's own, removed when done, whose URL no prompt prints.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
