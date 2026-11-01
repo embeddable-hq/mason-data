@@ -21,7 +21,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   statement failed; a numeric it computed was rounded; and a NULL, negative or fractional count or offset was not read as
   Postgres reads it. Over joined tables it now chooses its rows before reading wide columns, as a `LIMIT` does, instead
   of carrying every column through the ranking (a top 100 over a wide join spilled 20 GiB). Under `DISTINCT` or
-  `DISTINCT ON` it is still refused by name; over a filtered table it is answered (the docs said refused).
+  `DISTINCT ON` it is still refused by name, and over a set operation whose numeric column has no one scale (a quotient
+  beside an integer, numerics of different scales without `ALL`); over a filtered table or a view it is still refused.
 
 - **A `UNION`, `INTERSECT` or `EXCEPT` sorts and compares its column as the type Postgres gives it over every SELECT.**
   A `citext` column beside a `text` one is `text`, so it is no longer sorted or tied without regard to case, and a

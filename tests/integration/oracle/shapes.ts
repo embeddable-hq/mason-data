@@ -10,9 +10,10 @@
  *  - `named`: `SELECT s.<a>, s.<b> FROM (<statement>) AS s`, each column by the name POSTGRES gives it (`count` for
  *    count(*), `?column?` for 1 + 1), the names a tool reads back and writes into its wrapper;
  *  - `ordered`: `SELECT * FROM (<statement>) AS s ORDER BY s.<key>…`, the statement's own ORDER BY repeated OUTSIDE the
- *    derived table by column name (the wrapper a tool puts around hand-written SQL), compared IN ORDER.
+ *    derived table by column name (the wrapper a tool puts around hand-written SQL), compared in order where the
+ *    statement is: its keys repeated order no more than they did (a WITH TIES's ties stay in any order, PR 233).
  * The first three and `named` are compared as a set of rows (a subquery's order is no promise); `parameters` and
- * `ordered` as the statement. A review found both of the last two's classes in a real corpus: the
+ * `ordered` as the statement declares (`inOrder`), never in an order it does not. A review found both of the last two's classes in a real corpus: the
  * first run's shapes compared every wrapped statement as a set and read its columns by `*` alone.
  */
 import { parseSql } from "../../../src/api/postgres/parser.ts";
@@ -118,7 +119,7 @@ export async function shapes(sql: string, inOrder: boolean): Promise<Shaped[]> {
     if (outputs.sort !== null && outputs.sort.length > 0) {
       const dir = (d: string): string => d === "SORTBY_DESC" ? " DESC" : d === "SORTBY_ASC" ? " ASC" : "";
       const nulls = (n: string): string => n === "SORTBY_NULLS_FIRST" ? " NULLS FIRST" : n === "SORTBY_NULLS_LAST" ? " NULLS LAST" : "";
-      out.push({ shape: "ordered", sql: `SELECT * FROM (${sql}) AS mason_shape ORDER BY ${outputs.sort.map((k) => `mason_shape.${q(k.name)}${dir(k.dir)}${nulls(k.nulls)}`).join(", ")}`, inOrder: true });
+      out.push({ shape: "ordered", sql: `SELECT * FROM (${sql}) AS mason_shape ORDER BY ${outputs.sort.map((k) => `mason_shape.${q(k.name)}${dir(k.dir)}${nulls(k.nulls)}`).join(", ")}`, inOrder });
     }
   }
   const literals = await filterLiterals(sql);

@@ -202,9 +202,6 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   { name: "top N, filtered: an ICU collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name COLLATE \"und-x-icu\", o.id LIMIT 5" },
   { name: "top N, filtered: the database's collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name, o.id LIMIT 5" },
   { name: "top N, filtered: a prepared statement executed twice", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id WHERE o.amount > $1 ORDER BY o.id LIMIT 4", prepared: ["100", "500"] },
-  // FETCH … WITH TIES over a filtered table is answered (issue 192: docs/POSTGRES-API.md said refused; no code refused it)
-  { name: "with ties, filtered", sql: "SELECT * FROM (SELECT o.id, o.status, c.name FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id ORDER BY o.status NULLS FIRST FETCH FIRST 1 ROWS WITH TIES) s ORDER BY s.id" },
-  { name: "with ties, filtered, a collation", sql: "SELECT * FROM (SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name COLLATE \"und-x-icu\" FETCH FIRST 1 ROWS WITH TIES) s ORDER BY s.id" },
   // a DISTINCT ON keeps one row of each group behind the filter (issue 134, task E): on the key, and on a non-key through: a parent
   { name: "top N, filtered: DISTINCT ON the key, the kept item", sql: "SELECT DISTINCT ON (o.id) o.id, o.status, i.id AS iid, i.sku FROM shop.orders o JOIN shop.order_items i ON i.order_id = o.id ORDER BY o.id, i.unit_price DESC NULLS LAST, i.id LIMIT 6" },
   { name: "top N, filtered: DISTINCT ON a non-key, through:", sql: "SELECT DISTINCT ON (i.order_id) i.order_id, i.id, i.sku, o.status FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id ORDER BY i.order_id NULLS LAST, i.id DESC LIMIT 6" },

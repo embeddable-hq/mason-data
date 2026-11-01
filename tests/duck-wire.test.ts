@@ -3057,17 +3057,51 @@ test("a set operation's column is typed by Postgres's analysis of the set operat
       [`SELECT (${A} UNION ALL SELECT 'finalizeD'::text ORDER BY 1 DESC LIMIT 1)`, false],
     ] as const) { const d = await tiesAlike(c, sql, undefined, inOrder); if (d !== null) differ.push(d); }
     assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
-    // a set operation's numeric column under WITH TIES is the set operation's own, as the same set operation answers it
-    // with no WITH TIES: its scale where the arms' differ is the registered mixed-scale-numeric (#227), a quotient
-    // beside an integer arm is the base's double (#218), both on the base and filed there
-    for (const [ties, plain] of [
-      ["SELECT i.id, i.total FROM sales.invoices i UNION ALL SELECT o.id, o.amount FROM orders o ORDER BY 2 DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES",
-        "SELECT i.id, i.total FROM sales.invoices i UNION ALL SELECT o.id, o.amount FROM orders o ORDER BY 2 DESC NULLS LAST LIMIT 1"],
-      ["SELECT l.id::int AS x FROM late l WHERE l.id < 3 UNION ALL SELECT 1.5 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
-        "SELECT l.id::int AS x FROM late l WHERE l.id < 3 UNION ALL SELECT 1.5 ORDER BY 1 DESC LIMIT 1"],
-      ["SELECT l.k / 7.0 AS x FROM late l WHERE l.id IN (1, 2) UNION ALL SELECT l.id FROM late l WHERE l.id < 3 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
-        "SELECT l.k / 7.0 AS x FROM late l WHERE l.id IN (1, 2) UNION ALL SELECT l.id FROM late l WHERE l.id < 3 ORDER BY 1 DESC LIMIT 1"],
-    ] as const) assert.deepEqual((await answer(c, ties)).rows, (await answer(c, plain)).rows, ties);
+  } finally { await c.end(); }
+});
+
+// A SET OPERATION'S NUMERIC UNDER WITH TIES (the class "setop-numeric-engine-scale", PR 233 review r1): the engine
+// prints one DECIMAL scale per column, or a quotient's double, where Postgres's set-operation numeric keeps each value's
+// own. Under WITH TIES (which the base crashed on) such a column is answered only where the one decider of a union's
+// cells (`exactArms`) carries it, or Postgres's analysis gives it one typmod; any other is refused by name, at every depth
+test("a set operation's numeric under WITH TIES is Postgres's text at every depth, or refused by name (PR 233)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    const MIXED = "SELECT o.amount FROM orders o UNION ALL SELECT i.total FROM sales.invoices i ORDER BY 1 DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES";
+    const RATIO = "SELECT r.a / 3 AS q FROM ratios r UNION ALL SELECT r.b FROM ratios r ORDER BY 1 DESC FETCH FIRST 2 ROWS WITH TIES";
+    for (const sql of [
+      // UNION ALL whose every arm the union's cells carry: at the top, through a *, by name, a WITH query read whole
+      MIXED, `SELECT * FROM (${MIXED}) s`, `SELECT s.amount FROM (${MIXED}) s`, `WITH w AS (${MIXED}) SELECT * FROM w`,
+      RATIO, `SELECT * FROM (${RATIO}) s`,
+      // one declared scale throughout: Postgres's typmod, which the engine's DECIMAL prints
+      "SELECT o.amount FROM orders o UNION SELECT o.amount FROM orders o ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT o.amount FROM orders o INTERSECT SELECT o.amount FROM orders o ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT (l.k / 7.0)::numeric(20,10) AS x FROM late l WHERE l.id IN (1, 2) UNION ALL SELECT l.id::numeric(20,10) FROM late l WHERE l.id < 3 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+      // a WITH TIES set operation as an arm of another: its own cells, never flattened into the outer's
+      "(SELECT l.k / 7.0 AS q FROM late l WHERE l.id < 3 UNION ALL SELECT l.k / 7.0 FROM late l WHERE l.id = 5 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES) UNION ALL SELECT l.k / 7.0 FROM late l WHERE l.id = 9 ORDER BY 1",
+    ]) { const d = await tiesAlike(c, sql); if (d !== null) differ.push(d); }
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+    // refused by name where no single scale is Postgres's: a quotient beside an integer arm (either order, a column or
+    // a constant), an integer beside a numeric constant, scales that differ without ALL; at the top and at every depth
+    const QUOTIENT = "SELECT l.k / 7.0 AS q FROM late l WHERE l.id < 3 UNION ALL SELECT 1 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES";
+    const DEDUP = "SELECT i.total FROM sales.invoices i UNION SELECT o.amount FROM orders o ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES";
+    for (const sql of [
+      QUOTIENT, `SELECT * FROM (${QUOTIENT}) s`, `SELECT s.q FROM (${QUOTIENT}) s`, `WITH w AS (${QUOTIENT}) SELECT * FROM w`, `SELECT (${QUOTIENT})`,
+      `SELECT count(*) FROM (${QUOTIENT}) s`, `(${QUOTIENT}) UNION ALL SELECT 2.5 ORDER BY 1`,
+      // (where no printed column decided its cells, the column is refused however it is read: counted, or an arm the
+      // outer union cannot carry)
+      `SELECT count(*) FROM (${MIXED}) s`, `(${MIXED}) UNION ALL SELECT 2.5 ORDER BY 1`,
+      "SELECT * FROM (SELECT l.k / 7.0 AS q FROM late l UNION ALL SELECT 1 ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      "SELECT 1 UNION ALL SELECT l.k / 7.0 FROM late l WHERE l.id < 3 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.k / 7.0 AS x FROM late l WHERE l.id IN (1, 2) UNION ALL SELECT l.id FROM late l WHERE l.id < 3 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id::int AS x FROM late l WHERE l.id < 3 UNION ALL SELECT 1.5 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+      DEDUP, `SELECT * FROM (${DEDUP}) s ORDER BY 1`,
+      // (an arm whose other column the union casts, int4 beside int8: the union's cells carry no arm of it)
+      "SELECT i.id, i.total FROM sales.invoices i UNION ALL SELECT o.id, o.amount FROM orders o ORDER BY 2 DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT o.amount FROM orders o EXCEPT SELECT i.total FROM sales.invoices i ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT o.amount FROM orders o INTERSECT SELECT i.total FROM sales.invoices i ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES",
+    ]) await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /setop-numeric-ties/.test(e.detail ?? "") && /numeric\(p, s\)/.test(e.hint ?? ""), sql);
   } finally { await c.end(); }
 });
 

@@ -301,7 +301,9 @@ whichever side of a hidden row's value 500 falls.
 - a grouping set that relies on a filtered table's primary key for a column it does not group, and such a column no type's
   equality can group (`json`), are refused `0A000`, naming the gap `roles`: name the column in the GROUP BY, or read it in an
   aggregate. A plain `GROUP BY` of the key answers as Postgres does;
-- `FETCH FIRST n ROWS WITH TIES` over a filtered table is answered as Postgres answers it: the ties are ranked over the rows the filter keeps;
+- `FETCH FIRST n ROWS WITH TIES` over a filtered table is refused `0A000`, naming the gap `roles`: the statement with its
+  filters is checked by reading it back, and the deparser writes `WITH TIES` as `LIMIT` (issue 230). Write `ORDER BY …
+  LIMIT n` where ties do not matter;
 - `SET`, `RESET` and `set_config` of `mason.attr.*` are refused `42501`;
 - a statement verified for an unfiltered user can be refused `0A000` unverified for a filtered one: what reaches the
   allowlist is the statement with its filters in place.

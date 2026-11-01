@@ -574,6 +574,9 @@ class Rewriter {
     // and one typed as another (decidedByKey's any_value): a grouped ORDER BY 1 over a jsonb is keyed over its copy
     const like = isNode(v) ? this.typedLike.get(bodyOf(v)) : undefined;
     if (like !== undefined) this.typedLike.set(bodyOf(out as AstNode), like);
+    // and a set operation its place among Postgres's (`setOperationTypes`): a union arm's trial reads its columns' types
+    const depth = this.setDepth.get(v as Body);
+    if (depth !== undefined) this.setDepth.set(out, depth);
     return out as T;
   }
 
@@ -1417,6 +1420,16 @@ class Rewriter {
     const outputs = this.outputs(armTargets.slice(0, armTargets.length - (this.cellsAfter.get(arm)?.listed ?? 0)));
     // (the set operation's column: typed as Postgres resolved it over every arm, never as the first SELECT's)
     const types = this.setOperationTypes(b);
+    // A SET OPERATION'S NUMERIC (the class "setop-numeric-engine-scale", PR 233 review r1): the engine prints one DECIMAL
+    // scale for the column, or a quotient's double, where Postgres's column of no typmod keeps each value's own scale and
+    // digits. Such a column is answered only where the one decider of a union's cells (`exactArms`, through
+    // `exactThroughIn`) carries it; any other is refused by name, wherever the set operation stands
+    const carried = this.setExact.get(b);
+    types?.forEach((t, i) => {
+      if (t === null || t.type !== NUMERIC || t.typmod >= 0 || carried?.has(i) === true) return;
+      throw new Unrewritable(`FETCH … WITH TIES over a ${String(b.op).replace("SETOP_", "")} whose numeric column ${i + 1} has no one scale Mason can print as Postgres does (a quotient beside an integer or a constant, scales that differ without ALL) is not supported by Mason`,
+        "cast the column to numeric(p, s) in every SELECT, or round(x, s): SELECT x::numeric(12, 2) … UNION … SELECT y::numeric(12, 2) …", "setop-numeric-ties");
+    });
     const column = (i: number): AstNode => {
       const n = this.setColumn({ ColumnRef: { fields: [S(SET), S(`__mason_t${i + 1}`)] } }, types?.[i]);
       this.original.add(bodyOf(n));
@@ -1461,6 +1474,10 @@ class Rewriter {
    * WITH TIES wrapper and `rewrite`'s width (the class "the rewrite's width is not Postgres's", issue 192)
    */
   private readonly cellsAfter = new WeakMap<Body, { count: number; listed: number }>();
+
+  /** each set operation whose printed columns `exactThroughIn` decided: the columns its cells carry a program for (none
+   *  for one without ALL), read by `setOperationTies` (the class "setop-numeric-engine-scale") */
+  private readonly setExact = new WeakMap<Body, ReadonlySet<number>>();
 
   /** records a body's cells after Postgres's columns: `listed` of them entries of its own list, the rest carried by a `*` */
   private appendCells(b: Body, count: number, listed: number): void {
@@ -1826,7 +1843,11 @@ class Rewriter {
 
   private exactThroughIn(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }>): ExactColumn[] {
     const b = bodyOf(stmt);
-    if (b.op === "SETOP_UNION" && b.all === true) return this.exactArms(b, fields);
+    if (b.op === "SETOP_UNION" && b.all === true) {
+      const made = this.exactArms(b, fields);
+      this.setExact.set(b, new Set(made.map((e) => e.column)));
+      return made;
+    }
     const direct = this.exactColumns(stmt, fields);
     if (direct.length > 0) return direct;
     const through = this.passThrough(b, true);
@@ -1900,7 +1921,8 @@ class Rewriter {
     const arms: AstNode[] = [];
     const flatten = (n: AstNode): void => {
       const x = bodyOf(n);
-      if (x.op === "SETOP_UNION" && x.all === true && x.larg !== undefined && x.rarg !== undefined) { flatten({ SelectStmt: x.larg }); flatten({ SelectStmt: x.rarg }); }
+      // (an arm that is a set operation with a WITH TIES of its own is one arm: its cells are its own, `setOperationTies`)
+      if (x.op === "SETOP_UNION" && x.all === true && x.larg !== undefined && x.rarg !== undefined && (x === b || x.limitOption !== "LIMIT_OPTION_WITH_TIES")) { flatten({ SelectStmt: x.larg }); flatten({ SelectStmt: x.rarg }); }
       else arms.push(n);
     };
     flatten({ SelectStmt: b });
@@ -2031,9 +2053,14 @@ class Rewriter {
     return targets.map((t) => bodyOf(t).name ?? figureColname(bodyOf(t).val as AstNode));
   }
 
-  /** a query's output columns' types, as Postgres analysed them (a set operation's: its first arm's) */
+  /** a query's output columns' types, as Postgres analysed them (a set operation's: the set operation's own, over every
+   *  arm, `setOperationTypes`; never its first SELECT's, the class "setop-column-typed-by-first-arm") */
   private outputFields(q: AstNode): Array<{ oid: number; typmod: number }> | null {
     let b = bodyOf(q);
+    if (b.op !== undefined && b.op !== "SETOP_NONE") {
+      const types = this.setOperationTypes(b);
+      return types === null || types.some((t) => t === null) ? null : types.map((t) => ({ oid: t!.type, typmod: t!.typmod }));
+    }
     while (b.op !== undefined && b.op !== "SETOP_NONE" && b.larg !== undefined) b = b.larg;
     const star = this.starOf(b);
     if (star !== null) return this.outputFields(star);

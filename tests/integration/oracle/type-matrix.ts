@@ -1303,7 +1303,12 @@ function* matrix(): Generator<Matrixed> {
   for (const key of ["m", "1", "b.id % 4"]) yield { ...q(`with ties: a computed key by ${key}`, `SELECT b.id % 4 AS m, b.id, c.doc FROM top_b b JOIN top_c c ON c.b_id = b.id ORDER BY ${key} FETCH FIRST 1 ROWS WITH TIES`), inOrder: false };
   // an output named as Mason's own columns are (PR 233: the offset read the user's __mason_row, the wrapper lost its rank)
   yield q("with ties: outputs named __mason_row and __mason_rank, counted", "SELECT count(*) FROM (SELECT a.id AS __mason_row, a.name AS __mason_rank FROM top_a a ORDER BY 2 NULLS FIRST OFFSET 1 FETCH FIRST 1 ROWS WITH TIES) s");
-  yield { ...q("with ties: outputs named __mason_rank and __mason_cell_0 over a join", "SELECT a.id AS __mason_rank, b.amount / 3 AS __mason_cell_0, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY a.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  // (on outputs that are no exact numeric: a pass-through reads a subquery's exact cells by their name, which a user's
+  // output may hold, on the base too, #239; the `named` shape reads this statement so)
+  yield { ...q("with ties: outputs named __mason_rank and __mason_cell_0 over a join", "SELECT a.id AS __mason_rank, a.name AS __mason_cell_0, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY a.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  // a set operation's numeric under WITH TIES: carried by the union's cells, each value its own scale (PR 233 review r1)
+  yield { ...q("with ties: a UNION ALL of a numeric and its quotient", "SELECT b.amount AS x FROM top_b b UNION ALL SELECT b.amount / 3 FROM top_b b ORDER BY 1 DESC NULLS LAST FETCH FIRST 2 ROWS WITH TIES"), inOrder: false };
+  yield { ...q("with ties: a UNION ALL of a numeric and its quotient, through a *", "SELECT * FROM (SELECT b.amount AS x FROM top_b b UNION ALL SELECT b.amount / 3 FROM top_b b ORDER BY 1 DESC NULLS LAST FETCH FIRST 2 ROWS WITH TIES) s"), inOrder: false };
   yield { ...q("with ties: a subquery in the list", "SELECT a.id, (SELECT count(*) FROM top_b x WHERE x.a_id = a.id) AS n FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY a.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
   for (const key of ["a.name COLLATE \"C\"", "a.name COLLATE \"und-x-icu\"", "a.name NULLS FIRST"]) yield { ...q(`with ties: ordered by ${key}`, `SELECT a.id, a.name, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY ${key} FETCH FIRST 1 ROWS WITH TIES`), inOrder: false };
   yield q("with ties: a citext key, ties by Postgres's equality", "SELECT count(*) FROM (SELECT s.ci, s.id, s.j FROM star_o s ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) x");

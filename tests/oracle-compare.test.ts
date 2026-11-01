@@ -2,12 +2,17 @@
  * The oracle's comparison of two values by what they mean (tests/integration/oracle/compare.ts), which tells a wrong
  * value from another text of the same value.
  */
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { askedAs, normalise, same } from "./integration/oracle/compare.ts";
 import { TYPE_MATRIX } from "./integration/oracle/type-matrix.ts";
 import { everyRowOnce, withinWhole } from "./integration/oracle/unordered-limit.ts";
+import { shapes } from "./integration/oracle/shapes.ts";
+import { stopParser } from "../src/api/postgres/parser.ts";
+
+// (`shapes` parses: the parser's worker is stopped, or the file never exits)
+after(async () => { await stopParser(); });
 
 test("same: integers compare by their digits, exactly; a non-integer to one part in 10^12", () => {
   // Found in review of #389: a 1e-9 relative tolerance on every number let a 13-digit id be off by 1,000, and an
@@ -73,4 +78,16 @@ test("askedAs: an oracle statement is asked with its whole declared shape, its o
   const dir = new URL("./integration/oracle/", import.meta.url);
   const declaring = fs.readdirSync(dir).filter((f) => f.endsWith(".ts") && /\binOrder\b/.test(fs.readFileSync(new URL(f, dir), "utf8")));
   assert.deepEqual(declaring.sort(), ["compare.ts", "shapes.ts", "type-matrix.ts"], "a new list declaring inOrder: ask it through `askedAs`, or read its order where it is compared");
+});
+
+// NO SHAPE IS HELD TO AN ORDER ITS STATEMENT DOES NOT DECLARE (PR 233, the class "oracle-flag-unread", its second case:
+// the `ordered` shape repeats the statement's keys outside it and was compared in order always, so a WITH TIES
+// statement declared `inOrder: false` had its ties compared in order once wrapped)
+test("shapes: a statement declared unordered is compared unordered in every shape; one declared ordered keeps its order where it is repeated", async () => {
+  const sql = "SELECT a.id, a.name FROM top_a a WHERE a.id > 3 ORDER BY a.name FETCH FIRST 1 ROWS WITH TIES";
+  const unordered = await shapes(sql, false);
+  assert.ok(unordered.some((s) => s.shape === "ordered") && unordered.some((s) => s.shape === "parameters"), "the statement is asked in its ordered and parameters shapes");
+  assert.deepEqual(unordered.filter((s) => s.inOrder).map((s) => s.shape), [], "a shape compared in an order its statement does not declare");
+  const ordered = await shapes(sql, true);
+  assert.deepEqual(ordered.filter((s) => s.inOrder).map((s) => s.shape).sort(), ["ordered", "parameters"]);
 });

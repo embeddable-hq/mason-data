@@ -498,6 +498,22 @@ test("every spelling of a whole row of a filtered table is refused by the gap's 
   assert.deepEqual((await rows(c, "SELECT c.* FROM customers c WHERE c.id = 1")).length, 1);
 });
 
+// FETCH … WITH TIES OVER A FILTERED TABLE (PR 233; docs/POSTGRES-API.md): the statement with its filters is checked by
+// reading it back, and the deparser writes WITH TIES as LIMIT, so it is refused by the gap's name (issue 230), never
+// answered as a LIMIT; an unfiltered role's answers
+test("FETCH … WITH TIES over a filtered table is refused by the gap's name, never answered as a LIMIT; an unfiltered role's answers", async () => {
+  await wire();
+  const c = await connect("acme8", addUser("acme8", "tenant", { tenant: "1" }));
+  for (const sql of ["SELECT o.id FROM orders o ORDER BY o.status FETCH FIRST 1 ROWS WITH TIES",
+    "SELECT * FROM (SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.status NULLS FIRST FETCH FIRST 1 ROWS WITH TIES) s ORDER BY s.id"]) {
+    const r = await refusal(c, sql);
+    assert.equal(r.code, "0A000", `${sql}: ${JSON.stringify(r)}`);
+    assert.match(`${r.message} ${r.detail ?? ""}`, /Mason gap roles/, `${sql}: ${JSON.stringify(r)}`);
+  }
+  const plain = await connect("whole8", addUser("whole8", "everything"));
+  assert.ok((await rows(plain, "SELECT o.id FROM orders o ORDER BY o.status FETCH FIRST 1 ROWS WITH TIES")).length >= 1);
+});
+
 test("EXPLAIN says no row count for a filtered table, as text or JSON, where the Row Filter stands; an unfiltered table keeps its", async () => {
   await wire();
   const c = await connect("acme8", addUser("acme8", "tenant", { tenant: "1" }));
