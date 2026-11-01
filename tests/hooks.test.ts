@@ -145,7 +145,7 @@ function stop(t: { after: (fn: () => void) => void }, entries: unknown[] | strin
   return run("wake-up", { hook_event_name: "Stop", transcript_path: file, stop_hook_active: false, ...extra });
 }
 
-const WARNS = /"systemMessage":".* and no background wait is running: leave a bounded wait \(CLAUDE.md \\"A coordinator never ends a turn without a wake-up\\"\)"/;
+const WARNS = /"systemMessage":".* and no background wait is running: leave a bounded wait \(CLAUDE.md \\"The loop\\", step 5\)"/;
 
 test("wake-up: a queued merge or a message to a lead with no background wait after it warns, and never blocks", (t) => {
   const merge = stop(t, [assistant(MERGE)]);

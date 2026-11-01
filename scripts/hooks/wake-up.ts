@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Stop hook: a coordinator leaves a wake-up for what it waits on (CLAUDE.md "A coordinator never ends a turn without a
- * wake-up for what it waits on"). It reads the CURRENT turn of the session's transcript (JSONL), the tool uses after
+ * Stop hook: a coordinator leaves a wake-up for what it waits on (CLAUDE.md "How work is done here",
+ * guideline 4 and "The loop" step 5). It reads the CURRENT turn of the session's transcript (JSONL), the tool uses after
  * the last prompt a person typed: when the last merge queued (`gh pr merge … --auto`) or message sent to another
  * session (`mcp__ccd_session_mgmt__send_message`) has no background job started after it that is still running, it WARNS. A
  * SendMessage to a sub-agent is no trigger: a sub-agent's end wakes the session. A background job is a Bash call with
@@ -95,6 +95,6 @@ if (input.stop_hook_active !== true && !nonEmpty(input.background_tasks) && !non
     what = undefined;
   }
   if (what !== undefined) {
-    process.stdout.write(`${JSON.stringify({ systemMessage: `${what} and no background wait is running: leave a bounded wait (CLAUDE.md "A coordinator never ends a turn without a wake-up")` })}\n`);
+    process.stdout.write(`${JSON.stringify({ systemMessage: `${what} and no background wait is running: leave a bounded wait (CLAUDE.md "The loop", step 5)` })}\n`);
   }
 }
