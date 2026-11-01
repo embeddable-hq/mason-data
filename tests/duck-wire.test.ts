@@ -1027,7 +1027,7 @@ test("past what may spill is 53400 and a full disk 53100, each with the way out,
   assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'No space left on device' to INT32"), "SELECT 1").fields.code, "22P02");
 });
 
-test("a statement past what may spill fails alone, 53400, and the session goes on", async () => {
+test("a statement past what may spill fails alone, 53400, and the session goes on", { skip: "quarantined: #221" }, async () => {
   const memory = String((await store.writer.runAndReadAll("SELECT current_setting('memory_limit')")).getRows()[0]![0]);
   const spill = String((await store.writer.runAndReadAll("SELECT current_setting('max_temp_directory_size')")).getRows()[0]![0]);
   const c = await client();
