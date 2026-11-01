@@ -33,6 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type QueryOutputs, type Typed } from "./pgtree.ts";
+import { constantKey } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
@@ -4622,8 +4623,3 @@ export function treeDifference(back: unknown, tree: unknown, at = "$"): string |
   }
   return null;
 }
-
-/** a constant, under casts and a COLLATE: as a sort key it orders no row (a bare integer written is an ordinal,
- *  resolved to its output before this is asked) */
-const constantKey = (n: AstNode): boolean => kindOf(n) === "A_Const"
-  || ((kindOf(n) === "TypeCast" || kindOf(n) === "CollateClause") && isNode(bodyOf(n).arg) && constantKey(bodyOf(n).arg as AstNode));

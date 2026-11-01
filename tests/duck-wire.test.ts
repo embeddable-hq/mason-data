@@ -2334,6 +2334,18 @@ test("a constant sort key orders nothing at any depth: by name and by number, un
       // CI's statement: an integer and a text constant, by name and by number, in a subquery under a LEFT JOIN
       const ci = "SELECT count(*) FROM (SELECT l.id, l.k, 1 AS one, 'x' AS t FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY one DESC, 4 LIMIT 3) s";
       assert.deepEqual(await answer(c, ci), await postgres(ci), `${ci} (${database})`);
+      // a derived table's constant read through the table around it: the fold makes `s.one` the literal, an ordinal to the
+      // sort below it (the re-check of ca748c6: ids 2000, 1999, 1998 where Postgres answers 1, 2, 3); by name and number too
+      for (const k of ["1", "2", "'x'", "true"]) {
+        for (const order of ["s.one DESC, s.id", "s.one, s.id DESC", "one DESC, s.id", "2, s.id DESC", "s.one, 2 DESC, s.id"]) {
+          const sql = `SELECT s.id, s.one FROM (SELECT l.id, c.name, ${k} AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY ${order} LIMIT 3`;
+          assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} (${database})`);
+        }
+      }
+      // a chain of casts is no constant: it runs, and raises as Postgres's does
+      const chain = "SELECT l.id FROM late l ORDER BY 'abc'::text::int, l.id LIMIT 3";
+      await assert.rejects(postgres(chain), /invalid input syntax for type integer: "abc"/);
+      await assert.rejects(c.query(chain), (e: pg.DatabaseError) => e.code === "22P02", `${chain} (${database})`);
     }
   } finally { await bytes.end(); await onLibc.end(); await libc.close(); }
 });
