@@ -131,7 +131,8 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "a constant sort key: an integer output by name and a cast one by ordinal, a join", sql: "SELECT o.id, o.status, 1 AS one, 2::bigint AS two, c.name FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY one, 4, o.id DESC LIMIT 3" },
   { name: "a constant sort key: a text and a boolean output by name, a join", sql: "SELECT o.id, o.notes, 'x' AS t, true AS b FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY t, b, o.id LIMIT 2" },
   { name: "a constant sort key: a cast text output by name over one table, its list computed", sql: "SELECT o.id, upper(o.status) AS s, 'x'::text AS t FROM orders o ORDER BY t, o.id DESC LIMIT 3" },
-  { name: "a constant sort key: a boolean output by ordinal over one table", sql: "SELECT o.id, o.status, true AS b FROM orders o ORDER BY 3, o.id LIMIT 3" },
+  { name: "a constant sort key: every key a constant, a join: any rows, counted", sql: "SELECT count(*) FROM (SELECT o.id, o.status, 1 AS one, 'x' AS t FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY one DESC, 4 LIMIT 3) s" },
+  { name: "a constant sort key: a boolean output by ordinal over one table",sql: "SELECT o.id, o.status, true AS b FROM orders o ORDER BY 3, o.id LIMIT 3" },
   // no oracle table has a composite key: tests/duck-wire.test.ts holds the whole and the partial composite key over late_p
   { name: "key-first GROUP BY: no primary key grouped stays as it was", sql: "SELECT i.order_id, i.product, count(*) AS n FROM order_items i GROUP BY i.order_id, i.product ORDER BY 1, 2 LIMIT 6" },
   { name: "key-first GROUP BY: the nulls idiom over a fetched column", sql: "SELECT o.id, o.status, sum(i.quantity) AS q FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY (o.status) IS NULL ASC, o.status DESC, o.id LIMIT 10" },
