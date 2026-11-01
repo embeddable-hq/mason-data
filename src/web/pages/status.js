@@ -20,7 +20,8 @@
 const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "#observability/usage?range=24h", queries: "#observability/queries?range=24h",
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
 import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
-  utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick } from "../shared.js";
+  utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
+  badge, button, copyable, pop, renderFailure, json } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
@@ -401,9 +402,56 @@ export function renderStatus(s, o = {}) {
   // how to connect, once a table is added: first under the cards while nothing has asked Mason anything (the last
   // day's and week's statements, read as none), else after the facts, for the next tool
   const first = isFirstConnect(o.queries);
-  const connect = added ? renderConnect(s.postgres, { first, served: s.served === true, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null }) : "";
+  const connect = added ? renderConnect(s.postgres, { first, served: s.served === true, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null,
+    share: renderShare(s, o.share ?? NO_SHARE, now) }) : "";
   return renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
+}
+
+// ------------------------------------------------------------------ Connect from anywhere (mason share, from the page)
+
+/** The page's share before anything was asked: what `renderShare` and the page's model start from. */
+export const NO_SHARE = Object.freeze({ phase: "none", choices: null, reads: null, role: null, opened: null, ended: null, failure: null });
+
+/** The share the page holds, as `/api/state` `share` lists it (`from: "page"`), or null. */
+export const pageShareOf = (s) => s?.share?.shares?.find((x) => x.from === "page") ?? null;
+
+/** When a free share ends, as `mason share` says it: about an hour, and the time. */
+const endsLine = (endsAt, now) => endsAt === null || endsAt === undefined ? "It ends when you Stop sharing, or when this page closes."
+  : `A free share ends within about an hour: at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, in about ${Math.max(0, Math.round((Date.parse(endsAt) - now) / 60_000))} minutes. Then Connect from anywhere again gives a new address and password.`;
+
+/**
+ * CONNECT FROM ANYWHERE, the Connect card's part (src/cli/page-share.ts; `mason share`'s, from the page): a pure function
+ * of the state (`s`) and the page's own model (`m`: `phase` none · asking · opening · open · ended · refused, the roles
+ * offered, the answer that opened it — the password is in it alone — and the failure). Nothing under `mason serve`.
+ */
+export function renderShare(s, m = NO_SHARE, now = Date.now()) {
+  if (s?.served === true) return "";
+  const open = pageShareOf(s);
+  const head = `<p class="connect-title share-title">Connect from anywhere</p>`;
+  const ask = button("Connect from anywhere", { shareAsk: "" }, "", { disabled: m.phase === "asking" || m.phase === "opening" });
+  const askLine = `<p class="tip" id="share-anchor">${ask} <span>For a tool in the cloud, which cannot reach this machine: a temporary public address and a password, as ${code("mason share")} opens. TLS is required of every connection.</span></p>`;
+  if (open !== null && m.phase !== "ended") {
+    const mine = m.opened !== null && m.opened.user === open.user ? m.opened : null;
+    const rows = [["Host", open.host ?? "opening…", "share-host"], ["Port", open.port === null ? "…" : String(open.port), "share-port"], ["Database", mine?.database ?? s.postgres?.database ?? "", null],
+      ["User", open.user, "share-user"], ...(mine !== null ? [["Password", mine.password, "share-password"]] : []), ["SSL mode", "require", null]];
+    return `<div class="share open" role="status">${head}<p class="headline">Shared ${badge("Public", "warn")} for <time data-tick datetime="${esc(open.openedAt)}">${esc(spanText((now - Date.parse(open.openedAt)) / 1000))}</time>` +
+      `${open.role !== null ? `, reading as the role ${esc(open.role)}` : ""}: ${esc(open.reads)}</p>` +
+      `<dl class="facts">${rows.map(([k, v, id]) => `<dt>${esc(k)}</dt><dd>${id ? copyable(id, v) : esc(v)}</dd>`).join("")}</dl>` +
+      (mine !== null ? `<p class="tip">Paste it into the tool now: the password is shown this once, is kept nowhere, and ends with the share.</p>`
+        : `<p class="tip">The password was shown once, when it opened, and is kept nowhere: Stop sharing and Connect from anywhere again for a new one.</p>`) +
+      `<p class="tip">${esc(endsLine(open.endsAt, now))} It also ends within two minutes of this page closing.</p>` +
+      `<p class="tip">${button("Stop sharing", { shareStop: open.user }, "danger")}</p></div>`;
+  }
+  if (m.phase === "opening") return `<div class="share">${head}<p class="dim" aria-busy="true">Opening a temporary public address… (up to 30 s)</p></div>`;
+  const before = m.phase === "ended" && m.ended !== null
+    ? `<p class="said">The share ended: ${esc(m.ended.why)}. Its address no longer answers, and its password no longer works.</p>`
+    : m.phase === "refused" && m.failure !== null ? renderFailure(m.failure) : "";
+  const question = m.phase !== "asking" ? "" : pop("share-anchor", m.choices === null ? `<p class="dim">Reading the roles…</p>` :
+    `<p>This opens a <strong>temporary public address</strong>: anyone with it and its password reads ${esc(m.reads ?? "what the role you choose reads")}. A free share ends within about an hour, and when this page closes.</p>` +
+    (m.choices.length > 0 ? `<label for="share-role">Read as the role</label> <select id="share-role">${m.choices.map((c) => `<option value="${esc(c.role)}"${c.role === m.role ? " selected" : ""}>${esc(`${c.role}: ${c.reads}${c.default ? " (the file's default)" : ""}`)}</option>`).join("")}</select>` : "") +
+    `<p>${button("Open the address", { shareOpen: "" }, "primary")} ${button("Cancel", { shareCancel: "", popClose: "" })}</p>`, { kind: "dialog", label: "Connect from anywhere" });
+  return `<div class="share">${head}${before}${askLine}${question}</div>`;
 }
 
 /** Nothing has asked Mason anything yet: the last day's statements were read (`/api/queries`' body), and are none. */
@@ -428,20 +476,116 @@ export const page = {
     // the details open (a copy's whole error), by key: a poll rewrites the section, and they stay open
     const opened = createOpenSet();
     const monotone = createMonotone();
+    const share = createShare(ctx);
     return {
-      model: { open: opened.open },
+      model: { open: opened.open, share: share.m },
       reads: () => [{ path: "/api/state", everyMs: POLL_MS }, ...SLOWER.map((path) => ({ path, everyMs: 30_000 })), { path: HOURLY, everyMs: 60_000 }],
-      actions: {},
+      actions: share.actions,
+      afterRead: () => share.afterRead(ctx.read("/api/state")?.body),
+      input: (target) => share.input(target),
       view() {
         const st = ctx.read("/api/state");
         if (!st?.body) return { status: st?.failure ? "" : skeleton(4) };
         const [queries, events, requests, unsupported, users] = SLOWER.map((p) => asRequest(ctx.read(p)));
-        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body), before: monotone.before }) };
+        return { status: renderStatus(st.body, { now: ctx.now().getTime(), queries, events, requests, unsupported, users, usage: ctx.read(HOURLY)?.body, open: opened.has, shares: monotone.of(st.body), before: monotone.before, share: share.m }) };
       },
       toggle: (target) => opened.toggle(target),
-      // Connect's Copy buttons
-      click: (d, button, env) => copyClick(d, button, env),
+      // Connect's Copy buttons, and Connect from anywhere's
+      click: (d, button, env) => share.click(d) ?? copyClick(d, button, env),
       charts: () => sparkSpecs(ctx.read(HOURLY)?.body),
     };
   },
 };
+
+/** What a page beats with, when the answer that opened the share does not say (src/cli/page-share.ts BEAT_MS). */
+const BEAT_MS = 15_000;
+
+/**
+ * THE PAGE'S SIDE OF CONNECT FROM ANYWHERE (src/cli/page-share.ts has why each choice): ask once, open, BEAT while the
+ * share is open — on a timer of its own, which runs while the tab is hidden (the poll does not: the person is in their
+ * tool's tab, pasting) —, Stop sharing. The password is in `m.opened` alone, the page's memory, and is dropped the moment
+ * the share is seen ended. `ctx.timers` is a test's clock; a browser's own otherwise.
+ */
+export function createShare(ctx) {
+  const m = { ...NO_SHARE };
+  const timers = ctx.timers ?? globalThis;
+  let beating = null;
+  const stopBeats = () => { if (beating !== null) { timers.clearInterval(beating.id); beating = null; } };
+  const ended = (user, why) => { stopBeats(); m.opened = null; m.phase = "ended"; m.ended = { user, why }; };
+  const beat = async () => {
+    if (beating === null) return;
+    const user = beating.user;
+    const r = await ctx.ask(`/api/share/${encodeURIComponent(user)}/beat`, json("POST"));
+    if ("failure" in r && r.failure.code === "not_found" && beating?.user === user) { ended(user, r.failure.message.replace(/^.*?; it ended: /, "")); await ctx.refresh(["/api/state"]); }
+  };
+  const startBeats = (user, everyMs = BEAT_MS) => {
+    if (beating?.user === user) return;
+    stopBeats();
+    beating = { user, id: timers.setInterval(() => { void beat(); }, everyMs) };
+  };
+  const actions = {
+    /** Connect from anywhere: what a share would read, then the question */
+    async shareAsk() {
+      Object.assign(m, NO_SHARE, { phase: "asking" });
+      const r = await ctx.ask("/api/share/choices");
+      if (m.phase !== "asking") return;
+      if ("failure" in r) { m.phase = "refused"; m.failure = r.failure; return; }
+      m.choices = r.body.choices;
+      m.reads = r.body.reads ?? null;
+      m.role = r.body.choices.find((c) => c.default)?.role ?? r.body.choices[0]?.role ?? null;
+    },
+    shareCancel() { Object.assign(m, NO_SHARE); },
+    shareRole(role) { if (m.choices?.some((c) => c.role === role)) m.role = role; },
+    /** the person said yes: the run opens the share (confirmed), and its one answer carries the password */
+    async shareOpen() {
+      if (m.phase !== "asking" || m.choices === null) return;
+      const role = m.choices.length > 0 ? m.role : null;
+      Object.assign(m, { phase: "opening", failure: null });
+      const r = await ctx.ask("/api/share", json("POST", { from: "page", confirmed: true, ...(role !== null ? { role } : {}) }));
+      if ("failure" in r) { m.phase = "refused"; m.failure = r.failure; return; }
+      Object.assign(m, { phase: "open", opened: { ...r.body, seen: false } });
+      startBeats(r.body.user, r.body.beatMs);
+      await ctx.refresh(["/api/state"]);
+    },
+    async shareStop(user) {
+      const r = await ctx.ask(`/api/share/${encodeURIComponent(user)}`, json("DELETE"));
+      if ("failure" in r && r.failure.code !== "not_found") { m.phase = "refused"; m.failure = r.failure; return; }
+      ended(user, "Stop sharing, on this page");
+      await ctx.refresh(["/api/state"]);
+    },
+    shareBeat: beat,
+  };
+  return {
+    m,
+    actions,
+    /** after each read of the state: a share of the page's open is beaten (a reload's too); the one this page opened,
+     *  once listed and now gone, ended — said with the run's why, and its password dropped */
+    afterRead(s) {
+      if (s === undefined || s === null) return;
+      const open = pageShareOf(s);
+      if (open !== null) {
+        if (m.opened?.user === open.user) m.opened.seen = true;
+        if (m.phase === "ended" && m.ended?.user === open.user) return;
+        if (m.phase === "none" || m.phase === "ended") m.phase = "open";
+        startBeats(open.user);
+        return;
+      }
+      if (m.phase === "open" && (m.opened === null || m.opened.seen)) {
+        const user = m.opened?.user ?? beating?.user ?? null;
+        ended(user, s.shareEnded !== null && s.shareEnded !== undefined && s.shareEnded.user === user ? s.shareEnded.why : "it is no longer open");
+      }
+    },
+    input(target) {
+      if (target?.id !== "share-role") return null;
+      actions.shareRole(target.value);
+      return true;
+    },
+    click(d) {
+      if (d.shareAsk !== undefined) return actions.shareAsk() ?? true;
+      if (d.shareOpen !== undefined) return actions.shareOpen();
+      if (d.shareCancel !== undefined) return actions.shareCancel() ?? true;
+      if (d.shareStop !== undefined) return actions.shareStop(d.shareStop);
+      return null;
+    },
+  };
+}
