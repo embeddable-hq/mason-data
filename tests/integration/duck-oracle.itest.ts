@@ -61,10 +61,11 @@ import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { refusedAsNamed, SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
-import { collationMet, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
+import { ANY, collationMet, decidedShapes, shapeDecision, shapesDecided, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { LATEST_CASES, LATEST_SCHEMA, LATEST_TABLES } from "./oracle/latest.ts";
 import { LATEST_SQL } from "../../src/api/postgres/catalog.ts";
+import { CHAR_ARMS, emptyShapeCount, NUMERIC_READERS, say as sayShape, SET_OPERATION_ARMS, shapeProblems, VALUES_ARMS, type ShapeCount, type ShapeName, type ShapeTally } from "./oracle/shape-names.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
 import { countGap, emptyTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
@@ -127,12 +128,13 @@ const viaOne = (rel: string): string => {
 };
 const throughOne = (sql: string): string => sql.replaceAll(T, viaOne(T)).replaceAll(U, viaOne(U)).replaceAll(Z, viaOne(Z));
 
-type Answer = { names: string[]; oids: number[]; rows: (string | null)[][] } | { code: string; message: string; detail?: string | undefined };
+// `typmods`: RowDescription's, read only to spell a shape's casts (oracle/shapes.ts); `verdict` does not compare them
+type Answer = { names: string[]; oids: number[]; typmods?: number[]; rows: (string | null)[][] } | { code: string; message: string; detail?: string | undefined };
 const raw = { getTypeParser: () => (v: string) => v };
 async function ask(c: pg.Client, sql: string, values?: string[], name?: string): Promise<Answer> {
   try {
     const r = await c.query({ text: sql, ...(values === undefined ? {} : { values }), ...(name === undefined ? {} : { name }), rowMode: "array", types: raw } as pg.QueryConfig);
-    return { names: r.fields.map((f) => f.name), oids: r.fields.map((f) => f.dataTypeID), rows: r.rows as (string | null)[][] };
+    return { names: r.fields.map((f) => f.name), oids: r.fields.map((f) => f.dataTypeID), typmods: r.fields.map((f) => f.dataTypeModifier), rows: r.rows as (string | null)[][] };
   } catch (e) {
     const d = e as pg.DatabaseError;
     if (d.code === undefined) throw e;
@@ -204,6 +206,31 @@ function showAllHolds(want: Answered, got: Answered): string | null {
  * part of the answer may differ in any kind but there.
  */
 const KNOWN: Decided[] = [
+  // A SHAPE'S DECISIONS (oracle/known.ts: `shape`, matched against the BASE text): a difference the base already has,
+  // filed, and decided so the shape is still asked and lives by it (oracle/shape-names.ts)
+  { shape: "count-negative", sql: /LIMIT|FETCH/i, kind: "sqlstate", issue: 119, why: "a negative LIMIT: Postgres's 2201W, Mason's 42804" },
+  { shape: "offset-negative", sql: /[\s\S]/, kind: "sqlstate", issue: 119, why: "a negative OFFSET: Postgres's 2201X, Mason's 42804" },
+  // What the variant shapes meet on the head MERGED WITH MAIN (PR 261: CI run 41351366200, refs/pull/261/merge at main
+  // 80ebcd9, both legs; the first run's 3788 differences were each a defect main already had), one class an issue, each
+  // over the group of shapes whose construction reaches it (oracle/shape-names.ts), one entry a group and kind
+  // (oracle/known.ts shapeDecision). An entry over every base (`ANY`) is a class the group meets by its construction,
+  // wherever its output type is reached. (Main fixed #265, a star over a WITH TIES derived table as an arm, and #268,
+  // TABLE t's sort, before the merge: neither is decided.)
+  // a char(n) arm in a text set operation keeps its padding (`"A  "`), and so keeps a row Postgres's UNION dedupes
+  shapesDecided(CHAR_ARMS, { sql: ANY, kind: "value", issue: 247, why: "a char(n) arm in a text set operation keeps its trailing spaces" }),
+  shapesDecided(CHAR_ARMS, { sql: ANY, kind: "rows", issue: 247, why: "a char(n) arm's padding keeps a row Postgres's UNION dedupes" }),
+  // an exact numeric leaves the exact path in a set operation's arm (its first arm's scale, a quotient's digits, a
+  // float4's numeric), under a CTE's aggregates, and in its ::text and ORDER BY over a derived quotient (#252's class)
+  shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS],
+    { sql: ANY, kind: "text", issue: 252, why: "an exact numeric in a set operation, a CTE's aggregate or a derived quotient's text loses Postgres's scale or digits" }),
+  shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS],
+    { sql: ANY, kind: "value", issue: 252, why: "an exact numeric in a set operation or a CTE's aggregate is rounded, or read through a double" }),
+  // (main answers a set operation's 1e30 arm since PR 231; a CTE's sum still overflows)
+  shapesDecided(NUMERIC_READERS, { sql: /sum\(s::numeric\)/, kind: "refused", issue: 252, why: "a numeric sum past the engine's 38 digits, in a CTE: 22003" }),
+  // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
+  shapesDecided(VALUES_ARMS, { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
+  // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text
+  shapesDecided(VALUES_ARMS, { sql: /json|\bip\b|array_agg/, kind: "value", issue: 267, why: "a set operation's inet, jsonb or array output loses Postgres's text" }),
   // a domain's column is its base type's: the wire and data_type say so on Postgres too, pg_typeof and format_type do not
   { sql: /pg_typeof\(d[itzp]\)|attname = 'd[itzp]'/, kind: "value", gap: "domain-column", why: "a domain's column is read and declared as its base type" },
   // SHOW ALL (Postico sends it at every connection): the listener's settings — its catalog Postgres's, the session's
@@ -425,6 +452,23 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     return named !== undefined && named in GAPS && GAPS[named as GapId].kind === "refused" ? named as GapId : null;
   };
   let shaped = 0;
+  /** what each shape met (oracle/shape-names.ts): an answer and a refusal kept apart, so no shape lives on refusals */
+  const shapeTally: ShapeTally = {};
+  const countOf = (s: ShapeName): ShapeCount => shapeTally[s] ??= emptyShapeCount();
+  /** a type as the SOURCE spells it, and its kind, once per (oid, typmod): a shape's casts (oracle/shapes.ts) */
+  const types = new Map<string, Promise<{ name: string; typtype: string } | null>>();
+  const typeOf = (oid: number, typmod: number): Promise<{ name: string; typtype: string } | null> => {
+    const key = `${oid} ${typmod}`;
+    let t = types.get(key);
+    if (t === undefined) {
+      t = source.query({ text: "SELECT format_type($1::oid, $2::int4), typtype FROM pg_type WHERE oid = $1::oid", values: [oid, typmod], rowMode: "array" })
+        .then((r) => r.rows.length === 0 ? null : { name: String(r.rows[0]![0]), typtype: String(r.rows[0]![1]) });
+      types.set(key, t);
+    }
+    return t;
+  };
+  /** a decided difference by its kind; a shape's decision met by its `gap` (one naming an `issue` is in no gap tally) */
+  const meetDecided = (k: Decided, group: string, first: boolean): void => { if (k.gap !== undefined) meet("decided", k.gap, group, first); };
   // the sessions' TimeZone: UTC, as set at their start, until a statement asks for another
   let zone = "UTC";
   const run = async (phase: string): Promise<void> => {
@@ -446,32 +490,42 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         tallies.duckdb[kind]++;
       }
       if (v !== null || "code" in got) unproven.add(q.sql);
-      const k = KNOWN.find((x) => x.sql.test(q.sql));
+      // (a shape's decision never decides the statement itself)
+      const k = KNOWN.find((x) => x.shape === undefined && x.sql.test(q.sql));
       if (k) decided.add(k);
       // a decision that HOLDS part of the answer alike (SHOW ALL's fields and the rows the sessions set): that part
       // differing, or a refusal on either side, is a difference like any other; the rest may differ in any kind
       const broken = k?.holds === undefined ? null : "code" in got ? `refused: ${got.code} ${got.message}` : "code" in want ? `answered where Postgres refuses ${want.code} ${want.message}` : k.holds(want, got);
       if (broken !== null) { if (first) tallies.mason.differs++; differences.push({ phase, group: q.group, kind: "held", name: q.name, detail: broken, sql: q.sql }); continue; }
       // a decided case differing in ANOTHER way than decided is a difference like any other
-      if (k && (v === null || v.kind === k.kind || k.holds !== undefined)) { unproven.add(q.sql); if (v !== null) { known.add(k); meet("decided", k.gap, q.group, first); } else if (first) tallies.mason.exact++; continue; }
+      if (k && (v === null || v.kind === k.kind || k.holds !== undefined)) { unproven.add(q.sql); if (v !== null) { known.add(k); meetDecided(k, q.group, first); } else if (first) tallies.mason.exact++; continue; }
       const gap = v === null ? null : namedGap(got);
       if (gap !== null) { meet("refused", gap, q.group, first); continue; }
       if (v !== null) { if (first) tallies.mason.differs++; differences.push({ phase, group: q.group, kind: v.kind, name: q.name, detail: v.detail, sql: q.sql }); continue; }
       if (first) tallies.mason.exact++;
       // THE SHAPES (oracle/shapes.ts), once, of what both answered alike with rows: the same answer at another depth
-      if (!first || "code" in want || q.group === "copy" || SHAPES === false) continue;
-      for (const s of await shapesOf(q.sql, q.inOrder ?? ordered(q.sql))) {
+      // (the `copy` group gets only `table` and `table-arm`: oracle/shapes.ts)
+      if (!first || "code" in want || SHAPES === false) continue;
+      const { shaped: forms, unspellable } = await shapesOf(q.sql, q.inOrder ?? ordered(q.sql), q.group, { ...want, typmods: want.typmods ?? want.oids.map(() => -1) }, typeOf);
+      for (const u of unspellable) countOf(u).unspellable++;
+      for (const s of forms) {
         shaped++;
+        const c = countOf(s.shape);
+        c.asked++;
         const [sw, sg] = [await ask(source, s.sql, s.values), await ask(mason, s.sql, s.values)];
+        if ("code" in sw) c.postgresRefused[sw.code] = (c.postgresRefused[sw.code] ?? 0) + 1;
         const sv = verdict(sw, sg, s.inOrder);
         // a decided difference a shape alone meets (a filter's literal sent as a parameter: limit-lateral-filter),
-        // decided before an agreement so one that no longer differs is said so (staleDecisions)
-        const sk = KNOWN.find((x) => x.sql.test(s.sql));
-        if (sk) decided.add(sk);
-        if (sv === null) continue;
+        // decided before an agreement so one that no longer differs is said so (staleDecisions). A shape's own
+        // decision is matched against the BASE text, for its shape only, ahead of the rest (oracle/known.ts)
+        // A shape may have one decision per kind: each it matches is decided, and the one of the difference's kind decides
+        const { matched, decides: sk } = shapeDecision(KNOWN, s.shape, q.sql, s.sql, sv?.kind ?? null);
+        for (const m of matched) decided.add(m);
+        if (sv === null) { if ("code" in sw) c.refusedAlike[sw.code] = (c.refusedAlike[sw.code] ?? 0) + 1; else c.answeredAlike++; continue; }
         const sgap = namedGap(sg);
-        if (sgap !== null) { meet("refused", sgap, q.group, false); continue; }
-        if (sk && sv.kind === sk.kind) { known.add(sk); meet("decided", sk.gap, q.group, false); continue; }
+        if (sgap !== null) { c.refusedByGap++; meet("refused", sgap, q.group, false); continue; }
+        if (sk && sv.kind === sk.kind) { c.decided++; if ("code" in sw) c.decidedRefused[sw.code] = (c.decidedRefused[sw.code] ?? 0) + 1; known.add(sk); meetDecided(sk, q.group, false); continue; }
+        c.differs++;
         differences.push({ phase, group: `${q.group} [${s.shape}]`, kind: sv.kind, name: `${q.name} [${s.shape}]`, detail: sv.detail,
           sql: s.values === undefined ? s.sql : `${s.sql} -- with ${JSON.stringify(s.values)}` });
       }
@@ -956,6 +1010,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     [...counted].sort((a, b) => b[1] - a[1]).map(([k, n]) => `  ${n} × ${k}`).join("\n") + "\n\n" +
     differences.map((d) => `[${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`).join("\n\n") + "\n");
   console.log(`duck oracle: ${asked} statements asked, ${differences.length} differ (${report}): ${[...counted].map(([k, n]) => `${n} ${k}`).join(", ")}`);
+  console.log(`duck oracle: shaped ${shaped}; per shape: ${Object.entries(shapeTally).map(([s, c]) => `${s} (${sayShape(c)})`).join("; ") || "none"}`);
   // the first differences in the log too, whichever assertion below fails first (a difference can be why a decision
   // is stale or a verified entry dropped, and CI keeps only the log)
   for (const d of differences.slice(0, 5)) console.log(`duck oracle: differs: [${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`);
@@ -983,6 +1038,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const unmet = (k: Decided): boolean => !collationMet(k, runProvider, runCollate);
   const stale = WHOLE ? staleDecisions(KNOWN, known, decided, unmet) : [];
   assert.deepEqual(stale, [], "a decided difference that no longer differs");
+  // A DEAD OR MISSPELT SHAPE (oracle/shape-names.ts): a whole run's own; a leg's report is summed by scripts/oracle-legs.ts
+  const shapesWrong = WHOLE && SHAPES ? shapeProblems(shapeTally) : [];
+  assert.deepEqual(shapesWrong, [], "a shape no statement answered alike, or one Postgres refused with a SQLSTATE it does not declare");
   // A DEAD GAP: a refused or decided entry no statement meets (removed, or held by a test it names)
   const dead = WHOLE ? deadGaps(everyAskGaps) : [];
   assert.deepEqual(dead, [], "src/duck/gaps.ts entries no oracle statement meets: add a statement that does (oracle/gap-cases.ts), or remove the entry");
@@ -993,8 +1051,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const { added: newly, dropped } = verifiedDiff(verified, VERIFIED);
   // A LEG'S REPORT, before the assertion below, so that a leg that differs still lets the check say what else is wrong
   if (LEG !== null) {
-    const legReport: LegReport = { ...LEG, whole: [...every().map((q) => ({ id: statementId(q), name: q.name })), ...UNORDERED_LIMITS.map(unorderedStatement).map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))], asked: askedIn, stages: stageAsked, shaped, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
-      decisions: KNOWN.map((k) => ({ sql: String(k.sql), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
+    const legReport: LegReport = { ...LEG, whole: [...every().map((q) => ({ id: statementId(q), name: q.name })), ...UNORDERED_LIMITS.map(unorderedStatement).map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))], asked: askedIn, stages: stageAsked, shaped, shapeTally, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
+      decisions: KNOWN.map((k) => ({ sql: String(k.sql), ...(k.shape === undefined ? {} : { shape: decidedShapes(k).join(", "), kind: k.kind }), ...(k.issue === undefined ? {} : { issue: k.issue }), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
       verified: [...verified], names: Object.fromEntries(await describeKeys(async (sql) => (await source.query({ text: sql, rowMode: "array" })).rows as (string | null)[][], verified)),
       asks: asked, measured, differences: differences.length };
     const out = process.env.IT_ORACLE_LEG_REPORT!;   // legRefused: a leg without it does not start

@@ -45,3 +45,43 @@ again before each review. Its Learn step adds to this list; each bullet names th
 - A KNOWN decision or gap case under C, ICU and libc sources: stale or dead off the collation it was written for (PR
   135).
 - The allowlist and fixture written from a CI run: that run's head is the commit's (PR 159, 170).
+- An oracle helper that answers a question the engine already answers (does a deparsed text mean this modified tree):
+  over `SELECT ARRAY[1,2] FROM t`, a hand-written tree equality that skips `location` but not `list_start` calls every
+  modified tree unequal. Use the engine's module (`sameTree` / `treeDifference`, `src/duck/rewrite.ts`):
+  `tree-equality-derived-again` (PR 261).
+- One relation name spelled two ways in the oracle: a quoting call made after the listener replaced
+  `QuoteUtils.quoteIdentifier` (DuckDB's keywords) spells `t` one way in the real run and another in the unit world,
+  beside the RangeVar's written text at its location. One spelling per relation, from one module:
+  `fact-derived-twice` (PR 261).
+- An oracle shape's reach claimed from the statement it is built on, not from the base the real run asks: a base the
+  loop skips because both sides refuse it (`SELECT * FROM t ORDER BY id COLLATE "C"` over a bigint `id`, 42804 alike)
+  is never shaped: `shape-unreachable-in-real-run` (PR 261).
+- A shapes table restated from one group of bases: a bare `SELECT * FROM t2 ORDER BY id` over a table with a
+  composite, a range and a domain over point is shaped by every star arm, with types no row of the table covers:
+  `shapes-table-gap` (PR 261).
+- A liveness count that cannot tell rows answered alike from a refusal met alike: a UNION arm both sides refuse with
+  42804 or 42601 counts as alive as one that answered rows. The tally says which, and a shape expected to live by
+  refusal declares its SQLSTATE: `dead-shape-detector-blind` (PR 261).
+- A shape's refusal codes assumed, not read from the bases it reaches: `SELECT j::json, 'x'::text FROM t UNION SELECT
+  NULL, 'y'::character(3)` is refused by Postgres with 42883 (no equality operator for json), and the undeclared code
+  fails the run with only the declaration left to edit: `undeclared-refusal-expectation` (PR 261).
+- A decision's key spelled by two readers (`[<shape>] <regex>` in the leg report; the regex alone in
+  `staleDecisions`' message and `staleOrDead`'s merge): a stale `[integer-arm] /c \/ 3/` is named like the base entry
+  with the same pattern. One function builds the key: `decision-key-spelled-twice` (PR 261).
+- A detector that fires where the PR may not respond: a shape whose every ask meets a decided base difference
+  (`SELECT id, c / 3 FROM t … UNION ALL VALUES (…)`, decided under an issue) reported dead and failing the run:
+  `detector-without-response` (PR 261).
+- A refusal shape alive only once a filed base issue is fixed (`SELECT * FROM t ORDER BY a LIMIT -1`: Postgres 2201W,
+  Mason 42804) with no KNOWN entry able to keep it alive, so every push is red. Liveness counts a decided difference,
+  or the shape declares the code it meets: `undecidable-shape-liveness` (PR 261).
+- A new shape pushed without the base differences it meets decided: every difference in the differences file of the
+  run of the head MERGED WITH CURRENT MAIN (`SELECT NULL, 'paid'::character(6), NULL UNION (SELECT id, b, c / 3 FROM t
+  ORDER BY id LIMIT 5)`, a numeric's scale lost) is filed once per class and recorded in KNOWN (`shape`, `issue`) for
+  every shape and kind it appears under, in the same push: `shape-base-differences-undecided` (PR 261).
+- An issue-backed decision written from a run against an older main: main fixes the defect (`TABLE t ORDER BY b, id`
+  sorted by code point), the PR's merge ref answers alike, and the stale decision turns the gate red though the PR
+  changed no engine code. Read the decisions from the head merged with current main:
+  `shape-decisions-stale-on-merged-main` (PR 261).
+- A constraint stated in a design note without reading the code it names ("oracle-legs imports only Node's builtins",
+  where it imports `src/duck/gaps.ts`; the rule is no node_modules dependency, transitively): it forbids what is
+  allowed and misleads the implementer: `misstated-constraint` (PR 261).
