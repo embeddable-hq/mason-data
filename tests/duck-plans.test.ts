@@ -164,6 +164,8 @@ const REWRITTEN: Shape[] = [
   { name: "a LIMIT with no ORDER BY over a NATURAL join, a *", sql: "SELECT * FROM orders o NATURAL JOIN order_tags t LIMIT 100" },
   { name: "a top N over joins by a computed output's name", sql: "SELECT o.id, o.meta, c.name, o.amount * 2 AS twice FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY twice DESC, o.id LIMIT 100" },
   { name: "a top N over joins by a computed key no output shows", sql: "SELECT o.id, o.meta, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY date_trunc('day', o.created_at) DESC, o.id LIMIT 100" },
+  // key-first grouping (src/duck/late.ts keyFirst, issue 134 step 6): grouped on the key, the wide columns read after the limit
+  { name: "a GROUP BY the key with wide columns and a LIMIT: grouped on the key, read by row number", sql: "SELECT o.id, o.meta, o.notes, count(i.id) AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY o.id DESC LIMIT 100" },
   { name: "a tool's wrapper of a many-to-many join, no sort", sql: "SELECT * FROM (SELECT c.id, o.meta FROM customers c JOIN orders o ON c.tenant_id = o.tenant_id) t LIMIT 100" },
   // leftLateral: the "expand the JSON" preview, over jsonb and json, guarded to objects as the tool guards it
   { name: "LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", sql: "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 0" },

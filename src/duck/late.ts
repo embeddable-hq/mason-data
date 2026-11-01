@@ -148,8 +148,9 @@
  * that raises on a row the limit leaves out answers here (`limit-errors`).
  */
 import type { TreeNode, TreeValue } from "./pgtree.ts";
-import { fanOutBounded, projectionOnly } from "./distinct-key.ts";
+import { fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
+import { constantExpression, evaluated } from "./constant-key.ts";
 
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
@@ -314,12 +315,15 @@ const UNKNOWN: LateContext = { volatile: async (functions) => new Set(functions)
  */
 export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, keys: () => Promise<PrimaryKeys>, context: LateContext = UNKNOWN): Promise<AstNode | null> {
   const strict = rowWiseStatement(analysis);
-  if (!strict && !rowWiseAround(analysis)) return null;
+  const around = strict || rowWiseAround(analysis);
+  if (!around && !groupsWithLimit(analysis)) return null;
   const volatile = await context.volatile(derivedFunctions(analysis));
   const wall = context.wall;
   const relations = relationsOf(analysis, await keys(), volatile, wall?.alias ?? null);
   let changed = false;
   const written = (select: AstNode): AstNode | null => {
+    const grouped = keyFirst(select, relations);
+    if (grouped !== null || !around) return grouped;
     const rows = joinRows(select, relations, wall?.alias ?? null);
     if (rows !== null) { if (wall !== null) wall.added += rows.walls; return rows.select; }
     return strict ? afterLimit(select) : null;
@@ -359,6 +363,192 @@ function limited(s: Body, withs = false): { targets: AstNode[]; sorts: AstNode[]
   return { targets, sorts: (s.sortClause as AstNode[] | undefined) ?? [] };
 }
 
+/** whether a query of the statement groups and has a LIMIT: one `keyFirst` may write */
+function groupsWithLimit(tree: TreeValue): boolean {
+  let found = false;
+  walkTree(tree, (n) => { found ||= n._node === "QUERY" && isTreeNode(n.limitCount) && treeList(n.groupClause).length > 0; });
+  return found;
+}
+
+/** `keyGrouped`'s tables of a query by the alias its FROM reads them by, each key's columns by name */
+function keyedTables(q: TreeNode, keys: PrimaryKeys): Query["keyed"] {
+  const rtable = treeList(q.rtable);
+  return [...keyGrouped(q, keys)].flatMap(([rtindex, attnos]) => {
+    const e = rtable[rtindex - 1];
+    if (!isTreeNode(e) || !isTreeNode(e.eref) || typeof e.eref.aliasname !== "string") return [];
+    const names = treeList(e.eref.colnames);
+    const key = attnos.map((a) => names[a - 1]);
+    return key.every((k) => typeof k === "string" && k !== "") ? [{ alias: e.eref.aliasname, key: key as string[] }] : [];
+  }).sort((a, b) => a.alias.localeCompare(b.alias));
+}
+
+const anyValue = (arg: AstNode): AstNode => ({ FuncCall: { funcname: [S("any_value")], args: [arg], funcformat: "COERCE_EXPLICIT_CALL" } });
+
+/**
+ * KEY-FIRST GROUPING (issue 134, step 6: `GROUP BY` a table's primary key with its wide columns in the list and a LIMIT
+ * carried every wide value through the hash aggregate, the rewrite's `any_value` of each (src/duck/rewrite.ts
+ * `decidedByKey`), for every group before the limit kept a hundred: 29 GiB spilled and a failure, against 0.76 s). Where
+ * the analysis proves a table's WHOLE primary key grouped (`keyGrouped`, src/duck/distinct-key.ts: pg_index's primary
+ * key, never a UNIQUE index), a group holds one row of that table, so its columns are read by that row's number after
+ * the limit:
+ *
+ *   SELECT <the list, each column of the keyed table read of it> FROM (
+ *     SELECT any_value(t.rowid) AS __mason_r1, <every other output> AS __mason_c<i>, <each sort key> AS __mason_o<i>
+ *     FROM … WHERE … GROUP BY <as written, less a column of t only the list reads> HAVING … ORDER BY … LIMIT … OFFSET …
+ *   ) AS __mason_late LEFT JOIN t ON t.rowid = __mason_late.__mason_r1
+ *   ORDER BY __mason_late.__mason_o<i> …
+ *
+ * The groups are grouped as written, by the key, never by a row number: a key the copy holds twice for a moment is one
+ * group, as on the source, and `any_value` reads one of its rows. A column of the table grouped beside its key and read
+ * nowhere but as an output is left out of the grouping, being decided by the key. An output fetched is a column of a
+ * keyed table, bare or as the rewrite's `any_value` of it, under casts; every other output (an aggregate, a key of
+ * another table, a grouped expression) is computed inside as it was, and a NULL row number (an outer join's group of
+ * no row) reads NULL, as the group's `any_value` did. What stays as it was: grouping sets, DISTINCT, a row lock, no LIMIT
+ * in fact, a FROM item a join names, and a table with a column named rowid.
+ */
+function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
+  const s = bodyOf(select);
+  if (s.op !== undefined && s.op !== "SETOP_NONE") return null;
+  for (const f of ["distinctClause", "lockingClause", "intoClause", "valuesLists"]) {
+    if (s[f] !== undefined && !(Array.isArray(s[f]) && (s[f] as unknown[]).length === 0)) return null;
+  }
+  const groups = s.groupClause as AstNode[] | undefined;
+  if (!Array.isArray(groups) || groups.length === 0 || groups.some((g) => kindOf(g) === "GroupingSet")) return null;
+  if (s.limitCount === undefined || noLimit(s.limitCount) || (s.limitOption !== undefined && s.limitOption !== "LIMIT_OPTION_COUNT" && s.limitOption !== "LIMIT_OPTION_DEFAULT")) return null;
+  const items = fromItems(s.fromClause);
+  if (items === null) return null;
+  const aliases = items.map(aliasOfItem);
+  if (aliases.some((a) => a === null) || new Set(aliases).size !== aliases.length) return null;
+  const named = relations.filter((q) => q.items.length === aliases.length && q.items.every((t, i) => t?.alias === aliases[i]));
+  const first = named[0];
+  if (first === undefined || named.some((q) => JSON.stringify([q.items, q.keyed]) !== JSON.stringify([first.items, first.keyed]))) return null;
+  const keyed = new Map(first.keyed.flatMap((k) => {
+    const at = aliases.indexOf(k.alias), r = first.items[at];
+    const ok = r?.kind === "table" && kindOf(items[at]) === "RangeVar" && !r.columns.some((c) => c === "" || c.toLowerCase() === "rowid");
+    return ok ? [[k.alias, { ...k, at, columns: r.columns }] as const] : [];
+  }));
+  if (keyed.size === 0) return null;
+  const targets = s.targetList as AstNode[] | undefined;
+  if (targets === undefined || targets.some((t) => kindOf(t) !== "ResTarget" || hasStarTarget(t))) return null;
+  // a column of a keyed table, as a ColumnRef names it: its alias and its column, or null
+  const columnOf = (n: unknown): { alias: string; column: string } | null => {
+    if (kindOf(n) !== "ColumnRef") return null;
+    const names = fieldNames(bodyOf(n));
+    const column = names.at(-1);
+    if (typeof column !== "string" || names.length > 2) return null;
+    if (names.length === 2) return typeof names[0] === "string" && keyed.get(names[0])?.columns.includes(column) ? { alias: names[0], column } : null;
+    const owners = first.items.filter((r) => r?.columns.includes(column));
+    return owners.length === 1 && keyed.has(owners[0]!.alias) ? { alias: owners[0]!.alias, column } : null;
+  };
+  // an output read of a keyed table's row: its column, bare or as any_value of it, under casts
+  const fetchOf = (val: unknown): { alias: string; outer: AstNode } | null => {
+    if (kindOf(val) === "TypeCast") {
+      const inner = fetchOf(bodyOf(val).arg);
+      return inner === null ? null : { alias: inner.alias, outer: { TypeCast: { ...structuredClone(bodyOf(val)), arg: inner.outer } } };
+    }
+    let column = val;
+    if (kindOf(val) === "FuncCall") {
+      const b = bodyOf(val), args = b.args as unknown[] | undefined;
+      const plain = Object.keys(b).every((k) => ["funcname", "args", "funcformat", "location"].includes(k));
+      if (!plain || fieldNames({ fields: b.funcname }).join(".").toLowerCase() !== "any_value" || args?.length !== 1) return null;
+      column = args[0];
+    }
+    const c = columnOf(column);
+    return c === null ? null : { alias: c.alias, outer: ref(c.alias, c.column) };
+  };
+  // an ordinal or an output's name in the GROUP BY is that output's expression: the inner list is another list
+  const outputs = new Map<string, AstNode[]>();
+  for (const t of targets) { const name = bodyOf(t).name; if (typeof name === "string") outputs.set(name, [...outputs.get(name) ?? [], bodyOf(t).val as AstNode]); }
+  const inputs = new Set(first.items.flatMap((r) => r?.columns ?? []));
+  const grouping: AstNode[] = [];
+  for (const g of groups) {
+    if (kindOf(g) === "A_Const" && isObject(bodyOf(g).ival)) {
+      const t = targets[Number((bodyOf(g).ival as Body).ival ?? 0) - 1];
+      if (t === undefined) return null;
+      grouping.push(structuredClone(bodyOf(t).val as AstNode));
+      continue;
+    }
+    if (kindOf(g) === "A_Const") return null;
+    const bare = kindOf(g) === "ColumnRef" ? fieldNames(bodyOf(g)) : [];
+    const named1 = bare.length === 1 && typeof bare[0] === "string" && !inputs.has(bare[0]) ? outputs.get(bare[0]) : undefined;
+    if (named1 !== undefined && named1.length !== 1) return null;
+    grouping.push(structuredClone(named1?.[0] ?? g));
+  }
+  const shown = new Map<number, number>();
+  const sorted = sortKeys(targets, (s.sortClause as AstNode[] | undefined) ?? [], shown);
+  if (sorted === null) return null;
+  const { keys, sorts } = sorted;
+  const fetched: string[] = [];
+  const carried: AstNode[] = [];
+  const list = targets.map((t, i) => {
+    const b = bodyOf(t), at = shown.get(i);
+    if (at !== undefined) return { ResTarget: { ...b, val: ref(LATE, `__mason_o${at + 1}`) } };
+    const f = fetchOf(b.val);
+    if (f !== null) { if (!fetched.includes(f.alias)) fetched.push(f.alias); return { ResTarget: { ...b, val: f.outer } }; }
+    const name = `__mason_c${carried.length + 1}`;
+    carried.push({ ResTarget: { name, val: b.val } });
+    return { ResTarget: { ...b, val: ref(LATE, name) } };
+  });
+  if (fetched.length === 0) return null;
+  // a grouped column of a keyed table, not its key, read nowhere inside but where it is grouped: decided by the key
+  const mentions = (n: unknown, c: { alias: string; column: string }): boolean => {
+    if (Array.isArray(n)) return n.some((x) => mentions(x, c));
+    if (!isObject(n)) return false;
+    const own = columnOf(n);
+    if (own !== null) return own.alias === c.alias && own.column === c.column;
+    return Object.values(n).some((x) => mentions(x, c));
+  };
+  // (or the rewrite's key of one, a jsonb's: its columns alone, through Mason's own functions, nothing volatile)
+  const decided = (g: unknown): Array<{ alias: string; column: string }> | null => {
+    const out: Array<{ alias: string; column: string }> = [];
+    let ok = true;
+    const walk = (n: unknown): void => {
+      if (!ok) return;
+      if (Array.isArray(n)) { n.forEach(walk); return; }
+      if (!isObject(n)) return;
+      const k = kindOf(n);
+      if (k === "ColumnRef") {
+        const c = columnOf(n);
+        if (c === null || keyed.get(c.alias)!.key.includes(c.column)) ok = false;
+        else out.push(c);
+        return;
+      }
+      if (k === "SubLink") { ok = false; return; }
+      if (k === "FuncCall") {
+        const name = fieldNames({ fields: bodyOf(n).funcname }).join(".");
+        if (!name.startsWith("__mason_") && name !== "getvariable") { ok = false; return; }
+      }
+      Object.values(n).forEach(walk);
+    };
+    walk(g);
+    return ok && out.length > 0 ? out : null;
+  };
+  const kept = grouping.filter((g, i) => {
+    const columns = decided(g);
+    if (columns === null) return true;
+    return columns.some((c) => mentions([carried, keys, s.havingClause, s.windowClause, grouping.filter((_x, j) => j !== i)], c));
+  });
+  const fromInner = mapFrom(s.fromClause as unknown[], (n, i) => keyed.has(aliases[i]!) ? ownTable(bodyOf(n)) : n);
+  const { sortClause: _sorts, ...unsorted } = s;
+  const inner: Body = { ...unsorted, fromClause: fromInner, groupClause: kept, targetList: [
+    ...fetched.map((alias, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: anyValue(rowNumber(alias)) } })),
+    ...carried,
+    ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
+  ] };
+  if (sorts.length > 0) inner.sortClause = sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: structuredClone(keys[i]!) } }));
+  let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
+  fetched.forEach((alias, i) => {
+    joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg: ownTable(bodyOf(items[keyed.get(alias)!.at]!)), quals: { A_Expr: {
+      kind: "AEXPR_OP", name: [S("=")], lexpr: rowNumber(alias), rexpr: ref(LATE, `__mason_r${i + 1}`) } } } };
+  });
+  return { SelectStmt: {
+    targetList: list,
+    fromClause: [joined],
+    ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: ref(LATE, `__mason_o${i + 1}`) } })) } : {}),
+    limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
+  } };
+}
+
 /** a limited SELECT that sorts: only one the keys alone put back in order may compute its list after the limit */
 function sortedLimited(s: Body): { targets: AstNode[]; sorts: AstNode[] } | null {
   const shape = limited(s);
@@ -372,9 +562,9 @@ const noLimit = (n: unknown): boolean => kindOf(n) === "A_Const" ? bodyOf(n).isn
  *  output's own expression, as Postgres reads it (an output name before an input column's). Without `shown`, a sort by a
  *  computed output is left alone: over one table it computes that output for every row anyway, so nothing is deferred.
  *  With it, the key is that output, and `shown` says which key each computed output is, by the output's place: one value */
-function sortKeys(targets: AstNode[], sorts: AstNode[], shown: Map<number, number> | null = null): AstNode[] | null {
-  const keys: AstNode[] = [];
-  for (const sort of sorts) {
+function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, number> | null = null): { keys: AstNode[]; sorts: AstNode[] } | null {
+  const keys: AstNode[] = [], sorts: AstNode[] = [];
+  for (const sort of written) {
     if (kindOf(sort) !== "SortBy") return null;
     const b = bodyOf(sort);
     if (b.useOp !== undefined) return null;
@@ -390,12 +580,14 @@ function sortKeys(targets: AstNode[], sorts: AstNode[], shown: Map<number, numbe
       target = named[0];
     }
     const computed = (t: AstNode): boolean => rowWise(bodyOf(t).val).computes;
+    sorts.push(sort);
     if (target !== undefined) {
       if (computed(target)) {
         if (shown === null) return null;
         if (!shown.has(targets.indexOf(target))) shown.set(targets.indexOf(target), keys.length);
       }
-      keys.push(structuredClone(bodyOf(target).val as AstNode));
+      // (an output a rewrite wrote as a bare literal: a key the engine evaluates, never an ordinal of the query it is in)
+      keys.push(evaluated(structuredClone(bodyOf(target).val as AstNode)));
     } else if (kindOf(node) === "A_Const") return null;
     else {
       // the expression repeated: Postgres's first output equal to it is this key (findTargetlistEntrySQL99)
@@ -404,15 +596,16 @@ function sortKeys(targets: AstNode[], sorts: AstNode[], shown: Map<number, numbe
       keys.push(structuredClone(node as AstNode));
     }
   }
-  return keys;
+  return { keys, sorts };
 }
+
 
 /** one SELECT written so, or null where it is not so shaped */
 function afterLimit(select: AstNode): AstNode | null {
   const s = bodyOf(select);
   const shape = sortedLimited(s);
   if (shape === null) return null;
-  const { targets, sorts } = shape;
+  const { targets } = shape;
   let computes = false;
   for (const t of targets) {
     if (kindOf(t) !== "ResTarget") return null;
@@ -421,8 +614,9 @@ function afterLimit(select: AstNode): AstNode | null {
     computes ||= r.computes;
   }
   if (!computes) return null;
-  const keys = sortKeys(targets, sorts);
-  if (keys === null) return null;
+  const sorted = sortKeys(targets, shape.sorts);
+  if (sorted === null || sorted.sorts.length === 0) return null;
+  const { keys, sorts } = sorted;
   const columns = new Map<string, string>();
   const list = targets.map((t) => ({ ResTarget: { ...bodyOf(t), val: overLate(bodyOf(t).val, columns) } }));
   const inner: Body = { ...s, targetList: [
@@ -448,12 +642,13 @@ interface Table { kind: "table"; alias: string; columns: string[] }
 /** a derived table or a WITH query of a query's rtable. `read` is its query where it may be read twice, a projection
  *  and a WHERE with nothing volatile or from outside it; null, its columns are carried. `cte` names a WITH query that
  *  may stand in its place */
-interface Derived { kind: "derived"; alias: string; columns: string[]; read: Query | null; cte: string | null }
+/** `constants`: which of its columns the analysis made a Const (src/duck/constant-key.ts), a sort key that orders nothing */
+interface Derived { kind: "derived"; alias: string; columns: string[]; read: Query | null; cte: string | null; constants: boolean[] }
 /** a role's filtered read, behind its barrier and its wall (see above): fetched by its row number, through itself */
 interface Walled { kind: "walled"; alias: string; columns: string[] }
 /** a FROM item; null for one that is none of these (a function, a VALUES list) */
 type Relation = Table | Derived | Walled | null;
-const RTE_RELATION = "0", RTE_SUBQUERY = "1", RTE_JOIN = "2", RTE_CTE = "6";
+const RTE_RELATION = "0", RTE_SUBQUERY = "1", RTE_JOIN = "2", RTE_CTE = "6", RTE_GROUP = "9";
 /** Postgres's first OID for an object not of its own (FirstNormalObjectId): below it, a catalog table, no copy */
 const FIRST_USER_OID = 16384;
 /** ctematerialized: CTEMaterializeAlways */
@@ -465,7 +660,9 @@ const MATERIALIZED = "1";
  *  only the join can (it is carried). `joins` is each JOIN's merged columns, in the order the tree meets its joins.
  *  `volatileOutputs` is the outputs a sort reads that hold a volatile function, by place, `volatileKeys` whether any sort
  *  key does, and `sorts` how many keys Postgres sorts by: a rewrite that wrote them as others (a collation's) repeats a value */
-interface Query { items: Relation[]; bounded: boolean; rowWise: boolean; listReads: string[]; listSubLinks: number; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number }
+interface Query { items: Relation[]; bounded: boolean; rowWise: boolean; listReads: string[]; listSubLinks: number; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number;
+  /** the tables whose whole primary key the query groups by (`keyGrouped`), by alias, with the key's columns by name */
+  keyed: Array<{ alias: string; key: string[] }> }
 
 function isTreeNode(v: TreeValue | undefined): v is TreeNode { return typeof v === "object" && v !== null && !Array.isArray(v); }
 const treeList = (v: TreeValue | undefined): TreeValue[] => Array.isArray(v) ? v : [];
@@ -595,6 +792,11 @@ function walledQuery(q: TreeNode, wall: string): boolean {
   return rtable.length === 1 && isTreeNode(e) && e.rtekind === RTE_SUBQUERY && isTreeNode(e.eref) && e.eref.aliasname === wall;
 }
 
+/** each output column of an analysed query, whether the analysis made it a Const (a set operation's are its own VARs) */
+function constantColumns(q: TreeNode): boolean[] {
+  return treeList(q.targetList).filter((t): t is TreeNode => isTreeNode(t) && t.resjunk !== "true").map((t) => constantExpression(t.expr));
+}
+
 function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlySet<number>, wall: string | null): Query[] {
   const out: Query[] = [];
   const queryOf = (q: TreeNode, enclosing: readonly TreeValue[][]): Query => {
@@ -608,18 +810,20 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
         return holdsVolatile(e.subquery, volatile) ? null : { kind: "walled", alias, columns };
       }
       if (e.rtekind === RTE_SUBQUERY && isTreeNode(e.subquery)) {
-        return { kind: "derived", alias, columns, cte: null, read: e.lateral !== "true" && readTwice(e.subquery, volatile) ? queryOf(e.subquery, scopes) : null };
+        return { kind: "derived", alias, columns, cte: null, read: e.lateral !== "true" && readTwice(e.subquery, volatile) ? queryOf(e.subquery, scopes) : null, constants: constantColumns(e.subquery) };
       }
       if (e.rtekind !== RTE_CTE) return null;
       const level = scopes[Number(e.ctelevelsup)] ?? [];
       const cte = level.find((c): c is TreeNode => isTreeNode(c) && c.ctename === e.ctename);
       const once = cte !== undefined && cte.cterefcount === "1" && cte.ctematerialized !== MATERIALIZED && isTreeNode(cte.ctequery) && readTwice(cte.ctequery, volatile);
-      return { kind: "derived", alias, columns, cte: once ? e.ctename as string : null, read: once ? queryOf(cte.ctequery as TreeNode, scopes.slice(Number(e.ctelevelsup))) : null };
+      return { kind: "derived", alias, columns, cte: once ? e.ctename as string : null, read: once ? queryOf(cte.ctequery as TreeNode, scopes.slice(Number(e.ctelevelsup))) : null,
+        constants: cte !== undefined && isTreeNode(cte.ctequery) ? constantColumns(cte.ctequery) : [] };
     };
-    const items = treeList(q.rtable).filter((e): e is TreeNode => isTreeNode(e) && e.rtekind !== RTE_JOIN).map(relation);
+    // (a grouped query's RTE_GROUP entry, Postgres 17+, is no FROM item: it holds what the GROUP BY groups)
+    const items = treeList(q.rtable).filter((e): e is TreeNode => isTreeNode(e) && e.rtekind !== RTE_JOIN && e.rtekind !== RTE_GROUP).map(relation);
     const computed = computedSorts(q).filter((c) => holdsVolatile(c.expr, volatile));
     return { items, bounded: fanOutBounded(q, keys), rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
-      volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length };
+      volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length, keyed: keyedTables(q, keys) };
   };
   const visit = (v: TreeValue | undefined, enclosing: readonly TreeValue[][]): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x, enclosing); return; }
@@ -828,13 +1032,26 @@ function fold(s: Body, sub: Body, item: Derived): Body | null {
   const byName = new Map<string, unknown>();
   item.columns.forEach((c, i) => byName.set(c, byName.has(c) ? null : values[i]));
   let whole = true;
+  // the item's column a reference reads, by the name the wrapper reads it by
+  const columnOf = (n: Record<string, unknown>): string | null => {
+    const names = fieldNames(n.ColumnRef as Body);
+    const column = names.length === 2 && names[0] === item.alias ? names[1] : names.length === 1 ? names[0] : null;
+    return typeof column === "string" ? column : null;
+  };
+  // the item's columns the ANALYSIS made a Const (src/duck/constant-key.ts), by a name it has once: a key reading one
+  // orders nothing
+  const constant = new Set(item.columns.filter((c, i) => item.constants[i] === true && item.columns.indexOf(c) === item.columns.lastIndexOf(c)));
+  const readsConstant = (n: unknown): boolean => {
+    if (!isObject(n) || kindOf(n) !== "ColumnRef" || !isObject(n.ColumnRef)) return false;
+    const column = columnOf(n);
+    return column !== null && !ownName(column) && constant.has(column);
+  };
   const over = (n: unknown): unknown => {
     if (Array.isArray(n)) return n.map(over);
     if (!isObject(n)) return n;
     if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
-      const names = fieldNames(n.ColumnRef);
-      const column = names.length === 2 && names[0] === item.alias ? names[1] : names.length === 1 ? names[0] : null;
-      if (typeof column === "string" && ownName(column)) return n;
+      const column = columnOf(n);
+      if (column !== null && ownName(column)) return n;
       const value = typeof column === "string" ? byName.get(column) : undefined;
       if (value === undefined || value === null) { whole = false; return n; }
       return structuredClone(value);
@@ -842,23 +1059,36 @@ function fold(s: Body, sub: Body, item: Derived): Body | null {
     return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, over(v)]));
   };
   const targets: AstNode[] = [];
+  // which of them is a constant: a column of the item the analysis made a Const, read as it is
+  const constantOutputs: boolean[] = [];
   for (const t of s.targetList as AstNode[]) {
     if (kindOf(t) !== "ResTarget") return null;
     if (hasStarTarget(t)) {
       const fields = bodyOf(bodyOf(t).val).fields as unknown[];
       if (fields.length > 2 || (fields.length === 2 && bodyOf(fields[0]).sval !== item.alias)) return null;
-      item.columns.forEach((c, i) => targets.push({ ResTarget: { name: c, val: structuredClone(values[i]) } }));
+      item.columns.forEach((c, i) => { targets.push({ ResTarget: { name: c, val: structuredClone(values[i]) } }); constantOutputs.push(constant.has(c)); });
       continue;
     }
     const name = outputName(t);
+    constantOutputs.push(readsConstant(bodyOf(t).val));
     targets.push({ ResTarget: { ...bodyOf(t), ...(name !== null ? { name } : {}), val: over(bodyOf(t).val) } });
   }
   // an output's number or bare name is read by `sortKeys` from the list; any other key is over the wrapper's columns
   const outputs = new Set(targets.map(outputName));
-  const sorts = ((s.sortClause as AstNode[] | undefined) ?? []).map((sort) => {
+  // A CONSTANT SORT KEY (the class, issue 134): a key reading the derived table's column the analysis made a Const
+  // (`s.one`, the subquery's `1 AS one`), by itself or by the wrapper's output's number or name, orders nothing, and
+  // folded it would be the literal, an ordinal to the engine: it is no key. Any other key folded is written so the
+  // engine evaluates it (`evaluated`), never as a bare literal
+  const sorts = ((s.sortClause as AstNode[] | undefined) ?? []).flatMap((sort) => {
     const node = bodyOf(sort).node;
     const bare = kindOf(node) === "ColumnRef" && (bodyOf(node).fields as unknown[]).length === 1 ? fieldNames(bodyOf(node))[0] : null;
-    return kindOf(node) === "A_Const" || (bare !== null && bare !== undefined && outputs.has(bare)) ? sort : { SortBy: { ...bodyOf(sort), node: over(node) } };
+    const named = bare !== null && bare !== undefined && outputs.has(bare);
+    const at = kindOf(node) === "A_Const" && isObject(bodyOf(node).ival) ? Number((bodyOf(node).ival as Body).ival ?? 0) - 1
+      : named ? targets.findIndex((t) => outputName(t) === bare) : -1;
+    if (at >= 0 && constantOutputs[at] === true) return [];
+    if (kindOf(node) === "A_Const" || named) return [sort];
+    if (readsConstant(node)) return [];
+    return [{ SortBy: { ...bodyOf(sort), node: evaluated(over(node)) } }];
   });
   const where = over(s.whereClause);
   if (!whole) return null;
@@ -1009,13 +1239,14 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   if (subLinks.some((a) => { const i = aliases.indexOf(a); return i < 0 || (listed[i]!.kind === "derived" && sides[i] === null); })) return null;
   const outputs = writtenOut(s.targetList as AstNode[], listed, tablesAlone, subqueried ? subLinks : null);
   if (outputs === null) return null;
-  const sorts = (s.sortClause as AstNode[] | undefined) ?? [];
+  const writtenSorts = (s.sortClause as AstNode[] | undefined) ?? [];
   // the keys are read from the outputs as the join reads them: a bare merged column is the join's, inside
   const shown = new Map<number, number>();
-  const keys = sortKeys(outputs.list, sorts, shown);
-  if (keys === null) return null;
+  const sorted = sortKeys(outputs.list, writtenSorts, shown);
+  if (sorted === null) return null;
+  const { keys, sorts } = sorted;
   // ONE VALUE: a volatile output a sort reads is read from its key, and a key a written form cannot show stays as it was
-  if (named.some((q) => q.volatileOutputs.some((o) => !shown?.has(o)) || (q.volatileKeys && q.sorts !== sorts.length))) return null;
+  if (named.some((q) => q.volatileOutputs.some((o) => !shown?.has(o)) || (q.volatileKeys && q.sorts !== writtenSorts.length))) return null;
   const volatileKeys = named.some((q) => q.volatileKeys);
   if (query.joins.length !== joinCount(s.fromClause) || natural(s.fromClause)) return null;
   const columns = new Map<string, { name: string; val: AstNode }>();
@@ -1046,7 +1277,8 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   // What is carried has no row number, so with one (a keyed WITH query read twice) they would be no total order
   const pagedInOrder = sorts.length === 0 && carried.length === 0 && (query === first ? named.every((q) => q.bounded) : query.bounded);
   const order = (node: AstNode): AstNode => ({ SortBy: { node, sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } });
-  const { withClause: _with, ...body } = s;
+  // (the written sort is never the inner's: the outer sorts the rows the inner fetched)
+  const { withClause: _with, sortClause: _sorts, ...body } = s;
   const left = isObject(s.withClause) ? (s.withClause.ctes as AstNode[]).filter((c) => !withs.used.has(String(bodyOf(c).ctename))) : [];
   const inner: Body = { ...body, ...(left.length > 0 ? { withClause: { ...s.withClause as Body, ctes: left } } : {}), fromClause: from, targetList: [
     ...fetched.map((t, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: t.id } })),

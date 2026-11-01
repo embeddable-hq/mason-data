@@ -136,6 +136,18 @@ paths:
     PR 118. The proof decides cost and pages, never an answer, so what it cannot show goes unsorted. OFFSET alone and
     LIMIT ALL stay as they were, and `afterLimit` still needs a sort. `tests/duck-distinct-key.test.ts` holds the proof,
     the plan fixture and `tests/duck-wire.test.ts` each side, `oracle/unordered-limit.ts` the rows. ("A top N over joined tables");
+  - **a grouped top N on a whole primary key reads its table's columns after the LIMIT** (`keyFirst`, src/duck/late.ts,
+    issue 134, step 6): where the analysis proves a table's WHOLE primary key grouped (`keyGrouped`, pg_index's primary
+    key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and
+    only then is each kept group's row of that table fetched by its row number, so no wide value goes through the hash
+    aggregate. It groups by the key, never by `rowid`: a key the copy holds twice for a moment is one group. What stays
+    as it was: grouping sets, DISTINCT, a row lock, no LIMIT, a partial key or no key, a FROM item a join names (an
+    aliased JoinExpr, which `fromItems` refuses), and a `*` in the list. Only a plain table is FETCHED (a `RangeVar` the
+    analysis reads as a table, `r?.kind === "table"`): a walled read, a derived item and a table with a column named
+    `rowid` never are, but a statement that mixes one with a keyed plain table is still rewritten and only the plain
+    table is fetched; with no such table, or no output read of one, it stays as it was. `tests/duck-wire.test.ts`
+    holds each side over `late`, `late_p` (the composite and partial keys) and `late_d`; `oracle/bi-shapes.ts` the rows
+    ("Key-first grouping", docs/DESIGN.md).
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
   **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
   independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
@@ -146,6 +158,15 @@ paths:
 - **An output's number or bare name is read through `Rewriter.outputs` alone** (issue 112): a target is one output, a `*`
   one per column from Postgres's expansion (`Typed.column`), so every rule meets a star's column as the column named. A
   `targets[n - 1]` of a number is the wrong column beside a `*` (the class: an output not resolved to its column).
+  Its second instance (PR 170): a key Postgres binds to an output or another clause's key by EQUALITY OF THE ANALYSED
+  EXPRESSIONS (`'1.5'::numeric` to `1.5::numeric AS v`) leaves no node at its offset, so whether such a key is constant is
+  read by one resolver, `keysConstant` (src/duck/constant-key.ts), from the analysis's own sort lists (`Keys`,
+  src/duck/pgtree.ts), never from a syntactic match. Detector: tests/duck-wire.test.ts "a key equal to an output …".
+  Its third (PR 170, the fourth round): the binding decides how a key is WRITTEN, not only whether it is constant. Every
+  ORDER BY and DISTINCT ON key, by name, number or equal expression, is bound by `Rewriter.keysBound` (GROUP BY's by
+  `groupOutput`), and a key bound to an output IS that output: a jsonb's, citext's or collation's key built over it,
+  and a key bound by equality to a computed output written as its ordinal, never a second evaluation of a volatile
+  one. Detector: tests/duck-wire.test.ts "a key bound to an output is that output …".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its

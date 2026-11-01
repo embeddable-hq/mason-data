@@ -43,6 +43,7 @@ const COUNT_ANY = 2147;
 const RTE_RELATION = 0;
 const RTE_SUBQUERY = 1;
 const RTE_CTE = 6;
+const RTE_GROUP = 9;
 /** JoinType: INNER, LEFT, FULL, RIGHT (nodes.h); the planner's SEMI / ANTI never reach a parse tree */
 const JOINS = new Set([0, 1, 2, 3]);
 
@@ -331,6 +332,66 @@ export function fanOutTables(tree: TreeValue): number[] {
     if (v._node === "QUERY" && isNode(v.limitCount) && list(v.sortClause).length === 0) {
       const tables = tablesUnder(v);
       if (tables.length >= 2) for (const r of tables) relids.add(r);
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return [...relids].sort((a, b) => a - b);
+}
+
+/** a grouped expression's collation where it is a bare column (a VAR's, or a binary-compatible relabel's own) */
+const collationOf = (v: TreeValue | undefined): number => !isNode(v) ? 0 : v._node === "RELABELTYPE" ? num(v.resultcollid) ?? 0 : num(v.varcollid) ?? 0;
+
+/**
+ * THE KEY-FIRST GROUPING PROOF (issue 134, step 6; src/duck/late.ts `keyFirst`): the base tables of `query` whose WHOLE
+ * primary key it groups by, by rtindex, each with its key's columns by attno. A group then holds one row of that table
+ * (or none, where an outer join supplied none), so every column of it is decided by the group, and the row can be read
+ * by its row number after the limit. Each key column grouped bare (a binary-compatible relabel allowed), by its btree
+ * family's equality and under its collation; a grouping set proves nothing (a key reads NULL in its total rows). The
+ * key is the primary key, never a UNIQUE index (the module's doc): the copy is written by it. A key the copy holds
+ * twice for a moment (a change applied in pieces) is grouped as written, never by a row number, so no group is split.
+ */
+export function keyGrouped(query: TreeNode, keys: PrimaryKeys): Map<number, number[]> {
+  const out = new Map<number, number[]>();
+  if (list(query.groupingSets).length > 0) return out;
+  const targets = list(query.targetList).filter(isNode);
+  const rtable = list(query.rtable);
+  const grouped = new Map<number, Set<number>>();
+  // a grouped output is a VAR of the query's RTE_GROUP entry (Postgres 17+): the expression grouped is its groupexprs'
+  const grouped1 = (e: TreeValue | undefined): TreeValue | undefined => {
+    const v = ownVar(e), rte = v === null ? undefined : rtable[(num(v.varno) ?? 0) - 1];
+    return isNode(rte) && num(rte.rtekind) === RTE_GROUP ? list(rte.groupexprs)[(num(v!.varattno) ?? 0) - 1] : e;
+  };
+  for (const g of list(query.groupClause)) {
+    if (!isNode(g)) continue;
+    const t = targets.find((x) => x.ressortgroupref === g.tleSortGroupRef);
+    const expr = grouped1(t?.expr);
+    const v = ownVar(expr);
+    const rtindex = num(v?.varno), attno = num(v?.varattno);
+    if (v === null || rtindex === null || attno === null) continue;
+    const table = baseTable(rtable, { _node: "RANGETBLREF", rtindex: String(rtindex) });
+    const key = table === null ? undefined : keys.get(table.relid)?.get(attno);
+    const collation = collationOf(expr);
+    if (key === undefined || !key.equalities.has(num(g.eqop) ?? -1) || (collation !== 0 && collation !== key.collation)) continue;
+    grouped.set(rtindex, new Set([...grouped.get(rtindex) ?? [], attno]));
+  }
+  for (const [rtindex, attnos] of grouped) {
+    const table = baseTable(rtable, { _node: "RANGETBLREF", rtindex: String(rtindex) })!;
+    const key = [...keys.get(table.relid)!.keys()];
+    if (key.every((a) => attnos.has(a))) out.set(rtindex, key);
+  }
+  return out;
+}
+
+/** The base tables `keyGrouped` may be asked about: those of a query that groups and has a LIMIT (none: the plan asks
+ *  the catalog nothing) */
+export function groupedLimitTables(tree: TreeValue): number[] {
+  const relids = new Set<number>();
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (!isNode(v)) return;
+    if (v._node === "QUERY" && isNode(v.limitCount) && list(v.groupClause).length > 0) {
+      for (const e of list(v.rtable)) if (isNode(e) && num(e.rtekind) === RTE_RELATION) { const r = num(e.relid) ?? 0; if (r > 0) relids.add(r); }
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };
