@@ -115,6 +115,9 @@ const DDL = [
   "INSERT INTO public.late_p SELECT (range % 50)::INTEGER, (range // 50)::INTEGER, 'n' || range FROM range(200)",
   "CREATE TABLE public.late_n (id INTEGER, c INTEGER)",
   "INSERT INTO public.late_n SELECT range::INTEGER, (range % 50)::INTEGER FROM range(50)",
+  // a key the copy holds twice for a moment (a change applied in pieces): the catalog declares it the key, the copy holds row 1 twice
+  "CREATE TABLE public.late_d (id INTEGER, w VARCHAR)",
+  "INSERT INTO public.late_d VALUES (1, 'one'), (1, 'one'), (2, 'two'), (3, 'three')",
   'CREATE TABLE public.rowid_cased (id INTEGER PRIMARY KEY, "RowId" INTEGER)',
   'INSERT INTO public.rowid_cased SELECT range::INTEGER, 5 FROM range(1, 7)',
   "INSERT INTO public.late_c SELECT range::INTEGER, 'c' || range FROM range(50)",
@@ -230,6 +233,7 @@ const schema: PgSchema = {
     { name: "late_c", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "name", type: "text" }] },
     { name: "late_p", primaryKey: ["c", "line"], joins: [], columns: [{ name: "c", type: "int4" }, { name: "line", type: "int4" }, { name: "note", type: "text" }] },
     { name: "late_n", primaryKey: [], joins: [], columns: [{ name: "id", type: "int4" }, { name: "c", type: "int4" }] },
+    { name: "late_d", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "w", type: "text" }] },
     { name: "rowid_cased", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "RowId", type: "int4" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
@@ -402,7 +406,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -2514,6 +2518,68 @@ test("a computed key and a merged column in a prepared statement run after a SET
         }
       } finally { await truth.exec("SET TimeZone = 'UTC'"); }
     }
+  } finally { await c.end(); }
+});
+
+test("a GROUP BY a table's whole primary key with a LIMIT groups on the key and reads that table's columns after the limit (issue 134, step 6)", async () => {
+  const c = await client();
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const KEYED = /any_value\(\w+\.rowid\) AS __mason_r1.*\) AS __mason_late LEFT JOIN \w+ AS (\w+) ON \1\.rowid = __mason_late\.__mason_r1/;
+  try {
+    const answered = [
+      // the key and other columns of its table, sorted, by a column, an aggregate's name and an ordinal
+      "SELECT l.id, l.j, l.k, count(c.id) AS n FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY l.id ORDER BY l.id DESC LIMIT 4",
+      "SELECT l.id, l.j, count(*) AS n FROM late l JOIN late_c c ON c.id = l.c GROUP BY l.id ORDER BY n DESC, l.id LIMIT 3 OFFSET 2",
+      "SELECT l.j, l.k, l.id FROM late l GROUP BY l.id ORDER BY 2, 3 LIMIT 3",
+      // the other columns grouped beside the key, by their ordinals (a tool groups by every column it shows)
+      "SELECT l.id, l.j, l.k, max(c.name) AS m FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY 1, 2, 3 ORDER BY 1 LIMIT 3",
+      // a key of one table beside a column of another, grouped: a NULL in that grouped column of the outer join
+      "SELECT l.id, l.j, c.name, count(*) AS n FROM late l LEFT JOIN late_c c ON c.id = l.c + 40 GROUP BY l.id, c.name ORDER BY c.name NULLS FIRST, l.id LIMIT 5 OFFSET 8",
+      // the keyed table on the nullable side: its group of no row reads NULL
+      "SELECT c.id, l.id AS l, l.j, count(c.id) AS n FROM late_c c LEFT JOIN late l ON l.c = c.id AND l.id < 0 GROUP BY c.id, l.id ORDER BY c.id DESC LIMIT 3",
+      // the nulls idiom over a fetched column, and a HAVING
+      "SELECT l.id, l.k, sum(c.id) AS s FROM late l JOIN late_c c ON c.id = l.c GROUP BY l.id HAVING sum(c.id) > 10 ORDER BY (l.k) IS NULL ASC, l.k DESC LIMIT 3",
+      // a composite key, whole, grouped with another column of its table
+      "SELECT p.c, p.line, p.note FROM late_p p GROUP BY p.c, p.note, p.line ORDER BY 1, 2 LIMIT 3",
+    ];
+    for (const sql of answered) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      assert.match(await sent(sql), KEYED, sql);
+    }
+    // the grouped columns of the table the list alone reads are left out of the grouping: the key decides them
+    assert.match(await sent("SELECT l.id, l.j, l.k, max(c.name) AS m FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY 1, 2, 3 ORDER BY 1 LIMIT 3"), /GROUP BY l\.id ORDER BY/);
+    // unsorted: as many rows, each a group of the whole answer
+    const unsorted = await answer(c, "SELECT l.id, l.j, count(*) AS n FROM late l GROUP BY l.id LIMIT 5");
+    assert.equal(unsorted.rows.length, 5);
+    const whole = held(await postgres("SELECT l.id, l.j, count(*) AS n FROM late l GROUP BY l.id")) as { rows: unknown[][] };
+    for (const r of (held(unsorted) as { rows: unknown[][] }).rows) assert.ok(whole.rows.some((w) => JSON.stringify(w) === JSON.stringify(r)), JSON.stringify(r));
+    // a key the copy holds twice for a moment is one group, read of one of its rows: never split by a row number
+    assert.deepEqual((await answer(c, "SELECT d.id, d.w, count(*) AS n FROM late_d d GROUP BY d.id ORDER BY d.id LIMIT 5")).rows, [["1", "one", "2"], ["2", "two", "1"], ["3", "three", "1"]]);
+    assert.match(await sent("SELECT d.id, d.w, count(*) AS n FROM late_d d GROUP BY d.id ORDER BY d.id LIMIT 5"), /any_value\(d\.rowid\) AS __mason_r1.* GROUP BY d\.id /);
+    // what stays as it was: a key in part, no key, no LIMIT, grouping sets, a key's column grouped as an expression
+    for (const sql of ["SELECT p.c, p.note FROM late_p p GROUP BY p.c, p.note ORDER BY 1, 2 LIMIT 3",
+      "SELECT p.c, max(p.note) AS m FROM late_p p GROUP BY p.c ORDER BY 1 LIMIT 3",
+      "SELECT n.id, count(*) AS k FROM late_n n GROUP BY n.id ORDER BY 1 LIMIT 3",
+      "SELECT l.id, l.j FROM late l GROUP BY l.id ORDER BY l.id",
+      "SELECT l.id, count(*) AS n FROM late l GROUP BY ROLLUP (l.id) ORDER BY 1 NULLS FIRST LIMIT 3",
+      "SELECT l.id + 0 AS i, count(*) AS n FROM late l GROUP BY l.id + 0 ORDER BY 1 LIMIT 3"]) {
+      assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    }
+    // a statement prepared, run after a SET: the same plan
+    await c.query({ name: "keyfirst", text: "SELECT l.id, l.j, count(c.id) AS n FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY l.id ORDER BY l.id LIMIT $1", values: [2] });
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    logged.length = 0;
+    const again = await c.query({ name: "keyfirst", text: "SELECT l.id, l.j, count(c.id) AS n FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY l.id ORDER BY l.id LIMIT $1", values: [3], rowMode: "array" });
+    assert.equal(again.rows.length, 3);
+    assert.match(logged.findLast((l) => l.startsWith("statement: ")) ?? "", KEYED);
   } finally { await c.end(); }
 });
 

@@ -529,6 +529,30 @@
       "full_sort": false
     },
     {
+      "name": "a GROUP BY the key with wide columns and a LIMIT: grouped on the key, read by row number",
+      "sql": "SELECT o.id, o.meta, o.notes, count(i.id) AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY o.id DESC LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.orders",
+        "        TOP_N (1 key)",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              HASH_GROUP_BY",
+        "                PROJECTION",
+        "                  PROJECTION",
+        "                    HASH_JOIN",
+        "                      TABLE_SCAN public.orders [top-N filter: id]",
+        "                      TABLE_SCAN public.order_items"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "a tool's wrapper of a many-to-many join, no sort",
       "sql": "SELECT * FROM (SELECT c.id, o.meta FROM customers c JOIN orders o ON c.tenant_id = o.tenant_id) t LIMIT 100",
       "plan": [
@@ -2005,15 +2029,21 @@
       "name": "BI shape: GROUP BY a primary key, selecting the columns it decides",
       "sql": "SELECT c.id, c.name, c.email, count(o.id) AS n, sum(o.amount) AS total FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY c.name, c.id LIMIT 20",
       "plan": [
-        "TOP_N (2 keys)",
-        "  PROJECTION",
+        "PROJECTION",
+        "  ORDER_BY",
         "    PROJECTION",
-        "      HASH_GROUP_BY",
-        "        PROJECTION",
-        "          PROJECTION",
-        "            HASH_JOIN",
-        "              TABLE_SCAN public.orders",
-        "              TABLE_SCAN public.customers"
+        "      PROJECTION",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.customers",
+        "          TOP_N (2 keys)",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    PROJECTION",
+        "                      HASH_JOIN",
+        "                        TABLE_SCAN public.orders",
+        "                        TABLE_SCAN public.customers"
       ],
       "calls": [],
       "sends": [],
@@ -2024,16 +2054,22 @@
       "name": "BI shape: GROUP BY a primary key: a decided numeric divided, computed exactly",
       "sql": "SELECT o.id, o.amount / 3 AS third, round(o.amount * 1.5, 1) AS r, count(i.id) AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY o.id LIMIT 20",
       "plan": [
-        "TOP_N (1 key)",
-        "  PROJECTION",
+        "PROJECTION",
+        "  ORDER_BY",
         "    PROJECTION",
         "      PROJECTION",
-        "        HASH_GROUP_BY",
-        "          PROJECTION",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.orders",
+        "          TOP_N (1 key)",
         "            PROJECTION",
-        "              HASH_JOIN",
-        "                TABLE_SCAN public.orders [top-N filter: id]",
-        "                TABLE_SCAN public.order_items"
+        "              PROJECTION",
+        "                PROJECTION",
+        "                  HASH_GROUP_BY",
+        "                    PROJECTION",
+        "                      PROJECTION",
+        "                        HASH_JOIN",
+        "                          TABLE_SCAN public.orders [top-N filter: id]",
+        "                          TABLE_SCAN public.order_items"
       ],
       "calls": [
         "__mason_numeric_div"

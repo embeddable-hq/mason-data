@@ -96,6 +96,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A `time` cast to `timetz` takes the session zone's offset for today at the value's own time of day**, as Postgres
   does. On a day the clocks change it took the offset of the moment the query ran, so before the change `12:30` was
   answered `-04` in New York where Postgres has `-05`. Nothing to do on upgrade.
+- **`GROUP BY` a table's primary key with a `LIMIT` no longer fills the disk** when the list shows that table's wide
+  columns (a JSON document, long text): the groups are chosen on the key, and the wide columns read for the rows the
+  limit keeps. Such a query spilled tens of GiB and failed for memory; it now answers in under a second. Nothing to do
+  on upgrade.
 
 ## Known
 
