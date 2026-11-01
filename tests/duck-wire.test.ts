@@ -2432,6 +2432,77 @@ test("a constant sort key is the analysis's Const, however it is spelled: the ke
   } finally { await c.end(); }
 });
 
+// THE SECOND CLASS ROUND (PR 170, the class widened: a constant key written into the engine as a bare literal, in ANY
+// clause). The sixth finding was a DISTINCT ON key (`DISTINCT ON (1.5::numeric)`, a Const to Postgres, written as the
+// bare 1.5 the engine refuses, 42804). Every clause where a key can be an analysed Const is held here against Postgres
+const constantKeysAnyClause = ["1.5::numeric", "'1.5'::numeric", "(1.5::numeric)", "1::int", "'x'::text", "NULL::int"];
+test("a constant key in any clause is the analysis's Const: DISTINCT ON, GROUP BY, grouping sets, a window, a set operation, an aggregate's ORDER BY", async () => {
+  const c = await client();
+  const outcome = (p: Promise<unknown>): Promise<unknown> => p.then((r) => r, (e: { code?: string }) => ({ error: e.code }));
+  const wrong: string[] = [];
+  const alike = async (sql: string, values?: unknown[]): Promise<void> => {
+    const [mason, pg] = [await outcome(answer(c, sql, values)), await outcome(postgres(sql, values))];
+    try { assert.deepEqual(mason, pg); } catch { wrong.push(`${sql}${values !== undefined ? ` ${JSON.stringify(values)}` : ""}: Mason ${JSON.stringify(mason)}, Postgres ${JSON.stringify(pg)}`); }
+  };
+  try {
+    for (const k of constantKeysAnyClause) {
+      for (const sql of [
+        // A. DISTINCT ON: the key alone (one row), beside a column key, by output number and name, no LIMIT, at depth
+        `SELECT DISTINCT ON (${k}) l.id FROM late l ORDER BY ${k}, l.id DESC LIMIT 3`,
+        `SELECT DISTINCT ON (${k}) l.id FROM late l ORDER BY ${k}, l.id LIMIT 3`,
+        `SELECT DISTINCT ON (${k}, l.c) l.c, l.id FROM late l ORDER BY ${k}, l.c DESC, l.id LIMIT 3`,
+        `SELECT DISTINCT ON (l.c, ${k}) l.c, l.id FROM late l ORDER BY l.c, ${k}, l.id DESC LIMIT 3`,
+        `SELECT DISTINCT ON (2) l.id, ${k} AS v FROM late l ORDER BY 2, l.id DESC LIMIT 3`,
+        `SELECT DISTINCT ON (v, l.c) l.c, ${k} AS v, l.id FROM late l ORDER BY v, l.c DESC, l.id LIMIT 3`,
+        `SELECT DISTINCT ON (${k}, l.c) l.c, l.id FROM late l WHERE l.id < 120 ORDER BY ${k}, l.c, l.id DESC`,
+        `SELECT count(*) FROM (SELECT DISTINCT ON (${k}) l.id FROM late l) s`,
+        // B. GROUP BY: by expression alone (one group) and beside a column, by number, by output name, the key-first form
+        `SELECT count(*) AS n FROM late l GROUP BY ${k}`,
+        `SELECT l.c, count(*) AS n FROM late l GROUP BY ${k}, l.c ORDER BY l.c DESC LIMIT 3`,
+        `SELECT ${k} AS v, count(*) FROM late l GROUP BY 1`,
+        `SELECT ${k} AS v, l.c, count(*) FROM late l GROUP BY v, 2 ORDER BY 2 LIMIT 3`,
+        `SELECT l.id, l.k FROM late l GROUP BY l.id, ${k} ORDER BY l.id DESC LIMIT 3`,
+        // C. grouping sets: ROLLUP, CUBE, GROUPING SETS with a constant key beside a column
+        `SELECT l.c, count(*) FROM late l WHERE l.c < 3 GROUP BY ROLLUP (${k}, l.c) ORDER BY 1 NULLS FIRST, 2`,
+        `SELECT l.c, count(*) FROM late l WHERE l.c < 3 GROUP BY CUBE (${k}, l.c) ORDER BY 1 NULLS FIRST, 2`,
+        `SELECT l.c, count(*) FROM late l WHERE l.c < 3 GROUP BY GROUPING SETS ((${k}), (l.c), ()) ORDER BY 1 NULLS FIRST, 2`,
+        // D. a window's ORDER BY: alone (every row a peer) and before a column
+        `SELECT l.id, row_number() OVER (ORDER BY ${k}, l.id DESC) AS r FROM late l ORDER BY l.id LIMIT 3`,
+        `SELECT l.id, sum(l.k) OVER (ORDER BY ${k}) AS s, rank() OVER (ORDER BY ${k}) AS r FROM late l WHERE l.id < 10 ORDER BY l.id`,
+        // E. a window's PARTITION BY: alone, beside a column, a named window
+        `SELECT l.id, count(*) OVER (PARTITION BY ${k}) AS n FROM late l WHERE l.id < 5 ORDER BY 1`,
+        `SELECT l.id, row_number() OVER (PARTITION BY ${k}, l.c ORDER BY l.id) AS r FROM late l WHERE l.id < 120 ORDER BY 1 DESC LIMIT 3`,
+        `SELECT l.id, sum(l.k) OVER w AS s FROM late l WHERE l.id < 5 WINDOW w AS (PARTITION BY ${k} ORDER BY ${k}, l.id) ORDER BY 1`,
+        // H. a set operation's ORDER BY, by number and by name of an output each branch makes a constant
+        `SELECT l.id, ${k} AS v FROM late l WHERE l.id < 3 UNION ALL SELECT l.id, ${k} FROM late l WHERE l.id > 1998 ORDER BY 2, 1 DESC LIMIT 3`,
+        `SELECT l.id, ${k} AS v FROM late l WHERE l.id < 3 UNION SELECT l.id, ${k} FROM late l WHERE l.id > 1998 ORDER BY v DESC, id LIMIT 3`,
+        // I. an aggregate's ORDER BY (an integer there is no ordinal to Postgres); J. an ordered-set aggregate's
+        `SELECT string_agg(l.id::text, ',' ORDER BY ${k}, l.id DESC) AS s FROM late l WHERE l.id < 5`,
+        `SELECT l.c, array_agg(l.id ORDER BY ${k}, l.id DESC)::text AS a FROM late l WHERE l.id < 120 GROUP BY l.c ORDER BY 1 LIMIT 3`,
+        `SELECT string_agg(DISTINCT ${k}::text, ',') AS s FROM late l`, `SELECT array_length(array_agg(DISTINCT ${k}), 1) AS a, array_agg(DISTINCT ${k}) IS NULL AS b FROM late l`,
+        `SELECT mode() WITHIN GROUP (ORDER BY ${k}) AS m FROM late l`,
+        `SELECT l.c, mode() WITHIN GROUP (ORDER BY ${k}) AS m, percentile_disc(0.5) WITHIN GROUP (ORDER BY ${k}) AS p FROM late l WHERE l.id < 120 GROUP BY l.c ORDER BY 1 LIMIT 3`,
+        `SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${k}) AS p FROM late l WHERE l.id < 0`,
+      ]) await alike(sql);
+    }
+    // a bare literal as a DISTINCT ON or GROUP BY key is Postgres's own refusal (42601), or an ordinal
+    for (const k of ["1.5", "'x'", "(1.5)", "NULL"]) {
+      await alike(`SELECT DISTINCT ON (${k}) l.id FROM late l ORDER BY l.id LIMIT 3`);
+      await alike(`SELECT count(*) FROM late l GROUP BY ${k}`);
+    }
+    // a parameter: evaluated, partitioning and ordering nothing whatever its value (never an ordinal)
+    for (const [k, v] of [["$1::numeric", "1.5"], ["$1::int", 1], ["$1::text", "x"]] as const) {
+      await alike(`SELECT DISTINCT ON (${k}, l.c) l.c, l.id FROM late l ORDER BY ${k}, l.c DESC, l.id LIMIT 3`, [v]);
+      await alike(`SELECT l.id, count(*) OVER (PARTITION BY ${k}) AS n FROM late l WHERE l.id < 5 ORDER BY 1`, [v]);
+      await alike(`SELECT string_agg(l.id::text, ',' ORDER BY ${k}, l.id DESC) AS s FROM late l WHERE l.id < 5`, [v]);
+    }
+    // F. a window's frame offset spelled as a cast: a value, never a key
+    await alike("SELECT l.id, sum(l.k) OVER (ORDER BY l.id ROWS BETWEEN 1::int PRECEDING AND CURRENT ROW) AS s FROM late l WHERE l.id < 5 ORDER BY 1");
+    await alike("SELECT l.id, sum(l.k) OVER (ORDER BY l.id::numeric RANGE BETWEEN 1.5::numeric PRECEDING AND CURRENT ROW) AS s FROM late l WHERE l.id < 5 ORDER BY 1");
+    assert.deepEqual(wrong, []);
+  } finally { await c.end(); }
+});
+
 // ISSUE 112: an output's number or bare name beside a * reached the engine as written: no rule met the column it is
 test("an output of a * is read by its number and its bare name as the column it is", async () => {
   const c = await client();
