@@ -2281,6 +2281,13 @@ test("a sort key that is an output holding a constant orders nothing: by name an
       "SELECT l.id, l.j ->> 'n' AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY true::boolean, l.id DESC LIMIT 3"]) {
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
     }
+    // every key a constant: no order at all, so any 3 rows are Postgres's; the written sort never reaches the inner
+    for (const sql of ["SELECT l.id, l.k, 1 AS one FROM late l JOIN late_c c ON c.id = l.c ORDER BY one DESC LIMIT 3",
+      "SELECT l.id, l.k, 1 AS one FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3 LIMIT 3",
+      "SELECT l.id, l.k, 'x' AS t FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY t LIMIT 3",
+      "SELECT l.id, l.k, true AS b FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY 3 DESC LIMIT 3"]) {
+      assert.equal((await answer(c, sql)).rows.length, 3, sql);
+    }
   } finally { await c.end(); }
 });
 
