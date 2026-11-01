@@ -141,11 +141,15 @@ paths:
     key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and
     only then is each kept group's row of that table fetched by its row number, so no wide value goes through the hash
     aggregate. It groups by the key, never by `rowid`: a key the copy holds twice for a moment is one group. What stays
-    as it was: grouping sets, DISTINCT, a row lock, no LIMIT, a partial key or no key, a FROM item a join names (an
-    aliased JoinExpr, which `fromItems` refuses), and a `*` in the list. Only a plain table is FETCHED (a `RangeVar` the
-    analysis reads as a table, `r?.kind === "table"`): a walled read, a derived item and a table with a column named
-    `rowid` never are, but a statement that mixes one with a keyed plain table is still rewritten and only the plain
-    table is fetched; with no such table, or no output read of one, it stays as it was. `tests/duck-wire.test.ts`
+    as it was: grouping sets, a DISTINCT beside a GROUP BY, a row lock, no LIMIT, a partial key or no key, a FROM item a
+    join names (an aliased JoinExpr, which `fromItems` refuses), and a `*` in the list. Only a plain table is FETCHED (a
+    `RangeVar` the analysis reads as a table, `r?.kind === "table"`): a walled read, a derived item and a table with a
+    column named `rowid` never are, but a statement that mixes one with a keyed plain table is still rewritten and only
+    the plain table is fetched; with no such table, or no output read of one, it stays as it was. A `SELECT DISTINCT`
+    whose list holds a table's whole primary key is the same grouping (`distinctGrouping`: never a DISTINCT ON, a UNION,
+    nor a DISTINCT over an aggregate, a window, a set-returning function or a subquery), written as a GROUP BY of each
+    output (the rewrite's key of a jsonb one, which must then be fetched), the key's other columns left out of it.
+    `tests/duck-wire.test.ts`
     holds each side over `late`, `late_p` (the composite and partial keys) and `late_d`; `oracle/bi-shapes.ts` the rows
     ("Key-first grouping", docs/DESIGN.md).
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,

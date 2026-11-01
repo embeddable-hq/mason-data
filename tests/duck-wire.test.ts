@@ -2999,6 +2999,73 @@ test("a GROUP BY a table's whole primary key with a LIMIT groups on the key and 
   } finally { await c.end(); }
 });
 
+test("a SELECT DISTINCT whose list holds a table's whole primary key, with a LIMIT, groups on the key and reads that table's columns after the limit (issue 134, step 6)", async () => {
+  const c = await client();
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const KEYED = /any_value\(\w+\.rowid\) AS __mason_r1.*\) AS __mason_late LEFT JOIN \w+ AS (\w+) ON \1\.rowid = __mason_late\.__mason_r1/;
+  try {
+    const answered = [
+      // the key and other columns of its table (a jsonb among them, its equality the rewrite's key), sorted, with OFFSET
+      "SELECT DISTINCT l.id, l.j, l.k FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id DESC LIMIT 4 OFFSET 2",
+      "SELECT DISTINCT l.j, l.k, l.id FROM late l ORDER BY 2, 3 LIMIT 3",
+      // a key of one table beside a column of another, which stays in the distinct: a NULL in it from the outer join
+      "SELECT DISTINCT l.id, l.j, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c + 40 ORDER BY c.name NULLS FIRST, l.id LIMIT 5 OFFSET 8",
+      "SELECT DISTINCT c.name, l.id, l.k FROM late_c c JOIN late l ON l.c = c.id ORDER BY c.name, l.id LIMIT 4",
+      // the nulls idiom over a fetched column, and a constant in the list
+      "SELECT DISTINCT l.id, l.k, (l.k) IS NULL AS nk, 1 AS one FROM late l ORDER BY (l.k) IS NULL ASC, l.k DESC LIMIT 3",
+      // a sort by an output holding a constant: it orders nothing, and never reaches the inner sort as an ordinal
+      "SELECT DISTINCT l.id, l.k, 1 AS one FROM late l ORDER BY 3, 2 ASC LIMIT 3",
+      "SELECT DISTINCT l.id, l.k, 1 AS one FROM late l ORDER BY one, l.id DESC LIMIT 3",
+      // a composite key, whole, beside another column of its table
+      "SELECT DISTINCT p.line, p.note, p.c FROM late_p p ORDER BY 3, 1 LIMIT 3",
+      // over a derived side: the DISTINCT inside it is written, the read around it as it was
+      "SELECT * FROM (SELECT DISTINCT l.id, l.j FROM late l ORDER BY l.id LIMIT 3) d ORDER BY d.id DESC",
+    ];
+    for (const sql of answered) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      assert.match(await sent(sql), KEYED, sql);
+    }
+    // Postgres's rows for the constant sorts, written out
+    assert.deepEqual((await answer(c, "SELECT DISTINCT l.id, l.k, 1 AS one FROM late l ORDER BY 3, 2 ASC LIMIT 3")).rows, [["2000", "0", "1"], ["1999", "1", "1"], ["1998", "2", "1"]]);
+    assert.deepEqual((await answer(c, "SELECT DISTINCT l.id, l.k, 1 AS one FROM late l ORDER BY one, l.id DESC LIMIT 3")).rows.map((r) => r[0]), ["2000", "1999", "1998"]);
+    // the columns the key decides are left out of the grouping, the other table's stay in it
+    assert.match(await sent("SELECT DISTINCT l.id, l.j, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 3"), /GROUP BY l\.id, c\.name ORDER BY/);
+    // unsorted: as many rows, each a row of the whole answer
+    const unsorted = await answer(c, "SELECT DISTINCT l.id, l.j FROM late l LIMIT 5");
+    assert.equal(unsorted.rows.length, 5);
+    const whole = held(await postgres("SELECT DISTINCT l.id, l.j FROM late l")) as { rows: unknown[][] };
+    for (const r of (held(unsorted) as { rows: unknown[][] }).rows) assert.ok(whole.rows.some((w) => JSON.stringify(w) === JSON.stringify(r)), JSON.stringify(r));
+    // a key the copy holds twice for a moment is one row, never split by a row number
+    assert.deepEqual((await answer(c, "SELECT DISTINCT d.id, d.w FROM late_d d ORDER BY d.id LIMIT 5")).rows, [["1", "one"], ["2", "two"], ["3", "three"]]);
+    assert.match(await sent("SELECT DISTINCT d.id, d.w FROM late_d d ORDER BY d.id LIMIT 5"), /any_value\(d\.rowid\) AS __mason_r1.* GROUP BY d\.id /);
+    // what stays as it was: a key in part, no key, no LIMIT, DISTINCT ON, a DISTINCT over an aggregate or beside a GROUP BY, a UNION
+    for (const sql of ["SELECT DISTINCT p.c, p.note FROM late_p p ORDER BY 1, 2 LIMIT 3",
+      "SELECT DISTINCT n.id, n.c FROM late_n n ORDER BY 1 LIMIT 3",
+      "SELECT DISTINCT l.id, l.k FROM late l ORDER BY l.id",
+      "SELECT DISTINCT ON (l.id) l.id, l.k FROM late l ORDER BY l.id LIMIT 3",
+      "SELECT DISTINCT count(*) AS n FROM late l LIMIT 3",
+      "SELECT DISTINCT l.id, count(*) AS n FROM late l GROUP BY l.id ORDER BY 1 LIMIT 3",
+      "SELECT l.id, l.k FROM late l WHERE l.id < 3 UNION SELECT l.id, l.k FROM late l WHERE l.id < 5 ORDER BY 1 LIMIT 3"]) {
+      assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    }
+    // a statement prepared, run after a SET: the same plan
+    await c.query({ name: "keyfirst_distinct", text: "SELECT DISTINCT l.id, l.j, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT $1", values: [2] });
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    logged.length = 0;
+    const again = await c.query({ name: "keyfirst_distinct", text: "SELECT DISTINCT l.id, l.j, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT $1", values: [3], rowMode: "array" });
+    assert.equal(again.rows.length, 3);
+    assert.match(logged.findLast((l) => l.startsWith("statement: ")) ?? "", KEYED);
+  } finally { await c.end(); }
+});
+
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
   const c = await client();
   // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison

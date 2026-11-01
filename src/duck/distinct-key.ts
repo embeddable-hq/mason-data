@@ -350,10 +350,12 @@ const collationOf = (v: TreeValue | undefined): number => !isNode(v) ? 0 : v._no
  * family's equality and under its collation; a grouping set proves nothing (a key reads NULL in its total rows). The
  * key is the primary key, never a UNIQUE index (the module's doc): the copy is written by it. A key the copy holds
  * twice for a moment (a change applied in pieces) is grouped as written, never by a row number, so no group is split.
+ * A SELECT DISTINCT that is a grouping on its list (`distinctGrouping`) is read as its GROUP BY: its distinctClause.
  */
 export function keyGrouped(query: TreeNode, keys: PrimaryKeys): Map<number, number[]> {
   const out = new Map<number, number[]>();
   if (list(query.groupingSets).length > 0) return out;
+  const clause = list(query.groupClause).length > 0 ? list(query.groupClause) : distinctGrouping(query) ? list(query.distinctClause) : [];
   const targets = list(query.targetList).filter(isNode);
   const rtable = list(query.rtable);
   const grouped = new Map<number, Set<number>>();
@@ -362,7 +364,7 @@ export function keyGrouped(query: TreeNode, keys: PrimaryKeys): Map<number, numb
     const v = ownVar(e), rte = v === null ? undefined : rtable[(num(v.varno) ?? 0) - 1];
     return isNode(rte) && num(rte.rtekind) === RTE_GROUP ? list(rte.groupexprs)[(num(v!.varattno) ?? 0) - 1] : e;
   };
-  for (const g of list(query.groupClause)) {
+  for (const g of clause) {
     if (!isNode(g)) continue;
     const t = targets.find((x) => x.ressortgroupref === g.tleSortGroupRef);
     const expr = grouped1(t?.expr);
@@ -383,14 +385,26 @@ export function keyGrouped(query: TreeNode, keys: PrimaryKeys): Map<number, numb
   return out;
 }
 
-/** The base tables `keyGrouped` may be asked about: those of a query that groups and has a LIMIT (none: the plan asks
- *  the catalog nothing) */
+/**
+ * Whether a query is a SELECT DISTINCT that is a grouping on its list (issue 134, step 6, task D): a DISTINCT, not a
+ * DISTINCT ON (which keeps one row of each set, a different thing), with no GROUP BY beside it, and nothing in its list
+ * computed before the DISTINCT that a grouping would compute after it: no aggregate (a DISTINCT over one row), window
+ * function, set-returning function or subquery. Such a DISTINCT's rows are its GROUP BY's, its list's equalities the
+ * same, so `keyGrouped` reads its distinctClause as it reads a groupClause.
+ */
+export function distinctGrouping(q: TreeNode): boolean {
+  if (list(q.distinctClause).length === 0 || list(q.groupClause).length > 0 || q.hasDistinctOn !== "false") return false;
+  return ["hasAggs", "hasWindowFuncs", "hasTargetSRFs", "hasSubLinks"].every((f) => q[f] === "false");
+}
+
+/** The base tables `keyGrouped` may be asked about: those of a query that groups, or is a DISTINCT, and has a LIMIT
+ *  (none: the plan asks the catalog nothing) */
 export function groupedLimitTables(tree: TreeValue): number[] {
   const relids = new Set<number>();
   const visit = (v: TreeValue | undefined): void => {
     if (Array.isArray(v)) { v.forEach(visit); return; }
     if (!isNode(v)) return;
-    if (v._node === "QUERY" && isNode(v.limitCount) && list(v.groupClause).length > 0) {
+    if (v._node === "QUERY" && isNode(v.limitCount) && (list(v.groupClause).length > 0 || distinctGrouping(v))) {
       for (const e of list(v.rtable)) if (isNode(e) && num(e.rtekind) === RTE_RELATION) { const r = num(e.relid) ?? 0; if (r > 0) relids.add(r); }
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);

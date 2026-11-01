@@ -113,6 +113,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   columns (a JSON document, long text): the groups are chosen on the key, and the wide columns read for the rows the
   limit keeps. Such a query spilled tens of GiB and failed for memory; it now answers in under a second. Nothing to do
   on upgrade.
+- **`SELECT DISTINCT` with a `LIMIT` whose list holds a table's primary key no longer fills the disk** either: the rows
+  are made distinct on the key (and the other tables' listed columns), and that table's wide columns read for the rows
+  the limit keeps. Such a query spilled 29 GiB and failed for memory after five minutes; it now answers in under a
+  second. Nothing to do on upgrade.
 
 ## Known
 
