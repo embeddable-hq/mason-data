@@ -2036,7 +2036,9 @@ the PR merged at 02:12, and nothing ran until the owner's next message at 04:22.
 reported within three minutes, and their reports reached it only with the owner's next message at 08:08. Waits for
 the coordinator's own reviews took about 35 and 47 min per lead, and a red oracle over a clock change about an hour.
 Inside the agents the largest single cost was test runs: a 100 s test file run whole, and `fails-without` over it twice
-per proof; 43 min of commands ran past their own foreground limit and were moved to the background.
+per proof, 36 min of one issue's agents in three proofs (2, 13 and 20 min, each of which built a
+copy of the tree as well); 43 min of commands ran past their own foreground limit and were moved to the background.
+
 ## A libc order, read level by level
 
 Issue 128: under en_US.utf8 one value holding U+FE0F (`❤️`) or a Thai vowel refused a whole column's sort, group and
