@@ -2946,6 +2946,10 @@ test("FETCH … WITH TIES answers as Postgres does: every key by its output's co
       "SELECT * FROM ((SELECT l.c FROM late l UNION SELECT lc.id FROM late_c lc ORDER BY 1 LIMIT 3) UNION ALL SELECT l.c FROM late l WHERE l.id < 3 ORDER BY 1 DESC FETCH FIRST 2 ROWS WITH TIES) s ORDER BY 1",
       "WITH x AS (SELECT l.c FROM late l WHERE l.id < 5) SELECT x.c FROM x UNION ALL SELECT lc.id FROM late_c lc ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES",
       "WITH t AS (SELECT l.c FROM late l UNION ALL SELECT lc.id FROM late_c lc ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) SELECT count(*) FROM t",
+      // a VALUES as an arm, after a SELECT and first (its outputs are column1, …)
+      "SELECT count(*) FROM (SELECT l.c FROM late l UNION ALL VALUES (0) ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) s",
+      "VALUES (49), (0), (49) UNION ALL SELECT l.c FROM late l WHERE l.id < 60 ORDER BY 1 DESC FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT count(*) FROM (VALUES (1, 'x') UNION ALL SELECT lc.id, lc.name FROM late_c lc ORDER BY column1, 2 FETCH FIRST 1 ROWS WITH TIES) s",
       // AN OUTPUT NEVER COMPUTED TWICE: a window's, a set-returning function's
       "SELECT row_number() OVER (ORDER BY l.id) AS rn, l.id FROM late l ORDER BY rn FETCH FIRST 2 ROWS WITH TIES",
       "SELECT * FROM (SELECT l.id, rank() OVER (ORDER BY l.c) AS r FROM late l WHERE l.id < 120 ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES) s ORDER BY 1",
@@ -3019,6 +3023,37 @@ test("FETCH … WITH TIES answers as Postgres does: every key by its output's co
         assert.deepEqual((await c.query({ name: "ties_zoned", text: zoned, rowMode: "array", types: raw } as pg.QueryConfig)).rows, (await postgres(zoned)).rows, `prepared before SET TimeZone = ${zone}`);
       } finally { await truth.exec("SET TimeZone = 'UTC'"); }
     }
+  } finally { await c.end(); }
+});
+
+test("a set operation's ORDER BY sorts its column as Postgres resolved it, and a row output is never a sort key", async () => {
+  const c = await client();
+  try {
+    // a citext SELECT beside a text one is a text column: sorted as text, never case-insensitively as the first's
+    for (const sql of [
+      "SELECT a.status AS v FROM accounts a UNION ALL SELECT a.team FROM accounts a ORDER BY 1",
+      "SELECT a.status AS v FROM accounts a UNION ALL SELECT a.team FROM accounts a ORDER BY v DESC",
+      "SELECT a.team AS v, a.id FROM accounts a UNION ALL SELECT a.status, a.id FROM accounts a ORDER BY 1 DESC, 2 LIMIT 4",
+      "SELECT l.c FROM late l WHERE l.id < 5 UNION ALL VALUES (3), (0) ORDER BY 1",
+    ]) assert.deepEqual((await answer(c, sql)).rows, (await postgres(sql)).rows, sql);
+    // a row output is written as its text, which sorts unlike the row (`(0,100)` before `(0,50)`): a key bound to it,
+    // by its number, its name, a DISTINCT ON or a set operation's, is refused by name, as a row written as a key is
+    for (const sql of [
+      "SELECT ROW(l.c, l.k) AS r FROM late l ORDER BY 1 LIMIT 2",
+      "SELECT ROW(l.c, l.k) AS r FROM late l ORDER BY r DESC LIMIT 2",
+      "SELECT (l.c, l.k) AS r, l.id FROM late l ORDER BY 1, 2 LIMIT 2",
+      "SELECT ROW(l.c, l.k) AS r FROM late l ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT DISTINCT ON (1) ROW(l.c, l.k) AS r FROM late l ORDER BY 1 LIMIT 2",
+      "SELECT l FROM late l ORDER BY 1 LIMIT 2",
+      "SELECT s FROM (SELECT l.c, l.k FROM late l) s ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT ROW(l.c, l.k) AS r FROM late l UNION ALL SELECT ROW(l.c, l.k) FROM late l ORDER BY 1 LIMIT 3",
+      "SELECT ROW(l.c, l.k) AS r FROM late l UNION ALL SELECT ROW(l.c, l.k) FROM late l ORDER BY r FETCH FIRST 3 ROWS WITH TIES",
+    ]) await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap row-value/.test(e.detail ?? ""), sql);
+    // the row's text is a text, sorted as one; a row beside the key it is not, answered
+    for (const sql of [
+      "SELECT ROW(l.c, l.k)::text AS r FROM late l ORDER BY 1 LIMIT 2",
+      "SELECT ROW(l.c, l.k) AS r, l.id FROM late l ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES",
+    ]) assert.deepEqual((await answer(c, sql)).rows, (await postgres(sql)).rows, sql);
   } finally { await c.end(); }
 });
 

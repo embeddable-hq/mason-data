@@ -175,9 +175,12 @@ paths:
   constant. Its keys are bound by `keysBound` too (a set operation's by number or name, all Postgres takes there), and a
   key bound to an output reads that output's COLUMN by its place (`withTies`: the statement is a derived table whose
   columns are named by place), never its expression again, so a window's, a set-returning function's or a volatile
-  output is one value; a key no output is is computed once, as a column of its own. A set operation's column is typed
-  as Postgres resolved it (`setOperationOutputs`, src/duck/pgtree.ts: `citext UNION ALL text` is text), never as its
-  first SELECT's. Detector: tests/duck-wire.test.ts "FETCH … WITH TIES answers as Postgres does …".
+  output is one value; a key no output is is computed once, as a column of its own. A set operation's key, under WITH
+  TIES or a plain ORDER BY, is typed as Postgres resolved the column (`setOperationColumns` over
+  `setOperationOutputs`, src/duck/pgtree.ts: `citext UNION ALL text` is text), never as its first SELECT's. A key bound
+  to a ROW output is refused by `row-value` (`rowKey`), as a row written as a key is: the list writes a row as its
+  text, which sorts unlike the row. Detector: tests/duck-wire.test.ts "FETCH … WITH TIES answers as Postgres does …"
+  and "a set operation's ORDER BY sorts its column as Postgres resolved it …".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its

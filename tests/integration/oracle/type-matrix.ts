@@ -1256,6 +1256,18 @@ function* matrix(): Generator<Matrixed> {
   yield q("star sort: a VALUES of no name", "SELECT * FROM one, (VALUES ('b'), ('A'), ('a')) ORDER BY 2");
   yield q("star sort: a subquery of no name", "SELECT * FROM (SELECT id, name FROM star_o) ORDER BY 2 NULLS FIRST, 1");
   yield q("star sort: a parameter-free filter on the same column", "SELECT * FROM star_o WHERE name <> 'Z' ORDER BY name NULLS FIRST, id");
+  // A SET OPERATION'S SORT reads its column as Postgres resolved it (issue 192): a citext SELECT beside a text one is
+  // text, sorted as text, whichever comes first; a VALUES is a SELECT of its own, first or after one
+  yield q("a set operation's sort: a citext beside a text, by number", "SELECT o.ci AS v FROM star_o o UNION ALL SELECT o.name FROM star_o o ORDER BY 1 NULLS FIRST");
+  yield q("a set operation's sort: a citext beside a text, by name, descending, a LIMIT", "SELECT o.ci AS v, o.id FROM star_o o UNION ALL SELECT o.name, o.id FROM star_o o ORDER BY v DESC NULLS LAST, 2 LIMIT 6");
+  yield q("a set operation's sort: a text beside a citext, by number", "SELECT o.name AS v FROM star_o o UNION ALL SELECT o.ci FROM star_o o ORDER BY 1 NULLS FIRST");
+  yield q("a set operation's sort: a citext beside a text, WITH TIES", "SELECT o.ci AS v FROM star_o o UNION ALL SELECT o.name FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES");
+  yield q("a set operation's sort: a VALUES after a SELECT and first", "SELECT 'a' AS k, s.* FROM (SELECT o.name FROM star_o o UNION ALL VALUES ('a'), ('B') ORDER BY 1 NULLS FIRST) s UNION ALL SELECT 'b', s.* FROM (VALUES ('a'), ('B') UNION ALL SELECT o.name FROM star_o o ORDER BY 1 DESC FETCH FIRST 2 ROWS WITH TIES) s");
+  // A ROW OUTPUT AS A KEY: written as its text, it would sort as one (`(0,100)` before `(0,50)`), so it is refused by
+  // row-value, by its number, its name or a set operation's
+  yield q("a row output as a key: by number, a LIMIT", "SELECT ROW(o.n, o.id) AS r FROM star_o o ORDER BY 1 LIMIT 3");
+  yield q("a row output as a key: by name, WITH TIES", "SELECT ROW(o.n, o.id) AS r FROM star_o o ORDER BY r DESC FETCH FIRST 2 ROWS WITH TIES");
+  yield q("a row output as a key: a set operation's", "SELECT ROW(o.n, o.id) AS r FROM star_o o UNION ALL SELECT ROW(o.id, o.n) FROM star_o o ORDER BY 1 LIMIT 3");
   yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
   yield q("top N over joins: USING of two tables, a *", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
   yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);

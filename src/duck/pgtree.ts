@@ -483,7 +483,11 @@ export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; 
         if (s._node === "SETOPERATIONSTMT") { leaves(s.larg); leaves(s.rarg); return; }
         const rte = s._node === "RANGETBLREF" ? rtable[(num(s.rtindex ?? null) ?? 0) - 1] : undefined;
         const q = isNode(rte ?? null) ? (rte as TreeNode).subquery ?? null : null;
-        arms.push(isNode(q) && Array.isArray(q.targetList) ? held(q.targetList.filter((t) => isNode(t) && t.resjunk !== "true").map((t) => (t as TreeNode).expr ?? null)) : []);
+        if (!isNode(q)) { arms.push([]); return; }
+        const own = Array.isArray(q.targetList) ? held(q.targetList.filter((t) => isNode(t) && t.resjunk !== "true").map((t) => (t as TreeNode).expr ?? null)) : [];
+        // (a VALUES's outputs read its rows at no offset of their own: it is known by its rows')
+        const rows = own.length > 0 || !Array.isArray(q.rtable) ? [] : q.rtable.filter(isNode).flatMap((r) => held(r.values_lists));
+        arms.push([...own, ...rows]);
       };
       leaves(v.setOperations);
       const columns = v.targetList.filter(isNode).filter((t) => t.resjunk !== "true").map((t) => {

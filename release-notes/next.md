@@ -126,6 +126,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   column under it lost its decimals. A sort by a window function's or a set-returning function's column or by
   `random()`, and `SELECT DISTINCT` or `DISTINCT ON` with `WITH TIES`, now answer where they were refused or failed. Over
   a table a user's role filters it is refused by name (`roles`), with the way out. Nothing to do on upgrade.
+- **A sort by a `UNION`'s column or by a row column answers as Postgres does, or is refused.** In a `UNION`,
+  `INTERSECT` or `EXCEPT`, a `citext` column beside a `text`
+  one is `text`, and `ORDER BY` now sorts it as text, where it was sorted without regard to case as the first `SELECT`'s
+  `citext`. A sort by a column that is a row (`SELECT ROW(a, b) AS r … ORDER BY r`, `SELECT t … ORDER BY 1`) sorted by
+  the row's text (`(0,100)` before `(0,50)`): it is now refused by name (`row-value`), with the way out, as `ORDER BY
+  ROW(a, b)` already was. Sort by the row's columns instead. Nothing to do on upgrade.
 
 ## Known
 

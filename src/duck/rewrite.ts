@@ -438,6 +438,8 @@ class Rewriter {
 
   /** the nodes the rewrite made that Postgres analysed as another: typed as that one */
   private readonly typedLike = new WeakMap<Body, AstNode>();
+  /** a row the SELECT list writes as its text (`rowValues`): an output a key sorts by must never be one (`rowKey`) */
+  private readonly rowTexts = new WeakSet<Body>();
   /** what `widen` made, and the type it made it: a rule after it reads that type (a date widened to a timestamptz is
    *  one, never cast again), and a second pass leaves it as it is — a SELECT's expression and its GROUP BY twin must
    *  print alike, or DuckDB refuses the grouping (42803) */
@@ -784,7 +786,11 @@ class Rewriter {
       if (k === "SelectStmt" || k === "SubLink" || k === "RangeSubselect") return v;
       if (inList) {
         const cols = this.rowFields(v, b);
-        if (cols !== null) return this.recordText(cols);
+        if (cols !== null) {
+          const text = this.recordText(cols);
+          this.rowTexts.add(bodyOf(text));
+          return text;
+        }
       }
       if (k === "TypeCast" && isNode(body.arg) && textTypes.has(lastName(body.typeName?.names))) {
         const cols = this.rowFields(body.arg as AstNode, b);
@@ -939,7 +945,7 @@ class Rewriter {
     targets.forEach((t, target) => {
       const v = bodyOf(t).val;
       if (!isNode(v)) return;
-      if (!hasStar(v)) { at++; out.push({ target, at: out.length, name: typeof bodyOf(t).name === "string" ? bodyOf(t).name : figureColname(v), value: v, star: false, twin: false }); return; }
+      if (!hasStar(v)) { at++; out.push({ target, at: out.length, name: typeof bodyOf(t).name === "string" ? bodyOf(t).name : figureColname(v), value: v, star: false, twin: false, row: this.rowTexts.has(bodyOf(v)) }); return; }
       const width = widthOf(t) ?? (bare === 0 ? 0 : rest / bare);
       for (const c of query?.columns.slice(at, at + width) ?? []) {
         const n = c?.column;
@@ -947,7 +953,7 @@ class Rewriter {
         const value: AstNode = { ColumnRef: { fields: [...(n.owner === null ? [] : [S(n.owner)]), S(n.name)], location: -1 } };
         this.original.add(bodyOf(value));
         this.synthetic.set(bodyOf(value), c);
-        out.push({ target, at: out.length, name: n.name, value, star: true, twin: n.twin === true });
+        out.push({ target, at: out.length, name: n.name, value, star: true, twin: n.twin === true, row: false });
       }
       at += width;
     });
@@ -1056,6 +1062,22 @@ class Rewriter {
    * volatile one. `constant` as `keysConstant`. With no analysis, the number or name alone binds.
    */
   private keysBound(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<{ output: Output | null; constant: boolean | null; equal: boolean }> {
+    const bound = this.keysBoundAs(nodes, keys, clause, targets);
+    for (const k of bound) this.rowKey(k.output);
+    return bound;
+  }
+
+  /**
+   * A KEY BOUND TO A ROW OUTPUT (by its number, its name or an expression equal to it) is refused by `row-value`, as the
+   * row written as a key is (the ColumnRef / RowExpr rule): the list writes a row as its text (`rowValues`), and a key
+   * over that output would sort or tell apart the text (`(0,100)` before `(0,50)`), where Postgres compares field by
+   * field. Every reader of a key's output goes through here: the ORDER BY, DISTINCT ON and FETCH … WITH TIES.
+   */
+  private rowKey(out: Output | null): void {
+    if (out?.row === true) throw new Unrewritable("a row used as a value here (compared, tested, grouped or sorted) is not supported by Mason", "sort by its columns", "row-value");
+  }
+
+  private keysBoundAs(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<{ output: Output | null; constant: boolean | null; equal: boolean }> {
     const outputs = targets === undefined ? [] : this.outputs(targets);
     const named = (n: AstNode | undefined): Output | null => n === undefined || !isNode(n) ? null : outputs[this.outputIndex(n, outputs)] ?? null;
     if (keys === undefined) return nodes.map((n) => ({ output: named(n), constant: null, equal: false }));
@@ -1134,7 +1156,8 @@ class Rewriter {
   /**
    * A SET OPERATION'S ORDER BY of a text column (`… UNION … ORDER BY 1`, or `ORDER BY status` where the first SELECT
    * says `o.status`): Postgres sorts by its output column, which it analysed at no offset of the ORDER BY's own, so the
-   * SortBy rule found no type and DuckDB sorted by bytes. Each is typed as the first SELECT's target, and an ordinal is
+   * SortBy rule found no type and DuckDB sorted by bytes. Each is typed as the set operation's column, as Postgres resolved
+   * it (`setOperationColumns`: a citext SELECT beside a text one is text, never its first SELECT's type), and an ordinal is
    * sorted by that output column's name, so the rule builds the collation's keys. A target with no name of its own is
    * given one: Postgres's analysis names the columns the tool reads, never DuckDB's.
    */
@@ -1144,33 +1167,42 @@ class Rewriter {
     while (arm.op !== undefined && arm.op !== "SETOP_NONE" && arm.larg !== undefined) arm = isNode(arm.larg) ? bodyOf(arm.larg) : arm.larg as Body;
     const targets = (arm.targetList ?? []) as AstNode[];
     const outputs = this.outputs(targets);
+    // each key is typed as the set operation's column, as Postgres resolved it, never as the first SELECT's target (a
+    // citext beside a text is text; a row is refused, as any row key is: `rowKey`)
+    let resolved: Array<Typed | null> | undefined;
+    const typeAs = (key: AstNode, out: Output): void => {
+      resolved ??= this.setOperationColumns(b);
+      const own = resolved[out.at] ?? null;
+      if (own === null) { this.typedLike.set(bodyOf(key), out.value); return; }
+      this.rowKey({ ...out, row: own.node === "ROWEXPR" || (own.node === "VAR" && this.isRowType(own.type)) });
+      this.synthetic.set(bodyOf(key), own);
+    };
     for (const s of b.sortClause as AstNode[]) {
       const sb = bodyOf(s);
       const by = sb.node as AstNode;
       const f = kindOf(by) === "ColumnRef" ? names(bodyOf(by).fields) : [];
       if (f.length === 1) {
         const named = outputs.filter((o) => o.name === f[0]);
-        if (named.length === 1) this.typedLike.set(bodyOf(by), named[0]!.value);
+        if (named.length === 1) typeAs(by, named[0]!);
         continue;
       }
       const n = constInt(by);
       const out = n === null ? null : this.outputOf(by, targets);
       if (out === null) continue;
-      const value = out.value;
       if (out.star) {
         // a set operation's ORDER BY reads an output by its name alone: a column of a `*` has no other
         if (outputs.filter((o) => o.name === out.name).length !== 1) throw new Unrewritable("ORDER BY a column number of a set operation whose first SELECT lists two columns of that name is not supported by Mason", "name the columns apart in the first SELECT", "setop-ordinal-star");
-        if (this.sortsAsStored(value)) continue;
         const named: AstNode = { ColumnRef: { fields: [S(out.name)] } };
-        this.typedLike.set(bodyOf(named), value);
+        typeAs(named, out);
+        if (this.sortsAsStored(named)) continue;
         sb.node = named;
         continue;
       }
       const target = bodyOf(targets[out.target]!);
-      if (this.sortsAsStored(value)) continue;
+      const ref: AstNode = { ColumnRef: { fields: [S(String(target.name ?? `__mason_sort_${n}`))] } };
+      typeAs(ref, out);
+      if (this.sortsAsStored(ref)) continue;
       if (target.name === undefined) target.name = `__mason_sort_${n}`;
-      const ref: AstNode = { ColumnRef: { fields: [S(String(target.name))] } };
-      this.typedLike.set(bodyOf(ref), value);
       sb.node = ref;
     }
   }
@@ -1263,7 +1295,11 @@ class Rewriter {
     // a set operation's outputs are its first arm's (libpg-query writes the arms unwrapped)
     let arm: Body = b;
     while (arm.op !== undefined && arm.op !== "SETOP_NONE" && arm.larg !== undefined) arm = isNode(arm.larg) ? bodyOf(arm.larg) : arm.larg as Body;
-    const targets = (arm.targetList ?? []) as AstNode[];
+    // (a VALUES's outputs are its first row's, named as Postgres names them)
+    const rows = arm.targetList === undefined ? arm.valuesLists as AstNode[] | undefined : undefined;
+    const targets = Array.isArray(rows) && rows.length > 0
+      ? ((bodyOf(rows[0]!).items ?? []) as AstNode[]).map((val, i): AstNode => ({ ResTarget: { name: `column${i + 1}`, val } }))
+      : (arm.targetList ?? []) as AstNode[];
     // (the columns are read by place: a `*` is as many as Postgres expanded it to, which only its analysis says)
     if (targets.some((t) => hasStar(bodyOf(t).val)) && this.analysedQuery(targets) === undefined) {
       throw new Error("a * under FETCH … WITH TIES is not in Postgres's analysis: report it, with the statement");
@@ -1272,7 +1308,11 @@ class Rewriter {
     const sorts = ((b.sortClause ?? []) as AstNode[]).filter((s) => kindOf(s) === "SortBy");
     const nodes = sorts.map((s) => bodyOf(s).node as AstNode);
     const bound = setOperation
-      ? nodes.map((n) => ({ output: outputs[this.outputIndex(n, outputs)] ?? null, constant: false as boolean | null, equal: false }))
+      ? nodes.map((n) => {
+        const output = outputs[this.outputIndex(n, outputs)] ?? null;
+        this.rowKey(output);
+        return { output, constant: false as boolean | null, equal: false };
+      })
       : this.keysBound(nodes, this.analysedQuery(targets)?.keys, "sorted", targets);
     // (a set operation's columns are typed as Postgres resolved them, never as its first SELECT's)
     const resolved = setOperation ? this.setOperationColumns(b) : null;
@@ -1380,7 +1420,8 @@ class Rewriter {
       // (a subquery's outputs are its own)
       return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" && x >= 0 ? [x - this.base] : k === "subselect" || k === "SelectStmt" ? [] : held(x));
     };
-    const offsets = arms.map((a) => { let first = a; while (setOp(first)) first = unwrapped(first.larg); return held(first.targetList ?? []); });
+    // (a VALUES is known by its rows, as Postgres's analysis knows it)
+    const offsets = arms.map((a) => { let first = a; while (setOp(first)) first = unwrapped(first.larg); return held(first.targetList ?? first.valuesLists ?? []); });
     this.setOps ??= setOperationOutputs(this.analysisTree);
     const found = this.setOps.filter((q) => q.arms.length === offsets.length && q.arms.every((at, i) => offsets[i]!.some((o) => at.includes(o))));
     if (found.length !== 1) throw new Error("a set operation is not in Postgres's analysis, or twice: report it, with the statement");
@@ -4031,7 +4072,8 @@ const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
 
 /** one output column of a SELECT (Rewriter.outputs): the target it comes from, its name, what it reads, and whether a `*` lists it */
 /** one output column: its target, and its place among the outputs (a `*` is one per column) */
-type Output = { target: number; at: number; name: string; value: AstNode; star: boolean; twin: boolean };
+/** an output of a SELECT; `row`: a row value, which the list writes as its text (`rowValues`) */
+type Output = { target: number; at: number; name: string; value: AstNode; star: boolean; twin: boolean; row: boolean };
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 
 /** whether a program does what DuckDB would compute otherwise: a division, a rounding, a scale chosen per value; a
