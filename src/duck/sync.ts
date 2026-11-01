@@ -327,6 +327,18 @@ export async function writeStaged(w: DuckConnection, t: Pick<AddedTable, "key" |
 export const RETIRED_LAYOUT = "stored in key order with an index, by an older Mason: read again whole, in heap order";
 
 /**
+ * A COPY AN OLDER MASON MADE BEFORE A TYPE WAS HELD AS ITS TEXT (src/duck/held-types.ts): a column this Mason holds as the
+ * source's text (a `point`, a `money`, a range) stored as the extension's scan read it (a `point` as a STRUCT). Its
+ * record (`copy_state.columns`) was written by code that did not know the column's kind, so it cannot say so: found by
+ * what the copy physically is (`duckdb_columns()`), copied again through the normal path (`needsCopy`), serving as it
+ * was until its swap; never converted in place.
+ */
+export const HELD_LAYOUT = "stored by an older Mason with a column not held as the source's text: read again whole, each such column as its text";
+
+/** a copy in a layout this Mason no longer keeps: the layout as `mason status` says it, and its short form for a line */
+interface Retired { layout: string; short: string }
+
+/**
  * How long a failed copy waits before it is tried again: four times the attempt, at least 5 minutes, doubled for each
  * failure in a row, at most 6 hours (a copy whose sort failed for good read a production replica whole for
  * 20 minutes at every pass). A restart, or a change of the table's columns or key, tries it at once.
@@ -783,7 +795,7 @@ export class Sync {
   /** each table whose copy failed: the failures in a row, and when it is tried again (`copyRetryDelayMs`) */
   private readonly retries = new Map<string, { failures: number; at: number }>();
   /** each copied table in a layout this Mason no longer keeps (`RETIRED_LAYOUT`), found at `open`: copied again */
-  private readonly retired = new Set<string>();
+  private readonly retired = new Map<string, Retired>();
   /** the catalog's own connection (`rebuildSchema`): it sees only what a copy or poll has committed, and is never
    *  held by a copy's statement, so a table is served the moment its copy commits */
   private catalog: DuckConnection | null = null;
@@ -1104,7 +1116,7 @@ export class Sync {
     const copy = st === undefined ? "never synced"
       : st.phase === "failed" ? `its first sync failed: ${firstLine(st.error)}`
       : st.phase !== "copied" ? "its first sync has not finished"
-      : this.retired.has(t.source) ? "it is in an older Mason's layout, key order with an index"
+      : this.retired.has(t.source) ? `it is ${this.retired.get(t.source)!.short}`
       : this.readAgainWhy(t);
     if (copy !== null) return { source: t.source, copy };
     const b = this.behind.get(t.source);
@@ -1220,7 +1232,7 @@ export class Sync {
     const now = Date.now();
     // in the project's order, whatever order the copies ran and were recorded in (`copyOrder`)
     return [...this.tables.keys()].flatMap((source) => this.states.get(source) ?? [])
-      .map((s) => this.retired.has(s.source) ? { ...s, retired: RETIRED_LAYOUT } : s)
+      .map((s) => { const r = this.retired.get(s.source); return r !== undefined ? { ...s, retired: r.layout } : s; })
       // a copy's chunks as they are NOW: the rows the ones in flight have read by now at the measured rate
       .map((s) => { const l = this.copyLive.get(s.source); return s.phase === "copying" && l !== undefined ? { ...s, progress: copyProgressNow(l, Date.now()) } : s; })
       // how it is kept current, and a table the passes leave as copied, from ONE derivation (`keptOf`)
@@ -1469,7 +1481,8 @@ export class Sync {
       if (st?.phase !== "copied") throw new PollRefused("nothing_yet", `${t.source} is not synced yet (${st?.phase === "failed" ? `its first sync failed: ${st.error ?? "mason logs says why"}` : "its first sync has not finished"}): mason wait waits for it`);
       const again = this.readAgainWhy(t);
       if (again !== null) throw new PollRefused("nothing_yet", `${t.source} is being read again whole (${again}): mason wait waits for it`);
-      if (this.retired.has(t.source)) throw new PollRefused("nothing_yet", `${t.source} is ${RETIRED_LAYOUT} (its synced data serves as it was): it is current once read again — mason wait waits for it`);
+      const r = this.retired.get(t.source);
+      if (r !== undefined) throw new PollRefused("nothing_yet", `${t.source} is ${r.layout} (its synced data serves as it was): it is current once read again — mason wait waits for it`);
       this.refuseRebuilding(t);
     }
     const poll = (async (): Promise<PolledTable[]> => {
@@ -1918,7 +1931,8 @@ export class Sync {
     const st = this.states.get(source);
     if (this.copiedAs.has(source) && this.copiedAs.get(source) !== columnsKey(t.columns)) return "its columns changed: it is read again whole, then caught up by one poll";
     if (st?.phase === "copied" && !this.snapshots.has(source)) return "a numeric value outgrew its synced DECIMAL column: it is read again whole, wider, then caught up by one poll";
-    if (st?.phase === "copied" && this.retired.has(source)) return "it is in an older Mason's layout, key order with an index: it is read again whole, then caught up by one poll";
+    const r = this.retired.get(source);
+    if (st?.phase === "copied" && r !== undefined) return `it is ${r.short}: it is read again whole, then caught up by one poll`;
     // what follows the copy: a catch-up poll, then the stream or the polls; copied again whole, nothing (`keptOf`'s recopy)
     const joins = this.mode === "recopy" ? "it is kept current once synced" : "it joins once synced and caught up by one poll";
     if (st?.phase === "copying" || this.rebuildingNow?.source === source && this.rebuildingNow.kind === "copy") return `it is being read whole: ${joins}`;
@@ -2891,7 +2905,8 @@ export class Sync {
         // caught up from the copy's snapshot
         const beside = this.replicated(t) ? "beside the stream, which goes on keeping the other tables current: it is streamed once caught up by one poll from the snapshot it was read at"
           : this.mode !== "recopy" ? "beside the other tables' polls: once read, it is caught up by one poll from the snapshot it was read at" : "beside the other tables";
-        const again = this.retired.has(t.source) ? `, again (it is ${RETIRED_LAYOUT})` : "";
+        const r = this.retired.get(t.source);
+        const again = r !== undefined ? `, again (it is ${r.layout})` : "";
         this.log(`syncing ${t.source}${again}: ${t.rows === null ? "rows unknown" : `about ${t.rows} row(s)`}, ${t.bytes} source bytes, ${beside}`);
       }
       let read: { rows: number; seconds: number; progress: CopyProgress };
@@ -3293,8 +3308,47 @@ export class Sync {
       `WHERE database_name = current_database() AND schema_name <> ${literal(MASON_SCHEMA)} AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')`);
     for (const [source] of r.getRowsJS() as Array<[string]>) {
       if (this.states.get(source)?.phase !== "copied") continue;
-      this.retired.add(source);
+      this.retired.set(source, { layout: RETIRED_LAYOUT, short: "in an older Mason's layout, key order with an index" });
       this.log(`${source}: it is ${RETIRED_LAYOUT} — its rows are sorted on disk, and only the source has them in its own order, so it is read again whole; its synced data serves as it was until then`);
+    }
+    await this.findHeldLayout();
+  }
+
+  /**
+   * THE COPIES AN OLDER MASON MADE BEFORE A TYPE WAS HELD AS ITS TEXT (`HELD_LAYOUT`), read at `open` from what each copy
+   * physically is, never from its record alone: a record written before `typeKind` was read says neither that a column
+   * is an enum nor how a held one was stored. Each copied column is held to what `storedType` makes of it now: an ENUM is
+   * an enum (its record completed, so its key is the one a fresh read makes, and it is not read again for nothing); a
+   * column held as its text that is not a VARCHAR (a `point` as the extension's STRUCT) marks the table, said by name and
+   * copied again through the normal path (`needsCopy`), serving as it was until its swap.
+   */
+  private async findHeldLayout(): Promise<void> {
+    const r = await this.store.writer.runAndReadAll(`SELECT schema_name || '.' || table_name, column_name, data_type FROM duckdb_columns() ` +
+      `WHERE database_name = current_database() AND schema_name <> ${literal(MASON_SCHEMA)}`);
+    const physical = new Map<string, Map<string, string>>();
+    for (const [source, column, type] of r.getRowsJS() as Array<[string, string, string]>) {
+      const m = physical.get(source) ?? new Map<string, string>();
+      m.set(column, type);
+      physical.set(source, m);
+    }
+    for (const [source, columns] of this.copiedColumns) {
+      const types = physical.get(source);
+      if (this.states.get(source)?.phase !== "copied" || types === undefined || this.retired.has(source)) continue;
+      const mis: string[] = [];
+      const completed = columns.map((c) => {
+        const type = types.get(c.name);
+        if (type === undefined) return c;
+        if (c.typeKind === undefined && type.startsWith("ENUM(")) return { ...c, typeKind: "e" };
+        const hold = holdOf(c.type, c.typeKind);
+        const want = hold === "text" ? "VARCHAR" : hold === "text[]" ? "VARCHAR[]" : null;
+        if (want !== null && type !== want) mis.push(`${c.name} (${c.type})`);
+        return c;
+      });
+      this.copiedColumns.set(source, completed);
+      this.copiedAs.set(source, columnsKey(completed));
+      if (mis.length === 0) continue;
+      this.retired.set(source, { layout: HELD_LAYOUT, short: `in an older Mason's layout, ${mis.join(", ")} not held as the source's text` });
+      this.log(`${source}: it is ${HELD_LAYOUT} (${mis.join(", ")}) — it is read again whole; its synced data serves as it was until then`);
     }
   }
 

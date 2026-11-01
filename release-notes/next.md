@@ -7,9 +7,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   start exits and says so. Stored jsonb sort keys are dropped and refilled after it.
 - **The same read runs again on the first start after an OS upgrade moves the source's glibc**: the same 50-60 s, with the
   source reachable.
-- **A table with a column of a type below is read again whole on the first start**, once: tables of `timetz` alone are
-  not, those of `point`, `money`, `bit`, `macaddr`, `cidr`, a range, `tsvector`, `xml`, a composite, a domain or an
-  extension's type are. Plan for the source's load, as for a `mason add` of them.
+- **A table whose synced data holds a column of a type below in another form than Postgres's text is read again whole on
+  the first start**, once (a `point` was held as its x and y): Mason looks at what each synced table holds, says each
+  such table by name in the log and `mason status`, and serves it as it was until it is read. A table with a domain
+  column is read again too; tables of `timetz` or an enum are not. Plan for the source's load, as for a `mason add` of
+  them.
 
 ## What changes
 
