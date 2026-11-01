@@ -141,8 +141,11 @@ paths:
     key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and
     only then is each kept group's row of that table fetched by its row number, so no wide value goes through the hash
     aggregate. It groups by the key, never by `rowid`: a key the copy holds twice for a moment is one group. What stays
-    as it was: grouping sets, DISTINCT, a row lock, no LIMIT, a partial key or no key, a walled read or any FROM item
-    that is not a plain table, a table with a column named `rowid`, and a `*` in the list. `tests/duck-wire.test.ts`
+    as it was: grouping sets, DISTINCT, a row lock, no LIMIT, a partial key or no key, and a `*` in the list. Only a
+    plain table is FETCHED (a `RangeVar` the analysis reads as a table, `r?.kind === "table"`): a walled read, a derived
+    item, a FROM item a join names (an aliased JoinExpr) and a table with a column named `rowid` never are, but a
+    statement that mixes one with a keyed plain table is still rewritten and only the plain table is fetched; with no
+    such table it stays as it was. `tests/duck-wire.test.ts`
     holds each side over `late`, `late_p` (the composite and partial keys) and `late_d`; `oracle/bi-shapes.ts` the rows
     ("Key-first grouping", docs/DESIGN.md).
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
