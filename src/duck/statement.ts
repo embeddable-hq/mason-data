@@ -35,8 +35,8 @@ export interface DuckPlan {
   params: number[];
   /** the result's columns, Postgres's RowDescription (size from pg_type) */
   fields: Array<{ name: string; oid: number; typmod: number; size: number }> | null;
-  /** DuckDB answers one column after Postgres's (a WITH TIES rank), not sent */
-  dropLast: boolean;
+  /** the statement itself is FETCH … WITH TIES, by Postgres's analysis (its QUERY's limitOption) */
+  ties: boolean;
   /** the numeric columns computed as Postgres computes them, from cells DuckDB answers after Postgres's columns */
   exact?: ExactColumn[];
   /** what Postgres resolved the statement to (src/duck/resolved.ts): each one verified, or the statement was refused */

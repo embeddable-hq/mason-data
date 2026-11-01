@@ -869,12 +869,26 @@ class Rewriter {
       const sorts = b.sortClause as AstNode[];
       const bound = this.keysBound(sorts.map((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined), this.analysedQuery(targets)?.keys, "sorted", targets);
       const starred = targets.some((t) => hasStar(bodyOf(t).val));
+      // WITH TIES ranks its rows by a window, which has no outputs (DuckDB reads `rank() OVER (ORDER BY 1)` as a
+      // constant): every key bound to an output, by number or by name, star or no star, is written as that output's
+      // expression, here where the binding is; one bound by equality is that expression already, and never becomes an
+      // ordinal (the class "an output not resolved to its column", issue 192: the rank reads the keys as written)
+      const ties = b.limitOption === "LIMIT_OPTION_WITH_TIES";
       b.sortClause = sorts.flatMap((s, i) => {
         const sb = bodyOf(s);
         this.done.add(sb);
         const out = bound[i]!.output;
         if (kindOf(s) === "SortBy" && sb.useOp === undefined) {
           if (out?.twin !== true && (bound[i]!.constant ?? this.typed(out !== null ? out.value : sb.node as AstNode)?.constant) === true) return [];
+        }
+        if (ties && out !== null && !bound[i]!.equal && kindOf(s) === "SortBy" && isNode(sb.node)) {
+          if (out.twin) throw this.twinRefused();
+          const value = this.clone(out.value);
+          this.original.add(bodyOf(value));
+          sb.node = value;
+          // (a collated key over a grouped output reads the grouped value, as one bound by equality does)
+          if (kindOf(value) === "CollateClause") sb.node = this.overGroups(value, b);
+          return this.sortBy(sb, targets, b, null) ?? [s];
         }
         // (a key bound by equality is built over its own expression, which is the output's and carries its own typing)
         // (a collated key bound by equality to a grouped output: its collation's keys read the grouped value, as a key
@@ -888,7 +902,7 @@ class Rewriter {
         // a key bound to a computed output by EQUALITY, written as it is, is that output: its ordinal, so DuckDB reads
         // the one value the list shows (`ORDER BY random()` beside `random() AS r` is r, never a second random()). A
         // list with a * keeps its key: its outputs' numbers are Postgres's expansion
-        if (built === null && sb.node === as && bound[i]!.equal && out !== null && !starred && kindOf(out.value) !== "ColumnRef" && kindOf(s) === "SortBy" && sb.useOp === undefined) {
+        if (built === null && !ties && sb.node === as && bound[i]!.equal && out !== null && !starred && kindOf(out.value) !== "ColumnRef" && kindOf(s) === "SortBy" && sb.useOp === undefined) {
           sb.node = { A_Const: { ival: { ival: out.target + 1 } } };
         }
         // (an integer the rewrite wrote is an ordinal it meant; any other bare literal DuckDB would refuse)
@@ -901,6 +915,8 @@ class Rewriter {
       });
       if ((b.sortClause as AstNode[]).length === 0) delete b.sortClause;
     }
+    // a set operation under WITH TIES is first a plain SELECT over it, which then takes the one WITH TIES path
+    if (b.limitOption === "LIMIT_OPTION_WITH_TIES" && b.op !== undefined && b.op !== "SETOP_NONE") return this.setOperationTies(b);
     if (Array.isArray(b.sortClause) && b.op !== undefined && b.op !== "SETOP_NONE") this.setOperationOrdinals(b);
     if (b.limitOption === "LIMIT_OPTION_WITH_TIES") return this.withTies(b);
     return null;
@@ -1137,14 +1153,13 @@ class Rewriter {
     for (const s of b.sortClause as AstNode[]) {
       const sb = bodyOf(s);
       const by = sb.node as AstNode;
-      const f = kindOf(by) === "ColumnRef" ? names(bodyOf(by).fields) : [];
-      if (f.length === 1) {
-        const named = outputs.filter((o) => o.name === f[0]);
-        if (named.length === 1) this.typedLike.set(bodyOf(by), named[0]!.value);
+      const at = setOperationOutput(by, outputs);
+      if (kindOf(by) === "ColumnRef") {
+        if (at >= 0) this.typedLike.set(bodyOf(by), outputs[at]!.value);
         continue;
       }
       const n = constInt(by);
-      const out = n === null ? null : this.outputOf(by, targets);
+      const out = n === null ? null : outputs[at] ?? null;
       if (out === null) continue;
       const value = out.value;
       if (out.star) {
@@ -1225,66 +1240,111 @@ class Rewriter {
   }
 
   /**
-   * `FETCH FIRST n ROWS WITH TIES` (DuckDB has none): the rows whose rank under the ORDER BY is at most n — the
-   * statement, with that rank as a column of its own, read by a statement around it that keeps those rows in the
-   * same order and leaves the rank out (`* EXCLUDE`, DuckDB's).
+   * `FETCH FIRST n ROWS WITH TIES` (DuckDB has none), in four layers each with one owner (issue 192):
+   *  - THE KEYS are the ones the sort pass wrote (every key bound to an output written as its expression), read as
+   *    written: the rank orders by exactly what the sort orders by, so it counts the same ties;
+   *  - THE WIDTH: the body is read by a statement around it that lists Postgres's outputs (a star's columns counted by
+   *    Postgres's expansion) and the exact cells recorded after them, never `*`, so the rank and anything else past
+   *    them never leaves it, at any depth (a derived table, a CTE, IN, a scalar, a set operation's arm);
+   *  - THE COUNT AND THE OFFSET are Postgres's: coerced to int8 as Postgres coerces them (src/duck/ties.ts reads them);
+   *  - THE RANK is written after the walk (src/duck/late.ts over joined tables, src/duck/ties.ts `tiesRanked` for every
+   *    other body), which reads the body still marked WITH TIES, with its keys and its bound.
    */
   private withTies(b: Body): AstNode {
-    if (b.distinctClause !== undefined) throw new Unrewritable("FETCH … WITH TIES over a SELECT DISTINCT is not supported by Mason (the engine has no WITH TIES)", "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it", "with-ties-distinct");
-    const order = (b.sortClause as AstNode[] | undefined) ?? [];
-    const count = b.limitCount as AstNode;
-    delete b.limitCount;
-    b.limitOption = "LIMIT_OPTION_DEFAULT";
-    const offset = b.limitOffset as AstNode | undefined;
-    delete b.limitOffset;
-    const rankName = "__mason_rank";
-    // EVERY READER OF THE SORT LIST READS A KEY AS THE SELECT'S ORDER BY DOES (the class "an output not resolved to its
-    // column"): a number or an output name there is that output, and a window's ORDER BY has no outputs (DuckDB reads
-    // `rank() OVER (ORDER BY 1)` as a constant, every row a tie), so the window's key is the output's expression
-    const targets = (b.targetList as AstNode[] | undefined) ?? [];
-    const starred = targets.some((t) => hasStar(bodyOf(t).val));
-    const asOutput = (n: AstNode): AstNode => {
-      const at = kindOf(n) === "A_Const" ? constInt(n) : null;
-      const name = kindOf(n) === "ColumnRef" && names(bodyOf(n).fields).length === 1 ? names(bodyOf(n).fields)[0] : undefined;
-      const target = at !== null ? (starred ? undefined : targets[at - 1])
-        : name !== undefined ? targets.find((t) => !hasStar(bodyOf(t).val) && bodyOf(t).name === name) : undefined;
-      return target !== undefined && isNode(bodyOf(target).val) ? evaluated(this.clone(bodyOf(target).val as AstNode)) : this.clone(n);
-    };
-    const sortCopy = order.map((o) => kindOf(o) === "SortBy" && isNode(bodyOf(o).node) ? { SortBy: { ...bodyOf(this.clone(o)), node: asOutput(bodyOf(o).node as AstNode) } } : this.clone(o));
-    for (const s of sortCopy) this.done.add(bodyOf(s));
+    if (b.distinctClause !== undefined) throw new Unrewritable("FETCH … WITH TIES over a SELECT DISTINCT or DISTINCT ON is not supported by Mason (the engine has no WITH TIES)", "select the DISTINCT rows in a subquery and FETCH … WITH TIES from it", "with-ties-distinct");
     // A VOLATILE VALUE EVALUATED TWICE (the class): the window's key would be a second random(), never the one shown, and
     // DuckDB refuses a volatile window key raw (42804). Refused by name, as a window ordered by one is
     const calls = (x: unknown): boolean => Array.isArray(x) ? x.some(calls) : x !== null && typeof x === "object"
       && ((isNode(x) && kindOf(x) === "FuncCall" && VOLATILE.has(lastName(bodyOf(x).funcname))) || Object.values(isNode(x) ? bodyOf(x) : x as Body).some(calls));
-    if (calls(sortCopy)) {
+    if (calls(b.sortClause)) {
       throw new Unrewritable("FETCH … WITH TIES ordered by random() (or another volatile function) is not supported by Mason: its ties are ranked by a window, which would draw the value again",
         "compute it in a subquery and order by its column: SELECT … FROM (SELECT *, random() AS r FROM t) AS s ORDER BY r FETCH FIRST n ROWS WITH TIES", "volatile-window");
     }
-    // (every key a constant, none is left: every row ties, rank() OVER () is 1 for each)
-    const rank: AstNode = { FuncCall: { funcname: [S("rank")], over: { ...(sortCopy.length > 0 ? { orderClause: sortCopy } : {}), frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } };
-    this.done.add(bodyOf(rank));
-    b.targetList = [...(b.targetList as AstNode[]), { ResTarget: { name: rankName, val: rank } }];
-    const inner: AstNode = { SelectStmt: b };
-    // the rank of the first row past the offset is offset + 1; a row is kept while its rank is within offset + n
-    // (the offset is read twice, here and as the outer LIMIT's OFFSET: one copy each)
-    const bound = offset === undefined ? count : op("+", this.clone(offset), count);
+    // Postgres coerces the count and the offset to int8 (2.5 is 3, a float8's 2.5 is 2: DuckDB's casts round alike)
+    b.limitCount = cast(b.limitCount as AstNode, ["int8"]);
+    if (b.limitOffset !== undefined) b.limitOffset = cast(b.limitOffset as AstNode, ["int8"]);
+    const cells = this.cellsAfter.get(b) ?? { count: 0, listed: 0 };
+    const targets = (b.targetList ?? []) as AstNode[];
+    const outputs = this.outputs(targets.slice(0, targets.length - cells.listed));
     const outer: Body = {
-      targetList: [{ ResTarget: { val: { ColumnRef: { fields: [{ A_Star: {} }] } } } }],
-      fromClause: [{ RangeSubselect: { subquery: inner, alias: { aliasname: "__mason_ties" } } }],
-      whereClause: op("<=", { ColumnRef: { fields: [S(rankName)] } }, bound),
-      sortClause: [{ SortBy: { node: { ColumnRef: { fields: [S(rankName)] } }, sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }],
-      op: "SETOP_NONE",
+      targetList: [
+        ...outputs.map((o, i) => ({ ResTarget: { name: o.name, val: { ColumnRef: { fields: [S(TIES), S(`__mason_t${i + 1}`)] } } } })),
+        ...Array.from({ length: cells.count }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: { ColumnRef: { fields: [S(TIES), S(`__mason_cell_${j}`)] } } } })),
+      ],
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname: TIES, colnames: outputs.map((_o, i) => S(`__mason_t${i + 1}`)) } } }],
+      sortClause: [{ SortBy: { node: { ColumnRef: { fields: [S(TIES), S(TIES_RANK)] } }, sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }],
+      limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
     };
-    if (offset !== undefined) outer.limitOffset = offset;
     this.done.add(outer);
-    this.excludeRank = true;
     return { SelectStmt: outer };
   }
 
-  /** the outer WITH TIES statement reads `*` and must not send its rank: the server drops that last column */
-  excludeRank = false;
+  /**
+   * A SET OPERATION UNDER WITH TIES (issue 192: `… UNION ALL … ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES` raised XX000):
+   * a plain SELECT of its outputs over it, `SELECT __mason_set.__mason_t1 AS <name>, … FROM (<it>) AS
+   * __mason_set(__mason_t1, …)`, ordered by the outputs its keys name (`setOperationOutput`, Postgres's rule: an
+   * output's number or name) typed as the first SELECT's, so the SortBy rule writes a collation's, a citext's or a
+   * jsonb's key; its arms' exact cells follow by name. That SELECT then takes the WITH TIES path as any other.
+   */
+  private setOperationTies(b: Body): AstNode {
+    let arm: Body = b;
+    while (arm.op !== undefined && arm.op !== "SETOP_NONE" && arm.larg !== undefined) arm = isNode(arm.larg) ? bodyOf(arm.larg) : arm.larg as Body;
+    // (Postgres's outputs: the first SELECT's list less the exact cells recorded after them)
+    const armTargets = (arm.targetList ?? []) as AstNode[];
+    const outputs = this.outputs(armTargets.slice(0, armTargets.length - (this.cellsAfter.get(arm)?.listed ?? 0)));
+    const column = (i: number): AstNode => {
+      const n: AstNode = { ColumnRef: { fields: [S(SET), S(`__mason_t${i + 1}`)] } };
+      const t = this.typed(outputs[i]!.value);
+      // (the set operation's column: typed as the first SELECT's, but no constant, whatever that SELECT's is)
+      if (t !== null) { const { constant: _c, ...typed } = t; this.synthetic.set(bodyOf(n), { ...typed, node: "VAR" }); }
+      this.original.add(bodyOf(n));
+      return n;
+    };
+    const sorts = ((b.sortClause ?? []) as AstNode[]).map((s) => {
+      const sb = bodyOf(s);
+      const at = setOperationOutput(sb.node as AstNode, outputs);
+      if (kindOf(s) !== "SortBy" || at < 0) throw new Unrewritable("this ORDER BY of a set operation under FETCH … WITH TIES is not supported by Mason", "order by an output column's number or name", "unverified");
+      if (outputs[at]!.star && outputs.filter((o) => o.name === outputs[at]!.name).length !== 1) throw new Unrewritable("ORDER BY a column number of a set operation whose first SELECT lists two columns of that name is not supported by Mason", "name the columns apart in the first SELECT", "setop-ordinal-star");
+      const { node: _n, location: _l, ...rest } = sb;
+      const key: AstNode = { SortBy: { ...rest, node: column(at) } };
+      this.original.add(bodyOf(key));
+      return key;
+    });
+    const { limitCount, limitOffset } = b;
+    delete b.sortClause; delete b.limitCount; delete b.limitOffset;
+    b.limitOption = "LIMIT_OPTION_DEFAULT";
+    const cells = this.cellsAfter.get(b)?.count ?? 0;
+    const select: Body = {
+      targetList: [
+        ...outputs.map((o, i) => ({ ResTarget: { name: o.name, val: column(i) } })),
+        ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: { ColumnRef: { fields: [S(SET), S(`__mason_cell_${j}`)] } } } })),
+      ],
+      fromClause: [{ RangeSubselect: { subquery: { SelectStmt: b }, alias: { aliasname: SET, colnames: outputs.map((_o, i) => S(`__mason_t${i + 1}`)) } } }],
+      ...(sorts.length > 0 ? { sortClause: sorts } : {}),
+      limitCount, ...(limitOffset !== undefined ? { limitOffset } : {}), limitOption: "LIMIT_OPTION_WITH_TIES", op: "SETOP_NONE",
+    };
+    for (const t of select.targetList as AstNode[]) this.original.add(bodyOf(t));
+    this.original.add(select);
+    this.appendCells(select, cells, cells);
+    return { SelectStmt: select };
+  }
 
   // ------------------------------------------------------------------------------------- exact numerics
+
+  /**
+   * HOW MANY EXACT CELLS A BODY ANSWERS AFTER POSTGRES'S COLUMNS (`count`), and how many of them are entries at the end
+   * of its own list (`listed`): the one record of it, written where cells are appended (`appendCells`) and read by the
+   * WITH TIES wrapper and `rewrite`'s width (the class "the rewrite's width is not Postgres's", issue 192)
+   */
+  private readonly cellsAfter = new WeakMap<Body, { count: number; listed: number }>();
+
+  /** records a body's cells after Postgres's columns: `listed` of them entries of its own list, the rest carried by a `*` */
+  private appendCells(b: Body, count: number, listed: number): void {
+    if (count > 0) this.cellsAfter.set(b, { count, listed });
+  }
+
+  /** the cells a body answers after Postgres's columns (0 when none) */
+  cellsOf(b: Body): number { return this.cellsAfter.get(b)?.count ?? 0; }
 
   /** The statement's numeric result columns as programs, their cells appended to its SELECT list (before the walk,
    *  which rewrites each cell as it rewrites the column). Only a plain SELECT: a UNION or a DISTINCT would read the
@@ -1292,7 +1352,7 @@ class Rewriter {
   exactColumns(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }> | null): ExactColumn[] {
     if (kindOf(stmt) !== "SelectStmt" || fields === null) return [];
     const b = bodyOf(stmt);
-    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.distinctClause !== undefined || b.limitOption === "LIMIT_OPTION_WITH_TIES") return [];
+    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.distinctClause !== undefined) return [];
     const targets = (b.targetList ?? []) as AstNode[];
     if (targets.length !== fields.length || targets.some((t) => hasStar(bodyOf(t).val))) return [];
     const grouped = (Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val));
@@ -1330,6 +1390,7 @@ class Rewriter {
     if (out.length === 0) return [];
     for (const c of out) c.cells = cells.map((x) => x.conv);
     b.targetList = [...targets, ...cells.map((c, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: this.clone(c.node) } }))];
+    this.appendCells(b, cells.length, cells.length);
     return out;
   }
 
@@ -1365,7 +1426,8 @@ class Rewriter {
       const targets = (b.targetList ?? []) as AstNode[];
       b.targetList = [...targets, ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`,
         val: { ColumnRef: { fields: [S(through.alias), S(`__mason_cell_${j}`)] } } } }))];
-    }
+      this.appendCells(b, cells, cells);
+    } else this.appendCells(b, cells, 0);
     const map = through.columns;
     return inner.flatMap((e) => (map === "star" ? [e.column] : map.flatMap((k, i) => k === e.column ? [i] : []))
       .filter((i) => i < fields.length && fields[i]!.oid === NUMERIC || e.text).map((column) => ({ ...e, column })));
@@ -1386,6 +1448,8 @@ class Rewriter {
     const first = JSON.stringify(trial[0]);
     if (trial[0]!.length === 0 || trial.some((t) => JSON.stringify(t) !== first)) return [];
     const made = arms.map((a) => this.exactThrough(a, fields));
+    // the union answers its arms' cells after Postgres's columns: none an entry of a list of its own
+    this.appendCells(b, made[0]![0]?.cells.length ?? 0, 0);
     return made[0]!;
   }
 
@@ -3924,6 +3988,23 @@ const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
 
 /** one output column of a SELECT (Rewriter.outputs): the target it comes from, its name, what it reads, and whether a `*` lists it */
 type Output = { target: number; name: string; value: AstNode; star: boolean; twin: boolean };
+
+/** the WITH TIES wrapper's alias, the rank it orders by (src/duck/ties.ts writes it), and a set operation's alias under it */
+const TIES = "__mason_ties", TIES_RANK = "__mason_rank", SET = "__mason_set";
+
+/**
+ * the output a set operation's ORDER BY key names, Postgres's rule (transformSetOperationStmt: an output column's
+ * number, or its bare name, once), as its place in `outputs`, or -1: one reader for the set operation's ORDER BY and
+ * its WITH TIES
+ */
+function setOperationOutput(by: AstNode, outputs: readonly Output[]): number {
+  const n = constInt(by);
+  if (n !== null) return n >= 1 && n <= outputs.length ? n - 1 : -1;
+  const f = kindOf(by) === "ColumnRef" ? names(bodyOf(by).fields) : [];
+  if (f.length !== 1) return -1;
+  const at = outputs.findIndex((o) => o.name === f[0]);
+  return at >= 0 && outputs.filter((o) => o.name === f[0]).length === 1 ? at : -1;
+}
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 
 /** whether a program does what DuckDB would compute otherwise: a division, a rounding, a scale chosen per value; a
@@ -4593,7 +4674,7 @@ export interface RewriteOptions {
 
 export function rewrite({ stmt, base, analysis, collation, userTypes = new Map(), rowTypes = new Map(), timeZone = "UTC", enums = { labels: new Map(), arrays: new Map() }, kept = null,
   wireBound = false, keyCounts = new Set() }: RewriteOptions):
-  { tree: AstNode; dropLast: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
+  { tree: AstNode; cells: number; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
   const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, enums, kept, keyCounts);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
@@ -4605,10 +4686,12 @@ export function rewrite({ stmt, base, analysis, collation, userTypes = new Map()
   r.indexShapes(own);
   r.repeatedKeyCounts(own);
   const exact = r.exactThrough(own, analysis.fields);
+  // the cells DuckDB answers after Postgres's columns: the statement's own body's record (src/duck/store.ts checks it)
+  const cells = kindOf(own) === "SelectStmt" ? r.cellsOf(bodyOf(own)) : 0;
   r.markBounds(own, wireBound);
   r.markWholeReads(own);
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;
-  return { tree, dropLast: r.excludeRank, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral };
+  return { tree, cells, exact, clock: r.clock, jsonReads: [...r.jsonReads.values()], unboundedLateral: r.unboundedLateral };
 }
 
 /** the functions whose every call is a new value (Postgres's volatile ones Mason answers) */

@@ -16,6 +16,7 @@ import { analyze, catalogRows, readParameters } from "./analyze.ts";
 import { argumentTypes, describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
+import { tiesRanked } from "./ties.ts";
 import { pgTyplen } from "./types.ts";
 import type { CopyState } from "./sync.ts";
 import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
@@ -109,7 +110,19 @@ export interface PlannedSql {
    * (none, a LIMIT already bounds it, or an aggregate, a GROUP BY, a DISTINCT, a window or an ORDER BY reads every row)
    */
   readonly unboundedLateral?: true;
+  /**
+   * the exact cells DuckDB answers after Postgres's columns (src/duck/rewrite.ts `cellsAfter`, the statement's own
+   * body's record); absent: none. The store holds DuckDB's width to Postgres's columns plus these, exactly
+   */
+  readonly cells?: number;
   readonly [PLANNED]: true;
+}
+
+/** whether the statement itself is FETCH … WITH TIES: Postgres's analysis says so (its QUERY's limitOption), never the
+ *  rewrite's text */
+function tiesQuery(tree: TreeValue): boolean {
+  const top = Array.isArray(tree) ? tree[0] : tree;
+  return typeof top === "object" && top !== null && !Array.isArray(top) && top._node === "QUERY" && String(top.limitOption) === "1";
 }
 
 /**
@@ -404,7 +417,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       if (source !== undefined) f.oid = source;
     }
   }
-  let tree, dropLast, exact, clock, jsonReads, unboundedLateral;
+  let tree, cells, exact, clock, jsonReads, unboundedLateral;
   // a table's row the source has otherwise (copied in part: no source OID for it) is not the source's row
   const sourceRows = new Map([...rowTypes].filter(([oid]) => userTypes.has(catalogTypes.get(oid) ?? "")));
   // IS [NOT] NULL of a composite reads its fields (a row of NULLs IS NULL), which the copy's text does not
@@ -421,15 +434,15 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const analysed = performance.now();
   const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, userTypes: catalogTypes, rowTypes: sourceRows, timeZone, enums, kept: l, wireBound, keyCounts });
   try {
-    ({ tree, dropLast, exact, clock, jsonReads, unboundedLateral } = rewritten());
+    ({ tree, cells, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
     if (kept?.keepNow != null && lookup !== null && jsonReads.some((r) => kept.ready(r) === null)) {
       await kept.keepNow(jsonReads);
-      ({ tree, dropLast, exact, clock, jsonReads, unboundedLateral } = rewritten());
+      ({ tree, cells, exact, clock, jsonReads, unboundedLateral } = rewritten());
     }
     // a statement that lists a copy's columns without naming them reads none from a stored column (hideKept): made
     // again with every read its call, the reads still recorded
-    if (lookup !== null && exposes(tree)) ({ tree, dropLast, exact, clock, jsonReads, unboundedLateral } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
+    if (lookup !== null && exposes(tree)) ({ tree, cells, exact, clock, jsonReads, unboundedLateral } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
   }
   catch (e) {
     // a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its SQLSTATE, and no gap
@@ -447,6 +460,14 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const lateWall = walls !== null ? { alias: walls.alias, added: 0 } : null;
   tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree),
     { volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall }) ?? tree;
+  // every FETCH … WITH TIES late.ts did not rank on row numbers, ranked (src/duck/ties.ts)
+  try { tiesRanked(tree as Record<string, unknown>); }
+  catch (e) { throw new StatementError({ code: "XX000", message: (e as Error).message }, text); }
+  // THE WIDTH DuckDB ANSWERS IS POSTGRES'S COLUMNS AND THE CELLS RECORDED AFTER THEM (src/duck/store.ts checks it): the
+  // exact columns read the same cells, or the two have drifted
+  if (exact.length > 0 && exact[0]!.cells.length !== cells) {
+    throw new StatementError({ code: "XX000", message: `Mason's rewrite recorded ${cells} cell(s) after Postgres's columns where its exact columns read ${exact[0]!.cells.length}: report it, with the statement` }, text);
+  }
   // ONLY WHAT THE ORACLE VERIFIED: after the rewrite, so a construct the rewrite refuses by name (with its own way out)
   // says so first
   const keys = [...resolved].sort();
@@ -473,8 +494,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     throw new StatementError({ code: "0A000", message: "Mason cannot run this statement exactly: its rewritten form does not read back as itself (a Mason gap: report it, with the statement)",
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
-  const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}) } as unknown as PlannedSql;
-  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, dropLast, ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree),
+  const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}), ...(cells > 0 ? { cells } : {}) } as unknown as PlannedSql;
+  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, ties: tiesQuery(analysis.tree), ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
     timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
 }

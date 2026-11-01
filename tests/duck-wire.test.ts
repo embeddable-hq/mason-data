@@ -2906,6 +2906,106 @@ test("a key bound to an output is that output: by alias, number or an equal expr
   } finally { await c.end(); }
 });
 
+/** a WITH TIES statement's answer and Postgres's: equal, as sets where its ties have no order; an error by its SQLSTATE */
+async function tiesAlike(c: pg.Client, sql: string, values?: unknown[], inOrder = false): Promise<string | null> {
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => {
+    const rows = a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v));
+    return { fields: a.fields, rows: inOrder ? rows : rows.map((r) => JSON.stringify(r)).sort() };
+  };
+  const [got, want] = await Promise.all([answer(c, sql, values).then(held, (e: pg.DatabaseError) => `${e.code}: ${e.message}`),
+    postgres(sql, values).then(held, (e: { code?: string; message: string }) => `${e.code}: ${e.message}`)]);
+  return util.isDeepStrictEqual(got, want) ? null : `${sql}${values === undefined ? "" : ` ${JSON.stringify(values)}`}\n  Mason:    ${JSON.stringify(got).slice(0, 300)}\n  Postgres: ${JSON.stringify(want).slice(0, 300)}`;
+}
+
+// FETCH … WITH TIES, ITS FOUR LAYERS (issue 192): its keys are the sort pass's (one resolver), its width Postgres's at
+// every depth (the rank never leaves its wrapper), a set operation a plain SELECT over it, its count and offset Postgres's
+test("FETCH … WITH TIES answers as Postgres at every depth: one resolver for its keys, its rank in no row, a set operation, Postgres's count (issue 134, task F)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    const check = async (sql: string, values?: unknown[], inOrder = false): Promise<void> => { const d = await tiesAlike(c, sql, values, inOrder); if (d !== null) differ.push(d); };
+    for (const sql of [
+      // an ordinal bound to a computed output beside a star, a name, an equal expression, over a join
+      "SELECT count(*) FROM (SELECT l.*, l.k % 5 AS m FROM late l ORDER BY 5 FETCH FIRST 3 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT *, l.k % 5 AS m FROM late l ORDER BY 5 FETCH FIRST 3 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.*, l.k % 5 AS m FROM late l ORDER BY m FETCH FIRST 3 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.*, l.k % 5 AS m FROM late l ORDER BY l.k % 5 DESC, 2 FETCH FIRST 3 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.*, lc.name, l.k % 5 AS m FROM late l JOIN late_c lc ON lc.id = l.c ORDER BY 6 FETCH FIRST 3 ROWS WITH TIES) s",
+      // a set operation, by number and by name, with and without ALL, a text and a citext key, INTERSECT
+      "SELECT count(*) FROM (SELECT l.k % 5 AS m, l.id FROM late l WHERE l.id < 10 UNION ALL SELECT l.k % 5, l.id FROM late l WHERE l.id > 1990 ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.k % 5 AS m, l.id FROM late l WHERE l.id < 10 UNION ALL SELECT l.k % 5, l.id FROM late l WHERE l.id > 1990 ORDER BY m DESC FETCH FIRST 3 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.c FROM late l UNION SELECT lc.id FROM late_c lc ORDER BY 1 DESC FETCH FIRST 2 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT t.s AS x FROM texts t UNION ALL SELECT t.s FROM texts t ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s",
+      "SELECT l.id, l.c FROM late l WHERE l.id < 5 INTERSECT SELECT l.id, l.c FROM late l ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES",
+      // the rank in no row: a derived table read by s.*, joined after, a CTE, IN, scalar, ARRAY, EXISTS, an arm, LATERAL
+      "SELECT s.*, 1 AS one FROM (SELECT l.id, l.c FROM late l ORDER BY l.c, l.id FETCH FIRST 3 ROWS WITH TIES) s ORDER BY 2, 1",
+      "SELECT * FROM (SELECT l.id, l.c FROM late l ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES) s JOIN late_c lc ON lc.id = s.c ORDER BY s.id",
+      "WITH t AS (SELECT l.id, l.c FROM late l ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES) SELECT t.*, 1 AS one FROM t ORDER BY id",
+      "SELECT count(*) FROM late WHERE id IN (SELECT l.id FROM late l ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES)",
+      "SELECT (SELECT l.id FROM late l ORDER BY l.k FETCH FIRST 1 ROWS WITH TIES)",
+      "SELECT EXISTS (SELECT l.id FROM late l ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES)",
+      "SELECT count(*) FROM ((SELECT l.id FROM late l ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES) UNION ALL SELECT 1) u",
+      "SELECT x.id FROM (SELECT l.id FROM late l ORDER BY l.c, l.id FETCH FIRST 2 ROWS WITH TIES) x UNION ALL SELECT 5 ORDER BY 1",
+      "SELECT c.id, x.id FROM late_c c CROSS JOIN LATERAL (SELECT l.id FROM late l WHERE l.c = c.id ORDER BY l.k FETCH FIRST 1 ROWS WITH TIES) x WHERE c.id < 3 ORDER BY 1, 2",
+      // numerics exact: cells appended, passed through, carried by a star, through a CTE, in each UNION ALL arm
+      "SELECT l.id, l.k / 7.0 AS q FROM late l ORDER BY l.id FETCH FIRST 3 ROWS WITH TIES",
+      "SELECT l.id, l.k / 7.0 AS q FROM late l ORDER BY 2 DESC FETCH FIRST 3 ROWS WITH TIES",
+      "SELECT l.id, l.k / 7.0 * 2 AS q2, round(l.k / 7.0, 3) AS r, coalesce(l.k / 7.0, 0) AS c FROM late l ORDER BY l.id FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.c, avg(l.k) AS a FROM late l GROUP BY l.c ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT s.q FROM (SELECT l.id, l.k / 7.0 AS q FROM late l ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 1 LIMIT 3",
+      "SELECT * FROM (SELECT l.id, l.k / 7.0 AS q FROM late l) s ORDER BY 2 DESC, 1 FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT s.q, s.id FROM (SELECT l.id, l.k / 7.0 AS q FROM late l) s ORDER BY 1 DESC FETCH FIRST 2 ROWS WITH TIES",
+      "WITH t AS (SELECT l.id, l.k / 7.0 AS q FROM late l ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES) SELECT * FROM t ORDER BY 1 LIMIT 3",
+      "SELECT l.id, l.k / 7.0 AS q FROM late l WHERE l.id < 5 UNION ALL SELECT l.id, l.k / 7.0 FROM late l WHERE l.id > 1995 ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES",
+      // cells appended for no computed column: the width still Postgres's and the cells
+      "SELECT s.id FROM (SELECT l.id, l.k / 7.0 AS q FROM late l) s ORDER BY 1 LIMIT 2",
+      "SELECT s.id FROM (SELECT l.id, l.k / 7.0 AS q FROM late l) s ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES",
+      // the count and the offset as Postgres reads them
+      "SELECT l.id FROM late l ORDER BY l.c FETCH FIRST (NULL::int) ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c FETCH FIRST (-1) ROWS WITH TIES",
+      "SELECT l.id FROM late l WHERE false ORDER BY l.c FETCH FIRST (-1) ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c OFFSET (-1) FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c OFFSET (-1) FETCH FIRST (-1) ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c, l.id OFFSET NULL FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c, l.id FETCH FIRST 2.5 ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c, l.id FETCH FIRST 2.5::float8 ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c, l.id FETCH FIRST 3.5::float8 ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c FETCH FIRST 0 ROWS WITH TIES",
+      "SELECT l.id FROM late l ORDER BY l.c FETCH FIRST NULL ROWS WITH TIES",
+      "SELECT l.id FROM late l FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.id, l.j FROM late l ORDER BY l.c DESC, l.id OFFSET 100000 FETCH FIRST 3 ROWS WITH TIES",
+      // every key a constant: every row ties
+      "SELECT count(*) FROM (SELECT l.id, 1.5::numeric AS v FROM late l ORDER BY v FETCH FIRST 2 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.id, 1.5::numeric AS v FROM late l ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES) s",
+      // an approximate aggregate's ties (a probe: a difference is an issue of its own)
+      "SELECT g.c, sum(g.f) AS s FROM (SELECT l.c, (l.k % 4)::float8 / 4 AS f FROM late l) g GROUP BY g.c ORDER BY s FETCH FIRST 1 ROWS WITH TIES",
+    ]) await check(sql);
+    // a parameter's count and offset, NULL among them
+    const P1 = "SELECT l.id FROM late l ORDER BY l.c, l.id FETCH FIRST $1 ROWS WITH TIES";
+    const P2 = "SELECT l.id FROM late l ORDER BY l.c, l.id OFFSET $2 FETCH FIRST $1 ROWS WITH TIES";
+    for (const [sql, values] of [[P1, [2]], [P1, [null]], [P2, [3, 1]], [P2, [3, null]]] as const) await check(sql, [...values]);
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+    // an ARRAY of a WITH TIES (PGlite's answer parsed, Mason's the wire's text)
+    const ARRAY = "SELECT ARRAY(SELECT l.id FROM late l ORDER BY l.c, l.id FETCH FIRST 3 ROWS WITH TIES)";
+    assert.deepEqual((await answer(c, ARRAY)).rows, (await postgres(ARRAY)).rows.map((r) => [`{${(r[0] as number[]).join(",")}}`]), ARRAY);
+    // refused by name: DISTINCT and DISTINCT ON, a volatile key on every path, FOR UPDATE
+    const refused = async (sql: string, gap: RegExp): Promise<void> => {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && gap.test(e.detail ?? ""), sql);
+    };
+    await refused("SELECT count(*) FROM (SELECT DISTINCT l.c FROM late l ORDER BY l.c FETCH FIRST 3 ROWS WITH TIES) s", /with-ties-distinct/);
+    await refused("SELECT count(*) FROM (SELECT DISTINCT ON (l.c) l.c, l.id FROM late l ORDER BY l.c, l.id FETCH FIRST 3 ROWS WITH TIES) s", /with-ties-distinct/);
+    for (const key of ["r", "1", "random()"]) {
+      await refused(`SELECT count(*) FROM (SELECT random() AS r, l.id FROM late l JOIN late_c c ON c.id = l.c ORDER BY ${key} FETCH FIRST 3 ROWS WITH TIES) s`, /volatile-window/);
+    }
+    await assert.rejects(c.query("SELECT l.id FROM late l ORDER BY l.c, l.id FOR UPDATE FETCH FIRST 3 ROWS WITH TIES"), (e: pg.DatabaseError) => e.code === "0A000");
+    // the width detector: a plan whose SQL answers a column past Postgres's and its cells is a report, never a row
+    const runner = await store.runner();
+    await assert.rejects(runner.run({ text: "SELECT l.id, 1 AS x FROM late l", functions: [] } as never, [], { timeZone: "UTC", searchPath: "public", settings: {} } as never,
+      new AbortController().signal, [{ name: "id", oid: 23, typmod: -1 }]),
+    (e: Error) => /the engine answered 2 column\(s\) where Postgres's analysis has 1: report it \(Mason's rewrite\)/.test(e.message));
+  } finally { await c.end(); }
+});
+
 test("a computed key and a merged column in a prepared statement run after a SET, and in two session zones", async () => {
   const c = await client();
   try {
