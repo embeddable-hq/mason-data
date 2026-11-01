@@ -14,7 +14,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DuckStore, MASON_SCHEMA } from "../src/duck/store.ts";
-import { HELD_LAYOUT, Sync, type AddedTable } from "../src/duck/sync.ts";
+import * as syncModule from "../src/duck/sync.ts";
+import { Sync, type AddedTable } from "../src/duck/sync.ts";
+
+// read by name, so the file loads where the layout was not known (scripts/fails-without.ts)
+const HELD_LAYOUT = (syncModule as unknown as { HELD_LAYOUT?: string }).HELD_LAYOUT ?? "(no HELD_LAYOUT)";
 import type { Source, SourceColumnInfo } from "../src/cli/preflight.ts";
 
 const source = { url: "postgresql://x@127.0.0.1:1/x", remote: false, host: "127.0.0.1", port: 1, database: "x", user: "x", password: "", sslmode: "disable" } as unknown as Source;
