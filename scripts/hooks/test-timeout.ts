@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * PreToolUse hook (Bash): a test run carries its time limit (CLAUDE.md "Local gates", "While working, the tests nearest the change"). A hung test never
- * exits, and a background job reports only when it exits, so `node --test` without `--test-timeout=<ms>` BEFORE its
- * first file is blocked: after the files Node ignores the flag. `npm test` is blocked too, because its script names the
- * files and anything npm appends lands after them (issue 139).
+ * PreToolUse hook (Bash): a test run carries its time limit (CLAUDE.md "Local gates", "While working, the tests
+ * nearest the change"). A hung test never exits, and a background job reports only when it exits, so `node --test`
+ * without `--test-timeout=<ms>` BEFORE its first file is blocked: after the files Node ignores the flag. `npm test` is
+ * blocked too, because its script names the files and anything npm appends lands after them (issue 139).
  *
  * Allowed: `npm run check` and `npm run gate` (each step bounded by the gate), anything through scripts/gate-slot.ts,
  * and scripts/fails-without.ts (it sets its own): for each of those, `node`'s first argument is a script, not `--test`.

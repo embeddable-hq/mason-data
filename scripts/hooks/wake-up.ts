@@ -3,9 +3,9 @@
  * Stop hook: a coordinator leaves a wake-up for what it waits on (CLAUDE.md "How work is done here",
  * guideline 4 and "The loop" step 5). It reads the CURRENT turn of the session's transcript (JSONL), the tool uses after
  * the last prompt a person typed: when the last merge queued (`gh pr merge … --auto`) or message sent to another
- * session (`mcp__ccd_session_mgmt__send_message`) has no background job started after it that is still running, it WARNS. A
- * SendMessage to a sub-agent is no trigger: a sub-agent's end wakes the session. A background job is a Bash call with
- * run_in_background or a Monitor; it is still running until a `<task-notification>` names its tool use.
+ * session (`mcp__ccd_session_mgmt__send_message`) has no background job started after it that is still running, it
+ * WARNS. A SendMessage to a sub-agent is no trigger: a sub-agent's end wakes the session. A background job is a Bash
+ * call with run_in_background or a Monitor; it is still running until a `<task-notification>` names its tool use.
  *
  * A heuristic, so it never blocks: the warning is a `systemMessage` the person sees, and the turn ends as it would.
  * Silent when stop_hook_active (a stop hook is already continuing the turn), when the Stop input lists a background
