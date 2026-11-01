@@ -4472,3 +4472,27 @@ test("the statements running now, by session; a cancel by session stops one as a
     await s.untilReady();
   } finally { s.end(); }
 });
+
+// THE GROUPED COLLATED INNER ORDER under a libc database (PR 170's oracle statements "a bound key: a collated output
+// grouped and ordered by …", mirrored): the keys bound to the output, by number, name or expression, sort by its ICU
+// collation (a space counts: ' alpha' before '10'), never the database's. A last key that is no output keeps the
+// oracle from re-sorting the derived column outside, which is #213's
+test("a grouped collated output ordered by number, name or expression is its collation's order on a libc database", async () => {
+  const libc = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => schema, record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
+    duck: await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined,
+      handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" "], { collate: "en_US.utf8" }), () => copies),
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: libc.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+  await c.connect();
+  try {
+    for (const sql of [
+      "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY 1 ORDER BY 1, min(a.id) LIMIT 8",
+      "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY 1 ORDER BY 1 DESC, min(a.id) LIMIT 8",
+      "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY n ORDER BY a.team COLLATE \"und-x-icu\", n, min(a.id) LIMIT 8",
+      "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY n ORDER BY n DESC, min(a.id) LIMIT 8",
+    ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  } finally { await c.end(); await libc.close(); }
+});
