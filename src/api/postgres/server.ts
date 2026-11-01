@@ -78,7 +78,7 @@ import {
   type FieldDescription, type FrontendMessage,
   cstr, int16, int32, frame, decodeBackend, decodeNoticeFrame, splitFrames, MAX_MESSAGE_LENGTH,
 } from "./protocol.ts";
-import { typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
+import { madeTypeName, typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
 import { Unsupported, duckTranslate, endsFailedBlock, type Translation } from "./translate.ts";
 import type { Node } from "libpg-query";
 
@@ -2621,7 +2621,7 @@ class Server {
     for (const t of this.options.schema().tables) for (const c of t.columns) {
       if (c.typeOid === undefined || c.spelled === undefined) continue;
       // the type's name as pg_type holds it (`other.level` is `level`, `"My Mood"` is `My Mood`)
-      const name = typeNameParts(c.spelled.replace(/\[\]$/, "")).name;
+      const name = typeNameParts(madeTypeName(c.spelled)).name;
       // the element type and its array type, as pg_type names them (`citext`, `_citext`); an array column's own OID is
       // its array type's (pg_attribute.atttypid), and it has none of its own (an array type's typarray is 0)
       if (c.spelled.endsWith("[]")) out.set(`_${name}`, c.typeOid);

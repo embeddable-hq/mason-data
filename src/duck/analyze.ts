@@ -14,6 +14,7 @@
  * left in the sidecar between calls — another session's Sync can lose nothing (tests/postgres-api/server.test.ts "a
  * catalog statement's portal, beside another session's").
  */
+import { HELD } from "./held-types.ts";
 import { cstr, decodeBackend, frame, int16, int32 } from "../api/postgres/protocol.ts";
 import { outputsByLocation, parseTree, typesByLocation, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
 
@@ -79,8 +80,10 @@ export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, s
 /** the types whose input DuckDB reads otherwise than Postgres, as the catalog Postgres writes their value back */
 const PARAM_TYPES: Record<number, string> = {
   16: "boolean", 21: "smallint", 23: "integer", 20: "bigint", 700: "real", 701: "double precision", 1700: "numeric",
-  2950: "uuid", 114: "json", 3802: "jsonb", 1083: "time", 1082: "date", 1114: "timestamp", 1184: "timestamptz", 1186: "interval", 869: "inet",
+  2950: "uuid", 114: "json", 3802: "jsonb", 1083: "time", 1082: "date", 1114: "timestamp", 1184: "timestamptz", 1186: "interval", 869: "inet", 1266: "timetz",
   1009: "text[]", 1015: "varchar[]",
+  // a type the copy holds as its text: the text Postgres writes the value as
+  ...Object.fromEntries(Object.entries(HELD).map(([name, h]) => [h.oid, name])),
 };
 
 /**

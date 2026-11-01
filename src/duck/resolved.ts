@@ -14,6 +14,11 @@
  * defined is never in the catalog Postgres, so it never reaches here.
  */
 import { exprType, type TreeNode, type TreeValue } from "./pgtree.ts";
+import { HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
+import { heldType, isHeldArray } from "./held-types.ts";
+
+/** the key of a type the source made, held as its text (src/duck/held-types.ts) */
+const HELD_KEY = "made";
 
 const isNode = (v: TreeValue | undefined): v is TreeNode => v !== null && v !== undefined && typeof v === "object" && !Array.isArray(v);
 /** an OID a customer's database made (an extension's type or operator, a table's row type) differs between databases:
@@ -43,7 +48,9 @@ export async function nameUserKeys(rows: (sql: string) => Promise<(string | null
     set.size === 0 ? new Map() : new Map((await rows(sql([...set].join(", ")))).map((r) => [r[0]!, r[1]!]));
   const proc = await read(oids.proc, (l) => `SELECT oid::text, 'ext:' || oid::regprocedure::text FROM pg_proc WHERE oid IN (${l})`);
   const op = await read(oids.op, (l) => `SELECT oid::text, 'ext:' || oid::regoperator::text FROM pg_operator WHERE oid IN (${l})`);
-  const type = await read(oids.type, (l) => `SELECT oid::text, CASE WHEN typtype = 'c' THEN 'rowtype' ELSE 'ext:' || typname END FROM pg_type WHERE oid IN (${l})`);
+  // a type the source made that the copy holds as its text is one key, whichever: what is verified over one is the text's
+  const type = await read(oids.type, (l) => `SELECT t.oid::text, CASE WHEN t.typtype = 'c' THEN 'rowtype' WHEN t.typinput::text LIKE '%${HELD_TYPE_INPUT}%' THEN '${HELD_KEY}'
+    WHEN e.typinput::text LIKE '%${HELD_TYPE_INPUT}%' THEN '${HELD_KEY}[]' ELSE 'ext:' || t.typname END FROM pg_type t LEFT JOIN pg_type e ON e.oid = t.typelem WHERE t.oid IN (${l})`);
   const name = (kind: string, p: string): string => { const m = USER.exec(p); return m === null ? p : (kind === "operator" ? op : kind === "type" || kind === "cast" ? type : proc).get(m[1]!) ?? p; };
   return new Set(list.map((k) => {
     const kind = k.slice(0, k.indexOf(":")), value = k.slice(k.indexOf(":") + 1);
@@ -81,6 +88,8 @@ export function resolvedKeys(tree: TreeValue): Set<string> {
     keys.add(`node:${name}`);
     const t = exprType(v);
     if (t !== null && t.type !== 0) keys.add(`type:${oidKey(t.type)}`);
+    // a system column (ctid, xmin, tableoid): a copy has none, whatever its type's being verified says. Never verified
+    if (name === "VAR" && Number(v.varattno) < 0) keys.add("field:VAR.system");
     const resolved = RESOLVED[name];
     if (resolved) { const oid = v[resolved[0]]; if (typeof oid === "string") keys.add(`${resolved[1]}:${oidKey(oid)}`); }
     if (CASTS.has(name) && isNode(v.arg)) {
@@ -98,6 +107,63 @@ export function resolvedKeys(tree: TreeValue): Set<string> {
   };
   visit(tree);
   return keys;
+}
+
+/** What a statement does with a value the copy holds as its text (src/duck/held-types.ts): what the text cannot answer
+ *  as the type would. Each is `operator:<oid>`, `function:<oid>` … as a key; the planner reads an operator's name. */
+export function heldUses(tree: TreeValue): Array<{ kind: "operator" | "function" | "cast"; oid: string; type: number }> {
+  const out: Array<{ kind: "operator" | "function" | "cast"; oid: string; type: number }> = [];
+  const typeOf = (x: TreeValue | undefined): number | null => {
+    if (!isNode(x)) return null;
+    if (x._node === "TARGETENTRY") return typeOf(x.expr);
+    // a literal is the statement's, not the copy's (`to_tsvector('simple', x)` reads a regconfig)
+    if (x._node === "CONST") return null;
+    // a binary-compatible cast is its value (a cidr read by inet's operators)
+    if (x._node === "RELABELTYPE") return typeOf(x.arg);
+    return exprType(x)?.type ?? null;
+  };
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    const resolved = RESOLVED[v._node];
+    if (resolved !== undefined && Array.isArray(v.args)) {
+      const oid = v[resolved[0]];
+      const type = v.args.map(typeOf).find((t) => heldType(t) !== undefined);
+      if (type != null && typeof oid === "string") out.push({ kind: resolved[1] === "operator" ? "operator" : "function", oid, type });
+    }
+    if (v._node === "COERCEVIAIO" || v._node === "ARRAYCOERCEEXPR") {
+      const from = typeOf(v.arg), to = exprType(v)?.type ?? null;
+      // to another type, or a value read as one (a text cast to macaddr), which only Postgres's input function reads
+      if (heldType(from) !== undefined && to !== 25 && to !== 1043 && from !== to) out.push({ kind: "cast", oid: String(to), type: from! });
+      else if (heldType(to) !== undefined && from !== to) out.push({ kind: "cast", oid: String(to), type: to! });
+    }
+    // a regclass read as its oid: the copy holds its name
+    if (v._node === "RELABELTYPE") {
+      const from = typeOf(v.arg), to = exprType(v)?.type ?? null;
+      if (heldType(from) !== undefined && to !== 869 && heldType(to) === undefined && from !== to) out.push({ kind: "cast", oid: String(to), type: from! });
+    }
+    // a "char" read as a text by min and max, under the database's collation: the copy's is a byte's order
+    if (v._node === "AGGREF" && Array.isArray(v.args) && v.args.some((a) => isNode(a) && isNode(a.expr) && a.expr.funcid === "946")) out.push({ kind: "cast", oid: "25", type: 18 });
+    // a point's x, a vector's element: a subscript of a type that is not an array
+    if (v._node === "SUBSCRIPTINGREF") {
+      const of = typeOf(v.refexpr);
+      if (heldType(of) !== undefined && !isHeldArray(of)) out.push({ kind: "cast", oid: String(of), type: of! });
+    }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node" && k !== "joinaliasvars") visit(x);
+  };
+  visit(tree);
+  return out;
+}
+
+/** whether a statement tests a value of one of `types` with IS [NOT] NULL */
+export function nullTested(tree: TreeValue, types: ReadonlySet<number>): boolean {
+  const visit = (v: TreeValue | undefined): boolean => {
+    if (Array.isArray(v)) return v.some(visit);
+    if (!isNode(v)) return false;
+    if (v._node === "NULLTEST" && isNode(v.arg) && types.has(exprType(v.arg)?.type ?? 0)) return true;
+    return Object.entries(v).some(([k, x]) => k !== "_node" && k !== "joinaliasvars" && visit(x));
+  };
+  return visit(tree);
 }
 
 // --------------------------------------------------------------------------------------------- what a key names
@@ -129,6 +195,7 @@ const VALUES: Record<string, Record<string, string>> = {
   "COMMONTABLEEXPR.ctematerialized": { 0: "WITH", 1: "WITH … AS MATERIALIZED", 2: "WITH … AS NOT MATERIALIZED" },
 };
 const FLAGS: Record<string, string> = {
+  "VAR.system": "a system column (ctid, xmin, tableoid …), which a synced table does not have",
   "AGGREF.aggdistinct": "an aggregate of DISTINCT values", "AGGREF.aggorder": "an aggregate's own ORDER BY", "AGGREF.aggfilter": "an aggregate's FILTER (WHERE …)",
   "AGGREF.aggdirectargs": "an ordered-set aggregate's direct argument", "WINDOWFUNC.aggfilter": "a window aggregate's FILTER (WHERE …)",
   "QUERY.distinctClause": "SELECT DISTINCT", "QUERY.groupingSets": "GROUPING SETS / ROLLUP / CUBE", "QUERY.havingQual": "HAVING",
@@ -185,7 +252,7 @@ export async function describeKeys(rows: (sql: string) => Promise<(string | null
   const proc = await read(procs, (l) => `SELECT oid::text, oid::regprocedure::text FROM pg_proc WHERE oid IN (${l})`);
   const op = await read(ops, (l) => `SELECT oid::text, oid::regoperator::text FROM pg_operator WHERE oid IN (${l})`);
   const type = await read(types, (l) => `SELECT oid::text, format_type(oid, NULL) FROM pg_type WHERE oid IN (${l})`);
-  const typeName = (t: string): string => t === "rowtype" ? "a table's row type" : t.startsWith("ext:") ? `${t.slice(4)} (an extension's)` : type.get(t) ?? `type OID ${t}`;
+  const typeName = (t: string): string => t === "rowtype" ? "a table's row type" : t === HELD_KEY ? "a type the source made" : t === `${HELD_KEY}[]` ? "an array of a type the source made" : t.startsWith("ext:") ? `${t.slice(4)} (an extension's)` : type.get(t) ?? `type OID ${t}`;
   const extName = (v: string): string => v.startsWith("ext:") ? `${v.slice(4)} (an extension's)` : `OID ${v}`;
   for (const k of list) {
     const kind = k.slice(0, k.indexOf(":")), value = k.slice(k.indexOf(":") + 1);

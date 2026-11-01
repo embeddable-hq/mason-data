@@ -42,7 +42,17 @@ export interface PgColumn {
   /** an enum's labels in their declared order (a column, or an array's element, of the source's
    *  enum type), which the catalog creates the type with: Postgres orders and compares an enum by them */
   enumLabels?: readonly string[] | undefined;
+  /** a type a database made that the copy holds as its text (a composite, a range, an extension's: src/duck/held-types.ts):
+   *  the catalog declares it under its name, with nothing defined over it, so a tool reads the source's type */
+  made?: boolean | "row" | undefined;
 }
+
+/** the input function's name of a type the catalog declares for a `made` column: what the planner tells one by */
+export const HELD_TYPE_INPUT = "mason_held_in";
+/** a composite's: its input function's name holds `HELD_TYPE_INPUT` too */
+export const HELD_ROW_INPUT = "row_mason_held_in";
+/** the name a `made` type is declared under, its typmod and `[]` left off (`vector(3)`, `pair[]`) */
+export const madeTypeName = (spelled: string): string => spelled.replace(/\[\]$/, "").replace(/\(\d+(,\d+)?\)$/, "");
 
 /**
  * A type as format_type spells it (`mood`, `other.level`, `"My Mood"`, `"a.b"."c"`, an array's `[]` left off): its

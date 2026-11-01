@@ -10,6 +10,8 @@
  * project of the folder they run in. Every command is in src/cli/registry.ts, described once (src/cli/command.ts).
  * Apache-2.0: it runs the stack (CLAUDE.md "Licensing").
  */
+// FIRST: it sizes libuv's pool, which nothing below may have started (src/cli/pool-size.cjs)
+import "./pool-size.cjs";
 import { COMMANDS, orientation, topUsage, version } from "./registry.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { spinUntilOutput } from "./style.ts";

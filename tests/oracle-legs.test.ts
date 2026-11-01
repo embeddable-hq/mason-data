@@ -5,10 +5,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
-import { STAGES, deadGaps, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, verifiedDiff, wholeRunProblems, type Decision, type LegReport } from "../scripts/oracle-legs.ts";
+import { STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
+import { reportName } from "../scripts/ci-layout.ts";
+import { VERIFIED } from "../src/duck/verified.ts";
+import type { GapTally } from "./integration/oracle/gap-tally.ts";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const statements = Array.from({ length: 40 }, (_, i) => ({ group: "g", name: `statement ${i}`, sql: `SELECT ${i}` }));
 /** asked in every phase and held apart from the tallies, as oracle/unordered-limit.ts's are */
@@ -18,12 +26,13 @@ const whole: LegReport["whole"] = [...statements.map((q) => ({ id: statementId(q
 const everyGap = () => ({ refused: {}, decided: Object.fromEntries((Object.keys(GAPS) as GapId[]).map((id) => [id, { planted: 1, natural: 0 }])) });
 const decisions = (over: Partial<Decision> = {}): Decision[] => [{ sql: "/x/", why: "why", differed: true, decided: true, ...over }];
 
+const measured: Measured = { what: "w", machine: "linux x64", postgres: "PostgreSQL 18 on x86_64-pc-linux-gnu", collation: "en_US.utf8 (c)", shapes: true };
 function report(leg: number, of = 2): LegReport {
   const mine = statements.filter((q) => legOf(q.sql, of) === leg).map(statementId);
   const mineApart = apart.filter((q) => legOf(q.sql, of) === leg).map(statementId);
   return { leg, of, whole, asked: Object.fromEntries(PHASES.map((p) => [p, [...mine, ...mineApart]])), stages: leg === 1 ? Object.fromEntries(STAGES.map((s) => [s, 5])) : {}, shaped: 3,
     tallies: { statements: mine.length, mason: { exact: mine.length }, duckdb: { exact: mine.length } }, copyPhase: { refused: {}, decided: {} }, everyAsk: leg === 1 ? everyGap() : { refused: {}, decided: {} },
-    decisions: decisions({ differed: leg === 1 }), verified: [`k${leg}`], differences: 0 };
+    decisions: decisions({ differed: leg === 1 }), verified: [`k${leg}`], names: { [`k${leg}`]: leg === 1 ? "one" : "two" }, asks: 3 * (mine.length + mineApart.length) + 3, measured, differences: 0 };
 }
 const legs = (): [LegReport, LegReport] => [report(1), report(2)];
 
@@ -176,4 +185,116 @@ test("a leg left in a shell fails the oracle's file at once, before it needs a P
   const r = spawnSync(process.execPath, [fileURLToPath(new URL("integration/duck-oracle.itest.ts", import.meta.url))], { encoding: "utf8", env: { ...env, IT_ORACLE_LEG: "1/2" } });
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /IT_ORACLE_LEG=1\/2 with no IT_ORACLE_LEG_REPORT/);
+});
+
+test("a failure of the allowlist or the fixture names the command that writes them from the legs", () => {
+  const extra = legs();
+  extra[1].verified.push("k3");
+  assert.match(wholeRunProblems(extra, fixture, listed).join("\n"), /verified\.ts is not what the legs verified: .*Regenerate with `node scripts\/oracle-legs\.ts --write (<run-id>|\d+)`/);
+  assert.match(wholeRunProblems(legs(), { mason: { exact: 30 }, duckdb: { exact: 40 } }, listed).join("\n"), /oracle-duckdb-alone\.json is not what the legs measured: .*Regenerate with `node scripts\/oracle-legs\.ts --write (<run-id>|\d+)`/);
+});
+
+/** Two legs whose sums are the committed fixture and the committed allowlist, every count split between them (the
+ *  fixture's 3669 statements as the whole, partitioned by `legOf` as CI's are) */
+function legsOfTheRepo(): [LegReport, LegReport] {
+  type Fixture = Tallies & { gaps: { copyPhase: GapTally; everyAsk: GapTally & { asked: number } }; measured: Measured };
+  const was = JSON.parse(fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8")) as Fixture;
+  const many = Array.from({ length: was.statements }, (_, i) => ({ group: "g", name: `s${i}`, sql: `SELECT ${i}` }));
+  const all = many.map((q) => ({ id: statementId(q), name: q.name }));
+  const half = (n: number, leg: number): number => leg === 1 ? Math.ceil(n / 2) : Math.floor(n / 2);
+  const halves = <T extends Record<string, number>>(o: T, leg: number): T => Object.fromEntries(Object.entries(o).map(([k, n]) => [k, half(n, leg)])) as T;
+  // leg 2 lists the gaps in the other order, and leaves out every other one (leg 1 has it whole): the sums are by id
+  const split = (counts: GapTally["refused"], leg: number): GapTally["refused"] => Object.fromEntries((leg === 1 ? Object.entries(counts) : Object.entries(counts).reverse())
+    .flatMap(([id, c]) => Object.keys(counts).indexOf(id) % 2 === 1 ? (leg === 1 ? [[id, c!]] : []) : [[id, halves(c!, leg)]]));
+  const tally = (t: GapTally, leg: number): GapTally => ({ refused: split(t.refused, leg), decided: split(t.decided, leg) });
+  const keys = [...VERIFIED.keys()];
+  const leg = (n: 1 | 2): LegReport => {
+    const mine = many.filter((q) => legOf(q.sql, 2) === n).map(statementId);
+    const verified = keys.filter((_, i) => i % 3 === 0 || i % 2 === n - 1).reverse();   // some in both legs, in no order
+    return { leg: n, of: 2, whole: all, asked: Object.fromEntries(PHASES.map((p) => [p, mine])), stages: n === 1 ? Object.fromEntries(STAGES.map((s) => [s, 1])) : {}, shaped: 0,
+      tallies: { statements: mine.length, mason: halves(was.mason, n), duckdb: halves(was.duckdb, n) }, copyPhase: tally(was.gaps.copyPhase, n), everyAsk: tally(was.gaps.everyAsk, n),
+      decisions: [], verified, names: Object.fromEntries(verified.map((k) => [k, VERIFIED.get(k)!])), asks: half(was.gaps.everyAsk.asked, n), measured: was.measured, differences: 0 };
+  };
+  return [leg(1), leg(2)];
+}
+
+test("--write gives src/duck/verified.ts and the fixture byte for byte as a whole run's UPDATE_VERIFIED=1 and UPDATE_FIXTURE=1 wrote them", () => {
+  const files = filesFromLegs(legsOfTheRepo(), 2, fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8"));
+  assert.ok(!("problems" in files), JSON.stringify(files));
+  assert.equal(files.verified, fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8"));
+  assert.equal(files.fixture, fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8"));
+});
+
+test("--write refuses legs that are not the whole, or that predate it, and legs measured apart", () => {
+  const verifiedNow = fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8");
+  const [a, b] = legsOfTheRepo();
+  assert.match(JSON.stringify(filesFromLegs([a], 2, verifiedNow)), /the reports are of leg\(s\) 1, where 1, 2 must each report once/);
+  const { names: _n, asks: _a, measured: _m, ...old } = b;
+  assert.match(JSON.stringify(filesFromLegs([a, old as LegReport], 2, verifiedNow)), /leg\(s\) 2 has no names, asks or measured: the run predates/);
+  assert.match(JSON.stringify(filesFromLegs([a, { ...b, measured: { ...b.measured, machine: "another machine" } }], 2, verifiedNow)), /the legs measured on different machines/);
+});
+
+test("--write over a folder as `gh run download` leaves it: both files rewritten to what the legs measured, and nothing when a leg is missing", (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-write-"));
+  t.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+  const root = path.join(tmp, "repo"), dir = path.join(tmp, "download");
+  for (const f of [VERIFIED_FILE, FIXTURE_FILE]) fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+  const stale = fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8").replace(/^ {2}\["aggregate:2050".*\n/m, "") + "";
+  fs.writeFileSync(path.join(root, VERIFIED_FILE), stale);
+  fs.writeFileSync(path.join(root, FIXTURE_FILE), "{}\n");
+  const reports = legsOfTheRepo();
+  for (const r of reports) { fs.mkdirSync(path.join(dir, `ran-oracle-${r.leg}`), { recursive: true }); fs.writeFileSync(path.join(dir, `ran-oracle-${r.leg}`, reportName(r.leg)), JSON.stringify(r)); }
+  fs.rmSync(path.join(dir, "ran-oracle-2", reportName(2)));
+  const missing = writeFromLegs(dir, root);
+  assert.equal(missing.code, 1);
+  assert.match(missing.err.join("\n"), /nothing written/);
+  assert.equal(fs.readFileSync(path.join(root, FIXTURE_FILE), "utf8"), "{}\n");
+  fs.writeFileSync(path.join(dir, "ran-oracle-2", reportName(2)), JSON.stringify(reports[1]));
+  const done = writeFromLegs(dir, root);
+  assert.equal(done.code, 0, done.err.join("\n"));
+  assert.deepEqual(done.out, [`oracle legs: wrote ${FIXTURE_FILE}`, `oracle legs: wrote ${VERIFIED_FILE}`, "oracle legs: read the diff, then commit both files"]);
+  for (const f of [VERIFIED_FILE, FIXTURE_FILE]) assert.equal(fs.readFileSync(path.join(root, f), "utf8"), fs.readFileSync(path.join(ROOT, f), "utf8"), f);
+  // what else a whole run asserts is said after writing, and fails
+  reports[0].differences = 2;
+  fs.writeFileSync(path.join(dir, "ran-oracle-1", reportName(1)), JSON.stringify(reports[0]));
+  const differ = writeFromLegs(dir, root);
+  assert.equal(differ.code, 1);
+  assert.deepEqual(differ.out, [`oracle legs: unchanged ${FIXTURE_FILE}`, `oracle legs: unchanged ${VERIFIED_FILE}`]);
+  assert.match(differ.err.join("\n"), /written, and still wrong: 2 statement\(s\) answered differently/);
+});
+
+test("--write as a whole run: a stale decision or a dead gap writes the fixture and leaves src/duck/verified.ts as it was", (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-write-"));
+  t.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+  const root = path.join(tmp, "repo"), dir = path.join(tmp, "download");
+  for (const f of [VERIFIED_FILE, FIXTURE_FILE]) fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+  fs.mkdirSync(dir);
+  const stale = fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8").replace(/^ {2}\["aggregate:2050".*\n/m, "");
+  const reports = legsOfTheRepo();
+  for (const r of reports) r.decisions = [{ sql: "/x/", why: "why", differed: false, decided: true }];
+  const run = (): ReturnType<typeof writeFromLegs> => {
+    fs.writeFileSync(path.join(root, VERIFIED_FILE), stale);
+    fs.writeFileSync(path.join(root, FIXTURE_FILE), "{}\n");
+    for (const r of reports) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r));
+    return writeFromLegs(dir, root);
+  };
+  const decided = run();
+  assert.equal(decided.code, 1);
+  assert.deepEqual(decided.out, [`oracle legs: wrote ${FIXTURE_FILE}`]);
+  assert.match(decided.err.join("\n"), /no longer differs[\s\S]*src\/duck\/verified\.ts not written/);
+  assert.equal(fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"), stale, "verified.ts is left as it was");
+  assert.equal(fs.readFileSync(path.join(root, FIXTURE_FILE), "utf8"), fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8"), "the fixture is written first, as a whole run's");
+  for (const r of reports) { r.decisions = []; r.everyAsk = { refused: {}, decided: {} }; }
+  const dead = run();
+  assert.equal(dead.code, 1);
+  assert.match(dead.err.join("\n"), /entries no oracle statement meets/);
+  assert.equal(fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"), stale);
+});
+
+test("--write <run-id> takes only a finished run of the commit checked out: another push's or branch's legs measured another tree", () => {
+  const head = "a".repeat(40);
+  assert.deepEqual(runProblems({ headSha: head, status: "completed", conclusion: "failure" }, head), [], "a run whose oracle failed is the one to write from");
+  assert.match(runProblems({ headSha: "b".repeat(40), status: "completed", conclusion: "success" }, head).join("\n"), /the run is of commit b{40}, where this checkout is at a{40}/);
+  assert.match(runProblems({ headSha: head, status: "in_progress", conclusion: null }, head).join("\n"), /has not finished \(in_progress\)/);
+  assert.equal(runProblems({}, head).length, 2, "a view that says nothing is refused");
 });

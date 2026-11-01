@@ -14,10 +14,12 @@ import { Buffer } from "node:buffer";
 import {
   DuckDBTypeId, type DuckDBType, type DuckDBValue, DuckDBDateValue, DuckDBTimestampValue, DuckDBTimestampTZValue,
   DuckDBDecimalValue, DuckDBUUIDValue, DuckDBListValue, DuckDBArrayValue, DuckDBIntervalValue, DuckDBBlobValue, DuckDBTimeValue,
-  DuckDBListType, DuckDBArrayType, DuckDBTimestampSecondsValue, DuckDBTimestampMillisecondsValue, DuckDBTimestampNanosecondsValue,
+  DuckDBListType, DuckDBArrayType, DuckDBTimeTZValue, DuckDBTimestampSecondsValue, DuckDBTimestampMillisecondsValue, DuckDBTimestampNanosecondsValue,
 } from "@duckdb/node-api";
 import { jsonbText } from "./jsonb.ts";
 import { gapMark } from "./gaps.ts";
+import { heldType, ZONED_HELD } from "./held-types.ts";
+import { pgEvalSync } from "./pg-eval.ts";
 import { EncodeError, encodeValue, OID, TIMESTAMP, type ApiValue, type PgSession, type WireType } from "../api/postgres/encode.ts";
 
 /** One result column as the wire describes it, and how its cells are written. */
@@ -146,6 +148,13 @@ function timeText(micros: bigint): string {
   return `${pad(secs / 3600n)}:${pad((secs % 3600n) / 60n)}:${pad(secs % 60n)}${frac === 0n ? "" : `.${pad(frac, 6).replace(/0+$/, "")}`}`;
 }
 
+/** A timetz as timetz_out writes it: the time, then its offset as `+HH`, `+HH:MM` or `+HH:MM:SS` (DuckDB's offset, as
+ *  Postgres writes it, is east of UTC; its stored zone is west) */
+export function timetzText(v: DuckDBTimeTZValue): string {
+  const abs = Math.abs(v.offset), s = abs % 60, m = Math.trunc(abs / 60) % 60;
+  return `${timeText(v.micros)}${v.offset < 0 ? "-" : "+"}${pad(Math.trunc(abs / 3600))}${m !== 0 || s !== 0 ? `:${pad(m)}` : ""}${s !== 0 ? `:${pad(s)}` : ""}`;
+}
+
 /** An interval as Postgres's `interval_out` writes it under IntervalStyle postgres: `1 year 2 mons 3 days 04:05:06.7` */
 export function intervalText(months: number, days: number, micros: bigint): string {
   const parts: string[] = [];
@@ -211,7 +220,7 @@ function arrayElement(text: string | null): string {
 /** Postgres's array OIDs of the element OIDs this file sends */
 const ARRAY_OID: Record<number, number> = {
   16: 1000, 17: 1001, 20: 1016, 21: 1005, 23: 1007, 25: 1009, 700: 1021, 701: 1022, 1082: 1182, 1083: 1183,
-  1114: 1115, 1184: 1185, 1186: 1187, 1700: 1231, 2950: 2951, 3802: 3807,
+  1114: 1115, 1184: 1185, 1186: 1187, 1266: 1270, 1700: 1231, 2950: 2951, 3802: 3807,
 };
 
 function custom(name: string, oid: number, size: number, text: (v: DuckDBValue, s: PgSession) => string, binary: ((v: DuckDBValue, s: PgSession) => Buffer) | null, divergence: string | null = null): WireColumn {
@@ -270,6 +279,8 @@ export function wireColumn(name: string, t: DuckDBType): WireColumn {
     case DuckDBTypeId.TIMESTAMP_TZ: return timestampColumn(name, true);
     case DuckDBTypeId.TIME:
       return custom(name, 1083, 8, (v) => timeText((v as DuckDBTimeValue).micros), (v) => { const b = Buffer.alloc(8); b.writeBigInt64BE((v as DuckDBTimeValue).micros); return b; });
+    case DuckDBTypeId.TIME_TZ:
+      return custom(name, 1266, 12, (v) => timetzText(v as DuckDBTimeTZValue), (v) => { const t = v as DuckDBTimeTZValue; const b = Buffer.alloc(12); b.writeBigInt64BE(t.micros, 0); b.writeInt32BE(-t.offset, 8); return b; });
     case DuckDBTypeId.INTERVAL:
       return custom(name, 1186, 16, (v) => { const i = v as DuckDBIntervalValue; return intervalText(i.months, i.days, i.micros); },
         (v) => { const i = v as DuckDBIntervalValue; const b = Buffer.alloc(16); b.writeBigInt64BE(i.micros, 0); b.writeInt32BE(i.days, 8); b.writeInt32BE(i.months, 12); return b; });
@@ -300,7 +311,7 @@ export function wireColumn(name: string, t: DuckDBType): WireColumn {
 // Postgres's type (a timestamp where Postgres says date), DuckDB's own encoding stands and the column says why.
 
 /** pg_type.typlen of the OIDs a result column may have */
-const TYPLEN: Record<number, number> = { 16: 1, 18: 1, 19: 64, 20: 8, 21: 2, 23: 4, 26: 4, 700: 4, 701: 8, 1082: 4, 1083: 8, 1114: 8, 1184: 8, 1186: 16, 2950: 16 };
+const TYPLEN: Record<number, number> = { 16: 1, 18: 1, 19: 64, 20: 8, 21: 2, 23: 4, 26: 4, 700: 4, 701: 8, 1082: 4, 1083: 8, 1114: 8, 1184: 8, 1186: 16, 1266: 12, 2950: 16 };
 const PG_TEXT = new Set([25, 1043, 1042, 19, 18]);
 const PG_INT: Record<number, "int2" | "int4" | "int8"> = { 21: "int2", 23: "int4", 20: "int8" };
 const DUCK_EXACT = new Set<DuckDBTypeId>([DuckDBTypeId.TINYINT, DuckDBTypeId.SMALLINT, DuckDBTypeId.INTEGER, DuckDBTypeId.BIGINT, DuckDBTypeId.HUGEINT,
@@ -338,6 +349,44 @@ export function floatAsNumeric(x: number, digits = 15): string {
   return s === "-0" ? "0" : s;
 }
 
+/** the binary forms of the text-held types a driver asks for by default (pgjdbc: point, box): each a float8's bytes */
+const HELD_BINARY: Record<number, (text: string) => Buffer> = {
+  600: floats, 603: floats,
+};
+function floats(text: string): Buffer {
+  const parts = text.match(/-?(?:Infinity|NaN|[\d.]+(?:e[-+]?\d+)?)/g) ?? [];
+  const b = Buffer.alloc(parts.length * 8);
+  parts.forEach((p, i) => b.writeDoubleBE(Number(p), i * 8));
+  return b;
+}
+
+/** a time range's text in the session's zone: Postgres's own output, a value at a time, the last few remembered */
+const zonedTexts = new Map<string, string>();
+function inZone(type: string, text: string, zone: string): string {
+  const key = `${zone}\u0000${type}\u0000${text}`;
+  let written = zonedTexts.get(key);
+  if (written === undefined) {
+    written = pgEvalSync(`SELECT $1::${type}::text`, [text], zone)[0]?.[0] ?? text;
+    if (zonedTexts.size >= 1024) zonedTexts.clear();
+    zonedTexts.set(key, written);
+  }
+  return written;
+}
+
+/** a column of a type held as its text. A value's text only: Mason writes the binary form of few of them */
+function heldColumn(name: string, oid: number, own: WireColumn, size: number): WireColumn {
+  const binary = HELD_BINARY[oid], zoned = ZONED_HELD.get(oid);
+  return {
+    name, oid, size, divergence: null,
+    encode: (v, format, s) => {
+      if (v === null) return null;
+      if (format === 0) return zoned !== undefined ? Buffer.from(inZone(zoned, str(v), s.timeZone), "utf8") : own.encode(v, 0, s);
+      if (binary !== undefined) return binary(str(v));
+      throw new EncodeError(`column ${JSON.stringify(name)} (type OID ${oid}) is held as its text and cannot be sent in binary by Mason: ask for text (${gapMark("binary-held-type")})`, "0A000", "binary-held-type");
+    },
+  };
+}
+
 /** The wire column of a result column whose Postgres type the analysis gave, holding DuckDB values of type `t`. */
 export function pgTypedColumn(name: string, oid: number, t: DuckDBType, typmod = -1): WireColumn {
   const own = wireColumn(name, t);
@@ -347,6 +396,13 @@ export function pgTypedColumn(name: string, oid: number, t: DuckDBType, typmod =
   // copies a numeric(65,30) at the decimals its values use)
   if (oid === 1700 && typmod >= 4 && DUCK_EXACT.has(t.typeId)) return retyped(viaApi(name, "numeric", (v) => padDecimals(exactText(v), (typmod - 4) & 0xffff)));
   if (own.oid === oid) return retyped(own);
+  // a type the copy holds as its text, or an array of one (src/duck/held-types.ts): the text, under Postgres's OID
+  const held = heldType(oid);
+  if (held !== undefined && (own.oid === 25 || own.oid === 1009)) return heldColumn(name, oid, own, held.oid === oid ? held.size : -1);
+  // an oid element of an oid[], held as its digits
+  if (oid === 26 && own.oid === 25) return custom(name, 26, 4, str, (v) => { const b = Buffer.alloc(4); b.writeUInt32BE(Number(str(v))); return b; });
+  // an oid: DuckDB's UINTEGER
+  if (oid === 26 && DUCK_EXACT.has(t.typeId)) return custom(name, 26, 4, (v) => exactText(v), (v) => { const b = Buffer.alloc(4); b.writeUInt32BE(Number(exactText(v))); return b; });
   // an inet: stored as Postgres's text with its mask (`10.3.6.45/32`), sent as inet_out writes it (a full mask dropped)
   if (oid === 869 && own.oid === 25) return custom(name, 869, -1, (v) => inetOut(str(v)), (v) => inetBytes(str(v)));
   // a type an extension made that DuckDB holds as text (citext), or an array of one: its bytes, under the source's OID

@@ -202,13 +202,14 @@ test("every type arrives through the stream as the copy stores it; a numeric wid
   psql(adminUrl!, `CREATE DATABASE ${db}`);
   const cols = "id int PRIMARY KEY, i2 smallint, i8 bigint, n10 numeric(10,2), nu numeric, r real, d double precision, b boolean, t text, vc varchar(20), " +
     "c5 char(5), by bytea, dt date, ts timestamp, tz timestamptz, tm time, ttz timetz, iv interval, u uuid, j json, jb jsonb, ia int[], ta text[], " +
-    "m mood, ip inet, jba jsonb[]";
+    "m mood, ip inet, jba jsonb[], pt point, bx box, mn money, mc macaddr, cda cidr[], rg int4range";
   psql(url, `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy'); CREATE TABLE typed (${cols})`);
   const row = (id: number): string => `(${id}, ${id}, ${id} * 10000000000, ${id}.25, ${id}.125, ${id}.5, ${id}.0625, ${id % 2 === 0}, 'a ''quoted'' ${id}', 'v${id}', ` +
     `'ab', '\\x00ff${id.toString(16).padStart(2, "0")}', '2026-01-${String(id % 28 + 1).padStart(2, "0")}', '2026-01-02 03:04:05.${id}', '2026-01-02 03:04:05.123456+02', ` +
     `'12:34:56', '12:34:56+05:30', '1 year 2 mons 3 days 04:05:06.789', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a${String(id).padStart(2, "0")}', ` +
     `'{"a": [1, 2], "b": "x"}', '{"b": "x", "a": [1, 2]}', '{1,NULL,${id}}', '{"a,b","with \\"quote\\"",NULL,""}', ` +
-    `'${["sad", "ok", "happy"][id % 3]}', '10.0.0.${id}/24', ARRAY['{"k": 1}'::jsonb, NULL])`;
+    `'${["sad", "ok", "happy"][id % 3]}', '10.0.0.${id}/24', ARRAY['{"k": 1}'::jsonb, NULL], '(${id},2.5)', '(1,1),(0,${id})', '${id}.50', '08:00:2b:01:02:${String(id).padStart(2, "0")}', ` +
+    `'{10.0.0.0/8,NULL}', '[1,${id + 1})')`;
   // the first rows before the copy (they set an unconstrained numeric's scale), with the extremes a type has
   psql(url, `INSERT INTO typed VALUES ${[1, 2, 3].map(row).join(", ")}; ` +
     "INSERT INTO typed (id, r, d, dt, ts, tz, ta, ia) VALUES (4, 'NaN', '-Infinity', 'infinity', '-infinity', 'infinity', '{}', '{}'), (5, NULL, NULL, NULL, NULL, NULL, NULL, NULL)");
