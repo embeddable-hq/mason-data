@@ -2423,6 +2423,35 @@ class Rewriter {
             const built = this.exactOf(args[0]!, (m, conv) => cell(picked(m), conv));
             return built === null ? asCell() : numeric(built.p);
           }
+          case "latest": {
+            // Mason's own aggregate (`latest`), as min / max: one row's value, at THAT ROW's scale. Of an expression
+            // whose rows' scales differ (a coalesce or a CASE over a numeric(p, s) and a literal: Postgres's 0 beside
+            // 0.10, DuckDB's one DECIMAL's 0.00) or that this program computes, the program over the picked row's
+            // operands: latest() of each operand, every call ordered by the statement's keys and THEN by the operands
+            // themselves, so every call picks one row (rows tied on all of those hold the same operands; a tie the
+            // statement's keys leave open is any tied row, as in Postgres). Each call is `latest`'s own rewrite
+            // (`latest`, `latestRefused`); a form it refuses (no ORDER BY, a window, a numeric held as a double) is the
+            // call itself, refused there
+            const t = this.typed(n);
+            if (!plain || t?.node !== "AGGREF" || args.length !== 1 || b.agg_star === true || !Array.isArray(b.agg_order) || b.agg_order.length === 0 || !this.duckExact(args[0]!)) return asCell();
+            const operands: AstNode[] = [];
+            const probe = this.exactOf(args[0]!, (m) => { operands.push(m); return { op: "cell", key: String(operands.length - 1) }; });
+            // a column's own latest is the engine's exact decimal, padded to its scale; + - * of fixed scales the engine's too
+            if (probe === null || probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell") || !worthComputing(probe.p)) return asCell();
+            const order = (): AstNode[] => [...this.clone(b.agg_order as AstNode[]),
+              ...operands.map((m): AstNode => ({ SortBy: { node: this.clone(m), sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }))];
+            const picked = (m: AstNode): AstNode => {
+              const call: AstNode = { FuncCall: { ...this.clone(b), args: [this.clone(m)], agg_order: order() } };
+              // latest's call, which the walk rewrites as the statement's own (`latest`, which reads AGGREF), typed as
+              // the operand it picks
+              this.original.add(bodyOf(call));
+              const own = this.typed(m);
+              this.synthetic.set(bodyOf(call), { ...t, type: own?.type ?? NUMERIC, typmod: own?.typmod ?? -1, args: [], collation: own?.collation ?? 0 });
+              return call;
+            };
+            const built = this.exactOf(args[0]!, (m, conv) => cell(picked(m), conv));
+            return built === null ? asCell() : numeric(built.p);
+          }
           default: return asCell();
         }
       }

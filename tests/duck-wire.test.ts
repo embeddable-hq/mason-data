@@ -1936,7 +1936,16 @@ test("latest(x ORDER BY …) is the x of the row that sorts last, by Postgres's 
       // DISTINCT changes no answer; a constant key orders nothing (one row here)
       ["SELECT latest(DISTINCT t ORDER BY t) FROM nullish", tuple],
       ["SELECT latest(id ORDER BY 1) FROM nullish WHERE id = 4", /\blast\(/],
+      // a numeric whose rows' scales differ (a coalesce or a CASE of a numeric(12,2) and a literal): the picked row's
+      // own scale, Postgres's 0 where the literal 0 was taken (never the column's 0.00), in either rewrite, FILTERed,
+      // wrapped, and through a derived table (PR 274's review, round 1)
+      ["SELECT status, latest(CASE WHEN qty < 5 THEN amount ELSE 0 END ORDER BY id), latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id) FROM orders GROUP BY 1 ORDER BY 1", tuple],
+      ["SELECT latest(coalesce(CASE WHEN qty > 2 THEN amount END, 1.5) ORDER BY id DESC), latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY created_at DESC, id) FROM orders", sorted],
+      ["SELECT latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY id) FILTER (WHERE status = 'paid'), latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id) * 2 FROM orders", tuple],
+      ["SELECT * FROM (SELECT status, latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY qty DESC, id) AS l FROM orders GROUP BY 1) q ORDER BY status", sorted],
     ];
+    // of ties the keys leave open, any tied row's value, at that row's scale (ids 1 and 2 are both 'paid')
+    assert.ok(["120.00", "0"].includes(String((await answer(c, "SELECT latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY status) FROM orders WHERE status = 'paid'")).rows[0]![0])));
     for (const [sql, want] of cases) {
       const from = logged.length;
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
