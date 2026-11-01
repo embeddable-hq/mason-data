@@ -822,6 +822,21 @@ test("pr-loop: a finding with no severity, or one the script does not know, bloc
   assert.deepEqual((r.result["deferred"] as Array<{ input: string }>).map((g) => g.input), [mine.input]);
 });
 
+test("pr-loop: an input deferred once and found blocking later is fixed, never filed; a failed filing never says filed", async () => {
+  const w = later({ input: "SELECT later_blocking FROM t" });
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), w], judgedCorrect: [] }, "fix r1": pushed("b"),
+    "review r2": { findings: [{ ...w, severity: "regression" }], judgedCorrect: [] }, "fix r2": pushed("c"), "review r3": clean, "CI 1": green,
+  });
+  assert.ok(r.prompt("fix r2").includes(w.input), "the blocking re-report is fixed");
+  assert.deepEqual(r.result["deferred"], [], "and no longer deferred");
+  assert.ok(!r.labels.includes("file"), "so nothing is filed");
+
+  const lost = await run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": green, file: null });
+  assert.match(String(lost.result["status"]), /filing failed: the findings are in fromBase and deferred/);
+  assert.doesNotMatch(String(lost.result["status"]), /filed, not fixed/);
+});
+
 test("review-stats: a first review passes when it found nothing blocking; a finding with no severity (a record older than severity) blocks", () => {
   const rec = (o: Partial<ReviewRecord>): ReviewRecord => ({ pr: 1, designRounds: 1, probeRounds: 1, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed", ...o });
   const block = (r: unknown) => "```json mason-review-record\n" + JSON.stringify(r) + "\n```";

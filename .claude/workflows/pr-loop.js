@@ -240,7 +240,12 @@ function tally(findings, at) {
   const mine = findings.filter((f) => f.origin === 'this-pr' && blocks(f))
   for (const f of findings) if (f.origin === 'base' && !fromBase.some((g) => g.input === f.input)) fromBase.push(f)
   const later = findings.filter((f) => f.origin === 'this-pr' && !blocks(f))
-  for (const f of later) if (!deferred.some((g) => g.input === f.input)) deferred.push({ ...f, ...at })
+  for (const f of later) if (!deferred.some((g) => g.input === f.input) && !mine.some((g) => g.input === f.input)) deferred.push({ ...f, ...at })
+  // an input deferred once and found blocking later is this PR's to fix, never filed as well
+  for (const f of mine) {
+    const i = deferred.findIndex((g) => g.input === f.input)
+    if (i >= 0) deferred.splice(i, 1)
+  }
   const repeated = [...new Set(mine.map((f) => f.classKey).filter((k) => classes[k] || mine.filter((g) => g.classKey === k).length >= 2))]
   for (const f of mine) classes[f.classKey] = { count: (classes[f.classKey]?.count || 0) + 1, why: f.classWhy }
   return { mine, later, repeated }
@@ -319,11 +324,12 @@ ${byClass(fromBase)}` : ''}${deferred.length ? `
 Each issue says it was met in PR ${last.pr}'s review (the round named in each), its severity, and that it was deferred as non-blocking (CLAUDE.md "The loop" step 4): the refusal or answer is safe, and PR ${last.pr} goes on without it.
 ${byClass(deferred.map((f) => ({ ...f, classWhy: `${f.classWhy} (met in ${f.label})` })))}` : ''}`,
       { label: 'file', phase: 'File', ...ON.file, schema: FILED })
-    if (r) filed.push(...r.issues)
-    else status = `${status}; filing failed: the findings are in fromBase and deferred`
+    if (r) {
+      filed.push(...r.issues)
+      if (deferred.length) status = `${status}; ${deferred.length} non-blocking finding(s) of this PR filed, not fixed: in deferred`
+    } else status = `${status}; filing failed: the findings are in fromBase and deferred`
     log(`filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.source}, ${i.action})`).join(', ') || 'nothing'}`)
   }
-  if (deferred.length) status = `${status}; ${deferred.length} non-blocking finding(s) of this PR filed, not fixed: in deferred`
   const open = designOpen()
   if (open.length) status = `${status}; ${open.length} design finding(s) still open after ${MAX_DESIGN_ROUNDS} design rounds: in designRounds`
   if (notes.length) status = `${status}; ${notes.join('; ')}`
