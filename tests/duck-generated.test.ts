@@ -537,6 +537,33 @@ test("a synced table that takes a generated table's name is never written over: 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a synced table that takes the name while a run is going is never written over: the run's swap looks on the writer's turn, and drops what it built", async () => {
+  let take: (() => Promise<void>) | null = null;
+  await withWorld({ counts: COUNTS }, async (w) => {
+    await w.until(built);
+    const host = (w.sync.generated as unknown as { host: { added(name: string): "copied" | "adding" | "view" | null } }).host;
+    const was = host.added.bind(host);
+    // between the run's commit and its swap, `mason add counts` lands: the copy's swap puts the synced table at the name
+    take = async () => {
+      take = null;
+      await w.store.writer.run("DROP TABLE public.counts");
+      await w.store.writer.run("CREATE TABLE public.counts (x INTEGER)");
+      await w.store.writer.run("INSERT INTO public.counts VALUES (101), (102), (103)");
+      host.added = (name) => name === "public.counts" ? "copied" : was(name);
+    };
+    await w.store.writer.run("INSERT INTO public.events VALUES (13, 9, 'query', 'ok', '13', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+    w.sync.generated.changed("public.events");
+    w.reached.length = 0;
+    const dropped = (): boolean => w.logged.some((l) => /public\.counts: a synced table now holds its name, so what this run built was dropped/.test(l));
+    for (const end = Date.now() + 10_000; !dropped() && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
+    assert.ok(w.reached.includes("committed"), "the run wrote and committed its table");
+    assert.ok(dropped(), w.logged.join("\n"));
+    assert.ok(!w.reached.includes("swapped"), "and never swapped it in");
+    assert.deepEqual(await w.rows("SELECT x FROM public.counts ORDER BY x"), [[101], [102], [103]], "the synced table's rows stay");
+    assert.deepEqual(await w.rows("SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE 'counts%' AND table_name <> 'counts'"), [[0n]], "what the run built is dropped");
+  }, { onStep: (s) => s === "committed" ? take?.() : undefined });
+});
+
 test("a function stable only for its arguments' text is built over types whose text reads no setting, and refused with a way out that works otherwise", async () => {
   const lag = "kind: scheduled\ntarget_lag: 1h\n";
   await withWorld({

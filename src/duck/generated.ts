@@ -183,6 +183,8 @@ export class GeneratedTables {
   private planner: Planner | null = null;
   private timer: NodeJS.Timeout | null = null;
   private reviewing: Promise<void> | null = null;
+  /** a run's planning in flight: it plans on the listener's catalog, so a stop waits for it before the listener closes */
+  private planning: Promise<unknown> | null = null;
   private stopped = false;
 
   constructor(store: DuckStore, host: GeneratedHost, options: GeneratedOptions = {}) {
@@ -233,11 +235,14 @@ export class GeneratedTables {
     this.timer.unref();
   }
 
-  /** the timer stopped, and what it was doing ended */
+  /** the timer stopped, and what it was doing ended: the review, and a run's planning, the two that read the listener's
+   *  catalog (a run past its plan sees `stopped` and ends; its build is the sync's stop to interrupt) */
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer !== null) clearTimeout(this.timer);
     await this.reviewing;
+    // settled, not awaited: its failure is the run's to say, or not, as stopped
+    if (this.planning !== null) await Promise.allSettled([this.planning]);
   }
 
   private entry(name: string): Entry {
@@ -416,7 +421,8 @@ export class GeneratedTables {
   /**
    * A NAME A SYNCED TABLE NOW HOLDS (`mason add` of the generated table's name): the synced table wins, so what was deployed
    * is forgotten, its ledger row with it, and the table under that name, now the copy's, is never touched. Not while a run
-   * has it: the run's end looks again, and `buildable` keeps it from swapping.
+   * has it: the run's end looks again, and its swap looks on the writer's turn and abandons the run if a synced table
+   * holds the name (`swap`).
    */
   private async release(e: Entry): Promise<void> {
     if (e.deployed === null || e.running || e.queued) return;
@@ -460,7 +466,11 @@ export class GeneratedTables {
     const d = b.definition, target = `${ident(d.schema)}.${ident(d.table)}`, side = `${ident(d.schema)}.${ident(`${d.table}${SIDE_SUFFIX}`)}`;
     try {
       // planned now, for what it reads as of now (a stored JSON path may have come or gone since it was checked)
-      const planned = await planDefinition(planner, d.sql, d.orderBy, this.names(name));
+      const planning = planDefinition(planner, d.sql, d.orderBy, this.names(name));
+      this.planning = planning;
+      const planned = await planning.finally(() => { if (this.planning === planning) this.planning = null; });
+      // a stop came while it planned: nothing is built, and nothing failed
+      if (this.stopped) return;
       if ("refused" in planned) throw new Error(planned.refused[0]!.message);
       const { plan, columns, bases } = planned.definition;
       await this.searchPath(c);
@@ -487,7 +497,12 @@ export class GeneratedTables {
       await this.onStep("committed", name);
       const seconds = (Date.now() - started) / 1000;
       const deployed: Deployed = { definition: d, fingerprint: b.fingerprint, columns, bases, basesSynced: clock.synced, snapshotAt: clock.at, builtAt: Date.now(), rows: Number(rowsChanged), seconds };
-      await this.host.onWriter(() => this.swap(e, deployed, side, target));
+      if (!await this.host.onWriter(() => this.swap(e, deployed, side, target))) {
+        // a synced table took the name while it ran: what it built is dropped, and the next review lets the name go
+        e.taken = null;
+        this.host.log(`${name}: a synced table now holds its name, so what this run built was dropped`);
+        return;
+      }
       await this.onStep("swapped", name);
       const was = e.error;
       e.deployed = deployed; e.taken = null; e.error = null; e.failures = 0; e.retryAt = 0;
@@ -520,9 +535,11 @@ export class GeneratedTables {
   }
 
   /** THE SWAP, ON THE WRITER'S TURN, as a copy's is: the side table replaces the table, with its ledger row, in ONE
-   *  transaction, never beside a write. The ledger row is what the table is re-run from after a restart. */
-  private async swap(e: Entry, n: Deployed, side: string, target: string): Promise<void> {
+   *  transaction, never beside a write. The ledger row is what the table is re-run from after a restart. False, and
+   *  the side table dropped, when a synced table now holds the name: on this turn, so no copy's swap comes between. */
+  private async swap(e: Entry, n: Deployed, side: string, target: string): Promise<boolean> {
     const w = this.store.writer, d = n.definition;
+    if (this.host.added(e.name) !== null) { await w.run(`DROP TABLE IF EXISTS ${side}`); return false; }
     await w.run("BEGIN TRANSACTION");
     try {
       await w.run(`DROP TABLE IF EXISTS ${target}`);
@@ -532,5 +549,6 @@ export class GeneratedTables {
           new Date(n.snapshotAt).toISOString(), new Date(n.builtAt).toISOString(), n.rows, n.seconds, JSON.stringify(n.basesSynced)]);
       await w.run("COMMIT");
     } catch (x) { await w.run("ROLLBACK"); throw x; }
+    return true;
   }
 }
