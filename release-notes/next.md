@@ -115,6 +115,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   spilled 25 GiB and failed for memory after twenty minutes. One
   thing changes: a value in the list that cannot be computed (`'x'::int`) in a row that is not its group's first no
   longer fails the query. Nothing to do on upgrade.
+- **`SELECT DISTINCT ON` answers as Postgres does in three more cases**: with an `ORDER BY` that names only some of the
+  `ON` expressions (or none, with a `LIMIT`), the groups now come back in Postgres's order and a `LIMIT` keeps the same
+  ones; a jsonb `ON` named by its output alias now treats `1.0` and `1` as one value; and a numeric division in the list
+  of a `DISTINCT ON` or a `SELECT DISTINCT` (`amount / 3`) shows Postgres's exact digits instead of a rounded number.
 
 ## Known
 

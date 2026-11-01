@@ -155,8 +155,11 @@ paths:
   - **a DISTINCT ON with a LIMIT chooses its kept rows by row number** (`joinRows`, src/duck/late.ts, issue 134, task E):
     a DISTINCT ON keeps ONE WHOLE ROW of its FROM per group, so the inner query keeps the DISTINCT ON (its ordinals and
     output names resolved to clones of the outputs' expressions, as the sort keys are), the ORDER BY and the LIMIT, and
-    lists each FROM item's row number; the list is read from the kept rows. It is exact for ANY ON expressions, a key or
-    not, so no primary key is asked and never `any_value` (which would answer an arbitrary row of the group for another
+    lists each FROM item's row number; the list is read from the kept rows. The sort it is sent is the one Postgres
+    runs: the rewrite appends each ON expression the ORDER BY lacks, ASC NULLS LAST (`distinctOnSorted`, src/duck/rewrite.ts,
+    for every form sent), and keys a jsonb ON named by its output's number or name alike (`keyedDistinct`, through
+    `outputOf`). A numeric computed exactly rides its cells beside a DISTINCT ON, and a plain DISTINCT with one is sent as
+    the DISTINCT ON of every output's number (`exactColumns`). It is exact for ANY ON expressions, a key or not, so no primary key is asked and never `any_value` (which would answer an arbitrary row of the group for another
     table's columns). One table is written so too. `keyFirst` refuses it (`first.distinct` is false), so the two never
     both write one SELECT. What stays as it was: no LIMIT in fact, an aggregate, window or set-returning function, a
     GROUP BY, a volatile ON expression (`volatileOn`), a column named `rowid`, WITH TIES (`with-ties-distinct`). A test

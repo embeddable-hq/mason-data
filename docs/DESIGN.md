@@ -2262,7 +2262,12 @@ itself. It is `joinRows`'s form with the DISTINCT ON inside, one table included,
 materialization does not reach through the window and filter its DISTINCT ON is. What is given up is `limit-errors`: a
 raising list value in a row that is not its group's first now answers. The task's brief wrote two of its "legal odd
 forms" with a sort key between the ON expressions (`DISTINCT ON (a, b) … ORDER BY a, c`), which Postgres refuses with
-42P10; the legal form is a sort that is a prefix of them (`ORDER BY a`), Postgres appending the rest.
+42P10; the legal form is a sort that is a prefix of them (`ORDER BY a`), Postgres appending the rest. The review of
+PR 207 found that the engine was sent the sort as written, not Postgres's with the rest appended, so a LIMIT kept other
+groups in another order (at the base too, in the form sent as written): the rewrite now appends them to the statement's
+sort before any key is built (`distinctOnSorted`), so every form sent sorts as Postgres's Unique does. It found too that
+a jsonb ON named by its output compared the value's text, not jsonb's equality (only an ordinal was resolved), and that a
+numeric quotient under a DISTINCT ON or a DISTINCT was the engine's double's text, as no cell rode beside it.
 
 **Step 3: `USING`, `NATURAL` and computed keys.** Through the listener, a 2 GB limit, 8 M facts beside 3 M rows of about 3 kB
 that compress well (346 MB on disk, so the spill and the seconds before are smaller than the issue's 9.1 GB of noise; the

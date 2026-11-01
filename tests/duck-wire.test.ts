@@ -119,6 +119,9 @@ const DDL = [
   // a key the copy holds twice for a moment (a change applied in pieces): the catalog declares it the key, the copy holds row 1 twice
   "CREATE TABLE public.late_d (id INTEGER, w VARCHAR)",
   "INSERT INTO public.late_d VALUES (1, 'one'), (1, 'one'), (2, 'two'), (3, 'three')",
+  // jsonb values Postgres equates whose text differs (a DISTINCT ON's jsonb key)
+  "CREATE TABLE public.jq (id INTEGER PRIMARY KEY, v JSON)",
+  "INSERT INTO public.jq VALUES (1, '{\"k\": 1.0}'), (2, '{\"k\": 1.00}'), (3, '{\"k\": 1}'), (4, '{\"k\": [1, 2]}'), (5, '{\"k\": {\"b\": 1, \"a\": 2}}'), (6, '{\"k\": {\"a\": 2, \"b\": 1.0}}'), (7, NULL), (8, '{\"x\": 3}')",
   'CREATE TABLE public.rowid_cased (id INTEGER PRIMARY KEY, "RowId" INTEGER)',
   'INSERT INTO public.rowid_cased SELECT range::INTEGER, 5 FROM range(1, 7)',
   "INSERT INTO public.late_c SELECT range::INTEGER, 'c' || range FROM range(50)",
@@ -169,6 +172,8 @@ const PG_DDL = [
   "CREATE TABLE public.late (id integer PRIMARY KEY, j jsonb, k integer, c integer)",
   "INSERT INTO public.late SELECT g, jsonb_build_object('n', CASE WHEN g = 2000 THEN 'x' ELSE g::text END), 2000 - g, g % 50 FROM generate_series(1, 2000) g",
   "CREATE TABLE public.late_c (id integer PRIMARY KEY, name text)",
+  "CREATE TABLE public.jq (id integer PRIMARY KEY, v jsonb)",
+  "INSERT INTO public.jq VALUES (1, '{\"k\": 1.0}'), (2, '{\"k\": 1.00}'), (3, '{\"k\": 1}'), (4, '{\"k\": [1, 2]}'), (5, '{\"k\": {\"b\": 1, \"a\": 2}}'), (6, '{\"k\": {\"a\": 2, \"b\": 1.0}}'), (7, NULL), (8, '{\"x\": 3}')",
   'CREATE TABLE public.rowid_cased (id integer PRIMARY KEY, "RowId" integer)',
   'INSERT INTO public.rowid_cased SELECT g, 5 FROM generate_series(1, 6) g',
   "INSERT INTO public.late_c SELECT g, 'c' || g FROM generate_series(0, 49) g",
@@ -235,6 +240,7 @@ const schema: PgSchema = {
     { name: "late_p", primaryKey: ["c", "line"], joins: [], columns: [{ name: "c", type: "int4" }, { name: "line", type: "int4" }, { name: "note", type: "text" }] },
     { name: "late_n", primaryKey: [], joins: [], columns: [{ name: "id", type: "int4" }, { name: "c", type: "int4" }] },
     { name: "late_d", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "w", type: "text" }] },
+    { name: "jq", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "jsonb" }] },
     { name: "rowid_cased", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "RowId", type: "int4" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
@@ -407,7 +413,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -2932,6 +2938,67 @@ test("a DISTINCT ON with a LIMIT chooses its rows by row number and reads the co
     assert.deepEqual(held({ fields: [], rows: again.rows }), held({ fields: [], rows: (await postgres(text, [3])).rows }));
     assert.match(logged.findLast((l) => l.startsWith("statement: ")) ?? "", BY_ROW);
   } finally { await c.end(); await onLibc.end(); await libc.close(); }
+});
+
+const heldJson = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+
+test("a DISTINCT ON sorts by the ON expressions its ORDER BY lacks, appended as Postgres does (PR 207's review)", async () => {
+  const c = await client();
+  try {
+    // the ON expressions the ORDER BY lacks are appended, ASC NULLS LAST, and a LIMIT keeps the first groups of that order
+    for (const sql of ["SELECT DISTINCT ON (l.c, l.k % 3) l.c, l.k % 3 AS m FROM late l ORDER BY l.c DESC LIMIT 4",
+      "SELECT DISTINCT ON (c.id, l.k % 3) c.id, l.k % 3 AS m FROM late_c c JOIN late l ON l.c = c.id ORDER BY c.id LIMIT 4",
+      "SELECT DISTINCT ON (l.k % 3, l.c) l.c, l.k % 3 AS m FROM late l ORDER BY l.k % 3 LIMIT 4",
+      "SELECT DISTINCT ON (c.id, l.k % 3) c.id, c.name, l.k % 3 AS m FROM late_c c JOIN late l ON l.c = c.id ORDER BY c.id DESC LIMIT 4 OFFSET 1",
+      "SELECT DISTINCT ON (l.c, m) l.c, l.k % 3 AS m FROM late l ORDER BY l.c DESC LIMIT 4",
+      "SELECT DISTINCT ON (l.c, 2) l.c, l.k % 3 AS m FROM late l ORDER BY 1 DESC",
+      "SELECT DISTINCT ON (l.c) l.c, l.id FROM late l ORDER BY l.c DESC, l.id LIMIT 4",
+      // no ORDER BY: Postgres's Unique runs over the ON expressions' order
+      "SELECT DISTINCT ON (l.c) l.c FROM late l LIMIT 4 OFFSET 2"]) {
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+    assert.deepEqual((await answer(c, "SELECT DISTINCT ON (l.c, l.k % 3) l.c, l.k % 3 AS m FROM late l ORDER BY l.c DESC LIMIT 4")).rows,
+      [["49", "0"], ["49", "1"], ["49", "2"], ["48", "0"]]);
+    // still chosen by row number, the inner query and the outer sorting by the appended key too
+    logged.length = 0;
+    await c.query("SELECT DISTINCT ON (l.c, l.k % 3) l.c, l.k % 3 AS m FROM late l ORDER BY l.c DESC LIMIT 4");
+    const line = logged.findLast((l) => l.startsWith("statement: ")) ?? "";
+    assert.match(line, /SELECT DISTINCT ON \(.*\) l\.rowid AS __mason_r1.* ORDER BY l\.c DESC, \(?l\.k % 3\)? LIMIT 4 \) AS __mason_late .* ORDER BY __mason_late\.__mason_o1 DESC, __mason_late\.__mason_o2/);
+  } finally { await c.end(); }
+});
+
+test("a DISTINCT ON of a jsonb named by its output compares by jsonb's equality (PR 207's review)", async () => {
+  const c = await client();
+  const held = heldJson;
+  try {
+    // a jsonb ON named by its output, by its number and as the expression: jsonb's equality each, one statement
+    for (const sql of ["SELECT DISTINCT ON (k) q.v -> 'k' AS k, q.id FROM jq q ORDER BY k, q.id LIMIT 8",
+      "SELECT DISTINCT ON (1) q.v -> 'k' AS k, q.id FROM jq q ORDER BY k, q.id LIMIT 8",
+      "SELECT DISTINCT ON (q.v -> 'k') q.v -> 'k' AS k, q.id FROM jq q ORDER BY q.v -> 'k', q.id LIMIT 8",
+      "SELECT DISTINCT ON (v) q.v -> 'k' AS v, q.id FROM jq q ORDER BY v, q.id LIMIT 8",
+      "SELECT DISTINCT ON (k) q.v -> 'k' AS k, q.id, c.name FROM jq q LEFT JOIN late_c c ON c.id = q.id ORDER BY k, q.id LIMIT 8",
+      "SELECT DISTINCT ON (k) q.v -> 'k' AS k, q.id FROM jq q ORDER BY k, q.id"]) {
+      const ours = held(await answer(c, sql)) as { rows: unknown[][] };
+      assert.deepEqual(ours, held(await postgres(sql)), sql);
+      assert.equal(ours.rows.length, 4, sql);
+    }
+  } finally { await c.end(); }
+});
+
+test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exact text (PR 207's review)", async () => {
+  const c = await client();
+  const held = heldJson;
+  try {
+    // a numeric quotient under a DISTINCT ON or a DISTINCT: Postgres's exact text, from the kept row's cells
+    for (const sql of ["SELECT DISTINCT ON (o.id) o.id, o.amount / 3 AS third, o.meta FROM orders o ORDER BY o.id DESC LIMIT 2",
+      "SELECT DISTINCT ON (o.id) o.id, o.amount / 3 AS third FROM orders o ORDER BY o.id DESC",
+      "SELECT DISTINCT ON (l.c) l.c, l.k::numeric / 7 AS q, l.id FROM late l ORDER BY l.c, l.id LIMIT 2",
+      "SELECT DISTINCT ON (c.id) c.id, l.k::numeric / 7 AS q FROM late_c c JOIN late l ON l.c = c.id ORDER BY c.id, l.id LIMIT 3",
+      "SELECT DISTINCT o.amount / 3 AS third FROM orders o ORDER BY 1",
+      "SELECT DISTINCT o.status, o.amount / 3 AS third FROM orders o ORDER BY 2 DESC, 1 LIMIT 2"]) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    }
+  } finally { await c.end(); }
 });
 
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {

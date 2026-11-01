@@ -814,6 +814,8 @@ class Rewriter {
 
   private select(b: Body): AstNode | null {
     for (const c of (b.withClause?.ctes ?? []) as AstNode[]) if (isNode(c) && typeof bodyOf(c).ctename === "string" && isNode(bodyOf(c).ctequery)) this.ctes.set(bodyOf(c).ctename, bodyOf(c).ctequery as AstNode);
+    // a DISTINCT ON's sort holds its ON expressions (distinctOnSorted): before any key is built, so each is built as one
+    this.distinctOnSorted(b);
     // `x IS NULL, x DESC` as `x DESC NULLS LAST` (nullsKeyFolded): the folded key is the statement's own, its rules to
     // run; before anything writes a key another way, as the two are told alike by their trees
     if (Array.isArray(b.sortClause)) {
@@ -988,6 +990,31 @@ class Rewriter {
 
   private twinRefused(): Unrewritable {
     return new Unrewritable("this * of a named join lists two columns of one name, and Mason cannot read one of them apart here", "name the join's columns in the SELECT, or leave the join's own name out", "star-join-twin");
+  }
+
+  /**
+   * A DISTINCT ON'S SORT IS ITS ON EXPRESSIONS TOO (transformDistinctOnClause: Postgres appends each ON expression its
+   * ORDER BY lacks, ASC NULLS LAST, and its Unique runs over that order, so the groups come back in it and a LIMIT or an
+   * OFFSET keeps the first groups of it). The engine is sent the sort Postgres runs, never the one written: each ON
+   * expression whose output (by its number, its bare name or the expression repeated) no sort key reads is appended
+   * here, as written, before any key is built, so every form sent (as written, src/duck/late.ts's inner query and its
+   * outer sort) sorts by it. Only where an order is read: a sort or a LIMIT. A sort with a key that is no ON expression
+   * holds them all already (else the catalog's 42P10). A constant ON expression orders nothing, and is not appended.
+   */
+  private distinctOnSorted(b: Body): void {
+    const on = b.distinctClause;
+    if (!Array.isArray(on) || on.length === 0 || !on.every(isNode) || (b.op !== undefined && b.op !== "SETOP_NONE")) return;
+    const sorts = (b.sortClause ?? []) as AstNode[];
+    if (sorts.length === 0 && b.limitCount === undefined && b.limitOffset === undefined) return;
+    const targets = (b.targetList ?? []) as AstNode[];
+    const read = (e: AstNode): AstNode => { const o = this.outputOf(e, targets); return o !== null && !o.twin ? o.value : e; };
+    const same = (x: AstNode, y: AstNode): boolean => sameTree(x, y) && sameTree(y, x);
+    const keys = sorts.flatMap((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? [read(bodyOf(s).node as AstNode)] : []);
+    const added = (on as AstNode[]).filter((d) => {
+      const e = read(d);
+      return !keys.some((k) => same(k, e)) && kindOf(e) !== "ParamRef" && this.typed(e)?.constant !== true;
+    }).map((d) => ({ SortBy: { node: this.clone(d), sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }));
+    if (added.length > 0) b.sortClause = [...sorts, ...added];
   }
 
   /** the output a number names, or null for a number past the list */
@@ -1180,12 +1207,15 @@ class Rewriter {
   // ------------------------------------------------------------------------------------- exact numerics
 
   /** The statement's numeric result columns as programs, their cells appended to its SELECT list (before the walk,
-   *  which rewrites each cell as it rewrites the column). Only a plain SELECT: a UNION or a DISTINCT would read the
-   *  hidden cells as part of each row. */
+   *  which rewrites each cell as it rewrites the column). Not a UNION, which would read the hidden cells as part of each
+   *  row. A DISTINCT ON compares its ON expressions alone, so the cells ride beside them, the kept row's; a plain DISTINCT
+   *  with a cell is written as the DISTINCT ON of every output by its number, which keeps the same rows and lets the cells
+   *  ride so too: a numeric decided exactly never leaves the engine as a double's text. */
   exactColumns(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }> | null): ExactColumn[] {
     if (kindOf(stmt) !== "SelectStmt" || fields === null) return [];
     const b = bodyOf(stmt);
-    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.distinctClause !== undefined || b.limitOption === "LIMIT_OPTION_WITH_TIES") return [];
+    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.limitOption === "LIMIT_OPTION_WITH_TIES") return [];
+    const plainDistinct = Array.isArray(b.distinctClause) && !b.distinctClause.every(isNode);
     const targets = (b.targetList ?? []) as AstNode[];
     if (targets.length !== fields.length || targets.some((t) => hasStar(bodyOf(t).val))) return [];
     const grouped = (Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val));
@@ -1222,6 +1252,7 @@ class Rewriter {
     });
     if (out.length === 0) return [];
     for (const c of out) c.cells = cells.map((x) => x.conv);
+    if (plainDistinct) b.distinctClause = targets.map((_t, i) => intConst(i + 1));
     b.targetList = [...targets, ...cells.map((c, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: this.clone(c.node) } }))];
     return out;
   }
@@ -1998,11 +2029,12 @@ class Rewriter {
     if (plain) for (const v of values) if (this.typeOf(v) !== JSONB) this.comparable(v, "SELECT DISTINCT");
     if (!plain) {
       b.distinctClause = (b.distinctClause as AstNode[]).map((d) => {
-        const n = constInt(d);
-        const out = n === null ? null : this.outputAt(targets, n);
-        const e = out?.value ?? d;
+        // (an output's number or bare name, SQL92's rule as an ORDER BY's: the output's expression, typed and keyed here,
+        // so every form sent reads the key, never the raw value an alias names)
+        const out = this.outputOf(d, targets);
+        const e = out !== null && !out.twin ? out.value : d;
         if (this.typeOf(e) !== JSONB) { this.comparable(e, "SELECT DISTINCT ON"); return d; }
-        return this.equalKey(out !== null ? this.clone(e) : d);
+        return this.equalKey(e !== d ? this.clone(e) : d);
       });
       return;
     }

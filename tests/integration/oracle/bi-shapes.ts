@@ -191,6 +191,19 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "key-first DISTINCT ON: a derived side ordered by its output name", sql: "SELECT * FROM (SELECT DISTINCT ON (c.id) c.id, c.name AS who, o.id AS oid FROM customers c JOIN orders o ON o.customer_id = c.id ORDER BY c.id, o.created_at DESC, o.id LIMIT 6) g ORDER BY who NULLS FIRST, id" },
   { name: "key-first DISTINCT ON: over a plain derived read with a WHERE", sql: "SELECT DISTINCT ON (v.customer_id) v.customer_id, v.id, v.notes FROM (SELECT o.id, o.customer_id, o.notes, o.amount FROM orders o WHERE o.status = 'paid') v ORDER BY v.customer_id NULLS LAST, v.amount DESC, v.id LIMIT 5" },
   { name: "key-first DISTINCT ON: a jsonb ON expression", sql: "SELECT DISTINCT ON (b.payload -> 'k') b.payload -> 'k' AS k, b.id, a.note FROM top_b b LEFT JOIN top_a a ON a.id = b.a_id ORDER BY b.payload -> 'k', b.id LIMIT 5" },
+  // PR 207's review: the sort Postgres runs is the ORDER BY with the ON expressions it lacks appended, ASC NULLS LAST
+  { name: "key-first DISTINCT ON: a computed ON expression the sort lacks decides the kept groups", sql: "SELECT DISTINCT ON (l.c, l.k % 3) l.c, l.k % 3 AS m FROM late l ORDER BY l.c DESC LIMIT 4" },
+  { name: "key-first DISTINCT ON: an ON expression the sort lacks over a join, OFFSET", sql: "SELECT DISTINCT ON (c.id, l.k % 3) c.id, c.name, l.k % 3 AS m FROM late_c c JOIN late l ON l.c = c.id ORDER BY c.id DESC LIMIT 4 OFFSET 1" },
+  { name: "key-first DISTINCT ON: the sort holds the second ON expression alone", sql: "SELECT DISTINCT ON (l.k % 3, l.c) l.c, l.k % 3 AS m FROM late l ORDER BY l.k % 3 LIMIT 4" },
+  { name: "DISTINCT ON: no ORDER BY, the groups in the ON expressions' order", sql: "SELECT DISTINCT ON (l.c) l.c FROM late l LIMIT 4 OFFSET 2" },
+  // a jsonb ON named by its output: jsonb's equality, as by its number or the expression
+  { name: "key-first DISTINCT ON: a jsonb ON by its output name", sql: "SELECT DISTINCT ON (v) j.j AS v, j.id FROM jorder j ORDER BY v, j.id LIMIT 12" },
+  { name: "DISTINCT ON: a jsonb ON by its output name, no LIMIT", sql: "SELECT DISTINCT ON (v) j.j AS v, j.id FROM jorder j WHERE j.id < 30 ORDER BY v, j.id" },
+  // an exact numeric under a DISTINCT ON or a DISTINCT: the kept row's cells, Postgres's text
+  { name: "key-first DISTINCT ON: a numeric quotient shown exactly", sql: "SELECT DISTINCT ON (o.id) o.id, o.amount / 3 AS third, o.notes FROM orders o ORDER BY o.id DESC LIMIT 5" },
+  { name: "key-first DISTINCT ON: a numeric quotient of a cast, over one table", sql: "SELECT DISTINCT ON (l.c) l.c, l.k::numeric / 7 AS q, l.id FROM late l ORDER BY l.c, l.id LIMIT 3" },
+  { name: "DISTINCT ON: a numeric quotient shown exactly, no LIMIT", sql: "SELECT DISTINCT ON (o.id) o.id, o.amount / 3 AS third FROM orders o WHERE o.id < 20 ORDER BY o.id" },
+  { name: "SELECT DISTINCT: a numeric quotient shown exactly", sql: "SELECT DISTINCT o.amount / 3 AS third FROM orders o ORDER BY 1 LIMIT 10" },
   { name: "key-first DISTINCT ON: over a GROUP BY stays as it was", sql: "SELECT DISTINCT ON (o.customer_id) o.customer_id, count(*) AS n FROM orders o GROUP BY o.customer_id ORDER BY o.customer_id NULLS LAST LIMIT 5" },
   { name: "key-first DISTINCT ON: no LIMIT stays as it was", sql: "SELECT DISTINCT ON (o.id) o.id, o.notes FROM orders o WHERE o.id < 20 ORDER BY o.id" },
   { name: "key-first DISTINCT ON: a window beside it stays as it was", sql: "SELECT DISTINCT ON (o.id) o.id, o.notes, sum(o.amount) OVER (PARTITION BY o.customer_id) AS w FROM orders o ORDER BY o.id LIMIT 5" },
