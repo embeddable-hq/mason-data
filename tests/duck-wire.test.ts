@@ -2678,6 +2678,39 @@ test("a binary text[] parameter is read as Postgres reads it, refused as it refu
   } finally { s.end(); }
 });
 
+// array_recv's own refusals, each of a binary text[] whose bytes array_send never writes (the second review of PR 149):
+// an element that is no UTF-8 or holds a NUL (it was decoded with U+FFFD, or truncated the catalog's query), an element
+// type other than the parameter's, flags other than 0 or 1, a dimension too large or negative. Each is Postgres's
+// SQLSTATE and message, read from the same Bind.
+test("a binary text[] parameter's bad element bytes, element type, flags and dimension are refused as Postgres's array_recv refuses them", async () => {
+  const s = await rawSession();
+  try {
+    const sql = "SELECT id::text, array_to_string($1::text[], '|') AS s FROM jdocs ORDER BY id";
+    const array = (flags: number, element: number, dims: Array<[number, number]>, items: Buffer[]): Buffer => {
+      const int = (v: number): Buffer => { const b = Buffer.alloc(4); b.writeInt32BE(v); return b; };
+      return Buffer.concat([int(dims.length), int(flags), int(element), ...dims.flatMap(([n, l]) => [int(n), int(l)]), ...items.flatMap((x) => [int(x.length), x])]);
+    };
+    const errors = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "ErrorResponse" ? [`${m.fields.C} ${m.fields.M}`] : []);
+    const cases: Array<[string, Buffer, string]> = [
+      ["not UTF-8", array(0, 25, [[1, 1]], [Buffer.from([0x61, 0xff, 0x62])]), "22021"],
+      ["a NUL", array(0, 25, [[1, 1]], [Buffer.from([0x61, 0x00, 0x62])]), "22021"],
+      ["a bad three-byte character", array(0, 25, [[2, 1]], [Buffer.from("ok"), Buffer.from([0x78, 0xe2, 0x28, 0xa1])]), "22021"],
+      ["a character cut short", array(0, 25, [[1, 1]], [Buffer.from([0x78, 0xe2, 0x82])]), "22021"],
+      ["varchar elements", array(0, 1043, [[1, 1]], [Buffer.from("a")]), "42804"],
+      ["flags 2", array(2, 25, [[1, 1]], [Buffer.from("a")]), "22P03"],
+      ["a dimension past the maximum", array(0, 25, [[268435456, 1]], []), "54000"],
+      ["a negative dimension", array(0, 25, [[-1, 1]], []), "54000"],
+    ];
+    for (const [name, bytes, code] of cases) {
+      const bind = wire.extended(sql, [bytes], [0], 1);
+      const want = errors(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(errors(await s.untilReady()), want, name);
+      assert.match(want[0] ?? "", new RegExp(`^${code} `), name);
+    }
+  } finally { s.end(); }
+});
+
 // THE REVIEW OF THE NATIVE READ: two classes it broke, each shape answered as Postgres answers it.
 //  - A jsonb VALUE is canonical only where it is a copied table's column (the copy holds jsonbText): a jsonb a statement
 //    computes (jsonb_object_agg, jsonb_build_object, in a CTE, a subquery or an arm of a UNION) may hold a key twice,
