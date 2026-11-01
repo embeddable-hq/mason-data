@@ -2,11 +2,14 @@
 /**
  * HOW OFTEN A PR PASSES ITS REVIEW (.claude/workflows/pr-loop.js). Every exit of pr-loop with a PR posts a
  * `Review record` comment on that PR, holding one fenced block tagged `json mason-review-record`: the PR, its design,
- * probe and review rounds, each finding of the PR's with its round, stage and class, its CI fixes and its status. This
+ * probe and review rounds, each blocking finding of the PR's with its round, stage, class and severity, the ones it
+ * deferred as non-blocking (filed, not fixed) under `deferred`, its CI fixes and its status. This
  * reads every such block from the repository's PR comments and prints the number to watch, over the PRs whose run
  * reached a review:
- *   - passed the first review: Fable's round 1 found nothing of the PR's (a later re-check of a CI fix does not undo it);
- *   - passed by the second: round 1 found nothing, or a round 2 ran and found nothing;
+ *   - passed the first review: Fable's round 1 found nothing BLOCKING of the PR's (a later re-check of a CI fix does not
+ *     undo it); a finding the run deferred as non-blocking (a refusal's wording, an over-refusal, docs, quality: filed,
+ *     never fixed in the PR, CLAUDE.md "The loop" step 4) does not count against it;
+ *   - passed by the second: round 1 found nothing blocking, or a round 2 ran and found nothing blocking;
  *   - the mean review and probe rounds, and the classes met most.
  * The runs that never reached a review (a stop at the link check, a failed brief or review) are counted apart, never
  * as passing.
@@ -23,10 +26,21 @@ import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type RecordFinding = { round: number; stage: "design" | "probe" | "review"; classKey: string };
+/** A finding's severity, as pr-loop's FINDINGS schema names it; .claude/workflows/pr-loop.js holds the same two lists
+ * (it cannot import), and tests/workflows.test.ts holds them equal. When unsure, a reviewer gives a blocking one. */
+export const BLOCKING = ["wrong-answer", "crash", "data-loss", "security", "regression"] as const;
+export const DEFERRED = ["message", "over-refusal", "docs", "quality"] as const;
+export type Severity = (typeof BLOCKING)[number] | (typeof DEFERRED)[number];
+const SEVERITIES = new Set<string>([...BLOCKING, ...DEFERRED]);
+
+export type RecordFinding = { round: number; stage: "design" | "probe" | "review"; classKey: string; severity?: Severity };
 export type ReviewRecord = {
   pr: number; designRounds: number; probeRounds: number; reviewRounds: number;
-  findings: RecordFinding[]; ciFixes: number; status: string;
+  /** this PR's findings; pr-loop writes only its blocking ones here */
+  findings: RecordFinding[];
+  /** this PR's non-blocking findings, filed and not fixed; records written before severity have none */
+  deferred?: RecordFinding[];
+  ciFixes: number; status: string;
 };
 export type Stats = {
   prs: number; reviewed: number; neverReviewed: number; firstPass: number; bySecond: number;
@@ -46,11 +60,18 @@ function problemOf(v: unknown): string | null {
   }
   if (typeof r["status"] !== "string") return "status is not a string";
   if (!Array.isArray(r["findings"])) return "findings is not an array";
-  for (const f of r["findings"] as unknown[]) {
+  if (r["deferred"] !== undefined && !Array.isArray(r["deferred"])) return "deferred is not an array";
+  for (const f of [...r["findings"] as unknown[], ...(r["deferred"] as unknown[] | undefined ?? [])]) {
     const g = f as Record<string, unknown> | null;
     if (!g || typeof g["round"] !== "number" || typeof g["classKey"] !== "string" || !STAGES.has(String(g["stage"]))) {
       return `a finding is not { round, stage, classKey }: ${JSON.stringify(f)}`;
     }
+    if (g["severity"] !== undefined && !SEVERITIES.has(String(g["severity"]))) {
+      return `a finding's severity is not one of ${[...SEVERITIES].join(", ")}: ${JSON.stringify(f)}`;
+    }
+  }
+  for (const f of (r["deferred"] as Array<Record<string, unknown>> | undefined) ?? []) {
+    if (!(DEFERRED as readonly unknown[]).includes(f["severity"])) return `a deferred finding is not of a non-blocking severity: ${JSON.stringify(f)}`;
   }
   return null;
 }
@@ -88,9 +109,13 @@ export function recordsOfComment(c: { issue_url: string; body: string }): { reco
   return { records, quoted: all.length - records.length };
 }
 
-/** Whether review round `n` of a record ran and found nothing of the PR's. */
+/** Whether a finding blocks its PR. A finding with no severity blocks: records written before pr-loop graded findings
+ * (2026-11-01) have none, and then every finding of the PR's sent it back for a fix round, so it was blocking. */
+export const blocks = (f: RecordFinding): boolean => !(DEFERRED as readonly string[]).includes(f.severity ?? "");
+
+/** Whether review round `n` of a record ran and found nothing blocking of the PR's. */
 const cleanRound = (r: ReviewRecord, n: number) =>
-  r.reviewRounds >= n && !r.findings.some((f) => f.stage === "review" && f.round === n);
+  r.reviewRounds >= n && !r.findings.some((f) => f.stage === "review" && f.round === n && blocks(f));
 
 /** The numbers over records in the order they were posted: the last record of a PR is its own. */
 export function stats(records: readonly ReviewRecord[], top = 10): Stats {

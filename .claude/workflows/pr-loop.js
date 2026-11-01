@@ -9,11 +9,11 @@ export const meta = {
     { title: 'Implement', detail: 'Opus, a worktree of its own, ends at the push, the note in the PR body', model: 'opus' },
     { title: 'Link', detail: "GitHub itself says the PR closes its sub-issue, or the body is fixed and asked again", model: 'sonnet' },
     { title: 'Probe', detail: "a fresh Opus runs the rules files' review probes before each review; at most two rounds a push", model: 'opus' },
-    { title: 'Review', detail: 'Fable, fresh context, findings with their class and whether the base has them', model: 'fable' },
-    { title: 'Fix', detail: "this PR's failures and classes and CI's, every earlier round, never the edit; a repeated class makes a class round", model: 'opus' },
+    { title: 'Review', detail: 'Fable, fresh context, findings with their class, their severity and whether the base has them', model: 'fable' },
+    { title: 'Fix', detail: "this PR's blocking failures and classes and CI's, every earlier round, never the edit; a repeated class makes a class round", model: 'opus' },
     { title: 'Learn', detail: "each class met becomes a review probe in its rules file, one docs-only commit", model: 'opus' },
     { title: 'CI', detail: 'bounded wait on gh pr checks, beside each review and after the last; a CI fix gets a narrow re-check', model: 'sonnet' },
-    { title: 'File', detail: "the base's findings, one issue per class, at every exit", model: 'sonnet' },
+    { title: 'File', detail: "the base's findings and this PR's non-blocking ones, one issue per class, at every exit", model: 'sonnet' },
     { title: 'Record', detail: 'the Review record comment, with its machine-readable block, at every exit with a PR', model: 'sonnet' },
   ],
 }
@@ -23,9 +23,9 @@ export const meta = {
 //   anyone on the team, from any checkout: no path of one machine is written here.
 //   knownClasses: { slug: { count, why } } carried from the PRs this one is stacked on (or the issue's earlier PRs), so
 //   a class met on PR 170 counts on PR 207 too. The run returns its classes in the same shape, for the next run: only
-//   the classes of findings a PR made, never the base's, which are filed instead.
+//   the classes of blocking findings a PR made, never the base's nor a non-blocking one, which are filed instead.
 // Every exit returns one shape, result(status):
-//   { status, pr, head, rounds, fromBase, filed, classes, designRounds, probeRounds }.
+//   { status, pr, head, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds }.
 const A = args
 const REPO = A.repo || '<repo>'
 const WHERE = A.repo
@@ -143,13 +143,23 @@ const LINKED = { type: 'object', required: ['linked', 'bodyFixed', 'detail'], pr
   bodyFixed: { type: 'boolean', description: 'true when the PR body was edited to say Closes' },
   detail: { type: 'string', description: 'the numbers each query listed, and what was edited' },
 } }
+// Only a blocking finding sends a PR back (Tom, 2026-11-01): PR 202's rounds 5 to 7 found only refusal wording, about
+// two hours of rounds while every answer was already right. A finding of another severity is filed at finish, one issue
+// per class, and the PR goes on. When the reviewer is unsure, the finding blocks; a severity this script does not know
+// (or none) is read as blocking too. scripts/review-stats.ts holds the same two lists (tests/workflows.test.ts).
+const BLOCKING = ['wrong-answer', 'crash', 'data-loss', 'security', 'regression']
+const DEFERRED = ['message', 'over-refusal', 'docs', 'quality']
+const blocks = (f) => !DEFERRED.includes(f.severity)
+// the line, as the review and the probe are told it
+const SEVERITY_RULE = "Give each finding its SEVERITY. Blocking, and sent back for a fix: wrong-answer (where Mason answers, it answers differently from Postgres: rows, text, types or OIDs, order, or SQLSTATE), crash (a crash, a hang, or a stuck state such as a table left `building`), data-loss (synced data lost or corrupted), security, regression (what the base got right is now wrong or refused). Not blocking, filed as an issue while the PR goes on: message (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is right), over-refusal (Mason refuses where Postgres answers, and the base refused it too: safe, and a gap), docs, quality (code quality, or a missing test of a shape already answered right). When you are unsure, the finding is blocking: give the blocking severity it would be."
 const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect'], properties: {
-  findings: { type: 'array', items: { type: 'object', required: ['input', 'expected', 'actual', 'atBase', 'origin', 'classKey', 'classWhy', 'where'], properties: {
+  findings: { type: 'array', items: { type: 'object', required: ['input', 'expected', 'actual', 'atBase', 'origin', 'severity', 'classKey', 'classWhy', 'where'], properties: {
     input: { type: 'string', description: 'the failing statement or input, exactly, with the table it runs over' },
     expected: { type: 'string', description: "Postgres's answer (or the right one)" },
     actual: { type: 'string', description: "Mason's answer at the PR's head" },
     atBase: { type: 'string', description: `Mason's answer to the same input at the PR's base (origin/${A.base}), run, not reasoned` },
     origin: { type: 'string', enum: ['this-pr', 'base'], description: "'base' when Mason at the base gives the same wrong answer (the PR did not cause it); 'this-pr' when the base answered right, refused, or did not reach it" },
+    severity: { type: 'string', enum: [...BLOCKING, ...DEFERRED], description: `${BLOCKING.join(', ')} BLOCK: the PR goes back for a fix. ${DEFERRED.join(', ')} do not: the finding is filed as an issue and the PR goes on. wrong-answer: where Mason answers, it answers differently from Postgres (rows, text, types/OIDs, order, SQLSTATE); crash: a crash, a hang or a stuck state; data-loss: synced data lost or corrupted; regression: what the base got right is now wrong or refused; message: a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal is right; over-refusal: Mason refuses where Postgres answers and the base refused too; docs; quality: code quality, or a missing test of a shape already answered right. When unsure, a blocking severity.` },
     classKey: { type: 'string', description: 'kebab-case slug of the class; REUSE a known slug when it is the same class' },
     classWhy: { type: 'string', description: 'the class in one sentence, and the decision that would make it impossible' },
     where: { type: 'string', description: 'file:line' },
@@ -157,8 +167,10 @@ const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect'], prop
   judgedCorrect: { type: 'array', items: { type: 'string' } },
 } }
 const FILED = { type: 'object', required: ['issues'], properties: {
-  issues: { type: 'array', items: { type: 'object', required: ['classKey', 'issue', 'action'], properties: {
-    classKey: { type: 'string' }, issue: { type: 'number' }, action: { type: 'string', enum: ['filed', 'commented'] },
+  issues: { type: 'array', items: { type: 'object', required: ['classKey', 'source', 'issue', 'action'], properties: {
+    classKey: { type: 'string' },
+    source: { type: 'string', enum: ['base', 'deferred'], description: "'base' for a class the base already has; 'deferred' for this PR's non-blocking findings" },
+    issue: { type: 'number' }, action: { type: 'string', enum: ['filed', 'commented'] },
   } } },
 } }
 const CI = { type: 'object', required: ['state', 'detail'], properties: {
@@ -170,7 +182,9 @@ const CHANGED = { type: 'object', required: ['files'], properties: {
 } }
 const POSTED = { type: 'object', required: ['url'], properties: { url: { type: 'string', description: "the comment's URL" } } }
 
-const asFailures = (fs) => fs.map((f, i) => `${i + 1}. [class: ${f.classKey}] ${f.classWhy}\n   input: ${f.input}\n   expected (Postgres): ${f.expected}\n   actual (Mason): ${f.actual}\n   at: ${f.where}`).join('\n')
+// a severity the script does not know, or none, is said to be read as blocking, so the fixer is not left to guess
+const severityText = (s) => (!s ? 'no severity: read as blocking' : BLOCKING.includes(s) || DEFERRED.includes(s) ? s : `${s}: not a known severity, read as blocking`)
+const asFailures = (fs) => fs.map((f, i) => `${i + 1}. [class: ${f.classKey}; ${severityText(f.severity)}] ${f.classWhy}\n   input: ${f.input}\n   expected (Postgres): ${f.expected}\n   actual (Mason): ${f.actual}\n   at: ${f.where}`).join('\n')
 const asDesignFindings = (fs) => fs.map((f, i) => `${i + 1}. [class: ${f.class}; ${f.principle}] ${f.problem}`).join('\n')
 // the classes of THIS PR's findings and the stack's (knownClasses), never the base's: a class the base has is filed,
 // and counting it here would make a class round of a class this PR did not make
@@ -184,12 +198,14 @@ const designRounds = [] // { round, verdict, findings }: the last one's findings
 // (PR 202: each round's fresh agent saw only the latest findings, and undid or re-guessed what the one before decided)
 const history = []
 const fromBase = []
+// this PR's findings that do not block, each with the round that met it: filed at finish beside fromBase, never fixed
+const deferred = []
 const filed = []
 const notes = [] // what a stage that does not stop the run failed to do, said in the final status
 let ciFixes = 0
 let design = null // the note the implementer and every fix round get
 let last = null // the PR's last pushed head: { pr, head }
-const result = (status) => ({ status, pr: last ? last.pr : null, head: last ? last.head : null, rounds, fromBase, filed, classes, designRounds, probeRounds })
+const result = (status) => ({ status, pr: last ? last.pr : null, head: last ? last.head : null, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds })
 
 const noteText = () => {
   if (!design) return '(no design note)'
@@ -210,19 +226,33 @@ const designOpen = () => {
   const d = designRounds[designRounds.length - 1]
   return d && d.verdict === 'revise' ? d.findings : []
 }
+// A later probe or review is told what is already deferred, so it is not reported again round after round at the same
+// severity; and it is told to RUN each again, since a fix can turn a deferred refusal into a wrong answer, and tally()
+// takes an input back from deferred only when it is reported again as blocking. Nothing is filed before finish.
+const alreadyDeferred = () => deferred.length
+  ? ` Already deferred as non-blocking (to be filed as issues when this run ends, not fixed in this PR): ${deferred.map((f) => `${f.classKey} (${f.severity}): ${f.input}`).join('; ')}. Do not report one of these again at a non-blocking severity. But RUN each of them again at this head: if one now blocks (a fix turned its refusal into a wrong answer, a crash, or anything else blocking), report it again with that blocking severity, as it is then this PR's to fix.`
+  : ''
 const historyText = (hs) => hs.length
   ? hs.map((h) => `### ${h.label} (head ${h.head.slice(0, 7)})\nFindings of this PR:\n${h.findings.length ? asFailures(h.findings) : '(none)'}\nJudged correct: ${h.judgedCorrect.join('; ') || '(none listed)'}`).join('\n\n')
   : '(none: this is the first)'
 
 // A finding the base has joins fromBase (one input is one finding, whatever slug a later round gives it); this PR's
-// are counted toward the class rule. A class seen before (on this PR, or carried from the stack), or twice in these
+// that do not block join deferred, the same way; this PR's blocking ones are `mine`, and only they drive a fix and
+// count toward the class rule. A class seen before (on this PR, or carried from the stack), or twice in these
 // findings, makes the fix a class round.
-function tally(findings) {
-  const mine = findings.filter((f) => f.origin === 'this-pr')
+function tally(findings, at) {
+  const mine = findings.filter((f) => f.origin === 'this-pr' && blocks(f))
   for (const f of findings) if (f.origin === 'base' && !fromBase.some((g) => g.input === f.input)) fromBase.push(f)
+  const later = findings.filter((f) => f.origin === 'this-pr' && !blocks(f))
+  for (const f of later) if (!deferred.some((g) => g.input === f.input) && !mine.some((g) => g.input === f.input)) deferred.push({ ...f, ...at })
+  // an input deferred once and found blocking later is this PR's to fix, never filed as well
+  for (const f of mine) {
+    const i = deferred.findIndex((g) => g.input === f.input)
+    if (i >= 0) deferred.splice(i, 1)
+  }
   const repeated = [...new Set(mine.map((f) => f.classKey).filter((k) => classes[k] || mine.filter((g) => g.classKey === k).length >= 2))]
   for (const f of mine) classes[f.classKey] = { count: (classes[f.classKey]?.count || 0) + 1, why: f.classWhy }
-  return { mine, repeated }
+  return { mine, later, repeated }
 }
 
 // One fix prompt for a probe's findings, a review's, and a CI failure met beside a review: the design note, every
@@ -246,17 +276,21 @@ ${FIX_GATES} Come back in ONE push. The commit ends with \`${coAuthor(on)}\`. Re
 }
 
 // The Review record: one comment at every exit with a PR, a summary for a person and a block that
-// scripts/review-stats.ts reads
+// scripts/review-stats.ts reads. `findings` are this PR's blocking ones (a probe's and a review's with their severity;
+// a design finding has none); `deferred` the PR's non-blocking ones, filed and not fixed.
+const sev = (f) => (f.severity ? { severity: f.severity } : {})
 const recordOf = (status) => ({
   pr: last.pr, designRounds: designRounds.length, probeRounds: probeRounds.length, reviewRounds: rounds.length,
   findings: [
     ...designRounds.flatMap((d) => d.findings.map((f) => ({ round: d.round, stage: 'design', classKey: f.class }))),
-    ...probeRounds.flatMap((p) => p.findings.map((f) => ({ round: p.round, stage: 'probe', classKey: f.classKey }))),
-    ...rounds.flatMap((r) => r.findings.map((f) => ({ round: r.round, stage: 'review', classKey: f.classKey }))),
+    ...probeRounds.flatMap((p) => p.findings.map((f) => ({ round: p.round, stage: 'probe', classKey: f.classKey, ...sev(f) }))),
+    ...rounds.flatMap((r) => r.findings.map((f) => ({ round: r.round, stage: 'review', classKey: f.classKey, ...sev(f) }))),
   ],
+  deferred: deferred.map((f) => ({ round: f.round, stage: f.stage, classKey: f.classKey, severity: f.severity })),
   ciFixes, status,
 })
-const roundLine = (name, n, fs) => `- ${name} ${n}: ${fs.length} finding(s)${fs.length ? `: ${[...new Set(fs)].join(', ')}` : ''}`
+const roundLine = (name, n, fs, later = 0) => `- ${name} ${n}: ${fs.length} finding(s)${fs.length ? `: ${[...new Set(fs)].join(', ')}` : ''}${later ? `; ${later} non-blocking, deferred` : ''}`
+const laterOf = (stage, n) => deferred.filter((f) => f.stage === stage && f.round === n).length
 const recordBody = (status) => `${signed(ON.record)}
 ## Review record
 
@@ -264,28 +298,52 @@ PR ${last.pr}: ${status}
 
 ${designRounds.length} design round(s), ${probeRounds.length} probe round(s), ${rounds.length} review round(s), ${ciFixes} CI fix(es).
 ${designRounds.map((d) => roundLine('design', d.round, d.findings.map((f) => f.class))).join('\n')}
-${probeRounds.map((p) => roundLine('probe', p.round, p.findings.map((f) => f.classKey))).join('\n')}
-${rounds.map((r) => roundLine('review', r.round, r.findings.map((f) => f.classKey))).join('\n')}
-Base issues filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.action})`).join(', ') || 'none'}
+${probeRounds.map((p) => roundLine('probe', p.round, p.findings.map((f) => f.classKey), laterOf('probe', p.round))).join('\n')}
+${rounds.map((r) => roundLine('review', r.round, r.findings.map((f) => f.classKey), laterOf('review', r.round))).join('\n')}
+Deferred as non-blocking: ${deferred.map((f) => `${f.classKey} (${f.severity}, ${f.label})`).join(', ') || 'none'}
+Issues filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.source}, ${i.action})`).join(', ') || 'none'}
 
 \`\`\`json mason-review-record
 ${JSON.stringify(recordOf(status))}
 \`\`\``
 
-// Every exit goes through finish: the base's findings are filed whatever stopped the run, so "never fixed in the PR"
-// never means "never filed" either; and a PR gets its Review record, whatever stopped it.
+// Every exit goes through finish: the base's findings and this PR's non-blocking ones are filed whatever stopped the
+// run, so "never fixed in the PR" never means "never filed" either; and a PR gets its Review record, whatever stopped it.
+const byClass = (fs) => {
+  const out = {}
+  for (const f of fs) (out[f.classKey] = out[f.classKey] || []).push(f)
+  return Object.entries(out).map(([k, gs]) => `### ${k}: ${gs[0].classWhy}\n${asFailures(gs)}`).join('\n\n')
+}
+// the classes of `fs` that no returned issue of `source` names, and the issues that name the classes of `fs`
+const isIssue = (i, source, k) => i.source === source && i.classKey === k && Number.isInteger(i.issue) && i.issue > 0
+const unfiled = (source, fs) => [...new Set(fs.map((f) => f.classKey))].filter((k) => !filed.some((i) => isIssue(i, source, k)))
+const issuesOf = (source, fs) => [...new Set(filed.filter((i) => fs.some((f) => isIssue(i, source, f.classKey))).map((i) => `#${i.issue}`))].join(', ')
 async function finish(status) {
-  if (fromBase.length) {
+  if (fromBase.length || deferred.length) {
     phase('File')
-    const byClass = {}
-    for (const f of fromBase) (byClass[f.classKey] = byClass[f.classKey] || []).push(f)
     const r = await agent(
-      `${WHERE}PR ${last.pr}'s review met wrong answers that origin/${A.base} already gives, so they are not that PR's to fix. File them as CLAUDE.md "What a session finds" says: ONE issue per class, each first looked for (\`gh issue list --state open --search "<words>"\`) and, when one already names the class, a comment on it instead. Each issue and comment begins \`${signed(ON.file)}\`, says what was seen (every input with Postgres's answer and Mason's), what is not known, the class and the decision that would make it impossible, and what done looks like, and that it was met in the review of PR ${last.pr}. Synthetic tables only. Move no card on the board: PR ${last.pr}'s card is moved by its own stages. The classes:
-${Object.entries(byClass).map(([k, fs]) => `## ${k}: ${fs[0].classWhy}\n${asFailures(fs)}`).join('\n\n')}`,
+      `${WHERE}PR ${last.pr}'s review met findings that are not that PR's to fix. File them as CLAUDE.md "What a session finds" says: ONE issue per class, each first looked for (\`gh issue list --state open --search "<words>"\`) and, when one already names the class, a comment on it instead. Each issue and comment begins \`${signed(ON.file)}\`, says what was seen (every input with Postgres's answer and Mason's), what is not known, the class and the decision that would make it impossible, and what done looks like. Synthetic tables only. Move no card on the board: PR ${last.pr}'s card is moved by its own stages. There are two kinds, kept apart: never one issue for a class of both, and return each issue with its source.${fromBase.length ? `
+
+## source 'base': wrong answers origin/${A.base} already gives
+Each issue says it was met in the review of PR ${last.pr} and that the base already gives it.
+${byClass(fromBase)}` : ''}${deferred.length ? `
+
+## source 'deferred': PR ${last.pr}'s own findings, deferred as non-blocking
+Each issue says it was met in PR ${last.pr}'s review (the round named in each), its severity, and that it was deferred as non-blocking (CLAUDE.md "The loop" step 4): the refusal or answer is safe, and PR ${last.pr} goes on without it.
+${byClass(deferred.map((f) => ({ ...f, classWhy: `${f.classWhy} (met in ${f.label})` })))}` : ''}`,
       { label: 'file', phase: 'File', ...ON.file, schema: FILED })
-    if (r) filed.push(...r.issues)
-    else status = `${status}; filing the base's findings failed: they are in fromBase`
-    log(`filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.action})`).join(', ') || 'nothing'}`)
+    if (r) {
+      filed.push(...r.issues)
+      // "filed" is read from the issues returned, class by class and source by source, never from the call returning:
+      // a class with no issue of its own source is said not filed, whatever the agent returned beside it
+      const onBase = unfiled('base', fromBase)
+      const mineLater = unfiled('deferred', deferred)
+      const filedLater = deferred.filter((f) => !mineLater.includes(f.classKey))
+      if (filedLater.length) status = `${status}; ${filedLater.length} non-blocking finding(s) of this PR filed (${issuesOf('deferred', filedLater)}), not fixed: in deferred`
+      if (mineLater.length) status = `${status}; non-blocking class(es) of this PR NOT filed: ${mineLater.join(', ')}: in deferred`
+      if (onBase.length) status = `${status}; the base's class(es) NOT filed: ${onBase.join(', ')}: in fromBase`
+    } else status = `${status}; filing failed: the findings are in fromBase and deferred`
+    log(`filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.source}, ${i.action})`).join(', ') || 'nothing'}`)
   }
   const open = designOpen()
   if (open.length) status = `${status}; ${open.length} design finding(s) still open after ${MAX_DESIGN_ROUNDS} design rounds: in designRounds`
@@ -305,10 +363,11 @@ END`,
 
 // ---------------------------------------------------------------- Probe: the author's side, before every review
 // A fresh Opus with no stake in the code runs every probe the rules files list for the paths the diff touches, and
-// the shapes reviews used and authors never ran. What it finds of this PR's is fixed before Fable reads the head;
-// what the base has joins fromBase. At most PROBE_ROUNDS a push; none counts toward MAX_ROUNDS. The probe is the
-// author's own check and the review is the gate: a probe or probe fix that fails, or pushes nothing, is said in the
-// run's notes and the review goes on, never a stop (one failed probe would otherwise end a whole issue-loop stack).
+// the shapes reviews used and authors never ran. What it finds of this PR's that blocks is fixed before Fable reads
+// the head; its others join deferred, and what the base has joins fromBase, both filed at finish. At most PROBE_ROUNDS
+// a push; none counts toward MAX_ROUNDS. The probe is the author's own check and the review is the gate: a probe or
+// probe fix that fails, or pushes nothing, is said in the run's notes and the review goes on, never a stop (one failed
+// probe would otherwise end a whole issue-loop stack).
 async function probeAndFix(base) {
   for (let n = 1; n <= PROBE_ROUNDS; n++) {
     const p = probeRounds.length + 1
@@ -316,7 +375,7 @@ async function probeAndFix(base) {
     const probe = await agent(
       `${WHERE}Probe PR ${last.pr} of embeddable-hq/mason-data at head ${last.head} for wrong answers, before its review, as its reviewer will: you have no stake in this code. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff --name-only ${base} ${last.head}\`. For each .claude/rules/*.md file whose \`paths:\` covers a changed path, read its \`## What review probes\` section at the head (\`git -C ${REPO} show ${last.head}:.claude/rules/<file>\`): each bullet is a probe shape, the class it catches, and where it was met. Run EVERY probe that applies to this change, and these, which reviews ran and authors did not: ${PROBE_SHAPES}. Run the design note's shapes too:
 ${design ? design.shapes.map((s) => `- ${s.input} (${s.where})`).join('\n') : '(no note)'}
-Compare with a real Postgres as the tests do, ${PROBE_TREES}. Do not edit or push. For each wrong answer give the failing input, Postgres's answer, Mason's at the head, and Mason's at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible. origin is 'base' when the base gives the same wrong answer, else 'this-pr'. Known classes, to REUSE by slug when it is the same class:
+Compare with a real Postgres as the tests do, ${PROBE_TREES}. Do not edit or push. For each wrong answer give the failing input, Postgres's answer, Mason's at the head, and Mason's at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible. origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
   ${knownList()}
 Give no fix. List what you ran and judged correct. About 30 tool calls.`,
       { label: `probe ${p}`, phase: 'Probe', ...ON.probe, schema: FINDINGS })
@@ -324,11 +383,11 @@ Give no fix. List what you ran and judged correct. About 30 tool calls.`,
       notes.push(`probe ${p} failed: the review read head ${last.head.slice(0, 7)} unprobed`)
       return
     }
-    const { mine, repeated } = tally(probe.findings)
-    const entry = { round: p, label: `probe ${p}`, head: last.head, findings: mine, base: probe.findings.length - mine.length, judgedCorrect: probe.judgedCorrect, classRound: repeated.length > 0 }
+    const { mine, later, repeated } = tally(probe.findings, { round: p, stage: 'probe', label: `probe ${p}` })
+    const entry = { round: p, label: `probe ${p}`, head: last.head, findings: mine, deferred: later.length, base: probe.findings.length - mine.length - later.length, judgedCorrect: probe.judgedCorrect, classRound: repeated.length > 0 }
     probeRounds.push(entry)
     history.push(entry)
-    log(`probe ${p}: ${mine.length} finding(s) of this PR, ${entry.base} of the base`)
+    log(`probe ${p}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base`)
     if (mine.length === 0) return
     const fixed = await agent(fixPrompt(`Probe fix ${p}`, ON.probeFix, entry, repeated, null),
       { label: `probe fix ${p}${entry.classRound ? ' (class)' : ''}`, phase: 'Probe', ...ON.probeFix, schema: PUSHED })
@@ -342,10 +401,10 @@ Give no fix. List what you ran and judged correct. About 30 tool calls.`,
 }
 
 // ---------------------------------------------------------------- Review and fix rounds, with the class rule
-// Only this PR's findings drive a round. A finding the base already answers wrong is the base's: it is filed (finish)
-// and never patched here, or a PR chases a class it did not make (PR 207: a numeric quotient computed as a double,
-// main's since before the PR, took three rounds and grew each one). Returns null when a review finds nothing of this
-// PR's, else the status to stop with. `start` is the first review: { kind: 'full' }, or { kind: 'narrow', base, what }
+// Only this PR's blocking findings drive a round; its others are filed (finish), and a round with only those is clean.
+// A finding the base already answers wrong is the base's: it is filed (finish) and never patched here, or a PR chases a class it did not make (PR 207: a numeric quotient computed as a double,
+// main's since before the PR, took three rounds and grew each one). Returns null when a review finds nothing blocking of
+// this PR's, else the status to stop with. `start` is the first review: { kind: 'full' }, or { kind: 'narrow', base, what }
 // for a re-check of the commits since `base`, `what` saying what they were meant to fix. Every push is probed first,
 // and CI is read beside each review, so a red CI goes back in the review's fix round when there is one (PR 202 was
 // red from its first push, and rounds 1 and 2 never heard of it); beside a clean review the CI stage reads it again.
@@ -364,7 +423,7 @@ async function reviewAndFix(start) {
       () => agent(
         `${WHERE}First run \`${BOARD('In review')}\`. ${kind === 'full' ? 'Review' : 'Narrowly re-check the latest fix of'} PR ${last.pr} of embeddable-hq/mason-data at head ${last.head}, for wrong answers. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff ${base} ${last.head}\`, and read the whole touched files at that head with \`git show\`. Read the .claude/rules/ file of the subsystem. Never take the author's report as evidence. Probe against a real Postgres as the tests do, ${PROBE_TREES}. Do not edit or push.
 ${kind === 'full' ? `The shapes the brief named:\n${brief.shapes.map((s) => '- ' + s).join('\n')}\nLook beyond them too. About 40 tool calls.` : `${what}${probeFixed ? `\nThe commits since ${probedFrom.slice(0, 7)} fix what a probe found; check them the same way.` : ''}\nLook for what the fix broke, in the code it changed only. Already judged correct, so do NOT re-check: ${judged.join('; ') || '(nothing yet)'}. About 20 tool calls.`}
-For each confirmed finding give the failing input, Postgres's answer, Mason's answer at the head, and Mason's answer at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible (CLAUDE.md "Fix the class, not the symptom"). origin is 'base' when the base gives the same wrong answer, else 'this-pr'. Known classes, to REUSE by slug when it is the same class:
+For each confirmed finding give the failing input, Postgres's answer, Mason's answer at the head, and Mason's answer at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible (CLAUDE.md "Fix the class, not the symptom"). origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
   ${knownList()}
 Give no fix and no patch. Also list what you judged correct.`,
         { label: `review r${round}`, phase: 'Review', ...ON.review, schema: FINDINGS }),
@@ -374,13 +433,14 @@ Give no fix and no patch. Also list what you judged correct.`,
     // "couldn't tell" is never a failure sent back: the CI loop after the reviews reads it again
     const ciFailure = ciNow && ciNow.state === 'failed' ? ciNow.detail : null
     if (!ciNow || ciNow.state === 'timeout') log(`CI beside review r${round}: ${ciNow ? 'not finished' : 'no answer'}; the CI stage reads it`)
-    const { mine, repeated } = tally(review.findings)
+    const { mine, later, repeated } = tally(review.findings, { round, stage: 'review', label: `review r${round}` })
     const classRound = repeated.length > 0
-    const entry = { round, label: `review r${round}`, head: last.head, findings: mine, base: review.findings.length - mine.length, judgedCorrect: review.judgedCorrect, classRound }
+    const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound }
     rounds.push(entry)
     history.push(entry)
-    log(`round ${round}: ${mine.length} finding(s) of this PR, ${entry.base} of the base${ciFailure ? ', CI red' : ''}${classRound ? `; CLASS round next (${repeated.join(', ')})` : ''}`)
-    // a clean review with a red CI: the CI stage reads that failure next and sends it to a CI fix
+    log(`round ${round}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base${ciFailure ? ', CI red' : ''}${classRound ? `; CLASS round next (${repeated.join(', ')})` : ''}`)
+    // nothing blocking of this PR's is a clean round, whatever was deferred. A clean review with a red CI: the CI stage
+    // reads that failure next and sends it to a CI fix
     if (mine.length === 0) return null
     if (round >= MAX_ROUNDS) return `still ${mine.length} finding(s) after ${round} rounds: the coordinator decides`
 
@@ -479,7 +539,7 @@ const stopped = await reviewAndFix({ kind: 'full', base: `origin/${A.base}` })
 if (stopped) return await finish(stopped)
 
 // ---------------------------------------------------------------- Learn: each class met becomes a review probe
-// Before the CI loop, so CI covers its commit. Every finding of this PR, design, probe and review, goes to the rules
+// Before the CI loop, so CI covers its commit. Every blocking finding of this PR, design, probe and review, goes to the rules
 // file of its subsystem as a probe the next PR's Probe stage runs; a class already listed gets this PR's number.
 const learnable = history.filter((h) => h.findings.length)
 const designFindings = designRounds.filter((d) => d.findings.length)
@@ -519,7 +579,7 @@ for (let attempt = 1; attempt <= MAX_CI_FIXES + 1; attempt++) {
   const ci = await agent(CI_PROMPT(true), { label: `CI ${attempt}`, phase: 'CI', ...ON.ci, schema: CI })
   if (!ci) return await finish(`CI wait ${attempt} returned nothing: the coordinator looks`)
   if (ci.state === 'timeout') return await finish('CI not finished within the bound')
-  if (ci.state === 'green') return await finish('reviewed, no open finding of this PR, CI green: ready for the merge decision')
+  if (ci.state === 'green') return await finish('reviewed, no open blocking finding of this PR, CI green: ready for the merge decision')
   log(`CI failed: ${ci.detail.slice(0, 200)}`)
   if (attempt > MAX_CI_FIXES) return await finish(`CI still red after ${MAX_CI_FIXES} fixes: the coordinator decides`)
   phase('Fix')

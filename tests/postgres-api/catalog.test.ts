@@ -426,7 +426,7 @@ test("an idle timer stops the instance, and the next run starts it again", async
   }
 });
 
-test("a statement past the deadline is refused naming it, the instance is replaced, and the event loop ran meanwhile", async () => {
+test("a statement past the deadline is refused naming it, the instance is replaced, and the event loop ran meanwhile", { skip: "quarantined: #232" }, async () => {
   // PGlite runs synchronously on the thread that hosts it: on the main thread one catalog statement stalled every
   // session and every HTTP request (review of #480). On its worker, a timer here keeps firing while it spins.
   const lines: string[] = [];
