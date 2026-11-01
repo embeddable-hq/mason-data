@@ -10,6 +10,8 @@ import pg from "pg";
 import { PLAIN } from "../src/cli/style.ts";
 import type { Failure } from "../src/cli/command.ts";
 import * as assert from "node:assert/strict";
+import { generatedReadiness } from "../src/cli/readiness.ts";
+import type { GeneratedStatus } from "../src/duck/generated.ts";
 import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readiness, STATUS, tableLines, WAIT, type RunState, type TableState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
 import { jsonText } from "../src/cli/command.ts";
@@ -81,6 +83,23 @@ test("mason wait: ready once every added table is copied; a copy still running o
   // a copy that failed: the sync tries again by itself, but an agent waiting is told now, with the reason's first line
   const failed = t({ table: "public.big", added: true, copy: { phase: "failed", rowsCopied: 0, updatedAt: "" }, error: "permission denied for table big\nmore" });
   assert.deepEqual(readiness(state({ tables: [failed, done] })), { ready: false, failed: ["public.big: permission denied for table big"], waiting: [] });
+});
+
+test("mason wait <generated table>: ready once a base change committed before the wait is in the chain; one after it does not hold it; a failed run or a blocking parent is a failure", () => {
+  const since = Date.parse("2026-10-29T09:00:00.000Z");
+  const g = (extra: Partial<GeneratedStatus>): GeneratedStatus => ({ table: "public.daily", file: "mason/generated_tables/daily.yml", kind: "scheduled", method: "whole", state: "current",
+    targetLag: "1m", behindSeconds: 0, behindSince: null, missingTarget: false, serving: true, lastRun: null, error: null, retryAt: null, refusals: [], waitingFor: null, warnings: [], ...extra });
+  const behind = g({ state: "behind", behindSeconds: 12, behindSince: "2026-10-29T08:59:50.000Z" });
+  assert.deepEqual(generatedReadiness(behind, since), { ready: false, failed: [], waiting: ["public.daily: 12 s behind its bases; its next run brings in what was synced before the wait"] });
+  assert.deepEqual(generatedReadiness(g({}), since), { ready: true, failed: [], waiting: [] }, "the chain's run brought it in");
+  assert.equal(generatedReadiness(g({ state: "behind", behindSeconds: 1, behindSince: "2026-10-29T09:00:01.000Z" }), since).ready, true, "only a change after the wait began");
+  assert.equal(generatedReadiness(g({ state: "behind", behindSince: "2026-10-29T09:00:00.000Z" }), since).ready, false, "a change at the wait's start counts as before it");
+  assert.deepEqual(generatedReadiness(g({ serving: false, state: "building" }), since).waiting, ["public.daily: being built"]);
+  assert.deepEqual(generatedReadiness({ ...behind, state: "failed", error: "division by zero\nmore" }, since).failed, ["public.daily: its last run failed: division by zero"]);
+  assert.deepEqual(generatedReadiness(g({ serving: false, state: "waiting", waitingFor: "public.counts failed its last run" }), since).failed, ["public.daily: not run, because public.counts failed its last run"]);
+  assert.deepEqual(generatedReadiness(g({ serving: false, state: "refused", refusals: [{ key: "target_lag", message: "target_lag 1s is shorter", why: "", options: [], text: "" }] }), since).failed,
+    ["public.daily: refused: target_lag 1s is shorter"]);
+  assert.deepEqual(generatedReadiness(g({ serving: false, state: "waiting", waitingFor: "public.events" }), since).waiting, ["public.daily: waiting for public.events"]);
 });
 
 test("mason wait shows a copy's progress: of the table's estimate, never 100% until it is done, never back once past a stale estimate", () => {

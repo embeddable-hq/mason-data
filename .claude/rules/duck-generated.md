@@ -39,7 +39,13 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   snapshot": a poll's time is its start. Detector: the itest's poll, stream
   batch, held changes and copy made again, each followed by the statements held to Postgres.
 - **Lag is the age of the oldest base change not in the table** (`oldest`: a run's changes count until its swap), never
-  the snapshot's age: over an idle base nothing is behind and nothing runs.
+  the snapshot's age: over an idle base nothing is behind and nothing runs. **Across a chain it is the oldest anywhere
+  below** (`chainOldest`): a parent's unreflected change is not in its child either, and a parent swapped in without its
+  child marks the child at the oldest base change that swap brought, never at the swap's time. Measured against the base,
+  never summed. `behindSince` is that change's time, what `mason wait <table>` reads (src/cli/readiness.ts
+  `generatedReadiness`). Detector: the chain lag tests of tests/duck-generated.test.ts, a restart's included.
+- **A child's `target_lag` is never shorter than a generated parent's**: refused at its key (`fresherThan`), with the
+  way out, and checked again when any table's target moves (the check's `seen` key holds them).
 - **The run and the swap are a copy's**: one at a time in the one rebuild queue, behind the copies whose rows it reads, on
   a connection of its own set up as a session, swapped on a writer's turn with its ledger row in ONE transaction. A crash
   leaves the old table and at worst a side table, which `open` drops. Detector: a SIGKILL at each `GeneratedStep`.
