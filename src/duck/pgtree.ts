@@ -13,6 +13,8 @@
  * characters that would end one), or a datum `N [ b b … ]` (a Const's value).
  */
 
+import { constantExpression } from "./constant-key.ts";
+
 export type TreeValue = TreeNode | TreeValue[] | string | null;
 export interface TreeNode { readonly _node: string; readonly [field: string]: TreeValue }
 
@@ -123,6 +125,8 @@ export interface Typed {
    *  name but another case (`"T"` beside `t`), which DuckDB cannot tell apart: the item's columns are renamed alike
    *  (caseTwins) */
   renamed: string | null;
+  /** a Const of the analysis (under a COLLATE): a sort key that orders nothing, by ONE reader (src/duck/constant-key.ts) */
+  constant?: true;
   /** a VAR as DuckDB can name it: the FROM item it is read from and the column's name there (an alias list's); a merged
    *  column of a join by the join's name, or null for that of a join (or a VALUES, a subquery) with none, which only its
    *  bare name reads. A join's name hides what it joins, so a column of a named join is read by that name, and `twin`
@@ -316,6 +320,7 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
     qualifier: v._node === "VAR" ? qualifierOf(v, rtables) : null,
     renamed: v._node === "VAR" ? renamedOf(v, rtables) : null,
   };
+  if (constantExpression(v)) typed.constant = true;
   const text = constText(v);
   if (text !== undefined) typed.text = text;
   const textArray = constTextArray(v);

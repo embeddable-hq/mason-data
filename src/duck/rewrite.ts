@@ -33,7 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type QueryOutputs, type Typed } from "./pgtree.ts";
-import { constantKey } from "./constant-key.ts";
+import { evaluated } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
@@ -857,11 +857,12 @@ class Rewriter {
     this.keyedDistinct(b);
     // the statement's own ORDER BY: an ordinal or an output name sorts by that target's expression, so its key is
     // built over the expression (DuckDB's `ORDER BY 1 COLLATE …` would sort by the constant)
-    // A SORT KEY WRITTEN AS A BARE LITERAL (the class's third instance, issue 134): a key whose expression is a
-    // constant, after its ordinal or output name is resolved, orders nothing, and written into DuckDB's sort it is an
-    // ordinal (an integer) or refused (42804, a non-integer literal), whether as the value or as a collation's key over
-    // it. So it is no key, here where every key of a SELECT is written, at any depth; with none left there is no ORDER
-    // BY, and the LIMIT keeps any rows, as Postgres's plan does
+    // A CONSTANT SORT KEY (the class, issue 134: whether a key is constant is the ANALYSIS's, src/duck/constant-key.ts):
+    // a key Postgres analysed as a Const, after its ordinal or output name is resolved, orders nothing, and written
+    // into DuckDB's sort it is an ordinal (an integer) or refused (42804, a non-integer literal), whether as the value or
+    // as a collation's key over it. So it is no key, here where every key of a SELECT is written, at any depth; with
+    // none left there is no ORDER BY, and the LIMIT keeps any rows, as Postgres's plan does. Any other key Postgres
+    // evaluates, and may raise on at planning: written so DuckDB evaluates it, never as a bare non-integer literal
     if (Array.isArray(b.sortClause) && Array.isArray(b.targetList) && (b.op === undefined || b.op === "SETOP_NONE")) {
       const targets = b.targetList as AstNode[];
       b.sortClause = (b.sortClause as AstNode[]).flatMap((s) => {
@@ -869,9 +870,15 @@ class Rewriter {
         this.done.add(sb);
         if (kindOf(s) === "SortBy" && sb.useOp === undefined) {
           const out = this.outputOf(sb.node as AstNode, targets);
-          if (out?.twin !== true && constantKey(out !== null ? out.value : sb.node as AstNode)) return [];
+          if (out?.twin !== true && this.typed(out !== null ? out.value : sb.node as AstNode)?.constant === true) return [];
         }
-        return this.sortBy(sb, targets, b) ?? [s];
+        // (an integer the rewrite wrote is an ordinal it meant; any other bare literal DuckDB would refuse)
+        const written = this.sortBy(sb, targets, b) ?? [s];
+        for (const w of written) {
+          const n = kindOf(w) === "SortBy" ? bodyOf(w).node as AstNode | undefined : undefined;
+          if (n !== undefined && kindOf(n) === "A_Const" && bodyOf(n).ival === undefined) bodyOf(w).node = evaluated(n);
+        }
+        return written;
       });
       if ((b.sortClause as AstNode[]).length === 0) delete b.sortClause;
     }

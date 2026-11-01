@@ -2359,6 +2359,79 @@ test("a constant sort key orders nothing at any depth: by name and by number, un
   } finally { await bytes.end(); await onLibc.end(); await libc.close(); }
 });
 
+// THE CLASS ROUND (PR 170, a fact derived in several places: whether a sort key is constant). Five findings in four
+// rounds were each a spelling `constantKey` matched or missed (the last: `1.5::numeric`, a CONST to Postgres, written as
+// the bare 1.5 DuckDB refuses, 42804). A key is constant where Postgres's ANALYSIS put a Const, read in one place; every
+// spelling of the class is held here against Postgres, as the key itself, by output name and by number, under each shape
+const constantKeys = [
+  // a cast of an untyped literal: folded by the analysis into a Const
+  "'x'::text", "'1.5'::numeric", "NULL::int", "NULL::text",
+  // a cast of a typed literal to its own type leaves the Const (int, numeric, bool); to another type it is a function
+  // Postgres evaluates (at planning: folded there, and it could raise there)
+  "1::int", "1::bigint", "1.5::numeric", "0.5::numeric", "1.5::decimal", "1.5::numeric(3,1)", "1.5::float8", "true::bool",
+  "'x'::text::text", "'x'::text::varchar",
+  // a chain of casts
+  "'1.5'::numeric::numeric", "1.5::numeric::float8", "1::int::bigint", "'1.5'::text::numeric", "'2'::text::int",
+  // COLLATE, parentheses
+  "'x' COLLATE \"C\"", "'x'::text COLLATE \"C\"", "(1.5::numeric)", "((1.5)::numeric)", "('x'::text)",
+  // a constant expression: Postgres folds it at planning
+  "1 + 0", "1.5::numeric + 0",
+];
+test("a constant sort key is the analysis's Const, however it is spelled: the key, its output's name and number, under every shape", async () => {
+  const c = await client();
+  const outcome = (p: Promise<unknown>): Promise<unknown> => p.then((r) => r, (e: { code?: string }) => ({ error: e.code }));
+  const wrong: string[] = [];
+  const alike = async (sql: string, values?: unknown[]): Promise<void> => {
+    const [mason, pg] = [await outcome(answer(c, sql, values)), await outcome(postgres(sql, values))];
+    try { assert.deepEqual(mason, pg); } catch { wrong.push(`${sql}${values !== undefined ? ` ${JSON.stringify(values)}` : ""}: Mason ${JSON.stringify(mason)}, Postgres ${JSON.stringify(pg)}`); }
+  };
+  try {
+    for (const k of constantKeys) {
+      for (const sql of [
+        // the key itself: one table (afterLimit), DESC, the join (joinRows), a computed list, the GROUP BY form
+        // (keyFirst), DISTINCT ON, WITH TIES, no LIMIT
+        `SELECT l.id, l.k FROM late l ORDER BY ${k}, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k FROM late l ORDER BY ${k} DESC, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k FROM late l JOIN late_c c ON c.id = l.c ORDER BY ${k}, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.j ->> 'n' AS n FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY ${k} DESC, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, count(*) AS n FROM late l GROUP BY l.id ORDER BY ${k}, l.id DESC LIMIT 3`,
+        `SELECT DISTINCT ON (l.c) l.c, l.id FROM late l ORDER BY l.c DESC, ${k}, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k FROM late l ORDER BY ${k}, l.k FETCH FIRST 3 ROWS WITH TIES`,
+        `SELECT l.id, l.k FROM late l WHERE l.id < 5 ORDER BY ${k}, l.id DESC`,
+        // by output name and by number
+        `SELECT l.id, l.k, ${k} AS v FROM late l ORDER BY v, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${k} AS v FROM late l ORDER BY 3 DESC, 1 DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${k} AS v FROM late l JOIN late_c c ON c.id = l.c ORDER BY v DESC, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${k} AS v, count(*) AS n FROM late l GROUP BY l.id ORDER BY 3, 1 DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${k} AS v FROM late l WHERE l.id < 5 ORDER BY 3, l.id DESC`,
+        // at depth, and a derived table's constant read through the table around it (late.ts's fold)
+        `SELECT s.id FROM (SELECT l.id, ${k} AS v FROM late l ORDER BY v DESC, l.id LIMIT 4) s ORDER BY s.id`,
+        `SELECT s.id, s.one FROM (SELECT l.id, c.name, ${k} AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY s.one, s.id DESC LIMIT 3`,
+        `SELECT s.id, s.one FROM (SELECT l.id, c.name, ${k} AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY 2 DESC, s.id DESC LIMIT 3`,
+      ]) await alike(sql);
+    }
+    // a bare literal or NULL as the key itself is Postgres's own refusal (42601) or an ordinal; by name and number it is a constant
+    for (const k of ["1.5", "'x'", "NULL", "true", "(1.5)", "(2)"]) {
+      await alike(`SELECT l.id, l.k FROM late l ORDER BY ${k}, l.id DESC LIMIT 3`);
+      await alike(`SELECT l.id, l.k, ${k} AS v FROM late l ORDER BY v, l.id DESC LIMIT 3`);
+      await alike(`SELECT l.id, l.k, ${k} AS v FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3, l.id DESC LIMIT 3`);
+    }
+    // a parameter: a Param to the analysis, evaluated, ordering nothing whatever its value
+    for (const [k, v] of [["$1", "2"], ["$1::int", 2], ["$1::numeric", "1.5"], ["$1::text", "x"]] as const) {
+      await alike(`SELECT l.id, l.k FROM late l ORDER BY ${k}, l.id DESC LIMIT 3`, [v]);
+      await alike(`SELECT l.id, l.k FROM late l JOIN late_c c ON c.id = l.c ORDER BY ${k}, l.id DESC LIMIT 3`, [v]);
+      await alike(`SELECT l.id, l.k FROM late l WHERE l.id < 5 ORDER BY ${k}, l.id DESC`, [v]);
+    }
+    // a key Postgres evaluates at planning, and raises there: evaluated, never dropped as a constant nor read as an ordinal
+    for (const k of ["2147483648::int", "12345::numeric(3)", "'abc'::text::int", "'abc'::text::numeric", "1 / 0", "(2147483648::int)"]) {
+      await alike(`SELECT l.id FROM late l ORDER BY ${k}, l.id LIMIT 3`);
+      await alike(`SELECT l.id, ${k} AS v FROM late l JOIN late_c c ON c.id = l.c ORDER BY v, l.id LIMIT 3`);
+      await alike(`SELECT s.id FROM (SELECT l.id, c.name, ${k} AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY s.one, s.id LIMIT 3`);
+    }
+    assert.deepEqual(wrong, []);
+  } finally { await c.end(); }
+});
+
 // ISSUE 112: an output's number or bare name beside a * reached the engine as written: no rule met the column it is
 test("an output of a * is read by its number and its bare name as the column it is", async () => {
   const c = await client();
