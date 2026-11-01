@@ -30,3 +30,9 @@ paths:
 - **A disabled user is KEPT with `disabledAt` and its id** (`mason user disable`): `LiveUsers` still holds it, so its
   login is judged whole first — a wrong password stays 28P01 — and only then refused `user_disabled` (the listener's
   28000); its sessions end at their next statement; `enable` deletes the field, so the same password connects again.
+
+## What review probes
+
+Run each probe that applies before a push; the harness's Learn step adds to this list.
+
+- A share's password on the run's port, a user's password or a token on a share, a share whose role the roles file changes while it is open: a refusal that names what it was given and its way out (PR 142; issue 91).

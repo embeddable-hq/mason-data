@@ -104,3 +104,11 @@ paths:
   said with its steps (`open`), and `pathText` says it raw. A new kind of stored read is added there (the release before
   `equal:` broke its status and every write of the table on one). `tests/duck-json-columns.test.ts` holds it with a
   made-up kind `future:x`. ("jsonb's order", "Rolling back past it")
+
+## What review probes
+
+Run each probe that applies before a push; the harness's Learn step adds to this list.
+
+- jsonb values Postgres holds equal but whose text differs (`{"k": 1}`, `{"k": 1.0}`, `{"k": 1.00}`; one object's keys in two orders) under DISTINCT, DISTINCT ON and GROUP BY, by name, by number and as the expression: equality taken on the text (PR 170, 207).
+- `(j -> 'r')::text` under a GROUP BY of another expression: the engine's text (`2.45`), not Postgres's (`2.450`) (PR 170; issue 212).
+- A stored path's fill given NULL over several rows: the NULL written in the column's own type (PR 144).

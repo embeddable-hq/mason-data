@@ -110,3 +110,9 @@ paths:
   `tests/integration/extensions.itest.ts` holds a copy and an inet cast with HOME empty and the package read-only.
 - **Read-only on the source**: a scan through a `READ_ONLY` attachment, SELECTs only, never an `ORDER BY` there (a sort,
   or an index walk, of the source table).
+
+## What review probes
+
+Run each probe that applies before a push; the harness's Learn step adds to this list.
+
+- A table holding every held built-in type and its array (point, money, macaddr, cidr, bit, tsvector, a range, `oid[]`): the copy writes what the poll and the stream write, and an older copy's layout is caught (PR 153).
