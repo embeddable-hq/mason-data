@@ -2183,7 +2183,13 @@ two columns of one name by position; the substitution is sound because nothing f
 from outside it. A fetch keeps a nullable side's derived form, and DuckDB moved a computed list above the join in every
 plan measured, so a raising value on a row left out stayed unread (`limit-errors`, held by the oracle). A plain read
 counts for `fanOutBounded`, its bare outputs as its table's columns; what is carried has no row number and goes unsorted
-even where the proof holds. A statement with a role's filtered read keeps its form until step 4 reviews the barrier.
+even where the proof holds. A statement with a role's filtered read kept its form until step 4 reviewed the barrier.
+
+Decided (2026-11-01, issue 134 step 4): a role's filtered read takes the late fetch too, its rows chosen inside the
+barrier and fetched through the same filtered read. Three fetches were measured on issue 134 and cost the same: the base
+table 177 ms, the statistics wall 190 ms, the whole filtered read 145 ms. The filtered read was chosen because it adds
+no new argument: the fetch never hands a list expression the table-wide statistics the wall hides, nor a row the filter
+drops, so what the barrier and the wall already proved holds for the fetch unchanged.
 
 **Step 3: `USING`, `NATURAL` and computed keys.** Through the listener, a 2 GB limit, 8 M facts beside 3 M rows of about 3 kB
 that compress well (346 MB on disk, so the spill and the seconds before are smaller than the issue's 9.1 GB of noise; the
