@@ -3566,7 +3566,8 @@ function pgColumn(c: SourceColumnInfo, duck: DuckDBType, now: SourceColumnInfo |
   return { name: c.name, type, spelled, ...(c.comment ? { description: c.comment } : {}), ...(labels !== null ? { enumLabels: labels } : {}), ...(made !== undefined ? { made } : {}),
     ...(facts.notNull ? { notNull: true } : {}), ...(facts.default !== undefined ? { default: facts.default } : {}),
     ...(facts.identity !== undefined ? { identity: facts.identity } : {}), ...(facts.sequence !== undefined ? { sequence: facts.sequence } : {}),
-    ...(c.typeOid !== undefined && double === null ? { typeOid: c.typeOid, ...(c.typeArrayOid !== undefined ? { typeArrayOid: c.typeArrayOid } : {}) } : {}) };
+    // a number, whatever spelling the column's record kept (an oid is a string in Postgres's JSON, and a copy's columns are JSON)
+    ...(c.typeOid !== undefined && double === null ? { typeOid: Number(c.typeOid), ...(c.typeArrayOid !== undefined ? { typeArrayOid: Number(c.typeArrayOid) } : {}) } : {}) };
 }
 
 /** a span as the stream's line says it: `2.1 s`, `3 min`, `2 h` */

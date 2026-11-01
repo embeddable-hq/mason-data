@@ -36,7 +36,7 @@
 import { createHash } from "node:crypto";
 import type { DuckConnection } from "./executor.ts";
 import type { Planner, GeneratedColumn, GeneratedRefusal, DefinitionPlan as DefinitionPlanOf } from "./generated-plan.ts";
-import { cycleRefusal, planDefinition, readsByName, refusalOf, refusalText, storedColumns, type EngineTypes } from "./generated-plan.ts";
+import { cycleRefusal, isNumeric, planDefinition, readsByName, refusalOf, refusalText, storedColumns, type EngineTypes } from "./generated-plan.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { StatementError } from "./statement.ts";
 import type { SyncEventInput } from "./events.ts";
@@ -193,10 +193,21 @@ export function withoutValues(message: string): string {
   return message.split("\n")[0]!.replace(/'(?:[^']|'')*'/g, "…").replace(/"(?:[^"]|"")*"/g, "…").replace(/\b\d[\d.:,-]*\b/g, "…");
 }
 
+/** a definition the write's engine types refuse (`storedColumns`): the table's refusal, with its ways out */
+class RefusedAtWrite extends Error {
+  readonly entry: Entry; readonly refused: GeneratedRefusal[];
+  constructor(entry: Entry, refused: GeneratedRefusal[]) { super(refused.map((r) => r.message).join("; ")); this.entry = entry; this.refused = refused; }
+}
+
+/** DuckDB's words for a DECIMAL past its 38 digits, at an operation or a cast */
+const NUMERIC_OVERFLOW = /Overflow in (?:addition|subtraction|multiplication) of DECIMAL|out of range for (?:the desired )?DECIMAL|Could not cast value .* to DECIMAL/i;
+const OVERFLOW_WORDS = "a numeric it computes has more than the 38 digits a stored numeric holds. " +
+  "Cast it to double precision if it need not be exact, or compute it in the statement that reads the synced table";
+
 /** the engine type of each column a plan's SQL computes, as DuckDB says when it prepares it (`EngineTypes`) */
 async function engineTypes(c: DuckConnection, sql: string): Promise<EngineTypes> {
   const p = await c.prepare(sql);
-  try { return new Map(Array.from({ length: p.columnCount }, (_, i) => [p.columnName(i), p.columnType(i).toString()] as const)); }
+  try { return new Map(Array.from({ length: p.columnCount }, (_, i) => { const type = p.columnType(i).toString(); return [[p.columnName(i), type], [`#${i}`, type]] as const; }).flat()); }
   finally { p.destroySync(); }
 }
 
@@ -755,8 +766,9 @@ export class GeneratedTables {
         const { plan } = p.plan;
         // a computed numeric's DECIMAL arithmetic, over the engine types of the SQL that runs (a parent's side table now
         // there), never assumed: what the check held, the write holds again
-        const stored = p.plan.numerics.length === 0 ? { columns: p.plan.columns } : storedColumns(p.plan, await engineTypes(c, plan.sql.text));
-        if ("refused" in stored) throw new Error(stored.refused[0]!.message);
+        const stored = !p.plan.columns.some(isNumeric) ? { columns: p.plan.columns } : storedColumns(p.plan, await engineTypes(c, plan.sql.text));
+        // refused here, it is a refusal as the check's are, with its options: never a failure retried on a timer
+        if ("refused" in stored) throw new RefusedAtWrite(p.e, stored.refused);
         const { columns } = stored;
         const params: string[] = [];
         if (plan.clock?.exec !== undefined) params[plan.clock.exec - 1] = new Date(clock.at).toISOString();
@@ -807,11 +819,22 @@ export class GeneratedTables {
       // what this run took is still not in the tables
       for (const m of members) { m.dirtySince = this.oldest(m); m.taken = null; }
       if (this.host.stopping(x)) throw x;
+      if (x instanceof RefusedAtWrite) {
+        // what the write's engine types refuse is the table's refusal, with its ways out, as at a check: it keeps serving
+        // what it holds and is not run again until its definition or the schema changes (the check's `seen`)
+        const e = x.entry;
+        e.checked = null; e.refusals = x.refused;
+        this.say(e);
+        this.host.log(`${e.name}: refused at its run: ${x.refused.map((r) => r.message).join("; ")}`);
+        return null;
+      }
       at.failures++;
       const attempt = Date.now() - started;
       at.retryAt = Date.now() + this.host.retryDelayMs(at.failures, attempt);
       const fields = x instanceof StatementError ? x.fields.message : x instanceof Error ? x.message : String(x);
-      at.error = withoutValues(fields);
+      // a numeric past the 38 digits a stored DECIMAL holds is the data's, not the definition's: said with its way out,
+      // and run again on the back-off, since a change to the rows can bring it back within them
+      at.error = NUMERIC_OVERFLOW.test(fields) ? OVERFLOW_WORDS : withoutValues(fields);
       const m = `its re-run failed (it serves what it last held; tried again after ${new Date(at.retryAt).toISOString()}): ${at.error}`;
       this.host.log(`${at.name}: ${m}`);
       this.host.event({ kind: "generated_failed", table: at.name, message: m });

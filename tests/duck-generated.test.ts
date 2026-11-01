@@ -502,7 +502,7 @@ test("the guide, the rules file and the release note name the numeric forms the 
   const docs = { guide: (await guideText("generated")).replace(/\s+/g, " "), rules: fs.readFileSync(".claude/rules/duck-generated.md", "utf8").replace(/\s+/g, " "),
     notes: fs.readFileSync("release-notes/next.md", "utf8").replace(/\s+/g, " ") };
   for (const [doc, text] of Object.entries(docs)) {
-    for (const said of [/trunc/, /mod/, /GREATEST/, /COALESCE/, /variance/i, /18 decimals|past 18/, /double/]) assert.match(text, said, `${doc}: ${said}`);
+    for (const said of [/trunc/, /mod/, /GREATEST/, /COALESCE/, /variance/i, /sqrt/, /18 decimals|past 18/, /double/]) assert.match(text, said, `${doc}: ${said}`);
     assert.doesNotMatch(text, /CASE, GREATEST, COALESCE, mod or trunc over a numeric/, doc);
   }
 });
@@ -968,13 +968,13 @@ const NUMS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, amount, big FROM 
 const SUMS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT mood, sum(small) AS s2, sum(n) AS s4, sum(id) AS s8, sum(amount) AS sa, max(big) AS mb FROM ledger GROUP BY mood\n";
 const KINDS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, mood, name FROM ledger\n";
 /** a world over `ledger`: the base made in a first world, the tables declared in the second, `use`d there and after a restart */
-async function overLedger(files: Record<string, string>, use: (w: Parameters<Parameters<typeof withWorld>[1]>[0], restarted: boolean) => Promise<void>): Promise<void> {
+async function overLedger(files: Record<string, string>, use: (w: Parameters<Parameters<typeof withWorld>[1]>[0], restarted: boolean) => Promise<void>, columns: readonly object[] = LEDGER_COLUMNS): Promise<void> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-numeric-"));
   try {
-    await withWorld({}, async (w) => { for (const sql of LEDGER_SEED) await w.store.writer.run(sql); }, { dir });
+    await withWorld({}, async (w) => { for (const sql of LEDGER_SEED) await w.store.writer.run(sql.replace(JSON.stringify(LEDGER_COLUMNS), JSON.stringify(columns))); }, { dir });
     // served, not built (#205): `use` queries each table over the wire at once
-    await withWorld(files, async (w) => { for (const name of Object.keys(files)) await w.until(served(w.logged), `public.${name}`); await use(w, false); }, { dir, again: true, tables: [ledger] });
-    await withWorld({}, async (w) => { for (const name of Object.keys(files)) assert.ok(built(w.status(`public.${name}`))); await use(w, true); }, { dir, again: true, tables: [ledger] });
+    await withWorld(files, async (w) => { for (const name of Object.keys(files)) await w.until(served(w.logged), `public.${name}`); await use(w, false); }, { dir, again: true, tables: [{ ...ledger, columns } as AddedTable] });
+    await withWorld({}, async (w) => { for (const name of Object.keys(files)) assert.ok(built(w.status(`public.${name}`))); await use(w, true); }, { dir, again: true, tables: [{ ...ledger, columns } as AddedTable] });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 const typed = async (w: { client(): Promise<pg.Client> }, sql: string): Promise<{ fields: Array<[string, number, number]>; rows: unknown[][] }> => {
@@ -1076,10 +1076,10 @@ test("a numeric the types don't fix is refused with its own reason: a division, 
     says("wide", /^column total has 30 decimals, more than the 18 a stored numeric keeps$/, "round(");
     says("texts", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/, "::numeric(20,4)");
     says("larger", /^column top is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones$/, "::numeric(12,2)");
-    says("spread", /^column sd is a variance or a standard deviation, whose decimals Postgres picks by the size of each value$/, "::double precision");
-    says("varied", /^column v is a variance or a standard deviation/, "::double precision");
+    says("spread", /^column sd is a numeric whose decimals Postgres picks by the size of each value \(a variance, a standard deviation, sqrt, exp, ln or power\)$/, "::double precision");
+    says("varied", /^column v is a numeric whose decimals Postgres picks by the size of each value/, "::double precision");
     for (const [name, col] of [["idwide", "a"], ["bigwide", "b"], ["timeswide", "m"], ["negwide", "n"]]) says(name!, new RegExp(`^column ${col} has 30 decimals, more than the 18`), "round(");
-    says("floated", /^column d is a numeric computed from a value the engine holds as a double/, "::double precision");
+    says("floated", /^column d is a numeric cast from a double precision value/, "::double precision");
     for (const name of Object.keys(refusedFiles)) assert.doesNotMatch(JSON.stringify(r(name).refusals), name === "mean" ? /no fixed scale|can't store exactly yet/ : /no fixed scale|can't store exactly yet|divides a numeric/, name);
     // each refusal's way out is stored: a sum of an unconstrained numeric's synced column is one cell at the scale its
     // DECIMAL holds; a stddev as a double; the 30 decimals rounded; a picked value given one scale (#205: `served`, not `built`)
@@ -1121,5 +1121,83 @@ test("each numeric form whose scale the types fix is stored with Postgres's digi
       ["40", "0", "4.0", "40", "4.00", "1.00", "4.00", "4.00", "4.00", "4.00", "-8589934588.00"],
     ]);
     assert.deepEqual((await typed(w, "SELECT * FROM aggregates")).rows, [["-2.50", "4.00", "2.60", "2.60000", "12345678901234567890.1235"]]);
+  });
+});
+
+// review round 3 of PR 202, F3: a made type's OID, as a REAL run spells it. The source's catalog read gives an oid as a
+// STRING (Postgres's JSON writes only the int, float and numeric types as numbers), and a field carries the SOURCE's OID
+// for a made type, which the catalog's pg_type does not have: the enum and the citext were refused by type in a real run
+const SOURCE_OIDS = LEDGER_COLUMNS.map((c) => c.name === "mood" ? { ...c, typeOid: "5974240", typeArrayOid: "5974239" } : c.name === "name" ? { ...c, typeOid: "5974250", typeArrayOid: "5974249" } : c);
+
+test("an enum and a citext over a source's own type OIDs, spelled as the source's JSON spells them, are stored, not refused by type", async () => {
+  await overLedger({ kinds: KINDS }, async (w) => {
+    assert.deepEqual(w.status("public.kinds").refusals, []);
+    const r = await typed(w, "SELECT id, mood, name FROM kinds ORDER BY mood, id");
+    assert.deepEqual([r.fields[1]![1], r.fields[2]![1]], [5974240, 5974250], "the source's OIDs on the wire, as a synced column sends");
+    assert.deepEqual(r.rows.map((x) => x[1]), ["sad", "sad", "ok", "happy"], "the declared order");
+    assert.deepEqual((await typed(w, "SELECT id FROM kinds WHERE name = 'ALICE' ORDER BY id")).rows, [["1"], ["9223372036854775806"]]);
+  }, SOURCE_OIDS);
+});
+
+// review round 3 of PR 202, F1: a numeric the engine answers itself (no exact program, "as the engine answers it") is
+// held to the engine type DuckDB says it computes: a DECIMAL stored, an integer stored as HUGEINT, a double refused
+test("a numeric the engine answers itself is held to its engine type: a variance it computes as a double is refused, a sign is stored as HUGEINT", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({ signs: `${lag}sql: SELECT id, sign(amount) AS s FROM ledger\norder_by: id\n` }, async (w, restarted) => {
+    const r = await typed(w, "SELECT id, s FROM signs ORDER BY id");
+    assert.deepEqual(r.fields.map(([, oid]) => oid), [20, 1700]);
+    assert.deepEqual(r.rows.map((x) => x[1]), ["1", null, "-1", "1"]);
+    if (restarted) return;
+    assert.deepEqual(await w.rows("SELECT data_type FROM duckdb_columns() WHERE table_name = 'signs' AND column_name = 's'"), [["HUGEINT"]]);
+    w.write("sb", `${lag}sql: SELECT stddev(big) AS sb FROM ledger\n`);
+    w.write("vw", `${lag}sql: SELECT variance(wide) AS vw FROM ledger\n`);
+    for (const name of ["sb", "vw"]) await w.until((s) => s.state === "refused", `public.${name}`);
+    for (const [name, col] of [["sb", "sb"], ["vw", "vw"]] as const) {
+      const refusals = w.status(`public.${name}`).refusals;
+      refusedAt(refusals, "sql", new RegExp(`^column ${col} is a numeric (the engine computes as a double|whose decimals Postgres picks by the size of each value)`));
+      assert.ok(refusals[0]!.options.some((o) => o.includes("::double precision")), JSON.stringify(refusals));
+    }
+  });
+});
+
+// review round 3 of PR 202, F2: each refusal says its true reason. A sqrt, exp, ln or power is computed by the catalog's
+// Postgres at decimals it picks per value, never "a double"; one an outer round fixes says what still stands in the way;
+// a JSON number's sum an outer round fixes is held at 36 decimals on the way, never "the rows decide its decimals"
+test("a numeric's refusal says its true reason: sqrt, exp, ln and power pick their decimals per value; a round over them, or over a JSON number's sum, says what still stands", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  const files: Record<string, [string, RegExp]> = {
+    root: ["SELECT sqrt(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    squared: ["SELECT power(amount, 2) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    squaredsum: ["SELECT power(sum(id), 2) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    grown: ["SELECT exp(amount) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    logged: ["SELECT ln(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value/],
+    rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks/],
+    sdround: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks/],
+    textround: ["SELECT round(sum((payload ->> 'a')::numeric), 2) AS x FROM events", /^column x is computed at 36 decimals on the way to its own, more than the 18/],
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(files)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const name of Object.keys(files)) await w.until((s) => s.state === "refused", `public.${name}`);
+    for (const [name, [, message]] of Object.entries(files)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      refusedAt(refusals, "sql", message);
+      assert.doesNotMatch(JSON.stringify(refusals), /holds as a double|sync the value as a numeric|rows decide/, name);
+    }
+  });
+});
+
+// review round 3 of PR 202, F4: a numeric past the 38 digits a stored numeric holds, at the write, is a failure that names
+// its cause and its way out, run again on the back-off (a change to the rows can bring it back within them), never a
+// DuckDB message alone
+test("a numeric that overflows the stored numeric at the write fails naming its cause and its way out, on the back-off", async () => {
+  await overLedger({ nums: NUMS }, async (w, restarted) => {
+    if (restarted) return;
+    w.write("squares", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT sum(big) * sum(big) AS sq FROM ledger\n");
+    await w.until((s) => s.state === "failed", "public.squares");
+    const s = w.status("public.squares");
+    assert.deepEqual(s.refusals, [], "data-dependent: a failure, not a refusal of the definition");
+    assert.match(s.error ?? "", /^a numeric it computes has more than the 38 digits a stored numeric holds\. Cast it to double precision if it need not be exact/);
+    assert.ok(s.retryAt !== null, "run again on the back-off");
   });
 });

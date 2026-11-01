@@ -69,10 +69,12 @@ ${keys}
     A numeric column is stored exactly, with Postgres's digits, wherever its types fix the scale: one passed through,
     its min or max, a sum (of a bigint too), and + - * of those, negated, abs, mod, round(x, n) and trunc(x, n) (n
     below 0 too), floor, ceil, a cast to numeric(p,s), and a CASE, GREATEST, LEAST or COALESCE whose values have one
-    scale, up to 18 decimals. Refused, each with its reason and the way out: a division (avg is one: store sum and
-    count, divide where you read), a variance or stddev (store it as a double), more than 18 decimals (round it), a sum
-    whose decimals the rows decide (cast the values to one scale first), a CASE, GREATEST, LEAST or COALESCE of
-    values with differing decimals (cast it to numeric(p,s)), and one computed from a double (read it as a double).
+    scale, up to 18 decimals; a sign is stored too. Refused, each with its reason and the way out: a division (avg is
+    one: store sum and count, divide where you read), a variance, stddev, sqrt, exp, ln or power, whose decimals
+    Postgres picks per value, rounded or not (store it as a double), more than 18 decimals, at the end or on the way
+    (round it, or give the values fewer decimals first), a sum whose decimals the rows decide (cast the values to one
+    scale first), a CASE, GREATEST, LEAST or COALESCE of values with differing decimals (cast it to numeric(p,s)), and a
+    numeric cast from a double (read it as a double). A value past 38 digits fails its run, saying so.
     An enum and a citext are stored as themselves:
     an enum sorts in its declared order, a citext compares without case.
     Not available yet: kind: live, and a domain or a composite type's column.

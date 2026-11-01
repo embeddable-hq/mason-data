@@ -119,7 +119,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Known
 
-- **A generated table can't yet hold a numeric that divides (an average is one), is a variance or a standard deviation, has more than 18 decimals, sums values whose decimals the rows decide, is a CASE, GREATEST, LEAST or COALESCE of values with differing decimals, or is computed from a double; nor a domain or a composite**, and `kind: live` is refused. Each is refused by file and key, with the way out, before anything is built.
+- **A generated table can't yet hold a numeric that divides (an average is one); is a variance, a standard deviation, sqrt, exp, ln or power, whose decimals Postgres picks per value, rounded or not; has more than 18 decimals, at the end or on the way; sums values whose decimals the rows decide; is a CASE, GREATEST, LEAST or COALESCE of values with differing decimals; or is cast from a double; nor a domain or a composite**, and `kind: live` is refused. Each is refused by file and key, with the way out, before anything is built.
 - **`mason status` shows generated tables; the web page doesn't yet.**
 - **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows, or over
   an aggregated side, has no stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY

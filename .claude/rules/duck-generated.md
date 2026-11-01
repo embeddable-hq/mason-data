@@ -36,10 +36,17 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   negation, abs, mod, round and trunc at any place, a typmod, floor, ceil, a pad, a CASE, GREATEST, LEAST or COALESCE of
   one scale), at most 18 decimals. **Each cell's engine type is what DuckDB says the plan's SQL computes** (`EngineTypes`,
   a prepared statement's, at the check and again at the write), never assumed: a sum of int8 is a HUGEINT, whose floor is
-  a double's, so an integer is cast to DECIMAL(38,0) first. A scale is a number or "picks" (a picked value's own), never
-  unknown: a null that meant both let 30 decimals through. What is not stored says ITS OWN reason (`notStoredRefusal`: a
-  division, a variance, a scale past 18, a scale a sum's rows or a picked value decide, a double), and the guide and the
-  release note name the same shapes: one refusal's reason for every shape was a false one. `dropLast` is refused. A
+  a double's, so an integer is cast to DECIMAL(38,0) first. **Every path a numeric reaches storage by is held to its
+  engine type** (`storedColumns`): a program's cells, and a numeric the engine answers itself (no program, a passthrough
+  among them: a DECIMAL stored, an integer as HUGEINT, a double refused, never stored as a double under a numeric's
+  name). A scale is a number or what decides it per row ("value", "rows", "picks"), never unknown: a null that meant both
+  let 30 decimals through. What is not stored says ITS OWN reason (`verdict`, `notStoredRefusal`: a division, a variance,
+  sqrt, exp, ln or power picking decimals per value (a round over one says what still stands), a scale past 18 at the end
+  or on the way, a scale a sum's rows or a picked value decide, a cast from a double), and the guide and the release
+  note name the same shapes: one refusal's reason for every shape was a false one, three times. A refusal at the write
+  is the table's refusal with its options; a value past 38 digits fails the run naming its cause, on the back-off.
+  A made type is judged by the catalog's type of its NAME, never the field's OID, which is the source's (and an oid
+  is a string in Postgres's JSON: a number from the entrance, `readSourceFacts`). `dropLast` is refused. A
   domain and a composite stay refused by name. Detector: tests/duck-generated.test.ts, a test per shape.
 - **One source of an enum's labels, the synced table's ENUM.** A generated table stores the ENUM it was built with; a
   value added since is declared by the synced column (`schemaBuilt` hands the generated column its labels; `catalogDdl`
