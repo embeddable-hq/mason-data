@@ -115,7 +115,8 @@ docs/DESIGN.md ("The independent review", "Local gates").
    judging by reading alone: batched through `scripts/duck-repro.ts` at the head and the base, only the differences
    read, hundreds in a full review; in the variant forms no author wrote, and a regression sweep of each touched
    path's plain form, where a statement the base matched and the head does not blocks (`pr-loop.js` `VARIANT_FORMS`,
-   `BATCH`; the record counts them). Its ONE report gives, for each finding,
+   `BATCH`; the record counts them). A review that ran none is no review: the run stops `unreviewed`. Its ONE report
+   gives, for each finding,
    the failing input and the two answers (for the engine: the statement, Postgres's answer and Mason's), the
    finding's class and its severity (step 4: blocking or not); and what it judged correct, so nobody checks that
    twice. Each confirmed blocking finding becomes a test and, for the engine, an oracle statement. CI is read beside

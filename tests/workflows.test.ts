@@ -82,7 +82,13 @@ async function run(name: string, args: Record<string, unknown>, answers: Answers
     const d = name === "pr-loop" ? DEFAULTS.find(([re]) => re.test(opts.label)) : undefined;
     assert.ok(opts.label in answers || d, `${name}: no stub answer for the agent labelled "${opts.label}"`);
     const a = opts.label in answers ? answers[opts.label] : d![1];
-    return typeof a === "function" ? (a as (c: Call) => unknown)({ prompt, opts }) : a;
+    const v = await (typeof a === "function" ? (a as (c: Call) => unknown)({ prompt, opts }) : a);
+    // a probe or review stub that says nothing of its statements ran some: a review that ran none stops the run, and
+    // the tests of that give the key (0, a non-count, or undefined) themselves
+    if (name === "pr-loop" && /^(probe \d+|review r\d+)$/.test(opts.label) && v && typeof v === "object" && !("statementsRun" in v)) {
+      return { ...v, statementsRun: 1, statementsMatched: 1 };
+    }
+    return v;
   };
   // the harness's parallel(): every thunk started at once. The harness resolves a thunk that throws to null; here a
   // throw is a stub's assertion failing, so it fails the test instead of reading as an agent that returned nothing.
@@ -1024,10 +1030,44 @@ test("pr-loop: the probe's and the review's schema count the statements run and 
   const rec = parseRecords(r.prompt("record"))[0]!;
   assert.deepEqual([rec.statementsRun, rec.statementsMatched], [120 + 40 + 340 + 60 + 80, 117 + 40 + 331 + 60 + 80]);
   assert.match(r.prompt("record"), /review 1: 1 finding\(s\): c-a[^\n]*; 340 statement\(s\) run, 331 matched/);
-  // a full review or a probe that ran no statement read the code only: said in the status, never silent
-  const read = await run("pr-loop", { ...PR }, { ...START, "probe 1": { ...clean, statementsRun: 0, statementsMatched: 0 }, "review r1": { ...clean, statementsRun: 0, statementsMatched: 0 }, "CI 1": green });
-  assert.match(String(read.result["status"]), /probe 1 ran no statement/);
-  assert.match(String(read.result["status"]), /review r1 ran no statement/);
+});
+
+test("pr-loop: a review that ran no statement, or gave no valid count, is never a clean round: the run stops unreviewed, and issue-loop goes no further", async () => {
+  const none = (o: Record<string, unknown> = {}) => ({ ...clean, statementsRun: 0, statementsMatched: 0, ...o });
+  // the first review ran nothing (no psql, no Docker): no CI wait, no learn, a stop that says what to install
+  let r = await run("pr-loop", { ...PR }, { ...START, "review r1": none({ judgedCorrect: ["psql: command not found"] }) });
+  const status = String(r.result["status"]);
+  assert.match(status, /^unreviewed: review r1 ran no statement \(it said: psql: command not found\)/);
+  assert.doesNotMatch(status, /^reviewed/);
+  for (const s of ["`psql` on PATH", "brew install libpq", "postgresql-client", "Docker running", "itEnv"]) assert.ok(status.includes(s), `the stop says what to install: ${s}`);
+  assert.deepEqual(r.labels.slice(-2), ["CI read r1", "record"], "nothing after the review but its record");
+  const rec = parseRecords(r.prompt("record"))[0]!;
+  assert.equal(rec.status, status);
+  assert.equal(rec.reviewRounds, 0, "an unrun round is no review round");
+  assert.deepEqual([stats([rec]).reviewed, stats([rec]).neverReviewed, stats([rec]).firstPass], [0, 1, 0], "and review-stats never reads it as passed");
+
+  // no valid count at all: missing, or not a count
+  for (const bad of [undefined, "many", -1, 2.5]) {
+    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...clean, statementsRun: bad, statementsMatched: 0 } });
+    assert.match(String(r.result["status"]), /^unreviewed: review r1 reported no valid count of the statements it ran/, String(bad));
+  }
+  // a re-check that ran nothing after a fix: the fix is unchecked, so no clean round either
+  r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": none() });
+  assert.match(String(r.result["status"]), /^unreviewed: review r2 ran no statement, so head bbbbbbb was read and never run/);
+  const rec2 = parseRecords(r.prompt("record"))[0]!;
+  assert.equal(rec2.reviewRounds, 1);
+  assert.equal(stats([rec2]).bySecond, 0, "round 2 ran nothing, so the PR did not pass by the second");
+
+  // issue-loop reads the stop as a stop
+  const stop = await run("issue-loop", { issue: 300, tasks: TASKS }, SETUP, [() => ({ status, pr: 401, classes: {} })]);
+  assert.equal(stop.flowCalls.length, 1, "the next task is not run");
+  assert.match(String(stop.result["status"]), /^stopped at task 1: unreviewed/);
+
+  // a probe is the author's check: one that ran nothing, or gave no count, is noted with what to install, and the review goes on
+  r = await run("pr-loop", { ...PR }, { ...START, "probe 1": none(), "review r1": clean, "CI 1": green });
+  assert.match(String(r.result["status"]), /^reviewed.*probe 1 ran no statement: it read the code only \(scripts\/duck-repro\.ts needs `psql` on PATH/);
+  r = await run("pr-loop", { ...PR }, { ...START, "probe 1": { ...clean, statementsRun: undefined }, "review r1": clean, "CI 1": green });
+  assert.match(String(r.result["status"]), /^reviewed.*probe 1 reported no valid count/);
 });
 
 test("review-stats: it reads and prints the statements run and matched, and a record without them still reads", () => {

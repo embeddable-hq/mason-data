@@ -509,8 +509,10 @@ runs dozens, its output goes to a file, and only the differences are read. The c
 So the probe and every review in `pr-loop.js` run their statements that way, at the head and the base: the forms are one
 list (`VARIANT_FORMS`, over synthetic tables), a full review aims for hundreds and a re-check for a narrower set, and
 a statement the base matched and the head does not is a `regression`, blocking. Each reports `statementsRun` and
-`statementsMatched`, which the Review record sums and `scripts/review-stats.ts` prints; a probe or review that ran
-none is said in the run's status. Their Postgres is the file the `itEnv` argument names, or a throwaway `postgres:18`
+`statementsMatched`, which the Review record sums and `scripts/review-stats.ts` prints. A review or re-check that ran
+none, or gave no valid count, is never a clean round: the run stops `unreviewed`, saying what to install (`psql` on
+PATH, Docker or `itEnv`), issue-loop goes no further, and the record counts the round as no review (PR 245's first
+review found such a round passing as reviewed); a probe that ran none is noted, as a failed probe is. Their Postgres is the file the `itEnv` argument names, or a throwaway `postgres:18`
 container of the stage's own, removed when done, whose URL no prompt prints.
 
 ### The plan fixture (2026-10-28)

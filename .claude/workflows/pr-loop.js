@@ -323,12 +323,21 @@ ${FIX_GATES} Come back in ONE push. The commit ends with \`${coAuthor(on)}\`. Re
 // scripts/review-stats.ts reads. `findings` are this PR's blocking ones (a probe's and a review's with their severity;
 // a design finding has none); `deferred` the PR's non-blocking ones, filed and not fixed.
 const sev = (f) => (f.severity ? { severity: f.severity } : {})
-// a round's statement counts, when its agent gave them (the schema requires them; an answer without is counted as none)
+// a round's statement counts, when its agent gave them (the schema requires them). An answer with none, or with no
+// valid count, ran nothing anyone can see: a review's round is then UNRUN and stops the run as `unreviewed`, which
+// issue-loop does not read as passed; a probe's is noted, as a failed probe is (PR 245, round 1: a review that ran
+// nothing was a clean round, so "never judge by reading alone" was asserted and never enforced)
 const isCount = (x) => Number.isInteger(x) && x >= 0
 const countsOf = (a) => (isCount(a.statementsRun) ? { statementsRun: a.statementsRun, statementsMatched: isCount(a.statementsMatched) ? Math.min(a.statementsMatched, a.statementsRun) : 0 } : {})
+const unrun = (a) => !isCount(a.statementsRun) || a.statementsRun === 0
+const unrunText = (label, a) => `${label} ${isCount(a.statementsRun) ? 'ran no statement' : 'reported no valid count of the statements it ran'}${Array.isArray(a.judgedCorrect) && a.judgedCorrect[0] ? ` (it said: ${String(a.judgedCorrect[0]).slice(0, 200)})` : ''}`
+// what the statements need, said wherever a stage that ran none is reported
+const NEEDS = 'scripts/duck-repro.ts needs `psql` on PATH (the Postgres client: `brew install libpq` and its bin on PATH, or the `postgresql-client` package) and a Postgres: Docker running, for a throwaway postgres:18, or itEnv naming a file that exports IT_POSTGRES_URL'
 const sumOf = (k) => [...probeRounds, ...rounds].reduce((s, e) => s + (e[k] || 0), 0)
+// reviewRounds counts only the rounds that ran statements: an unrun round is no review, so review-stats never reads it
+// as a clean one (a run whose first review was unrun is counted as never reviewed); its findings keep their round
 const recordOf = (status) => ({
-  pr: last.pr, designRounds: designRounds.length, probeRounds: probeRounds.length, reviewRounds: rounds.length,
+  pr: last.pr, designRounds: designRounds.length, probeRounds: probeRounds.length, reviewRounds: rounds.filter((r) => !r.unrun).length,
   findings: [
     ...designRounds.flatMap((d) => d.findings.map((f) => ({ round: d.round, stage: 'design', classKey: f.class }))),
     ...probeRounds.flatMap((p) => p.findings.map((f) => ({ round: p.round, stage: 'probe', classKey: f.classKey, ...sev(f) }))),
@@ -436,7 +445,7 @@ Give no fix. List what you ran and judged correct. About 50 tool calls, never mo
     }
     const { mine, later, repeated } = tally(probe.findings, { round: p, stage: 'probe', label: `probe ${p}` })
     const entry = { round: p, label: `probe ${p}`, head: last.head, findings: mine, deferred: later.length, base: probe.findings.length - mine.length - later.length, judgedCorrect: probe.judgedCorrect, classRound: repeated.length > 0, ...countsOf(probe) }
-    if (probe.statementsRun === 0) notes.push(`probe ${p} ran no statement: it read the code only`)
+    if (unrun(probe)) notes.push(`${unrunText(`probe ${p}`, probe)}: it read the code only (${NEEDS})`)
     probeRounds.push(entry)
     history.push(entry)
     log(`probe ${p}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base`)
@@ -490,11 +499,13 @@ Give no fix and no patch. Also list what you judged correct.`,
     if (!ciNow || ciNow.state === 'timeout') log(`CI beside review r${round}: ${ciNow ? 'not finished' : 'no answer'}; the CI stage reads it`)
     const { mine, later, repeated } = tally(review.findings, { round, stage: 'review', label: `review r${round}` })
     const classRound = repeated.length > 0
-    const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound, ...countsOf(review) }
-    if (review.statementsRun === 0) notes.push(`review r${round} ran no statement: it read the code only`)
+    const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound, unrun: unrun(review), ...countsOf(review) }
     rounds.push(entry)
     history.push(entry)
     log(`round ${round}: ${mine.length} blocking finding(s) of this PR, ${later.length} non-blocking (deferred, filed at the end), ${entry.base} of the base${ciFailure ? ', CI red' : ''}${classRound ? `; CLASS round next (${repeated.join(', ')})` : ''}`)
+    // a full review or a re-check that ran nothing is never a clean round, whatever it found by reading: the run stops
+    // `unreviewed`, saying what to install
+    if (entry.unrun) return `unreviewed: ${unrunText(`review r${round}`, review)}, so head ${last.head.slice(0, 7)} was read and never run, and a review that runs nothing is no review. ${NEEDS}: install what is missing and run the review again, or the coordinator decides`
     // nothing blocking of this PR's is a clean round, whatever was deferred. A clean review with a red CI: the CI stage
     // reads that failure next and sends it to a CI fix
     if (mine.length === 0) return null
