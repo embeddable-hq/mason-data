@@ -43,7 +43,12 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   a double's, so an integer is cast to DECIMAL(38,0) first. **Every path a numeric reaches storage by is held to its
   engine type** (`storedColumns`): a program's cells, and a numeric the engine answers itself (no program, a passthrough
   among them: a DECIMAL stored, an integer as HUGEINT, a double refused, never stored as a double under a numeric's
-  name). A scale is a number or what decides it per row ("value", "rows", "picks"), never unknown: a null that meant both
+  name). **Before its engine type, its FORM: the analysis is the one authority on what is stored.** A column whose
+  analysed form the engine computes as a double (a variance, sqrt and its kin, avg or `/`, a cast from a double:
+  `ENGINE_DOUBLES`) is refused by that form, whether or not the rewrite made a program for it; whether a program exists
+  (src/duck/rewrite.ts `programNeeded`) is the wire's rule, and its silence stored `stddev(x)::numeric(p,s)` from the
+  double over an input with a typmod (PR 202 round 11). Detector: tests/duck-generated.test.ts "round 11", every such
+  node bare, under `::numeric` and under a typmod, over inputs with a typmod and without. A scale is a number or what decides it per row ("value", "rows", "picks"), never unknown: a null that meant both
   let 30 decimals through. What is not stored says ITS OWN reason (`verdict`, `notStoredRefusal`: a division; the
   variance family in ONE wording; sqrt, exp, ln, log or power picking decimals per value (a round over one says what
   still stands); a JSON number's text with no scale; a scale past 18 at the end or on the way; a scale a sum's rows or

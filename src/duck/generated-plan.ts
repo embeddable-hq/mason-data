@@ -485,6 +485,10 @@ const asAnswered = (oid: number, kind: string | undefined): boolean => oid === N
 /** why a numeric is not stored (`storedNumeric`, `storedColumns`): each its own refusal, with ways out that hold */
 type NotStored = { why: "divides" | "rows" | "text" | "engine" } | { why: "scale" | "held" | "picks"; scale: number } | { why: "other"; what: string };
 
+/** the forms whose value the engine computes as a double, where Postgres computes it exactly (a variance; sqrt, exp, ln,
+ *  log or power; avg or `/`) or from a double's digits (a numeric cast from one): never stored, whatever the program */
+const ENGINE_DOUBLES: ReadonlySet<Form["why"]> = new Set(["variance", "per-value", "divides", "double"]);
+
 /** the variance family: Postgres computes each of a numeric exactly, at decimals it picks by the value's size */
 const VARIANCES = new Set(["variance", "var_samp", "var_pop", "stddev", "stddev_samp", "stddev_pop"]);
 
@@ -696,18 +700,25 @@ export const isNumeric = (c: { type: string }): boolean => /^numeric\b/.test(c.t
  * by its own reason. A computed one (`DefinitionPlan.numerics`) is written as DECIMAL arithmetic over its cells; one the
  * engine answers itself (no program, "as the engine answers it", a passthrough's among them) is stored as the engine's
  * DECIMAL, an integer as HUGEINT (one type for a numeric of no decimals: a sum of int8, a sign), and a double refused.
+ * Before either, the ONE authority: a column whose analysed form the engine computes as a double (`ENGINE_DOUBLES`) is
+ * refused by that form, whether the rewrite made a program for it or not.
  * At the check (`planDefinition` with a `describe`) and again at the write, over the SQL that runs.
  */
 export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns: GeneratedColumn[] } | { refused: GeneratedRefusal[] } {
   const refused: GeneratedRefusal[] = [], exprs = new Map<number, string>();
+  // what the analysis says the engine computes as a double is refused by its form, whether or not the rewrite made a
+  // program for it: no exact program carries one, and the rewrite's silence (src/duck/rewrite.ts `programNeeded`, the
+  // wire's rule) stored `stddev(x)::numeric(p,s)` from the engine's double (PR 202 round 11)
+  const engineDouble = (i: number): boolean => { const f = d.forms[i]; return f !== null && f !== undefined && ENGINE_DOUBLES.has(f.why); };
   for (const { column, program, cells } of d.numerics) {
     const name = d.columns[column]!.name, stored = storedNumeric(program, types, cells);
-    const no = "why" in stored ? stored : verdict(stored);
+    const no = engineDouble(column) ? { why: "engine" as const } : "why" in stored ? stored : verdict(stored);
     if (no !== null) refused.push(notStoredRefusal(name, no, d.forms[column] ?? null, d.roots[column]));
     else exprs.set(column, (stored as Stored).sql);
   }
   d.columns.forEach((c, i) => {
     if (!isNumeric(c) || d.numerics.some((n) => n.column === i)) return;
+    if (engineDouble(i)) { refused.push(notStoredRefusal(c.name, { why: "engine" }, d.forms[i] ?? null, d.roots[i])); return; }
     const type = types.get(`#${i}`);
     if (type !== undefined && (DECIMAL_TYPE.test(type) || type === "HUGEINT")) return;
     if (type !== undefined && INTEGER_TYPES.has(type)) exprs.set(i, `CAST(__mason_output.__mason_c${i} AS HUGEINT)`);

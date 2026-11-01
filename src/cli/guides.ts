@@ -71,8 +71,9 @@ ${keys}
     below 0 too), floor, ceil, a cast to numeric(p,s) (of a JSON number's text too), and a CASE, GREATEST, LEAST or
     COALESCE whose values have one scale, up to 18 decimals; a sign is stored too. Refused, each with its reason and
     the way out: a division (avg is one: store it as a double, or divide where you read), a variance or stddev, which
-    Postgres computes exactly at decimals it picks per value, rounded or not (store it as a double), a sqrt, exp, ln,
-    log or power, whose decimals Postgres picks per value, rounded or not (store it as a double), a JSON number's text
+    Postgres computes exactly at decimals it picks per value, rounded, cast to numeric(p,s) or not (store it as a
+    double), a sqrt, exp, ln, log or power, whose decimals Postgres picks per value, rounded, cast to numeric(p,s) or
+    not (store it as a double), whatever the decimals of what it is computed from, a JSON number's text
     cast to numeric with no scale (cast it to numeric(p,s)), more than 18 decimals, at the end or on the way
     (round it, or give the values fewer decimals first), a sum whose decimals the rows decide (cast the values to one
     scale first), a CASE, GREATEST, LEAST or COALESCE of values with differing decimals (cast it to numeric(p,s)), and a
