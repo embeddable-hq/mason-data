@@ -3082,6 +3082,71 @@ test("a numeric quotient is compared by its exact value wherever it is equated (
   } finally { await c.end(); }
 });
 
+test("a numeric decided exactly carries its program wherever it is read, compared or printed (PR 207's third round)", async () => {
+  const c = await client();
+  try {
+    for (const sql of [
+      // F1 / F2: a subquery's or WITH query's quotient read outside it — grouped, filtered, partitioned, counted, joined
+      "SELECT q, count(*) FROM (SELECT b.x / 1 AS q FROM bigdec b) s GROUP BY q ORDER BY 1",
+      "WITH q AS (SELECT b.x / 1 AS q FROM bigdec b) SELECT q, count(*) FROM q GROUP BY q ORDER BY 1",
+      "SELECT count(*) FROM (SELECT b.x / 1 AS q FROM bigdec b) s WHERE s.q = 1.00000000000000000001",
+      "SELECT * FROM (SELECT b.id, b.x / 1 AS q FROM bigdec b) s WHERE s.q = 1.00000000000000000001",
+      "SELECT s.q, count(*) OVER (PARTITION BY s.q) FROM (SELECT b.x / 1 AS q FROM bigdec b) s ORDER BY 1",
+      "SELECT count(DISTINCT s.q) FROM (SELECT b.x / 1 AS q FROM bigdec b) s",
+      "SELECT a.q FROM (SELECT b.x / 1 AS q FROM bigdec b) a JOIN (SELECT b.x / 1 AS q FROM bigdec b WHERE b.id = 1) c ON a.q = c.q",
+      "SELECT s.q, count(*) FROM (SELECT o.amount / 3 AS q FROM orders o) s GROUP BY 1 ORDER BY 1",
+      "SELECT DISTINCT s.third FROM (SELECT o.amount / 3 AS third FROM orders o) s GROUP BY s.third ORDER BY 1",
+      "SELECT DISTINCT s.third FROM (SELECT o.amount / 3 AS third FROM orders o) s JOIN orders o2 ON true ORDER BY 1",
+      "SELECT DISTINCT * FROM (SELECT o.amount / 3 AS third FROM orders o) s(t) ORDER BY 1",
+      "SELECT DISTINCT t FROM (SELECT o.amount / 3 AS third FROM orders o) s(t) ORDER BY 1",
+      "SELECT DISTINCT third FROM (SELECT o.amount / 3 AS third FROM orders o) ORDER BY 1",
+      "SELECT max(s.q) FROM (SELECT b.x / 1 AS q FROM bigdec b) s",
+      "SELECT s.q * 2, s.q::text FROM (SELECT b.x / 1 AS q FROM bigdec b) s ORDER BY 1",
+      "SELECT s.t, count(*) FROM (SELECT (b.x / 1)::text AS t FROM bigdec b) s GROUP BY 1 ORDER BY 1",
+      "SELECT g.q FROM (SELECT s.q FROM (SELECT b.x / 1 AS q FROM bigdec b) s GROUP BY s.q) g WHERE g.q = 1.00000000000000000002",
+      // F3: a scalar subquery and a parameter on the other side of =
+      "SELECT b.id FROM bigdec b WHERE b.x / 1 = (SELECT c.x / 1 FROM bigdec c WHERE c.id = 1) ORDER BY 1",
+      "SELECT b.id FROM bigdec b WHERE b.x / 1 = (SELECT 1.00000000000000000001::numeric(30,20)) ORDER BY 1",
+      // F4: a quotient's text or a cast of it, equated
+      "SELECT (b.x / 1)::text AS t, count(*) FROM bigdec b GROUP BY 1 ORDER BY 1",
+      "SELECT count(*) FROM bigdec b WHERE (b.x / 1)::text = '1.00000000000000000001'",
+      "SELECT DISTINCT (b.x / 1)::text AS t FROM bigdec b ORDER BY 1",
+      "SELECT count(*) FROM bigdec b WHERE (b.x / 1)::numeric(30,20) = 1.00000000000000000001",
+      "SELECT DISTINCT (b.x / 1)::numeric(30,20) AS q FROM bigdec b ORDER BY 1",
+      // F5: a UNION ALL whose arms are computed otherwise, each arm its own program
+      "SELECT b.x FROM bigdec b UNION ALL SELECT b.x / 1 FROM bigdec b ORDER BY 1",
+      "SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT 1.5 ORDER BY 1",
+      "SELECT DISTINCT b.x / 1 AS q FROM bigdec b UNION ALL SELECT 1.5 ORDER BY 1",
+      "SELECT o.amount / 3 AS q FROM orders o UNION ALL SELECT o.amount FROM orders o ORDER BY 1",
+      "SELECT u.q, count(*) FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT b.x FROM bigdec b) u GROUP BY 1 ORDER BY 1"]) {
+      assert.deepEqual(rowSet(await answer(c, sql)), rowSet(await postgres(sql)), sql);
+    }
+    // F3: a parameter, bare, cast to numeric, and to numeric(30,20)
+    for (const sql of ["SELECT b.id FROM bigdec b WHERE b.x / 1 = $1 ORDER BY 1", "SELECT b.id FROM bigdec b WHERE b.x / 1 = $1::numeric ORDER BY 1",
+      "SELECT b.id FROM bigdec b WHERE b.x / 1 = $1::numeric(30,20) ORDER BY 1"]) {
+      const answered = await answer(c, sql, ["1.00000000000000000001"]);
+      assert.deepEqual(answered, await postgres(sql, ["1.00000000000000000001"]), sql);
+      assert.deepEqual(answered.rows, [["1"]], sql);
+    }
+    // F1: no key can be placed (a grouping set), and a subquery read by * beside its quotient's equality: refused by name
+    for (const sql of ["SELECT q, count(*) FROM (SELECT b.x / 1 AS q FROM bigdec b) s GROUP BY ROLLUP (q) ORDER BY 1",
+      "SELECT *, 1 AS one FROM (SELECT b.x / 1 AS q FROM bigdec b) s WHERE s.q = 1.00000000000000000001"]) {
+      await postgres(sql);
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /numeric-quotient-equality/.test(e.detail ?? ""), sql);
+    }
+    // F6: a row holding a quotient, compared or written: refused by name
+    for (const sql of ["SELECT b.id FROM bigdec b WHERE (b.x / 1, b.y) = (1.00000000000000000001, 1) ORDER BY 1",
+      "SELECT b.id FROM bigdec b WHERE (b.x / 1, b.y) IN ((1.00000000000000000001, 1)) ORDER BY 1",
+      "SELECT DISTINCT (b.x / 1, b.y) AS r FROM bigdec b ORDER BY 1"]) {
+      await postgres(sql);
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /row-value/.test(e.detail ?? ""), sql);
+    }
+    // nested-exact-numeric, as listed: an aggregate of the subquery's quotient outside it is the engine's sum of doubles
+    const listed = "SELECT sum(s.q) FROM (SELECT o.amount / 3 AS q FROM orders o) s";
+    assert.notDeepEqual((await answer(c, listed)).rows, (await postgres(listed)).rows);
+  } finally { await c.end(); }
+});
+
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
   const c = await client();
   // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison
@@ -4555,3 +4620,4 @@ test("the statements running now, by session; a cancel by session stops one as a
     await s.untilReady();
   } finally { s.end(); }
 });
+

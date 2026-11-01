@@ -125,6 +125,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   digits. A quotient in `ROLLUP` / `CUBE` / `GROUPING SETS`, in `sum(DISTINCT …)` and similar, or in a `UNION` /
   `INTERSECT` / `EXCEPT` without `ALL` is now refused with `numeric-quotient-equality` (write `round(x, n)`), where it
   could answer wrong rows before.
+- **A division or average a subquery computes is exact outside it too**: grouped, filtered, joined, counted
+  `DISTINCT`, cast or computed with outside a subquery or a `WITH` query (`SELECT q, count(*) FROM (SELECT a / 3 AS q
+  …) s GROUP BY q`), compared with a scalar subquery's or a parameter's value, as its text (`(a / 3)::text`), or in a
+  `UNION ALL` beside a plain column, it now shows and compares Postgres's exact digits — where it showed a rounded
+  number, and could join or group values that differ past their 17th digit. A row holding one (`(a / 3, b) = (…)`) is
+  now refused with `row-value`, and one compared outside a subquery that is also read by `*` beside other columns
+  with `numeric-quotient-equality` (name the subquery's columns).
 
 ## Known
 

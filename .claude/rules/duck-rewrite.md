@@ -249,6 +249,15 @@ paths:
   another aggregate's DISTINCT, a set operation without ALL) is refused, `numeric-quotient-equality`; IN, IS DISTINCT
   FROM, NULLIF, CASE x WHEN and every ORDER are the listed difference `numeric-quotient-compare`. A new context that
   equates values asks `exactKey` as it asks `equalKey` for a jsonb. `tests/duck-wire.test.ts` "class round".
+  **"Decided exactly" is a property of the value's PROGRAM, never of its syntax or its type** (PR 207's third round):
+  a column of a subquery or WITH query that holds one is that query's program over its cells, which ride as hidden
+  columns of the FROM item (`carry`, decided once per item before the walk, `carryAll`), so it is printed and keyed
+  outside it however it is read; a cast of one to numeric(p, s), its text (`exactNumericText`), a scalar subquery of
+  one and a parameter (its bound text) are keyed alike; `duckExact` is true only where every numeric an expression is
+  computed from is DuckDB's exact value. Each UNION ALL arm carries its own program (`exactArms`, `pick`). Where the
+  cells cannot ride (the item read by a `*` beside other columns, a NATURAL JOIN, its whole row) an equality refuses
+  by name and a print is the listed `nested-exact-numeric`; a row holding one is refused, `row-value`.
+  `tests/duck-wire.test.ts` "third round".
 
 ## What a column is
 
