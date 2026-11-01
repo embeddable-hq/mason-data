@@ -878,3 +878,54 @@ test("a child's target_lag below its parent's is refused by name, with the way o
     refusedAt((await w.until((s) => s.state === "refused", "public.slow")).refusals, "target_lag", /^target_lag 10m is shorter than that of public\.counts, which it reads \(1h\)$/);
   });
 });
+
+// ------------------------------------------------------------------------------- chains: PR 171's review round
+
+test("a grandchild left out of its chain's run is marked at the base change below it, though its parent took none itself", async () => {
+  await withWorld({ bottom: hourly(scheduled("SELECT id, n FROM events", "id")), middle: hourly(scheduled("SELECT id, n FROM bottom", "id")),
+    top: hourly(scheduled("SELECT sum(n::integer) AS total FROM middle")) }, async (w) => {
+    await w.until(built, "public.top");
+    await w.store.writer.run("INSERT INTO public.events VALUES (9, 1, 'query', 'ok', 'not-a-number', NULL, NULL, NULL, NULL)");
+    w.sync.generated.changed("public.events");
+    const since = w.status("public.bottom").behindSince;
+    assert.ok(since !== null);
+    await new Promise((r) => setTimeout(r, 30));
+    // the run builds all three; top's build fails and is taken out; bottom and middle swap in, middle having taken nothing
+    await w.sync.generated.run("public.bottom");
+    assert.deepEqual([w.status("public.bottom").behindSince, w.status("public.middle").behindSince], [null, null]);
+    assert.equal(w.status("public.top").behindSince, since, "behind the base change below it, not its parent's swap");
+  });
+});
+
+test("a child waiting for a parent says it is refused as the parent is when read: in either file order, and not once the parent is fixed", async () => {
+  // a refusal from the parent's check (a column it lacks), not its file: the child, checked first or last, sees it
+  const broken = "kind: scheduled\ntarget_lag: 1s\nsql: SELECT nope FROM events\n";
+  let look: ((n: string) => string | null) | null = null;
+  const during: Array<string | null> = [];
+  await withWorld({ a: scheduled("SELECT one FROM zz"), zz: broken, aa: broken, z: scheduled("SELECT one FROM aa") }, async (w) => {
+    look = (n) => w.status(n).waitingFor;
+    for (const [child, parent] of [["public.a", "public.zz"], ["public.z", "public.aa"]] as const) {
+      await w.until((s) => s.state === "refused", parent);
+      const s = await w.until((s) => s.waitingFor !== null, child);
+      assert.equal(s.waitingFor, `${parent}, which is refused`, child);
+    }
+    // the parent fixed: while it builds, the child waits for it by name, and no longer says it is refused
+    w.write("zz", scheduled("SELECT 1 AS one"));
+    await w.until(built, "public.a");
+    assert.ok(during.length > 0, "the parent's run was seen");
+    assert.deepEqual([...new Set(during)], ["public.zz"]);
+  }, { onStep: (s, n) => { if (s === "snapshot" && n === "public.zz" && look !== null) during.push(look("public.a")); } });
+});
+
+test("a child is held to the target_lag its parent runs at: a parent refused in its file but deployed keeps its built one", async () => {
+  await withWorld({ counts: COUNTS.replace("target_lag: 1s", "target_lag: 5m"), slow: scheduled("SELECT count(*) AS n FROM counts").replace("1s", "10m") }, async (w) => {
+    await w.until(built, "public.slow");
+    w.write("counts", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT nope FROM events\n");
+    await w.until((s) => s.state === "refused", "public.counts");
+    await w.sync.generated.review();
+    await w.sync.generated.review();
+    const slow = w.status("public.slow");
+    assert.deepEqual(slow.refusals, [], "held to the 5m public.counts runs at, not its refused file's 1h");
+    assert.notEqual(slow.state, "refused");
+  });
+});

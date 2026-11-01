@@ -41,11 +41,13 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
 - **Lag is the age of the oldest base change not in the table** (`oldest`: a run's changes count until its swap), never
   the snapshot's age: over an idle base nothing is behind and nothing runs. **Across a chain it is the oldest anywhere
   below** (`chainOldest`): a parent's unreflected change is not in its child either, and a parent swapped in without its
-  child marks the child at the oldest base change that swap brought, never at the swap's time. Measured against the base,
+  child marks the child at the oldest base change that swap brought, never at the swap's time: the oldest any member of
+  the run at or below that parent took, not the parent's own alone (`chainTook`). Measured against the base,
   never summed. `behindSince` is that change's time, what `mason wait <table>` reads (src/cli/readiness.ts
   `generatedReadiness`). Detector: the chain lag tests of tests/duck-generated.test.ts, a restart's included.
 - **A child's `target_lag` is never shorter than a generated parent's**: refused at its key (`fresherThan`), with the
-  way out, and checked again when any table's target moves (the check's `seen` key holds them).
+  way out, and checked again when any table's target moves (the check's `seen` key holds them). A parent refused in its
+  file but deployed is held at the target it runs at, its built one (`targetOf`).
 - **The run and the swap are a copy's**: one at a time in the one rebuild queue, behind the copies whose rows it reads, on
   a connection of its own set up as a session, swapped on a writer's turn with its ledger row in ONE transaction. A crash
   leaves the old table and at worst a side table, which `open` drops. Detector: a SIGKILL at each `GeneratedStep`.
@@ -57,7 +59,8 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   parent, which is the old one until the swap. A child that comes due while a parent has changes not in it hands its
   run to that parent (`rootOf`). A new definition of a parent swaps in alone and marks its children, whose plans need
   the catalog to say its columns first. A child of a parent refused or failed is not run, and says why in `waitingFor`
-  (`blocker`); a child that fails is taken out of its parent's run, which goes on without it. Detector: the chain tests
+  (`blocker`): the entry keeps the parent's NAME only, and why is read when status is (`waitingWords`), never cached
+  with it, since `mason wait` exits 1 on it; a child that fails is taken out of its parent's run, which goes on without it. Detector: the chain tests
   of tests/duck-generated.test.ts, and the itest's children held to Postgres over the parent's view.
 - **A cycle is refused by name, with the tables in it**: from the SQL's names when the folder is read (`readsByName`,
   `findCycles`), else from what the plan reads at the check (`cycleOf`). A refused table keeps serving what it was built

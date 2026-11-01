@@ -12,7 +12,7 @@ import type { Failure } from "../src/cli/command.ts";
 import * as assert from "node:assert/strict";
 import { generatedReadiness } from "../src/cli/readiness.ts";
 import type { GeneratedStatus } from "../src/duck/generated.ts";
-import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readiness, STATUS, tableLines, WAIT, type RunState, type TableState } from "../src/cli/commands.ts";
+import { addSpecs, addSteps, copyProgress, duration, findTable, paintBar, readiness, SAY_AGAIN_MS, sayAgain, STATUS, tableLines, WAIT, type RunState, type TableState } from "../src/cli/commands.ts";
 import * as commands from "../src/cli/commands.ts";
 import { jsonText } from "../src/cli/command.ts";
 import type { CopyProgressView, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
@@ -100,6 +100,12 @@ test("mason wait <generated table>: ready once a base change committed before th
   assert.deepEqual(generatedReadiness(g({ serving: false, state: "refused", refusals: [{ key: "target_lag", message: "target_lag 1s is shorter", why: "", options: [], text: "" }] }), since).failed,
     ["public.daily: refused: target_lag 1s is shorter"]);
   assert.deepEqual(generatedReadiness(g({ serving: false, state: "waiting", waitingFor: "public.events" }), since).waiting, ["public.daily: waiting for public.events"]);
+  assert.deepEqual(generatedReadiness(g({ serving: false, state: "waiting", waitingFor: "public.counts, which is refused" }), since).failed, ["public.daily: not run, because public.counts, which is refused"]);
+  // a parent fixed since: said by name alone, so the wait goes on
+  assert.deepEqual(generatedReadiness(g({ serving: false, state: "waiting", waitingFor: "public.counts" }), since).failed, []);
+  // a wait not drawn in place, the copies' or a generated table's, says its block again every 30 s though nothing changed
+  assert.equal(SAY_AGAIN_MS, 30_000);
+  assert.deepEqual([sayAgain("a", "a", 0, SAY_AGAIN_MS - 1), sayAgain("a", "a", 0, SAY_AGAIN_MS), sayAgain("b", "a", 0, 1)], [false, true, true]);
 });
 
 test("mason wait shows a copy's progress: of the table's estimate, never 100% until it is done, never back once past a stale estimate", () => {

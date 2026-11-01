@@ -130,7 +130,8 @@ interface Entry {
   reads: string[];
   /** the cycle its SQL's names make, refused before its check */
   cycle: GeneratedRefusal | null;
-  /** why it was not run: a parent refused, or whose run failed (said in `waitingFor`) */
+  /** the table, a parent or one below it, that kept it from being run because it was refused or its run failed: its
+   *  NAME only, said with why as it is when read (`waitingWords`), never as it was when blocked */
   blocked: string | null;
   /** the definition and the catalog `check` last looked at: looked at again when either moves */
   seen: { json: string; schema: unknown } | null;
@@ -140,6 +141,8 @@ interface Entry {
   /** `GeneratedStatus.warnings`, as the catalog last said them of `wanted`; what they were last said as */
   warnings: string[];
   warned: string | null;
+  /** the table it waits for, by NAME only: a parent's refusal or failure is read when it is said (`waitingWords`), so a
+   *  parent fixed since, or refused after this was checked, is said as it is now */
   waitingFor: string | null;
   deployed: Deployed | null;
   /** when the oldest base change no run has taken was committed (ms); null: none */
@@ -340,8 +343,17 @@ export class GeneratedTables {
         behindSince: since === null ? null : new Date(since).toISOString(),
         missingTarget: target !== null && behindSeconds > target.seconds, serving: e.deployed !== null,
         lastRun: e.deployed === null ? null : { at: new Date(e.deployed.builtAt).toISOString(), seconds: e.deployed.seconds, rows: e.deployed.rows },
-        error: e.error, retryAt: e.error === null ? null : new Date(e.retryAt).toISOString(), refusals: refusals.map((r) => ({ ...r, text: refusalText(file, r) })), waitingFor: e.waitingFor ?? e.blocked, warnings: e.warnings.map((w) => `${file}: ${w}`) };
+        error: e.error, retryAt: e.error === null ? null : new Date(e.retryAt).toISOString(), refusals: refusals.map((r) => ({ ...r, text: refusalText(file, r) })), waitingFor: this.waitingWords(e), warnings: e.warnings.map((w) => `${file}: ${w}`) };
     }).sort((a, b) => a.table.localeCompare(b.table));
+  }
+
+  /** what `e` waits for, as `GeneratedStatus.waitingFor` says it: the table's name, with why it blocks as that table is
+   *  NOW (refused with nothing deployed, or its last run failed), read here and never stored, so `mason wait` decides
+   *  from what is so when it reads (src/cli/readiness.ts `generatedReadiness`) */
+  private waitingWords(e: Entry): string | null {
+    if (e.waitingFor !== null) { const why = this.refusedOrFailed(e.waitingFor); return why === null ? e.waitingFor : `${e.waitingFor}, which ${why}`; }
+    if (e.blocked !== null) { const why = this.refusedOrFailed(e.blocked); return why === null ? e.blocked : `${e.blocked} ${why}`; }
+    return null;
   }
 
   /** the tables as the listener takes the sync's states (`Sync.state`): how EXPLAIN says each is kept current, and what a
@@ -500,18 +512,20 @@ export class GeneratedTables {
       e.checked = null;
       const missing = x.fields.code === "42P01" ? /^relation "([^"]+)" does not exist$/.exec(x.fields.message)?.[1] : undefined;
       const adding = missing === undefined ? null : this.host.added(missing.includes(".") ? missing : `public.${missing}`);
-      // a parent not built yet: waited for, with why where it is refused or its build failed
+      // a parent not built yet: waited for by name; why it is refused or its build failed is read when it is said
       const parent = x.gap === "generated-not-built" ? /the generated table (\S+) is not built yet/.exec(x.fields.message)?.[1] : undefined;
       if (adding === "adding") { e.waitingFor = missing!; e.refusals = []; }
-      else if (parent !== undefined) { e.waitingFor = `${parent}${this.refusedOrFailed(parent) === null ? "" : `, which ${this.refusedOrFailed(parent)!}`}`; e.refusals = []; }
+      else if (parent !== undefined) { e.waitingFor = parent; e.refusals = []; }
       else { e.waitingFor = null; e.refusals = [refusalOf(x)]; }
     }
     this.say(e);
   }
 
-  /** the `target_lag` a table is kept to: its file's, else what it was built from */
+  /** the `target_lag` a table is kept to: its file's, else what it was built from. A table refused in its file but
+   *  deployed runs at what it was built from, so that is what a child is held to, never the refused file's */
   private targetOf(e: Entry): { every: string; seconds: number } | null {
-    return e.wanted?.targetLag ?? e.deployed?.definition.targetLag ?? null;
+    const running = e.fileRefused !== null || e.refusals.length > 0 ? e.deployed?.definition.targetLag : undefined;
+    return running ?? e.wanted?.targetLag ?? e.deployed?.definition.targetLag ?? null;
   }
 
   /** A CHILD'S TARGET AGAINST ITS PARENT'S: a table can be no fresher than a generated table it reads, so a `target_lag`
@@ -546,23 +560,22 @@ export class GeneratedTables {
     return b === null ? [] : b.bases.filter((x) => this.entries.has(x) && this.host.added(x) === null);
   }
 
-  /** why `e` is not run: a parent, or a parent's parent, refused or failed; null: nothing blocks it */
+  /** the table that keeps `e` from being run: a parent, or a parent's parent, refused or failed; null: nothing blocks it */
   private blocker(e: Entry, seen = new Set<string>()): string | null {
     seen.add(e.name);
     for (const p of this.parentsOf(e)) {
       if (seen.has(p)) continue;
-      const why = this.refusedOrFailed(p);
-      if (why !== null) return `${p} ${why}`;
+      if (this.refusedOrFailed(p) !== null) return p;
       const up = this.blocker(this.entries.get(p)!, seen);
       if (up !== null) return up;
     }
     return null;
   }
 
-  /** `e` not run, said once per reason */
-  private block(e: Entry, why: string): void {
-    if (e.blocked !== why) this.host.log(`${e.name}: not run, because ${why}`);
-    e.blocked = why;
+  /** `e` not run because of the table `by`, said once per table */
+  private block(e: Entry, by: string): void {
+    if (e.blocked !== by) this.host.log(`${e.name}: not run, because ${by} ${this.refusedOrFailed(by) ?? "is not ready"}`);
+    e.blocked = by;
   }
 
   /** a base is there to read: a synced table synced, or a generated table built */
@@ -665,7 +678,7 @@ export class GeneratedTables {
       const failed = await this.build(members, planner);
       if (failed === null) return;
       const gone = new Set([failed.name]);
-      for (const m of members) if (this.parentsOf(m).some((x) => gone.has(x))) { gone.add(m.name); this.block(m, `${failed.name} failed its last run`); }
+      for (const m of members) if (this.parentsOf(m).some((x) => gone.has(x))) { gone.add(m.name); this.block(m, failed.name); }
       members = members.filter((m) => !gone.has(m.name));
     }
   }
@@ -743,12 +756,21 @@ export class GeneratedTables {
         return null;
       }
       for (const m of members) await this.onStep("swapped", m.name);
+      // what each swap brought, across the run: the oldest change any member at or below it took (parents come first in
+      // `written`), so a child left out under a member that took nothing itself is marked at the base change, never at
+      // the swap
+      const chainTook = new Map<string, number | null>();
       for (const w of written) {
-        const e = w.e, was = e.error, took = e.taken;
+        let t = w.e.taken;
+        for (const p of w.n.bases) { const q = chainTook.get(p); if (q !== undefined && q !== null && (t === null || q < t)) t = q; }
+        chainTook.set(w.e.name, t);
+      }
+      for (const w of written) {
+        const e = w.e, was = e.error;
         e.deployed = w.n; e.taken = null; e.error = null; e.failures = 0; e.retryAt = 0; e.blocked = null;
         // what reads it and was not built with it is behind it, whatever its definition: a new one, a child this run
         // left out, or one whose own build failed and was taken out of the run (its marks were the parent's)
-        this.changedGenerated(e.name, members, took);
+        this.changedGenerated(e.name, members, chainTook.get(e.name) ?? null);
         if (was !== null) this.host.event({ kind: "recovered", table: e.name, message: `its re-run succeeded (it had failed: ${was})` });
       }
       await this.host.rebuildCatalog();
