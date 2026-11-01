@@ -33,7 +33,10 @@ Make a run folder in your scratchpad. In it, write `args.json` with pr-loop-slim
 - `brief`: in the race, the ONE brief both arms share, in pr-loop's BRIEF shape (`{ brief, shapes, tests }`). Write it
   yourself as CLAUDE.md "The loop" step 1 says, and give the other arm the same object.
 
-Then write `answers.json` holding `{}`.
+Then write `answers.json` holding `{}`, and PIN the script: copy `<repo>/.claude/workflows/pr-loop-slim.js` into the
+run folder, as `pr-loop-slim.js`, at the same commit the other arm starts from. Note that commit in the race log
+(`git -C <repo> rev-parse HEAD`). The render reads only that copy, as the Workflow tool loads its script once, so a
+main that moves during the race cannot change a later stage's prompt or labels.
 
 Keep a race log there too. For each stage, note its wall-clock start and end (`date -u +%FT%TZ`) and the tokens and
 tool uses that the agent's completion notification reports. Each SendMessage round to the implementer is a row of its
@@ -42,20 +45,50 @@ own, and so is Learn.
 ## 2. The loop: render, dispatch, record
 
 ```sh
-# render-stage: replays pr-loop-slim.js against $RUN/answers.json and writes the prompt of each stage it starts next.
-# Export RUN (the run folder) and REPO (the main checkout's absolute path) first.
+# render-stage: replays $RUN/pr-loop-slim.js (the pinned copy) against $RUN/answers.json, and writes the prompt of
+# each stage it starts next. Export RUN (the run folder) first.
 node --input-type=module <<'EOF'
 import fs from "node:fs";
-const { RUN, REPO } = process.env;
-if (!RUN || !REPO) throw new Error("export RUN (the run folder) and REPO (the main checkout) first");
+const { RUN } = process.env;
+if (!RUN) throw new Error("export RUN (the run folder) first");
 const read = (f) => JSON.parse(fs.readFileSync(`${RUN}/${f}`, "utf8"));
 const args = read("args.json"), answers = read("answers.json");
-const src = fs.readFileSync(`${REPO}/.claude/workflows/pr-loop-slim.js`, "utf8");
+const src = fs.readFileSync(`${RUN}/pr-loop-slim.js`, "utf8");
 if (!/^export const meta = /.test(src)) throw new Error("pr-loop-slim.js no longer begins with `export const meta`: fix this command");
 const run = new (Object.getPrototypeOf(async () => {}).constructor)("args", "agent", "phase", "log", "workflow", "parallel", src.replace(/^export const meta/, "const meta"));
+// An answer is read as the Workflow tool reads an agent's result: one that fails the schema its agent() call carries
+// is null, the result of an agent that failed. Why it failed is the first thing printed.
+const problem = (v, s, at) => {
+  if (s.enum && !s.enum.includes(v)) return `${at} is ${JSON.stringify(v)}, not one of ${s.enum.join(", ")}`;
+  const min = (x) => (s.minimum !== undefined && x < s.minimum ? `${at} is below ${s.minimum}` : null);
+  switch (s.type) {
+    case "object": {
+      if (!v || typeof v !== "object" || Array.isArray(v)) return `${at} is not an object`;
+      const gone = (s.required ?? []).find((k) => !Object.hasOwn(v, k));
+      if (gone) return `${at}.${gone} is missing`;
+      for (const [k, p] of Object.entries(s.properties ?? {})) { const w = Object.hasOwn(v, k) ? problem(v[k], p, `${at}.${k}`) : null; if (w) return w; }
+      return null;
+    }
+    case "array": {
+      if (!Array.isArray(v)) return `${at} is not an array`;
+      for (const [i, x] of v.entries()) { const w = s.items ? problem(x, s.items, `${at}[${i}]`) : null; if (w) return w; }
+      return null;
+    }
+    case "string": return typeof v === "string" ? null : `${at} is not a string`;
+    case "number": return typeof v === "number" && Number.isFinite(v) ? min(v) : `${at} is not a number`;
+    case "integer": return Number.isInteger(v) ? min(v) : `${at} is not an integer`;
+    case "boolean": return typeof v === "boolean" ? null : `${at} is not a boolean`;
+    default: return null;
+  }
+};
 const STOP = Symbol("stop"), next = [];
 const agent = async (prompt, opts) => {
-  if (Object.hasOwn(answers, opts.label)) return answers[opts.label];
+  if (Object.hasOwn(answers, opts.label)) {
+    const a = answers[opts.label];
+    const why = a === null || !opts.schema ? null : problem(a, opts.schema, "answer");
+    if (why) console.log(`NULL ${JSON.stringify(opts.label)}: ${why}; read as null, an agent that failed, as the Workflow tool would`);
+    return why ? null : a;
+  }
   next.push({ prompt, opts });
   throw STOP;
 };
@@ -78,8 +111,9 @@ try {
 EOF
 ```
 
-Export RUN and REPO, then run the render. It prints `DONE: <status>` when the run is over, or one `STAGE` line for each stage the script starts
-next. A review and the CI read beside it come as two stages together. Each `STAGE` line gives the stage's label, its
+Export RUN, then run the render. It prints `DONE: <status>` when the run is over, or one `STAGE` line for each stage
+the script starts next. Before those, it prints a `NULL` line for each recorded answer that fails its stage's schema:
+that answer was read as `null`, a failed agent, exactly as the Workflow tool reads it. A review and the CI read beside it come as two stages together. Each `STAGE` line gives the stage's label, its
 options and the file that holds its whole prompt. Dispatch each stage as its label says, with that file's content as
 the message, unchanged:
 
@@ -93,8 +127,8 @@ the message, unchanged:
   a FRESH agent with the Agent tool, with the printed options. A review is `model: "fable"`, `effort: "medium"`.
 
 When an agent reports, take the fenced json block at the end of its report. Add it to `answers.json` under the
-stage's label exactly as printed, with `null` when the agent failed or returned no valid block, as the Workflow tool
-would. Then render again. A review's block is its `FINDINGS`; the implementer's and a fixer's carry the handoff, which
+stage's label exactly as printed, or `null` when the agent failed or gave no block. Then render again. Never judge
+whether a block is valid by eye: the render checks each answer against the schema its stage carries. A review's block is its `FINDINGS`; the implementer's and a fixer's carry the handoff, which
 the next fix prompt pastes verbatim. Record each answer as the agent gave it, and never edit one. The script itself
 decides what happens next from those answers: a class round, a deferral, the 4-round bound, the `unreviewed` stop,
 CI, Learn, filing and the record.

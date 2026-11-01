@@ -1436,12 +1436,16 @@ function renderCommand(): string {
   assert.ok(m, "the skill has the render command, in a ```sh block that begins `# render-stage`");
   return m[1]!;
 }
-/** The skill's render, run over args and answers in a run folder of its own: what it printed, and the files it wrote. */
-function renderStage(args: Record<string, unknown>, answers: Answers): { out: string; files: Record<string, string>; dir: string } {
+/** The skill's render, run over args and answers in a run folder of its own, which holds the pinned copy of slim (this
+ * tree's, or `slimSrc`): what it printed, and the files it wrote. */
+function renderStage(args: Record<string, unknown>, answers: Answers, slimSrc = source("pr-loop-slim")): { out: string; files: Record<string, string>; dir: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-persistent-"));
   fs.writeFileSync(path.join(dir, "args.json"), JSON.stringify(args));
   fs.writeFileSync(path.join(dir, "answers.json"), JSON.stringify(answers));
-  const out = execFileSync("bash", ["-c", renderCommand()], { env: { ...process.env, RUN: dir, REPO: ROOT }, encoding: "utf8" });
+  fs.writeFileSync(path.join(dir, "pr-loop-slim.js"), slimSrc);
+  const env: Record<string, string | undefined> = { ...process.env, RUN: dir };
+  delete env["REPO"];
+  const out = execFileSync("bash", ["-c", renderCommand()], { env, encoding: "utf8" });
   const next = path.join(dir, "next");
   const files = Object.fromEntries(fs.readdirSync(next).map((f) => [f, fs.readFileSync(path.join(next, f), "utf8")]));
   return { out, files, dir };
@@ -1475,36 +1479,37 @@ test("the pr-persistent skill restates no sentence of a prompt pr-loop-slim.js g
   assert.equal(parseRecords(text).length, 0, "no record block of its own: the record stage is rendered");
 });
 
+/** A full run of the persistent arm: its args, and every stage answered explicitly, so the harness adds nothing the
+ * render does not see. */
+const RACE_ARGS = { ...PR, repo: ROOT, brief: { brief: "the shared brief", shapes: ["SELECT shared_shape FROM t"], tests: ["tests/duck-wire.test.ts --test-name-pattern shared"] }, process: "pr-persistent" };
+const ran = (o: object) => ({ changedPaths: ["src/duck/plan.ts"], statementsRun: 300, statementsMatched: 299, checksRun: 0, ...o });
+const RACE_ANSWERS: Answers = {
+  implement: { ...pushed("a"), statementsRun: 120, statementsMatched: 118, checksRun: 1, handoff: H1 },
+  link: { linked: true, bodyFixed: false, detail: "listed 900" },
+  "review r1": ran({ findings: [finding({ classKey: "k", input: "SELECT r1 FROM t" }), finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" })], judgedCorrect: ["the cast"] }),
+  "CI read r1": { state: "failed", detail: "tests/duck-wire.test.ts: a test failed" },
+  "fix r1": { ...pushed("b"), statementsRun: 40, statementsMatched: 40, checksRun: 0, handoff: { ...H1, risks: ["after fix r1"] } },
+  "review r2": ran({ findings: [finding({ classKey: "k", input: "SELECT r2 FROM t" })], judgedCorrect: [] }),
+  "CI read r2": green,
+  "fix r2 (class)": { ...pushed("c"), statementsRun: 60, statementsMatched: 60, checksRun: 0, handoff: H1 },
+  "review r3": ran({ findings: [], judgedCorrect: ["the class"] }),
+  "CI read r3": green,
+  learn: { ...pushed("d"), startedAt: "2026-11-01T10:00:00Z", endedAt: "2026-11-01T10:03:00Z" },
+  "learn check": { files: [".claude/rules/duck-rewrite.md"], endedAt: "2026-11-01T10:04:00Z" },
+  "CI 1": red,
+  "CI fix 1": { ...pushed("e"), flake: false, statementsRun: 12, statementsMatched: 12, checksRun: 0, handoff: H1 },
+  "review r4": ran({ findings: [], judgedCorrect: [] }),
+  "CI read r4": green,
+  "CI 2": green,
+  file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
+  record: { url: "https://github.com/embeddable-hq/mason-data/pull/900#issuecomment-2" },
+};
+const fileOf = (label: string) => `${label.replace(/[^a-z0-9]+/gi, "-").replace(/-$/, "")}.md`;
+
 test("the pr-persistent skill: every stage's prompt and options, rendered by the skill, are pr-loop-slim's own, whole", async () => {
-  const brief = { brief: "the shared brief", shapes: ["SELECT shared_shape FROM t"], tests: ["tests/duck-wire.test.ts --test-name-pattern shared"] };
-  const args = { ...PR, repo: ROOT, brief, process: "pr-persistent" };
-  const ran = (o: object) => ({ changedPaths: ["src/duck/plan.ts"], statementsRun: 300, statementsMatched: 299, checksRun: 0, ...o });
-  const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
-  // every stage answered explicitly, so the harness adds nothing the render does not see
-  const answers: Answers = {
-    implement: { ...pushed("a"), statementsRun: 120, statementsMatched: 118, checksRun: 1, handoff: H1 },
-    link: { linked: true, bodyFixed: false, detail: "listed 900" },
-    "review r1": ran({ findings: [finding({ classKey: "k", input: "SELECT r1 FROM t" }), base], judgedCorrect: ["the cast"] }),
-    "CI read r1": { state: "failed", detail: "tests/duck-wire.test.ts: a test failed" },
-    "fix r1": { ...pushed("b"), statementsRun: 40, statementsMatched: 40, checksRun: 0, handoff: { ...H1, risks: ["after fix r1"] } },
-    "review r2": ran({ findings: [finding({ classKey: "k", input: "SELECT r2 FROM t" })], judgedCorrect: [] }),
-    "CI read r2": green,
-    "fix r2 (class)": { ...pushed("c"), statementsRun: 60, statementsMatched: 60, checksRun: 0, handoff: H1 },
-    "review r3": ran({ findings: [], judgedCorrect: ["the class"] }),
-    "CI read r3": green,
-    learn: { ...pushed("d"), startedAt: "2026-11-01T10:00:00Z", endedAt: "2026-11-01T10:03:00Z" },
-    "learn check": { files: [".claude/rules/duck-rewrite.md"], endedAt: "2026-11-01T10:04:00Z" },
-    "CI 1": red,
-    "CI fix 1": { ...pushed("e"), flake: false, statementsRun: 12, statementsMatched: 12, checksRun: 0, handoff: H1 },
-    "review r4": ran({ findings: [], judgedCorrect: [] }),
-    "CI read r4": green,
-    "CI 2": green,
-    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
-    record: { url: "https://github.com/embeddable-hq/mason-data/pull/900#issuecomment-2" },
-  };
+  const [args, answers] = [RACE_ARGS, RACE_ANSWERS];
   const slim = await run("pr-loop-slim", args, answers);
   assert.deepEqual(slim.labels, Object.keys(answers), "the run reaches every stage, in this order");
-  const fileOf = (label: string) => `${label.replace(/[^a-z0-9]+/gi, "-").replace(/-$/, "")}.md`;
   for (const [i, call] of slim.calls.entries()) {
     const { label, phase, schema, ...on } = call.opts;
     const before = Object.fromEntries(slim.labels.slice(0, i).map((l) => [l, answers[l]]));
@@ -1526,6 +1531,95 @@ test("the pr-persistent skill: every stage's prompt and options, rendered by the
   const done = renderStage(args, answers);
   assert.equal(done.out.trim(), `DONE: ${String(slim.result["status"])}`);
   assert.equal(JSON.parse(fs.readFileSync(path.join(done.dir, "result.json"), "utf8")).status, slim.result["status"]);
+});
+
+/** What pr-loop-slim, under the stub harness, starts next with these answers: the first stage it calls that has none
+ * (its call), or the run's end (its status). The harness's DEFAULTS never answer: an unanswered stage is the next. */
+async function slimNext(args: Record<string, unknown>, answers: Answers): Promise<Call | { done: string }> {
+  const STOP = new Error("stop");
+  let first: Call | undefined;
+  const proxy = new Proxy(answers, {
+    has: () => true,
+    get: (t, k) => (typeof k === "string" && Object.hasOwn(t, k) ? t[k] : (c: Call) => { first ??= c; throw STOP; }),
+  });
+  try {
+    const r = await run("pr-loop-slim", args, proxy);
+    return { done: String(r.result["status"]) };
+  } catch (e) {
+    if (e !== STOP) throw e;
+    return first!;
+  }
+}
+/** The skill's render and slim agree on what comes next: the same stage with the same whole prompt, or the same end. */
+async function sameNext(answers: Answers, expect: Answers, what: string): Promise<string> {
+  const want = await slimNext(RACE_ARGS, expect);
+  const got = renderStage(RACE_ARGS, answers);
+  if ("done" in want) {
+    assert.equal(got.out.split("\n").filter((l) => !l.startsWith("NULL ")).join("\n").trim(), `DONE: ${want.done}`, what);
+  } else {
+    const { label, phase, schema } = want.opts;
+    assert.match(got.out, new RegExp(`^STAGE ${JSON.stringify(label).replace(/[()]/g, "\\$&")} \\(${phase}\\) `, "m"), `${what}: the next stage is ${label}`);
+    assert.equal(got.files[fileOf(label)], want.prompt + RESULT_TRAILER + JSON.stringify(schema), `${what}: ${label}'s prompt, whole`);
+  }
+  return got.out;
+}
+/** The answers of the full run up to `label` (not included), with `label` answered by `a`. */
+const upTo = (label: string, a: unknown): Answers => {
+  const keys = Object.keys(RACE_ANSWERS);
+  return { ...Object.fromEntries(keys.slice(0, keys.indexOf(label)).map((k) => [k, RACE_ANSWERS[k]])), [label]: a };
+};
+
+// PR 258, re-check: the Workflow tool checks each agent's result against its schema and reads one that fails as null;
+// the render once trusted answers.json, so a finding with `origin: "this_pr"` matched no origin, the round read clean,
+// and a blocking wrong answer went to CI as reviewed. The authority is the schema each agent() call carries.
+test("the pr-persistent skill's render reads an answer that fails its stage's schema as null, as the Workflow tool does", async () => {
+  const goodReview = RACE_ANSWERS["review r1"] as Record<string, unknown>;
+  const ciGreen = { "CI read r1": green };
+  // a finding whose origin is not in the enum: slim's run reads the review as failed, never as clean
+  const badOrigin = { ...goodReview, findings: [finding({ origin: "this_pr", severity: "wrong-answer" })] };
+  let out = await sameNext({ ...upTo("review r1", badOrigin), ...ciGreen }, { ...upTo("review r1", null), ...ciGreen }, "origin this_pr");
+  assert.match(out, /^NULL "review r1": answer\.findings\[0\]\.origin is "this_pr", not one of this-pr, base; read as null/m);
+  assert.doesNotMatch(out, /STAGE "CI 1"/, "the PR never goes to CI as reviewed");
+  const status = (await slimNext(RACE_ARGS, { ...upTo("review r1", null), ...ciGreen, record: RACE_ANSWERS["record"] })) as { done: string };
+  assert.match(status.done, /^review r1 failed/);
+  // no changedPaths: a failed review, as the Workflow arm's, never `unreviewed`
+  const noPaths = { findings: [], judgedCorrect: [], statementsRun: 3, statementsMatched: 3, checksRun: 0 };
+  out = await sameNext({ ...upTo("review r1", noPaths), ...ciGreen }, { ...upTo("review r1", null), ...ciGreen }, "changedPaths absent");
+  assert.match(out, /^NULL "review r1": answer\.changedPaths is missing/m);
+  // a fix with no head: a failed fix, said so, never a TypeError
+  const { head: _head, ...noHead } = RACE_ANSWERS["fix r1"] as Record<string, unknown>;
+  out = await sameNext(upTo("fix r1", noHead), upTo("fix r1", null), "fix r1 without head");
+  assert.match(out, /^NULL "fix r1": answer\.head is missing/m);
+
+  // one missing required field for each schema the run uses: each answer then follows slim's path for null
+  const full = await run("pr-loop-slim", RACE_ARGS, RACE_ANSWERS);
+  const seen = new Set<string>();
+  for (const c of full.calls) {
+    const schema = c.opts.schema as { required?: string[] };
+    const key = JSON.stringify(schema);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const k = schema.required!.at(-1)!;
+    const { [k]: _gone, ...without } = RACE_ANSWERS[c.opts.label] as Record<string, unknown>;
+    const label = c.opts.label;
+    // a review's CI read is answered beside it, as the coordinator records both
+    const beside = label.startsWith("review r") ? { [`CI read r${label.slice(8)}`]: RACE_ANSWERS[`CI read r${label.slice(8)}`] } : {};
+    out = await sameNext({ ...upTo(label, without), ...beside }, { ...upTo(label, null), ...beside }, `${label} without ${k}`);
+    assert.match(out, new RegExp(`^NULL ${JSON.stringify(label).replace(/[()]/g, "\\$&")}: answer\\.${k} is missing`, "m"), `${label} without ${k}`);
+  }
+  assert.ok(seen.size >= 9, `every schema the run uses (${seen.size})`);
+  // and a valid answer is never read as null
+  assert.doesNotMatch(renderStage(RACE_ARGS, RACE_ANSWERS).out, /^NULL /m);
+});
+
+test("the pr-persistent skill's render reads only the run folder's pinned pr-loop-slim.js, never the checkout's", () => {
+  const marked = source("pr-loop-slim").replace("Implement ONE PR in the Mason repo", "Implement ONE PINNED PR in the Mason repo");
+  assert.notEqual(marked, source("pr-loop-slim"));
+  const { files } = renderStage(RACE_ARGS, {}, marked);
+  assert.match(files["implement.md"]!, /Implement ONE PINNED PR/, "the stage is rendered from the copy in the run folder");
+  assert.match(renderCommand(), /\$\{RUN\}\/pr-loop-slim\.js/);
+  assert.doesNotMatch(renderCommand(), /REPO|\.claude\/workflows/, "the render reads nothing from a checkout");
+  assert.match(skillText(), /PIN the script/);
 });
 
 test("pr-loop-slim: args.process names the arm in the record's text, and an unknown one stops the run", async () => {
