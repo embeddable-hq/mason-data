@@ -155,8 +155,9 @@ export interface Typed {
 export interface Keys {
   /** each target entry, the junk ones too, in its list's order: whether the analysis made it a Const, the offset of its
    *  expression (null for none), the first entry whose analysed expression is equal (the one a key binds to), and
-   *  whether it reads a column of its own query (a VAR outside a subquery) */
-  entries: Array<{ constant: boolean; at: number | null; first: number; reads: boolean }>;
+   *  whether it reads a column of its own query (a VAR outside a subquery), and whether it is an OUTPUT (no junk entry:
+   *  the rewrite may add targets of its own after them, so its list's length cannot tell) */
+  entries: Array<{ constant: boolean; at: number | null; first: number; reads: boolean; output: boolean }>;
   /** the entries the ORDER BY sorts by, in order: Postgres drops a key whose entry an earlier key sorts by */
   sorted: number[];
   /** the entries a DISTINCT ON (an aggregate's DISTINCT) compares, a set: ORDER BY's first, then the rest */
@@ -173,6 +174,7 @@ function keysOf(targets: TreeValue | undefined, sort: TreeValue | undefined, dis
     at: isNode(e) ? num(e.location) : null,
     first: exprs.findIndex((o, j) => j <= i && sameExpression(o, e)),
     reads: readsVar(e),
+    output: list[i]!.resjunk !== "true",
   }));
   const refs = (v: TreeValue | undefined): number[] => (Array.isArray(v) ? v.filter(isNode) : []).map((c) => {
     const ref = num(c.tleSortGroupRef ?? null);

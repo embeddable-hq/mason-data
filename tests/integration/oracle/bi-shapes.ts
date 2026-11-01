@@ -169,6 +169,16 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "an equal key: a Const twice in ORDER BY, spelled two ways", sql: "SELECT s.id FROM (SELECT o.id FROM orders o ORDER BY 1.5::numeric, '1.5'::numeric, o.id DESC LIMIT 3) s ORDER BY s.id" },
   { name: "an equal key: an aggregate's ORDER BY its argument spelled another way", sql: "SELECT o.status, (array_agg(1.5::numeric ORDER BY '1.5'::numeric, o.id DESC))[1] AS a FROM orders o GROUP BY o.status ORDER BY 1 LIMIT 3" },
   { name: "an equal key: a qualified key against an unqualified output, and an implicit cast against an explicit one", sql: "SELECT customer_id, o.id::numeric + 1.5 AS v FROM orders o ORDER BY o.customer_id DESC, o.id + 1.5 LIMIT 5" },
+  // the fourth class round: a key bound to an output, by its alias, number, an equal expression, an alias that is also
+  // an input column, or over a derived table, IS that output, written through the one binding (a jsonb's equality and
+  // order, a collation's keys, a volatile value once)
+  { name: "a bound key: DISTINCT ON a jsonb output by its alias", sql: "SELECT DISTINCT ON (k) o.meta -> 'tags' AS k, o.id FROM orders o ORDER BY k, o.id LIMIT 8" },
+  { name: "a bound key: DISTINCT ON a jsonb alias, ORDER BY its expression DESC", sql: "SELECT DISTINCT ON (k) o.meta -> 'tags' AS k, o.id FROM orders o ORDER BY o.meta -> 'tags' DESC, o.id" },
+  { name: "a bound key: a jsonb alias that is also an input column", sql: "SELECT DISTINCT ON (meta) o.meta -> 'tags' AS meta, o.id FROM orders o ORDER BY meta, o.id" },
+  { name: "a bound key: DISTINCT ON a derived table's jsonb column by an alias", sql: "SELECT DISTINCT ON (k) s.t AS k, s.id FROM (SELECT o.meta -> 'tags' AS t, o.id FROM orders o) s ORDER BY k DESC, s.id" },
+  { name: "a bound key: a grouped jsonb output, ORDER BY its expression", sql: "SELECT o.meta -> 'tags' AS k, count(*) AS n FROM orders o GROUP BY 1 ORDER BY o.meta -> 'tags' DESC" },
+  { name: "a bound key: a collated output ORDER BY its expression", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, c.id FROM customers c ORDER BY c.name COLLATE \"und-x-icu\" DESC, c.id LIMIT 8" },
+  { name: "a bound key: a volatile output ORDER BY its expression, one value", sql: "SELECT count(*) FROM (SELECT random() AS r, o.id FROM orders o ORDER BY random() LIMIT 5) s" },
   // no oracle table has a composite key: tests/duck-wire.test.ts holds the whole and the partial composite key over late_p
   { name: "key-first GROUP BY: no primary key grouped stays as it was", sql: "SELECT i.order_id, i.product, count(*) AS n FROM order_items i GROUP BY i.order_id, i.product ORDER BY 1, 2 LIMIT 6" },
   { name: "key-first GROUP BY: the nulls idiom over a fetched column", sql: "SELECT o.id, o.status, sum(i.quantity) AS q FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY (o.status) IS NULL ASC, o.status DESC, o.id LIMIT 10" },

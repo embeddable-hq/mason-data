@@ -32,6 +32,16 @@ export function constantExpression(v: TreeValue | undefined): boolean {
  * ways disagree (the caller's own reading stands).
  */
 export function keysConstant(keys: Keys, clause: "sorted" | "distinct", known: ReadonlyArray<number | Unbound>): Array<boolean | null> {
+  return keysBound(keys, clause, known).map((k) => k.constant);
+}
+
+/**
+ * EACH KEY'S ENTRY, AS POSTGRES BOUND IT (the class "an output not resolved to its column", its fourth round: the binding
+ * decides how a key is WRITTEN, not only whether it is constant). `entry` is the target entry every way the clause can
+ * read agrees the key is bound to (null where they disagree, or none fits); `constant` as `keysConstant`. A key bound to
+ * an entry below the outputs' count IS that output (src/duck/rewrite.ts `keysBound`, which writes it so).
+ */
+export function keysBound(keys: Keys, clause: "sorted" | "distinct", known: ReadonlyArray<number | Unbound>): Array<{ entry: number | null; constant: boolean | null }> {
   const listed = keys[clause];
   const constant = (e: number): boolean | null => keys.entries[e]?.constant ?? null;
   const open = known.flatMap((k, i) => typeof k === "number" ? [] : [i]);
@@ -42,7 +52,7 @@ export function keysConstant(keys: Keys, clause: "sorted" | "distinct", known: R
     const k = known[i] as Unbound;
     return first.filter((e) => (k.reads === null || keys.entries[e]!.reads === k.reads) && (k.constant === null || keys.entries[e]!.constant === k.constant));
   });
-  const agreed = known.map((k) => typeof k === "number" ? constant(k) : null);
+  const agreed = known.map((k) => typeof k === "number" ? { entry: k as number | null, constant: constant(k) } : { entry: null, constant: null });
   if (open.length === 0) return agreed;
   const fits = (entries: number[]): boolean => {
     if (clause === "distinct") return new Set(entries).size === new Set(listed).size && listed.every((e) => entries.includes(e));
@@ -54,14 +64,17 @@ export function keysConstant(keys: Keys, clause: "sorted" | "distinct", known: R
   const ways = choices.reduce((n, c) => n * c.length, 1);
   if (ways > 4096) return agreed;
   const seen: Array<Set<boolean | null>> = open.map(() => new Set());
+  const bound: Array<Set<number>> = open.map(() => new Set());
   const choice = open.map(() => 0);
   for (let n = 0; n < ways; n++) {
     let at = n;
     choices.forEach((c, i) => { choice[i] = c[at % c.length]!; at = Math.floor(at / c.length); });
     const entries = known.map((k, i) => typeof k === "number" ? k : choice[open.indexOf(i)]!);
-    if (fits(entries)) open.forEach((_, i) => seen[i]!.add(constant(choice[i]!)));
+    if (fits(entries)) open.forEach((_, i) => { seen[i]!.add(constant(choice[i]!)); bound[i]!.add(choice[i]!); });
   }
-  open.forEach((key, i) => { agreed[key] = seen[i]!.size === 1 ? [...seen[i]!][0]! : null; });
+  open.forEach((key, i) => {
+    agreed[key] = { entry: bound[i]!.size === 1 ? [...bound[i]!][0]! : null, constant: seen[i]!.size === 1 ? [...seen[i]!][0]! : null };
+  });
   return agreed;
 }
 
