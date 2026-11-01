@@ -36,7 +36,7 @@
 import { createHash } from "node:crypto";
 import type { DuckConnection } from "./executor.ts";
 import type { Planner, GeneratedColumn, GeneratedRefusal, DefinitionPlan as DefinitionPlanOf } from "./generated-plan.ts";
-import { cycleRefusal, isNumeric, planDefinition, readsByName, refusalOf, refusalText, storedColumns, type EngineTypes } from "./generated-plan.ts";
+import { cycleRefusal, isNumeric, planDefinition, readsByName, refusalOf, refusalText, storedColumns, uncheckedRefusal, type EngineTypes } from "./generated-plan.ts";
 import { MASON_SCHEMA, pgErrorOf, type DuckStore } from "./store.ts";
 import { StatementError } from "./statement.ts";
 import type { SyncEventInput } from "./events.ts";
@@ -546,7 +546,17 @@ export class GeneratedTables {
         e.refusals = [];
       }
     } catch (x) {
-      if (!(x instanceof StatementError)) throw x;
+      // NO DEFINITION LEAVES THE CHECK WITHOUT A VERDICT: what Mason did not expect while checking one is that table's
+      // refusal, in words a user reads, and the review goes on to the others. Thrown up, it stopped the review at this
+      // table, ran it again for ever, and left the table `building` with no reason (PR 202 round 8). What it said goes to
+      // the log once, for the report; the refusal stands until the definition or the catalog changes (`seen`)
+      if (!(x instanceof StatementError)) {
+        e.checked = null; e.waitingFor = null; e.warnings = [];
+        e.refusals = [uncheckedRefusal()];
+        this.host.log(`${def.file}: Mason could not check this definition (Mason bug: report it, with this line and the file's SQL): ${x instanceof Error ? x.stack ?? x.message : String(x)}`);
+        this.say(e);
+        return;
+      }
       e.checked = null;
       const missing = x.fields.code === "42P01" ? /^relation "([^"]+)" does not exist$/.exec(x.fields.message)?.[1] : undefined;
       const adding = missing === undefined ? null : this.host.added(missing.includes(".") ? missing : `public.${missing}`);

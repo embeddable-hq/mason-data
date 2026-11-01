@@ -745,6 +745,14 @@ export function cycleRefusal(cycle: readonly string[]): GeneratedRefusal {
     options: ["read the tables the cycle is generated from instead", "or write the other table's SQL into this one, as a subquery"] };
 }
 
+/** a definition whose check failed on what Mason did not expect (src/duck/generated.ts `check`): a verdict all the same,
+ *  in a user's words, never the error's, which names the engine (its text goes to the log, for the report) */
+export function uncheckedRefusal(): GeneratedRefusal {
+  return { key: "sql", message: "Mason could not check this definition (a Mason bug: report it)",
+    why: "Checking it stopped on something Mason did not expect, so the table is not built; Mason's log says what, for the report.",
+    options: ["report it, with the file's SQL and the log's line for this file", "or write the SQL another way: a CTE or a subquery as a join, or each UNION ALL arm as its own generated table"] };
+}
+
 /**
  * A DEFINITION HELD TO WHAT A TABLE CAN STORE, its reads named. `relations`: for a run of a chain, each parent built in
  * the same run (`schema.table`) and the side table read in its place (src/duck/plan.ts swapRelations). Throws what `Planner.plan` throws: a statement Postgres or the rewrite refuses is the

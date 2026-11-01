@@ -19,7 +19,11 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   again, for what the catalog and the stored JSON paths say now. Detector: tests/integration/duck-generated.itest.ts, every
   statement over a table held to Postgres from the same SQL over the base.
 - **What a table can't hold is refused at load, by file, key, reason and options, never at a run** (`GeneratedRefusal`,
-  `refusalText`), and each refusal stops only its table. A table already built keeps serving and keeps being re-run from
+  `refusalText`), and each refusal stops only its table. **No definition leaves the check without a verdict**: what Mason
+  did not expect while checking one (anything but a `StatementError`) is that table's refusal (`uncheckedRefusal`, a
+  user's words, never the error's), its text logged once for the report, and the review goes on to the next table; thrown
+  up, it stopped the review at that table for ever and left it `building` with no reason (PR 202 round 8). Detector:
+  tests/duck-generated.test.ts "round 8: a definition whose check throws unexpectedly". A table already built keeps serving and keeps being re-run from
   the definition the ledger holds, so a bad edit costs no freshness. Detector: tests/duck-generated.test.ts.
 - **A table has no session.** What reads one (a time zone, a setting, a role, `'now'`) is refused from what Postgres
   RESOLVED, by `pg_proc.provolatile` and the cast's functions, never a list of names (`sessionReads`). `now()` is the run's

@@ -1575,3 +1575,51 @@ test("round 7: the walk follows a sublink, a CTE, a set operation's arms and a s
     for (const [name, sql] of builds) assert.deepEqual((await typed(w, `SELECT x FROM ${name}`)).fields.map(([, oid]) => oid), [/double precision/.test(sql) ? 701 : 1700], `${name}: ${sql}`);
   });
 });
+
+// review round 8 of PR 202: a definition that crashed the review instead of reaching a verdict. A UNION ALL whose arm
+// reads a CTE built a program whose arms had different column counts, the engine threw, the review threw and ran again
+// for ever, and the table stayed `building` with no reason. The class: no definition leaves the review without a verdict
+const R8_CTE_UNION = "WITH t AS (SELECT sqrt(abs(amount)) AS v FROM ledger) SELECT v AS x FROM t UNION ALL SELECT sqrt(abs(amount)) FROM ledger";
+test("round 8: a numeric over a UNION ALL arm that reads a CTE reaches a verdict, refused by its own reason, never left building", async () => {
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    w.write("cteunion", `kind: scheduled\ntarget_lag: 1h\nsql: ${R8_CTE_UNION}\n`);
+    w.write("cteplain", "kind: scheduled\ntarget_lag: 1h\nsql: WITH t AS (SELECT amount AS v FROM ledger) SELECT v AS x FROM t UNION ALL SELECT amount FROM ledger\n");
+    const s = await w.until((x) => x.state === "refused" || x.serving, "public.cteunion");
+    assert.equal(s.refusals.length, 1, JSON.stringify(s.refusals));
+    assert.match(s.refusals[0]!.message, PER("sqrt"));
+    assert.deepEqual(s.refusals[0]!.options, [`${DBL}write the WITH query t as SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger; and write the UNION ALL as ` +
+      "WITH t AS (SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger) SELECT v AS x FROM t UNION ALL SELECT CAST(sqrt(abs(amount)) AS double precision) FROM ledger", AT_READ]);
+    assert.ok(!w.logged.some((l) => /review failed/.test(l)), w.logged.join("\n"));
+    // the statement on the wire, whose plan the definition's is: every arm as wide as the others
+    assert.equal((await typed(w, R8_CTE_UNION)).rows.length, 8);
+    await w.until(served(w.logged), "public.cteplain");
+    assert.deepEqual((await typed(w, "SELECT x FROM cteplain ORDER BY x")).rows, [["-2.50"], ["-2.50"], ["1.10"], ["1.10"], ["4.00"], ["4.00"], [null], [null]]);
+    // its way out is built and stored as a double
+    w.write("cteway", "kind: scheduled\ntarget_lag: 1h\nsql: WITH t AS (SELECT CAST(sqrt(abs(amount)) AS double precision) AS v FROM ledger) SELECT v AS x FROM t UNION ALL SELECT CAST(sqrt(abs(amount)) AS double precision) FROM ledger\n");
+    await w.until(served(w.logged), "public.cteway");
+    const way = await typed(w, "SELECT x FROM cteway WHERE x = 2 ORDER BY x");
+    assert.deepEqual([way.fields.map(([, oid]) => oid), way.rows], [[701], [[2], [2]]]);
+  });
+});
+
+test("round 8: a definition whose check throws unexpectedly is refused in readable words, and the other tables of the review are still built", async () => {
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    const real = w.api.planner();
+    const planner: typeof real = { ...real, plan: (text, stmt, relations) => /boom/.test(text) ? Promise.reject(new Error("Binder Error: something the engine said")) : real.plan(text, stmt, relations) };
+    // the throwing table first in the review, so a review that stops at it never reaches the other
+    w.write("aboom", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id AS boom FROM ledger\n");
+    w.write("zfine", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id FROM ledger\n");
+    await w.sync.generated.start(() => readGenerated(w.folder, w.dir), planner);
+    const s = await w.until((x) => x.state === "refused" || x.serving, "public.aboom");
+    assert.equal(s.state, "refused");
+    assert.equal(s.refusals.length, 1, JSON.stringify(s.refusals));
+    const r = s.refusals[0]!;
+    assert.doesNotMatch(`${r.message} ${r.why ?? ""} ${r.options.join(" ")}`, /Binder|engine|duck/i);
+    assert.match(r.message, /Mason could not check/);
+    assert.ok(r.options.length > 0);
+    await w.until(served(w.logged), "public.zfine");
+    assert.equal(w.status("public.zfine").refusals.length, 0);
+  });
+});

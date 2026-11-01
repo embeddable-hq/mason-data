@@ -1295,6 +1295,8 @@ class Rewriter {
     const b = bodyOf(stmt);
     if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.distinctClause !== undefined || b.limitOption === "LIMIT_OPTION_WITH_TIES") return [];
     const targets = (b.targetList ?? []) as AstNode[];
+    // a query that selects cells already (a CTE two arms of a UNION ALL read): its cells are not appended twice
+    if (targets.some((t) => typeof bodyOf(t).name === "string" && (bodyOf(t).name as string).startsWith("__mason_cell_"))) return [];
     if (targets.length !== fields.length || targets.some((t) => hasStar(bodyOf(t).val))) return [];
     const grouped = (Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val));
     const groupShapes = new Set(((b.groupClause ?? []) as AstNode[]).map((g) => {
@@ -1383,7 +1385,15 @@ class Rewriter {
     flatten({ SelectStmt: b });
     // an arm typed otherwise than the union (an integer arm of a numeric column) is cast by Postgres: not this program
     if (arms.some((a) => { const f = this.outputFields(a); return f === null || f.some((x, i) => x.oid !== fields[i]?.oid); })) return [];
-    const trial = arms.map((a) => this.exactThrough(this.clone(a), fields));
+    // THE TRIAL WRITES ONLY COPIES: of the arms, AND of the CTEs above them, which an arm that reads one appends its cells
+    // to. A trial that wrote the real CTE left it selecting cells its arm, built again below, never read: arms of
+    // different widths, which the engine refused (`WITH t AS (… sqrt(abs(x)) AS v …) SELECT v FROM t UNION ALL SELECT
+    // sqrt(abs(x)) …`, PR 202 round 8). The copies are shared across the arms as the real CTEs are, so the trial is the
+    // real pass run on a copy, and what it finds is what the real pass will
+    const real = this.cteScope.splice(0);
+    this.cteScope.push(...real.map((list) => this.clone(list)));
+    let trial: ExactColumn[][];
+    try { trial = arms.map((a) => this.exactThrough(this.clone(a), fields)); } finally { this.cteScope.splice(0, this.cteScope.length, ...real); }
     const first = JSON.stringify(trial[0]);
     if (trial[0]!.length === 0 || trial.some((t) => JSON.stringify(t) !== first)) return [];
     const made = arms.map((a) => this.exactThrough(a, fields));
