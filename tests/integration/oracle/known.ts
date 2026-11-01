@@ -16,7 +16,9 @@ import type { ShapeName } from "./shape-names.ts";
  * A decided difference. One without `shape` decides a statement by its own text, and a shape's text as before. One
  * with `shape` decides only that shape (oracle/shape-names.ts) of a statement whose BASE text its pattern matches,
  * never the statement nor another shape; it names an existing `differs` gap, or the `issue` the difference is filed as
- * (in no gap tally). Either must still differ in its kind.
+ * (in no gap tally). Either must still differ in its kind. A shape may carry one per kind (`shapeDecision`): a class
+ * of the base's that a new shape meets is filed once and recorded here in the push that adds the shape, read from that
+ * run's differences file, never left to turn the oracle red.
  */
 export type Decided = DecidedOf & ({ shape?: undefined; gap: GapId; issue?: undefined } | { shape: ShapeName; gap: GapId; issue?: undefined } | { shape: ShapeName; issue: number; gap?: undefined });
 type DecidedOf = {
@@ -33,6 +35,24 @@ type DecidedOf = {
    *  said, or null. With it, the rest may differ in any kind (`kind` says the one expected); without it, in `kind` only */
   holds?: (want: Answered, got: Answered) => string | null;
 };
+
+/** a shape decision's pattern over every base: a class the shape meets by its construction, wherever its type is reached */
+export const ANY = /[\s\S]/;
+
+/** one decision for each of `shapes`: a class a set of shapes meets alike, said once */
+export const shapesDecided = (shapes: readonly ShapeName[], d: Omit<DecidedOf, "sql"> & { sql: RegExp; issue: number }): Decided[] => shapes.map((shape) => ({ ...d, shape }));
+
+/**
+ * The decisions a shape's ask meets. Its shape's own entries whose pattern the BASE text matches are each `matched`
+ * (decided, for staleDecisions), and the one of the difference's `kind` `decides` it, so one shape may carry a class
+ * per kind; with none of its own, the first entry without `shape` that the shape's own `text` matches does both.
+ */
+export function shapeDecision<K extends { shape?: string | undefined; sql: RegExp; kind: string }>(known: readonly K[], shape: string, base: string, text: string, kind: string | null): { matched: K[]; decides: K | undefined } {
+  const own = known.filter((k) => k.shape === shape && k.sql.test(base));
+  if (own.length > 0) return { matched: own, decides: own.find((k) => k.kind === kind) };
+  const plain = known.find((k) => k.shape === undefined && k.sql.test(text));
+  return { matched: plain === undefined ? [] : [plain], decides: plain };
+}
 
 /** A decision's key, the one spelling of it: its pattern, or `[<shape>] <pattern>` for a shape's (the oracle's stale
  *  assertion, a leg's report, and scripts/oracle-legs.ts's merge of the legs' decisions) */

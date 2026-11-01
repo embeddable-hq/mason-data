@@ -61,7 +61,7 @@ import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { refusedAsNamed, SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
-import { collationMet, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
+import { ANY, collationMet, shapeDecision, shapesDecided, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { emptyShapeCount, say as sayShape, shapeProblems, type ShapeCount, type ShapeName, type ShapeTally } from "./oracle/shape-names.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
@@ -208,6 +208,29 @@ const KNOWN: Decided[] = [
   // filed, and decided so the shape is still asked and lives by it (oracle/shape-names.ts)
   { shape: "count-negative", sql: /LIMIT|FETCH/i, kind: "sqlstate", issue: 119, why: "a negative LIMIT: Postgres's 2201W, Mason's 42804" },
   { shape: "offset-negative", sql: /[\s\S]/, kind: "sqlstate", issue: 119, why: "a negative OFFSET: Postgres's 2201X, Mason's 42804" },
+  // What the first run of the variant shapes met (PR 261, CI run 41349260740, both legs: 3788 differences, every one
+  // a defect main already has), one class an issue, one entry a shape and kind (oracle/known.ts shapeDecision). An
+  // entry over every base (`ANY`) is a class the shape meets by its construction, wherever its output type is reached.
+  // a `*` over a FETCH … WITH TIES derived table, as a set operation's arm: 42804, the arms' column counts differ
+  ...shapesDecided(["null-arm", "null-arm-first", "integer-arm", "integer-arm-first", "char-arm", "char-arm-first", "values-arm", "values-arm-first"],
+    { sql: /WITH TIES/, kind: "refused", issue: 265, why: "a star over a WITH TIES derived table in a set operation: the engine's 42804 column count" }),
+  // a char(n) arm in a text set operation keeps its padding (`"A  "`), and so keeps a row Postgres's UNION dedupes
+  ...shapesDecided(["char-arm", "char-arm-first"], { sql: ANY, kind: "value", issue: 247, why: "a char(n) arm in a text set operation keeps its trailing spaces" }),
+  ...shapesDecided(["char-arm", "char-arm-first"], { sql: ANY, kind: "rows", issue: 247, why: "a char(n) arm's padding keeps a row Postgres's UNION dedupes" }),
+  // an exact numeric leaves the exact path in a set operation's arm (its first arm's scale, a quotient's digits, a
+  // float4's numeric), under a CTE's aggregates, and in its ::text and ORDER BY over a derived quotient (#252's class)
+  ...shapesDecided(["char-arm-first", "integer-arm", "integer-arm-first", "null-arm", "null-arm-first", "values-arm", "values-arm-first", "numeric-aggregate", "numeric-text", "numeric-ordered"],
+    { sql: ANY, kind: "text", issue: 252, why: "an exact numeric in a set operation, a CTE's aggregate or a derived quotient's text loses Postgres's scale or digits" }),
+  ...shapesDecided(["integer-arm", "integer-arm-first", "numeric-aggregate"], { sql: /sum\(s::numeric\)/, kind: "refused", issue: 252, why: "a numeric sum past the engine's 38 digits, in a set operation or a CTE: 22003" }),
+  // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
+  ...shapesDecided(["values-arm", "values-arm-first"], { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
+  // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text
+  ...shapesDecided(["values-arm", "values-arm-first"], { sql: /json|\bip\b|array_agg/, kind: "value", issue: 267, why: "a set operation's inet, jsonb or array output loses Postgres's text" }),
+  ...shapesDecided(["integer-arm", "integer-arm-first", "values-arm", "values-arm-first", "numeric-aggregate"],
+    { sql: ANY, kind: "value", issue: 252, why: "an exact numeric in a set operation or a CTE's aggregate is rounded, or read through a double" }),
+  // TABLE t ORDER BY … is not sorted as SELECT * FROM t ORDER BY … is (the source's collation, ordinals, WITH TIES)
+  ...shapesDecided(["table"], { sql: /FROM (star_o|coll)\b/, kind: "rows", issue: 268, collation: "libc", why: "TABLE t's sort is not the source's collation" }),
+  ...shapesDecided(["table"], { sql: /FROM (star_o|coll)\b/, kind: "value", issue: 268, collation: "libc", why: "TABLE t's sort under a bound is not the source's collation" }),
   // a domain's column is its base type's: the wire and data_type say so on Postgres too, pg_typeof and format_type do not
   { sql: /pg_typeof\(d[itzp]\)|attname = 'd[itzp]'/, kind: "value", gap: "domain-column", why: "a domain's column is read and declared as its base type" },
   // SHOW ALL (Postico sends it at every connection): the listener's settings — its catalog Postgres's, the session's
@@ -492,8 +515,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         // a decided difference a shape alone meets (a filter's literal sent as a parameter: limit-lateral-filter),
         // decided before an agreement so one that no longer differs is said so (staleDecisions). A shape's own
         // decision is matched against the BASE text, for its shape only, ahead of the rest (oracle/known.ts)
-        const sk = KNOWN.find((x) => x.shape === s.shape && x.sql.test(q.sql)) ?? KNOWN.find((x) => x.shape === undefined && x.sql.test(s.sql));
-        if (sk) decided.add(sk);
+        // A shape may have one decision per kind: each it matches is decided, and the one of the difference's kind decides
+        const { matched, decides: sk } = shapeDecision(KNOWN, s.shape, q.sql, s.sql, sv?.kind ?? null);
+        for (const m of matched) decided.add(m);
         if (sv === null) { if ("code" in sw) c.refusedAlike[sw.code] = (c.refusedAlike[sw.code] ?? 0) + 1; else c.answeredAlike++; continue; }
         const sgap = namedGap(sg);
         if (sgap !== null) { c.refusedByGap++; meet("refused", sgap, q.group, false); continue; }

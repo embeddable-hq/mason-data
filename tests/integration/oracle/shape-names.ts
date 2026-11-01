@@ -33,8 +33,10 @@ export const NEW_SHAPES = {
   "empty": { life: "answer", may: [] },
   "count-zero": { life: "answer", may: [] },
   "count-negative": { life: "refusal", may: ["2201W"] },
-  // a NULL count under WITH TIES is Postgres's 2201W (unspellable today: the deparser drops WITH TIES)
-  "count-null": { life: "answer", may: ["2201W"] },
+  // a NULL count under WITH TIES is Postgres's 2201W (unspellable today: the deparser drops WITH TIES). With no bound,
+  // every row is computed: one past the base's bound that Postgres cannot compute is refused, a bad input (22P02, met
+  // by PR 261's first run) or a division by zero (22012)
+  "count-null": { life: "answer", may: ["2201W", "22P02", "22012"] },
   "offset-negative": { life: "refusal", may: ["2201X"] },
   "bound-expression": { life: "answer", may: [] },
   "offset-zero": { life: "answer", may: [] },

@@ -342,4 +342,10 @@ test("every shape's liveness can be reached by deciding a difference the base al
   assert.match(shapeProblems(refusedOnly).join("\n"), /the shape table-arm is dead/);
   // an answer shape whose every ask Postgres answered and Mason differed from by a decided difference lives
   assert.deepEqual(shapeProblems({ ...live(), "integer-arm": { ...emptyShapeCount(), asked: 2, decided: 2 } }), []);
+  // count-null computes every row: a row past the base's bound Postgres cannot compute (22P02, PR 261's first run) is
+  // what its text means, not a misspelling; a syntax error still is
+  const unbounded = (code: string): ShapeTally => ({ ...live(), "count-null": { ...emptyShapeCount(), asked: 3, answeredAlike: 2, refusedAlike: { [code]: 1 }, postgresRefused: { [code]: 1 } } });
+  assert.deepEqual(shapeProblems(unbounded("22P02")), []);
+  assert.deepEqual(shapeProblems(unbounded("22012")), []);
+  assert.match(shapeProblems(unbounded("42601")).join("\n"), /the shape count-null is misspelt: Postgres refused it 1 time\(s\) with 42601/);
 });
