@@ -392,3 +392,27 @@ again before each review. Its Learn step adds to this list; each bullet names th
 - A libc collation: en_US over symbols (`㊿`, `€`, `½`), private use and NFD marks (`E'ä6ß'`), a non-glibc en_US,
   the source's glibc upgraded; tr_TR and sv_SE over ASCII pairs: en_US refused, or another locale differing unsaid
   (PR 135).
+- An exact numeric output (`l.k / 7.0 AS q`, `avg(l.k)`) under a wrapper that counts or renames the body's outputs
+  (`ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES`, a column alias list `AS w(t1, …)`): the appended `__mason_cell_<j>`
+  counted as Postgres's columns and renamed (width-count-includes-cells; PR 233).
+- An exact numeric under `UNION ALL` at the top, in a derived table and under WITH TIES (`SELECT l.k / 7.0 FROM late l
+  UNION ALL SELECT l.k / 3.0 FROM late l`): the cells' count read by each reader on its own walk (the first arm's,
+  through `larg`), not from the one record (fact-derived-in-several-places; PR 233).
+- Every body the change writes whose list ends in cells (a set operation's `SELECT __mason_set.… , __mason_cell_<j>`
+  wrapper), traced to the record of the cells: an appender the record does not name, so a later wrapper slices a count
+  nobody wrote (unrecorded-appender; PR 233).
+- A citext, collated or jsonb column in a set operation's FIRST arm met by a text arm (`SELECT a.s FROM t a UNION ALL
+  SELECT 'Ab'::text ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES` over `s citext`): the column typed from one arm, not the
+  analysed set operation's type and collation (setop-column-typed-by-first-arm; PR 233).
+- A numeric column of a set operation over arms of two scales or a constant arm (`numeric(10,3)` UNION ALL
+  `numeric(12,2)`, `l.k / 7.0 UNION ALL SELECT 1`, `SELECT 1.5` beside an int, UNION without ALL), at the top and under
+  WITH TIES: printed at the engine's one DECIMAL scale or as a double (setop-numeric-engine-scale; PR 233).
+- An arm whose type is not the set operation's, in every position (a `char(3)` arm second after `varchar`, a text arm
+  after `char(3)` under UNION, a UNION nested in a UNION ALL's right arm), under ORDER BY, UNION and WITH TIES: the
+  arm's value sorted, deduplicated and printed uncast (setop-arm-cast-dropped; PR 233).
+- A set operation whose first arm is only a `*` over a column the set operation casts (`SELECT * FROM (SELECT i4, id
+  FROM t) x UNION ALL SELECT f8, id FROM t ORDER BY 2, 1`, `x.*`, a CTE): the analysed types looked up by a target's
+  location after the rewrite wrote the star out at location -1 (setop-star-written-loses-location; PR 233).
+- A `*` whose expansion repeats a name (`SELECT * FROM (SELECT i4 AS id, id FROM t) x UNION ALL SELECT f8, id FROM t`,
+  with and without ORDER BY, WITH TIES, the star in either arm): the star written out by a name that binds to the
+  first column of that name (star-written-out-by-ambiguous-name; PR 233).

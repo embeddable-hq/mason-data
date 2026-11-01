@@ -116,3 +116,7 @@ again before each review. Its Learn step adds to this list; each bullet names th
 - `(j -> 'r')::text` under a GROUP BY of another expression: the engine's text (`2.45`), not Postgres's (`2.450`) (PR
   170; issue 212).
 - A stored path's fill given NULL over several rows: the NULL written in the column's own type (PR 144).
+- A new wrapper over a star, tried over a table with a stored jsonb path (`SELECT * FROM t ORDER BY t.c FETCH FIRST 1
+  ROWS WITH TIES`, and through a derived table), where plan.ts runs the rewrite twice and `hideKept` edits the star
+  after the walk: a width or name counted from Postgres's expansion while the engine's `*` answers another
+  (shape-coverage-gap; PR 233).

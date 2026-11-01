@@ -45,3 +45,6 @@ again before each review. Its Learn step adds to this list; each bullet names th
 - A KNOWN decision or gap case under C, ICU and libc sources: stale or dead off the collation it was written for (PR
   135).
 - The allowlist and fixture written from a CI run: that run's head is the commit's (PR 159, 170).
+- Each option an oracle statement declares (`inOrder: false` on a WITH TIES shape whose ties come in any order), traced
+  through the runner's `every()` mapping to `verdict()`: a field dropped on the way, so the statement is judged by
+  another rule than its own (oracle-flag-unread; PR 233).
