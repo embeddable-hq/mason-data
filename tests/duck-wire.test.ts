@@ -2710,6 +2710,73 @@ test("a join's FROM items: a plain derived read is fetched by its row number, a 
   } finally { await c.end(); }
 });
 
+// ISSUE 134, STEP 5: a subquery in the select list runs for the rows the limit chose, after they are chosen on keys alone;
+// one anywhere else (a WHERE, a join, a sort key) keeps the statement as it was
+test("a subquery in the select list is computed for the chosen rows alone, and one anywhere else keeps the statement as it was", async () => {
+  const c = await client();
+  // (this file's truth parses an int4[]: written back as its text)
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : Array.isArray(v) ? `{${v.join(",")}}` : v)) });
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  // the subquery stands in the outer list, over the fetch, never inside the rows' choice
+  const AFTER = /\) AS __mason_late LEFT JOIN .*__mason_late\.__mason_r1/;
+  try {
+    for (const sql of [
+      // correlated to the wide table and to the narrow one, a scalar, an EXISTS, an ARRAY, an IN
+      "SELECT l.id, l.j, (SELECT count(*) FROM late_p p WHERE p.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.k, l.id LIMIT 4",
+      "SELECT l.id, (SELECT max(p.note) FROM late_p p WHERE p.c = c.id) AS top FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id DESC LIMIT 3",
+      "SELECT l.id, EXISTS (SELECT 1 FROM late_p p WHERE p.c = l.c AND p.line = 3) AS e FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 5",
+      "SELECT l.id, ARRAY(SELECT p.line FROM late_p p WHERE p.c = l.c ORDER BY p.line) AS lines FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 3",
+      "SELECT l.id, l.c IN (SELECT p.c FROM late_p p WHERE p.line = 3) AS hit, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 3",
+      // on the nullable side of a LEFT and a FULL join: NULL where nothing matched
+      "SELECT c.id, (SELECT count(*) FROM late_p p WHERE p.c = l.c) AS n, l.id AS l FROM late_c c LEFT JOIN late l ON l.c = c.id AND l.id < 3 ORDER BY c.id, l.id NULLS FIRST LIMIT 5",
+      "SELECT c.id, (SELECT min(p.note) FROM late_p p WHERE p.c = l.c) AS n FROM late_c c FULL JOIN late l ON l.c = c.id + 1000 ORDER BY c.id NULLS LAST, l.id LIMIT 4",
+      // beside a computed key by name and by ordinal, and a plain derived side the subquery reads
+      "SELECT l.id * 2 AS x, (SELECT count(*) FROM late_p p WHERE p.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY x DESC LIMIT 3",
+      "SELECT l.id * 2 AS x, (SELECT count(*) FROM late_p p WHERE p.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 LIMIT 3",
+      "SELECT l.id, (SELECT count(*) FROM late_p p WHERE p.c = d.id) AS n FROM late l JOIN (SELECT id, name FROM late_c) d ON d.id = l.c ORDER BY l.id LIMIT 3",
+      // a merged column of an inner join is its left side's, as Postgres's analysis reads it
+      "SELECT id, (SELECT count(*) FROM late_p p WHERE p.c = id) AS n FROM late_c x JOIN late_n y USING (id) ORDER BY id LIMIT 3",
+      // one table alone
+      "SELECT l.id, l.j, (SELECT count(*) FROM late_p p WHERE p.c = l.c) AS n FROM late l ORDER BY l.k LIMIT 3",
+    ]) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      assert.match(await sent(sql), AFTER, sql);
+    }
+    // a subquery that would raise on a row the limit leaves out: Postgres's sort computes it for every row, Mason for
+    // the rows chosen (limit-errors)
+    assert.deepEqual((await answer(c, "SELECT l.id, (SELECT 1 / (p.line - 3) FROM late_p p WHERE p.c = 0 AND p.line = 3 AND l.id = 2000) AS x FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.k DESC LIMIT 2")).rows, [["1", null], ["2", null]]);
+    // what stays as it was: a subquery in a WHERE, in a join's condition, a sort key, a subquery read by name as a key,
+    // one that reads a FULL join's merged column, a wrapper folded away, and one that reads a WITH query of the statement
+    // (the WITH queries no FROM item reads would move into the inner query, below the list that reads them)
+    for (const sql of [
+      "SELECT l.id, l.j FROM late l JOIN late_c c ON c.id = l.c WHERE l.c IN (SELECT p.c FROM late_p p WHERE p.line = 3) ORDER BY l.id LIMIT 3",
+      "SELECT l.id, l.j FROM late l JOIN late_c c ON c.id = l.c AND EXISTS (SELECT 1 FROM late_p p WHERE p.c = c.id) ORDER BY l.id LIMIT 3",
+      "SELECT l.id, l.j FROM late l JOIN late_c c ON c.id = l.c ORDER BY (SELECT count(*) FROM late_p p WHERE p.c = l.c), l.id LIMIT 3",
+      "SELECT l.id, l.j, (SELECT count(*) FROM late_p p WHERE p.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY n, l.id LIMIT 3",
+      "SELECT id, (SELECT count(*) FROM late_p p WHERE p.c = id) AS n FROM late_c x FULL JOIN late_n y USING (id) ORDER BY id LIMIT 3",
+      "SELECT t.id, (SELECT count(*) FROM late_p p WHERE p.c = t.c) AS n FROM (SELECT l.id, l.c, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY t.id LIMIT 3",
+      "WITH w AS (SELECT c, count(*) AS n FROM late_p GROUP BY c) SELECT l.id, (SELECT w.n FROM w WHERE w.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 3",
+      "WITH w AS (SELECT id, c FROM late_n) SELECT l.id, (SELECT count(*) FROM w x WHERE x.c = l.c) AS n FROM late l JOIN w ON w.c = l.c ORDER BY l.id, w.id LIMIT 3",
+    ]) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      assert.doesNotMatch(await sent(sql), /__mason_late/, sql);
+    }
+    assert.deepEqual((await answer(c, "WITH w AS (SELECT c, count(*) AS n FROM late_p GROUP BY c) SELECT l.id, (SELECT w.n FROM w WHERE w.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 3")).rows, [["1", "4"], ["2", "4"], ["3", "4"]]);
+    assert.deepEqual((await answer(c, "WITH w AS (SELECT id, c FROM late_n) SELECT l.id, (SELECT count(*) FROM w x WHERE x.c = l.c) AS n FROM late l JOIN w ON w.c = l.c ORDER BY l.id, w.id LIMIT 3")).rows, [["1", "1"], ["2", "1"], ["3", "1"]]);
+    // a prepared statement run after a SET reads the setting where it runs
+    const prepared = { name: "listed_subquery", text: "SELECT l.id, (SELECT count(*) FROM late_p p WHERE p.c = l.c AND p.line < $1) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 2" };
+    await c.query({ ...prepared, values: [2] });
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual((await c.query({ ...prepared, values: [1], rowMode: "array", types: raw } as pg.QueryConfig)).rows, [["1", "1"], ["2", "1"]]);
+  } finally { await c.end(); }
+});
+
 // ISSUE 105, the same preview with no ORDER BY: which rows a LIMIT keeps is defined by no one, so what is held is what
 // is defined: how many, each a row of the whole join, none more often than the join holds it, and a page of one list
 test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number, sorted where the join is proved bounded, and they are rows of the join", async () => {

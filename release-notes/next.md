@@ -75,7 +75,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   every visible row to keep 100** (about 2 s now a tenth of that, on a 3.4 kB-a-row table filtered to a tenth). Which rows
   the user sees is unchanged: the rows are chosen, and their columns read, through the role's filter alone, and the
   statement's expressions still never run on a row the filter hides. Nothing to do on upgrade.
-- **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
+- **A subquery in the select list of a LIMIT, such as `(SELECT count(*) FROM items i WHERE i.order_id = o.id)`, now runs
+  for the rows the LIMIT keeps alone**, over one table or a join, with the rows chosen first: a statement that took about a
+  minute and tens of gigabytes of spill now takes a fraction of a second. A subquery in a WHERE, a join's condition or the
+  ORDER BY runs as before. Nothing to do on upgrade.
+- **A value that raises in such a derived list or list subquery no longer fails the statement when the LIMIT leaves its row out**: Postgres
   raises there, sorting every row first. This is the decided difference `limit-errors` (docs/SQL-SUPPORT.md), wider.
 - **`#>> array['k']`, the form BI tools send for a JSON field, is as fast as `->> 'k'`**: on 20 M rows a `GROUP BY` of it
   took 45-90 s and now takes about 1.2 s. The same holds for `'{k}'::text[]`, `array['k']::text[]` and

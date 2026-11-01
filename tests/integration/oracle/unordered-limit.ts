@@ -131,7 +131,8 @@ export const FROM_ITEM_VIEWS: string = MERGE_TABLES +
   "CREATE VIEW public.top_merged AS SELECT id, k, x.only1, y.only2 FROM public.top_m1 x FULL JOIN public.top_m2 y USING (id, k); " +
   `CREATE VIEW public.top_read AS ${SIDE}; CREATE VIEW public.top_read2 AS SELECT * FROM public.top_read WHERE id > 1; CREATE VIEW public.top_sums AS ${SUMS}; ` +
   JOIN_KINDS.map((k) => `CREATE VIEW public.${viewName(k.kind)} AS ${wrapped(k.from(`(${SIDE}) d`))}; `).join("") +
-  `CREATE VIEW public.top_join_twice AS SELECT * FROM public.top_join_0 WHERE id IS NOT NULL OR d_id > 0;`;
+  `CREATE VIEW public.top_join_twice AS SELECT * FROM public.top_join_0 WHERE id IS NOT NULL OR d_id > 0; ` +
+  `CREATE VIEW public.top_counted AS SELECT b.id, b.a_id, (SELECT count(*) FROM public.top_c c WHERE c.b_id = b.id) AS n FROM public.top_b b;`;
 
 interface Spelling { spelled: string; side?: (k: typeof SELF) => string; head?: string; from?: (k: typeof SELF) => string; carried?: boolean }
 const SPELLINGS: Spelling[] = [
@@ -306,8 +307,53 @@ const MERGED_SORTED: ReadonlyArray<{ name: string; sql: string; zone?: string }>
   { name: "natural: two columns in common, a count", sql: "SELECT count(*) FROM top_m1 x NATURAL FULL JOIN top_m4 z" },
 ];
 
+/**
+ * A SUBQUERY IN THE SELECT LIST (src/duck/late.ts; issue 134, step 5): the rows chosen on keys alone, the subquery run for
+ * the chosen rows in the fetch, where it reads the row's own columns, NULL on a side no row matched. One in a WHERE, a
+ * join, a sort key, or reading a carried side, keeps the statement as it was: held equal all the same.
+ */
+const COUNT_C = "(SELECT count(*) FROM top_c c WHERE c.b_id = b.id)";
+const LIST_SUBLINKS: ReadonlyArray<{ name: string; sql: string; zone?: string }> = [
+  { name: "list subquery: a scalar correlated to the wide side", sql: `SELECT a.id, b.payload, ${COUNT_C} AS n ${COMPUTED_FROM} ORDER BY b.id NULLS FIRST, a.id LIMIT 5 OFFSET 1` },
+  { name: "list subquery: a scalar correlated to the narrow side", sql: "SELECT a.id, b.payload, (SELECT max(x.amount) FROM top_b x WHERE x.a_id = a.id) AS top FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY b.id DESC LIMIT 4" },
+  { name: "list subquery: EXISTS", sql: `SELECT a.id, b.id AS b, EXISTS (SELECT 1 FROM top_c c WHERE c.b_id = b.id) AS e ${COMPUTED_FROM} ORDER BY a.id, b NULLS FIRST LIMIT 6` },
+  { name: "list subquery: ARRAY", sql: `SELECT a.id, b.id AS b, ARRAY(SELECT c.id FROM top_c c WHERE c.b_id = b.id ORDER BY c.id) AS cs ${COMPUTED_FROM} ORDER BY a.id, b NULLS FIRST LIMIT 6` },
+  { name: "list subquery: IN, its tested value the row's", sql: `SELECT a.id, b.id AS b, b.id IN (SELECT c.b_id FROM top_c c) AS has ${COMPUTED_FROM} ORDER BY a.id DESC, b NULLS FIRST LIMIT 6` },
+  { name: "list subquery: the nullable side of a LEFT join sees NULL", sql: `SELECT a.id, b.id AS b, ${COUNT_C} AS n, (SELECT b.amount * 2) AS twice, (SELECT b.id IS NULL) AS none ${COMPUTED_FROM} ORDER BY a.id, b NULLS FIRST LIMIT 9` },
+  { name: "list subquery: both sides of a FULL join see NULL", sql: `SELECT a.id, b.id AS b, ${COUNT_C} AS n, (SELECT a.note IS NULL) AS no_a FROM top_a a FULL JOIN top_b b ON a.id = b.a_id ORDER BY a.id NULLS FIRST, b NULLS FIRST LIMIT 9` },
+  { name: "list subquery: beside a computed key by name", sql: `SELECT a.id * 2 AS x, ${COUNT_C} AS n, b.id AS b ${COMPUTED_FROM} ORDER BY x DESC, b NULLS FIRST LIMIT 5` },
+  { name: "list subquery: beside a computed key by ordinal", sql: `SELECT upper(a.name) AS x, ${COUNT_C} AS n, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY 1 NULLS FIRST, 3, 4 NULLS FIRST LIMIT 5` },
+  { name: "list subquery: reading a plain derived side", sql: `SELECT a.id, d.id AS d, (SELECT count(*) FROM top_c c WHERE c.b_id = d.id) AS n FROM top_a a LEFT JOIN (${SIDE}) d ON d.a_id = a.id ORDER BY a.id, d.id NULLS FIRST LIMIT 6` },
+  { name: "list subquery: reading a view as a side", sql: "SELECT a.id, r.id AS r, (SELECT count(*) FROM top_c c WHERE c.b_id = r.id) AS n FROM top_a a LEFT JOIN top_read r ON r.a_id = a.id ORDER BY a.id DESC, r.id NULLS FIRST LIMIT 6" },
+  { name: "list subquery: in a view's list, the view a side", sql: "SELECT a.id, v.id AS v, v.n FROM top_a a LEFT JOIN top_counted v ON v.a_id = a.id ORDER BY a.id, v.id NULLS FIRST LIMIT 6" },
+  { name: "list subquery: in a view's list, the view alone", sql: "SELECT * FROM top_counted ORDER BY n DESC, id LIMIT 3" },
+  { name: "list subquery: in a derived side's list", sql: "SELECT a.id, d.id AS d, d.n FROM top_a a JOIN (SELECT b.id, b.a_id, (SELECT count(*) FROM top_c c WHERE c.b_id = b.id) AS n FROM top_b b) d ON d.a_id = a.id ORDER BY a.id, d.id LIMIT 6" },
+  { name: "list subquery: in a tool's wrapper of a join", sql: `SELECT * FROM (SELECT a.id, b.id AS b, ${COUNT_C} AS n ${COMPUTED_FROM}) t ORDER BY id DESC, b NULLS FIRST LIMIT 4` },
+  { name: "list subquery: over a wrapper of a join", sql: "SELECT t.id, (SELECT count(*) FROM top_c c WHERE c.b_id = t.b) AS n FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON b.a_id = a.id) t ORDER BY t.id, t.b LIMIT 4" },
+  { name: "list subquery: reading an aggregated side, carried", sql: "SELECT a.id, (SELECT count(*) FROM top_b b WHERE b.a_id = s.a_id) AS n, s.twice FROM top_a a LEFT JOIN top_sums s ON s.a_id = a.id ORDER BY a.id LIMIT 4" },
+  { name: "list subquery: the grouped view ordered by its output name", sql: "SELECT a_id, twice AS total, (SELECT count(*) FROM top_b b WHERE b.a_id = s.a_id) AS n FROM top_sums s ORDER BY total DESC NULLS LAST, a_id LIMIT 3" },
+  { name: "list subquery: reading a WITH query no FROM item reads, as it was", sql: "WITH w AS (SELECT b.a_id, count(*) AS n FROM top_b b GROUP BY b.a_id) SELECT a.id, b.id AS b, (SELECT w.n FROM w WHERE w.a_id = a.id) AS n FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY a.id, b.id LIMIT 4" },
+  { name: "list subquery: one table alone", sql: `SELECT b.id, b.payload, ${COUNT_C} AS n FROM top_b b ORDER BY b.amount DESC NULLS LAST, b.id LIMIT 4` },
+  // the keys under each kind of order: the database's collation, bytes, ICU, the nulls idiom in a zone
+  { name: "list subquery: under the database's collation", sql: `SELECT a.name, a.id, b.id AS b, ${COUNT_C} AS n ${COMPUTED_FROM} ORDER BY a.name NULLS FIRST, 2, 3 NULLS FIRST LIMIT 6` },
+  { name: "list subquery: under C", sql: `SELECT a.name, a.id, b.id AS b, ${COUNT_C} AS n ${COMPUTED_FROM} ORDER BY a.name COLLATE "C" DESC NULLS LAST, 2, 3 NULLS FIRST LIMIT 6` },
+  { name: "list subquery: under ICU", sql: `SELECT a.name, a.id, b.id AS b, ${COUNT_C} AS n ${COMPUTED_FROM} ORDER BY a.name COLLATE "und-x-icu", 2, 3 NULLS FIRST LIMIT 6` },
+  { name: "list subquery: the nulls idiom, in a zone of daylight saving", sql: `SELECT a.made, a.id, b.id AS b, ${COUNT_C} AS n ${COMPUTED_FROM} ORDER BY (a.made) IS NULL ASC, a.made DESC, 2, 3 NULLS FIRST LIMIT 6`, zone: "America/New_York" },
+  // random() and now() beside it: one value each, run for the chosen rows
+  { name: "list subquery: random() and now() beside it", sql: `SELECT random() < 2 AS r, now() - now() AS z, ${COUNT_C} AS n, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY a.id, b NULLS FIRST LIMIT 4` },
+  { name: "list subquery: random() a key beside it", sql: `SELECT random() < 2 AS r, ${COUNT_C} AS n, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY r, 3, 4 NULLS FIRST LIMIT 4` },
+  { name: "list subquery: random() inside it", sql: `SELECT (SELECT random() < 2 AND b.id IS NOT NULL) AS r, a.id, b.id AS b ${COMPUTED_FROM} ORDER BY a.id, b NULLS FIRST LIMIT 4` },
+  // where it stays as it was
+  { name: "list subquery: one in a WHERE stays", sql: `SELECT a.id, b.payload ${COMPUTED_FROM} WHERE b.id IN (SELECT c.b_id FROM top_c c) ORDER BY a.id, b.id LIMIT 4` },
+  { name: "list subquery: one in a join's condition stays", sql: "SELECT a.id, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id AND EXISTS (SELECT 1 FROM top_c c WHERE c.b_id = b.id) ORDER BY a.id, b.id LIMIT 4" },
+  { name: "list subquery: one a sort key stays", sql: `SELECT a.id, b.id AS b, ${COUNT_C} AS n ${COMPUTED_FROM} ORDER BY n DESC, 1, 2 NULLS FIRST LIMIT 4` },
+  { name: "list subquery: one reading a FULL join's merged column stays", sql: "SELECT id, (SELECT count(*) FROM top_b b WHERE b.a_id = id) AS n FROM top_m1 x FULL JOIN top_m2 y USING (id) ORDER BY id NULLS FIRST LIMIT 5" },
+  { name: "list subquery: one reading an inner join's merged column", sql: "SELECT id, (SELECT count(*) FROM top_b b WHERE b.a_id = id) AS n FROM top_m1 x JOIN top_m2 y USING (id) ORDER BY id LIMIT 5" },
+];
+
 /** each spelling of each kind sorted, so every byte of the answer is held: asked in the type matrix */
 export const FROM_ITEMS_SORTED: ReadonlyArray<{ name: string; sql: string; zone?: string }> = [
+  ...LIST_SUBLINKS,
   ...MERGED_SORTED,
   ...COMPUTED_KEYS,
   ...everySpelling().flatMap(({ s, k }) => {
