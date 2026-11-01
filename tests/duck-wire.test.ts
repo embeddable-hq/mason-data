@@ -59,8 +59,8 @@ const INSTANTS: Array<[number, string | null]> = [
   [23, "1999-12-31 23:59:59.999999+00"], [24, "2262-04-11 23:47:16+00"],
 ];
 /** times of day on each side of New York's clock changes (02:00 local): midnight, the repeated hour's, the skipped
- *  hour's, the afternoon's and the last minute (issue 162) */
-const CLOCK_TIMES = "INSERT INTO public.clock_times VALUES (1, '00:00:00'), (2, '01:30:00'), (3, '02:30:00'), (4, '12:30:00.5'), (5, '23:59:00')";
+ *  hour's, the afternoon's, the last minute and the end of the day, 24:00 (issue 162) */
+const CLOCK_TIMES = "INSERT INTO public.clock_times VALUES (1, '00:00:00'), (2, '01:30:00'), (3, '02:30:00'), (4, '12:30:00.5'), (5, '23:59:00'), (6, '24:00:00')";
 const instantsInsert = `INSERT INTO public.instants VALUES ${INSTANTS.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v}'`})`).join(", ")}`;
 /** a nullable column of each kind a sort meets, NULLs among the values and ties beside them */
 const NULLISH = "INSERT INTO public.nullish VALUES (1, '2026-01-02 03:04:05', 'b', 3), (2, NULL, NULL, NULL), (3, '2025-12-31 00:00:00', 'a', 1), (4, '2026-01-02 03:04:05', NULL, 3), " +
@@ -1095,12 +1095,12 @@ test("a time as a timetz takes the offset of the transaction's date at the value
   const c = await client();
   const cases: Array<[string, string, string[]]> = [
     // 00:31 EDT, before the clocks go back at 02:00
-    ["2026-11-01T04:31:00Z", "America/New_York", ["00:00:00-04", "01:30:00-05", "02:30:00-05", "12:30:00.5-05", "23:59:00-05"]],
+    ["2026-11-01T04:31:00Z", "America/New_York", ["00:00:00-04", "01:30:00-05", "02:30:00-05", "12:30:00.5-05", "23:59:00-05", "24:00:00-05"]],
     // 01:00 EST, before they go forward at 02:00 (02:30 does not exist that day)
-    ["2026-03-08T06:00:00Z", "America/New_York", ["00:00:00-05", "01:30:00-05", "02:30:00-05", "12:30:00.5-04", "23:59:00-04"]],
+    ["2026-03-08T06:00:00Z", "America/New_York", ["00:00:00-05", "01:30:00-05", "02:30:00-05", "12:30:00.5-04", "23:59:00-04", "24:00:00-04"]],
     // 20:00 PDT on 31 October: the date is the zone's, not UTC's (Los Angeles goes back at 09:00 UTC on 1 November)
-    ["2026-11-01T03:00:00Z", "America/Los_Angeles", ["00:00:00-07", "01:30:00-07", "02:30:00-07", "12:30:00.5-07", "23:59:00-07"]],
-    ["2026-11-01T04:31:00Z", "Asia/Kolkata", ["00:00:00+05:30", "01:30:00+05:30", "02:30:00+05:30", "12:30:00.5+05:30", "23:59:00+05:30"]],
+    ["2026-11-01T03:00:00Z", "America/Los_Angeles", ["00:00:00-07", "01:30:00-07", "02:30:00-07", "12:30:00.5-07", "23:59:00-07", "24:00:00-07"]],
+    ["2026-11-01T04:31:00Z", "Asia/Kolkata", ["00:00:00+05:30", "01:30:00+05:30", "02:30:00+05:30", "12:30:00.5+05:30", "23:59:00+05:30", "24:00:00+05:30"]],
   ];
   try {
     for (const [now, zone, times] of cases) {
@@ -1110,7 +1110,22 @@ test("a time as a timetz takes the offset of the transaction's date at the value
       assert.deepEqual(await answer(c, "SELECT id, tm::timetz FROM clock_times ORDER BY id"),
         { fields: [["id", 23], ["tm", 1266]], rows: times.map((t, i) => [String(i + 1), t]) }, what);
       assert.deepEqual((await answer(c, "SELECT id, CAST(tm AS time with time zone) FROM clock_times WHERE id = 4")).rows, [["4", times[3]]], what);
+      // the function's spelling, time_timetz called by name (function 2047), is the cast
+      assert.deepEqual((await answer(c, "SELECT id, timetz(tm) FROM clock_times ORDER BY id")).rows, times.map((t, i) => [String(i + 1), t]), `timetz(tm) ${what}`);
+      // a time[] as a timetz[]: each element by the same rule, a NULL element kept
+      assert.deepEqual((await answer(c, "SELECT ARRAY[tm]::timetz[], ARRAY[tm, NULL]::timetz[] FROM clock_times WHERE id = 4")).rows, [[`{${times[3]}}`, `{${times[3]},NULL}`]], `an array ${what}`);
     }
+    // 24:00 is its own time, never the next midnight's 00:00: in New York on 2026-11-01 beside 00:00, and in Kolkata (one
+    // offset all day) not equal to it
+    fixedNow = Date.parse("2026-11-01T04:31:00Z");
+    await c.query("SET TimeZone = 'America/New_York'");
+    assert.deepEqual((await answer(c, "SELECT tm::timetz FROM clock_times WHERE id IN (1, 6) ORDER BY id")).rows, [["00:00:00-04"], ["24:00:00-05"]]);
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    assert.deepEqual((await answer(c, "SELECT a.tm::timetz = b.tm::timetz FROM clock_times a, clock_times b WHERE a.id = 6 AND b.id = 1")).rows, [["f"]]);
+    // a time[] VALUE as a timetz[] is refused by name until the oracle verifies it (the rewrite maps each element by the
+    // same rule, for when it does)
+    await assert.rejects(c.query("SELECT a::timetz[] FROM (SELECT array_agg(tm ORDER BY id) AS a FROM clock_times) s"),
+      (e: Error & { code?: string; detail?: string }) => e.code === "0A000" && e.detail === "Mason gap unverified: cast:1183>1270");
     // planned once (at its Parse, in Kolkata) and executed under a later SET TimeZone and clock: the execution's date and zone
     const prepared = { name: "tm_timetz", text: "SELECT tm::timetz FROM clock_times WHERE id = $1", values: [4], rowMode: "array", types: raw } as pg.QueryConfig;
     assert.deepEqual((await c.query(prepared)).rows, [["12:30:00.5+05:30"]]);
