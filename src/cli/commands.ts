@@ -37,7 +37,7 @@ import type { KeptPathStatus } from "../duck/kept.ts";
 import { pathText } from "../duck/kept-route.ts";
 import type { LedgerRequest, QuerySummary, QueryWindow, RequestQuery, UnsupportedSql } from "../duck/requests.ts";
 import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
-import type { ShareState } from "./share-run.ts";
+import type { ShareEnded, ShareState } from "./share-run.ts";
 import { DEFAULT_REQUEST_LIMIT, eventLimit, MAX_SEARCH, SLOW_MS, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
 import { agoText, BIG_TABLE_ROWS, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -132,6 +132,8 @@ export interface RunState {
     attributes?: Record<string, Record<string, "scalar" | "list">>; wheres?: Record<string, Array<{ table: string; at: string; where: string }>> };
   /** the share open now (mason share, src/cli/share-run.ts), or null; a run from before it has none */
   share?: ShareState | null;
+  /** the last share that ended and why (src/cli/share-run.ts), or null */
+  shareEnded?: ShareEnded | null;
 }
 
 // ------------------------------------------------------------------ shared
@@ -358,7 +360,7 @@ const STATUS_USAGE = `usage: mason status [--json]
            projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
            sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
            application_name), open, running }] }, share: (null, or what mason share has open) { port, fingerprint, sessions,
-           refusedLogins, droppedConnections, shares: [{ user, role, reads, openedAt, via, host, port, endsAt, state }] }, queries: { keptDays, day, week } (the last day's and the last 7
+           refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
            days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
            when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap
@@ -424,7 +426,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
     "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly",
-    "roles", "share", "lastRun", "lastStop", "hung", "next"],
+    "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
 export async function status(argv: string[]): Promise<number> {

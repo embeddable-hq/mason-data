@@ -3710,3 +3710,114 @@ test("only the clock moved: the ages are set where they are, the part not writte
   assert.equal(log.writes, writes, "not written again");
   assert.equal(shown[0]!.innerHTML, "7s ago", "the age moved where it is");
 });
+
+// ------------------------------------------------------------------ Connect from anywhere (the page's mason share)
+
+const SHARE_AT = "2026-11-01T10:00:00.000Z";
+const SHARE_NOW = Date.parse("2026-11-01T10:05:00.000Z");
+const PASSWORD = `mason_share_${"ab".repeat(24)}`;
+const listed = { user: "share_a1b2c3", from: "page", role: null, reads: "every synced table", openedAt: SHARE_AT, via: "pinggy", host: "relay.example", port: 41234, endsAt: "2026-11-01T11:00:00.000Z", state: "up" };
+const sharing = (shares: unknown[], o: Record<string, unknown> = {}) => ({ ...RUNNING, share: shares.length ? { port: 40001, fingerprint: "AA", sessions: 0, refusedLogins: 0, droppedConnections: 0, shares } : null, shareEnded: null, ...o });
+const shareModel = (o: Record<string, unknown> = {}) => ({ phase: "none", choices: null, reads: null, role: null, opened: null, ended: null, failure: null, ...o });
+const renderShare = (s: unknown, m: unknown) => fn<[unknown, unknown, number], string>("renderShare")(s, m, SHARE_NOW);
+
+test("Connect from anywhere: the card in each state, as it WROTE it — none, asking (one role, two), opening, open, open after a reload, ended, refused, served", () => {
+  const none = textOf(renderShare(sharing([]), shareModel()));
+  assert.match(none, /Connect from anywhere/);
+  assert.match(none, /a temporary public address and a password, as mason share opens\. TLS is required of every connection/);
+  assert.match(fn<[unknown, unknown?], string>("renderStatus")(sharing([]), { now: NOW, queries: QUERIES }), /data-share-ask/, "the Overview's Connect card offers it beside the local connection");
+
+  const asking = textOf(renderShare(sharing([]), shareModel({ phase: "asking", choices: [], reads: "every synced table" })));
+  assert.match(asking, /This opens a temporary public address : anyone with it and its password reads every synced table\. A free share ends within about an hour, and when this page closes\./);
+  assert.match(asking, /Open the address/);
+  assert.doesNotMatch(renderShare(sharing([]), shareModel({ phase: "asking", choices: [] })), /<select/, "one answer: no picker");
+  const two = renderShare(sharing([]), shareModel({ phase: "asking", choices: [{ role: "sales", reads: "1 synced table: orders", default: true }, { role: "ops", reads: "every synced table", default: false }], role: "sales" }));
+  assert.match(two, /<select id="share-role"><option value="sales" selected>sales: 1 synced table: orders \(the file&#39;s default\)<\/option><option value="ops">ops: every synced table<\/option><\/select>/);
+  assert.match(textOf(renderShare(sharing([]), shareModel({ phase: "asking" }))), /Reading the roles…/);
+
+  assert.match(textOf(renderShare(sharing([]), shareModel({ phase: "opening" }))), /Opening a temporary public address… \(up to 30 s\)/);
+
+  const opened = { user: "share_a1b2c3", password: PASSWORD, database: "shop", host: "relay.example", port: 41234 };
+  const open = renderShare(sharing([listed]), shareModel({ phase: "open", opened }));
+  for (const [id, v] of [["share-host", "relay.example"], ["share-port", "41234"], ["share-user", "share_a1b2c3"], ["share-password", PASSWORD]]) {
+    assert.match(open, new RegExp(`<code id="${id}">${v}</code> <button type="button" class="small" data-copy="${id}"`), `${id} with its Copy`);
+  }
+  const openText = textOf(open);
+  assert.match(openText, /Shared Public for 5 min : every synced table/);
+  assert.match(openText, /SSL mode require/);
+  assert.match(openText, /the password is shown this once, is kept nowhere, and ends with the share/);
+  assert.match(openText, /A free share ends within about an hour: at .+, in about 55 minutes\./);
+  assert.match(openText, /It also ends within two minutes of this page closing\./);
+  assert.match(open, /data-share-stop="share_a1b2c3"[^>]*>Stop sharing</);
+
+  const reloaded = renderShare(sharing([listed]), shareModel());
+  assert.ok(!reloaded.includes(PASSWORD) && !reloaded.includes("share-password"), "after a reload the password is nowhere on the page");
+  assert.match(textOf(reloaded), /The password was shown once, when it opened, and is kept nowhere/);
+  assert.match(reloaded, /Stop sharing/);
+
+  const ended = textOf(renderShare(sharing([]), shareModel({ phase: "ended", ended: { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" } })));
+  assert.match(ended, /The share ended: its tunnel closed \(ssh exited 255\)\. Its address no longer answers, and its password no longer works\./);
+  assert.match(ended, /Connect from anywhere/);
+
+  const failure = { code: "not_found", message: "ssh is not on this machine, and Connect from anywhere needs it", fix: "install the OpenSSH client, then Connect from anywhere again", next: [{ command: "mason doctor", what: "checks this machine" }] };
+  const refused = renderShare(sharing([]), shareModel({ phase: "refused", failure }));
+  assert.ok(refused.includes(fn<[unknown], string>("renderFailure")(failure)), "a refusal is the CLI's Failure, rendered by renderFailure");
+
+  for (const m of [shareModel(), shareModel({ phase: "open", opened })]) assert.equal(renderShare(sharing([listed], { served: true }), m), "", "under mason serve: absent");
+  assert.doesNotMatch(fn<[unknown, unknown?], string>("renderStatus")({ ...sharing([]), served: true }, { now: NOW, queries: QUERIES }), /share-ask|Connect from anywhere/, "nor on a served Overview");
+
+  // every word the card writes: no tunnel's provider, no engine
+  for (const html of [none, asking, two, openText, reloaded, ended, refused]) assert.doesNotMatch(textOf(html), /pinggy|bore\b|duck/i);
+});
+
+test("Connect from anywhere over a fake run: asked once, opened confirmed with the role chosen, beaten on a timer of its own, its end said and its password dropped", async () => {
+  const asked: Array<[string, string | undefined, unknown]> = [];
+  let state: unknown = sharing([]);
+  const answers: Record<string, unknown> = {
+    "GET /api/share/choices": { body: { choices: [{ role: "sales", reads: "1 synced table: orders", default: false }, { role: "ops", reads: "every synced table", default: true }] } },
+    "POST /api/share": { body: { user: "share_a1b2c3", host: "relay.example", port: 41234, database: "shop", password: PASSWORD, beatMs: 15_000 } },
+    "POST /api/share/share_a1b2c3/beat": { body: { ok: true } },
+  };
+  const intervals: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+  const ctx = {
+    ask: async (p: string, init?: { method?: string; body?: string }) => { asked.push([p, init?.method, init?.body === undefined ? undefined : JSON.parse(init.body)]); return answers[`${init?.method ?? "GET"} ${p}`]; },
+    read: () => ({ body: state, failure: null }), refresh: async () => undefined, now: () => new Date(SHARE_NOW),
+    timers: { setInterval: (f: () => void, ms: number) => { intervals.push({ fn: f, ms, cleared: false }); return intervals.length - 1; }, clearInterval: (i: number) => { intervals[i]!.cleared = true; } },
+  };
+  const share = fn<[unknown], { m: Record<string, unknown>; actions: Record<string, (...a: unknown[]) => Promise<void> | void>; afterRead: (s: unknown) => void; click: (d: Record<string, string>) => unknown; input: (t: unknown) => unknown }>("createShare")(ctx);
+  await share.click({ shareAsk: "" });
+  assert.equal(share.m.phase, "asking");
+  assert.equal(share.m.role, "ops", "the file's default chosen first");
+  share.input({ id: "share-role", value: "sales" });
+  await share.click({ shareOpen: "" });
+  assert.deepEqual(asked.find(([p, m]) => p === "/api/share" && m === "POST")?.[2], { from: "page", confirmed: true, role: "sales" }, "confirmed, the role chosen");
+  assert.equal(share.m.phase, "open");
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0]!.ms, 15_000);
+  // a state read before the open lists nothing: never taken for its end
+  share.afterRead(sharing([]));
+  assert.equal(share.m.phase, "open");
+  state = sharing([listed]);
+  share.afterRead(state);
+  intervals[0]!.fn();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(asked.some(([p, m]) => p === "/api/share/share_a1b2c3/beat" && m === "POST"), "the beat");
+  // the run ended it (the tunnel closed): the next state says so, and the password leaves the page's memory
+  state = sharing([], { shareEnded: { user: "share_a1b2c3", from: "page", why: "its tunnel closed (ssh exited 255)", at: SHARE_AT } });
+  share.afterRead(state);
+  assert.equal(share.m.phase, "ended");
+  assert.deepEqual(share.m.ended, { user: "share_a1b2c3", why: "its tunnel closed (ssh exited 255)" });
+  assert.equal(share.m.opened, null);
+  assert.ok(!JSON.stringify(share.m).includes(PASSWORD));
+  assert.equal(intervals[0]!.cleared, true, "no more beats");
+  // a reload over an open share: it is beaten again, its password not shown
+  const again = fn<[unknown], { m: Record<string, unknown>; afterRead: (s: unknown) => void }>("createShare")(ctx);
+  again.afterRead(sharing([listed]));
+  assert.equal(again.m.phase, "open");
+  assert.equal(intervals.length, 2);
+  // Stop sharing: DELETE, the beats end
+  answers["DELETE /api/share/share_a1b2c3"] = { body: { ok: true } };
+  await (again as unknown as { actions: Record<string, (u: string) => Promise<void>> }).actions.shareStop!("share_a1b2c3");
+  assert.equal(again.m.phase, "ended");
+  assert.equal(intervals[1]!.cleared, true);
+});

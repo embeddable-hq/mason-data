@@ -59,6 +59,17 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   Mason anything (no statement in the last day or week) it is **Connect your first tool**, right under the cards, saying
   what the URL is for; afterwards a quieter panel after the facts. It is `/api/state` `postgres` (`mason status --json`'s
   `postgres`: `shown`, `psql`).
+- **Overview**, Connect from anywhere (under `mason start` only): `mason share` from the page, for a tool in the cloud.
+  It asks once that this opens a temporary public address (`GET /api/share/choices`: a role picker where
+  `mason/roles.yml` offers more than one role, as `mason share --role`), then `POST /api/share` `{ from: "page",
+  confirmed: true, role? }` opens the same share the command opens (src/cli/page-share.ts): the run makes the password
+  and starts the tunnel's client, and the card shows host, port, user and the password, each with **Copy**, how long it
+  has been shared, when a free share ends (within about an hour), and **Stop sharing** (`DELETE /api/share/<user>`).
+  The password is in that one answer alone, kept in the page's memory: after a reload the card says it was shown once.
+  The page holds the share by a beat (`POST /api/share/<user>/beat`, every 15 s, hidden or not): two minutes without
+  one (the tab closed, crashed or asleep) and the share, its sessions and the tunnel's client end, said by `/api/state`
+  `shareEnded`. One share at a time between the page and `mason share`, refused naming the open one. Under `mason serve`
+  (and so through `mason ui --ssh`) it is absent, and every one of those endpoints refuses.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
   with no % beside it), and nothing once every table is synced.
 - **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime

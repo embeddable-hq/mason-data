@@ -34,13 +34,15 @@ import type { RunMetrics } from "./metrics.ts";
 import { readGenerated } from "./generated-files.ts";
 import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, syncWritten, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
-import { liveRun } from "./runs.ts";
+import { alive, liveRun } from "./runs.ts";
 import { DEMO_DIR, DUCK_FILE, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { connectDatabase } from "../lib/database-name.ts";
 import { certificateFingerprint, elsewhereTip, ensureSelfSigned, listenerText, runListenerSettings, selfSignedPair, SELF_SIGNED_FILES } from "./pg-tls.ts";
 import { RunShares } from "./share-run.ts";
+import { PageShares } from "./page-share.ts";
+import { sweepTunnelFiles } from "./tunnel.ts";
 import { startPostgresApi, timeoutMs, type PgApiServer } from "../api/postgres/server.ts";
 import { RequestLedger, REQUESTS_TABLE } from "../duck/requests.ts";
 import { historyDaysSetting } from "../duck/history.ts";
@@ -544,6 +546,11 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   }
 
   // WHAT mason share OPENS (src/cli/share-run.ts): a second socket of this listener, on a run on a laptop alone
+  // a tunnel's ssh config a run or a mason share killed with -9 left behind (src/cli/tunnel.ts): removed unless its
+  // process lives, so a run stopped with the page's share open leaves nothing at the next start
+  if (o.serve === undefined) {
+    try { sweepTunnelFiles(home, alive); } catch (e) { logLine(`share: the tunnels' files left behind could not be swept: ${(e as Error).message}`); }
+  }
   const shares = o.serve !== undefined ? undefined : new RunShares({
     listener: api, database, log: logLine,
     // the project's own certificate, as --self-signed-tls serves it: made once, and recorded as that flag records it
@@ -572,7 +579,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl },
     // the roles as the listener holds them: their row filters checked by its catalog (a filter Postgres refuses is a problem)
     roles: () => api.roles(),
-    ...(shares !== undefined ? { shares } : {}),
+    ...(shares !== undefined ? { shares, pageShares: new PageShares({ shares, home, log: logLine }) } : {}),
     // the sources file is the list of what is added: a change to it is read by the sync at once
     sources: () => sources, sourcesChanged: () => { void added(); }, readSource: readSources, runUrl: src.resolved,
     // a table set to sync: replication while the run is up, in a run that never checked the database for it: the
