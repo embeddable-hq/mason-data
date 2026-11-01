@@ -522,6 +522,57 @@ the record counts the round as no review (PR 245's first review found such a rou
 showed none is noted, as a failed probe is. The statements' Postgres is the file the `itEnv` argument names, or a
 throwaway `postgres:18` container of the stage's own, removed when done, whose URL no prompt prints.
 
+### Issue labels and a bug's Severity (Tom, 2026-11-01)
+
+**Decision.** Every open issue carries the label `bug` or `enhancement`. Every bug is on the Mason work board with its
+`Severity` field set to Critical, High, Medium or Low (CLAUDE.md "What a session finds"). A session sets it with
+`scripts/board.ts severity <n> <level>`, which adds the issue to the board if it is not there.
+
+**Why a field, not a label.** The triage first recorded severity as four `severity:` labels, and the owner moved it to
+the board the same day. A single-select field holds exactly one value, where labels allow none or two. Its options are
+ordered most severe first, so a view sorts the bugs by it. The four labels were deleted.
+
+**Why.** On 2026-11-01, 3 of the 100 open issues carried either label. Nearly all had been filed by sessions under "What
+a session finds, it acts on", each one well written, but none said how much it mattered. A silent wrong answer
+sat in the list beside a test's fixed sleep and a harness prompt's wording, and only reading all of them told them
+apart. The blocking rule above already sorts a review's findings by severity. The backlog had no such order, and
+it is where the deferred findings now go.
+
+**How the lines were drawn.**
+- **An over-refusal of a shape never answered is a feature, a regression a bug.** The same split the blocking rule
+  makes (`over-refusal` against `regression`): a refusal is safe, and what the base answered is a promise.
+- **Harness and tooling defects are bugs.** A harness that drops a finding, misreads its origin or prints DIFFER for a
+  statement with no ORDER BY lets a wrong answer through, or wastes a run, as surely as a test that hangs.
+- **Data staler than Mason reports is high.** Two issues measured on real deployments made the case:
+  - a table frozen for hours while `mason status` called it ready;
+  - tables written `poll 15m` polled about hourly.
+
+  No row is wrong, but the reader cannot tell the data is old. That is the same harm as a silent wrong answer, in time.
+- **A loud failure is medium, whatever its cause.** A wrong SQLSTATE, the engine's error, or a refusal where Postgres
+  answers is a failure the reader sees and can route around. A silent one is never below high.
+
+**COMMON takes evidence.** The first pass rated severity by judgement, and one issue was rated critical: a numeric
+quotient that leaves the engine as a double in several readers, judged common because numeric division is everyday BI.
+The second pass asked for evidence and moved it to high. The BI shapes the oracle ranks already hold a quotient exact
+under DISTINCT, beside a numeric arm in a UNION ALL, and as a cast to text. The readers still wrong (an integer arm,
+USING, `length()` of the text, a cast subquery) are in neither the corpus nor the BI shapes, and no deployment met
+them. "Common" was the one judgement the two passes disagreed on, so it now names its source:
+- the recorded corpus or the ranked BI shapes;
+- a named tool, ORM or agent that writes the shape by default;
+- a real deployment.
+
+The source is a shape, not a condition. One issue's statements, `initcap` and a text percentile, are among the BI
+shapes, but they differ only on a source under an ICU collation. No source records how common that is, so that issue
+stayed high, and that call was reported to the owner.
+
+**The triage's result.** It closed three duplicates and closed nothing as fixed. Two candidates were checked against
+main and each kept a done criterion still unmet. After the second pass, of 100 open issues: 71 bugs (35 High, 34
+Medium, 2 Low, none Critical) and 29 features.
+
+**Detector.** The board's view "Bugs by severity" (`is:open label:bug`, sorted by Severity), where a bug with no
+Severity shows at the bottom. An issue with neither label is seen only by reading the list. There is no automatic
+check. A script that lists an open issue with neither label, or a bug with no Severity, would be one; it is not built.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
