@@ -3125,6 +3125,65 @@ test("a set operation whose first SELECT is a `*` the cast writes out keeps Post
   } finally { await c.end(); }
 });
 
+// A `*` WHOSE FROM ITEM HAS TWO COLUMNS OF ONE NAME, AND A SET OPERATION'S char(n) COMPARED (PR 233 review r3, two
+// classes). "star-written-out-by-ambiguous-name": a star's column is written by its FROM item's name and its own, which
+// reads the first of two of one name; whether the handle is unique is decided where the column gets it (pgtree's
+// columnOf, `twin`), so every writer of a star's column (the set operation's cast, a WITH TIES key, a sort key) refuses
+// it by name, and a `*` sent as written answers. "setop-arm-cast-dropped": a set operation that compares its rows over
+// a char(n) column whose arms disagree (a text arm, another length) compares bpchar's way, which no engine cast is:
+// refused by name; a char(n) of one length, and UNION ALL, answer
+test("a * of two columns of one name is never written out by name; a set operation never compares char(n) as text (PR 233 review r3)", async () => {
+  const c = await client();
+  try {
+    const differ: string[] = [];
+    const D = "SELECT l.c AS id, l.id FROM late l WHERE l.id < 6", F = "SELECT l.k::float8, l.id FROM late l WHERE l.id < 6";
+    const CH = "SELECT c.c, c.id FROM chars c";
+    for (const [sql, inOrder] of [
+      // a `*` of two of one name sent as written, or written out where no name is ambiguous
+      [`SELECT * FROM (${D}) x`, false],
+      [`SELECT count(*) FROM (SELECT * FROM (${D}) x UNION ALL SELECT l.k, l.id FROM late l) s`, true],
+      [`SELECT * FROM (SELECT l.c AS a, l.id FROM late l WHERE l.id < 6) x UNION ALL ${F} ORDER BY 2, 1`, true],
+      // a char(n) set operation that compares nothing, or whose arms are one length, or whose column is text
+      [`SELECT * FROM (${CH}) x UNION ALL SELECT c.t, c.id FROM chars c ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, false],
+      ["SELECT c.c FROM chars c UNION ALL SELECT c.t FROM chars c ORDER BY 1 NULLS FIRST", false],
+      ["SELECT c.c FROM chars c UNION SELECT c.c FROM chars c ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", false],
+      ["SELECT c.c, length(c.c) FROM chars c INTERSECT SELECT c.c, length(c.c) FROM chars c ORDER BY 1", true],
+      ["SELECT c.t FROM chars c UNION SELECT c.c FROM chars c ORDER BY 1 NULLS FIRST", true],
+      ["SELECT * FROM late l JOIN (SELECT c.id, c.id AS k, c.name, c.name || 'x' AS name FROM late_c c) d ON d.k = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES", false],
+      ["SELECT * FROM late l JOIN (SELECT c.id, c.id AS k, c.name, c.name || 'x' AS name FROM late_c c) d ON d.k = l.c ORDER BY l.c DESC, l.id LIMIT 3", true],
+      ["SELECT l.id, d.* FROM late l LEFT JOIN (SELECT c.id AS k, c.name, c.name || 'x' AS name FROM late_c c) d ON d.k = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES", false],
+      ["SELECT * FROM (SELECT c.id, c.name, c.name || 'x' AS name FROM late_c c) d ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES", false],
+      ["SELECT * FROM (SELECT c.id, c.name, c.name || 'x' AS name FROM late_c c) d ORDER BY 1 DESC LIMIT 2", true],
+    ] as const) { const d = await tiesAlike(c, sql, undefined, inOrder); if (d !== null) differ.push(d); }
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+    for (const [sql, gap] of [
+      // a `*` of two of one name written out for the set operation's cast: every placement, with and without a sort
+      [`SELECT * FROM (${D}) x UNION ALL ${F} ORDER BY 2, 1`, "star-join-twin"],
+      [`SELECT * FROM (${D}) x UNION ALL ${F}`, "star-join-twin"],
+      [`SELECT * FROM (${D}) x UNION ALL ${F} ORDER BY 1, 2`, "star-join-twin"],
+      [`SELECT * FROM (${D}) x UNION ${F} ORDER BY 2, 1`, "star-join-twin"],
+      [`SELECT x.* FROM (${D}) x UNION ALL ${F} ORDER BY 2, 1`, "star-join-twin"],
+      [`WITH w AS (${D}) SELECT * FROM w UNION ALL ${F} ORDER BY 2, 1`, "star-join-twin"],
+      [`${F} UNION ALL SELECT * FROM (${D}) x ORDER BY 2, 1`, "star-join-twin"],
+      [`SELECT * FROM (SELECT l.c::int2 AS id, l.id FROM late l WHERE l.id < 6) x UNION ALL SELECT l.k, l.id FROM late l WHERE l.id < 6 ORDER BY 2, 1`, "star-join-twin"],
+      [`SELECT * FROM (${D}) x UNION ALL ${F} ORDER BY 2 DESC FETCH FIRST 2 ROWS WITH TIES`, "star-join-twin"],
+      // a key bound to one of the two, written as that column: under WITH TIES and under a LIMIT
+      [`SELECT * FROM (${D}) x ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "star-join-twin"],
+      [`SELECT * FROM (${D}) x ORDER BY 2 DESC LIMIT 3`, "star-join-twin"],
+      // a set operation comparing a char(n) column whose arms disagree: a text or varchar arm, another length; a `*`
+      [`SELECT * FROM (${CH}) x UNION SELECT c.t, c.id FROM chars c ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, "setop-char-compare"],
+      ["SELECT c.c FROM chars c UNION SELECT c.t FROM chars c", "setop-char-compare"],
+      ["SELECT c.c FROM chars c INTERSECT SELECT c.v FROM chars c ORDER BY 1", "setop-char-compare"],
+      ["SELECT c.c FROM chars c EXCEPT ALL SELECT c.t FROM chars c", "setop-char-compare"],
+      ["SELECT c.c FROM chars c UNION SELECT c.c::char(5) FROM chars c", "setop-char-compare"],
+      ["SELECT count(*) FROM (SELECT c.c FROM chars c UNION SELECT c.t FROM chars c ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s", "setop-char-compare"],
+    ] as const) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && new RegExp(`Mason gap ${gap}`).test(e.detail ?? ""), sql);
+      await postgres(sql);
+    }
+  } finally { await c.end(); }
+});
+
 // A SET OPERATION'S NUMERIC UNDER WITH TIES (the class "setop-numeric-engine-scale", PR 233 review r1): the engine
 // prints one DECIMAL scale per column, or a quotient's double, where Postgres's set-operation numeric keeps each value's
 // own. Under WITH TIES (which the base crashed on) such a column is answered only where the one decider of a union's

@@ -1285,6 +1285,12 @@ function* matrix(): Generator<Matrixed> {
   // a first SELECT that is only a `*` the cast writes out keeps the set operation's types (setop-star-written-loses-location, PR 233 review r2)
   yield q("set operation: a first * written out for the cast, ordered", "SELECT * FROM (SELECT x.i4, x.id FROM typed x) s UNION ALL SELECT x.f8, x.id FROM typed x ORDER BY 2, 1 NULLS FIRST");
   yield q("set operation: a first * of a date beside a timestamptz, ordered", "SELECT * FROM (SELECT x.d, x.id FROM typed x) s UNION ALL SELECT x.tz, x.id FROM typed x ORDER BY 2, 1 NULLS FIRST");
+  // a `*` of two columns of one name is never written out by name; a char(n) column is never compared as text (PR 233 review r3)
+  yield q("set operation: a first * of two columns of one name, sent as written", "SELECT count(*) FROM (SELECT * FROM (SELECT x.i4 AS id, x.id FROM typed x) s UNION ALL SELECT x.i4, x.id FROM typed x) u");
+  yield { ...q("with ties: a char(n) * arm beside a text, ALL", "SELECT * FROM (SELECT s.ch, s.id FROM star_o s) x UNION ALL SELECT s.name, s.id FROM star_o s ORDER BY 1 NULLS FIRST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  yield q("set operation: a char(n) of one length, without ALL", "SELECT s.ch FROM star_o s UNION SELECT s.ch FROM star_o s ORDER BY 1 NULLS FIRST");
+  yield q("with ties: a char(n) * arm beside a text, without ALL", "SELECT * FROM (SELECT s.ch, s.id FROM star_o s) x UNION SELECT s.name, s.id FROM star_o s ORDER BY 1 NULLS FIRST FETCH FIRST 1 ROWS WITH TIES");
+  yield q("with ties: a * of two columns of one name, cast for the set operation", "SELECT * FROM (SELECT x.i4 AS id, x.id FROM typed x) s UNION ALL SELECT x.f8, x.id FROM typed x ORDER BY 2 DESC FETCH FIRST 2 ROWS WITH TIES");
   yield q("with ties: a first * written out for the cast", "SELECT count(*) FROM (SELECT * FROM (SELECT x.i4, x.id FROM typed x) s UNION ALL SELECT x.f8, x.id FROM typed x ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) u");
   yield q("with ties: its rank in no row (a derived table beside a column)", `SELECT s.*, 1 AS one FROM (${TIES_A}) s ORDER BY s.id`);
   yield q("with ties: joined after", `SELECT s.id, s.made, b.id AS b FROM (${TIES_A}) s JOIN top_b b ON b.a_id = s.id ORDER BY 1, 3`);

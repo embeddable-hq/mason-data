@@ -988,6 +988,13 @@ class Rewriter {
       const firstTargets = (first.targetList ?? []) as AstNode[];
       const firstOutputs = this.outputs(firstTargets);
       const types = this.setOperationTypes(b);
+      // a char(n) column whose arms disagree (a text or varchar arm, another length: no typmod in Postgres's analysis)
+      // is compared as bpchar, without the trailing spaces, and no cast the engine has is that: each column, a `*`'s
+      // included, as the set operation's analysis types it (setop-arm-cast-dropped, PR 233 review r3). One length is
+      // padded alike in every arm, and compared as Postgres compares it
+      for (const typed of types ?? []) {
+        if (typed?.type === BPCHAR && typed.typmod < 0) throw new Unrewritable(`${what} a char(n) column beside a text, a varchar or a char of another length is not supported by Mason (Postgres compares it without its trailing spaces)`, "cast the char(n) column to text in the first SELECT (x::text), or UNION ALL", "setop-char-compare");
+      }
       firstTargets.forEach((t, ti) => {
         const v = bodyOf(t).val;
         if (!isNode(v)) return;
@@ -1182,7 +1189,7 @@ class Rewriter {
   }
 
   private twinRefused(): Unrewritable {
-    return new Unrewritable("this * of a named join lists two columns of one name, and Mason cannot read one of them apart here", "name the join's columns in the SELECT, or leave the join's own name out", "star-join-twin");
+    return new Unrewritable("this * lists two columns of one name from one subquery, CTE or named join, and Mason cannot read one of them apart here", "name the columns apart in the subquery (AS), or name the join's columns in the SELECT", "star-join-twin");
   }
 
   /**

@@ -129,8 +129,9 @@ export interface Typed {
   constant?: true;
   /** a VAR as DuckDB can name it: the FROM item it is read from and the column's name there (an alias list's); a merged
    *  column of a join by the join's name, or null for that of a join (or a VALUES, a subquery) with none, which only its
-   *  bare name reads. A join's name hides what it joins, so a column of a named join is read by that name, and `twin`
-   *  says the join has two of that name, which no name tells apart. What a `*` expands to has no text of its own to read
+   *  bare name reads. A join's name hides what it joins, so a column of a named join is read by that name. `twin` says the
+   *  FROM item (a named join, a subquery, a CTE, a VALUES, a function) has two columns of that name, which no handle tells
+   *  apart: the one decision every writer of a star's column reads (PR 233 review r3). What a `*` expands to has no text of its own to read
    *  this from. Absent for a set operation's output, which only its arm's column names */
   column?: { owner: string | null; name: string; twin?: true };
   /** a VAR read from a TABLE of its query's FROM (an RTE_RELATION): the catalog's OID of that table and the column's
@@ -519,7 +520,8 @@ function columnOf(v: TreeNode, rtables: TreeNode[][]): NonNullable<Typed["column
   const kind = num(rte.rtekind ?? null) ?? -1;
   const named = isNode(rte.alias ?? null);
   return { owner: UNNAMED.has(kind) && !named ? null : eref.aliasname, name,
-    ...(kind === RTE_JOIN && named && columns.filter((c) => c === name).length > 1 ? { twin: true as const } : {}) };
+    // (two columns of one name in the FROM item, of any kind: no handle reads the second, and the engine binds the first)
+    ...(columns.filter((c) => c === name).length > 1 ? { twin: true as const } : {}) };
 }
 const RTE_FUNCTION = 3;
 /** Typed.functionColumn */
