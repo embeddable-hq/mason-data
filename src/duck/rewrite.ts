@@ -2870,6 +2870,61 @@ class Rewriter {
   }
 
   /**
+   * `latest(x ORDER BY a [, b …])` (src/api/postgres/catalog.ts masonAggregatesSql), the x of the row that sorts LAST
+   * under its ORDER BY, ordered by its keys as the SortBy rule writes every key (`sortBy`: a collation's keys, citext's
+   * lower(), jsonb's order key, a char(n)'s rtrim), so no key is ordered by a rule of its own here. Every key ascending
+   * with its NULLs last: the row whose TUPLE of keys is greatest, `arg_max_null(x, ROW(a, b, …))` — a ROW even of one
+   * key, since the engine orders a NULL field of a ROW last, as Postgres sorts a NULL key, where `arg_max_null(x, a)`
+   * passes over a row whose a is NULL. A key DESC or NULLS FIRST, under USING, or a COLLATE (which the engine applies in
+   * a sort, never inside a ROW): `last(x ORDER BY …)`, the engine's sort, whose NULLs the session places as Postgres's
+   * (store.ts `default_null_order`). A tie under the keys is any one of the tied rows' x, as in Postgres, which defines
+   * no pick. DISTINCT is dropped: its ORDER BY may name only the argument, whose last distinct value is its last value.
+   * A key the analysis made a constant was dropped by the caller: with none left every row ties, and any row's x is one
+   * Postgres may answer. A call refused (no ORDER BY, a window, a numeric computed exactly) was refused before
+   * (`latestRefused`).
+   */
+  private latest(b: Body, args: AstNode[]): AstNode {
+    const filter = b.agg_filter === undefined ? {} : { agg_filter: b.agg_filter };
+    const keys = ((b.agg_order ?? []) as AstNode[]).flatMap((s) => {
+      if (kindOf(s) !== "SortBy") return [s];
+      // the key's own rule, run here and not again by the walk
+      this.done.add(bodyOf(s));
+      return this.sortBy(bodyOf(s), null, null) ?? [s];
+    });
+    const ascending = (k: AstNode): boolean => {
+      const s = bodyOf(k);
+      return kindOf(k) === "SortBy" && s.useOp === undefined && isNode(s.node) && kindOf(s.node) !== "CollateClause"
+        && (s.sortby_dir === "SORTBY_DEFAULT" || s.sortby_dir === "SORTBY_ASC") && (s.sortby_nulls === "SORTBY_NULLS_DEFAULT" || s.sortby_nulls === "SORTBY_NULLS_LAST");
+    };
+    const call = keys.length > 0 && keys.every(ascending) ? fn("arg_max_null", [args[0]!, row(keys.map((k) => bodyOf(k).node as AstNode))], filter)
+      : fn("last", [args[0]!], { ...filter, ...(keys.length === 0 ? {} : { agg_order: keys }) });
+    // an aggregate of latest's type, as the grouping checks read it (validGrouped, decidedByKey)
+    this.typedLike.set(bodyOf(call), { FuncCall: b });
+    return call;
+  }
+
+  /** `latest()` in a form Mason refuses, by name, with the way out for the form seen: no ORDER BY of its own (its
+   *  answer would be an arbitrary row's), as a window function (Postgres refuses one with an ORDER BY of its own), and
+   *  of a numeric Mason holds no exact value of (`duckExact`: a quotient, an average, NaN), whose answer would be a double's digits */
+  private latestRefused(b: Body, args: AstNode[]): void {
+    const arg = args[0];
+    const fields = arg !== undefined && kindOf(arg) === "ColumnRef" ? ((bodyOf(arg).fields ?? []) as AstNode[]) : [];
+    const last = fields.at(-1);
+    const x = last !== undefined && kindOf(last) === "String" ? String(bodyOf(last).sval) : "x";
+    if (b.over !== undefined) {
+      throw new Unrewritable("latest() as a window function is not supported by Mason", `last_value(${x}) OVER (…), the value of the window's last row`, "latest-without-order");
+    }
+    if (!Array.isArray(b.agg_order) || b.agg_order.length === 0) {
+      throw new Unrewritable("latest() needs an ORDER BY of its own: it answers the value of the row that sorts last, and without one no row is last",
+        `latest(${x} ORDER BY …), its keys ending in a unique column to decide a tie`, "latest-without-order");
+    }
+    if (arg !== undefined && this.typeOf(arg) === NUMERIC && !this.duckExact(arg)) {
+      throw new Unrewritable("latest() of a numeric Mason holds no exact value of (a quotient, an average, NaN) is not supported by Mason",
+        "take latest() of each operand with one ORDER BY that decides every tie, then compute: latest(a ORDER BY k, id) / latest(b ORDER BY k, id)", "latest-computed-numeric");
+    }
+  }
+
+  /**
    * AN OUTPUT'S EXPRESSION AS A KEY BUILT OVER IT READS IT IN A GROUPED SELECT (the class "an output not resolved to its
    * column"): a collation's keys, citext's lower() or jsonb's order key are built over the value under the output's
    * COLLATE, which is no grouped expression when the GROUP BY groups the output itself (`t.s COLLATE "und-x-icu" AS x
@@ -3546,6 +3601,10 @@ class Rewriter {
       const type = duckTypeOf(t.type, t.typmod);
       if (type !== null && !(t.type === NUMERIC && t.typmod < 0)) return cast(args[0]!, type);
     }
+    // Mason's own aggregate (src/api/postgres/catalog.ts masonAggregatesSql), as the analysis resolved it: refused before
+    // its keys are read, since a constant key dropped below is still an ORDER BY the statement wrote
+    const latest = name === "latest" && (t?.node === "AGGREF" || t?.node === "WINDOWFUNC");
+    if (latest) this.latestRefused(b, args);
     // A CONSTANT KEY of an aggregate's ORDER BY (the class, issue 134; src/duck/constant-key.ts): a key the analysis put
     // a Const orders nothing, and written as the bare literal the engine refuses it (42804, reported as 42803). It is no
     // key, and with none left no ORDER BY. An ordered-set aggregate's key is its VALUE, so it stays (`withinGroup`)
@@ -3560,6 +3619,7 @@ class Rewriter {
       });
       if ((b.agg_order as AstNode[]).length === 0) delete b.agg_order;
     }
+    if (latest) return this.latest(b, args);
     // an aggregate over DISTINCT values sorts them to find the duplicates, so Postgres's string_agg / array_agg (DISTINCT)
     // lists them in that order (the argument's, under its collation); DuckDB's in any order. A constant argument is one
     // value, and would be a constant key (above)
@@ -4893,7 +4953,7 @@ const NOT_EXACT = new Error("not exact");
 /** the engine's integer types, as the rewrite casts to them (`duckExact`: an integer is exact) */
 const DUCK_INTEGER_NAMES = new Set(["tinyint", "smallint", "integer", "int", "bigint", "hugeint", "int2", "int4", "int8"]);
 /** the functions whose value is one of their first argument's (or its sum), in its own type (`duckExact`) */
-const VALUE_KEEPING = new Set(["sum", "min", "max", "any_value", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
+const VALUE_KEEPING = new Set(["sum", "min", "max", "any_value", "arg_min_null", "arg_max_null", "latest", "last", "lag", "lead", "first_value", "last_value", "nth_value"]);
 /** the numeric functions the walk writes as an exact DECIMAL or integer (`duckExact`): count, extract (`extract`: as
  *  the exact numeric Postgres returns), div of integers */
 const WRITTEN_EXACT = new Set(["count", "extract", "div"]);

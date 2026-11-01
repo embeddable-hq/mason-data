@@ -18,6 +18,7 @@ import { DuckStore } from "../src/duck/store.ts";
 import { Sync } from "../src/duck/sync.ts";
 import { connectSource, parseSource, readSourceFacts } from "../src/cli/preflight.ts";
 import { startPostgresApi } from "../src/api/postgres/server.ts";
+import { masonAggregatesSql } from "../src/api/postgres/catalog.ts";
 import { readLibcOrder } from "../src/duck/libc-order.ts";
 import { isLibcCollation } from "../src/duck/rewrite.ts";
 
@@ -39,6 +40,8 @@ let store: DuckStore | null = null, sync: Sync | null = null, server: Awaited<Re
 const clients: pg.Client[] = [];
 try {
   psql(dbUrl, fs.readFileSync(ddlFile, "utf8"));
+  // the aggregates Mason adds (`latest`), declared in Postgres as the catalog declares them, so both answer them
+  psql(dbUrl, masonAggregatesSql().map((s) => `${s};`).join("\n"));
   const parsed = parseSource(dbUrl);
   if ("problem" in parsed) throw new Error(parsed.problem);
   const conn = await connectSource(parsed.source);

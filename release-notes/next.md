@@ -171,6 +171,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   ROW(a, b) AS r … ORDER BY r`, `SELECT t … ORDER BY 1`) sorted by the row's text (`(0,100)` before `(0,50)`): it is
   now refused by name (`row-value`), with the way out, as `ORDER BY ROW(a, b)` already was. Sort by the row's columns
   instead. Nothing to do on upgrade.
+- **`latest(x ORDER BY a, id)` answers the `x` of the row that sorts last**, an aggregate Mason adds to what Postgres
+  has: the newest status per customer is `SELECT customer_id, latest(status ORDER BY updated_at, id) FROM orders GROUP BY
+  customer_id`, with no window or `DISTINCT ON`. Rows are ordered as Postgres orders them: NULLs last ascending and
+  first descending (or as `NULLS FIRST` / `LAST` says), text by its collation, and a tie in the keys is any one of the
+  tied rows, so end the `ORDER BY` in a unique column. It works with `FILTER`, `HAVING`, a `GROUP BY` and in a
+  subquery. Without an `ORDER BY`, as a window function, or over a computed numeric such as a division it is refused
+  with what to write instead (`latest-without-order`, `latest-computed-numeric`). Mason's API only: your database has
+  no `latest`.
 
 ## Known
 

@@ -378,6 +378,21 @@ export function unwrapRole(frames: ReadonlyArray<{ type: string; frame: Buffer }
 export const SESSION_SETTINGS = `mason_${randomBytes(8).toString("hex")}.session`;
 
 /**
+ * THE AGGREGATES MASON ADDS, declared in the catalog Postgres so that its analysis types and names every call as it does
+ * Postgres's own (src/duck/plan.ts), and in the oracle's Postgres from this same list, so that the two are held alike
+ * (tests/integration/duck-oracle.itest.ts). `latest(x ORDER BY a [, b …])` is the `x` of the row that sorts LAST under
+ * its ORDER BY: Postgres feeds an aggregate its rows in that order, so the step keeps the newest value, a NULL included
+ * (not STRICT). Without an ORDER BY the order is no one's, and Mason refuses it (src/duck/rewrite.ts `latest`, gap
+ * `latest-without-order`); the engine computes it as `arg_max_null` or `last` there. Plain SQL, as `currentSettingSql`.
+ */
+export function masonAggregatesSql(): string[] {
+  return [
+    "CREATE OR REPLACE FUNCTION public.mason_latest_step(anyelement, anyelement) RETURNS anyelement LANGUAGE sql IMMUTABLE AS $$ SELECT $2 $$",
+    "CREATE OR REPLACE AGGREGATE public.latest(anyelement) (SFUNC = public.mason_latest_step, STYPE = anyelement)",
+  ];
+}
+
+/**
  * THE CATALOG'S `current_setting(name[, missing_ok])` IS THE SESSION'S (GitHub issue 40: after `SET TimeZone` it answered
  * the catalog's UTC, where `SHOW TimeZone` answered the session's): the value the session holds under that name, from
  * the request's `SESSION_SETTINGS` (`asSession`: every parameter the listener's `sessionSetting` answers), else

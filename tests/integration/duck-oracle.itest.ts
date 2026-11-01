@@ -57,6 +57,8 @@ import { mutations, KEY_OF, SCHEMA, STAMPING, seed, TABLES } from "./oracle/data
 import { normalise, same } from "./oracle/compare.ts";
 import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postgres-cases.ts";
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
+import { LATEST_DDL, LATEST_SHAPES, LATEST_TABLES } from "./oracle/latest.ts";
+import { masonAggregatesSql } from "../../src/api/postgres/catalog.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
@@ -113,7 +115,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
+const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -284,6 +286,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   psql(dbUrl, META);
   psql(dbUrl, TYPED);
   psql(dbUrl, ROWS_SCHEMA);
+  // the aggregates Mason adds (`latest`), declared as the catalog declares them, so Postgres answers them too
+  psql(dbUrl, masonAggregatesSql().map((x) => `${x};`).join("\n"));
+  psql(dbUrl, LATEST_DDL);
   const collation = psql(dbUrl, "SELECT datcollate || ' (' || datlocprovider::text || ')' FROM pg_database WHERE datname = current_database()");
   console.log(`duck oracle: database ${tag}, collation ${collation}`);
 
@@ -388,6 +393,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     ...QUERY_CASES.map((q) => ({ group: "query case", name: q.slice(0, 80), sql: throughOne(q) })),
     ...REFUSED_CASES.map((q) => ({ group: "refused case", name: q.sql.slice(0, 80), sql: throughOne(q.sql) })),
     ...BI_SHAPES.map((q) => ({ group: "BI shape", name: q.name, sql: q.sql })),
+    ...LATEST_SHAPES.map((q) => ({ group: "latest", name: q.name, sql: q.sql })),
     ...TYPE_MATRIX.map((q) => ({ group: "type matrix", name: q.name, sql: q.sql, ...(q.zone === undefined ? {} : { zone: q.zone }) })),
     ...GAP_CASES.map((q) => ({ group: "gap case", name: `gap case: ${q.gap}`, sql: q.sql })),
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },

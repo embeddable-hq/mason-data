@@ -31,7 +31,7 @@ import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
-import { catalogDdl } from "../src/api/postgres/catalog.ts";
+import { catalogDdl, masonAggregatesSql } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
 import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
@@ -303,6 +303,8 @@ before(async () => {
   // a session starts in UTC on this API, as on a server whose TimeZone is UTC
   await truth.exec("SET TimeZone = 'UTC'");
   for (const s of PG_DDL) await truth.exec(s);
+  // the aggregates Mason adds (`latest`), declared as the catalog declares them
+  for (const s of masonAggregatesSql()) await truth.exec(s);
   // the "source's" OID for citext is the truth's: what the copy records (SourceColumnInfo.typeOid) and the wire sends
   const citextOid = Number((await truth.query<{ oid: number }>("SELECT oid FROM pg_type WHERE typname = 'citext'")).rows[0]!.oid);
   schema.tables[2]!.columns[1]!.typeOid = citextOid;
@@ -1895,6 +1897,69 @@ test("ORDER BY x IS [NOT] NULL, x is one key with its nulls placed, as Postgres 
       const from = logged.length;
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
       assert.match(sent(from), /ORDER BY e\.ts IS NULL/, `${sql}\n${sent(from)}`);
+    }
+  } finally { await c.end(); }
+});
+
+// LATEST(x ORDER BY …), THE AGGREGATE MASON ADDS (src/api/postgres/catalog.ts masonAggregatesSql, src/duck/rewrite.ts
+// latest): the x of the row that sorts last, by Postgres's sort. Every key ascending with its NULLs last is the
+// greatest ROW of the keys — a ROW even of one key, or a row whose key is NULL (last in Postgres's order) is passed
+// over; any other order is the engine's sorted last(), its NULLs placed as Postgres places them. Over `nullish`, whose
+// n holds NULLs and ties; a statement whose keys tie is never held to one row's x
+test("latest(x ORDER BY …) is the x of the row that sorts last, by Postgres's sort, and refused by name without its ORDER BY", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  const tuple = /arg_max_null\(.*ROW\(/, sorted = /\blast\(.*ORDER BY/;
+  try {
+    const cases: Array<[string, RegExp]> = [
+      // one key, a NULL among the rows: the NULL sorts last ascending, and its row wins (id 2)
+      ["SELECT latest(id ORDER BY n) FROM nullish WHERE id IN (1, 2, 3)", tuple],
+      ["SELECT latest(id ORDER BY n ASC NULLS LAST) FROM nullish WHERE id IN (1, 2, 3)", tuple],
+      ["SELECT latest(id ORDER BY n DESC) FROM nullish WHERE id IN (1, 2, 3)", sorted],
+      ["SELECT latest(id ORDER BY n NULLS FIRST) FROM nullish WHERE id IN (1, 2, 3)", sorted],
+      ["SELECT latest(id ORDER BY n DESC NULLS LAST) FROM nullish WHERE id IN (1, 2, 3)", sorted],
+      // the first key ties, the second decides; mixed directions; each kind of key and of value
+      ["SELECT id % 3 AS g, latest(t ORDER BY n, id), latest(ts ORDER BY n, id DESC), latest(n ORDER BY ts DESC, id) FROM nullish GROUP BY 1 ORDER BY 1", sorted],
+      ["SELECT id % 3 AS g, latest(t ORDER BY n, id), latest(ts ORDER BY t, id), latest(n ORDER BY ts, id), latest(id ORDER BY t COLLATE \"C\", id) FROM nullish GROUP BY 1 ORDER BY 1", tuple],
+      ["SELECT latest(status ORDER BY amount, id), latest(meta ORDER BY created_at, id), latest(amount ORDER BY status DESC, id) FROM orders", sorted],
+      // FILTER, HAVING, the output's name sorted, a subquery, a CTE, beside other aggregates, an empty input
+      ["SELECT id % 2 AS g, latest(t ORDER BY n, id) FILTER (WHERE ts IS NOT NULL) FROM nullish GROUP BY 1 ORDER BY 1", tuple],
+      ["SELECT id % 2 AS g FROM nullish GROUP BY 1 HAVING latest(n ORDER BY ts, id) > 1 ORDER BY 1", tuple],
+      ["SELECT id % 3 AS g, latest(n ORDER BY t, id) AS l FROM nullish GROUP BY 1 ORDER BY l, g", tuple],
+      ["SELECT * FROM (SELECT id % 2 AS g, latest(n ORDER BY t, id) AS l FROM nullish GROUP BY 1) q ORDER BY g", tuple],
+      ["WITH q AS (SELECT id % 2 AS g, latest(n ORDER BY t DESC, id) AS l FROM nullish GROUP BY 1) SELECT * FROM q ORDER BY g", sorted],
+      ["SELECT count(*), max(n), latest(t ORDER BY n, id), sum(n) FROM nullish", tuple],
+      ["SELECT latest(t ORDER BY n, id) FROM nullish WHERE false", tuple],
+      ["SELECT latest(e.n * 2 ORDER BY e.ts, e.id), coalesce(latest(e.t ORDER BY e.ts, e.id), '-'), latest(o.amount ORDER BY o.id, e.id) * 2 FROM nullish e, orders o", tuple],
+      // DISTINCT changes no answer; a constant key orders nothing (one row here)
+      ["SELECT latest(DISTINCT t ORDER BY t) FROM nullish", tuple],
+      ["SELECT latest(id ORDER BY 1) FROM nullish WHERE id = 4", /\blast\(/],
+    ];
+    for (const [sql, want] of cases) {
+      const from = logged.length;
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+      assert.match(sent(from), want, `${sql}\n${sent(from)}`);
+    }
+    // a parameter in its FILTER, by the extended protocol
+    const prepared = "SELECT id % 2 AS g, latest(t ORDER BY n, id) FILTER (WHERE n > $1) FROM nullish GROUP BY 1 ORDER BY 1";
+    assert.deepEqual(await answer(c, prepared, [1]), await postgres(prepared, [1]));
+    // a tie the keys do not decide: any one of the tied rows' x (n = 3 holds ids 1 and 4), never held to one
+    assert.ok(["1", "4"].includes(String((await answer(c, "SELECT latest(id ORDER BY n) FROM nullish WHERE n = 3")).rows[0]![0])));
+    // no ORDER BY: refused by name, the way out from the form seen, and the way out answered
+    await assert.rejects(c.query("SELECT latest(t) FROM nullish"), (e: pg.DatabaseError) => e.code === "0A000" && /latest\(\) needs an ORDER BY/.test(e.message)
+      && /Mason gap latest-without-order/.test(e.detail ?? "") && /latest\(t ORDER BY …\)/.test(e.hint ?? ""));
+    await assert.rejects(c.query("SELECT id, latest(t) OVER (ORDER BY id) FROM nullish"), (e: pg.DatabaseError) => e.code === "0A000"
+      && /Mason gap latest-without-order/.test(e.detail ?? "") && /last_value\(t\) OVER/.test(e.hint ?? ""));
+    assert.deepEqual((await answer(c, "SELECT id, last_value(t) OVER (ORDER BY id) FROM nullish ORDER BY id")).rows, (await postgres("SELECT id, latest(t) OVER (ORDER BY id) FROM nullish ORDER BY id")).rows);
+    // Postgres's own refusal of an ORDER BY in a window's aggregate
+    await assert.rejects(c.query("SELECT latest(t ORDER BY n) OVER (ORDER BY id) FROM nullish"), (e: pg.DatabaseError) => e.code === "0A000" && !/Mason gap/.test(e.detail ?? ""));
+    // a numeric computed from other values is refused, and the way out (each operand's latest) is answered as Postgres
+    await assert.rejects(c.query("SELECT latest(amount / 3 ORDER BY id) FROM orders"), (e: pg.DatabaseError) => e.code === "0A000"
+      && /Mason gap latest-computed-numeric/.test(e.detail ?? "") && /latest\(a ORDER BY k, id\) \/ latest\(b ORDER BY k, id\)/.test(e.hint ?? ""));
+    assert.deepEqual((await answer(c, "SELECT latest(amount ORDER BY id) / latest(3 ORDER BY id) FROM orders")).rows, (await postgres("SELECT latest(amount / 3 ORDER BY id) FROM orders")).rows);
+    // the engine's functions the rewrite writes are not a client's: refused as on main, by Postgres's analysis
+    for (const sql of ["SELECT arg_max_null(t, n) FROM nullish", "SELECT last(t ORDER BY n) FROM nullish"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "42883", sql);
     }
   } finally { await c.end(); }
 });

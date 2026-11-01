@@ -67,7 +67,7 @@ import type { GapId } from "../../duck/gaps.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "../../duck/statement.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
-import { asRole, asSession, catalogPolicies, currentSettingSql, databaseNameSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
+import { asRole, asSession, catalogPolicies, currentSettingSql, databaseNameSql, masonAggregatesSql, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
 import { wrongDatabaseHint } from "../../lib/database-name.ts";
 import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
@@ -2684,6 +2684,8 @@ class Server {
         `CREATE OR REPLACE FUNCTION public.version() RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT '${version.replaceAll("'", "''")}' $$`,
         // `current_setting(name)` answers the session's settings, carried in by each of its requests (catalog.ts asSession)
         ...currentSettingSql(),
+        // the aggregates Mason adds (`latest(x ORDER BY …)`), typed and named by the catalog's analysis as Postgres's own
+        ...masonAggregatesSql(),
         "SET search_path = public, pg_catalog",
         ...databaseNameSql(options.database),
       ],

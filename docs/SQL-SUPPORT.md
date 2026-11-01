@@ -20,7 +20,7 @@ each). The copy is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 256 functions, 387 operators, 95 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 55 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 57 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (55)
+## Refused (57)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -101,6 +101,8 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `bc-timestamptz-zone` | a timestamptz before year 1 written in a zone other than UTC | the zone's local mean time | refused when a row holds one | SET TimeZone = 'UTC', or filter those rows out |
 | `width-bucket-forms` | width_bucket with its bounds reversed, or of an array of thresholds | answers | refused | low bound first |
 | `inet-order` | ORDER BY, <, >, min or max over an inet | orders addresses by network, then host | refused (equality, IS NULL and the value itself are answered) | sort or compare another column |
+| `latest-without-order` | latest(x) with no ORDER BY of its own (`latest(x)`, `latest(x ORDER BY …)` being the aggregate Mason adds), or as a window function (`latest(x) OVER (…)`) | the x of whichever row the scan reads last: no answer anyone can rely on | refused (latest(x ORDER BY a, id) is answered: the x of the row that sorts last) | latest(x ORDER BY …), its keys ending in a unique column; last_value(x) OVER (…) in a window |
+| `latest-computed-numeric` | latest(x ORDER BY …) of a numeric Mason holds no exact value of: a quotient, an average, a text read as a number, NaN | the exact value of the last row | refused (latest() of a numeric column, or of its sum, difference or product with another, is answered) | latest() of each operand with one ORDER BY that decides every tie, then compute: latest(a ORDER BY k, id) / latest(b ORDER BY k, id) |
 | `held-type-compare` | what needs the type's own value of a column Mason holds as its text (money, bit, macaddr, cidr, a geometric type, a range, a tsvector, xml, a composite, an extension's type): ORDER BY, <, >, min, max, sum; a function, an operator, a cast to another type, a subscript or a field; GROUP BY or DISTINCT of a numrange, a tsquery or a tstzrange; = of a money | orders and computes by the type's own rules | refused (the value, x::text, IS NULL, count, and = and GROUP BY where equal values have one text are answered: docs/SQL-SUPPORT.md) | x::text, which sorts, groups and compares as text; or another column |
 | `binary-held-type` | a column of a type Mason holds as its text, in binary format, but a point or a box | the type's binary form | refused | ask for the column in text format |
 | `citext-forms` | GROUP BY, DISTINCT, min, max, a set operation, or = ANY (an array) over a citext | groups and sorts without regard to case, answering one spelling | refused (=, <>, <, >, IN (…), LIKE and ORDER BY are answered, case-insensitively) | GROUP BY lower(x), or x::text where case matters |
