@@ -498,6 +498,23 @@ test("every spelling of a whole row of a filtered table is refused by the gap's 
   assert.deepEqual((await rows(c, "SELECT c.* FROM customers c WHERE c.id = 1")).length, 1);
 });
 
+test("FETCH … WITH TIES over a filtered table is refused by the gap's name, with the way out, at any depth", async () => {
+  await wire();
+  const c = await connect("acme8", addUser("acme8", "tenant", { tenant: "1" }));
+  for (const sql of ["SELECT c.id FROM customers c ORDER BY c.id FETCH FIRST 1 ROWS WITH TIES",
+    "SELECT count(*) FROM (SELECT c.id FROM customers c ORDER BY c.id FETCH FIRST 1 ROWS WITH TIES) s",
+    "(SELECT c.id FROM customers c ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) UNION ALL SELECT 1",
+    "SELECT c.id FROM customers c UNION ALL SELECT 1 ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES"]) {
+    const r = await refusal(c, sql);
+    assert.equal(r.code, "0A000", `${sql}: ${JSON.stringify(r)}`);
+    assert.match(`${r.message} ${r.detail ?? ""}`, /WITH TIES[^]*Mason gap roles/, `${sql}: ${JSON.stringify(r)}`);
+    assert.match(r.hint ?? "", /LIMIT/, sql);
+    assert.doesNotMatch(r.message, /report it/, sql);
+  }
+  // the same statement of a table no filter reads answers
+  assert.equal((await rows(c, "SELECT 1 AS one ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES")).length, 1);
+});
+
 test("EXPLAIN says no row count for a filtered table, as text or JSON, where the Row Filter stands; an unfiltered table keeps its", async () => {
   await wire();
   const c = await connect("acme8", addUser("acme8", "tenant", { tenant: "1" }));

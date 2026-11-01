@@ -546,6 +546,11 @@ export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: P
   if ([...filteredRead.values()].some((v) => !found.has(v.table))) {
     throw refused("Mason could not tell which of the statement's names are the tables its role filters (a Mason gap: report it, with the statement)", "write each table's name qualified by its schema");
   }
+  // the printer below (pgsql-deparser) writes FETCH … WITH TIES as a LIMIT, which the read-back refuses as a report-it
+  // gap: said by name here instead, at any depth (a set operation's arm is a body of its own, unwrapped)
+  if (JSON.stringify(tree).includes("\"limitOption\":\"LIMIT_OPTION_WITH_TIES\"")) {
+    throw refused("Mason cannot yet answer FETCH … WITH TIES in a statement that reads a table its role filters", "write ORDER BY … LIMIT n where the ties do not matter");
+  }
   // a column qualified by its table's schema (`public.orders.id`, Metabase writes every column so) names the subquery by
   // its alias alone: sound only where no other item of the statement has the table's name
   const named = all.flatMap((n) => {
