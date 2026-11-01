@@ -53,13 +53,16 @@ ${keys}
     table serves until then. It runs again once a base has changed and target_lag comes due; nothing runs over idle
     bases. A run shares the queue that first syncs use, one at a time, and reads nothing from your database.
     A run that fails leaves the table serving what it held, and mason status says why.
+    A table may read another generated table. Parents are built first; a base's change re-runs the whole chain above
+    it over one snapshot, and the chain swaps in at once. A table that reads itself, through others or not, is refused;
+    a table whose parent is refused or failed is not run, and mason status says why.
 
   WHAT IS REFUSED, WITH THE WAY OUT
     A file with a mistake, or SQL Mason cannot store, is refused by file, key and reason. Nothing else stops, and a
     table already built keeps serving and being re-run from what it was built with. A table has no session, so SQL that
     reads a time zone or a setting is refused: name the zone (t AT TIME ZONE 'UTC', date_trunc('day', t, 'UTC')).
     A daily table in one zone doesn't serve a dashboard in another.
-    Not available yet: kind: live, numeric columns and columns of your own types, and reading another generated table.
+    Not available yet: kind: live, and numeric columns and columns of your own types.
 
   WHO READS IT
     A role with tables: all reads it. A role with a list of tables reads it once it names it, as mason/roles.yml names

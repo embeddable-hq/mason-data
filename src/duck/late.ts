@@ -598,10 +598,6 @@ function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, num
       target = named[0];
     }
     const computed = (t: AstNode): boolean => rowWise(bodyOf(t).val).computes;
-    // A SORT KEY WRITTEN AS A BARE LITERAL: a constant orders nothing, and written into a sort it is an ordinal to
-    // DuckDB (an integer: the inner list's first column, a row number) or refused (42804, a non-integer literal). So it
-    // is no key: the statement sorts by the keys left, as Postgres's plan does
-    if (constant(target !== undefined ? bodyOf(target).val : node)) continue;
     sorts.push(sort);
     if (target !== undefined) {
       if (computed(target)) {
@@ -620,8 +616,6 @@ function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, num
   return { keys, sorts };
 }
 
-/** a constant, under casts: it orders no row (a bare one written as a sort key is an ordinal, read before this) */
-const constant = (n: unknown): boolean => kindOf(n) === "A_Const" || (kindOf(n) === "TypeCast" && constant(bodyOf(n).arg));
 
 /** one SELECT written so, or null where it is not so shaped */
 function afterLimit(select: AstNode): AstNode | null {
@@ -1269,7 +1263,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   // What is carried has no row number, so with one (a keyed WITH query read twice) they would be no total order
   const pagedInOrder = sorts.length === 0 && carried.length === 0 && (query === first ? named.every((q) => q.bounded) : query.bounded);
   const order = (node: AstNode): AstNode => ({ SortBy: { node, sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } });
-  // (the written sort is never the inner's: every key a constant, none is left to sort by)
+  // (the written sort is never the inner's: the outer sorts the rows the inner fetched)
   const { withClause: _with, sortClause: _sorts, ...body } = s;
   const left = isObject(s.withClause) ? (s.withClause.ctes as AstNode[]).filter((c) => !withs.used.has(String(bodyOf(c).ctename))) : [];
   const inner: Body = { ...body, ...(left.length > 0 ? { withClause: { ...s.withClause as Body, ctes: left } } : {}), fromClause: from, targetList: [

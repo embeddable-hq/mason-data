@@ -209,6 +209,46 @@ function printed(tree: Node, statement: string): string {
   throw new StatementError({ code: "0A000", message: "Mason cannot print this statement for the engine (a Mason gap: report it, with the statement)" }, statement);
 }
 
+/**
+ * A CHAIN'S CHILD READS ITS PARENT'S SIDE TABLE (src/duck/generated.ts, issue 124 stage 2): on the finished tree, each
+ * read of a table `relations` names is swapped for the table it maps to, in the same schema, under the name the statement
+ * read it by (its alias, else the table's own), so every column the rewrite qualified still binds. A bare name is the
+ * search path's first schema's (a generated table is planned under `public`), and a bare name a WITH in scope holds is a
+ * CTE's, never swapped. Every table named must be met: a read left on the served table would read the old parent, so
+ * one not met throws. The read-back below holds the swapped text to the tree, as any other.
+ */
+function swapRelations(tree: unknown, relations: ReadonlyMap<string, string>, schemas: readonly string[]): void {
+  const met = new Set<string>();
+  const walk = (v: unknown, ctes: ReadonlySet<string>): void => {
+    if (Array.isArray(v)) { for (const x of v) walk(x, ctes); return; }
+    if (typeof v !== "object" || v === null) return;
+    const o = v as Record<string, unknown>;
+    const r = o.RangeVar as { schemaname?: string; relname: string; alias?: { aliasname: string } } | undefined;
+    if (r !== undefined) {
+      if (r.schemaname === undefined && ctes.has(r.relname)) return;
+      const key = `${r.schemaname ?? schemas[0] ?? "public"}.${r.relname}`;
+      const to = relations.get(key);
+      if (to !== undefined) { r.alias ??= { aliasname: r.relname }; r.relname = to; met.add(key); }
+      return;
+    }
+    // a column by the table's schema-qualified name (`public.counts.tenant_id`, valid Postgres): the swapped table is
+    // read under its own name as an alias, which binds no schema, so the column is named by that alias alone
+    const fields = (o.ColumnRef as { fields?: unknown[] } | undefined)?.fields;
+    if (fields !== undefined && fields.length >= 3) {
+      const sval = (x: unknown): string | undefined => (x as { String?: { sval?: string } } | undefined)?.String?.sval;
+      const schema = sval(fields[fields.length - 3]), table = sval(fields[fields.length - 2]);
+      if (schema !== undefined && table !== undefined && relations.has(`${schema}.${table}`)) (o.ColumnRef as { fields: unknown[] }).fields = fields.slice(-2);
+      return;
+    }
+    const list = (o.withClause as { ctes?: Array<{ CommonTableExpr?: { ctename?: string } }> } | undefined)?.ctes;
+    const scope = list === undefined ? ctes : new Set([...ctes, ...list.map((c) => c.CommonTableExpr?.ctename ?? "")]);
+    for (const x of Object.values(o)) walk(x, scope);
+  };
+  walk(tree, new Set());
+  const missed = [...relations.keys()].filter((k) => !met.has(k));
+  if (missed.length > 0) throw new Error(`a generated table's plan does not read ${missed.join(", ")} by a name it can swap (Mason bug: report it)`);
+}
+
 /** what a statement is planned from: `planDuck`'s one argument */
 export interface PlanOptions {
   catalog: (bytes: Uint8Array) => Promise<Uint8Array>;
@@ -227,6 +267,8 @@ export interface PlanOptions {
   wireBound?: boolean;
   grants?: RoleGrants | null | undefined;
   walls?: Walls | null;
+  /** a generated table's run (src/duck/generated.ts): `schema.table` → the table read in its place, in the same schema */
+  relations?: ReadonlyMap<string, string>;
 }
 
 /** The catalog declares a type the source made with nothing over it (`PgColumn.made`), so what its analysis says is not
@@ -263,7 +305,7 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const { catalog, text, stmt, base, paramOids, searchPath, timeZone, collation, verified, userTypes = new Map<string, number>(), copies = () => [],
-    depth = 0, kept = null, wireBound = false, grants, walls = null } = options;
+    depth = 0, kept = null, wireBound = false, grants, walls = null, relations } = options;
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -421,6 +463,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   if (walls !== null && wallSwitch.statistics) wallStatistics(tree, { alias: walls.alias, reads: walls.reads + (lateWall?.added ?? 0) });
   // on the finished tree, so no rule above meets it; `masonCalls` below does not count it as a function called
   giveTurns(tree);
+  if (relations !== undefined && relations.size > 0) swapRelations(tree, relations, searchSchemas(searchPath));
   const sql = printed(tree as Node, text);
   // THE PRINTED TEXT MUST READ BACK AS THE TREE: a printing gap (the deparser drops or respells something) would run
   // another statement than the one Postgres analysed — refused instead, by name

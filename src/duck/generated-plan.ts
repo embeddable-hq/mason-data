@@ -52,7 +52,7 @@ export interface DefinitionPlan {
 /** What a plan is asked of: the listener's catalog (src/api/postgres/server.ts `planner`). */
 export interface Planner {
   /** a statement planned as a session with no role, in UTC under `public`, would be: a StatementError where it is refused */
-  plan(text: string, stmt: Node): Promise<DuckPlan>;
+  plan(text: string, stmt: Node, relations?: ReadonlyMap<string, string>): Promise<DuckPlan>;
   /** rows of a read of the catalog */
   rows(sql: string): Promise<(string | null)[][]>;
 }
@@ -219,22 +219,44 @@ function columnProblem(f: { name: string; oid: number }, typeName: string): Gene
   return { key: "sql", message: `${it} is of type ${typeName}, which a generated table can't store yet`, why: null, options: [`cast it to a type it can store: ${f.name}::text`] };
 }
 
-/** a definition that reads a generated table (`what`: the table, built or not) */
-export function readsGenerated(what: string): GeneratedRefusal {
-  return { key: "sql", message: `it reads ${what === "" ? "a generated table" : `${what}, a generated table`}`, why: "A generated table reads the tables the sources file syncs. Reading another one isn't available yet.",
-    options: ["read the table it was generated from", "or write its SQL into this one, as a subquery"] };
+/** the tables a definition's SQL names, by name alone (`schema.table`, a bare name `public`'s): what a cycle is told
+ *  from before anything is planned. A bare name some WITH of the statement holds is a CTE's and left out. Nothing,
+ *  where the SQL does not parse: that is refused at its check. */
+export async function readsByName(sql: string): Promise<string[]> {
+  const select = await selectOf(sql);
+  if ("refused" in select) return [];
+  const ctes = new Set<string>(), qualified = new Set<string>(), bare = new Set<string>();
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (typeof v !== "object" || v === null) return;
+    const o = v as Record<string, unknown>;
+    const cte = o.CommonTableExpr as { ctename?: string } | undefined;
+    if (cte?.ctename !== undefined) ctes.add(cte.ctename);
+    const r = o.RangeVar as { schemaname?: string; relname: string } | undefined;
+    if (r !== undefined) (r.schemaname === undefined ? bare : qualified).add(r.schemaname === undefined ? r.relname : `${r.schemaname}.${r.relname}`);
+    Object.values(o).forEach(walk);
+  };
+  walk(select.stmt);
+  return [...new Set([...qualified, ...[...bare].filter((n) => !ctes.has(n)).map((n) => `public.${n}`)])].sort();
+}
+
+/** a definition in a cycle of generated tables (`cycle`: the tables, from this one round to it again) */
+export function cycleRefusal(cycle: readonly string[]): GeneratedRefusal {
+  return { key: "sql", message: cycle.length <= 2 ? `it reads ${cycle[0]}, itself` : `it reads itself through other generated tables: ${cycle.join(" -> ")}`,
+    why: "A generated table is built from the tables built before it, so none can read itself, through others or not.",
+    options: ["read the tables the cycle is generated from instead", "or write the other table's SQL into this one, as a subquery"] };
 }
 
 /**
- * A DEFINITION HELD TO WHAT A TABLE CAN STORE, its reads named. `generated`: the names of the generated tables, which a
- * definition may not read yet. Throws what `Planner.plan` throws: a statement Postgres or the rewrite refuses is the
+ * A DEFINITION HELD TO WHAT A TABLE CAN STORE, its reads named. `relations`: for a run of a chain, each parent built in
+ * the same run (`schema.table`) and the side table read in its place (src/duck/plan.ts swapRelations). Throws what `Planner.plan` throws: a statement Postgres or the rewrite refuses is the
  * caller's to say at its key, and a table not there yet its to wait for.
  */
-export async function planDefinition(p: Planner, sql: string, orderBy: string | null, generated: ReadonlySet<string>): Promise<{ definition: DefinitionPlan } | { refused: GeneratedRefusal[] }> {
+export async function planDefinition(p: Planner, sql: string, orderBy: string | null, relations?: ReadonlyMap<string, string>): Promise<{ definition: DefinitionPlan } | { refused: GeneratedRefusal[] }> {
   const statement = await definitionStatement(sql, orderBy);
   if ("refused" in statement) return { refused: [statement.refused] };
   let plan: DuckPlan;
-  try { plan = await p.plan(statement.text, statement.stmt); }
+  try { plan = await p.plan(statement.text, statement.stmt, relations); }
   catch (e) {
     // a statement refused for what Mason has not verified (`current_time`, a timetz) that also reads a session is refused
     // for the session, with the line to write: verifying it would not make it a table's to hold
@@ -246,8 +268,6 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   }
   const bases = [...new Set((plan.reads ?? []).map((r) => r.table))].sort();
   const refused: GeneratedRefusal[] = [];
-  const chained = bases.filter((b) => generated.has(b));
-  if (chained.length > 0) refused.push(readsGenerated(chained.join(" and ")));
   const session = await sessionReads(p.rows, plan.resolved);
   if (session.length > 0) refused.push(sessionRefusal(session));
   const text = await textReads(p.rows, plan.resolved, plan.argumentTypes ?? []);

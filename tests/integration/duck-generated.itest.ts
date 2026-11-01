@@ -94,6 +94,30 @@ const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: str
       "SELECT id, payload ->> 'k' AS k, payload_name FROM joined WHERE payload ->> 'k' = '1' ORDER BY id LIMIT 5",
       "SELECT on_day, utc::text AS utc, created_at::text AS created_at, taken::text AS taken, ref::text AS ref FROM joined WHERE id < 5 ORDER BY id",
     ] },
+  // CHAINS (stage 2a): a child over a parent, held to Postgres running the child's SQL over the parent's view, which holds
+  // the parent's rows; each after its parent, as Postgres's views must be made
+  { name: "tenant_totals", schema: "public", table: "tenant_totals",
+    sql: "SELECT tenant_id AS tenant, sum(orders)::bigint AS orders, sum(units)::bigint AS units, max(last_at) AS last_at FROM daily GROUP BY tenant_id",
+    orderBy: "tenant",
+    statements: [
+      "SELECT * FROM tenant_totals ORDER BY tenant",
+      "SELECT tenant, orders FROM tenant_totals ORDER BY orders DESC, tenant",
+    ] },
+  { name: "daily_named", schema: "public", table: "daily_named",
+    sql: "SELECT d.day, c.name, c.region, d.orders, d.first_status FROM daily d JOIN customers c ON c.id = d.tenant_id",
+    orderBy: "day, name",
+    statements: [
+      "SELECT * FROM daily_named ORDER BY day, name, orders",
+      "SELECT region, count(*) AS days, sum(orders) AS orders FROM daily_named GROUP BY region ORDER BY region",
+    ] },
+  { name: "by_status", schema: "public", table: "by_status",
+    sql: "SELECT status, count(*) AS n, sum(quantity) AS q, min(on_day) AS first_day FROM joined GROUP BY status",
+    orderBy: "status",
+    statements: [
+      "SELECT * FROM by_status ORDER BY status",
+      "SELECT status, n FROM by_status ORDER BY status DESC",
+      "SELECT status, q FROM by_status ORDER BY status NULLS FIRST",
+    ] },
   { name: "reports.ranked", schema: "reports", table: "ranked",
     sql: "SELECT tenant_id, count(*) AS n, rank() OVER (ORDER BY count(*) DESC, tenant_id) AS position FROM orders GROUP BY tenant_id",
     orderBy: "position",
@@ -182,10 +206,17 @@ async function withHarness(db: string, mode: "poll" | "replication", use: (h: Ha
     };
     const until = async (name: string, done: (s: GeneratedStatus) => boolean): Promise<GeneratedStatus> => {
       const end = Date.now() + 60_000;
+      // a table refused for 2 s on end fails now with the refusal's text: a refusal is decided from the definition, so
+      // waiting out the minute only hides its reason (a numeric column timed two tests out, PR 163)
+      let refusedSince: number | null = null;
       for (;;) {
         await sync.generated.review();
         const s = status(name);
         if (done(s)) return s;
+        refusedSince = s.state === "refused" ? refusedSince ?? Date.now() : null;
+        if (refusedSince !== null && Date.now() - refusedSince > 2_000) {
+          assert.fail(`${name} is refused: ${s.refusals.map((r) => r.text).join("; ")}`);
+        }
         if (Date.now() > end) assert.fail(`${name} never got there: ${JSON.stringify(s)}\n${logged.slice(-12).join("\n")}`);
         await new Promise((r) => setTimeout(r, 25));
       }
