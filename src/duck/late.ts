@@ -490,10 +490,10 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
     if (named1 !== undefined && named1.length !== 1) return null;
     grouping.push(structuredClone(named1?.[0] ?? g));
   }
-  const sorts = (s.sortClause as AstNode[] | undefined) ?? [];
   const shown = new Map<number, number>();
-  const keys = sortKeys(targets, sorts, shown);
-  if (keys === null) return null;
+  const sorted = sortKeys(targets, (s.sortClause as AstNode[] | undefined) ?? [], shown);
+  if (sorted === null) return null;
+  const { keys, sorts } = sorted;
   const fetched: string[] = [];
   const carried: AstNode[] = [];
   const list = targets.map((t, i) => {
@@ -547,7 +547,8 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
     return columns.some((c) => mentions([carried, keys, s.havingClause, s.windowClause, grouping.filter((_x, j) => j !== i)], c));
   });
   const fromInner = mapFrom(s.fromClause as unknown[], (n, i) => keyed.has(aliases[i]!) ? ownTable(bodyOf(n)) : n);
-  const inner: Body = { ...s, fromClause: fromInner, groupClause: kept, distinctClause: undefined, targetList: [
+  const { sortClause: _sorts, ...unsorted } = s;
+  const inner: Body = { ...unsorted, fromClause: fromInner, groupClause: kept, distinctClause: undefined, targetList: [
     ...fetched.map((alias, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: anyValue(rowNumber(alias)) } })),
     ...carried,
     ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
@@ -579,9 +580,9 @@ const noLimit = (n: unknown): boolean => kindOf(n) === "A_Const" ? bodyOf(n).isn
  *  output's own expression, as Postgres reads it (an output name before an input column's). Without `shown`, a sort by a
  *  computed output is left alone: over one table it computes that output for every row anyway, so nothing is deferred.
  *  With it, the key is that output, and `shown` says which key each computed output is, by the output's place: one value */
-function sortKeys(targets: AstNode[], sorts: AstNode[], shown: Map<number, number> | null = null): AstNode[] | null {
-  const keys: AstNode[] = [];
-  for (const sort of sorts) {
+function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, number> | null = null): { keys: AstNode[]; sorts: AstNode[] } | null {
+  const keys: AstNode[] = [], sorts: AstNode[] = [];
+  for (const sort of written) {
     if (kindOf(sort) !== "SortBy") return null;
     const b = bodyOf(sort);
     if (b.useOp !== undefined) return null;
@@ -597,6 +598,11 @@ function sortKeys(targets: AstNode[], sorts: AstNode[], shown: Map<number, numbe
       target = named[0];
     }
     const computed = (t: AstNode): boolean => rowWise(bodyOf(t).val).computes;
+    // A SORT KEY WRITTEN AS A BARE LITERAL: a constant orders nothing, and written into a sort it is an ordinal to
+    // DuckDB (an integer: the inner list's first column, a row number) or refused (42804, a non-integer literal). So it
+    // is no key: the statement sorts by the keys left, as Postgres's plan does
+    if (constant(target !== undefined ? bodyOf(target).val : node)) continue;
+    sorts.push(sort);
     if (target !== undefined) {
       if (computed(target)) {
         if (shown === null) return null;
@@ -611,15 +617,18 @@ function sortKeys(targets: AstNode[], sorts: AstNode[], shown: Map<number, numbe
       keys.push(structuredClone(node as AstNode));
     }
   }
-  return keys;
+  return { keys, sorts };
 }
+
+/** a constant, under casts: it orders no row (a bare one written as a sort key is an ordinal, read before this) */
+const constant = (n: unknown): boolean => kindOf(n) === "A_Const" || (kindOf(n) === "TypeCast" && constant(bodyOf(n).arg));
 
 /** one SELECT written so, or null where it is not so shaped */
 function afterLimit(select: AstNode): AstNode | null {
   const s = bodyOf(select);
   const shape = sortedLimited(s);
   if (shape === null) return null;
-  const { targets, sorts } = shape;
+  const { targets } = shape;
   let computes = false;
   for (const t of targets) {
     if (kindOf(t) !== "ResTarget") return null;
@@ -628,8 +637,9 @@ function afterLimit(select: AstNode): AstNode | null {
     computes ||= r.computes;
   }
   if (!computes) return null;
-  const keys = sortKeys(targets, sorts);
-  if (keys === null) return null;
+  const sorted = sortKeys(targets, shape.sorts);
+  if (sorted === null || sorted.sorts.length === 0) return null;
+  const { keys, sorts } = sorted;
   const columns = new Map<string, string>();
   const list = targets.map((t) => ({ ResTarget: { ...bodyOf(t), val: overLate(bodyOf(t).val, columns) } }));
   const inner: Body = { ...s, targetList: [
@@ -1221,13 +1231,14 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   if (subLinks.some((a) => { const i = aliases.indexOf(a); return i < 0 || (listed[i]!.kind === "derived" && sides[i] === null); })) return null;
   const outputs = writtenOut(s.targetList as AstNode[], listed, tablesAlone, subqueried ? subLinks : null);
   if (outputs === null) return null;
-  const sorts = (s.sortClause as AstNode[] | undefined) ?? [];
+  const writtenSorts = (s.sortClause as AstNode[] | undefined) ?? [];
   // the keys are read from the outputs as the join reads them: a bare merged column is the join's, inside
   const shown = new Map<number, number>();
-  const keys = sortKeys(outputs.list, sorts, shown);
-  if (keys === null) return null;
+  const sorted = sortKeys(outputs.list, writtenSorts, shown);
+  if (sorted === null) return null;
+  const { keys, sorts } = sorted;
   // ONE VALUE: a volatile output a sort reads is read from its key, and a key a written form cannot show stays as it was
-  if (named.some((q) => q.volatileOutputs.some((o) => !shown?.has(o)) || (q.volatileKeys && q.sorts !== sorts.length))) return null;
+  if (named.some((q) => q.volatileOutputs.some((o) => !shown?.has(o)) || (q.volatileKeys && q.sorts !== writtenSorts.length))) return null;
   const volatileKeys = named.some((q) => q.volatileKeys);
   if (query.joins.length !== joinCount(s.fromClause) || natural(s.fromClause)) return null;
   const columns = new Map<string, { name: string; val: AstNode }>();

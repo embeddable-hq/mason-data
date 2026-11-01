@@ -2253,6 +2253,37 @@ test("a sorted, limited select list is computed for the rows the limit keeps, as
   } finally { await c.end(); }
 });
 
+// a sort key written as a bare literal: an output holding a constant, sorted by its name or number, was written into the
+// inner ORDER BY as the literal, which DuckDB reads as an ordinal (an integer: the first inner column, a row number) or
+// refuses (42804, "non-integer literal"); a constant orders nothing, so it is no key at all
+test("a sort key that is an output holding a constant orders nothing: by name and by number, before the real keys", async () => {
+  const c = await client();
+  try {
+    for (const v of ["1 AS v", "'x' AS v", "true AS v", "2::bigint AS v", "'x'::text AS v"]) {
+      for (const sql of [
+        // the GROUP BY form (keyFirst)
+        `SELECT l.id, l.k, ${v}, count(*) AS n FROM late l GROUP BY l.id ORDER BY v, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${v}, count(*) AS n FROM late l GROUP BY l.id ORDER BY 3, 1 DESC LIMIT 3`,
+        // the join (joinRows)
+        `SELECT l.id, l.k, ${v} FROM late l JOIN late_c c ON c.id = l.c ORDER BY v, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${v}, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3, l.k, 1 LIMIT 3`,
+        // one table, a computed list (afterLimit) and a plain one
+        `SELECT l.id, l.j ->> 'n' AS n, ${v} FROM late l ORDER BY v, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${v} FROM late l ORDER BY 3, l.k LIMIT 2`,
+        // no LIMIT: no rewrite of the sort, and the engine's own reading of it
+        `SELECT l.id, l.k, ${v} FROM late l WHERE l.id < 5 ORDER BY v, l.id DESC`,
+        `SELECT l.id, l.k, ${v}, c.name FROM late l JOIN late_c c ON c.id = l.c WHERE l.id < 5 ORDER BY 3, l.id DESC`,
+      ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+    // a constant cast, written as the key itself: an expression to Postgres, ordering nothing
+    for (const sql of ["SELECT l.id, l.k FROM late l ORDER BY 'x'::text, l.id DESC LIMIT 3",
+      "SELECT l.id, l.k, count(*) AS n FROM late l GROUP BY l.id ORDER BY 1::int, l.id DESC LIMIT 3",
+      "SELECT l.id, l.j ->> 'n' AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY true::boolean, l.id DESC LIMIT 3"]) {
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+  } finally { await c.end(); }
+});
+
 // ISSUE 112: an output's number or bare name beside a * reached the engine as written: no rule met the column it is
 test("an output of a * is read by its number and its bare name as the column it is", async () => {
   const c = await client();
@@ -2604,6 +2635,9 @@ test("a SELECT DISTINCT whose list holds a table's whole primary key, with a LIM
       "SELECT DISTINCT c.name, l.id, l.k FROM late_c c JOIN late l ON l.c = c.id ORDER BY c.name, l.id LIMIT 4",
       // the nulls idiom over a fetched column, and a constant in the list
       "SELECT DISTINCT l.id, l.k, (l.k) IS NULL AS nk, 1 AS one FROM late l ORDER BY (l.k) IS NULL ASC, l.k DESC LIMIT 3",
+      // a sort by an output holding a constant: it orders nothing, and never reaches the inner sort as an ordinal
+      "SELECT DISTINCT l.id, l.k, 1 AS one FROM late l ORDER BY 3, 2 ASC LIMIT 3",
+      "SELECT DISTINCT l.id, l.k, 1 AS one FROM late l ORDER BY one, l.id DESC LIMIT 3",
       // a composite key, whole, beside another column of its table
       "SELECT DISTINCT p.line, p.note, p.c FROM late_p p ORDER BY 3, 1 LIMIT 3",
       // over a derived side: the DISTINCT inside it is written, the read around it as it was
@@ -2613,6 +2647,9 @@ test("a SELECT DISTINCT whose list holds a table's whole primary key, with a LIM
       assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
       assert.match(await sent(sql), KEYED, sql);
     }
+    // Postgres's rows for the constant sorts, written out
+    assert.deepEqual((await answer(c, "SELECT DISTINCT l.id, l.k, 1 AS one FROM late l ORDER BY 3, 2 ASC LIMIT 3")).rows, [["2000", "0", "1"], ["1999", "1", "1"], ["1998", "2", "1"]]);
+    assert.deepEqual((await answer(c, "SELECT DISTINCT l.id, l.k, 1 AS one FROM late l ORDER BY one, l.id DESC LIMIT 3")).rows.map((r) => r[0]), ["2000", "1999", "1998"]);
     // the columns the key decides are left out of the grouping, the other table's stay in it
     assert.match(await sent("SELECT DISTINCT l.id, l.j, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 3"), /GROUP BY l\.id, c\.name ORDER BY/);
     // unsorted: as many rows, each a row of the whole answer
