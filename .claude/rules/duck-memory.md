@@ -47,3 +47,11 @@ paths:
   Nothing warns before 1 %; a table whose late pages are wider than its early ones is under-projected. What the check
   last projected is kept on the copy's live state and said, never computed a second way (`diskStatus`: `/api/state`
   `disk`, `mason status`'s Disk line, beside the bytes free by the same `diskFree`).
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- Many heavy statements at once (64 with the pool) under one `MASON_DUCKDB_MEMORY`: out-of-memory failures or spills
+  where a queue used to make them wait (PR 148).

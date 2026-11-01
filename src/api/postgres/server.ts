@@ -482,7 +482,7 @@ function asPgError(err: unknown, sql: string): PgError {
   if (err instanceof PostgresSyntaxError) return new PgError({ code: "42601", message: err.message, position: positionOf(sql, err.offset) });
   if (err instanceof ApiError) return new PgError({ code: sqlstateOf(err.status, err.code), message: err.message, detail: `Mason: ${err.code}` }, err.status);
   // Postgres's own error for a numeric (a division by zero, 22012; a field overflow, 22003), raised as Postgres raises it
-  if (err instanceof NumericError) return new PgError({ code: err.sqlstate, message: err.message, ...(err.detail === undefined ? {} : { detail: err.detail }) }, err.sqlstate === "XX000" ? 500 : 400, err.gap);
+  if (err instanceof NumericError) return new PgError({ code: err.sqlstate, message: err.message, ...(err.detail === null ? {} : { detail: err.detail }) }, err.sqlstate === "XX000" ? 500 : 400, err.gap);
   if (err instanceof EncodeError) return err.code === "XX000"
     ? new PgError({ code: "XX000", message: err.message, detail: "Mason: a value the column's Postgres type cannot carry; report it" }, 500)
     : new PgError({ code: err.code, message: err.message }, 400, err.gap);

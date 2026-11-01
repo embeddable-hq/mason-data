@@ -175,3 +175,16 @@ paths:
   a later poll. **`readPolledAt` only ever moves a time forward** (its SELECT's snapshot may be older than a commit on
   the rebuilds' connection), and drops a table the ledger no longer holds only when no commit gave it a time meanwhile.
   `tests/duck-sync-facts.test.ts` and `tests/integration/duck-poll.itest.ts` hold what the run says to the ledger.
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- A store written by the previous release (a `copy_state` row without the new field, a `point` copied as a STRUCT, an
+  enum column): synced again exactly where the layout differs, and quiet on the second start (PR 153).
+- A kept form or ledger column changed: a store from the previous release, or from an earlier commit of the branch, read
+  again or refused plainly, never decoded as `NaN` or failing a SELECT (PR 135, 156).
+- A replicated table leaving the stream for a re-sync whose column change is reverted before it swaps: back in the
+  stream with no catch-up (issue 79).
+- A slot invalidated for another reason (a conflict on a standby): blamed on `max_slot_wal_keep_size` (issue 74).

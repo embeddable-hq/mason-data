@@ -31,3 +31,17 @@ paths:
   400,000-row copy in "copies beside the polls" took 0.89 s on a CI runner, one poll pass ran beside it, and it failed). Its
   check: the test still passes with the table cut to 50 rows. Release the hold in a `finally` before `sync.stop()`,
   which interrupts DuckDB's statements, never the test's promise.
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- A test or oracle statement whose data cannot tell right from wrong (the ON key is the primary key, the GROUP BY keys
+  are the star's leading columns, every shape carries a LIMIT, the constant listed is never the sort key): a detector
+  that dodges the failing shape (PR 120, 155, 197, 207).
+- An oracle shape's name against its table (a "composite key" shape over a table keyed by `id`): a claim its data does
+  not hold (PR 170).
+- A KNOWN decision or gap case under C, ICU and libc sources: stale or dead off the collation it was written for (PR
+  135).
+- The allowlist and fixture written from a CI run: that run's head is the commit's (PR 159, 170).

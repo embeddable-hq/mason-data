@@ -32,7 +32,7 @@ import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
-import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
+import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, type Keys, type QueryOutputs, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
@@ -257,6 +257,9 @@ class Rewriter {
   private readonly done = new WeakSet<Body>();
   /** the statement's own bodies (and copies of them): only these are rewritten, never a node a rule built */
   private readonly original = new WeakSet<Body>();
+  /** the sort keys `distinctOnSorted` appended, each with its ON expression's binding (the one resolver's, `keysBound`):
+   *  no key of the analysis's sort list, which holds the ORDER BY as written */
+  private readonly distinctAppended = new WeakMap<Body, { output: Output | null; constant: boolean | null }>();
   /** the statement's own bodies the walk has met, each in its one place (walk) */
   private readonly placed = new WeakSet<Body>();
   /** the bodies whose own rule's answer is being walked: met there, a body is in the place its rule put it */
@@ -815,6 +818,8 @@ class Rewriter {
 
   private select(b: Body): AstNode | null {
     for (const c of (b.withClause?.ctes ?? []) as AstNode[]) if (isNode(c) && typeof bodyOf(c).ctename === "string" && isNode(bodyOf(c).ctequery)) this.ctes.set(bodyOf(c).ctename, bodyOf(c).ctequery as AstNode);
+    // a DISTINCT ON's sort holds its ON expressions (distinctOnSorted): before any key is built, so each is built as one
+    this.distinctOnSorted(b);
     // `x IS NULL, x DESC` as `x DESC NULLS LAST` (nullsKeyFolded): the folded key is the statement's own, its rules to
     // run; before anything writes a key another way, as the two are told alike by their trees
     if (Array.isArray(b.sortClause)) {
@@ -852,6 +857,11 @@ class Rewriter {
         // (INTERSECT ALL and EXCEPT ALL: jsonb's equality alone, which is not its text's; the rest as before)
         if (b.all !== true || this.typeOf(v) === JSONB || this.typeOf(v) === JSONB_ARRAY) this.comparable(v, what);
       }
+      // a numeric decided exactly, in any arm: the rows are compared whole, where no exact key can be placed
+      const arms: Body[] = [];
+      const armsOf = (x: Body): void => { if (x.op !== undefined && x.op !== "SETOP_NONE" && x.larg !== undefined && x.rarg !== undefined) { armsOf(x.larg as Body); armsOf(x.rarg as Body); } else arms.push(x); };
+      armsOf(b);
+      for (const arm of arms) for (const t of (arm.targetList ?? []) as AstNode[]) if (isNode(bodyOf(t).val)) this.refuseExactEquality(bodyOf(t).val as AstNode, what);
     }
     this.decidedByKey(b);
     // (after decidedByKey: a DISTINCT ON a target names it as the SELECT list reads it, through any_value where it must)
@@ -868,7 +878,15 @@ class Rewriter {
       const targets = b.targetList as AstNode[];
       // (a key bound to an output or another clause's key by equality, spelled unlike it: by the one resolver)
       const sorts = b.sortClause as AstNode[];
-      const bound = this.keysBound(sorts.map((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined), this.analysedQuery(targets)?.keys, "sorted", targets);
+      // (a key a DISTINCT ON appended (`distinctOnSorted`) is none of the analysis's sort list: the written keys are bound
+      // by it, an appended one as its ON expression was, by the DISTINCT ON's list)
+      const written = sorts.filter((s) => !this.distinctAppended.has(bodyOf(s)));
+      const nodeOf = (s: AstNode): AstNode | undefined => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined;
+      const writtenBound = this.keysBound(written.map(nodeOf), this.analysedQuery(targets)?.keys, "sorted", targets);
+      const bound = sorts.map((s) => {
+        const appended = this.distinctAppended.get(bodyOf(s));
+        return appended === undefined ? writtenBound[written.indexOf(s)]! : { ...appended, equal: false };
+      });
       const starred = targets.some((t) => hasStar(bodyOf(t).val));
       b.sortClause = sorts.flatMap((s, i) => {
         const sb = bodyOf(s);
@@ -1008,6 +1026,37 @@ class Rewriter {
 
   private twinRefused(): Unrewritable {
     return new Unrewritable("this * of a named join lists two columns of one name, and Mason cannot read one of them apart here", "name the join's columns in the SELECT, or leave the join's own name out", "star-join-twin");
+  }
+
+  /**
+   * A DISTINCT ON'S SORT IS ITS ON EXPRESSIONS TOO (transformDistinctOnClause: Postgres appends each ON expression its
+   * ORDER BY lacks, ASC NULLS LAST, and its Unique runs over that order, so the groups come back in it and a LIMIT or an
+   * OFFSET keeps the first groups of it). The engine is sent the sort Postgres runs, never the one written: each ON
+   * expression whose output (by its number, its bare name or the expression repeated) no sort key reads is appended
+   * here, as written, before any key is built, so every form sent (as written, src/duck/late.ts's inner query and its
+   * outer sort) sorts by it. Only where an order is read: a sort or a LIMIT. A sort with a key that is no ON expression
+   * holds them all already (else the catalog's 42P10). A constant ON expression orders nothing, and is not appended.
+   */
+  private distinctOnSorted(b: Body): void {
+    const on = b.distinctClause;
+    if (!Array.isArray(on) || on.length === 0 || !on.every(isNode) || (b.op !== undefined && b.op !== "SETOP_NONE")) return;
+    const sorts = (b.sortClause ?? []) as AstNode[];
+    if (sorts.length === 0 && b.limitCount === undefined && b.limitOffset === undefined) return;
+    const targets = (b.targetList ?? []) as AstNode[];
+    const read = (e: AstNode): AstNode => { const o = this.outputOf(e, targets); return o !== null && !o.twin ? o.value : e; };
+    const same = (x: AstNode, y: AstNode): boolean => sameTree(x, y) && sameTree(y, x);
+    const keys = sorts.flatMap((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? [read(bodyOf(s).node as AstNode)] : []);
+    // (each ON expression as the one resolver binds it, as keyedDistinct reads it: its output, and whether it is constant)
+    const bound = this.keysBound(on as AstNode[], this.analysedQuery(targets)?.keys, "distinct", targets);
+    const added = (on as AstNode[]).flatMap((d, i) => {
+      const e = read(d);
+      const constant = bound[i]!.constant ?? this.typed(e)?.constant;
+      if (keys.some((k) => same(k, e)) || kindOf(e) === "ParamRef" || constant === true) return [];
+      const key: AstNode = { SortBy: { node: this.clone(d), sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } };
+      this.distinctAppended.set(bodyOf(key), { output: bound[i]!.output, constant: bound[i]!.constant });
+      return [key];
+    });
+    if (added.length > 0) b.sortClause = [...sorts, ...added];
   }
 
   /** the output an ORDER BY item reads: by its number, or by its bare name (SQL92's rule: an output before an input
@@ -1210,7 +1259,8 @@ class Rewriter {
         const f = names(n.fields);
         if (depth === 0 && f.length === 1 && this.typedAt(v) === null && targets.some((t) => bodyOf(t).name === f[0])) return v;
         const t = this.typed(v);
-        if (t?.node !== "VAR" || t.levelsUp !== depth) return v;
+        // a cell riding beside a FROM item's column the group decides (carry): its value is the group's too
+        if (!(depth === 0 && isCellRef(v)) && (t?.node !== "VAR" || t.levelsUp !== depth)) return v;
         const call: AstNode = { FuncCall: { funcname: [S("any_value")], args: [v], funcformat: "COERCE_EXPLICIT_CALL" } };
         this.done.add(bodyOf(call));
         // typed as the column it reads: a sort's collation, a cast's source type
@@ -1288,12 +1338,15 @@ class Rewriter {
   // ------------------------------------------------------------------------------------- exact numerics
 
   /** The statement's numeric result columns as programs, their cells appended to its SELECT list (before the walk,
-   *  which rewrites each cell as it rewrites the column). Only a plain SELECT: a UNION or a DISTINCT would read the
-   *  hidden cells as part of each row. */
+   *  which rewrites each cell as it rewrites the column). Not a UNION, which would read the hidden cells as part of each
+   *  row. A DISTINCT ON compares its ON expressions alone, so the cells ride beside them, the kept row's; a plain DISTINCT
+   *  with a cell is written as the DISTINCT ON of every output by its number, which keeps the same rows and lets the cells
+   *  ride so too: a numeric decided exactly never leaves the engine as a double's text. */
   exactColumns(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }> | null): ExactColumn[] {
     if (kindOf(stmt) !== "SelectStmt" || fields === null) return [];
     const b = bodyOf(stmt);
-    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.distinctClause !== undefined || b.limitOption === "LIMIT_OPTION_WITH_TIES") return [];
+    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.limitOption === "LIMIT_OPTION_WITH_TIES") return [];
+    const plainDistinct = Array.isArray(b.distinctClause) && !b.distinctClause.every(isNode);
     const targets = (b.targetList ?? []) as AstNode[];
     // a query that selects cells already is never given them twice. No WITH query read twice reaches here: its programs
     // are derived once and every later reader is given them (`exactThrough`'s `derived`), never this empty answer
@@ -1312,6 +1365,8 @@ class Rewriter {
       let text = false;
       // a numeric's text (a varchar(n) cuts it, which the program does not: left to the rewrite's cast)
       if (TEXTS.has(field.oid) && (field.typmod ?? -1) < 0 && kindOf(node) === "TypeCast" && this.typeOf(bodyOf(node).arg as AstNode) === NUMERIC) { node = bodyOf(node).arg as AstNode; text = true; }
+      // a subquery's column holding such a text (carry): its program, the text Postgres writes
+      else if (TEXTS.has(field.oid) && (field.typmod ?? -1) < 0 && kindOf(node) === "ColumnRef" && (this.carry(node) as { text?: boolean } | null)?.text === true) text = true;
       else if (field.oid !== NUMERIC) return;
       const mine: typeof cells = [];
       const cell = (n: AstNode, conv: CellConv = "exact"): NumericProgram => {
@@ -1321,11 +1376,9 @@ class Rewriter {
         if (at < 0) { mine.push({ node: n, conv, shape }); at = mine.length - 1; }
         return { op: "cell", key: String(at) };
       };
-      let built: Built | null;
-      try { built = this.exactOf(node, cell); } catch (e) { if (e === NOT_EXACT) return; throw e; }
-      if (built === null || !worthComputing(built.p) && mine.every((c) => c.conv === "exact")) return;
-      // a numeric(p, s) column as it is: the wire pads it to s (src/duck/types.ts pgTypedColumn), no program needed
-      if (built.p.op === "pad" && built.p.arg.op === "cell" && !text && (field.typmod ?? -1) >= 4 && ((field.typmod! - 4) & 0xffff) === built.p.scale) return;
+      const built = this.programOf(node, cell);
+      // (the one test of whether its text needs the program: `programNeeded`)
+      if (built === null || !this.programNeeded(node, built.p, mine, text ? -1 : field.typmod ?? -1)) return;
       // the column's cells after every earlier column's
       const base = cells.length;
       cells.push(...mine);
@@ -1333,6 +1386,7 @@ class Rewriter {
     });
     if (out.length === 0) return [];
     for (const c of out) c.cells = cells.map((x) => x.conv);
+    if (plainDistinct) b.distinctClause = targets.map((_t, i) => intConst(i + 1));
     b.targetList = [...targets, ...cells.map((c, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: this.clone(c.node) } }))];
     return out;
   }
@@ -1366,27 +1420,359 @@ class Rewriter {
   /** the CTEs of the queries `exactThrough` is inside, outermost first (a recursive WITH's are none: never read whole) */
   private readonly cteScope: AstNode[][] = [];
 
+  // ------------------------------------------------------------------------------- an exact numeric carried
+
+  /** each column reference's query levels, by its offset in the statement: the query it is in last, each with the
+   *  WITH queries it declares (a clone keeps the offset, so it is found alike) */
+  private readonly scopes = new Map<number, Frame[]>();
+  /** each of the statement's own queries, with the query levels it is in (its own last): a WITH query a FROM name
+   *  reads is resolved by these, the one resolver (`cteOf`), wherever the reading query is met */
+  private readonly frames = new WeakMap<Body, Frame[]>();
+  /** every query that reads a WITH query in its FROM, by the WITH query */
+  private readonly cteReaders = new Map<Body, Body[]>();
+  /** the exact columns of each FROM item's query whose cells ride beside its columns (`innerExact`), made once */
+  private readonly innerExacts = new Map<Body, ExactColumn[]>();
+  /** whether a FROM item's query's cells may ride, decided at its first column read (`carry`): true, or why not */
+  private readonly rides = new Map<Body, true | string>();
+  /** why each FROM item's column could not be carried, in the developer's words (`refuseUncarried`) */
+  private readonly whyUncarried = new Map<Body, { what: string; where: string; why: string }>();
+  /** the subqueries in a FROM given a name for their cells to be read by */
+  private named = 0;
+
+  /** Before anything else: which query each column reference is read in (`carry` resolves its FROM item there) */
+  scopeColumns(v: unknown, stack: Frame[] = []): void {
+    if (Array.isArray(v)) { for (const x of v) this.scopeColumns(x, stack); return; }
+    if (v === null || typeof v !== "object") return;
+    if (isNode(v) && kindOf(v) === "SelectStmt") { this.scopeQuery(bodyOf(v), stack); return; }
+    if (isNode(v) && kindOf(v) === "ColumnRef" && typeof bodyOf(v).location === "number") this.scopes.set(bodyOf(v).location as number, stack);
+    for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) this.scopeColumns(x, stack);
+  }
+
+  private scopeQuery(b: Body, stack: Frame[]): void {
+    const here: Frame[] = [...stack, { select: b, ctes: (b.withClause?.ctes ?? []) as AstNode[], recursive: b.withClause?.recursive === true }];
+    this.frames.set(b, here);
+    for (const item of fromLeaves(b.fromClause)) {
+      if (kindOf(item) !== "RangeVar" || bodyOf(item).schemaname !== undefined) continue;
+      const cte = cteIn(here, String(bodyOf(item).relname));
+      if (cte !== null) this.cteReaders.set(bodyOf(cte.cte), [...this.cteReaders.get(bodyOf(cte.cte)) ?? [], b]);
+    }
+    // a set operation's arms are queries a level below it, as Postgres analyses them
+    for (const [key, x] of Object.entries(b)) {
+      if ((key === "larg" || key === "rarg") && x !== null && typeof x === "object") this.scopeQuery(x as Body, here);
+      else this.scopeColumns(x, here);
+    }
+  }
+
+  /** A ROW HOLDING A NUMERIC DECIDED EXACTLY (`(x / 1, y)`), compared, grouped or written, is refused by name: its
+   *  members are the engine's values, compared and written as its doubles, where Postgres's are exact */
+  refuseExactRows(v: unknown): void {
+    if (Array.isArray(v)) { for (const x of v) this.refuseExactRows(x); return; }
+    if (v === null || typeof v !== "object") return;
+    if (isNode(v) && kindOf(v) === "RowExpr" && ((bodyOf(v).args ?? []) as unknown[]).some((m) => isNode(m) && this.exactKey(m) !== null)) {
+      throw new Unrewritable("a row holding a numeric quotient or average is not supported by Mason (Postgres compares and writes the exact value, which the engine holds as a double)", "compare or select its members one by one: a = x AND b = y", "row-value");
+    }
+    for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) this.refuseExactRows(x);
+  }
+
+  /** after the outermost query's exact columns: every FROM item an exact numeric is read from carries its cells, before
+   *  the walk rewrites the query that holds them (a rule meeting the column later finds them made: `innerExact`) */
+  carryAll(v: unknown): void {
+    if (Array.isArray(v)) { for (const x of v) this.carryAll(x); return; }
+    if (v === null || typeof v !== "object") return;
+    if (isNode(v) && kindOf(v) === "ColumnRef") { this.carry(v); return; }
+    for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) this.carryAll(x);
+  }
+
+  /**
+   * A NUMERIC A SUBQUERY DECIDED EXACTLY, READ OUTSIDE IT (the classes approximate-compared-as-exact and
+   * approximate-printed-as-exact, PR 207's third round): a column of a FROM item — a subquery, a WITH query — whose
+   * query computes it as the engine's double (a quotient, an avg) is its query's PROGRAM over that query's cells, which
+   * ride as hidden columns of the item (`innerExact`, the same cells a pass-through reads), so every rule that asks for
+   * a numeric's program — its text, its equality key, a sum's scale — has it, wherever the column is read: grouped,
+   * joined, filtered, under an alias list or none. Decided ONCE, here, for the column, never per form of the query
+   * that reads it. "uncarried": the column is such a value, and its cells cannot ride (the item is read by a `*` beside
+   * other columns, a NATURAL JOIN or as a whole row, which would read them; its query computes no program): a rule that
+   * must equate it refuses by name, never the double. null: anything else (a table's column, an exact value).
+   */
+  private carry(ref: AstNode): { program: NumericProgram; text: boolean; owner: string; convs: ExactColumn["cells"] } | "uncarried" | null {
+    const found = this.fromColumn(ref);
+    if (found === null) return null;
+    const approximate = this.approximateAt(found.query, found.index);
+    // (a numeric whose values are not found is not known exact: it cannot be carried, and is never compared as exact)
+    if (approximate === null && this.typeOf(ref) === NUMERIC) return this.uncarried(found, "Mason cannot tell how that query computes it");
+    if (approximate !== true) return null;
+    // decided once for the item, before the walk (`carryAll`), which rewrites what the decision reads (a NATURAL JOIN
+    // written as USING, a whole row as its columns' text)
+    let rides = this.rides.get(bodyOf(found.query));
+    if (rides === undefined) {
+      const why = found.recursive ? "it is a recursive WITH query" : found.readers.map((r) => this.cellsMayRide(r.select, r.names, found.query)).find((w) => w !== null) ?? null;
+      rides = why ?? true;
+      this.rides.set(bodyOf(found.query), rides);
+    }
+    if (rides !== true) return this.uncarried(found, rides);
+    const exact = this.innerExact(found.query).find((e) => e.column === found.index);
+    if (exact === undefined) return this.uncarried(found, this.unwritable(found.query));
+    // decided from what the item exposes, as it is written: its query (through a `*`, a WITH query's) holds the cells
+    if (this.exposedCells(found.query) < exact.cells.length) return this.uncarried(found, "Mason cannot carry its exact digits out of it");
+    // a subquery with no name (Postgres 16) is given one, so its cells can be read
+    if (found.name === null && bodyOf(found.item).alias === undefined) bodyOf(found.item).alias = { aliasname: `__mason_from${this.named++}` };
+    return { program: exact.program, text: exact.text, owner: found.name ?? String((bodyOf(found.item).alias as Body).aliasname), convs: exact.cells };
+  }
+
+  /** the FROM item a column reference reads (`fromItemOf`, by the query levels it is in), or null: a table's column */
+  private fromColumn(ref: AstNode): ReturnType<Rewriter["fromItemOf"]> {
+    if (kindOf(ref) !== "ColumnRef" || hasStar(ref)) return null;
+    const t = this.typed(ref);
+    const at = bodyOf(ref).location;
+    if (t?.node !== "VAR" || t.column === undefined || t.levelsUp === null || typeof at !== "number") return null;
+    const stack = this.scopes.get(at);
+    if (stack === undefined || stack.length <= t.levelsUp) return null;
+    return this.fromItemOf(stack.slice(0, stack.length - t.levelsUp), t.column.owner, t.column.name);
+  }
+
+  /** a carried column's program over the cells `cell` makes of its item's hidden columns, each read as it rode */
+  private carried(ref: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): NumericProgram | "uncarried" | null {
+    const c = this.carry(ref);
+    if (c === null || c === "uncarried") return c;
+    return mapCells(c.program, (key) => key.startsWith("$") ? { op: "cell", key }
+      : cell({ ColumnRef: { fields: [S(c.owner), S(`__mason_cell_${key}`)] } }, c.convs[Number(key)]));
+  }
+
+  /** the FROM item of a query (`frames`' last) a column is read from, by the name Postgres resolved it to: the item's
+   *  query, the column's place in its outputs, and every query that reads the item (a WITH query's every reader) */
+  private fromItemOf(frames: Frame[], owner: string | null, column: string): {
+    item: AstNode; query: AstNode; index: number; name: string | null; recursive: boolean; readers: Array<{ select: Body; names: Set<string> }>;
+  } | null {
+    const frame = frames[frames.length - 1]!;
+    const candidates: Array<{ item: AstNode; query: AstNode; name: string | null; colnames: string[]; recursive: boolean; cte: AstNode | null }> = [];
+    for (const item of fromLeaves(frame.select.fromClause)) {
+      const b = bodyOf(item);
+      const aliasNames = ((b.alias?.colnames ?? []) as AstNode[]).map((n) => String(bodyOf(n).sval));
+      if (kindOf(item) === "RangeSubselect" && isNode(b.subquery)) {
+        // (a name `carry` gave it is none of Postgres's)
+        const name = b.alias?.aliasname === undefined || String(b.alias.aliasname).startsWith("__mason_from") ? null : String(b.alias.aliasname);
+        candidates.push({ item, query: b.subquery, name, colnames: aliasNames, recursive: false, cte: null });
+      } else if (kindOf(item) === "RangeVar" && b.schemaname === undefined) {
+        const cte = cteIn(frames, String(b.relname));
+        if (cte === null || !isNode(bodyOf(cte.cte).ctequery)) continue;
+        const own = ((bodyOf(cte.cte).aliascolnames ?? []) as AstNode[]).map((n) => String(bodyOf(n).sval));
+        candidates.push({ item, query: bodyOf(cte.cte).ctequery as AstNode, name: b.alias?.aliasname ?? String(b.relname),
+          colnames: own.map((n, i) => aliasNames[i] ?? n).concat(aliasNames.slice(own.length)), recursive: cte.recursive, cte: cte.cte });
+      }
+    }
+    const matching = candidates.filter((c) => c.name === owner && (owner !== null || this.columnsOf(c.query, c.colnames).includes(column)));
+    if (matching.length !== 1) return null;
+    const m = matching[0]!;
+    const columns = this.columnsOf(m.query, m.colnames);
+    const index = columns.indexOf(column);
+    if (index < 0 || columns.lastIndexOf(column) !== index) return null;
+    const readers = m.cte === null ? [{ select: frame.select, names: new Set(m.name === null ? [] : [m.name]) }]
+      : (this.cteReaders.get(bodyOf(m.cte)) ?? []).map((select) => ({ select, names: new Set(fromLeaves(select.fromClause)
+        .filter((i) => kindOf(i) === "RangeVar" && bodyOf(i).relname === bodyOf(m.cte!).ctename).map((i) => String(bodyOf(i).alias?.aliasname ?? bodyOf(i).relname))) }));
+    return { item: m.item, query: m.query, index, name: m.name, recursive: m.recursive, readers };
+  }
+
+  /** a FROM item's column names: its query's outputs under its alias list */
+  private columnsOf(query: AstNode, colnames: readonly string[]): string[] {
+    // (a VALUES list's are column1, column2, …)
+    const rows = bodyOf(query).valuesLists as AstNode[] | undefined;
+    const own = Array.isArray(rows) && rows.length > 0 ? ((bodyOf(rows[0]!).items ?? []) as unknown[]).map((_v, i) => `column${i + 1}`)
+      : this.outputNames(query) ?? this.listed(query)?.map((o) => o.name) ?? [];
+    return own.map((n, i) => colnames[i] ?? n);
+  }
+
+  /** a plain query's outputs, a `*` beside other columns listed as Postgres's analysis expands it (`outputs`), or
+   *  null: a set operation, a VALUES list, a query the analysis does not hold */
+  private listed(query: AstNode): Output[] | null {
+    const b = bodyOf(query);
+    if ((b.op !== undefined && b.op !== "SETOP_NONE") || !Array.isArray(b.targetList)) return null;
+    return this.outputs(b.targetList as AstNode[]);
+  }
+
+  /** whether a query's i-th output is a numeric (or a numeric's text) the engine holds as a double where the plan has
+   *  its program: in any arm of a set operation, through a `*` pass-through */
+  private approximateAt(query: AstNode, index: number): boolean | null {
+    return this.over(query, false, (values) => values.some((v) => this.approximateValue(v)), index);
+  }
+
+  /** whether a FROM item's column is a value the engine computes exactly (`duckExact` of each value it can be); a
+   *  column none of whose values is found is not (unknown is not exact) */
+  private outputExact(query: AstNode, index: number): boolean {
+    return this.over(query, true, (values) => values.every((v) => this.duckExact(v)), index) ?? false;
+  }
+
+  /** a decision over a query's i-th output's values (`valuesAt`), or `met` where it is met again inside itself: a
+   *  recursive WITH query's own column read in its recursive arm, which its other values decide. Null where its values
+   *  are not found: COULDN'T TELL, which no caller reads as a decision (PR 207's fifth round: an empty list's `every`
+   *  called a column exact that nothing had decided) */
+  private over(query: AstNode, met: boolean, decide: (values: AstNode[]) => boolean, index: number): boolean | null {
+    const b = bodyOf(query);
+    if (this.deciding.has(b)) return met;
+    this.deciding.add(b);
+    try { const values = this.valuesAt(query, index); return values === null ? null : decide(values); } finally { this.deciding.delete(b); }
+  }
+  private readonly deciding = new WeakSet<Body>();
+
+  /** the values a query's i-th output can be: each arm's of a set operation, each row's of a VALUES list, through a
+   *  `*` pass-through; a `*` beside other columns by the output Postgres's analysis puts there. Null where the output
+   *  is a column a `*` lists (decided where it is read), or none is found */
+  private valuesAt(query: AstNode, index: number): AstNode[] | null {
+    const b = bodyOf(query);
+    if (b.op !== undefined && b.op !== "SETOP_NONE") {
+      const arms = [b.larg, b.rarg].map((a) => a === undefined || a === null ? null : this.valuesAt({ SelectStmt: a }, index));
+      return arms.some((a) => a === null) ? null : arms.flatMap((a) => a!);
+    }
+    const star = this.starOf(b);
+    if (star !== null) return this.valuesAt(star, index);
+    if (Array.isArray(b.valuesLists)) {
+      const values = (b.valuesLists as AstNode[]).map((row) => ((bodyOf(row).items ?? []) as unknown[])[index]);
+      return values.every(isNode) ? values as AstNode[] : null;
+    }
+    const output = this.listed(query)?.[index];
+    if (output === undefined) return null;
+    if (!output.star) return [output.value];
+    // a column a `*` lists is what it reads: a table's column as it is, a FROM item's the values that item's column can
+    // be (one level deeper, decided there); a column it cannot place, none
+    const column = this.typed(output.value)?.column;
+    const frames = this.frames.get(b);
+    if (column === undefined || frames === undefined) return null;
+    const found = this.fromItemOf(frames, column.owner, column.name);
+    if (found !== null) return this.valuesAt(found.query, found.index);
+    const table = fromLeaves(b.fromClause).some((i) => kindOf(i) === "RangeVar" && cteIn(frames, String(bodyOf(i).relname)) === null
+      && String(bodyOf(i).alias?.aliasname ?? bodyOf(i).relname) === column.owner);
+    return table ? [output.value] : null;
+  }
+
+  /** whether a value is a numeric (or a numeric's text) whose text needs the program the plan has (`programNeeded`) */
+  private approximateValue(v: AstNode): boolean {
+    const type = this.typeOf(v);
+    const text = type !== null && TEXTS.has(type) && kindOf(v) === "TypeCast" && isNode(bodyOf(v).arg) && this.typeOf(bodyOf(v).arg as AstNode) === NUMERIC;
+    const numeric = text ? bodyOf(v).arg as AstNode : type === NUMERIC ? v : null;
+    if (numeric === null) return false;
+    const cells: Array<{ conv: CellConv }> = [];
+    const built = this.programOf(numeric, (_m, conv = "exact") => { cells.push({ conv }); return { op: "cell", key: String(cells.length - 1) }; });
+    return built !== null && this.programNeeded(numeric, built.p, cells, text ? -1 : this.typed(numeric)?.typmod ?? -1);
+  }
+
+  /**
+   * WHETHER A NUMERIC'S TEXT NEEDS ITS PROGRAM — the one test of a column printed (`exactColumns`) and of a FROM item's
+   * column carried (`carry`), so a column read alone and the same column beside another are computed alike (PR 207's
+   * fourth round): the engine does not compute its value exactly (`duckExact`), or writes other digits (a scale the
+   * copy dropped, a rounding, a parameter's text, a cell read from a float or a text). Not a numeric(p, s) value as it
+   * is (`typmod` its own, -1 for its text): the wire pads it to s (src/duck/types.ts pgTypedColumn).
+   */
+  private programNeeded(node: AstNode, p: NumericProgram, cells: ReadonlyArray<{ conv: CellConv }>, typmod: number): boolean {
+    if (this.duckExact(node) && !worthComputing(p) && cells.every((c) => c.conv === "exact")) return false;
+    return !(p.op === "pad" && p.arg.op === "cell" && typmod >= 4 && ((typmod - 4) & 0xffff) === p.scale);
+  }
+
+  /** whether a FROM item's hidden cells may ride in a query that reads it (null), or why not: never where they would be
+   *  read as columns — a `*` (but the pass-through's own, which drops them), a NATURAL JOIN, the item's whole row */
+  private cellsMayRide(select: Body, names: ReadonlySet<string>, query: AstNode): string | null {
+    if (fromJoins(select.fromClause).some((j) => bodyOf(j).isNatural === true)) return "it is joined by a NATURAL JOIN";
+    const passThrough = this.passThrough(select, true);
+    if (passThrough !== null && passThrough.columns === "star" && passThrough.query === query) return null;
+    const outputs = new Set(this.outputNames(query) ?? []);
+    let rides: string | null = null;
+    const look = (v: unknown, depth: number): void => {
+      if (rides !== null || v === null || typeof v !== "object") return;
+      if (Array.isArray(v)) { for (const x of v) look(x, depth); return; }
+      if (isNode(v)) {
+        const k = kindOf(v), n = bodyOf(v);
+        if (k === "SelectStmt") { look(n.targetList, depth + 1); look(n.whereClause, depth + 1); return; }
+        if (k === "ColumnRef") {
+          const f = (n.fields ?? []) as AstNode[];
+          if (hasStar(v) && depth === 0 && (f.length === 1 || names.has(String(bodyOf(f[0]!).sval)))) rides = "it is read by * beside other columns";
+          if (f.length === 1 && kindOf(f[0]!) === "String" && names.has(String(bodyOf(f[0]!).sval)) && !outputs.has(String(bodyOf(f[0]!).sval))) rides = "its whole row is read";
+          return;
+        }
+        for (const [key, x] of Object.entries(n)) if (key !== "fromClause") look(x, depth);
+        return;
+      }
+      for (const x of Object.values(v as Body)) look(x, depth);
+    };
+    look(select.targetList, 0); look(select.whereClause, 0); look(select.havingClause, 0); look(select.groupClause, 0);
+    look(select.sortClause, 0); look(select.distinctClause, 0); look(select.windowClause, 0); look(fromJoins(select.fromClause).map((j) => bodyOf(j).quals), 0);
+    return rides;
+  }
+
+  /** a FROM item's query's exact columns, its cells appended to its SELECT list once (`exactThrough`) */
+  private innerExact(query: AstNode): ExactColumn[] {
+    const b = bodyOf(query);
+    let made = this.innerExacts.get(b);
+    if (made === undefined) { made = this.exactThrough(query, this.outputFields(query)); this.innerExacts.set(b, made); }
+    return made;
+  }
+
   private exactThroughIn(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }>): ExactColumn[] {
     const b = bodyOf(stmt);
     if (b.op === "SETOP_UNION" && b.all === true) return this.exactArms(b, fields);
     const direct = this.exactColumns(stmt, fields);
     if (direct.length > 0) return direct;
-    const through = this.passThrough(b);
-    if (through === null) return [];
-    const inner = this.exactThrough(through.query, this.outputFields(through.query));
+    const through = this.passThrough(b, true);
+    // (never where the cells would be read as columns: the item's whole row, `SELECT s FROM (…) s`)
+    if (through === null || this.cellsMayRide(b, new Set([through.alias]), through.query) !== null) return [];
+    const inner = this.innerExact(through.query);
     if (inner.length === 0) return [];
     const cells = inner[0]!.cells.length;
-    if (through.columns !== "star") {
-      const targets = (b.targetList ?? []) as AstNode[];
-      b.targetList = [...targets, ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`,
-        val: { ColumnRef: { fields: [S(through.alias), S(`__mason_cell_${j}`)] } } } }))];
-    }
+    const targets = (b.targetList ?? []) as AstNode[];
+    const cellRef = (j: number): AstNode => ({ ColumnRef: { fields: [S(through.alias), S(`__mason_cell_${j}`)] } });
+    if (through.columns !== "star") b.targetList = [...targets, ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: cellRef(j) } }))];
     const map = through.columns;
-    return inner.flatMap((e) => (map === "star" ? [e.column] : map.flatMap((k, i) => k === e.column ? [i] : []))
+    const out = inner.flatMap((e) => (map === "star" ? [e.column] : map.flatMap((k, i) => k === e.column ? [i] : []))
       .filter((i) => i < fields.length && fields[i]!.oid === NUMERIC || e.text).map((column) => ({ ...e, column })));
+    if (b.distinctClause !== undefined) this.distinctThrough(b, through, out, fields.length, cellRef);
+    return out;
   }
 
-  /** a UNION ALL's arms, each with the same programs at the same columns (else none is computed) */
+  /**
+   * A DISTINCT OVER A PASS-THROUGH (approximate-printed-as-exact, PR 207): the outer query reads the inner's cells
+   * beside its columns, so a plain DISTINCT would compare them too, and its exact columns are the inner's doubles. It
+   * is the DISTINCT ON of every output, an exact one by the exact key of its program over the inner's cells (`exactKey`
+   * read through the pass-through), the rest by their number (a `*`: by the inner's output name); a DISTINCT ON's own
+   * entries that name an exact column (by number or name) are keyed alike. The cells ride, the kept row's.
+   */
+  private distinctThrough(b: Body, through: { alias: string; columns: number[] | "star"; query: AstNode; colnames: string[] }, exact: ExactColumn[], outputs: number, cellRef: (j: number) => AstNode): void {
+    const innerNames = through.columns === "star" ? this.outputNames(through.query)?.map((n, i) => through.colnames[i] ?? n) ?? null : null;
+    const keyAt = (i: number): AstNode => {
+      const e = exact.find((x) => x.column === i);
+      if (e !== undefined) {
+        const texts = e.cells.map((conv, j) => conv === "text" || conv === "parsed" ? cellRef(j) : conv === "exact" ? cast(cellRef(j), ["varchar"])
+          : fn("__mason_float_numeric_text", [cast(cellRef(j), ["double"]), boolConst(conv === "float4")]));
+        const value = fn("__mason_numeric_program", [strConst(JSON.stringify(e.program)), ...texts]);
+        return e.text ? value : fn("__mason_numeric_key", [value]);
+      }
+      if (innerNames === null) return intConst(i + 1);
+      const name = innerNames[i];
+      if (name === undefined || innerNames.indexOf(name) !== innerNames.lastIndexOf(name)) throw new Unrewritable("SELECT DISTINCT * over a subquery with two columns of one name beside a numeric quotient is not supported by Mason", "name the columns: SELECT DISTINCT a, b, …", "numeric-quotient-equality");
+      return { ColumnRef: { fields: [S(through.alias), S(name)] } };
+    };
+    const on = b.distinctClause as unknown[];
+    if (on.length === 0 || !on.every(isNode)) { b.distinctClause = Array.from({ length: outputs }, (_, i) => keyAt(i)); return; }
+    const targets = (b.targetList ?? []) as AstNode[];
+    b.distinctClause = (on as AstNode[]).map((d) => {
+      const n = constInt(d);
+      let at = n !== null && n >= 1 && n <= outputs ? n - 1 : -1;
+      if (at < 0 && kindOf(d) === "ColumnRef" && !hasStar(d)) {
+        const f = names(bodyOf(d).fields), last = f[f.length - 1]!;
+        // the inner column it reads, then the output that passes it through
+        const inner = (innerNames ?? this.outputNames(through.query) ?? []).indexOf(last);
+        at = through.columns === "star" ? inner : inner < 0 ? -1 : through.columns.indexOf(inner);
+        if (at < 0 && f.length === 1) at = targets.findIndex((t, i) => i < outputs && bodyOf(t).name === last);
+      }
+      return at >= 0 && exact.some((x) => x.column === at) ? keyAt(at) : d;
+    });
+  }
+
+  /**
+   * A UNION ALL's exact columns. Where every arm builds the same programs, each arm's cells are the union's. Where they
+   * differ (a column beside a quotient, a quotient beside a literal), EACH ARM CARRIES ITS OWN PROGRAM (the class
+   * approximate-printed-as-exact, PR 207's third round): the arm's cells in slots of its own (NULL in the other arms'),
+   * its number in a last cell, and the column is the program of the arm the row came from (`pick`); an arm with no
+   * program at the column is one DuckDB holds exactly (a column, a literal), its own cell — so DuckDB unifying the
+   * column to a double loses no arm's digits. An arm none of this can write (a `*`, a value with no program the engine
+   * holds as a double) leaves the union DuckDB's.
+   */
   private exactArms(b: Body, fields: ReadonlyArray<{ oid: number; typmod?: number }>): ExactColumn[] {
     const arms: AstNode[] = [];
     const flatten = (n: AstNode): void => {
@@ -1404,36 +1790,99 @@ class Rewriter {
     // real pass run on a copy, and what it finds is what the real pass will
     const real = this.cteScope.splice(0);
     this.cteScope.push(...real.map((list) => this.clone(list)));
-    let trial: ExactColumn[][];
-    try { trial = arms.map((a) => this.exactThrough(this.clone(a), fields)); } finally { this.cteScope.splice(0, this.cteScope.length, ...real); }
-    const first = JSON.stringify(trial[0]);
-    if (trial[0]!.length === 0 || trial.some((t) => JSON.stringify(t) !== first)) return [];
+    let trial: Array<{ made: ExactColumn[]; listed: number }>;
+    try { trial = arms.map((a) => { const clone = this.clone(a); const made = this.exactThrough(clone, fields); return { made, listed: ((bodyOf(clone).targetList ?? []) as AstNode[]).length }; }); }
+    finally { this.cteScope.splice(0, this.cteScope.length, ...real); }
+    const first = JSON.stringify(trial[0]!.made);
+    if (trial[0]!.made.length > 0 && trial.every((t) => JSON.stringify(t.made) === first)) return arms.map((a) => this.exactThrough(a, fields))[0]!;
+    // the columns some arm computes; every other arm's value there must be DuckDB's exact one, and every arm's cells
+    // its SELECT list's last entries (not a `*`'s)
+    const columns = fields.map((f, i) => f.oid === NUMERIC && trial.some((t) => t.made.some((e) => e.column === i && !e.text)) ? i : -1).filter((i) => i >= 0);
+    if (columns.length === 0 || trial.some((t) => t.made.some((e) => e.text))) return [];
+    const valueAt = (a: AstNode, i: number): AstNode | null => {
+      const targets = (bodyOf(a).targetList ?? []) as AstNode[];
+      const v = targets[i] === undefined ? undefined : bodyOf(targets[i]!).val;
+      return isNode(v) && !targets.some((t) => hasStar(bodyOf(t).val)) && this.duckExact(v) ? v : null;
+    };
+    for (const [k, a] of arms.entries()) {
+      const t = trial[k]!;
+      if (t.made.length > 0 && t.listed !== fields.length + t.made[0]!.cells.length) return [];
+      if (columns.some((i) => !t.made.some((e) => e.column === i) && valueAt(a, i) === null)) return [];
+    }
     const made = arms.map((a) => this.exactThrough(a, fields));
-    return made[0]!;
+    // each arm's cells: its own program's, then its plain values'
+    const own = arms.map((a, k) => {
+      const targets = (bodyOf(a).targetList ?? []) as AstNode[];
+      const cells = targets.slice(fields.length).map((t) => ({ node: bodyOf(t).val as AstNode, conv: made[k]![0]!.cells[targets.indexOf(t) - fields.length]! }));
+      const programs = new Map<number, NumericProgram>();
+      for (const i of columns) {
+        const e = made[k]!.find((x) => x.column === i);
+        if (e !== undefined) { programs.set(i, e.program); continue; }
+        const v = valueAt(a, i)!;
+        cells.push({ node: this.clone(v), conv: "exact" });
+        programs.set(i, this.padded(v, { op: "cell", key: String(cells.length - 1) }));
+      }
+      return { targets: targets.slice(0, fields.length), cells, programs };
+    });
+    const total = own.reduce((n, o) => n + o.cells.length, 0);
+    const offsets = own.map((_o, k) => own.slice(0, k).reduce((n, o) => n + o.cells.length, 0));
+    own.forEach((o, k) => {
+      const slots: AstNode[] = Array.from({ length: total }, (): AstNode => ({ A_Const: { isnull: true } }));
+      o.cells.forEach((c, j) => { slots[offsets[k]! + j] = c.node; });
+      bodyOf(arms[k]!).targetList = [...o.targets, ...[...slots, intConst(k)].map((val, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val } }))];
+    });
+    const convs: ExactColumn["cells"] = [...own.flatMap((o) => o.cells.map((c) => c.conv)), "exact"];
+    return columns.map((i) => ({ column: i, text: false, cells: convs,
+      program: { op: "pick", index: { op: "cell", key: String(total) }, args: own.map((o, k) => offsetCells(o.programs.get(i)!, offsets[k]!)) } }));
+  }
+
+  /**
+   * THE WITH QUERY A FROM NAME READS, from a query: its own WITH first, then the enclosing queries', innermost first (a
+   * nearer one of the name shadows a farther); none of a recursive WITH (never read whole). A query of the statement's
+   * own is resolved by the levels it is in (`frames`), as `carry` resolves its FROM items, so the two never name two
+   * WITH queries (PR 207's fourth round: a carry decided over one `base`, its cells added to another); a copy of one (a
+   * union arm's trial) by the WITH queries `exactThrough` is inside.
+   */
+  private cteOf(b: Body, name: string): AstNode | null {
+    const frames = this.frames.get(b);
+    if (frames !== undefined) { const found = cteIn(frames, name); return found === null || found.recursive ? null : found.cte; }
+    if (b.withClause?.recursive === true) return null;
+    const scopes = [(b.withClause?.ctes ?? []) as AstNode[], ...[...this.cteScope].reverse()];
+    return scopes.map((list) => list.find((c) => bodyOf(c).ctename === name)).find((c) => c !== undefined) ?? null;
+  }
+
+  /** how many hidden cells a query's rows carry after its columns, as it is written now: its own `__mason_cell_n`
+   *  targets, or those a `*` passes through (a set operation's: its first arm's) */
+  private exposedCells(query: AstNode): number {
+    let b = bodyOf(query);
+    while (b.op !== undefined && b.op !== "SETOP_NONE" && b.larg !== undefined) b = b.larg;
+    const targets = (b.targetList ?? []) as AstNode[];
+    const through = targets.length === 1 && hasStar(bodyOf(targets[0]!).val) ? this.passThrough(b) : null;
+    if (through !== null && through.columns === "star") return this.exposedCells(through.query);
+    return targets.filter((t) => String(bodyOf(t).name ?? "").startsWith("__mason_cell_")).length;
   }
 
   /** an outer query that only reads one subquery's or CTE's columns: the inner query, its alias, and which inner
    *  column each outer one is ("star": all of them, in order) */
-  private passThrough(b: Body): { query: AstNode; alias: string; columns: number[] | "star" } | null {
-    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.groupClause !== undefined || b.havingClause !== undefined || b.distinctClause !== undefined || b.windowClause !== undefined) return null;
+  private passThrough(b: Body, distinct = false): { query: AstNode; alias: string; columns: number[] | "star"; colnames: string[] } | null {
+    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.groupClause !== undefined || b.havingClause !== undefined || (b.distinctClause !== undefined && !distinct) || b.windowClause !== undefined) return null;
     const from = (b.fromClause ?? []) as AstNode[];
     if (from.length !== 1) return null;
     const f = from[0]!;
     let query: AstNode | undefined, alias: string | undefined;
     if (kindOf(f) === "RangeSubselect") { query = bodyOf(f).subquery as AstNode; alias = bodyOf(f).alias?.aliasname; }
     else if (kindOf(f) === "RangeVar" && bodyOf(f).schemaname === undefined) {
-      // its own WITH first, then the enclosing queries', innermost first (a nearer CTE of the name shadows a farther)
-      if (b.withClause?.recursive === true) return null;
-      const scopes = [(b.withClause?.ctes ?? []) as AstNode[], ...[...this.cteScope].reverse()];
-      const cte = scopes.map((list) => list.find((c) => bodyOf(c).ctename === bodyOf(f).relname)).find((c) => c !== undefined);
-      if (cte === undefined || bodyOf(cte).aliascolnames !== undefined) return null;
+      const cte = this.cteOf(b, String(bodyOf(f).relname));
+      if (cte === null || bodyOf(cte).aliascolnames !== undefined) return null;
       query = bodyOf(cte).ctequery as AstNode; alias = bodyOf(f).alias?.aliasname ?? bodyOf(f).relname;
     }
     if (query === undefined || alias === undefined || kindOf(query) !== "SelectStmt") return null;
-    if (bodyOf(f).alias?.colnames !== undefined) return null;
     const targets = (b.targetList ?? []) as AstNode[];
     if (targets.some((t) => this.hasAggregate(bodyOf(t).val))) return null;
-    if (targets.length === 1 && hasStar(bodyOf(targets[0]!).val)) return { query, alias, columns: "star" };
+    // (an alias list renames the columns a `*` reads, and leaves the cells after them their own names)
+    const colnames = ((bodyOf(f).alias?.colnames ?? []) as AstNode[]).map((n) => String(bodyOf(n).sval));
+    if (targets.length === 1 && hasStar(bodyOf(targets[0]!).val)) return { query, alias, columns: "star", colnames };
+    if (colnames.length > 0) return null;
     const outputs = this.outputNames(query);
     if (outputs === null) return null;
     const columns = targets.map((t) => {
@@ -1443,7 +1892,7 @@ class Rewriter {
       const at = outputs.indexOf(f[f.length - 1]!);
       return at >= 0 && outputs.lastIndexOf(f[f.length - 1]!) === at ? at : -1;
     });
-    return { query, alias, columns };
+    return { query, alias, columns, colnames };
   }
 
   /** the query a `SELECT * FROM (q) s` passes through whole, or null: its output names and types are q's (a BI tool's
@@ -1495,7 +1944,7 @@ class Rewriter {
     if (k === "A_Const") return true;
     // a column of this query Postgres accepted outside the GROUP BY is one the group's key decides: valid, and read
     // through any_value when the walk reaches its cell (decidedByKey)
-    if (k === "ColumnRef") { const t = this.typed(n); return t?.node === "VAR" && t.levelsUp === 0; }
+    if (k === "ColumnRef") { const t = this.typed(n); return (t?.node === "VAR" && t.levelsUp === 0) || isCellRef(n); }
     if (k === "SubLink") return false;
     if (k === "FuncCall" && (bodyOf(n).over !== undefined || this.typed(n)?.node === "AGGREF")) return true;
     const children = Object.values(bodyOf(n)).flatMap((x) => Array.isArray(x) ? x : [x]).filter(isNode);
@@ -1513,6 +1962,11 @@ class Rewriter {
     switch (k) {
       // a numeric parameter is its bound text, as Postgres reads it (DuckDB is given it as a double: 15 digits)
       case "ParamRef": return type === NUMERIC ? numeric({ op: "cell", key: `$${b.number}` }) : asCell();
+      // a column of a FROM item whose query decided it exactly: that query's program over its cells, which ride (carry)
+      case "ColumnRef": {
+        const carried = this.carried(n, cell);
+        return carried === "uncarried" ? null : carried !== null ? numeric(carried) : asCell();
+      }
       case "A_Const": {
         if (b.ival !== undefined) return { p: { op: "literal", text: String(b.ival.ival ?? 0) }, kind: "int" };
         if (b.fval !== undefined) return numeric({ op: "literal", text: positional(String(b.fval.fval)) });
@@ -1655,7 +2109,7 @@ class Rewriter {
             const operands: AstNode[] = [];
             const probe = this.exactOf(args[0]!, (m) => { operands.push(m); return { op: "cell", key: String(operands.length - 1) }; });
             // a column's own min is DuckDB's exact decimal, padded to its scale
-            if (probe === null || probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell") || !worthComputing(probe.p)) return asCell();
+            if (probe === null || probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell") || (this.duckExact(args[0]!) && !worthComputing(probe.p))) return asCell();
             const key = caseWhen([[isNotNull(this.clone(args[0]!)), row([this.clone(args[0]!), ...operands.map((m) => this.clone(m))])]], null);
             const picked = (m: AstNode): AstNode => {
               const call = fn(name === "min" ? "arg_min_null" : "arg_max_null", [this.clone(m), this.clone(key)], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) });
@@ -1742,9 +2196,10 @@ class Rewriter {
     const read = args.map((a): [string, AstNode] | null => {
       const own = this.typed(a);
       if (own !== null && INTEGERS.has(own.type)) return ["numeric", this.clone(a)];
+      // (read as itself only where the engine holds it exactly: `duckExact`; else its program)
       const scale = this.displayScale(a);
-      if (scale !== null) return [`numeric(1000, ${scale})`, this.clone(a)];
-      if (kindOf(a) === "ColumnRef" && own?.type === NUMERIC) return ["numeric", this.clone(a)];
+      if (scale !== null && this.duckExact(a)) return [`numeric(1000, ${scale})`, this.clone(a)];
+      if (kindOf(a) === "ColumnRef" && own?.type === NUMERIC && this.duckExact(a)) return ["numeric", this.clone(a)];
       const exact = this.exactText(a);
       return exact === null ? null : ["numeric", exact];
     });
@@ -1754,34 +2209,212 @@ class Rewriter {
     return pgCall("text", `${name}(${read.map((x, i) => `a${i + 1}::${x![0]}`).join(", ")})`, read.map((x) => x![1]));
   }
 
-  /** whether DuckDB holds an expression's value exactly (an integer, or a DECIMAL its types decide): a column, an
-   *  expression of declared scales, a sum / min / max of one, a count; a CASE the rewrite made of such arms (an exact
-   *  program's arm index, a cell on its arm's rows). Not what DuckDB computes as a double (`^`, a quotient). */
+  /**
+   * WHETHER WHAT IS SENT FOR AN EXPRESSION COMPUTES ITS VALUE EXACTLY — THE ONE DECIDER of a numeric's exactness (PR
+   * 207's fourth round, the class a-fact-derived-in-several-places): an integer or a DECIMAL as the walk WRITES it for
+   * the engine, never a double. Every place that asks whether a value, a cell or a column is exact asks this: a
+   * program's cells (`programOf`), whether a program is the engine's own answer (`exactColumns`, min / max), a FROM
+   * item's column (`carry`), an equality key (`exactKey`), a union arm's value, a function's argument (`pgNumeric`).
+   * A constant and a cast to numeric are decided by the writer's own decision (`engineReadsExactly`,
+   * `numericCastWrite`); an operator, a function or an aggregate by what DuckDB computes from exact operands (+ - * a
+   * DECIMAL, a sum / min / max / a window's or arg_min's pick the value's own type, a count an integer); the rewrite's
+   * own integer casts (a variance's split squares) are integers. Anything else is not called exact: a quotient, `^`,
+   * `%`, an avg (DuckDB's doubles), a parameter (written as a double), a column a FROM item computes as a double
+   * (`carry`), a function this does not know — whose value then has its program, or is the engine's everywhere.
+   */
   private duckExact(n: AstNode): boolean {
-    const t = this.typed(n), b = bodyOf(n);
+    const t = this.typed(n), b = bodyOf(n), k = kindOf(n);
     if (t !== null && INTEGERS.has(t.type)) return true;
-    if (kindOf(n) === "ColumnRef") return t !== null && t.type === NUMERIC;
-    if (this.displayScale(n) !== null) return true;
+    if (isCellRef(n)) return true;
+    const exact = (x: unknown): boolean => isNode(x) && this.duckExact(x);
     const args = (b.args ?? []) as AstNode[];
-    // a count (an avg's, made from the avg's node, carries the avg's type)
-    if (kindOf(n) === "FuncCall" && lastName(b.funcname) === "count") return true;
-    if (kindOf(n) === "FuncCall" && ["sum", "min", "max", "any_value"].includes(lastName(b.funcname)) && args.length === 1) return this.duckExact(args[0]!);
-    if (kindOf(n) === "CaseExpr" && t === null) return [...args.map((w) => bodyOf(w).result), ...(b.defresult === undefined ? [] : [b.defresult])].every((r) => isNode(r) && this.duckExact(r));
-    return false;
+    switch (k) {
+      // a table's column; a FROM item's, the value it is (`outputExact`), whether or not its program rides
+      case "ColumnRef": { if (t === null || t.type !== NUMERIC) return false; const found = this.fromColumn(n); return found === null || this.outputExact(found.query, found.index); }
+      // a scalar subquery: its one column
+      case "SubLink": { const target = scalarTarget(n); return target !== null && this.duckExact(target); }
+      case "A_Const":
+        if (b.isnull === true || b.ival !== undefined) return true;
+        // a numeric constant as it is written (`numericConstText`, `decimalConst`): DuckDB's DECIMAL within 38 digits
+        return b.fval !== undefined && (t === null || t.type === NUMERIC) && engineReadsExactly(numericConstText(String(b.fval.fval)));
+      case "TypeCast": {
+        const target = lastName(b.typeName?.names);
+        // the rewrite's own integer casts (a variance's split squares: `CAST(x >> 32 AS hugeint)`)
+        if (DUCK_INTEGER_NAMES.has(target)) return true;
+        if ((target !== "numeric" && target !== "decimal") || !isNode(b.arg)) return false;
+        const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], this.typeOf(b.arg), constString(b.arg));
+        switch (w.as) {
+          // DuckDB's DECIMAL(p, s) of a text constant, or of a value it holds exactly (of a double: the double's)
+          case "decimal": return constString(b.arg) !== null || this.duckExact(b.arg)
+            || (kindOf(b.arg) === "FuncCall" && EXACT_TEXTS.has(lastName(bodyOf(b.arg).funcname)));
+          case "whole": return true;
+          case "literal": return engineReadsExactly(w.text);
+          case "same": return this.duckExact(b.arg);
+          case "double": case "as written": return false;
+        }
+        return false;
+      }
+      case "A_Expr": {
+        const name = lastName(b.name);
+        // + - * of DuckDB's DECIMALs is a DECIMAL (a scale past 38 an error, never a double); / % ^ are its doubles
+        if (b.kind === "AEXPR_OP" && ["+", "-", "*"].includes(name)) return (b.lexpr === undefined || exact(b.lexpr)) && exact(b.rexpr);
+        if (b.kind === "AEXPR_NULLIF") return exact(b.lexpr);
+        return false;
+      }
+      case "FuncCall": {
+        const name = lastName(b.funcname);
+        // a count (an avg's, made from the avg's node, carries the avg's type), and what the walk writes as a DECIMAL
+        if (WRITTEN_EXACT.has(name)) return true;
+        // a value picked or summed, in its own type: an aggregate, a window's row, min / max's picked operand
+        if (VALUE_KEEPING.has(name) && args.length >= 1) return exact(args[0]) && ((name !== "lag" && name !== "lead") || args.length < 3 || exact(args[2]));
+        return false;
+      }
+      // DuckDB's CASE, COALESCE, GREATEST and LEAST of DECIMALs are a DECIMAL
+      case "CaseExpr": return [...args.map((w) => bodyOf(w).result), ...(b.defresult === undefined ? [] : [b.defresult])].every(exact);
+      case "CoalesceExpr": case "MinMaxExpr": return args.every(exact);
+      default: return false;
+    }
+  }
+
+  /** AN EXPRESSION AS A PROGRAM OVER CELLS (`exactOf`), every cell it reads as exact one the engine holds exactly
+   *  (`duckExact`, the one decider), or null: a program over a double's digits computes nothing Postgres's. Every
+   *  program is built here — a column's (`exactColumns`), a value's text or key (`exactText`) — so no two disagree */
+  private programOf(n: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): Built | null {
+    const checked = (m: AstNode, conv: CellConv = "exact"): NumericProgram => {
+      if (conv === "exact" && !this.duckExact(m)) throw NOT_EXACT;
+      return cell(m, conv);
+    };
+    try { return this.exactOf(n, checked); } catch (e) { if (e === NOT_EXACT) return null; throw e; }
   }
 
   /** a numeric's exact text, row by row: its program (exactOf) evaluated by DuckDB over its cells' texts
    *  (`__mason_numeric_program`, src/duck/functions.ts); null where there is none, or it reads a parameter */
   private exactText(n: AstNode): AstNode | null {
     const cells: Array<{ node: AstNode; conv: CellConv }> = [];
-    let built: Built | null;
-    try { built = this.exactOf(n, (m, conv = "exact") => { cells.push({ node: m, conv }); return { op: "cell", key: String(cells.length - 1) }; }); }
-    catch (e) { if (e === NOT_EXACT) return null; throw e; }
-    if (built === null || cellsOfProgram(built.p).some((k) => k.startsWith("$"))) return null;
-    if (cells.some((c) => c.conv === "exact" && !this.duckExact(c.node))) return null;
+    const built = this.programOf(n, (m, conv = "exact") => { cells.push({ node: m, conv }); return { op: "cell", key: String(cells.length - 1) }; });
+    if (built === null) return null;
+    // a parameter is the text it was bound as, Postgres's numeric_out of what it read (src/duck/analyze.ts readParameters):
+    // DuckDB reads it as its varchar, never the double the rewrite makes of it elsewhere (a ParamRef the walk leaves)
+    const program = mapCells(built.p, (key) => {
+      if (!key.startsWith("$")) return { op: "cell", key };
+      cells.push({ node: cast({ ParamRef: { number: Number(key.slice(1)) } }, ["varchar"]), conv: "text" });
+      return { op: "cell", key: String(cells.length - 1) };
+    });
     const texts = cells.map((c) => c.conv === "text" || c.conv === "parsed" ? this.clone(c.node) : c.conv === "exact" ? cast(this.clone(c.node), ["varchar"])
       : fn("__mason_float_numeric_text", [cast(this.clone(c.node), ["double"]), boolConst(c.conv === "float4")]));
-    return fn("__mason_numeric_program", [strConst(JSON.stringify(built.p)), ...texts]);
+    return fn("__mason_numeric_program", [strConst(JSON.stringify(program)), ...texts]);
+  }
+
+  /**
+   * A NUMERIC THE PLAN DECIDES EXACTLY, AS ITS EQUALITY KEY (the class approximate-compared-as-exact, PR 207): a
+   * numeric DuckDB holds as a double (a quotient, an avg) whose exact program the plan has is compared by that
+   * program's value, trailing zeros dropped (`__mason_numeric_key`), never by its double, which equates two values
+   * Postgres tells apart past the double's 17 digits. Every context that equates — DISTINCT, DISTINCT ON, GROUP BY,
+   * PARTITION BY, count(DISTINCT), =, <> — reads this one; where none can be placed the form is refused by name
+   * (`numeric-quotient-equality`). null: no such value (one DuckDB holds exactly, or one with no program, which is the
+   * engine's value everywhere).
+   */
+  private exactKey(e: AstNode): AstNode | null {
+    const type = this.typeOf(e);
+    // a numeric's text: the program's text, which text's equality compares as it is
+    if (type !== null && TEXTS.has(type)) return this.exactNumericText(e);
+    if (type !== NUMERIC || this.duckExact(e)) return null;
+    // a scalar subquery's one column: the subquery answers its key
+    if (kindOf(e) === "SubLink") {
+      const target = scalarTarget(e);
+      const key = target === null ? null : this.exactKey(target);
+      // (none: the column is no value decided exactly; one whose program cannot be read has refused already)
+      if (key === null) return null;
+      const sub = this.clone(bodyOf(e));
+      bodyOf(sub.subselect as AstNode).targetList = [{ ResTarget: { val: key } }];
+      return { SubLink: sub };
+    }
+    const exact = this.exactText(e);
+    return exact === null ? this.refuseUncarried(e) : fn("__mason_numeric_key", [exact]);
+  }
+
+  /** a numeric's text decided exactly (`(x / 3)::text`, a subquery's column holding one) as the program's text, or null */
+  private exactNumericText(e: AstNode): AstNode | null {
+    const b = bodyOf(e);
+    if (kindOf(e) === "TypeCast" && isNode(b.arg) && this.typeOf(b.arg) === NUMERIC && ((b.typeName?.typmods ?? []) as unknown[]).length === 0 && !this.duckExact(b.arg)) {
+      return this.exactText(b.arg) ?? this.refuseUncarried(b.arg);
+    }
+    if (kindOf(e) !== "ColumnRef") return null;
+    const c = this.carry(e);
+    if (c === "uncarried") return this.refuseUncarried(e);
+    return c === null || !c.text ? null : this.exactText(e);
+  }
+
+  /** null where a value is no numeric decided exactly; a refusal where it is one whose program cannot be read here (a
+   *  subquery's quotient whose cells cannot ride: `carry`): never its double, compared */
+  private refuseUncarried(e: AstNode): null {
+    if (kindOf(e) !== "ColumnRef" || this.carry(e) !== "uncarried") return null;
+    const found = this.fromColumn(e);
+    const w = found === null ? undefined : this.whyUncarried.get(bodyOf(found.query));
+    const what = w?.what ?? "a numeric the engine holds as a double", where = w?.where ?? "a subquery", why = w?.why ?? "Mason cannot carry its exact digits out of it";
+    // (each way out is one a test follows to Postgres's answer, tests/duck-wire.test.ts "sixth round": a round(x, n)
+    // inside the query is still its double, and a USING join reads it as the double — neither is offered)
+    const hint = why.includes("*") ? "name the columns in place of the *: SELECT s.q, … FROM (…) s"
+      : why.includes("NATURAL") ? "join it with ON, naming its columns: … JOIN t ON t.id = s.id"
+      : why.includes("whole row") ? "read its columns, not its whole row: s.q, never s"
+      : why.includes("recursive") ? "compute the value outside the recursive WITH query, from the columns it carries"
+      : where === "a VALUES list" && what === "a numeric of more than 38 digits" ? "write each value in the VALUES list in 38 digits or fewer (the 0 of 0.5 counts)"
+      : "compute the value in the query that compares it, from the columns it is made of";
+    throw new Unrewritable(`${what} from ${where}, compared outside it, is not supported by Mason where ${why} (Postgres compares the exact value; the engine holds it as a double)`, hint, "numeric-quotient-equality");
+  }
+
+  /** a FROM item's column that cannot be carried, its reason kept for the refusal's words (`refuseUncarried`) */
+  private uncarried(found: NonNullable<ReturnType<Rewriter["fromItemOf"]>>, why: string): "uncarried" {
+    const b = bodyOf(found.query);
+    const where = Array.isArray(b.valuesLists) ? "a VALUES list" : kindOf(found.item) === "RangeVar" ? "a WITH query" : "a subquery";
+    this.whyUncarried.set(b, { what: this.approximateWhat(this.valuesAt(found.query, found.index) ?? []), where, why });
+    return "uncarried";
+  }
+
+  /** why a FROM item's query computes no program for its columns, in the developer's words */
+  private unwritable(query: AstNode): string {
+    const b = bodyOf(query);
+    if (Array.isArray(b.valuesLists)) return "Mason cannot carry its exact digits out of a VALUES list";
+    if (((b.targetList ?? []) as AstNode[]).some((t) => hasStar(bodyOf(t).val))) return "it lists * beside other columns";
+    return "Mason cannot carry its exact digits out of it";
+  }
+
+  /** what a value the engine holds as a double is, as the developer wrote it: the first of a quotient, an average, a
+   *  variance, a numeric past 38 digits, a float read as numeric, in what it computes */
+  private approximateWhat(values: readonly AstNode[]): string {
+    const kinds: string[] = [];
+    const look = (v: unknown): void => {
+      if (Array.isArray(v)) { for (const x of v) look(x); return; }
+      if (!isNode(v)) return;
+      const k = kindOf(v), b = bodyOf(v);
+      if (k === "A_Expr" && ["/", "%", "^"].includes(lastName(b.name))) kinds.push("a numeric quotient");
+      if (k === "FuncCall" && lastName(b.funcname) === "avg") kinds.push("an average");
+      if (k === "FuncCall" && /^(stddev|var)/.test(lastName(b.funcname))) kinds.push("a standard deviation or variance");
+      // (a constant, or a cast to numeric, the writer writes as a double: `engineReadsExactly`, `numericCastWrite`)
+      const written = k === "TypeCast" && ["numeric", "decimal"].includes(lastName(b.typeName?.names)) && isNode(b.arg)
+        ? numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], this.typeOf(b.arg as AstNode), constString(b.arg)) : null;
+      if ((k === "A_Const" && b.fval !== undefined && !engineReadsExactly(numericConstText(String(b.fval.fval))))
+        || (written !== null && ((written.as === "double" && ((b.typeName?.typmods ?? []) as unknown[]).length > 0) ||(written.as === "literal" && !engineReadsExactly(written.text))))) kinds.push("a numeric of more than 38 digits");
+      if (k === "TypeCast" && isNode(b.arg) && FLOATS.has(this.typeOf(b.arg as AstNode) ?? -1)) kinds.push("a float read as numeric");
+      for (const x of Object.values(b)) look(x);
+    };
+    look(values);
+    const order = ["a numeric quotient", "an average", "a standard deviation or variance", "a numeric of more than 38 digits", "a float read as numeric"];
+    return order.find((o) => kinds.includes(o)) ?? "a numeric the engine holds as a double";
+  }
+
+  /** the refusal of a form that equates a numeric decided exactly where no exact key can be placed */
+  private refuseExactEquality(e: AstNode, where: string): void {
+    if (this.exactKey(e) === null) return;
+    // (each way out is one a test follows to Postgres's answer, tests/duck-wire.test.ts "sixth round"; a round(x, n) is
+    // computed as exactly as the quotient, and refused alike, so none offers it)
+    const hint = where.startsWith("UNION") ? "SELECT DISTINCT over the UNION ALL of the same queries: SELECT DISTINCT u.q FROM (SELECT … UNION ALL SELECT …) u"
+      : / ALL of$/.test(where) ? "count each value in each query (GROUP BY it) and join the counts on it: … FROM (SELECT q, count(*) AS n … GROUP BY q) a JOIN (…) b ON b.q = a.q"
+      : where.startsWith("INTERSECT") ? "keep the rows the other query has, by EXISTS: SELECT DISTINCT a.q FROM … a WHERE EXISTS (SELECT 1 FROM … b WHERE b.q = a.q)"
+      : where.startsWith("EXCEPT") ? "keep the rows the other query has not, by NOT EXISTS: SELECT DISTINCT a.q FROM … a WHERE NOT EXISTS (SELECT 1 FROM … b WHERE b.q = a.q)"
+      : where.startsWith("GROUP BY") ? "a GROUP BY for each grouping set, joined by UNION ALL: SELECT q, count(*) … GROUP BY q UNION ALL SELECT NULL, count(*) …"
+      : "count(DISTINCT …) of it is answered; Mason has no exact form of this aggregate's DISTINCT of it";
+    throw new Unrewritable(`${where} a numeric quotient or average is not supported by Mason (Postgres compares the exact values, which the engine holds as doubles)`, hint, "numeric-quotient-equality");
   }
 
   /**
@@ -2125,14 +2758,18 @@ class Rewriter {
       if (Array.isArray(v)) { for (const x of v) refuseIn(x); return; }
       if (!isNode(v)) return;
       if (kindOf(v) === "GroupingSet") refuseIn(bodyOf(v).content);
-      else this.comparable(this.groupedExpression(v, b), "GROUP BY a grouping set of");
+      else { const e = this.groupedExpression(v, b); this.refuseExactEquality(e, "GROUP BY a grouping set of"); this.comparable(e, "GROUP BY a grouping set of"); }
     };
-    b.groupClause = (b.groupClause as AstNode[]).map((g) => {
-      if (!isNode(g)) return g;
-      if (kindOf(g) === "GroupingSet") { refuseIn(bodyOf(g).content); return g; }
+    b.groupClause = (b.groupClause as AstNode[]).flatMap((g): AstNode[] => {
+      if (!isNode(g)) return [g];
+      if (kindOf(g) === "GroupingSet") { refuseIn(bodyOf(g).content); return [g]; }
       const e = this.groupedExpression(g, b);
-      if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return g; }
-      return this.equalKey(e === g ? g : this.clone(e));
+      // a numeric decided exactly: grouped by its exact key too, the value kept a key so the list still reads it
+      // (its double is a function of the exact value, so the groups are the key's: exactKey)
+      const exact = this.exactKey(e);
+      if (exact !== null) return [g, exact];
+      if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return [g]; }
+      return [this.equalKey(e === g ? g : this.clone(e))];
     });
   }
 
@@ -2165,15 +2802,20 @@ class Rewriter {
       });
       if (keys.length === 0) { b.distinctClause = [evaluated(strConst("one set"))]; return; }
       b.distinctClause = keys.map(({ d, out }) => {
-        const e = out?.value ?? d;
+        // (the output's expression, typed and keyed here, so every form sent reads the key, never the raw value an alias
+        // names; a numeric decided exactly by its exact key: exactKey)
+        const e = out !== null && !out.twin ? out.value : d;
+        const exact = this.exactKey(e);
+        if (exact !== null) return exact;
         if (this.typeOf(e) !== JSONB) { this.comparable(e, "SELECT DISTINCT ON"); return d; }
-        return this.equalKey(out !== null ? this.clone(e) : d);
+        return this.equalKey(e !== d ? this.clone(e) : d);
       });
       return;
     }
     for (const v of values) if (this.starHoldsJsonb(v)) throw new Unrewritable("SELECT DISTINCT * over a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "name the columns: SELECT DISTINCT a, b, …", "jsonb-compare");
-    if (!values.some((v) => this.typeOf(v) === JSONB)) return;
-    b.distinctClause = values.map((v) => this.equated(this.clone(v), "SELECT DISTINCT"));
+    if (!values.some((v) => this.typeOf(v) === JSONB || this.exactKey(v) !== null)) return;
+    // (a numeric decided exactly by its exact key: exactKey)
+    b.distinctClause = values.map((v) => this.exactKey(v) ?? this.equated(this.clone(v), "SELECT DISTINCT"));
   }
 
   private collateClause(b: Body): AstNode | null {
@@ -2228,6 +2870,24 @@ class Rewriter {
     // (an operand of a jsonb operator is a jsonb, a literal included: each is keyed, whatever its own analysis says)
     const lType = l === undefined ? null : this.typeOf(l);
     const comparing = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name);
+    // a numeric decided exactly, compared for equality: by its exact key, the other side by its own (exactKey)
+    if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 === NUMERIC && a1 === NUMERIC && l !== undefined && r !== undefined) {
+      const kl = this.exactKey(l), kr = this.exactKey(r);
+      const side = (x: AstNode, k: AstNode | null): AstNode | null => k ?? (this.duckExact(x) ? fn("__mason_numeric_key", [cast(x, ["varchar"])]) : null);
+      // a parameter alone is keyed only beside a value decided exactly (its bound text; DuckDB compares a column with it
+      // natively elsewhere)
+      const decided = (x: AstNode, k: AstNode | null): boolean => k !== null && kindOf(stripCasts(x)) !== "ParamRef";
+      const sl = !decided(l, kl) && !decided(r, kr) ? null : side(l, kl), sr = sl === null ? null : side(r, kr);
+      if (sl !== null && sr !== null) { b.lexpr = sl; b.rexpr = sr; return null; }
+    }
+    // a numeric's text decided exactly (`(x / 3)::text`), compared for equality: by the program's text (text's equality
+    // is its bytes', under any deterministic collation)
+    if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 !== null && a1 !== null && TEXTS.has(a0) && TEXTS.has(a1) && l !== undefined && r !== undefined) {
+      const tl = this.exactNumericText(l), tr = this.exactNumericText(r);
+      if (tl !== null) b.lexpr = tl;
+      if (tr !== null) b.rexpr = tr;
+      if (tl !== null || tr !== null) return null;
+    }
     // rows compared member by member (`(id, j) = (1, '…')`: Postgres's per-member operators; a struct to DuckDB,
     // compared by its text)
     if ((l !== undefined && this.rowHoldsJsonb(l)) || (r !== undefined && this.rowHoldsJsonb(r))) {
@@ -2406,7 +3066,14 @@ class Rewriter {
       case "*": {
         // a numeric product is exact to 38 digits in Postgres; DuckDB multiplies two narrow DECIMALs in 18
         if (t?.type !== NUMERIC || l === undefined || r === undefined) return null;
-        const wide = (x: AstNode): AstNode => { const m = this.typed(x)?.typmod ?? -1; return m >= 4 && this.typeOf(x) === NUMERIC ? cast(x, ["decimal", "38", String((m - 4) & 0xffff)]) : x; };
+        // (as the one writer of a cast to numeric writes numeric(38, s), `numericCastWrite`: a scale DuckDB's DECIMAL cannot
+        // hold is no DECIMAL, and the operand stays as it is written — PR 207's fifth round, a second writer)
+        const wide = (x: AstNode): AstNode => {
+          const m = this.typed(x)?.typmod ?? -1;
+          if (m < 4 || this.typeOf(x) !== NUMERIC) return x;
+          const w = numericCastWrite([intConst(38), intConst((m - 4) & 0xffff)], NUMERIC, null);
+          return w.as === "decimal" ? cast(x, ["decimal", String(w.precision), String(w.scale)]) : x;
+        };
         b.lexpr = wide(b.lexpr as AstNode); b.rexpr = wide(b.rexpr as AstNode);
         return null;
       }
@@ -2530,7 +3197,7 @@ class Rewriter {
 
   /** a window's PARTITION BY: a jsonb by its order key (jsonb's equality), a jsonb array refused */
   private keyedPartition(w: Body | undefined): void {
-    if (w !== undefined && Array.isArray(w.partitionClause)) w.partitionClause = (w.partitionClause as AstNode[]).map((p) => isNode(p) ? this.equated(p, "PARTITION BY") : p);
+    if (w !== undefined && Array.isArray(w.partitionClause)) w.partitionClause = (w.partitionClause as AstNode[]).map((p) => isNode(p) ? this.exactKey(p) ?? this.equated(p, "PARTITION BY") : p);
   }
 
   private funcCall(b: Body): AstNode | AstNode[] | null {
@@ -2560,8 +3227,12 @@ class Rewriter {
     if (b.agg_distinct === true && name === "count" && typeof b.location === "number" && this.keyCounts.has(b.location)) delete b.agg_distinct;
     // count(DISTINCT j) counts jsonb's equal values once: their keys, counted (another aggregate's DISTINCT would hand
     // the key itself to the aggregate)
-    if (b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 && this.typeOf(args[0]) === JSONB) args[0] = this.equalKey(args[0]);
-    else if (b.agg_distinct === true && args[0] !== undefined) this.comparable(args[0], `${name}(DISTINCT …) of`);
+    // count(DISTINCT q) of a numeric decided exactly counts its exact keys (exactKey); another aggregate's DISTINCT would
+    // hand the key itself to the aggregate, and is refused
+    const exactArg = b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 ? this.exactKey(args[0]) : null;
+    if (exactArg !== null) args[0] = exactArg;
+    else if (b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 && this.typeOf(args[0]) === JSONB) args[0] = this.equalKey(args[0]);
+    else if (b.agg_distinct === true && args[0] !== undefined) { this.refuseExactEquality(args[0], `${name}(DISTINCT …) of`); this.comparable(args[0], `${name}(DISTINCT …) of`); }
     // a jsonb array searched for an element: jsonb's equality, where DuckDB's list functions compare the text
     if (["array_position", "array_positions", "array_remove", "array_replace"].includes(name) && args[0] !== undefined && this.typeOf(args[0]) === JSONB_ARRAY) {
       throw new Unrewritable(`${name}() of a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's equality)`, "compare an element: a[1] = '…'::jsonb", "jsonb-compare");
@@ -3259,24 +3930,16 @@ class Rewriter {
     if (target === "jsonb" && from !== JSONB && from !== null && (TEXTS.has(from) || from === JSON_OID)) return cast(fn("__mason_jsonb_text", [cast(arg, ["varchar"])]), ["json"]);
     if (target === "jsonb" || target === "json") { b.typeName = { names: [S("json")], typemod: -1 }; return null; }
     if (target === "numeric" || target === "decimal") {
-      const typmods = (b.typeName?.typmods ?? []) as AstNode[];
-      if (typmods.length > 0) {
-        const p = constInt(typmods[0]), s = typmods.length > 1 ? constInt(typmods[1]) : 0;
-        if (p !== null && p > 38) return cast(arg, ["double"]);
-        if (p !== null) return cast(arg, ["decimal", String(p), String(s ?? 0)]);
-        return null;
+      // (how it is written is one decision, `numericCastWrite`, which `duckExact` reads too)
+      const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], from, constString(arg));
+      switch (w.as) {
+        case "double": return cast(arg, ["double"]);
+        case "decimal": return cast(arg, ["decimal", String(w.precision), String(w.scale)]);
+        case "whole": return cast(arg, ["decimal", "38", "0"]);
+        case "literal": return decimalConst(w.text);
+        case "same": return arg;
+        case "as written": return null;
       }
-      // an unconstrained numeric keeps the value's digits: an integer is a whole decimal, a literal text is read as a
-      // decimal literal (BEFORE a numeric: Postgres types `'1.5'` as the cast's numeric, and as it stood DuckDB answered
-      // the text, `2.5e2` for 250), a numeric stays what it is
-      if (from !== null && INTEGERS.has(from)) return cast(arg, ["decimal", "38", "0"]);
-      // as numeric_in reads it (`1_000`, `0x1F`, `1.5e3`: one reader, src/lib/pg-numeric.ts); NaN and Infinity are no
-      // DuckDB decimal and keep the double below
-      const s = constString(arg);
-      const literal = s === null ? null : numericLiteral(s);
-      if (literal !== null) return decimalConst(literal);
-      if (from === NUMERIC) return arg;
-      return cast(arg, ["double"]);
     }
     if ((target === "varchar" || target === "bpchar") && t !== null && t.typmod > 4 && target === "varchar") {
       // varchar(n) cuts the value to n characters, as Postgres's explicit cast does
@@ -3340,7 +4003,7 @@ class Rewriter {
     // a numeric literal with an exponent is a positional decimal (DuckDB reads `1e-7` as a double)
     if (b.fval !== undefined && /[eE]/.test(String(b.fval.fval ?? ""))) {
       const t = this.at(b, ["CONST"]);
-      if (t === null || t.type === NUMERIC) return decimalConst(positional(String(b.fval.fval)));
+      if (t === null || t.type === NUMERIC) return decimalConst(numericConstText(String(b.fval.fval)));
     }
     return null;
   }
@@ -3926,6 +4589,15 @@ function listLateral(columns: Array<{ name: string; list: AstNode }>, alias: str
 type Built = { p: NumericProgram; kind: "int" | "numeric" };
 /** a cell an exact program cannot take (in a grouped SELECT, a column not grouped): the column stays DuckDB's */
 const NOT_EXACT = new Error("not exact");
+/** the engine's integer types, as the rewrite casts to them (`duckExact`: an integer is exact) */
+const DUCK_INTEGER_NAMES = new Set(["tinyint", "smallint", "integer", "int", "bigint", "hugeint", "int2", "int4", "int8"]);
+/** the functions whose value is one of their first argument's (or its sum), in its own type (`duckExact`) */
+const VALUE_KEEPING = new Set(["sum", "min", "max", "any_value", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
+/** the numeric functions the walk writes as an exact DECIMAL or integer (`duckExact`): count, extract (`extract`: as
+ *  the exact numeric Postgres returns), div of integers */
+const WRITTEN_EXACT = new Set(["count", "extract", "div"]);
+/** Mason's functions whose text is an exact decimal's, which a DECIMAL cast reads exactly (`summed`'s parts) */
+const EXACT_TEXTS = new Set(["__mason_numeric_exact"]);
 
 /** a SELECT list item that is `*` or `t.*` */
 /** a set operation's arm (libpg-query's `larg` / `rarg`: a SelectStmt's body, unwrapped), as the node it is */
@@ -3949,8 +4621,9 @@ const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
 type Output = { target: number; name: string; value: AstNode; star: boolean; twin: boolean };
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 
-/** whether a program does what DuckDB would compute otherwise: a division, a rounding, a scale chosen per value; a
- *  sum, a difference or a product of DuckDB's decimals is DuckDB's own right answer */
+/** whether a program of a value the engine holds exactly (`duckExact`, asked first) writes what DuckDB would write
+ *  otherwise: a rounding, a scale chosen per value, a parameter's text; a sum, a difference or a product of DuckDB's
+ *  decimals is DuckDB's own right answer */
 function worthComputing(p: NumericProgram): boolean {
   switch (p.op) {
     // a parameter's cell is its text: DuckDB computes with it as a double
@@ -3966,17 +4639,73 @@ function worthComputing(p: NumericProgram): boolean {
 
 /** the program with each cell's key moved by `by` (the cells of the columns before it) */
 function offsetCells(p: NumericProgram, by: number): NumericProgram {
+  return mapCells(p, (key) => key.startsWith("$") ? { op: "cell", key } : { op: "cell", key: String(Number(key) + by) });
+}
+
+/** an expression without the casts around it */
+function stripCasts(n: AstNode): AstNode {
+  return kindOf(n) === "TypeCast" && isNode(bodyOf(n).arg) ? stripCasts(bodyOf(n).arg as AstNode) : n;
+}
+
+/** a hidden cell riding beside a FROM item's columns, read outside it (`carry`, `exactThrough`): `s.__mason_cell_0` */
+function isCellRef(n: AstNode): boolean {
+  if (kindOf(n) !== "ColumnRef") return false;
+  const f = (bodyOf(n).fields ?? []) as AstNode[];
+  return f.length === 2 && kindOf(f[1]!) === "String" && String(bodyOf(f[1]!).sval).startsWith("__mason_cell_");
+}
+
+/** a scalar subquery's one column, where it is a plain query's (not a set operation's, not a `*`) */
+function scalarTarget(n: AstNode): AstNode | null {
+  const b = bodyOf(n);
+  if (kindOf(n) !== "SubLink" || b.subLinkType !== "EXPR_SUBLINK" || !isNode(b.subselect)) return null;
+  const q = bodyOf(b.subselect);
+  if (q.op !== undefined && q.op !== "SETOP_NONE") return null;
+  const targets = (q.targetList ?? []) as AstNode[];
+  const v = targets.length === 1 ? bodyOf(targets[0]!).val : undefined;
+  return isNode(v) && !hasStar(v) ? v : null;
+}
+
+
+/** a query level as `scopeColumns` meets it: the query and the WITH queries it declares */
+interface Frame { select: Body; ctes: AstNode[]; recursive: boolean }
+
+/** the WITH query a FROM name reads, from the innermost query outwards (a nearer one of the name shadows a farther) */
+function cteIn(frames: readonly Frame[], name: string): { cte: AstNode; recursive: boolean } | null {
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const cte = frames[i]!.ctes.find((c) => bodyOf(c).ctename === name);
+    if (cte !== undefined) return { cte, recursive: frames[i]!.recursive };
+  }
+  return null;
+}
+
+/** a FROM list's items, through its joins (a join's own name is no item: what it joins is read by that name) */
+function fromLeaves(from: unknown): AstNode[] {
+  if (!Array.isArray(from)) return [];
+  return (from as AstNode[]).flatMap((f): AstNode[] => !isNode(f) ? [] : kindOf(f) === "JoinExpr"
+    ? [...fromLeaves([bodyOf(f).larg]), ...fromLeaves([bodyOf(f).rarg])] : [f]);
+}
+
+/** a FROM list's joins */
+function fromJoins(from: unknown): AstNode[] {
+  if (!Array.isArray(from)) return [];
+  return (from as AstNode[]).flatMap((f): AstNode[] => !isNode(f) || kindOf(f) !== "JoinExpr" ? []
+    : [f, ...fromJoins([bodyOf(f).larg]), ...fromJoins([bodyOf(f).rarg])]);
+}
+
+/** a program with each cell replaced (a parameter's `$n` too) */
+function mapCells(p: NumericProgram, f: (key: string) => NumericProgram): NumericProgram {
+  const m = (x: NumericProgram): NumericProgram => mapCells(x, f);
   switch (p.op) {
-    case "cell": return p.key.startsWith("$") ? p : { op: "cell", key: String(Number(p.key) + by) };
+    case "cell": return f(p.key);
     case "literal": return p;
-    case "add": case "sub": case "mul": case "div": case "mod": return { op: p.op, args: [offsetCells(p.args[0], by), offsetCells(p.args[1], by)] };
-    case "neg": case "abs": case "floor": case "ceil": return { op: p.op, arg: offsetCells(p.arg, by) };
-    case "round": case "trunc": case "pad": return { op: p.op, arg: offsetCells(p.arg, by), scale: p.scale };
-    case "typmod": return { op: "typmod", arg: offsetCells(p.arg, by), precision: p.precision, scale: p.scale };
-    case "greatest": case "least": case "coalesce": return { op: p.op, args: p.args.map((x) => offsetCells(x, by)) };
-    case "stddev": return { ...p, args: [offsetCells(p.args[0], by), offsetCells(p.args[1], by), offsetCells(p.args[2], by)] };
-    case "pick": return { op: "pick", index: offsetCells(p.index, by), args: p.args.map((x) => offsetCells(x, by)) };
-    case "rescale": return { op: "rescale", arg: offsetCells(p.arg, by), scale: offsetCells(p.scale, by) };
+    case "add": case "sub": case "mul": case "div": case "mod": return { op: p.op, args: [m(p.args[0]), m(p.args[1])] };
+    case "neg": case "abs": case "floor": case "ceil": return { op: p.op, arg: m(p.arg) };
+    case "round": case "trunc": case "pad": return { op: p.op, arg: m(p.arg), scale: p.scale };
+    case "typmod": return { op: "typmod", arg: m(p.arg), precision: p.precision, scale: p.scale };
+    case "greatest": case "least": case "coalesce": return { op: p.op, args: p.args.map(m) };
+    case "stddev": return { ...p, args: [m(p.args[0]), m(p.args[1]), m(p.args[2])] };
+    case "pick": return { op: "pick", index: m(p.index), args: p.args.map(m) };
+    case "rescale": return { op: "rescale", arg: m(p.arg), scale: m(p.scale) };
   }
 }
 
@@ -4338,9 +5067,43 @@ function positional(text: string): string {
  *  as an integer cast to numeric is, to DECIMAL(38, 0) (DuckDB keeps a product of two 18-digit decimals in 64 bits and
  *  fails past it). Past DuckDB's 38 digits it stays as written: DuckDB's double, as before */
 function decimalConst(text: string): AstNode {
-  if (text.includes(".") || text.replace(/^-/, "").length > 38) return numConst(text);
+  if (text.includes(".") || !engineReadsExactly(text)) return numConst(text);
   const n = Number(text);
   return cast(Number.isSafeInteger(n) && n >= -2147483648 && n <= 2147483647 ? intConst(n) : numConst(text), ["decimal", "38", "0"]);
+}
+
+/** WHETHER THE ENGINE READS A NUMERIC CONSTANT EXACTLY, AS IT IS WRITTEN FOR IT (the one reader of a constant's
+ *  exactness: `decimalConst` writes by it, `duckExact` asks it): DuckDB's DECIMAL holds 38 digits, every digit written
+ *  counted (`0.5` is two); past them, or with an exponent, DuckDB reads the constant as a double */
+function engineReadsExactly(text: string): boolean {
+  return !/[eE]/.test(text) && (text.match(/[0-9]/g) ?? []).length <= 38;
+}
+
+/** the text a numeric constant (`A_Const`'s fval) is written with for the engine: positional where it has an exponent
+ *  (`decimalConst`, which DuckDB would read as a double), else as Postgres's parser kept it */
+const numericConstText = (fval: string): string => /[eE]/.test(fval) ? positional(fval) : fval;
+
+/** HOW A CAST TO NUMERIC IS WRITTEN FOR THE ENGINE: one decision, which the cast's writer (`typeCast`) follows and
+ *  `duckExact` reads, so what is called exact is what is sent — and a product's widening (`aExpr` `*`) writes by it too.
+ *  With a typmod: DuckDB's DECIMAL(p, s) of the value, its double past 38 digits or a scale past the precision, as
+ *  written where the typmod is no constant. Unconstrained: an integer as a whole DECIMAL, a
+ *  text constant as numeric_in reads it (`decimalConst`: BEFORE a numeric, Postgres types `'1.5'` as the cast's numeric,
+ *  and as it stood DuckDB answered the text, `2.5e2` for 250), a numeric as itself, anything else (a float, NaN) as
+ *  the engine's double */
+type NumericCastWrite = { as: "double" } | { as: "decimal"; precision: number; scale: number } | { as: "whole" } | { as: "literal"; text: string } | { as: "same" } | { as: "as written" };
+function numericCastWrite(typmods: readonly AstNode[], from: number | null, text: string | null): NumericCastWrite {
+  if (typmods.length > 0) {
+    const p = constInt(typmods[0]), s = typmods.length > 1 ? constInt(typmods[1]) : 0;
+    // (DuckDB's DECIMAL holds 38 digits, and a scale no larger than its precision)
+    if (p !== null && (p > 38 || (s ?? 0) > p)) return { as: "double" };
+    return p !== null ? { as: "decimal", precision: p, scale: s ?? 0 } : { as: "as written" };
+  }
+  if (from !== null && INTEGERS.has(from)) return { as: "whole" };
+  // as numeric_in reads it (`1_000`, `0x1F`, `1.5e3`: one reader, src/lib/pg-numeric.ts); NaN and Infinity are no
+  // DuckDB decimal and keep the double
+  const literal = text === null ? null : numericLiteral(text);
+  if (literal !== null) return { as: "literal", text: literal };
+  return from === NUMERIC ? { as: "same" } : { as: "double" };
 }
 
 /** a text cast to an integer, as strict as Postgres's: whitespace around an optional sign and digits, nothing else */
@@ -4627,7 +5390,10 @@ export function rewrite({ stmt, base, analysis, collation, userTypes = new Map()
   nameTargets(own);
   r.indexShapes(own);
   r.repeatedKeyCounts(own);
+  r.scopeColumns(own);
+  r.refuseExactRows(own);
   const exact = r.exactThrough(own, analysis.fields);
+  r.carryAll(own);
   r.markBounds(own, wireBound);
   r.markWholeReads(own);
   const tree = guardFilters(flattenBool(r.walk(own))) as AstNode;

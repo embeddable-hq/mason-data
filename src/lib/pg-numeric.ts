@@ -35,9 +35,9 @@ export class NumericError extends Error {
   readonly sqlstate: string;
   /** the registry entry that refused it (src/duck/gaps.ts): the request log's `gap`; null for Postgres's own error */
   readonly gap: GapId | null;
-  /** Postgres's DETAIL, where it gives one (`fieldOverflow`) */
-  readonly detail: string | undefined;
-  constructor(message: string, sqlstate: string, gap: GapId | null = null, detail?: string) { super(message); this.sqlstate = sqlstate; this.gap = gap; this.detail = detail; }
+  /** Postgres's DETAIL, apart from its message, as Postgres sends them (`numeric field overflow` and its field's limit) */
+  readonly detail: string | null;
+  constructor(message: string, sqlstate: string, gap: GapId | null = null, detail: string | null = null) { super(message); this.sqlstate = sqlstate; this.gap = gap; this.detail = detail; }
 }
 
 /**

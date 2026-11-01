@@ -187,3 +187,20 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   `MASON_PG_TRACE=1` and take the trace's statements, the tool's version beside them; a refusal a tool meets is in
   `KNOWN_GAPS`, with why. `tests/postgres-api/server.test.ts` and `tests/duck-wire.test.ts` drive a real listener over
   a real store; `tests/postgres-api/tls.test.ts` holds the TLS rules; the oracle holds every answer to Postgres.
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- A binary Bind of a `text[]` or `varchar[]` parameter holding invalid UTF-8, a NUL byte, flags 2, the other element
+  OID, a dimension past 268435455, a lower bound of 2147483647: Postgres's SQLSTATE and message, not 08P01 (PR 149;
+  issue 160).
+- A text-format array parameter of a shape the literal path refuses (`{{1},{2}}`, `[2:3]={a,b}`): a parameter path that
+  skips the literal's checks (PR 149).
+- A function argument holding a parameter inside it (`a = $1`, `col || $1`) beside a bare `$1`: one parameter decides a
+  whole argument (PR 144).
+- A prepared statement executed after `SET TimeZone` or `SET search_path`: the Parse's analysis read under another
+  session (PR 146; issue 63).
+- A statement of no table under `SET TimeZone = 'America/St_Johns'` (`SELECT '12:30'::time::timetz`): the catalog's UTC
+  answer (PR 166; issue 168).

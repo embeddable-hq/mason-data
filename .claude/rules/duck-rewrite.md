@@ -141,13 +141,32 @@ paths:
     key only), the groups are formed as written with `any_value(t.rowid)`, the HAVING, ORDER BY and LIMIT applied, and
     only then is each kept group's row of that table fetched by its row number, so no wide value goes through the hash
     aggregate. It groups by the key, never by `rowid`: a key the copy holds twice for a moment is one group. What stays
-    as it was: grouping sets, DISTINCT, a row lock, no LIMIT, a partial key or no key, a FROM item a join names (an
-    aliased JoinExpr, which `fromItems` refuses), and a `*` in the list. Only a plain table is FETCHED (a `RangeVar` the
-    analysis reads as a table, `r?.kind === "table"`): a walled read, a derived item and a table with a column named
-    `rowid` never are, but a statement that mixes one with a keyed plain table is still rewritten and only the plain
-    table is fetched; with no such table, or no output read of one, it stays as it was. `tests/duck-wire.test.ts`
+    as it was: grouping sets, a DISTINCT beside a GROUP BY, a row lock, no LIMIT, a partial key or no key, a FROM item a
+    join names (an aliased JoinExpr, which `fromItems` refuses), and a `*` in the list. Only a plain table is FETCHED (a
+    `RangeVar` the analysis reads as a table, `r?.kind === "table"`): a walled read, a derived item and a table with a
+    column named `rowid` never are, but a statement that mixes one with a keyed plain table is still rewritten and only
+    the plain table is fetched; with no such table, or no output read of one, it stays as it was. A `SELECT DISTINCT`
+    whose list holds a table's whole primary key is the same grouping (`distinctGrouping`: never a DISTINCT ON, a UNION,
+    nor a DISTINCT over an aggregate, a window, a set-returning function or a subquery), written as a GROUP BY of each
+    output (the rewrite's key of a jsonb one, which must then be fetched), the key's other columns left out of it.
+    `tests/duck-wire.test.ts`
     holds each side over `late`, `late_p` (the composite and partial keys) and `late_d`; `oracle/bi-shapes.ts` the rows
     ("Key-first grouping", docs/DESIGN.md).
+  - **a DISTINCT ON with a LIMIT chooses its kept rows by row number** (`joinRows`, src/duck/late.ts, issue 134, task E):
+    a DISTINCT ON keeps ONE WHOLE ROW of its FROM per group, so the inner query keeps the DISTINCT ON (its ordinals and
+    output names resolved to clones of the outputs' expressions, as the sort keys are), the ORDER BY and the LIMIT, and
+    lists each FROM item's row number; the list is read from the kept rows. The sort it is sent is the one Postgres
+    runs: the rewrite appends each ON expression the ORDER BY lacks, ASC NULLS LAST (`distinctOnSorted`, src/duck/rewrite.ts,
+    for every form sent; an appended key is bound as its ON expression is, by the one resolver over the DISTINCT
+    ON's list, never through the analysis's sort list, which holds the ORDER BY as written), and keys a jsonb ON named by its output's number or name alike (`keyedDistinct`, through
+    the one resolver, `keysBound`). A numeric computed exactly rides its cells beside a DISTINCT ON, and a plain DISTINCT with one is sent as
+    the DISTINCT ON of every output's number (`exactColumns`); over a pass-through (`SELECT DISTINCT * FROM (…) s`) the
+    DISTINCT ON keys an exact column by its program over the inner query's cells (`distinctThrough`). It is exact for ANY ON expressions, a key or not, so no primary key is asked and never `any_value` (which would answer an arbitrary row of the group for another
+    table's columns). One table is written so too. `keyFirst` refuses it (`first.distinct` is false), so the two never
+    both write one SELECT. What stays as it was: no LIMIT in fact, an aggregate, window or set-returning function, a
+    GROUP BY, a volatile ON expression (`volatileOn`), a column named `rowid`, WITH TIES (`with-ties-distinct`). A test
+    statement compared row for row ends its sort in a key total within the group, or lists the ON table's columns alone;
+    any other is counted. `tests/duck-wire.test.ts` "task E", `oracle/bi-shapes.ts` "key-first DISTINCT ON:".
   A new such form is held to Postgres by the oracle in more than one session zone and its SQL by `tests/duck-wire.test.ts`,
   **in the shapes a BI tool sends, each of which broke a rewrite that passed its author's oracle** (2026-10-28, "The
   independent review"): the value grouped, then ORDER BY its ordinal, its output name and the qualified column; the
@@ -233,6 +252,33 @@ paths:
   that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
   Postgres's order under C, ICU and libc, and the oracle's `jorder` every form. ("jsonb's order")
 
+- **A numeric the plan decides exactly is compared by its EXACT KEY, never its double** (`exactKey`, src/duck/rewrite.ts;
+  PR 207's class round): a quotient or an avg the engine holds as a double equates values Postgres tells apart past 17
+  digits, so DISTINCT, DISTINCT ON, GROUP BY (beside the value), PARTITION BY, count(DISTINCT), `=` and `<>` read the
+  program's value without trailing zeros (`__mason_numeric_key`); a form where no key can be placed (a grouping set,
+  another aggregate's DISTINCT, a set operation without ALL) is refused, `numeric-quotient-equality`; IN, IS DISTINCT
+  FROM, NULLIF, CASE x WHEN and every ORDER are the listed difference `numeric-quotient-compare`. A new context that
+  equates values asks `exactKey` as it asks `equalKey` for a jsonb. `tests/duck-wire.test.ts` "class round".
+  **"Decided exactly" is a property of the value's PROGRAM, never of its syntax or its type** (PR 207's third round):
+  a column of a subquery or WITH query that holds one is that query's program over its cells, which ride as hidden
+  columns of the FROM item (`carry`, decided once per item before the walk, `carryAll`), so it is printed and keyed
+  outside it however it is read; a cast of one to numeric(p, s), its text (`exactNumericText`), a scalar subquery of
+  one and a parameter (its bound text) are keyed alike; `duckExact` is true only where every numeric an expression is
+  computed from is DuckDB's exact value. Each UNION ALL arm carries its own program (`exactArms`, `pick`). Where the
+  cells cannot ride (the item read by a `*` beside other columns, a NATURAL JOIN, its whole row) an equality refuses
+  by name and a print is the listed `nested-exact-numeric`; a row holding one is refused, `row-value`.
+  `tests/duck-wire.test.ts` "third round".
+- **Whether a numeric is exact is ONE decision, `duckExact`, by how the value is WRITTEN for the engine** (PR 207's fourth
+  round, a class round: a literal past 38 digits called exact where `decimalConst` writes a double; a variance's cells
+  called inexact where the rewrite's own hugeint casts hold them; a program skipped over a double): a constant and a
+  cast to numeric are decided by the writer's own decision (`engineReadsExactly`, `numericCastWrite`, which `typeCast`
+  follows), the rest by what DuckDB computes from exact operands. Every place that asks — a program's cells
+  (`programOf`, the one builder of a program), whether a program is the engine's own answer (`exactColumns`, min /
+  max), a FROM item's column (`carry`), a key (`exactKey`), a union arm's value, a function's argument (`pgNumeric`) —
+  asks it, never a property of its own (a declared scale, a column's kind). Unknown is not exact. A WITH query a FROM
+  name reads is resolved by one resolver (`cteOf`), and a carry is decided from the cells its item EXPOSES, as written
+  (`exposedCells`). `tests/duck-wire.test.ts` "fourth round".
+
 ## What a column is
 
 - **A column is the source's type, whatever the copy holds** (`src/duck/held-types.ts`, the only place that says what the
@@ -282,3 +328,50 @@ paths:
   does not compile; `docs/SQL-SUPPORT.md` is rendered from the registry, and `tests/duck-gaps.test.ts` fails when it is not.
 - **No dead entries**: the oracle fails when a `refused` or `differs` entry is met by none of its statements
   (`oracle/gap-cases.ts`), so an entry no longer true is removed, not left to mislead. ("What is not supported")
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- A constant as a key in ORDER BY, DISTINCT ON, WITH TIES and a window, by name, by number and as itself (`1 AS one`,
+  `1.5::numeric`, `'1.5'::numeric`, `2147483648::int`, `'abc'::text::int`, every key a constant): a literal the engine
+  reads as an ordinal or refuses (42804), or a cast Postgres raises at planning dropped (PR 170, 197).
+- A key equal to an output but spelled otherwise (`'1.5'::numeric` beside `1.5::numeric AS v`, `0 + l.c` beside `l.c +
+  0`), named by a bare output name, or by number beside a `*`: an output resolved by syntax, not by Postgres's analysed
+  equality (PR 170, 207).
+- A type-dependent key (jsonb, citext, a collated text) as a DISTINCT ON or sort key by bare output name, by number and
+  as the expression: a rule applied to one spelling only (PR 170, 207).
+- A volatile output as a key (`random() AS r … ORDER BY random()`, `ORDER BY r`, `ORDER BY 1`), also under WITH TIES:
+  evaluated twice (PR 170).
+- `SELECT * … GROUP BY name, id` (keys not the star's leading columns in order), `b.*, count(*)`, a `*` beside a
+  computed output ordered by number: outputs taken in the tree's order, not the target list's (PR 120, 170).
+- Each shape above inside a scalar subquery, `ARRAY(…)`, `EXISTS` or `IN` in the SELECT list: the inner query resolved
+  against the outer (PR 120).
+- A citext, collated or jsonb column ordered by number through `UNION ALL … ORDER BY 2`: sorted as bytes (PR 120).
+- A numeric quotient or text-read numeric (`o.amount / 3`, `l.k / 7.0`, `t::numeric`) under DISTINCT, DISTINCT ON, GROUP
+  BY, UNION ALL, USING, `::text`, a row value, `= $1`, `= (SELECT …)`, through a derived table or CTE: approximate
+  printed or compared as exact (PR 197, 207; issues 212, 218).
+- A numeric past the engine's 38 digits (`x * x` over `numeric(30,20)`, `power(x, 400)`): the engine's error or its
+  double (PR 207; issues 214, 217).
+- A form the change fixes under a LIMIT, tried with no LIMIT, no ORDER BY and a list that reads no table (`SELECT
+  count(*) FROM late_c l NATURAL JOIN late_p lc`): fixed in one path only (PR 155).
+- A LIMIT over a join (late.ts) with a CTE read only by a list subquery, a LATERAL plain read, `schema.table.column`,
+  the keyed table on a LEFT or FULL join's nullable side, OFFSET past the end, LIMIT 0, a DISTINCT ON whose ON list the
+  ORDER BY lacks: a scope moved, or a sort narrower than Postgres's (PR 146, 163, 164, 207).
+- No ORDER BY, a deep `OFFSET 2000000`, a small table LEFT JOINed to a 50 M-row one: a sort over the whole join where
+  the old plan stopped early (PR 118, 146).
+- A coercion Postgres adds that the raw tree lacks (`tm = '12:30-04'::timetz`, a UNION of time and timetz, `CASE …
+  tm::timetz ELSE tm END`), and every spelling of one cast (`timetz(tm)`, `tm::timetz`, `ARRAY[tm]::timetz[]`): the
+  analysed node unread; one input through two paths (PR 166; issue 167).
+- A type's edge values (`'24:00'::time`, NaN, ±Infinity, a bigint sum past 2^53 under `floor`/`ceil`, `1e400`): a value
+  rolled over, or a double's digits (PR 166, 202; issue 203).
+- An engine error a statement can meet (`ORDER BY x USING <`, a scalar subquery returning two rows, a CASE mixing time
+  and timetz, `l.k::numeric(2,0)` overflowing from a column, `'NaN'::float8::numeric(5,0)`): an error in the engine's
+  words or the wrong SQLSTATE (PR 164, 166, 170; issues 165, 204, 208).
+- A set operation under a clause written for a plain SELECT (`… UNION ALL … ORDER BY 1 FETCH FIRST 3 ROWS WITH
+  TIES`), a collated output under ROLLUP ordered by itself: a crash, or the engine's GROUP BY error (PR 170; issue
+  211).
+- A libc collation: en_US over symbols (`㊿`, `€`, `½`), private use and NFD marks (`E'ä6ß'`), a non-glibc en_US,
+  the source's glibc upgraded; tr_TR and sv_SE over ASCII pairs: en_US refused, or another locale differing unsaid
+  (PR 135).

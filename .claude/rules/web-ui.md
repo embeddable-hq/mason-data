@@ -226,3 +226,12 @@ adds pages, not endpoints.
 | The copy's progress | `GET /api/state` `tables[].copy.progress`, `readiness` | `mason wait --json` (`tableLine`, `copyingText` already render it) |
 | Sync on demand | `POST /api/sync` `{ tables }` | `mason sync --json` |
 | A table's columns (the Columns… form) | `GET /api/tables/<table>/columns` (`{ table, columns }`; never in the polled `GET /api/state`, whose `?columns=1` has every table's) | `mason tables <table> --json` `columns` |
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- A field `mason status --json` gained: shown on the page in the CLI's words, with a fixture that carries it (PR 135).
+- Enter or Space on a row's `<summary>`, then Tab: the focus kept on that row (issue 70).
+- A cause the page states for a state (a lost slot): one the source can actually tell (issue 74).

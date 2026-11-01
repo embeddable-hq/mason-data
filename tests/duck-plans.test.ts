@@ -166,6 +166,11 @@ const REWRITTEN: Shape[] = [
   { name: "a top N over joins by a computed key no output shows", sql: "SELECT o.id, o.meta, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY date_trunc('day', o.created_at) DESC, o.id LIMIT 100" },
   // key-first grouping (src/duck/late.ts keyFirst, issue 134 step 6): grouped on the key, the wide columns read after the limit
   { name: "a GROUP BY the key with wide columns and a LIMIT: grouped on the key, read by row number", sql: "SELECT o.id, o.meta, o.notes, count(i.id) AS items FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY o.id DESC LIMIT 100" },
+  { name: "a DISTINCT with the key and wide columns and a LIMIT: distinct on the key, read by row number", sql: "SELECT DISTINCT o.id, o.meta, o.notes, c.name FROM orders o JOIN order_items i ON i.order_id = o.id LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 100" },
+  // task E: a DISTINCT ON keeps one whole row per group, so its rows are chosen by row number and the wide columns read
+  // for the kept rows alone, whatever the ON expressions
+  { name: "a DISTINCT ON the key with wide columns and a LIMIT: the kept rows chosen by row number", sql: "SELECT DISTINCT ON (o.id) o.id, o.meta, o.notes, i.id AS item FROM orders o JOIN order_items i ON i.order_id = o.id ORDER BY o.id DESC, i.id LIMIT 100" },
+  { name: "a DISTINCT ON a non-key of one table with wide columns and a LIMIT: the kept rows chosen by row number", sql: "SELECT DISTINCT ON (o.customer_id) o.customer_id, o.id, o.meta, o.notes FROM orders o ORDER BY o.customer_id, o.created_at DESC, o.id LIMIT 100" },
   { name: "a tool's wrapper of a many-to-many join, no sort", sql: "SELECT * FROM (SELECT c.id, o.meta FROM customers c JOIN orders o ON c.tenant_id = o.tenant_id) t LIMIT 100" },
   // leftLateral: the "expand the JSON" preview, over jsonb and json, guarded to objects as the tool guards it
   { name: "LEFT lateral preview: jsonb_each, LIMIT 100 OFFSET 0", sql: "SELECT q.*, d.key, d.value FROM (SELECT t.id, t.meta FROM orders t) AS q LEFT JOIN jsonb_each(CASE WHEN jsonb_typeof(q.meta) = 'object' THEN q.meta ELSE NULL END) d ON TRUE LIMIT 100 OFFSET 0" },

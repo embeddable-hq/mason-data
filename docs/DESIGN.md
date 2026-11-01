@@ -429,6 +429,54 @@ the second finding of a class on one PR turns the next round into a class round,
 first, tests each against Postgres, then fixes the decision. Its first such round ran at high effort, to see whether
 effort changes the count.
 
+**The loop as workflows, and the base's findings filed (Tom, 2026-11-01).** PR 207 took three rounds over a numeric
+quotient computed as a double, and the wrong answer grew each round: main had given it since before the PR, so the PR
+chased a class it did not make. A finding the base already answers wrong is now the base's: one issue per class, never
+a fix in the PR, and never counted toward the PR's class rule. PR 170 and PR 207 met one class, which per-PR counting
+could not see, so a run's classes carry to the PR stacked on it. The coordinator ran the loop by hand; it now runs as
+`.claude/workflows/pr-loop.js` and `.claude/workflows/issue-loop.js`, started with the Workflow tool, each stage an
+agent and the scripts' logic held by `tests/workflows.test.ts`. The brief and the plan moved to Opus with implementation, and Fable is kept for the reviews,
+where outreading the author is the point.
+
+**Passing the review the first time (Tom, 2026-11-01).** By the coordinator's count of fix rounds over the last 25
+merged PRs that change `src/`, about 45% needed at most one and about 55% at most two. GitHub counts 17 commits on
+PR 170, 12 on PR 156, 8 on PR 149, 6 each on PRs 109 and 163, and 5 on PR 135. The aim is about 90% passing Fable's
+review the first or second time. PR 202 (generated tables, stage 3; open, 10 commits) took six review rounds by the
+coordinator's count, and its root cause was a design nobody reviewed. At its head, its refusal reasons were decided by
+a walk over the raw parse tree (`seen` and `formsOf` in `src/duck/generated-plan.ts`), guessing types from lists of
+function names, where Postgres's analysis already held every node's result type (`src/duck/pgtree.ts` reads them)
+and "Postgres decides, DuckDB computes" is CLAUDE.md's first principle. Every round's wording finding traced back to
+that guess; each fix layered another guess on it, and each class round's brief described the syntax walk as the
+decision, so the class rounds built more of the wrong design. What the reviews caught, the brief had never given the
+author: a rule the project already has, not applied ("Postgres decides", "a fact derived in several places", "A
+refusal on the wire is Postgres's", "An APPROXIMATE value cannot be compared for equality"); the reviewer's probes,
+which the author never ran (wrap the expression in `* 2`, coalesce or round, nest it, change the input type, put the
+table on an outer join's nullable side, pass a parameter, prepare before a SET, run the real run and not only the unit
+world); unverified assumptions about the engine or the real run; and context lost between rounds, each fix round a
+fresh agent seeing only the latest findings. CI was red at PR 202's first commit (`checks`, a unit shard and
+`integration (rest)` failed), and rounds 1 and 2 never heard of it, since the loop read CI only once the reviews were
+clean. So `pr-loop.js` gained six phases and changed its rounds twice:
+- **Design** and **Design review**: an Opus note before code, naming each fact's authority, which Fable reviews
+  against that code; after two rounds the run goes on, carrying what is still open in its result and status.
+- **Probe**: before every review, a fresh Opus with no stake in the code runs the `## What review probes` of the
+  rules files the diff touches, the reviews' own probes and the note's shapes; this PR's findings are fixed before
+  Fable reads the head, at most two rounds a push, counted apart from the review's. The probe is the author's check
+  and the review the gate, so a probe that fails is noted and the review goes on.
+- **Learn**: once the reviews are clean and before the CI loop, each class met becomes a bullet in its rules file's
+  section, so the next PR's probe runs it. Its commit is neither probed nor reviewed, so its files are read from git
+  and a head that changed anything outside `.claude/rules/` stops the run. `tests/workflows.test.ts` holds every
+  rules file to the heading, and `tests/conventions.test.ts` every bullet to the PR or issue it was met in.
+- **Record**: every exit with a PR posts a `Review record` on it, and `scripts/review-stats.ts` turns the records into
+  the number that says whether this worked: of the PRs that reached a review, the share whose first review found
+  nothing of theirs, and whose first or second did; runs that stopped before a review are counted apart.
+- **Link**: PR 202 said "Part of #175", which GitHub does not link, and the board never saw it: the prompt asked for
+  `Closes` and nothing read it. After the implement push the run now asks GitHub whether the PR closes its
+  sub-issue, fixes the body once if not, and stops if it still does not. GitHub links a closing keyword only on a PR
+  into the default branch, so for a stacked PR the body's keyword is read instead.
+- The rounds: every fix round is handed the note and every earlier round, probe and review, with what each judged
+  correct; and CI is read beside each review, a red run going back with the review's findings in the same fix. Beside
+  a clean review there is no fix round to join, and the CI stage reads the failure again after Learn.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
@@ -2285,6 +2333,31 @@ where the hand rewrite took 0.76 s with none. So `keyFirst` (src/duck/late.ts) g
 by row number would answer two rows where the source answers one. That moment is the reason `distinct-key.ts` trusts no
 UNIQUE index that is not the key, since a column the copy is not written by may hold one value twice; the primary key it
 does trust because the copy is written by it, and the swap checks as many distinct keys as rows.
+
+**A DISTINCT ON with a LIMIT, by row number (issue 134, task E), decided 2026-11-01.** `SELECT DISTINCT ON (…) … ORDER BY
+… LIMIT` with wide columns in the list carried every row's wide values through DuckDB's DISTINCT ON (a window and a
+filter) and the top N: on issue 134's dataset it failed with 53400 after 1230 s and 25 GiB of spill, where the hand form
+took 0.21 s and Postgres 0.7 s. It is NOT key-first grouping: a DISTINCT ON keeps one whole row of the FROM per group,
+the first by the sort, where a GROUP BY's group may hold many rows of a table. So `any_value(rowid)` would be wrong (it
+answers an arbitrary row of the group for another table's columns, where DuckDB's DISTINCT ON answers the first), and the
+primary-key proof decides nothing: the kept row's row numbers identify it exactly whatever the ON expressions, a key, a
+non-key, a computed or a jsonb one, and a key the copy holds twice for a moment is still one row, kept by the DISTINCT ON
+itself. It is `joinRows`'s form with the DISTINCT ON inside, one table included, because DuckDB's own late
+materialization does not reach through the window and filter its DISTINCT ON is. What is given up is `limit-errors`: a
+raising list value in a row that is not its group's first now answers. The task's brief wrote two of its "legal odd
+forms" with a sort key between the ON expressions (`DISTINCT ON (a, b) … ORDER BY a, c`), which Postgres refuses with
+42P10; the legal form is a sort that is a prefix of them (`ORDER BY a`), Postgres appending the rest. The review of
+PR 207 found that the engine was sent the sort as written, not Postgres's with the rest appended, so a LIMIT kept other
+groups in another order (at the base too, in the form sent as written): the rewrite now appends them to the statement's
+sort before any key is built (`distinctOnSorted`), so every form sent sorts as Postgres's Unique does. It found too that
+a jsonb ON named by its output compared the value's text, not jsonb's equality (only an ordinal was resolved), and that a
+numeric quotient under a DISTINCT ON or a DISTINCT was the engine's double's text, as no cell rode beside it. Its
+second round found the same text through a DISTINCT over a pass-through (`SELECT DISTINCT * FROM (…) s`: whether the
+cells ride was decided per form), and that every DISTINCT, GROUP BY and `=` compared a quotient's double, so
+1.00000000000000000001 and 1.00000000000000000002 were one group (pre-existing at the base). The class round's decision:
+a numeric the plan decides exactly is equated by its exact program's value (`exactKey`), the pass-through's DISTINCT keyed
+by the inner query's cells, and what cannot take a key refused by name; IN and the order of quotients equal to 17
+digits are a listed difference, since a key there would have to sort as a numeric does.
 
 **Step 3: `USING`, `NATURAL` and computed keys.** Through the listener, a 2 GB limit, 8 M facts beside 3 M rows of about 3 kB
 that compress well (346 MB on disk, so the spill and the seconds before are smaller than the issue's 9.1 GB of noise; the

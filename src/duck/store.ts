@@ -359,8 +359,8 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   // a refusal raised inside DuckDB (a Mason function's, the rewrite's error() call) crossed it as its text alone: the
   // entry its text names (gapIn), read here, the one place that text becomes a statement's error
   // (Mason's own refusal keeps the engine's text out of the DETAIL: it may quote the row, tests/conventions.test.ts)
-  // Postgres's own DETAIL where it has one (a numeric field's digits), which quotes no value
-  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, ...(pg.detail !== undefined ? { detail: pg.detail } : pg.code === "0A000" ? {} : { detail: `the engine: ${message}` }) }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
+  // (a Mason function's error that carries Postgres's own DETAIL sends it as Postgres does, apart from the message)
+  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, ...(pg.code === "0A000" ? {} : { detail: pg.detail ?? `the engine: ${message}` }) }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
   const fn = /(?:Scalar|Aggregate|Table) Function with name "?([A-Za-z_][\w]*)"? does not exist/.exec(message)?.[1];
   if (fn !== undefined) {
     // what reaches DuckDB was verified against Postgres (src/duck/verified.ts), so a function DuckDB lacks is a gap in
@@ -404,7 +404,7 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
 }
 
 /** The errors DuckDB raises for what Postgres raises too, in Postgres's code and words (a tool or a person matches them). */
-function postgresWording(kind: string, message: string): { code: string; message: string; detail?: string; gap?: GapId | null } | null {
+function postgresWording(kind: string, message: string): { code: string; message: string; gap?: GapId | null; detail?: string } | null {
   if (/^Division by zero\b/i.test(message) || message === "division by zero") return { code: "22012", message: "division by zero" };
   const zone = /Unknown TimeZone '([^']*)'/.exec(message);
   if (zone) return { code: "22023", message: `time zone "${zone[1]}" not recognized` };
@@ -930,7 +930,7 @@ function exactRows(computed: ComputedColumns, rows: DuckDBValue[][], base: numbe
     for (const e of computed.columns) {
       try { out[e.column] = evaluateText(e.program, values); }
       catch (err) {
-        if (err instanceof NumericError) throw new StatementError({ code: err.sqlstate, message: err.message, ...(err.detail === undefined ? {} : { detail: err.detail }) }, sql, err.gap);
+        if (err instanceof NumericError) throw new StatementError({ code: err.sqlstate, message: err.message, ...(err.detail === null ? {} : { detail: err.detail }) }, sql, err.gap);
         throw err;
       }
     }

@@ -129,3 +129,32 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
 - **A file's name is its table.** A name a synced table holds is refused, and the synced table wins the catalog
   (`served`, `names`) and the table: what was deployed under that name is let go with its ledger row (`release`), and
   nothing is built or swapped over it (`buildable`).
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- A chain of three (`bottom` reads `events`, `middle` reads `bottom`, `top` reads `middle`) where `top` fails after a
+  base change: tried again after its back-off, and its lag dated from the base change, not the swap (PR 163, 171).
+- A restart after a chain is built, nothing changed since: no child marked behind or built again (PR 163).
+- A parent refused in its file but deployed; a parent refused before its child is checked (`child.yml` sorts before
+  `parent.yml`), then fixed: the child's state, `waitingFor` and `mason wait` exit follow the parent's state now (PR
+  163, 171).
+- Two files edited in one review so their reads cross (`a` now reads `events`, `b` now reads `a`): a false cycle from
+  the previous definition's reads (PR 163).
+- A child naming its parent's columns as `public.counts.tenant_id`: built alone, failing in a chain (PR 163).
+- A synced table taking a generated table's name while its run is going, reverted before the next review: the run's
+  marks lost (PR 156, 210).
+- A stored numeric: `floor(sum(id))` past 2^53, `sum(id) + sum(wide)` with `wide numeric(65,30)`, `round(amount, -1)`,
+  `amount::numeric(40,2)`, `avg(amount::float8)::numeric`: the engine's type assumed, one value meaning two things, a
+  refusal whose reason is not the form (PR 202).
+- A definition whose text depends on the session (`to_json` of a timestamptz, `current_date`): refused, with a way out
+  that builds (PR 156).
+- A wire query or a log line read right after `until(built)`: served before the catalog is rebuilt (PR 202, 206).
+- Many definitions written at once, most failing at the write (an overflow, a division by zero, a bad text cast): a
+  connection left aborted, a table building for ever (issue 216).
+- One failure through the stored cast and through the rewrite (`(id::text || '00000000000')::numeric(10,3)` with and
+  without `::double precision`), and an unmapped engine error (`chr(2147483647)`): Postgres's DETAIL on one path only,
+  the engine's words in the record (PR 202).
+- `stop()` while a run plans or a review checks: a spurious `generated_failed` at shutdown (PR 156).

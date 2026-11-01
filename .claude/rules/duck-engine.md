@@ -19,3 +19,13 @@ computes**: the catalog Postgres (PGlite, the copied tables' definitions, no row
 makes it DuckDB's, and DuckDB runs it (`src/duck/plan.ts`). Each added table is copied whole from the source, then kept
 current as its `sync:` says — `off` (the default: read again only at `mason sync`), Mason's xmin poll at its interval,
 or logical replication (`replication`, `src/duck/stream.ts`), mixed in one project.
+
+## What review probes
+
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+
+- Each probe at the base as well as the head: a refusal the change turns into an answer must equal Postgres's, an answer
+  it turns into a refusal is a regression, and a difference both share is the base's (PR 120, 170, 197).
+- Each rules-file, DESIGN or release-note sentence the change touches, read against the code's branches: a sentence
+  still stating what the change removed, or wider or narrower than the code (PR 146, 161, 163, 170).
