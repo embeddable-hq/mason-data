@@ -24,7 +24,8 @@
  * outside the derived table; `IT_ORACLE_SHAPES=0` leaves them out).
  *
  * WHAT THE STATEMENTS ANSWERED ALIKE ARE MADE OF is what the endpoint admits (src/duck/verified.ts, rewritten by
- * `UPDATE_VERIFIED=1`; anything else is refused): this test fails while the file is not exactly that.
+ * `UPDATE_VERIFIED=1`, or from a CI run's legs by `node scripts/oracle-legs.ts --write <run-id>`; anything else is
+ * refused): this test fails while the file is not exactly that.
  *
  * A difference is a defect to fix, or a DECIDED one in `KNOWN` naming its `differs` gap, which must still differ in the
  * kind decided; a refusal where Postgres answers must name a `refused` gap, and a gap none of the statements meets is
@@ -63,11 +64,11 @@ import { SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.t
 import { collationMet, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
-import { countGap, emptyTally, fixtureTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
+import { countGap, emptyTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
 import { GAP_MARK, GAPS, type GapId } from "../../src/duck/gaps.ts";
-import { deadGaps, FIRST_LEG_RUNS_STAGES, legOf, legRefused, movedTallies, parseLeg, PHASES, statementId, verifiedDiff, type LegReport } from "../../scripts/oracle-legs.ts";
+import { deadGaps, FIRST_LEG_RUNS_STAGES, fixtureOf, legOf, legRefused, movedTallies, parseLeg, PHASES, statementId, verifiedDiff, verifiedText, WRITE_COMMAND, type LegReport, type Measured } from "../../scripts/oracle-legs.ts";
 import type { RolesLive } from "../../src/duck/grants.ts";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -112,7 +113,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "typed", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
+const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -201,6 +202,8 @@ function showAllHolds(want: Answered, got: Answered): string | null {
  * part of the answer may differ in any kind but there.
  */
 const KNOWN: Decided[] = [
+  // a domain's column is its base type's: the wire and data_type say so on Postgres too, pg_typeof and format_type do not
+  { sql: /pg_typeof\(d[itzp]\)|attname = 'd[itzp]'/, kind: "value", gap: "domain-column", why: "a domain's column is read and declared as its base type" },
   // SHOW ALL (Postico sends it at every connection): the listener's settings — its catalog Postgres's, the session's
   // laid over — never the source's, so its values differ (and its rows, where the two servers list other settings); its
   // fields and the rows the sessions set are held alike (`holds`)
@@ -512,13 +515,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   }
   const asked = all().length * 3 + shaped;
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of
-  // play), and the gaps' detail beside them: here, past the last phase, as `everyAsk` counts every phase
+  // play), and the gaps' detail beside them: here, past the last phase, as `everyAsk` counts every phase. A leg reports
+  // its part, and `measured`, for scripts/oracle-legs.ts --write
+  const measured: Measured = {
+    what: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy",
+    machine: `${process.platform} ${process.arch}`, postgres: psql(dbUrl, "SELECT version()").split(",")[0]!, collation, shapes: SHAPES,
+  };
   if (WHOLE) {
-    const measured = {
-      what: "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy",
-      machine: `${process.platform} ${process.arch}`, postgres: psql(dbUrl, "SELECT version()").split(",")[0]!, collation, shapes: SHAPES,
-    };
-    const fixture = { ...tallies, gaps: { copyPhase: fixtureTally(copyPhaseGaps), everyAsk: { asked, ...fixtureTally(everyAskGaps) } }, measured };
+    const fixture = fixtureOf(tallies, copyPhaseGaps, everyAskGaps, asked, measured);
     const pct = (n: number): string => `${(100 * n / tallies.statements).toFixed(1)}%`;
     console.log(`duck oracle, DuckDB alone: ${tallies.statements} statements: exact ${pct(tallies.duckdb.exact)}, the rows under its own names ${pct(tallies.duckdb.name)}, refused ${pct(tallies.duckdb.refused)}, ` +
       `a wrong value ${pct(tallies.duckdb.value)}, wrong rows ${pct(tallies.duckdb.rows)}, other text ${pct(tallies.duckdb.text)}, other ${pct(tallies.duckdb.other)}; ` +
@@ -527,7 +531,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     else {
       const was = JSON.parse(fs.readFileSync(ALONE_FIXTURE, "utf8")) as typeof fixture;
       const moved = movedTallies(tallies, was);
-      assert.deepEqual(moved, [], `${ALONE_FIXTURE} is not what this run measured (docs/SQL-SUPPORT.md's comparison renders it): regenerate with UPDATE_FIXTURE=1 and read the diff`);
+      assert.deepEqual(moved, [], `${ALONE_FIXTURE} is not what this run measured (docs/SQL-SUPPORT.md's comparison renders it): regenerate with ${WRITE_COMMAND} and read the diff`);
     }
   }
 
@@ -978,7 +982,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   if (LEG !== null) {
     const legReport: LegReport = { ...LEG, whole: [...every().map((q) => ({ id: statementId(q), name: q.name })), ...UNORDERED_LIMITS.map(unorderedStatement).map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))], asked: askedIn, stages: stageAsked, shaped, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
       decisions: KNOWN.map((k) => ({ sql: String(k.sql), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
-      verified: [...verified], differences: differences.length };
+      verified: [...verified], names: Object.fromEntries(await describeKeys(async (sql) => (await source.query({ text: sql, rowMode: "array" })).rows as (string | null)[][], verified)),
+      asks: asked, measured, differences: differences.length };
     const out = process.env.IT_ORACLE_LEG_REPORT!;   // legRefused: a leg without it does not start
     fs.writeFileSync(out, JSON.stringify(legReport));
     console.log(`duck oracle: leg ${LEG.leg} of ${LEG.of}: ${tallies.statements} statements of ${legReport.whole.filter((w) => w.apart !== true).length}, and those of ${UNORDERED_LIMITS.length} apart that are its own; report in ${out}`);
@@ -986,13 +991,11 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   if (process.env.UPDATE_VERIFIED === "1" && WHOLE) {
     const names = await describeKeys(async (sql) => (await source.query({ text: sql, rowMode: "array" })).rows as (string | null)[][], verified);
     const file = path.join(REPO, "src", "duck", "verified.ts");
-    const head = fs.readFileSync(file, "utf8").split("export const VERIFIED")[0]!;
-    fs.writeFileSync(file, `${head}export const VERIFIED: ReadonlyMap<string, string> = new Map([\n` +
-      [...verified].sort().map((k) => `  [${JSON.stringify(k)}, ${JSON.stringify(names.get(k) ?? k)}],\n`).join("") + "]);\n");
+    fs.writeFileSync(file, verifiedText(fs.readFileSync(file, "utf8"), verified, names));
     console.log(`duck oracle: src/duck/verified.ts rewritten: ${verified.size} verified (${newly.length} added, ${dropped.length} dropped)`);
   } else if (WHOLE) {
     assert.deepEqual({ added: newly, dropped }, { added: [], dropped: [] }, "src/duck/verified.ts is not what the oracle verifies: `added` were answered " +
-      "exactly and are refused until listed, `dropped` are listed and no statement answered alike uses them. Regenerate with UPDATE_VERIFIED=1 and read the diff");
+      `exactly and are refused until listed, \`dropped\` are listed and no statement answered alike uses them. Regenerate with ${WRITE_COMMAND} and read the diff`);
   }
   assert.equal(differences.length, 0, `the endpoint answered ${differences.length} statement(s) differently from Postgres; ${report} lists them. The first:\n` +
     differences.slice(0, 5).map((d) => `[${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}`).join("\n"));

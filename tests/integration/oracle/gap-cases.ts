@@ -41,7 +41,9 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "enum-forms", sql: "SELECT id, t::text::mood[] FROM moods WHERE false" },
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },
   { gap: "jsonb-compare", sql: "SELECT id, greatest(jb, '1') FROM typed ORDER BY id" },
+  { gap: "held-type-compare", sql: "SELECT id FROM mapped ORDER BY mc, id" },
   // the decided differences (KNOWN in duck-oracle.itest.ts)
+  { gap: "domain-column", sql: "SELECT pg_typeof(di)::text FROM mapped LIMIT 1" },
   { gap: "limit-errors", sql: "SELECT l.id, (l.j ->> 'n')::int, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.k DESC LIMIT 3" },
   { gap: "limit-errors", sql: "SELECT c.id, d.id AS d, d.n FROM late_c c JOIN (SELECT l.id, l.k, l.c, (l.j ->> 'n')::int AS n FROM late l) d ON d.c = c.id ORDER BY d.k DESC LIMIT 3" },
   { gap: "limit-errors", sql: "SELECT * FROM (SELECT l.id, (l.j ->> 'n')::int AS n, l.k, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY t.k DESC LIMIT 3" },

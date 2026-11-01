@@ -567,8 +567,8 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 - **The oracle** (`tests/integration/duck-oracle.itest.ts`, `oracle/`): adversarial synthetic data seeded on a real
   Postgres and copied by Mason's own sync, then thousands of statements — BI tools' shapes, every type, function,
   operator, aggregate, cast and construct — sent through the listener and held to what Postgres answers, after the
-  copy and after two rounds of changes. It writes `src/duck/verified.ts` (`UPDATE_VERIFIED=1`) and fails while that
-  file is not exactly what it would write.
+  copy and after two rounds of changes. It fails while `src/duck/verified.ts` is not exactly what it verified, which
+  `node scripts/oracle-legs.ts --write <run-id>` writes from a CI run's oracle legs.
 - **The gaps** (`tests/duck-gaps.test.ts`): docs/SQL-SUPPORT.md is what `src/duck/gaps.ts` and `verified.ts` render,
   and every refusal names an entry that exists.
 - **The wire** (`tests/postgres-api/protocol.test.ts`, `encode.test.ts`, `server.test.ts`, `tests/duck-wire.test.ts`):

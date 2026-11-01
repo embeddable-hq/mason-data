@@ -26,6 +26,8 @@
  * answered differently. The rewritten tree is printed with pgsql-deparser; the server parses the printed text again
  * and refuses the statement unless it reads back as exactly this tree (`sameTree`), so a printing gap can only refuse.
  */
+import { HELD, heldType, isHeldArray, ZONED_HELD } from "./held-types.ts";
+import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
@@ -120,13 +122,15 @@ const NUMBER_ELEMENT: Record<number, number> = { 1005: INT2, 1007: INT4, 1016: I
 const TEXTS = new Set([TEXT, VARCHAR, BPCHAR, NAME, UNKNOWN]);
 const JSONS = new Set([JSON_OID, JSONB]);
 const JSONB_ARRAY = 3807;
+const HELD_TYPE_NAMES = new Map(Object.entries(HELD).map(([name, h]) => [h.oid, name] as const));
 /** the way out of a jsonb comparison Mason does not key (gap jsonb-compare) */
 const JSONB_WAY_OUT = "compare a member (j ->> 'k'), or j::text for the canonical text";
 const BOOL = 16, UUID = 2950, TIME = 1083, BYTEA = 17;
 /** pg_type's array types of the element types above */
-const ARRAYS = new Set([1000, 1001, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 1022, 1028, 1115, 1182, 1183, 1185, 1187, 1231, 2951, 199, 3807]);
+const ARRAYS = new Set([1000, 1001, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 1022, 1115, 1182, 1183, 1185, 1187, 1231, 1270, 2951, 199, 3807]);
 /** inet[], which the copy holds as a list of its text (src/duck/sync.ts KEPT_ARRAYS) */
 const INET_ARRAY = 1041;
+const TIMETZ = 1266;
 /** numeric[] and record[] */
 const NUMERIC_ARRAY = 1231, RECORD_ARRAY = 2287;
 /** pg_collation's C and POSIX: byte order */
@@ -152,6 +156,8 @@ function duckTypeOf(oid: number, typmod = -1): string[] | null {
     case TIMESTAMPTZ: return ["timestamptz"];
     case INTERVAL: return ["interval"];
     case 1083: return ["time"];
+    case TIMETZ: return ["timetz"];
+    case 18: return ["varchar"];
     case 2950: return ["uuid"];
     case JSON_OID: case JSONB: return ["json"];
     case 17: return ["blob"];
@@ -1763,6 +1769,8 @@ class Rewriter {
     }
     const type = this.typeOf(e);
     if (type === INET) throw new Unrewritable("ORDER BY an inet value is not supported by Mason (Postgres orders addresses by network, then host)", "sort by another column", "inet-order");
+    // the copy holds its text, and the type's order is not the text's (src/duck/held-types.ts)
+    if (heldType(type) !== undefined) throw new Unrewritable("ORDER BY a value of this type is not supported by Mason: Mason holds the value's text, and Postgres orders it by the type's own rules", "ORDER BY x::text, or another column", "held-type-compare");
     // a citext sorts by its lower-cased text under the database's collation (citext_cmp)
     if (this.isCitext(type)) { e = this.foldCitext(e); b.node = e; }
     // a jsonb sorts by its order key (jsonb's own order: src/duck/jsonb-order.ts), its NULLs where the SortBy puts them
@@ -1824,6 +1832,8 @@ class Rewriter {
    *  it) — refused, where a statement would need it */
   private comparable(n: AstNode, where: string): void {
     const type = this.typeOf(n);
+    const held = heldType(type);
+    if (held !== undefined && !held.textEqual) throw new Unrewritable(`${where} a value of this type is not supported by Mason: Mason holds the value's text, and Postgres's equal values may be written apart`, "x::text, where equal text is what is meant", "held-type-compare");
     if (this.isCitext(type)) throw new Unrewritable(`${where} a citext value is not supported by Mason (Postgres groups and sorts it without regard to case)`, "GROUP BY lower(x), or x::text where case matters", "citext-forms");
     if (type === JSONB) throw new Unrewritable(`${where} a jsonb value is not supported by Mason (Postgres orders and equates jsonb by its own rules)`, JSONB_WAY_OUT, "jsonb-compare");
     if (type === JSONB_ARRAY) throw new Unrewritable(`${where} a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's rules)`, "compare an element (a[1]), or a::text", "jsonb-compare");
@@ -2579,6 +2589,13 @@ class Rewriter {
         b.args = [args[0]!, re, replacement(args[2]!), ...args.slice(3)];
         return null;
       }
+      // the type Postgres says the argument has, never DuckDB's name for what it holds
+      case "pg_typeof": {
+        const type = argType(0);
+        if (type === null) return null;
+        const made = this.userTypes.get(type);
+        return strConst(made !== undefined ? made.replace(/^rowtype:(public\.)?/, "") : pgEvalSync("SELECT $1::oid::regtype::text", [String(type)], this.timeZone)[0]?.[0] ?? String(type));
+      }
       case "regexp_matches": case "regexp_match": case "regexp_split_to_table": case "regexp_split_to_array": case "regexp_count": case "regexp_instr": case "regexp_substr": case "regexp_like":
         throw new Unrewritable(`${name}() is not supported by Mason`, "test a match with ~ (or ~*), take a part with substring(text from pattern), or replace with regexp_replace", "regexp-functions");
       case "substring":
@@ -2807,7 +2824,10 @@ class Rewriter {
     if (FLOATS.has(type)) return fn("__mason_float_text", [cast(n, ["double"]), boolConst(type === FLOAT4)]);
     if (type === BOOL) return asCast ? null : caseWhen([[n, strConst("t")], [not(this.clone(n)), strConst("f")]], null);
     if (type === INTERVAL) return fn("__mason_interval_text", [n]);
-    if (ARRAYS.has(type)) return fn("__mason_array_text", [arrayCast(n, "varchar"), boolConst(type === 1000)]);
+    if (ARRAYS.has(type) || isHeldArray(type)) return fn("__mason_array_text", [arrayCast(n, "varchar"), boolConst(type === 1000)]);
+    // written again in the zone the statement executes under (the copy's text is the zone it was read in)
+    const zoned = ZONED_HELD.get(type);
+    if (zoned !== undefined) return pgCall("text", `a1::${zoned}`, [n]);
     if (type === JSONB) return fn("__mason_jsonb_text", [n]);
     // a year before 1 is DuckDB's `4713-11-24 (BC)`, Postgres's `4713-11-24 BC` (after the time, for a timestamp)
     if (type === DATE || type === TIMESTAMP || type === TIMESTAMPTZ) return fn("regexp_replace", [cast(n, ["varchar"]), strConst("^(\\S+) \\(BC\\)(.*)$"), strConst("\\1\\2 BC")]);
@@ -2929,6 +2949,25 @@ class Rewriter {
     // own (Postgres refers to the list's), and is the value the list's was parsed to — the same SQL on both sides
     if (t?.node === "CONST" && kindOf(arg) === "A_Const" && this.at(bodyOf(arg), ["CONST"]) === null) this.constLike.set(bodyOf(arg), t);
     const from = this.typeOf(arg);
+    // a literal of a type the copy holds as its text, or of a timetz(n): the text Postgres writes it as
+    if (t !== null && constString(arg) !== null && (heldType(t.type) !== undefined || t.type === TIMETZ)) {
+      if (t.typmod >= 0) {
+        const written = pgEvalSync(`SELECT $1::timetz(${t.typmod})::text`, [constString(arg)], this.timeZone)[0]?.[0];
+        if (written != null) return cast(strConst(written), ["timetz"]);
+      }
+      this.constLike.set(bodyOf(arg), t);
+      return this.aConst(bodyOf(arg)) ?? arg;
+    }
+    // a bit string read as its type: its text, for what the copy holds
+    const bits = bodyOf(arg).bsval as { bsval?: string } | undefined;
+    if (t !== null && kindOf(arg) === "A_Const" && bits?.bsval !== undefined && heldType(t.type) !== undefined) {
+      return strConst(pgEvalSync("SELECT $1::varbit::text", [bits.bsval], this.timeZone)[0]?.[0] ?? "");
+    }
+    // a parameter Postgres read as the type: its text already (src/duck/analyze.ts readParameters)
+    if (t !== null && from === t.type && heldType(t.type) !== undefined) return arg;
+    // only Postgres's input function reads a text as one, and it is the session's offset where the text has none
+    if (t !== null && t.type === TIMETZ && from !== null && TEXTS.has(from)) throw new Unrewritable("a text read as a timetz is not supported by Mason", "compare the text, or write a literal", "held-type-compare");
+    if (t !== null && t.type === TIMETZ && t.typmod >= 0) throw new Unrewritable("a timetz(n) of a value is not supported by Mason", "cast to timetz with no precision", "held-type-compare");
     // to an enum (or an array of one): a label, a text read by Postgres's rules, or the enum it already is
     if (t !== null && (this.enums.labels.has(t.type) || this.enums.arrays.has(t.type))) {
       if (from === t.type) return arg;
@@ -3015,6 +3054,15 @@ class Rewriter {
       if (asEnum !== null) return asEnum;
       // a date, timestamp or interval: the value Postgres parsed, never the text again — DuckDB reads only ISO, and not
       // `'01/02/2026'`, `'March 1, 2026'`, `'… BC'`, `'epoch'`, `'1 day ago'` or `'P1D'`
+      // a value of a type the copy holds as its text: the text Postgres writes it as, under the session's zone (a
+      // timetz with no zone of its own is at the Parse's offset, as Postgres folds it)
+      if (t !== null && (t.type === TIMETZ || heldType(t.type) !== undefined) && t.type !== 26) {
+        const type = t.type === TIMETZ ? "timetz" : HELD_TYPE_NAMES.get(t.type);
+        if (type !== undefined) {
+          const written = pgEvalSync(`SELECT $1::${type}::text`, [String(b.sval.sval ?? "")], this.timeZone)[0]?.[0];
+          if (written != null) return t.type === TIMETZ ? cast(strConst(written), ["timetz"]) : strConst(written);
+        }
+      }
       // an inet literal as Postgres canonicalises it (`'10.3.6.45'` is `10.3.6.45/32`, as the copy stores the column)
       // a bytea literal (`'\x00ff'`, an escaped `'a\000b'`): the bytes Postgres read, by their hex
       if (t !== null && t.type === BYTEA && t.datum !== null && t.datum.length >= 4) return fn("unhex", [strConst(t.datum.slice(4).map((x) => x.toString(16).padStart(2, "0")).join(""))]);

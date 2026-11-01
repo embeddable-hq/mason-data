@@ -137,10 +137,12 @@ reads.
   change, and CI carries the full suite: the few real catches a full local run made in another file were all such fast
   checks. Which files are nearest is the author's judgement, not a guarantee: a recent change imports its way to most of
   the unit tests, so no list can be computed, and CI catches the rest. Detector: `checks` red on the PR.
-- **An engine or listener change** (`src/duck/`, `src/api/`, `src/cdc/`) **also runs the full oracle once before its
-  first push**: `scripts/gate-slot.ts node --test tests/integration/duck-oracle.itest.ts`, with `UPDATE_VERIFIED=1` when
-  what is answered changed, because CI holds the allowlist but only a local run writes it. Of the other integration
-  files, those nearest the change; the rest is CI's. Detector: `integration (oracle)` or `integration (rest)` red on the PR.
+- **No session runs the full oracle locally; CI runs it on every push**, in two legs. An engine or listener change
+  (`src/duck/`, `src/api/`, `src/cdc/`) runs only `IT_ORACLE_ONLY=<regex>` for the statements it touches, and of the
+  other integration files those nearest the change; the rest is CI's. When what is answered moved, the allowlist
+  (`src/duck/verified.ts`) and `tests/fixtures/oracle-duckdb-alone.json` come from that push's CI run, by
+  `node scripts/oracle-legs.ts --write <run-id>`, then read the diff and commit both: a whole local run held a shared
+  slot for what the legs already measured. Detector: `integration (oracle)` red on the PR, naming the command.
 - **A heavy gate takes a slot.** `npm run check`, `npm run gate` and `npm run test:integration` queue for one of
   `MASON_GATE_SLOTS` machine-wide (`scripts/gate-slot.ts`) and say who they wait for, so a long wait is not a hang: start
   a gate in the background, because the wait can outlast a tool's foreground limit. Anything else whole goes through it
@@ -244,7 +246,7 @@ scripts/gate-slot.ts <command>        # runs a command in one of the machine's s
   registry and its doc (`tests/duck-gaps.test.ts`).
 - **The oracle is the arbiter** (`tests/integration/duck-oracle.itest.ts`): every statement Mason answers is held equal to
   what a real Postgres answers — names, OIDs, text, order, SQLSTATE. A fix for a class of statement adds a statement to
-  it; `UPDATE_VERIFIED=1` regenerates the allowlist from what it verified.
+  it; the allowlist is regenerated from CI's legs (`node scripts/oracle-legs.ts --write <run-id>`, "Local gates").
 - **Golden fixtures are change-detectors: update them with `UPDATE_FIXTURE=1 npm run check`, then READ THE
   DIFF** (`docs/SQL-SUPPORT.md` is one, rendered from `src/duck/gaps.ts` and `src/duck/verified.ts`).
 - **Watch every test fail before you trust it.** When the fix is already in the tree, `scripts/fails-without.ts <commit>
