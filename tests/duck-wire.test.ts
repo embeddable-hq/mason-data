@@ -29,6 +29,7 @@ import type { ApiLogRow } from "../src/api/request-log.ts";
 import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
+import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -2289,6 +2290,52 @@ test("a sort key that is an output holding a constant orders nothing: by name an
       assert.equal((await answer(c, sql)).rows.length, 3, sql);
     }
   } finally { await c.end(); }
+});
+
+// A SORT KEY WRITTEN AS A BARE LITERAL, its third instance (CI on PR 170): inside a subquery the late rewrites do not
+// apply, and the collation's sort key was written over the constant — `ORDER BY one DESC, __mason_libc_key(…, 'x'), 'x'`,
+// refused 42804. The rewrite drops a constant key wherever a SELECT's keys are written: at the top and at any depth, by
+// name and by number, under each collation kind, with no key left no ORDER BY, the LIMIT kept
+test("a constant sort key orders nothing at any depth: by name and by number, under C, ICU and the database's libc collation", async () => {
+  const libc = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => schema, record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
+    duck: await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined,
+      handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" "], { collate: "en_US.utf8" }), () => copies),
+  });
+  const bytes = await client();
+  const onLibc = new pg.Client({ host: "127.0.0.1", port: libc.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+  await onLibc.connect();
+  try {
+    for (const [c, database] of [[bytes, "C"], [onLibc, "libc"]] as const) {
+      for (const v of ["'x' AS v", `'x' COLLATE "C" AS v`, `'x' COLLATE "und-x-icu" AS v`, "'x'::text AS v", "7 AS v", "true AS v"]) {
+        const say = (sql: string): string => `${sql} (the database's collation ${database})`;
+        // answered as Postgres answers: the keys left decide the order
+        for (const sql of [
+          `SELECT l.id, l.k, ${v} FROM late l ORDER BY v DESC, l.id LIMIT 3`,
+          `SELECT l.id, l.k, ${v} FROM late l ORDER BY 3, 1 DESC LIMIT 3`,
+          `SELECT l.id, l.k, ${v} FROM late l WHERE l.id < 5 ORDER BY v, l.id DESC`,
+          `SELECT l.id, l.k, ${v} FROM late l WHERE l.id < 5 ORDER BY 3 DESC, 1`,
+          `SELECT s.id FROM (SELECT l.id, ${v} FROM late l ORDER BY v, l.id DESC LIMIT 4) s ORDER BY s.id`,
+          `SELECT s.id FROM (SELECT l.id, ${v} FROM late l ORDER BY 2 DESC, 1 LIMIT 4) s ORDER BY s.id`,
+          `SELECT count(*) FROM (SELECT l.id, l.k, ${v} FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY v DESC LIMIT 3) s`,
+          `SELECT count(*) FROM (SELECT l.id, l.k, ${v} FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY 3 LIMIT 3) s`,
+          `SELECT count(*) FROM (SELECT l.id, ${v} FROM late l ORDER BY v) s`,
+          `SELECT count(*) FROM (SELECT l.id, ${v} FROM late l ORDER BY 2 DESC) s`,
+          // every key a constant, as WITH TIES reads it: every row ties
+          `SELECT count(*) FROM (SELECT l.id, ${v} FROM late l ORDER BY v FETCH FIRST 2 ROWS WITH TIES) s`,
+        ]) assert.deepEqual(await answer(c, sql), await postgres(sql), say(sql));
+        // every key a constant: no order at all, so any 3 rows are Postgres's
+        for (const sql of [`SELECT l.id, l.k, ${v} FROM late l ORDER BY v LIMIT 3`, `SELECT l.id, l.k, ${v} FROM late l ORDER BY 3 DESC LIMIT 3`]) {
+          assert.equal((await answer(c, sql)).rows.length, 3, say(sql));
+        }
+      }
+      // CI's statement: an integer and a text constant, by name and by number, in a subquery under a LEFT JOIN
+      const ci = "SELECT count(*) FROM (SELECT l.id, l.k, 1 AS one, 'x' AS t FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY one DESC, 4 LIMIT 3) s";
+      assert.deepEqual(await answer(c, ci), await postgres(ci), `${ci} (${database})`);
+    }
+  } finally { await bytes.end(); await onLibc.end(); await libc.close(); }
 });
 
 // ISSUE 112: an output's number or bare name beside a * reached the engine as written: no rule met the column it is

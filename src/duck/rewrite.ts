@@ -856,13 +856,23 @@ class Rewriter {
     this.keyedDistinct(b);
     // the statement's own ORDER BY: an ordinal or an output name sorts by that target's expression, so its key is
     // built over the expression (DuckDB's `ORDER BY 1 COLLATE …` would sort by the constant)
+    // A SORT KEY WRITTEN AS A BARE LITERAL (the class's third instance, issue 134): a key whose expression is a
+    // constant, after its ordinal or output name is resolved, orders nothing, and written into DuckDB's sort it is an
+    // ordinal (an integer) or refused (42804, a non-integer literal), whether as the value or as a collation's key over
+    // it. So it is no key, here where every key of a SELECT is written, at any depth; with none left there is no ORDER
+    // BY, and the LIMIT keeps any rows, as Postgres's plan does
     if (Array.isArray(b.sortClause) && Array.isArray(b.targetList) && (b.op === undefined || b.op === "SETOP_NONE")) {
       const targets = b.targetList as AstNode[];
       b.sortClause = (b.sortClause as AstNode[]).flatMap((s) => {
         const sb = bodyOf(s);
         this.done.add(sb);
+        if (kindOf(s) === "SortBy" && sb.useOp === undefined) {
+          const out = this.outputOf(sb.node as AstNode, targets);
+          if (out?.twin !== true && constantKey(out !== null ? out.value : sb.node as AstNode)) return [];
+        }
         return this.sortBy(sb, targets, b) ?? [s];
       });
+      if ((b.sortClause as AstNode[]).length === 0) delete b.sortClause;
     }
     if (Array.isArray(b.sortClause) && b.op !== undefined && b.op !== "SETOP_NONE") this.setOperationOrdinals(b);
     if (b.limitOption === "LIMIT_OPTION_WITH_TIES") return this.withTies(b);
@@ -1136,7 +1146,8 @@ class Rewriter {
     const rankName = "__mason_rank";
     const sortCopy = order.map((o) => this.clone(o));
     for (const s of sortCopy) this.done.add(bodyOf(s));
-    const rank: AstNode = { FuncCall: { funcname: [S("rank")], over: { orderClause: sortCopy, frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } };
+    // (every key a constant, none is left: every row ties, rank() OVER () is 1 for each)
+    const rank: AstNode = { FuncCall: { funcname: [S("rank")], over: { ...(sortCopy.length > 0 ? { orderClause: sortCopy } : {}), frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } };
     this.done.add(bodyOf(rank));
     b.targetList = [...(b.targetList as AstNode[]), { ResTarget: { name: rankName, val: rank } }];
     const inner: AstNode = { SelectStmt: b };
@@ -4611,3 +4622,8 @@ export function treeDifference(back: unknown, tree: unknown, at = "$"): string |
   }
   return null;
 }
+
+/** a constant, under casts and a COLLATE: as a sort key it orders no row (a bare integer written is an ordinal,
+ *  resolved to its output before this is asked) */
+const constantKey = (n: AstNode): boolean => kindOf(n) === "A_Const"
+  || ((kindOf(n) === "TypeCast" || kindOf(n) === "CollateClause") && isNode(bodyOf(n).arg) && constantKey(bodyOf(n).arg as AstNode));
