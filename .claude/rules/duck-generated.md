@@ -60,7 +60,11 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   is "cast from a double"; only a numeric over exact inputs is said by its kind (a variance, sqrt and its kin, avg or
   `/`, a text read as a numeric, said by what the analysis typed the text as: a JSON value's, a double's, any text),
   and a name only chooses those words. Each node passes up the form below it (a round, a trunc or a typmod marks it
-  fixed), and a division, a variance or sqrt and its kin over a text read as a numeric is said by its own kind. **The
+  fixed), and a division, a variance or sqrt and its kin over a text read as a numeric is said by its own kind. **A
+  value's form survives every conversion** (PR 202 round 12): a text read as a numeric keeps the form of what the text
+  was made from (`textFrom` walks every text and JSON node down to it: a cast, `||`, a jsonb build and `->>`, a WITH
+  column), so a typmod over a variance's text is refused by the variance, never stored from the engine's double; only a
+  stored column's or a JSON number's text is "a text". Detector: tests/duck-generated.test.ts "round 12". **The
   walk follows the value wherever the analysis says it comes from**: a scalar sublink's subselect, a CTE's query, each
   arm of a set operation (the reason any arm's, the way out in every arm of that form) and a subquery in FROM, under any
   node (`outputExpressions` hangs what a VAR reads on it as `followed`). The way out is the user's own SQL, deparsed,

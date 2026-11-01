@@ -76,7 +76,7 @@ export interface DefinitionPlan {
  * it. The TYPE decides: a node Postgres types as a double is a double whatever its kind (`sqrt(float8)`, `avg(float8)`,
  * `float8 / n`, `coalesce(numeric, float8)`), and a numeric cast from one is "double"; only a node Postgres types as an
  * exact numeric over exact inputs is said by its own kind (a variance; sqrt, exp, ln, log or power; avg or `/`; a text
- * read as a numeric). A name never decides a type here: it only chooses the words, once the type has said what the value
+ * read as a numeric, which keeps the form of what the text was made from where it has one, `textFrom`). A name never decides a type here: it only chooses the words, once the type has said what the value
  * is (`fn` the user's own function, `fixed` that a round, a trunc, floor, ceil or a typmod is over it, `from` what a text
  * read as a numeric was, as the analysis typed it). The walk follows the value wherever the analysis says it comes from
  * (a sublink's subselect, a CTE, each arm of a set operation, a subquery: src/duck/pgtree.ts `outputExpressions`), and
@@ -123,17 +123,43 @@ function inputsOf(n: TreeNode): TreeNode[] {
   return isTree(n.arg) ? [n.arg] : [];
 }
 
-/** what the text a numeric is read from was, as the analysis typed it: down through its casts, a double's text, a JSON
- *  value's (an operator or a function over json or jsonb: `->>`, `json_extract_path_text`), or any other text */
-function textFrom(n: TreeNode): TextFrom {
-  for (let x: TreeNode | undefined = n; x !== undefined;) {
-    if (DOUBLES.has(exprType(x)?.type ?? -1)) return "double";
+/** a form born at a node: its kind, the user's function, and the node's offset as its one site */
+const bornAt = (why: Form["why"], fn: string, at: number, from: TextFrom | null = null): Form => ({ why, fn, fixed: false, from, sites: [{ at, vars: [] }], way: null, scaled: null });
+
+/**
+ * WHAT THE TEXT A NUMERIC IS READ FROM WAS MADE FROM (PR 202 round 12): a value's form survives every conversion, so the
+ * walk goes down through every text and JSON node over it (a cast, `||`, a jsonb build and `->>`, a WITH or subquery
+ * column, any other) to the values it was made from. A numeric there keeps its own form (`seen`: a variance, sqrt and
+ * its kin, a division, a cast from a double, a text read as a numeric), and a double the statement computes is "a cast
+ * from a double" at its node: either is the text's form, so a typmod over the text never stores the engine's double. Where
+ * none is, `from` says what the text was, as the analysis typed it: a JSON value's (an operator or a function over json or
+ * jsonb: `->>`, `json_extract_path_text`), a stored double's (a column or a constant), or any other text (a stored or
+ * exactly computed numeric's among them). Any other type stops the walk: an integer's, a date's or a boolean's text is
+ * exact whatever made it.
+ */
+function textFrom(n: TreeNode, names: ReadonlyMap<string, string>): { form: Form | null; from: TextFrom } {
+  let from: TextFrom | null = null;
+  const walk = (x: TreeNode): Form | null => {
+    const type = exprType(x)?.type ?? -1, at = int(x.location);
+    if (x._node === "VAR" && inputsOf(x).length > 0) {
+      // a column read from a subquery, a CTE or a set operation: the first arm's form, every arm of it a site, through this VAR
+      const forms = inputsOf(x).map(walk).filter((f): f is Form => f !== null), first = forms[0];
+      if (first === undefined) return null;
+      return { ...first, sites: forms.filter((f) => f.why === first.why).flatMap((f) => f.sites).map((s) => ({ at: s.at, vars: at >= 0 ? [at, ...s.vars] : s.vars })) };
+    }
+    if (DOUBLES.has(type)) {
+      if (x._node === "VAR" || x._node === "CONST") { from ??= "double"; return null; }
+      return bornAt("double", "", at);
+    }
+    if (type === NUMERIC_OID) { const s = seen(x, names); return isForm(s) ? s : null; }
+    if (!TEXTS.has(type) && !JSONS.has(type)) return null;
     const args: TreeNode[] = Array.isArray(x.args) ? x.args.filter(isTree) : [];
-    if ((x._node === "OPEXPR" || x._node === "FUNCEXPR") && args[0] !== undefined && JSONS.has(exprType(args[0])?.type ?? -1)) return "json";
-    const cast: boolean = x._node === "FUNCEXPR" && (int(x.funcformat) === 1 || int(x.funcformat) === 2);
-    x = x._node === "COERCEVIAIO" || x._node === "RELABELTYPE" ? (isTree(x.arg) ? x.arg : undefined) : cast ? args[0] : x._node === "VAR" ? inputsOf(x)[0] : undefined;
-  }
-  return "text";
+    if ((x._node === "OPEXPR" || x._node === "FUNCEXPR") && args[0] !== undefined && JSONS.has(exprType(args[0])?.type ?? -1)) from ??= "json";
+    for (const i of inputsOf(x)) { const f = walk(i); if (f !== null) return f; }
+    return null;
+  };
+  const form = walk(n);
+  return { form, from: from ?? "text" };
 }
 
 /** the walk: each node's type first (a double is a double, anything but a numeric carries nothing), then the form below
@@ -144,7 +170,7 @@ function seen(n: TreeNode, names: ReadonlyMap<string, string>): Seen {
   if (t === null || t.type !== NUMERIC_OID) return null;
   const inputs = inputsOf(n), below = inputs.map((x) => seen(x, names));
   const inner = below.find(isForm) ?? null, at = int(n.location);
-  const born = (why: Form["why"], fn: string, from: TextFrom | null = null): Form => ({ why, fn, fixed: false, from, sites: [{ at, vars: [] }], way: null, scaled: null });
+  const born = (why: Form["why"], fn: string, from: TextFrom | null = null): Form => bornAt(why, fn, at, from);
   // a text read as a numeric is the one form a node over it outranks: one scale for the text would not store a division,
   // a variance or sqrt and its kin over it, so that node is the reason
   const under = (outranks: boolean): Form | null => inner !== null && !(outranks && inner.why === "text") ? inner : null;
@@ -168,8 +194,13 @@ function seen(n: TreeNode, names: ReadonlyMap<string, string>): Seen {
       const divides = names.get(`o${int(n.opno)}`) === "/";
       return under(divides) ?? (divides ? born("divides", "/") : null);
     }
-    // a text read as a numeric keeps the decimals each value's text has
-    case "COERCEVIAIO": return inputs[0] !== undefined && TEXTS.has(exprType(inputs[0])?.type ?? -1) ? born("text", "", textFrom(inputs[0])) : inner;
+    // a text read as a numeric keeps the form of what the text was made from (round 12: a variance's text under a typmod
+    // stored the engine's double); where nothing beneath has one, it keeps the decimals each value's text has
+    case "COERCEVIAIO": {
+      if (inputs[0] === undefined || !TEXTS.has(exprType(inputs[0])?.type ?? -1)) return inner;
+      const made = textFrom(inputs[0], names);
+      return made.form ?? born("text", "", made.from);
+    }
     // a column read from a subquery, a CTE or a set operation: the first arm's form says the reason, and every arm of
     // that form is a site of the way out, reached through this VAR
     case "VAR": {
