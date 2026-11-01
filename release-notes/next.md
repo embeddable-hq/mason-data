@@ -43,7 +43,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   rows, are read as before. Nothing to do on upgrade.
 - **A LIMIT over `JOIN … USING`, a `NATURAL JOIN` or a sort by a computed column of a join no longer reads every wide column to
   keep 100 rows**: seconds and gigabytes of spill are now a fraction of a second and none, and such a statement that failed
-  for memory now answers. `SELECT upper(name) AS u … ORDER BY u`, `ORDER BY 1` and `ORDER BY upper(name)` are now one plan. A
+  for memory now answers, whether the sort names the computed column by its alias, its position or its expression. A
   `NATURAL JOIN` with no column in common under a LIMIT now answers as Postgres does. A statement of a role that filters rows
   is read as before. Nothing to do on upgrade.
 - **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
