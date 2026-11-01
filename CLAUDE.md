@@ -124,12 +124,13 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   Nothing detects it; a transcript's gaps did.
 - **The board says where each piece is**, so the owner reads progress there instead of asking: the [Mason work
   board](https://github.com/orgs/embeddable-hq/projects/4). An issue split into pieces has one sub-issue per PR, made
-  with `scripts/board.ts sub <issue> "<issue> · <piece>"`, and its PR says `Closes #<sub-issue>`. Each move is made
-  where it happens, with `scripts/board.ts status <n> "<status>"`: a lead sets **Implementing** when it starts the
-  agent; the coordinator sets **In review** when it starts a review, **Fixing** when it sends findings or a red CI
-  back, and **CI / queued** when it queues the merge; the merge closes the sub-issue, which GitHub moves to **Done**.
-  The parent issue is **In progress** while any piece is; anything waiting on the owner's word is **Needs Tom**.
-  Nothing detects a card left behind; the owner, reading the board, does.
+  with `scripts/board.ts sub <issue> "<issue> · <piece>" --from "<model>"`, and its PR says `Closes #<sub-issue>`.
+  Each move is made where it happens, with `scripts/board.ts status <n> "<status>"`: a lead sets **Implementing** when
+  it starts the agent; the coordinator sets **In review** when it starts a review, **Fixing** when it sends findings or
+  a red CI back, **CI / queued** when it queues the merge, and **Done** when it confirms the merge (the board's own
+  "item closed" workflow is off, and GitHub's API cannot turn it on). The parent issue is **In progress** while any
+  piece is, and **Done** with its last; anything waiting on the owner's word is **Needs Tom**. Nothing detects a card
+  left behind; the owner, reading the board, does.
 - **Delegate when it is faster, but merge nothing you have not read.** Independent pieces go to sub-agents, each in a
   worktree of its own; the one who merges reads each diff in full, verifies it (CI on its last commit; a local gate for a
   reason, "Local gates"), and merges it. A sub-agent's report is its claim, not the evidence. Two
@@ -249,6 +250,7 @@ docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; 
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
 scripts/gate-slot.ts <command>        # runs a command in one of the machine's slots, as the heavy gates do
 scripts/board.ts status <n> "<status>"   # moves an issue's card on the Mason work board ("The board says …")
+scripts/board.ts sub <issue> "<title>" --from "<model>"   # makes a sub-issue of <issue>, on the board; prints its number
 ```
 
 ### Checks and tests
