@@ -98,16 +98,16 @@ whose forms are refused by name.
    the worker: prefer DuckDB's own form where it is Postgres's answer.
 5. **Refuse what is not exact:** `Unrewritable` with a `GapId`, an entry in `src/duck/gaps.ts`, a statement in
    `tests/integration/oracle/gap-cases.ts`.
-6. **The allowlist:** a new function, operator or cast is `unverified` until the oracle verified it. Add its statements, run
-   `UPDATE_VERIFIED=1`, then read the diff of `src/duck/verified.ts`: a piece is as wide as every statement that uses it.
-7. **Fixtures:** `UPDATE_FIXTURE=1` regenerates `docs/SQL-SUPPORT.md` (on `npm run check`) and
-   `tests/fixtures/oracle-duckdb-alone.json` (on the oracle). Read both diffs.
+6. **The allowlist:** a new function, operator or cast is `unverified` until the oracle verified it. Add its statements,
+   push, and once CI's oracle legs ran, `node scripts/oracle-legs.ts --write <run-id>` writes `src/duck/verified.ts` and
+   `tests/fixtures/oracle-duckdb-alone.json` from them; read the diff: a piece is as wide as every statement that uses it.
+7. **Fixtures:** `UPDATE_FIXTURE=1 npm run check` then regenerates `docs/SQL-SUPPORT.md` from them. Read both diffs.
 8. **For speed:** the plan fixture too (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`). The oracle is blind to
    the plan.
 
 **Tests:** `tests/duck-wire.test.ts` against PGlite for the SQL sent. Statements in `tests/integration/duck-oracle.itest.ts` or
 `tests/integration/oracle/bi-shapes.ts`, columns they need in `tests/integration/oracle/type-matrix.ts`. Iterate with
-`IT_ORACLE_ONLY`; run the full oracle once. `tests/integration/oracle/shapes.ts` asks each statement again as a subquery, a
+`IT_ORACLE_ONLY`; the full oracle is CI's, on every push. `tests/integration/oracle/shapes.ts` asks each statement again as a subquery, a
 CTE, a UNION, with parameters, by name and ordered, so those need no statement of their own.
 
 **The shapes the brief must name** are `.claude/rules/duck-rewrite.md`'s, under "A statement": "in the shapes a BI tool sends".

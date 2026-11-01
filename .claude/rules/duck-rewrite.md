@@ -221,10 +221,11 @@ paths:
 ## What is not supported, and how the list stays true
 
 - **An allowlist, not a blocklist**: DuckDB answers only a statement whose every resolved piece is in
-  `src/duck/verified.ts`, which the oracle regenerates (`UPDATE_VERIFIED=1`) from what it answered exactly; anything
+  `src/duck/verified.ts`, regenerated from what CI's oracle legs answered exactly (`node scripts/oracle-legs.ts --write
+  <run-id>`; no session runs the whole oracle, CLAUDE.md "Local gates"); anything
   else is refused naming the piece (0A000, `Mason gap unverified`). **A piece is as wide as every statement that
   uses it**: one the oracle verified over its scalar forms answers the others too, so a new piece added by
-  `UPDATE_VERIFIED` is read in the diff for the forms it unlocks, and a form not exact is refused by name in the rewrite
+  the regeneration is read in the diff for the forms it unlocks, and a form not exact is refused by name in the rewrite
   (ARRAY(SELECT …) of a numeric, an array, a row: `array-subquery-element`).
 - **A libc order is read, never assumed** (`src/duck/libc-order.ts`; "A libc order, read level by level"): all four of
   glibc's levels from comparisons alone, a spelling kept only when the source says it is equal, the result held to the

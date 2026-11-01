@@ -248,15 +248,15 @@ type GapFixture = Pick<AloneTallies, "statements" | "mason"> & {
 };
 const readGaps = (): GapFixture => {
   const fixture = JSON.parse(fs.readFileSync(ALONE_FIXTURE, "utf8")) as Partial<GapFixture>;
-  assert.ok(fixture.gaps !== undefined, `${ALONE_FIXTURE} has no gaps: regenerate it with the oracle's UPDATE_FIXTURE=1`);
+  assert.ok(fixture.gaps !== undefined, `${ALONE_FIXTURE} has no gaps: regenerate it with node scripts/oracle-legs.ts --write <run-id>`);
   return fixture as GapFixture;
 };
 const sum = (c: GapCount): number => c.planted + c.natural;
 
 test("the oracle's fixture counts by gap sum to the tallies they refine", () => {
   const { mason, statements, gaps: { copyPhase, everyAsk } } = readGaps();
-  assert.equal(sum(totalOf(copyPhase.refused)), mason.refused, "the copy phase's refusals by gap: regenerate with the oracle's UPDATE_FIXTURE=1");
-  assert.equal(sum(totalOf(copyPhase.decided)), mason.decided, "the copy phase's decided differences by gap: regenerate with the oracle's UPDATE_FIXTURE=1");
+  assert.equal(sum(totalOf(copyPhase.refused)), mason.refused, "the copy phase's refusals by gap: regenerate with node scripts/oracle-legs.ts --write <run-id>");
+  assert.equal(sum(totalOf(copyPhase.decided)), mason.decided, "the copy phase's decided differences by gap: regenerate with node scripts/oracle-legs.ts --write <run-id>");
   // no gap is counted for more statements than were planted for it, so no planted statement twice (one answered
   // exactly is counted for none): each gap has its gap case, and mixed-scale-numeric MIXED_SCALE besides
   const plantedFor = new Map<string, number>([["mixed-scale-numeric", 1]]);
@@ -275,13 +275,13 @@ test("every id of the oracle's fixture counts is a gap of the kind counted: a re
   const { gaps: { copyPhase, everyAsk } } = readGaps();
   const wrong = [copyPhase, everyAsk].flatMap((t) => ([["refused", "refused"], ["decided", "differs"]] as const).flatMap(([met, kind]) =>
     Object.keys(t[met]).filter((id) => !Object.hasOwn(GAPS, id) || (GAPS as Record<string, Gap>)[id]!.kind !== kind).map((id) => `${met}: ${id}`)));
-  assert.deepEqual(wrong, [], "the fixture names a gap src/duck/gaps.ts does not have, or of another kind: regenerate with the oracle's UPDATE_FIXTURE=1");
+  assert.deepEqual(wrong, [], "the fixture names a gap src/duck/gaps.ts does not have, or of another kind: regenerate with node scripts/oracle-legs.ts --write <run-id>");
 });
 
 test("the oracle's fixture says what it was measured on, and it is what CI measures on: the shapes, a libc collation, a Linux Postgres", () => {
   // a regeneration under IT_ORACLE_SHAPES=0, or against a C or ICU database, writes a `gaps` block that looks the same
   const { measured } = readGaps();
-  assert.equal(typeof measured?.machine, "string", "the fixture does not say its machine: regenerate with the oracle's UPDATE_FIXTURE=1");
+  assert.equal(typeof measured?.machine, "string", "the fixture does not say its machine: regenerate it from a CI run's oracle legs, node scripts/oracle-legs.ts --write <run-id>");
   assert.equal(measured.shapes, true, "the fixture was measured with the shapes off: regenerate it without IT_ORACLE_SHAPES=0");
   assert.match(measured.collation, /\(c\)$/, "the fixture was measured over another provider than libc: regenerate it against a Postgres as CI's (postgres:18)");
   assert.match(measured.postgres, /linux/, "the fixture was measured against a Postgres not on Linux, whose libc collation is not glibc's: regenerate it against a Postgres as CI's (postgres:18)");
