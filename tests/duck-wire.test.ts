@@ -3418,6 +3418,8 @@ test("a numeric is exact exactly where what is sent computes it exactly, whereve
       // (a FROM item's column is the value it is, whether or not its program rides: a recursive WITH query's too)
       "WITH RECURSIVE r(n, v) AS (SELECT 1, 1.5 UNION ALL SELECT r.n + 1, r.v * 2 FROM r WHERE r.n < 3) SELECT x.id, r.v FROM r JOIN ratios x ON x.id = r.n WHERE r.v = 3.0 ORDER BY 1",
       "SELECT m.s, m.q FROM (SELECT sum(r.a) AS s, avg(r.a) AS q FROM ratios r) m WHERE m.s = 4.0",
+      "WITH base AS (SELECT b.x / 1 AS q FROM bigdec b) SELECT * FROM base UNION ALL SELECT s.q FROM (SELECT * FROM base) s WHERE s.q = 1.00000000000000000001",
+      "WITH base AS (SELECT b.x / 1 AS q FROM bigdec b) SELECT * FROM base UNION ALL SELECT b2.q FROM base b2 WHERE b2.q = 1.00000000000000000001",
       // D6: a function of a FROM item's quotient reads the quotient's program, never its double
       "SELECT sqrt(s.q) FROM (SELECT b.x / 3 AS q FROM bigdec b) s ORDER BY 1",
       // D7: a carry decided from what the FROM item exposes: a `*` of a WITH query, under a UNION ALL
