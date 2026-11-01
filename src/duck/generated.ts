@@ -498,8 +498,9 @@ export class GeneratedTables {
       const seconds = (Date.now() - started) / 1000;
       const deployed: Deployed = { definition: d, fingerprint: b.fingerprint, columns, bases, basesSynced: clock.synced, snapshotAt: clock.at, builtAt: Date.now(), rows: Number(rowsChanged), seconds };
       if (!await this.host.onWriter(() => this.swap(e, deployed, side, target))) {
-        // a synced table took the name while it ran: what it built is dropped, and the next review lets the name go
-        e.taken = null;
+        // a synced table took the name while it ran: what it built is dropped, and the next review lets the name go; what
+        // this run took is still not in the table, so it stays dirty should the name come back (the sources file reverted)
+        e.dirtySince = this.oldest(e); e.taken = null;
         this.host.log(`${name}: a synced table now holds its name, so what this run built was dropped`);
         return;
       }

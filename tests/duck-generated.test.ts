@@ -561,6 +561,12 @@ test("a synced table that takes the name while a run is going is never written o
     assert.ok(!w.reached.includes("swapped"), "and never swapped it in");
     assert.deepEqual(await w.rows("SELECT x FROM public.counts ORDER BY x"), [[101], [102], [103]], "the synced table's rows stay");
     assert.deepEqual(await w.rows("SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE 'counts%' AND table_name <> 'counts'"), [[0n]], "what the run built is dropped");
+    // the change the run was built for is still not in the generated table: should the sources file be reverted before
+    // the next review, the entry is still dirty, so a run picks it up rather than serving the rows from before it
+    const entry = (w.sync.generated as unknown as { entries: Map<string, { dirtySince: number | null; taken: number | null }> }).entries.get("public.counts");
+    assert.ok(entry !== undefined, "the entry is still there until the next review lets the name go");
+    assert.equal(entry.taken, null, "the run's mark is released");
+    assert.notEqual(entry.dirtySince, null, "and the change it took is dirty again");
   }, { onStep: (s) => s === "committed" ? take?.() : undefined });
 });
 
