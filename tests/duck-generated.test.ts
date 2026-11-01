@@ -19,13 +19,13 @@ import { definitionStatement, refusalText, type GeneratedRefusal } from "../src/
 import { parseLag, parseSync } from "../src/lib/table-sync.ts";
 import { generatedLines } from "../src/cli/commands.ts";
 import { guideText } from "../src/cli/guides.ts";
-import { built, COUNTS, plain, refusedAt, withWorld } from "./duck-generated-world.ts";
+import { built, COUNTS, plain, refusedAt, served, withWorld } from "./duck-generated-world.ts";
 
 after(() => stopParser());
 
 test("a declared table is built, in the catalog with Postgres's names and types and its comment, and served by name", async () => {
   await withWorld({ counts: `${COUNTS}comment: Requests per tenant.\n` }, async (w) => {
-    await w.until(built);
+    await w.until(served(w.logged));
     const c = await w.client();
     try {
       const r = await c.query({ text: "SELECT * FROM counts ORDER BY tenant_id", rowMode: "array" });
@@ -219,13 +219,15 @@ test("a live table is refused by name: stage by stage, never run as something el
 
 test("an edit that is refused leaves the deployed table serving and still being re-run from what it was built with", async () => {
   await withWorld({ counts: COUNTS }, async (w) => {
-    const first = await w.until(built);
+    // each run waited for to its log line (`served`), so the next run's line is the one logged after `logged.length`
+    const first = await w.until(served(w.logged));
     w.write("counts", "kind: scheduled\ntarget_lag: 1s\nsql: SELECT date_trunc('day', started_at) AS day FROM events\n");
     const refused = await w.until((s) => s.state === "refused");
     assert.equal(refused.serving, true);
     await w.store.writer.run("INSERT INTO public.events VALUES (7, 5, 'query', 'ok', '7', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+    const rerun = w.logged.length;
     w.sync.generated.changed("public.events");
-    const after = await w.until((s) => s.lastRun?.at !== first.lastRun?.at);
+    const after = await w.until((s) => s.lastRun?.at !== first.lastRun?.at && served(w.logged, rerun)(s));
     assert.equal(after.lastRun?.rows, 3, "a new tenant, from the deployed SQL");
     assert.equal(after.state, "refused", "and it still says the file is refused");
     // to live from a deployed scheduled table: refused, and the table stays what it was
@@ -235,20 +237,13 @@ test("an edit that is refused leaves the deployed table serving and still being 
     assert.equal(live.serving, true);
     const c = await w.client();
     try { assert.equal((await c.query("SELECT count(*) AS n FROM counts")).rows[0].n, "3"); } finally { await c.end(); }
+    const from = w.logged.length;
     w.write("counts", COUNTS.replace("count(*) AS requests", "count(*) AS requests, min(id) AS first_id"));
     await w.until((s) => s.state !== "refused" && s.serving && s.refusals.length === 0);
-    await w.until((s) => s.lastRun?.at !== after.lastRun?.at);
+    await w.until((s) => s.lastRun?.at !== after.lastRun?.at && served(w.logged, from)(s));
     const c2 = await w.client();
     try {
-      // the catalog follows the swap by a moment, as it does a copy's
-      const read = "SELECT tenant_id, first_id FROM counts ORDER BY 1 LIMIT 1";
-      const end = Date.now() + 10_000;
-      let rows = await c2.query(read).then((r) => r.rows, (e: { code?: string }) => { if (e.code !== "42703") throw e; return null; });
-      while (rows === null && Date.now() < end) {
-        await new Promise((r) => setTimeout(r, 20));
-        rows = await c2.query(read).then((r) => r.rows, (e: { code?: string }) => { if (e.code !== "42703") throw e; return null; });
-      }
-      assert.deepEqual(rows, [{ tenant_id: 1, first_id: "1" }]);
+      assert.deepEqual((await c2.query("SELECT tenant_id, first_id FROM counts ORDER BY 1 LIMIT 1")).rows, [{ tenant_id: 1, first_id: "1" }]);
     } finally { await c2.end(); }
   });
 });
@@ -645,8 +640,7 @@ const ask = async (w: { client(): Promise<pg.Client> }, sql: string): Promise<un
 
 test("a chain of three is built parents first, each over what its parent holds", async () => {
   await withWorld({ counts: COUNTS, totals: scheduled("SELECT count(*) AS tenants, max(requests) AS most FROM counts"), top: scheduled("SELECT tenants * 10 AS t, most FROM totals") }, async (w) => {
-    // serving comes before the run's log line (the catalog is rebuilt between them): wait for the line the order is read from
-    await w.until((s) => built(s) && w.logged.some((l) => l.startsWith("generated public.top:")), "public.top");
+    await w.until(served(w.logged), "public.top");
     const order = w.logged.filter((l) => l.startsWith("generated ")).map((l) => /^generated (\S+):/.exec(l)![1]);
     assert.deepEqual(order, ["public.counts", "public.totals", "public.top"]);
     assert.deepEqual(await ask(w, "SELECT t, most FROM top"), [["20", "2"]]);
