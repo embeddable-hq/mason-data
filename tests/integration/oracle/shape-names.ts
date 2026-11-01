@@ -4,10 +4,12 @@
  * expected to meet cannot drift apart. It imports no package: oracle-legs runs in CI's final jobs with no `npm ci`
  * (tests/conventions.test.ts "what CI's final jobs run needs no npm ci").
  *
- * A shape LIVES when the run shows it doing its work: an ANSWER shape when some statement's shape was answered by both
- * alike (or differed by a decided difference: a shape whose every ask meets a recorded decision is still asked and
- * still answered), a REFUSAL shape when Postgres and Mason both refused it with its declared SQLSTATE. A refusal both
- * share keeps no answer shape alive, and a Postgres refusal under a SQLSTATE the shape does not declare is a MISSPELT
+ * A shape LIVES when the run shows Postgres answering it as the shape declares, and Mason agreeing or differing by a
+ * DECIDED difference (oracle/known.ts): an ANSWER shape when some statement's shape Postgres answered was answered alike
+ * or decided, a REFUSAL shape when some statement's shape Postgres refused with the declared SQLSTATE was refused alike
+ * or decided. So every shape's liveness can be reached by recording a difference the base already has (a KNOWN entry
+ * naming its `issue`), never only by fixing it, which a PR that finds it may not do. A refusal both share keeps no answer
+ * shape alive, nor does a decided one; and a Postgres refusal under a SQLSTATE the shape does not declare is a MISSPELT
  * shape: its text says something other than what it was built to say.
  */
 
@@ -57,15 +59,17 @@ export interface ShapeCount {
   postgresRefused: Record<string, number>;
   /** Mason's 0A000 naming a refused gap */
   refusedByGap: number;
-  /** a decided difference (oracle/known.ts) */
+  /** a decided difference (oracle/known.ts), whatever Postgres answered */
   decided: number;
+  /** of `decided`, those Postgres refused, by its SQLSTATE: what keeps a refusal shape alive, and no answer shape */
+  decidedRefused: Record<string, number>;
   differs: number;
   /** a statement the shape reaches, whose text did not read back as the tree it was built to be: not asked */
   unspellable: number;
 }
 export type ShapeTally = Partial<Record<ShapeName, ShapeCount>>;
 
-export const emptyShapeCount = (): ShapeCount => ({ asked: 0, answeredAlike: 0, refusedAlike: {}, postgresRefused: {}, refusedByGap: 0, decided: 0, differs: 0, unspellable: 0 });
+export const emptyShapeCount = (): ShapeCount => ({ asked: 0, answeredAlike: 0, refusedAlike: {}, postgresRefused: {}, decidedRefused: {}, refusedByGap: 0, decided: 0, differs: 0, unspellable: 0 });
 
 /** the legs' tallies summed */
 export function sumShapeTallies(tallies: readonly ShapeTally[]): ShapeTally {
@@ -76,6 +80,7 @@ export function sumShapeTallies(tallies: readonly ShapeTally[]): ShapeTally {
     for (const k of ["asked", "answeredAlike", "refusedByGap", "decided", "differs", "unspellable"] as const) s[k] += c[k];
     add(s.refusedAlike, c.refusedAlike);
     add(s.postgresRefused, c.postgresRefused);
+    add(s.decidedRefused, c.decidedRefused);
   }
   return sum;
 }
@@ -86,13 +91,14 @@ export function shapeProblems(tally: ShapeTally): string[] {
   for (const [name, spec] of Object.entries(NEW_SHAPES) as Array<[NewShapeName, (typeof NEW_SHAPES)[NewShapeName]]>) {
     const c = tally[name] ?? emptyShapeCount();
     const may: readonly string[] = spec.may;
-    const alive = spec.life === "answer" ? c.answeredAlike + c.decided > 0 : (c.refusedAlike[may[0]!] ?? 0) > 0;
-    if (!alive) problems.push(`the shape ${name} is dead: ${spec.life === "answer" ? "no statement's shape was answered alike" : `no statement's shape was refused alike with ${may[0]}`} (${say(c)}). ` +
-      "Find why it is never answered (the per-shape tally, the differences file), or remove the shape from oracle/shape-names.ts");
+    const decidedRefused = Object.values(c.decidedRefused).reduce((a, n) => a + n, 0);
+    const alive = spec.life === "answer" ? c.answeredAlike + c.decided - decidedRefused > 0 : (c.refusedAlike[may[0]!] ?? 0) + (c.decidedRefused[may[0]!] ?? 0) > 0;
+    if (!alive) problems.push(`the shape ${name} is dead: ${spec.life === "answer" ? "no statement's shape Postgres answered was answered alike or decided" : `no statement's shape Postgres refused with ${may[0]} was refused alike or decided`} (${say(c)}). ` +
+      "Read its differences in the differences file: a difference the base already has is filed once and recorded in KNOWN with `shape` and `issue`; otherwise find why it is never answered, or remove the shape from oracle/shape-names.ts");
     for (const [code, n] of Object.entries(c.postgresRefused)) if (!may.includes(code)) problems.push(`the shape ${name} is misspelt: Postgres refused it ${n} time(s) with ${code}, which it does not declare. Read the shape's text in the differences file, and fix the shape or declare the SQLSTATE in oracle/shape-names.ts`);
   }
   return problems;
 }
 
 /** one shape's tally, in a line */
-export const say = (c: ShapeCount): string => `asked ${c.asked}, alike ${c.answeredAlike}, refused alike ${JSON.stringify(c.refusedAlike)}, refused by gap ${c.refusedByGap}, decided ${c.decided}, differs ${c.differs}, unspellable ${c.unspellable}`;
+export const say = (c: ShapeCount): string => `asked ${c.asked}, alike ${c.answeredAlike}, refused alike ${JSON.stringify(c.refusedAlike)}, refused by gap ${c.refusedByGap}, decided ${c.decided}${Object.keys(c.decidedRefused).length > 0 ? ` (of refusals ${JSON.stringify(c.decidedRefused)})` : ""}, differs ${c.differs}, unspellable ${c.unspellable}`;

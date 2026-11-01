@@ -204,6 +204,10 @@ function showAllHolds(want: Answered, got: Answered): string | null {
  * part of the answer may differ in any kind but there.
  */
 const KNOWN: Decided[] = [
+  // A SHAPE'S DECISIONS (oracle/known.ts: `shape`, matched against the BASE text): a difference the base already has,
+  // filed, and decided so the shape is still asked and lives by it (oracle/shape-names.ts)
+  { shape: "count-negative", sql: /LIMIT|FETCH/i, kind: "sqlstate", issue: 119, why: "a negative LIMIT: Postgres's 2201W, Mason's 42804" },
+  { shape: "offset-negative", sql: /[\s\S]/, kind: "sqlstate", issue: 119, why: "a negative OFFSET: Postgres's 2201X, Mason's 42804" },
   // a domain's column is its base type's: the wire and data_type say so on Postgres too, pg_typeof and format_type do not
   { sql: /pg_typeof\(d[itzp]\)|attname = 'd[itzp]'/, kind: "value", gap: "domain-column", why: "a domain's column is read and declared as its base type" },
   // SHOW ALL (Postico sends it at every connection): the listener's settings — its catalog Postgres's, the session's
@@ -493,7 +497,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         if (sv === null) { if ("code" in sw) c.refusedAlike[sw.code] = (c.refusedAlike[sw.code] ?? 0) + 1; else c.answeredAlike++; continue; }
         const sgap = namedGap(sg);
         if (sgap !== null) { c.refusedByGap++; meet("refused", sgap, q.group, false); continue; }
-        if (sk && sv.kind === sk.kind) { c.decided++; known.add(sk); meetDecided(sk, q.group, false); continue; }
+        if (sk && sv.kind === sk.kind) { c.decided++; if ("code" in sw) c.decidedRefused[sw.code] = (c.decidedRefused[sw.code] ?? 0) + 1; known.add(sk); meetDecided(sk, q.group, false); continue; }
         c.differs++;
         differences.push({ phase, group: `${q.group} [${s.shape}]`, kind: sv.kind, name: `${q.name} [${s.shape}]`, detail: sv.detail,
           sql: s.values === undefined ? s.sql : `${s.sql} -- with ${JSON.stringify(s.values)}` });

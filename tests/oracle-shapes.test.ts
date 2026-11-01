@@ -162,7 +162,7 @@ test("a dead or misspelt new shape is said by name; the first six are not held t
   assert.match(misspelt.join("\n"), /the shape values-arm is misspelt: Postgres refused it 30 time\(s\) with 42804/);
   assert.deepEqual(shapeProblems({ ...all, "table-arm": alive({ answeredAlike: 5, refusedAlike: { "42883": 2 }, postgresRefused: { "42883": 2 } }) }), [], "a declared refusal beside answers");
   assert.deepEqual(shapeProblems({ ...all, "integer-arm": alive({ answeredAlike: 0, decided: 4 }) }), [], "a shape whose every ask meets a recorded decision still lives");
-  assert.match(shapeProblems({ ...all, "count-negative": alive({ answeredAlike: 3 }) }).join("\n"), /count-negative is dead: no statement's shape was refused alike with 2201W/);
+  assert.match(shapeProblems({ ...all, "count-negative": alive({ answeredAlike: 3 }) }).join("\n"), /count-negative is dead: no statement.s shape Postgres refused with 2201W was refused alike or decided/);
   // summed across legs: alive in either
   const legA = { ...all, "char-arm": alive({ answeredAlike: 0 }) }, legB = { "char-arm": alive({ answeredAlike: 1 }) };
   assert.deepEqual(shapeProblems(sumShapeTallies([legA, legB])), []);

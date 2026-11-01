@@ -11,7 +11,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
-import { emptyShapeCount, NEW_SHAPES } from "./integration/oracle/shape-names.ts";
+import { emptyShapeCount, NEW_SHAPES, shapeProblems, sumShapeTallies, type ShapeTally } from "./integration/oracle/shape-names.ts";
 import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
@@ -317,4 +317,29 @@ test("the shapes' tallies are summed across the legs: a dead or misspelt new sha
   const withShape = (r: LegReport, differed: boolean): LegReport => ({ ...r, shapeTally: r.leg === 1 ? live() : {}, decisions: [...r.decisions, { sql: "/x/", shape: "integer-arm", why: "a scale", differed, decided: true }] });
   assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, true)]), [], "the shape entry differed in leg 2");
   assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, false)]), ["a decided difference that no longer differs: [integer-arm] /x/: no longer differs (a scale) — remove it from KNOWN"]);
+});
+
+test("every shape's liveness can be reached by deciding a difference the base already has: a refusal shape lives by a decided refusal under its SQLSTATE, an answer shape by no refusal", () => {
+  const live = (): ShapeTally => Object.fromEntries(Object.entries(NEW_SHAPES).map(([s, spec]) => [s, { ...emptyShapeCount(), asked: 2,
+    ...(spec.life === "answer" ? { answeredAlike: 1 } : { refusedAlike: { [spec.may[0]!]: 1 }, postgresRefused: { [spec.may[0]!]: 1 } }) }]));
+  // issue 119's base difference: Postgres refuses a negative LIMIT 2201W and a negative OFFSET 2201X, Mason both 42804
+  const base: ShapeTally = { ...live(),
+    "count-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201W": 3 }, differs: 3 },
+    "offset-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201X": 3 }, differs: 3 } };
+  assert.deepEqual(shapeProblems(base).map((p) => p.split(":")[0]), ["the shape count-negative is dead", "the shape offset-negative is dead"], "undecided, they are dead");
+  assert.match(shapeProblems(base)[0]!, /recorded in KNOWN with `shape` and `issue`/, "the message names the response a PR may take");
+  // decided (KNOWN with `shape` and `issue: 119`): the itest counts each under Postgres's SQLSTATE, and they live
+  const decided: ShapeTally = { ...live(),
+    "count-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201W": 3 }, decided: 3, decidedRefused: { "2201W": 3 } },
+    "offset-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201X": 3 }, decided: 3, decidedRefused: { "2201X": 3 } } };
+  assert.deepEqual(shapeProblems(decided), []);
+  // across legs: the decided refusals are summed by SQLSTATE
+  assert.deepEqual(sumShapeTallies([decided, decided])["count-negative"]!.decidedRefused, { "2201W": 6 });
+  // a decided refusal under ANOTHER SQLSTATE keeps no refusal shape alive, and a decided refusal keeps no answer shape alive
+  const other: ShapeTally = { ...decided, "count-negative": { ...emptyShapeCount(), asked: 3, postgresRefused: { "2201W": 3 }, decided: 3, decidedRefused: { "2201X": 3 } } };
+  assert.match(shapeProblems(other).join("\n"), /the shape count-negative is dead/);
+  const refusedOnly: ShapeTally = { ...live(), "table-arm": { ...emptyShapeCount(), asked: 2, postgresRefused: { "42883": 2 }, decided: 2, decidedRefused: { "42883": 2 } } };
+  assert.match(shapeProblems(refusedOnly).join("\n"), /the shape table-arm is dead/);
+  // an answer shape whose every ask Postgres answered and Mason differed from by a decided difference lives
+  assert.deepEqual(shapeProblems({ ...live(), "integer-arm": { ...emptyShapeCount(), asked: 2, decided: 2 } }), []);
 });
