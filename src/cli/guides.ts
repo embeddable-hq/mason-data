@@ -67,10 +67,13 @@ ${keys}
     reads a time zone or a setting is refused: name the zone (t AT TIME ZONE 'UTC', date_trunc('day', t, 'UTC')).
     A daily table in one zone doesn't serve a dashboard in another.
     A numeric column is stored exactly, with Postgres's digits, wherever its types fix the scale: one passed through,
-    its min or max, a sum, and + - * of those, negated, abs, round(x, n), floor, ceil or cast to numeric(p,s), up to 18
-    decimals. Refused, each with its reason and the way out: a division (avg is one: store sum and count, divide where
-    you read), more than 18 decimals (round it), a sum whose decimals the rows decide (cast the values to one scale
-    first), and a CASE, GREATEST, COALESCE, mod or trunc over a numeric. An enum and a citext are stored as themselves:
+    its min or max, a sum (of a bigint too), and + - * of those, negated, abs, mod, round(x, n) and trunc(x, n) (n
+    below 0 too), floor, ceil, a cast to numeric(p,s), and a CASE, GREATEST, LEAST or COALESCE whose values have one
+    scale, up to 18 decimals. Refused, each with its reason and the way out: a division (avg is one: store sum and
+    count, divide where you read), a variance or stddev (store it as a double), more than 18 decimals (round it), a sum
+    whose decimals the rows decide (cast the values to one scale first), a CASE, GREATEST, LEAST or COALESCE of
+    values with differing decimals (cast it to numeric(p,s)), and one computed from a double (read it as a double).
+    An enum and a citext are stored as themselves:
     an enum sorts in its declared order, a citext compares without case.
     Not available yet: kind: live, and a domain or a composite type's column.
 

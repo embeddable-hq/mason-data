@@ -28,7 +28,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   parent refused and the child current until the file is fixed.
   A generated table holds a numeric exactly, with Postgres's digits, wherever its types fix the scale: a column passed
   through, its min or max, a sum of an integer (`bigint` for a `smallint` or `integer`, `numeric` for a `bigint`) or of a
-  `numeric(p,s)`, and `+ - *`, negation, `abs`, `round(x, n)`, `floor`, `ceil` or a cast to `numeric(p,s)` of those.
+  `numeric(p,s)`, and `+ - *`, negation, `abs`, `mod`, `round(x, n)` and `trunc(x, n)` (`n` below 0 too), `floor`,
+  `ceil`, a cast to `numeric(p,s)`, or a `CASE`, `GREATEST`, `LEAST` or `COALESCE` of one scale, over those.
   A value added to an enum is answered by the synced table at once, though a generated table built before it still
   holds the old type until its next run. It holds an enum,
   sorted in its declared order, and a citext, compared without case.
@@ -118,7 +119,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Known
 
-- **A generated table can't yet hold a numeric that divides (an average is one), has more than 18 decimals, sums values whose decimals the rows decide, or comes from a CASE, GREATEST, COALESCE, mod or trunc over a numeric; nor a domain or a composite**, and `kind: live` is refused. Each is refused by file and key, with the way out, before anything is built.
+- **A generated table can't yet hold a numeric that divides (an average is one), is a variance or a standard deviation, has more than 18 decimals, sums values whose decimals the rows decide, is a CASE, GREATEST, LEAST or COALESCE of values with differing decimals, or is computed from a double; nor a domain or a composite**, and `kind: live` is refused. Each is refused by file and key, with the way out, before anything is built.
 - **`mason status` shows generated tables; the web page doesn't yet.**
 - **Pages of such a statement may overlap**: `LIMIT n OFFSET m` with no ORDER BY over a join that can multiply rows, or over
   an aggregated side, has no stable order, so a tool paging one can see a row twice and miss another. Add an ORDER BY

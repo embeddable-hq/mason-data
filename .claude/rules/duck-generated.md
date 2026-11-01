@@ -33,8 +33,12 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   which is what a copy of the column holds, so the catalog's typmod pads a numeric's scale on read and an enum keeps its
   declared order (stage 3, issue 175). A numeric the plan computes after the engine's answer (`DuckPlan.exact`) is stored
   where Postgres's TYPES fix its scale, its program written as the engine's DECIMAL arithmetic (`storedNumeric`: `+ - *`,
-  negation, abs, round, a typmod, floor, ceil, a pad), at most 18 decimals. What is not stored says ITS OWN reason
-  (`notStoredRefusal`: a division, a scale past 18, a scale the rows decide, no translation yet), and the guide and the
+  negation, abs, mod, round and trunc at any place, a typmod, floor, ceil, a pad, a CASE, GREATEST, LEAST or COALESCE of
+  one scale), at most 18 decimals. **Each cell's engine type is what DuckDB says the plan's SQL computes** (`EngineTypes`,
+  a prepared statement's, at the check and again at the write), never assumed: a sum of int8 is a HUGEINT, whose floor is
+  a double's, so an integer is cast to DECIMAL(38,0) first. A scale is a number or "picks" (a picked value's own), never
+  unknown: a null that meant both let 30 decimals through. What is not stored says ITS OWN reason (`notStoredRefusal`: a
+  division, a variance, a scale past 18, a scale a sum's rows or a picked value decide, a double), and the guide and the
   release note name the same shapes: one refusal's reason for every shape was a false one. `dropLast` is refused. A
   domain and a composite stay refused by name. Detector: tests/duck-generated.test.ts, a test per shape.
 - **One source of an enum's labels, the synced table's ENUM.** A generated table stores the ENUM it was built with; a

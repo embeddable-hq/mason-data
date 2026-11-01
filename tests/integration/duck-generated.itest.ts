@@ -119,6 +119,17 @@ const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: str
       "SELECT s8 > 9223372036854775807 AS past, sum(sa) AS total, sum(s4) AS s4 FROM sums GROUP BY 1 ORDER BY 1",
       "SELECT mood, s2 + s4 AS both FROM sums WHERE sa = 1.50 ORDER BY mood",
     ] },
+  // PR 202's review round 2: a numeric computed at the result's edge, stored as DECIMAL arithmetic over the engine types
+  // DuckDB says the plan computes (an integer's sum under a function: finding 1), and each form whose scale the types fix
+  { name: "integral", schema: "public", table: "integral",
+    sql: "SELECT floor(sum(id)) AS f, ceil(sum(id)) AS c, floor(sum(id) + sum(n)) AS fn, abs(-sum(id)) AS a, round(sum(id), -1) AS r, mod(sum(id), 10) AS md, trunc(sum(id), -2) AS t, greatest(sum(id), 1) AS g FROM ledger",
+    orderBy: null,
+    statements: ["SELECT * FROM integral", "SELECT f - c AS d, fn > f AS more FROM integral"] },
+  { name: "forms", schema: "public", table: "forms",
+    sql: "SELECT id, round(amount * 10, -1) AS r1, trunc(amount, 1) AS t, amount::numeric(40,2) AS w, mod(amount, 3) AS md, coalesce(amount, 0.00) AS co, greatest(amount, 1.00) AS g, " +
+      "CASE WHEN amount > 0 THEN amount ELSE 0.00 END AS k, greatest(amount, 1)::numeric(12,2) AS gc, -amount * n AS mi FROM ledger",
+    orderBy: "id",
+    statements: ["SELECT * FROM forms ORDER BY id", "SELECT id, w FROM forms WHERE md = 1.00 ORDER BY w DESC NULLS LAST, id"] },
   { name: "kinds", schema: "public", table: "kinds",
     sql: "SELECT id, mood, name FROM ledger",
     orderBy: null,

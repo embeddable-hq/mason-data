@@ -498,6 +498,15 @@ test("the guide lists every key the reader takes", async () => {
   assert.doesNotMatch(text, /DuckDB/);
 });
 
+test("the guide, the rules file and the release note name the numeric forms the plan stores and refuses, and no false reason", async () => {
+  const docs = { guide: (await guideText("generated")).replace(/\s+/g, " "), rules: fs.readFileSync(".claude/rules/duck-generated.md", "utf8").replace(/\s+/g, " "),
+    notes: fs.readFileSync("release-notes/next.md", "utf8").replace(/\s+/g, " ") };
+  for (const [doc, text] of Object.entries(docs)) {
+    for (const said of [/trunc/, /mod/, /GREATEST/, /COALESCE/, /variance/i, /18 decimals|past 18/, /double/]) assert.match(text, said, `${doc}: ${said}`);
+    assert.doesNotMatch(text, /CASE, GREATEST, COALESCE, mod or trunc over a numeric/, doc);
+  }
+});
+
 test("a top-level ORDER BY with no LIMIT is said, once, pointing at order_by, and refuses nothing; a column the copy leaves out says how to sync it", async () => {
   await withWorld({
     sorted: "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id FROM events ORDER BY id\n",
@@ -963,7 +972,8 @@ async function overLedger(files: Record<string, string>, use: (w: Parameters<Par
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-numeric-"));
   try {
     await withWorld({}, async (w) => { for (const sql of LEDGER_SEED) await w.store.writer.run(sql); }, { dir });
-    await withWorld(files, async (w) => { for (const name of Object.keys(files)) await w.until(built, `public.${name}`); await use(w, false); }, { dir, again: true, tables: [ledger] });
+    // served, not built (#205): `use` queries each table over the wire at once
+    await withWorld(files, async (w) => { for (const name of Object.keys(files)) await w.until(served(w.logged), `public.${name}`); await use(w, false); }, { dir, again: true, tables: [ledger] });
     await withWorld({}, async (w) => { for (const name of Object.keys(files)) assert.ok(built(w.status(`public.${name}`))); await use(w, true); }, { dir, again: true, tables: [ledger] });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
@@ -1033,27 +1043,83 @@ test("a numeric whose scale the types fix is stored with Postgres's digits: nega
   });
 });
 
-test("a numeric the types don't fix is refused with its own reason: a division, a scale past 18; a sum of differing columns' scales is stored", async () => {
+test("a numeric the types don't fix is refused with its own reason: a division, a variance, a scale past 18, a scale the rows or a picked value decide, a double's", async () => {
   const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  const refusedFiles: Record<string, string> = {
+    mean: "SELECT avg(n) AS mean FROM ledger",
+    wide: "SELECT sum(wide) AS total FROM ledger",
+    texts: "SELECT sum((payload ->> 'a')::numeric) AS total FROM events",
+    larger: "SELECT greatest(amount, 1) AS top FROM ledger",
+    spread: "SELECT stddev(amount) AS sd FROM ledger",
+    varied: "SELECT variance(amount) AS v FROM ledger",
+    // review round 2, finding 2: an integer's scale is 0, never "unknown", so the 30 decimals are seen
+    idwide: "SELECT sum(id) + sum(wide) AS a FROM ledger",
+    bigwide: "SELECT sum(big) + sum(wide) AS b FROM ledger",
+    timeswide: "SELECT sum(wide) * sum(id) AS m FROM ledger",
+    negwide: "SELECT -sum(wide) AS n FROM ledger",
+    floated: "SELECT sum(n::float8)::numeric AS d FROM ledger",
+  };
   await overLedger({ counts: COUNTS }, async (w, restarted) => {
     if (restarted) return;
-    w.write("mean", `${lag}sql: SELECT avg(n) AS mean FROM ledger\n`);
-    w.write("wide", `${lag}sql: SELECT sum(wide) AS total FROM ledger\n`);
+    for (const [name, sql] of Object.entries(refusedFiles)) w.write(name, `${lag}sql: ${sql}\n`);
     w.write("mixed", `${lag}sql: SELECT sum(amount) + sum(big) AS combined FROM ledger\n`);
-    w.write("texts", `${lag}sql: SELECT sum((payload ->> 'a')::numeric) AS total FROM events\n`);
-    w.write("larger", `${lag}sql: SELECT greatest(amount, 1) AS top FROM ledger\n`);
+    w.write("spreadout", `${lag}sql: SELECT stddev(amount)::double precision AS sd FROM ledger\n`);
+    w.write("picked", `${lag}sql: SELECT round(sum(id) + sum(wide), 2) AS a, greatest(sum(amount), 1)::numeric(12,2) AS g FROM ledger\n`);
     // each file read and planned, under load too: a review already in flight when they were written may not have read them
-    for (const name of ["mean", "wide", "texts", "larger"]) await w.until((s) => s.state === "refused", `public.${name}`);
+    for (const name of Object.keys(refusedFiles)) await w.until((s) => s.state === "refused", `public.${name}`);
     const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
-    refusedAt(r("mean").refusals, "sql", /^column mean divides a numeric, which the engine computes as a double$/);
-    assert.ok(r("mean").refusals[0]!.options.some((o) => o.includes("count(")), JSON.stringify(r("mean").refusals));
-    refusedAt(r("wide").refusals, "sql", /^column total has 30 decimals, more than the 18 a stored numeric keeps$/);
-    assert.ok(r("wide").refusals[0]!.options.some((o) => o.includes("round(")), JSON.stringify(r("wide").refusals));
-    refusedAt(r("texts").refusals, "sql", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/);
-    refusedAt(r("larger").refusals, "sql", /^column top computes a numeric in a way Mason can't store exactly yet/);
-    for (const name of ["mean", "wide", "texts", "larger"]) assert.doesNotMatch(JSON.stringify(r(name).refusals), /no fixed scale/);
-    // case 2f: the sum of an unconstrained numeric's synced column is one cell at the scale its DECIMAL holds, so it is stored
-    await w.until(built, "public.mixed");
+    const says = (name: string, message: RegExp, option: string): void => {
+      refusedAt(r(name).refusals, "sql", message);
+      assert.ok(r(name).refusals[0]!.options.some((o) => o.includes(option)), `${name}: ${JSON.stringify(r(name).refusals)}`);
+    };
+    says("mean", /^column mean divides a numeric, which the engine computes as a double$/, "count(");
+    says("wide", /^column total has 30 decimals, more than the 18 a stored numeric keeps$/, "round(");
+    says("texts", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/, "::numeric(20,4)");
+    says("larger", /^column top is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones$/, "::numeric(12,2)");
+    says("spread", /^column sd is a variance or a standard deviation, whose decimals Postgres picks by the size of each value$/, "::double precision");
+    says("varied", /^column v is a variance or a standard deviation/, "::double precision");
+    for (const [name, col] of [["idwide", "a"], ["bigwide", "b"], ["timeswide", "m"], ["negwide", "n"]]) says(name!, new RegExp(`^column ${col} has 30 decimals, more than the 18`), "round(");
+    says("floated", /^column d is a numeric computed from a value the engine holds as a double/, "::double precision");
+    for (const name of Object.keys(refusedFiles)) assert.doesNotMatch(JSON.stringify(r(name).refusals), name === "mean" ? /no fixed scale|can't store exactly yet/ : /no fixed scale|can't store exactly yet|divides a numeric/, name);
+    // each refusal's way out is stored: a sum of an unconstrained numeric's synced column is one cell at the scale its
+    // DECIMAL holds; a stddev as a double; the 30 decimals rounded; a picked value given one scale (#205: `served`, not `built`)
+    for (const name of ["mixed", "spreadout", "picked"]) await w.until(served(w.logged), `public.${name}`);
     assert.deepEqual((await typed(w, "SELECT combined FROM mixed")).rows, [["12345678901234567893.823456788"]]);
+    assert.equal((await typed(w, "SELECT sd FROM spreadout")).fields[0]![1], 701);
+    assert.deepEqual((await typed(w, "SELECT a, g FROM picked")).rows, [["18446744073709551619.75", "2.60"]]);
+  });
+});
+
+// review round 2 of PR 202, finding 1: a numeric Postgres types from integers, under any function, is stored from the
+// engine type DuckDB says it computes (a sum of int8 is a HUGEINT, whose floor is a double's), never an assumed one
+const INTEGRAL = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT floor(sum(id)) AS f, ceil(sum(id)) AS c, floor(sum(id) + sum(n)) AS fn, abs(-sum(id)) AS a, " +
+  "round(sum(id), -1) AS r, sum(id) * 2 AS m, mod(sum(id), 10) AS md, trunc(sum(id), -2) AS t, greatest(sum(id), 1) AS g FROM ledger\n";
+
+test("an integer Postgres types as numeric is stored with its digits under any function: floor, ceil, abs, round, mod, trunc, greatest of sum(int8)", async () => {
+  await overLedger({ integral: INTEGRAL }, async (w) => {
+    const r = await typed(w, "SELECT * FROM integral");
+    assert.deepEqual(r.fields.map(([, oid]) => oid), Array(9).fill(1700));
+    assert.deepEqual(r.rows, [["18446744073709551617", "18446744073709551617", "18446744078004518921", "18446744073709551617", "18446744073709551620",
+      "36893488147419103234", "7", "18446744073709551600", "18446744073709551617"]]);
+  });
+});
+
+// review round 2 of PR 202, finding 3: each form stored, or refused for its own reason (the PR's "Review round 2" table)
+const FORMS = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT id, round(amount * 10, -1) AS r1, round(amount, -1) AS r0, trunc(amount, 1) AS t, trunc(amount * 10, -1) AS t1, " +
+  "amount::numeric(40,2) AS w, mod(amount, 3) AS md, coalesce(amount, 0.00) AS co, greatest(amount, 1.00) AS g, CASE WHEN amount > 0 THEN amount ELSE 0.00 END AS k, " +
+  "greatest(amount, 1)::numeric(12,2) AS gc, -amount * n AS mi FROM ledger\norder_by: id\n";
+const AGGREGATES = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT min(amount) AS lo, max(amount) AS hi, sum(amount) AS s, round(sum(amount), 5) AS r5, round(max(big), 4) AS rb FROM ledger\n";
+
+test("each numeric form whose scale the types fix is stored with Postgres's digits: round to tens, trunc, mod, a typmod past 38, COALESCE, GREATEST, CASE of one scale", async () => {
+  await overLedger({ forms: FORMS, aggregates: AGGREGATES }, async (w) => {
+    const r = await typed(w, "SELECT * FROM forms ORDER BY id");
+    assert.equal(r.fields.find(([n]) => n === "w")![2], (40 << 16) + 2 + 4, "numeric(40,2) on the wire");
+    assert.deepEqual(r.rows.map((x) => x.slice(1)), [
+      ["10", "0", "1.1", "10", "1.10", "1.10", "1.10", "1.10", "1.10", "1.10", "-11.00"],
+      [null, null, null, null, null, null, "0.00", "1.00", "0.00", "1.00", null],
+      ["-30", "0", "-2.5", "-20", "-2.50", "-2.50", "-2.50", "1.00", "0.00", "1.00", "5368709117.50"],
+      ["40", "0", "4.0", "40", "4.00", "1.00", "4.00", "4.00", "4.00", "4.00", "-8589934588.00"],
+    ]);
+    assert.deepEqual((await typed(w, "SELECT * FROM aggregates")).rows, [["-2.50", "4.00", "2.60", "2.60000", "12345678901234567890.1235"]]);
   });
 });

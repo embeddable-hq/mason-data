@@ -36,7 +36,7 @@
 import { createHash } from "node:crypto";
 import type { DuckConnection } from "./executor.ts";
 import type { Planner, GeneratedColumn, GeneratedRefusal, DefinitionPlan as DefinitionPlanOf } from "./generated-plan.ts";
-import { cycleRefusal, planDefinition, readsByName, refusalOf, refusalText } from "./generated-plan.ts";
+import { cycleRefusal, planDefinition, readsByName, refusalOf, refusalText, storedColumns, type EngineTypes } from "./generated-plan.ts";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { StatementError } from "./statement.ts";
 import type { SyncEventInput } from "./events.ts";
@@ -191,6 +191,13 @@ export type GeneratedStep = "snapshot" | "written" | "committed" | "swapped";
  *  quoted (`invalid input syntax for type integer: "abc"`): quoted text and every number go. */
 export function withoutValues(message: string): string {
   return message.split("\n")[0]!.replace(/'(?:[^']|'')*'/g, "…").replace(/"(?:[^"]|"")*"/g, "…").replace(/\b\d[\d.:,-]*\b/g, "…");
+}
+
+/** the engine type of each column a plan's SQL computes, as DuckDB says when it prepares it (`EngineTypes`) */
+async function engineTypes(c: DuckConnection, sql: string): Promise<EngineTypes> {
+  const p = await c.prepare(sql);
+  try { return new Map(Array.from({ length: p.columnCount }, (_, i) => [p.columnName(i), p.columnType(i).toString()] as const)); }
+  finally { p.destroySync(); }
 }
 
 export class GeneratedTables {
@@ -495,7 +502,9 @@ export class GeneratedTables {
     if (e.seen?.json === json && e.seen.schema === schema) return;
     e.seen = { json, schema };
     try {
-      const r = await planDefinition(planner, def.sql, def.orderBy);
+      const c = this.host.connection();
+      await this.searchPath(c);
+      const r = await planDefinition(planner, def.sql, def.orderBy, undefined, (sql) => engineTypes(c, sql));
       e.waitingFor = null;
       e.warnings = "refused" in r ? [] : r.definition.warnings;
       // what its names did not show (a name the plan resolved otherwise): a cycle by what the plan reads
@@ -743,7 +752,12 @@ export class GeneratedTables {
       const written: Array<{ e: Entry; n: Deployed; side: string; target: string }> = [];
       for (const p of plans) {
         at = p.e;
-        const { plan, columns } = p.plan;
+        const { plan } = p.plan;
+        // a computed numeric's DECIMAL arithmetic, over the engine types of the SQL that runs (a parent's side table now
+        // there), never assumed: what the check held, the write holds again
+        const stored = p.plan.numerics.length === 0 ? { columns: p.plan.columns } : storedColumns(p.plan, await engineTypes(c, plan.sql.text));
+        if ("refused" in stored) throw new Error(stored.refused[0]!.message);
+        const { columns } = stored;
         const params: string[] = [];
         if (plan.clock?.exec !== undefined) params[plan.clock.exec - 1] = new Date(clock.at).toISOString();
         const aliases = columns.map((_, i) => `__mason_c${i}`);
