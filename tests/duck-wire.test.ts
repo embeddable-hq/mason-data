@@ -3443,6 +3443,40 @@ test("a numeric is exact exactly where what is sent computes it exactly, whereve
   } finally { await c.end(); }
 });
 
+// PR 207'S FIFTH ROUND: two places the one decider did not yet reach (a failure to apply the decision of the fourth
+// round, not a new class): an empty list read as "every value exact" for a column nothing decided, and a product's
+// widening writing a DECIMAL of its own; and a refusal's words that named what the statement did not hold.
+test("unknown is never exact, one writer writes every numeric cast, and a refusal names what was written (PR 207's fifth round)", async () => {
+  const c = await client();
+  try {
+    // the product's widening writes by the cast's one writer: a scale past 38 is no DECIMAL
+    for (const sql of ["SELECT r.id, (1e-39)::numeric(45,40) * r.n FROM ratios r ORDER BY 1",
+      "SELECT r.id, r.a * (1e-39)::numeric(45,40) FROM ratios r ORDER BY 1"]) {
+      assert.deepEqual(await answer(c, sql).catch((e: Error) => e.message), await postgres(sql), sql);
+    }
+    // a column a `*` lists one FROM item deeper is the value it reads there, never "exact" for want of one: compared or
+    // grouped, refused by name — in the words of what was written
+    const refused = async (sql: string, words: RegExp[], not: RegExp[] = []): Promise<void> => {
+      await postgres(sql);
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => {
+        assert.equal(e.code, "0A000", sql);
+        assert.match(e.detail ?? "", /numeric-quotient-equality/, sql);
+        for (const w of words) assert.match(e.message, w, sql);
+        for (const w of not) assert.doesNotMatch(e.message, w, sql);
+        return true;
+      }, sql);
+    };
+    await refused("SELECT count(*) FROM (SELECT s.*, 1 AS one FROM (SELECT b.x / 1 AS q FROM bigdec b) s) t WHERE t.q = 1.00000000000000000001", [/a numeric quotient/, /lists \* beside other columns/]);
+    await refused("SELECT t.q, count(*) FROM (SELECT s.*, 1 AS one FROM (SELECT b.x / 1 AS q FROM bigdec b) s) t GROUP BY 1 ORDER BY 1", [/a numeric quotient/]);
+    await refused("SELECT count(*) FROM (SELECT *, b.x / 1 AS q FROM bigdec b) s WHERE s.q = 1.00000000000000000001", [/a numeric quotient/, /\*/]);
+    // a VALUES list's constant past 38 digits: no quotient, no average and no `*` in the words
+    for (const sql of ["SELECT count(*) FROM (VALUES ('1e-39'::numeric), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0",
+      "SELECT v.x, count(*) FROM (VALUES ('1e-39'::numeric), (0)) v(x), ratios r WHERE r.id = 1 GROUP BY v.x"]) {
+      await refused(sql, [/more than 38 digits/, /VALUES list/], [/quotient/, /average/, /\*/]);
+    }
+  } finally { await c.end(); }
+});
+
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
   const c = await client();
   // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison
