@@ -3477,6 +3477,87 @@ test("unknown is never exact, one writer writes every numeric cast, and a refusa
   } finally { await c.end(); }
 });
 
+// PR 207'S SIXTH ROUND: the class "a hint whose way out was never exercised". round(x, n) is computed exactly, the
+// way the quotient is, so it is refused the same way; a USING join reads the double; a DISTINCT over a subquery sums the
+// double. Each refusal of numeric-quotient-equality is asked here, and then the way out its HINT names, which must
+// answer as Postgres does. The same holds for each way out numeric-quotient-compare's doc names. A numeric's error sends
+// Postgres's DETAIL apart from its message, on both the runtime's path and the engine function's path.
+test("every way out a numeric refusal names answers as Postgres does; a numeric overflow's DETAIL is Postgres's, apart (PR 207's sixth round)", async () => {
+  const c = await client();
+  const K = "1.00000000000000000001";
+  try {
+    const cases: Array<[refused: string, hint: RegExp, wayOut: string]> = [
+      // a FROM item's value compared outside it
+      [`SELECT count(*) FROM (SELECT s.*, 1 AS one FROM (SELECT b.x / 1 AS q FROM bigdec b) s) t WHERE t.q = ${K}`, /name the columns in place of the \*/,
+        `SELECT count(*) FROM (SELECT s.q, 1 AS one FROM (SELECT b.x / 1 AS q FROM bigdec b) s) t WHERE t.q = ${K}`],
+      [`SELECT count(*) FROM (SELECT *, b.x / 1 AS q FROM bigdec b) s WHERE s.q = ${K}`, /name the columns in place of the \*/,
+        `SELECT count(*) FROM (SELECT b.id, b.x, b.y, b.x / 1 AS q FROM bigdec b) s WHERE s.q = ${K}`],
+      [`SELECT s.*, s.q = ${K} AS eq FROM (SELECT b.x / 1 AS q FROM bigdec b) s`, /name the columns in place of the \*/,
+        `SELECT s.q, s.q = ${K} AS eq FROM (SELECT b.x / 1 AS q FROM bigdec b) s`],
+      [`SELECT count(*) FROM (SELECT b.x / 1 AS q, b.id FROM bigdec b) s NATURAL JOIN ratios r WHERE s.q = ${K}`, /join it with ON/,
+        `SELECT count(*) FROM (SELECT b.x / 1 AS q, b.id FROM bigdec b) s JOIN ratios r ON r.id = s.id WHERE s.q = ${K}`],
+      [`SELECT s FROM (SELECT b.x / 1 AS q FROM bigdec b) s WHERE s.q = ${K}`, /not its whole row/,
+        `SELECT s.q FROM (SELECT b.x / 1 AS q FROM bigdec b) s WHERE s.q = ${K}`],
+      ["WITH RECURSIVE r(q, n) AS (SELECT round(b.x / 1, 2), 1 FROM bigdec b UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.q = 1.00", /outside the recursive WITH query/,
+        "WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE round(r.x / 1, 2) = 1.00"],
+      ["SELECT count(*) FROM (VALUES ('1e-39'::numeric), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0", /38 digits or fewer/,
+        "SELECT count(*) FROM (VALUES ('1e-37'::numeric), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0"],
+      ["SELECT count(*) FROM (VALUES (1 / 3.0), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0", /compute the value in the query that compares it/,
+        "SELECT count(*) FROM (VALUES (1, 3.0), (0, 1)) v(a, b), ratios r WHERE r.id = 1 AND v.a / v.b = 0"],
+      ["SELECT DISTINCT u.q FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT 0) u", /compute the value in the query that compares it/,
+        "SELECT DISTINCT u.x / 1 AS q FROM (SELECT b.x FROM bigdec b UNION ALL SELECT 0) u"],
+      // a value compared where no exact key can be placed
+      ["SELECT b.x / 1 AS q FROM bigdec b UNION SELECT 0 / 1.0", /SELECT DISTINCT over the UNION ALL/,
+        "SELECT DISTINCT u.q FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT 0 / 1.0) u"],
+      ["SELECT b.x / 1 AS q FROM bigdec b INTERSECT SELECT b.x / 1 FROM bigdec b WHERE b.id = 1", /by EXISTS/,
+        "SELECT DISTINCT b.x / 1 AS q FROM bigdec b WHERE EXISTS (SELECT 1 FROM bigdec c WHERE c.id = 1 AND c.x / 1 = b.x / 1)"],
+      ["SELECT b.x / 1 AS q FROM bigdec b EXCEPT SELECT b.x / 1 FROM bigdec b WHERE b.id = 1", /by NOT EXISTS/,
+        "SELECT DISTINCT b.x / 1 AS q FROM bigdec b WHERE NOT EXISTS (SELECT 1 FROM bigdec c WHERE c.id = 1 AND c.x / 1 = b.x / 1)"],
+      ["SELECT b.x / 1 AS q FROM bigdec b INTERSECT ALL SELECT b.x / 1 FROM bigdec b WHERE b.id = 1", /count each value in each query/,
+        "SELECT a.q, least(a.n, z.n) AS n FROM (SELECT b.x / 1 AS q, count(*) AS n FROM bigdec b GROUP BY 1) a JOIN (SELECT b.x / 1 AS q, count(*) AS n FROM bigdec b WHERE b.id = 1 GROUP BY 1) z ON z.q = a.q"],
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY ROLLUP (1)", /a GROUP BY for each grouping set/,
+        "SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 UNION ALL SELECT NULL, count(*) FROM bigdec b"],
+      ["SELECT sum(DISTINCT b.x / 1) FROM bigdec b", /count\(DISTINCT …\) of it is answered/, "SELECT count(DISTINCT b.x / 1) FROM bigdec b"],
+      ["SELECT DISTINCT * FROM (SELECT b.x / 1 AS q, b.id AS k, b.y AS k FROM bigdec b) s", /name the columns/,
+        "SELECT DISTINCT s.q, s.k FROM (SELECT b.x / 1 AS q, b.id AS k, b.y AS k2 FROM bigdec b) s"]];
+    const differ: string[] = [];
+    for (const [sql, hint, way] of cases) {
+      await postgres(sql);
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => {
+        assert.equal(e.code, "0A000", sql);
+        assert.match(e.detail ?? "", /numeric-quotient-equality/, sql);
+        assert.match(e.hint ?? "", hint, sql);
+        assert.doesNotMatch(e.hint ?? "", /round\(|USING/, sql);
+        return true;
+      }, sql);
+      const pg = rowSet(await postgres(way));
+      const mine = await answer(c, way).then(rowSet, (e: Error) => e.message);
+      if (JSON.stringify(mine) !== JSON.stringify(pg)) differ.push(`${way}\n  Postgres: ${JSON.stringify(pg)}\n  Mason:    ${JSON.stringify(mine)}`);
+    }
+    // numeric-quotient-compare's ways out (docs/SQL-SUPPORT.md): each answered as Postgres answers it
+    for (const way of [`SELECT count(*) FROM bigdec b WHERE b.x / 1 = ${K} OR b.x / 1 = 5`,
+      `SELECT count(*) FROM (SELECT b.x / 1 AS q FROM bigdec b) t WHERE t.q = ${K} OR t.q = 5`,
+      `SELECT count(*) FROM bigdec b WHERE (b.x / 1 = ${K}) IS NOT TRUE`,
+      `SELECT b.id, CASE WHEN b.x / 1 = ${K} THEN 'y' ELSE 'n' END FROM bigdec b`]) {
+      const pg = rowSet(await postgres(way));
+      const mine = await answer(c, way).then(rowSet, (e: Error) => e.message);
+      if (JSON.stringify(mine) !== JSON.stringify(pg)) differ.push(`${way}\n  Postgres: ${JSON.stringify(pg)}\n  Mason:    ${JSON.stringify(mine)}`);
+    }
+    assert.deepEqual(differ, []);
+    // a numeric field overflow: Postgres's message and its DETAIL, apart, whichever path raised it
+    for (const sql of ["SELECT r.id, r.a::numeric(3,5) FROM ratios r WHERE r.id = 1",
+      "SELECT r.id, (r.a / 3)::numeric(3,5) FROM ratios r WHERE r.id = 1",
+      "SELECT count(*) FROM (SELECT (r.a / 3)::numeric(3,5) AS v FROM ratios r) s WHERE s.v = 1"]) {
+      const want = await postgres(sql).then(() => null, (e: { code?: string; message: string; detail?: string }) => e);
+      assert.ok(want !== null, sql);
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => {
+        assert.deepEqual({ code: e.code, message: e.message, detail: e.detail }, { code: want.code, message: want.message, detail: want.detail }, sql);
+        return true;
+      }, sql);
+    }
+  } finally { await c.end(); }
+});
+
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
   const c = await client();
   // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison

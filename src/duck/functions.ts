@@ -441,6 +441,10 @@ const itemsOf = (v: DuckDBValue): Array<string | null> => (v as { items: DuckDBV
 
 // ------------------------------------------------------------------------------------------------- registration
 
+/** a NumericError as the error a Mason function raises: Postgres's DETAIL after its message (`\nDETAIL: `), which
+ *  src/duck/store.ts postgresWording sends apart, as Postgres does */
+const numericEvalError = (e: NumericError): PgEvalError => new PgEvalError(e.sqlstate, e.detail === null ? e.message : `${e.message}\nDETAIL: ${e.detail}`);
+
 const text = (v: DuckDBValue | undefined): string | null => v === null || v === undefined ? null : String(v);
 
 /** a scalar function over VARCHAR (and BOOLEAN) arguments, one call per row; a thrown error is the statement's */
@@ -769,7 +773,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
       return q === 0 ? 0 : q;
     }
     try { return Number(numericText(div(parseNumeric(x), parseNumeric(y)))); }
-    catch (e) { if (e instanceof NumericError) throw new PgEvalError(e.sqlstate, e.message); throw e; }
+    catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
   });
   // a numeric Postgres's own function computed, summed (src/duck/rewrite.ts summed): numeric_out's text as two parts
   // DuckDB's DECIMAL(38,18) holds exactly — its integer digits and first 18 decimals (part 0), and its next 18 decimals
@@ -804,7 +808,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
   scalar(conn, "__mason_numeric_program", [], VARCHAR, ([program, ...cells]) => {
     const values = Object.fromEntries(cells.map((c, i) => [String(i), text(c)]));
     try { return evaluateText(JSON.parse(String(program)) as NumericProgram, values); }
-    catch (e) { if (e instanceof NumericError) throw new PgEvalError(e.sqlstate, e.message); throw e; }
+    catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
   }, { nulls: "pass", varargs: true });
   // the decimals of numeric_out's text: the value's display scale (`2.450` has 3)
   scalar(conn, "__mason_numeric_scale", [VARCHAR], INTEGER, ([t]) => { const at = String(t).indexOf("."); return at < 0 ? 0 : String(t).length - at - 1; });

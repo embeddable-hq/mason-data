@@ -2328,11 +2328,14 @@ class Rewriter {
     const found = this.fromColumn(e);
     const w = found === null ? undefined : this.whyUncarried.get(bodyOf(found.query));
     const what = w?.what ?? "a numeric the engine holds as a double", where = w?.where ?? "a subquery", why = w?.why ?? "Mason cannot carry its exact digits out of it";
-    const hint = why.includes("*") ? "name the columns in place of the *, or round(x, n) to the digits that matter"
-      : why.includes("NATURAL") ? "join with USING (…) or ON, or round(x, n) to the digits that matter"
-      : why.includes("whole row") ? "read its columns, not its whole row, or round(x, n) to the digits that matter"
-      : where === "a VALUES list" ? "write each value in the VALUES list with 38 digits or fewer, or round(x, n) to the digits that matter"
-      : "round(x, n) to the digits that matter, inside it";
+    // (each way out is one a test follows to Postgres's answer, tests/duck-wire.test.ts "sixth round": a round(x, n)
+    // inside the query is still its double, and a USING join reads it as the double — neither is offered)
+    const hint = why.includes("*") ? "name the columns in place of the *: SELECT s.q, … FROM (…) s"
+      : why.includes("NATURAL") ? "join it with ON, naming its columns: … JOIN t ON t.id = s.id"
+      : why.includes("whole row") ? "read its columns, not its whole row: s.q, never s"
+      : why.includes("recursive") ? "compute the value outside the recursive WITH query, from the columns it carries"
+      : where === "a VALUES list" && what === "a numeric of more than 38 digits" ? "write each value in the VALUES list in 38 digits or fewer (the 0 of 0.5 counts)"
+      : "compute the value in the query that compares it, from the columns it is made of";
     throw new Unrewritable(`${what} from ${where}, compared outside it, is not supported by Mason where ${why} (Postgres compares the exact value; the engine holds it as a double)`, hint, "numeric-quotient-equality");
   }
 
@@ -2378,7 +2381,16 @@ class Rewriter {
 
   /** the refusal of a form that equates a numeric decided exactly where no exact key can be placed */
   private refuseExactEquality(e: AstNode, where: string): void {
-    if (this.exactKey(e) !== null) throw new Unrewritable(`${where} a numeric quotient or average is not supported by Mason (Postgres compares the exact values, which the engine holds as doubles)`, "round(x, n) to the digits that matter, or compute it in a subquery and DISTINCT / GROUP BY outside", "numeric-quotient-equality");
+    if (this.exactKey(e) === null) return;
+    // (each way out is one a test follows to Postgres's answer, tests/duck-wire.test.ts "sixth round"; a round(x, n) is
+    // computed as exactly as the quotient, and refused alike, so none offers it)
+    const hint = where.startsWith("UNION") ? "SELECT DISTINCT over the UNION ALL of the same queries: SELECT DISTINCT u.q FROM (SELECT … UNION ALL SELECT …) u"
+      : / ALL of$/.test(where) ? "count each value in each query (GROUP BY it) and join the counts on it: … FROM (SELECT q, count(*) AS n … GROUP BY q) a JOIN (…) b ON b.q = a.q"
+      : where.startsWith("INTERSECT") ? "keep the rows the other query has, by EXISTS: SELECT DISTINCT a.q FROM … a WHERE EXISTS (SELECT 1 FROM … b WHERE b.q = a.q)"
+      : where.startsWith("EXCEPT") ? "keep the rows the other query has not, by NOT EXISTS: SELECT DISTINCT a.q FROM … a WHERE NOT EXISTS (SELECT 1 FROM … b WHERE b.q = a.q)"
+      : where.startsWith("GROUP BY") ? "a GROUP BY for each grouping set, joined by UNION ALL: SELECT q, count(*) … GROUP BY q UNION ALL SELECT NULL, count(*) …"
+      : "count(DISTINCT …) of it is answered; Mason has no exact form of this aggregate's DISTINCT of it";
+    throw new Unrewritable(`${where} a numeric quotient or average is not supported by Mason (Postgres compares the exact values, which the engine holds as doubles)`, hint, "numeric-quotient-equality");
   }
 
   /**
