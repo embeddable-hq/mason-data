@@ -150,7 +150,7 @@
 import type { TreeNode, TreeValue } from "./pgtree.ts";
 import { fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
-import { constantKey } from "./constant-key.ts";
+import { constantExpression, evaluated } from "./constant-key.ts";
 
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
@@ -580,15 +580,14 @@ function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, num
       target = named[0];
     }
     const computed = (t: AstNode): boolean => rowWise(bodyOf(t).val).computes;
-    // an output a folded derived table made a constant (`one`, or `2`, over the subquery's `1 AS one`): no key, as fold
-    if (target !== undefined && constantKey(bodyOf(target).val)) continue;
     sorts.push(sort);
     if (target !== undefined) {
       if (computed(target)) {
         if (shown === null) return null;
         if (!shown.has(targets.indexOf(target))) shown.set(targets.indexOf(target), keys.length);
       }
-      keys.push(structuredClone(bodyOf(target).val as AstNode));
+      // (an output a rewrite wrote as a bare literal: a key the engine evaluates, never an ordinal of the query it is in)
+      keys.push(evaluated(structuredClone(bodyOf(target).val as AstNode)));
     } else if (kindOf(node) === "A_Const") return null;
     else {
       // the expression repeated: Postgres's first output equal to it is this key (findTargetlistEntrySQL99)
@@ -643,7 +642,8 @@ interface Table { kind: "table"; alias: string; columns: string[] }
 /** a derived table or a WITH query of a query's rtable. `read` is its query where it may be read twice, a projection
  *  and a WHERE with nothing volatile or from outside it; null, its columns are carried. `cte` names a WITH query that
  *  may stand in its place */
-interface Derived { kind: "derived"; alias: string; columns: string[]; read: Query | null; cte: string | null }
+/** `constants`: which of its columns the analysis made a Const (src/duck/constant-key.ts), a sort key that orders nothing */
+interface Derived { kind: "derived"; alias: string; columns: string[]; read: Query | null; cte: string | null; constants: boolean[] }
 /** a role's filtered read, behind its barrier and its wall (see above): fetched by its row number, through itself */
 interface Walled { kind: "walled"; alias: string; columns: string[] }
 /** a FROM item; null for one that is none of these (a function, a VALUES list) */
@@ -792,6 +792,11 @@ function walledQuery(q: TreeNode, wall: string): boolean {
   return rtable.length === 1 && isTreeNode(e) && e.rtekind === RTE_SUBQUERY && isTreeNode(e.eref) && e.eref.aliasname === wall;
 }
 
+/** each output column of an analysed query, whether the analysis made it a Const (a set operation's are its own VARs) */
+function constantColumns(q: TreeNode): boolean[] {
+  return treeList(q.targetList).filter((t): t is TreeNode => isTreeNode(t) && t.resjunk !== "true").map((t) => constantExpression(t.expr));
+}
+
 function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlySet<number>, wall: string | null): Query[] {
   const out: Query[] = [];
   const queryOf = (q: TreeNode, enclosing: readonly TreeValue[][]): Query => {
@@ -805,13 +810,14 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
         return holdsVolatile(e.subquery, volatile) ? null : { kind: "walled", alias, columns };
       }
       if (e.rtekind === RTE_SUBQUERY && isTreeNode(e.subquery)) {
-        return { kind: "derived", alias, columns, cte: null, read: e.lateral !== "true" && readTwice(e.subquery, volatile) ? queryOf(e.subquery, scopes) : null };
+        return { kind: "derived", alias, columns, cte: null, read: e.lateral !== "true" && readTwice(e.subquery, volatile) ? queryOf(e.subquery, scopes) : null, constants: constantColumns(e.subquery) };
       }
       if (e.rtekind !== RTE_CTE) return null;
       const level = scopes[Number(e.ctelevelsup)] ?? [];
       const cte = level.find((c): c is TreeNode => isTreeNode(c) && c.ctename === e.ctename);
       const once = cte !== undefined && cte.cterefcount === "1" && cte.ctematerialized !== MATERIALIZED && isTreeNode(cte.ctequery) && readTwice(cte.ctequery, volatile);
-      return { kind: "derived", alias, columns, cte: once ? e.ctename as string : null, read: once ? queryOf(cte.ctequery as TreeNode, scopes.slice(Number(e.ctelevelsup))) : null };
+      return { kind: "derived", alias, columns, cte: once ? e.ctename as string : null, read: once ? queryOf(cte.ctequery as TreeNode, scopes.slice(Number(e.ctelevelsup))) : null,
+        constants: cte !== undefined && isTreeNode(cte.ctequery) ? constantColumns(cte.ctequery) : [] };
     };
     // (a grouped query's RTE_GROUP entry, Postgres 17+, is no FROM item: it holds what the GROUP BY groups)
     const items = treeList(q.rtable).filter((e): e is TreeNode => isTreeNode(e) && e.rtekind !== RTE_JOIN && e.rtekind !== RTE_GROUP).map(relation);
@@ -1026,13 +1032,26 @@ function fold(s: Body, sub: Body, item: Derived): Body | null {
   const byName = new Map<string, unknown>();
   item.columns.forEach((c, i) => byName.set(c, byName.has(c) ? null : values[i]));
   let whole = true;
+  // the item's column a reference reads, by the name the wrapper reads it by
+  const columnOf = (n: Record<string, unknown>): string | null => {
+    const names = fieldNames(n.ColumnRef as Body);
+    const column = names.length === 2 && names[0] === item.alias ? names[1] : names.length === 1 ? names[0] : null;
+    return typeof column === "string" ? column : null;
+  };
+  // the item's columns the ANALYSIS made a Const (src/duck/constant-key.ts), by a name it has once: a key reading one
+  // orders nothing
+  const constant = new Set(item.columns.filter((c, i) => item.constants[i] === true && item.columns.indexOf(c) === item.columns.lastIndexOf(c)));
+  const readsConstant = (n: unknown): boolean => {
+    if (!isObject(n) || kindOf(n) !== "ColumnRef" || !isObject(n.ColumnRef)) return false;
+    const column = columnOf(n);
+    return column !== null && !ownName(column) && constant.has(column);
+  };
   const over = (n: unknown): unknown => {
     if (Array.isArray(n)) return n.map(over);
     if (!isObject(n)) return n;
     if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
-      const names = fieldNames(n.ColumnRef);
-      const column = names.length === 2 && names[0] === item.alias ? names[1] : names.length === 1 ? names[0] : null;
-      if (typeof column === "string" && ownName(column)) return n;
+      const column = columnOf(n);
+      if (column !== null && ownName(column)) return n;
       const value = typeof column === "string" ? byName.get(column) : undefined;
       if (value === undefined || value === null) { whole = false; return n; }
       return structuredClone(value);
@@ -1040,27 +1059,36 @@ function fold(s: Body, sub: Body, item: Derived): Body | null {
     return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, over(v)]));
   };
   const targets: AstNode[] = [];
+  // which of them is a constant: a column of the item the analysis made a Const, read as it is
+  const constantOutputs: boolean[] = [];
   for (const t of s.targetList as AstNode[]) {
     if (kindOf(t) !== "ResTarget") return null;
     if (hasStarTarget(t)) {
       const fields = bodyOf(bodyOf(t).val).fields as unknown[];
       if (fields.length > 2 || (fields.length === 2 && bodyOf(fields[0]).sval !== item.alias)) return null;
-      item.columns.forEach((c, i) => targets.push({ ResTarget: { name: c, val: structuredClone(values[i]) } }));
+      item.columns.forEach((c, i) => { targets.push({ ResTarget: { name: c, val: structuredClone(values[i]) } }); constantOutputs.push(constant.has(c)); });
       continue;
     }
     const name = outputName(t);
+    constantOutputs.push(readsConstant(bodyOf(t).val));
     targets.push({ ResTarget: { ...bodyOf(t), ...(name !== null ? { name } : {}), val: over(bodyOf(t).val) } });
   }
   // an output's number or bare name is read by `sortKeys` from the list; any other key is over the wrapper's columns
   const outputs = new Set(targets.map(outputName));
-  // A SORT KEY WRITTEN AS A BARE LITERAL: a key over the derived table's column that folds to its constant (`s.one`,
-  // the subquery's `1 AS one`) orders nothing, and as the literal 1 it would be read as an ordinal: it is no key
+  // A CONSTANT SORT KEY (the class, issue 134): a key reading the derived table's column the analysis made a Const
+  // (`s.one`, the subquery's `1 AS one`), by itself or by the wrapper's output's number or name, orders nothing, and
+  // folded it would be the literal, an ordinal to the engine: it is no key. Any other key folded is written so the
+  // engine evaluates it (`evaluated`), never as a bare literal
   const sorts = ((s.sortClause as AstNode[] | undefined) ?? []).flatMap((sort) => {
     const node = bodyOf(sort).node;
     const bare = kindOf(node) === "ColumnRef" && (bodyOf(node).fields as unknown[]).length === 1 ? fieldNames(bodyOf(node))[0] : null;
-    if (kindOf(node) === "A_Const" || (bare !== null && bare !== undefined && outputs.has(bare))) return [sort];
-    const folded = over(node);
-    return constantKey(folded) ? [] : [{ SortBy: { ...bodyOf(sort), node: folded } }];
+    const named = bare !== null && bare !== undefined && outputs.has(bare);
+    const at = kindOf(node) === "A_Const" && isObject(bodyOf(node).ival) ? Number((bodyOf(node).ival as Body).ival ?? 0) - 1
+      : named ? targets.findIndex((t) => outputName(t) === bare) : -1;
+    if (at >= 0 && constantOutputs[at] === true) return [];
+    if (kindOf(node) === "A_Const" || named) return [sort];
+    if (readsConstant(node)) return [];
+    return [{ SortBy: { ...bodyOf(sort), node: evaluated(over(node)) } }];
   });
   const where = over(s.whereClause);
   if (!whole) return null;

@@ -140,6 +140,17 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "a constant sort key: a chain of casts is no constant, its error raised", sql: "SELECT o.id FROM orders o ORDER BY 'abc'::text::int, o.id LIMIT 3" },
   { name: "a constant sort key: a cast of a typed literal is no constant, its planning error raised", sql: "SELECT o.id FROM orders o ORDER BY 2147483648::int, o.id LIMIT 3" },
   { name: "a constant sort key: a derived table's cast of a typed literal, a key and not shown, its error raised", sql: "SELECT s.id FROM (SELECT o.id, c.name, 2147483648::int AS one FROM orders o LEFT JOIN customers c ON c.id = o.customer_id) s ORDER BY s.one, s.id LIMIT 3" },
+  // THE CLASS ROUND: a key is constant where Postgres's analysis put a Const, however it is spelled (src/duck/constant-key.ts)
+  { name: "a constant sort key: a numeric literal cast to numeric is the analysis's Const, the key itself", sql: "SELECT o.id, o.status FROM orders o ORDER BY 1.5::numeric, o.id DESC LIMIT 3" },
+  { name: "a constant sort key: a numeric literal cast to decimal, descending, a join", sql: "SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY 0.5::decimal DESC, o.id DESC LIMIT 3" },
+  { name: "a constant sort key: a cast chain and parentheses, key-first GROUP BY", sql: "SELECT c.id, count(o.id) AS n FROM customers c LEFT JOIN orders o ON o.customer_id = c.id GROUP BY c.id ORDER BY ('1.5'::numeric::numeric), c.id DESC LIMIT 3" },
+  { name: "a constant sort key: a numeric constant under DISTINCT ON", sql: "SELECT DISTINCT ON (o.customer_id) o.customer_id, o.id FROM orders o ORDER BY o.customer_id DESC, 1.5::numeric, o.id DESC LIMIT 3" },
+  { name: "a constant sort key: a numeric constant under WITH TIES", sql: "SELECT o.id FROM orders o ORDER BY 1.5::numeric, o.id FETCH FIRST 3 ROWS WITH TIES" },
+  { name: "a constant sort key: a numeric constant with no LIMIT", sql: "SELECT o.id FROM orders o WHERE o.id < 5 ORDER BY 1.5::numeric DESC, o.id DESC" },
+  { name: "a constant sort key: a cast to another type is evaluated, ordering nothing", sql: "SELECT o.id FROM orders o ORDER BY 1::bigint, 1.5::numeric(3,1), 'x'::text::varchar, o.id DESC LIMIT 3" },
+  { name: "a constant sort key: a constant expression is evaluated, ordering nothing", sql: "SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY 1 + 0, o.id DESC LIMIT 3" },
+  { name: "a constant sort key: a derived table's numeric constant by name and number", sql: "SELECT s.id, s.one FROM (SELECT o.id, c.name, 1.5::numeric AS one FROM orders o LEFT JOIN customers c ON c.id = o.customer_id) s ORDER BY 2 DESC, s.one, s.id DESC LIMIT 3" },
+  { name: "a constant sort key: a key Postgres evaluates at planning raises there", sql: "SELECT o.id FROM orders o ORDER BY 12345::numeric(3), o.id LIMIT 3" },
   // no oracle table has a composite key: tests/duck-wire.test.ts holds the whole and the partial composite key over late_p
   { name: "key-first GROUP BY: no primary key grouped stays as it was", sql: "SELECT i.order_id, i.product, count(*) AS n FROM order_items i GROUP BY i.order_id, i.product ORDER BY 1, 2 LIMIT 6" },
   { name: "key-first GROUP BY: the nulls idiom over a fetched column", sql: "SELECT o.id, o.status, sum(i.quantity) AS q FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY (o.status) IS NULL ASC, o.status DESC, o.id LIMIT 10" },
