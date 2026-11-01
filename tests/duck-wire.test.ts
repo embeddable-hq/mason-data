@@ -2687,7 +2687,8 @@ test("a subquery in the select list is computed for the chosen rows alone, and o
     // the rows chosen (limit-errors)
     assert.deepEqual((await answer(c, "SELECT l.id, (SELECT 1 / (p.line - 3) FROM late_p p WHERE p.c = 0 AND p.line = 3 AND l.id = 2000) AS x FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.k DESC LIMIT 2")).rows, [["1", null], ["2", null]]);
     // what stays as it was: a subquery in a WHERE, in a join's condition, a sort key, a subquery read by name as a key,
-    // one that reads a FULL join's merged column, and a wrapper folded away
+    // one that reads a FULL join's merged column, a wrapper folded away, and one that reads a WITH query of the statement
+    // (the WITH queries no FROM item reads would move into the inner query, below the list that reads them)
     for (const sql of [
       "SELECT l.id, l.j FROM late l JOIN late_c c ON c.id = l.c WHERE l.c IN (SELECT p.c FROM late_p p WHERE p.line = 3) ORDER BY l.id LIMIT 3",
       "SELECT l.id, l.j FROM late l JOIN late_c c ON c.id = l.c AND EXISTS (SELECT 1 FROM late_p p WHERE p.c = c.id) ORDER BY l.id LIMIT 3",
@@ -2695,10 +2696,14 @@ test("a subquery in the select list is computed for the chosen rows alone, and o
       "SELECT l.id, l.j, (SELECT count(*) FROM late_p p WHERE p.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY n, l.id LIMIT 3",
       "SELECT id, (SELECT count(*) FROM late_p p WHERE p.c = id) AS n FROM late_c x FULL JOIN late_n y USING (id) ORDER BY id LIMIT 3",
       "SELECT t.id, (SELECT count(*) FROM late_p p WHERE p.c = t.c) AS n FROM (SELECT l.id, l.c, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY t.id LIMIT 3",
+      "WITH w AS (SELECT c, count(*) AS n FROM late_p GROUP BY c) SELECT l.id, (SELECT w.n FROM w WHERE w.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 3",
+      "WITH w AS (SELECT id, c FROM late_n) SELECT l.id, (SELECT count(*) FROM w x WHERE x.c = l.c) AS n FROM late l JOIN w ON w.c = l.c ORDER BY l.id, w.id LIMIT 3",
     ]) {
       assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
       assert.doesNotMatch(await sent(sql), /__mason_late/, sql);
     }
+    assert.deepEqual((await answer(c, "WITH w AS (SELECT c, count(*) AS n FROM late_p GROUP BY c) SELECT l.id, (SELECT w.n FROM w WHERE w.c = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 3")).rows, [["1", "4"], ["2", "4"], ["3", "4"]]);
+    assert.deepEqual((await answer(c, "WITH w AS (SELECT id, c FROM late_n) SELECT l.id, (SELECT count(*) FROM w x WHERE x.c = l.c) AS n FROM late l JOIN w ON w.c = l.c ORDER BY l.id, w.id LIMIT 3")).rows, [["1", "1"], ["2", "1"], ["3", "1"]]);
     // a prepared statement run after a SET reads the setting where it runs
     const prepared = { name: "listed_subquery", text: "SELECT l.id, (SELECT count(*) FROM late_p p WHERE p.c = l.c AND p.line < $1) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.id LIMIT 2" };
     await c.query({ ...prepared, values: [2] });

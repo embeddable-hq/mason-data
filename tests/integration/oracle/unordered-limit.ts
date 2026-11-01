@@ -332,6 +332,7 @@ const LIST_SUBLINKS: ReadonlyArray<{ name: string; sql: string; zone?: string }>
   { name: "list subquery: over a wrapper of a join", sql: "SELECT t.id, (SELECT count(*) FROM top_c c WHERE c.b_id = t.b) AS n FROM (SELECT a.id, b.id AS b FROM top_a a JOIN top_b b ON b.a_id = a.id) t ORDER BY t.id, t.b LIMIT 4" },
   { name: "list subquery: reading an aggregated side, carried", sql: "SELECT a.id, (SELECT count(*) FROM top_b b WHERE b.a_id = s.a_id) AS n, s.twice FROM top_a a LEFT JOIN top_sums s ON s.a_id = a.id ORDER BY a.id LIMIT 4" },
   { name: "list subquery: the grouped view ordered by its output name", sql: "SELECT a_id, twice AS total, (SELECT count(*) FROM top_b b WHERE b.a_id = s.a_id) AS n FROM top_sums s ORDER BY total DESC NULLS LAST, a_id LIMIT 3" },
+  { name: "list subquery: reading a WITH query no FROM item reads, as it was", sql: "WITH w AS (SELECT b.a_id, count(*) AS n FROM top_b b GROUP BY b.a_id) SELECT a.id, b.id AS b, (SELECT w.n FROM w WHERE w.a_id = a.id) AS n FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY a.id, b.id LIMIT 4" },
   { name: "list subquery: one table alone", sql: `SELECT b.id, b.payload, ${COUNT_C} AS n FROM top_b b ORDER BY b.amount DESC NULLS LAST, b.id LIMIT 4` },
   // the keys under each kind of order: the database's collation, bytes, ICU, the nulls idiom in a zone
   { name: "list subquery: under the database's collation", sql: `SELECT a.name, a.id, b.id AS b, ${COUNT_C} AS n ${COMPUTED_FROM} ORDER BY a.name NULLS FIRST, 2, 3 NULLS FIRST LIMIT 6` },

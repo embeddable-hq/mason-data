@@ -223,6 +223,9 @@ function listSubLinkReads(q: TreeNode): string[] | null {
         reads.add(e.eref.aliasname);
       }
     }
+    // a WITH query of `q` read in a subselect: the rewrite moves `q`'s unread WITH queries into the inner query, below
+    // the list that reads it, so the statement stays as it was (one of a query above `q` stays where it is)
+    if (v.rtekind === RTE_CTE && Number(v.ctelevelsup ?? 0) === depth && depth > 0) { ok = false; return; }
     const below = v._node === "QUERY" ? depth + 1 : depth;
     for (const [k, x] of Object.entries(v)) if (k !== "_node") inner(x, below);
   };
