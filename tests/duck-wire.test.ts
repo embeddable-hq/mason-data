@@ -5166,8 +5166,8 @@ test("a grouped collated output ordered by number, name or expression is its col
 // below more than once grew 3^depth (depth 12 took 880 ms, 16 about 70 s) on the planning thread every session waits
 // on, whatever the column's type. The class: work on the wire's path for a reader only another path has, with no bound
 // on its size. The decision: the wire never computes what only a generated table reads, and the walk is linear in the
-// analysed tree. (An int8: a numeric carried through every level grows in the rewrite's exact program, as on main, a
-// finding of its own)
+// analysed tree. (An int8: a numeric carried through every level grows in the rewrite's exact program, as on main, issue
+// 244)
 test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
   const catalogDb = new PGlite();
   try {

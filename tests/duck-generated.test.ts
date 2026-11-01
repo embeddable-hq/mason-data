@@ -1817,7 +1817,7 @@ test("round 13: a check while a run holds its transaction open never touches the
 // making are found once), and only the generated planner asks for it. Each shape at depth 16 reaches its verdict within
 // the bound: an int8 stored; a text read as a numeric at the top refused by the form the text was made from, sqrt's, met
 // at the bottom of every path; and with no form below, every path walked to the bottom, refused as a text. (A numeric
-// carried through every level grows in the rewrite's exact program, as on main: a finding of its own, not this walk's)
+// carried through every level grows in the rewrite's exact program, as on main: issue 244, not this walk's)
 type R14Case = { bottom: string; op: string; top: (chain: string) => string; verdict: RegExp | null };
 const R14_CASES: R14Case[] = [
   { bottom: "1::int8", op: "+", top: (c) => c, verdict: null },
