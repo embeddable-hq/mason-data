@@ -40,7 +40,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `json_extract_path_text(j, VARIADIC array['k'])`, and each now reads a stored JSON path where there is one. `#>` with
   a constant path reads what `->` reads. Nothing to do on upgrade.
 - **A `text[]` parameter works as a prepared statement's value**, where it failed: a JSON path bound as `$1`, and any
-  other array of text bound the same way. Nothing to do on upgrade.
+  other array of text bound the same way, sent as text or in binary (as Npgsql sends every parameter). One of two
+  dimensions (`{{a},{b}}`) or whose subscripts do not start at 1 (`[2:3]={a,b}`) is refused by name
+  (`multidim-array`, `array-lower-bound`). Nothing to do on upgrade.
 - **A JSON path cast to `varchar(n)[]`, `char(n)[]` or `name[]` is refused by name (`json-path-type`)**, where it read the
   path uncut or failed. Cast it to `text[]`.
 - **`SELECT *` in an arm of a UNION no longer lists a stored JSON path's hidden column**, which failed or added a column

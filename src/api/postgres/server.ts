@@ -2152,6 +2152,8 @@ class Session {
       if (p === null) return null;
       const format = m.paramFormats.length === 0 ? 0 : m.paramFormats.length === 1 ? m.paramFormats[0]! : m.paramFormats[i] ?? 0;
       if (format === 0) return p.toString("utf8");
+      const oid = statement.paramOids[i] || planned?.params[i] || 0;
+      if (TEXT_ARRAYS.has(oid)) return textArrayFromBinary(p, i);
       const type = oidOf(statement.paramOids[i] ?? 0) ?? (planned !== undefined ? oidOf(planned.params[i] ?? 0) : undefined) ?? "text";
       return decodeBinaryParam(type, p, i);
     });
@@ -2465,6 +2467,48 @@ function statementText(sql: string, raw: RawStmt): string {
 const oidOf = (oid: number): PgApiType | undefined => (Object.keys(OID) as PgApiType[]).find((t) => OID[t].oid === oid);
 
 const PG_EPOCH_MS = Date.UTC(2000, 0, 1);
+
+/** an element type's name, as array_recv's 42804 says it */
+const ELEMENT_NAMES: Record<number, string> = { 16: "boolean", 20: "bigint", 21: "smallint", 23: "integer", 700: "real", 701: "double precision", 1700: "numeric", 2950: "uuid", 1082: "date", 1114: "timestamp without time zone", 1184: "timestamp with time zone", 3802: "jsonb", 114: "json" };
+
+/** text[] and varchar[], the array types whose binary form a Bind is decoded from (textArrayFromBinary) */
+const TEXT_ARRAYS = new Set([1009, 1015]);
+
+/**
+ * A BINARY text[] (or varchar[]) PARAMETER, as the literal array_in reads to the same array (Npgsql sends every
+ * parameter binary): array_send's form, its dimensions, a NULL flag, the element type, each dimension's length and lower
+ * bound, then each element's length (-1 a NULL) and bytes. Every element is quoted, so any character is itself; a lower
+ * bound other than 1 and a second dimension are written as array_in reads them, and refused where every text[] value is
+ * (src/duck/analyze.ts readParameters). Bytes that are no such array are refused as array_recv refuses them: too few
+ * 08P01 (22P03 within an element), too many 22P03 naming the parameter, another element type 42804.
+ */
+function textArrayFromBinary(bytes: Buffer, i: number): string {
+  const bad = (): PgError => new PgError({ code: "22P03", message: `incorrect binary data format in bind parameter ${i + 1}` });
+  const short = (): PgError => new PgError({ code: "08P01", message: "insufficient data left in message" });
+  let at = 0;
+  const int = (): number => { if (at + 4 > bytes.length) throw short(); const v = bytes.readInt32BE(at); at += 4; return v; };
+  const ndim = int(); int(); const element = int();
+  if (ndim < 0 || ndim > 6) throw new PgError({ code: ndim < 0 ? "22P03" : "54000", message: ndim < 0 ? `invalid number of dimensions: ${ndim}` : `number of array dimensions (${ndim}) exceeds the maximum allowed (6)` });
+  if (element !== 25 && element !== 1043) {
+    throw new PgError({ code: "42804", message: `binary data has array element type ${element} (${ELEMENT_NAMES[element] ?? "another type"}) instead of expected 25 (text)` });
+  }
+  const dims: Array<{ length: number; lower: number }> = [];
+  for (let d = 0; d < ndim; d++) { const length = int(); dims.push({ length, lower: int() }); }
+  if (dims.some((d) => d.length < 0)) throw new PgError({ code: "54000", message: "array size exceeds the maximum allowed" });
+  const elementText = (): string => {
+    const length = int();
+    if (length === -1) return "NULL";
+    // ReadArrayBinary's own check is 22P03, where reading a length past the end is pq_getmsgint's 08P01
+    if (length < 0 || at + length > bytes.length) throw new PgError({ code: "22P03", message: "insufficient data left in message" });
+    const text = bytes.toString("utf8", at, at + length); at += length;
+    return `"${text.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+  };
+  const level = (d: number): string => `{${Array.from({ length: dims[d]!.length }, () => d === ndim - 1 ? elementText() : level(d + 1)).join(",")}}`;
+  const body = ndim === 0 || dims.some((d) => d.length === 0) ? "{}" : level(0);
+  if (at !== bytes.length) throw bad();
+  const bounds = dims.every((d) => d.lower === 1) || body === "{}" ? "" : `${dims.map((d) => `[${d.lower}:${d.lower + d.length - 1}]`).join("")}=`;
+  return bounds + body;
+}
 
 /** A binary-format parameter, as text Postgres's input function reads (DuckOptions.parameters). */
 function decodeBinaryParam(type: PgApiType, bytes: Buffer, i: number): string {

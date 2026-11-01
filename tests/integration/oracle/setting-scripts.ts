@@ -7,8 +7,12 @@
  * message of the extended protocol, which is what a failed block holds to its end.
  */
 import type pg from "pg";
+import { GAP_MARK, type GapId } from "../../../src/duck/gaps.ts";
 
-export type Step = string | { pipeline: string[] } | { prepare: string; sql: string } | { run: string; values?: Array<string | null> }
+/** a named statement run (Bind, Describe, Execute); `refused`: Mason's reply must be the 0A000 naming that gap
+ *  (src/duck/gaps.ts), where Postgres answers — the step met as a refusal by name, never held equal */
+export type Run = { run: string; values?: Array<string | null>; refused?: GapId };
+export type Step = string | { pipeline: string[] } | { prepare: string; sql: string } | Run
   /** a Parse, Bind and Execute of a row count of one, then `then`'s statements, in one batch */
   | { suspend: string; then: string[] }
   /** a named statement bound to a named portal, and that portal's own messages, each to its own Sync */
@@ -40,6 +44,13 @@ const PATH_PARAMETERS: Array<[string, string]> = [
   ["VARIADIC", "SELECT id, jsonb_extract_path_text(jb, VARIADIC $1::text[]), json_extract_path(j, VARIADIC $1::text[]) FROM public.jpath ORDER BY id"],
 ];
 const PATH_VALUES = ["{k}", "{o,b}", "{a,0}", "{a,-1}", "{0}", "{}", "{k,NULL}", null];
+
+/** a text[] parameter DuckDB's list cannot hold as Postgres read it, refused by name, then one it can, run on */
+const TEXT_ARRAY_PARAMETERS: Array<[string, string]> = [
+  ["in ANY", "SELECT id FROM public.jpath WHERE id::text = ANY($1::text[]) ORDER BY id"],
+  ["read whole", "SELECT $1::text[], array_to_string($1::text[], '|'), ($1::text[])[2], array_position($1::text[], '1') FROM public.one"],
+];
+const TEXT_ARRAY_STEPS: Step[] = [{ run: "p", values: ["{{1},{2}}"], refused: "multidim-array" }, { run: "p", values: ["[2:3]={1,2}"], refused: "array-lower-bound" }, { run: "p", values: ["{1,2}"] }];
 
 export const SETTING_SCRIPTS: SettingScript[] = [
   // SET LOCAL outside a block: the warning, its value gone by the next request, nothing reported
@@ -177,6 +188,7 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   // a prepared statement reads what is in force when it RUNS: a reverted setting never stays in its plan
   // a json read's path as a parameter is not constant at the Parse (issue 130): each run reads its own, after a SET too
   ...PATH_PARAMETERS.map(([name, sql]) => s(`a json path as a parameter, ${name}`, { prepare: "p", sql }, ...PATH_VALUES.flatMap((v, i): Step[] => [{ run: "p", values: [v] }, `SET TimeZone = '${i % 2 === 0 ? "Asia/Tokyo" : "UTC"}'`, { run: "p", values: [v] }]))),
+  ...TEXT_ARRAY_PARAMETERS.map(([name, sql]) => s(`a text[] parameter of two dimensions or other bounds, ${name}`, { prepare: "p", sql }, ...TEXT_ARRAY_STEPS)),
   s("a json path element as a parameter", { prepare: "p", sql: "SELECT id, jb #>> ARRAY[$1], j #>> ARRAY[$1, 'b'], jsonb_extract_path_text(jb, $1, 'b') FROM public.jpath ORDER BY id" }, { run: "p", values: ["o"] }, "SET TimeZone = 'Asia/Tokyo'", { run: "p", values: ["k"] }, { run: "p", values: [null] }, { run: "p", values: ["0"] }),
   s("a statement parsed before, run through SET LOCAL and after", { prepare: "z", sql: ZONED }, { run: "z" }, "BEGIN", "SET LOCAL TimeZone = 'Asia/Tokyo'", "SET LOCAL application_name = 'loc'", { run: "z" }, "COMMIT", { run: "z" }),
   s("a statement parsed before, run through a rolled-back SET and after", { prepare: "z", sql: ZONED }, "BEGIN", "SET TimeZone = 'Asia/Tokyo'", { run: "z" }, "ROLLBACK", { run: "z" }),
@@ -194,11 +206,12 @@ export const SETTING_SCRIPTS: SettingScript[] = [
 /** One step's whole reply, a line a message, the reported parameters of one request in a fixed order (Postgres's is
  *  its list's, a client reads them as a set). Only what a session's settings can move is reported here. */
 const REPORTED = new Set(["application_name", "TimeZone", "search_path"]);
-interface Message { name: string; severity?: string; code?: string; message?: string; parameterName?: string; parameterValue?: string; text?: string; fields?: unknown[]; status?: string }
+interface Message { name: string; severity?: string; code?: string; message?: string; detail?: string; parameterName?: string; parameterValue?: string; text?: string; fields?: unknown[]; status?: string }
 const line = (m: Message): string | null => {
   switch (m.name) {
     case "notice": return `notice ${m.severity} ${m.code} ${m.message}`;
-    case "error": return `error ${m.code} ${m.message}`;
+    // Mason's refusal by name carries its gap (Postgres's DETAIL never says "Mason gap")
+    case "error": { const gap = GAP_MARK.exec(m.detail ?? "")?.[1]; return `error ${m.code} ${m.message}${gap === undefined ? "" : ` [gap ${gap}]`}`; }
     case "parameterStatus": return REPORTED.has(m.parameterName ?? "") ? `status ${m.parameterName}=${m.parameterValue}` : null;
     case "commandComplete": return `tag ${m.text}`;
     case "dataRow": return `row ${JSON.stringify(m.fields)}`;
@@ -266,6 +279,13 @@ export async function traceStep(client: pg.Client, step: Step): Promise<string[]
   const at = lines.findIndex(isStatus);
   const others = lines.filter((l) => !isStatus(l));
   return at < 0 ? lines : [...others.slice(0, at), ...lines.filter(isStatus).sort(), ...others.slice(at)];
+}
+
+/** a step that must be refused by its gap: null when Mason's reply is that refusal, else what it was */
+export function refusedAsNamed(step: Step, got: string[]): { gap: GapId; differs: string | null } | null {
+  if (typeof step === "string" || !("run" in step) || step.refused === undefined) return null;
+  const gap = step.refused;
+  return { gap, differs: got.some((l) => l.startsWith("error 0A000 ") && l.endsWith(` [gap ${gap}]`)) ? null : `${JSON.stringify(got)} where Mason refuses by the gap ${gap}` };
 }
 
 export const stepText = (step: Step): string => typeof step === "string" ? step : "pipeline" in step ? step.pipeline.join(" |> ") : "prepare" in step ? `PARSE ${step.prepare}: ${step.sql}`

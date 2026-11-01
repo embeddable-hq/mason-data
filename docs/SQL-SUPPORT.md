@@ -20,7 +20,7 @@ each). The copy is read-only.
 | The types: bigint, boolean, bytea, character, character varying, date, double precision, inet, integer, interval, json, jsonb, jsonpath, name, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; arrays of bigint, boolean, character, character varying, date, double precision, inet, integer, interval, json, jsonb, numeric, real, smallint, text, time without time zone, timestamp with time zone, timestamp without time zone, uuid; the source's enums and citext; a table's row | answered (49 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 245 functions, 347 operators, 91 aggregates, 58 window functions and 78 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 51 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 52 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (51)
+## Refused (52)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -81,7 +81,8 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `with-ordinality` | a function in FROM … WITH ORDINALITY | numbers the rows | refused | row_number() OVER () instead |
 | `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …), array_agg(x ORDER BY …) in a subquery, or x = ANY (SELECT …) without the ARRAY |
 | `json-path-type` | a json read's path cast to a type that changes its text (`varchar(n)[]`, `char(n)[]`, `name[]`) | answers | refused | cast the path to `text[]` |
-| `multidim-array` | a multi-dimensional array literal | answers | refused | a one-dimensional array |
+| `multidim-array` | a multi-dimensional array literal, or one bound as a `text[]` parameter | answers | refused | a one-dimensional array |
+| `array-lower-bound` | a `text[]` parameter whose subscripts do not start at 1 (`[2:3]={a,b}`) | answers, its first element at subscript 2 | refused | bind the array without its bounds (`{a,b}`) |
 | `format-specifiers` | format() with a specifier other than %s (%I, %L, widths, positions) | answers | refused | concatenate with \|\|, or %s only |
 | `to-char-patterns` | to_char of an interval or a time; its TZ, SP, EEEE, RN, V, B, L patterns; a day or month name padded to 9 characters in a parse | answers | refused | the patterns listed in the hint; extract(… FROM interval) for an interval's parts |
 | `to-timestamp-format` | to_timestamp / to_date with a format that is not a literal | answers | refused | write the format as a string literal |

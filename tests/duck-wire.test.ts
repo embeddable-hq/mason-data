@@ -2629,6 +2629,50 @@ test("a constant path is the read ->> is, however it is spelled: no row reaches 
   } finally { await c.end(); }
 });
 
+// A TEXT[] PARAMETER IS ONE LIST OF DUCKDB'S (the review of issue 130): a value of two dimensions, or whose subscripts
+// do not start at 1, is no such list — read as one it answered wrong (an inner array a string of its JSON, the bounds
+// dropped), so it is refused by name, as its literal is. In binary (Npgsql sends every parameter so) it is array_send's
+// bytes, decoded to the literal Postgres reads, and refused alike.
+test("a text[] parameter: two dimensions or other bounds refused by name, in text and in binary; binary read as Postgres reads it", async () => {
+  const c = await client();
+  const s = await rawSession();
+  try {
+    const named = (gap: string) => (e: Error & { code?: string; detail?: string }): boolean => e.code === "0A000" && new RegExp(`Mason gap ${gap}\\b`).test(e.detail ?? "");
+    for (const sql of ["SELECT id::text, id::text = ANY($1::text[]), id::text <> ALL($1::text[]) FROM jdocs WHERE id < 4 ORDER BY id", "SELECT $1::text[], ($1::text[])[1], array_position($1::text[], '1') FROM jdocs WHERE id = 1"]) {
+      for (const [value, gap] of [["{{1},{2}}", "multidim-array"], ["[2:3]={1,2}", "array-lower-bound"], ["[1:1][1:1]={{1}}", "multidim-array"]] as const) {
+        await assert.rejects(answer(c, sql, [value]), named(gap), `${value}: ${sql}`);
+      }
+      // a one-dimensional value from 1, its bounds written or not, is answered as Postgres answers it
+      for (const value of ["{1,2}", "[1:2]={1,2}"]) assert.deepEqual((await answer(c, sql, [value])).rows, (await postgres(sql, [value])).rows, value);
+    }
+    // in binary: the same Bind to Postgres and to Mason, the same rows
+    const sql = "SELECT id::text, b #>> $1::text[] AS a, array_to_string($1::text[], '|', '*') AS s, (id::text = ANY($1::text[]))::text AS k FROM jdocs ORDER BY id";
+    const send = async (array: string): Promise<Buffer> => Buffer.from((await truth.query<{ b: Uint8Array }>(`SELECT array_send(${array}) AS b`)).rows[0]!.b);
+    const rows = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "DataRow" ? [JSON.stringify(m.values.map((v) => v === null ? null : String(v)))] : m.type === "ErrorResponse" ? [`error ${m.fields.C} ${m.fields.M}`] : []);
+    for (const array of ["ARRAY['o', 'b']::text[]", "ARRAY['a\"b\\c', NULL, 'NULL', '', ' x ', '{,}']::text[]", "ARRAY['1', '3']::varchar[]::text[]", "ARRAY[]::text[]", "ARRAY[NULL]::text[]"]) {
+      const bind = wire.extended(sql, [await send(array)], [0], 1);
+      const want = rows(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(rows(await s.untilReady()), want, array);
+      assert.ok(want.length > 0 && !want[0]!.startsWith("error"), array);
+    }
+    for (const [array, gap] of [["'{{1},{2}}'::text[]", "multidim-array"], ["'[2:3]={1,2}'::text[]", "array-lower-bound"]] as const) {
+      s.socket.write(wire.extended(sql, [await send(array)], [0], 1));
+      const error = (await s.untilReady()).find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+      assert.equal(error?.fields.C, "0A000", array);
+      assert.match(error?.fields.D ?? "", new RegExp(`Mason gap ${gap}\\b`), array);
+    }
+    // bytes that are no text[]: refused as Postgres's array_recv refuses them (too few, too many, another element type)
+    for (const bytes of [Buffer.from([0, 0, 0]), await send("ARRAY['a', 'b']::text[]").then((b) => b.subarray(0, b.length - 1)), Buffer.concat([await send("ARRAY['a']::text[]"), Buffer.from([0])]), await send("ARRAY[1]::int4[]")]) {
+      const bind = wire.extended(sql, [bytes], [0], 1);
+      const want = rows(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(rows(await s.untilReady()), want, bytes.toString("hex"));
+      assert.match(want[0] ?? "", /^error /, bytes.toString("hex"));
+    }
+  } finally { s.end(); await c.end(); }
+});
+
 // THE REVIEW OF THE NATIVE READ: two classes it broke, each shape answered as Postgres answers it.
 //  - A jsonb VALUE is canonical only where it is a copied table's column (the copy holds jsonbText): a jsonb a statement
 //    computes (jsonb_object_agg, jsonb_build_object, in a CTE, a subquery or an arm of a UNION) may hold a key twice,
