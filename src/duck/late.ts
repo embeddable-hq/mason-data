@@ -148,7 +148,7 @@
  * that raises on a row the limit leaves out answers here (`limit-errors`).
  */
 import type { TreeNode, TreeValue } from "./pgtree.ts";
-import { fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
+import { distinctGrouping, fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
 
 type Body = Record<string, unknown>;
@@ -362,10 +362,10 @@ function limited(s: Body, withs = false): { targets: AstNode[]; sorts: AstNode[]
   return { targets, sorts: (s.sortClause as AstNode[] | undefined) ?? [] };
 }
 
-/** whether a query of the statement groups and has a LIMIT: one `keyFirst` may write */
+/** whether a query of the statement groups, or is a DISTINCT that is a grouping, and has a LIMIT: one `keyFirst` may write */
 function groupsWithLimit(tree: TreeValue): boolean {
   let found = false;
-  walkTree(tree, (n) => { found ||= n._node === "QUERY" && isTreeNode(n.limitCount) && treeList(n.groupClause).length > 0; });
+  walkTree(tree, (n) => { found ||= n._node === "QUERY" && isTreeNode(n.limitCount) && (treeList(n.groupClause).length > 0 || distinctGrouping(n)); });
   return found;
 }
 
@@ -402,17 +402,25 @@ const anyValue = (arg: AstNode): AstNode => ({ FuncCall: { funcname: [S("any_val
  * nowhere but as an output is left out of the grouping, being decided by the key. An output fetched is a column of a
  * keyed table, bare or as the rewrite's `any_value` of it, under casts; every other output (an aggregate, a key of
  * another table, a grouped expression) is computed inside as it was, and a NULL row number (an outer join's group of
- * no row) reads NULL, as the group's `any_value` did. What stays as it was: grouping sets, DISTINCT, a row lock, no LIMIT
- * in fact, a FROM item a join names, and a table with a column named rowid.
+ * no row) reads NULL, as the group's `any_value` did. What stays as it was: grouping sets, a DISTINCT beside a GROUP BY,
+ * a row lock, no LIMIT in fact, a FROM item a join names, and a table with a column named rowid.
+ *
+ * A SELECT DISTINCT whose list holds a table's whole primary key (task D) is the same shape: a DISTINCT is a grouping on
+ * its list (`distinctGrouping`, from the analysis: never a DISTINCT ON, nor one over an aggregate, a window or a
+ * set-returning function), so it is written as a GROUP BY of each output, and on as above. Where the rewrite keyed a
+ * jsonb output's equality (`keyedDistinct`: its DISTINCT ON of the outputs' keys), the grouping is those keys, and an
+ * output so keyed must be one the fetch reads, so no raw jsonb is shown from a group it does not decide.
  */
 function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
   const s = bodyOf(select);
   if (s.op !== undefined && s.op !== "SETOP_NONE") return null;
-  for (const f of ["distinctClause", "lockingClause", "intoClause", "valuesLists"]) {
+  for (const f of ["lockingClause", "intoClause", "valuesLists"]) {
     if (s[f] !== undefined && !(Array.isArray(s[f]) && (s[f] as unknown[]).length === 0)) return null;
   }
-  const groups = s.groupClause as AstNode[] | undefined;
-  if (!Array.isArray(groups) || groups.length === 0 || groups.some((g) => kindOf(g) === "GroupingSet")) return null;
+  const distinct = Array.isArray(s.distinctClause) && s.distinctClause.length > 0 ? s.distinctClause as unknown[] : null;
+  const groupClause = s.groupClause as AstNode[] | undefined;
+  if (distinct !== null && Array.isArray(groupClause) && groupClause.length > 0) return null;
+  if (distinct === null && (!Array.isArray(groupClause) || groupClause.length === 0 || groupClause.some((g) => kindOf(g) === "GroupingSet"))) return null;
   if (s.limitCount === undefined || noLimit(s.limitCount) || (s.limitOption !== undefined && s.limitOption !== "LIMIT_OPTION_COUNT" && s.limitOption !== "LIMIT_OPTION_DEFAULT")) return null;
   const items = fromItems(s.fromClause);
   if (items === null) return null;
@@ -420,7 +428,9 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
   if (aliases.some((a) => a === null) || new Set(aliases).size !== aliases.length) return null;
   const named = relations.filter((q) => q.items.length === aliases.length && q.items.every((t, i) => t?.alias === aliases[i]));
   const first = named[0];
-  if (first === undefined || named.some((q) => JSON.stringify([q.items, q.keyed]) !== JSON.stringify([first.items, first.keyed]))) return null;
+  if (first === undefined || named.some((q) => JSON.stringify([q.items, q.keyed, q.distinct]) !== JSON.stringify([first.items, first.keyed, first.distinct]))) return null;
+  // a DISTINCT is the analysis's grouping on its list, never a DISTINCT ON
+  if (distinct !== null && !first.distinct) return null;
   const keyed = new Map(first.keyed.flatMap((k) => {
     const at = aliases.indexOf(k.alias), r = first.items[at];
     const ok = r?.kind === "table" && kindOf(items[at]) === "RangeVar" && !r.columns.some((c) => c === "" || c.toLowerCase() === "rowid");
@@ -429,6 +439,10 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
   if (keyed.size === 0) return null;
   const targets = s.targetList as AstNode[] | undefined;
   if (targets === undefined || targets.some((t) => kindOf(t) !== "ResTarget" || hasStarTarget(t))) return null;
+  // a DISTINCT's grouping: each output, or the rewrite's key of each where it keyed a jsonb's equality, one per output
+  const plainDistinct = distinct !== null && distinct.length === 1 && (!isObject(distinct[0]) || Object.keys(distinct[0]).length === 0);
+  if (distinct !== null && !plainDistinct && (distinct.length !== targets.length || !distinct.every((d) => isObject(d) && kindOf(d) !== null))) return null;
+  const groups: AstNode[] = distinct === null ? groupClause! : plainDistinct ? targets.map((t) => structuredClone(bodyOf(t).val as AstNode)) : distinct as AstNode[];
   // a column of a keyed table, as a ColumnRef names it: its alias and its column, or null
   const columnOf = (n: unknown): { alias: string; column: string } | null => {
     if (kindOf(n) !== "ColumnRef") return null;
@@ -461,6 +475,9 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
   const inputs = new Set(first.items.flatMap((r) => r?.columns ?? []));
   const grouping: AstNode[] = [];
   for (const g of groups) {
+    // a DISTINCT's grouping is its outputs' values: a constant among them groups nothing (and DuckDB reads an integer
+    // in a GROUP BY as an ordinal)
+    if (distinct !== null) { if (kindOf(g) !== "A_Const") grouping.push(structuredClone(g)); continue; }
     if (kindOf(g) === "A_Const" && isObject(bodyOf(g).ival)) {
       const t = targets[Number((bodyOf(g).ival as Body).ival ?? 0) - 1];
       if (t === undefined) return null;
@@ -484,11 +501,13 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
     if (at !== undefined) return { ResTarget: { ...b, val: ref(LATE, `__mason_o${at + 1}`) } };
     const f = fetchOf(b.val);
     if (f !== null) { if (!fetched.includes(f.alias)) fetched.push(f.alias); return { ResTarget: { ...b, val: f.outer } }; }
+    // an output a DISTINCT groups by the rewrite's key of it, not by itself, is not computed inside
+    if (distinct !== null && JSON.stringify(groups[i]) !== JSON.stringify(b.val)) return null;
     const name = `__mason_c${carried.length + 1}`;
     carried.push({ ResTarget: { name, val: b.val } });
     return { ResTarget: { ...b, val: ref(LATE, name) } };
   });
-  if (fetched.length === 0) return null;
+  if (fetched.length === 0 || list.some((t) => t === null)) return null;
   // a grouped column of a keyed table, not its key, read nowhere inside but where it is grouped: decided by the key
   const mentions = (n: unknown, c: { alias: string; column: string }): boolean => {
     if (Array.isArray(n)) return n.some((x) => mentions(x, c));
@@ -528,7 +547,7 @@ function keyFirst(select: AstNode, relations: Query[]): AstNode | null {
     return columns.some((c) => mentions([carried, keys, s.havingClause, s.windowClause, grouping.filter((_x, j) => j !== i)], c));
   });
   const fromInner = mapFrom(s.fromClause as unknown[], (n, i) => keyed.has(aliases[i]!) ? ownTable(bodyOf(n)) : n);
-  const inner: Body = { ...s, fromClause: fromInner, groupClause: kept, targetList: [
+  const inner: Body = { ...s, fromClause: fromInner, groupClause: kept, distinctClause: undefined, targetList: [
     ...fetched.map((alias, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: anyValue(rowNumber(alias)) } })),
     ...carried,
     ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
@@ -655,7 +674,9 @@ const MATERIALIZED = "1";
  *  key does, and `sorts` how many keys Postgres sorts by: a rewrite that wrote them as others (a collation's) repeats a value */
 interface Query { items: Relation[]; bounded: boolean; rowWise: boolean; listReads: string[]; listSubLinks: number; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number;
   /** the tables whose whole primary key the query groups by (`keyGrouped`), by alias, with the key's columns by name */
-  keyed: Array<{ alias: string; key: string[] }> }
+  keyed: Array<{ alias: string; key: string[] }>;
+  /** whether the query is a SELECT DISTINCT that is a grouping on its list (`distinctGrouping`) */
+  distinct: boolean }
 
 function isTreeNode(v: TreeValue | undefined): v is TreeNode { return typeof v === "object" && v !== null && !Array.isArray(v); }
 const treeList = (v: TreeValue | undefined): TreeValue[] => Array.isArray(v) ? v : [];
@@ -810,7 +831,7 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
     const items = treeList(q.rtable).filter((e): e is TreeNode => isTreeNode(e) && e.rtekind !== RTE_JOIN && e.rtekind !== RTE_GROUP).map(relation);
     const computed = computedSorts(q).filter((c) => holdsVolatile(c.expr, volatile));
     return { items, bounded: fanOutBounded(q, keys), rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
-      volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length, keyed: keyedTables(q, keys) };
+      volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length, keyed: keyedTables(q, keys), distinct: distinctGrouping(q) };
   };
   const visit = (v: TreeValue | undefined, enclosing: readonly TreeValue[][]): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x, enclosing); return; }
