@@ -16,10 +16,11 @@
  *
  *   node scripts/oracle-legs.ts --write <run-id | folder>
  *
- * downloads that CI run's `ran-oracle-*` artifacts (`gh run download`), or reads a folder of them, and writes both files
- * as a whole run's UPDATE_VERIFIED=1 and UPDATE_FIXTURE=1 would, through the same two writers (`verifiedText`,
- * `fixtureOf`): exit 0 when what the legs measured now holds, 1 when anything else is wrong (nothing is written when the
- * legs are not the whole), 2 on a usage error.
+ * downloads that CI run's `ran-oracle-*` artifacts (`gh run download`), once the run has finished and only when it is
+ * of the commit checked out (`runProblems`), or reads a folder of them (whose commit nothing checks), and writes both
+ * files as a whole run's UPDATE_VERIFIED=1 and UPDATE_FIXTURE=1 would, through the same two writers (`verifiedText`,
+ * `fixtureOf`) and in the same order (`writeFromLegs`): exit 0 when what the legs measured now holds, 1 when anything
+ * else is wrong (nothing is written when the legs are not the whole, or are another commit's), 2 on a usage error.
  *
  * The statements are named by what each leg ASKED, recorded where it asks, against the whole list each leg computed
  * before filtering: the check does not trust `legOf`. A whole run, and everything that regenerates a file
@@ -173,8 +174,9 @@ export function verifiedDiff(verified: ReadonlySet<string>, listed: ReadonlyMap<
 /** the command that writes src/duck/verified.ts and the fixture from a CI run's legs (in CI, GITHUB_RUN_ID names this one) */
 export const WRITE_COMMAND = `\`node scripts/oracle-legs.ts --write ${process.env.GITHUB_RUN_ID ?? "<run-id>"}\` (from this run's oracle legs; never a local whole run)`;
 
-/** What a whole run asserts at its end, of the legs together. A decision differed, or decided a statement, in any leg. */
-export function wholeRunProblems(reports: readonly LegReport[], fixture: Pick<Tallies, "mason" | "duckdb">, listed: ReadonlyMap<string, string>): string[] {
+/** What a whole run asserts BEFORE it writes src/duck/verified.ts: no decided difference that no longer differs (a
+ *  decision differed, or decided a statement, in any leg), and no gap that no statement meets */
+export function staleOrDead(reports: readonly LegReport[]): string[] {
   const problems: string[] = [];
   const decisions = new Map<string, Decision>();
   for (const r of reports) for (const d of r.decisions) {
@@ -185,6 +187,12 @@ export function wholeRunProblems(reports: readonly LegReport[], fixture: Pick<Ta
   problems.push(...staleDecisions(all, new Set(all.filter((d) => d.differed)), new Set(all.filter((d) => d.decided))).map((s) => `a decided difference that no longer differs: ${s}`));
   const dead = deadGaps(sumTally(reports.map((r) => r.everyAsk)));
   if (dead.length > 0) problems.push(`src/duck/gaps.ts entries no oracle statement meets: ${dead.join(", ")}. Add a statement that does (oracle/gap-cases.ts), or remove the entry`);
+  return problems;
+}
+
+/** What a whole run asserts at its end, of the legs together. */
+export function wholeRunProblems(reports: readonly LegReport[], fixture: Pick<Tallies, "mason" | "duckdb">, listed: ReadonlyMap<string, string>): string[] {
+  const problems = staleOrDead(reports);
   const { added, dropped } = verifiedDiff(new Set(reports.flatMap((r) => r.verified)), listed);
   if (added.length + dropped.length > 0) problems.push(`src/duck/verified.ts is not what the legs verified: added ${JSON.stringify(added.slice(0, 20))}, dropped ${JSON.stringify(dropped.slice(0, 20))}. Regenerate with ${WRITE_COMMAND} and read the diff`);
   const moved = movedTallies(sumTallies(reports.map((r) => r.tallies)), fixture);
@@ -238,25 +246,37 @@ export function readReports(dir: string): LegReport[] {
 
 export const VERIFIED_FILE = "src/duck/verified.ts", FIXTURE_FILE = "tests/fixtures/oracle-duckdb-alone.json";
 
-/** `--write`: both files under `root` from the reports in `dir`, and what to say. Nothing is written when the legs are
- *  not the whole; what else is wrong (a stale decision, a dead gap, a statement that differs) is said after writing,
- *  and exits 1, as a whole run with UPDATE_FIXTURE=1 fails after it writes. */
+/** Why a run's legs are not this tree's, from `gh run view <id> --json headSha,status,conclusion`: a run of another
+ *  commit (an earlier push, another branch) measured another tree, and a run still going may have no legs yet */
+export function runProblems(view: { headSha?: string; status?: string; conclusion?: string | null }, headSha: string): string[] {
+  const problems: string[] = [];
+  if (view.headSha !== headSha) problems.push(`the run is of commit ${view.headSha ?? "unknown"}, where this checkout is at ${headSha}: use the run of this commit's push (gh run list --commit ${headSha}), or check out ${view.headSha ?? "its commit"}`);
+  if (view.status !== "completed") problems.push(`the run has not finished (${view.status ?? "unknown"}): wait for it, then run this again`);
+  return problems;
+}
+
+/** `--write`: the files under `root` from the reports in `dir`, in a whole run's order, and what to say. Nothing is
+ *  written when the legs are not the whole. The fixture is written first, as a whole run writes it before its other
+ *  assertions; then a stale decision or a dead gap writes no src/duck/verified.ts, as a whole run fails on them before
+ *  it writes the file; a statement that differs is said after both, as a whole run fails on it after writing. */
 export function writeFromLegs(dir: string, root: string): { code: 0 | 1; out: string[]; err: string[] } {
   const reports = readReports(dir);
   const files = filesFromLegs(reports, SHARDS.oracle, fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"));
   if ("problems" in files) return { code: 1, out: [], err: [...files.problems.map((p) => `oracle legs: ${p}`), "oracle legs: nothing written"] };
   const out: string[] = [];
-  for (const [file, text] of [[VERIFIED_FILE, files.verified], [FIXTURE_FILE, files.fixture]] as const) {
+  const put = (file: string, text: string): void => {
     const was = fs.readFileSync(path.join(root, file), "utf8");
     if (was !== text) fs.writeFileSync(path.join(root, file), text);
     out.push(`oracle legs: ${was === text ? "unchanged" : "wrote"} ${file}`);
-  }
-  const listed = new Map(reports.flatMap((r) => r.verified).map((k) => [k, ""]));
-  const rest = wholeRunProblems(reports, JSON.parse(files.fixture) as Tallies, listed);
+  };
+  put(FIXTURE_FILE, files.fixture);
+  const before = staleOrDead(reports);
+  if (before.length > 0) return { code: 1, out, err: [...before.map((p) => `oracle legs: ${p}`), `oracle legs: ${VERIFIED_FILE} not written, as a whole run writes it only past these`] };
+  put(VERIFIED_FILE, files.verified);
   const differ = reports.reduce((n, r) => n + r.differences, 0);
-  if (differ > 0) rest.push(`${differ} statement(s) answered differently from Postgres in the legs: each leg's log lists them`);
-  if (rest.length === 0) out.push("oracle legs: read the diff, then commit both files");
-  return { code: rest.length === 0 ? 0 : 1, out, err: rest.map((p) => `oracle legs: written, and still wrong: ${p}`) };
+  if (differ > 0) return { code: 1, out, err: [`oracle legs: written, and still wrong: ${differ} statement(s) answered differently from Postgres in the legs: each leg's log lists them`] };
+  out.push("oracle legs: read the diff, then commit both files");
+  return { code: 0, out, err: [] };
 }
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -266,10 +286,14 @@ if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLTo
     if (from === undefined || process.argv.length > 4) { console.error("usage: scripts/oracle-legs.ts --write <run-id | folder of the ran-oracle-* artifacts>"); process.exit(2); }
     let dir = from;
     if (/^\d+$/.test(from) && !fs.existsSync(from)) {
+      const view = JSON.parse(execFileSync("gh", ["run", "view", from, "--json", "headSha,status,conclusion"], { cwd: root, encoding: "utf8" })) as Parameters<typeof runProblems>[0];
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+      const wrong = runProblems(view, head);
+      if (wrong.length > 0) { for (const p of wrong) console.error(`oracle legs: run ${from}: ${p}`); console.error("oracle legs: nothing written"); process.exit(1); }
       dir = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-legs-"));
       console.log(`oracle legs: downloading the ran-oracle-* artifacts of run ${from} into ${dir}`);
       execFileSync("gh", ["run", "download", from, "--pattern", "ran-oracle-*", "--dir", dir], { cwd: root, stdio: "inherit" });
-    }
+    } else console.log(`oracle legs: ${dir} is a folder, not a run: nothing checks that its legs ran on this checkout's commit`);
     const { code, out, err } = writeFromLegs(dir, root);
     for (const l of out) console.log(l);
     for (const l of err) console.error(l);

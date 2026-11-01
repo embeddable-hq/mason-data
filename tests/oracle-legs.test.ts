@@ -11,7 +11,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
-import { STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
+import { STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import type { GapTally } from "./integration/oracle/gap-tally.ts";
@@ -252,13 +252,49 @@ test("--write over a folder as `gh run download` leaves it: both files rewritten
   fs.writeFileSync(path.join(dir, "ran-oracle-2", reportName(2)), JSON.stringify(reports[1]));
   const done = writeFromLegs(dir, root);
   assert.equal(done.code, 0, done.err.join("\n"));
-  assert.deepEqual(done.out, [`oracle legs: wrote ${VERIFIED_FILE}`, `oracle legs: wrote ${FIXTURE_FILE}`, "oracle legs: read the diff, then commit both files"]);
+  assert.deepEqual(done.out, [`oracle legs: wrote ${FIXTURE_FILE}`, `oracle legs: wrote ${VERIFIED_FILE}`, "oracle legs: read the diff, then commit both files"]);
   for (const f of [VERIFIED_FILE, FIXTURE_FILE]) assert.equal(fs.readFileSync(path.join(root, f), "utf8"), fs.readFileSync(path.join(ROOT, f), "utf8"), f);
   // what else a whole run asserts is said after writing, and fails
   reports[0].differences = 2;
   fs.writeFileSync(path.join(dir, "ran-oracle-1", reportName(1)), JSON.stringify(reports[0]));
   const differ = writeFromLegs(dir, root);
   assert.equal(differ.code, 1);
-  assert.deepEqual(differ.out.slice(0, 2), [`oracle legs: unchanged ${VERIFIED_FILE}`, `oracle legs: unchanged ${FIXTURE_FILE}`]);
+  assert.deepEqual(differ.out, [`oracle legs: unchanged ${FIXTURE_FILE}`, `oracle legs: unchanged ${VERIFIED_FILE}`]);
   assert.match(differ.err.join("\n"), /written, and still wrong: 2 statement\(s\) answered differently/);
+});
+
+test("--write as a whole run: a stale decision or a dead gap writes the fixture and leaves src/duck/verified.ts as it was", (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-write-"));
+  t.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+  const root = path.join(tmp, "repo"), dir = path.join(tmp, "download");
+  for (const f of [VERIFIED_FILE, FIXTURE_FILE]) fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+  fs.mkdirSync(dir);
+  const stale = fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8").replace(/^ {2}\["aggregate:2050".*\n/m, "");
+  const reports = legsOfTheRepo();
+  for (const r of reports) r.decisions = [{ sql: "/x/", why: "why", differed: false, decided: true }];
+  const run = (): ReturnType<typeof writeFromLegs> => {
+    fs.writeFileSync(path.join(root, VERIFIED_FILE), stale);
+    fs.writeFileSync(path.join(root, FIXTURE_FILE), "{}\n");
+    for (const r of reports) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r));
+    return writeFromLegs(dir, root);
+  };
+  const decided = run();
+  assert.equal(decided.code, 1);
+  assert.deepEqual(decided.out, [`oracle legs: wrote ${FIXTURE_FILE}`]);
+  assert.match(decided.err.join("\n"), /no longer differs[\s\S]*src\/duck\/verified\.ts not written/);
+  assert.equal(fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"), stale, "verified.ts is left as it was");
+  assert.equal(fs.readFileSync(path.join(root, FIXTURE_FILE), "utf8"), fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8"), "the fixture is written first, as a whole run's");
+  for (const r of reports) { r.decisions = []; r.everyAsk = { refused: {}, decided: {} }; }
+  const dead = run();
+  assert.equal(dead.code, 1);
+  assert.match(dead.err.join("\n"), /entries no oracle statement meets/);
+  assert.equal(fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"), stale);
+});
+
+test("--write <run-id> takes only a finished run of the commit checked out: another push's or branch's legs measured another tree", () => {
+  const head = "a".repeat(40);
+  assert.deepEqual(runProblems({ headSha: head, status: "completed", conclusion: "failure" }, head), [], "a run whose oracle failed is the one to write from");
+  assert.match(runProblems({ headSha: "b".repeat(40), status: "completed", conclusion: "success" }, head).join("\n"), /the run is of commit b{40}, where this checkout is at a{40}/);
+  assert.match(runProblems({ headSha: head, status: "in_progress", conclusion: null }, head).join("\n"), /has not finished \(in_progress\)/);
+  assert.equal(runProblems({}, head).length, 2, "a view that says nothing is refused");
 });
