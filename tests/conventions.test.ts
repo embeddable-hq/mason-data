@@ -34,7 +34,7 @@ const SCANNED_DIRS = ["src", "scripts"];
  */
 const SWALLOW_DIRS = [...SCANNED_DIRS, "tests"];
 const NOT_SCANNED = new Set(["tests/conventions.test.ts"]);
-const SCANNED_EXTS = [".ts", ".js", ".html"];
+const SCANNED_EXTS = [".ts", ".cjs", ".js", ".html"];
 
 /**
  * Promise rejection handlers that DISCARD the error, as `file:line` hits.

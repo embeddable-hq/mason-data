@@ -1885,9 +1885,57 @@ alone, 5.6 and 5.4 s of CPU over 3 M rows). The body is O(1): the session handed
 23 s, a decimal division 339 ms where the bin took 15 s. Each must be proved exact shape by shape first, and any function
 left in JavaScript needs the turn all the same.
 
-**What remains:** a statement in flight holds a libuv thread, so at four running statements a fifth waits for one: five
-`to_char` at once left a small statement a worst case of 28.6 s, 1.6 s with `UV_THREADPOOL_SIZE=16` and nothing else
-changed (issue 88). And a very wide document's vector still takes as long as it takes: a turn is N of them.
+**What remains:** a very wide document's vector still takes as long as it takes: a turn is N of them.
+
+### The pool (2026-10-31, issue 88)
+
+**Measured:** a statement in flight holds a libuv thread, so at Node's four a fifth waits for one: five `to_char` at once
+left a small statement a worst case of 28.6 s, 1.6 s with `UV_THREADPOOL_SIZE=16` and nothing else changed. A small
+statement beside N heavy `to_char`, on the real listener and store, with the machine's other work at a load of 12 to 22:
+
+| | N | pool 4: p50, worst | pool 64: p50, worst |
+|---|---|---|---|
+| 10 cores, 3 M rows | 2 | 250 ms, 0.9 s | 238 ms, 1.0 s |
+| | 5 | 259 ms, 16.1 s | 295 ms, 0.8 s |
+| | 8 | 239 ms, 39.2 s | 368 ms, 1.0 s |
+| 2 vCPU (`--cpus=2`), 1.5 M rows, three runs | 2 | 69-113 ms, 2.2-4.8 s | 56-321 ms, 1.2-7.9 s |
+| | 5 | 82-128 ms, 10.9-14.9 s | 134-801 ms, 0.4-2.1 s |
+| | 8 | 73-430 ms, 25.6-52.9 s | 294-405 ms, 0.8-2.1 s |
+
+The heavy statements' own time did not get worse, and at 2 vCPU it varied more with the machine's other work than with
+the pool. The small p50 rises because more statements really do run at once. The worst at two heavy is the same either
+way: it is not the pool.
+
+**Memory is not the limit.** The bench's process idles at 216 MB with 4 threads, 219 MB with 64 and 222 MB with 256: a
+parked thread touches a few kilobytes of its stack. The real image at 2 vCPU, 64 beside 4: 292 MB and 292 MB, then 298 MB
+and 269 MB after a restart, 621 MB and 563 MB after a first start. So a few tens of MB at most, within the noise of one
+sample. Peak RSS under load showed no pattern (687 to 912 MB at either size). Threads, read from the process: 81 at
+2 vCPU where a pool of 4 has 21, exactly the 60 more; 121 at 10 CPUs.
+
+**Why 32, a number and not derived.** The size was to sit above Mason's limit on running statements, and there is no
+such limit: one statement runs per session, and `CANCEL_SLOTS` allows 4,096 sessions, past libuv's maximum of 1,024.
+Past the pool's size, libuv's queue is the admission, first in, first out. 1,024 was tried and refused: libuv starts
+every thread at the pool's first task and aborts with no message if one cannot be made, so `--pids-limit=300` ended the
+process with exit 133. 64 was the first choice and the table's; the review chose 32, because nothing was measured past
+eight statements, 16 already fixed five, and the old queue was the only limit on how much memory statements take at
+once. So 32 covers the same data with half the thread exposure (at 2 vCPU, eight heavy, one run: p50 321 ms, worst 1.5 s, 32 s of wall time). An admission
+limit would be the one fact to derive this from; it would be new behaviour, so it was not added here.
+
+**A thread limit is read, because its failure is silent.** A platform restarting a process that aborts with no message
+is a loop nobody can read. `src/cli/pool-size.cjs` reads `pids.max` (both cgroup versions) and `Max processes` first, and
+a run is taken to need its size plus 20 plus five a CPU, more than the threads real runs were read to have (about 40 plus
+five a CPU at 32: 49 at 2 and 89 at 10, each 32 below the 81 and 121 read at 64). Below that the default is lowered to
+fit, never under 4, and said once, by the commands that start a run; a size of the operator's own that does not fit
+refuses the start. So does one that is not a number from 1 to 1024: `abc` would run one thread and `-1` 1,024.
+
+**Windows:** `process.env` never reaches libuv's getenv there, so the size set here does nothing and the pool stays at
+four unless the shell sets it. A re-exec would cure it and was refused; the docs say so instead.
+
+**Early enough:** `process.env` at the top of an ES entry was measured on Node 22.13, 24 and 26, on a pool counted by
+parking its threads on FIFOs. On 22.13 the pool had started with four threads before the first line ran, even with no
+static import, because the ES loader reads its files through it; on 24 and 26 it had not, and a first import is enough.
+A CommonJS entry got its size on all three, so `src/cli/mason.cjs` is the `bin`, the image's `mason` and the run's
+command, and `main.ts` imports `pool-size.cjs` first for `node src/cli/main.ts` in a checkout, which needs 23.6 or later.
 
 ### Local gates (2026-10-30)
 

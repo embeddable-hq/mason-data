@@ -62,8 +62,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           node cli/build.ts
-          node cli/dist/src/cli/main.js --version
-          node cli/dist/src/cli/main.js --help > /dev/null
+          node cli/dist/src/cli/mason.cjs --version
+          node cli/dist/src/cli/mason.cjs --help > /dev/null
 
       # The CLI's platform packages (cli/extensions.ts): every platform's copy of the two extensions fetched and held
       # to the checksums cli/extensions.json pins, each package packed as npm would publish it; and the CLI's own tarball

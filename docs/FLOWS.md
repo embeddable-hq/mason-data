@@ -223,9 +223,10 @@ probe measured the event loop's longest stall during each call.
   1,000 calls before the loop turns, so a statement calling on two or more threads held the worker's loop for 999 calls
   a turn (2.2 to 3.3 s each), and a small statement needs about eight turns. `__mason_turn` empties that queue after one
   call per DuckDB thread (`registerTurn`, `src/duck/functions.ts`; docs/DESIGN.md "The turn").
-- **The pool is small and shared.** libuv's pool is per process, four threads by default, and nothing here sets
-  `UV_THREADPOOL_SIZE`. Six statements on six connections finished four together, then the rest; a `connect` beside them
-  waited 1.5 s, and 3.7 s with a pool of two. So a call that looks free can be waiting behind running statements.
+- **The pool is shared, and 32 threads.** libuv's pool is per process, four threads by default, and `src/cli/pool-size.cjs`
+  sets `UV_THREADPOOL_SIZE` to 32 before it starts. At four, six statements on six connections finished four together,
+  then the rest; a `connect` beside them waited 1.5 s, and 3.7 s with a pool of two. So a call that looks free can be
+  waiting behind running statements, here past 32 of them or more (docs/DESIGN.md "The pool").
 - **`stream()` is not where the work is, reliably.** For a call-free aggregate it returned in 2 ms and the first
   `fetchChunk` took the whole 1.3 s. The comment in `SessionRunner.streamed` describes a calling count computing inside
   `stream()`. Handle both.
