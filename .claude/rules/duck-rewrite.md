@@ -157,8 +157,9 @@ paths:
     output names resolved to clones of the outputs' expressions, as the sort keys are), the ORDER BY and the LIMIT, and
     lists each FROM item's row number; the list is read from the kept rows. The sort it is sent is the one Postgres
     runs: the rewrite appends each ON expression the ORDER BY lacks, ASC NULLS LAST (`distinctOnSorted`, src/duck/rewrite.ts,
-    for every form sent), and keys a jsonb ON named by its output's number or name alike (`keyedDistinct`, through
-    `outputOf`). A numeric computed exactly rides its cells beside a DISTINCT ON, and a plain DISTINCT with one is sent as
+    for every form sent; an appended key is bound as its ON expression is, by the one resolver over the DISTINCT
+    ON's list, never through the analysis's sort list, which holds the ORDER BY as written), and keys a jsonb ON named by its output's number or name alike (`keyedDistinct`, through
+    the one resolver, `keysBound`). A numeric computed exactly rides its cells beside a DISTINCT ON, and a plain DISTINCT with one is sent as
     the DISTINCT ON of every output's number (`exactColumns`); over a pass-through (`SELECT DISTINCT * FROM (…) s`) the
     DISTINCT ON keys an exact column by its program over the inner query's cells (`distinctThrough`). It is exact for ANY ON expressions, a key or not, so no primary key is asked and never `any_value` (which would answer an arbitrary row of the group for another
     table's columns). One table is written so too. `keyFirst` refuses it (`first.distinct` is false), so the two never
@@ -176,6 +177,15 @@ paths:
 - **An output's number or bare name is read through `Rewriter.outputs` alone** (issue 112): a target is one output, a `*`
   one per column from Postgres's expansion (`Typed.column`), so every rule meets a star's column as the column named. A
   `targets[n - 1]` of a number is the wrong column beside a `*` (the class: an output not resolved to its column).
+  Its second instance (PR 170): a key Postgres binds to an output or another clause's key by EQUALITY OF THE ANALYSED
+  EXPRESSIONS (`'1.5'::numeric` to `1.5::numeric AS v`) leaves no node at its offset, so whether such a key is constant is
+  read by one resolver, `keysConstant` (src/duck/constant-key.ts), from the analysis's own sort lists (`Keys`,
+  src/duck/pgtree.ts), never from a syntactic match. Detector: tests/duck-wire.test.ts "a key equal to an output …".
+  Its third (PR 170, the fourth round): the binding decides how a key is WRITTEN, not only whether it is constant. Every
+  ORDER BY and DISTINCT ON key, by name, number or equal expression, is bound by `Rewriter.keysBound` (GROUP BY's by
+  `groupOutput`), and a key bound to an output IS that output: a jsonb's, citext's or collation's key built over it,
+  and a key bound by equality to a computed output written as its ordinal, never a second evaluation of a volatile
+  one. Detector: tests/duck-wire.test.ts "a key bound to an output is that output …".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its

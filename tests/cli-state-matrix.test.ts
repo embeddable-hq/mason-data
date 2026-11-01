@@ -18,6 +18,7 @@ import { MATRIX_ARGS, MATRIX_EXTRA_ARGS, MATRIX_MORE, TRANSITIONS, answerProblem
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
 import type { CopyState, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
+import type { GeneratedStatus } from "../src/duck/generated.ts";
 
 // nothing listens on port 1: a database that does not answer, as one that is away
 const SOURCE = "kind: postgres\nurl: postgres://mason:secret@127.0.0.1:1/shop\ntables:\n  orders: {}\n";
@@ -194,7 +195,7 @@ test("mason status --json, Mason stopped: source is the database — its name, i
  * read its state. The copies are the sync's, faked (`copies`); the sources file adds `orders`, `events` and `fresh`, and
  * the database also has `logs`.
  */
-async function upProject(changes: "poll" | "replication", copies: CopyState[], stream: StreamStatus | null): Promise<{ root: string; close: () => void }> {
+async function upProject(changes: "poll" | "replication", copies: CopyState[], stream: StreamStatus | null, generated: GeneratedStatus[] = []): Promise<{ root: string; close: () => void }> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `mason-matrix-up-${changes}-`));
   made.push(root);
   const token = "u".repeat(64);
@@ -211,7 +212,7 @@ async function upProject(changes: "poll" | "replication", copies: CopyState[], s
     port: 0, token, page: false, users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     listener: { openSessions: () => ({ open: 0, byClient: [] }), running: () => [] }, folder: () => folder, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sourcesChanged: () => undefined, log: () => undefined, readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "",
     sources: () => ({ file: { name: "shop", file, kind: "postgres", url: { env: "DATABASE_URL" }, tables: ["orders", "events", "fresh"].map((t) => ({ name: t, table: `public.${t}`, columns: null, exclude: [], key: null })) }, problem: null }),
-    duck: { copies: () => copies, file: path.join(root, ".mason", "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => stream, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => copies, generated: () => generated, file: path.join(root, ".mason", "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => stream, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, recent: async () => [], slow: async () => [], refused: async () => ({ total: 0, refused: [] }) } },
   } as unknown as RunContext;
   const server = createRunServer(ctx);
@@ -266,6 +267,39 @@ test("mason status and mason wait --json, Mason up: each added table says how it
       assert.deepEqual(keptOf(w.tables), { "public.orders": m.kept["public.orders"], "public.events": m.kept["public.events"] }, `${m.changes}: mason wait --json says the same`);
     } finally { p.close(); }
   }
+});
+
+test("mason wait <generated table>, Mason up: 0 once it holds what was synced, 124 past --timeout, 1 for a failed run or no such table, each --json in its declared shape", async () => {
+  const g = (table: string, extra: Partial<GeneratedStatus>): GeneratedStatus => ({ table, file: `mason/generated_tables/${table.slice(7)}.yml`, kind: "scheduled", method: "whole",
+    state: "current", targetLag: "1m", behindSeconds: 0, behindSince: null, missingTarget: false, serving: true, lastRun: { at: "2026-10-29T09:00:00.000Z", seconds: 1, rows: 3 },
+    error: null, retryAt: null, refusals: [], waitingFor: null, warnings: [], ...extra });
+  const generated = [g("public.daily", {}), g("public.weekly", { state: "behind", behindSeconds: 3600, behindSince: new Date(Date.now() - 3_600_000).toISOString() }),
+    g("public.broken", { state: "failed", behindSeconds: 60, behindSince: new Date(Date.now() - 60_000).toISOString(), error: "division by zero", retryAt: "2026-10-29T09:01:00.000Z" })];
+  const p = await upProject("poll", [], null, generated);
+  try {
+    const keys = ["ready", "failed", "waiting", "timedOut", "tables", "generatedTable", "next"];
+    const ready = await runMason(p.root, ["wait", "daily", "--json"], matrixEnv());
+    assert.equal(ready.code, 0, ready.stdout + ready.stderr);
+    const r = JSON.parse(ready.stdout) as Record<string, unknown> & { generatedTable: GeneratedStatus };
+    assert.deepEqual(Object.keys(r), keys);
+    assert.deepEqual([r.ready, r.timedOut, r.tables, r.generatedTable.table, r.generatedTable.behindSince], [true, false, [], "public.daily", null]);
+    const person = await runMason(p.root, ["wait", "daily"], matrixEnv());
+    assert.equal(person.code, 0, person.stdout + person.stderr);
+    assert.match(person.stdout, /Ready: public\.daily holds every change synced when the wait began\./);
+    const late = await runMason(p.root, ["wait", "public.weekly", "--json", "--timeout", "1"], matrixEnv());
+    assert.equal(late.code, 124, late.stdout + late.stderr);
+    const l = JSON.parse(late.stdout) as { ready: boolean; timedOut: boolean; waiting: string[]; error: { code: string; message: string } };
+    assert.deepEqual([l.ready, l.timedOut, l.error.code], [false, true, "timeout"]);
+    assert.match(l.waiting[0]!, /^public\.weekly: 3600 s behind its bases/);
+    const broken = await runMason(p.root, ["wait", "broken", "--json"], matrixEnv());
+    assert.equal(broken.code, 1, broken.stdout + broken.stderr);
+    assert.deepEqual((JSON.parse(broken.stdout) as { error: { code: string; message: string } }).error.code, "failed");
+    assert.match(broken.stdout, /public\.broken: its last run failed: division by zero/);
+    const none = await runMason(p.root, ["wait", "monthly", "--json"], matrixEnv());
+    assert.equal(none.code, 1, none.stdout + none.stderr);
+    const n = (JSON.parse(none.stdout) as { error: { code: string; message: string; fix: string } }).error;
+    assert.deepEqual([n.code, n.message, n.fix], ["not_found", 'no generated table "monthly"', "name one of: daily, weekly, broken"]);
+  } finally { p.close(); }
 });
 
 test("a demo project, stopped: mason tables says its database runs inside mason start, and a table set to sync: replication is refused before anything starts", async () => {

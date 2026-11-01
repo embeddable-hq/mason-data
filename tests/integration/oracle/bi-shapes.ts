@@ -151,6 +151,41 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "a constant sort key: a constant expression is evaluated, ordering nothing", sql: "SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY 1 + 0, o.id DESC LIMIT 3" },
   { name: "a constant sort key: a derived table's numeric constant by name and number", sql: "SELECT s.id, s.one FROM (SELECT o.id, c.name, 1.5::numeric AS one FROM orders o LEFT JOIN customers c ON c.id = o.customer_id) s ORDER BY 2 DESC, s.one, s.id DESC LIMIT 3" },
   { name: "a constant sort key: a key Postgres evaluates at planning raises there", sql: "SELECT o.id FROM orders o ORDER BY 12345::numeric(3), o.id LIMIT 3" },
+  // the class widened (PR 170's second class round): a constant key in ANY clause, the analysis's Const read once
+  { name: "a constant key: DISTINCT ON a numeric Const alone is one row", sql: "SELECT DISTINCT ON (1.5::numeric) o.id FROM orders o ORDER BY 1.5::numeric, o.id DESC LIMIT 3" },
+  { name: "a constant key: DISTINCT ON a Const beside a column, and by output number", sql: "SELECT DISTINCT ON ('1.5'::numeric, o.customer_id) o.customer_id, 1.5::numeric AS v, o.id FROM orders o ORDER BY 1.5::numeric, o.customer_id DESC, o.id LIMIT 3" },
+  { name: "a constant key: GROUP BY a Const by expression and by number", sql: "SELECT 1.5::numeric AS v, o.status, count(*) AS n FROM orders o GROUP BY 1.5::numeric, 2 ORDER BY 2 LIMIT 3" },
+  { name: "a constant key: ROLLUP over a Const and a column", sql: "SELECT o.status, count(*) AS n FROM orders o GROUP BY ROLLUP (1.5::numeric, o.status) ORDER BY 1 NULLS FIRST, 2" },
+  { name: "a constant key: a window's ORDER BY and PARTITION BY a Const", sql: "SELECT o.id, row_number() OVER (PARTITION BY 1.5::numeric ORDER BY 1.5::numeric, o.id DESC) AS r, count(*) OVER (PARTITION BY 'x'::text) AS n FROM orders o ORDER BY o.id LIMIT 3" },
+  { name: "a constant key: a set operation's ORDER BY a Const output", sql: "SELECT o.id, 1.5::numeric AS v FROM orders o UNION ALL SELECT c.id, 1.5::numeric FROM customers c ORDER BY 2, 1 DESC LIMIT 3" },
+  { name: "a constant key: an aggregate's ORDER BY a Const", sql: "SELECT o.customer_id, string_agg(o.id::text, ',' ORDER BY 1.5::numeric, o.id DESC) AS s, array_agg(o.id ORDER BY 1::int, o.id)::text AS a FROM orders o GROUP BY o.customer_id ORDER BY 1 LIMIT 3" },
+  { name: "a constant key: an ordered-set aggregate's Const is its value", sql: "SELECT o.status, mode() WITHIN GROUP (ORDER BY 1.5::numeric) AS m, percentile_disc(0.5) WITHIN GROUP (ORDER BY 'x'::text) AS p FROM orders o GROUP BY o.status ORDER BY 1 LIMIT 3" },
+  // the third class round: a key bound to an output or another key by EQUALITY OF THE ANALYSED EXPRESSIONS, spelled
+  // another way (Postgres's findTargetlistEntrySQL99 leaves no node at such a key's offset)
+  { name: "an equal key: ORDER BY a Const spelled unlike its output", sql: "SELECT o.id, 1.5::numeric AS v FROM orders o ORDER BY '1.5'::numeric, o.id DESC LIMIT 3" },
+  { name: "an equal key: ORDER BY an integer Const spelled unlike its output (no ordinal)", sql: "SELECT o.id, 1::int AS v FROM orders o ORDER BY CAST('1' AS int), o.id DESC LIMIT 3" },
+  { name: "an equal key: ORDER BY a Const unlike its output, under a join and GROUP BY", sql: "SELECT o.customer_id, numeric '1.5' AS v, count(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY o.customer_id ORDER BY CAST('1.5' AS numeric), o.customer_id DESC LIMIT 3" },
+  { name: "an equal key: DISTINCT ON and ORDER BY one Const spelled two ways", sql: "SELECT DISTINCT ON ('1.5'::numeric, o.customer_id) o.customer_id, o.id FROM orders o ORDER BY 1.5::numeric, o.customer_id DESC, o.id LIMIT 3" },
+  { name: "an equal key: a Const twice in ORDER BY, spelled two ways", sql: "SELECT s.id FROM (SELECT o.id FROM orders o ORDER BY 1.5::numeric, '1.5'::numeric, o.id DESC LIMIT 3) s ORDER BY s.id" },
+  { name: "an equal key: an aggregate's ORDER BY its argument spelled another way", sql: "SELECT o.status, (array_agg(1.5::numeric ORDER BY '1.5'::numeric, o.id DESC))[1] AS a FROM orders o GROUP BY o.status ORDER BY 1 LIMIT 3" },
+  { name: "an equal key: a qualified key against an unqualified output, and an implicit cast against an explicit one", sql: "SELECT customer_id, o.id::numeric + 1.5 AS v FROM orders o ORDER BY o.customer_id DESC, o.id + 1.5 LIMIT 5" },
+  // the fourth class round: a key bound to an output, by its alias, number, an equal expression, an alias that is also
+  // an input column, or over a derived table, IS that output, written through the one binding (a jsonb's equality and
+  // order, a collation's keys, a volatile value once)
+  { name: "a bound key: DISTINCT ON a jsonb output by its alias", sql: "SELECT DISTINCT ON (k) o.meta -> 'tags' AS k, o.id FROM orders o ORDER BY k, o.id LIMIT 8" },
+  { name: "a bound key: DISTINCT ON a jsonb alias, ORDER BY its expression DESC", sql: "SELECT DISTINCT ON (k) o.meta -> 'tags' AS k, o.id FROM orders o ORDER BY o.meta -> 'tags' DESC, o.id" },
+  { name: "a bound key: a jsonb alias that is also an input column", sql: "SELECT DISTINCT ON (meta) o.meta -> 'tags' AS meta, o.id FROM orders o ORDER BY meta, o.id" },
+  { name: "a bound key: DISTINCT ON a derived table's jsonb column by an alias", sql: "SELECT DISTINCT ON (k) s.t AS k, s.id FROM (SELECT o.meta -> 'tags' AS t, o.id FROM orders o) s ORDER BY k DESC, s.id" },
+  { name: "a bound key: a grouped jsonb output, ORDER BY its expression", sql: "SELECT o.meta -> 'tags' AS k, count(*) AS n FROM orders o GROUP BY 1 ORDER BY o.meta -> 'tags' DESC" },
+  { name: "a bound key: a collated output ORDER BY its expression", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, c.id FROM customers c ORDER BY c.name COLLATE \"und-x-icu\" DESC, c.id LIMIT 8" },
+  // (a last key that is no output, min(c.id), deciding nothing as n is one a group: the statement's own order is held,
+  // and the "[ordered]" shape, whose outer sort by the derived collated column is #213's, is not made of it)
+  { name: "a bound key: a collated output grouped and ordered by number", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, count(*) AS k FROM customers c GROUP BY 1 ORDER BY 1 DESC, min(c.id) LIMIT 8" },
+  { name: "a bound key: a collated output grouped and ordered by name and expression", sql: "SELECT c.name COLLATE \"und-x-icu\" AS n, count(*) AS k FROM customers c GROUP BY n ORDER BY c.name COLLATE \"und-x-icu\", n, min(c.id) LIMIT 8" },
+  { name: "a bound key: a citext output grouped and ordered by number", sql: "SELECT lower(c.email)::citext AS e, count(*) AS k FROM customers c GROUP BY 1 ORDER BY 1 LIMIT 8" },
+  { name: "a bound key: WITH TIES by an expression equal to an output", sql: "SELECT count(*) FROM (SELECT o.id % 5 AS m, o.id FROM orders o ORDER BY o.id % 5 FETCH FIRST 3 ROWS WITH TIES) s" },
+  { name: "a bound key: WITH TIES by a user's own number", sql: "SELECT count(*) FROM (SELECT o.tenant_id, o.id FROM orders o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s" },
+  { name: "a bound key: a volatile output ORDER BY its expression, one value", sql: "SELECT count(*) FROM (SELECT random() AS r, o.id FROM orders o ORDER BY random() LIMIT 5) s" },
   // no oracle table has a composite key: tests/duck-wire.test.ts holds the whole and the partial composite key over late_p
   { name: "key-first GROUP BY: no primary key grouped stays as it was", sql: "SELECT i.order_id, i.product, count(*) AS n FROM order_items i GROUP BY i.order_id, i.product ORDER BY 1, 2 LIMIT 6" },
   { name: "key-first GROUP BY: the nulls idiom over a fetched column", sql: "SELECT o.id, o.status, sum(i.quantity) AS q FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY (o.status) IS NULL ASC, o.status DESC, o.id LIMIT 10" },

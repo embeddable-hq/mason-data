@@ -77,71 +77,96 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
 
 ## How work is done here
 
-- **Every change carries its test**, in the matching `tests/*.test.ts` ("Checks and tests"), proved to guard the change by
-  `scripts/fails-without.ts`; a change that cannot be tested says why in its commit. A change to docs alone needs none.
-- **Work on a branch, in a worktree of its own** whenever anything else may be working in the checkout (another session,
-  another agent), and never in another session's worktree: two writers on one tree overwrite each other silently.
-- **Commit at natural checkpoints and push, to a PR.** When the branch has no PR yet, push it and create one
-  (`gh pr create`). A PR is where a person reviews and another agent comments, and a PR (or a commit on one) can always
-  be thrown away or rolled back, where unpushed work can be lost. Don't leave work uncommitted or unpushed at the end
-  of a task.
-- **Every PR gets an independent review before a person sees it**: a reader in a FRESH context (another agent, or
-  the harness's review), given the diff and the code, never the author's conclusions or report, reading for wrong
-  answers. The author's own green oracle is not that evidence: three PRs whose oracle runs showed zero differences
-  carried eleven wrong answers an independent reader found (docs/DESIGN.md "The independent review"). Each confirmed
-  finding becomes an oracle statement and a test; what the reviewer judged correct is said too, so the author does not
-  re-check it.
-- **One review per PR, its findings in ONE message.** Findings sent to an author in three batches cost three fix
-  cycles, each a CI run; collect them, then send once.
-- **A brief says what the test must hold, not only what to build.** Name the shapes the oracle must hold up front
-  (`.claude/rules/duck-rewrite.md` lists them for a rewrite: the grouped view ordered by its output name, the nulls idiom,
-  each collation kind, a prepared statement run after a SET): the first fix round of every PR was for shapes the brief
-  had not named. It names the tests its runs use too: a slow test file is run by `--test-name-pattern` for the tests at
-  hand, and so is `scripts/fails-without.ts`, which runs it twice (one issue's agents spent 36 min proving a 100 s file).
-- **Which gate runs when is "Local gates".** A measurement's dataset is built once and kept until the PR is pushed: an
-  agent that built a 20 M-row table twice spent the second build on nothing new.
-- **Push early, read while CI runs.** Open the PR as soon as the first commit is green locally; read the diff and run the
-  review while CI runs; land fix commits in one push, not one per finding.
-- **Every wait has a limit, and a job past it is a hang**, because a background job reports only when it exits and a
-  deadlocked one never does (docs/DESIGN.md "Local gates"). `npm run gate` bounds each step already. A bare test run
-  names it before the files, `node --test --test-timeout=<ms> <file>`: after them Node ignores it, so `npm test` and
-  `npm run check` cannot take it until issue 139, the rule's detector. Never end a turn on an unbounded job: a queued
-  gate is watched in a bounded wait on its output, whose `waiting for a slot` lines say it is queued. Past the limit,
-  compare CPU with elapsed time on the test's own process, not the wrapper (`pgrep -P <pid>` down to it, then
-  `ps -o time,etime -p <pid>`): a hung test uses none, though nor does one waiting on I/O. A hang is the change's to
-  fix, or a flake as "Local gates" says, never a run to repeat.
-- **Nobody waits on CI.** An implementer ends at the push and reports the PR and its head; the coordinator binds the PR
-  and lets the app's PR monitor bring a failure (auto-merge, for a tooling PR already read and reviewed), and goes on
-  with other work. No session sits in a wait on a run: watching CI took most of a coordinator's active time (issue 78).
-- **A coordinator never ends a turn without a wake-up for what it waits on.** With a merge queued, a run whose verdict
-  it must act on, or a lead session working, it leaves a bounded background job that exits when that changes: a loop
-  of `gh pr view --json state`, `gh pr checks` or `git ls-remote` with a `sleep`, run in the background, that ends on
-  the PR merged or a check failed, the branch's head moved, or the PR opened. A job's exit wakes the session that
-  started it, where an auto-merge, the app's PR monitor (which wakes on a failure, a conflict or a comment, never on a
-  green run or a merge) and another session's report may not; a sub-agent's end does. When its bound passes with
-  nothing changed, look, and leave another. Such a job costs nothing while it runs, unlike a wait in the foreground.
-  Two turns ended without one left both leads idle half of the seven hours read (docs/DESIGN.md "Local gates").
-  Nothing detects it; a transcript's gaps did.
-- **Delegate when it is faster, but merge nothing you have not read.** Independent pieces go to sub-agents, each in a
-  worktree of its own; the one who merges reads each diff in full, verifies it (CI on its last commit; a local gate for a
-  reason, "Local gates"), and merges it. A sub-agent's report is its claim, not the evidence. Two
-  implementations of two hours each ran side by side; the review-and-fix round after them was the next hour and a half,
-  so the time to land a batch is the slowest implementation plus one review cycle, never the sum.
-- **Implementation runs on Opus 5.5; every review is Fable's.** A sub-agent or a session that writes code is started
-  on Opus 5.5 (`model: "opus"` on the Agent tool, `model: "claude-opus-5-5"` on a session: a session INHERITS the
-  coordinator's model when none is named). The independent review of a PR is done by the coordinating session itself
-  (Fable) or by a Fable agent, never by an Opus one: the reviewer must outread the author (2026-10-29).
+Four guidelines, then the loop every PR goes through. Why each is so, with its incident and its numbers, is in
+docs/DESIGN.md ("The independent review", "Local gates").
+
+1. **Nothing lands unproved.** Every change carries its test in the matching `tests/*.test.ts` ("Checks and tests"),
+   seen failing without the change (`scripts/fails-without.ts`); a change that cannot be tested says why in its commit,
+   and docs alone need none. Every PR is read by an independent reviewer, and in full by whoever merges it: an author's
+   report and its green oracle are claims, not evidence.
+2. **Fix the class, not the symptom** ("Conventions"). A finding names a failure, never a patch, and the reviewer names
+   its class. A second finding of one class on a PR ends the patching: the next round fixes the class.
+3. **Work where nobody else writes, and push it.** A branch, in a worktree of its own whenever anything else may be
+   working in the checkout, never in another session's worktree (two writers on one tree overwrite each other
+   silently); commit at checkpoints and push to a PR (`gh pr create`), since unpushed work can be lost and a PR can be
+   rolled back.
+4. **Nothing waits unwatched, and nobody watches.** Every wait has a bound, and a job past it is a hang: a background
+   job reports only when it exits, and a deadlocked one never does. No session sits in a wait on a run, and no session
+   that waits on anything ends a turn without a background job that will wake it ("The loop", step 5).
+
+### The loop
+
+1. **Brief.** Name what the tests must hold, not only what to build: the shapes the oracle must answer
+   (`.claude/rules/duck-rewrite.md` lists them for a rewrite), and the tests the runs use, by `--test-name-pattern` and
+   `IT_ORACLE_ONLY`.
+2. **Implement**, on Opus 5.5 (`model: "opus"` on an agent; `model: "claude-opus-5-5"` on a session, which otherwise
+   inherits the coordinator's), in its own worktree, ending at the push with the PR and its head. Push as soon as the
+   first commit is green locally ("Local gates" says which gate when); the review runs while CI does. Independent pieces
+   run side by side: a batch lands in its slowest piece plus one review, never the sum.
+3. **Review**, by Fable (the coordinating session or a Fable agent, never Opus: the reader must outread the author),
+   in a fresh context given the diff and the code, never the author's report. Its ONE report gives, for each finding,
+   the failing input and the two answers (for the engine: the statement, Postgres's answer and Mason's) and the
+   finding's class; and what it judged correct, so nobody checks that twice. Each confirmed finding becomes a test and,
+   for the engine, an oracle statement.
+4. **Fix.** The findings go to the author in ONE message, as failures and their class, never the edit (for a change to
+   prose, the words are the failure): an author handed a patch applies it, and the class goes unfixed. The author comes
+   back in ONE push, not one per finding. The second finding of a class on a PR makes the next round a CLASS round: it
+   first writes down every case of the class, in the PR, gives each a test, then fixes the decision that makes the class
+   impossible; give it room (about 60 calls). Every fix commit gets a narrow re-check, the same way. Detector: the
+   reviewer's classes, read across a PR's rounds.
+5. **Merge.** Read the diff in full, then queue it pinned to the head read:
+   `gh pr merge <n> --auto --merge --match-head-commit <sha>`. A queued merge survives a later push, so a PR sent back
+   has it withdrawn (`gh pr merge <n> --disable-auto`) and queued again once the fix is read; who may merge what is
+   "Local gates". Bind the PR to the session (the app's monitor then brings a failure, a conflict or a comment, never a
+   green run or a merge), and go on with other work. While a merge is queued, a run's verdict is awaited or a lead is
+   working, leave one bounded background job per thing, which exits when it changes: a loop on `gh pr checks` ("Local
+   gates"), `gh pr view --json state` for a merge, `git ls-remote` for a lead's new head. Its exit wakes the session,
+   where an auto-merge and another session's report may not; when its bound passes with nothing changed, look, and
+   leave another. Detector: the Stop hook `scripts/hooks/wake-up.ts` warns when a turn ends after a queued merge or a
+   message to a lead with no background job started since and still running; a warning, never a block, because it
+   reads the transcript by heuristic.
+
+The coordinator runs the loop with the Workflow tool: `.claude/workflows/pr-loop.js` for one PR, and
+`.claude/workflows/issue-loop.js` for an issue's tasks, planned first and read by the coordinator, then run. In them
+the brief and the plan are Opus's and only the reviews are Fable's. A finding the base already has is filed, one issue
+per class, at whatever exit the run takes, and is never fixed in the PR nor counted toward its class rule: a PR that
+chases a class it did not make grows each round. Classes carry across a stack, so a class met on the PR below counts
+on the one above. A teammate needs Claude Code with the Workflow tool, the Opus and Fable models, and `gh`
+authenticated with the `project` scope for the board. Why: docs/DESIGN.md "The independent review". Detector:
+`tests/workflows.test.ts`.
+
+**The board says where each piece is**, so the owner reads progress there instead of asking: the [Mason work
+board](https://github.com/orgs/embeddable-hq/projects/4). An issue split into pieces has one sub-issue per PR
+(`scripts/board.ts sub <issue> "<issue> · <piece>" --from "<model>"`), and its PR says `Closes #<sub-issue>`. Each move
+is made where it happens, with `scripts/board.ts status <n> "<status>"` run from a file, never `node <(git show …)`,
+which exits 0 having run nothing: **Implementing** when an agent starts, **In review** with the review, **Fixing** when
+findings or a red CI go back, **CI / queued** with the merge, **Done** once it is confirmed (the board's "item closed"
+workflow is off), and **Needs Tom** for anything that waits on the owner's word. The parent is **In progress** while any
+piece is, and **Done** with its last.
 
 ## Local gates
 
 One laptop is shared by every session, and one gate fills it: gates are the largest single use of a session's time
 (docs/DESIGN.md "Local gates" has the measurements). **CI is the full gate**, and a local gate runs for a reason. Each
 rule says what detects it, or why nothing does: most are habits that only a session's transcript shows, which no test
-reads.
+reads. Some detectors are Claude Code hooks, wired in `.claude/settings.json` from `scripts/hooks/`
+(`tests/hooks.test.ts`): a PreToolUse hook blocks the command, and its one-line message says what to run instead; the
+Stop hook only warns. They resolve against `$CLAUDE_PROJECT_DIR`, the main checkout even from a worktree, so a main
+checkout on a branch without `scripts/hooks/` prints a hook error on each Bash call and each turn's end (not a block).
 
-- **While working, the tests nearest the change**: `node --test <file>`, with `--test-name-pattern` for one test, and
-  `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. **A full integration run is not an iteration tool**,
-  and neither is the full oracle. Nothing detects it; a transcript found it.
+- **While working, the tests nearest the change**: `node --test --test-timeout=<ms> <file>`, with
+  `--test-name-pattern` for one test, and `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. The
+  timeout goes BEFORE the files, since Node ignores it after them, so `npm test` cannot take one (issue 139); the hook
+  `scripts/hooks/test-timeout.ts` blocks a `node --test` without it before its files, and `npm test`. **A full
+  integration run is not an iteration tool**, and neither is the full oracle. A measurement's dataset is built once and
+  kept until the PR is pushed. Nothing detects that; a transcript found it.
+- **A test past its bound is read, not repeated.** Compare CPU with elapsed time on the test's own process, not the
+  wrapper (`pgrep -P <pid>` down to it, then `ps -o time,etime -p <pid>`): a hung test uses none, though nor does one
+  waiting on I/O. A hang is the change's to fix, or a flake (below).
+- **A wait on CI is a `gh pr checks <n>` loop with a deadline**, without `--watch`: it exits 0 when all passed, 8 while
+  any is pending, 1 on a failure, and also 1 with "no checks reported" just after a push, which is a wait, not a
+  failure. `--watch` exits on that at once, and an alarm `exec`'d into `gh` (a Go program) is ignored, so neither bounds
+  it. Nothing detects it; three waits, each wrong a different way, were found by reading the transcript.
 - **One full `npm run check`, before a PR's first push.** A fix round after a review or a merge of main gets
   `npm run typecheck`, `node --test tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
   change, and CI carries the full suite: the few real catches a full local run made in another file were all such fast
@@ -177,11 +202,13 @@ reads.
   Detector: the merge is refused, and the `push` run on main after it.
 - **Who merges what.** A PR that changes nothing under `src/` merges without the owner's word once its Fable review has
   no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release,
-  merge on the owner's word. Once that is so, `gh pr merge <n> --auto --merge` queues it for the checks still running,
-  and a push after it needs reading again. PR 89 had not merged itself some while after its last check went green and
-  was merged by hand, so confirm a PR landed.
+  merge on the owner's word. It is queued pinned, as "The loop" step 5 says, and its landing is confirmed, never
+  assumed: PR 89 had not merged itself some while after its last check went green, and was merged by hand.
+  Detector: the hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`, and lets
+  `gh pr merge <n> --disable-auto` through.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
-  to fix, or it is a flake, the next rule. Nothing detects it; the gate could compare the tree's hash, and does not.
+  to fix, or it is a flake, the next rule. Detector: the hook `scripts/hooks/no-rerun.ts` blocks `gh run rerun`; a
+  local gate run again on an unchanged tree, nothing detects (the gate could compare the tree's hash, and does not).
 - **A flaky test met during other work is quarantined with an issue, not fixed in that PR**: a flake's fix costs more
   than the PR it interrupts, and its review is its own. A flake here is a test the change cannot have touched, failing
   on timing or load. The skip goes in its own commit, `test("…", { skip: "quarantined: #<issue>" }, …)`, and the issue
@@ -240,6 +267,8 @@ node cli/extensions.ts                # its platform packages (the copy's extens
 docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; deploy/mason-data/compose.yml runs it
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
 scripts/gate-slot.ts <command>        # runs a command in one of the machine's slots, as the heavy gates do
+scripts/board.ts status <n> "<status>"   # moves an issue's card on the Mason work board ("The board says …")
+scripts/board.ts sub <issue> "<title>" --from "<model>"   # makes a sub-issue of <issue>, on the board; prints its number
 ```
 
 ### Checks and tests

@@ -6,6 +6,7 @@
  */
 import type { RunState } from "./commands.ts";
 import type { CopyProgressView, CopyState, Synced } from "../duck/sync.ts";
+import type { GeneratedStatus } from "../duck/generated.ts";
 
 const n = (x: number): string => x.toLocaleString("en-US");
 const firstLine = (s: string): string => s.split("\n")[0]!.trim();
@@ -137,4 +138,22 @@ export function readiness(s: Pick<RunState, "tables">): Readiness {
     if (!t.copy) waiting.push(`${t.table}: waiting for its first sync to start`);
   }
   return { ready: failed.length === 0 && waiting.length === 0, failed, waiting };
+}
+
+/**
+ * WHERE A GENERATED TABLE IS, for `mason wait <table>`: ready once it is served and holds every base change Mason had
+ * synced when the wait began (`since`, ms), across its chain — nothing behind (`behindSince` null), or only changes
+ * committed after it began. A last run that failed, or a parent that blocks it, is a failure, so an agent is never left
+ * waiting for a run that cannot come. The marks are the run's clock and `since` this machine's: `mason wait` reads a run
+ * on this machine.
+ */
+export function generatedReadiness(g: GeneratedStatus, since: number): Readiness {
+  const caught = g.serving && (g.behindSince === null || Date.parse(g.behindSince) > since);
+  if (caught) return { ready: true, failed: [], waiting: [] };
+  const fail = (why: string): Readiness => ({ ready: false, failed: [`${g.table}: ${why}`], waiting: [] });
+  if (g.error !== null) return fail(`its last run failed: ${firstLine(g.error)}`);
+  if (g.state === "refused" && !g.serving) return fail(`refused: ${g.refusals[0]?.message ?? "mason status says why"}`);
+  if (g.waitingFor !== null && /(failed its last run|is refused)$/.test(g.waitingFor)) return fail(`not run, because ${g.waitingFor}`);
+  return { ready: false, failed: [], waiting: [`${g.table}: ${!g.serving ? g.waitingFor === null ? "being built" : `waiting for ${g.waitingFor}` :
+    `${Math.round(g.behindSeconds)} s behind its bases; its next run brings in what was synced before the wait`}`] };
 }

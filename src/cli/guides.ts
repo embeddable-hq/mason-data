@@ -54,8 +54,12 @@ ${keys}
     bases. A run shares the queue that first syncs use, one at a time, and reads nothing from your database.
     A run that fails leaves the table serving what it held, and mason status says why.
     A table may read another generated table. Parents are built first; a base's change re-runs the whole chain above
-    it over one snapshot, and the chain swaps in at once. A table that reads itself, through others or not, is refused;
-    a table whose parent is refused or failed is not run, and mason status says why.
+    it over one snapshot, and the chain swaps in at once. A table that reads itself, through others or not, is refused.
+    A parent whose run failed, or that was refused before it was ever built, holds back its children, and mason status
+    says why; a parent already built whose file is then refused keeps being re-run from what it was built from, and
+    carries its children. A table's lag is measured against the base, across the chain: the oldest change below it not
+    yet in it. So a child's target_lag can't be shorter than its parent's, and is refused if it is.
+    mason wait <table> waits until a table holds every change synced when the wait began.
 
   WHAT IS REFUSED, WITH THE WAY OUT
     A file with a mistake, or SQL Mason cannot store, is refused by file, key and reason. Nothing else stops, and a

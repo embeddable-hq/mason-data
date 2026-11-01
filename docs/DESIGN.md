@@ -397,7 +397,7 @@ table (and the source password) through the attachment. Others, each fixed with 
 ### The independent review (2026-10-28)
 
 **Decision.** Every PR is read for wrong answers by a reader in a fresh context before a person sees it, and its
-findings go back to the author in one message (CLAUDE.md "How work is done here").
+findings go back to the author in one message (CLAUDE.md "How work is done here", "The loop").
 
 **Why.** Three PRs landed in one day — three rewrites for a BI tool's slow shapes (date_trunc of a timestamptz, a
 LEFT lateral of json rows, the nulls idiom), jsonb's order and equality, and that order stored as a column — each by an
@@ -414,6 +414,29 @@ rounds took 44 minutes and 1 h 28 (three batches of findings, three cycles); CI 
 mostly overlapped. The batch landed in a little over three hours: the slowest implementation, one review cycle, and the
 CI runs that gated the merges — not the sum of the parts. Where time was spent on nothing new: each agent ran the full
 oracle several times while iterating, and one built a 20 M-row dataset twice.
+
+**A finding is a failure, never a patch (2026-11-01).** PR 170 (key-first GROUP BY, issue 134) took five findings of
+one class in four rounds: a sort key written as a constant, which the engine reads as an ordinal or refuses. The CI
+oracle found a text literal; then a second statement of the same shape; a re-check found a chain of casts and a
+derived table's `1 AS one` read through the table around it; the next a cast of a typed literal (`2147483648::int`,
+which Postgres evaluates at planning and refuses); the next a regression of that fix (`1.5::numeric`, now kept and
+written as a bare `1.5`). Every round the coordinator forwarded the reviewer's suggested edit as the fix, in 20 to 30
+calls, and the author applied it, correctly; the reviewer had named the class in round three ("the constant is decided
+from syntax where it should be decided from the analysis", CLAUDE.md's "a fact derived in several places") and the
+class was never the round's task. Neither the size of the pieces nor the agents' effort explained it: an author handed
+a patch applies the patch. So a finding goes back as the statement, Postgres's answer and Mason's, with its class; and
+the second finding of a class on one PR turns the next round into a class round, which writes the class's cases down
+first, tests each against Postgres, then fixes the decision. Its first such round ran at high effort, to see whether
+effort changes the count.
+
+**The loop as workflows, and the base's findings filed (Tom, 2026-11-01).** PR 207 took three rounds over a numeric
+quotient computed as a double, and the wrong answer grew each round: main had given it since before the PR, so the PR
+chased a class it did not make. A finding the base already answers wrong is now the base's: one issue per class, never
+a fix in the PR, and never counted toward the PR's class rule. PR 170 and PR 207 met one class, which per-PR counting
+could not see, so a run's classes carry to the PR stacked on it. The coordinator ran the loop by hand; it now runs as
+`.claude/workflows/pr-loop.js` and `.claude/workflows/issue-loop.js`, started with the Workflow tool, each stage an
+agent and the scripts' logic held by `tests/workflows.test.ts`. The brief and the plan moved to Opus with implementation, and Fable is kept for the reviews,
+where outreading the author is the point.
 
 ### The plan fixture (2026-10-28)
 
@@ -1226,7 +1249,15 @@ read-back as any plan). The whole chain is one transaction on the run's connecti
 snapshot, and one swap transaction on one writer's turn. A parent's new definition swaps in alone: its children's plans
 need the catalog to say its columns first.
 
-**Not yet**, by stage: a child's target against its parent's, lag across a chain and `mason wait` (2b), numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
+**Lag across a chain (stage 2b)** is the oldest base change anywhere below a table not yet in its rows: a parent's
+pending change is not in its child either, so the child's lag is the minimum of its own mark and its parents', taken
+recursively. A parent swapped in without its child marks the child at the oldest base change the swap brought, not at
+the swap, so lag stays measured against the base. Nothing new is stored: a restart's marks come back from the ledger's
+`basesSynced` as before, and the chain's from its parents'. A child's `target_lag` shorter than a parent's is refused
+(the issue: it could be no fresher than its parent). `mason wait <table>` reads `behindSince`, the oldest such change's
+time, and is done when it is null or after the wait began.
+
+**Not yet**, by stage: numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
 
 ## The Postgres API
 
@@ -2045,6 +2076,20 @@ the coordinator's own reviews took about 35 and 47 min per lead, and a red oracl
 Inside the agents the largest single cost was test runs: a 100 s test file run whole, and `fails-without` over it twice
 per proof, 36 min of one issue's agents in three proofs (2, 13 and 20 min, each of which built a
 copy of the tree as well); 43 min of commands ran past their own foreground limit and were moved to the background.
+
+The same day the waits that replaced those gaps were found late twice over. They slept 120 s between looks, and the
+one on a PR sent back for a fix watched only for its branch's next head, so its CI's red oracle was seen only when the
+next push woke it. And two PRs queued to auto-merge at a reviewed head were found still queued at a later, unread
+head: GitHub keeps a queued auto-merge across a push by someone with write access, and `--match-head-commit` is checked
+only when the merge is queued. The first replacement, `gh pr checks --watch --fail-fast` bounded by a perl alarm, was
+wrong twice more: `--watch` exits at once, as a failure, on a PR whose checks have not registered yet (just after a
+push), and the alarm, `exec`'d into `gh`, is caught and ignored by Go's runtime, so the bound bounded nothing (a 3 s
+alarm still running at 67 s). The waits became a loop of `gh pr checks` with a deadline, reading its exit code (0
+passed, 8 pending, 1 failed or no checks yet), and a PR sent back has its merge withdrawn.
+
+A brief names the shapes its tests must hold because on each of the three PRs of 2026-10-28 the first fix round was for
+a shape its brief had left out, and the tests its runs use because one issue's agents spent 36 min proving a whole slow
+file twice.
 
 ## A libc order, read level by level
 

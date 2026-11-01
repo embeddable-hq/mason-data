@@ -32,8 +32,8 @@ import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { caseTwins, joinsUsing, type QueryOutputs, type Typed } from "./pgtree.ts";
-import { evaluated } from "./constant-key.ts";
+import { caseTwins, joinsUsing, type Keys, type QueryOutputs, type Typed } from "./pgtree.ts";
+import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
@@ -256,6 +256,9 @@ class Rewriter {
   private readonly done = new WeakSet<Body>();
   /** the statement's own bodies (and copies of them): only these are rewritten, never a node a rule built */
   private readonly original = new WeakSet<Body>();
+  /** the sort keys `distinctOnSorted` appended, each with its ON expression's binding (the one resolver's, `keysBound`):
+   *  no key of the analysis's sort list, which holds the ORDER BY as written */
+  private readonly distinctAppended = new WeakMap<Body, { output: Output | null; constant: boolean | null }>();
   /** the statement's own bodies the walk has met, each in its one place (walk) */
   private readonly placed = new WeakSet<Body>();
   /** the bodies whose own rule's answer is being walked: met there, a body is in the place its rule put it */
@@ -872,15 +875,42 @@ class Rewriter {
     // evaluates, and may raise on at planning: written so DuckDB evaluates it, never as a bare non-integer literal
     if (Array.isArray(b.sortClause) && Array.isArray(b.targetList) && (b.op === undefined || b.op === "SETOP_NONE")) {
       const targets = b.targetList as AstNode[];
-      b.sortClause = (b.sortClause as AstNode[]).flatMap((s) => {
+      // (a key bound to an output or another clause's key by equality, spelled unlike it: by the one resolver)
+      const sorts = b.sortClause as AstNode[];
+      // (a key a DISTINCT ON appended (`distinctOnSorted`) is none of the analysis's sort list: the written keys are bound
+      // by it, an appended one as its ON expression was, by the DISTINCT ON's list)
+      const written = sorts.filter((s) => !this.distinctAppended.has(bodyOf(s)));
+      const nodeOf = (s: AstNode): AstNode | undefined => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined;
+      const writtenBound = this.keysBound(written.map(nodeOf), this.analysedQuery(targets)?.keys, "sorted", targets);
+      const bound = sorts.map((s) => {
+        const appended = this.distinctAppended.get(bodyOf(s));
+        return appended === undefined ? writtenBound[written.indexOf(s)]! : { ...appended, equal: false };
+      });
+      const starred = targets.some((t) => hasStar(bodyOf(t).val));
+      b.sortClause = sorts.flatMap((s, i) => {
         const sb = bodyOf(s);
         this.done.add(sb);
+        const out = bound[i]!.output;
         if (kindOf(s) === "SortBy" && sb.useOp === undefined) {
-          const out = this.outputOf(sb.node as AstNode, targets);
-          if (out?.twin !== true && this.typed(out !== null ? out.value : sb.node as AstNode)?.constant === true) return [];
+          if (out?.twin !== true && (bound[i]!.constant ?? this.typed(out !== null ? out.value : sb.node as AstNode)?.constant) === true) return [];
+        }
+        // (a key bound by equality is built over its own expression, which is the output's and carries its own typing)
+        // (a collated key bound by equality to a grouped output: its collation's keys read the grouped value, as a key
+        // named by the output's number or name does, `overGroups`)
+        if (bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(sb.node) && kindOf(sb.node as AstNode) === "CollateClause") sb.node = this.overGroups(sb.node as AstNode, b);
+        const as = sb.node;
+        // (a key bound by equality has no analysed node of its own where Postgres's tree reads it as the entry: it is
+        // typed as the output it is, so a jsonb's, a citext's or a collation's key is built for it)
+        if (bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(as) && this.typeOf(as as AstNode) === null && this.typeOf(out.value) !== null) this.typedLike.set(bodyOf(as as AstNode), out.value);
+        const built = this.sortBy(sb, targets, b, bound[i]!.equal ? null : out);
+        // a key bound to a computed output by EQUALITY, written as it is, is that output: its ordinal, so DuckDB reads
+        // the one value the list shows (`ORDER BY random()` beside `random() AS r` is r, never a second random()). A
+        // list with a * keeps its key: its outputs' numbers are Postgres's expansion
+        if (built === null && sb.node === as && bound[i]!.equal && out !== null && !starred && kindOf(out.value) !== "ColumnRef" && kindOf(s) === "SortBy" && sb.useOp === undefined) {
+          sb.node = { A_Const: { ival: { ival: out.target + 1 } } };
         }
         // (an integer the rewrite wrote is an ordinal it meant; any other bare literal DuckDB would refuse)
-        const written = this.sortBy(sb, targets, b) ?? [s];
+        const written = built ?? [s];
         for (const w of written) {
           const n = kindOf(w) === "SortBy" ? bodyOf(w).node as AstNode | undefined : undefined;
           if (n !== undefined && kindOf(n) === "A_Const" && bodyOf(n).ival === undefined) bodyOf(w).node = evaluated(n);
@@ -1015,24 +1045,100 @@ class Rewriter {
     const read = (e: AstNode): AstNode => { const o = this.outputOf(e, targets); return o !== null && !o.twin ? o.value : e; };
     const same = (x: AstNode, y: AstNode): boolean => sameTree(x, y) && sameTree(y, x);
     const keys = sorts.flatMap((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? [read(bodyOf(s).node as AstNode)] : []);
-    const added = (on as AstNode[]).filter((d) => {
+    // (each ON expression as the one resolver binds it, as keyedDistinct reads it: its output, and whether it is constant)
+    const bound = this.keysBound(on as AstNode[], this.analysedQuery(targets)?.keys, "distinct", targets);
+    const added = (on as AstNode[]).flatMap((d, i) => {
       const e = read(d);
-      return !keys.some((k) => same(k, e)) && kindOf(e) !== "ParamRef" && this.typed(e)?.constant !== true;
-    }).map((d) => ({ SortBy: { node: this.clone(d), sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }));
+      const constant = bound[i]!.constant ?? this.typed(e)?.constant;
+      if (keys.some((k) => same(k, e)) || kindOf(e) === "ParamRef" || constant === true) return [];
+      const key: AstNode = { SortBy: { node: this.clone(d), sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } };
+      this.distinctAppended.set(bodyOf(key), { output: bound[i]!.output, constant: bound[i]!.constant });
+      return [key];
+    });
     if (added.length > 0) b.sortClause = [...sorts, ...added];
   }
-
-  /** the output a number names, or null for a number past the list */
-  private outputAt(targets: readonly AstNode[], n: number): Output | null { return n >= 1 ? this.outputs(targets)[n - 1] ?? null : null; }
 
   /** the output an ORDER BY item reads: by its number, or by its bare name (SQL92's rule: an output before an input
    *  column; two outputs of one name reach here only as Postgres found them equal) */
   private outputOf(e: AstNode, targets: readonly AstNode[]): Output | null {
+    const outputs = this.outputs(targets);
+    return outputs[this.outputIndex(e, outputs)] ?? null;
+  }
+
+  /** the place in `outputs` of the output an ORDER BY or DISTINCT ON item reads by its number or bare name, or -1 */
+  private outputIndex(e: AstNode, outputs: readonly Output[]): number {
     const n = constInt(e);
-    if (n !== null) return this.outputAt(targets, n);
-    if (kindOf(e) !== "ColumnRef") return null;
+    if (n !== null) return n >= 1 && n <= outputs.length ? n - 1 : -1;
+    if (kindOf(e) !== "ColumnRef") return -1;
     const f = names(bodyOf(e).fields);
-    return f.length !== 1 ? null : this.outputs(targets).find((o) => o.name === f[0]) ?? null;
+    return f.length !== 1 ? -1 : outputs.findIndex((o) => o.name === f[0]);
+  }
+
+  /**
+   * WHETHER EACH KEY IS CONSTANT, by the entry Postgres bound it to (`keysConstant`, src/duck/constant-key.ts, the one
+   * resolver): a SELECT's ORDER BY or DISTINCT ON over its outputs (`targets`), or an aggregate's ORDER BY over its
+   * arguments (no `targets`: there a number is a value, never an output). A key's entry is known by its number or output
+   * name, or by an entry at its own offset (one Postgres made for it); one bound by equality is left to the resolver.
+   * null for a key it cannot tell (the analysis not found, a way that does not fit), whose own reading stands.
+   */
+  private keysConstant(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<boolean | null> {
+    return this.keysBound(nodes, keys, clause, targets).map((k) => k.constant);
+  }
+
+  /**
+   * EACH KEY OF A SELECT'S ORDER BY OR DISTINCT ON, AS POSTGRES BOUND IT: THE ONE RESOLVER (the class "an output not
+   * resolved to its column", its fourth round: the binding decides how a key is WRITTEN, not only whether it is
+   * constant). A key bound to an output, by its number, its output name (an alias that is also an input column
+   * included: ORDER BY and DISTINCT ON take the output) or an expression EQUAL to it (findTargetlistEntrySQL99), IS that
+   * output, and every writer of a key writes it through `output`: a key built over the output's expression, or, for a
+   * key bound by equality and written as it is, the output itself (`equal`: its ordinal), never a second evaluation of a
+   * volatile one. `constant` as `keysConstant`. With no analysis, the number or name alone binds.
+   */
+  private keysBound(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<{ output: Output | null; constant: boolean | null; equal: boolean }> {
+    const outputs = targets === undefined ? [] : this.outputs(targets);
+    const named = (n: AstNode | undefined): Output | null => n === undefined || !isNode(n) ? null : outputs[this.outputIndex(n, outputs)] ?? null;
+    if (keys === undefined) return nodes.map((n) => ({ output: named(n), constant: null, equal: false }));
+    const offsets = (n: AstNode): number[] => {
+      const b = bodyOf(n);
+      const own = typeof b.location === "number" && b.location >= 0 ? [b.location - this.base] : [];
+      const k = kindOf(n);
+      return (k === "TypeCast" || k === "CollateClause") && isNode(b.arg) ? [...own, ...offsets(b.arg as AstNode)] : own;
+    };
+    const known = nodes.map((n) => {
+      if (n === undefined || !isNode(n)) return -1;
+      const out = targets === undefined ? -1 : this.outputIndex(n, outputs);
+      // (an output's place is its entry's: Postgres lists the outputs first, a *'s columns each one)
+      if (out >= 0) return out;
+      const at = offsets(n);
+      const own = keys.entries.findIndex((e) => e.at !== null && at.includes(e.at));
+      if (own >= 0) return own;
+      // bound by equality: whether it reads a column (a subquery's own columns aside), and its constancy where the
+      // same text was analysed elsewhere (`typed`'s shape)
+      const text = JSON.stringify(n);
+      const t = this.typed(n);
+      return { reads: text.includes("\"SubLink\"") ? null : text.includes("\"ColumnRef\""), constant: t === null ? null : t.constant === true } satisfies Unbound;
+    });
+    // (a key no entry can be told for leaves the clause's reading to each key's own)
+    if (known.includes(-1)) return nodes.map((n) => ({ output: named(n), constant: null, equal: false }));
+    return keysBound(keys, clause, known).map((k, i) => {
+      const by = named(nodes[i]);
+      if (by !== null) return { output: by, constant: k.constant, equal: false };
+      // (an entry Postgres made an output is the output at its place: it lists the outputs first, a *'s columns each one)
+      const output = k.entry !== null && keys.entries[k.entry]?.output === true ? outputs[k.entry] ?? null : null;
+      return { output, constant: k.constant, equal: output !== null };
+    });
+  }
+
+  /**
+   * THE OUTPUT A GROUP BY ITEM NAMES (the one resolver's GROUP BY reading): its number, or its bare name where Postgres
+   * read no input column of that name (GROUP BY prefers the column, the opposite of ORDER BY), or null.
+   */
+  private groupOutput(g: AstNode, targets: readonly AstNode[]): Output | null {
+    if (constInt(g) !== null) return this.outputOf(g, targets);
+    if (kindOf(g) !== "ColumnRef" || this.typedAt(g)?.node === "VAR") return null;
+    // (a *'s column is an input column by that name: never an output name here)
+    const out = this.outputOf(g, targets);
+    return out?.star === true ? null : out;
   }
 
   /**
@@ -1087,7 +1193,7 @@ class Rewriter {
         continue;
       }
       const n = constInt(by);
-      const out = n === null ? null : this.outputAt(targets, n);
+      const out = n === null ? null : this.outputOf(by, targets);
       if (out === null) continue;
       const value = out.value;
       if (out.star) {
@@ -1123,13 +1229,10 @@ class Rewriter {
     const targets = (b.targetList ?? []) as AstNode[];
     // a target the GROUP BY names by its ordinal or its output name is a key itself, and DuckDB reads it there: untouched
     const keyTargets = new Set<number>();
+    // (by the one resolver's GROUP BY reading: a number, or a bare name that is no input column)
     for (const g of groups) {
-      const n = constInt(g);
-      const out = n === null ? null : this.outputAt(targets, n);
-      if (out !== null) { keyTargets.add(out.target); continue; }
-      // a bare name is an output name only where it is no input column (Postgres prefers the column)
-      const f = kindOf(g) === "ColumnRef" ? names(bodyOf(g).fields) : [];
-      if (f.length === 1 && this.typedAt(g)?.node !== "VAR") targets.forEach((t, i) => { if (bodyOf(t).name === f[0]) keyTargets.add(i); });
+      const out = this.groupOutput(g, targets);
+      if (out !== null) keyTargets.add(out.target);
     }
     const grouped = new Set([...groups.map(shapeOf), ...[...keyTargets].map((i) => shapeOf(bodyOf(targets[i]!).val as AstNode))]);
     // `depth`: the subqueries between here and this query (a correlated subquery's column of this query is levelsUp 1)
@@ -1185,15 +1288,36 @@ class Rewriter {
     const offset = b.limitOffset as AstNode | undefined;
     delete b.limitOffset;
     const rankName = "__mason_rank";
-    const sortCopy = order.map((o) => this.clone(o));
+    // EVERY READER OF THE SORT LIST READS A KEY AS THE SELECT'S ORDER BY DOES (the class "an output not resolved to its
+    // column"): a number or an output name there is that output, and a window's ORDER BY has no outputs (DuckDB reads
+    // `rank() OVER (ORDER BY 1)` as a constant, every row a tie), so the window's key is the output's expression
+    const targets = (b.targetList as AstNode[] | undefined) ?? [];
+    const starred = targets.some((t) => hasStar(bodyOf(t).val));
+    const asOutput = (n: AstNode): AstNode => {
+      const at = kindOf(n) === "A_Const" ? constInt(n) : null;
+      const name = kindOf(n) === "ColumnRef" && names(bodyOf(n).fields).length === 1 ? names(bodyOf(n).fields)[0] : undefined;
+      const target = at !== null ? (starred ? undefined : targets[at - 1])
+        : name !== undefined ? targets.find((t) => !hasStar(bodyOf(t).val) && bodyOf(t).name === name) : undefined;
+      return target !== undefined && isNode(bodyOf(target).val) ? evaluated(this.clone(bodyOf(target).val as AstNode)) : this.clone(n);
+    };
+    const sortCopy = order.map((o) => kindOf(o) === "SortBy" && isNode(bodyOf(o).node) ? { SortBy: { ...bodyOf(this.clone(o)), node: asOutput(bodyOf(o).node as AstNode) } } : this.clone(o));
     for (const s of sortCopy) this.done.add(bodyOf(s));
+    // A VOLATILE VALUE EVALUATED TWICE (the class): the window's key would be a second random(), never the one shown, and
+    // DuckDB refuses a volatile window key raw (42804). Refused by name, as a window ordered by one is
+    const calls = (x: unknown): boolean => Array.isArray(x) ? x.some(calls) : x !== null && typeof x === "object"
+      && ((isNode(x) && kindOf(x) === "FuncCall" && VOLATILE.has(lastName(bodyOf(x).funcname))) || Object.values(isNode(x) ? bodyOf(x) : x as Body).some(calls));
+    if (calls(sortCopy)) {
+      throw new Unrewritable("FETCH … WITH TIES ordered by random() (or another volatile function) is not supported by Mason: its ties are ranked by a window, which would draw the value again",
+        "compute it in a subquery and order by its column: SELECT … FROM (SELECT *, random() AS r FROM t) AS s ORDER BY r FETCH FIRST n ROWS WITH TIES", "volatile-window");
+    }
     // (every key a constant, none is left: every row ties, rank() OVER () is 1 for each)
     const rank: AstNode = { FuncCall: { funcname: [S("rank")], over: { ...(sortCopy.length > 0 ? { orderClause: sortCopy } : {}), frameOptions: 1058 }, funcformat: "COERCE_EXPLICIT_CALL" } };
     this.done.add(bodyOf(rank));
     b.targetList = [...(b.targetList as AstNode[]), { ResTarget: { name: rankName, val: rank } }];
     const inner: AstNode = { SelectStmt: b };
     // the rank of the first row past the offset is offset + 1; a row is kept while its rank is within offset + n
-    const bound = offset === undefined ? count : op("+", offset, count);
+    // (the offset is read twice, here and as the outer LIMIT's OFFSET: one copy each)
+    const bound = offset === undefined ? count : op("+", this.clone(offset), count);
     const outer: Body = {
       targetList: [{ ResTarget: { val: { ColumnRef: { fields: [{ A_Star: {} }] } } } }],
       fromClause: [{ RangeSubselect: { subquery: inner, alias: { aliasname: "__mason_ties" } } }],
@@ -1966,6 +2090,12 @@ class Rewriter {
     if (k === "FuncCall" && lastName(b.funcname) === "count") return true;
     if (k === "FuncCall" && ["sum", "min", "max", "any_value"].includes(lastName(b.funcname)) && args.length === 1) return this.duckExact(args[0]!);
     if (k === "CaseExpr" && t === null) return [...args.map((w) => bodyOf(w).result), ...(b.defresult === undefined ? [] : [b.defresult])].every((r) => isNode(r) && this.duckExact(r));
+    // a text literal numeric_in reads, cast to a numeric (`'1.5'::numeric`), is written as DuckDB's decimal literal or a
+    // DECIMAL(p, s) cast of the text (the cast's writer: `decimalConst`), exact as a numeric literal is
+    if (k === "TypeCast" && isNode(b.arg) && constString(b.arg) !== null && numericLiteral(constString(b.arg)!) !== null && this.displayScale(n) !== null) {
+      const p = ((b.typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m))[0];
+      if (p === undefined || (p !== null && p <= 38)) return true;
+    }
     // a declared scale is DuckDB's exact DECIMAL only where every numeric it is computed from is exact
     if (this.displayScale(n) !== null) return operandsOf(n).every((o) => this.typeOf(o) !== NUMERIC || this.duckExact(o));
     return false;
@@ -2167,12 +2297,13 @@ class Rewriter {
   }
 
   /** a SortBy: its expression's sort keys under its collation (several under a libc one), each with its direction */
-  private sortBy(b: Body, targets: AstNode[] | null, select: Body | null): AstNode[] | null {
+  private sortBy(b: Body, targets: AstNode[] | null, select: Body | null, bound?: Output | null): AstNode[] | null {
     let e = b.node as AstNode;
     if (targets !== null) {
-      const out = this.outputOf(e, targets);
+      // (the output the one resolver bound the key to, where the caller has it: `keysBound`)
+      const out = bound !== undefined ? bound : this.outputOf(e, targets);
       if (out?.twin === true) throw this.twinRefused();
-      if (out !== null) e = this.clone(out.value);
+      if (out !== null) e = this.overGroups(this.clone(out.value), select);
     }
     // a derived table's column read through `s.*` (`SELECT s.* FROM (…) AS s ORDER BY s.pod`, a tool's wrapper): Postgres
     // analysed the ORDER BY as the star's expansion, at no offset of its own, so the column has no type here — it is the
@@ -2195,6 +2326,37 @@ class Rewriter {
     if (this.typeOf(e) === BPCHAR) { e = fn("rtrim", [e]); this.typedLike.set(bodyOf(e), b.node as AstNode); b.node = e; }
     if (c === null || (c.kind === "bytes" && kindOf(b.node as AstNode) !== "CollateClause")) return null;
     return this.sortKeys(e, c).map((k) => ({ SortBy: { ...b, node: k } }));
+  }
+
+  /**
+   * AN OUTPUT'S EXPRESSION AS A KEY BUILT OVER IT READS IT IN A GROUPED SELECT (the class "an output not resolved to its
+   * column"): a collation's keys, citext's lower() or jsonb's order key are built over the value under the output's
+   * COLLATE, which is no grouped expression when the GROUP BY groups the output itself (`t.s COLLATE "und-x-icu" AS x
+   * … GROUP BY 1 ORDER BY 1`: DuckDB refused t.s, "must appear in the GROUP BY clause"). Every row of a group holds one
+   * such value, so it is read through any_value. A grouped expression itself, or one holding an aggregate or a window,
+   * stays as it is.
+   */
+  private overGroups(e: AstNode, select: Body | null): AstNode {
+    const groups = (select?.groupClause ?? []) as AstNode[];
+    if (select === null || groups.length === 0 || groups.some((g) => kindOf(g) === "GroupingSet")) return e;
+    const collated = kindOf(e) === "CollateClause" && isNode(bodyOf(e).arg);
+    const value = collated ? bodyOf(e).arg as AstNode : e;
+    // (DuckDB groups `t.s COLLATE …` as that expression: the bare t.s under it is not grouped)
+    const grouped = new Set(groups.map((g) => shapeOf(this.groupedExpression(g, select))));
+    if (grouped.has(shapeOf(value)) || kindOf(value) === "A_Const") return e;
+    const aggregated = (v: unknown): boolean => {
+      if (Array.isArray(v)) return v.some(aggregated);
+      if (v === null || typeof v !== "object") return false;
+      if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || ["any_value", "count"].includes(lastName(bodyOf(v).funcname)))) return true;
+      if (isNode(v) && kindOf(v) === "SubLink") return true;
+      return Object.values(isNode(v) ? bodyOf(v) : v as Body).some(aggregated);
+    };
+    if (aggregated(value)) return e;
+    const read = fn("any_value", [value]);
+    this.typedLike.set(bodyOf(read), value);
+    if (!collated) return read;
+    bodyOf(e).arg = read;
+    return e;
   }
 
   /** the target a derived table's column names (`s.pod`, or `pod` where one derived table is read): the subquery's or
@@ -2229,16 +2391,7 @@ class Rewriter {
 
   /** a GROUP BY item as the expression it groups: an ordinal or an output name is that target's */
   private groupedExpression(g: AstNode, b: Body): AstNode {
-    const targets = (b.targetList ?? []) as AstNode[];
-    const n = constInt(g);
-    const out = n === null ? null : this.outputAt(targets, n);
-    if (out !== null) return out.value;
-    if (kindOf(g) === "ColumnRef") {
-      const f = names(bodyOf(g).fields);
-      const named = f.length === 1 && this.typed(g) === null ? targets.filter((t) => bodyOf(t).name === f[0]) : [];
-      if (named.length === 1) return bodyOf(named[0]!).val as AstNode;
-    }
-    return g;
+    return this.groupOutput(g, (b.targetList ?? []) as AstNode[])?.value ?? g;
   }
 
   /** a value Mason cannot sort, group or compare as Postgres does: a jsonb where it is not keyed (`compared` keys it),
@@ -2394,10 +2547,23 @@ class Rewriter {
     // (a DISTINCT ON compares its ON expressions alone: the targets beside them are only read)
     if (plain) for (const v of values) if (this.typeOf(v) !== JSONB) this.comparable(v, "SELECT DISTINCT");
     if (!plain) {
-      b.distinctClause = (b.distinctClause as AstNode[]).map((d) => {
-        // (an output's number or bare name, SQL92's rule as an ORDER BY's: the output's expression, typed and keyed here,
-        // so every form sent reads the key, never the raw value an alias names)
-        const out = this.outputOf(d, targets);
+      // A CONSTANT KEY (the class, issue 134: a constant key written into the engine as a bare literal, in any clause;
+      // src/duck/constant-key.ts): a DISTINCT ON key the analysis put a Const, after its output name or number is
+      // resolved, divides no rows, and written as the bare literal the engine refuses it (42804) or reads an ordinal. It
+      // is no key; with none left every row is one set, so one key the engine evaluates, which divides nothing either
+      // (a key bound to an output or the ORDER BY's key by equality, spelled unlike it: by the one resolver)
+      const ons = b.distinctClause as AstNode[];
+      // (a key bound to an output, by its number, its name or an equal expression, is that output: the one resolver;
+      // a jsonb's equality key is built over the output's expression, a key named by its alias included)
+      const bound = this.keysBound(ons.map((d) => isNode(d) ? d : undefined), this.analysedQuery(targets)?.keys, "distinct", targets);
+      const keys = ons.flatMap((d, i) => {
+        const out = bound[i]!.output;
+        return !isNode(d) || out?.twin === true || (bound[i]!.constant ?? this.typed(out !== null ? out.value : d)?.constant) !== true ? [{ d, out }] : [];
+      });
+      if (keys.length === 0) { b.distinctClause = [evaluated(strConst("one set"))]; return; }
+      b.distinctClause = keys.map(({ d, out }) => {
+        // (the output's expression, typed and keyed here, so every form sent reads the key, never the raw value an alias
+        // names; a numeric decided exactly by its exact key: exactKey)
         const e = out !== null && !out.twin ? out.value : d;
         const exact = this.exactKey(e);
         if (exact !== null) return exact;
@@ -2832,9 +2998,24 @@ class Rewriter {
       const type = duckTypeOf(t.type, t.typmod);
       if (type !== null && !(t.type === NUMERIC && t.typmod < 0)) return cast(args[0]!, type);
     }
+    // A CONSTANT KEY of an aggregate's ORDER BY (the class, issue 134; src/duck/constant-key.ts): a key the analysis put
+    // a Const orders nothing, and written as the bare literal the engine refuses it (42804, reported as 42803). It is no
+    // key, and with none left no ORDER BY. An ordered-set aggregate's key is its VALUE, so it stays (`withinGroup`)
+    // A key equal to an argument by the analysis (`array_agg(1.5::numeric ORDER BY '1.5'::numeric)`) is that argument:
+    // resolved by the one resolver (`keysConstant`)
+    if (b.agg_within_group !== true && Array.isArray(b.agg_order)) {
+      const order = b.agg_order as AstNode[];
+      const constant = this.keysConstant(order.map((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined), t?.keys, "sorted");
+      b.agg_order = order.filter((s, i) => {
+        const sb = bodyOf(s);
+        return !(kindOf(s) === "SortBy" && sb.useOp === undefined && isNode(sb.node) && (constant[i] ?? this.typed(sb.node as AstNode)?.constant) === true);
+      });
+      if ((b.agg_order as AstNode[]).length === 0) delete b.agg_order;
+    }
     // an aggregate over DISTINCT values sorts them to find the duplicates, so Postgres's string_agg / array_agg (DISTINCT)
-    // lists them in that order (the argument's, under its collation); DuckDB's in any order
-    if (b.agg_distinct === true && b.agg_order === undefined && args[0] !== undefined && ["string_agg", "array_agg", "json_agg", "jsonb_agg"].includes(name)) {
+    // lists them in that order (the argument's, under its collation); DuckDB's in any order. A constant argument is one
+    // value, and would be a constant key (above)
+    if (b.agg_distinct === true && b.agg_order === undefined && args[0] !== undefined && this.typed(args[0])?.constant !== true && ["string_agg", "array_agg", "json_agg", "jsonb_agg"].includes(name)) {
       b.agg_order = [{ SortBy: { node: this.clone(args[0]), sortby_dir: "SORTBY_DEFAULT", sortby_nulls: "SORTBY_NULLS_DEFAULT" } }];
       this.original.add(bodyOf((b.agg_order as AstNode[])[0]!));
     }
@@ -3204,6 +3385,14 @@ class Rewriter {
     // a jsonb's position in its order, or its most frequent value: DuckDB would pick by its text
     if (key !== undefined && (this.typeOf(key) === JSONB || this.typeOf(key) === JSONB_ARRAY)) {
       throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY a jsonb) is not supported by Mason (Postgres orders jsonb by its own rules)`, "ORDER BY the value … LIMIT 1 OFFSET n in a subquery", "jsonb-compare");
+    }
+    // a key the analysis put a Const (the class, issue 134; src/duck/constant-key.ts) is the value aggregated, and written
+    // as the bare literal the engine's WITHIN GROUP refuses it (42804): every row holds it, so mode() and percentile_disc
+    // take it as an argument, which the engine evaluates (NULL where no row is aggregated, as Postgres's)
+    if (key !== undefined && order.length === 1 && this.typed(key)?.constant === true && (name === "mode" || name === "percentile_disc")) {
+      const args = (b.args ?? []) as AstNode[];
+      if (name === "mode") return { FuncCall: { ...b, args: [this.clone(key)], agg_order: undefined, agg_within_group: undefined } };
+      if (args.length === 1) return { FuncCall: { ...b, funcname: [S("quantile_disc")], args: [this.clone(key), args[0]!], agg_order: undefined, agg_within_group: undefined } };
     }
     const c = key === undefined ? null : this.textCollation(key);
     if (c === null || c.kind === "bytes") return null;
