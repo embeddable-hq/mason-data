@@ -95,6 +95,8 @@ test("merge-head: a merge pinned to its head, and other gh commands, are allowed
   assertAllowed("merge-head", "gh pr merge 12 --merge --match-head-commit=36c6ea8f");
   assertAllowed("merge-head", "gh pr view 12 --json headRefOid --jq .headRefOid");
   assertAllowed("merge-head", "git merge origin/main");
+  // withdrawing a queued merge takes no head: gh refuses --match-head-commit beside --disable-auto
+  assertAllowed("merge-head", "gh pr merge 12 --disable-auto");
 });
 
 // ------------------------------------------------------------------ no re-run of an unchanged tree
@@ -109,10 +111,16 @@ test("no-rerun: reading a run is allowed", () => {
   for (const command of ["gh run view 123 --log-failed", "gh run list", "echo gh run rerun"]) assertAllowed("no-rerun", command);
 });
 
-test("the PreToolUse hooks let every other tool through", () => {
-  for (const name of ["test-timeout", "merge-head", "no-rerun"]) {
-    const r = run(name, { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/x" } });
-    assert.deepEqual([r.code, r.stderr], [0, ""], name);
+test("the PreToolUse hooks let every other tool through, and allow on an empty or malformed input", () => {
+  for (const name of ["test-timeout", "merge-head", "no-rerun", "wake-up"]) {
+    if (name !== "wake-up") {
+      const r = run(name, { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/x" } });
+      assert.deepEqual([r.code, r.stderr], [0, ""], name);
+    }
+    for (const input of ["", "not json", "{\"tool_name\":\"Ba", "null"]) {
+      const r = spawnSync(process.execPath, [hook(name)], { input, encoding: "utf8", timeout: 30_000 });
+      assert.deepEqual([r.status, r.stdout, r.stderr], [0, "", ""], `${name} on ${JSON.stringify(input)}`);
+    }
   }
 });
 
@@ -120,6 +128,8 @@ test("the PreToolUse hooks let every other tool through", () => {
 
 const assistant = (...content: unknown[]): unknown => ({ type: "assistant", message: { role: "assistant", content } });
 const use = (id: string, name: string, input: unknown): unknown => ({ type: "tool_use", id, name, input });
+const prompt = (content: unknown): unknown => ({ type: "user", message: { role: "user", content } });
+const result = (id: string): unknown => ({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } });
 const notification = (id: string): unknown => ({
   type: "user", message: { role: "user", content: `<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>${id}</tool-use-id>\n<status>completed</status>` },
 });
@@ -142,8 +152,10 @@ test("wake-up: a queued merge or a message to a lead with no background wait aft
   assert.equal(merge.code, 0);
   assert.match(merge.stdout, /a merge is queued/);
   assert.match(merge.stdout, WARNS);
-  const send = stop(t, [assistant(use("t1", "SendMessage", { to: "lead", message: "x" }))]);
+  const send = stop(t, [assistant(SEND)]);
   assert.deepEqual([send.code, /a lead is working/.test(send.stdout)], [0, true]);
+  // in this turn, after a prompt, with tool results and a notification between: still this turn
+  assert.match(stop(t, [prompt("merge 12"), assistant(MERGE), result("t1"), notification("t9"), assistant(use("t3", "Bash", { command: "ls" }))]).stdout, WARNS);
   // a wait started BEFORE the merge, or one that has already finished, wakes nobody after it
   assert.match(stop(t, [assistant(WAIT), assistant(MERGE)]).stdout, WARNS);
   assert.match(stop(t, [assistant(SEND), assistant(WAIT), notification("t2")]).stdout, WARNS);
@@ -159,6 +171,11 @@ test("wake-up: a background wait still running after the merge or the message, o
     [assistant(SEND), assistant(use("t4", "Monitor", { command: "x" }))],
     [assistant(use("t5", "Bash", { command: "gh pr merge 3 --merge --match-head-commit a" }))], // not queued: nothing to wait on
     [assistant(use("t6", "Bash", { command: "ls" }))],
+    // a SendMessage continues a sub-agent, whose end wakes the session: no wake-up needed
+    [assistant(use("t7", "SendMessage", { to: "agent", message: "x" }))],
+    // a trigger in an EARLIER turn was that turn's to resolve, or to be warned of
+    [prompt("merge 12"), assistant(MERGE), result("t1"), prompt("now the other thing"), assistant(use("t8", "Bash", { command: "ls" }))],
+    [assistant(SEND), prompt([{ type: "text", text: "next" }])],
   ]) {
     const r = stop(t, entries);
     assert.deepEqual([r.code, r.stdout, r.stderr], [0, "", ""], JSON.stringify(entries));

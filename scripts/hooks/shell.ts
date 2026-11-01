@@ -1,5 +1,5 @@
 /**
- * What the PreToolUse hooks share (CLAUDE.md "Hooks"): the hook's input, and a Bash command line cut into the simple
+ * What the PreToolUse hooks share (CLAUDE.md "Local gates"): the hook's input, and a Bash command line cut into the simple
  * commands it runs, each as its words with the quotes removed and the leading `VAR=value` / `env` / `time` dropped.
  *
  * It is a reader of the shapes a session types, not a shell: `cd x && node --test …`, `A=1 node --test … | tail`,
@@ -22,9 +22,18 @@ export interface HookInput {
   session_crons?: unknown;
 }
 
-/** The hook's JSON on stdin. A hook that cannot read it throws: Claude Code shows exit 1 as a hook error, and runs the call. */
+/**
+ * The hook's JSON on stdin, or `{}` when it is empty or not JSON: such an input names no command to check, so the hook
+ * allows (exit 0) rather than print a hook error on every call.
+ */
 export function readInput(): HookInput {
-  return JSON.parse(fs.readFileSync(0, "utf8")) as HookInput;
+  try {
+    const input: unknown = JSON.parse(fs.readFileSync(0, "utf8"));
+    return typeof input === "object" && input !== null ? input as HookInput : {};
+  } catch {
+    // Narrow by construction: only the read and the parse are inside; what they cannot give is "nothing to check".
+    return {};
+  }
 }
 
 /** The Bash command of a PreToolUse input, or undefined for any other tool. */

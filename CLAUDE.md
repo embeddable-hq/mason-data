@@ -142,7 +142,8 @@ One laptop is shared by every session, and one gate fills it: gates are the larg
 rule says what detects it, or why nothing does: most are habits that only a session's transcript shows, which no test
 reads. Some detectors are Claude Code hooks, wired in `.claude/settings.json` from `scripts/hooks/`
 (`tests/hooks.test.ts`): a PreToolUse hook blocks the command, and its one-line message says what to run instead; the
-Stop hook only warns.
+Stop hook only warns. They resolve against `$CLAUDE_PROJECT_DIR`, the main checkout even from a worktree, so a main
+checkout on a branch without `scripts/hooks/` prints a hook error on each Bash call (not a block).
 
 - **While working, the tests nearest the change**: `node --test <file>`, with `--test-name-pattern` for one test, and
   `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. **A full integration run is not an iteration tool**,
@@ -184,8 +185,9 @@ Stop hook only warns.
   no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release,
   merge on the owner's word. Once that is so, `gh pr merge <n> --auto --merge --match-head-commit <sha>` queues it for
   the checks still running, pinned to the head that was read, and a push after it needs reading again. Detector: the
-  hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`. PR 89 had not merged itself
-  some while after its last check went green and was merged by hand, so confirm a PR landed.
+  hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`;
+  `gh pr merge <n> --disable-auto` withdraws a queued merge. PR 89 had not merged itself some while after its last
+  check went green and was merged by hand, so confirm a PR landed.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
   to fix, or it is a flake, the next rule. Detector: the hook `scripts/hooks/no-rerun.ts` blocks `gh run rerun`; a
   local gate run again on an unchanged tree, nothing detects (the gate could compare the tree's hash, and does not).
