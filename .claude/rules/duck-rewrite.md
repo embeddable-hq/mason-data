@@ -158,6 +158,10 @@ paths:
 - **An output's number or bare name is read through `Rewriter.outputs` alone** (issue 112): a target is one output, a `*`
   one per column from Postgres's expansion (`Typed.column`), so every rule meets a star's column as the column named. A
   `targets[n - 1]` of a number is the wrong column beside a `*` (the class: an output not resolved to its column).
+  Its second instance (PR 170): a key Postgres binds to an output or another clause's key by EQUALITY OF THE ANALYSED
+  EXPRESSIONS (`'1.5'::numeric` to `1.5::numeric AS v`) leaves no node at its offset, so whether such a key is constant is
+  read by one resolver, `keysConstant` (src/duck/constant-key.ts), from the analysis's own sort lists (`Keys`,
+  src/duck/pgtree.ts), never from a syntactic match. Detector: tests/duck-wire.test.ts "a key equal to an output …".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its

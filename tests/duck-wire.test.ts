@@ -2503,6 +2503,70 @@ test("a constant key in any clause is the analysis's Const: DISTINCT ON, GROUP B
   } finally { await c.end(); }
 });
 
+// THE THIRD CLASS ROUND (PR 170; CI's oracle leg 2 and the review): a key Postgres binds to an output, or to another
+// clause's key, by EQUALITY OF THE ANALYSED EXPRESSIONS (findTargetlistEntrySQL99) has no node of its own at its offset.
+// Spelled unlike the expression it equals (`'1.5'::numeric` beside `1.5::numeric AS v`), a syntactic match missed it, no
+// analysis was read there, and the constant was written bare: 42804, or an integer read as an ordinal. The second
+// instance of the class "an output not resolved to its column"; the case list is PR 170's (K1-K8, N1-N3)
+const equalSpellings = { numeric: ["1.5::numeric", "'1.5'::numeric", "CAST('1.5' AS numeric)", "numeric '1.5'", "CAST(1.5 AS numeric)"], int: ["1::int", "'1'::int", "CAST(1 AS int)", "int '1'"] };
+test("a key equal to an output or another key by the analysis is resolved to it, however each is spelled", async () => {
+  const c = await client();
+  const outcome = (p: Promise<unknown>): Promise<unknown> => p.then((r) => r, (e: { code?: string }) => ({ error: e.code }));
+  const wrong: string[] = [];
+  const alike = async (sql: string): Promise<void> => {
+    const [mason, pg] = [await outcome(answer(c, sql)), await outcome(postgres(sql))];
+    try { assert.deepEqual(mason, pg); } catch { wrong.push(`${sql}: Mason ${JSON.stringify(mason)}, Postgres ${JSON.stringify(pg)}`); }
+  };
+  try {
+    for (const spellings of Object.values(equalSpellings)) {
+      for (const out of spellings) {
+        for (const key of spellings) {
+          if (key === out) continue;
+          // K1-K3: ORDER BY against an output, plain, under a join, under GROUP BY, at depth
+          await alike(`SELECT l.id, ${out} AS v FROM late l ORDER BY ${key}, l.id DESC LIMIT 3`);
+          await alike(`SELECT l.id, ${out} AS v FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY ${key}, l.id DESC LIMIT 3`);
+          await alike(`SELECT l.c, ${out} AS v, count(*) AS n FROM late l GROUP BY l.c ORDER BY ${key}, l.c DESC LIMIT 3`);
+          await alike(`SELECT s.id FROM (SELECT l.id, ${out} AS v FROM late l ORDER BY ${key}, l.id DESC LIMIT 3) s ORDER BY s.id`);
+          // K4: a key against a key of the same clause
+          await alike(`SELECT l.id FROM late l ORDER BY ${out}, ${key}, l.id DESC LIMIT 3`);
+          // K5, K6: DISTINCT ON against an output, against the ORDER BY's key, the ORDER BY by expression and by number
+          await alike(`SELECT DISTINCT ON (${key}, l.c) l.c, ${out} AS v, l.id FROM late l ORDER BY ${out}, l.c DESC, l.id LIMIT 3`);
+          await alike(`SELECT DISTINCT ON (${key}, l.c) l.c, ${out} AS v, l.id FROM late l ORDER BY 2, l.c DESC, l.id LIMIT 3`);
+          await alike(`SELECT DISTINCT ON (${key}, l.c) l.c, l.id FROM late l ORDER BY ${out}, l.c DESC, l.id LIMIT 3`);
+          await alike(`SELECT DISTINCT ON (l.c, ${key}) l.c, l.id FROM late l ORDER BY l.c DESC, ${out}, l.id LIMIT 3`);
+          // K7: an aggregate's ORDER BY against its argument
+          await alike(`SELECT l.c, (array_agg(${out} ORDER BY ${key}, l.id DESC))[1] AS a, count(*) AS n FROM late l GROUP BY l.c ORDER BY 1 LIMIT 3`);
+          // K8: the fold, a wrapper's key against its output over a derived table
+          await alike(`SELECT s.id, ${out} AS k FROM (SELECT l.id, l.c FROM late l) s ORDER BY ${key}, s.id DESC LIMIT 3`);
+          await alike(`SELECT s.id, s.v FROM (SELECT l.id, ${out} AS v FROM late l) s ORDER BY ${key}, s.id DESC LIMIT 3`);
+        }
+      }
+    }
+    // N1-N3: an expression equal to an output, no constant: it still orders, as the output it is
+    for (const sql of [
+      "SELECT c, l.id FROM late l ORDER BY l.c DESC, l.id LIMIT 3",
+      "SELECT l.c, id FROM late l ORDER BY c DESC, l.id DESC LIMIT 3",
+      "SELECT DISTINCT ON (l.c) c, l.id FROM late l ORDER BY c DESC, l.id DESC LIMIT 3",
+      "SELECT DISTINCT ON (c) l.c, l.id FROM late l ORDER BY l.c DESC, l.id LIMIT 3",
+      "SELECT l.id, l.id::numeric + 1.5 AS v FROM late l ORDER BY l.id + 1.5 DESC LIMIT 3",
+      "SELECT l.id, l.id + 1.5 AS v FROM late l ORDER BY l.id::numeric + 1.5 DESC LIMIT 3",
+      "SELECT DISTINCT ON (l.id + 1.5) l.id, l.id::numeric + 1.5 AS v FROM late l ORDER BY l.id::numeric + 1.5 DESC LIMIT 3",
+      "SELECT name, c.id FROM late_c c ORDER BY c.name DESC LIMIT 3",
+      "SELECT c.name, id FROM late_c c ORDER BY name COLLATE \"C\" DESC, c.id LIMIT 3",
+      // a Const output beside an equal-by-analysis column key: the Const is dropped, the column orders
+      "SELECT l.id, 1.5::numeric AS v, c FROM late l ORDER BY '1.5'::numeric, l.c DESC, id DESC LIMIT 3",
+      // K8, the fold: a derived table's Const column read by a key spelled unlike the wrapper's output (a cast to its own
+      // type is the column to Postgres), which the fold makes the literal
+      ...["1 AS one", "'x'::text AS one", "1.5::numeric AS one"].flatMap((one) => [
+        `SELECT s.id, s.one FROM (SELECT l.id, ${one} FROM late l) s ORDER BY CAST(s.one AS ${one.includes("'") ? "text" : one.includes(".") ? "numeric" : "int"}), s.id DESC LIMIT 3`,
+        `SELECT s.id, s.one AS w FROM (SELECT l.id, ${one} FROM late l) s ORDER BY (one), s.id DESC LIMIT 3`,
+        `SELECT s.id, one FROM (SELECT l.id, ${one} FROM late l) s ORDER BY s.one, 1 DESC LIMIT 3`,
+      ]),
+    ]) await alike(sql);
+    assert.deepEqual(wrong, []);
+  } finally { await c.end(); }
+});
+
 // ISSUE 112: an output's number or bare name beside a * reached the engine as written: no rule met the column it is
 test("an output of a * is read by its number and its bare name as the column it is", async () => {
   const c = await client();
