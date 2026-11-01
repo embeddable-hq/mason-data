@@ -164,6 +164,12 @@ export interface GeneratedHost {
   connection(): DuckConnection;
   /** the run's connection settled as a session with no role is (UTC, under `public` once it exists): before a plan */
   settle(): Promise<void>;
+  /** THE CHECK'S OWN CONNECTION, never the run's: a review runs whenever it is asked, and a run holds its connection in a
+   *  transaction across awaits, so a check on the run's connection ran its settle and its prepare INSIDE that transaction,
+   *  interleaved with the build's statements, unserialised (PR 202 round 13: the engine stuck from a check's settle while
+   *  a build had the connection). Set up as a session is, by the one set-up, and settled (`settleCheck`) before each check */
+  checkConnection(): DuckConnection;
+  settleCheck(): Promise<void>;
   /** a run of it, queued in the one rebuild queue (it comes back through `run`) */
   enqueue(name: string): void;
   /** `f` as `Sync.interruptible` runs a long statement on the run's connection: `stop` ends it, thrown as Stopping */
@@ -529,8 +535,9 @@ export class GeneratedTables {
     if (e.seen?.json === json && e.seen.schema === schema) return;
     e.seen = { json, schema };
     try {
-      const c = this.host.connection();
-      await this.host.settle();
+      // on the check's own connection: a run may hold the run's in a transaction now (`checkConnection`)
+      const c = this.host.checkConnection();
+      await this.host.settleCheck();
       const r = await planDefinition(planner, def.sql, def.orderBy, undefined, (sql) => engineTypes(c, sql));
       e.waitingFor = null;
       e.warnings = "refused" in r ? [] : r.definition.warnings;

@@ -1765,3 +1765,46 @@ test("round 12: a text read as a numeric keeps the form of what it was made from
     }
   });
 });
+
+// review round 13 of PR 202: the review's check ran its settle and its prepare on the RUN'S connection, unserialised with
+// a build that holds that connection in a transaction across awaits (its snapshot, its writer's turn, its steps), so a
+// check landed inside the build's transaction and between its statements; CI's stream test stalled, and a reviewer's
+// unit world stuck in the engine from `SessionSetup.settle` under `GeneratedTables.check` (#224's class). The decision:
+// the check has a connection of its own, so nothing a review asks reaches the connection a run holds
+test("round 13: a check while a run holds its transaction open never touches the run's connection, and gives its verdict", async () => {
+  let hold: Promise<void> | null = null;
+  await withWorld({ counts: COUNTS }, async (w) => {
+    const first = await w.until(built);
+    let release = (): void => undefined;
+    hold = new Promise<void>((r) => { release = r; });
+    try {
+      w.reached.length = 0;
+      await w.store.writer.run("INSERT INTO public.events VALUES (11, 7, 'query', 'ok', '11', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+      w.sync.generated.changed("public.events");
+      await w.sync.generated.review();
+      for (const end = Date.now() + 10_000; !w.reached.includes("snapshot") && Date.now() < end;) { await new Promise((r) => setTimeout(r, 10)); await w.sync.generated.review(); }
+      assert.ok(w.reached.includes("snapshot"), "the run holds its transaction open at its snapshot");
+      // every call on the run's connection from here until the release is the check's, since the run is held
+      const run = (w.sync as unknown as { generatedLane: { conn: Record<string, unknown> } }).generatedLane.conn;
+      const touched: string[] = [];
+      for (const m of ["run", "runAndReadAll", "prepare"]) {
+        const f = run[m] as (...a: unknown[]) => unknown;
+        run[m] = (...a: unknown[]) => { touched.push(`${m}: ${String(a[0]).slice(0, 60)}`); return f.apply(run, a); };
+      }
+      try {
+        w.write("checked", scheduled("SELECT kind, count(*) AS n FROM events GROUP BY kind"));
+        w.write("wrong", scheduled("SELECT nope FROM events"));
+        // bounded: a check stuck behind the run is a failure here, never a hang
+        let bound: NodeJS.Timeout | undefined;
+        const said = await Promise.race([w.sync.generated.review().then(() => "reviewed"), new Promise((r) => { bound = setTimeout(() => r("stuck"), 20_000); })]);
+        clearTimeout(bound);
+        assert.equal(said, "reviewed");
+        assert.equal(w.status("public.wrong").state, "refused", JSON.stringify(w.status("public.wrong")));
+        assert.deepEqual(w.status("public.checked").refusals, []);
+        assert.deepEqual(touched, [], "the check reached the run's connection");
+      } finally { for (const m of ["run", "runAndReadAll", "prepare"]) delete run[m]; }
+    } finally { hold = null; release(); }
+    await w.until((s) => s.lastRun?.at !== first.lastRun?.at);
+    await w.until(built, "public.checked");
+  }, { onStep: (s, n) => s === "snapshot" && n === "public.counts" ? hold ?? undefined : undefined });
+});

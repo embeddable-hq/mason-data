@@ -83,7 +83,10 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`
   reads), never by hand: a connection without `__mason_session` answers NULL from every Mason function (DuckDB's NULL in,
   NULL out), and a JSON number's cast stored NULL in every row with no error. What reads a session's settings is refused
-  at the plan ("it reads a session"). Detector: tests/duck-generated.test.ts, the run's session variables.
+  at the plan ("it reads a session"). Detector: tests/duck-generated.test.ts, the run's session variables. **The review's
+  check has a connection of its own** (`GeneratedHost.checkConnection`, set up by the same set-up), never the run's: a
+  run holds its connection in a transaction across awaits, and a check on it landed inside that transaction, between the
+  build's statements (PR 202 round 13, #224's class). Detector: tests/duck-generated.test.ts "round 13".
 - **A run's failure is Postgres's error, by the ONE mapping a statement on the wire gets** (src/duck/store.ts
   `pgErrorOf`; `failureWords` reads it and matches no engine spelling): its message and SQLSTATE, Postgres's DETAIL
   where it has one, the way out its SQLSTATE has, no value of a row and no `__mason_` name. An engine error said in

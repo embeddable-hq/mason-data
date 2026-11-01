@@ -215,6 +215,7 @@ async function withHarness(db: string, mode: "poll" | "replication", use: (h: Ha
   });
   let api: Awaited<ReturnType<typeof startPostgresApi>> | null = null;
   let mason: pg.Client | null = null;
+  let passed = false;
   const truth = new pg.Client({ connectionString: url });
   await truth.connect();
   try {
@@ -280,13 +281,24 @@ async function withHarness(db: string, mode: "poll" | "replication", use: (h: Ha
         }
       },
     }, url, source);
+    passed = true;
   } finally {
-    await mason?.end();
-    await truth.end();
-    await api?.close();
-    await sync.stop();
-    await store.close();
+    // EVERY STEP RUNS, whatever failed before it: a step that threw (a client whose connection the failure ended) skipped
+    // the rest, and the sync, the listener and the engine left open kept the file's process alive after its test failed
+    // (CI's shard ran 21 minutes past its last test, PR 202 round 13). The generated tables stop before the listener
+    // whose catalog they plan on, as `mason start` stops (src/cli/dev.ts). A failure of the teardown is thrown only after a
+    // test that passed: after one that failed it is said, and the test's own failure is the one reported
+    await closeAll([() => mason?.end(), () => truth.end(), () => sync.generated.stop(), () => api?.close(), () => sync.stop(), () => store.close()], passed);
   }
+}
+
+/** each step run in order, every one even after one threw; the first failure thrown once all have run (`rethrow`), or
+ *  each said on stderr when a failure of the test is already on its way */
+async function closeAll(steps: ReadonlyArray<() => Promise<unknown> | undefined>, rethrow: boolean): Promise<void> {
+  const failed: unknown[] = [];
+  for (const step of steps) { try { await step(); } catch (e) { failed.push(e); } }
+  if (failed.length > 0 && rethrow) throw failed[0];
+  for (const e of failed) console.error(`the teardown after a failed test also failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
 }
 
 /** every table current, then every statement held to Postgres */

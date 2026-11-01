@@ -943,6 +943,8 @@ export class Sync {
   private generatedLane: Lane | null = null;
   /** the generated lane's session set-up: settled before each plan and run (`GeneratedHost.settle`) */
   private generatedSession: SessionSetup | null = null;
+  /** the review's check's own connection and its set-up, never the run's (`GeneratedHost.checkConnection`) */
+  private generatedCheck: { conn: DuckConnection; setup: SessionSetup } | null = null;
 
   constructor(store: DuckStore, source: Source, database: string, log: (line: string) => void, intervalMs: number, mode: SyncMode = "poll",
     replication: SyncReplication | null = null,
@@ -985,6 +987,14 @@ export class Sync {
       settle: async () => {
         if (this.generatedSession === null) throw new Error("the generated tables' connection is not open (Mason bug: report it)");
         await this.generatedSession.settle(NO_ROLE_SESSION);
+      },
+      checkConnection: () => {
+        if (this.generatedCheck === null) throw new Error("the generated tables' check connection is not open (Mason bug: report it)");
+        return this.generatedCheck.conn;
+      },
+      settleCheck: async () => {
+        if (this.generatedCheck === null) throw new Error("the generated tables' check connection is not open (Mason bug: report it)");
+        await this.generatedCheck.setup.settle(NO_ROLE_SESSION);
       },
       enqueue: (name) => this.enqueue(name, { kind: "generated" }),
       interruptible: (f) => this.interruptible(generatedLane(), f),
@@ -1079,6 +1089,8 @@ export class Sync {
     const conn = await this.store.instance.connect();
     this.generatedSession = await SessionSetup.open(conn, GENERATED_SESSION);
     this.generatedLane = { conn, inFlight: false };
+    const checkConn = await this.store.instance.connect();
+    this.generatedCheck = { conn: checkConn, setup: await SessionSetup.open(checkConn, GENERATED_SESSION) };
     await this.generated.open();
     this.catalog = await this.store.instance.connect();
     await this.rebuildSchema();
@@ -1587,6 +1599,9 @@ export class Sync {
     this.generatedLane?.conn.closeSync();
     this.generatedLane = null;
     this.generatedSession = null;
+    // after `generated.stop`, which waited for the review and so for any check on it
+    this.generatedCheck?.conn.closeSync();
+    this.generatedCheck = null;
   }
 
   /** a poll asked of a table while it is rebuilt or not yet caught up: refused, by name (it is caught up when that ends) */
