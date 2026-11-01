@@ -239,6 +239,7 @@ const HELD_BI = [
   "regex: Postgres-only escapes (\\y, \\m)",
   "array: ARRAY[…] constructor / = ANY(ARRAY[…])",
   "json ->> / -> on a jsonb column (stored as JSON)",
+  "jsonb #>> array[…] grouped",
   "jsonb @>",
   "a UNION's ORDER BY a column number, text under the database's collation",
   "json_each in a LEFT JOIN ON TRUE over a derived table, guarded by a CASE",

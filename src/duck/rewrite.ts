@@ -108,7 +108,7 @@ export class Unrewritable extends Error {
 
 // --------------------------------------------------------------------------------------------------------- the types
 
-const INT2 = 21, INT4 = 23, INT8 = 20, FLOAT4 = 700, FLOAT8 = 701, NUMERIC = 1700, TEXT = 25, VARCHAR = 1043, BPCHAR = 1042, NAME = 19;
+const INT2 = 21, INT4 = 23, INT8 = 20, FLOAT4 = 700, FLOAT8 = 701, NUMERIC = 1700, TEXT = 25, VARCHAR = 1043, BPCHAR = 1042, NAME = 19, TEXT_ARRAY = 1009, VARCHAR_ARRAY = 1015;
 const DATE = 1082, TIMESTAMP = 1114, TIMESTAMPTZ = 1184, INTERVAL = 1186, JSON_OID = 114, JSONB = 3802, UNKNOWN = 705, INET = 869, RECORD = 2249;
 const INTEGERS = new Set([INT2, INT4, INT8]);
 const FLOATS = new Set([FLOAT4, FLOAT8]);
@@ -2262,7 +2262,7 @@ class Rewriter {
       case "#>": case "#>>": case "->": case "->>": {
         if (a0 === null || !JSONS.has(a0)) return null;
         const either = name.startsWith("#"), canonical = a0 === JSONB, asText = name.endsWith(">>");
-        let steps = either ? jsonPath(r!) : jsonSteps([r!], a1 !== null && INTEGERS.has(a1)), base = l!;
+        let steps = either ? this.jsonPath(r!) : this.jsonKey(r!, a1), base = l!;
         // `(c -> 'a') ->> 'b'` is one read at the steps a, b (jsonChain)
         const chain = this.jsonChain(l!, either), literal = constString(steps);
         if (chain !== null && literal !== null) { base = chain.base; steps = strConst(JSON.stringify([...chain.steps, ...JSON.parse(literal) as unknown[]])); }
@@ -2561,11 +2561,8 @@ class Rewriter {
       }
       case "jsonb_extract_path_text": case "json_extract_path_text": case "jsonb_extract_path": case "json_extract_path": {
         const own = argType(0);
-        // VARIADIC <array>: the array's elements are the path (a literal as array_in reads it)
-        const literal = b.func_variadic === true && args.length === 2 ? constString(args[1]) : null;
-        const steps = b.func_variadic !== true ? jsonSteps(args.slice(1), false)
-          : literal !== null ? strConst(JSON.stringify(arrayLiteral(literal)))
-          : cast(fn("to_json", [arrayCast(args[1]!, "varchar")]), ["varchar"]);
+        // VARIADIC <array>: the array's elements are the path, as `#>`'s; else each argument is an element
+        const steps = b.func_variadic === true ? this.jsonPath(args[1]!, (n) => arrayCast(n, "varchar")) : this.pathOfArguments(args.slice(1));
         const canonical = own === JSONB || name.startsWith("jsonb");
         return this.jsonRead(args[0]!, steps, true, canonical, name.endsWith("_text"));
       }
@@ -3121,6 +3118,8 @@ class Rewriter {
   private param(b: Body): AstNode | null {
     // a parameter is bound as its text; Postgres decided its type, and DuckDB is told it
     const oid = this.params[Number(b.number) - 1];
+    // a text array is bound as the JSON Postgres read it to (src/duck/analyze.ts readParameters)
+    if (oid === TEXT_ARRAY || oid === VARCHAR_ARRAY) return fn("from_json", [cast({ ParamRef: b }, ["varchar"]), strConst('["VARCHAR"]')]);
     const asEnum = oid === undefined || !this.enums.labels.has(oid) ? null : this.enumValue({ ParamRef: b }, oid, null);
     if (asEnum !== null) return asEnum;
     const type = oid === undefined ? null : oid === NUMERIC ? ["double"] : duckTypeOf(oid);
@@ -3142,10 +3141,62 @@ class Rewriter {
     const a0 = t?.args[0]?.type ?? null, a1 = t?.args[1]?.type ?? null;
     if (a0 === null || !JSONS.has(a0)) return null;
     const r = b.rexpr as AstNode;
-    const own = constString(either ? jsonPath(r) : jsonSteps([r], a1 !== null && INTEGERS.has(a1)));
+    const own = constString(either ? this.jsonPath(r) : this.jsonKey(r, a1));
     if (own === null) return null;
     const deeper = this.jsonChain(b.lexpr as AstNode, either);
     return { base: deeper === null ? b.lexpr as AstNode : deeper.base, steps: [...(deeper === null ? [] : deeper.steps), ...JSON.parse(own) as unknown[]] };
+  }
+
+  /**
+   * A CONSTANT OF A JSON READ'S PATH, AS POSTGRES READ IT, from the analysis alone (Typed.text, Typed.textArray). A path
+   * has ONE ROUTE however it is spelled — `'{a,b}'`, `'{a,b}'::text[]`, `ARRAY['a', 'b']`, `ARRAY['a', 'b']::text[]`,
+   * `'a'::text` — so a BI tool's `#>> array['k']` is the read `->> 'k'` is: DuckDB's own, a stored column, one path in
+   * the request log. Spelled as an array it was a `to_json` of the list, a literal to none of those, and every row went
+   * through the function (issue 130: 160-205 s against 11 s). Only a cast written directly on the constant is seen
+   * through, which Postgres folds in; a length is a node of its own over the Const (no constant), and a cast on a cast
+   * is one `typedAt` may step past to the value inside, so neither is read here.
+   */
+  private constRead(n: AstNode): Typed | null {
+    const inner = kindOf(n) === "TypeCast" && isNode(bodyOf(n).arg) ? bodyOf(n).arg as AstNode : n;
+    return kindOf(inner) === "A_Const" || kindOf(inner) === "A_ArrayExpr" ? this.typed(n) : null;
+  }
+
+  /** `#>`'s path, or VARIADIC's array (`list` as DuckDB reads it), as the JSON array of its elements; a NULL path or a
+   *  NULL element is NULL (get_path_all, the functions being strict) */
+  private jsonPath(r: AstNode, list: (n: AstNode) => AstNode = (n) => n): AstNode {
+    let read = this.constRead(r)?.textArray;
+    // a literal the analysis does not read as an array here: a twin of the same text typed otherwise (`typed`'s shape)
+    const literal = read === undefined ? constString(r) : null;
+    if (literal !== null) read = arrayLiteral(literal);
+    if (read === undefined) {
+      this.pathTypeKnown(r);
+      return cast(fn("to_json", [list(r)]), ["varchar"]);
+    }
+    return read === null || read.includes(null) ? nullConst() : strConst(JSON.stringify(read));
+  }
+
+  /** a path that reaches Postgres through a type that changes its text (`varchar(1)[]` cuts it, `char(2)[]` pads and
+   *  trims it, `name[]`), which DuckDB's list holds as written: refused, never read as what was written */
+  private pathTypeKnown(r: AstNode): void {
+    const t = this.typed(r);
+    const length = kindOf(r) === "TypeCast" && ((bodyOf(r).typeName?.typmods ?? []) as AstNode[]).length > 0;
+    if (length || (t !== null && t.type !== TEXT_ARRAY && t.type !== VARCHAR_ARRAY && t.type !== UNKNOWN)) {
+      throw new Unrewritable("a json path of a type that changes its text is not supported by Mason", "cast the path to text[]", "json-path-type");
+    }
+  }
+
+  /** json_extract_path's elements, an argument each, as the JSON array of steps */
+  private pathOfArguments(keys: AstNode[]): AstNode {
+    const read = keys.map((k) => this.constRead(k)?.text);
+    if (read.some((k) => k === undefined)) return jsonSteps(keys.map((k) => this.widen(k, TEXT)), false);
+    return read.includes(null) ? nullConst() : strConst(JSON.stringify(read));
+  }
+
+  /** `->`'s key: an integer one an index, a constant text its one step, a char(n)'s text without its padding (`widen`) */
+  private jsonKey(r: AstNode, type: number | null): AstNode {
+    const index = type !== null && INTEGERS.has(type);
+    const text = index ? null : this.constRead(r)?.text;
+    return typeof text === "string" ? strConst(JSON.stringify([text])) : jsonSteps([index ? r : this.widen(r, TEXT)], index);
   }
 
   // --------------------------------------------------------------------------------------------- FROM
@@ -3686,7 +3737,8 @@ function offsetCells(p: NumericProgram, by: number): NumericProgram {
 }
 
 /** an expression's shape: its tree without offsets */
-const shapeOf = (n: AstNode): string => JSON.stringify(n, (k, v: unknown) => k === "location" ? undefined : v);
+/** a node without its offsets (`location`, and an ARRAY[…]'s `list_start` and `list_end`): two spellings of one expression at two places */
+const shapeOf = (n: AstNode): string => JSON.stringify(n, (k, v: unknown) => k === "location" || k === "list_start" || k === "list_end" ? undefined : v);
 
 const strip = (n: AstNode): AstNode => kindOf(n) === "CollateClause" ? bodyOf(n).arg as AstNode : n;
 
@@ -4060,14 +4112,6 @@ function pgCall(kind: PgKind, template: string, args: AstNode[]): AstNode {
 /** a json argument: a text literal is read as JSON (DuckDB's json functions over a VARCHAR literal parse it anyway) */
 const jsonArg = (n: AstNode): AstNode => n;
 
-/** `#>` / `#>>`'s path (a text array: a literal `'{a,b,1}'` or an expression) as the JSON array of its elements */
-function jsonPath(r: AstNode): AstNode {
-  const s = constString(r);
-  if (s === null) return cast(fn("to_json", [r]), ["varchar"]);
-  const elements = arrayLiteral(s);
-  if (elements.some((e) => e === null)) return nullConst();
-  return strConst(JSON.stringify(elements));
-}
 
 /**
  * A Postgres (ARE) pattern as RE2's: `.` matches a newline (Postgres's default; RE2's `(?s)`), `\w` / `\d` / `\s` are

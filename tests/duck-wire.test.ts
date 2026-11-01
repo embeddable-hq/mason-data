@@ -2777,6 +2777,137 @@ test("a ->> of a column is DuckDB's own read where it is Postgres's answer, the 
   } finally { await c.end(); }
 });
 
+// A PATH HAS ONE ROUTE HOWEVER IT IS SPELLED (issue 130): a BI tool's `#>> array['k']` was a to_json of the list, every
+// row through the function, where `->> 'k'` is DuckDB's own read. Read from the analysis, so a cast that changes the
+// text is never read as what was written, and a value only known at the Bind stays computed.
+test("a constant path is the read ->> is, however it is spelled: no row reaches the function, answers as Postgres's", async () => {
+  const c = await client();
+  try {
+    const native = ["b #>> ARRAY['o', 'b']", "b #>> ARRAY['o', 'b']::text[]", "b #>> ARRAY['o'::text, 'b'::text]", "b #>> '{o,b}'::text[]", "b #>> ARRAY['o', 'b']::varchar[]", "b #>> ARRAY['a.b']", "b ->> 'a'::text", "b ->> 'a'::varchar",
+      "jsonb_extract_path_text(b, 'o'::text, 'b'::text)", "jsonb_extract_path_text(b, VARIADIC ARRAY['o', 'b'])", "jsonb_extract_path_text(b, VARIADIC '{o,b}'::text[])", "b #> ARRAY['o'] #>> ARRAY['b']"];
+    const others = ["b #>> ARRAY['arr', '0']", "b #>> ARRAY['arr', '-1']", "b #> ARRAY['o']", "b #>> ARRAY[]::text[]", "b #> '{}'::text[]", "b #>> NULL::text[]", "b #>> ARRAY['o', NULL]", "b #>> '{o,NULL}'", "jsonb_extract_path_text(b, 'o', NULL)", "jsonb_extract_path_text(b, VARIADIC NULL::text[])",
+      "b #>> '[2:3]={o,b}'", "b #>> ARRAY[lower('O'), 'b']", "b #>> ARRAY['o', id::text]", "j #>> ARRAY['o', 'k']", "j #> ARRAY['o']", "j #>> ARRAY['a']", "j #>> ARRAY['1']", "j #>> ARRAY[]::text[]"];
+    const sql = `SELECT id, ${[...native, ...others].join(", ")} FROM jdocs ORDER BY id`;
+    const [got, want] = [await answer(c, sql), await postgres(sql)];
+    const named = ["id", ...native, ...others];
+    for (const [i, row] of want.rows.entries()) for (const [k, v] of row.entries()) assert.equal(got.rows[i]![k], v, `row ${row[0]}: ${named[k]}`);
+    assert.deepEqual(got.fields, want.fields);
+    const calls = async (): Promise<number> => (await store.functionCalls()).get("__mason_json_get") ?? 0;
+    for (const read of native) {
+      const before = await calls();
+      await answer(c, `SELECT ${read} FROM jdocs WHERE id <> 5`);
+      assert.equal(await calls() - before, 0, `${read} reached the function`);
+    }
+    // a value the Parse cannot see stays computed, row by row or at the Bind, and is Postgres's
+    for (const read of ["b #>> ARRAY['o', id::text]"]) {
+      const before = await calls();
+      await answer(c, `SELECT ${read} FROM jdocs`);
+      assert.ok(await calls() > before, `${read} is computed`);
+    }
+    // the expression repeated in the GROUP BY and the ORDER BY is the one read: an array's own offsets are no part of it
+    for (const statement of ["SELECT b #>> ARRAY['a'] AS v, count(*) AS n FROM jdocs GROUP BY b #>> ARRAY['a'] ORDER BY v", "SELECT b #>> ARRAY['a'], count(*) FROM jdocs GROUP BY b #>> ARRAY['a'] ORDER BY b #>> ARRAY['a']", "SELECT id FROM jdocs ORDER BY b #>> ARRAY['a'], id"]) {
+      assert.deepEqual((await answer(c, statement)).rows, (await postgres(statement)).rows, statement);
+    }
+    // a text[] at the Bind: read by Postgres (a quote, a NULL element, an empty array), the plan made at the Parse
+    const list = "SELECT id::text, b #>> $1::text[] AS a, (j #> $1::text[])::text AS b, jsonb_extract_path_text(b, VARIADIC $1::text[]) AS c FROM jdocs ORDER BY id";
+    for (const value of ['{o,b}', '{arr,0}', '{"a.b"}', '{}', '{o,NULL}']) {
+      const wanted = await postgres(list.replaceAll("$1::text[]", `'${value}'::text[]`));
+      assert.deepEqual((await c.query({ text: list, values: [value], rowMode: "array" })).rows, wanted.rows, value);
+    }
+    // the same binding beside a list read as a list
+    for (const value of ["{1,2}", "{}", "{NULL}"]) {
+      const statement = "SELECT id::text FROM jdocs WHERE id::text = ANY($1::text[]) ORDER BY id";
+      assert.deepEqual((await c.query({ text: statement, values: [value], rowMode: "array" })).rows, (await postgres(statement.replace("$1::text[]", `'${value}'::text[]`))).rows, value);
+    }
+    // a cast that changes the text is refused by name, never read as what was written
+    for (const path of ["ARRAY['kk']::varchar(1)[]", "'{kk}'::char(1)[]", "ARRAY['k']::name[]"]) {
+      await assert.rejects(answer(c, `SELECT b #>> ${path} FROM jdocs`), (e: Error & { code?: string; detail?: string }) => e.code === "0A000" && /json-path-type/.test(`${e.message} ${e.detail ?? ""}`), path);
+    }
+  } finally { await c.end(); }
+});
+
+// A TEXT[] PARAMETER IS ONE LIST OF DUCKDB'S (the review of issue 130): a value of two dimensions, or whose subscripts
+// do not start at 1, is no such list — read as one it answered wrong (an inner array a string of its JSON, the bounds
+// dropped), so it is refused by name, as its literal is. In binary (Npgsql sends every parameter so) it is array_send's
+// bytes, decoded to the literal Postgres reads, and refused alike.
+test("a text[] parameter of two dimensions or other bounds is refused by name", async () => {
+  const c = await client();
+  try {
+    const named = (gap: string) => (e: Error & { code?: string; detail?: string }): boolean => e.code === "0A000" && new RegExp(`Mason gap ${gap}\\b`).test(e.detail ?? "");
+    for (const sql of ["SELECT id::text, id::text = ANY($1::text[]), id::text <> ALL($1::text[]) FROM jdocs WHERE id < 4 ORDER BY id", "SELECT $1::text[], ($1::text[])[1], array_position($1::text[], '1') FROM jdocs WHERE id = 1"]) {
+      for (const [value, gap] of [["{{1},{2}}", "multidim-array"], ["[2:3]={1,2}", "array-lower-bound"], ["[1:1][1:1]={{1}}", "multidim-array"]] as const) {
+        await assert.rejects(answer(c, sql, [value]), named(gap), `${value}: ${sql}`);
+      }
+      // a one-dimensional value from 1, its bounds written or not, is answered as Postgres answers it
+      for (const value of ["{1,2}", "[1:2]={1,2}"]) assert.deepEqual((await answer(c, sql, [value])).rows, (await postgres(sql, [value])).rows, value);
+    }
+  } finally { await c.end(); }
+});
+
+test("a binary text[] parameter is read as Postgres reads it, refused as it refuses, two dimensions or other bounds by name", async () => {
+  const s = await rawSession();
+  try {
+    // the same Bind to Postgres and to Mason, the same rows
+    const sql = "SELECT id::text, b #>> $1::text[] AS a, array_to_string($1::text[], '|', '*') AS s, (id::text = ANY($1::text[]))::text AS k FROM jdocs ORDER BY id";
+    const send = async (array: string): Promise<Buffer> => Buffer.from((await truth.query<{ b: Uint8Array }>(`SELECT array_send(${array}) AS b`)).rows[0]!.b);
+    const rows = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "DataRow" ? [JSON.stringify(m.values.map((v) => v === null ? null : String(v)))] : m.type === "ErrorResponse" ? [`error ${m.fields.C} ${m.fields.M}`] : []);
+    for (const array of ["ARRAY['o', 'b']::text[]", "ARRAY['a\"b\\c', NULL, 'NULL', '', ' x ', '{,}']::text[]", "ARRAY['1', '3']::varchar[]::text[]", "ARRAY[]::text[]", "ARRAY[NULL]::text[]"]) {
+      const bind = wire.extended(sql, [await send(array)], [0], 1);
+      const want = rows(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(rows(await s.untilReady()), want, array);
+      assert.ok(want.length > 0 && !want[0]!.startsWith("error"), array);
+    }
+    for (const [array, gap] of [["'{{1},{2}}'::text[]", "multidim-array"], ["'[2:3]={1,2}'::text[]", "array-lower-bound"]] as const) {
+      s.socket.write(wire.extended(sql, [await send(array)], [0], 1));
+      const error = (await s.untilReady()).find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+      assert.equal(error?.fields.C, "0A000", array);
+      assert.match(error?.fields.D ?? "", new RegExp(`Mason gap ${gap}\\b`), array);
+    }
+    // bytes that are no text[]: refused as Postgres's array_recv refuses them (too few, too many, another element type)
+    for (const bytes of [Buffer.from([0, 0, 0]), await send("ARRAY['a', 'b']::text[]").then((b) => b.subarray(0, b.length - 1)), Buffer.concat([await send("ARRAY['a']::text[]"), Buffer.from([0])]), await send("ARRAY[1]::int4[]")]) {
+      const bind = wire.extended(sql, [bytes], [0], 1);
+      const want = rows(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(rows(await s.untilReady()), want, bytes.toString("hex"));
+      assert.match(want[0] ?? "", /^error /, bytes.toString("hex"));
+    }
+  } finally { s.end(); }
+});
+
+// array_recv's own refusals, each of a binary text[] whose bytes array_send never writes (the second review of PR 149):
+// an element that is no UTF-8 or holds a NUL (it was decoded with U+FFFD, or truncated the catalog's query), an element
+// type other than the parameter's, flags other than 0 or 1, a dimension too large or negative. Each is Postgres's
+// SQLSTATE and message, read from the same Bind.
+test("a binary text[] parameter's bad element bytes, element type, flags and dimension are refused as Postgres's array_recv refuses them", async () => {
+  const s = await rawSession();
+  try {
+    const sql = "SELECT id::text, array_to_string($1::text[], '|') AS s FROM jdocs ORDER BY id";
+    const array = (flags: number, element: number, dims: Array<[number, number]>, items: Buffer[]): Buffer => {
+      const int = (v: number): Buffer => { const b = Buffer.alloc(4); b.writeInt32BE(v); return b; };
+      return Buffer.concat([int(dims.length), int(flags), int(element), ...dims.flatMap(([n, l]) => [int(n), int(l)]), ...items.flatMap((x) => [int(x.length), x])]);
+    };
+    const errors = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "ErrorResponse" ? [`${m.fields.C} ${m.fields.M}`] : []);
+    const cases: Array<[string, Buffer, string]> = [
+      ["not UTF-8", array(0, 25, [[1, 1]], [Buffer.from([0x61, 0xff, 0x62])]), "22021"],
+      ["a NUL", array(0, 25, [[1, 1]], [Buffer.from([0x61, 0x00, 0x62])]), "22021"],
+      ["a bad three-byte character", array(0, 25, [[2, 1]], [Buffer.from("ok"), Buffer.from([0x78, 0xe2, 0x28, 0xa1])]), "22021"],
+      ["a character cut short", array(0, 25, [[1, 1]], [Buffer.from([0x78, 0xe2, 0x82])]), "22021"],
+      ["varchar elements", array(0, 1043, [[1, 1]], [Buffer.from("a")]), "42804"],
+      ["flags 2", array(2, 25, [[1, 1]], [Buffer.from("a")]), "22P03"],
+      ["a dimension past the maximum", array(0, 25, [[268435456, 1]], []), "54000"],
+      ["a negative dimension", array(0, 25, [[-1, 1]], []), "54000"],
+    ];
+    for (const [name, bytes, code] of cases) {
+      const bind = wire.extended(sql, [bytes], [0], 1);
+      const want = errors(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(errors(await s.untilReady()), want, name);
+      assert.match(want[0] ?? "", new RegExp(`^${code} `), name);
+    }
+  } finally { s.end(); }
+});
+
 // THE REVIEW OF THE NATIVE READ: two classes it broke, each shape answered as Postgres answers it.
 //  - A jsonb VALUE is canonical only where it is a copied table's column (the copy holds jsonbText): a jsonb a statement
 //    computes (jsonb_object_agg, jsonb_build_object, in a CTE, a subquery or an arm of a UNION) may hold a key twice,
