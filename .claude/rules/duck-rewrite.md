@@ -117,8 +117,8 @@ paths:
     wrapper, a view of a join, a WITH of a join, a view of a view), each column read as its expression, and only as a
     whole: a form it cannot write stays as it was. **`USING` and `NATURAL` stay as written inside** (issue 134, step 3): a
     merged column of the list is read through Postgres's join alias variables (left for INNER and LEFT, right for RIGHT,
-    `coalesce` for FULL, the join's own cast added), never a column the fetch guesses, a NATURAL is written as the USING of
-    the columns Postgres merged (`ON true` for none), and a cast `mergedRead` cannot write is carried. **A computed output
+    `coalesce` for FULL, the join's own cast added), never a column the fetch guesses, a NATURAL arrives as the USING of
+    the columns Postgres merged (`ON true` for none: the rewrite's `naturalWritten`, in EVERY statement), and a cast `mergedRead` cannot write is carried. **A computed output
     that is a sort key is one key by name, number or repeated expression, shown from `__mason_o<i>`, one value**; a
     volatile key (`computedSorts`, pg_proc's `provolatile`) is sorted by its output's name inside, and one a collation's
     keys would repeat stays as it was. Over one table a computed output's sort stays as it was. **A statement with a role's filtered read keeps its form**

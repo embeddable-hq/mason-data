@@ -107,8 +107,9 @@
  *    LEFT, right for RIGHT, `coalesce` for FULL (an inner join reads the side of the join's type where a side needs a
  *    cast), a merged column of a join below read through that join, with the cast the join adds. A cast to any other type
  *    (a timestamp's, in a session's zone) cannot be written here: that column is carried, the join's own reading of it.
- *    A NATURAL is written as the USING of the columns Postgres merged (`namedJoin`), and as `ON true` for none, which
- *    DuckDB takes for a mistake. A join with a name of its own stays as it was.
+ *    A NATURAL arrives as the USING of the columns Postgres merged, or `ON true` for none (src/duck/rewrite.ts
+ *    `naturalWritten`, for every statement); one it could not write stays as it was. A join with a name of its own stays
+ *    as it was.
  *  - A COMPUTED OUTPUT THAT IS A SORT KEY, by its name, its number or its expression repeated, is one key, and the list
  *    reads it from `__mason_o<i>` (`sortKeys`' `shown`): one value, never computed again, so `SELECT upper(x) AS u … ORDER
  *    BY u` and `ORDER BY 1` and `ORDER BY upper(x)` are one statement. A key runs on every row, a raising one raises as
@@ -565,12 +566,12 @@ function merges(n: unknown): boolean {
   return b.isNatural === true || b.usingClause !== undefined || merges(b.larg) || merges(b.rarg);
 }
 
-/** a NATURAL JOIN as the columns Postgres found it merges: a read of the table itself has hidden columns of its own
- *  (src/duck/kept-route.ts) that a NATURAL would join on, and DuckDB takes one with none in common for a mistake */
-function namedJoin(b: Body, columns: readonly string[]): Body {
-  if (b.isNatural !== true) return b;
-  const { isNatural: _n, ...join } = b;
-  return { ...join, ...(columns.length > 0 ? { usingClause: columns.map(S) } : { quals: { A_Const: { boolval: { boolval: true } } } }) };
+/** whether a FROM clause holds a NATURAL JOIN the rewrite left as written (src/duck/rewrite.ts `naturalWritten`) */
+function natural(n: unknown): boolean {
+  if (Array.isArray(n)) return n.some(natural);
+  if (kindOf(n) !== "JoinExpr") return false;
+  const b = bodyOf(n);
+  return b.isNatural === true || natural(b.larg) || natural(b.rarg);
 }
 
 /** a select list with each bare reference to a merged column read as `merged` says, or carried where it says null */
@@ -859,7 +860,7 @@ function joinRows(select: AstNode, relations: Query[], tablesOnly: boolean): Ast
   // ONE VALUE: a volatile output a sort reads is read from its key, and a key a written form cannot show stays as it was
   if (named.some((q) => q.volatileOutputs.some((o) => !shown?.has(o)) || (q.volatileKeys && q.sorts !== sorts.length))) return null;
   const volatileKeys = named.some((q) => q.volatileKeys);
-  if (query.joins.length !== joinCount(s.fromClause)) return null;
+  if (query.joins.length !== joinCount(s.fromClause) || natural(s.fromClause)) return null;
   const columns = new Map<string, { name: string; val: AstNode }>();
   const carriedMerge = (name: string): AstNode => {
     const key = `.${name}`;
@@ -881,7 +882,7 @@ function joinRows(select: AstNode, relations: Query[], tablesOnly: boolean): Ast
     const side = sides[i];
     if (side !== null && side !== undefined) return isFetched(i) ? exposed(side, bodyOf(n).alias as Body, true) : { RangeSubselect: { ...bodyOf(n), subquery: { SelectStmt: side.body } } };
     return kindOf(n) === "RangeVar" && listed[i]!.kind === "table" ? ownTable(bodyOf(n)) : n;
-  }, (join, at) => namedJoin(join, query.joins[at]!));
+  });
   // no sort of its own: the row numbers are the order where the join is proved bounded, so a page of the statement is
   // one page of one list; otherwise none, or a join that multiplies is run whole. Two queries alike must both be proved.
   // What is carried has no row number, so with one (a keyed WITH query read twice) they would be no total order

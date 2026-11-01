@@ -2165,7 +2165,9 @@ because only the analysis knows the side (an inner join prefers the side that ne
 bigint). A computed key is read from the analysis as well as the tree: the tree alone cannot tell a collation's second key
 from a value, so a volatile key the rewrite wrote as several keys stays as it was. `NATURAL` becomes the USING of the
 columns Postgres merged because a copy's own table has hidden columns a NATURAL would join on, and because DuckDB refuses a
-NATURAL of no column in common, which Postgres reads as every pair.
+NATURAL of no column in common, which Postgres reads as every pair. It is written so in EVERY statement, by the rewrite
+(`naturalWritten`), not by the rows a LIMIT chooses alone: written there first, a count, a sort with no LIMIT and a list
+that reads no table still reached DuckDB as NATURAL and were refused (the review of PR 155).
 
 ### First copy, and the poll's cost on the source
 

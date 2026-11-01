@@ -294,6 +294,16 @@ const MERGED_SORTED: ReadonlyArray<{ name: string; sql: string; zone?: string }>
   { name: "merged: an aggregated side in the USING", sql: "SELECT id, s.n, x.only1 FROM top_m1 x FULL JOIN (SELECT id, count(*) AS n FROM top_m4 GROUP BY id) s USING (id) ORDER BY id NULLS FIRST LIMIT 6" },
   { name: "merged: a join's own alias stays as it was", sql: "SELECT j.id, x.only1 FROM (top_m1 x JOIN top_m4 z USING (id)) AS j ORDER BY j.id LIMIT 2" },
   { name: "merged: a table's whole row stays as it was", sql: "SELECT row_to_json(z), x.only1 FROM top_m1 x JOIN top_m4 z USING (id) ORDER BY x.id LIMIT 2" },
+  // a NATURAL is the columns Postgres merged in every statement, not only one whose rows a LIMIT chooses (src/duck/rewrite.ts
+  // `naturalWritten`): with none in common, DuckDB refused it
+  { name: "natural: none in common, a count", sql: "SELECT count(*) FROM top_m1 x NATURAL JOIN top_m3 z" },
+  { name: "natural: none in common, sorted, no LIMIT", sql: "SELECT id, z.y FROM top_m1 x NATURAL JOIN top_m3 z ORDER BY id, z.x" },
+  ...["LEFT JOIN", "FULL JOIN"].flatMap((join) => [
+    { name: `natural: none in common, ${join}, no LIMIT`, sql: `SELECT id, x.only1, z.x, z.y FROM top_m1 x NATURAL ${join} top_m3 z ORDER BY id NULLS FIRST, z.x NULLS FIRST` },
+    { name: `natural: two columns in common, ${join}, no LIMIT`, sql: `SELECT id, k, x.only1, z.tail FROM top_m1 x NATURAL ${join} top_m4 z ORDER BY id NULLS FIRST, k NULLS FIRST, x.only1 NULLS FIRST, z.tail NULLS FIRST` },
+    { name: `natural: two columns in common, ${join}, a *, no LIMIT`, sql: `SELECT * FROM top_m1 x NATURAL ${join} top_m4 z ORDER BY id NULLS FIRST, k NULLS FIRST, x.only1 NULLS FIRST, z.tail NULLS FIRST` },
+  ]),
+  { name: "natural: two columns in common, a count", sql: "SELECT count(*) FROM top_m1 x NATURAL FULL JOIN top_m4 z" },
 ];
 
 /** each spelling of each kind sorted, so every byte of the answer is held: asked in the type matrix */

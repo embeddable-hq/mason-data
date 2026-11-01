@@ -2306,6 +2306,38 @@ test("USING and NATURAL choose their rows by row number, and a merged column is 
   } finally { await c.end(); }
 });
 
+test("a NATURAL JOIN is the columns Postgres merged in every statement, none in common every pair, with or without a LIMIT", async () => {
+  const c = await client();
+  const each = async (form: RegExp, sql: string): Promise<void> => {
+    assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    assert.match(line, form, sql);
+    assert.doesNotMatch(line, /NATURAL/, sql);
+  };
+  try {
+    // nothing in common: DuckDB refused the statement ("No columns found to join on") where Postgres pairs every row
+    const NONE = /late_p AS lc ON true/;
+    await each(NONE, "SELECT count(*) FROM late_c l NATURAL JOIN late_p lc");
+    await each(NONE, "SELECT l.id FROM late_c l NATURAL JOIN late_p lc WHERE l.id < 3 ORDER BY l.id, lc.c, lc.line");
+    await each(NONE, "SELECT 1 AS one FROM late_c l NATURAL JOIN late_p lc LIMIT 3");
+    await each(NONE, "SELECT l.id, lc.c FROM late_c l NATURAL FULL JOIN late_p lc WHERE l.id < 2 ORDER BY 1, 2, lc.line");
+    await each(NONE, "SELECT count(*) FROM late_c WHERE id IN (SELECT l.id FROM late_c l NATURAL JOIN late_p lc)");
+    // columns in common, each join kind, and a `*` with the merged columns first
+    const SOME = /late_n USING \(id, c\)/;
+    for (const join of ["JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"]) {
+      await each(SOME, `SELECT id, c, l.k FROM late l NATURAL ${join} late_n WHERE id < 60 OR id IS NULL ORDER BY id, c`);
+    }
+    // (the merged columns in the left side's order, as Postgres lists them)
+    await each(/late_n USING \(c, id\)/, "SELECT * FROM (SELECT k, c, id FROM late) l NATURAL FULL JOIN late_n ORDER BY id, c");
+    await each(SOME, "SELECT count(*) FROM late NATURAL JOIN late_n");
+  } finally {
+    await c.end();
+  }
+});
+
 test("a computed sort key is the output it spells, one value through every spelling, read from the key", async () => {
   const c = await client();
   const sent = async (sql: string): Promise<string> => {

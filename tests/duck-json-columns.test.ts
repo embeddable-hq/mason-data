@@ -288,7 +288,10 @@ test("a read is answered from its stored column only once it is ready, every rea
       const functions = (p.sql as unknown as { functions?: readonly string[] }).functions;
       assert.deepEqual(functions, [...new Set(p.sql.text.match(/\b__mason_(?!turn\()[a-z0-9_]+(?=\()/g) ?? [])].sort(), `${listing}: the functions it calls`);
       if (!/->>/.test(listing)) assert.deepEqual(functions, [], `${listing} calls no Mason function`);
-      assert.doesNotMatch(p.sql.text, /__mason_json_[0-9a-f]{12}/, listing);
+      // (a NATURAL is written as the USING of the columns Postgres merged, its * written out: it names every column it
+      // lists, so a read of it may be the stored column, and no hidden column is joined on)
+      if (/NATURAL/.test(listing)) assert.match(p.sql.text, /JOIN \(\s*SELECT 1 AS id\s*\) AS x USING \(id\)/, listing);
+      else assert.doesNotMatch(p.sql.text, /__mason_json_[0-9a-f]{12}/, listing);
       // a top N over joins and a * over USING or NATURAL have their * written out, so no hidden column can be listed
       if (!/JOIN docs y|NATURAL/.test(listing)) assert.match(p.sql.text, new RegExp(route.VISIBLE_CATALOG), listing);
       const got = await answer(p.sql.text);
