@@ -166,7 +166,7 @@ const CI = { type: 'object', required: ['state', 'detail'], properties: {
   detail: { type: 'string', description: 'for failed: each failing job, its failing test name and assertion text' },
 } }
 const CHANGED = { type: 'object', required: ['files'], properties: {
-  files: { type: 'array', items: { type: 'string' }, description: 'every path git diff --name-only printed, exactly' },
+  files: { type: 'array', items: { type: 'string' }, description: 'every path git diff --no-renames --name-only printed, exactly' },
 } }
 const POSTED = { type: 'object', required: ['url'], properties: { url: { type: 'string', description: "the comment's URL" } } }
 
@@ -497,13 +497,15 @@ ${learnable.map((h) => `### ${h.label}\n${asFailures(h.findings)}`).join('\n\n')
   else {
     // Learn's commit is neither probed nor reviewed, so it may touch .claude/rules/ only, and that is read from git,
     // never taken from the agent's word: a head that changed anything else, or whose files could not be read, is not
-    // reported ready for the merge decision.
+    // reported ready for the merge decision. --no-renames, as git detects renames by default and prints only a
+    // rename's new path: a file moved from src/ into .claude/rules/ must show its removal too. A head that moved
+    // touched at least one path, so no path read is "couldn't tell", never "nothing outside".
     const prev = last.head
     last = learned
     const check = await agent(
-      `${WHERE}Run \`git -C ${REPO} fetch origin ${A.branch}\` and \`git -C ${REPO} diff --name-only ${prev} ${learned.head}\`, and return every path it prints, exactly. Change nothing. Move no card on the board.`,
+      `${WHERE}Run \`git -C ${REPO} fetch origin ${A.branch}\` and \`git -C ${REPO} diff --no-renames --name-only ${prev} ${learned.head}\`, and return every path it prints, exactly; if either command fails, return nothing rather than an empty list. Change nothing. Move no card on the board.`,
       { label: 'learn check', phase: 'Learn', ...ON.learnCheck, schema: CHANGED })
-    if (!check) return await finish(`learn's commit ${learned.head.slice(0, 7)} could not be read: whether it touched only .claude/rules/ is not known, and that head is neither probed nor reviewed: the coordinator decides`)
+    if (!check || check.files.length === 0) return await finish(`learn's commit ${learned.head.slice(0, 7)} could not be read: whether it touched only .claude/rules/ is not known, and that head is neither probed nor reviewed: the coordinator decides`)
     const outside = check.files.filter((f) => !f.startsWith('.claude/rules/'))
     if (outside.length) return await finish(`learn's commit ${learned.head.slice(0, 7)} changed ${outside.join(', ')} outside .claude/rules/, and that head is neither probed nor reviewed: the coordinator decides`)
   }

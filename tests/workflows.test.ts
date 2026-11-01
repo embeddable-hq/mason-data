@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import ts from "typescript";
@@ -637,7 +639,7 @@ test("pr-loop: Learn's commit is read from git, and a head that changed anything
   const learnt: Answers = { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green };
   let r = await run("pr-loop", { ...PR }, learnt);
   assert.deepEqual(r.labels.slice(-4), ["learn", "learn check", "CI 1", "record"]);
-  assert.ok(r.prompt("learn check").includes(`diff --name-only ${sha("b")} ${sha("f")}`), "the files are read from the commit range");
+  assert.ok(r.prompt("learn check").includes(`diff --no-renames --name-only ${sha("b")} ${sha("f")}`), "the files are read from the commit range");
   assert.match(String(r.result["status"]), /^reviewed/);
   // a learn that touched a test: stopped before CI, at learn's head
   r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": { files: [".claude/rules/cli.md", "tests/workflows.test.ts"] } });
@@ -645,9 +647,40 @@ test("pr-loop: Learn's commit is read from git, and a head that changed anything
   assert.match(String(r.result["status"]), /^learn's commit fffffff changed tests\/workflows\.test\.ts outside \.claude\/rules\//);
   assert.equal(r.result["head"], sha("f"));
   // the files could not be read: not known, never ready
-  r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": null });
-  assert.match(String(r.result["status"]), /could not be read: whether it touched only \.claude\/rules\/ is not known/);
-  assert.ok(!r.labels.includes("CI 1"));
+  // the files could not be read, or no path was read of a head that moved: not known, never ready
+  for (const check of [null, { files: [] }]) {
+    r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": check });
+    assert.match(String(r.result["status"]), /could not be read: whether it touched only \.claude\/rules\/ is not known/, JSON.stringify(check));
+    assert.ok(!r.labels.includes("CI 1"), JSON.stringify(check));
+  }
+  // a rename from outside into .claude/rules/: both ends are paths the check reads, so its source stops the run
+  r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": { files: [".claude/rules/moved.md", "src/duck/plan.ts"] } });
+  assert.match(String(r.result["status"]), /changed src\/duck\/plan\.ts outside/);
+});
+
+test("pr-loop: the Learn check's own git command prints both ends of a rename", async () => {
+  // the command the prompt gives, run on a real repository where a file moved from src/ into .claude/rules/
+  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  const m = /`git -C \S+ (diff [^`]*) \S+ \S+`/.exec(r.prompt("learn check"));
+  assert.ok(m, "the learn check names a git diff over the commit range");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-check-"));
+  try {
+    const git = (...a: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", ...a], { encoding: "utf8" });
+    git("init", "-q");
+    fs.mkdirSync(path.join(dir, "src", "duck"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "src", "duck", "plan.ts"), "export const a = 1;\n".repeat(20));
+    git("add", "-A");
+    git("commit", "-q", "-m", "before");
+    fs.mkdirSync(path.join(dir, ".claude", "rules"), { recursive: true });
+    git("mv", "src/duck/plan.ts", ".claude/rules/moved.md");
+    git("commit", "-q", "-m", "after");
+    const printed = git(...m[1]!.split(" "), "HEAD~1", "HEAD").split("\n").filter(Boolean).sort();
+    assert.deepEqual(printed, [".claude/rules/moved.md", "src/duck/plan.ts"]);
+    // without --no-renames git prints the new path alone: the check would see nothing outside
+    assert.deepEqual(git("diff", "--name-only", "-M", "HEAD~1", "HEAD").split("\n").filter(Boolean), [".claude/rules/moved.md"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("pr-loop: a red CI beside a clean review goes to the CI stage, which reads it and sends it to a CI fix", async () => {
