@@ -26,6 +26,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   or of a parent refused before it was ever built, is not run, and `mason status` says why; a parent refused after an edit
   to its file keeps re-running from the SQL it was last built from, and carries its children, so `mason status` shows the
   parent refused and the child current until the file is fixed.
+  A table's lag is measured against the base across its chain: a child is behind from the moment a base below its parent
+  changes, not from its parent's run, in `mason status`, `--json`'s `behindSeconds` and `behindSince`, and after a
+  restart. A child's `target_lag` shorter than a parent's is refused by name, with the way out: it can be no fresher than
+  what it reads. `mason wait <table>` waits until a generated table holds every change synced when the wait began (exit
+  0; 1 when its run failed or it or a parent was refused before it was built; 124 on `--timeout`), so a script can read it right after a load. A table
+  that serves and holds everything synced is ready though its last run failed: after editing its file, read
+  `mason status` for whether the new definition was refused or failed.
 - **A column is reported as the source's type, whatever Mason holds.** `information_schema`, `pg_attribute`, `pg_typeof`
   and the wire's type OID now say `timetz` (1266), `point`, `money`, `bit`, `macaddr` and the rest where they said `text`,
   so a BI tool stops sending text functions at them. If a saved question or a script of yours read one of these columns as
