@@ -126,6 +126,15 @@ docs/DESIGN.md ("The independent review", "Local gates").
    message to a lead with no background job started since and still running; a warning, never a block, because it
    reads the transcript by heuristic.
 
+The coordinator runs the loop with the Workflow tool: `.claude/workflows/pr-loop.js` for one PR, and
+`.claude/workflows/issue-loop.js` for an issue's tasks, planned first and read by the coordinator, then run. In them
+the brief and the plan are Opus's and only the reviews are Fable's. A finding the base already has is filed, one issue
+per class, at whatever exit the run takes, and is never fixed in the PR nor counted toward its class rule: a PR that
+chases a class it did not make grows each round. Classes carry across a stack, so a class met on the PR below counts
+on the one above. A teammate needs Claude Code with the Workflow tool, the Opus and Fable models, and `gh`
+authenticated with the `project` scope for the board. Why: docs/DESIGN.md "The independent review". Detector:
+`tests/workflows.test.ts`.
+
 **The board says where each piece is**, so the owner reads progress there instead of asking: the [Mason work
 board](https://github.com/orgs/embeddable-hq/projects/4). An issue split into pieces has one sub-issue per PR
 (`scripts/board.ts sub <issue> "<issue> · <piece>" --from "<model>"`), and its PR says `Closes #<sub-issue>`. Each move

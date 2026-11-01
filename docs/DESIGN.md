@@ -429,6 +429,15 @@ the second finding of a class on one PR turns the next round into a class round,
 first, tests each against Postgres, then fixes the decision. Its first such round ran at high effort, to see whether
 effort changes the count.
 
+**The loop as workflows, and the base's findings filed (Tom, 2026-11-01).** PR 207 took three rounds over a numeric
+quotient computed as a double, and the wrong answer grew each round: main had given it since before the PR, so the PR
+chased a class it did not make. A finding the base already answers wrong is now the base's: one issue per class, never
+a fix in the PR, and never counted toward the PR's class rule. PR 170 and PR 207 met one class, which per-PR counting
+could not see, so a run's classes carry to the PR stacked on it. The coordinator ran the loop by hand; it now runs as
+`.claude/workflows/pr-loop.js` and `.claude/workflows/issue-loop.js`, started with the Workflow tool, each stage an
+agent and the scripts' logic held by `tests/workflows.test.ts`. The brief and the plan moved to Opus with implementation, and Fable is kept for the reviews,
+where outreading the author is the point.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
