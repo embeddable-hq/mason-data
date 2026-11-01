@@ -1219,7 +1219,14 @@ ledger row moves with the swap, so the table and its row never disagree. `open` 
 the engine answers (`src/lib/pg-numeric.ts`), and a plain write would store DuckDB's double. A type joins `STORED_TYPES`
 when a statement over it is held to Postgres.
 
-**Not yet**, by stage: chains, numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
+**Chains (stage 2a).** A child built in the same run as its parent reads the parent's side table, never the served one:
+the child's plan names the parent, and the served parent is the OLD one until the swap, so the plan's tree is changed
+after the rewrite to read the side table under the parent's name (src/duck/plan.ts `swapRelations`, held by the same
+read-back as any plan). The whole chain is one transaction on the run's connection, so parent and child are one
+snapshot, and one swap transaction on one writer's turn. A parent's new definition swaps in alone: its children's plans
+need the catalog to say its columns first.
+
+**Not yet**, by stage: a child's target against its parent's, lag across a chain and `mason wait` (2b), numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
 
 ## The Postgres API
 
@@ -2028,6 +2035,17 @@ read as a proof, so an interrupted run now has no verdict.
 notification; one test had deadlocked, so the job never exited and nothing came. It sat for 2h07 with 0.43 s of CPU,
 shown as completed. Across that day's agents, about 31 of 115 agent-hours were idle until a notification or message
 arrived and about 11 went on sleep loops, against about 4 running the oracle.
+
+**A turn ended with nothing to wake it (2026-11-01).** Two issue leads, each running one Opus agent at a time, were
+read from their transcripts over seven hours: an agent worked 34% and 21% of the wall clock. Of the rest, about 3.5 h
+per lead was two gaps in which nothing woke the coordinator. At 02:07 it queued a PR to auto-merge and ended its turn;
+the PR merged at 02:12, and nothing ran until the owner's next message at 04:22. At 06:55 it ended a turn, both leads
+reported within three minutes, and their reports reached it only with the owner's next message at 08:08. Waits for
+the coordinator's own reviews took about 35 and 47 min per lead, and a red oracle over a clock change about an hour.
+Inside the agents the largest single cost was test runs: a 100 s test file run whole, and `fails-without` over it twice
+per proof, 36 min of one issue's agents in three proofs (2, 13 and 20 min, each of which built a
+copy of the tree as well); 43 min of commands ran past their own foreground limit and were moved to the background.
+
 ## A libc order, read level by level
 
 Issue 128: under en_US.utf8 one value holding U+FE0F (`❤️`) or a Thai vowel refused a whole column's sort, group and
