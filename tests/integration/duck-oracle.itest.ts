@@ -63,6 +63,7 @@ import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { refusedAsNamed, SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
 import { collationMet, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
+import { emptyShapeCount, say as sayShape, shapeProblems, type ShapeCount, type ShapeName, type ShapeTally } from "./oracle/shape-names.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
 import { countGap, emptyTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
@@ -125,12 +126,13 @@ const viaOne = (rel: string): string => {
 };
 const throughOne = (sql: string): string => sql.replaceAll(T, viaOne(T)).replaceAll(U, viaOne(U)).replaceAll(Z, viaOne(Z));
 
-type Answer = { names: string[]; oids: number[]; rows: (string | null)[][] } | { code: string; message: string; detail?: string | undefined };
+// `typmods`: RowDescription's, read only to spell a shape's casts (oracle/shapes.ts); `verdict` does not compare them
+type Answer = { names: string[]; oids: number[]; typmods?: number[]; rows: (string | null)[][] } | { code: string; message: string; detail?: string | undefined };
 const raw = { getTypeParser: () => (v: string) => v };
 async function ask(c: pg.Client, sql: string, values?: string[], name?: string): Promise<Answer> {
   try {
     const r = await c.query({ text: sql, ...(values === undefined ? {} : { values }), ...(name === undefined ? {} : { name }), rowMode: "array", types: raw } as pg.QueryConfig);
-    return { names: r.fields.map((f) => f.name), oids: r.fields.map((f) => f.dataTypeID), rows: r.rows as (string | null)[][] };
+    return { names: r.fields.map((f) => f.name), oids: r.fields.map((f) => f.dataTypeID), typmods: r.fields.map((f) => f.dataTypeModifier), rows: r.rows as (string | null)[][] };
   } catch (e) {
     const d = e as pg.DatabaseError;
     if (d.code === undefined) throw e;
@@ -420,6 +422,23 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     return named !== undefined && named in GAPS && GAPS[named as GapId].kind === "refused" ? named as GapId : null;
   };
   let shaped = 0;
+  /** what each shape met (oracle/shape-names.ts): an answer and a refusal kept apart, so no shape lives on refusals */
+  const shapeTally: ShapeTally = {};
+  const countOf = (s: ShapeName): ShapeCount => shapeTally[s] ??= emptyShapeCount();
+  /** a type as the SOURCE spells it, and its kind, once per (oid, typmod): a shape's casts (oracle/shapes.ts) */
+  const types = new Map<string, Promise<{ name: string; typtype: string } | null>>();
+  const typeOf = (oid: number, typmod: number): Promise<{ name: string; typtype: string } | null> => {
+    const key = `${oid} ${typmod}`;
+    let t = types.get(key);
+    if (t === undefined) {
+      t = source.query({ text: "SELECT format_type($1::oid, $2::int4), typtype FROM pg_type WHERE oid = $1::oid", values: [oid, typmod], rowMode: "array" })
+        .then((r) => r.rows.length === 0 ? null : { name: String(r.rows[0]![0]), typtype: String(r.rows[0]![1]) });
+      types.set(key, t);
+    }
+    return t;
+  };
+  /** a decided difference by its kind; a shape's decision met by its `gap` (one naming an `issue` is in no gap tally) */
+  const meetDecided = (k: Decided, group: string, first: boolean): void => { if (k.gap !== undefined) meet("decided", k.gap, group, first); };
   // the sessions' TimeZone: UTC, as set at their start, until a statement asks for another
   let zone = "UTC";
   const run = async (phase: string): Promise<void> => {
@@ -441,32 +460,41 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         tallies.duckdb[kind]++;
       }
       if (v !== null || "code" in got) unproven.add(q.sql);
-      const k = KNOWN.find((x) => x.sql.test(q.sql));
+      // (a shape's decision never decides the statement itself)
+      const k = KNOWN.find((x) => x.shape === undefined && x.sql.test(q.sql));
       if (k) decided.add(k);
       // a decision that HOLDS part of the answer alike (SHOW ALL's fields and the rows the sessions set): that part
       // differing, or a refusal on either side, is a difference like any other; the rest may differ in any kind
       const broken = k?.holds === undefined ? null : "code" in got ? `refused: ${got.code} ${got.message}` : "code" in want ? `answered where Postgres refuses ${want.code} ${want.message}` : k.holds(want, got);
       if (broken !== null) { if (first) tallies.mason.differs++; differences.push({ phase, group: q.group, kind: "held", name: q.name, detail: broken, sql: q.sql }); continue; }
       // a decided case differing in ANOTHER way than decided is a difference like any other
-      if (k && (v === null || v.kind === k.kind || k.holds !== undefined)) { unproven.add(q.sql); if (v !== null) { known.add(k); meet("decided", k.gap, q.group, first); } else if (first) tallies.mason.exact++; continue; }
+      if (k && (v === null || v.kind === k.kind || k.holds !== undefined)) { unproven.add(q.sql); if (v !== null) { known.add(k); meetDecided(k, q.group, first); } else if (first) tallies.mason.exact++; continue; }
       const gap = v === null ? null : namedGap(got);
       if (gap !== null) { meet("refused", gap, q.group, first); continue; }
       if (v !== null) { if (first) tallies.mason.differs++; differences.push({ phase, group: q.group, kind: v.kind, name: q.name, detail: v.detail, sql: q.sql }); continue; }
       if (first) tallies.mason.exact++;
       // THE SHAPES (oracle/shapes.ts), once, of what both answered alike with rows: the same answer at another depth
-      if (!first || "code" in want || q.group === "copy" || SHAPES === false) continue;
-      for (const s of await shapesOf(q.sql, q.inOrder ?? ordered(q.sql))) {
+      // (the `copy` group gets only `table` and `table-arm`: oracle/shapes.ts)
+      if (!first || "code" in want || SHAPES === false) continue;
+      const { shaped: forms, unspellable } = await shapesOf(q.sql, q.inOrder ?? ordered(q.sql), q.group, { ...want, typmods: want.typmods ?? want.oids.map(() => -1) }, typeOf);
+      for (const u of unspellable) countOf(u).unspellable++;
+      for (const s of forms) {
         shaped++;
+        const c = countOf(s.shape);
+        c.asked++;
         const [sw, sg] = [await ask(source, s.sql, s.values), await ask(mason, s.sql, s.values)];
+        if ("code" in sw) c.postgresRefused[sw.code] = (c.postgresRefused[sw.code] ?? 0) + 1;
         const sv = verdict(sw, sg, s.inOrder);
         // a decided difference a shape alone meets (a filter's literal sent as a parameter: limit-lateral-filter),
-        // decided before an agreement so one that no longer differs is said so (staleDecisions)
-        const sk = KNOWN.find((x) => x.sql.test(s.sql));
+        // decided before an agreement so one that no longer differs is said so (staleDecisions). A shape's own
+        // decision is matched against the BASE text, for its shape only, ahead of the rest (oracle/known.ts)
+        const sk = KNOWN.find((x) => x.shape === s.shape && x.sql.test(q.sql)) ?? KNOWN.find((x) => x.shape === undefined && x.sql.test(s.sql));
         if (sk) decided.add(sk);
-        if (sv === null) continue;
+        if (sv === null) { if ("code" in sw) c.refusedAlike[sw.code] = (c.refusedAlike[sw.code] ?? 0) + 1; else c.answeredAlike++; continue; }
         const sgap = namedGap(sg);
-        if (sgap !== null) { meet("refused", sgap, q.group, false); continue; }
-        if (sk && sv.kind === sk.kind) { known.add(sk); meet("decided", sk.gap, q.group, false); continue; }
+        if (sgap !== null) { c.refusedByGap++; meet("refused", sgap, q.group, false); continue; }
+        if (sk && sv.kind === sk.kind) { c.decided++; known.add(sk); meetDecided(sk, q.group, false); continue; }
+        c.differs++;
         differences.push({ phase, group: `${q.group} [${s.shape}]`, kind: sv.kind, name: `${q.name} [${s.shape}]`, detail: sv.detail,
           sql: s.values === undefined ? s.sql : `${s.sql} -- with ${JSON.stringify(s.values)}` });
       }
@@ -951,6 +979,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     [...counted].sort((a, b) => b[1] - a[1]).map(([k, n]) => `  ${n} × ${k}`).join("\n") + "\n\n" +
     differences.map((d) => `[${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`).join("\n\n") + "\n");
   console.log(`duck oracle: ${asked} statements asked, ${differences.length} differ (${report}): ${[...counted].map(([k, n]) => `${n} ${k}`).join(", ")}`);
+  console.log(`duck oracle: shaped ${shaped}; per shape: ${Object.entries(shapeTally).map(([s, c]) => `${s} (${sayShape(c)})`).join("; ") || "none"}`);
   // the first differences in the log too, whichever assertion below fails first (a difference can be why a decision
   // is stale or a verified entry dropped, and CI keeps only the log)
   for (const d of differences.slice(0, 5)) console.log(`duck oracle: differs: [${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`);
@@ -978,6 +1007,9 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const unmet = (k: Decided): boolean => !collationMet(k, runProvider, runCollate);
   const stale = WHOLE ? staleDecisions(KNOWN, known, decided, unmet) : [];
   assert.deepEqual(stale, [], "a decided difference that no longer differs");
+  // A DEAD OR MISSPELT SHAPE (oracle/shape-names.ts): a whole run's own; a leg's report is summed by scripts/oracle-legs.ts
+  const shapesWrong = WHOLE && SHAPES ? shapeProblems(shapeTally) : [];
+  assert.deepEqual(shapesWrong, [], "a shape no statement answered alike, or one Postgres refused with a SQLSTATE it does not declare");
   // A DEAD GAP: a refused or decided entry no statement meets (removed, or held by a test it names)
   const dead = WHOLE ? deadGaps(everyAskGaps) : [];
   assert.deepEqual(dead, [], "src/duck/gaps.ts entries no oracle statement meets: add a statement that does (oracle/gap-cases.ts), or remove the entry");
@@ -988,8 +1020,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const { added: newly, dropped } = verifiedDiff(verified, VERIFIED);
   // A LEG'S REPORT, before the assertion below, so that a leg that differs still lets the check say what else is wrong
   if (LEG !== null) {
-    const legReport: LegReport = { ...LEG, whole: [...every().map((q) => ({ id: statementId(q), name: q.name })), ...UNORDERED_LIMITS.map(unorderedStatement).map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))], asked: askedIn, stages: stageAsked, shaped, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
-      decisions: KNOWN.map((k) => ({ sql: String(k.sql), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
+    const legReport: LegReport = { ...LEG, whole: [...every().map((q) => ({ id: statementId(q), name: q.name })), ...UNORDERED_LIMITS.map(unorderedStatement).map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))], asked: askedIn, stages: stageAsked, shaped, shapeTally, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
+      decisions: KNOWN.map((k) => ({ sql: String(k.sql), ...(k.shape === undefined ? {} : { shape: k.shape }), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
       verified: [...verified], names: Object.fromEntries(await describeKeys(async (sql) => (await source.query({ text: sql, rowMode: "array" })).rows as (string | null)[][], verified)),
       asks: asked, measured, differences: differences.length };
     const out = process.env.IT_ORACLE_LEG_REPORT!;   // legRefused: a leg without it does not start

@@ -11,7 +11,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
-import { STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
+import { emptyShapeCount, NEW_SHAPES } from "./integration/oracle/shape-names.ts";
+import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import type { GapTally } from "./integration/oracle/gap-tally.ts";
@@ -297,4 +298,23 @@ test("--write <run-id> takes only a finished run of the commit checked out: anot
   assert.match(runProblems({ headSha: "b".repeat(40), status: "completed", conclusion: "success" }, head).join("\n"), /the run is of commit b{40}, where this checkout is at a{40}/);
   assert.match(runProblems({ headSha: head, status: "in_progress", conclusion: null }, head).join("\n"), /has not finished \(in_progress\)/);
   assert.equal(runProblems({}, head).length, 2, "a view that says nothing is refused");
+});
+
+test("the shapes' tallies are summed across the legs: a dead or misspelt new shape fails by name, a shape decision merges apart from a base one", () => {
+  const live = (): NonNullable<LegReport["shapeTally"]> => Object.fromEntries(Object.entries(NEW_SHAPES).map(([s, spec]) => [s, { ...emptyShapeCount(), asked: 2,
+    ...(spec.life === "answer" ? { answeredAlike: 1 } : { refusedAlike: { [spec.may[0]!]: 1 }, postgresRefused: { [spec.may[0]!]: 1 } }) }]));
+  const [a, b] = legs();
+  assert.deepEqual(staleOrDead([{ ...a, shapeTally: live() }, { ...b, shapeTally: {} }]), [], "alive in one leg is alive");
+  const dead = { ...live(), "char-arm": { ...emptyShapeCount(), asked: 40, refusedByGap: 40 } };
+  assert.match(staleOrDead([{ ...a, shapeTally: dead }, { ...b, shapeTally: {} }]).join("\n"), /the shape char-arm is dead/);
+  const misspelt = { ...live(), "values-arm": { ...emptyShapeCount(), asked: 30, refusedAlike: { "42804": 30 }, postgresRefused: { "42804": 30 } } };
+  const said = staleOrDead([{ ...a, shapeTally: misspelt }, { ...b, shapeTally: {} }]).join("\n");
+  assert.match(said, /the shape values-arm is dead/);
+  assert.match(said, /the shape values-arm is misspelt: Postgres refused it 30 time\(s\) with 42804/);
+  assert.deepEqual(staleOrDead([{ ...a, shapeTally: dead, measured: { ...measured, shapes: false } }, { ...b, shapeTally: {}, measured: { ...measured, shapes: false } }]), [], "shapes off: no shape check");
+  assert.match(staleOrDead([{ ...a, shapeTally: live() }, b]).join("\n"), /leg\(s\) 2 has no shape tally where another has/);
+  // a base entry /x/ and a shape entry of the same pattern are two decisions: the shape's, differing in neither leg, is stale
+  const withShape = (r: LegReport, differed: boolean): LegReport => ({ ...r, shapeTally: r.leg === 1 ? live() : {}, decisions: [...r.decisions, { sql: "/x/", shape: "integer-arm", why: "a scale", differed, decided: true }] });
+  assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, true)]), [], "the shape entry differed in leg 2");
+  assert.deepEqual(staleOrDead([withShape(a, false), withShape(b, false)]), ["a decided difference that no longer differs: [integer-arm] /x/: no longer differs (a scale) — remove it from KNOWN"]);
 });

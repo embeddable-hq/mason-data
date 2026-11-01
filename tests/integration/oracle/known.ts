@@ -10,11 +10,18 @@
  * decided by it at all: a pattern that meets nothing is dead on every machine.
  */
 import type { GapId } from "../../../src/duck/gaps.ts";
+import type { ShapeName } from "./shape-names.ts";
 
-export type Decided = {
+/**
+ * A decided difference. One without `shape` decides a statement by its own text, and a shape's text as before. One
+ * with `shape` decides only that shape (oracle/shape-names.ts) of a statement whose BASE text its pattern matches,
+ * never the statement nor another shape; it names an existing `differs` gap, or the `issue` the difference is filed as
+ * (in no gap tally). Either must still differ in its kind.
+ */
+export type Decided = DecidedOf & ({ shape?: undefined; gap: GapId; issue?: undefined } | { shape: ShapeName; gap: GapId; issue?: undefined } | { shape: ShapeName; issue: number; gap?: undefined });
+type DecidedOf = {
   sql: RegExp;
   kind: string;
-  gap: GapId;
   why: string;
   /** its truth depends on the machine's floating-point arithmetic (its libm, its build's): where the two machines'
    *  last digits agree, it differs nowhere, and that is not stale */
@@ -26,6 +33,10 @@ export type Decided = {
    *  said, or null. With it, the rest may differ in any kind (`kind` says the one expected); without it, in `kind` only */
   holds?: (want: Answered, got: Answered) => string | null;
 };
+
+/** A decision's key, the one spelling of it: its pattern, or `[<shape>] <pattern>` for a shape's (the oracle's stale
+ *  assertion, a leg's report, and scripts/oracle-legs.ts's merge of the legs' decisions) */
+export const decisionKey = (k: { sql: RegExp | string; shape?: string | undefined }): string => k.shape === undefined ? String(k.sql) : `[${k.shape}] ${String(k.sql)}`;
 
 /** Whether an entry's `collation` is the run's: `provider` and `collate` as pg_database says them. */
 export function collationMet(k: Pick<Decided, "collation">, provider: string, collate: string): boolean {
@@ -44,8 +55,8 @@ export type Answered = { names: string[]; oids: number[]; rows: (string | null)[
  * @param decided — the entries that decided a statement asked (the first whose pattern it matched), differing or not
  * @param unmet — an entry whose `collation` is not this run's: as `machineFloat`
  */
-export function staleDecisions<K extends Pick<Decided, "why" | "machineFloat"> & { sql: RegExp | string }>(known: readonly K[], differed: ReadonlySet<K>, decided: ReadonlySet<K>, unmet: (k: K) => boolean = () => false): string[] {
+export function staleDecisions<K extends Pick<Decided, "why" | "machineFloat"> & { sql: RegExp | string; shape?: string | undefined }>(known: readonly K[], differed: ReadonlySet<K>, decided: ReadonlySet<K>, unmet: (k: K) => boolean = () => false): string[] {
   return known.filter((k) => !differed.has(k) && !((k.machineFloat === true || unmet(k)) && decided.has(k))).map((k) => decided.has(k)
-    ? `${k.sql}: no longer differs (${k.why}) — remove it from KNOWN`
-    : `${k.sql}: no statement asked matches it (${k.why}) — remove it from KNOWN`);
+    ? `${decisionKey(k)}: no longer differs (${k.why}) — remove it from KNOWN`
+    : `${decisionKey(k)}: no statement asked matches it (${k.why}) — remove it from KNOWN`);
 }
