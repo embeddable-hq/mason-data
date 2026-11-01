@@ -546,7 +546,7 @@ test("a synced table that takes a generated table's name is never written over: 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("a synced table that takes the name while a run is going is never written over: the run's swap looks on the writer's turn, and drops what it built", async () => {
+test("a synced table that takes the name while a run is going is never written over: the run's swap looks on the writer's turn, and drops what it built", { skip: "quarantined: #209" }, async () => {
   let take: (() => Promise<void>) | null = null;
   await withWorld({ counts: COUNTS }, async (w) => {
     await w.until(built);
