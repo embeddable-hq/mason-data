@@ -358,7 +358,7 @@ const STATUS_USAGE = `usage: mason status [--json]
            projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
            sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
            application_name), open, running }] }, share: (null, or what mason share has open) { port, fingerprint, sessions,
-           refusedLogins, droppedConnections, shares: [{ user, role, reads, openedAt, via, host, port, endsAt, state }] }, queries: { keptDays, day, week } (the last day's and the last 7
+           refusedLogins, droppedConnections, shares: [{ user, from (page or command), role, reads, openedAt, via, host, port, endsAt, state }] }, queries: { keptDays, day, week } (the last day's and the last 7
            days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
            failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
            when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap
@@ -742,7 +742,7 @@ export function shareRows(s: ShareState | null | undefined, now = Date.now()): A
   const each = s.shares.map((h): [string, string] => {
     const where = h.host === null ? "its tunnel is opening" : `${h.host}:${h.port} via ${h.via ?? "a tunnel"}${h.state === "reconnecting" ? " (reconnecting)" : ""}`;
     const ends = h.endsAt === null ? "" : `, ends in about ${Math.max(0, Math.round((Date.parse(h.endsAt) - now) / 60_000))} min`;
-    return ["Share", `${where}, as ${h.user}, reads ${h.role === null ? h.reads : `as the role ${h.role}`}${ends}`];
+    return ["Share", `${where}, as ${h.user}${h.from === "page" ? " (from the web page)" : ""}, reads ${h.role === null ? h.reads : `as the role ${h.role}`}${ends}`];
   });
   return [...each, ["Share socket", `127.0.0.1:${s.port}, TLS required, SHA-256 ${s.fingerprint} · ${s.sessions} session${s.sessions === 1 ? "" : "s"}, ${s.refusedLogins} login${s.refusedLogins === 1 ? "" : "s"} refused, ${s.droppedConnections} dropped before a login`]];
 }

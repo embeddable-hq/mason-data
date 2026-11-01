@@ -59,6 +59,18 @@ followed close it. The icons are Lucide's (ISC), vendored whole under `src/web/v
   Mason anything (no statement in the last day or week) it is **Connect your first tool**, right under the cards, saying
   what the URL is for; afterwards a quieter panel after the facts. It is `/api/state` `postgres` (`mason status --json`'s
   `postgres`: `shown`, `psql`).
+- **Overview**, Connect from anywhere (on the Connect card, under `mason start` alone): the page's `mason share`, for a
+  tool in the cloud. Its button asks once, in a popover, that this opens a temporary public address (and, where
+  `mason/roles.yml` names several roles that a share can read as, which one, as `mason share` asks); then the run opens
+  the same share the command opens (`POST /api/share/page` `{ confirmed: true, role? }`, src/cli/share-page.ts: the
+  share's own socket, TLS required of every connection, a new `mason_share_` password) and starts the free tunnel's
+  client itself. The card shows host, port, database, user and password, each with **Copy**, how long it has been
+  shared, that a free share ends within about an hour, and **Stop sharing**. The password is in that one answer and the
+  page's memory alone: no log line, no `/api/state`, and not after a reload. The page holds the share by checking in
+  every 20 s (`POST /api/share/page/beat`, whether the tab is shown or not), and says goodbye when it closes; a share
+  whose page has not checked in for 2 minutes — a tab crashed, a laptop asleep — is closed, its tunnel's client with it.
+  One share at a time: while `mason share` holds one the card says so (Ctrl-C ends it), and `mason share` is refused
+  while the page holds one. Under `mason serve`, and so through `mason ui --ssh`, it is absent and its endpoints refuse.
 - **Overview**, the tables not synced yet: a bar each with the line `mason wait` prints (a first sync not begun shimmers,
   with no % beside it), and nothing once every table is synced.
 - **Overview**, the facts: one table with the database and how its changes arrive, the warnings, Mason's version, uptime

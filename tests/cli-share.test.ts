@@ -34,6 +34,8 @@ const absent = (): Record<string, unknown> => ({});
 const { lastLines, pinggyConfig, probeShare, tunnelAddress, tunnelEnds, tunnelPlan } = await import("../src/cli/tunnel.ts" as string).catch(absent) as typeof import("../src/cli/tunnel.ts");
 const { newSharePassword, RunShares, shareRole, shareSecret, tunnelReport } = await import("../src/cli/share-run.ts" as string).catch(absent) as typeof import("../src/cli/share-run.ts");
 const { chosenRole, inOrder } = await import("../src/cli/share.ts" as string).catch(absent) as typeof import("../src/cli/share.ts");
+const { PageShare } = await import("../src/cli/share-page.ts" as string).catch(absent) as typeof import("../src/cli/share-page.ts");
+import type { OpenTunnel } from "../src/cli/tunnel.ts";
 
 /** a share's password: `mason_share_`, then the 192 random bits as hex */
 const SHARE_PASSWORD_RE = /^mason_share_[0-9a-f]{48}$/;
@@ -371,6 +373,7 @@ case "$mode" in
 esac
 while :; do
   [ -f "$STUB_STATE/drop" ] && { rm -f "$STUB_STATE/drop"; echo "connection reset by the relay" >&2; exit 1; }
+  [ -f "$STUB_STATE/orphan-ends" ] && ! kill -0 $PPID 2>/dev/null && exit 0
   sleep 0.1
 done
 `;
@@ -770,4 +773,176 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
     assert.match(s.stderr(), /mason share: the share ended: Mason is stopping/);
     await until(() => stubAlive().length === 0, "the tunnel client ended");
   });
+
+  // the web page's share (src/cli/share-page.ts), on a run again: asked as the page asks, with the run's token
+  const pagePost = async (route: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const r = config().running!;
+    const res = await fetch(`${r.controlUrl}${route}`, { method: "POST", headers: { Authorization: `Bearer ${r.token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json() as Record<string, unknown> };
+  };
+
+  test("a run starting sweeps the tunnel file a kill -9 left; the page's share then opens on it, TLS required, its password in its answer alone", async () => {
+    const stale = path.join(home, "share-tunnel-999999.ssh");
+    fs.writeFileSync(stale, "Host mason-share\n", { mode: 0o600 });
+    const start = await mason(["start"]);
+    assert.equal(start.code, 0, said(start));
+    assert.equal(fs.existsSync(stale), false, "swept at the start");
+    const a = await pagePost("/api/share/page", { confirmed: true });
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    const share = a.body.share as { host: string; port: number; user: string; password: string; database: string };
+    assert.equal(stubAlive().length, 1, "the run started the tunnel's client");
+    const st = await status();
+    assert.equal(st.share?.shares[0]?.user, share.user);
+    assert.ok(st.share !== null);
+    // through the stub, the address is the share's own socket: TLS required there, the password works there
+    await assert.rejects(client(share.port, share, false).connect(), /SSL|TLS|require/i, "a connection without TLS refused");
+    const c = client(share.port, share);
+    await c.connect();
+    assert.equal((await c.query("SELECT 1 AS a")).rows[0].a, 1);
+    await c.end();
+    // the command is refused while the page holds a share, naming it
+    const cmd = await mason(["share", "--json"], 60_000);
+    assert.equal(cmd.code, 1, said(cmd));
+    assert.match(cmd.stdout + cmd.stderr, new RegExp(`a share is open from the web page \\(${share.user}\\): one share at a time`));
+    const logs = await mason(["logs", "--lines", "400"]);
+    for (const text of [logs.stdout, JSON.stringify(st)]) assert.ok(!text.includes(share.password), "the password in no log line and no state");
+    assert.deepEqual(inHome(share.password), [], "the password in no file of .mason/");
+    const stopped = await pagePost("/api/share/page/stop", { user: share.user });
+    assert.equal(stopped.status, 200, JSON.stringify(stopped.body));
+    await gone(st.share.port);
+    await until(() => stubAlive().length === 0, "the tunnel client stopped");
+    assert.equal(fs.existsSync(path.join(home, `share-tunnel-${config().running!.pid}.ssh`)), false, "no tunnel file left");
+  });
+
+  test("mason share first: the page is refused, naming it", async () => {
+    const s = startShare();
+    const r = await reported(s);
+    const a = await pagePost("/api/share/page", { confirmed: true });
+    assert.equal(a.status, 409);
+    assert.match((a.body.failure as { message: string }).message, new RegExp(`mason share is holding a share now \\(${r.user}\\): one share at a time`));
+    s.child.kill("SIGINT");
+    assert.equal(await s.exited, 0);
+    await gone(r.port);
+  });
+
+  test("kill -9 of the run with the page's share open: the share's socket and the tunnel's client end with it", async () => {
+    fs.writeFileSync(path.join(stubState, "orphan-ends"), "");
+    try {
+      const a = await pagePost("/api/share/page", { confirmed: true });
+      assert.equal(a.status, 200, JSON.stringify(a.body));
+      const st = await status();
+      assert.ok(st.share !== null);
+      const pid = config().running!.pid;
+      const sup = supervisorOf(home);
+      if (sup !== null) process.kill(sup, "SIGKILL");
+      process.kill(pid, "SIGKILL");
+      await until(() => !alive(pid), "the run gone");
+      await until(() => portClosed(st.share!.port), "the share's socket closed");
+      await until(() => stubAlive().length === 0, "the tunnel's client ended with the run");
+    } finally { fs.rmSync(path.join(stubState, "orphan-ends"), { force: true }); }
+  });
+});
+
+// ------------------------------------------------------------------ the web page's share (src/cli/share-page.ts, issue 137)
+
+/** A tunnel that opened, faked: `end` is the client ending by itself, `stop` the run ending it. */
+function fakeTunnel(): { tunnel: OpenTunnel; stopped: () => boolean; end: (why: string) => void } {
+  let finish: (why: string) => void = () => undefined, stopped = false;
+  const ended = new Promise<string>((r) => { finish = r; });
+  const tunnel: OpenTunnel = { host: "relay.example.net", port: 41234, endsAt: new Date(Date.now() + 3_600_000).toISOString(), pid: 999_999, ended,
+    stop: () => { stopped = true; finish("it was ended (SIGTERM)"); } };
+  return { tunnel, stopped: () => stopped, end: (why) => finish(why) };
+}
+
+function pageShareOver(f: ReturnType<typeof fakeShares>, o: { boundMs?: number; tunnel?: () => Promise<{ tunnel: OpenTunnel; verified: boolean } | import("../src/cli/command.ts").Failure> } = {}) {
+  const tunnels: Array<ReturnType<typeof fakeTunnel>> = [];
+  const page = new PageShare({ shares: f.shares, home: os.tmpdir(), log: (l) => f.lines.push(l), boundMs: o.boundMs ?? 60_000,
+    openTunnel: o.tunnel ?? (async () => { const t = fakeTunnel(); tunnels.push(t); return { tunnel: t.tunnel, verified: true }; }) });
+  return { page, tunnels };
+}
+
+test("the page's share: opened only once confirmed, the password in its answer alone (no log line, no state), one share at a time with mason share either way", async () => {
+  const f = fakeShares();
+  const { page, tunnels } = pageShareOver(f);
+  const unconfirmed = await page.open({});
+  assert.ok("failure" in unconfirmed && unconfirmed.status === 400 && unconfirmed.failure.code === "usage", JSON.stringify(unconfirmed));
+  assert.equal(f.shares.state(), null, "nothing opened without the confirmation");
+  const a = await page.open({ confirmed: true });
+  assert.ok(!("failure" in a), JSON.stringify(a));
+  const share = a.body.share as { user: string; password: string; host: string; port: number; sslmode: string };
+  assert.match(share.password, /^mason_share_[0-9a-f]{48}$/);
+  assert.deepEqual([share.host, share.port, share.sslmode], ["relay.example.net", 41234, "require"]);
+  assert.equal(page.user(), share.user);
+  const state = JSON.stringify(f.shares.state());
+  assert.match(state, new RegExp(`"user":"${share.user}","from":"page"`));
+  for (const said of [state, ...f.lines]) assert.ok(!said.includes(share.password), `the password nowhere but the answer: ${said}`);
+  // the login is the password's, on the share's socket, as mason share's is
+  assert.equal((await f.door().authenticate(share.password, share.user)).user, share.user);
+  const again = await page.open({ confirmed: true });
+  assert.ok("failure" in again && again.status === 409);
+  assert.match(again.failure.message, new RegExp(`a share is open already, from the web page \\(${share.user}\\): one share at a time`));
+  assert.match(again.failure.fix ?? "", /Stop sharing/);
+  await page.stop({ user: share.user });
+  assert.equal(tunnels[0]!.stopped(), true, "Stop sharing stops the tunnel's client");
+  assert.equal(f.shares.state(), null);
+  // mason share first: the page is refused, naming it
+  const command = await f.shares.open({ secret: shareSecret(newSharePassword()) });
+  assert.ok(!("failure" in command));
+  const second = await page.open({ confirmed: true });
+  assert.ok("failure" in second && second.status === 409);
+  assert.match(second.failure.message, new RegExp(`mason share is holding a share now \\(${command.user}\\): one share at a time`));
+  assert.match(second.failure.fix ?? "", /Ctrl-C in the terminal that runs mason share/);
+  const notMine = await page.stop({ user: command.user });
+  assert.ok("failure" in notMine && notMine.status === 409, "the page never ends the command's share");
+  await f.shares.close(command.user, "test");
+});
+
+test("the page's share ends when the page stops checking in, within the bound: its tunnel stopped, the state without it, a late beat told why", async () => {
+  const f = fakeShares();
+  const { page, tunnels } = pageShareOver(f, { boundMs: 200 });
+  const a = await page.open({ confirmed: true });
+  assert.ok(!("failure" in a));
+  const user = (a.body.share as { user: string }).user;
+  for (let i = 0; i < 4; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    const beat = await page.beat({ user });
+    assert.ok(!("failure" in beat), `a beat within the bound keeps it (${i})`);
+  }
+  // no beat: the run's own check closes it (a tab killed, a laptop asleep)
+  for (const end = Date.now() + 5_000; f.shares.state() !== null && Date.now() < end;) await new Promise((r) => setTimeout(r, 25));
+  assert.equal(f.shares.state(), null, "closed within the bound");
+  assert.equal(tunnels[0]!.stopped(), true);
+  assert.equal(page.user(), null);
+  const late = await page.beat({ user });
+  assert.ok("failure" in late && late.status === 410);
+  assert.match(late.failure.message, /^the share ended: the page stopped checking in \(nothing for \d+ s\)/);
+  assert.match(f.lines.join("\n"), new RegExp(`share: ${user} closed: the page stopped checking in`));
+});
+
+test("the page's share: a tunnel that ends ends the share, said to the next beat; a missing ssh said in the page's words; the run stopping ends it", async () => {
+  const f = fakeShares();
+  const { page, tunnels } = pageShareOver(f);
+  const a = await page.open({ confirmed: true });
+  assert.ok(!("failure" in a));
+  const user = (a.body.share as { user: string }).user;
+  tunnels[0]!.end("ssh exited 1: connection reset by the relay");
+  for (const end = Date.now() + 5_000; f.shares.state() !== null && Date.now() < end;) await new Promise((r) => setTimeout(r, 25));
+  const beat = await page.beat({ user });
+  assert.ok("failure" in beat);
+  assert.equal(beat.failure.message, "the share ended: its tunnel closed (ssh exited 1: connection reset by the relay)");
+  assert.match(beat.failure.fix ?? "", /Connect from anywhere gives a new address and a new password/);
+
+  const noSsh = pageShareOver(f, { tunnel: async () => ({ message: "ssh is not on this machine's PATH, and --via pinggy needs it", code: "not_found" }) }).page;
+  const refused = await noSsh.open({ confirmed: true });
+  assert.ok("failure" in refused && refused.status === 404);
+  assert.equal(refused.failure.message, "ssh is not on this machine's PATH, and Connect from anywhere needs it");
+  assert.doesNotMatch(`${refused.failure.message} ${refused.failure.fix}`, /pinggy/i);
+  assert.equal(f.shares.state(), null, "a tunnel that never opened leaves no share");
+
+  const held = pageShareOver(f);
+  const b = await held.page.open({ confirmed: true });
+  assert.ok(!("failure" in b));
+  await f.shares.closeAll("Mason is stopping");
+  assert.equal(held.tunnels[0]!.stopped(), true, "the run stopping stops the page's tunnel");
+  assert.equal(held.page.user(), null);
 });

@@ -83,10 +83,10 @@ export interface OpenedShare { user: string; port: number; fingerprint: string; 
 /** `/api/state` `share`, `mason status`: nothing in it logs anyone in. */
 export interface ShareState {
   port: number; fingerprint: string; sessions: number; refusedLogins: number; droppedConnections: number;
-  shares: Array<{ user: string; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; endsAt: string | null; state: string }>;
+  shares: Array<{ user: string; from: "page" | "command"; role: string | null; reads: string; openedAt: string; via: string | null; host: string | null; port: number | null; endsAt: string | null; state: string }>;
 }
 
-interface Held { user: string; secret: string; role: string | null; reads: string; openedAt: string; tunnel: ShareTunnel; ended: ((why: string) => void) | null }
+interface Held { user: string; from: "page" | "command"; secret: string; role: string | null; reads: string; openedAt: string; tunnel: ShareTunnel; ended: ((why: string) => void) | null }
 
 export interface ShareDeps {
   /** `checkRoles`: the roles as the listener holds them, each row filter read by the catalog, as `mason start` says them */
@@ -196,12 +196,12 @@ export class RunShares {
   constructor(deps: ShareDeps) { this.deps = deps; }
 
   /** Opens a share: the socket when none is open, and a login of its own. Refused: the failure, with the choices when a role is what is missing. */
-  async open(ask: { secret: string; role?: string | undefined }): Promise<OpenedShare | { failure: Failure; choices?: ShareChoice[] }> {
+  async open(ask: { secret: string; role?: string | undefined; from?: "page" | "command" }): Promise<OpenedShare | { failure: Failure; choices?: ShareChoice[] }> {
     const role = shareRole(ask.role, await this.deps.listener.checkRoles());
     if ("failure" in role) return role;
     const user = `share_${crypto.randomBytes(3).toString("hex")}`;
     // in the list before the first wait, so a share ending meanwhile does not close the socket under this one
-    this.held.set(user, { user, secret: ask.secret, role: role.role, reads: role.reads, openedAt: new Date().toISOString(), tunnel: { state: "opening" }, ended: null });
+    this.held.set(user, { user, from: ask.from ?? "command", secret: ask.secret, role: role.role, reads: role.reads, openedAt: new Date().toISOString(), tunnel: { state: "opening" }, ended: null });
     let socket: ShareSocket, fingerprint: string;
     try {
       const made = this.socket ?? this.openSocket();
@@ -307,7 +307,7 @@ export class RunShares {
   state(): ShareState | null {
     if (this.socket === null || this.live === null) return null;
     return { port: this.live.port, fingerprint: this.socket.fingerprint, sessions: this.live.sessions, refusedLogins: this.refused, droppedConnections: this.dropped,
-      shares: [...this.held.values()].map((h) => ({ user: h.user, role: h.role, reads: h.reads, openedAt: h.openedAt, via: h.tunnel.via ?? null, host: h.tunnel.host ?? null, port: h.tunnel.port ?? null,
+      shares: [...this.held.values()].map((h) => ({ user: h.user, from: h.from, role: h.role, reads: h.reads, openedAt: h.openedAt, via: h.tunnel.via ?? null, host: h.tunnel.host ?? null, port: h.tunnel.port ?? null,
         endsAt: h.tunnel.endsAt ?? null, state: h.tunnel.state ?? "opening" })) };
   }
 }

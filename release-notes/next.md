@@ -15,6 +15,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Connect from anywhere, on the web page.** The Overview's Connect card opens what `mason share` opens, for a BI tool
+  in the cloud, without leaving the page: it asks once, then shows the host, port, user and password to paste (the
+  password this once), with Stop sharing. The share ends when you stop it, when the page closes or stops checking in
+  for 2 minutes, or when the free tunnel ends (within about an hour). One share at a time: `mason share` is refused
+  while the page holds one, and the reverse. It is not offered under `mason serve`.
+
 - **Generated tables: a table declared in SQL, kept current by Mason.** One file per table in `mason/generated_tables/`,
   committed beside the sources file, with `kind: scheduled`, `target_lag:` and `sql:`; `mason help generated` is the
   guide. A table re-runs its whole SQL once a base has changed and its target comes due, inside Mason, reading nothing from

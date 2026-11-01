@@ -48,6 +48,9 @@ import type { ClientActivity, LedgerRequest, QueryWindow, RequestLedger, Unsuppo
 import { eventLimit, requestFilter, requestFilterText, SLOW_MS, timeOf } from "./request-filter.ts";
 import type { PgApiServer } from "../api/postgres/server.ts";
 import { tunnelReport, type RunShares } from "./share-run.ts";
+import { PageShare } from "./share-page.ts";
+import { sweepTunnelFiles } from "./tunnel.ts";
+import { alive } from "./runs.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
 import type { CopySize, UsageFacts, UsageSample, UsageSampler } from "../duck/usage.ts";
 import { FRESH_SAMPLES, type RunMetrics } from "./metrics.ts";
@@ -84,6 +87,9 @@ export interface RunContext {
   roles?: () => RolesLive;
   /** what `mason share` opens (src/cli/share-run.ts): mason start's run alone; a server has an address of its own */
   shares?: RunShares;
+  /** the web page's share (Connect from anywhere, src/cli/share-page.ts): a test's; by default made over `shares`, and
+   *  never under mason serve (no `shares`) */
+  pageShare?: PageShare;
   /** the project's folder (sources/, mason.yml) */
   folder: () => string | null;
   /** the project's root (where .mason/ is): what messages name files from */
@@ -528,14 +534,25 @@ export function timedCache<T>(read: () => Promise<T>, ms: number, clock: () => n
   };
 }
 
+/** Connect from anywhere under mason serve: refused, whatever the request (the page never offers it there). */
+const SERVED_SHARE: Failure = { message: "this run is on a server: a web page never opens a public address from a server, which has an address of its own", code: "refused",
+  next: [["mason help production", "reaching a server's Postgres API"]] };
+
 /**
  * `POST /api/share` { secret, role? }: a share opened, its first line of JSON, and THE ANSWER LEFT OPEN: the connection is
  * the share (src/cli/share-run.ts), so a command gone by any means ends it. Only the password's hash arrives here. Past
  * its first line the answer says one thing, why the run ended it.
  */
-async function openShare(ctx: RunContext, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function openShare(ctx: RunContext, pageShare: PageShare | undefined, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (ctx.shares === undefined) {
     sendFailure(res, 409, { message: "this run is on a server, and has an address of its own: mason share is for a run on a laptop", code: "refused", next: [["mason help production", "reaching a server's Postgres API"]] });
+    return;
+  }
+  // one share at a time between the page and the command (src/cli/share-page.ts)
+  const onPage = pageShare?.user() ?? null;
+  if (onPage !== null) {
+    sendFailure(res, 409, { message: `a share is open from the web page (${onPage}): one share at a time`, code: "refused",
+      fix: "Stop sharing, on the web page's Connect card, ends it (closing that page does too); then mason share again", next: [["mason ui", "the web page"]] });
     return;
   }
   const shares = ctx.shares;
@@ -592,6 +609,10 @@ export function createRunServer(ctx: RunContext): http.Server {
   const tunnels: PageTunnel[] = [];
   // read once, here: nothing a request names is ever read from disk
   const page = ctx.page ? pageFiles() : new Map<string, PageFile>();
+  // the web page's share, over the run's shares (mason start's alone: under mason serve there is none, and it is refused);
+  // a tunnel's config file a kill -9 of an earlier run left is swept first (it may hold a token)
+  if (ctx.shares !== undefined && fs.existsSync(ctx.home)) sweepTunnelFiles(ctx.home, alive);
+  const pageShare = ctx.shares === undefined ? undefined : ctx.pageShare ?? new PageShare({ shares: ctx.shares, home: ctx.home, log: ctx.log });
   return http.createServer((req, res) => {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
     const v = guard({ method: req.method ?? "GET", url: req.url ?? "/", host: req.headers.host, origin: req.headers.origin, cookie: req.headers.cookie, authorization: req.headers.authorization }, ctx.port, ctx.token, tunnels);
@@ -701,7 +722,14 @@ export function createRunServer(ctx: RunContext): http.Server {
         } else if (req.method === "POST" && url.pathname === "/api/ui/tunnel") {
           await openTunnel(ctx, tunnels, req, res);
         } else if (req.method === "POST" && url.pathname === "/api/share") {
-          await openShare(ctx, req, res);
+          await openShare(ctx, pageShare, req, res);
+        } else if (req.method === "POST" && /^\/api\/share\/page(\/beat|\/stop)?$/.test(url.pathname)) {
+          // the web page's share (src/cli/share-page.ts): opened once the page asked, held by its beats, stopped by it
+          if (pageShare === undefined) { sendFailure(res, 409, SERVED_SHARE); return; }
+          const body: unknown = JSON.parse(await readBody(req, 64 * 1024));
+          const a = url.pathname.endsWith("/beat") ? await pageShare.beat(body) : url.pathname.endsWith("/stop") ? await pageShare.stop(body) : await pageShare.open(body);
+          if ("failure" in a) sendFailure(res, a.status, a.failure);
+          else sendJson(res, a.status, a.body);
         } else if (req.method === "POST" && /^\/api\/share\/[^/]+$/.test(url.pathname)) {
           // what the command knows of its tunnel, as it knows it: mason status says it, and the run stops the client
           const body = tunnelReport(JSON.parse(await readBody(req, 64 * 1024)));

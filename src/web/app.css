@@ -507,6 +507,12 @@ form.formcard input { width: 18em; }
 .connect .facts { margin: 0 0 var(--space-3); gap: var(--space-2) var(--space-4); align-items: center; }
 .connect .copyrow { flex-wrap: wrap; }
 .connect .copyrow code { overflow-wrap: anywhere; }
+/* Connect from anywhere: a course of its own under the local connection, over a mortar line */
+.connect .anywhere { border-top: 1px solid var(--line); margin-top: var(--space-3); padding-top: var(--space-3); }
+.connect .anywhere .connect-sub { font-weight: 700; margin: 0 0 var(--space-2); }
+.connect .anywhere .headline { font-weight: 700; margin: 0 0 var(--space-2); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.pop fieldset.roles { border: 1px solid var(--frame); border-radius: var(--radius); margin: 0 0 var(--space-2); padding: var(--space-2) var(--space-3); }
+.pop fieldset.roles label { display: block; overflow-wrap: anywhere; }
 .connect .facts dd .dim { font-family: var(--font-sans); font-size: var(--text-sm); }
 .connect .tip { margin: var(--space-3) 0 0; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
 .empty + .connect { margin-top: var(--space-3); }

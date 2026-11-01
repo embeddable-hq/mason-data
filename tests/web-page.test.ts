@@ -3215,7 +3215,7 @@ test("the Overview, nothing asked yet: Connect your first tool under the cards �
   assert.match(text, new RegExp(`Connect your first tool Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL\\. ` +
     `URL ${SHOP_PG.shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy psql ${SHOP_PG.psql.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} Copy ` +
     "Then try select count\\(\\*\\) from customers; Copy it shows on Queries " +
-    "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. Mason Source "));
+    "Create a user Its name and password go in place of <user>:<password> : the Users page shows the whole URL once, as mason user add <name> prints it\\. Connect from anywhere .* Mason Source "));
   assert.match(html, /<code id="connect-try">select count\(\*\) from customers;<\/code> <button type="button" class="small" data-copy="connect-try" data-room="Press ⌘C">Copy<\/button>/,
     "a first statement that the request log lists: one that reads a copied table (the first copied), never a select 1 it does not");
   // first under the cards, before the facts: the most important thing on a fresh install is how to reach it
@@ -3709,4 +3709,147 @@ test("only the clock moved: the ages are set where they are, the part not writte
   tick(); await settle();
   assert.equal(log.writes, writes, "not written again");
   assert.equal(shown[0]!.innerHTML, "7s ago", "the age moved where it is");
+});
+
+// ------------------------------------------------------------------ Connect from anywhere (issue 137: mason share on the page)
+
+/** The page's share as the run answers its open (src/cli/share-page.ts PageShareOpened): synthetic, the password made up. */
+const OPENED = { host: "relay.example.net", port: 41234, database: "shop", user: "share_0a1b2c", password: `mason_share_${"ab".repeat(24)}`, sslmode: "require",
+  fingerprint: "AA:BB", role: null, reads: "every synced table", endsAt: "2026-10-27T10:05:00.000Z", openedAt: "2026-10-27T09:02:30.000Z", verified: true, beatMs: 20_000, boundMs: 120_000 };
+const listed = (from: "page" | "command", host: string | null = OPENED.host): unknown => ({ ...RUNNING, share: { port: 6000, fingerprint: "AA:BB", sessions: 0, refusedLogins: 0, droppedConnections: 0,
+  shares: [{ user: OPENED.user, from, role: null, reads: "every synced table", openedAt: OPENED.openedAt, via: "a tunnel", host, port: host === null ? null : OPENED.port, endsAt: OPENED.endsAt, state: host === null ? "opening" : "up" }] } });
+/** Nothing the card or its refusals write names the tunnel's provider or the engine. */
+const NOT_SAID = /pinggy|bore|duck/i;
+
+test("Connect from anywhere, each state a pure function of the JSON: none, asking, a role to choose, opening, open, refused, held elsewhere, served", () => {
+  const render = fn<[unknown, unknown?, number?], string>("renderAnywhere");
+  const none = render(RUNNING, undefined, NOW);
+  assert.match(textOf(none), /Connect from anywhere For a tool in the cloud, which cannot reach this machine: a temporary public address, TLS required, and a password shown once\. A free share ends within about an hour\. Connect from anywhere$/);
+  assert.match(none, /data-share-ask=""/);
+  assert.equal(popsOf(none).length, 0, "nothing asked before the click");
+
+  const asking = render(RUNNING, { phase: "asking", choices: null, opened: null, failure: null }, NOW);
+  const q = popsOf(asking);
+  assert.equal(q.length, 1);
+  assert.equal(q[0]!.anchor, "share-anywhere-act", "the question is beside the button");
+  assert.match(textOf(q[0]!.html), /^This opens a temporary public address for this project's Postgres API: anyone with the address and its password reads the synced data, until you stop sharing, close this page, or the free share ends \(within about an hour\)\. Open a public address Cancel$/);
+  assert.doesNotMatch(asking, /name="share-role"/, "one role or none: no picker");
+
+  const choices = [{ role: "sales", reads: "2 synced tables: orders, customers", default: true }, { role: "ops", reads: "every synced table", default: false }];
+  const picker = popsOf(render(RUNNING, { phase: "asking", choices, opened: null, failure: null }, NOW))[0]!.html;
+  assert.deepEqual([...picker.matchAll(/<input type="radio" name="share-role" value="([^"]+)"( checked)?>/g)].map((m) => [m[1], m[2] === " checked"]), [["sales", true], ["ops", false]]);
+  assert.match(textOf(picker), /Which role does this share read as\? .* sales: 2 synced tables: orders, customers \(the file's default\) ops: every synced table Open a public address Cancel$/);
+
+  const opening = render(RUNNING, { phase: "opening", choices: null, opened: null, failure: null }, NOW);
+  assert.match(opening, /<button type="button" data-share-ask="" disabled>Opening…<\/button>/);
+  assert.match(textOf(opening), /Opening a temporary public address: up to about 40 s/);
+
+  const open = render(listed("page"), { phase: "open", choices: null, opened: OPENED, failure: null }, NOW);
+  const said = textOf(open);
+  for (const [label, id, v] of [["Host", "share-host", OPENED.host], ["Port", "share-port", String(OPENED.port)], ["User", "share-user", OPENED.user], ["Password", "share-password", OPENED.password]]) {
+    assert.match(open, new RegExp(`<dt>${label}</dt><dd><span class="copyrow"><code id="${id}">${v!.replace(/\./g, "\\.")}</code> <button type="button" class="small" data-copy="${id}"`), `${label} with its Copy`);
+  }
+  assert.match(said, /Database shop User share_0a1b2c Copy Password mason_share_(ab)+ Copy SSL mode require/);
+  assert.match(said, /Shared for 3 min , reading every synced table \(this project has no roles file\)\. A free share ends within about an hour \(at 10:05 UTC\): Stop sharing ends it now, and closing this page ends it too\./);
+  assert.match(said, /the password is shown this once, is kept nowhere/);
+  assert.match(open, /data-share-stop="share_0a1b2c">Stop sharing<\/button>/);
+  assert.doesNotMatch(said, /Connect from anywhere For a tool/, "open: no second offer");
+
+  const failure = { code: "refused", message: "mason share is holding a share now (share_999999): one share at a time", fix: "Ctrl-C in the terminal that runs mason share ends it; then Connect from anywhere again", next: [] };
+  const refusedHtml = render(RUNNING, { phase: "none", choices: null, opened: null, failure }, NOW);
+  assert.match(textOf(refusedHtml), /✗ mason share is holding a share now \(share_999999\): one share at a time fix Ctrl-C in the terminal that runs mason share ends it; then Connect from anywhere again Dismiss$/);
+
+  const command = textOf(render(listed("command"), undefined, NOW));
+  assert.match(command, /mason share is holding a share now: share_0a1b2c at relay\.example\.net:41234\. One share at a time: Ctrl-C in its terminal ends it\./);
+  assert.doesNotMatch(command, /Stop sharing|mason_share_/, "another's share: no stop, never a password");
+  const orphan = render(listed("page"), undefined, NOW);
+  assert.match(textOf(orphan), /A share is open from a page that has since closed or reloaded: share_0a1b2c at relay\.example\.net:41234\. Its password was shown once, on that page/);
+  assert.match(orphan, /data-share-stop="share_0a1b2c"/);
+  assert.doesNotMatch(orphan, /mason_share_/, "a reload shows no password");
+
+  assert.equal(render({ ...RUNNING, served: true }, { phase: "open", choices: null, opened: OPENED, failure: null }, NOW), "", "never on a server's page");
+  const served = fn<[unknown, unknown?], string>("renderStatus")({ ...RUNNING, served: true }, { queries: NO_QUERIES, now: NOW });
+  assert.doesNotMatch(textOf(served), /Connect from anywhere/);
+  assert.doesNotMatch(served, /data-share-/);
+  assert.match(textOf(fn<[unknown, unknown?], string>("renderStatus")(RUNNING, { queries: NO_QUERIES, now: NOW })), /Create a user .* Connect from anywhere For a tool in the cloud/, "under mason start, beside the local connection");
+
+  for (const html of [none, asking, picker, opening, open, refusedHtml, orphan]) assert.doesNotMatch(textOf(html), NOT_SAID);
+});
+
+/** The run, faked: /api/state, and the share's three endpoints answering as src/cli/share-page.ts does. */
+function shareRun(o: { choices?: boolean } = {}) {
+  const asked: Array<{ path: string; body: unknown }> = [];
+  let state: unknown = RUNNING;
+  let beatFails: unknown = null;
+  const ok = (body: unknown, status = 200): { ok: boolean; status: number; text: () => Promise<string> } => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
+  const fetchFn = async (p: string, init?: { body?: string }): Promise<ReturnType<typeof ok>> => {
+    const body = init?.body === undefined ? undefined : JSON.parse(init.body) as Record<string, unknown>;
+    asked.push({ path: p, body });
+    if (p === "/api/share/page") {
+      if (o.choices && body?.role === undefined) return ok({ choices: [{ role: "sales", reads: "1 synced table: orders", default: false }, { role: "ops", reads: "every synced table", default: false }], why: null });
+      state = listed("page");
+      return ok({ share: { ...OPENED, ...(body?.role ? { role: body.role } : {}) } });
+    }
+    if (p === "/api/share/page/beat") return beatFails === null ? ok({ ok: true }) : ok({ error: "x", failure: beatFails }, 410);
+    if (p === "/api/share/page/stop") { state = RUNNING; return ok({ ended: "stopped from the web page" }); }
+    if (p === "/api/state") return ok(state);
+    return ok({}, 404);
+  };
+  const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+  const listeners = new Map<string, () => void>();
+  const beacons: Array<[string, string]> = [];
+  const win = { setInterval: (f: () => void, ms: number) => { timers.push({ fn: f, ms, cleared: false }); return timers.length - 1; }, clearInterval: (i: number) => { if (timers[i]) timers[i]!.cleared = true; },
+    addEventListener: (t: string, f: () => void) => listeners.set(t, f), removeEventListener: (t: string) => listeners.delete(t),
+    navigator: { sendBeacon: (u: string, b: string) => { beacons.push([u, b]); return true; } } };
+  return { fetchFn, asked, timers, listeners, beacons, win, setState: (s: unknown) => { state = s; }, failBeats: (f: unknown) => { beatFails = f; } };
+}
+
+interface StatusPage { click(d: Record<string, string | undefined>, b: unknown, env: unknown): unknown; view(): Record<string, string> }
+const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+test("Connect from anywhere on the page: asked once, opened with the confirmation, held by its beat whether shown or not, stopped, and the password then nowhere", async () => {
+  const run = shareRun();
+  const app = fn<[unknown, () => Date], App & { pages: Map<string, StatusPage> }>("createApp")(run.fetchFn, () => new Date(NOW));
+  await app.poll();
+  const status = app.pages.get("status")!;
+  const doc = { querySelector: () => null };
+  assert.equal(status.click({ shareAsk: "" }, {}, { doc, win: run.win }), true);
+  assert.equal(popsOf(status.view().status!).length, 1, "the question");
+  assert.equal(run.asked.filter((a) => a.path.startsWith("/api/share")).length, 0, "the click alone opens nothing");
+  await status.click({ shareOpen: "" }, {}, { doc, win: run.win });
+  assert.deepEqual(run.asked.find((a) => a.path === "/api/share/page")?.body, { confirmed: true }, "the confirmation the run checks");
+  assert.match(status.view().status!, new RegExp(OPENED.password), "the password, this once, from the page's memory");
+  assert.equal(run.timers.length, 1);
+  assert.equal(run.timers[0]!.ms, OPENED.beatMs, "the beat at the run's rate");
+  run.timers[0]!.fn();
+  await tick();
+  assert.deepEqual(run.asked.at(-1), { path: "/api/share/page/beat", body: { user: OPENED.user } });
+  run.listeners.get("pagehide")!();
+  assert.deepEqual(run.beacons, [["/api/share/page/stop", JSON.stringify({ user: OPENED.user })]], "leaving says goodbye");
+  await status.click({ shareStop: OPENED.user }, {}, { doc, win: run.win });
+  assert.deepEqual(run.asked.find((a) => a.path === "/api/share/page/stop")?.body, { user: OPENED.user });
+  assert.equal(run.timers[0]!.cleared, true, "no beat after the stop");
+  assert.equal(run.listeners.has("pagehide"), false);
+  assert.doesNotMatch(status.view().status!, /mason_share_/, "the password gone with the share");
+  assert.match(textOf(status.view().status!), /Connect from anywhere For a tool in the cloud/);
+});
+
+test("Connect from anywhere: a role picked from the file's several, sent as mason share --role sends it; a share that ended is said with its why, and its password goes", async () => {
+  const run = shareRun({ choices: true });
+  const app = fn<[unknown, () => Date], App & { pages: Map<string, StatusPage> }>("createApp")(run.fetchFn, () => new Date(NOW));
+  await app.poll();
+  const status = app.pages.get("status")!;
+  status.click({ shareAsk: "" }, {}, { doc: { querySelector: () => null }, win: run.win });
+  await status.click({ shareOpen: "" }, {}, { doc: { querySelector: () => null }, win: run.win });
+  assert.match(popsOf(status.view().status!)[0]!.html, /name="share-role" value="sales" checked/, "the question again, with the roles");
+  await status.click({ shareOpen: "" }, {}, { doc: { querySelector: () => ({ value: "ops" }) }, win: run.win });
+  assert.deepEqual(run.asked.filter((a) => a.path === "/api/share/page").map((a) => a.body), [{ confirmed: true }, { confirmed: true, role: "ops" }]);
+  // the tunnel ended while the page is open: the next state no longer lists it, and a beat asks why
+  run.failBeats({ code: "ended", message: "the share ended: its tunnel closed (ssh exited 1)", fix: "its address no longer answers, and its password no longer works: Connect from anywhere gives a new address and a new password", next: [] });
+  run.setState(RUNNING);
+  await app.poll();
+  await tick();
+  assert.match(textOf(status.view().status!), /✗ the share ended: its tunnel closed \(ssh exited 1\) fix its address no longer answers, and its password no longer works: Connect from anywhere gives a new address and a new password/);
+  assert.doesNotMatch(status.view().status!, /mason_share_/);
+  assert.equal(run.timers[0]!.cleared, true);
 });

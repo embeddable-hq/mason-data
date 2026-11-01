@@ -224,3 +224,21 @@ export function probeShare(address: { host: string; port: number }, fingerprint:
     });
   });
 }
+
+/**
+ * A TUNNEL OPENED AND ITS ADDRESS CHECKED: the client started (`startTunnel`), then the address it gave probed for this
+ * share's certificate (`probeShare`). `verified` false: nothing answered there from this machine (no verdict); an
+ * address where something else answers is the Failure, and its client is stopped. ONE way for `mason share` and the
+ * web page's share (src/cli/share-page.ts), so the two cannot drift.
+ */
+export async function openVerifiedTunnel(plan: TunnelPlan, fingerprint: string, o: { timeoutMs: number; onPid?: (pid: number) => void }): Promise<{ tunnel: OpenTunnel; verified: boolean } | Failure> {
+  const t = await startTunnel(plan, o);
+  if ("message" in t) return t;
+  const probe = await probeShare(t, fingerprint);
+  if (probe === "other") {
+    t.stop();
+    return { message: `${t.host}:${t.port} is not this share: something else answers there`, code: "failed", why: "the tunnel printed that address, and the certificate there is not this share's: its output may have changed, or something stands in the way",
+      fix: "nothing was left open. Do not connect a tool to that address", next: [["mason share --via bore", "another tunnel"]] };
+  }
+  return { tunnel: t, verified: probe === "same" };
+}

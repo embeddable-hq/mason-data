@@ -121,3 +121,70 @@ test("the browser is the platform's: open on macOS, start on Windows, xdg-open e
   assert.deepEqual(openCommand!("linux", u), ["xdg-open", [u]]);
   assert.deepEqual(openCommand!("freebsd", u), ["xdg-open", [u]]);
 });
+
+// ------------------------------------------------------------------ the web page's share behind the run's guard (issue 137)
+
+/** A run's command server with its shares faked (each open counted, none ever made), as mason start's, or mason serve's (`served`: no shares). */
+async function shareServer(served: boolean): Promise<{ port: number; opened: () => number; close: () => void }> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mason-ui-share-"));
+  made.push(root);
+  let opened = 0;
+  const shares = { open: async () => { opened++; return { failure: { message: "the fake opens nothing", code: "failed" } }; }, state: () => null, onEnd: () => undefined, update: () => true, close: async () => undefined };
+  const ctx = {
+    source, facts: () => ({ version: 160000, versionText: "16", standby: false, tables: [], systemIdentifier: null }), warnings: [], replication: () => null,
+    port: 0, token: TOKEN, page: true, ...(served ? { served: true } : { shares }), users: { file: path.join(root, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:5433/shop" },
+    folder: () => null, root, home: path.join(root, ".mason"), version: "test", startedAt: Date.now(), sources: () => ({ file: null, problem: null }), sourcesChanged: () => undefined, log: () => undefined,
+    readSource: () => ({ message: "none", code: "bad_source" }), runUrl: "", duck: {},
+  } as unknown as RunContext;
+  const server = createRunServer(ctx);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = ctx.port = (server.address() as { port: number }).port;
+  return { port, opened: () => opened, close: () => server.close() };
+}
+
+const post = async (port: number, route: string, headers: Record<string, string>, body: unknown = { confirmed: true }): Promise<{ status: number; text: string }> => {
+  const res = await fetch(`http://127.0.0.1:${port}${route}`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+  return { status: res.status, text: await res.text() };
+};
+
+test("the page's share endpoint: a foreign Origin, no guard and another run's token refused, the confirmation required, and nothing opened by any of them", async () => {
+  const s = await shareServer(false);
+  try {
+    const cookie = `mason_dev_${s.port}=${TOKEN}`;
+    const page = { Cookie: cookie, Origin: `http://127.0.0.1:${s.port}` };
+    for (const [why, headers] of [["a foreign Origin", { Cookie: cookie, Origin: "http://evil.example" }], ["no Origin", { Cookie: cookie }], ["no guard", {}],
+      ["another run's token", { Authorization: `Bearer ${"v".repeat(64)}` }], ["another run's cookie", { Cookie: `mason_dev_${s.port}=${"v".repeat(64)}`, Origin: `http://127.0.0.1:${s.port}` }]] as const) {
+      for (const route of ["/api/share/page", "/api/share/page/beat", "/api/share/page/stop"]) {
+        const a = await post(s.port, route, headers);
+        assert.equal(a.status, 403, `${why}, ${route}: ${a.text}`);
+      }
+    }
+    assert.equal(s.opened(), 0, "nothing opened past the guard");
+    for (const body of [{}, { confirmed: "yes" }, { role: "sales" }]) {
+      const a = await post(s.port, "/api/share/page", page, body);
+      assert.equal(a.status, 400, a.text);
+      const f = (JSON.parse(a.text) as { failure: { code: string; message: string } }).failure;
+      assert.equal(f.code, "usage");
+      assert.equal(f.message, "nothing was opened: a public address is opened only once the page has asked");
+    }
+    assert.equal(s.opened(), 0, "nothing opened without the confirmation");
+    const asked = await post(s.port, "/api/share/page", page);
+    assert.notEqual(asked.status, 403, asked.text);
+    assert.equal(s.opened(), 1, "the page, confirmed, reaches the share");
+  } finally { s.close(); }
+});
+
+test("the page's share under mason serve: refused in the CLI's failure shape, whatever is asked, and nothing opened", async () => {
+  const s = await shareServer(true);
+  try {
+    const page = { Cookie: `mason_dev_${s.port}=${TOKEN}`, Origin: `http://127.0.0.1:${s.port}` };
+    for (const route of ["/api/share/page", "/api/share/page/beat", "/api/share/page/stop"]) {
+      const a = await post(s.port, route, page, { confirmed: true, user: "share_000000" });
+      assert.equal(a.status, 409, a.text);
+      const f = (JSON.parse(a.text) as { failure: { code: string; message: string; next: Array<{ command: string }> } }).failure;
+      assert.equal(f.code, "refused");
+      assert.equal(f.message, "this run is on a server: a web page never opens a public address from a server, which has an address of its own");
+      assert.deepEqual(f.next.map((n) => n.command), ["mason help production"]);
+    }
+  } finally { s.close(); }
+});

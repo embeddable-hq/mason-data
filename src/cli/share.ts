@@ -24,7 +24,7 @@ import { err as styleErr, out as styleOut, stepRenderer } from "./style.ts";
 import { alive, type DevRun } from "./runs.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
 import { newSharePassword, shareSecret, type OpenedShare, type ShareChoice, type ShareTunnel } from "./share-run.ts";
-import { probeShare, startTunnel, sweepTunnelFiles, TOKEN_RE, TUNNELS, tunnelPlan, type OpenTunnel, type TunnelPlan, type Via } from "./tunnel.ts";
+import { openVerifiedTunnel, sweepTunnelFiles, TOKEN_RE, TUNNELS, tunnelPlan, type OpenTunnel, type TunnelPlan, type Via } from "./tunnel.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const say = (m: string): void => { process.stderr.write(`${m}\n`); };
@@ -121,16 +121,6 @@ function endsText(endsAt: string | null, now: number): string {
   return `in about ${minutes} minutes, at ${new Date(endsAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: the free tunnel's limit (mason share again gives a new address and a new password)`;
 }
 
-/** What a tunnel's address is checked to be, once the client gave it: the Failure when something else answers there. */
-async function verified(t: OpenTunnel, fingerprint: string): Promise<boolean | Failure> {
-  const probe = await probeShare(t, fingerprint);
-  if (probe === "other") {
-    return { message: `${t.host}:${t.port} is not this share: something else answers there`, code: "failed", why: "the tunnel printed that address, and the certificate there is not this share's: its output may have changed, or something stands in the way",
-      fix: "nothing was left open. Do not connect a tool to that address", next: [["mason share --via bore", "another tunnel"]] };
-  }
-  return probe === "same";
-}
-
 export async function share(argv: string[]): Promise<number> {
   const f = parseCommand(SHARE, argv);
   if (typeof f === "number") return f;
@@ -179,11 +169,7 @@ async function holding(h: Holding): Promise<number> {
   steps.done(`A socket of its own for the share, TLS required (127.0.0.1:${opened.port})`);
   const open = async (): Promise<{ tunnel: OpenTunnel; verified: boolean } | Failure> => {
     const plan = h.plan();
-    const t = await startTunnel(plan, { timeoutMs: h.timeoutMs, onPid: (pid) => { void tell({ pid, via: plan.via, state: "opening" }); } });
-    if ("message" in t) return t;
-    const checked = await verified(t, opened.fingerprint);
-    if (typeof checked !== "boolean") { t.stop(); return checked; }
-    return { tunnel: t, verified: checked };
+    return openVerifiedTunnel(plan, opened.fingerprint, { timeoutMs: h.timeoutMs, onPid: (pid) => { void tell({ pid, via: plan.via, state: "opening" }); } });
   };
   const plan = h.plan();
   steps.begin(`Opening a tunnel (${plan.via})`);
