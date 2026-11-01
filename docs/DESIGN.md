@@ -496,10 +496,15 @@ met in the PR's review and deferred, and listed in the Review record's `deferred
 first review as passed when it found nothing blocking, and reads a record written before severity as all blocking,
 since every finding then made a round.
 
-### Issue labels (Tom, 2026-11-01)
+### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
-**Decision.** Every open issue carries `bug` or `enhancement`, and every bug exactly one of four `severity:` labels
-(CLAUDE.md "What a session finds"). The labels' descriptions on GitHub carry the one-line form of each severity.
+**Decision.** Every open issue carries the label `bug` or `enhancement`. Every bug is on the Mason work board with its
+`Severity` field set to Critical, High, Medium or Low (CLAUDE.md "What a session finds"). A session sets it with
+`scripts/board.ts severity <n> <level>`, which adds the issue to the board if it is not there.
+
+**Why a field, not a label.** The triage first recorded severity as four `severity:` labels, and the owner moved it to
+the board the same day. A single-select field holds exactly one value, where labels allow none or two. Its options are
+ordered most severe first, so a view sorts the bugs by it. The four labels were deleted.
 
 **Why.** On 2026-11-01, 3 of the 100 open issues carried either label. Nearly all had been filed by sessions under "What
 a session finds, it acts on", each one well written, but none said how much it mattered. A silent wrong answer
@@ -535,11 +540,12 @@ shapes, but they differ only on a source under an ICU collation. No source recor
 stayed high, and that call was reported to the owner.
 
 **The triage's result.** It closed three duplicates and closed nothing as fixed. Two candidates were checked against
-main and each kept a done criterion still unmet. After the second pass, of 100 open issues: 71 bugs (35 high, 34
-medium, 2 low, none critical) and 29 features.
+main and each kept a done criterion still unmet. After the second pass, of 100 open issues: 71 bugs (35 High, 34
+Medium, 2 Low, none Critical) and 29 features.
 
-**Detector.** None yet: a session reads the labels. A script listing open issues without `bug` or `enhancement`, or
-a bug without exactly one severity, would make it one; it is not built.
+**Detector.** The board's view "Bugs by severity" (`is:open label:bug`, sorted by Severity), where a bug with no
+Severity shows at the bottom. An issue with neither label is seen only by reading the list. There is no automatic
+check. A script that lists an open issue with neither label, or a bug with no Severity, would be one; it is not built.
 
 ### The plan fixture (2026-10-28)
 

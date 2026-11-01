@@ -70,21 +70,23 @@ Neither waits for the owner to ask, and neither stops at a line in a message, wh
 on, the reply names what was filed or started, and the fix's PR is reviewed and merged as any PR is ("Local gates"). A
 review's findings are the PR's and go to its author in one message ("How work is done here"), not here.
 
-**Every issue a session files is labelled** (2026-11-01): `bug` or `enhancement`, and a bug exactly one `severity:`, so
-the owner ranks the backlog from its labels instead of reading a hundred issues.
+**Every issue a session files is labelled `bug` or `enhancement`, and a bug gets a severity** (2026-11-01), so the
+owner ranks the backlog from the board instead of reading a hundred issues. A bug's severity is the `Severity` field on
+the [Mason work board](https://github.com/orgs/embeddable-hq/projects/4), not a label. Every bug a session files is put
+on the board with its Severity set, by `scripts/board.ts severity <n> <Critical|High|Medium|Low>`.
 - **A bug** is something Mason does wrong against what it promises or what Postgres does. That covers a wrong answer, a
   crash, a hang or a stuck state, lost or stale data, a security hole and a misleading error. It also covers a flaky or
   broken test and broken tooling, CI or harness: a harness that misreads a finding lets a wrong answer through.
 - **A feature** is everything else: new capability, performance that is not a regression, docs, refactoring and
   process. An over-refusal of a shape Mason never answered is a feature. A refusal or wrong answer where the base
   answered is a regression, so a bug. An issue that is both is labelled by what its "done looks like" asks for.
-- **A bug's severity:**
-  - `critical`: a silent wrong answer, data loss or corruption, or a security hole, in a COMMON shape;
-  - `high`: a silent wrong answer in a RARE shape; a crash, a hang or a stuck state; or data served staler than Mason
+- **A bug's Severity:**
+  - `Critical`: a silent wrong answer, data loss or corruption, or a security hole, in a COMMON shape;
+  - `High`: a silent wrong answer in a RARE shape; a crash, a hang or a stuck state; or data served staler than Mason
     reports, without the reader knowing;
-  - `medium`: a loud failure instead of an answer (a wrong SQLSTATE, the engine's error, a refusal of a shape Postgres
+  - `Medium`: a loud failure instead of an answer (a wrong SQLSTATE, the engine's error, a refusal of a shape Postgres
     answers); a misleading error; a flaky test; broken tooling or CI;
-  - `low`: cosmetic, such as wording, a HINT or DETAIL, or docs that disagree with the code.
+  - `Low`: cosmetic, such as wording, a HINT or DETAIL, or docs that disagree with the code.
 - **"Silent"** means the reader gets an answer and cannot tell it is wrong. When unsure between two severities, take
   the higher.
 - **A shape is COMMON only on evidence, which the issue names.** It is one of these:
@@ -94,8 +96,9 @@ the owner ranks the backlog from its labels instead of reading a hundred issues.
   - a real deployment met it, recorded in an issue or a comment.
 
   Anything else is RARE.
-- **Detector:** none yet. A session reads the labels (`gh issue list --label`), and an unlabelled issue is seen only
-  by reading the list. The reasoning, and the triage it came from, is in docs/DESIGN.md "Issue labels".
+- **Detector:** the board's view "Bugs by severity" (`is:open label:bug`, sorted by Severity), where a bug with no
+  Severity shows at the bottom. An issue with neither label is seen only by reading the list. There is no automatic
+  check. The reasoning, and the triage it came from, is in docs/DESIGN.md "Issue labels".
 
 ## Licensing
 
@@ -320,6 +323,7 @@ docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; 
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
 scripts/gate-slot.ts <command>        # runs a command in one of the machine's slots, as the heavy gates do
 scripts/board.ts status <n> "<status>"   # moves an issue's card on the Mason work board ("The board says …")
+scripts/board.ts severity <n> <Critical|High|Medium|Low>   # sets a bug's Severity on the board ("What a session finds")
 scripts/board.ts sub <issue> "<title>" --from "<model>"   # makes a sub-issue of <issue>, on the board; prints its number
 ```
 
