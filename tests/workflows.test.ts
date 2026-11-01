@@ -1423,50 +1423,117 @@ test("pr-loop-slim: its review, re-check and CI read are pr-loop's word for word
 });
 
 // ---------------------------------------------------------------- the pr-persistent skill: the race's first process
+// PR 258, review round 1, a CLASS round: a prompt duplicated by hand drifts from its source, and the race measures time
+// and tokens, so any drift between the arms' prompts biases it. The skill therefore restates NOTHING: its render
+// command replays pr-loop-slim.js against the answers recorded so far and writes the whole prompt of each next stage.
+// These tests hold every stage's rendered prompt equal to slim's own, whole, for the same inputs, and the skill free of
+// slim's prompt text.
 const SKILL = path.join(ROOT, ".claude", "skills", "pr-persistent", "SKILL.md");
+const skillText = (): string => fs.readFileSync(SKILL, "utf8");
+/** The skill's render command, the ```sh block that begins `# render-stage`. */
+function renderCommand(): string {
+  const m = /```sh\n(# render-stage[\s\S]*?)\n```/.exec(skillText());
+  assert.ok(m, "the skill has the render command, in a ```sh block that begins `# render-stage`");
+  return m[1]!;
+}
+/** The skill's render, run over args and answers in a run folder of its own: what it printed, and the files it wrote. */
+function renderStage(args: Record<string, unknown>, answers: Answers): { out: string; files: Record<string, string>; dir: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-persistent-"));
+  fs.writeFileSync(path.join(dir, "args.json"), JSON.stringify(args));
+  fs.writeFileSync(path.join(dir, "answers.json"), JSON.stringify(answers));
+  const out = execFileSync("bash", ["-c", renderCommand()], { env: { ...process.env, RUN: dir, REPO: ROOT }, encoding: "utf8" });
+  const next = path.join(dir, "next");
+  const files = Object.fromEntries(fs.readdirSync(next).map((f) => [f, fs.readFileSync(path.join(next, f), "utf8")]));
+  return { out, files, dir };
+}
+const RESULT_TRAILER = "\n\nEnd your report with ONE fenced json block holding your result, which must match this JSON schema (the Workflow tool enforces it on pr-loop-slim's agents): ";
 
-test("the pr-persistent skill: valid frontmatter, pr-loop's review text rendered from pr-loop.js, and pr-loop's record block", async () => {
+test("the pr-persistent skill: valid frontmatter, and it names where its text comes from without restating it", async () => {
   assert.ok(fs.existsSync(SKILL), "the skill exists at .claude/skills/pr-persistent/SKILL.md");
-  const text = fs.readFileSync(SKILL, "utf8");
+  const text = skillText();
   const front = /^---\n([\s\S]*?)\n---\n/.exec(text);
   assert.ok(front, "the skill opens with frontmatter");
   const fields = Object.fromEntries([...front[1]!.matchAll(/^([a-z-]+): (.+)$/gm)].map((m) => [m[1]!, m[2]!]));
   assert.equal(fields["name"], "pr-persistent");
   assert.ok((fields["description"] ?? "").length > 40, "a description that says when to use it");
-  for (const s of ["EVIDENCE", "VARIANT_FORMS", "SEVERITY_RULE", "FINDINGS", ".claude/workflows/pr-loop.js", "SendMessage", 'model: "opus"', 'effort: "high"', 'isolation: "worktree"',
-    'model: "fable"', 'effort: "medium"', "Closes #", "scripts/board.ts status", "CLASS round", "--match-head-commit", "## Design", "tokens",
-    // the implementer's own check at scale, and its handoff in the slim workflow's shape, kept as a PR comment too
-    "PART=implement", "PART=fix", "## Handoff", "decisions", "rejected", "keyFiles", "risks",
-    // learn, as in the slim workflow, checked from git and timed on its own
-    "## What review probes", "git diff --no-renames --name-only", "Learn's own time"]) {
+  assert.doesNotMatch(fields["description"]!, /: /, "the description is one plain YAML scalar");
+  for (const s of [".claude/workflows/pr-loop-slim.js", "EVIDENCE", "VARIANT_FORMS", "SEVERITY_RULE", "FINDINGS", "json mason-review-record", "SendMessage",
+    'process: "pr-persistent"', "THE SAME implementer", "--match-head-commit", "Race log", "Learn"]) {
     assert.ok(text.includes(s), `the skill says ${s}`);
   }
-  // the record block it shows parses as review-stats reads it, with the keys pr-loop's has
-  const recs = parseRecords(text);
-  assert.equal(recs.length, 1, "one record block, the template");
-  const pr = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
-  assert.deepEqual(Object.keys(recs[0]!).sort(), Object.keys(parseRecords(pr.prompt("record"))[0]!).sort());
-  assert.deepEqual([recs[0]!.designRounds, recs[0]!.probeRounds], [0, 0]);
+});
 
-  // the render command prints pr-loop's review text exactly as pr-loop's review is given it
-  const cmd = /```sh\n(# render-review-text[\s\S]*?)\n```/.exec(text);
-  assert.ok(cmd, "the skill has the render command, in a ```sh block that begins `# render-review-text`");
-  const loop = await run("pr-loop", { ...PR, repo: ROOT }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
-  const severity = /^const SEVERITY_RULE = "(.*)"$/m.exec(source("pr-loop"))![1]!;
-  for (const [scale, label] of [["full", "review r1"], ["narrow", "review r2"]] as const) {
-    const out = execFileSync("bash", ["-c", cmd[1]!], { env: { ...process.env, REPO: ROOT, BASE: "main", BRANCH: PR.branch, PART: "review", SCALE: scale, IT_ENV: "" }, encoding: "utf8" });
-    const p = loop.prompt(label);
-    const evidence = p.slice(p.indexOf("Run what you check"), p.indexOf("\nDo not edit or push."));
-    assert.ok(evidence.length > 1000 && out.includes(evidence), `${scale}: the render prints the evidence text "${label}" is given`);
-    assert.ok(p.includes(severity) && out.includes(severity), `${scale}: and SEVERITY_RULE`);
-    assert.ok(out.includes(JSON.stringify(loop.calls.find((c) => c.opts.label === label)!.opts.schema)), `${scale}: and the FINDINGS schema`);
-    for (const v of arrayOf("pr-loop", "VARIANT_FORMS")) assert.ok(out.includes(v), `${scale}: and the variant form ${v}`);
+test("the pr-persistent skill restates no sentence of a prompt pr-loop-slim.js gives its agents (PR 258's class)", async () => {
+  const text = skillText();
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green });
+  const sentences = new Set(r.calls.flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50));
+  assert.ok(sentences.size > 100);
+  const restated = [...sentences].filter((x) => text.includes(x));
+  assert.deepEqual(restated, [], "the skill restates a prompt of pr-loop-slim.js: render it instead");
+  // a paraphrase matches no sentence, so what drifted on PR 258 is held apart: a budget, a scale, a stage's rule
+  assert.doesNotMatch(text, /tool calls|hundreds of statements|a narrower set|CLASS round|Each finding becomes a test/, "a budget or rule of a stage is slim's, rendered, never the skill's");
+  assert.equal(parseRecords(text).length, 0, "no record block of its own: the record stage is rendered");
+});
+
+test("the pr-persistent skill: every stage's prompt and options, rendered by the skill, are pr-loop-slim's own, whole", async () => {
+  const brief = { brief: "the shared brief", shapes: ["SELECT shared_shape FROM t"], tests: ["tests/duck-wire.test.ts --test-name-pattern shared"] };
+  const args = { ...PR, repo: ROOT, brief, process: "pr-persistent" };
+  const ran = (o: object) => ({ changedPaths: ["src/duck/plan.ts"], statementsRun: 300, statementsMatched: 299, checksRun: 0, ...o });
+  const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
+  // every stage answered explicitly, so the harness adds nothing the render does not see
+  const answers: Answers = {
+    implement: { ...pushed("a"), statementsRun: 120, statementsMatched: 118, checksRun: 1, handoff: H1 },
+    link: { linked: true, bodyFixed: false, detail: "listed 900" },
+    "review r1": ran({ findings: [finding({ classKey: "k", input: "SELECT r1 FROM t" }), base], judgedCorrect: ["the cast"] }),
+    "CI read r1": { state: "failed", detail: "tests/duck-wire.test.ts: a test failed" },
+    "fix r1": { ...pushed("b"), statementsRun: 40, statementsMatched: 40, checksRun: 0, handoff: { ...H1, risks: ["after fix r1"] } },
+    "review r2": ran({ findings: [finding({ classKey: "k", input: "SELECT r2 FROM t" })], judgedCorrect: [] }),
+    "CI read r2": green,
+    "fix r2 (class)": { ...pushed("c"), statementsRun: 60, statementsMatched: 60, checksRun: 0, handoff: H1 },
+    "review r3": ran({ findings: [], judgedCorrect: ["the class"] }),
+    "CI read r3": green,
+    learn: { ...pushed("d"), startedAt: "2026-11-01T10:00:00Z", endedAt: "2026-11-01T10:03:00Z" },
+    "learn check": { files: [".claude/rules/duck-rewrite.md"], endedAt: "2026-11-01T10:04:00Z" },
+    "CI 1": red,
+    "CI fix 1": { ...pushed("e"), flake: false, statementsRun: 12, statementsMatched: 12, checksRun: 0, handoff: H1 },
+    "review r4": ran({ findings: [], judgedCorrect: [] }),
+    "CI read r4": green,
+    "CI 2": green,
+    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
+    record: { url: "https://github.com/embeddable-hq/mason-data/pull/900#issuecomment-2" },
+  };
+  const slim = await run("pr-loop-slim", args, answers);
+  assert.deepEqual(slim.labels, Object.keys(answers), "the run reaches every stage, in this order");
+  const fileOf = (label: string) => `${label.replace(/[^a-z0-9]+/gi, "-").replace(/-$/, "")}.md`;
+  for (const [i, call] of slim.calls.entries()) {
+    const { label, phase, schema, ...on } = call.opts;
+    const before = Object.fromEntries(slim.labels.slice(0, i).map((l) => [l, answers[l]]));
+    const { out, files } = renderStage(args, before);
+    assert.match(out, new RegExp(`^STAGE ${JSON.stringify(label).replace(/[()]/g, "\\$&")} \\(${phase}\\) `), `${label}: the render's next stage`);
+    assert.ok(out.split("\n")[0]!.includes(JSON.stringify(on)), `${label}: the options slim gives it (${JSON.stringify(on)})`);
+    assert.equal(files[fileOf(label)], call.prompt + RESULT_TRAILER + JSON.stringify(schema), `${label}: the rendered prompt is slim's, whole`);
   }
-  // and the author's own check at scale, as pr-loop-slim's implementer and fixers are given it
-  const slim = await run("pr-loop-slim", { ...PR, repo: ROOT }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green });
-  for (const [part, label] of [["implement", "implement"], ["fix", "fix r1"]] as const) {
-    const out = execFileSync("bash", ["-c", cmd[1]!], { env: { ...process.env, REPO: ROOT, BASE: "main", BRANCH: PR.branch, PART: part, IT_ENV: "" }, encoding: "utf8" }).trim();
-    assert.match(out, /^CHECK AT SCALE before you push/, part);
-    assert.ok(out.length > 1000 && slim.prompt(label).includes(out), `${part}: the render prints the check "${label}" is given in pr-loop-slim`);
-  }
+  // a review and the CI read beside it are rendered together, as slim starts them together
+  const together = renderStage(args, Object.fromEntries(slim.labels.slice(0, 2).map((l) => [l, answers[l]])));
+  assert.deepEqual(Object.keys(together.files).sort(), ["CI-read-r1.md", "review-r1.md"]);
+  // the record is rendered too: pr-loop's block, for the PR it is posted on, saying which arm wrote it
+  const record = renderStage(args, Object.fromEntries(slim.labels.slice(0, -1).map((l) => [l, answers[l]]))).files["record.md"]!;
+  const rec = parseRecords(record);
+  assert.equal(rec.length, 1);
+  assert.equal(rec[0]!.pr, 900, "the record names the PR, read from the implementer's answer");
+  assert.match(record, /pr-persistent \(pr-loop-slim's prompts, with ONE implementer kept alive across the fix rounds\)/);
+  // and when every stage is answered, the run is over, with slim's status
+  const done = renderStage(args, answers);
+  assert.equal(done.out.trim(), `DONE: ${String(slim.result["status"])}`);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(done.dir, "result.json"), "utf8")).status, slim.result["status"]);
+});
+
+test("pr-loop-slim: args.process names the arm in the record's text, and an unknown one stops the run", async () => {
+  let r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
+  assert.match(r.prompt("record"), /\npr-loop-slim \(no design review/);
+  r = await run("pr-loop-slim", { ...PR, process: "pr-persistent" }, { ...SLIM, "review r1": clean, "CI 1": green });
+  assert.match(r.prompt("record"), /\npr-persistent \(pr-loop-slim's prompts/);
+  r = await run("pr-loop-slim", { ...PR, process: "persistent" }, {});
+  assert.deepEqual(r.labels, []);
+  assert.match(String(r.result["status"]), /^args\.process is "persistent": it is one of pr-loop-slim, pr-persistent/);
 });

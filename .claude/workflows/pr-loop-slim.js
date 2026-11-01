@@ -31,10 +31,13 @@ export const meta = {
 // Everything else is pr-loop's, word for word where a prompt says it (the review, the re-check, the CI read: the review
 // adds one sentence, that the Handoff is the author's account and never read), and so are the args, the result's shape
 // and the Review record's block, whose designRounds and probeRounds are 0. tests/workflows.test.ts holds it so.
-// args: { issue, parent, title, base, branch, stackedOn, context, readFirst?, brief?, knownClasses?, repo?, itEnv? }
+// args: { issue, parent, title, base, branch, stackedOn, context, readFirst?, brief?, process?, knownClasses?, repo?, itEnv? }
 //   repo: the main checkout's path. Without it each agent finds the repository itself (WHERE), so the script runs for
 //   anyone on the team, from any checkout: no path of one machine is written here.
 //   brief: { brief, shapes, tests }, the Brief stage's shape: given, that stage is skipped (the race shares one brief).
+//   process: who drives the run, said in the Review record's text: 'pr-loop-slim' (the Workflow tool, the default) or
+//   'pr-persistent' (the coordinator following .claude/skills/pr-persistent/SKILL.md, which replays this script to
+//   render each prompt, and sends every fix to the one implementer it keeps alive). Nothing else reads it.
 //   knownClasses: { slug: { count, why } } carried from the PRs this one is stacked on (or the issue's earlier PRs), so
 //   a class met on PR 170 counts on PR 207 too. The run returns its classes in the same shape, for the next run: only
 //   the classes of blocking findings a PR made, never the base's nor a non-blocking one, which are filed instead.
@@ -45,6 +48,8 @@ export const meta = {
 // Every exit returns pr-loop's shape, result(status):
 //   { status, pr, head, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds }, the last two always [].
 const A = args
+const PROCESSES = ['pr-loop-slim', 'pr-persistent']
+const PROCESS = A.process === undefined ? 'pr-loop-slim' : A.process
 const REPO = A.repo || '<repo>'
 const WHERE = A.repo
   ? `The repository's main checkout is ${A.repo}.\n`
@@ -407,7 +412,7 @@ const recordBody = (status) => `${signed(ON.record)}
 
 PR ${last.pr}: ${status}
 
-pr-loop-slim (no design review and no probe; the context handed on in the PR's \`## Handoff\` comment): ${rounds.length} review round(s), ${ciFixes} CI fix(es); ${sumOf('statementsRun')} statement(s) run at the head by the reviews, ${sumOf('statementsMatched')} matching Postgres; ${sumOf('checksRun')} check(s) run on other paths.
+${PROCESS === 'pr-persistent' ? "pr-persistent (pr-loop-slim's prompts, with ONE implementer kept alive across the fix rounds)" : 'pr-loop-slim'} (no design review and no probe; the context handed on in the PR's \`## Handoff\` comment): ${rounds.length} review round(s), ${ciFixes} CI fix(es); ${sumOf('statementsRun')} statement(s) run at the head by the reviews, ${sumOf('statementsMatched')} matching Postgres; ${sumOf('checksRun')} check(s) run on other paths.
 Learn: ${learnTime ? `${learnTime.startedAt || '?'} to ${learnTime.endedAt || '?'}, the learn check included` : 'not run'}.
 The author's own check at scale before each push: ${authored.map((a) => `${a.label}: ${a.statementsRun ?? '?'} statement(s) run, ${a.statementsMatched ?? '?'} matched, ${a.checksRun ?? '?'} check(s)`).join('; ') || 'none reported'}.
 ${rounds.map((r) => roundLine('review', r.round, r.findings.map((f) => f.classKey), laterOf('review', r.round), r)).join('\n')}
@@ -534,6 +539,7 @@ Give no fix and no patch. Also list what you judged correct.`,
 }
 
 // ---------------------------------------------------------------- Brief
+if (!PROCESSES.includes(PROCESS)) return await finish(`args.process is ${JSON.stringify(PROCESS)}: it is one of ${PROCESSES.join(', ')}`)
 // A brief given in args (the race's processes share one) skips the stage; one that is not a brief stops the run.
 const givenBrief = A.brief && typeof A.brief.brief === 'string' && Array.isArray(A.brief.shapes) && Array.isArray(A.brief.tests) ? A.brief : null
 if (A.brief && !givenBrief) return await finish('args.brief is not a brief: { brief, shapes[], tests[] }, as the Brief stage returns')
