@@ -52,6 +52,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "limit-errors", sql: "SELECT DISTINCT ON (l.c) l.c, l.id, (l.j ->> 'n')::int AS n FROM late l ORDER BY l.c, l.id LIMIT 3" },
   { gap: "volatile-window", sql: "SELECT id, row_number() OVER (PARTITION BY b ORDER BY random()) FROM typed" },
   { gap: "min-max-scale-tie", sql: "SELECT min(a / b), max(a / b) FROM public.one, (VALUES (0::numeric, 7::numeric), (0, 1000000)) AS v(a, b)" },
+  { gap: "numeric-quotient-equality", sql: "SELECT sum(DISTINCT a / b) FROM public.one, (VALUES (1::numeric, 3::numeric)) AS v(a, b)" },
+  { gap: "numeric-quotient-compare", sql: "SELECT count(*) FROM (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002)) AS v(x) WHERE v.x / 1 IN (1.00000000000000000001)" },
   { gap: "nested-exact-numeric", sql: "SELECT x * 2 FROM (SELECT 7 / 3.0 AS x FROM public.one) AS s" },
   { gap: "unicode-16-case", sql: "SELECT upper('\u{10D70}'), lower('\u{10D50}') FROM public.one" },
   // the session's own statement (Postico's connect): its fields and the rows the sessions set are held alike (KNOWN's `holds`)

@@ -118,7 +118,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **`SELECT DISTINCT ON` answers as Postgres does in three more cases**: with an `ORDER BY` that names only some of the
   `ON` expressions (or none, with a `LIMIT`), the groups now come back in Postgres's order and a `LIMIT` keeps the same
   ones; a jsonb `ON` named by its output alias now treats `1.0` and `1` as one value; and a numeric division in the list
-  of a `DISTINCT ON` or a `SELECT DISTINCT` (`amount / 3`) shows Postgres's exact digits instead of a rounded number.
+  of a `DISTINCT ON` or a `SELECT DISTINCT` (`amount / 3`) shows Postgres's exact digits instead of a rounded number, also when the `DISTINCT` is outside a subquery
+  that computes it.
+- **A numeric division or average is compared by its exact value**: `DISTINCT`, `GROUP BY`, `PARTITION BY`,
+  `count(DISTINCT …)`, `=` and `<>` no longer treat two quotients as equal when they agree only in their first 17
+  digits. A quotient in `ROLLUP` / `CUBE` / `GROUPING SETS`, in `sum(DISTINCT …)` and similar, or in a `UNION` /
+  `INTERSECT` / `EXCEPT` without `ALL` is now refused with `numeric-quotient-equality` (write `round(x, n)`), where it
+  could answer wrong rows before.
 
 ## Known
 

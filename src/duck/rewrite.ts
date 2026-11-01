@@ -853,6 +853,11 @@ class Rewriter {
         // (INTERSECT ALL and EXCEPT ALL: jsonb's equality alone, which is not its text's; the rest as before)
         if (b.all !== true || this.typeOf(v) === JSONB || this.typeOf(v) === JSONB_ARRAY) this.comparable(v, what);
       }
+      // a numeric decided exactly, in any arm: the rows are compared whole, where no exact key can be placed
+      const arms: Body[] = [];
+      const armsOf = (x: Body): void => { if (x.op !== undefined && x.op !== "SETOP_NONE" && x.larg !== undefined && x.rarg !== undefined) { armsOf(x.larg as Body); armsOf(x.rarg as Body); } else arms.push(x); };
+      armsOf(b);
+      for (const arm of arms) for (const t of (arm.targetList ?? []) as AstNode[]) if (isNode(bodyOf(t).val)) this.refuseExactEquality(bodyOf(t).val as AstNode, what);
     }
     this.decidedByKey(b);
     // (after decidedByKey: a DISTINCT ON a target names it as the SELECT list reads it, through any_value where it must)
@@ -1280,19 +1285,58 @@ class Rewriter {
     if (b.op === "SETOP_UNION" && b.all === true) return this.exactArms(b, fields);
     const direct = this.exactColumns(stmt, fields);
     if (direct.length > 0) return direct;
-    const through = this.passThrough(b);
+    const through = this.passThrough(b, true);
     if (through === null) return [];
     const inner = this.exactThrough(through.query, this.outputFields(through.query));
     if (inner.length === 0) return [];
     const cells = inner[0]!.cells.length;
-    if (through.columns !== "star") {
-      const targets = (b.targetList ?? []) as AstNode[];
-      b.targetList = [...targets, ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`,
-        val: { ColumnRef: { fields: [S(through.alias), S(`__mason_cell_${j}`)] } } } }))];
-    }
+    const targets = (b.targetList ?? []) as AstNode[];
+    const cellRef = (j: number): AstNode => ({ ColumnRef: { fields: [S(through.alias), S(`__mason_cell_${j}`)] } });
+    if (through.columns !== "star") b.targetList = [...targets, ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: cellRef(j) } }))];
     const map = through.columns;
-    return inner.flatMap((e) => (map === "star" ? [e.column] : map.flatMap((k, i) => k === e.column ? [i] : []))
+    const out = inner.flatMap((e) => (map === "star" ? [e.column] : map.flatMap((k, i) => k === e.column ? [i] : []))
       .filter((i) => i < fields.length && fields[i]!.oid === NUMERIC || e.text).map((column) => ({ ...e, column })));
+    if (b.distinctClause !== undefined) this.distinctThrough(b, through, out, fields.length, cellRef);
+    return out;
+  }
+
+  /**
+   * A DISTINCT OVER A PASS-THROUGH (approximate-printed-as-exact, PR 207): the outer query reads the inner's cells
+   * beside its columns, so a plain DISTINCT would compare them too, and its exact columns are the inner's doubles. It
+   * is the DISTINCT ON of every output, an exact one by the exact key of its program over the inner's cells (`exactKey`
+   * read through the pass-through), the rest by their number (a `*`: by the inner's output name); a DISTINCT ON's own
+   * entries that name an exact column (by number or name) are keyed alike. The cells ride, the kept row's.
+   */
+  private distinctThrough(b: Body, through: { alias: string; columns: number[] | "star"; query: AstNode }, exact: ExactColumn[], outputs: number, cellRef: (j: number) => AstNode): void {
+    const innerNames = through.columns === "star" ? this.outputNames(through.query) : null;
+    const keyAt = (i: number): AstNode => {
+      const e = exact.find((x) => x.column === i);
+      if (e !== undefined) {
+        const texts = e.cells.map((conv, j) => conv === "text" ? cellRef(j) : conv === "exact" ? cast(cellRef(j), ["varchar"])
+          : fn("__mason_float_numeric_text", [cast(cellRef(j), ["double"]), boolConst(conv === "float4")]));
+        const value = fn("__mason_numeric_program", [strConst(JSON.stringify(e.program)), ...texts]);
+        return e.text ? value : fn("__mason_numeric_key", [value]);
+      }
+      if (innerNames === null) return intConst(i + 1);
+      const name = innerNames[i];
+      if (name === undefined || innerNames.indexOf(name) !== innerNames.lastIndexOf(name)) throw new Unrewritable("SELECT DISTINCT * over a subquery with two columns of one name beside a numeric quotient is not supported by Mason", "name the columns: SELECT DISTINCT a, b, …", "numeric-quotient-equality");
+      return { ColumnRef: { fields: [S(through.alias), S(name)] } };
+    };
+    const on = b.distinctClause as unknown[];
+    if (on.length === 0 || !on.every(isNode)) { b.distinctClause = Array.from({ length: outputs }, (_, i) => keyAt(i)); return; }
+    const targets = (b.targetList ?? []) as AstNode[];
+    b.distinctClause = (on as AstNode[]).map((d) => {
+      const n = constInt(d);
+      let at = n !== null && n >= 1 && n <= outputs ? n - 1 : -1;
+      if (at < 0 && kindOf(d) === "ColumnRef" && !hasStar(d)) {
+        const f = names(bodyOf(d).fields), last = f[f.length - 1]!;
+        // the inner column it reads, then the output that passes it through
+        const inner = (innerNames ?? this.outputNames(through.query) ?? []).indexOf(last);
+        at = through.columns === "star" ? inner : inner < 0 ? -1 : through.columns.indexOf(inner);
+        if (at < 0 && f.length === 1) at = targets.findIndex((t, i) => i < outputs && bodyOf(t).name === last);
+      }
+      return at >= 0 && exact.some((x) => x.column === at) ? keyAt(at) : d;
+    });
   }
 
   /** a UNION ALL's arms, each with the same programs at the same columns (else none is computed) */
@@ -1315,8 +1359,8 @@ class Rewriter {
 
   /** an outer query that only reads one subquery's or CTE's columns: the inner query, its alias, and which inner
    *  column each outer one is ("star": all of them, in order) */
-  private passThrough(b: Body): { query: AstNode; alias: string; columns: number[] | "star" } | null {
-    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.groupClause !== undefined || b.havingClause !== undefined || b.distinctClause !== undefined || b.windowClause !== undefined) return null;
+  private passThrough(b: Body, distinct = false): { query: AstNode; alias: string; columns: number[] | "star" } | null {
+    if ((b.op !== undefined && b.op !== "SETOP_NONE") || b.groupClause !== undefined || b.havingClause !== undefined || (b.distinctClause !== undefined && !distinct) || b.windowClause !== undefined) return null;
     const from = (b.fromClause ?? []) as AstNode[];
     if (from.length !== 1) return null;
     const f = from[0]!;
@@ -1686,6 +1730,26 @@ class Rewriter {
   }
 
   /**
+   * A NUMERIC THE PLAN DECIDES EXACTLY, AS ITS EQUALITY KEY (the class approximate-compared-as-exact, PR 207): a
+   * numeric DuckDB holds as a double (a quotient, an avg) whose exact program the plan has is compared by that
+   * program's value, trailing zeros dropped (`__mason_numeric_key`), never by its double, which equates two values
+   * Postgres tells apart past the double's 17 digits. Every context that equates — DISTINCT, DISTINCT ON, GROUP BY,
+   * PARTITION BY, count(DISTINCT), =, <> — reads this one; where none can be placed the form is refused by name
+   * (`numeric-quotient-equality`). null: no such value (one DuckDB holds exactly, or one with no program, which is the
+   * engine's value everywhere).
+   */
+  private exactKey(e: AstNode): AstNode | null {
+    if (this.typeOf(e) !== NUMERIC || this.duckExact(e)) return null;
+    const exact = this.exactText(e);
+    return exact === null ? null : fn("__mason_numeric_key", [exact]);
+  }
+
+  /** the refusal of a form that equates a numeric decided exactly where no exact key can be placed */
+  private refuseExactEquality(e: AstNode, where: string): void {
+    if (this.exactKey(e) !== null) throw new Unrewritable(`${where} a numeric quotient or average is not supported by Mason (Postgres compares the exact values, which the engine holds as doubles)`, "round(x, n) to the digits that matter, or compute it in a subquery and DISTINCT / GROUP BY outside", "numeric-quotient-equality");
+  }
+
+  /**
    * The decimals Postgres writes for one ROW's value of a numeric expression, as DuckDB computes them (an integer), where
    * the arm a row took decides them: a CASE's arms, a coalesce's first value that is not NULL, + - * over those
    * (numeric.c's add_var, mul_var). Null where a value's own digits decide (an unconstrained column, a division).
@@ -2003,14 +2067,18 @@ class Rewriter {
       if (Array.isArray(v)) { for (const x of v) refuseIn(x); return; }
       if (!isNode(v)) return;
       if (kindOf(v) === "GroupingSet") refuseIn(bodyOf(v).content);
-      else this.comparable(this.groupedExpression(v, b), "GROUP BY a grouping set of");
+      else { const e = this.groupedExpression(v, b); this.refuseExactEquality(e, "GROUP BY a grouping set of"); this.comparable(e, "GROUP BY a grouping set of"); }
     };
-    b.groupClause = (b.groupClause as AstNode[]).map((g) => {
-      if (!isNode(g)) return g;
-      if (kindOf(g) === "GroupingSet") { refuseIn(bodyOf(g).content); return g; }
+    b.groupClause = (b.groupClause as AstNode[]).flatMap((g): AstNode[] => {
+      if (!isNode(g)) return [g];
+      if (kindOf(g) === "GroupingSet") { refuseIn(bodyOf(g).content); return [g]; }
       const e = this.groupedExpression(g, b);
-      if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return g; }
-      return this.equalKey(e === g ? g : this.clone(e));
+      // a numeric decided exactly: grouped by its exact key too, the value kept a key so the list still reads it
+      // (its double is a function of the exact value, so the groups are the key's: exactKey)
+      const exact = this.exactKey(e);
+      if (exact !== null) return [g, exact];
+      if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return [g]; }
+      return [this.equalKey(e === g ? g : this.clone(e))];
     });
   }
 
@@ -2033,14 +2101,17 @@ class Rewriter {
         // so every form sent reads the key, never the raw value an alias names)
         const out = this.outputOf(d, targets);
         const e = out !== null && !out.twin ? out.value : d;
+        const exact = this.exactKey(e);
+        if (exact !== null) return exact;
         if (this.typeOf(e) !== JSONB) { this.comparable(e, "SELECT DISTINCT ON"); return d; }
         return this.equalKey(e !== d ? this.clone(e) : d);
       });
       return;
     }
     for (const v of values) if (this.starHoldsJsonb(v)) throw new Unrewritable("SELECT DISTINCT * over a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "name the columns: SELECT DISTINCT a, b, …", "jsonb-compare");
-    if (!values.some((v) => this.typeOf(v) === JSONB)) return;
-    b.distinctClause = values.map((v) => this.equated(this.clone(v), "SELECT DISTINCT"));
+    if (!values.some((v) => this.typeOf(v) === JSONB || this.exactKey(v) !== null)) return;
+    // (a numeric decided exactly by its exact key: exactKey)
+    b.distinctClause = values.map((v) => this.exactKey(v) ?? this.equated(this.clone(v), "SELECT DISTINCT"));
   }
 
   private collateClause(b: Body): AstNode | null {
@@ -2095,6 +2166,13 @@ class Rewriter {
     // (an operand of a jsonb operator is a jsonb, a literal included: each is keyed, whatever its own analysis says)
     const lType = l === undefined ? null : this.typeOf(l);
     const comparing = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name);
+    // a numeric decided exactly, compared for equality: by its exact key, the other side by its own (exactKey)
+    if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 === NUMERIC && a1 === NUMERIC && l !== undefined && r !== undefined) {
+      const kl = this.exactKey(l), kr = this.exactKey(r);
+      const side = (x: AstNode, k: AstNode | null): AstNode | null => k ?? (this.duckExact(x) ? fn("__mason_numeric_key", [cast(x, ["varchar"])]) : null);
+      const sl = kl === null && kr === null ? null : side(l, kl), sr = sl === null ? null : side(r, kr);
+      if (sl !== null && sr !== null) { b.lexpr = sl; b.rexpr = sr; return null; }
+    }
     // rows compared member by member (`(id, j) = (1, '…')`: Postgres's per-member operators; a struct to DuckDB,
     // compared by its text)
     if ((l !== undefined && this.rowHoldsJsonb(l)) || (r !== undefined && this.rowHoldsJsonb(r))) {
@@ -2397,7 +2475,7 @@ class Rewriter {
 
   /** a window's PARTITION BY: a jsonb by its order key (jsonb's equality), a jsonb array refused */
   private keyedPartition(w: Body | undefined): void {
-    if (w !== undefined && Array.isArray(w.partitionClause)) w.partitionClause = (w.partitionClause as AstNode[]).map((p) => isNode(p) ? this.equated(p, "PARTITION BY") : p);
+    if (w !== undefined && Array.isArray(w.partitionClause)) w.partitionClause = (w.partitionClause as AstNode[]).map((p) => isNode(p) ? this.exactKey(p) ?? this.equated(p, "PARTITION BY") : p);
   }
 
   private funcCall(b: Body): AstNode | AstNode[] | null {
@@ -2427,8 +2505,12 @@ class Rewriter {
     if (b.agg_distinct === true && name === "count" && typeof b.location === "number" && this.keyCounts.has(b.location)) delete b.agg_distinct;
     // count(DISTINCT j) counts jsonb's equal values once: their keys, counted (another aggregate's DISTINCT would hand
     // the key itself to the aggregate)
-    if (b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 && this.typeOf(args[0]) === JSONB) args[0] = this.equalKey(args[0]);
-    else if (b.agg_distinct === true && args[0] !== undefined) this.comparable(args[0], `${name}(DISTINCT …) of`);
+    // count(DISTINCT q) of a numeric decided exactly counts its exact keys (exactKey); another aggregate's DISTINCT would
+    // hand the key itself to the aggregate, and is refused
+    const exactArg = b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 ? this.exactKey(args[0]) : null;
+    if (exactArg !== null) args[0] = exactArg;
+    else if (b.agg_distinct === true && args[0] !== undefined && name === "count" && args.length === 1 && this.typeOf(args[0]) === JSONB) args[0] = this.equalKey(args[0]);
+    else if (b.agg_distinct === true && args[0] !== undefined) { this.refuseExactEquality(args[0], `${name}(DISTINCT …) of`); this.comparable(args[0], `${name}(DISTINCT …) of`); }
     // a jsonb array searched for an element: jsonb's equality, where DuckDB's list functions compare the text
     if (["array_position", "array_positions", "array_remove", "array_replace"].includes(name) && args[0] !== undefined && this.typeOf(args[0]) === JSONB_ARRAY) {
       throw new Unrewritable(`${name}() of a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's equality)`, "compare an element: a[1] = '…'::jsonb", "jsonb-compare");

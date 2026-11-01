@@ -792,6 +792,13 @@ export function registerFunctions(conn: DuckDBConnection): void {
     return label;
   });
   scalar(conn, "__mason_numeric_special", [VARCHAR], BOOLEAN, ([t]) => !/^-?\d/.test(String(t)));
+  // a numeric's EQUALITY KEY (src/duck/rewrite.ts exactKey): its exact text without trailing zeros, so two values
+  // Postgres finds equal (5.0 and 5.00, 0 and -0.0) are one key and two it tells apart are two, whatever their doubles
+  scalar(conn, "__mason_numeric_key", [VARCHAR], VARCHAR, ([t]) => {
+    const s = String(t);
+    const kept = /^-?\d/.test(s) && s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
+    return kept === "-0" ? "0" : kept;
+  });
   // a numeric program over a row's cells' texts (src/duck/rewrite.ts exactText): Postgres's exact value as numeric_out
   // writes it, where DuckDB computes a double (a quotient handed to ln)
   scalar(conn, "__mason_numeric_program", [], VARCHAR, ([program, ...cells]) => {

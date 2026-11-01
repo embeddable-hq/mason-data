@@ -159,7 +159,8 @@ paths:
     runs: the rewrite appends each ON expression the ORDER BY lacks, ASC NULLS LAST (`distinctOnSorted`, src/duck/rewrite.ts,
     for every form sent), and keys a jsonb ON named by its output's number or name alike (`keyedDistinct`, through
     `outputOf`). A numeric computed exactly rides its cells beside a DISTINCT ON, and a plain DISTINCT with one is sent as
-    the DISTINCT ON of every output's number (`exactColumns`). It is exact for ANY ON expressions, a key or not, so no primary key is asked and never `any_value` (which would answer an arbitrary row of the group for another
+    the DISTINCT ON of every output's number (`exactColumns`); over a pass-through (`SELECT DISTINCT * FROM (…) s`) the
+    DISTINCT ON keys an exact column by its program over the inner query's cells (`distinctThrough`). It is exact for ANY ON expressions, a key or not, so no primary key is asked and never `any_value` (which would answer an arbitrary row of the group for another
     table's columns). One table is written so too. `keyFirst` refuses it (`first.distinct` is false), so the two never
     both write one SELECT. What stays as it was: no LIMIT in fact, an aggregate, window or set-returning function, a
     GROUP BY, a volatile ON expression (`volatileOn`), a column named `rowid`, WITH TIES (`with-ties-distinct`). A test
@@ -240,6 +241,14 @@ paths:
   or computed. A node the rewrite typed as another (`typedLike`) keeps
   that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
   Postgres's order under C, ICU and libc, and the oracle's `jorder` every form. ("jsonb's order")
+
+- **A numeric the plan decides exactly is compared by its EXACT KEY, never its double** (`exactKey`, src/duck/rewrite.ts;
+  PR 207's class round): a quotient or an avg the engine holds as a double equates values Postgres tells apart past 17
+  digits, so DISTINCT, DISTINCT ON, GROUP BY (beside the value), PARTITION BY, count(DISTINCT), `=` and `<>` read the
+  program's value without trailing zeros (`__mason_numeric_key`); a form where no key can be placed (a grouping set,
+  another aggregate's DISTINCT, a set operation without ALL) is refused, `numeric-quotient-equality`; IN, IS DISTINCT
+  FROM, NULLIF, CASE x WHEN and every ORDER are the listed difference `numeric-quotient-compare`. A new context that
+  equates values asks `exactKey` as it asks `equalKey` for a jsonb. `tests/duck-wire.test.ts` "class round".
 
 ## What a column is
 

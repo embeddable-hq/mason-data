@@ -2267,7 +2267,13 @@ PR 207 found that the engine was sent the sort as written, not Postgres's with t
 groups in another order (at the base too, in the form sent as written): the rewrite now appends them to the statement's
 sort before any key is built (`distinctOnSorted`), so every form sent sorts as Postgres's Unique does. It found too that
 a jsonb ON named by its output compared the value's text, not jsonb's equality (only an ordinal was resolved), and that a
-numeric quotient under a DISTINCT ON or a DISTINCT was the engine's double's text, as no cell rode beside it.
+numeric quotient under a DISTINCT ON or a DISTINCT was the engine's double's text, as no cell rode beside it. Its
+second round found the same text through a DISTINCT over a pass-through (`SELECT DISTINCT * FROM (…) s`: whether the
+cells ride was decided per form), and that every DISTINCT, GROUP BY and `=` compared a quotient's double, so
+1.00000000000000000001 and 1.00000000000000000002 were one group (pre-existing at the base). The class round's decision:
+a numeric the plan decides exactly is equated by its exact program's value (`exactKey`), the pass-through's DISTINCT keyed
+by the inner query's cells, and what cannot take a key refused by name; IN and the order of quotients equal to 17
+digits are a listed difference, since a key there would have to sort as a numeric does.
 
 **Step 3: `USING`, `NATURAL` and computed keys.** Through the listener, a 2 GB limit, 8 M facts beside 3 M rows of about 3 kB
 that compress well (346 MB on disk, so the spill and the seconds before are smaller than the issue's 9.1 GB of noise; the

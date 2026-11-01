@@ -92,6 +92,9 @@ const DDL = [
   "INSERT INTO public.ga VALUES (1, 'A@X', 'a'), (2, 'B@X', 'A'), (3, NULL, 'b')",
   "CREATE TABLE public.big AS SELECT range::INTEGER AS id, 'v' || range AS v FROM range(150000)",
   // the rerun over BIRD and TPC-DS: quotients alike in Postgres, a NULL date, a team's name
+  // quotients equal to a double's 17 digits that Postgres tells apart (PR 207's class round)
+  "CREATE TABLE public.bigdec (id INTEGER PRIMARY KEY, x DECIMAL(30,20), y DECIMAL(30,20))",
+  "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
   "CREATE TABLE public.ratios (id INTEGER PRIMARY KEY, a DECIMAL(15,4), b DECIMAL(15,4), d DATE, team VARCHAR, n INTEGER)",
   "INSERT INTO public.ratios VALUES (1, 0.3, 0.1, '2026-01-02', '1st', 3), (2, 0.9, 0.3, NULL, '2nd', 5), (3, 0.7, 0.1, '2025-12-31', 'x', 10), (4, 2.1, 0.3, NULL, '3rd', 11)",
   // the BI-tools test: foreign keys to a unique index and to a UNIQUE constraint
@@ -154,6 +157,8 @@ const PG_DDL = [
   "CREATE TABLE public.ga (id integer PRIMARY KEY, \"Email\" text, name text)",
   "INSERT INTO public.ga VALUES (1, 'A@X', 'a'), (2, 'B@X', 'A'), (3, NULL, 'b')",
   "CREATE TABLE public.big AS SELECT g AS id, 'v' || g AS v FROM generate_series(0, 149999) g",
+  "CREATE TABLE public.bigdec (id integer PRIMARY KEY, x numeric(30,20), y numeric(30,20))",
+  "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
   "CREATE TABLE public.ratios (id integer PRIMARY KEY, a numeric(15,4), b numeric(15,4), d date, team text, n integer)",
   "INSERT INTO public.ratios VALUES (1, 0.3, 0.1, '2026-01-02', '1st', 3), (2, 0.9, 0.3, NULL, '2nd', 5), (3, 0.7, 0.1, '2025-12-31', 'x', 10), (4, 2.1, 0.3, NULL, '3rd', 11)",
   "CREATE TABLE public.uparent (id integer PRIMARY KEY, code text, ref text UNIQUE)",
@@ -216,6 +221,8 @@ const schema: PgSchema = {
     { name: "ua", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "givenName", type: "text" }, { name: "email", type: "text" }] },
     { name: "ga", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "Email", type: "text" }, { name: "name", type: "text" }] },
     { name: "big", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "text" }] },
+    { name: "bigdec", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "x", type: "numeric", spelled: "numeric(30,20)" }, { name: "y", type: "numeric", spelled: "numeric(30,20)" }] },
     { name: "ratios", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "a", type: "numeric", spelled: "numeric(15,4)" }, { name: "b", type: "numeric", spelled: "numeric(15,4)" },
         { name: "d", type: "date" }, { name: "team", type: "text" }, { name: "n", type: "int4" }] },
@@ -413,7 +420,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -2998,6 +3005,80 @@ test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exac
       "SELECT DISTINCT o.status, o.amount / 3 AS third FROM orders o ORDER BY 2 DESC, 1 LIMIT 2"]) {
       assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
     }
+  } finally { await c.end(); }
+});
+
+/** an answer's rows in one order: quotients equal to a double's 17 digits are in no defined order on Mason (the listed
+ *  difference numeric-quotient-compare), so a test of their equality reads the rows as a set */
+const rowSet = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => JSON.stringify(r)).sort() });
+
+test("a numeric quotient passed through a DISTINCT shows Postgres's exact text (PR 207's class round, P3 P4 C10)", async () => {
+  const c = await client();
+  try {
+    for (const sql of ["SELECT DISTINCT * FROM (SELECT o.amount / 3 AS third FROM orders o) s ORDER BY 1",
+      "SELECT DISTINCT s.third FROM (SELECT o.amount / 3 AS third FROM orders o) s ORDER BY 1",
+      "SELECT DISTINCT third FROM (SELECT DISTINCT o.amount / 3 AS third FROM orders o) s ORDER BY 1",
+      "SELECT DISTINCT * FROM (SELECT o.amount / o.qty AS per FROM orders o) s ORDER BY 1",
+      "WITH q AS (SELECT o.status, o.amount / 3 AS third FROM orders o) SELECT DISTINCT * FROM q ORDER BY 2",
+      "SELECT DISTINCT * FROM (SELECT * FROM (SELECT o.amount / 3 AS third FROM orders o) a) b ORDER BY 1",
+      "SELECT DISTINCT ON (s.status) * FROM (SELECT o.status, o.amount / 3 AS third FROM orders o) s ORDER BY s.status, s.third",
+      "SELECT DISTINCT ON (1) s.third, s.status FROM (SELECT o.status, o.amount / 3 AS third FROM orders o) s ORDER BY 1, 2",
+      "SELECT DISTINCT ON (third) third, status FROM (SELECT o.status, o.amount / 3 AS third FROM orders o) s ORDER BY third, status",
+      // equal to the double's 17 digits, told apart by the inner query's cells
+      "SELECT DISTINCT * FROM (SELECT b.x / 1 AS q FROM bigdec b) s ORDER BY 1",
+      "SELECT DISTINCT s.q FROM (SELECT b.x / b.y AS q FROM bigdec b) s ORDER BY 1 LIMIT 3"]) {
+      assert.deepEqual(rowSet(await answer(c, sql)), rowSet(await postgres(sql)), sql);
+    }
+  } finally { await c.end(); }
+});
+
+test("a numeric quotient is compared by its exact value wherever it is equated (PR 207's class round, C1-C8)", async () => {
+  const c = await client();
+  try {
+    for (const sql of [
+      // C1: SELECT DISTINCT, outermost and in a subquery
+      "SELECT DISTINCT b.x / 1 AS q FROM bigdec b ORDER BY 1",
+      "SELECT DISTINCT b.x / b.y AS q FROM bigdec b ORDER BY 1",
+      "SELECT count(*) FROM (SELECT DISTINCT b.x / 1 FROM bigdec b) s",
+      // C2: DISTINCT ON, by expression, alias, ordinal; under a LIMIT (the row-number route)
+      "SELECT DISTINCT ON (b.x / 1) b.x / 1 AS q, b.id FROM bigdec b ORDER BY b.x / 1, b.id",
+      "SELECT DISTINCT ON (q) b.x / 1 AS q, b.id FROM bigdec b ORDER BY q, b.id",
+      "SELECT DISTINCT ON (1) b.x / b.y AS q, b.id FROM bigdec b ORDER BY 1, 2",
+      "SELECT DISTINCT ON (b.x / 1) b.x / 1 AS q, b.id FROM bigdec b ORDER BY b.x / 1, b.id LIMIT 2",
+      // C3: GROUP BY, by ordinal, expression, alias
+      "SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY 1",
+      "SELECT b.x / 1, count(*) FROM bigdec b GROUP BY b.x / 1 ORDER BY 1",
+      "SELECT b.x / b.y AS q, count(*) FROM bigdec b GROUP BY q ORDER BY 1",
+      "SELECT a / b AS r, count(*), rank() OVER (ORDER BY a / b) FROM ratios GROUP BY 1 ORDER BY 1",
+      // C5: PARTITION BY
+      "SELECT b.id, count(*) OVER (PARTITION BY b.x / 1) FROM bigdec b ORDER BY 1",
+      // C6: count(DISTINCT)
+      "SELECT count(DISTINCT b.x / 1), count(DISTINCT b.x / b.y) FROM bigdec b",
+      "SELECT count(DISTINCT a / b) FROM ratios",
+      // C8: = and <> in a WHERE, a FILTER and a join's ON
+      "SELECT b.id FROM bigdec b WHERE b.x / 1 = 1.00000000000000000001 ORDER BY 1",
+      "SELECT b.id FROM bigdec b WHERE b.x / 1 <> 1.00000000000000000001 ORDER BY 1",
+      "SELECT count(*) FILTER (WHERE b.x / b.y = 2.5), count(*) FILTER (WHERE a.n = 3) FROM bigdec b, ratios a",
+      "SELECT a.id, c.id FROM bigdec a JOIN bigdec c ON a.x / 1 = c.x / c.y ORDER BY 1, 2",
+      // the oracle's statements over a VALUES list
+      "SELECT count(*) FROM (SELECT DISTINCT v.x / 1 FROM (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002), (2.5)) AS v(x)) s",
+      "SELECT count(*), max(n) FROM (SELECT count(*) AS n FROM (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002), (2.5)) AS v(x) GROUP BY v.x / 1) g",
+      "SELECT count(DISTINCT v.x / 1), count(*) FILTER (WHERE v.x / 1 = 1.00000000000000000001) FROM (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002), (2.5)) AS v(x)",
+      "SELECT max(c) FROM (SELECT count(*) OVER (PARTITION BY v.x / 1) AS c FROM (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002), (2.5)) AS v(x)) w"]) {
+      assert.deepEqual(rowSet(await answer(c, sql)), rowSet(await postgres(sql)), sql);
+    }
+    // C4, C6 (an aggregate's DISTINCT but count's), C7 and P6: no key can be placed, refused by name where Postgres answers
+    for (const sql of ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY ROLLUP (b.x / 1) ORDER BY 1",
+      "SELECT sum(DISTINCT b.x / 1) FROM bigdec b",
+      "SELECT b.x / 1 FROM bigdec b INTERSECT SELECT b.x FROM bigdec b",
+      "SELECT o.amount / 3 FROM orders o UNION SELECT 1.5 ORDER BY 1"]) {
+      await postgres(sql);
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /numeric-quotient-equality/.test(e.detail ?? ""), sql);
+    }
+    // C9: the decided difference numeric-quotient-compare, as listed: IN equates the doubles
+    const listed = "SELECT b.id FROM bigdec b WHERE b.x / 1 IN (1.00000000000000000001) ORDER BY 1";
+    assert.deepEqual((await postgres(listed)).rows, [["1"]]);
+    assert.deepEqual((await answer(c, listed)).rows, [["1"], ["2"]]);
   } finally { await c.end(); }
 });
 

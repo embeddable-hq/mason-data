@@ -20,7 +20,7 @@ each). The copy is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 256 functions, 387 operators, 95 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 55 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 56 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (55)
+## Refused (56)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -111,6 +111,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `volatile-window` | a window ordered or partitioned by random() or another volatile function (a random row per group) | a new value per row | refused (DuckDB refuses a volatile expression there, and computes a deterministic one once for every row) | SELECT …, row_number() OVER (ORDER BY r) FROM (SELECT *, random() AS r FROM t) AS s |
 | `numeric-special` | arithmetic on a numeric NaN or Infinity read from a text | NaN and ±Infinity by its own rules (NaN + 1 is NaN) | refused when a row holds one | filter the special values out first (x <> 'NaN') |
 | `numeric-exact-sum` | sum() or avg() of a numeric Postgres's own function computes here — a text read as an unconstrained numeric (Metabase's JSON number, `(j ->> 'k')::numeric`), ln, exp, sqrt, power — holding a value of more than 20 integer digits or 36 decimals besides trailing zeros, or summing past 20 integer digits | adds every digit | refused when a row or the sum does (each value is summed exactly, in two DECIMAL(38,18) parts) | cast to numeric(p, s), or round(x, 18) first |
+| `numeric-quotient-equality` | a numeric quotient or average (a value Mason computes exactly from its operands) in GROUPING SETS, ROLLUP or CUBE, in an aggregate's DISTINCT other than count's, or as a column of UNION, INTERSECT or EXCEPT without ALL (or INTERSECT ALL, EXCEPT ALL) | compares the exact values | refused: the engine holds the value as a double, which equates values Postgres tells apart past 17 digits (DISTINCT, GROUP BY, PARTITION BY, count(DISTINCT), = and <> compare the exact value) | round(x, n) to the digits that matter, or compute it in a subquery and DISTINCT / GROUP BY outside |
 | `numeric-math` | ln, log, exp, sqrt or power of a numeric expression whose scale its types do not decide (a division, an unconstrained numeric's arithmetic) | digits at a scale from the argument's own | refused (a column, an integer, a literal and a numeric(p, s) are answered by Postgres's own function) | cast the argument to numeric(p, s) |
 | `view-forms` | a view's whole row as a value (`SELECT v FROM v`), a WITH query named as a view the statement reads, a column qualified by its view's schema beside another item of the view's name, views read through more than 16 others | the view's row type; the WITH query or the view as each is in scope | refused (a view is answered by its definition in its place, as Postgres's rewriter answers it; its columns, `v.*` and `public.v.col` are answered) | name the view's columns; give the view or the WITH query another name |
 | `enum-forms` | an array of an enum read from a text (`t::mood[]`) | reads each element as a label | refused (a column, a label, an array literal and a text read as one label are answered) | write the array as a literal, or ARRAY[…] of its labels |
@@ -119,7 +120,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 
 ## Answered differently
 
-19 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
+20 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
@@ -139,7 +140,8 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `numeric-stddev` | stddev / variance of DISTINCT integers or numerics, or of a numeric declared without a precision or with more than 18 digits: the last digits | exact numeric arithmetic, to its own scale | a double's 15 digits | round(stddev(x), 10) |
 | `jsonb-equal-text` | GROUP BY or DISTINCT of jsonb values that are equal but written apart ('1.0' and '1.00', '{"a": 1}' and '{"a": 1.0}') | one group, written as the value its plan reads first | one group, written as the value DuckDB reads first: either may be any of them | GROUP BY j::text where the text must decide |
 | `char-n-minmax` | greatest / least of a char(n) beside a text | compares without the padding, answers the first of equal values | compares the padded text | cast the char(n) to text first |
-| `nested-exact-numeric` | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x), it is exact | compute it in the outermost query, or round(…, n) inside |
+| `numeric-quotient-compare` | a numeric quotient or average compared by IN, = ANY, IS DISTINCT FROM, NULLIF or CASE x WHEN, or ordered (ORDER BY, <, >, min / max), beside a value equal to it in its first 17 significant digits | compares the exact values | compares the doubles, which are equal (=, <>, DISTINCT, GROUP BY, PARTITION BY and count(DISTINCT) compare the exact values) | x = v OR x = w in place of IN, or round(x, n) to the digits that matter |
+| `nested-exact-numeric` | an expression over a numeric a subquery computed exactly (a division, an avg, a round), outside that subquery: SELECT x * 2 FROM (SELECT a / 3 AS x …) | exact digits at every step | the subquery's value as DuckDB computed it (a double's 15 digits) where the outer query computes with it; passed through as it is (SELECT *, s.x, a DISTINCT or DISTINCT ON of them), it is exact | compute it in the outermost query, or round(…, n) inside |
 | `domain-column` | a column of a domain: pg_typeof(x) and information_schema.columns.domain_name | the domain's name | the column is read and declared as its base type, which is what the wire says and what information_schema's data_type says on Postgres too; a cast to the domain's name (`x::my_domain`) is 42704 | none needed: a value of the domain is a value of its base type; cast to the base type |
 | `show-all` | SHOW ALL | every server setting with the source database's values | every setting the listener's catalog Postgres has, with this session's values laid over (search_path, TimeZone, ssl, …): Mason's settings, never your source database's | ask the source database for its settings (SHOW ALL or SHOW <name> there): Mason answers its own |
 
