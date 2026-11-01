@@ -2334,6 +2334,31 @@ by row number would answer two rows where the source answers one. That moment is
 UNIQUE index that is not the key, since a column the copy is not written by may hold one value twice; the primary key it
 does trust because the copy is written by it, and the swap checks as many distinct keys as rows.
 
+**A DISTINCT ON with a LIMIT, by row number (issue 134, task E), decided 2026-11-01.** `SELECT DISTINCT ON (…) … ORDER BY
+… LIMIT` with wide columns in the list carried every row's wide values through DuckDB's DISTINCT ON (a window and a
+filter) and the top N: on issue 134's dataset it failed with 53400 after 1230 s and 25 GiB of spill, where the hand form
+took 0.21 s and Postgres 0.7 s. It is NOT key-first grouping: a DISTINCT ON keeps one whole row of the FROM per group,
+the first by the sort, where a GROUP BY's group may hold many rows of a table. So `any_value(rowid)` would be wrong (it
+answers an arbitrary row of the group for another table's columns, where DuckDB's DISTINCT ON answers the first), and the
+primary-key proof decides nothing: the kept row's row numbers identify it exactly whatever the ON expressions, a key, a
+non-key, a computed or a jsonb one, and a key the copy holds twice for a moment is still one row, kept by the DISTINCT ON
+itself. It is `joinRows`'s form with the DISTINCT ON inside, one table included, because DuckDB's own late
+materialization does not reach through the window and filter its DISTINCT ON is. What is given up is `limit-errors`: a
+raising list value in a row that is not its group's first now answers. The task's brief wrote two of its "legal odd
+forms" with a sort key between the ON expressions (`DISTINCT ON (a, b) … ORDER BY a, c`), which Postgres refuses with
+42P10; the legal form is a sort that is a prefix of them (`ORDER BY a`), Postgres appending the rest. The review of
+PR 207 found that the engine was sent the sort as written, not Postgres's with the rest appended, so a LIMIT kept other
+groups in another order (at the base too, in the form sent as written): the rewrite now appends them to the statement's
+sort before any key is built (`distinctOnSorted`), so every form sent sorts as Postgres's Unique does. It found too that
+a jsonb ON named by its output compared the value's text, not jsonb's equality (only an ordinal was resolved), and that a
+numeric quotient under a DISTINCT ON or a DISTINCT was the engine's double's text, as no cell rode beside it. Its
+second round found the same text through a DISTINCT over a pass-through (`SELECT DISTINCT * FROM (…) s`: whether the
+cells ride was decided per form), and that every DISTINCT, GROUP BY and `=` compared a quotient's double, so
+1.00000000000000000001 and 1.00000000000000000002 were one group (pre-existing at the base). The class round's decision:
+a numeric the plan decides exactly is equated by its exact program's value (`exactKey`), the pass-through's DISTINCT keyed
+by the inner query's cells, and what cannot take a key refused by name; IN and the order of quotients equal to 17
+digits are a listed difference, since a key there would have to sort as a numeric does.
+
 **Step 3: `USING`, `NATURAL` and computed keys.** Through the listener, a 2 GB limit, 8 M facts beside 3 M rows of about 3 kB
 that compress well (346 MB on disk, so the spill and the seconds before are smaller than the issue's 9.1 GB of noise; the
 minimum of warm runs, a machine at load 28):

@@ -117,6 +117,33 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   are made distinct on the key (and the other tables' listed columns), and that table's wide columns read for the rows
   the limit keeps. Such a query spilled 29 GiB and failed for memory after five minutes; it now answers in under a
   second. Nothing to do on upgrade.
+- **`SELECT DISTINCT ON` with a `LIMIT` no longer fills the disk when the list shows wide columns**: the row kept for
+  each group is chosen on the sort's columns alone, and the wide columns read for the rows the limit keeps. Such a query
+  spilled 25 GiB and failed for memory after twenty minutes. One
+  thing changes: a value in the list that cannot be computed (`'x'::int`) in a row that is not its group's first no
+  longer fails the query. Nothing to do on upgrade.
+- **`SELECT DISTINCT ON` answers as Postgres does in three more cases**: with an `ORDER BY` that names only some of the
+  `ON` expressions (or none, with a `LIMIT`), the groups now come back in Postgres's order and a `LIMIT` keeps the same
+  ones; a jsonb `ON` named by its output alias now treats `1.0` and `1` as one value; and a numeric division in the list
+  of a `DISTINCT ON` or a `SELECT DISTINCT` (`amount / 3`) shows Postgres's exact digits instead of a rounded number, also when the `DISTINCT` is outside a subquery
+  that computes it.
+- **A numeric division or average is compared by its exact value**: `DISTINCT`, `GROUP BY`, `PARTITION BY`,
+  `count(DISTINCT …)`, `=` and `<>` no longer treat two quotients as equal when they agree only in their first 17
+  digits. A quotient in `ROLLUP` / `CUBE` / `GROUPING SETS`, in `sum(DISTINCT …)` and similar, or in a `UNION` /
+  `INTERSECT` / `EXCEPT` without `ALL` is now refused with `numeric-quotient-equality` (write `round(x, n)`), where it
+  could answer wrong rows before.
+- **A division or average a subquery computes is exact outside it too**: grouped, filtered, joined, counted
+  `DISTINCT`, cast or computed with outside a subquery or a `WITH` query (`SELECT q, count(*) FROM (SELECT a / 3 AS q
+  …) s GROUP BY q`), compared with a scalar subquery's or a parameter's value, as its text (`(a / 3)::text`), or in a
+  `UNION ALL` beside a plain column, it now shows and compares Postgres's exact digits — where it showed a rounded
+  number, and could join or group values that differ past their 17th digit. A row holding one (`(a / 3, b) = (…)`) is
+  now refused with `row-value`, and one compared outside a subquery that is also read by `*` beside other columns
+  with `numeric-quotient-equality` (name the subquery's columns).
+- **A numeric constant past 38 digits, or cast to `numeric(p, s)` past 38, is no longer compared as exact**
+  (`x + '1e-39'::numeric = x` was true): it is computed and compared with Postgres's digits, or refused by name where
+  it cannot be. A variance or standard deviation read from a subquery beside another computed column now shows
+  Postgres's digits, as it did read alone. A `GROUP BY` of a division of `extract(...)` (Grafana's `$__timeGroup`) now
+  groups by the exact quotient.
 - **`FETCH FIRST n ROWS WITH TIES` answers as Postgres does wherever it is written.** These were wrong and are now right:
   a sort by the number of a computed column beside a `*` (`SELECT t.*, x % 5 AS m … ORDER BY 5`) kept every row; a
   `UNION`, `INTERSECT` or `EXCEPT` with `WITH TIES` failed with an internal error; inside an `IN`, a scalar subquery,
@@ -127,11 +154,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `random()`, and `SELECT DISTINCT` or `DISTINCT ON` with `WITH TIES`, now answer where they were refused or failed. Over
   a table a user's role filters it is refused by name (`roles`), with the way out. Nothing to do on upgrade.
 - **A sort by a `UNION`'s column or by a row column answers as Postgres does, or is refused.** In a `UNION`,
-  `INTERSECT` or `EXCEPT`, a `citext` column beside a `text`
-  one is `text`, and `ORDER BY` now sorts it as text, where it was sorted without regard to case as the first `SELECT`'s
-  `citext`. A sort by a column that is a row (`SELECT ROW(a, b) AS r … ORDER BY r`, `SELECT t … ORDER BY 1`) sorted by
-  the row's text (`(0,100)` before `(0,50)`): it is now refused by name (`row-value`), with the way out, as `ORDER BY
-  ROW(a, b)` already was. Sort by the row's columns instead. Nothing to do on upgrade.
+  `INTERSECT` or `EXCEPT`, a `citext` column beside a `text` one is `text`, and `ORDER BY` now sorts it as text, where
+  it was sorted without regard to case as the first `SELECT`'s `citext`. A sort by a column that is a row (`SELECT
+  ROW(a, b) AS r … ORDER BY r`, `SELECT t … ORDER BY 1`) sorted by the row's text (`(0,100)` before `(0,50)`): it is
+  now refused by name (`row-value`), with the way out, as `ORDER BY ROW(a, b)` already was. Sort by the row's columns
+  instead. Nothing to do on upgrade.
 
 ## Known
 

@@ -580,6 +580,56 @@
       "full_sort": false
     },
     {
+      "name": "a DISTINCT ON the key with wide columns and a LIMIT: the kept rows chosen by row number",
+      "sql": "SELECT DISTINCT ON (o.id) o.id, o.meta, o.notes, i.id AS item FROM orders o JOIN order_items i ON i.order_id = o.id ORDER BY o.id DESC, i.id LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.orders",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.order_items",
+        "          TOP_N (1 key)",
+        "            PROJECTION",
+        "              PROJECTION",
+        "                HASH_GROUP_BY",
+        "                  PROJECTION",
+        "                    PROJECTION",
+        "                      PROJECTION",
+        "                        HASH_JOIN",
+        "                          FILTER",
+        "                            TABLE_SCAN public.orders [top-N filter: id]",
+        "                          TABLE_SCAN public.order_items"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "a DISTINCT ON a non-key of one table with wide columns and a LIMIT: the kept rows chosen by row number",
+      "sql": "SELECT DISTINCT ON (o.customer_id) o.customer_id, o.id, o.meta, o.notes FROM orders o ORDER BY o.customer_id, o.created_at DESC, o.id LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.orders",
+        "        TOP_N (1 key)",
+        "          PROJECTION",
+        "            PROJECTION",
+        "              HASH_GROUP_BY",
+        "                PROJECTION",
+        "                  PROJECTION",
+        "                    TABLE_SCAN public.orders [top-N filter: customer_id]"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "a tool's wrapper of a many-to-many join, no sort",
       "sql": "SELECT * FROM (SELECT c.id, o.meta FROM customers c JOIN orders o ON c.tenant_id = o.tenant_id) t LIMIT 100",
       "plan": [
@@ -2134,12 +2184,14 @@
         "ORDER_BY",
         "  PROJECTION",
         "    HASH_GROUP_BY",
-        "      PROJECTION",
+        "      PROJECTION calls __mason_numeric_key, __mason_numeric_program, __mason_turn",
         "        PROJECTION",
         "          TABLE_SCAN public.orders"
       ],
       "calls": [
-        "__mason_numeric_div"
+        "__mason_numeric_div",
+        "__mason_numeric_key",
+        "__mason_numeric_program"
       ],
       "sends": [
         "epoch_us"
