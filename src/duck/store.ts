@@ -416,7 +416,8 @@ function postgresWording(kind: string, message: string): { code: string; message
   const field = /^Date out of range: (.*)$/.exec(message);
   if (field) return { code: "22008", message: `date field value out of range: ${field[1]}` };
   // a cast to numeric(p, s) of a value with more than p - s integer digits
-  if (/Casting value "[^"]*" to type DECIMAL\(\d+,\s*\d+\) failed: value is out of range/.test(message)) return { code: "22003", message: "numeric field overflow" };
+  // (and of a number constant that does not fit: `12345::numeric(3)`, DuckDB's "Could not cast value 12345 to DECIMAL(3,0)")
+  if (/Casting value "[^"]*" to type DECIMAL\(\d+,\s*\d+\) failed: value is out of range|^Could not cast value \S+ to DECIMAL\(\d+,\s*\d+\)$/.test(message)) return { code: "22003", message: "numeric field overflow" };
   // an exact sum past DuckDB's 38 digits (a text read as numeric is summed as a DECIMAL(38,18), src/duck/rewrite.ts summed)
   if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past the engine's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
   // a numeric(p, s) read from a text holding NaN or Infinity (src/duck/rewrite.ts pgInput): DuckDB's decimal has none

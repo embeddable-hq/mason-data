@@ -2346,6 +2346,15 @@ test("a constant sort key orders nothing at any depth: by name and by number, un
       const chain = "SELECT l.id FROM late l ORDER BY 'abc'::text::int, l.id LIMIT 3";
       await assert.rejects(postgres(chain), /invalid input syntax for type integer: "abc"/);
       await assert.rejects(c.query(chain), (e: pg.DatabaseError) => e.code === "22P02", `${chain} (${database})`);
+      // a cast of a typed literal Postgres evaluates at planning, and raises there: no constant, it is evaluated and raises
+      for (const sql of ["SELECT l.id FROM late l ORDER BY 2147483648::int, l.id LIMIT 3",
+        "SELECT l.id FROM late l ORDER BY (2147483648::int), l.id LIMIT 3",
+        "SELECT l.id FROM late l ORDER BY 12345::numeric(3), l.id LIMIT 3",
+        "SELECT s.id FROM (SELECT l.id, c.name, 2147483648::int AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY s.one, s.id LIMIT 3"]) {
+        const code = await postgres(sql).then(() => "answered", (e: { code?: string }) => e.code);
+        assert.equal(code, "22003", sql);
+        await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === code, `${sql} (${database})`);
+      }
     }
   } finally { await bytes.end(); await onLibc.end(); await libc.close(); }
 });
