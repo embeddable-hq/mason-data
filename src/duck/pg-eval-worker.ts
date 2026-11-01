@@ -31,8 +31,8 @@ port.on("message", (m: Request) => {
       const textOf = (v: unknown): string | null => v === null ? null : Array.isArray(v) ? JSON.stringify(v.map(textOf)) : String(v);
       reply({ ok: true, rows: result.rows.map((r) => r.map(textOf)) });
     } catch (e) {
-      const err = e as { code?: string; message?: string };
-      reply({ ok: false, code: typeof err.code === "string" ? err.code : "XX000", message: err.message ?? String(e) });
+      const err = e as { code?: string; message?: string; detail?: string };
+      reply({ ok: false, code: typeof err.code === "string" ? err.code : "XX000", message: err.message ?? String(e), ...(typeof err.detail === "string" ? { detail: err.detail } : {}) });
     }
   })();
 });

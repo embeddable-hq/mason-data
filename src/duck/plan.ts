@@ -9,7 +9,7 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { heldName, heldType, isHeldArray } from "./held-types.ts";
-import { REWRITE_PREFIX, rewriteNamed, type TreeValue } from "./pgtree.ts";
+import { outputExpressions, REWRITE_PREFIX, rewriteNamed, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -286,6 +286,9 @@ export interface PlanOptions {
    *  src/duck/generated-plan.ts): the namespace check (`rewriteNamed`) passes them, and their columns, which are the
    *  statement's own outputs */
   own?: readonly string[];
+  /** the generated planner's ask for each output column's followed analysed expression (`DuckPlan.outputs`): only it
+   *  reads them, so a wire statement never pays for them (PR 202 round 14) */
+  outputs?: boolean;
 }
 
 /** The catalog declares a type the source made with nothing over it (`PgColumn.made`), so what its analysis says is not
@@ -322,7 +325,7 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const { catalog, text, stmt, base, paramOids, searchPath, timeZone, collation, verified, userTypes = new Map<string, number>(), copies = () => [],
-    depth = 0, kept = null, wireBound = false, grants, walls = null, relations, own = [] } = options;
+    depth = 0, kept = null, wireBound = false, grants, walls = null, relations, own = [], outputs = false } = options;
   const started = performance.now();
   const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
   if ("refused" in analysis) {
@@ -508,7 +511,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       detail: `read back: ${difference}; the rewritten SQL: ${sql}` }, text);
   }
   const planned = { text: sql, functions: masonCalls(tree), ...(unboundedLateral ? { unboundedLateral: true } : {}), ...(cells > 0 ? { cells } : {}) } as unknown as PlannedSql;
-  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, ties: tiesQuery(analysis.tree), ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree),
+  return { sql: planned, params: analysis.params, fields: fields?.map((f) => ({ ...f, size: pgTyplen(f.oid) })) ?? null, ties: tiesQuery(analysis.tree), ...(exact.length > 0 ? { exact } : {}), resolved: keys, argumentTypes: argumentTypes(analysis.tree), ...(outputs ? { outputs: outputExpressions(analysis.tree) ?? [] } : {}),
     ...(Object.keys(clock).length > 0 ? { clock } : {}), ...(jsonReads.length > 0 ? { jsonReads: jsonReads.map(readKey) } : {}), ...(reads !== undefined ? { reads } : {}),
     timing: { analysisMs: analysed - started, rewriteMs: performance.now() - analysed } };
 }

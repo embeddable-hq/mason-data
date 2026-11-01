@@ -66,7 +66,28 @@ ${keys}
     table already built keeps serving and being re-run from what it was built with. A table has no session, so SQL that
     reads a time zone or a setting is refused: name the zone (t AT TIME ZONE 'UTC', date_trunc('day', t, 'UTC')).
     A daily table in one zone doesn't serve a dashboard in another.
-    Not available yet: kind: live, and numeric columns and columns of your own types.
+    A numeric column is stored exactly, with Postgres's digits, wherever its types fix the scale: one passed through,
+    its min or max, a sum (of a bigint too), and + - * of those, negated, abs, mod, round(x, n) and trunc(x, n) (n
+    below 0 too), floor, ceil, a cast to numeric(p,s) (of a JSON number's text too), and a CASE, GREATEST, LEAST or
+    COALESCE whose values have one scale, up to 18 decimals; a sign is stored too. Refused, each with its reason and
+    the way out: a division (avg is one: store it as a double, or divide where you read), a variance or stddev, which
+    Postgres computes exactly at decimals it picks per value, rounded, cast to numeric(p,s) or not (store it as a
+    double), a sqrt, exp, ln, log or power, whose decimals Postgres picks per value, rounded, cast to numeric(p,s) or
+    not (store it as a double), whatever the decimals of what it is computed from, a JSON number's text
+    cast to numeric with no scale (cast it to numeric(p,s)), more than 18 decimals, at the end or on the way
+    (round it, or give the values fewer decimals first), a sum whose decimals the rows decide (cast the values to one
+    scale first), a CASE, GREATEST, LEAST or COALESCE of values with differing decimals (cast it to numeric(p,s)), and a
+    numeric cast from a double (store the double it is). Each keeps its reason read back from its text (::text,
+    ::varchar, || '', a jsonb's ->>, a WITH column), cast to numeric(p,s) or not; only a stored column's or a JSON
+    number's text is a text's. Each is said as Postgres types the value (sqrt or avg of a
+    double is a double, so cast to numeric it is a cast from a double) wherever it sits in the column (under an
+    operator, a coalesce, a round, a cast or an aggregate, or in a scalar subquery, a WITH query, a subquery in FROM or
+    a UNION's arm), its way out your own SQL with the cast moved, the aggregate kept: sum(sqrt(x)::double precision),
+    or the WITH query, subquery or UNION the cast belongs in, given whole. A run that fails (a value
+    past 38 digits, bigint out of range, a division by zero) says Postgres's error and SQLSTATE, and is tried again.
+    An enum and a citext are stored as themselves:
+    an enum sorts in its declared order, a citext compares without case.
+    Not available yet: kind: live, and a domain or a composite type's column.
 
   WHO READS IT
     A role with tables: all reads it. A role with a list of tables reads it once it names it, as mason/roles.yml names

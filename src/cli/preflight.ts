@@ -280,9 +280,9 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
 ) t`;
 
 interface TableRow {
-  schema: string; table: string; oid: number; row_type_oid: number; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
+  schema: string; table: string; oid: number; row_type_oid: number | string; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
-  columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; comment: string | null; type_oid: number; type_array_oid: number;
+  columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
     default: string | null; identity: string; generated: string; sequence: string | null }>;
   foreign_keys: Array<{ column: string; target: string; target_column: string }>;
 }
@@ -316,13 +316,14 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
     tables.push({
       source: `${t.schema}.${t.table}`, schema: t.schema, table: t.table, key: t.key, rows: count, bytes: Number(t.bytes), comment: t.comment,
       columns: t.columns.map((c) => ({ name: c.name, type: c.type, typeKind: c.type_kind, ...(c.domain ? { domain: true as const } : {}), notNull: c.not_null, comment: c.comment,
-        ...(c.type_oid >= 16384 ? { typeOid: c.type_oid, ...(c.type_array_oid > 0 ? { typeArrayOid: c.type_array_oid } : {}) } : {}),
+        // an oid is a STRING in Postgres's JSON (only the int, float and numeric types are numbers): one spelling, here
+        ...(Number(c.type_oid) >= 16384 ? { typeOid: Number(c.type_oid), ...(Number(c.type_array_oid) > 0 ? { typeArrayOid: Number(c.type_array_oid) } : {}) } : {}),
         // a generated column's pg_attrdef row is its expression, never a default
         ...(c.default !== null && c.generated === "" ? { default: c.default } : {}), ...(c.identity === "a" || c.identity === "d" ? { identity: c.identity } : {}),
         ...(c.generated === "s" ? { generated: true as const } : {}), ...(c.sequence !== null ? { sequence: c.sequence } : {}) })),
       foreignKeys: t.foreign_keys.map((f) => ({ column: f.column, target: f.target, targetColumn: f.target_column })),
       uniqueKeys: t.unique_keys.map((u) => ({ name: u.name, columns: u.columns, constraint: u.constraint, nullsNotDistinct: u.nulls_not_distinct })),
-      ...(t.row_type_oid > 0 ? { rowTypeOid: t.row_type_oid } : {}),
+      ...(Number(t.row_type_oid) > 0 ? { rowTypeOid: Number(t.row_type_oid) } : {}),
       ...(t.replica_identity === "d" || t.replica_identity === "n" || t.replica_identity === "f" || t.replica_identity === "i" ? { replicaIdentity: t.replica_identity } : {}),
     });
   }

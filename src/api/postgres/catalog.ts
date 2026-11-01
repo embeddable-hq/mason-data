@@ -122,7 +122,9 @@ export function catalogDdl(schema: PgSchema): string[] {
   // a source enum a column has: the type, its labels in their declared order, before the tables —
   // spelled as the source's format_type spells it (`mood`, `other.level`, `"Odd"`), its schema made first
   const enums = new Map<string, readonly string[]>();
-  for (const t of schema.tables) for (const c of t.columns) if (c.enumLabels !== undefined && c.spelled !== undefined) enums.set(c.spelled.replace(/\[\]$/, ""), c.enumLabels);
+  // one declaration a type, the FIRST column's: the synced tables come first, and src/duck/sync.ts hands a generated
+  // table's column its synced type's labels (one source of an enum's labels), so no later column's can replace them
+  for (const t of schema.tables) for (const c of t.columns) if (c.enumLabels !== undefined && c.spelled !== undefined && !enums.has(c.spelled.replace(/\[\]$/, ""))) enums.set(c.spelled.replace(/\[\]$/, ""), c.enumLabels);
   for (const [type, labels] of enums) {
     const qualifier = typeNameParts(type).schema;
     if (qualifier !== null && qualifier !== '"public"' && qualifier !== "public") statements.push(`CREATE SCHEMA IF NOT EXISTS ${qualifier};`);

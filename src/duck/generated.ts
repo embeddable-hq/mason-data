@@ -36,8 +36,8 @@
 import { createHash } from "node:crypto";
 import type { DuckConnection } from "./executor.ts";
 import type { Planner, GeneratedColumn, GeneratedRefusal, DefinitionPlan as DefinitionPlanOf } from "./generated-plan.ts";
-import { cycleRefusal, planDefinition, readsByName, refusalOf, refusalText } from "./generated-plan.ts";
-import { MASON_SCHEMA, type DuckStore } from "./store.ts";
+import { cycleRefusal, isNumeric, planDefinition, readsByName, refusalOf, refusalText, storedColumns, uncheckedRefusal, type EngineTypes } from "./generated-plan.ts";
+import { MASON_SCHEMA, pgErrorOf, type DuckStore } from "./store.ts";
 import { StatementError } from "./statement.ts";
 import type { SyncEventInput } from "./events.ts";
 import type { CopyState } from "./sync.ts";
@@ -159,8 +159,17 @@ interface Entry {
 /** What the table needs of the sync (src/duck/sync.ts `Sync`). */
 export interface GeneratedHost {
   onWriter<T>(f: () => Promise<T>): Promise<T>;
-  /** the run's own connection, opened and closed by the sync so `stop` interrupts it */
+  /** the run's own connection, opened and closed by the sync so `stop` interrupts it, and set up as a session is
+   *  (src/duck/store.ts `SessionSetup`: the session variable every Mason function reads, the null order, UTC) */
   connection(): DuckConnection;
+  /** the run's connection settled as a session with no role is (UTC, under `public` once it exists): before a plan */
+  settle(): Promise<void>;
+  /** THE CHECK'S OWN CONNECTION, never the run's: a review runs whenever it is asked, and a run holds its connection in a
+   *  transaction across awaits, so a check on the run's connection ran its settle and its prepare INSIDE that transaction,
+   *  interleaved with the build's statements, unserialised (PR 202 round 13: the engine stuck from a check's settle while
+   *  a build had the connection). Set up as a session is, by the one set-up, and settled (`settleCheck`) before each check */
+  checkConnection(): DuckConnection;
+  settleCheck(): Promise<void>;
   /** a run of it, queued in the one rebuild queue (it comes back through `run`) */
   enqueue(name: string): void;
   /** `f` as `Sync.interruptible` runs a long statement on the run's connection: `stop` ends it, thrown as Stopping */
@@ -191,6 +200,39 @@ export type GeneratedStep = "snapshot" | "written" | "committed" | "swapped";
  *  quoted (`invalid input syntax for type integer: "abc"`): quoted text and every number go. */
 export function withoutValues(message: string): string {
   return message.split("\n")[0]!.replace(/'(?:[^']|'')*'/g, "…").replace(/"(?:[^"]|"")*"/g, "…").replace(/\b\d[\d.:,-]*\b/g, "…");
+}
+
+/** a definition the write's engine types refuse (`storedColumns`): the table's refusal, with its ways out */
+class RefusedAtWrite extends Error {
+  readonly entry: Entry; readonly refused: GeneratedRefusal[];
+  constructor(entry: Entry, refused: GeneratedRefusal[]) { super(refused.map((r) => r.message).join("; ")); this.entry = entry; this.refused = refused; }
+}
+
+/**
+ * A RUN'S FAILURE IN POSTGRES'S WORDS, never the engine's (CLAUDE.md "Nothing a user sees is named for DuckDB"): the ONE
+ * mapping a statement on the wire gets (src/duck/store.ts `pgErrorOf`) gives its SQLSTATE, message and Postgres's own
+ * DETAIL, and nothing here reads an engine spelling. Said without the run's values (`withoutValues`: Postgres's message
+ * may quote one), with no name Mason keeps for itself (`__mason_cell_0`), and the way out its SQLSTATE has.
+ */
+export function failureWords(err: unknown): string {
+  const { code, message, detail } = pgErrorOf(err, "").fields;
+  // the mapping's own DETAIL is Postgres's; one that carries the engine's text is the engine's, and stays out
+  const theirs = detail === undefined || detail.startsWith("the engine") ? "" : ` ${detail}`;
+  const way = WAY_OUT[code];
+  return `${withoutValues(message)} (SQLSTATE ${code}).${theirs}${way === undefined ? "" : ` ${way}`}`.replace(/__mason_\w+/g, "a value it computes");
+}
+/** what to do about a run's failure, by its SQLSTATE: the data's, so the run is tried again on the back-off meanwhile */
+const WAY_OUT: Readonly<Record<string, string>> = {
+  "22003": "Give the value more digits (a wider type or typmod), cast it to double precision if it need not be exact, or compute it in the statement that reads the synced table.",
+  "22012": "Guard the divisor (x / nullif(y, 0)), or compute it in the statement that reads the synced table.",
+  "22P02": "Cast only the values that are of that type (a CASE over the text), or compute it in the statement that reads the synced table.",
+};
+
+/** the engine type of each column a plan's SQL computes, as DuckDB says when it prepares it (`EngineTypes`) */
+async function engineTypes(c: DuckConnection, sql: string): Promise<EngineTypes> {
+  const p = await c.prepare(sql);
+  try { return new Map(Array.from({ length: p.columnCount }, (_, i) => { const type = p.columnType(i).toString(); return [[p.columnName(i), type], [`#${i}`, type]] as const; }).flat()); }
+  finally { p.destroySync(); }
 }
 
 export class GeneratedTables {
@@ -235,10 +277,8 @@ export class GeneratedTables {
     }
     const left = (await w.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = current_database() AND ends_with(table_name, '${SIDE_SUFFIX}')`)).getRowsJS() as Array<[string, string]>;
     for (const [schema, table] of left) await w.run(`DROP TABLE ${ident(schema)}.${ident(table)}`);
-    const c = this.host.connection();
-    // what a session sets (src/duck/store.ts SessionRunner): a plan means what it means under these
-    await c.run("SET default_null_order = 'nulls_last_on_asc_first_on_desc'");
-    await c.run("SET TimeZone = 'UTC'");
+    // the run's connection was set up as a session is, by the one set-up (src/duck/store.ts `SessionSetup`)
+    await this.host.settle();
   }
 
   /** a base's last sync, ms; null: not known */
@@ -495,7 +535,10 @@ export class GeneratedTables {
     if (e.seen?.json === json && e.seen.schema === schema) return;
     e.seen = { json, schema };
     try {
-      const r = await planDefinition(planner, def.sql, def.orderBy);
+      // on the check's own connection: a run may hold the run's in a transaction now (`checkConnection`)
+      const c = this.host.checkConnection();
+      await this.host.settleCheck();
+      const r = await planDefinition(planner, def.sql, def.orderBy, undefined, (sql) => engineTypes(c, sql));
       e.waitingFor = null;
       e.warnings = "refused" in r ? [] : r.definition.warnings;
       // what its names did not show (a name the plan resolved otherwise): a cycle by what the plan reads
@@ -510,7 +553,17 @@ export class GeneratedTables {
         e.refusals = [];
       }
     } catch (x) {
-      if (!(x instanceof StatementError)) throw x;
+      // NO DEFINITION LEAVES THE CHECK WITHOUT A VERDICT: what Mason did not expect while checking one is that table's
+      // refusal, in words a user reads, and the review goes on to the others. Thrown up, it stopped the review at this
+      // table, ran it again for ever, and left the table `building` with no reason (PR 202 round 8). What it said goes to
+      // the log once, for the report; the refusal stands until the definition or the catalog changes (`seen`)
+      if (!(x instanceof StatementError)) {
+        e.checked = null; e.waitingFor = null; e.warnings = [];
+        e.refusals = [uncheckedRefusal()];
+        this.host.log(`${def.file}: Mason could not check this definition (Mason bug: report it, with this line and the file's SQL): ${x instanceof Error ? x.stack ?? x.message : String(x)}`);
+        this.say(e);
+        return;
+      }
       e.checked = null;
       const missing = x.fields.code === "42P01" ? /^relation "([^"]+)" does not exist$/.exec(x.fields.message)?.[1] : undefined;
       const adding = missing === undefined ? null : this.host.added(missing.includes(".") ? missing : `public.${missing}`);
@@ -725,7 +778,7 @@ export class GeneratedTables {
         plans.push({ e: m, b, plan: planned.definition, target: `${ident(d.schema)}.${ident(d.table)}`, side: `${ident(d.schema)}.${ident(`${d.table}${SIDE_SUFFIX}`)}` });
       }
       at = members[0]!;
-      await this.searchPath(c);
+      await this.host.settle();
       for (const s of new Set(plans.map((p) => p.b.definition.schema))) await c.run(`CREATE SCHEMA IF NOT EXISTS ${ident(s)}`);
       await c.run("BEGIN TRANSACTION");
       open = true;
@@ -743,11 +796,17 @@ export class GeneratedTables {
       const written: Array<{ e: Entry; n: Deployed; side: string; target: string }> = [];
       for (const p of plans) {
         at = p.e;
-        const { plan, columns } = p.plan;
+        const { plan } = p.plan;
+        // a computed numeric's DECIMAL arithmetic, over the engine types of the SQL that runs (a parent's side table now
+        // there), never assumed: what the check held, the write holds again
+        const stored = !p.plan.columns.some(isNumeric) ? { columns: p.plan.columns } : storedColumns(p.plan, await engineTypes(c, plan.sql.text));
+        // refused here, it is a refusal as the check's are, with its options: never a failure retried on a timer
+        if ("refused" in stored) throw new RefusedAtWrite(p.e, stored.refused);
+        const { columns } = stored;
         const params: string[] = [];
         if (plan.clock?.exec !== undefined) params[plan.clock.exec - 1] = new Date(clock.at).toISOString();
         const aliases = columns.map((_, i) => `__mason_c${i}`);
-        const sql = `CREATE OR REPLACE TABLE ${p.side} (${columns.map((x) => ident(x.name)).join(", ")}) AS SELECT ${columns.map((x, i) => `CAST(${aliases[i]!} AS ${x.duck})`).join(", ")} ` +
+        const sql = `CREATE OR REPLACE TABLE ${p.side} (${columns.map((x) => ident(x.name)).join(", ")}) AS SELECT ${columns.map((x, i) => { const v = x.expr ?? aliases[i]!; return x.duck === null ? v : `CAST(${v} AS ${x.duck})`; }).join(", ")} ` +
           `FROM (${plan.sql.text}) AS __mason_output(${aliases.join(", ")})`;
         const { rowsChanged } = await this.host.interruptible(() => c.run(sql, params.length > 0 ? params : undefined));
         await this.onStep("written", p.e.name);
@@ -793,11 +852,21 @@ export class GeneratedTables {
       // what this run took is still not in the tables
       for (const m of members) { m.dirtySince = this.oldest(m); m.taken = null; }
       if (this.host.stopping(x)) throw x;
+      if (x instanceof RefusedAtWrite) {
+        // what the write's engine types refuse is the table's refusal, with its ways out, as at a check: it keeps serving
+        // what it holds and is not run again until its definition or the schema changes (the check's `seen`)
+        const e = x.entry;
+        e.checked = null; e.refusals = x.refused;
+        this.say(e);
+        this.host.log(`${e.name}: refused at its run: ${x.refused.map((r) => r.message).join("; ")}`);
+        return null;
+      }
       at.failures++;
       const attempt = Date.now() - started;
       at.retryAt = Date.now() + this.host.retryDelayMs(at.failures, attempt);
-      const fields = x instanceof StatementError ? x.fields.message : x instanceof Error ? x.message : String(x);
-      at.error = withoutValues(fields);
+      // a numeric past the 38 digits a stored DECIMAL holds is the data's, not the definition's: said with its way out,
+      // and run again on the back-off, since a change to the rows can bring it back within them
+      at.error = failureWords(x);
       const m = `its re-run failed (it serves what it last held; tried again after ${new Date(at.retryAt).toISOString()}): ${at.error}`;
       this.host.log(`${at.name}: ${m}`);
       this.host.event({ kind: "generated_failed", table: at.name, message: m });
@@ -817,12 +886,6 @@ export class GeneratedTables {
       if (built.includes(e) || !e.deployed?.bases.includes(name)) continue;
       if (e.dirtySince === null || at < e.dirtySince) e.dirtySince = at;
     }
-  }
-
-  /** the search_path a definition is planned under (`public`), once that schema exists */
-  private async searchPath(c: DuckConnection): Promise<void> {
-    const there = (await c.runAndReadAll("SELECT count(*) FROM duckdb_schemas() WHERE database_name = current_database() AND schema_name = 'public'")).getRowsJS()[0]![0] as bigint;
-    await c.run(`SET search_path = '${there > 0n ? "public" : "main"}'`);
   }
 
   /** THE SWAP, ON THE WRITER'S TURN, as a copy's is: every side table of the run replaces its table, with its ledger

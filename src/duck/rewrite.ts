@@ -30,6 +30,7 @@ import { HELD, heldType, isHeldArray, ZONED_HELD } from "./held-types.ts";
 import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
+import type { CellConv } from "./types.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { caseTwins, joinsUsing, setOperationColumns, type Keys, type QueryOutputs, type SetShape, type Typed } from "./pgtree.ts";
@@ -86,10 +87,13 @@ export interface ExactColumn {
   column: number;
   program: NumericProgram;
   /** each cell's value: exact digits, or a float as Postgres's float8 / float4 → numeric casts write it */
-  cells: Array<"exact" | "float8" | "float4" | "text">;
+  cells: Array<CellConv>;
   /** the column is the program's text (`(x / 3)::text`) */
   text: boolean;
 }
+
+/** a query's output columns' types, as `exactThrough` reads them */
+type Fields = ReadonlyArray<{ oid: number; typmod?: number }>;
 
 /** a column of a table's row type, as the catalog has it */
 export interface RowColumn { name: string; type: number; typmod: number }
@@ -1638,13 +1642,18 @@ class Rewriter {
     if (b.op !== undefined && b.op !== "SETOP_NONE") return [];
     const plainDistinct = Array.isArray(b.distinctClause) && !b.distinctClause.every(isNode);
     const targets = (b.targetList ?? []) as AstNode[];
+    // a query that selects cells already is never given them twice. No WITH query read twice reaches here: its programs
+    // and its fields are derived once and every later reader is given them (`exactThrough`'s `derived`, read before
+    // anything is derived from the query again), never this empty answer. Read from the one record (`cellsOf`), never
+    // by a `__mason_cell_*` name, which a user's output may carry (the class "rewrite-name-in-user-namespace", PR 233)
+    if (this.cellsOf(b) > 0) return [];
     if (targets.length !== fields.length || targets.some((t) => hasStar(bodyOf(t).val))) return [];
     const grouped = (Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val));
     const groupShapes = new Set(((b.groupClause ?? []) as AstNode[]).map((g) => {
       const n = constInt(g);
       return shapeOf(n !== null && n >= 1 && n <= targets.length ? bodyOf(targets[n - 1]!).val as AstNode : g);
     }));
-    const cells: Array<{ node: AstNode; conv: "exact" | "float8" | "float4" | "text"; shape: string }> = [];
+    const cells: Array<{ node: AstNode; conv: CellConv; shape: string }> = [];
     const out: ExactColumn[] = [];
     targets.forEach((target, i) => {
       const field = fields[i]!;
@@ -1656,7 +1665,7 @@ class Rewriter {
       else if (TEXTS.has(field.oid) && (field.typmod ?? -1) < 0 && kindOf(node) === "ColumnRef" && (this.carry(node) as { text?: boolean } | null)?.text === true) text = true;
       else if (field.oid !== NUMERIC) return;
       const mine: typeof cells = [];
-      const cell = (n: AstNode, conv: "exact" | "float8" | "float4" | "text" = "exact"): NumericProgram => {
+      const cell = (n: AstNode, conv: CellConv = "exact"): NumericProgram => {
         if (grouped && !this.validGrouped(n, groupShapes)) throw NOT_EXACT;
         const shape = `${conv}:${shapeOf(n)}`;
         let at = mine.findIndex((c) => c.shape === shape);
@@ -1686,13 +1695,31 @@ class Rewriter {
    * after its own columns, and the programs are the inner's at the outer's column. Anything else that computes over an
    * inner exact numeric reads DuckDB's value (docs/SQL-SUPPORT.md `nested-exact-numeric`).
    */
-  exactThrough(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }> | null): ExactColumn[] {
-    if (fields === null || kindOf(stmt) !== "SelectStmt") return [];
-    // the query's CTEs are visible to every query inside it (`WITH base AS (…) SELECT b.x FROM (SELECT * FROM base) b`)
-    const ctes = bodyOf(stmt).withClause?.recursive === true ? [] : ((bodyOf(stmt).withClause?.ctes ?? []) as AstNode[]);
-    this.cteScope.push(ctes);
-    try { return this.exactThroughIn(stmt, fields); } finally { this.cteScope.pop(); }
+  exactThrough(stmt: AstNode, fields: Fields | null | (() => Fields | null)): ExactColumn[] {
+    if (kindOf(stmt) !== "SelectStmt") return [];
+    // DERIVED ONCE, AND EVERYTHING A LATER READER IS GIVEN WITH IT: a query read again (a WITH query two arms of a UNION
+    // ALL read, directly, through another WITH query or a subquery) is given what its first read derived, whichever arm
+    // read it first, before anything is derived from it again. Its programs derived again answered none (it selected
+    // its cells already: PR 202 round 9); its FIELDS derived again (`outputFields`, a FROM item's reader) were typed over
+    // the cells the first read appended, which cannot be: null, none, the arms disagreed and the union was the engine's
+    // double (round 10). So a reader's fields are asked for only when nothing is derived yet (a function, `innerExact`)
+    const known = this.derived.get(bodyOf(stmt));
+    if (known !== undefined) return known.map((e) => ({ ...e }));
+    const typed = typeof fields === "function" ? fields() : fields;
+    let out: ExactColumn[] = [];
+    if (typed !== null) {
+      // the query's CTEs are visible to every query inside it (`WITH base AS (…) SELECT b.x FROM (SELECT * FROM base) b`)
+      const ctes = bodyOf(stmt).withClause?.recursive === true ? [] : ((bodyOf(stmt).withClause?.ctes ?? []) as AstNode[]);
+      this.cteScope.push(ctes);
+      try { out = this.exactThroughIn(stmt, typed); } finally { this.cteScope.pop(); }
+    }
+    this.derived.set(bodyOf(stmt), out);
+    return out.map((e) => ({ ...e }));
   }
+
+  /** each query's exact columns as `exactThrough` first derived them, by the query (a trial's copy is its own query):
+   *  the one record of them, which every reader (an arm, a FROM item's `innerExact`, a carry) reads */
+  private readonly derived = new WeakMap<object, ExactColumn[]>();
 
   /** the CTEs of the queries `exactThrough` is inside, outermost first (a recursive WITH's are none: never read whole) */
   private readonly cteScope: AstNode[][] = [];
@@ -1707,8 +1734,6 @@ class Rewriter {
   private readonly frames = new WeakMap<Body, Frame[]>();
   /** every query that reads a WITH query in its FROM, by the WITH query */
   private readonly cteReaders = new Map<Body, Body[]>();
-  /** the exact columns of each FROM item's query whose cells ride beside its columns (`innerExact`), made once */
-  private readonly innerExacts = new Map<Body, ExactColumn[]>();
   /** whether a FROM item's query's cells may ride, decided at its first column read (`carry`): true, or why not */
   private readonly rides = new Map<Body, true | string>();
   /** why each FROM item's column could not be carried, in the developer's words (`refuseUncarried`) */
@@ -1808,7 +1833,7 @@ class Rewriter {
   }
 
   /** a carried column's program over the cells `cell` makes of its item's hidden columns, each read as it rode */
-  private carried(ref: AstNode, cell: (n: AstNode, conv?: "exact" | "float8" | "float4" | "text") => NumericProgram): NumericProgram | "uncarried" | null {
+  private carried(ref: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): NumericProgram | "uncarried" | null {
     const c = this.carry(ref);
     if (c === null || c === "uncarried") return c;
     return mapCells(c.program, (key) => key.startsWith("$") ? { op: "cell", key }
@@ -1926,7 +1951,7 @@ class Rewriter {
     const text = type !== null && TEXTS.has(type) && kindOf(v) === "TypeCast" && isNode(bodyOf(v).arg) && this.typeOf(bodyOf(v).arg as AstNode) === NUMERIC;
     const numeric = text ? bodyOf(v).arg as AstNode : type === NUMERIC ? v : null;
     if (numeric === null) return false;
-    const cells: Array<{ conv: "exact" | "float8" | "float4" | "text" }> = [];
+    const cells: Array<{ conv: CellConv }> = [];
     const built = this.programOf(numeric, (_m, conv = "exact") => { cells.push({ conv }); return { op: "cell", key: String(cells.length - 1) }; });
     return built !== null && this.programNeeded(numeric, built.p, cells, text ? -1 : this.typed(numeric)?.typmod ?? -1);
   }
@@ -1938,7 +1963,7 @@ class Rewriter {
    * copy dropped, a rounding, a parameter's text, a cell read from a float or a text). Not a numeric(p, s) value as it
    * is (`typmod` its own, -1 for its text): the wire pads it to s (src/duck/types.ts pgTypedColumn).
    */
-  private programNeeded(node: AstNode, p: NumericProgram, cells: ReadonlyArray<{ conv: "exact" | "float8" | "float4" | "text" }>, typmod: number): boolean {
+  private programNeeded(node: AstNode, p: NumericProgram, cells: ReadonlyArray<{ conv: CellConv }>, typmod: number): boolean {
     if (this.duckExact(node) && !worthComputing(p) && cells.every((c) => c.conv === "exact")) return false;
     return !(p.op === "pad" && p.arg.op === "cell" && typmod >= 4 && ((typmod - 4) & 0xffff) === p.scale);
   }
@@ -1973,12 +1998,10 @@ class Rewriter {
     return rides;
   }
 
-  /** a FROM item's query's exact columns, its cells appended to its SELECT list once (`exactThrough`) */
+  /** a FROM item's query's exact columns, its cells appended to its SELECT list once (`exactThrough`'s one derivation:
+   *  its fields are typed only before it, over the query as written) */
   private innerExact(query: AstNode): ExactColumn[] {
-    const b = bodyOf(query);
-    let made = this.innerExacts.get(b);
-    if (made === undefined) { made = this.exactThrough(query, this.outputFields(query)); this.innerExacts.set(b, made); }
-    return made;
+    return this.exactThrough(query, () => this.outputFields(query));
   }
 
   private exactThroughIn(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }>): ExactColumn[] {
@@ -2021,7 +2044,7 @@ class Rewriter {
     const keyAt = (i: number): AstNode => {
       const e = exact.find((x) => x.column === i);
       if (e !== undefined) {
-        const texts = e.cells.map((conv, j) => conv === "text" ? cellRef(j) : conv === "exact" ? cast(cellRef(j), ["varchar"])
+        const texts = e.cells.map((conv, j) => conv === "text" || conv === "parsed" ? cellRef(j) : conv === "exact" ? cast(cellRef(j), ["varchar"])
           : fn("__mason_float_numeric_text", [cast(cellRef(j), ["double"]), boolConst(conv === "float4")]));
         const value = fn("__mason_numeric_program", [strConst(JSON.stringify(e.program)), ...texts]);
         return e.text ? value : fn("__mason_numeric_key", [value]);
@@ -2068,7 +2091,18 @@ class Rewriter {
     flatten({ SelectStmt: b });
     // an arm typed otherwise than the union (an integer arm of a numeric column) is cast by Postgres: not this program
     if (arms.some((a) => { const f = this.outputFields(a); return f === null || f.some((x, i) => x.oid !== fields[i]?.oid); })) return [];
-    const trial = arms.map((a) => { const clone = this.clone(a); const made = this.exactThrough(clone, fields); return { made, listed: ((bodyOf(clone).targetList ?? []) as AstNode[]).length }; });
+    // THE TRIAL WRITES ONLY COPIES: of the arms, AND of the CTEs above them, which an arm that reads one appends its cells
+    // to. A trial that wrote the real CTE left it selecting cells its arm, built again below, never read: arms of
+    // different widths, which the engine refused (`WITH t AS (… sqrt(abs(x)) AS v …) SELECT v FROM t UNION ALL SELECT
+    // sqrt(abs(x)) …`, PR 202 round 8). The copies are shared across the arms as the real CTEs are, so the trial is the
+    // real pass run on a copy, and what it finds is what the real pass will. (A column an arm's copy CARRIES out of a
+    // WITH query is resolved by where it is written, `carry`'s `scopes`: the real WITH query, derived once there, and
+    // the real pass is given that one derivation, `exactThrough`'s `derived`)
+    const real = this.cteScope.splice(0);
+    this.cteScope.push(...real.map((list) => this.clone(list)));
+    let trial: Array<{ made: ExactColumn[]; listed: number }>;
+    try { trial = arms.map((a) => { const clone = this.clone(a); const made = this.exactThrough(clone, fields); return { made, listed: ((bodyOf(clone).targetList ?? []) as AstNode[]).length }; }); }
+    finally { this.cteScope.splice(0, this.cteScope.length, ...real); }
     const first = JSON.stringify(trial[0]!.made);
     if (trial[0]!.made.length > 0 && trial.every((t) => JSON.stringify(t.made) === first)) {
       const same = arms.map((a) => this.exactThrough(a, fields))[0]!;
@@ -2238,7 +2272,7 @@ class Rewriter {
 
   /** An expression as a program over cells (`cell` makes one), or null where it is not a numeric Postgres's rules
    *  decide here; `kind` int where the value is an integer (integer arithmetic is DuckDB's, one cell). */
-  private exactOf(n: AstNode, cell: (n: AstNode, conv?: "exact" | "float8" | "float4" | "text") => NumericProgram): Built | null {
+  private exactOf(n: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): Built | null {
     const k = kindOf(n), b = bodyOf(n);
     const type = this.typeOf(n);
     const asCell = (): Built | null => type !== null && INTEGERS.has(type) ? { p: cell(n), kind: "int" } : type === NUMERIC ? { p: this.padded(n, cell(n)), kind: "numeric" } : null;
@@ -2277,7 +2311,7 @@ class Rewriter {
         const from = this.typeOf(arg);
         const inner: Built | null = from !== null && FLOATS.has(from) ? numeric(cell(arg, from === FLOAT4 ? "float4" : "float8"))
           // a text: the digits Postgres's numeric_in reads (`1.50` keeps its scale, `1_000.5` is 1000.5)
-          : from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(arg) === null ? numeric(cell(pgCall("text", "a1::numeric", [this.clone(arg)]), "text"))
+          : from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(arg) === null ? numeric(cell(pgCall("text", "a1::numeric", [this.clone(arg)]), "parsed"))
           : sub(arg);
         if (inner === null) return null;
         const mods = ((b.typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m));
@@ -2294,7 +2328,7 @@ class Rewriter {
         const whens = (b.args ?? []) as AstNode[];
         const index = (): AstNode => ({ CaseExpr: { ...(b.arg === undefined ? {} : { arg: this.clone(b.arg) }),
           args: whens.map((w, i) => ({ CaseWhen: { expr: this.clone(bodyOf(w).expr), result: intConst(i) } })), defresult: intConst(whens.length) } });
-        const onItsRows = (i: number) => (m: AstNode, conv?: "exact" | "float8" | "float4" | "text"): NumericProgram =>
+        const onItsRows = (i: number) => (m: AstNode, conv?: CellConv): NumericProgram =>
           cell(kindOf(m) === "ColumnRef" || !holdsKind(m, "ColumnRef") ? m : caseWhen([[op("=", index(), intConst(i)), m]], null), conv);
         const results = [...whens.map((w) => bodyOf(w).result), ...(b.defresult === undefined ? [] : [b.defresult])];
         const arms = results.map((r, i) => isNode(r) ? this.exactOf(r, onItsRows(i)) : null);
@@ -2428,7 +2462,7 @@ class Rewriter {
    * window. Not of DISTINCT values: of 5 and 5.0 Postgres keeps one, and which is its sort's
    * (docs/SQL-SUPPORT.md `mixed-scale-numeric`)
    */
-  private summed(agg: Body, x: AstNode, sum: AstNode, cell: (n: AstNode, conv?: "exact" | "float8" | "float4" | "text") => NumericProgram): NumericProgram {
+  private summed(agg: Body, x: AstNode, sum: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): NumericProgram {
     if (this.displayScale(x) !== null || agg.agg_distinct === true) return this.padded(sum, cell(sum));
     // a text read as an unconstrained numeric (Metabase's every JSON number), an ln or a sqrt: DuckDB holds it as a
     // double, so it is summed as Postgres computes it (`pgNumeric`), in two exact DECIMAL(38,18) parts (a value they cannot hold refused, `numeric-exact-sum`), at the
@@ -2564,8 +2598,8 @@ class Rewriter {
   /** AN EXPRESSION AS A PROGRAM OVER CELLS (`exactOf`), every cell it reads as exact one the engine holds exactly
    *  (`duckExact`, the one decider), or null: a program over a double's digits computes nothing Postgres's. Every
    *  program is built here — a column's (`exactColumns`), a value's text or key (`exactText`) — so no two disagree */
-  private programOf(n: AstNode, cell: (n: AstNode, conv?: "exact" | "float8" | "float4" | "text") => NumericProgram): Built | null {
-    const checked = (m: AstNode, conv: "exact" | "float8" | "float4" | "text" = "exact"): NumericProgram => {
+  private programOf(n: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): Built | null {
+    const checked = (m: AstNode, conv: CellConv = "exact"): NumericProgram => {
       if (conv === "exact" && !this.duckExact(m)) throw NOT_EXACT;
       return cell(m, conv);
     };
@@ -2575,7 +2609,7 @@ class Rewriter {
   /** a numeric's exact text, row by row: its program (exactOf) evaluated by DuckDB over its cells' texts
    *  (`__mason_numeric_program`, src/duck/functions.ts); null where there is none, or it reads a parameter */
   private exactText(n: AstNode): AstNode | null {
-    const cells: Array<{ node: AstNode; conv: "exact" | "float8" | "float4" | "text" }> = [];
+    const cells: Array<{ node: AstNode; conv: CellConv }> = [];
     const built = this.programOf(n, (m, conv = "exact") => { cells.push({ node: m, conv }); return { op: "cell", key: String(cells.length - 1) }; });
     if (built === null) return null;
     // a parameter is the text it was bound as, Postgres's numeric_out of what it read (src/duck/analyze.ts readParameters):
@@ -2585,7 +2619,7 @@ class Rewriter {
       cells.push({ node: cast({ ParamRef: { number: Number(key.slice(1)) } }, ["varchar"]), conv: "text" });
       return { op: "cell", key: String(cells.length - 1) };
     });
-    const texts = cells.map((c) => c.conv === "text" ? this.clone(c.node) : c.conv === "exact" ? cast(this.clone(c.node), ["varchar"])
+    const texts = cells.map((c) => c.conv === "text" || c.conv === "parsed" ? this.clone(c.node) : c.conv === "exact" ? cast(this.clone(c.node), ["varchar"])
       : fn("__mason_float_numeric_text", [cast(this.clone(c.node), ["double"]), boolConst(c.conv === "float4")]));
     return fn("__mason_numeric_program", [strConst(JSON.stringify(program)), ...texts]);
   }

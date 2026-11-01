@@ -4,6 +4,7 @@
  */
 import type { ErrorFields } from "../api/postgres/protocol.ts";
 import { gapMark, type GapId } from "./gaps.ts";
+import type { TreeNode } from "./pgtree.ts";
 import type { ResolvedRead } from "./grants.ts";
 import type { PlannedSql } from "./plan.ts";
 import type { ExactColumn } from "./rewrite.ts";
@@ -43,6 +44,9 @@ export interface DuckPlan {
   resolved: readonly string[];
   /** each function it calls with each argument's type (src/duck/resolved.ts `argumentTypes`) */
   argumentTypes?: readonly string[];
+  /** each output column's ANALYSED expression, every node with the type Postgres gave it (src/duck/pgtree.ts
+   *  `outputExpressions`): what a generated table's refusal reads a value's type from (src/duck/generated-plan.ts) */
+  outputs?: ReadonlyArray<TreeNode | null>;
   /** the copied tables' JSON paths it reads by literal steps (src/duck/kept-route.ts readKey): the request log's
    *  `json_reads`, which decide the paths Mason stores (src/duck/kept.ts) */
   jsonReads?: readonly string[];

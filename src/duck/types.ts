@@ -441,9 +441,14 @@ export function pgTypedColumn(name: string, oid: number, t: DuckDBType, typmod =
 /** How a cell of an exact numeric (src/duck/rewrite.ts ExactColumn) reads as a decimal text, by DuckDB's type: an exact
  *  number's digits, a float as Postgres's cast to numeric writes it — or null where the cell needs digits DuckDB did not
  *  keep (a double where the program wants exact ones). */
-export function cellText(t: DuckDBType, conv: "exact" | "float8" | "float4" | "text"): ((v: DuckDBValue) => string) | null {
+/** what a cell of an exact numeric holds (src/duck/rewrite.ts ExactColumn), by the FORM it came from: exact digits; a
+ *  float as Postgres's float8 / float4 → numeric casts write it; Postgres's numeric text of a function it computes (sqrt,
+ *  exp, ln, log, power: "text") or of a text it reads as a numeric (a JSON number's `->>` cast: "parsed") */
+export type CellConv = "exact" | "float8" | "float4" | "text" | "parsed";
+
+export function cellText(t: DuckDBType, conv: CellConv): ((v: DuckDBValue) => string) | null {
   // a numeric's text as Postgres's numeric_out wrote it (a text read by numeric_in, src/duck/pg-eval.ts)
-  if (conv === "text") return t.typeId === DuckDBTypeId.VARCHAR ? (v) => String(v) : null;
+  if (conv === "text" || conv === "parsed") return t.typeId === DuckDBTypeId.VARCHAR ? (v) => String(v) : null;
   if (DUCK_EXACT.has(t.typeId)) return exactText;
   if (DUCK_FLOAT.has(t.typeId) && conv !== "exact") return (v) => floatAsNumeric(Number(v), conv === "float4" ? 6 : 15);
   // a NULL-only cell (DuckDB types it as its own NULL type)
