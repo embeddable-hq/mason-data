@@ -116,15 +116,22 @@ docs/DESIGN.md ("The independent review", "Local gates").
    finding's class; and what it judged correct, so nobody checks that twice. Each confirmed finding becomes a test and,
    for the engine, an oracle statement. CI is read beside it: a red run goes back with the review's findings, and
    beside a clean review it is read again by the CI stage.
-4. **Fix.** The findings go to the author in ONE message, as failures and their class, never the edit (for a change to
+4. **Fix.** **Only a blocking finding sends the PR back**: a wrong answer (where Mason answers, its rows, text, types
+   or OIDs, order or SQLSTATE differ from Postgres's), a crash, hang or stuck state, synced data lost or corrupted, a
+   security hole, a regression (what the base got right is now wrong or refused), or a red CI; when the reviewer is
+   unsure, it blocks. A refusal's wording, reason, HINT or DETAIL (the refusal itself right), an over-refusal (safe, and
+   a gap), docs and code quality do not: they are filed, one issue per class, and the PR goes on, since a round spent
+   on wording holds back a PR whose answers are already right (docs/DESIGN.md "Passing the review the first time").
+   The blocking findings go to the author in ONE message, as failures and their class, never the edit (for a change to
    prose, the words are the failure): an author handed a patch applies it, and the class goes unfixed. The message
    carries the note and every earlier round's findings and judged-correct list. The author comes back in ONE push, not
-   one per finding. The second finding of a class on a PR makes the next round a CLASS round: it first writes down
-   every case of the class, in the PR, gives each a test, then fixes the decision that makes the class impossible,
-   naming its authority and checked against the note; give it room (about 60 calls). Every fix commit gets a narrow
-   re-check, the same way. Once the reviews are clean, each class met is **learnt**: a bullet in its rules file's
-   `## What review probes` (a synthetic shape, the class, the PR), in one commit before CI whose files, read from git,
-   must all be under `.claude/rules/`. Detector: the reviewer's classes, read across a PR's rounds.
+   one per finding. The second blocking finding of a class on a PR makes the next round a CLASS round: it first writes
+   down every case of the class, in the PR, gives each a test, then fixes the decision that makes the class
+   impossible, naming its authority and checked against the note; give it room (about 60 calls). Every fix commit gets
+   a narrow re-check, the same way. Once the reviews are clean (nothing blocking), each blocking class met is
+   **learnt**: a bullet in its rules file's `## What review probes` (a synthetic shape, the class, the PR), in one
+   commit before CI whose files, read from git, must all be under `.claude/rules/`. Detector: the reviewer's classes
+   and severities, read across a PR's rounds (`tests/workflows.test.ts` holds the harness to them).
 5. **Merge.** Read the diff in full, then queue it pinned to the head read:
    `gh pr merge <n> --auto --merge --match-head-commit <sha>`. A queued merge survives a later push, so a PR sent back
    has it withdrawn (`gh pr merge <n> --disable-auto`) and queued again once the fix is read; who may merge what is
@@ -144,9 +151,11 @@ implement push, GitHub itself must list the PR as closing its sub-issue (`closed
 stacked PR, which GitHub links only once it targets the default branch, the body must say `Closes`), or the body is
 fixed, or the run stops. Every exit with a PR posts a `Review record` comment on it, whose `json mason-review-record`
 block `scripts/review-stats.ts` reads. The number to watch: of the PRs that reached a review, the share whose first
-review found nothing of theirs, and whose first or second did. A finding the base already has is filed, one issue
-per class, at whatever exit the run takes, and is never fixed in the PR nor counted toward its class rule: a PR that
-chases a class it did not make grows each round. Classes carry across a stack, so a class met on the PR below counts
+review found nothing blocking of theirs, and whose first or second did. Every finding carries its severity, and only
+the PR's blocking ones make a fix round, count toward the class rule, or keep a round from being clean; its others are
+filed, one issue per class saying the PR's review met it and deferred it, and listed in the Review record. A finding
+the base already has is filed the same way, at whatever exit the run takes, and is never fixed in the PR nor counted
+toward its class rule: a PR that chases a class it did not make grows each round. Classes carry across a stack, so a class met on the PR below counts
 on the one above. A teammate needs Claude Code with the Workflow tool, the Opus and Fable models, and `gh`
 authenticated with the `project` scope for the board. Why: docs/DESIGN.md "The independent review". Detector:
 `tests/workflows.test.ts`.

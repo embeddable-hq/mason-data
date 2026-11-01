@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import ts from "typescript";
-import { parseRecords, recordsOfComment, stats, type ReviewRecord } from "../scripts/review-stats.ts";
+import { BLOCKING, DEFERRED, parseRecords, recordsOfComment, stats, type ReviewRecord } from "../scripts/review-stats.ts";
 
 // The coordinator's Workflow scripts, .claude/workflows/pr-loop.js and issue-loop.js, run CLAUDE.md "The loop" with
 // agents. Nothing else reads them before a run, and a run costs hours, so this is their detector: each is loaded as the
@@ -108,7 +108,7 @@ async function run(name: string, args: Record<string, unknown>, answers: Answers
 
 const sha = (c: string) => c.repeat(40);
 const finding = (o: Partial<Record<string, string>>) => ({
-  input: "SELECT 1", expected: "1", actual: "2", atBase: "1", origin: "this-pr", classKey: "some-class", classWhy: "why", where: "plan.ts:1", ...o,
+  input: "SELECT 1", expected: "1", actual: "2", atBase: "1", origin: "this-pr", severity: "wrong-answer", classKey: "some-class", classWhy: "why", where: "plan.ts:1", ...o,
 });
 const clean = { findings: [], judgedCorrect: [] };
 const PR = { issue: 301, parent: 300, title: "300 · a piece", base: "main", branch: "issue-300-a-piece", stackedOn: "", context: "the scope" };
@@ -117,7 +117,7 @@ const START: Answers = {
   implement: { pr: 900, head: sha("a"), summary: "done" },
 };
 const pushed = (c: string) => ({ pr: 900, head: sha(c), summary: "fixed" });
-const RESULT_KEYS = ["classes", "designRounds", "filed", "fromBase", "head", "pr", "probeRounds", "rounds", "status"];
+const RESULT_KEYS = ["classes", "deferred", "designRounds", "filed", "fromBase", "head", "pr", "probeRounds", "rounds", "status"];
 const shapeOf = (r: Result) => Object.keys(r).sort();
 const NOTE = {
   decision: "the kind is read from Postgres's analysis",
@@ -167,7 +167,7 @@ test("pr-loop: a finding the base has is filed once and never fixed, never count
     "CI fix 1": { ...pushed("c"), flake: false },
     "review r3": clean,
     "CI 2": { state: "green", detail: "" },
-    file: { issues: [{ classKey: "base-class", issue: 950, action: "filed" }] },
+    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
   });
   assert.deepEqual(labels, [
     "brief", "design d1", "design review d1", "implement", "link", "probe 1", "review r1", "CI read r1", "fix r1",
@@ -243,7 +243,7 @@ test("pr-loop: each trigger of the class rule makes the next fix a class round, 
 test("pr-loop: every exit returns one shape, and the base's findings are filed at every exit", async () => {
   const base = finding({ origin: "base", classKey: "b", input: "SELECT on_base FROM t" });
   // MAX_ROUNDS: four reviews with findings, three fixes, then a stop that still files
-  const many: Answers = { ...START, file: { issues: [{ classKey: "b", issue: 951, action: "filed" }] } };
+  const many: Answers = { ...START, file: { issues: [{ classKey: "b", source: "base", issue: 951, action: "filed" }] } };
   for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [base] : [])], judgedCorrect: [] };
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
   let r = await run("pr-loop", { ...PR }, many);
@@ -438,7 +438,7 @@ test("pr-loop: a probe runs before every review, two rounds a push at most, neve
     "probe fix 1": pushed("b"),
     "probe 2": { findings: [finding({ classKey: "y", input: "p2" })], judgedCorrect: [] },
     "probe fix 2": pushed("c"),
-    "review r1": clean, "CI 1": green, file: { issues: [{ classKey: "on-base", issue: 960, action: "filed" }] },
+    "review r1": clean, "CI 1": green, file: { issues: [{ classKey: "on-base", source: "base", issue: 960, action: "filed" }] },
   });
   assert.deepEqual(r.labels.slice(4, 10), ["link", "probe 1", "probe fix 1", "probe 2", "probe fix 2", "review r1"]);
   assert.ok(r.prompt("review r1").includes(`diff origin/main ${sha("c")}`), "the review reads the last probe fix");
@@ -504,8 +504,10 @@ test("pr-loop: learn turns every finding of the PR into a review probe, before C
   assert.match(r.prompt("CI 1"), new RegExp(`at head ${"f".repeat(7)}`), "CI waits on learn's commit");
   const rec = parseRecords(r.prompt("record"))[0]!;
   assert.deepEqual(rec.findings, [
-    { round: 1, stage: "design", classKey: "type-from-syntax" }, { round: 1, stage: "probe", classKey: "p" }, { round: 1, stage: "review", classKey: "a" },
+    { round: 1, stage: "design", classKey: "type-from-syntax" }, { round: 1, stage: "probe", classKey: "p", severity: "wrong-answer" },
+    { round: 1, stage: "review", classKey: "a", severity: "wrong-answer" },
   ]);
+  assert.deepEqual(rec.deferred, []);
   assert.deepEqual([rec.designRounds, rec.probeRounds, rec.reviewRounds], [2, 3, 2]);
 
   // no finding anywhere: nothing to learn
@@ -697,4 +699,147 @@ test("pr-loop: the author is told to run the rules' review probes before every p
     ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green,
   });
   for (const l of ["implement", "fix r1", "CI fix 1"]) assert.match(r.prompt(l), /Before the push, run the `## What review probes`/, l);
+});
+
+// ---------------------------------------------------------------- only a blocking finding sends a PR back (Tom,
+// 2026-11-01; CLAUDE.md "The loop" step 4): a wrong answer, a crash, lost data, security, a regression, or a red CI.
+// A refusal's wording, an over-refusal, docs and quality are filed, one issue per class, and the PR goes on.
+
+/** A script's one-line `const <name> = [...]`. */
+function listOf(name: string, constName: string): string[] {
+  const m = new RegExp(`^const ${constName} = (\\[[^\\n]*\\])$`, "m").exec(source(name));
+  assert.ok(m, `${name}: ${constName} is declared on one line`);
+  return new Function(`return (${m[1]})`)() as string[];
+}
+const later = (o: Partial<Record<string, string>>) => finding({ severity: "message", classKey: "wording", ...o });
+
+test("pr-loop: every finding must carry a severity, blocking or not, and the two lists are review-stats' own", async () => {
+  // a script cannot import: its lists are held equal to the ones review-stats reads records with
+  assert.deepEqual(listOf("pr-loop", "BLOCKING"), [...BLOCKING]);
+  assert.deepEqual(listOf("pr-loop", "DEFERRED"), [...DEFERRED]);
+  assert.deepEqual([...BLOCKING], ["wrong-answer", "crash", "data-loss", "security", "regression"]);
+  assert.deepEqual([...DEFERRED], ["message", "over-refusal", "docs", "quality"]);
+  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1"]) {
+    const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as
+      { properties: { findings: { items: { required: string[]; properties: Record<string, { enum?: string[]; description?: string }> } } } };
+    const item = schema.properties.findings.items;
+    assert.ok(item.required.includes("severity"), `${l}: the schema requires a severity`);
+    assert.deepEqual(item.properties["severity"]!.enum, [...BLOCKING, ...DEFERRED], `${l}: the nine kinds`);
+    assert.match(item.properties["severity"]!.description!, /When unsure, a blocking severity/, `${l}: the schema says when unsure, blocking`);
+    // the prompt states the line in one paragraph: each kind, and that unsure is blocking
+    for (const k of [...BLOCKING, ...DEFERRED]) assert.ok(r.prompt(l).includes(k), `${l}: the prompt names ${k}`);
+    assert.match(r.prompt(l), /When you are unsure, the finding is blocking/, l);
+  }
+});
+
+test("pr-loop: a round with only non-blocking findings of the PR's is clean: filed as deferred, recorded, never fixed or learnt", async () => {
+  const a = later({ input: "SELECT wording_a FROM t" });
+  const b = later({ input: "SELECT wording_b FROM t" }); // the same class twice: no class round, since none is fixed
+  const o = later({ input: "SELECT refused FROM t", severity: "over-refusal", classKey: "gap" });
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [a, b, o], judgedCorrect: [] }, "CI 1": green,
+    file: (c: Call) => {
+      assert.ok(c.prompt.includes("source 'deferred'") && !c.prompt.includes("source 'base'"), "only the deferred section");
+      return { issues: [{ classKey: "wording", source: "deferred", issue: 970, action: "filed" }, { classKey: "gap", source: "deferred", issue: 971, action: "filed" }] };
+    },
+  });
+  assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "file"], "no fix round, no learn");
+  assert.ok(!r.labels.includes("learn"));
+  assert.match(String(r.result["status"]), /^reviewed, no open blocking finding of this PR, CI green.*3 non-blocking finding\(s\) of this PR filed, not fixed/);
+  assert.deepEqual(r.result["classes"], {}, "a non-blocking class is never counted toward the class rule");
+  assert.equal((r.result["deferred"] as unknown[]).length, 3);
+  assert.deepEqual(r.result["fromBase"], []);
+  const file = r.prompt("file");
+  for (const s of [a.input, b.input, o.input, "deferred as non-blocking", "met in PR 900's review", "met in review r1", "message", "over-refusal"]) assert.ok(file.includes(s), `the filing says ${s}`);
+  // the record lists them apart, and review-stats reads the PR as passing its first review
+  const rec = parseRecords(r.prompt("record"))[0]!;
+  assert.deepEqual(rec.findings, []);
+  assert.deepEqual(rec.deferred, [
+    { round: 1, stage: "review", classKey: "wording", severity: "message" }, { round: 1, stage: "review", classKey: "wording", severity: "message" },
+    { round: 1, stage: "review", classKey: "gap", severity: "over-refusal" },
+  ]);
+  assert.match(r.prompt("record"), /review 1: 0 finding\(s\); 3 non-blocking, filed/);
+  assert.match(r.prompt("record"), /#970 \(wording, deferred, filed\)/);
+  assert.equal(stats([rec]).firstPass, 1);
+
+  // a red CI still blocks: beside a non-blocking-only review it goes to the CI stage and a CI fix
+  const redRun = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": { findings: [a], judgedCorrect: [] }, "CI read r1": red, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: false },
+    "review r2": clean, "CI 2": green, file: { issues: [] },
+  });
+  assert.deepEqual(core(redRun.labels), ["brief", "implement", "review r1", "CI 1", "CI fix 1", "review r2", "CI 2", "file"]);
+});
+
+test("pr-loop: only a blocking finding of the PR's is fixed and counts toward a class round; the others never reach a fix", async () => {
+  const k = later({ classKey: "k", input: "SELECT k_wording FROM t" });
+  const r = await run("pr-loop", { ...PR }, {
+    ...START,
+    // a probe's non-blocking finding: no probe fix, and the review reads the head unchanged
+    "probe 1": { findings: [later({ classKey: "p", input: "SELECT probe_wording FROM t", severity: "docs" })], judgedCorrect: [] },
+    // round 1: one blocking of j, two non-blocking of k (which would make a class round if they counted)
+    "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), k, { ...k, input: "SELECT k_wording2 FROM t" }], judgedCorrect: [] },
+    "fix r1": pushed("b"),
+    // round 2: a blocking finding of k, the class round 1 met only as non-blocking; and k's first input met again
+    "review r2": { findings: [finding({ classKey: "k", input: "SELECT k_wrong FROM t", severity: "crash" }), k], judgedCorrect: [] },
+    "fix r2": pushed("c"),
+    "review r3": clean, "CI 1": green, file: { issues: [] },
+  });
+  assert.ok(!r.labels.some((l) => l.startsWith("probe fix")), "a probe's non-blocking finding gets no probe fix");
+  assert.deepEqual(r.labels.filter((l) => /^fix/.test(l)), ["fix r1", "fix r2"], "no class round: k's earlier findings did not block");
+  for (const l of ["fix r1", "fix r2", "learn"]) {
+    for (const s of ["SELECT probe_wording FROM t", "SELECT k_wording FROM t", "SELECT k_wording2 FROM t"]) assert.ok(!r.prompt(l).includes(s), `"${l}" was handed the non-blocking ${s}`);
+  }
+  assert.ok(r.prompt("fix r1").includes("SELECT j_wrong FROM t") && r.prompt("fix r2").includes("SELECT k_wrong FROM t"));
+  assert.deepEqual(Object.fromEntries(Object.entries(r.result["classes"] as Record<string, { count: number }>).map(([c, v]) => [c, v.count])), { j: 1, k: 1 });
+  // a later round is told what is already deferred, and an input met twice is filed once
+  assert.ok(r.prompt("review r2").includes("Already deferred as non-blocking") && r.prompt("review r2").includes("SELECT k_wording FROM t"));
+  assert.equal(r.prompt("file").split("SELECT k_wording FROM t").length - 1, 1);
+  assert.equal((r.result["deferred"] as unknown[]).length, 3);
+  const rec = parseRecords(r.prompt("record"))[0]!;
+  assert.deepEqual(rec.findings.map((f) => [f.stage, f.round, f.classKey, f.severity]), [["review", 1, "j", "wrong-answer"], ["review", 2, "k", "crash"]]);
+  assert.deepEqual(rec.deferred!.map((f) => [f.stage, f.round, f.classKey]), [["probe", 1, "p"], ["review", 1, "k"], ["review", 1, "k"]]);
+});
+
+test("pr-loop: a finding with no severity, or one the script does not know, blocks; a base finding is the base's whatever its severity", async () => {
+  for (const severity of [undefined, "cosmetic"]) {
+    const { severity: _, ...bare } = finding({ input: "SELECT unsure FROM t" });
+    const r = await run("pr-loop", { ...PR }, {
+      ...START, "review r1": { findings: [severity ? { ...bare, severity } : bare], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+    });
+    assert.ok(r.labels.includes("fix r1"), `severity ${severity}: blocking`);
+    assert.ok(!r.labels.includes("file"));
+  }
+  const base = later({ origin: "base", input: "SELECT base_wording FROM t" });
+  const mine = later({ input: "SELECT mine_wording FROM t" });
+  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [base, mine], judgedCorrect: [] }, "CI 1": green, file: { issues: [] } });
+  const file = r.prompt("file");
+  const [onBase, ofPr] = [file.indexOf("## source 'base'"), file.indexOf("## source 'deferred'")];
+  assert.ok(onBase >= 0 && ofPr > onBase, "two sections, kept apart");
+  assert.ok(file.indexOf(base.input) > onBase && file.indexOf(base.input) < ofPr, "the base's finding is filed as the base's");
+  assert.ok(file.indexOf(mine.input) > ofPr, "the PR's own is filed as deferred");
+  assert.deepEqual((r.result["fromBase"] as Array<{ input: string }>).map((g) => g.input), [base.input]);
+  assert.deepEqual((r.result["deferred"] as Array<{ input: string }>).map((g) => g.input), [mine.input]);
+});
+
+test("review-stats: a first review passes when it found nothing blocking; a finding with no severity (a record older than severity) blocks", () => {
+  const rec = (o: Partial<ReviewRecord>): ReviewRecord => ({ pr: 1, designRounds: 1, probeRounds: 1, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed", ...o });
+  const block = (r: unknown) => "```json mason-review-record\n" + JSON.stringify(r) + "\n```";
+  const s = stats([
+    // only a non-blocking finding in round 1: passed the first review
+    rec({ pr: 1, findings: [{ round: 1, stage: "review", classKey: "w", severity: "message" }] }),
+    // the same, written apart as pr-loop writes it
+    rec({ pr: 2, deferred: [{ round: 1, stage: "review", classKey: "w", severity: "over-refusal" }] }),
+    // a blocking one: not passed
+    rec({ pr: 3, reviewRounds: 2, findings: [{ round: 1, stage: "review", classKey: "j", severity: "regression" }, { round: 2, stage: "review", classKey: "j", severity: "regression" }] }),
+    // a legacy record: no severity, so blocking; its round 2 was clean, so passed by the second
+    rec({ pr: 4, reviewRounds: 2, findings: [{ round: 1, stage: "review", classKey: "j" }] }),
+  ]);
+  assert.equal(s.firstPass, 2 / 4, "PRs 1 and 2");
+  assert.equal(s.bySecond, 3 / 4, "PRs 1, 2 and 4");
+  // a severity is one of the nine, and a deferred finding is a non-blocking one
+  assert.throws(() => parseRecords(block(rec({ findings: [{ round: 1, stage: "review", classKey: "k", severity: "cosmetic" as never }] }))), /severity is not one of/);
+  assert.throws(() => parseRecords(block(rec({ deferred: [{ round: 1, stage: "review", classKey: "k", severity: "crash" }] }))), /deferred finding is not of a non-blocking severity/);
+  assert.throws(() => parseRecords(block({ ...rec({}), deferred: {} })), /deferred is not an array/);
+  assert.equal(parseRecords(block(rec({}))).length, 1, "a record with no deferred field still reads");
 });

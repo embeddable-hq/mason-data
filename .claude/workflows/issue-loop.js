@@ -16,7 +16,8 @@ export const meta = {
 //   split is a design decision, and a run of several PRs is expensive to redo.
 //   With `tasks`: run them in order. A task `stacked` on the one before it is based on that task's branch, its PR stacked
 //   on that PR; otherwise on `base`. The classes each run met go to the next, so a class repeated across the stack makes
-//   a class round (PR 170 and PR 207 met one class, and per-PR counting could not see it).
+//   a class round (PR 170 and PR 207 met one class, and per-PR counting could not see it). pr-loop returns only its
+//   blocking findings' classes: a non-blocking finding is filed, never counted.
 //   `from` (a task's index) resumes at that task, after the tasks before it have merged or been run. A stop returns
 //   `resume`: the arguments to run again with, its tasks carrying the sub-issues Setup made, so none is made twice.
 // Every exit of a run returns one shape, result(status): { status, tasks, done, classes, resume }.

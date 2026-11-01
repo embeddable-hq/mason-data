@@ -477,6 +477,25 @@ clean. So `pr-loop.js` gained six phases and changed its rounds twice:
   correct; and CI is read beside each review, a red run going back with the review's findings in the same fix. Beside
   a clean review there is no fix round to join, and the CI stage reads the failure again after Learn.
 
+**Only a blocking finding sends a PR back (Tom, 2026-11-01).** PR 202 took eight review rounds. Rounds 1 to 4 and 8
+found real wrong answers or a crash; rounds 5 to 7 found only the quality of refusal messages (a reason, a HINT, a
+DETAIL), about two hours of rounds on a PR whose answers were by then right, and PR 207 spent rounds the same way. The
+owner's words: "It's super important that we don't let any real correctness or security bugs get through. But if you
+determine that the feedback items don't block the current PR and instead go into a new issue, that feels like a good
+way to move forwards." So every finding the probe and the review report carries a severity (the `FINDINGS` schema in
+`pr-loop.js` requires it). Blocking: `wrong-answer` (where Mason answers, it answers differently from Postgres: rows,
+text, types or OIDs, order, SQLSTATE), `crash` (a crash, a hang, a stuck state such as a table left `building`),
+`data-loss`, `security`, `regression` (what the base got right is now wrong or refused), and a red CI. Not blocking:
+`message` (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is
+right), `over-refusal` (Mason refuses where Postgres answers and the base refused too: safe, and a gap), `docs`,
+`quality`. When the reviewer is unsure, the finding is blocking, and so is a finding with no severity or one the
+script does not know: the line errs toward a fix round, never toward a wrong answer merged. Only the PR's blocking
+findings make a fix or probe-fix round, count toward the class rule and are learnt; a round with only non-blocking
+findings is clean. The others are filed at the run's exit beside the base's, one issue per class, each saying it was
+met in the PR's review and deferred, and listed in the Review record's `deferred`; `scripts/review-stats.ts` counts a
+first review as passed when it found nothing blocking, and reads a record written before severity as all blocking,
+since every finding then made a round.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
