@@ -234,6 +234,8 @@ const WALLED: ReadonlyArray<{ sql: string; fetched: number }> = [
   { sql: "SELECT *, o.id * 2 AS twice FROM labels l JOIN orders o ON o.tenant_id = l.id ORDER BY twice, 1 LIMIT 3", fetched: 1 },
   { sql: `SELECT id, ${R134} AS r, i.qty FROM orders o JOIN (SELECT order_id AS id, qty FROM order_items) i USING (id) ORDER BY id LIMIT 3`, fetched: 2 },
   { sql: "SELECT o.id, i.qty FROM orders o NATURAL JOIN (SELECT order_id AS id, qty FROM order_items) i ORDER BY id LIMIT 3", fetched: 2 },
+  // a DISTINCT ON keeps one row of each group behind the walls, fetched through them (issue 134, task E)
+  { sql: `SELECT DISTINCT ON (o.id) o.id, ${R134} AS r, i.id AS iid FROM orders o JOIN order_items i ON i.order_id = o.id ORDER BY o.id, i.id LIMIT 3`, fetched: 2 },
 ];
 /** the statement over the filter written by hand, as the engine runs it: views of tenant 1's rows, which both users
  *  here see alone (the list user's tenant 2 has none) */

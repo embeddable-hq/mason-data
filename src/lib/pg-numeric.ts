@@ -35,7 +35,9 @@ export class NumericError extends Error {
   readonly sqlstate: string;
   /** the registry entry that refused it (src/duck/gaps.ts): the request log's `gap`; null for Postgres's own error */
   readonly gap: GapId | null;
-  constructor(message: string, sqlstate: string, gap: GapId | null = null) { super(message); this.sqlstate = sqlstate; this.gap = gap; }
+  /** Postgres's DETAIL, apart from its message, as Postgres sends them (`numeric field overflow` and its field's limit) */
+  readonly detail: string | null;
+  constructor(message: string, sqlstate: string, gap: GapId | null = null, detail: string | null = null) { super(message); this.sqlstate = sqlstate; this.gap = gap; this.detail = detail; }
 }
 
 /** Postgres's limits on a numeric's scale (numeric.h): a quotient's scale is held between these */
@@ -236,7 +238,7 @@ export function withTypmod(a: PgNumeric, precision: number, scale: number): PgNu
   const maxDigits = precision - scale;
   const digits = r.unscaled === 0n ? null : abs(r.unscaled).toString().length - r.scale;
   if (digits !== null && digits > maxDigits) {
-    throw new NumericError(`numeric field overflow: a field with precision ${precision}, scale ${scale} must round to an absolute value less than ${maxDigits === 0 ? "1" : `10^${maxDigits}`}`, "22003");
+    throw new NumericError("numeric field overflow", "22003", null, `A field with precision ${precision}, scale ${scale} must round to an absolute value less than ${maxDigits === 0 ? "1" : `10^${maxDigits}`}.`);
   }
   return r;
 }

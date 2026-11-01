@@ -125,6 +125,33 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   are made distinct on the key (and the other tables' listed columns), and that table's wide columns read for the rows
   the limit keeps. Such a query spilled 29 GiB and failed for memory after five minutes; it now answers in under a
   second. Nothing to do on upgrade.
+- **`SELECT DISTINCT ON` with a `LIMIT` no longer fills the disk when the list shows wide columns**: the row kept for
+  each group is chosen on the sort's columns alone, and the wide columns read for the rows the limit keeps. Such a query
+  spilled 25 GiB and failed for memory after twenty minutes. One
+  thing changes: a value in the list that cannot be computed (`'x'::int`) in a row that is not its group's first no
+  longer fails the query. Nothing to do on upgrade.
+- **`SELECT DISTINCT ON` answers as Postgres does in three more cases**: with an `ORDER BY` that names only some of the
+  `ON` expressions (or none, with a `LIMIT`), the groups now come back in Postgres's order and a `LIMIT` keeps the same
+  ones; a jsonb `ON` named by its output alias now treats `1.0` and `1` as one value; and a numeric division in the list
+  of a `DISTINCT ON` or a `SELECT DISTINCT` (`amount / 3`) shows Postgres's exact digits instead of a rounded number, also when the `DISTINCT` is outside a subquery
+  that computes it.
+- **A numeric division or average is compared by its exact value**: `DISTINCT`, `GROUP BY`, `PARTITION BY`,
+  `count(DISTINCT …)`, `=` and `<>` no longer treat two quotients as equal when they agree only in their first 17
+  digits. A quotient in `ROLLUP` / `CUBE` / `GROUPING SETS`, in `sum(DISTINCT …)` and similar, or in a `UNION` /
+  `INTERSECT` / `EXCEPT` without `ALL` is now refused with `numeric-quotient-equality` (write `round(x, n)`), where it
+  could answer wrong rows before.
+- **A division or average a subquery computes is exact outside it too**: grouped, filtered, joined, counted
+  `DISTINCT`, cast or computed with outside a subquery or a `WITH` query (`SELECT q, count(*) FROM (SELECT a / 3 AS q
+  …) s GROUP BY q`), compared with a scalar subquery's or a parameter's value, as its text (`(a / 3)::text`), or in a
+  `UNION ALL` beside a plain column, it now shows and compares Postgres's exact digits — where it showed a rounded
+  number, and could join or group values that differ past their 17th digit. A row holding one (`(a / 3, b) = (…)`) is
+  now refused with `row-value`, and one compared outside a subquery that is also read by `*` beside other columns
+  with `numeric-quotient-equality` (name the subquery's columns).
+- **A numeric constant past 38 digits, or cast to `numeric(p, s)` past 38, is no longer compared as exact**
+  (`x + '1e-39'::numeric = x` was true): it is computed and compared with Postgres's digits, or refused by name where
+  it cannot be. A variance or standard deviation read from a subquery beside another computed column now shows
+  Postgres's digits, as it did read alone. A `GROUP BY` of a division of `extract(...)` (Grafana's `$__timeGroup`) now
+  groups by the exact quotient.
 
 ## Known
 
