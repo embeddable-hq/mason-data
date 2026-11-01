@@ -2633,9 +2633,8 @@ test("a constant path is the read ->> is, however it is spelled: no row reaches 
 // do not start at 1, is no such list — read as one it answered wrong (an inner array a string of its JSON, the bounds
 // dropped), so it is refused by name, as its literal is. In binary (Npgsql sends every parameter so) it is array_send's
 // bytes, decoded to the literal Postgres reads, and refused alike.
-test("a text[] parameter: two dimensions or other bounds refused by name, in text and in binary; binary read as Postgres reads it", async () => {
+test("a text[] parameter of two dimensions or other bounds is refused by name", async () => {
   const c = await client();
-  const s = await rawSession();
   try {
     const named = (gap: string) => (e: Error & { code?: string; detail?: string }): boolean => e.code === "0A000" && new RegExp(`Mason gap ${gap}\\b`).test(e.detail ?? "");
     for (const sql of ["SELECT id::text, id::text = ANY($1::text[]), id::text <> ALL($1::text[]) FROM jdocs WHERE id < 4 ORDER BY id", "SELECT $1::text[], ($1::text[])[1], array_position($1::text[], '1') FROM jdocs WHERE id = 1"]) {
@@ -2645,7 +2644,13 @@ test("a text[] parameter: two dimensions or other bounds refused by name, in tex
       // a one-dimensional value from 1, its bounds written or not, is answered as Postgres answers it
       for (const value of ["{1,2}", "[1:2]={1,2}"]) assert.deepEqual((await answer(c, sql, [value])).rows, (await postgres(sql, [value])).rows, value);
     }
-    // in binary: the same Bind to Postgres and to Mason, the same rows
+  } finally { await c.end(); }
+});
+
+test("a binary text[] parameter is read as Postgres reads it, refused as it refuses, two dimensions or other bounds by name", async () => {
+  const s = await rawSession();
+  try {
+    // the same Bind to Postgres and to Mason, the same rows
     const sql = "SELECT id::text, b #>> $1::text[] AS a, array_to_string($1::text[], '|', '*') AS s, (id::text = ANY($1::text[]))::text AS k FROM jdocs ORDER BY id";
     const send = async (array: string): Promise<Buffer> => Buffer.from((await truth.query<{ b: Uint8Array }>(`SELECT array_send(${array}) AS b`)).rows[0]!.b);
     const rows = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "DataRow" ? [JSON.stringify(m.values.map((v) => v === null ? null : String(v)))] : m.type === "ErrorResponse" ? [`error ${m.fields.C} ${m.fields.M}`] : []);
@@ -2670,7 +2675,7 @@ test("a text[] parameter: two dimensions or other bounds refused by name, in tex
       assert.deepEqual(rows(await s.untilReady()), want, bytes.toString("hex"));
       assert.match(want[0] ?? "", /^error /, bytes.toString("hex"));
     }
-  } finally { s.end(); await c.end(); }
+  } finally { s.end(); }
 });
 
 // THE REVIEW OF THE NATIVE READ: two classes it broke, each shape answered as Postgres answers it.
