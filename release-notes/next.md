@@ -139,6 +139,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   number, and could join or group values that differ past their 17th digit. A row holding one (`(a / 3, b) = (…)`) is
   now refused with `row-value`, and one compared outside a subquery that is also read by `*` beside other columns
   with `numeric-quotient-equality` (name the subquery's columns).
+- **A numeric constant past 38 digits, or cast to `numeric(p, s)` past 38, is no longer compared as exact**
+  (`x + '1e-39'::numeric = x` was true): it is computed and compared with Postgres's digits, or refused by name where
+  it cannot be. A variance or standard deviation read from a subquery beside another computed column now shows
+  Postgres's digits, as it did read alone. A `GROUP BY` of a division of `extract(...)` (Grafana's `$__timeGroup`) now
+  groups by the exact quotient.
 
 ## Known
 

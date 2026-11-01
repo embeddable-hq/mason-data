@@ -268,6 +268,16 @@ paths:
   cells cannot ride (the item read by a `*` beside other columns, a NATURAL JOIN, its whole row) an equality refuses
   by name and a print is the listed `nested-exact-numeric`; a row holding one is refused, `row-value`.
   `tests/duck-wire.test.ts` "third round".
+- **Whether a numeric is exact is ONE decision, `duckExact`, by how the value is WRITTEN for the engine** (PR 207's fourth
+  round, a class round: a literal past 38 digits called exact where `decimalConst` writes a double; a variance's cells
+  called inexact where the rewrite's own hugeint casts hold them; a program skipped over a double): a constant and a
+  cast to numeric are decided by the writer's own decision (`engineReadsExactly`, `numericCastWrite`, which `typeCast`
+  follows), the rest by what DuckDB computes from exact operands. Every place that asks — a program's cells
+  (`programOf`, the one builder of a program), whether a program is the engine's own answer (`exactColumns`, min /
+  max), a FROM item's column (`carry`), a key (`exactKey`), a union arm's value, a function's argument (`pgNumeric`) —
+  asks it, never a property of its own (a declared scale, a column's kind). Unknown is not exact. A WITH query a FROM
+  name reads is resolved by one resolver (`cteOf`), and a carry is decided from the cells its item EXPOSES, as written
+  (`exposedCells`). `tests/duck-wire.test.ts` "fourth round".
 
 ## What a column is
 

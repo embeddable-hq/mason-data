@@ -2184,12 +2184,14 @@
         "ORDER_BY",
         "  PROJECTION",
         "    HASH_GROUP_BY",
-        "      PROJECTION",
+        "      PROJECTION calls __mason_numeric_key, __mason_numeric_program, __mason_turn",
         "        PROJECTION",
         "          TABLE_SCAN public.orders"
       ],
       "calls": [
-        "__mason_numeric_div"
+        "__mason_numeric_div",
+        "__mason_numeric_key",
+        "__mason_numeric_program"
       ],
       "sends": [
         "epoch_us"

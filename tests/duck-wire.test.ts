@@ -3384,6 +3384,63 @@ test("a numeric decided exactly carries its program wherever it is read, compare
   } finally { await c.end(); }
 });
 
+// PR 207'S FOURTH ROUND, A CLASS ROUND: "is this value exact" was decided in several places that disagreed (a literal
+// past the engine's 38 digits called exact where it is written as a double; a variance's cells called inexact where
+// the rewrite's own integer casts hold them; a program skipped over a value written as a double; a carry decided for a
+// FROM item whose `*` never exposed the cells). One decider now (`duckExact`, by how each value is WRITTEN for the
+// engine), and each case below was a disagreement between two of the old places.
+test("a numeric is exact exactly where what is sent computes it exactly, wherever that is asked (PR 207's fourth round)", async () => {
+  const c = await client();
+  const differ: string[] = [];
+  try {
+    for (const sql of [
+      // D1: a text literal past 38 digits, cast to numeric: the engine's double, never compared as exact
+      "SELECT r.id, r.n + '1e-39'::numeric = r.n AS eq FROM ratios r ORDER BY r.id",
+      "SELECT count(DISTINCT x) FROM (SELECT r.a + '1e-39'::numeric AS x FROM ratios r UNION ALL SELECT r.a FROM ratios r) s",
+      "SELECT r.id FROM ratios r WHERE r.n * '1.000000000000000000000000000000000000001'::numeric = r.n ORDER BY 1",
+      "SELECT count(*) FROM (SELECT x FROM (SELECT r.a + '1e-39'::numeric AS x FROM ratios r UNION ALL SELECT r.a FROM ratios r) s GROUP BY x) g",
+      "SELECT count(*) FROM (SELECT DISTINCT x FROM (SELECT r.a + '1e-39'::numeric AS x FROM ratios r UNION ALL SELECT r.a FROM ratios r) s) g",
+      // D2: the same past 38 digits written as a numeric literal, with and without an exponent
+      "SELECT r.id FROM ratios r WHERE r.n * 1.000000000000000000000000000000000000001 = r.n ORDER BY 1",
+      "SELECT r.id, r.n + 1e-39 = r.n AS eq FROM ratios r ORDER BY r.id",
+      // D3: a cast to numeric(p > 38, s), which is written as the engine's double
+      "SELECT DISTINCT s.x FROM (SELECT b.x::numeric(40,20) AS x FROM bigdec b) s ORDER BY 1",
+      "SELECT b.id FROM bigdec b WHERE b.x::numeric(40,20) = 1.00000000000000000001 ORDER BY 1",
+      // D4: a program skipped because its value was called the engine's: printed, and its min
+      "SELECT r.id, r.n + '1e-39'::numeric AS x FROM ratios r ORDER BY r.id",
+      "SELECT r.id, r.n + 1e-39 AS x FROM ratios r ORDER BY r.id",
+      "SELECT min(r.n + '1e-39'::numeric), max(r.a * 1.000000000000000000000000000000000000001) FROM ratios r",
+      "SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT '1e-39'::numeric ORDER BY 1",
+      // D5: a variance's cells are the rewrite's integer casts, exact: read beside another exact column of its FROM item
+      "SELECT m.a, m.b FROM (SELECT var_pop(o.amount) AS a, avg(o.qty) AS b FROM orders o) m",
+      "SELECT m.a, m.b FROM (SELECT var_pop(o.qty::bigint) AS a, var_pop(o.qty) AS b FROM orders o) m",
+      "SELECT m.a FROM (SELECT var_pop(o.amount) AS a, avg(o.qty) AS b FROM orders o) m WHERE m.b = 8 / 3.0",
+      // (a FROM item's column is the value it is, whether or not its program rides: a recursive WITH query's too)
+      "WITH RECURSIVE r(n, v) AS (SELECT 1, 1.5 UNION ALL SELECT r.n + 1, r.v * 2 FROM r WHERE r.n < 3) SELECT x.id, r.v FROM r JOIN ratios x ON x.id = r.n WHERE r.v = 3.0 ORDER BY 1",
+      "SELECT m.s, m.q FROM (SELECT sum(r.a) AS s, avg(r.a) AS q FROM ratios r) m WHERE m.s = 4.0",
+      // D6: a function of a FROM item's quotient reads the quotient's program, never its double
+      "SELECT sqrt(s.q) FROM (SELECT b.x / 3 AS q FROM bigdec b) s ORDER BY 1",
+      // D7: a carry decided from what the FROM item exposes: a `*` of a WITH query, under a UNION ALL
+      "SELECT * FROM (WITH base AS (SELECT round(100.0 * (r.n - r.id) / nullif(r.id, 0), 1) AS pct, r.id FROM ratios r) SELECT b.pct, b.id FROM (SELECT * FROM base) AS b) u1 ORDER BY 2, 1",
+      "WITH base AS (SELECT round(100.0 * (r.n - r.id) / nullif(r.id, 0), 1) AS pct, r.id FROM ratios r) SELECT b.pct, b.id FROM (SELECT * FROM base) AS b UNION ALL SELECT r.n * 1.0, r.id FROM ratios r ORDER BY 2, 1",
+      "SELECT * FROM (WITH base AS (SELECT round(100.0 * (r.n - r.id) / nullif(r.id, 0), 1) AS pct, r.id FROM ratios r) SELECT b.pct, b.id FROM (SELECT * FROM base) AS b) u1 UNION ALL SELECT * FROM (WITH base AS (SELECT round(100.0 * (r.n - r.id) / nullif(r.id, 0), 1) AS pct, r.id FROM ratios r) SELECT b.pct, b.id FROM (SELECT * FROM base) AS b) u2 ORDER BY 2, 1"]) {
+      // (every case is asked, and every one that differs named, so a failure reads as the list of cases)
+      const pg = rowSet(await postgres(sql));
+      const mine = await answer(c, sql).then(rowSet, (e: Error) => e.message);
+      if (JSON.stringify(mine) !== JSON.stringify(pg)) differ.push(`${sql}\n  Postgres: ${JSON.stringify(pg)}\n  Mason:    ${JSON.stringify(mine)}`);
+    }
+    assert.deepEqual(differ, []);
+    // D8: a FROM item's quotient beside its `*`, and a VALUES list's value written as a double, which no cell can ride:
+    // refused by name, never compared as the double (they were called a table's exact column)
+    for (const sql of ["SELECT count(*) FROM (SELECT *, b.x / 1 AS q FROM bigdec b) s WHERE s.q = 1.00000000000000000001",
+      "SELECT s.q, count(*) FROM (SELECT b.id, b.x / 1 AS q, b.* FROM bigdec b) s GROUP BY 1 ORDER BY 1",
+      "SELECT count(DISTINCT v.x) FROM (VALUES (1 + '1e-39'::numeric), (1::numeric)) v(x) JOIN ratios r ON r.id = 1"]) {
+      await postgres(sql);
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /numeric-quotient-equality/.test(e.detail ?? ""), sql);
+    }
+  } finally { await c.end(); }
+});
+
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
   const c = await client();
   // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison

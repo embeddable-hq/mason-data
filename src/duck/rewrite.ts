@@ -1372,11 +1372,9 @@ class Rewriter {
         if (at < 0) { mine.push({ node: n, conv, shape }); at = mine.length - 1; }
         return { op: "cell", key: String(at) };
       };
-      let built: Built | null;
-      try { built = this.exactOf(node, cell); } catch (e) { if (e === NOT_EXACT) return; throw e; }
-      if (built === null || !worthComputing(built.p) && mine.every((c) => c.conv === "exact")) return;
-      // a numeric(p, s) column as it is: the wire pads it to s (src/duck/types.ts pgTypedColumn), no program needed
-      if (built.p.op === "pad" && built.p.arg.op === "cell" && !text && (field.typmod ?? -1) >= 4 && ((field.typmod! - 4) & 0xffff) === built.p.scale) return;
+      const built = this.programOf(node, cell);
+      // (the one test of whether its text needs the program: `programNeeded`)
+      if (built === null || !this.programNeeded(node, built.p, mine, text ? -1 : field.typmod ?? -1)) return;
       // the column's cells after every earlier column's
       const base = cells.length;
       cells.push(...mine);
@@ -1412,6 +1410,9 @@ class Rewriter {
   /** each column reference's query levels, by its offset in the statement: the query it is in last, each with the
    *  WITH queries it declares (a clone keeps the offset, so it is found alike) */
   private readonly scopes = new Map<number, Frame[]>();
+  /** each of the statement's own queries, with the query levels it is in (its own last): a WITH query a FROM name
+   *  reads is resolved by these, the one resolver (`cteOf`), wherever the reading query is met */
+  private readonly frames = new WeakMap<Body, Frame[]>();
   /** every query that reads a WITH query in its FROM, by the WITH query */
   private readonly cteReaders = new Map<Body, Body[]>();
   /** the exact columns of each FROM item's query whose cells ride beside its columns (`innerExact`), made once */
@@ -1432,6 +1433,7 @@ class Rewriter {
 
   private scopeQuery(b: Body, stack: Frame[]): void {
     const here: Frame[] = [...stack, { select: b, ctes: (b.withClause?.ctes ?? []) as AstNode[], recursive: b.withClause?.recursive === true }];
+    this.frames.set(b, here);
     for (const item of fromLeaves(b.fromClause)) {
       if (kindOf(item) !== "RangeVar" || bodyOf(item).schemaname !== undefined) continue;
       const cte = cteIn(here, String(bodyOf(item).relname));
@@ -1476,13 +1478,7 @@ class Rewriter {
    * must equate it refuses by name, never the double. null: anything else (a table's column, an exact value).
    */
   private carry(ref: AstNode): { program: NumericProgram; text: boolean; owner: string; convs: ExactColumn["cells"] } | "uncarried" | null {
-    if (kindOf(ref) !== "ColumnRef" || hasStar(ref)) return null;
-    const t = this.typed(ref);
-    const at = bodyOf(ref).location;
-    if (t?.node !== "VAR" || t.column === undefined || t.levelsUp === null || typeof at !== "number") return null;
-    const stack = this.scopes.get(at);
-    if (stack === undefined || stack.length <= t.levelsUp) return null;
-    const found = this.fromItemOf(stack.slice(0, stack.length - t.levelsUp), t.column.owner, t.column.name);
+    const found = this.fromColumn(ref);
     if (found === null || !this.approximateAt(found.query, found.index)) return null;
     // decided once for the item, before the walk (`carryAll`), which rewrites what the decision reads (a NATURAL JOIN
     // written as USING, a whole row as its columns' text)
@@ -1494,9 +1490,22 @@ class Rewriter {
     if (!rides) return "uncarried";
     const exact = this.innerExact(found.query).find((e) => e.column === found.index);
     if (exact === undefined) return "uncarried";
+    // decided from what the item exposes, as it is written: its query (through a `*`, a WITH query's) holds the cells
+    if (this.exposedCells(found.query) < exact.cells.length) return "uncarried";
     // a subquery with no name (Postgres 16) is given one, so its cells can be read
     if (found.name === null && bodyOf(found.item).alias === undefined) bodyOf(found.item).alias = { aliasname: `__mason_from${this.named++}` };
     return { program: exact.program, text: exact.text, owner: found.name ?? String((bodyOf(found.item).alias as Body).aliasname), convs: exact.cells };
+  }
+
+  /** the FROM item a column reference reads (`fromItemOf`, by the query levels it is in), or null: a table's column */
+  private fromColumn(ref: AstNode): ReturnType<Rewriter["fromItemOf"]> {
+    if (kindOf(ref) !== "ColumnRef" || hasStar(ref)) return null;
+    const t = this.typed(ref);
+    const at = bodyOf(ref).location;
+    if (t?.node !== "VAR" || t.column === undefined || t.levelsUp === null || typeof at !== "number") return null;
+    const stack = this.scopes.get(at);
+    if (stack === undefined || stack.length <= t.levelsUp) return null;
+    return this.fromItemOf(stack.slice(0, stack.length - t.levelsUp), t.column.owner, t.column.name);
   }
 
   /** a carried column's program over the cells `cell` makes of its item's hidden columns, each read as it rode */
@@ -1543,24 +1552,83 @@ class Rewriter {
 
   /** a FROM item's column names: its query's outputs under its alias list */
   private columnsOf(query: AstNode, colnames: readonly string[]): string[] {
-    return (this.outputNames(query) ?? []).map((n, i) => colnames[i] ?? n);
+    // (a VALUES list's are column1, column2, …)
+    const rows = bodyOf(query).valuesLists as AstNode[] | undefined;
+    const own = Array.isArray(rows) && rows.length > 0 ? ((bodyOf(rows[0]!).items ?? []) as unknown[]).map((_v, i) => `column${i + 1}`)
+      : this.outputNames(query) ?? this.listed(query)?.map((o) => o.name) ?? [];
+    return own.map((n, i) => colnames[i] ?? n);
+  }
+
+  /** a plain query's outputs, a `*` beside other columns listed as Postgres's analysis expands it (`outputs`), or
+   *  null: a set operation, a VALUES list, a query the analysis does not hold */
+  private listed(query: AstNode): Output[] | null {
+    const b = bodyOf(query);
+    if ((b.op !== undefined && b.op !== "SETOP_NONE") || !Array.isArray(b.targetList)) return null;
+    return this.outputs(b.targetList as AstNode[]);
   }
 
   /** whether a query's i-th output is a numeric (or a numeric's text) the engine holds as a double where the plan has
    *  its program: in any arm of a set operation, through a `*` pass-through */
   private approximateAt(query: AstNode, index: number): boolean {
+    return this.over(query, false, (values) => values.some((v) => this.approximateValue(v)), index);
+  }
+
+  /** whether a FROM item's column is a value the engine computes exactly (`duckExact` of each value it can be): a
+   *  column a `*` lists, or one no value of which is found, is the column it reads */
+  private outputExact(query: AstNode, index: number): boolean {
+    return this.over(query, true, (values) => values.every((v) => this.duckExact(v)), index);
+  }
+
+  /** a decision over a query's i-th output's values (`valuesAt`), or `met` where it is met again inside itself: a
+   *  recursive WITH query's own column read in its recursive arm, which its other values decide */
+  private over(query: AstNode, met: boolean, decide: (values: AstNode[]) => boolean, index: number): boolean {
     const b = bodyOf(query);
-    if (b.op !== undefined && b.op !== "SETOP_NONE") return [b.larg, b.rarg].some((a) => a !== undefined && a !== null && this.approximateAt({ SelectStmt: a }, index));
+    if (this.deciding.has(b)) return met;
+    this.deciding.add(b);
+    try { return decide(this.valuesAt(query, index) ?? []); } finally { this.deciding.delete(b); }
+  }
+  private readonly deciding = new WeakSet<Body>();
+
+  /** the values a query's i-th output can be: each arm's of a set operation, each row's of a VALUES list, through a
+   *  `*` pass-through; a `*` beside other columns by the output Postgres's analysis puts there. Null where the output
+   *  is a column a `*` lists (decided where it is read), or none is found */
+  private valuesAt(query: AstNode, index: number): AstNode[] | null {
+    const b = bodyOf(query);
+    if (b.op !== undefined && b.op !== "SETOP_NONE") {
+      const arms = [b.larg, b.rarg].map((a) => a === undefined || a === null ? null : this.valuesAt({ SelectStmt: a }, index));
+      return arms.some((a) => a === null) ? null : arms.flatMap((a) => a!);
+    }
     const star = this.starOf(b);
-    if (star !== null) return this.approximateAt(star, index);
-    const targets = (b.targetList ?? []) as AstNode[];
-    if (targets.some((t) => hasStar(bodyOf(t).val))) return false;
-    const v = targets[index] === undefined ? undefined : bodyOf(targets[index]!).val;
-    if (!isNode(v)) return false;
+    if (star !== null) return this.valuesAt(star, index);
+    if (Array.isArray(b.valuesLists)) {
+      const values = (b.valuesLists as AstNode[]).map((row) => ((bodyOf(row).items ?? []) as unknown[])[index]);
+      return values.every(isNode) ? values as AstNode[] : null;
+    }
+    const output = this.listed(query)?.[index];
+    return output === undefined || output.star ? null : [output.value];
+  }
+
+  /** whether a value is a numeric (or a numeric's text) whose text needs the program the plan has (`programNeeded`) */
+  private approximateValue(v: AstNode): boolean {
     const type = this.typeOf(v);
-    const numeric = type !== null && TEXTS.has(type) && kindOf(v) === "TypeCast" && isNode(bodyOf(v).arg) && this.typeOf(bodyOf(v).arg as AstNode) === NUMERIC ? bodyOf(v).arg as AstNode
-      : type === NUMERIC ? v : null;
-    return numeric !== null && !this.duckExact(numeric) && this.exactText(numeric) !== null;
+    const text = type !== null && TEXTS.has(type) && kindOf(v) === "TypeCast" && isNode(bodyOf(v).arg) && this.typeOf(bodyOf(v).arg as AstNode) === NUMERIC;
+    const numeric = text ? bodyOf(v).arg as AstNode : type === NUMERIC ? v : null;
+    if (numeric === null) return false;
+    const cells: Array<{ conv: "exact" | "float8" | "float4" | "text" }> = [];
+    const built = this.programOf(numeric, (_m, conv = "exact") => { cells.push({ conv }); return { op: "cell", key: String(cells.length - 1) }; });
+    return built !== null && this.programNeeded(numeric, built.p, cells, text ? -1 : this.typed(numeric)?.typmod ?? -1);
+  }
+
+  /**
+   * WHETHER A NUMERIC'S TEXT NEEDS ITS PROGRAM — the one test of a column printed (`exactColumns`) and of a FROM item's
+   * column carried (`carry`), so a column read alone and the same column beside another are computed alike (PR 207's
+   * fourth round): the engine does not compute its value exactly (`duckExact`), or writes other digits (a scale the
+   * copy dropped, a rounding, a parameter's text, a cell read from a float or a text). Not a numeric(p, s) value as it
+   * is (`typmod` its own, -1 for its text): the wire pads it to s (src/duck/types.ts pgTypedColumn).
+   */
+  private programNeeded(node: AstNode, p: NumericProgram, cells: ReadonlyArray<{ conv: "exact" | "float8" | "float4" | "text" }>, typmod: number): boolean {
+    if (this.duckExact(node) && !worthComputing(p) && cells.every((c) => c.conv === "exact")) return false;
+    return !(p.op === "pad" && p.arg.op === "cell" && typmod >= 4 && ((typmod - 4) & 0xffff) === p.scale);
   }
 
   /** whether a FROM item's hidden cells may ride in a query that reads it: never where they would be read as columns —
@@ -1724,6 +1792,32 @@ class Rewriter {
       program: { op: "pick", index: { op: "cell", key: String(total) }, args: own.map((o, k) => offsetCells(o.programs.get(i)!, offsets[k]!)) } }));
   }
 
+  /**
+   * THE WITH QUERY A FROM NAME READS, from a query: its own WITH first, then the enclosing queries', innermost first (a
+   * nearer one of the name shadows a farther); none of a recursive WITH (never read whole). A query of the statement's
+   * own is resolved by the levels it is in (`frames`), as `carry` resolves its FROM items, so the two never name two
+   * WITH queries (PR 207's fourth round: a carry decided over one `base`, its cells added to another); a copy of one (a
+   * union arm's trial) by the WITH queries `exactThrough` is inside.
+   */
+  private cteOf(b: Body, name: string): AstNode | null {
+    const frames = this.frames.get(b);
+    if (frames !== undefined) { const found = cteIn(frames, name); return found === null || found.recursive ? null : found.cte; }
+    if (b.withClause?.recursive === true) return null;
+    const scopes = [(b.withClause?.ctes ?? []) as AstNode[], ...[...this.cteScope].reverse()];
+    return scopes.map((list) => list.find((c) => bodyOf(c).ctename === name)).find((c) => c !== undefined) ?? null;
+  }
+
+  /** how many hidden cells a query's rows carry after its columns, as it is written now: its own `__mason_cell_n`
+   *  targets, or those a `*` passes through (a set operation's: its first arm's) */
+  private exposedCells(query: AstNode): number {
+    let b = bodyOf(query);
+    while (b.op !== undefined && b.op !== "SETOP_NONE" && b.larg !== undefined) b = b.larg;
+    const targets = (b.targetList ?? []) as AstNode[];
+    const through = targets.length === 1 && hasStar(bodyOf(targets[0]!).val) ? this.passThrough(b) : null;
+    if (through !== null && through.columns === "star") return this.exposedCells(through.query);
+    return targets.filter((t) => String(bodyOf(t).name ?? "").startsWith("__mason_cell_")).length;
+  }
+
   /** an outer query that only reads one subquery's or CTE's columns: the inner query, its alias, and which inner
    *  column each outer one is ("star": all of them, in order) */
   private passThrough(b: Body, distinct = false): { query: AstNode; alias: string; columns: number[] | "star"; colnames: string[] } | null {
@@ -1734,11 +1828,8 @@ class Rewriter {
     let query: AstNode | undefined, alias: string | undefined;
     if (kindOf(f) === "RangeSubselect") { query = bodyOf(f).subquery as AstNode; alias = bodyOf(f).alias?.aliasname; }
     else if (kindOf(f) === "RangeVar" && bodyOf(f).schemaname === undefined) {
-      // its own WITH first, then the enclosing queries', innermost first (a nearer CTE of the name shadows a farther)
-      if (b.withClause?.recursive === true) return null;
-      const scopes = [(b.withClause?.ctes ?? []) as AstNode[], ...[...this.cteScope].reverse()];
-      const cte = scopes.map((list) => list.find((c) => bodyOf(c).ctename === bodyOf(f).relname)).find((c) => c !== undefined);
-      if (cte === undefined || bodyOf(cte).aliascolnames !== undefined) return null;
+      const cte = this.cteOf(b, String(bodyOf(f).relname));
+      if (cte === null || bodyOf(cte).aliascolnames !== undefined) return null;
       query = bodyOf(cte).ctequery as AstNode; alias = bodyOf(f).alias?.aliasname ?? bodyOf(f).relname;
     }
     if (query === undefined || alias === undefined || kindOf(query) !== "SelectStmt") return null;
@@ -1974,7 +2065,7 @@ class Rewriter {
             const operands: AstNode[] = [];
             const probe = this.exactOf(args[0]!, (m) => { operands.push(m); return { op: "cell", key: String(operands.length - 1) }; });
             // a column's own min is DuckDB's exact decimal, padded to its scale
-            if (probe === null || probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell") || !worthComputing(probe.p)) return asCell();
+            if (probe === null || probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell") || (this.duckExact(args[0]!) && !worthComputing(probe.p))) return asCell();
             const key = caseWhen([[isNotNull(this.clone(args[0]!)), row([this.clone(args[0]!), ...operands.map((m) => this.clone(m))])]], null);
             const picked = (m: AstNode): AstNode => {
               const call = fn(name === "min" ? "arg_min_null" : "arg_max_null", [this.clone(m), this.clone(key)], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) });
@@ -2061,9 +2152,10 @@ class Rewriter {
     const read = args.map((a): [string, AstNode] | null => {
       const own = this.typed(a);
       if (own !== null && INTEGERS.has(own.type)) return ["numeric", this.clone(a)];
+      // (read as itself only where the engine holds it exactly: `duckExact`; else its program)
       const scale = this.displayScale(a);
-      if (scale !== null) return [`numeric(1000, ${scale})`, this.clone(a)];
-      if (kindOf(a) === "ColumnRef" && own?.type === NUMERIC) return ["numeric", this.clone(a)];
+      if (scale !== null && this.duckExact(a)) return [`numeric(1000, ${scale})`, this.clone(a)];
+      if (kindOf(a) === "ColumnRef" && own?.type === NUMERIC && this.duckExact(a)) return ["numeric", this.clone(a)];
       const exact = this.exactText(a);
       return exact === null ? null : ["numeric", exact];
     });
@@ -2073,41 +2165,89 @@ class Rewriter {
     return pgCall("text", `${name}(${read.map((x, i) => `a${i + 1}::${x![0]}`).join(", ")})`, read.map((x) => x![1]));
   }
 
-  /** whether DuckDB holds an expression's value exactly (an integer, or a DECIMAL its types decide): a table's column,
-   *  an expression of declared scales over such values, a sum / min / max of one, a count; a CASE the rewrite made of
-   *  such arms (an exact program's arm index, a cell on its arm's rows); a cell riding beside a FROM item's columns.
-   *  Not what DuckDB computes as a double (`^`, a quotient), nor anything computed from one — a column of a subquery
-   *  that holds one (`carry`), a cast of one to numeric(p, s), which is DuckDB's DECIMAL of the double. */
+  /**
+   * WHETHER WHAT IS SENT FOR AN EXPRESSION COMPUTES ITS VALUE EXACTLY — THE ONE DECIDER of a numeric's exactness (PR
+   * 207's fourth round, the class a-fact-derived-in-several-places): an integer or a DECIMAL as the walk WRITES it for
+   * the engine, never a double. Every place that asks whether a value, a cell or a column is exact asks this: a
+   * program's cells (`programOf`), whether a program is the engine's own answer (`exactColumns`, min / max), a FROM
+   * item's column (`carry`), an equality key (`exactKey`), a union arm's value, a function's argument (`pgNumeric`).
+   * A constant and a cast to numeric are decided by the writer's own decision (`engineReadsExactly`,
+   * `numericCastWrite`); an operator, a function or an aggregate by what DuckDB computes from exact operands (+ - * a
+   * DECIMAL, a sum / min / max / a window's or arg_min's pick the value's own type, a count an integer); the rewrite's
+   * own integer casts (a variance's split squares) are integers. Anything else is not called exact: a quotient, `^`,
+   * `%`, an avg (DuckDB's doubles), a parameter (written as a double), a column a FROM item computes as a double
+   * (`carry`), a function this does not know — whose value then has its program, or is the engine's everywhere.
+   */
   private duckExact(n: AstNode): boolean {
     const t = this.typed(n), b = bodyOf(n), k = kindOf(n);
     if (t !== null && INTEGERS.has(t.type)) return true;
     if (isCellRef(n)) return true;
-    if (k === "ColumnRef") return t !== null && t.type === NUMERIC && this.carry(n) === null;
-    // a scalar subquery: its one column
-    if (k === "SubLink") { const target = scalarTarget(n); return target !== null && this.duckExact(target); }
+    const exact = (x: unknown): boolean => isNode(x) && this.duckExact(x);
     const args = (b.args ?? []) as AstNode[];
-    // a count (an avg's, made from the avg's node, carries the avg's type)
-    if (k === "FuncCall" && lastName(b.funcname) === "count") return true;
-    if (k === "FuncCall" && ["sum", "min", "max", "any_value"].includes(lastName(b.funcname)) && args.length === 1) return this.duckExact(args[0]!);
-    if (k === "CaseExpr" && t === null) return [...args.map((w) => bodyOf(w).result), ...(b.defresult === undefined ? [] : [b.defresult])].every((r) => isNode(r) && this.duckExact(r));
-    // a text literal numeric_in reads, cast to a numeric (`'1.5'::numeric`), is written as DuckDB's decimal literal or a
-    // DECIMAL(p, s) cast of the text (the cast's writer: `decimalConst`), exact as a numeric literal is
-    if (k === "TypeCast" && isNode(b.arg) && constString(b.arg) !== null && numericLiteral(constString(b.arg)!) !== null && this.displayScale(n) !== null) {
-      const p = ((b.typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m))[0];
-      if (p === undefined || (p !== null && p <= 38)) return true;
+    switch (k) {
+      // a table's column; a FROM item's, the value it is (`outputExact`), whether or not its program rides
+      case "ColumnRef": { if (t === null || t.type !== NUMERIC) return false; const found = this.fromColumn(n); return found === null || this.outputExact(found.query, found.index); }
+      // a scalar subquery: its one column
+      case "SubLink": { const target = scalarTarget(n); return target !== null && this.duckExact(target); }
+      case "A_Const":
+        if (b.isnull === true || b.ival !== undefined) return true;
+        // a numeric constant as it is written (`numericConstText`, `decimalConst`): DuckDB's DECIMAL within 38 digits
+        return b.fval !== undefined && (t === null || t.type === NUMERIC) && engineReadsExactly(numericConstText(String(b.fval.fval)));
+      case "TypeCast": {
+        const target = lastName(b.typeName?.names);
+        // the rewrite's own integer casts (a variance's split squares: `CAST(x >> 32 AS hugeint)`)
+        if (DUCK_INTEGER_NAMES.has(target)) return true;
+        if ((target !== "numeric" && target !== "decimal") || !isNode(b.arg)) return false;
+        const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], this.typeOf(b.arg), constString(b.arg));
+        switch (w.as) {
+          // DuckDB's DECIMAL(p, s) of a text constant, or of a value it holds exactly (of a double: the double's)
+          case "decimal": return constString(b.arg) !== null || this.duckExact(b.arg)
+            || (kindOf(b.arg) === "FuncCall" && EXACT_TEXTS.has(lastName(bodyOf(b.arg).funcname)));
+          case "whole": return true;
+          case "literal": return engineReadsExactly(w.text);
+          case "same": return this.duckExact(b.arg);
+          case "double": case "as written": return false;
+        }
+        return false;
+      }
+      case "A_Expr": {
+        const name = lastName(b.name);
+        // + - * of DuckDB's DECIMALs is a DECIMAL (a scale past 38 an error, never a double); / % ^ are its doubles
+        if (b.kind === "AEXPR_OP" && ["+", "-", "*"].includes(name)) return (b.lexpr === undefined || exact(b.lexpr)) && exact(b.rexpr);
+        if (b.kind === "AEXPR_NULLIF") return exact(b.lexpr);
+        return false;
+      }
+      case "FuncCall": {
+        const name = lastName(b.funcname);
+        // a count (an avg's, made from the avg's node, carries the avg's type), and what the walk writes as a DECIMAL
+        if (WRITTEN_EXACT.has(name)) return true;
+        // a value picked or summed, in its own type: an aggregate, a window's row, min / max's picked operand
+        if (VALUE_KEEPING.has(name) && args.length >= 1) return exact(args[0]) && ((name !== "lag" && name !== "lead") || args.length < 3 || exact(args[2]));
+        return false;
+      }
+      // DuckDB's CASE, COALESCE, GREATEST and LEAST of DECIMALs are a DECIMAL
+      case "CaseExpr": return [...args.map((w) => bodyOf(w).result), ...(b.defresult === undefined ? [] : [b.defresult])].every(exact);
+      case "CoalesceExpr": case "MinMaxExpr": return args.every(exact);
+      default: return false;
     }
-    // a declared scale is DuckDB's exact DECIMAL only where every numeric it is computed from is exact
-    if (this.displayScale(n) !== null) return operandsOf(n).every((o) => this.typeOf(o) !== NUMERIC || this.duckExact(o));
-    return false;
+  }
+
+  /** AN EXPRESSION AS A PROGRAM OVER CELLS (`exactOf`), every cell it reads as exact one the engine holds exactly
+   *  (`duckExact`, the one decider), or null: a program over a double's digits computes nothing Postgres's. Every
+   *  program is built here — a column's (`exactColumns`), a value's text or key (`exactText`) — so no two disagree */
+  private programOf(n: AstNode, cell: (n: AstNode, conv?: "exact" | "float8" | "float4" | "text") => NumericProgram): Built | null {
+    const checked = (m: AstNode, conv: "exact" | "float8" | "float4" | "text" = "exact"): NumericProgram => {
+      if (conv === "exact" && !this.duckExact(m)) throw NOT_EXACT;
+      return cell(m, conv);
+    };
+    try { return this.exactOf(n, checked); } catch (e) { if (e === NOT_EXACT) return null; throw e; }
   }
 
   /** a numeric's exact text, row by row: its program (exactOf) evaluated by DuckDB over its cells' texts
    *  (`__mason_numeric_program`, src/duck/functions.ts); null where there is none, or it reads a parameter */
   private exactText(n: AstNode): AstNode | null {
     const cells: Array<{ node: AstNode; conv: "exact" | "float8" | "float4" | "text" }> = [];
-    let built: Built | null;
-    try { built = this.exactOf(n, (m, conv = "exact") => { cells.push({ node: m, conv }); return { op: "cell", key: String(cells.length - 1) }; }); }
-    catch (e) { if (e === NOT_EXACT) return null; throw e; }
+    const built = this.programOf(n, (m, conv = "exact") => { cells.push({ node: m, conv }); return { op: "cell", key: String(cells.length - 1) }; });
     if (built === null) return null;
     // a parameter is the text it was bound as, Postgres's numeric_out of what it read (src/duck/analyze.ts readParameters):
     // DuckDB reads it as its varchar, never the double the rewrite makes of it elsewhere (a ParamRef the walk leaves)
@@ -2116,7 +2256,6 @@ class Rewriter {
       cells.push({ node: cast({ ParamRef: { number: Number(key.slice(1)) } }, ["varchar"]), conv: "text" });
       return { op: "cell", key: String(cells.length - 1) };
     });
-    if (cells.some((c) => c.conv === "exact" && !this.duckExact(c.node))) return null;
     const texts = cells.map((c) => c.conv === "text" ? this.clone(c.node) : c.conv === "exact" ? cast(this.clone(c.node), ["varchar"])
       : fn("__mason_float_numeric_text", [cast(this.clone(c.node), ["double"]), boolConst(c.conv === "float4")]));
     return fn("__mason_numeric_program", [strConst(JSON.stringify(program)), ...texts]);
@@ -3683,24 +3822,16 @@ class Rewriter {
     if (target === "jsonb" && from !== JSONB && from !== null && (TEXTS.has(from) || from === JSON_OID)) return cast(fn("__mason_jsonb_text", [cast(arg, ["varchar"])]), ["json"]);
     if (target === "jsonb" || target === "json") { b.typeName = { names: [S("json")], typemod: -1 }; return null; }
     if (target === "numeric" || target === "decimal") {
-      const typmods = (b.typeName?.typmods ?? []) as AstNode[];
-      if (typmods.length > 0) {
-        const p = constInt(typmods[0]), s = typmods.length > 1 ? constInt(typmods[1]) : 0;
-        if (p !== null && p > 38) return cast(arg, ["double"]);
-        if (p !== null) return cast(arg, ["decimal", String(p), String(s ?? 0)]);
-        return null;
+      // (how it is written is one decision, `numericCastWrite`, which `duckExact` reads too)
+      const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], from, constString(arg));
+      switch (w.as) {
+        case "double": return cast(arg, ["double"]);
+        case "decimal": return cast(arg, ["decimal", String(w.precision), String(w.scale)]);
+        case "whole": return cast(arg, ["decimal", "38", "0"]);
+        case "literal": return decimalConst(w.text);
+        case "same": return arg;
+        case "as written": return null;
       }
-      // an unconstrained numeric keeps the value's digits: an integer is a whole decimal, a literal text is read as a
-      // decimal literal (BEFORE a numeric: Postgres types `'1.5'` as the cast's numeric, and as it stood DuckDB answered
-      // the text, `2.5e2` for 250), a numeric stays what it is
-      if (from !== null && INTEGERS.has(from)) return cast(arg, ["decimal", "38", "0"]);
-      // as numeric_in reads it (`1_000`, `0x1F`, `1.5e3`: one reader, src/lib/pg-numeric.ts); NaN and Infinity are no
-      // DuckDB decimal and keep the double below
-      const s = constString(arg);
-      const literal = s === null ? null : numericLiteral(s);
-      if (literal !== null) return decimalConst(literal);
-      if (from === NUMERIC) return arg;
-      return cast(arg, ["double"]);
     }
     if ((target === "varchar" || target === "bpchar") && t !== null && t.typmod > 4 && target === "varchar") {
       // varchar(n) cuts the value to n characters, as Postgres's explicit cast does
@@ -3764,7 +3895,7 @@ class Rewriter {
     // a numeric literal with an exponent is a positional decimal (DuckDB reads `1e-7` as a double)
     if (b.fval !== undefined && /[eE]/.test(String(b.fval.fval ?? ""))) {
       const t = this.at(b, ["CONST"]);
-      if (t === null || t.type === NUMERIC) return decimalConst(positional(String(b.fval.fval)));
+      if (t === null || t.type === NUMERIC) return decimalConst(numericConstText(String(b.fval.fval)));
     }
     return null;
   }
@@ -4350,6 +4481,15 @@ function listLateral(columns: Array<{ name: string; list: AstNode }>, alias: str
 type Built = { p: NumericProgram; kind: "int" | "numeric" };
 /** a cell an exact program cannot take (in a grouped SELECT, a column not grouped): the column stays DuckDB's */
 const NOT_EXACT = new Error("not exact");
+/** the engine's integer types, as the rewrite casts to them (`duckExact`: an integer is exact) */
+const DUCK_INTEGER_NAMES = new Set(["tinyint", "smallint", "integer", "int", "bigint", "hugeint", "int2", "int4", "int8"]);
+/** the functions whose value is one of their first argument's (or its sum), in its own type (`duckExact`) */
+const VALUE_KEEPING = new Set(["sum", "min", "max", "any_value", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
+/** the numeric functions the walk writes as an exact DECIMAL or integer (`duckExact`): count, extract (`extract`: as
+ *  the exact numeric Postgres returns), div of integers */
+const WRITTEN_EXACT = new Set(["count", "extract", "div"]);
+/** Mason's functions whose text is an exact decimal's, which a DECIMAL cast reads exactly (`summed`'s parts) */
+const EXACT_TEXTS = new Set(["__mason_numeric_exact"]);
 
 /** a SELECT list item that is `*` or `t.*` */
 /** a set operation's arm (libpg-query's `larg` / `rarg`: a SelectStmt's body, unwrapped), as the node it is */
@@ -4373,8 +4513,9 @@ const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
 type Output = { target: number; name: string; value: AstNode; star: boolean; twin: boolean };
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 
-/** whether a program does what DuckDB would compute otherwise: a division, a rounding, a scale chosen per value; a
- *  sum, a difference or a product of DuckDB's decimals is DuckDB's own right answer */
+/** whether a program of a value the engine holds exactly (`duckExact`, asked first) writes what DuckDB would write
+ *  otherwise: a rounding, a scale chosen per value, a parameter's text; a sum, a difference or a product of DuckDB's
+ *  decimals is DuckDB's own right answer */
 function worthComputing(p: NumericProgram): boolean {
   switch (p.op) {
     // a parameter's cell is its text: DuckDB computes with it as a double
@@ -4416,18 +4557,6 @@ function scalarTarget(n: AstNode): AstNode | null {
   return isNode(v) && !hasStar(v) ? v : null;
 }
 
-/** the values an expression computes its own from (an operator's operands, a cast's argument, a function's arguments,
- *  a CASE's results) */
-function operandsOf(n: AstNode): AstNode[] {
-  const b = bodyOf(n);
-  switch (kindOf(n)) {
-    case "A_Expr": return [b.lexpr, b.rexpr].filter(isNode);
-    case "TypeCast": return [b.arg].filter(isNode);
-    case "FuncCall": case "CoalesceExpr": case "MinMaxExpr": return ((b.args ?? []) as unknown[]).filter(isNode);
-    case "CaseExpr": return [...((b.args ?? []) as AstNode[]).map((w) => bodyOf(w).result), b.defresult].filter(isNode);
-    default: return [];
-  }
-}
 
 /** a query level as `scopeColumns` meets it: the query and the WITH queries it declares */
 interface Frame { select: Body; ctes: AstNode[]; recursive: boolean }
@@ -4830,9 +4959,41 @@ function positional(text: string): string {
  *  as an integer cast to numeric is, to DECIMAL(38, 0) (DuckDB keeps a product of two 18-digit decimals in 64 bits and
  *  fails past it). Past DuckDB's 38 digits it stays as written: DuckDB's double, as before */
 function decimalConst(text: string): AstNode {
-  if (text.includes(".") || text.replace(/^-/, "").length > 38) return numConst(text);
+  if (text.includes(".") || !engineReadsExactly(text)) return numConst(text);
   const n = Number(text);
   return cast(Number.isSafeInteger(n) && n >= -2147483648 && n <= 2147483647 ? intConst(n) : numConst(text), ["decimal", "38", "0"]);
+}
+
+/** WHETHER THE ENGINE READS A NUMERIC CONSTANT EXACTLY, AS IT IS WRITTEN FOR IT (the one reader of a constant's
+ *  exactness: `decimalConst` writes by it, `duckExact` asks it): DuckDB's DECIMAL holds 38 digits, every digit written
+ *  counted (`0.5` is two); past them, or with an exponent, DuckDB reads the constant as a double */
+function engineReadsExactly(text: string): boolean {
+  return !/[eE]/.test(text) && (text.match(/[0-9]/g) ?? []).length <= 38;
+}
+
+/** the text a numeric constant (`A_Const`'s fval) is written with for the engine: positional where it has an exponent
+ *  (`decimalConst`, which DuckDB would read as a double), else as Postgres's parser kept it */
+const numericConstText = (fval: string): string => /[eE]/.test(fval) ? positional(fval) : fval;
+
+/** HOW A CAST TO NUMERIC IS WRITTEN FOR THE ENGINE: one decision, which the cast's writer (`typeCast`) follows and
+ *  `duckExact` reads, so what is called exact is what is sent. With a typmod: DuckDB's DECIMAL(p, s) of the value, its
+ *  double past 38 digits, as written where the typmod is no constant. Unconstrained: an integer as a whole DECIMAL, a
+ *  text constant as numeric_in reads it (`decimalConst`: BEFORE a numeric, Postgres types `'1.5'` as the cast's numeric,
+ *  and as it stood DuckDB answered the text, `2.5e2` for 250), a numeric as itself, anything else (a float, NaN) as
+ *  the engine's double */
+type NumericCastWrite = { as: "double" } | { as: "decimal"; precision: number; scale: number } | { as: "whole" } | { as: "literal"; text: string } | { as: "same" } | { as: "as written" };
+function numericCastWrite(typmods: readonly AstNode[], from: number | null, text: string | null): NumericCastWrite {
+  if (typmods.length > 0) {
+    const p = constInt(typmods[0]), s = typmods.length > 1 ? constInt(typmods[1]) : 0;
+    if (p !== null && p > 38) return { as: "double" };
+    return p !== null ? { as: "decimal", precision: p, scale: s ?? 0 } : { as: "as written" };
+  }
+  if (from !== null && INTEGERS.has(from)) return { as: "whole" };
+  // as numeric_in reads it (`1_000`, `0x1F`, `1.5e3`: one reader, src/lib/pg-numeric.ts); NaN and Infinity are no
+  // DuckDB decimal and keep the double
+  const literal = text === null ? null : numericLiteral(text);
+  if (literal !== null) return { as: "literal", text: literal };
+  return from === NUMERIC ? { as: "same" } : { as: "double" };
 }
 
 /** a text cast to an integer, as strict as Postgres's: whitespace around an optional sign and digits, nothing else */
