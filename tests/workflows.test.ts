@@ -55,7 +55,7 @@ function meta(name: string): Meta {
 }
 
 /** The name each model signs a posting with: each script's SIGNS is held to it. */
-const SIGNS: Record<string, string> = { opus: "Opus 5.5", fable: "Fable", sonnet: "Sonnet" };
+const SIGNS: Record<string, string> = { opus: "Opus 5.5", fable: "Fable 5.1", sonnet: "Sonnet 5.5" };
 /** A script's SIGNS. */
 function signs(name: string): Record<string, string> {
   const m = /^const SIGNS = (\{[^\n]*\})$/m.exec(source(name));
@@ -238,6 +238,47 @@ test("pr-loop: every exit returns one shape, and the base's findings are filed a
   r = await run("pr-loop", { ...PR }, { brief: null });
   assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
   assert.equal(r.result["pr"], null);
+});
+
+const red = { state: "failed", detail: "a test failed" };
+const f = (input: string) => ({ findings: [finding({ classKey: `c-${input}`, input })], judgedCorrect: [] });
+
+test("pr-loop: the round bound is the PR's, counted through a CI fix's re-check", async () => {
+  // two rounds before CI, two in a CI fix's re-check: the fourth is the PR's last, whatever call it falls in
+  let r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false },
+    "review r3": f("b"), "fix r3": pushed("d"), "review r4": f("c"),
+  });
+  assert.match(String(r.result["status"]), /^still 1 finding\(s\) after 4 rounds/);
+  assert.equal((r.result["rounds"] as unknown[]).length, 4);
+  assert.ok(!r.labels.includes("review r5"));
+  // the bound already reached when a CI fix lands: no fifth review, and the status says the head was not re-checked
+  r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": f("b"), "fix r2": pushed("c"), "review r3": f("c"), "fix r3": pushed("d"),
+    "review r4": clean, "CI 1": red, "CI fix 1": { ...pushed("e"), flake: false },
+  });
+  assert.match(String(r.result["status"]), /^4 review rounds reached; head eeeeeee is not re-checked/);
+  assert.equal(r.result["head"], sha("e"));
+});
+
+test("pr-loop: the head, not the flag, says whether a CI fix pushed; the last CI fix's CI is read", async () => {
+  // flake: true with a head that moved: it was pushed, so it is re-checked and its CI read
+  let r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": clean, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: true }, "review r2": clean, "CI 2": { state: "green", detail: "" },
+  });
+  assert.deepEqual(r.labels, ["brief", "implement", "review r1", "CI 1", "CI fix 1", "review r2", "CI 2"]);
+  assert.match(String(r.result["status"]), /^reviewed/);
+  assert.equal(r.result["head"], sha("b"));
+
+  // three CI fixes: the third one's CI is waited on before "still red"
+  r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": clean, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: false }, "review r2": clean,
+    "CI 2": red, "CI fix 2": { ...pushed("c"), flake: false }, "review r3": clean,
+    "CI 3": red, "CI fix 3": { ...pushed("d"), flake: false }, "review r4": clean, "CI 4": red,
+  });
+  assert.equal(r.labels.at(-1), "CI 4", "the last CI fix's CI is read");
+  assert.match(r.prompt("CI 4"), new RegExp(`at head ${"d".repeat(7)}`));
+  assert.match(String(r.result["status"]), /^CI still red after 3 fixes/);
 });
 
 test("issue-loop: without tasks it plans and returns, and runs nothing else", async () => {

@@ -27,7 +27,7 @@ const WHERE = A.repo
   : "<repo> below is the repository's main checkout: the one your working directory is in (`git rev-parse --show-toplevel`), or for a worktree agent, its main checkout via `git rev-parse --path-format=absolute --git-common-dir` and its parent. Find it first and use its absolute path for <repo>.\n"
 const BASE = A.base || 'main'
 // Each stage's model, and the name what it posts is signed with, read from the same value (as pr-loop's SIGNS)
-const SIGNS = { opus: 'Opus 5.5', fable: 'Fable', sonnet: 'Sonnet' }
+const SIGNS = { opus: 'Opus 5.5', fable: 'Fable 5.1', sonnet: 'Sonnet 5.5' }
 const ON = { plan: { model: 'opus', effort: 'high' }, setup: { model: 'sonnet', effort: 'low' } }
 
 const TASKS = { type: 'object', required: ['tasks'], properties: {

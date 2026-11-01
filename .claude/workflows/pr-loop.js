@@ -26,11 +26,15 @@ const WHERE = A.repo
   : "<repo> below is the repository's main checkout: the one your working directory is in (`git rev-parse --show-toplevel`), or for a worktree agent, its main checkout via `git rev-parse --path-format=absolute --git-common-dir` and its parent. Find it first and use its absolute path for <repo>.\n"
 // the board is moved from the main checkout's file, never through `node <(git show …)`, which exits 0 having run nothing
 const BOARD = (status) => `node ${REPO}/scripts/board.ts status ${A.issue} "${status}"`
+// one bound per PR, on the one counter (`round`) the stop's status and rounds[] read: the review rounds of a CI fix's
+// re-check count toward it too
 const MAX_ROUNDS = 4
+// the CI fixes a PR gets; the last one's CI is waited on too
+const MAX_CI_FIXES = 3
 
 // Each stage's model, and the name what it posts is signed with: a posting names the model that wrote it, read from
 // the same value as the agent's `model`, never written beside it.
-const SIGNS = { opus: 'Opus 5.5', fable: 'Fable', sonnet: 'Sonnet' }
+const SIGNS = { opus: 'Opus 5.5', fable: 'Fable 5.1', sonnet: 'Sonnet 5.5' }
 const ON = {
   brief: { model: 'opus', effort: 'high' },
   implement: { model: 'opus', effort: 'high', isolation: 'worktree' },
@@ -137,7 +141,8 @@ ${Object.entries(byClass).map(([k, fs]) => `## ${k}: ${fs[0].classWhy}\n${asFail
 let round = 0
 async function reviewAndFix(start) {
   let { kind, base, what } = start
-  for (let n = 1; n <= MAX_ROUNDS; n++) {
+  for (;;) {
+    if (round >= MAX_ROUNDS) return `${round} review rounds reached; head ${last.head.slice(0, 7)} is not re-checked: the coordinator decides`
     round++
     phase('Review')
     const judged = rounds.flatMap((x) => x.judgedCorrect)
@@ -159,7 +164,7 @@ Give no fix and no patch. Also list what you judged correct.`,
     rounds.push({ round, head: last.head, findings: mine, base: review.findings.length - mine.length, judgedCorrect: review.judgedCorrect, classRound })
     log(`round ${round}: ${mine.length} finding(s) of this PR, ${review.findings.length - mine.length} of the base${classRound ? `; CLASS round next (${repeated.join(', ')})` : ''}`)
     if (mine.length === 0) return null
-    if (n === MAX_ROUNDS) return `still ${mine.length} finding(s) after ${MAX_ROUNDS} rounds: the coordinator decides`
+    if (round >= MAX_ROUNDS) return `still ${mine.length} finding(s) after ${round} rounds: the coordinator decides`
 
     phase('Fix')
     const fixed = await agent(
@@ -179,7 +184,6 @@ ${FIX_GATES} Come back in ONE push. The commit ends with \`${coAuthor(ON.fix)}\`
     kind = 'narrow'
     what = `The previous round's findings were:\n${asFailures(mine)}\nCheck each is fixed.`
   }
-  return `still findings after ${MAX_ROUNDS} rounds: the coordinator decides`
 }
 
 // ---------------------------------------------------------------- Brief
@@ -214,7 +218,7 @@ if (stopped) return await finish(stopped)
 
 // ---------------------------------------------------------------- CI, until green, failures sent back as failures
 // A CI fix is a fix commit like any other, so it gets a narrow re-check (CLAUDE.md "The loop" step 4) before CI again.
-for (let attempt = 1; attempt <= 3; attempt++) {
+for (let attempt = 1; attempt <= MAX_CI_FIXES + 1; attempt++) {
   phase('CI')
   const ci = await agent(
     `${WHERE}First run \`${BOARD('CI / queued')}\`. Wait for PR ${last.pr}'s CI at head ${last.head.slice(0, 7)} and report it. The wait is CLAUDE.md "Local gates"' loop on \`gh pr checks\` with a deadline, never \`--watch\`. Run this chunk of it in the foreground, as it is, with the Bash tool's timeout set to ${CI_TOOL_MS} (the chunk runs up to ${CI_CHUNK_S / 60} minutes, and the default timeout of two minutes would kill it before it prints), up to 8 times, until its first line says green or failed; still pending after the 8th is a timeout:
@@ -226,6 +230,7 @@ If the tool refuses the loop (a foreground \`sleep\`), run the same chunk with r
   if (ci.state === 'timeout') return await finish('CI not finished within the bound')
   if (ci.state === 'green') return await finish('reviewed, no open finding of this PR, CI green: ready for the merge decision')
   log(`CI failed: ${ci.detail.slice(0, 200)}`)
+  if (attempt > MAX_CI_FIXES) return await finish(`CI still red after ${MAX_CI_FIXES} fixes: the coordinator decides`)
   phase('Fix')
   const fixed = await agent(
     `${WHERE}CI failed on PR ${last.pr} (branch ${A.branch}). ${WORKTREE(`origin/${A.branch}`)} Run \`${BOARD('Fixing')}\`. The failure:
@@ -233,11 +238,13 @@ ${ci.detail}
 Read it (CLAUDE.md "Local gates"). If it is this change's, fix it, with a test. If it is a flake (a test the change cannot have touched, failing on timing or load), say so with flake: true, change nothing and return the head unchanged: the coordinator quarantines it on main. If the oracle's allowlist or fixture is stale, regenerate it from this run (\`node scripts/oracle-legs.ts --write <run-id>\`) and read the diff. If ${A.base} has the fix, merge \`origin/${A.base}\`. ${FIX_GATES} ONE push, whose commit ends with \`${coAuthor(ON.fix)}\`; return the new head.`,
     { label: `CI fix ${attempt}`, phase: 'Fix', ...ON.fix, schema: CI_FIXED })
   if (!fixed) return await finish(`CI fix ${attempt} failed`)
-  if (fixed.flake) return await finish(`CI failed on a flake, nothing pushed: the coordinator quarantines it (${fixed.summary})`)
-  if (fixed.head === last.head) return await finish(`CI fix ${attempt} pushed nothing: the coordinator decides`)
+  // the head decides whether anything was pushed; the flag only says why nothing was
+  if (fixed.head === last.head) return await finish(fixed.flake
+    ? `CI failed on a flake, nothing pushed: the coordinator quarantines it (${fixed.summary})`
+    : `CI fix ${attempt} pushed nothing: the coordinator decides`)
   const prev = last.head
   last = fixed
   const again = await reviewAndFix({ kind: 'narrow', base: prev, what: `The commits since ${prev.slice(0, 7)} fix this CI failure:\n${ci.detail}\nCheck they fix it and change no answer Postgres would give.` })
   if (again) return await finish(again)
 }
-return await finish('CI still red after 3 fixes: the coordinator decides')
+return await finish('CI loop ended without a verdict: the coordinator looks')
