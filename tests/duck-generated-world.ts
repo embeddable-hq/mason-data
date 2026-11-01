@@ -97,6 +97,9 @@ export async function withWorld(files: Record<string, string>, use: (w: World) =
       rows: async (sql) => (await store.writer.runAndReadAll(sql)).getRowsJS(),
     });
   } finally {
+    // in the order `mason start` stops (src/cli/dev.ts): the generated tables before the listener whose catalog their
+    // planning reads, so a run still queued never plans on a closed catalog
+    await sync?.generated.stop();
     await api?.close();
     await sync?.stop();
     await store.close();

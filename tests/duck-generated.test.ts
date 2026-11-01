@@ -760,7 +760,7 @@ test("after a restart a chain built together is current, and a parent swapped in
     await withWorld({}, async (w) => {
       assert.ok(w.status("public.doubled").behindSeconds > 0 || w.status("public.doubled").lastRun?.at !== child, "a parent swapped in since its build leaves it behind");
       assert.equal(w.status("public.counts").behindSeconds, 0);
-      // and it is built again over the parent it reads (waited for, so the world never ends with a run going)
+      // and it is built again over the parent it reads
       await w.until((s) => s.lastRun?.at !== child, "public.doubled");
     }, { dir, again: true });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
