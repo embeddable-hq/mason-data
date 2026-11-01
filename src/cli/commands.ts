@@ -30,7 +30,7 @@ import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type 
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { reach } from "./state.ts";
-import { copyingText, copyProgress, duration, msText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
+import { copyingText, copyProgress, duration, generatedReadiness, msText, readiness, readinessWord, type Readiness, type SyncFacts, type SyncTotals } from "./readiness.ts";
 import type { SyncEvent } from "../duck/events.ts";
 import type { CopyProgressView, KeptCurrent, StreamStatus } from "../duck/sync.ts";
 import type { KeptPathStatus } from "../duck/kept.ts";
@@ -394,7 +394,8 @@ const STATUS_USAGE = `usage: mason status [--json]
            the column's bytes a row on disk, or its text's before it is on disk), rowsPerSecond } (the fill's estimate it
            was decided on), filled: { rows, seconds } (what its own fill measured), queued (a backfill waiting for the fill
            under way), keptAt, readyAt, why }]. generatedTables: [{ table, file, kind, method (whole: its SQL run again),
-           state (refused, waiting, building, failed, current, behind), targetLag, behindSeconds, missingTarget, serving,
+           state (refused, waiting, building, failed, current, behind), targetLag, behindSeconds (across its chain: the
+           oldest base change below it not in it), behindSince (when that change was committed; null: none), missingTarget, serving,
            lastRun: { at, seconds, rows }, error (the last run's, no value of a row in it), retryAt,
            refusals: [{ key, message, why, options, text }], waitingFor, warnings }]. roles (a run with a roles file, mason/roles.yml: what a user added
            with --role may read): { file, roles: [name], problem (what is wrong with the file now, every statement of a
@@ -1301,13 +1302,16 @@ export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "e
   return { table: t.table, copy: t.copy, error: t.error, ...(t.kept ? { kept: t.kept } : {}) };
 }
 
-const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
+const WAIT_USAGE = `usage: mason wait [<generated table>] [--timeout <seconds>] [--json]
 
   Waits until every added table is synced and served, showing every added table on a line of its own: 100% for the
   finished (in the order they finished), a bar for the ones still syncing, at the bottom. Run it after mason add.
+  Named, a generated table instead: waits until it holds every change Mason had synced when the wait began, across its
+  chain (the tables it is generated from, and theirs), so what is read from it next includes them.
 
     mason add orders && mason wait
     mason wait --timeout 3600     a large table: wait up to an hour
+    mason wait daily_requests     a generated table: until it holds what is synced now
 
   --timeout <seconds>   how long to wait (default 600); the sync goes on after, and mason wait again picks it up
   --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
@@ -1318,17 +1322,33 @@ const WAIT_USAGE = `usage: mason wait [--timeout <seconds>] [--json]
                         it is not kept current now, its phase included),
                         stream (replication mode: where the stream is, as mason status --json says it), error (on a
                         failure or a timeout: { code, message, next }), next }
+                        Named, a generated table: the same ready, failed, waiting, timedOut, error and next, tables
+                        empty, and generatedTable (as mason status --json's generatedTables says it: its state,
+                        behindSeconds, behindSince — when the oldest change not in it was committed, null: none)
 
-  Exit status: 0 ready; 1 a first sync failed (printed, with what to do; Mason tries it again by itself); 124 timed out.
+  Exit status: 0 ready; 1 a first sync failed, or the generated table's run failed, or it or a parent was refused
+  before it was built (printed, with what to do; Mason tries a failed one again by itself); 124 timed out.
+  A generated table that serves and holds everything synced is ready (0) though its last run failed: after editing its
+  file, read mason status for whether the new definition was refused or failed.
 `;
+
+/** how often a wait not drawn in place says its block again though nothing in it changed, so a long one never goes
+ *  quiet: the copies' wait and a generated table's */
+export const SAY_AGAIN_MS = 30_000;
+
+/** whether a wait says its block now: what it is changed (`what`, its numbers taken out), or `every` ms went by since it
+ *  last said it */
+export function sayAgain(what: string, said: string, saidAt: number, now: number, every = SAY_AGAIN_MS): boolean {
+  return what !== said || now - saidAt >= every;
+}
 
 export const WAIT: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "wait",
-  summary: "wait until every added table is synced and served (exit 0; 1 on a failure, with why)",
+  summary: "wait until every added table is synced, or a generated table holds what is synced now (1: a failure)",
   usage: WAIT_USAGE,
   options: { json: { type: "boolean" }, timeout: { type: "string" } },
-  json: ["ready", "failed", "waiting", "timedOut", "tables", "stream", "error", "next"],
+  json: ["ready", "failed", "waiting", "timedOut", "tables", "stream", "generatedTable", "error", "next"],
 };
 
 export async function wait(argv: string[]): Promise<number> {
@@ -1337,8 +1357,11 @@ export async function wait(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const timeout = f.values.timeout === undefined ? 600 : Number(f.values.timeout);
   if (!Number.isFinite(timeout) || timeout <= 0) return failed("wait", { message: `--timeout is a number of seconds, not ${JSON.stringify(f.values.timeout)}`, code: "usage" }, { json });
+  if (f.positionals.length > 1) return failed("wait", { message: `name one generated table, not ${f.positionals.length}`, code: "usage", usage: WAIT_USAGE }, { json });
+  const named = f.positionals[0];
   const run = await runOr(WAIT, json);
   if (!run) return 1;
+  if (named !== undefined) return waitGenerated(run, named, timeout, json);
   return guarded("wait", json, async () => {
     const until = Date.now() + timeout * 1000;
     // a terminal gets the block — every added table on its line (tableLines), then the stream — redrawn in place;
@@ -1362,7 +1385,7 @@ export async function wait(argv: string[]): Promise<number> {
       }
       // the same work, other numbers (a stream's positions included: they move with every change)
       const what = lines.join("\n").replace(/[█░]+/g, "").replace(/\b[0-9A-F]+\/[0-9A-F]+\b/g, "#").replace(/[\d,.]+(%| rows\/s| s| min| h)?/g, "#");
-      if (what !== said || Date.now() - saidAt >= 30_000) { err(lines.map((l) => `  ${l}`).join("\n")); said = what; saidAt = Date.now(); }
+      if (sayAgain(what, said, saidAt, Date.now())) { err(lines.map((l) => `  ${l}`).join("\n")); said = what; saidAt = Date.now(); }
     };
     for (;;) {
       // a copy's rate and progress are the run's own, measured per chunk (src/duck/sync.ts copyProgressNow)
@@ -1395,6 +1418,46 @@ export async function wait(argv: string[]): Promise<number> {
         return 0;
       }
       if (failure) return json ? (failure.code === "timeout" ? 124 : 1) : failed("wait", failure, { json: false });
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+  });
+}
+
+/** `mason wait <generated table>`: until it holds every change synced when the wait began (src/cli/readiness.ts
+ *  generatedReadiness), a line when what it waits for changes; the same outcome and exit codes as the wait for copies */
+async function waitGenerated(run: DevRun, named: string, timeout: number, json: boolean): Promise<number> {
+  return guarded("wait", json, async () => {
+    const since = Date.now(), until = since + timeout * 1000;
+    let said = "", saidAt = 0;
+    for (;;) {
+      const s = await readState(run);
+      const all = s.generatedTables ?? [];
+      const g = all.find((t) => t.table === named) ?? all.find((t) => t.table === `public.${named}`);
+      if (g === undefined) {
+        const names = all.map((t) => entryName(t.table));
+        return failed("wait", { message: `no generated table ${JSON.stringify(named)}${names.length ? "" : ": the project has none"}`, code: "not_found",
+          ...(names.length ? { fix: `name one of: ${names.join(", ")}` } : {}), next: [["mason status", "the generated tables and what each is doing"]] }, { json });
+      }
+      const r = generatedReadiness(g, since);
+      const next: NextStep[] = [["mason status", "the generated tables and what each is doing"]];
+      const failure: Failure | null = r.failed.length
+        ? { message: r.failed[0]!, code: "failed", fix: "Mason tries a failed run again by itself; mason logs says why it failed", next: [["mason logs", "the detail of the failure"], ...next] }
+        : !r.ready && Date.now() >= until
+        ? { message: `${g.table} does not hold what was synced ${timeout} s ago yet`, code: "timeout", why: r.waiting.join("\n"), fix: "nothing stopped: its runs go on",
+            next: [[`mason wait ${entryName(g.table)}`, "keep waiting (--timeout <seconds> for longer)"], ...next] }
+        : null;
+      if (json && (r.ready || failure)) {
+        out(jsonText(WAIT, { ...r, timedOut: !r.ready && failure?.code === "timeout", tables: [], generatedTable: g, ...(failure ? { error: errorJson(failure) } : {}) },
+          failure ? failure.next ?? [] : next));
+      }
+      if (r.ready) {
+        if (!json) out(withEnd(styleOut().green(`Ready: ${g.table} holds every change synced when the wait began.`), { next }));
+        return 0;
+      }
+      if (failure) return json ? (failure.code === "timeout" ? 124 : 1) : failed("wait", failure, { json: false });
+      const line = r.waiting.join("\n").replace(/\d+ s behind/, "# s behind");
+      // when what it waits for changes, and every 30 s while it does not, as the copies' wait says its block
+      if (!json && sayAgain(line, said, saidAt, Date.now())) { err(`  ${r.waiting.join("\n  ")}`); said = line; saidAt = Date.now(); }
       await new Promise((res) => setTimeout(res, 1000));
     }
   });

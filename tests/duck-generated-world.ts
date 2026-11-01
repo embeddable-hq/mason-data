@@ -108,5 +108,12 @@ export async function withWorld(files: Record<string, string>, use: (w: World) =
 }
 
 export const built = (s: GeneratedStatus): boolean => s.serving && s.state !== "failed";
+/** built, AND its run's `generated <name>:` line logged since `logged[from]`: the run writes the line after the catalog's
+ *  rebuild, and marks the table serving before it, so a statement on the table over the wire, or a read of the log, waits
+ *  for this, never for `built` (#205: once a table is serving only when the catalog has it, `built` alone suffices).
+ *  `from` picks a later run's line: the run before it must have been waited for with `served` too, or its own line,
+ *  late, is taken for the next one's */
+export const served = (logged: readonly string[], from = 0) => (s: GeneratedStatus): boolean =>
+  built(s) && logged.slice(from).some((l) => l.startsWith(`generated ${s.table}:`));
 export const plain = { bold: (s: string) => s, dim: (s: string) => s, red: (s: string) => s, green: (s: string) => s, yellow: (s: string) => s, cyan: (s: string) => s } as never;
 export const refusedAt = (r: readonly GeneratedRefusal[], key: string | null, re: RegExp): void => { assert.ok(r.some((x) => x.key === key && re.test(x.message)), JSON.stringify(r)); };
