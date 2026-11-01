@@ -726,6 +726,24 @@ test("the swap of a chain is one writer's turn: when the parent is swapped in, s
   }, { onStep: async (s, n) => { if (armed && s === "swapped" && n === "public.counts") seen.push(await rows!("SELECT count(*) FROM public.doubled")); } });
 });
 
+test("a run asked while another is in flight waits for it, so a child is never left over its parent's old rows (issue 195)", async () => {
+  // the child's own run is held after its swap, still running, as the queue's run is when a status already reads it built
+  let release: (() => void) | null = null, held = false;
+  const gate = new Promise<void>((r) => { release = r; });
+  await withWorld({ counts: COUNTS, doubled: scheduled("SELECT tenant_id, requests * 2 AS doubled FROM counts", "tenant_id") }, async (w) => {
+    for (const end = Date.now() + 20_000; !held && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
+    assert.ok(held, "the child's first run reached its swap");
+    await w.store.writer.run("INSERT INTO public.events VALUES (7, 3, 'query', 'ok', '7', '2026-01-03 00:00:00+00', NULL, 1, NULL), (8, 3, 'load', 'ok', '8', NULL, NULL, 1, NULL)");
+    w.sync.generated.changed("public.events");
+    const asked = w.sync.generated.run("public.doubled");
+    release!();
+    await asked;
+    const parent = await ask(w, "SELECT tenant_id, requests * 2 FROM counts ORDER BY 1"), child = await ask(w, "SELECT tenant_id, doubled FROM doubled ORDER BY 1");
+    assert.deepEqual(parent, [[1, "4"], [2, "4"], [3, "4"]]);
+    assert.deepEqual(child, parent, "the child was built with its parent");
+  }, { onStep: async (s, n) => { if (s === "swapped" && n === "public.doubled" && !held) { held = true; await gate; } } });
+});
+
 // ------------------------------------------------------------------------------- chains: PR 163's review round
 
 test("a child whose own build fails in its parent's run stays behind its parent, so it is tried again after its back-off", async () => {

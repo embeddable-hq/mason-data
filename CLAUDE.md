@@ -96,7 +96,8 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
 - **A brief says what the test must hold, not only what to build.** Name the shapes the oracle must hold up front
   (`.claude/rules/duck-rewrite.md` lists them for a rewrite: the grouped view ordered by its output name, the nulls idiom,
   each collation kind, a prepared statement run after a SET): the first fix round of every PR was for shapes the brief
-  had not named.
+  had not named. It names the tests its runs use too: a slow test file is run by `--test-name-pattern` for the tests at
+  hand, and so is `scripts/fails-without.ts`, which runs it twice (one issue's agents spent 36 min proving a 100 s file).
 - **Which gate runs when is "Local gates".** A measurement's dataset is built once and kept until the PR is pushed: an
   agent that built a 20 M-row table twice spent the second build on nothing new.
 - **Push early, read while CI runs.** Open the PR as soon as the first commit is green locally; read the diff and run the
@@ -110,8 +111,17 @@ application (a client library) would be MIT with its own `LICENSE`; anything tha
   `ps -o time,etime -p <pid>`): a hung test uses none, though nor does one waiting on I/O. A hang is the change's to
   fix, or a flake as "Local gates" says, never a run to repeat.
 - **Nobody waits on CI.** An implementer ends at the push and reports the PR and its head; the coordinator binds the PR
-  and lets the app's PR monitor bring the verdict (auto-merge, for a tooling PR already read and reviewed), and goes on
+  and lets the app's PR monitor bring a failure (auto-merge, for a tooling PR already read and reviewed), and goes on
   with other work. No session sits in a wait on a run: watching CI took most of a coordinator's active time (issue 78).
+- **A coordinator never ends a turn without a wake-up for what it waits on.** With a merge queued, a run whose verdict
+  it must act on, or a lead session working, it leaves a bounded background job that exits when that changes: a loop
+  of `gh pr view --json state`, `gh pr checks` or `git ls-remote` with a `sleep`, run in the background, that ends on
+  the PR merged or a check failed, the branch's head moved, or the PR opened. A job's exit wakes the session that
+  started it, where an auto-merge, the app's PR monitor (which wakes on a failure, a conflict or a comment, never on a
+  green run or a merge) and another session's report may not; a sub-agent's end does. When its bound passes with
+  nothing changed, look, and leave another. Such a job costs nothing while it runs, unlike a wait in the foreground.
+  Two turns ended without one left both leads idle half of the seven hours read (docs/DESIGN.md "Local gates").
+  Nothing detects it; a transcript's gaps did.
 - **Delegate when it is faster, but merge nothing you have not read.** Independent pieces go to sub-agents, each in a
   worktree of its own; the one who merges reads each diff in full, verifies it (CI on its last commit; a local gate for a
   reason, "Local gates"), and merges it. A sub-agent's report is its claim, not the evidence. Two
