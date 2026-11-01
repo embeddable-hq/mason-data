@@ -286,3 +286,18 @@ test("a where: reading a statement's parameter is refused at its key; a value ho
   }
   assert.deepEqual(attributesToAdd("acme", "t", ["tenant=42", "regions=eu", "regions=uk"], live), { values: { tenant: "42", regions: ["eu", "uk"] } });
 });
+
+test("a generated table is a table to a role: tables: all reads it, a list reads it once it names it, and one not built yet is no missing table", async () => {
+  const r = await roles();
+  const generated = [{ source: "public.daily", columns: [{ name: "tenant_id" }, { name: "requests" }] }];
+  const file = r.parseRolesText("roles:\n  everything:\n    tables: all\n  agent:\n    tables:\n      orders: { columns: [id] }\n  reports:\n    tables:\n      daily: { columns: [requests] }\n", FILE);
+  assert.ok(!("problems" in file), JSON.stringify(file));
+  const g = r.resolveRoles(file, [...copied, ...generated], "/p");
+  assert.ok(!("message" in g));
+  assert.ok(g.get("everything")!.tables.has("public.daily"), "tables: all");
+  assert.ok(!g.get("agent")!.tables.has("public.daily"), "a list that doesn't name it");
+  assert.deepEqual(g.get("reports")!.tables.get("public.daily")?.columns, ["requests"]);
+  // its columns not known until it is built: its name holds, and no column of it is called missing
+  assert.deepEqual(r.roleProblems(file, [...copied, { source: "public.daily", columns: [], pending: true }]), []);
+  assert.ok(r.roleProblems(file, copied).some((p) => /daily/.test(p)), "a table nothing declares is still refused");
+});

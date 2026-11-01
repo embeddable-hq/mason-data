@@ -161,6 +161,7 @@ export function keptText(f: CopyFacts | null, now: number = Date.now(), rows = t
   if (f.phase === "failed") return `its first sync failed: ${(f.error ?? "mason logs says why").split("\n")[0]}`;
   const k = f.kept;
   if (k === undefined) return UNKNOWN;
+  if (k.by === "generated") return k.text;
   if (k.by === "poll") {
     const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)} (${utc(k.syncedAt)})`;
     if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
@@ -186,6 +187,7 @@ export function keptCurrentBy(f: CopyFacts | null): "polling" | "copying again" 
   if (k === undefined) return null;
   if (k.by === "poll") return k.pending === undefined && k.sync.mode === "poll" ? "polling" : null;
   if (k.by === "recopy") return "copying again";
+  if (k.by === "generated") return null;
   return k.state === "streamed" && k.notRunning === null ? "logical replication" : null;
 }
 

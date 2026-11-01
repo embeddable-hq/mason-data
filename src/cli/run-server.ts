@@ -38,6 +38,7 @@ import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabled
 import { userRole } from "./roles.ts";
 import type { RunState } from "./commands.ts";
 import { postgresFacts, postgresLink } from "./pg-url.ts";
+import type { GeneratedStatus } from "../duck/generated.ts";
 import { catalogTable, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
@@ -130,7 +131,9 @@ export interface RunContext {
      *  a file that cannot be read throws, said as the request's failure); merged with the events */
     restarts: () => Restart[];
     /** the JSON paths stored as columns of the copies, and how far each is (src/duck/kept.ts): mason status */
-    jsonPaths?: () => KeptPathStatus[] };
+    jsonPaths?: () => KeptPathStatus[];
+    /** the generated tables (src/duck/generated.ts): mason status's `generatedTables` */
+    generated?: () => GeneratedStatus[] };
 }
 
 /** the request log's shapes (src/duck/requests.ts), as mason status reads them */
@@ -216,6 +219,7 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     sessions: ctx.listener.openSessions(),
     disk: { path: disk.path, freeBytes: disk.freeBytes, copyBytes: bytes, projectedBytes: disk.projectedBytes, ...(disk.error !== undefined ? { error: disk.error } : {}) },
     jsonPaths: ctx.duck.jsonPaths?.() ?? [],
+    generatedTables: ctx.duck.generated?.() ?? [],
     // the roles file as the listener reads it now: its roles by name, and what is wrong with it (every statement of a
     // session with a role is refused while there is)
     ...(ctx.roles ? { roles: rolesState(ctx.roles()) } : {}),

@@ -59,6 +59,8 @@ import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
+import { catalogRows } from "../../duck/analyze.ts";
+import type { Planner } from "../../duck/generated-plan.ts";
 import { ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
 import type { GapId } from "../../duck/gaps.ts";
@@ -342,6 +344,9 @@ export interface PgApiServer {
   close(): Promise<void>;
   /** opens a second socket (`ShareDoor`); closed by its own `close`, or with the server's */
   openShare(door: ShareDoor): Promise<ShareSocket>;
+  /** what a generated table's SQL is asked of (src/duck/generated-plan.ts `Planner`): a statement planned as a session with
+   *  no role, in UTC under `public`, by this listener's catalog as of now */
+  planner(): Planner;
   /** the roles as the listener holds them now, their row filters checked by the catalog Postgres (`checkRoles`): a filter
    *  Postgres refuses is the roles' `problem`. What `/api/state` says of the roles, and `mason user add` is held to */
   roles(): RolesLive;
@@ -2719,6 +2724,17 @@ class Server {
     return s;
   }
 
+  /** src/duck/generated-plan.ts `Planner`: null `grants` so the plan names what it reads, under no role */
+  planner(): Planner {
+    const duck = this.options.duck;
+    if (duck === undefined) throw new Error("a generated table needs the listener's engine (Mason bug: report it)");
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => this.catalog.run(b);
+    return {
+      plan: (text, stmt) => { this.schema(); return duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null); },
+      rows: (sql) => { this.schema(); return catalogRows(catalog, sql); },
+    };
+  }
+
   /** the roles as of now (src/duck/grants.ts RolesLive); the catalog is replaced when they changed, as for the schema */
   rolesNow(): RolesLive {
     this.schema();
@@ -2912,6 +2928,7 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
     get sessions() { return server.sessions.size; },
     roles: () => server.rolesChecked(),
     checkRoles: () => server.checkRoles(),
+    planner: () => server.planner(),
     openSessions: () => server.openSessions(),
     running: () => server.running(),
     cancel: (session, statement) => server.cancelSession(session, statement),
