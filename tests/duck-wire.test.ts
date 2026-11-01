@@ -1946,6 +1946,12 @@ test("latest(x ORDER BY …) is the x of the row that sorts last, by Postgres's 
       // no row (none at all, or none a group's FILTER keeps) is NULL, never the coalesce of no row's operands
       ["SELECT latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id) FROM orders WHERE false", tuple],
       ["SELECT status, latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id DESC) FILTER (WHERE qty > 2) FROM orders GROUP BY 1 ORDER BY 1", sorted],
+      // the same value as a correlated scalar subquery's column (one subquery a cell, guarded by its NULL: a group with
+      // no row is NULL), and read by a function the engine computes (to_json, concat, ||): the picked row's own scale
+      // there too (PR 274's review, round 2)
+      ["SELECT o.status, (SELECT latest(coalesce(CASE WHEN i.qty > 1 THEN i.amount END, 0) ORDER BY i.id) FROM orders i WHERE i.status = o.status) FROM orders o GROUP BY 1 ORDER BY 1", tuple],
+      ["SELECT o.id, (SELECT latest(CASE WHEN i.qty > 1 THEN i.amount ELSE 0 END ORDER BY i.id DESC) FROM orders i WHERE i.id > o.id + 1) AS l FROM orders o ORDER BY 1", sorted],
+      ["SELECT status, to_json(latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id)), concat('v', latest(CASE WHEN qty < 5 THEN amount ELSE 0 END ORDER BY id)), latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id DESC) || '' FROM orders GROUP BY 1 ORDER BY 1", sorted],
     ];
     // of ties the keys leave open, any tied row's value, at that row's scale (ids 1 and 2 are both 'paid')
     assert.ok(["120.00", "0"].includes(String((await answer(c, "SELECT latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY status) FROM orders WHERE status = 'paid'")).rows[0]![0])));

@@ -445,6 +445,9 @@ class Rewriter {
 
   /** the nodes the rewrite made that Postgres analysed as another: typed as that one */
   private readonly typedLike = new WeakMap<Body, AstNode>();
+  /** a scalar subquery's copy that selects one cell of its column's program (`scalarCell`): valid in a grouped SELECT
+   *  wherever the subquery it copies is, as Postgres accepted that one and the cell reads a part of its column */
+  private readonly scalarCells = new WeakSet<Body>();
   /** a row the SELECT list writes as its text (`rowValues`): an output a key sorts by must never be one (`rowKey`) */
   private readonly rowTexts = new WeakSet<Body>();
   /** what `widen` made, and the type it made it: a rule after it reads that type (a date widened to a timestamptz is
@@ -2246,7 +2249,7 @@ class Rewriter {
     // a column of this query Postgres accepted outside the GROUP BY is one the group's key decides: valid, and read
     // through any_value when the walk reaches its cell (decidedByKey)
     if (k === "ColumnRef") { const t = this.typed(n); return (t?.node === "VAR" && t.levelsUp === 0) || isCellRef(n); }
-    if (k === "SubLink") return false;
+    if (k === "SubLink") return this.scalarCells.has(bodyOf(n));
     if (k === "FuncCall" && (bodyOf(n).over !== undefined || this.typed(n)?.node === "AGGREF")) return true;
     const children = Object.values(bodyOf(n)).flatMap((x) => Array.isArray(x) ? x : [x]).filter(isNode);
     return children.every((c) => this.validGrouped(c, groupShapes));
@@ -2316,6 +2319,25 @@ class Rewriter {
         const arms = results.map((r, i) => isNode(r) ? this.exactOf(r, onItsRows(i)) : null);
         if (arms.some((a) => a === null)) return asCell();
         return numeric({ op: "pick", index: cell(index()), args: arms.map((a) => a!.p) });
+      }
+      // a scalar subquery whose column is its own aggregate and that has no GROUP BY (one row, the same for every copy,
+      // whatever its LIMIT, OFFSET, HAVING or DISTINCT then keep): its column's program, each cell the same subquery
+      // selecting that cell (`scalarCell`), so a value kept at its row's scale (latest, min / max of a coalesce) leaves
+      // the subquery as it leaves a SELECT list. Guarded by the column's own NULL (no row kept, or no row aggregated):
+      // the program over NULL cells need not be NULL (coalesce(NULL, 0) is 0). A GROUP BY could make the copies read
+      // other groups' rows: the engine's value, as before
+      case "SubLink": {
+        const target = scalarTarget(n);
+        const q = isNode(b.subselect) ? bodyOf(b.subselect) : {};
+        const agg = target === null ? null : this.typed(target);
+        if (type !== NUMERIC || target === null || agg?.node !== "AGGREF"
+          || (Array.isArray(q.groupClause) && q.groupClause.length > 0)) return asCell();
+        const built = this.exactOf(target, (m, conv) => cell(this.scalarCell(n, m), conv));
+        if (built === null || built.p.op === "cell" || (built.p.op === "pad" && built.p.arg.op === "cell")) return asCell();
+        const kept = caseWhen([[isNotNull(this.clone(target)), intConst(0)]], null);
+        this.synthetic.set(bodyOf(kept), { node: "CASEEXPR", type: INT4, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
+          levelsUp: null, datum: null, qualifier: null, renamed: null });
+        return numeric({ op: "pick", index: cell(this.scalarCell(n, kept)), args: [built.p] });
       }
       case "MinMaxExpr": case "CoalesceExpr": {
         if (type !== NUMERIC) return asCell();
@@ -2613,6 +2635,16 @@ class Rewriter {
       case "CoalesceExpr": case "MinMaxExpr": return args.every(exact);
       default: return false;
     }
+  }
+
+  /** a scalar subquery selecting `m`, a cell of its column's program, in place of its column; typed as `m` */
+  private scalarCell(sublink: AstNode, m: AstNode): AstNode {
+    const sub = this.clone(bodyOf(sublink));
+    bodyOf(sub.subselect as AstNode).targetList = [{ ResTarget: { val: this.clone(m) } }];
+    const own = this.typed(sublink), cellType = this.typed(m);
+    if (own !== null) this.synthetic.set(sub, { ...own, type: cellType?.type ?? own.type, typmod: cellType?.typmod ?? -1, collation: cellType?.collation ?? 0 });
+    this.scalarCells.add(sub);
+    return { SubLink: sub };
   }
 
   /** AN EXPRESSION AS A PROGRAM OVER CELLS (`exactOf`), every cell it reads as exact one the engine holds exactly
@@ -4089,6 +4121,14 @@ class Rewriter {
     if (type === null) return null;
     // a char(n)'s output is padded; its cast to text drops the padding
     if (type === BPCHAR) return asCast ? fn("rtrim", [n]) : null;
+    // a value an aggregate keeps at its row's own scale (latest, min / max of a coalesce over a numeric(p, s) and a
+    // literal), or a scalar subquery's: its program's text, as the SELECT list prints it (`exactColumns`), never the
+    // engine's one DECIMAL's scale. Only those, whose cells are aggregates (or the subquery's copies): any other's
+    // cells may be no grouped expression
+    if (type === NUMERIC && (this.typed(n)?.node === "AGGREF" || kindOf(n) === "SubLink") && this.duckExact(n) && this.approximateValue(n)) {
+      const text = this.exactText(n);
+      if (text !== null) return text;
+    }
     // a float cast to numeric is a DuckDB double; Postgres's numeric holds the float's shortest digits, written plainly
     // (`round(x)::numeric::text` is `25`, never `25.0`; `1e-7` is `0.0000001`)
     if (type === NUMERIC && kindOf(n) === "TypeCast" && (this.typed(n)?.typmod ?? -1) < 0) {
