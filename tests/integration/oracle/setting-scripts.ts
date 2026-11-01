@@ -32,6 +32,12 @@ const ZONED = "SELECT created_at, date_trunc('day', created_at) AS day, current_
 const s = (name: string, ...steps: Step[]): SettingScript => ({ name, steps });
 
 export const SETTING_SCRIPTS: SettingScript[] = [
+  // a type the copy holds as another: a statement parsed in one zone, run after a SET of another. A literal with no zone
+  // is the Parse's offset (Postgres folds it there); a value written in the session's zone is the run's
+  s("a timetz parsed in one zone and run in another", "SET TimeZone = 'Asia/Kolkata'", { prepare: "p", sql: "SELECT id, tz, tz::text FROM public.mapped WHERE tz <> '12:30:00' ORDER BY tz, id" },
+    "SET TimeZone = 'America/New_York'", { run: "p" }, "SET TimeZone = 'UTC'", { run: "p" }),
+  s("a tstzrange parsed in one zone and run in another", { prepare: "p", sql: "SELECT id, rz, mz::text FROM public.mapped ORDER BY id" }, "SET TimeZone = 'Asia/Kolkata'", { run: "p" }),
+  s("a held type parsed and run after a SET", { prepare: "p", sql: "SELECT id, mc, substring(cd::text, 1, 3) FROM public.mapped WHERE mc = '08:00:2b:01:02:03' ORDER BY id" }, "SET application_name = 'a'", { run: "p" }),
   // SET LOCAL outside a block: the warning, its value gone by the next request, nothing reported
   s("SET LOCAL alone", "SET LOCAL application_name = 'loc'", APP, ALL, BESIDE),
   s("SET LOCAL TO DEFAULT alone", "SET application_name = 'a'", "SET LOCAL application_name TO DEFAULT", APP),

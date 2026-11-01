@@ -7,10 +7,13 @@
  */
 import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
+import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
+import { heldName, heldType, isHeldArray } from "./held-types.ts";
+import type { TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
-import { describeKeys, nameUserKeys, resolvedKeys } from "./resolved.ts";
+import { describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { pgTyplen } from "./types.ts";
@@ -220,6 +223,33 @@ export interface PlanOptions {
   walls?: Walls | null;
 }
 
+/** The catalog declares a type the source made with nothing over it (`PgColumn.made`), so what its analysis says is not
+ *  there (an `=`, an order, a field of a composite) the source may have: Mason's gap, never Postgres's refusal. */
+async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code: string | undefined, message: string | undefined, text: string): Promise<StatementError | null> {
+  if (message === undefined || (code !== "42883" && code !== "42809" && code !== "42804" && code !== "42846")) return null;
+  const types = (await catalogRows(catalog, `SELECT t.typname FROM pg_type t WHERE t.typinput::text LIKE '%${HELD_TYPE_INPUT}%'`)).map((r) => r[0]!);
+  const name = types.find((t) => new RegExp(`\\b${t.replace(/[^\w]/g, ".")}\\b`).test(message));
+  if (name === undefined || /^function /.test(message) && !/\(.*\)/.test(message)) return null;
+  return gapRefusal("held-type-compare", `Mason cannot answer this over a column of the type ${name}: it holds the value's text, and has no operator of the type`,
+    "read the value, or its text (x::text); compare, sort or take a field on the source's own columns", text);
+}
+
+/** the functions that read a held value's position, not its value: its type, a count, an array's shape and rows */
+const HELD_READERS = new Set(["1619", "2147", "2803", "3179", "2176", "2091", "2092", "2331", "2334", "730", "2922"]);
+
+/** What a statement does with a value the copy holds as its text that the text cannot answer as the type would: an
+ *  operator but `=` and `<>` of a type whose equal values have one text, a function, a cast to another type. */
+async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: TreeValue, text: string): Promise<StatementError | null> {
+  const uses = heldUses(tree).filter((u) => !(u.kind === "function" && HELD_READERS.has(u.oid)));
+  if (uses.length === 0) return null;
+  const ops = uses.filter((u) => u.kind === "operator");
+  const equality = new Set(ops.length === 0 ? [] : (await catalogRows(catalog, `SELECT oid::text FROM pg_operator WHERE oid IN (${ops.map((u) => Number(u.oid)).join(", ")}) AND oprname IN ('=', '<>')`)).map((r) => r[0]!));
+  const bad = uses.find((u) => !(u.kind === "operator" && equality.has(u.oid) && heldType(u.type)?.textEqual === true && heldType(u.type)?.literal === true && !isHeldArray(u.type)));
+  if (bad === undefined) return null;
+  return gapRefusal("held-type-compare", `Mason cannot answer this over a value of the type ${heldName(bad.type)}: it holds the value's text, and this needs the type's own value`,
+    "read the value, or its text (x::text); = and GROUP BY are answered where equal values have one text", text);
+}
+
 /** A statement's plan. `wireBound`: its rows are bounded by a row count an Execute sets on the wire, which its SQL
  *  does not say (src/duck/rewrite.ts markBounds; the listener asks for it where PlannedSql.unboundedLateral says so).
  *  `grants`: the session's role (src/duck/grants.ts), held after the analysis; null for a session with no role where
@@ -238,6 +268,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     const unbuilt = missing === undefined ? undefined : copies().find((c) => c.kept?.by === "generated" && c.phase !== "copied" && (c.source === missing || c.source === `public.${missing}`));
     if (unbuilt?.kept?.by === "generated") throw gapRefusal("generated-not-built", `the generated table ${unbuilt.source} is not built yet: ${unbuilt.kept.text}`, "mason status says how far it is", text);
     const hint = missing !== undefined ? missingRelationHint(missing, copies()) : f.H;
+    const made = await madeTypeRefusal(catalog, f.C, f.M, text);
+    if (made !== null) throw made;
     throw new StatementError({ code: f.C ?? "XX000", message: f.M ?? "Postgres refused the statement", ...(f.D ? { detail: f.D } : {}), ...(hint ? { hint } : {}),
       ...(f.P ? { position: Number(f.P) } : {}) }, text);
   }
@@ -254,6 +286,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       throw new StatementError(fields, text, e.gap);
     }
   }
+  const held = await heldRefusal(catalog, analysis.tree, text);
+  if (held !== null) throw held;
   // THE ROLE (src/duck/grants.ts): the tables and columns Postgres's analysis says the statement reads, held to the
   // session's role — after Postgres's own refusal and the views' expansion (the check sees the tables a view reads),
   // before the rewrite (a role's refusal before a Mason gap's). The reads stay on the plan: an Execute under a role
@@ -325,6 +359,14 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   let tree, dropLast, exact, clock, jsonReads, unboundedLateral;
   // a table's row the source has otherwise (copied in part: no source OID for it) is not the source's row
   const sourceRows = new Map([...rowTypes].filter(([oid]) => userTypes.has(catalogTypes.get(oid) ?? "")));
+  // IS [NOT] NULL of a composite reads its fields (a row of NULLs IS NULL), which the copy's text does not
+  if (used.size > 0) {
+    const rows = await catalogRows(catalog, `SELECT oid::text FROM pg_type WHERE typinput::text LIKE '${HELD_ROW_INPUT}%'`);
+    if (rows.length > 0 && nullTested(analysis.tree, new Set(rows.map((r) => Number(r[0]))))) {
+      throw gapRefusal("held-type-compare", "IS [NOT] NULL of a composite column is not supported by Mason: it holds the value's text, and Postgres reads each of its fields",
+        "read x::text, or the source's own columns", text);
+    }
+  }
   // the stored JSON paths the statement's JSON reads may be answered from (src/duck/kept-route.ts)
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
   const keyCounts = await distinctKeys(catalog, analysis.tree);

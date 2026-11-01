@@ -1,19 +1,19 @@
 {
-  "statements": 3669,
+  "statements": 5686,
   "mason": {
-    "exact": 3498,
-    "decided": 41,
-    "refused": 130,
+    "exact": 5208,
+    "decided": 50,
+    "refused": 428,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1054,
-    "name": 734,
-    "refused": 784,
-    "value": 491,
-    "rows": 268,
+    "exact": 1530,
+    "name": 1228,
+    "refused": 997,
+    "value": 754,
+    "rows": 530,
     "text": 153,
-    "other": 185
+    "other": 494
   },
   "gaps": {
     "copyPhase": {
@@ -28,6 +28,7 @@
         "explain-option": { "planted": 1, "natural": 0 },
         "extract-julian": { "planted": 1, "natural": 0 },
         "format-specifiers": { "planted": 1, "natural": 0 },
+        "held-type-compare": { "planted": 1, "natural": 297 },
         "inet-order": { "planted": 0, "natural": 20 },
         "infinite-extract": { "planted": 0, "natural": 18 },
         "infinite-interval": { "planted": 1, "natural": 0 },
@@ -67,6 +68,7 @@
       },
       "decided": {
         "char-n-minmax": { "planted": 0, "natural": 2 },
+        "domain-column": { "planted": 1, "natural": 8 },
         "float-last-digit": { "planted": 0, "natural": 3 },
         "float-overflow": { "planted": 0, "natural": 3 },
         "fromless-text-order": { "planted": 1, "natural": 0 },
@@ -86,7 +88,7 @@
       }
     },
     "everyAsk": {
-      "asked": 26574,
+      "asked": 39158,
       "refused": {
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
@@ -98,6 +100,7 @@
         "explain-option": { "planted": 3, "natural": 0 },
         "extract-julian": { "planted": 3, "natural": 0 },
         "format-specifiers": { "planted": 3, "natural": 0 },
+        "held-type-compare": { "planted": 3, "natural": 891 },
         "inet-order": { "planted": 0, "natural": 60 },
         "infinite-extract": { "planted": 0, "natural": 54 },
         "infinite-interval": { "planted": 3, "natural": 0 },
@@ -137,6 +140,7 @@
       },
       "decided": {
         "char-n-minmax": { "planted": 0, "natural": 6 },
+        "domain-column": { "planted": 3, "natural": 24 },
         "float-last-digit": { "planted": 0, "natural": 8 },
         "float-overflow": { "planted": 0, "natural": 9 },
         "fromless-text-order": { "planted": 3, "natural": 0 },

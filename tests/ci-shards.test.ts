@@ -132,7 +132,8 @@ function legsFolder(t: { after(f: () => void): void }): { dir: string; reports: 
   const whole = statements.map((q) => ({ id: statementId(q), name: q.name }));
   const leg = (n: 1 | 2): LegReport => ({ leg: n, of: 2, whole, asked: Object.fromEntries(PHASES.map((p) => [p, [whole[n - 1]!.id]])), stages: n === 1 ? Object.fromEntries(STAGES.map((s) => [s, 1])) : {}, shaped: 0,
     tallies: { statements: 1, mason: n === 1 ? fixture.mason : {}, duckdb: n === 1 ? fixture.duckdb : {} }, copyPhase: { refused: {}, decided: {} },
-    everyAsk: { refused: {}, decided: n === 1 ? Object.fromEntries(Object.keys(GAPS).map((id) => [id, { planted: 1, natural: 0 }])) : {} }, decisions: [], verified: n === 1 ? [...VERIFIED.keys()] : [], differences: 0 });
+    everyAsk: { refused: {}, decided: n === 1 ? Object.fromEntries(Object.keys(GAPS).map((id) => [id, { planted: 1, natural: 0 }])) : {} }, decisions: [], verified: n === 1 ? [...VERIFIED.keys()] : [], names: n === 1 ? Object.fromEntries(VERIFIED) : {}, asks: 3,
+    measured: { what: "w", machine: "linux x64", postgres: "PostgreSQL 18 on x86_64-pc-linux-gnu", collation: "en_US.utf8 (c)", shapes: true }, differences: 0 });
   return { dir, reports: [leg(1), leg(2)] };
 }
 const write = (dir: string, reports: readonly LegReport[]): void => { for (const r of reports) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r)); };
@@ -154,6 +155,12 @@ test("scripts/oracle-legs.ts run as CI runs it: exit 0 on legs that are the whol
   assert.equal(none.status, 1, none.out);
   assert.match(none.out, /the reports are of leg\(s\) none/);
   assert.equal(program("oracle-legs.ts", []).status, 2);
+  // --write: a usage error is 2; a folder with no legs writes nothing (the tree's files are untouched) and is 1
+  assert.equal(program("oracle-legs.ts", ["--write"]).status, 2);
+  assert.equal(program("oracle-legs.ts", ["--write", dir, "extra"]).status, 2);
+  const nothing = program("oracle-legs.ts", ["--write", dir]);
+  assert.equal(nothing.status, 1, nothing.out);
+  assert.match(nothing.out, /the reports are of leg\(s\) none[\s\S]*nothing written/);
 });
 
 test("scripts/ci-shards.ts run as CI runs it: files, needs and verify each end with their exit code", (t) => {

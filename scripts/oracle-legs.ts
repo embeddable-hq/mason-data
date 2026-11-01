@@ -10,6 +10,18 @@
  *
  *   node scripts/oracle-legs.ts <folder>    exit 0: the legs are the whole, and hold what a whole run holds; exit 1: not
  *
+ * WHAT A WHOLE RUN REGENERATES COMES FROM THE LEGS TOO, since no session runs the whole oracle locally (CLAUDE.md "Local
+ * gates"): each leg reports its part of src/duck/verified.ts (the keys and what each names) and of the fixture's
+ * tallies, and
+ *
+ *   node scripts/oracle-legs.ts --write <run-id | folder>
+ *
+ * downloads that CI run's `ran-oracle-*` artifacts (`gh run download`), once the run has finished and only when it is
+ * of the commit checked out (`runProblems`), or reads a folder of them (whose commit nothing checks), and writes both
+ * files as a whole run's UPDATE_VERIFIED=1 and UPDATE_FIXTURE=1 would, through the same two writers (`verifiedText`,
+ * `fixtureOf`) and in the same order (`writeFromLegs`): exit 0 when what the legs measured now holds, 1 when anything
+ * else is wrong (nothing is written when the legs are not the whole, or are another commit's), 2 on a usage error.
+ *
  * The statements are named by what each leg ASKED, recorded where it asks, against the whole list each leg computed
  * before filtering: the check does not trust `legOf`. A whole run, and everything that regenerates a file
  * (`UPDATE_VERIFIED=1`, `UPDATE_FIXTURE=1`), stays one process without IT_ORACLE_LEG; a leg refuses to run under them.
@@ -20,14 +32,16 @@
  * builtins (tests/conventions.test.ts).
  */
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SHARDS, reportName } from "./ci-layout.ts";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import { staleDecisions } from "../tests/integration/oracle/known.ts";
-import type { GapCounts, GapTally } from "../tests/integration/oracle/gap-tally.ts";
+import { fixtureTally, fixtureText, type GapCounts, type GapTally } from "../tests/integration/oracle/gap-tally.ts";
 
 /** the three times every statement is asked; the shapes and the DuckDB-alone pass belong to the first */
 export const PHASES = ["after the copy", "after changes round 1", "after changes round 2"] as const;
@@ -38,6 +52,8 @@ export const FIRST_LEG_RUNS_STAGES = 1;
 
 export type Tallies = { statements: number; mason: Record<string, number>; duckdb: Record<string, number> };
 export interface Decision { sql: string; why: string; machineFloat?: true; differed: boolean; decided: boolean }
+/** what the fixture says the DuckDB-alone tallies were measured on */
+export interface Measured { what: string; machine: string; postgres: string; collation: string; shapes: boolean }
 export interface LegReport {
   leg: number;
   of: number;
@@ -53,6 +69,11 @@ export interface LegReport {
   everyAsk: GapTally;
   decisions: Decision[];
   verified: string[];
+  /** what each of `verified` names, in SQL's words (src/duck/resolved.ts describeKeys): src/duck/verified.ts's values */
+  names: Record<string, string>;
+  /** every ask of the leg, the three phases and the shapes: the fixture's `gaps.everyAsk.asked` is the legs' sum */
+  asks: number;
+  measured: Measured;
   differences: number;
 }
 
@@ -150,8 +171,12 @@ export function verifiedDiff(verified: ReadonlySet<string>, listed: ReadonlyMap<
   return { added: [...verified].filter((k) => !listed.has(k)).sort(), dropped: [...listed.keys()].filter((k) => !verified.has(k)).sort() };
 }
 
-/** What a whole run asserts at its end, of the legs together. A decision differed, or decided a statement, in any leg. */
-export function wholeRunProblems(reports: readonly LegReport[], fixture: Pick<Tallies, "mason" | "duckdb">, listed: ReadonlyMap<string, string>): string[] {
+/** the command that writes src/duck/verified.ts and the fixture from a CI run's legs (in CI, GITHUB_RUN_ID names this one) */
+export const WRITE_COMMAND = `\`node scripts/oracle-legs.ts --write ${process.env.GITHUB_RUN_ID ?? "<run-id>"}\` (from this run's oracle legs; never a local whole run)`;
+
+/** What a whole run asserts BEFORE it writes src/duck/verified.ts: no decided difference that no longer differs (a
+ *  decision differed, or decided a statement, in any leg), and no gap that no statement meets */
+export function staleOrDead(reports: readonly LegReport[]): string[] {
   const problems: string[] = [];
   const decisions = new Map<string, Decision>();
   for (const r of reports) for (const d of r.decisions) {
@@ -162,10 +187,16 @@ export function wholeRunProblems(reports: readonly LegReport[], fixture: Pick<Ta
   problems.push(...staleDecisions(all, new Set(all.filter((d) => d.differed)), new Set(all.filter((d) => d.decided))).map((s) => `a decided difference that no longer differs: ${s}`));
   const dead = deadGaps(sumTally(reports.map((r) => r.everyAsk)));
   if (dead.length > 0) problems.push(`src/duck/gaps.ts entries no oracle statement meets: ${dead.join(", ")}. Add a statement that does (oracle/gap-cases.ts), or remove the entry`);
+  return problems;
+}
+
+/** What a whole run asserts at its end, of the legs together. */
+export function wholeRunProblems(reports: readonly LegReport[], fixture: Pick<Tallies, "mason" | "duckdb">, listed: ReadonlyMap<string, string>): string[] {
+  const problems = staleOrDead(reports);
   const { added, dropped } = verifiedDiff(new Set(reports.flatMap((r) => r.verified)), listed);
-  if (added.length + dropped.length > 0) problems.push(`src/duck/verified.ts is not what the legs verified: added ${JSON.stringify(added.slice(0, 20))}, dropped ${JSON.stringify(dropped.slice(0, 20))}. Regenerate with a whole run's UPDATE_VERIFIED=1 and read the diff`);
+  if (added.length + dropped.length > 0) problems.push(`src/duck/verified.ts is not what the legs verified: added ${JSON.stringify(added.slice(0, 20))}, dropped ${JSON.stringify(dropped.slice(0, 20))}. Regenerate with ${WRITE_COMMAND} and read the diff`);
   const moved = movedTallies(sumTallies(reports.map((r) => r.tallies)), fixture);
-  if (moved.length > 0) problems.push(`tests/fixtures/oracle-duckdb-alone.json is not what the legs measured: ${moved.join(", ")}. Regenerate with a whole run's UPDATE_FIXTURE=1 and read the diff`);
+  if (moved.length > 0) problems.push(`tests/fixtures/oracle-duckdb-alone.json is not what the legs measured: ${moved.join(", ")}. Regenerate with ${WRITE_COMMAND} and read the diff`);
   return problems;
 }
 
@@ -176,12 +207,101 @@ export function foldProblems(reports: readonly LegReport[], want: number, fixtur
   return partition.length > 0 ? partition : wholeRunProblems(reports, fixture, listed);
 }
 
+/** src/duck/verified.ts's text: its head comment kept, then every key verified, sorted, with what it names. The one
+ *  writer of the file, a whole run's UPDATE_VERIFIED=1 and `--write` alike. */
+export function verifiedText(current: string, verified: Iterable<string>, names: ReadonlyMap<string, string>): string {
+  const head = current.split("export const VERIFIED")[0]!;
+  return `${head}export const VERIFIED: ReadonlyMap<string, string> = new Map([\n` +
+    [...new Set(verified)].sort().map((k) => `  [${JSON.stringify(k)}, ${JSON.stringify(names.get(k) ?? k)}],\n`).join("") + "]);\n";
+}
+
+/** tests/fixtures/oracle-duckdb-alone.json's content: its one shape, a whole run's UPDATE_FIXTURE=1 and `--write` alike
+ *  (its text is gap-tally.ts fixtureText's) */
+export const fixtureOf = (tallies: Tallies, copyPhase: GapTally, everyAsk: GapTally, asked: number, measured: Measured) =>
+  ({ ...tallies, gaps: { copyPhase: fixtureTally(copyPhase), everyAsk: { asked, ...fixtureTally(everyAsk) } }, measured });
+
+/** The two files a whole run regenerates, from the legs' reports; or why the reports cannot give them. */
+export function filesFromLegs(reports: readonly LegReport[], want: number, verifiedNow: string): { verified: string; fixture: string } | { problems: string[] } {
+  const partition = partitionProblems(reports, want);
+  if (partition.length > 0) return { problems: partition };
+  const old = reports.filter((r) => r.names === undefined || r.asks === undefined || r.measured === undefined).map((r) => r.leg);
+  if (old.length > 0) return { problems: [`the report of leg(s) ${old.join(", ")} has no names, asks or measured: the run predates \`--write\`. Run CI again on a commit that has it`] };
+  const measured = reports.map((r) => JSON.stringify(r.measured));
+  if (new Set(measured).size > 1) return { problems: [`the legs measured on different machines or Postgres: ${measured.join(" and ")}`] };
+  const names = new Map(reports.flatMap((r) => Object.entries(r.names)));
+  const fixture = fixtureOf(sumTallies(reports.map((r) => r.tallies)), sumTally(reports.map((r) => r.copyPhase)), sumTally(reports.map((r) => r.everyAsk)),
+    reports.reduce((n, r) => n + r.asks, 0), reports[0]!.measured);
+  return { verified: verifiedText(verifiedNow, reports.flatMap((r) => r.verified), names), fixture: fixtureText(fixture) };
+}
+
+/** the legs' reports in a folder, or in its folders one deep (`gh run download` puts each artifact in one of its own) */
+export function readReports(dir: string): LegReport[] {
+  if (!fs.existsSync(dir)) return [];
+  const isReport = (f: string): boolean => f === reportName(Number(/\d+/.exec(f)?.[0]));
+  const found = fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => e.isDirectory()
+    ? fs.readdirSync(path.join(dir, e.name)).filter(isReport).map((f) => path.join(dir, e.name, f))
+    : isReport(e.name) ? [path.join(dir, e.name)] : []);
+  return found.map((f) => JSON.parse(fs.readFileSync(f, "utf8")) as LegReport);
+}
+
+export const VERIFIED_FILE = "src/duck/verified.ts", FIXTURE_FILE = "tests/fixtures/oracle-duckdb-alone.json";
+
+/** Why a run's legs are not this tree's, from `gh run view <id> --json headSha,status,conclusion`: a run of another
+ *  commit (an earlier push, another branch) measured another tree, and a run still going may have no legs yet */
+export function runProblems(view: { headSha?: string; status?: string; conclusion?: string | null }, headSha: string): string[] {
+  const problems: string[] = [];
+  if (view.headSha !== headSha) problems.push(`the run is of commit ${view.headSha ?? "unknown"}, where this checkout is at ${headSha}: use the run of this commit's push (gh run list --commit ${headSha}), or check out ${view.headSha ?? "its commit"}`);
+  if (view.status !== "completed") problems.push(`the run has not finished (${view.status ?? "unknown"}): wait for it, then run this again`);
+  return problems;
+}
+
+/** `--write`: the files under `root` from the reports in `dir`, in a whole run's order, and what to say. Nothing is
+ *  written when the legs are not the whole. The fixture is written first, as a whole run writes it before its other
+ *  assertions; then a stale decision or a dead gap writes no src/duck/verified.ts, as a whole run fails on them before
+ *  it writes the file; a statement that differs is said after both, as a whole run fails on it after writing. */
+export function writeFromLegs(dir: string, root: string): { code: 0 | 1; out: string[]; err: string[] } {
+  const reports = readReports(dir);
+  const files = filesFromLegs(reports, SHARDS.oracle, fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"));
+  if ("problems" in files) return { code: 1, out: [], err: [...files.problems.map((p) => `oracle legs: ${p}`), "oracle legs: nothing written"] };
+  const out: string[] = [];
+  const put = (file: string, text: string): void => {
+    const was = fs.readFileSync(path.join(root, file), "utf8");
+    if (was !== text) fs.writeFileSync(path.join(root, file), text);
+    out.push(`oracle legs: ${was === text ? "unchanged" : "wrote"} ${file}`);
+  };
+  put(FIXTURE_FILE, files.fixture);
+  const before = staleOrDead(reports);
+  if (before.length > 0) return { code: 1, out, err: [...before.map((p) => `oracle legs: ${p}`), `oracle legs: ${VERIFIED_FILE} not written, as a whole run writes it only past these`] };
+  put(VERIFIED_FILE, files.verified);
+  const differ = reports.reduce((n, r) => n + r.differences, 0);
+  if (differ > 0) return { code: 1, out, err: [`oracle legs: written, and still wrong: ${differ} statement(s) answered differently from Postgres in the legs: each leg's log lists them`] };
+  out.push("oracle legs: read the diff, then commit both files");
+  return { code: 0, out, err: [] };
+}
+
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const dir = process.argv[2];
-  if (dir === undefined) { console.error("usage: scripts/oracle-legs.ts <folder of duck-oracle-leg-<n>.json>"); process.exit(2); }
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const reports = (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((f) => f === reportName(Number(/\d+/.exec(f)?.[0])))
-    .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as LegReport);
+  if (process.argv[2] === "--write") {
+    const from = process.argv[3];
+    if (from === undefined || process.argv.length > 4) { console.error("usage: scripts/oracle-legs.ts --write <run-id | folder of the ran-oracle-* artifacts>"); process.exit(2); }
+    let dir = from;
+    if (/^\d+$/.test(from) && !fs.existsSync(from)) {
+      const view = JSON.parse(execFileSync("gh", ["run", "view", from, "--json", "headSha,status,conclusion"], { cwd: root, encoding: "utf8" })) as Parameters<typeof runProblems>[0];
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+      const wrong = runProblems(view, head);
+      if (wrong.length > 0) { for (const p of wrong) console.error(`oracle legs: run ${from}: ${p}`); console.error("oracle legs: nothing written"); process.exit(1); }
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-legs-"));
+      console.log(`oracle legs: downloading the ran-oracle-* artifacts of run ${from} into ${dir}`);
+      execFileSync("gh", ["run", "download", from, "--pattern", "ran-oracle-*", "--dir", dir], { cwd: root, stdio: "inherit" });
+    } else console.log(`oracle legs: ${dir} is a folder, not a run: nothing checks that its legs ran on this checkout's commit`);
+    const { code, out, err } = writeFromLegs(dir, root);
+    for (const l of out) console.log(l);
+    for (const l of err) console.error(l);
+    process.exit(code);
+  }
+  const dir = process.argv[2];
+  if (dir === undefined) { console.error("usage: scripts/oracle-legs.ts <folder of duck-oracle-leg-<n>.json>, or --write <run-id | folder>"); process.exit(2); }
+  const reports = readReports(dir);
   const fixture = JSON.parse(fs.readFileSync(path.join(root, "tests/fixtures/oracle-duckdb-alone.json"), "utf8")) as Pick<Tallies, "mason" | "duckdb">;
   const problems = foldProblems(reports, SHARDS.oracle, fixture, VERIFIED);
   for (const r of reports) console.log(`oracle leg ${r.leg}: ${r.tallies.statements} tallied of ${r.whole.length} statements, ${r.shaped} in other shapes, ${r.differences} differ; stages: ${Object.keys(r.stages).join(", ") || "none"}`);
