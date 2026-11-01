@@ -158,6 +158,10 @@ const REWRITTEN: Shape[] = [
   // the join's alias variables; a computed key one value; a key of no bound keeps its top N
   { name: "a top N over USING, sorted", sql: "SELECT id, o.meta, o.notes, c.name FROM orders o JOIN customers c USING (id) ORDER BY o.created_at DESC LIMIT 100" },
   { name: "a top N over a FULL USING, by the merged column", sql: "SELECT id, o.meta, c.name FROM orders o FULL JOIN customers c USING (id) ORDER BY id DESC LIMIT 100" },
+  // FETCH … WITH TIES (issue 192): over joins ranked on row numbers and keys, the list fetched for the rows kept; one
+  // table ranked as it is (src/duck/ties.ts)
+  { name: "a top N with its ties over joins: every table's columns", sql: "SELECT c.*, o.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id ORDER BY o.created_at DESC FETCH FIRST 100 ROWS WITH TIES" },
+  { name: "a top N with its ties over one wide table", sql: "SELECT * FROM orders o ORDER BY o.created_at DESC FETCH FIRST 100 ROWS WITH TIES" },
   // a subquery in the select list (issue 134, step 5): the rows chosen on keys alone, the subquery run for the 100 chosen
   { name: "a top N with a subquery in its list, over a join", sql: "SELECT o.id, o.meta, (SELECT count(*) FROM order_items i WHERE i.order_id = o.id) AS items, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.created_at DESC LIMIT 100" },
   { name: "a top N with a subquery in its list, one table", sql: "SELECT o.id, o.meta, (SELECT count(*) FROM order_items i WHERE i.order_id = o.id) AS items FROM orders o ORDER BY o.created_at DESC LIMIT 100" },

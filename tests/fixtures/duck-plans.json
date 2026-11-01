@@ -378,6 +378,54 @@
       "full_sort": false
     },
     {
+      "name": "a top N with its ties over joins: every table's columns",
+      "sql": "SELECT c.*, o.* FROM customers c LEFT JOIN orders o ON c.id = o.customer_id ORDER BY o.created_at DESC FETCH FIRST 100 ROWS WITH TIES",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        PROJECTION",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.orders",
+        "            PROJECTION",
+        "              HASH_JOIN",
+        "                BLOCKWISE_NL_JOIN",
+        "                  PROJECTION",
+        "                    WINDOW",
+        "                      HASH_JOIN",
+        "                        TABLE_SCAN public.orders",
+        "                        TABLE_SCAN public.customers",
+        "                  PROJECTION",
+        "                    DUMMY_SCAN",
+        "                TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "a top N with its ties over one wide table",
+      "sql": "SELECT * FROM orders o ORDER BY o.created_at DESC FETCH FIRST 100 ROWS WITH TIES",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        BLOCKWISE_NL_JOIN",
+        "          PROJECTION",
+        "            WINDOW",
+        "              TABLE_SCAN public.orders",
+        "          PROJECTION",
+        "            DUMMY_SCAN"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
       "name": "a top N with a subquery in its list, over a join",
       "sql": "SELECT o.id, o.meta, (SELECT count(*) FROM order_items i WHERE i.order_id = o.id) AS items, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY o.created_at DESC LIMIT 100",
       "plan": [
@@ -2158,16 +2206,16 @@
         "        ORDER_BY",
         "          PROJECTION",
         "            PROJECTION",
-        "              ORDER_BY",
+        "              BLOCKWISE_NL_JOIN",
         "                PROJECTION",
-        "                  FILTER",
+        "                  WINDOW",
         "                    PROJECTION",
-        "                      WINDOW",
+        "                      HASH_GROUP_BY",
         "                        PROJECTION",
-        "                          HASH_GROUP_BY",
-        "                            PROJECTION",
-        "                              PROJECTION",
-        "                                TABLE_SCAN public.orders"
+        "                          PROJECTION",
+        "                            TABLE_SCAN public.orders",
+        "                PROJECTION",
+        "                  DUMMY_SCAN"
       ],
       "calls": [],
       "sends": [],

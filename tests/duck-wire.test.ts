@@ -3006,6 +3006,81 @@ test("FETCH … WITH TIES answers as Postgres at every depth: one resolver for i
   } finally { await c.end(); }
 });
 
+// THE FETCH AFTER THE RANK (issue 134 step 7): a WITH TIES over joined tables carried every wide column through its
+// window; ranked on row numbers and keys alone, the list fetched for the rows kept (src/duck/late.ts `rankedRows`)
+test("FETCH … WITH TIES over joined tables ranks on row numbers and keys, the list fetched after (issue 134, task F)", async () => {
+  const c = await client();
+  const sent = async (sql: string, values?: unknown[]): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql, values);
+    return logged.findLast((l) => l.startsWith("statement: ")) ?? "";
+  };
+  const FETCHED = /rank\(\) OVER \(.*\) AS __mason_rank.*\) AS __mason_lr.*\) AS __mason_late LEFT JOIN \w+ AS (\w+) ON \1\.rowid = __mason_late\.__mason_r1/;
+  try {
+    const differ: string[] = [];
+    const fetched = [
+      "SELECT l.id, l.j, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c DESC FETCH FIRST 3 ROWS WITH TIES",
+      "SELECT l.id, l.k / 7.0 AS q, l.j, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, l.j, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c + 40 ORDER BY c.name NULLS FIRST FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.*, c.* FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3, 1 FETCH FIRST 3 ROWS WITH TIES",
+      "SELECT *, l.k % 5 AS m FROM late l JOIN late_c c ON c.id = l.c ORDER BY 7 DESC FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.id, l.j FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c DESC, l.id OFFSET 1 FETCH FIRST 3 ROWS WITH TIES",
+      "SELECT x.id, y.id, y.j FROM late x JOIN late y ON y.c = x.c WHERE x.id < 60 ORDER BY x.c FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.k % 5 AS m, l.id, lc.name FROM late l JOIN late_c lc ON lc.id = l.c ORDER BY m FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.k % 5 AS m, l.id, lc.name FROM late l JOIN late_c lc ON lc.id = l.c ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.k % 5 AS m, l.id, lc.name FROM late l JOIN late_c lc ON lc.id = l.c ORDER BY l.k % 5 FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT a.id, a.status, l.j FROM accounts a JOIN late l ON l.id = a.id ORDER BY a.status DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT q.id, q.v, l.j FROM jq q JOIN late l ON l.id = q.id ORDER BY q.v -> 'k' FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT t.id, t.s, l.j FROM texts t JOIN late l ON l.id = t.id ORDER BY t.s COLLATE \"und-x-icu\" FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT t.id, t.s, l.j FROM texts t JOIN late l ON l.id = t.id ORDER BY t.s COLLATE \"C\" FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT t.id, t.s, l.j FROM texts t JOIN late l ON l.id = t.id ORDER BY t.s FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT n.id, n.n, l.j FROM nullish n JOIN late l ON l.id = n.id ORDER BY n.n DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT n.id, n.n, l.j FROM nullish n JOIN late l ON l.id = n.id ORDER BY n.n NULLS FIRST FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT n.id, n.n, l.j FROM nullish n JOIN late l ON l.id = n.id ORDER BY n.n IS NULL, n.n FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, c.name AS k FROM late l LEFT JOIN late_c c ON c.id = l.c + 40 ORDER BY k IS NULL, k DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c + 40 ORDER BY c.name IS NULL, 2 DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, l.j, c.name FROM late l JOIN late_c c ON c.id = l.c WHERE l.id < 0 ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT l.id, l.j, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c DESC OFFSET 100000 FETCH FIRST 2 ROWS WITH TIES",
+    ];
+    const answered = [
+      ...fetched,
+      // FROM items fetched by their row numbers, folded, carried, merged; a list subquery
+      "SELECT l.id, d.name, d.one FROM late l LEFT JOIN (SELECT id, name, 1 AS one FROM late_c WHERE id > 1) d ON d.id = l.c ORDER BY l.c FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT * FROM (SELECT l.id, l.j, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY t.name FETCH FIRST 1 ROWS WITH TIES",
+      "WITH w AS (SELECT id, name FROM late_c WHERE id > 1) SELECT l.id, w.name FROM late l JOIN w ON w.id = l.c ORDER BY w.name DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT c, p.line, p.note, l.id FROM late_p p JOIN late l USING (c) ORDER BY c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, (SELECT lc.name FROM late_c lc WHERE lc.id = l.c) AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES",
+      // one table, grouped, and what stays the rank form
+      "SELECT l.id, l.j FROM late l ORDER BY l.c DESC, l.id FETCH FIRST 3 ROWS WITH TIES",
+      "SELECT r.id, r.\"RowId\", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.\"RowId\" FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, row_number() OVER (ORDER BY l.id) AS rn FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES",
+      ...["1", "c", "l.c", "2 DESC", "n DESC", "count(*) DESC"].map((k) => `SELECT l.c, count(*) AS n FROM late l JOIN late_c c ON c.id = l.c GROUP BY l.c ORDER BY ${k} FETCH FIRST 2 ROWS WITH TIES`),
+    ];
+    for (const sql of answered) { const d = await tiesAlike(c, sql); if (d !== null) differ.push(d); }
+    // a prepared count, run again after a SET
+    const P = "SELECT l.id, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c FETCH FIRST $1 ROWS WITH TIES";
+    for (const values of [[1], [2], [null]]) { const d = await tiesAlike(c, P, values); if (d !== null) differ.push(d); }
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    { const d = await tiesAlike(c, P, [2]); if (d !== null) differ.push(d); }
+    await c.query("SET TimeZone = 'UTC'");
+    assert.deepEqual(differ, [], `each of these answers unlike Postgres:\n${differ.join("\n")}`);
+    // the rows chosen on row numbers and keys, the list fetched after the rank filter
+    for (const sql of fetched) assert.match(await sent(sql), FETCHED, sql);
+    assert.match(await sent(P, [2]), FETCHED, P);
+    // what stays the rank form: a "RowId" column, a whole row, a window in the list, a grouped query
+    for (const sql of [
+      "SELECT r.id, r.\"RowId\", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.\"RowId\" FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, row_number() OVER (ORDER BY l.id) AS rn FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.c, count(*) AS n FROM late l JOIN late_c c ON c.id = l.c GROUP BY l.c ORDER BY n FETCH FIRST 3 ROWS WITH TIES",
+    ]) assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
+    // a value that raises in a row the rank leaves out: Postgres postpones the cast past its sort here
+    // (make_sort_input_target) and Mason computes it for the rows kept, so both answer; where the row is kept (id 2000,
+    // in the group of c = 0) both raise
+    for (const sql of ["SELECT l.id, (l.j ->> 'n')::int AS n, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c DESC FETCH FIRST 1 ROWS WITH TIES",
+      "SELECT l.id, (l.j ->> 'n')::int AS n, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY l.c FETCH FIRST 1 ROWS WITH TIES"]) assert.equal(await tiesAlike(c, sql), null, sql);
+  } finally { await c.end(); }
+});
+
 test("a computed key and a merged column in a prepared statement run after a SET, and in two session zones", async () => {
   const c = await client();
   try {

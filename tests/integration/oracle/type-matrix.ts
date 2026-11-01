@@ -1265,6 +1265,44 @@ function* matrix(): Generator<Matrixed> {
   // TIES: which of equal rows a LIMIT keeps is defined by neither, so the limit falls where the tie ends (three rows
   // of made = 01:00, four with the NULLs below them), and the rows are held as a set
   yield { ...q("top N over joins: ties, the limit where they end", "SELECT a.id, a.note, p.note FROM top_a a LEFT JOIN top_a p ON p.id = a.parent WHERE a.made IS NOT NULL ORDER BY a.made DESC LIMIT 3"), inOrder: false };
+  // FETCH … WITH TIES (issue 192): its keys the sort pass's, its rank in no row at any depth, a set operation, the count
+  // and offset Postgres's, numerics exact, and over joins the list fetched after the rank (held as sets: ties have no order)
+  const TIES_A = "SELECT a.id, a.made FROM top_a a ORDER BY a.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES";
+  yield q("with ties: a computed output beside a * by number", "SELECT count(*) FROM (SELECT a.*, a.id % 3 AS m, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY 6 FETCH FIRST 2 ROWS WITH TIES) s");
+  yield q("with ties: * beside a computed output, one table", "SELECT count(*) FROM (SELECT *, s.n % 2 AS m FROM star_o s ORDER BY 7 FETCH FIRST 1 ROWS WITH TIES) x");
+  yield q("with ties: UNION ALL by number", "SELECT count(*) FROM (SELECT a.id % 3 AS m, a.id FROM top_a a UNION ALL SELECT b.id % 3, b.id FROM top_b b ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES) s");
+  yield q("with ties: UNION by a text output's name, the database's collation", "SELECT count(*) FROM (SELECT name FROM star_o UNION SELECT name FROM star_b ORDER BY name NULLS FIRST FETCH FIRST 2 ROWS WITH TIES) s");
+  yield q("with ties: EXCEPT by number DESC", "SELECT count(*) FROM (SELECT b.a_id FROM top_b b EXCEPT SELECT a.parent FROM top_a a ORDER BY 1 DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES) s");
+  yield q("with ties: its rank in no row (a derived table beside a column)", `SELECT s.*, 1 AS one FROM (${TIES_A}) s ORDER BY s.id`);
+  yield q("with ties: joined after", `SELECT s.id, s.made, b.id AS b FROM (${TIES_A}) s JOIN top_b b ON b.a_id = s.id ORDER BY 1, 3`);
+  yield q("with ties: in a CTE read beside a column", `WITH t AS (${TIES_A}) SELECT t.*, t.id * 2 AS twice FROM t ORDER BY t.id`);
+  yield q("with ties: IN and EXISTS", "SELECT (SELECT count(*) FROM top_b WHERE a_id IN (SELECT a.id FROM top_a a ORDER BY a.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES)), EXISTS (SELECT a.id FROM top_a a ORDER BY a.made FETCH FIRST 1 ROWS WITH TIES)");
+  yield q("with ties: a UNION ALL arm", `SELECT count(*) FROM ((${TIES_A}) UNION ALL SELECT 1, NULL) u`);
+  yield q("with ties: LATERAL", "SELECT a.id, x.id FROM top_a a CROSS JOIN LATERAL (SELECT b.id FROM top_b b WHERE b.a_id = a.id ORDER BY b.amount > 10 FETCH FIRST 1 ROWS WITH TIES) x ORDER BY 1, 2");
+  yield { ...q("with ties: numerics exact", "SELECT b.id, b.amount / 3 AS third FROM top_b b ORDER BY b.a_id NULLS FIRST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  yield q("with ties: grouped numerics exact", "SELECT b.a_id, avg(b.amount) AS av, sum(b.amount) / 7 AS s7 FROM top_b b GROUP BY b.a_id ORDER BY 1 NULLS FIRST FETCH FIRST 2 ROWS WITH TIES");
+  yield { ...q("with ties: exact numerics passed through", "SELECT * FROM (SELECT b.id, b.amount / 3 AS third FROM top_b b) s ORDER BY 2 DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  yield q("with ties: a NULL count constant", "SELECT a.id FROM top_a a ORDER BY a.id FETCH FIRST (NULL::int) ROWS WITH TIES");
+  yield q("with ties: a negative count", "SELECT a.id FROM top_a a ORDER BY a.id FETCH FIRST (-1) ROWS WITH TIES");
+  yield q("with ties: a NULL offset", "SELECT a.id FROM top_a a ORDER BY a.id OFFSET NULL FETCH FIRST 2 ROWS WITH TIES");
+  yield q("with ties: a fractional count", "SELECT a.id FROM top_a a ORDER BY a.id FETCH FIRST 2.5 ROWS WITH TIES");
+  yield q("with ties: OFFSET past the end", "SELECT a.id, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY a.made OFFSET 1000 FETCH FIRST 2 ROWS WITH TIES");
+  yield q("with ties: FETCH FIRST 0", "SELECT a.id, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY a.made FETCH FIRST 0 ROWS WITH TIES");
+  yield { ...q("with ties: over joins, every table's columns", "SELECT a.*, b.*, c.* FROM top_a a LEFT JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON b.id = c.b_id ORDER BY a.made DESC NULLS LAST FETCH FIRST 2 ROWS WITH TIES"), inOrder: false };
+  yield { ...q("with ties: RIGHT join", "SELECT a.id, a.note, b.id, b.payload FROM top_a a RIGHT JOIN top_b b ON a.id = b.a_id ORDER BY b.a_id NULLS FIRST FETCH FIRST 2 ROWS WITH TIES"), inOrder: false };
+  yield { ...q("with ties: a table joined to itself", "SELECT x.id, x.name, p.id AS parent, p.note FROM top_a x LEFT JOIN top_a p ON p.id = x.parent ORDER BY p.id NULLS FIRST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  yield { ...q("with ties: a join that multiplies", "SELECT x.id, y.id AS y, x.payload FROM top_b x JOIN top_b y ON x.a_id = y.a_id ORDER BY x.a_id FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  yield { ...q("with ties: a plain derived side, NULL where no match", "SELECT a.id, d.k, d.one FROM top_a a LEFT JOIN (SELECT a_id, payload ->> 'k' AS k, 1 AS one FROM top_b WHERE id > 20) d ON d.a_id = a.id ORDER BY a.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  yield { ...q("with ties: a wrapper of a join folded", "SELECT * FROM (SELECT a.id, a.made, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id) t ORDER BY t.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  yield { ...q("with ties: USING", "SELECT id, a.note, b.payload FROM top_a a JOIN top_b b USING (id) ORDER BY a.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  for (const key of ["m", "1", "b.id % 4"]) yield { ...q(`with ties: a computed key by ${key}`, `SELECT b.id % 4 AS m, b.id, c.doc FROM top_b b JOIN top_c c ON c.b_id = b.id ORDER BY ${key} FETCH FIRST 1 ROWS WITH TIES`), inOrder: false };
+  yield { ...q("with ties: a subquery in the list", "SELECT a.id, (SELECT count(*) FROM top_b x WHERE x.a_id = a.id) AS n FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY a.made DESC NULLS LAST FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
+  for (const key of ["a.name COLLATE \"C\"", "a.name COLLATE \"und-x-icu\"", "a.name NULLS FIRST"]) yield { ...q(`with ties: ordered by ${key}`, `SELECT a.id, a.name, b.payload FROM top_a a JOIN top_b b ON b.a_id = a.id ORDER BY ${key} FETCH FIRST 1 ROWS WITH TIES`), inOrder: false };
+  yield q("with ties: a citext key, ties by Postgres's equality", "SELECT count(*) FROM (SELECT s.ci, s.id, s.j FROM star_o s ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) x");
+  yield q("with ties: a char(n) key", "SELECT count(*) FROM (SELECT s.ch, s.id FROM star_o s ORDER BY s.ch FETCH FIRST 1 ROWS WITH TIES) x");
+  yield q("with ties: jsonb equality", "SELECT count(*) FROM (SELECT o.id, o.j FROM jorder o ORDER BY o.j NULLS LAST OFFSET 5 FETCH FIRST 1 ROWS WITH TIES) x");
+  for (const key of ["2 DESC", "n DESC", "count(*) DESC", "1 NULLS FIRST", "a.name"]) yield q(`with ties: grouped, by ${key}`, `SELECT a.name, count(*) AS n FROM top_a a JOIN top_b b ON b.a_id = a.id GROUP BY a.name ORDER BY ${key} FETCH FIRST 1 ROWS WITH TIES`);
+  yield { ...q("with ties: stays as it was (a whole row)", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY a.made FETCH FIRST 1 ROWS WITH TIES"), inOrder: false };
   yield q("a view", "SELECT * FROM happy ORDER BY id");
   yield q("a view's columns qualified by its schema (Metabase)", "SELECT \"public\".\"happy\".\"id\" AS \"id\", \"public\".\"happy\".\"m\" AS \"m\" FROM \"public\".\"happy\" WHERE \"public\".\"happy\".\"m\" > 'ok' ORDER BY \"public\".\"happy\".\"id\" ASC LIMIT 2000");
   yield q("a view of another schema, its columns renamed", "SELECT * FROM other.typed_summary ORDER BY flag NULLS FIRST");

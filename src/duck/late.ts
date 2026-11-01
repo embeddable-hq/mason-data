@@ -33,6 +33,18 @@
  *   LEFT JOIN a ON a.rowid = __mason_late.__mason_r1 LEFT JOIN b ON b.rowid = __mason_late.__mason_r2
  *   ORDER BY __mason_late.__mason_o<i> …
  *
+ * FETCH FIRST n ROWS WITH TIES is written the same way, its bound a rank in place of the ORDER BY … LIMIT (issue 192:
+ * its window carried every wide column of the join, 20 GiB spilled for a top 100): the inner query has no sort or limit,
+ * its rows ranked by the keys the rewrite wrote (`rank() OVER (ORDER BY <them>) AS __mason_rank`, and the row's place
+ * where there is an offset) and kept by the one bound of src/duck/ties.ts, then fetched as above, the rank last for the
+ * rewrite's wrapper to order by. Only where Postgres's analysis says the query is WITH TIES, and its keys as written:
+ *
+ *   SELECT <the list as written>, __mason_late.__mason_rank FROM (
+ *     SELECT __mason_lr.* FROM (SELECT a.rowid AS __mason_r1, …, <each key> AS __mason_o<i>,
+ *       rank() OVER (ORDER BY <the keys>) AS __mason_rank FROM … WHERE …) AS __mason_lr, <the bound>
+ *     WHERE <the rank within the bound>) AS __mason_late
+ *   LEFT JOIN a ON a.rowid = __mason_late.__mason_r1 …
+ *
  * A row of the join is one row number per table, NULL where an outer join supplied none, and that NULL finds no row, so
  * its columns are NULL as they were: a row the join multiplies is a pair of its own, and a statement of one snapshot
  * reads each row number once. The rows and the order among different keys are the inner query's; rows of EQUAL keys
@@ -151,6 +163,7 @@ import type { TreeNode, TreeValue } from "./pgtree.ts";
 import { distinctGrouping, fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
 import { constantExpression, evaluated } from "./constant-key.ts";
+import { isTies, tiesBound, tiesGuarded, tiesWindow, TIES_RANK, TIES_ROW } from "./ties.ts";
 
 type Body = Record<string, unknown>;
 type AstNode = Record<string, unknown>;
@@ -351,13 +364,15 @@ export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, k
 }
 
 /** a SELECT with a LIMIT, each row one row of its FROM: its list and its sort, which may be none */
-function limited(s: Body, withs = false): { targets: AstNode[]; sorts: AstNode[] } | null {
+function limited(s: Body, withs = false, ties = false): { targets: AstNode[]; sorts: AstNode[] } | null {
   if (s.op !== undefined && s.op !== "SETOP_NONE") return null;
   if (s.withClause !== undefined && (!withs || (s.withClause as Body).recursive === true)) return null;
   for (const f of ["distinctClause", "groupClause", "havingClause", "windowClause", "lockingClause", "intoClause", "valuesLists"]) {
     if (s[f] !== undefined && !(Array.isArray(s[f]) && (s[f] as unknown[]).length === 0)) return null;
   }
-  if (s.limitCount === undefined || (s.limitOption !== undefined && s.limitOption !== "LIMIT_OPTION_COUNT" && s.limitOption !== "LIMIT_OPTION_DEFAULT")) return null;
+  // (a FETCH … WITH TIES only where its caller writes its rank: `joinRows`)
+  const option = s.limitOption === undefined || s.limitOption === "LIMIT_OPTION_COUNT" || s.limitOption === "LIMIT_OPTION_DEFAULT" || (ties && isTies(s));
+  if (s.limitCount === undefined || !option) return null;
   const targets = s.targetList as AstNode[] | undefined;
   if (targets === undefined) return null;
   return { targets, sorts: (s.sortClause as AstNode[] | undefined) ?? [] };
@@ -581,7 +596,7 @@ const noLimit = (n: unknown): boolean => kindOf(n) === "A_Const" ? bodyOf(n).isn
  *  output's own expression, as Postgres reads it (an output name before an input column's). Without `shown`, a sort by a
  *  computed output is left alone: over one table it computes that output for every row anyway, so nothing is deferred.
  *  With it, the key is that output, and `shown` says which key each computed output is, by the output's place: one value */
-function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, number> | null = null): { keys: AstNode[]; sorts: AstNode[] } | null {
+function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, number> | null = null, asWritten = false): { keys: AstNode[]; sorts: AstNode[] } | null {
   const keys: AstNode[] = [], sorts: AstNode[] = [];
   for (const sort of written) {
     if (kindOf(sort) !== "SortBy") return null;
@@ -589,7 +604,11 @@ function sortKeys(targets: AstNode[], written: AstNode[], shown: Map<number, num
     if (b.useOp !== undefined) return null;
     const node = b.node;
     let target: AstNode | undefined;
-    if (kindOf(node) === "A_Const" && isObject(bodyOf(node).ival)) {
+    // AS WRITTEN (a WITH TIES body: src/duck/rewrite.ts wrote every key bound to an output as its expression): no number
+    // and no name is resolved here, and a number met is a breach of that, never a guess
+    if (asWritten && kindOf(node) === "A_Const") return null;
+    if (asWritten) { /* the expression branch below */ }
+    else if (kindOf(node) === "A_Const" && isObject(bodyOf(node).ival)) {
       target = targets[Number((bodyOf(node).ival as Body).ival ?? 0) - 1];
       if (target === undefined) return null;
     } else if (kindOf(node) === "ColumnRef" && (bodyOf(node).fields as unknown[]).length === 1) {
@@ -667,6 +686,8 @@ interface Derived { kind: "derived"; alias: string; columns: string[]; read: Que
 interface Walled { kind: "walled"; alias: string; columns: string[] }
 /** a FROM item; null for one that is none of these (a function, a VALUES list) */
 type Relation = Table | Derived | Walled | null;
+/** Postgres's LIMIT_OPTION_WITH_TIES in its analysis (src/duck/resolved.ts reads it the same) */
+const TIES_OPTION = "1";
 const RTE_RELATION = "0", RTE_SUBQUERY = "1", RTE_JOIN = "2", RTE_CTE = "6", RTE_GROUP = "9";
 /** Postgres's first OID for an object not of its own (FirstNormalObjectId): below it, a catalog table, no copy */
 const FIRST_USER_OID = 16384;
@@ -679,7 +700,7 @@ const MATERIALIZED = "1";
  *  only the join can (it is carried). `joins` is each JOIN's merged columns, in the order the tree meets its joins.
  *  `volatileOutputs` is the outputs a sort reads that hold a volatile function, by place, `volatileKeys` whether any sort
  *  key does, and `sorts` how many keys Postgres sorts by: a rewrite that wrote them as others (a collation's) repeats a value */
-interface Query { items: Relation[]; bounded: boolean; rowWise: boolean; listReads: string[]; listSubLinks: number; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number;
+interface Query { items: Relation[]; ties: boolean; bounded: boolean; rowWise: boolean; listReads: string[]; listSubLinks: number; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number;
   /** the tables whose whole primary key the query groups by (`keyGrouped`), by alias, with the key's columns by name */
   keyed: Array<{ alias: string; key: string[] }>;
   /** whether the query is a SELECT DISTINCT that is a grouping on its list (`distinctGrouping`) */
@@ -843,7 +864,7 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
     // (a grouped query's RTE_GROUP entry, Postgres 17+, is no FROM item: it holds what the GROUP BY groups)
     const items = treeList(q.rtable).filter((e): e is TreeNode => isTreeNode(e) && e.rtekind !== RTE_JOIN && e.rtekind !== RTE_GROUP).map(relation);
     const computed = computedSorts(q).filter((c) => holdsVolatile(c.expr, volatile));
-    return { items, bounded: fanOutBounded(q, keys), rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
+    return { items, ties: String(q.limitOption) === TIES_OPTION, bounded: fanOutBounded(q, keys), rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
       volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length, keyed: keyedTables(q, keys), distinct: distinctGrouping(q) };
   };
   const visit = (v: TreeValue | undefined, enclosing: readonly TreeValue[][]): void => {
@@ -1217,17 +1238,21 @@ function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string
 /** one SELECT over joined FROM items written with its rows chosen by row number (see above), or null where it is not so shaped */
 function joinRows(select: AstNode, relations: Query[], wall: string | null): { select: AstNode; walls: number } | null {
   const written0 = bodyOf(select);
-  const shape0 = limited(written0, true);
+  // FETCH … WITH TIES (issue 192): ranked on the row numbers and the keys alone, the list fetched after the rank filter
+  const ties = isTies(written0);
+  const shape0 = limited(written0, true, ties);
   if (shape0 === null) return null;
-  // no sort and in fact no limit: every row comes back, and reading each one again saves nothing
-  if (shape0.sorts.length === 0 && noLimit(written0.limitCount)) return null;
+  // no sort and in fact no limit: every row comes back, and reading each one again saves nothing; WITH TIES with no key
+  // left (every one a constant) is every row a tie, ranked as it is
+  if (shape0.sorts.length === 0 && (ties || noLimit(written0.limitCount))) return null;
   const items0 = fromItems(written0.fromClause);
   if (items0 === null) return null;
   const aliases0 = items0.map(aliasOfItem);
   // the query of the analysis this SELECT is: its FROM items, in order. Two queries alike must agree, or which is unsure
+  // (and agree with the written body on WITH TIES: the analysis says it, never the rewrite's text)
   const named = relations.filter((q) => q.items.length === aliases0.length && q.items.every((t, i) => t?.alias === aliases0[i]));
   const first = named[0];
-  if (first === undefined || named.some((q) => JSON.stringify([q.items, q.merged, q.joins]) !== JSON.stringify([first.items, first.merged, first.joins]) || !q.rowWise)) return null;
+  if (first === undefined || named.some((q) => JSON.stringify([q.items, q.merged, q.joins]) !== JSON.stringify([first.items, first.merged, first.joins]) || !q.rowWise || q.ties !== ties)) return null;
   const withs = withsOf(written0);
   const opened = unwrapped(written0, first, withs);
   if (opened === null) return null;
@@ -1263,7 +1288,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   const writtenSorts = (s.sortClause as AstNode[] | undefined) ?? [];
   // the keys are read from the outputs as the join reads them: a bare merged column is the join's, inside
   const shown = new Map<number, number>();
-  const sorted = sortKeys(outputs.list, writtenSorts, shown);
+  const sorted = sortKeys(outputs.list, writtenSorts, shown, ties);
   if (sorted === null) return null;
   const { keys, sorts } = sorted;
   // ONE VALUE: a volatile output a sort reads is read from its key, and a key a written form cannot show stays as it was
@@ -1308,7 +1333,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   ],
   // (a volatile key is sorted by the output that holds it: said twice, it would be two values)
   ...(sorts.length > 0 ? { sortClause: sorts.map((sort, i) => ({ SortBy: { ...bodyOf(sort), node: volatileKeys ? ref(`__mason_o${i + 1}`) : keys[i] } })) } : pagedInOrder ? { sortClause: fetched.map((t) => order(structuredClone(t.id))) } : {}) };
-  let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: LATE } } };
+  let joined: AstNode = { RangeSubselect: { subquery: { SelectStmt: ties ? rankedRows(inner) : inner }, alias: { aliasname: LATE } } };
   // the fetch reads a walled read through itself again, filter, barrier and wall: one more wall each
   let walls = 0;
   fetched.forEach((t, i) => {
@@ -1319,6 +1344,8 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
     joined = { JoinExpr: { jointype: "JOIN_LEFT", larg: joined, rarg, quals: { A_Expr: {
       kind: "AEXPR_OP", name: [S("=")], lexpr: structuredClone(t.id), rexpr: ref(LATE, `__mason_r${i + 1}`) } } } };
   });
+  // (WITH TIES: the rank last, read by the rewrite's wrapper, which lists the columns and orders by it)
+  if (ties) return { walls, select: { SelectStmt: { targetList: [...list, { ResTarget: { name: TIES_RANK, val: ref(LATE, TIES_RANK) } }], fromClause: [joined], limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } } };
   return { walls, select: { SelectStmt: {
     targetList: list,
     fromClause: [joined],
@@ -1326,4 +1353,24 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
       : pagedInOrder ? { sortClause: fetched.map((_t, i) => order(ref(LATE, `__mason_r${i + 1}`))) } : {}),
     limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
   } } };
+}
+
+/**
+ * THE ROWS A FETCH … WITH TIES KEEPS, ON ROW NUMBERS AND KEYS ALONE (issue 192, issue 134 step 7): the inner query of
+ * `joinRows` with no sort or limit of its own, ranked by its keys as the sort orders them (`rank() OVER`, and the row's
+ * place where there is an offset), filtered by the one bound (src/duck/ties.ts): the rows are chosen before any wide
+ * column is read, and the fetch reads the list for them alone.
+ */
+function rankedRows(inner: Body): Body {
+  const { limitCount, limitOffset, limitOption: _o, sortClause, ...plain } = inner;
+  const ranked = "__mason_lr";
+  const bound = tiesBound(limitCount, limitOffset, ranked);
+  const rows: Body = { ...plain, targetList: [...(plain.targetList as AstNode[]),
+    { ResTarget: { name: TIES_RANK, val: tiesWindow("rank", sortClause) } },
+    ...(bound.row ? [{ ResTarget: { name: TIES_ROW, val: tiesWindow("row_number", sortClause) } }] : [])], limitOption: "LIMIT_OPTION_DEFAULT" };
+  return tiesGuarded({
+    targetList: [{ ResTarget: { val: { ColumnRef: { fields: [S(ranked), { A_Star: {} }] } } } }],
+    fromClause: [{ RangeSubselect: { subquery: { SelectStmt: rows }, alias: { aliasname: ranked } } }, bound.item],
+    whereClause: bound.filter, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
+  }, limitCount, limitOffset);
 }

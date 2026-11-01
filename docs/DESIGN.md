@@ -2213,6 +2213,13 @@ filters did not help: the LEFT JOIN is planned RIGHT, `a` on the build side, so 
 | LIMIT 100 OFFSET 2,000,000 | 53200 after 2.9 s | 0.38 s, none |
 | the three ids alone | 0.06 s | 0.04 s |
 
+**FETCH … WITH TIES takes the same path** (issue 192, 2026-11-01). Its rank was a window over the whole join, every wide
+column carried through it: the issue measured 20 GiB spilled and a 53200 after 37 s for a top 100 whose rewrite took
+0.22 s. The window now reads the row numbers and the keys alone, the bound (src/duck/ties.ts) is a one-row FROM item
+read by the filter, and the list is fetched for the rows kept; the plan fixture's two entries hold the shape (WINDOW over
+a hash join of the scans, then the bound's nested-loop filter, then the `rowid` fetch). One table alone keeps the rank
+form: its row-number path was not measured against it here, and is taken only once a measurement shows it faster.
+
 Each row is one run of a warm page cache, the engine's statements only. Through the real listener, the first row as the
 tool spells it: 14.06 s, 8.54 GiB spilled, 2.59 GiB RSS before; 1.19 s, none, 1.38 GiB after, a first statement's cold catalog included. The fetch by `rowid`
 is cheap because the join's filter on `rowid` skips row groups. No limit on N is needed, and no width test: the narrow

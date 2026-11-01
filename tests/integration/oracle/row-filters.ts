@@ -202,6 +202,9 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   { name: "top N, filtered: an ICU collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name COLLATE \"und-x-icu\", o.id LIMIT 5" },
   { name: "top N, filtered: the database's collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name, o.id LIMIT 5" },
   { name: "top N, filtered: a prepared statement executed twice", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id WHERE o.amount > $1 ORDER BY o.id LIMIT 4", prepared: ["100", "500"] },
+  // FETCH … WITH TIES over a filtered table is answered (issue 192: docs/POSTGRES-API.md said refused; no code refused it)
+  { name: "with ties, filtered", sql: "SELECT * FROM (SELECT o.id, o.status, c.name FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id ORDER BY o.status NULLS FIRST FETCH FIRST 1 ROWS WITH TIES) s ORDER BY s.id" },
+  { name: "with ties, filtered, a collation", sql: "SELECT * FROM (SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name COLLATE \"und-x-icu\" FETCH FIRST 1 ROWS WITH TIES) s ORDER BY s.id" },
 ];
 
 /** raises on the value hidden rows hold, every hundredth of them; 1 on every visible row */

@@ -107,7 +107,10 @@ paths:
     the list is read from a LEFT JOIN of each table it reads on that `rowid`, the keys sorted again outside. Only joined
     by no join's own name, no table with a column named `rowid` in any case, and never over a whole row of a table; a `*` is
     written out from the analysis, because a copy's view of its visible columns has no `rowid`. Same rows; equal keys
-    are in no defined order. **Every FROM item is a table, a plain derived read or carried** (issue 134, step 2): a
+    are in no defined order. **FETCH … WITH TIES takes the same form with a rank for its bound** (issue 192): the inner
+    query ranks the row numbers by the keys the sort pass wrote (`rank() OVER`), keeps the rows the one bound of
+    src/duck/ties.ts allows, and the fetch adds `__mason_rank` last; only where the analysis's QUERY says WITH TIES, and
+    a grouped one or one over one table keeps the rank form (`tiesRanked`). **Every FROM item is a table, a plain derived read or carried** (issue 134, step 2): a
     derived table, a view or a WITH query read once and not MATERIALIZED, a projection and a WHERE over one table with
     nothing volatile (pg_proc's `provolatile`) or from outside it, exposes its row number (`__mason_rid`) and is fetched
     in its DERIVED form without its WHERE, because a NULL row number must read NULL where `1 AS one` would read 1;
@@ -190,6 +193,10 @@ paths:
   of its own scan, no operator named DELIM (`delimiterJoin`). ("The plan fixture")
 - **A result's names, types and typmods are Postgres's**, from the analysis, and a numeric Postgres computes exactly is
   computed by `src/lib/pg-numeric.ts`, never DuckDB's double or HUGEINT. ("How a statement is answered")
+- **A body's width is Postgres's outputs plus the exact cells recorded after them, never DuckDB's `*`** (issue 192: a WITH
+  TIES rank read by `*` reached a row at every depth): a column the rewrite adds stays inside a wrapper that lists the
+  outputs by name, and the cells are recorded by the one appender (`Rewriter.cellsAfter`, `appendCells`). Detector: the
+  store's `columnCount === fields.length + PlannedSql.cells` (XX000 otherwise) and the WITH TIES wire tests at depth.
 - **Whether a statement calls a Mason function is its PLAN's, never its text's** (a review finding: a `*` over a
   copy reads `__mason_visible`, which calls nothing, and a text match left every such statement uncancellable — 82 s
   past a 300 ms timeout): `PlannedSql.functions`, the `__mason_*` calls of the rewritten tree (`masonCalls`,

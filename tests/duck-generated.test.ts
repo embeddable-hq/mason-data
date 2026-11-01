@@ -181,6 +181,8 @@ test("what a table cannot store is refused by name at its key, before anything i
     events: `${lag}sql: SELECT id FROM events\n`,
     self: `${lag}sql: SELECT * FROM self\n`,
     today: `${lag}sql: SELECT id FROM events WHERE started_at < 'today'::timestamptz\n`,
+    // WITH TIES, read from Postgres's analysis (issue 192), never a side effect of the rewrite
+    ties: `${lag}sql: SELECT id, tenant_id FROM events ORDER BY tenant_id FETCH FIRST 2 ROWS WITH TIES\n`,
   }, async (w) => {
     await w.sync.generated.review();
     const r = (name: string): GeneratedStatus => w.status(`public.${name}`);
@@ -198,6 +200,7 @@ test("what a table cannot store is refused by name at its key, before anything i
     refusedAt(r("badcolumn").refusals, "sql", /column "tenant_id" does not exist/);
     refusedAt(r("events").refusals, null, /is a table the sources file syncs/);
     refusedAt(r("self").refusals, "sql", /^it reads public\.self, itself$/);
+    refusedAt(r("ties").refusals, "sql", /^it ends in FETCH … WITH TIES$/);
     refusedAt(r("today").refusals, "sql", /relative literal/);
     assert.deepEqual(w.sync.generated.status().filter((s) => s.serving), [], "nothing was built");
     assert.deepEqual(await w.rows("SELECT table_name FROM duckdb_tables() WHERE schema_name = 'public' AND table_name <> 'events'"), []);
