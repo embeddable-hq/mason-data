@@ -202,6 +202,9 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   { name: "top N, filtered: an ICU collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name COLLATE \"und-x-icu\", o.id LIMIT 5" },
   { name: "top N, filtered: the database's collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name, o.id LIMIT 5" },
   { name: "top N, filtered: a prepared statement executed twice", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id WHERE o.amount > $1 ORDER BY o.id LIMIT 4", prepared: ["100", "500"] },
+  // a DISTINCT ON keeps one row of each group behind the filter (issue 134, task E): on the key, and on a non-key through: a parent
+  { name: "top N, filtered: DISTINCT ON the key, the kept item", sql: "SELECT DISTINCT ON (o.id) o.id, o.status, i.id AS iid, i.sku FROM shop.orders o JOIN shop.order_items i ON i.order_id = o.id ORDER BY o.id, i.unit_price DESC NULLS LAST, i.id LIMIT 6" },
+  { name: "top N, filtered: DISTINCT ON a non-key, through:", sql: "SELECT DISTINCT ON (i.order_id) i.order_id, i.id, i.sku, o.status FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id ORDER BY i.order_id NULLS LAST, i.id DESC LIMIT 6" },
 ];
 
 /** raises on the value hidden rows hold, every hundredth of them; 1 on every visible row */
@@ -241,6 +244,7 @@ export const BARRIER_SHAPES: ReadonlyArray<{ name: string; sql: string }> = [
   { name: "barrier: a top N's list, a view joined", sql: `SELECT m.id, ${R} AS r FROM shop.marked_invoices m JOIN shop.invoice_lines i ON i.invoice_id = m.id ORDER BY m.id LIMIT 4` },
   { name: "barrier: a top N's list, a derived side's column", sql: `SELECT d.id, d.x, i.qty FROM (SELECT id, ${R} AS x FROM shop.invoices) d JOIN shop.invoice_lines i ON i.invoice_id = d.id ORDER BY d.id LIMIT 4` },
   { name: "barrier: a top N's list, the statistics wall's shape", sql: `SELECT o.id, ${R} AS r FROM shop.invoices o JOIN shop.invoice_lines i ON i.invoice_id = o.id WHERE o.marker > 98 ORDER BY o.id LIMIT 3` },
+  { name: "barrier: a DISTINCT ON's list, two filtered tables", sql: `SELECT DISTINCT ON (o.id) o.id, ${R} AS r, ${Q} AS q FROM shop.invoices o JOIN shop.invoice_lines i ON i.invoice_id = o.id ORDER BY o.id, i.id LIMIT 5` },
 ];
 
 /** an enum attribute, scalar and list, and <> ALL over an integer list, one predicate: `tiers` reads shop.accounts alone */

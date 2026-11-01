@@ -146,6 +146,18 @@
  * a whole row or a query outside its own, a wrapper folded away (its columns are names inside the subquery a fold does
  * not know), and one a rewrite wrote that the analysis has not. A subquery's own SELECT is never rewritten. A subquery
  * that raises on a row the limit leaves out answers here (`limit-errors`).
+ *
+ * A DISTINCT ON WITH A LIMIT IS WRITTEN SO TOO (issue 134, task E: a DISTINCT ON over a join with wide columns in its list
+ * carried every row's through DuckDB's DISTINCT ON and its top N, 25 GiB spilled and a failure after 20 minutes, the
+ * same rows written by hand 0.21 s). A DISTINCT ON keeps ONE WHOLE ROW of its FROM for each set of its ON expressions, the first in the sort's order,
+ * so that row's numbers identify it exactly, whatever the ON expressions are: a key or not, computed, a jsonb's equality
+ * key. The inner query keeps the DISTINCT ON beside the sort and the limit (its ordinals and output names read as the
+ * outputs' expressions, `distinctKeys`, a clone each), and the list is read from the rows kept, one table included:
+ * DuckDB's late materialization does not reach through the window and filter its DISTINCT ON is. Never `any_value` and
+ * never a primary key (`keyFirst` is a GROUP BY's, whose group may hold many rows of a table). What stays as it was: no
+ * LIMIT in fact, a DISTINCT ON over a GROUP BY, an aggregate, a window or a set-returning function, and an ON expression
+ * holding a volatile function (`Query.volatileOn`). A raising list value in a row that is not its group's first answers
+ * here (`limit-errors`).
  */
 import type { TreeNode, TreeValue } from "./pgtree.ts";
 import { distinctGrouping, fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
@@ -351,16 +363,60 @@ export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, k
 }
 
 /** a SELECT with a LIMIT, each row one row of its FROM: its list and its sort, which may be none */
-function limited(s: Body, withs = false): { targets: AstNode[]; sorts: AstNode[] } | null {
+function limited(s: Body, withs = false, on = false): { targets: AstNode[]; sorts: AstNode[] } | null {
   if (s.op !== undefined && s.op !== "SETOP_NONE") return null;
   if (s.withClause !== undefined && (!withs || (s.withClause as Body).recursive === true)) return null;
-  for (const f of ["distinctClause", "groupClause", "havingClause", "windowClause", "lockingClause", "intoClause", "valuesLists"]) {
+  if (!on && distinctOnOf(s) !== null) return null;
+  for (const f of [...on ? [] : ["distinctClause"], "groupClause", "havingClause", "windowClause", "lockingClause", "intoClause", "valuesLists"]) {
     if (s[f] !== undefined && !(Array.isArray(s[f]) && (s[f] as unknown[]).length === 0)) return null;
   }
   if (s.limitCount === undefined || (s.limitOption !== undefined && s.limitOption !== "LIMIT_OPTION_COUNT" && s.limitOption !== "LIMIT_OPTION_DEFAULT")) return null;
   const targets = s.targetList as AstNode[] | undefined;
   if (targets === undefined) return null;
   return { targets, sorts: (s.sortClause as AstNode[] | undefined) ?? [] };
+}
+
+/** a SELECT's DISTINCT ON expressions as written, or null for none (a plain DISTINCT is one empty entry) */
+function distinctOnOf(s: Body): AstNode[] | null {
+  const d = s.distinctClause;
+  return Array.isArray(d) && d.length > 0 && d.every((x) => kindOf(x) !== null) ? d as AstNode[] : null;
+}
+
+/** each DISTINCT ON expression over the FROM clause, as Postgres reads it (findTargetlistEntrySQL92, as an ORDER BY's):
+ *  an ordinal or an output's bare name is that output's own expression, a clone each (the inner list holds Mason's names
+ *  alone), written so the engine evaluates it; any other expression as written. Null where a bare output name stands
+ *  inside an expression that is not that output's own (the rewrite's equality key of a jsonb named by its output), which
+ *  the inner query would read as an input column */
+function distinctKeys(targets: AstNode[], on: readonly AstNode[]): AstNode[] | null {
+  const out: AstNode[] = [];
+  for (const d of on) {
+    let target: AstNode | undefined;
+    if (kindOf(d) === "A_Const" && isObject(bodyOf(d).ival)) {
+      target = targets[Number((bodyOf(d).ival as Body).ival ?? 0) - 1];
+      if (target === undefined) return null;
+    } else if (kindOf(d) === "ColumnRef" && (bodyOf(d).fields as unknown[]).length === 1) {
+      const name = fieldNames(bodyOf(d))[0];
+      const named = targets.filter((t) => outputName(t) === name);
+      if (named.length > 1) return null;
+      target = named[0];
+    }
+    if (target !== undefined) { out.push(evaluated(structuredClone(bodyOf(target).val as AstNode))); continue; }
+    let shadowed = false;
+    const walk = (n: unknown): void => {
+      if (Array.isArray(n)) { n.forEach(walk); return; }
+      if (!isObject(n)) return;
+      if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
+        const names = fieldNames(n.ColumnRef);
+        if (names.length === 1) shadowed ||= targets.some((t) => outputName(t) === names[0] && !sameTree(bodyOf(t).val, n));
+        return;
+      }
+      Object.values(n).forEach(walk);
+    };
+    walk(d);
+    if (shadowed) return null;
+    out.push(evaluated(structuredClone(d)));
+  }
+  return out;
 }
 
 /** whether a query of the statement groups, or is a DISTINCT that is a grouping, and has a LIMIT: one `keyFirst` may write */
@@ -683,7 +739,9 @@ interface Query { items: Relation[]; bounded: boolean; rowWise: boolean; listRea
   /** the tables whose whole primary key the query groups by (`keyGrouped`), by alias, with the key's columns by name */
   keyed: Array<{ alias: string; key: string[] }>;
   /** whether the query is a SELECT DISTINCT that is a grouping on its list (`distinctGrouping`) */
-  distinct: boolean }
+  distinct: boolean;
+  /** whether the query is a DISTINCT ON (Postgres's `hasDistinctOn`), and whether an ON expression holds a volatile function */
+  distinctOn: boolean; volatileOn: boolean }
 
 function isTreeNode(v: TreeValue | undefined): v is TreeNode { return typeof v === "object" && v !== null && !Array.isArray(v); }
 const treeList = (v: TreeValue | undefined): TreeValue[] => Array.isArray(v) ? v : [];
@@ -705,6 +763,12 @@ function computedSorts(q: TreeNode): Array<{ expr: TreeValue; output: number | n
     if (target === undefined || !isTreeNode(target.expr) || target.expr._node === "VAR") return [];
     return [{ expr: target.expr, output: target.resjunk === "true" ? null : targets.indexOf(target) }];
   });
+}
+
+/** the targets a query's DISTINCT ON names, by its clause's references */
+function onTargets(q: TreeNode): TreeNode[] {
+  const refs = new Set(treeList(q.distinctClause).flatMap((c) => isTreeNode(c) ? [c.tleSortGroupRef] : []));
+  return treeList(q.targetList).filter((t): t is TreeNode => isTreeNode(t) && refs.has(t.ressortgroupref));
 }
 
 /** the functions a statement calls, and the operators', by OID, where a query with a LIMIT holds a derived read itself or
@@ -844,7 +908,8 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
     const items = treeList(q.rtable).filter((e): e is TreeNode => isTreeNode(e) && e.rtekind !== RTE_JOIN && e.rtekind !== RTE_GROUP).map(relation);
     const computed = computedSorts(q).filter((c) => holdsVolatile(c.expr, volatile));
     return { items, bounded: fanOutBounded(q, keys), rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
-      volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length, keyed: keyedTables(q, keys), distinct: distinctGrouping(q) };
+      volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length, keyed: keyedTables(q, keys), distinct: distinctGrouping(q),
+      distinctOn: q.hasDistinctOn === "true", volatileOn: onTargets(q).some((t) => holdsVolatile(t.expr, volatile)) };
   };
   const visit = (v: TreeValue | undefined, enclosing: readonly TreeValue[][]): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x, enclosing); return; }
@@ -1111,11 +1176,21 @@ function fold(s: Body, sub: Body, item: Derived): Body | null {
     if (readsConstant(node)) return [];
     return [{ SortBy: { ...bodyOf(sort), node: evaluated(over(node)) } }];
   });
+  // a DISTINCT ON's expressions alike: an output's number or bare name is read from the list, any other over the
+  // wrapper's columns. One reading a constant column groups nothing, and is left as it was
+  const on = distinctOnOf(s);
+  const distinct: AstNode[] = [];
+  for (const d of on ?? []) {
+    const bare = kindOf(d) === "ColumnRef" && (bodyOf(d).fields as unknown[]).length === 1 ? fieldNames(bodyOf(d))[0] : null;
+    if (kindOf(d) === "A_Const" || (bare !== null && bare !== undefined && outputs.has(bare))) { distinct.push(d); continue; }
+    if (readsConstant(d)) return null;
+    distinct.push(evaluated(over(d) as AstNode));
+  }
   const where = over(s.whereClause);
   if (!whole) return null;
   const { whereClause: _w, sortClause: _s, ...rest } = s;
   const joined = both(sub.whereClause, where);
-  return { ...rest, targetList: targets, fromClause: sub.fromClause, ...(joined !== undefined ? { whereClause: joined } : {}), ...(sorts.length > 0 ? { sortClause: sorts } : {}) };
+  return { ...rest, ...(on !== null ? { distinctClause: distinct } : {}), targetList: targets, fromClause: sub.fromClause, ...(joined !== undefined ? { whereClause: joined } : {}), ...(sorts.length > 0 ? { sortClause: sorts } : {}) };
 }
 
 /** a SELECT's FROM read as its query's items: its WITH queries in place of their one read and, while its one item is a
@@ -1217,10 +1292,13 @@ function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string
 /** one SELECT over joined FROM items written with its rows chosen by row number (see above), or null where it is not so shaped */
 function joinRows(select: AstNode, relations: Query[], wall: string | null): { select: AstNode; walls: number } | null {
   const written0 = bodyOf(select);
-  const shape0 = limited(written0, true);
+  // a DISTINCT ON keeps one whole row of its FROM per group: that row's numbers fetch it, whatever the ON expressions
+  const on0 = distinctOnOf(written0);
+  const shape0 = limited(written0, true, on0 !== null);
   if (shape0 === null) return null;
-  // no sort and in fact no limit: every row comes back, and reading each one again saves nothing
-  if (shape0.sorts.length === 0 && noLimit(written0.limitCount)) return null;
+  // no sort and in fact no limit: every row comes back, and reading each one again saves nothing. Nor under a DISTINCT
+  // ON, whose every group comes back
+  if ((shape0.sorts.length === 0 || on0 !== null) && noLimit(written0.limitCount)) return null;
   const items0 = fromItems(written0.fromClause);
   if (items0 === null) return null;
   const aliases0 = items0.map(aliasOfItem);
@@ -1228,10 +1306,14 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   const named = relations.filter((q) => q.items.length === aliases0.length && q.items.every((t, i) => t?.alias === aliases0[i]));
   const first = named[0];
   if (first === undefined || named.some((q) => JSON.stringify([q.items, q.merged, q.joins]) !== JSON.stringify([first.items, first.merged, first.joins]) || !q.rowWise)) return null;
+  // the analysis's DISTINCT ON is the tree's, and none of its expressions is volatile: computed inside, once per row
+  if (named.some((q) => q.distinctOn !== (on0 !== null) || q.volatileOn)) return null;
   const withs = withsOf(written0);
   const opened = unwrapped(written0, first, withs);
   if (opened === null) return null;
   const { s, query } = opened;
+  const on = distinctOnOf(s);
+  if ((on === null) !== (on0 === null)) return null;
   const items = fromItems(s.fromClause)!;
   // a subquery in the list (issue 134, step 5): run for the chosen rows alone, a table's own too
   const subLinks = [...new Set(named.flatMap((q) => q.listReads))].sort();
@@ -1241,7 +1323,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   if (subqueried && query !== first) return null;
   // each the analysis's own, never one a rewrite wrote: what it reads of the FROM items is what the analysis says
   if (subqueried && named.some((q) => q.listSubLinks !== holdsSubLink(listed0))) return null;
-  if (items.length < (subqueried ? 1 : 2)) return null;
+  if (items.length < (subqueried || on !== null ? 1 : 2)) return null;
   const aliases = items.map(aliasOfItem);
   if (new Set(aliases).size !== aliases.length) return null;
   const relation = query.items;
@@ -1266,6 +1348,8 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   const sorted = sortKeys(outputs.list, writtenSorts, shown);
   if (sorted === null) return null;
   const { keys, sorts } = sorted;
+  const distinct = on === null ? null : distinctKeys(outputs.list, on);
+  if (on !== null && distinct === null) return null;
   // ONE VALUE: a volatile output a sort reads is read from its key, and a key a written form cannot show stays as it was
   if (named.some((q) => q.volatileOutputs.some((o) => !shown?.has(o)) || (q.volatileKeys && q.sorts !== writtenSorts.length))) return null;
   const volatileKeys = named.some((q) => q.volatileKeys);
@@ -1301,7 +1385,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   // (the written sort is never the inner's: the outer sorts the rows the inner fetched)
   const { withClause: _with, sortClause: _sorts, ...body } = s;
   const left = isObject(s.withClause) ? (s.withClause.ctes as AstNode[]).filter((c) => !withs.used.has(String(bodyOf(c).ctename))) : [];
-  const inner: Body = { ...body, ...(left.length > 0 ? { withClause: { ...s.withClause as Body, ctes: left } } : {}), fromClause: from, targetList: [
+  const inner: Body = { ...body, ...(distinct !== null ? { distinctClause: distinct } : {}), ...(left.length > 0 ? { withClause: { ...s.withClause as Body, ctes: left } } : {}), fromClause: from, targetList: [
     ...fetched.map((t, i) => ({ ResTarget: { name: `__mason_r${i + 1}`, val: t.id } })),
     ...[...columns.values()].map((c) => ({ ResTarget: { name: c.name, val: c.val } })),
     ...keys.map((k, i) => ({ ResTarget: { name: `__mason_o${i + 1}`, val: k } })),
