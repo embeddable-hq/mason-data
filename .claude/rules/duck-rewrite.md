@@ -204,9 +204,18 @@ paths:
   an integer arm of a numeric column is exact as it is (`exactArms`). Third, **FETCH … WITH TIES reads its count and
   offset where no row is**: the bound is a materialized WITH query, and the ranked rows are UNIONed with the bound's own
   row where its count is negative (never, past its CASE), so DuckDB cannot skip the bound when the rows are none (2201W
-  over `WHERE false`). The cells a lone `*` passes through (`exposedCells`) ride the wrapper after its outputs.
+  over `WHERE false`).
   Detector: tests/duck-wire.test.ts "a TABLE statement is found …", "a set operation's SELECTs are the column Postgres
   resolved …", "… reads its count and offset where no row is …" and "… keeps the exact numbers' cells it passes through".
+  Its third round named two more. **WITH TIES ties on the statement's own ORDER BY** (`writtenKeys`, marked before any
+  rule runs): Postgres's sortClause is the ORDER BY written (a DISTINCT ON's keys go to its distinctClause), so a key a
+  rule adds for its own sort (`distinctOnSorted`, which a DISTINCT over an exact numeric reaches) never reaches the rank.
+  **The cells a statement's exact columns read are one record** (`cellsOf`, `exactThrough`'s `derived`): the wrapper
+  passes that many through, whether its list writes them or a `*` passes them (a FROM item, a WITH query, a set
+  operation's arms, nested), and never counts them; a pass-through that carries no exact column selects none, and a
+  UNION ALL arm's record is what `exactArms` makes it select. A UNION ALL of its own WITH, ORDER BY or limit is one arm
+  of the UNION ALL around it (`ownClauses`), as `setOperationArms` reads it. Detector: tests/duck-wire.test.ts
+  "… carries every cell its exact numbers have …" and "… ties on the ORDER BY Postgres sorts by …".
   A `*` is written out from that list where DuckDB's own differs: over USING / NATURAL (Postgres lists the merged column
   first) and beside a GROUP BY. The order of a `*` is its query's `targetList` (`outputsByLocation`), never the order its
   VARs are met in the tree or their offsets: a grouped key's output is a VAR of RTE_GROUP at no offset, and its

@@ -1310,6 +1310,19 @@ function* matrix(): Generator<Matrixed> {
   // AN EXACT NUMBER PASSED THROUGH A `*` (PR 231): the cells ride the WITH TIES as they ride the statement
   yield q("WITH TIES over a * of a derived table: an exact quotient", "SELECT * FROM (SELECT o.id, o.n::numeric / 7 AS q FROM star_o o) s ORDER BY 2 DESC, 1 FETCH FIRST 2 ROWS WITH TIES");
   yield q("WITH TIES over a * of a WITH query: an exact quotient", "WITH s AS (SELECT o.id, o.n::numeric / 7 AS q FROM star_o o) SELECT * FROM s ORDER BY 2, 1 FETCH FIRST 2 ROWS WITH TIES");
+  // EVERY SHAPE CELLS REACH THE WRAPPER BY (PR 231 round 3): the wrapper passes the cells the statement's record says
+  const QUOTIENT = "(SELECT o.id, o.n::numeric / 7 AS q FROM star_o o)";
+  yield q("WITH TIES cells: a set operation's * arms over a WITH query", `WITH w AS ${QUOTIENT} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 2, 1 FETCH FIRST 1 ROWS WITH TIES`);
+  yield q("WITH TIES cells: a set operation's * arms over a WITH query, a plain LIMIT", `WITH w AS ${QUOTIENT} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 2, 1 LIMIT 3`);
+  yield q("WITH TIES cells: a set operation's * arms over a WITH query, ties on one key", "WITH w AS (SELECT o.n AS g, o.n::numeric / 7 AS q FROM star_o o) SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 1 DESC FETCH FIRST 3 ROWS WITH TIES");
+  yield q("WITH TIES cells: a set operation's * arms over subqueries", `SELECT * FROM ${QUOTIENT} s UNION ALL SELECT * FROM ${QUOTIENT} s2 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES`);
+  yield q("WITH TIES cells: s.*", `SELECT s.* FROM ${QUOTIENT} s ORDER BY 2, 1 FETCH FIRST 2 ROWS WITH TIES`);
+  yield q("WITH TIES cells: derived tables nested", `SELECT * FROM (SELECT * FROM ${QUOTIENT} s1) s2 ORDER BY 2 DESC, 1 FETCH FIRST 2 ROWS WITH TIES`);
+  yield q("WITH TIES cells: an arm of a UNION ALL beside a literal", `SELECT * FROM ((SELECT o.id, o.n::numeric / 7 AS q FROM star_o o ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES) UNION ALL SELECT 0, 1) s ORDER BY 1`);
+  // TIES ON THE STATEMENT'S OWN ORDER BY (PR 231 round 3): never a key a DISTINCT ON's sort adds
+  yield q("WITH TIES under a DISTINCT of an exact quotient", "SELECT * FROM (SELECT DISTINCT o.id % 2 AS g, o.n::numeric / 7 AS q FROM star_o o ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 2");
+  yield q("WITH TIES under a DISTINCT of a numeric halved", "SELECT * FROM (SELECT DISTINCT o.id % 2 AS g, o.n / 2.0 AS h FROM star_o o ORDER BY g FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 2");
+  yield q("WITH TIES under a DISTINCT ON its ORDER BY lacks", "SELECT * FROM (SELECT DISTINCT ON (1, 2) o.id % 2 AS g, o.n FROM star_o o ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 2");
   yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
   yield q("top N over joins: USING of two tables, a *", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
   yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);

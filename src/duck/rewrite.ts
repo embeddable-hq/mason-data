@@ -500,9 +500,22 @@ class Rewriter {
     if (Array.isArray(v)) { for (const x of v) this.adopt(x); return; }
     if (v === null || typeof v !== "object") return;
     if (isNode(v)) this.original.add(bodyOf(v));
-    if (isNode(v) && kindOf(v) === "SelectStmt") this.unplacedSelect(bodyOf(v));
+    if (isNode(v) && kindOf(v) === "SelectStmt") {
+      this.unplacedSelect(bodyOf(v));
+      for (const s of (bodyOf(v).sortClause ?? []) as AstNode[]) if (isNode(s) && kindOf(s) === "SortBy") this.writtenKeys.add(bodyOf(s));
+    }
     for (const [k, x] of Object.entries(isNode(v) ? bodyOf(v) : v as Body)) this.adopt(armOf(k, x) ?? x);
   }
+
+  /**
+   * THE KEYS OF THE STATEMENT'S OWN ORDER BY (the class "a statement's sort keys read from the rewritten tree", PR 231):
+   * each SortBy as Postgres parsed it, marked before any rule runs. Postgres's analysis sorts by exactly these
+   * (transformSortClause; a DISTINCT ON's expressions its ORDER BY lacks go to its distinctClause, never its
+   * sortClause), and FETCH … WITH TIES ties on its sortClause alone. A rule that adds a key for its own sort (a DISTINCT
+   * ON's, `distinctOnSorted`, which a DISTINCT over an exact numeric becomes) adds none of these, so it never reaches
+   * the ties. A copy of one is one (`clone`); a key folded from two of them stands for both (`nullsKeyFolded`).
+   */
+  private readonly writtenKeys = new WeakSet<Body>();
 
   /** a SELECT whose targets hold no offset (`TABLE t`): what else knows its query in Postgres's analysis
    *  (`analysedQuery`), by its targets, which the rewrite keeps as they are (a list made anew holds the same targets) */
@@ -558,6 +571,7 @@ class Rewriter {
     const out: Body = {};
     for (const [k, x] of Object.entries(v as Body)) out[k] = this.clone(x);
     if (isNode(v) && this.original.has(bodyOf(v))) this.original.add(bodyOf(out as AstNode));
+    if (isNode(v) && this.writtenKeys.has(bodyOf(v))) this.writtenKeys.add(bodyOf(out as AstNode));
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
     if (own !== undefined) this.synthetic.set(bodyOf(out as AstNode), own);
@@ -881,8 +895,11 @@ class Rewriter {
     // `x IS NULL, x DESC` as `x DESC NULLS LAST` (nullsKeyFolded): the folded key is the statement's own, its rules to
     // run; before anything writes a key another way, as the two are told alike by their trees
     if (Array.isArray(b.sortClause)) {
-      b.sortClause = nullsKeyFolded(b.sortClause as AstNode[], b);
+      const given = b.sortClause as AstNode[];
+      b.sortClause = nullsKeyFolded(given, b);
       for (const s of b.sortClause as AstNode[]) this.original.add(bodyOf(s));
+      // (a folded key is made of two of the statement's own, never under a DISTINCT ON, the one rule that adds keys)
+      for (const s of b.sortClause as AstNode[]) if (!given.includes(s)) this.writtenKeys.add(bodyOf(s));
     }
     this.naturalWritten(b);
     this.namedThroughStar(b);
@@ -1399,15 +1416,25 @@ class Rewriter {
     while (arm.op !== undefined && arm.op !== "SETOP_NONE" && arm.larg !== undefined) arm = isNode(arm.larg) ? bodyOf(arm.larg) : arm.larg as Body;
     // (a VALUES's outputs are its first row's, named as Postgres names them)
     const rows = arm.targetList === undefined ? arm.valuesLists as AstNode[] | undefined : undefined;
-    const targets = Array.isArray(rows) && rows.length > 0
+    const listed = Array.isArray(rows) && rows.length > 0
       ? ((bodyOf(rows[0]!).items ?? []) as AstNode[]).map((val, i): AstNode => ({ ResTarget: { name: `column${i + 1}`, val } }))
       : (arm.targetList ?? []) as AstNode[];
+    // THE CELLS ITS EXACT COLUMNS READ ARE THE ONE RECORD'S (the class "the cells a plan carries decided in two places",
+    // PR 231): as many as `exactThrough` recorded for the statement, after its columns, whether its SELECT list writes
+    // them (its own, a set operation's arms') or a `*` passes them through (a FROM item's, a WITH query's, nested). The
+    // wrapper passes that many through and never counts them itself; its columns are the rest of the list
+    const cellCount = this.cellsOf(b);
+    const targets = listed.filter((t) => !isCellTarget(t));
+    if (targets.length !== listed.length && listed.length - targets.length !== cellCount) {
+      throw new Error("the hidden columns of a FETCH … WITH TIES are not those its exact numbers read: report it, with the statement");
+    }
     // (the columns are read by place: a `*` is as many as Postgres expanded it to, which only its analysis says)
     if (targets.some((t) => hasStar(bodyOf(t).val)) && this.analysedQuery(targets) === undefined) {
       throw new Error("a * under FETCH … WITH TIES is not in Postgres's analysis: report it, with the statement");
     }
     const outputs = this.outputs(targets);
-    const sorts = ((b.sortClause ?? []) as AstNode[]).filter((s) => kindOf(s) === "SortBy");
+    // its ORDER BY as Postgres analysed it: the statement's own keys, never one a rule added for its own sort
+    const sorts = ((b.sortClause ?? []) as AstNode[]).filter((s) => kindOf(s) === "SortBy" && this.writtenKeys.has(bodyOf(s)));
     const nodes = sorts.map((s) => bodyOf(s).node as AstNode);
     const bound = setOperation
       ? nodes.map((n) => {
@@ -1464,10 +1491,8 @@ class Rewriter {
     delete b.limitCount;
     delete b.limitOffset;
     b.limitOption = "LIMIT_OPTION_DEFAULT";
-    // the hidden cells a lone `*` passes through from the FROM item it reads (`exactThrough`), after its columns: the
-    // statement's own after its outputs, so the exact programs read them where the store looks (`exposedCells`)
-    const lone = !setOperation && targets.length === 1 && hasStar(bodyOf(targets[0]!).val);
-    const cells = Array.from({ length: lone ? this.exposedCells({ SelectStmt: b }) : 0 }, (_c, j) => `__mason_cell_${j}`);
+    // the cells after the columns, where the exact programs read them
+    const cells = Array.from({ length: cellCount }, (_c, j) => `__mason_cell_${j}`);
     if (hidden.length > 0) b.targetList = [...(b.targetList as AstNode[]), ...hidden.map((h, j) => ({ ResTarget: { name: `__mason_ties_k${j + 1}`, val: h } }))];
     const columns = [...outputs.map((o) => COLUMN(o.at)), ...cells, ...hidden.map((_h, j) => `__mason_ties_k${j + 1}`)];
     const plain = (body: Body): AstNode => ({ SelectStmt: { ...body, limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } });
@@ -1522,8 +1547,7 @@ class Rewriter {
   private setOperationArms(b: Body): Body[] {
     const arms: Body[] = [];
     const leaves = (s: Body): void => {
-      const own = ["sortClause", "limitCount", "limitOffset", "lockingClause", "withClause"].some((k) => s[k] !== undefined);
-      if (isSetOp(s) && (s === b || !own)) { leaves(unwrappedArm(s.larg)); leaves(unwrappedArm(s.rarg)); return; }
+      if (isSetOp(s) && (s === b || !ownClauses(s))) { leaves(unwrappedArm(s.larg)); leaves(unwrappedArm(s.rarg)); return; }
       arms.push(s);
     };
     leaves(b);
@@ -1680,6 +1704,13 @@ class Rewriter {
   /** each query's exact columns as `exactThrough` first derived them, by the query (a trial's copy is its own query):
    *  the one record of them, which every reader (an arm, a FROM item's `innerExact`, a carry) reads */
   private readonly derived = new WeakMap<object, ExactColumn[]>();
+
+  /** how many hidden cells a query's rows carry after its columns: its record's (`derived`), which says a query's
+   *  cells wherever they are written — its own SELECT list, a `*` passing an inner query's through, a union's arms —
+   *  so every reader that must pass them on (FETCH … WITH TIES's wrapper) reads them here, and none counts them */
+  private cellsOf(b: Body): number {
+    return this.derived.get(b)?.[0]?.cells.length ?? 0;
+  }
 
   /** the CTEs of the queries `exactThrough` is inside, outermost first (a recursive WITH's are none: never read whole) */
   private readonly cteScope: AstNode[][] = [];
@@ -1977,10 +2008,12 @@ class Rewriter {
     const cells = inner[0]!.cells.length;
     const targets = (b.targetList ?? []) as AstNode[];
     const cellRef = (j: number): AstNode => ({ ColumnRef: { fields: [S(through.alias), S(`__mason_cell_${j}`)] } });
-    if (through.columns !== "star") b.targetList = [...targets, ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: cellRef(j) } }))];
     const map = through.columns;
     const out = inner.flatMap((e) => (map === "star" ? [e.column] : map.flatMap((k, i) => k === e.column ? [i] : []))
       .filter((i) => i < fields.length && fields[i]!.oid === NUMERIC || e.text).map((column) => ({ ...e, column })));
+    // (its record says its cells: a query that passes no exact column on selects none, so none is read as a column)
+    if (out.length === 0) return [];
+    if (through.columns !== "star") b.targetList = [...targets, ...Array.from({ length: cells }, (_, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val: cellRef(j) } }))];
     if (b.distinctClause !== undefined) this.distinctThrough(b, through, out, fields.length, cellRef);
     return out;
   }
@@ -2035,9 +2068,11 @@ class Rewriter {
    */
   private exactArms(b: Body, fields: ReadonlyArray<{ oid: number; typmod?: number }>): ExactColumn[] {
     const arms: AstNode[] = [];
+    // (its SELECTs as Postgres analyses them, `setOperationArms`: a UNION ALL of its own ORDER BY, limit or WITH is one,
+    // whose cells are its own record's, read with its WITH queries in scope)
     const flatten = (n: AstNode): void => {
       const x = bodyOf(n);
-      if (x.op === "SETOP_UNION" && x.all === true && x.larg !== undefined && x.rarg !== undefined) { flatten({ SelectStmt: x.larg }); flatten({ SelectStmt: x.rarg }); }
+      if (x.op === "SETOP_UNION" && x.all === true && x.larg !== undefined && x.rarg !== undefined && (x === b || !ownClauses(x))) { flatten({ SelectStmt: x.larg }); flatten({ SelectStmt: x.rarg }); }
       else arms.push(n);
     };
     flatten({ SelectStmt: b });
@@ -2090,12 +2125,14 @@ class Rewriter {
     });
     const total = own.reduce((n, o) => n + o.cells.length, 0);
     const offsets = own.map((_o, k) => own.slice(0, k).reduce((n, o) => n + o.cells.length, 0));
+    const convs: ExactColumn["cells"] = [...own.flatMap((o) => o.cells.map((c) => c.conv)), "exact"];
     own.forEach((o, k) => {
       const slots: AstNode[] = Array.from({ length: total }, (): AstNode => ({ A_Const: { isnull: true } }));
       o.cells.forEach((c, j) => { slots[offsets[k]! + j] = c.node; });
       bodyOf(arms[k]!).targetList = [...o.targets, ...[...slots, intConst(k)].map((val, j) => ({ ResTarget: { name: `__mason_cell_${j}`, val } }))];
+      // (the arm's record is what it now selects: the union's cells, its own program in its slots; `cellsOf`)
+      this.derived.set(bodyOf(arms[k]!), columns.map((i) => ({ column: i, text: false, cells: convs, program: offsetCells(o.programs.get(i)!, offsets[k]!) })));
     });
-    const convs: ExactColumn["cells"] = [...own.flatMap((o) => o.cells.map((c) => c.conv)), "exact"];
     return columns.map((i) => ({ column: i, text: false, cells: convs,
       program: { op: "pick", index: { op: "cell", key: String(total) }, args: own.map((o, k) => offsetCells(o.programs.get(i)!, offsets[k]!)) } }));
   }
@@ -4924,6 +4961,17 @@ function isCellRef(n: AstNode): boolean {
   if (kindOf(n) !== "ColumnRef") return false;
   const f = (bodyOf(n).fields ?? []) as AstNode[];
   return f.length === 2 && kindOf(f[1]!) === "String" && String(bodyOf(f[1]!).sval).startsWith("__mason_cell_");
+}
+
+/** a set operation's clauses of its own, which make it one SELECT of the set operation around it (Postgres's analysis
+ *  makes it a subquery there; libpg-query writes it unwrapped) */
+function ownClauses(s: Body): boolean {
+  return ["sortClause", "limitCount", "limitOffset", "lockingClause", "withClause"].some((k) => s[k] !== undefined);
+}
+
+/** a SELECT list's entry that is a hidden cell an exact column reads (`exactColumns`, a pass-through's, `exactArms`) */
+function isCellTarget(t: AstNode): boolean {
+  return String(bodyOf(t).name ?? "").startsWith("__mason_cell_");
 }
 
 /** a scalar subquery's one column, where it is a plain query's (not a set operation's, not a `*`) */

@@ -3258,6 +3258,60 @@ test("FETCH … WITH TIES over a derived table or a WITH query read by a * keeps
   } finally { await c.end(); }
 });
 
+test("FETCH … WITH TIES carries every cell its exact numbers have, in every shape they reach it by", async () => {
+  const c = await client();
+  try {
+    // the cells a statement's exact columns read are recorded once (`exactThrough`), and the wrapper passes that many
+    // through after the columns, by whichever shape they reach it: its own outputs, a lone `*` or `s.*`, a `*` beside
+    // outputs, a set operation's `*` arms over a WITH query or a subquery, derived tables nested, a WITH TIES query read
+    const q = "(SELECT r.id, r.id % 2 AS g, r.a / r.b AS q FROM ratios r)";
+    assert.deepEqual(await unlike(c, [
+      ["SELECT r.id, r.a / r.b AS q FROM ratios r ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      [`SELECT * FROM ${q} s ORDER BY 3 DESC FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      [`SELECT s.* FROM ${q} s ORDER BY 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      [`SELECT s.* FROM ${q} s ORDER BY s.g, 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 2, 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 3`, "bag"],
+      [`SELECT * FROM ${q} s UNION ALL SELECT * FROM ${q} s2 ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT r.id, r.id % 2, r.a / r.b FROM ratios r ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      [`SELECT * FROM (SELECT * FROM ${q} s1) s2 ORDER BY 3, 1 FETCH FIRST 2 ROWS WITH TIES`, "bag"],
+      [`WITH w AS ${q}, v AS (SELECT * FROM w) SELECT * FROM v ORDER BY 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      [`SELECT * FROM (SELECT * FROM ${q} s ORDER BY 3 FETCH FIRST 1 ROWS WITH TIES) t`, "bag"],
+      [`SELECT t.q FROM (SELECT r.id, r.a / r.b AS q FROM ratios r ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES) t`, "bag"],
+      [`SELECT DISTINCT * FROM ${q} s ORDER BY 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
+      // a WITH TIES arm of a UNION ALL whose other arm computes otherwise: its cells are the union's, in its own slots
+      ["(SELECT r.id, r.a / r.b AS q FROM ratios r ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES) UNION ALL SELECT 0, 1", "bag"],
+      ["SELECT 0, 1.5 UNION ALL (SELECT r.id, r.a / r.b AS q FROM ratios r ORDER BY 2 DESC FETCH FIRST 1 ROWS WITH TIES)", "bag"],
+      // a UNION ALL of its own WITH, ORDER BY and limit is one SELECT of the UNION ALL around it, its cells its own
+      [`(WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 2) UNION ALL (WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 FETCH FIRST 1 ROWS WITH TIES)`, "bag"],
+    ]), []);
+    // a `*` beside outputs carries no cells (its quotient is the engine's double, as without WITH TIES: not this PR's);
+    // under WITH TIES it answers as the same statement does under LIMIT, where the key ties nowhere
+    for (const sql of [
+      "SELECT *, r.a / r.b AS q FROM ratios r ORDER BY 1 {limit}",
+      "SELECT r.a / r.b AS q, * FROM ratios r ORDER BY 2 {limit}",
+      `SELECT *, s.id * 2 AS j FROM ${q} s ORDER BY 1 {limit}`,
+    ]) assert.deepEqual((await answer(c, sql.replace("{limit}", "FETCH FIRST 2 ROWS WITH TIES"))).rows, (await answer(c, sql.replace("{limit}", "LIMIT 2"))).rows, sql);
+  } finally { await c.end(); }
+});
+
+test("FETCH … WITH TIES ties on the ORDER BY Postgres sorts by: never a key a DISTINCT adds", async () => {
+  const c = await client();
+  try {
+    // a DISTINCT over an exact numeric is a DISTINCT ON of every output, and a DISTINCT ON's sort holds its keys: the
+    // rows tie on the statement's own ORDER BY all the same (Postgres's sortClause, which neither extends)
+    assert.deepEqual(await unlike(c, [
+      ["SELECT DISTINCT r.d IS NULL AS z, r.a / 7.0 AS q FROM ratios r ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT DISTINCT r.d IS NULL AS z, r.a / 2 AS h FROM ratios r ORDER BY z FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT DISTINCT r.d IS NULL AS z, r.team FROM ratios r ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT DISTINCT ON (1, 2) r.d IS NULL AS z, r.n FROM ratios r ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT DISTINCT ON (r.d IS NULL, r.a / 7.0) r.d IS NULL AS z, r.a / 7.0 AS q FROM ratios r ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT DISTINCT ON (1, 2) r.d IS NULL AS z, r.n FROM ratios r ORDER BY 1, 2 DESC FETCH FIRST 1 ROWS WITH TIES", "bag"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("a computed key and a merged column in a prepared statement run after a SET, and in two session zones", async () => {
   const c = await client();
   try {
