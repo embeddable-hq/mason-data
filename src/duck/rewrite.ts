@@ -32,8 +32,8 @@ import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { caseTwins, joinsUsing, type QueryOutputs, type Typed } from "./pgtree.ts";
-import { evaluated } from "./constant-key.ts";
+import { caseTwins, joinsUsing, type Keys, type QueryOutputs, type Typed } from "./pgtree.ts";
+import { evaluated, keysConstant, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
@@ -865,12 +865,15 @@ class Rewriter {
     // evaluates, and may raise on at planning: written so DuckDB evaluates it, never as a bare non-integer literal
     if (Array.isArray(b.sortClause) && Array.isArray(b.targetList) && (b.op === undefined || b.op === "SETOP_NONE")) {
       const targets = b.targetList as AstNode[];
-      b.sortClause = (b.sortClause as AstNode[]).flatMap((s) => {
+      // (a key bound to an output or another clause's key by equality, spelled unlike it: by the one resolver)
+      const sorts = b.sortClause as AstNode[];
+      const constant = this.keysConstant(sorts.map((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined), this.analysedQuery(targets)?.keys, "sorted", targets);
+      b.sortClause = sorts.flatMap((s, i) => {
         const sb = bodyOf(s);
         this.done.add(sb);
         if (kindOf(s) === "SortBy" && sb.useOp === undefined) {
           const out = this.outputOf(sb.node as AstNode, targets);
-          if (out?.twin !== true && this.typed(out !== null ? out.value : sb.node as AstNode)?.constant === true) return [];
+          if (out?.twin !== true && (constant[i] ?? this.typed(out !== null ? out.value : sb.node as AstNode)?.constant) === true) return [];
         }
         // (an integer the rewrite wrote is an ordinal it meant; any other bare literal DuckDB would refuse)
         const written = this.sortBy(sb, targets, b) ?? [s];
@@ -996,11 +999,52 @@ class Rewriter {
   /** the output an ORDER BY item reads: by its number, or by its bare name (SQL92's rule: an output before an input
    *  column; two outputs of one name reach here only as Postgres found them equal) */
   private outputOf(e: AstNode, targets: readonly AstNode[]): Output | null {
+    const outputs = this.outputs(targets);
+    return outputs[this.outputIndex(e, outputs)] ?? null;
+  }
+
+  /** the place in `outputs` of the output an ORDER BY or DISTINCT ON item reads by its number or bare name, or -1 */
+  private outputIndex(e: AstNode, outputs: readonly Output[]): number {
     const n = constInt(e);
-    if (n !== null) return this.outputAt(targets, n);
-    if (kindOf(e) !== "ColumnRef") return null;
+    if (n !== null) return n >= 1 && n <= outputs.length ? n - 1 : -1;
+    if (kindOf(e) !== "ColumnRef") return -1;
     const f = names(bodyOf(e).fields);
-    return f.length !== 1 ? null : this.outputs(targets).find((o) => o.name === f[0]) ?? null;
+    return f.length !== 1 ? -1 : outputs.findIndex((o) => o.name === f[0]);
+  }
+
+  /**
+   * WHETHER EACH KEY IS CONSTANT, by the entry Postgres bound it to (`keysConstant`, src/duck/constant-key.ts, the one
+   * resolver): a SELECT's ORDER BY or DISTINCT ON over its outputs (`targets`), or an aggregate's ORDER BY over its
+   * arguments (no `targets`: there a number is a value, never an output). A key's entry is known by its number or output
+   * name, or by an entry at its own offset (one Postgres made for it); one bound by equality is left to the resolver.
+   * null for a key it cannot tell (the analysis not found, a way that does not fit), whose own reading stands.
+   */
+  private keysConstant(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<boolean | null> {
+    if (keys === undefined) return nodes.map(() => null);
+    const outputs = targets === undefined ? [] : this.outputs(targets);
+    const offsets = (n: AstNode): number[] => {
+      const b = bodyOf(n);
+      const own = typeof b.location === "number" && b.location >= 0 ? [b.location - this.base] : [];
+      const k = kindOf(n);
+      return (k === "TypeCast" || k === "CollateClause") && isNode(b.arg) ? [...own, ...offsets(b.arg as AstNode)] : own;
+    };
+    const known = nodes.map((n) => {
+      if (n === undefined || !isNode(n)) return -1;
+      const out = targets === undefined ? -1 : this.outputIndex(n, outputs);
+      // (an output's place is its entry's: Postgres lists the outputs first, a *'s columns each one)
+      if (out >= 0) return out;
+      const at = offsets(n);
+      const own = keys.entries.findIndex((e) => e.at !== null && at.includes(e.at));
+      if (own >= 0) return own;
+      // bound by equality: whether it reads a column (a subquery's own columns aside), and its constancy where the
+      // same text was analysed elsewhere (`typed`'s shape)
+      const text = JSON.stringify(n);
+      const t = this.typed(n);
+      return { reads: text.includes("\"SubLink\"") ? null : text.includes("\"ColumnRef\""), constant: t === null ? null : t.constant === true } satisfies Unbound;
+    });
+    // (a key no entry can be told for leaves the clause's reading to each key's own)
+    if (known.includes(-1)) return nodes.map(() => null);
+    return keysConstant(keys, clause, known);
   }
 
   /**
@@ -2001,9 +2045,12 @@ class Rewriter {
       // src/duck/constant-key.ts): a DISTINCT ON key the analysis put a Const, after its output name or number is
       // resolved, divides no rows, and written as the bare literal the engine refuses it (42804) or reads an ordinal. It
       // is no key; with none left every row is one set, so one key the engine evaluates, which divides nothing either
-      const keys = (b.distinctClause as AstNode[]).filter((d) => {
+      // (a key bound to an output or the ORDER BY's key by equality, spelled unlike it: by the one resolver)
+      const ons = b.distinctClause as AstNode[];
+      const constant = this.keysConstant(ons.map((d) => isNode(d) ? d : undefined), this.analysedQuery(targets)?.keys, "distinct", targets);
+      const keys = ons.filter((d, i) => {
         const out = isNode(d) ? this.outputOf(d, targets) : null;
-        return !isNode(d) || out?.twin === true || this.typed(out !== null ? out.value : d)?.constant !== true;
+        return !isNode(d) || out?.twin === true || (constant[i] ?? this.typed(out !== null ? out.value : d)?.constant) !== true;
       });
       if (keys.length === 0) { b.distinctClause = [evaluated(strConst("one set"))]; return; }
       b.distinctClause = keys.map((d) => {
@@ -2421,10 +2468,14 @@ class Rewriter {
     // A CONSTANT KEY of an aggregate's ORDER BY (the class, issue 134; src/duck/constant-key.ts): a key the analysis put
     // a Const orders nothing, and written as the bare literal the engine refuses it (42804, reported as 42803). It is no
     // key, and with none left no ORDER BY. An ordered-set aggregate's key is its VALUE, so it stays (`withinGroup`)
+    // A key equal to an argument by the analysis (`array_agg(1.5::numeric ORDER BY '1.5'::numeric)`) is that argument:
+    // resolved by the one resolver (`keysConstant`)
     if (b.agg_within_group !== true && Array.isArray(b.agg_order)) {
-      b.agg_order = (b.agg_order as AstNode[]).filter((s) => {
+      const order = b.agg_order as AstNode[];
+      const constant = this.keysConstant(order.map((s) => kindOf(s) === "SortBy" && isNode(bodyOf(s).node) ? bodyOf(s).node as AstNode : undefined), t?.keys, "sorted");
+      b.agg_order = order.filter((s, i) => {
         const sb = bodyOf(s);
-        return !(kindOf(s) === "SortBy" && sb.useOp === undefined && isNode(sb.node) && this.typed(sb.node as AstNode)?.constant === true);
+        return !(kindOf(s) === "SortBy" && sb.useOp === undefined && isNode(sb.node) && (constant[i] ?? this.typed(sb.node as AstNode)?.constant) === true);
       });
       if ((b.agg_order as AstNode[]).length === 0) delete b.agg_order;
     }

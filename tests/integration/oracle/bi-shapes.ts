@@ -160,6 +160,15 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "a constant key: a set operation's ORDER BY a Const output", sql: "SELECT o.id, 1.5::numeric AS v FROM orders o UNION ALL SELECT c.id, 1.5::numeric FROM customers c ORDER BY 2, 1 DESC LIMIT 3" },
   { name: "a constant key: an aggregate's ORDER BY a Const", sql: "SELECT o.customer_id, string_agg(o.id::text, ',' ORDER BY 1.5::numeric, o.id DESC) AS s, array_agg(o.id ORDER BY 1::int, o.id)::text AS a FROM orders o GROUP BY o.customer_id ORDER BY 1 LIMIT 3" },
   { name: "a constant key: an ordered-set aggregate's Const is its value", sql: "SELECT o.status, mode() WITHIN GROUP (ORDER BY 1.5::numeric) AS m, percentile_disc(0.5) WITHIN GROUP (ORDER BY 'x'::text) AS p FROM orders o GROUP BY o.status ORDER BY 1 LIMIT 3" },
+  // the third class round: a key bound to an output or another key by EQUALITY OF THE ANALYSED EXPRESSIONS, spelled
+  // another way (Postgres's findTargetlistEntrySQL99 leaves no node at such a key's offset)
+  { name: "an equal key: ORDER BY a Const spelled unlike its output", sql: "SELECT o.id, 1.5::numeric AS v FROM orders o ORDER BY '1.5'::numeric, o.id DESC LIMIT 3" },
+  { name: "an equal key: ORDER BY an integer Const spelled unlike its output (no ordinal)", sql: "SELECT o.id, 1::int AS v FROM orders o ORDER BY CAST('1' AS int), o.id DESC LIMIT 3" },
+  { name: "an equal key: ORDER BY a Const unlike its output, under a join and GROUP BY", sql: "SELECT o.customer_id, numeric '1.5' AS v, count(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY o.customer_id ORDER BY CAST('1.5' AS numeric), o.customer_id DESC LIMIT 3" },
+  { name: "an equal key: DISTINCT ON and ORDER BY one Const spelled two ways", sql: "SELECT DISTINCT ON ('1.5'::numeric, o.customer_id) o.customer_id, o.id FROM orders o ORDER BY 1.5::numeric, o.customer_id DESC, o.id LIMIT 3" },
+  { name: "an equal key: a Const twice in ORDER BY, spelled two ways", sql: "SELECT s.id FROM (SELECT o.id FROM orders o ORDER BY 1.5::numeric, '1.5'::numeric, o.id DESC LIMIT 3) s ORDER BY s.id" },
+  { name: "an equal key: an aggregate's ORDER BY its argument spelled another way", sql: "SELECT o.status, (array_agg(1.5::numeric ORDER BY '1.5'::numeric, o.id DESC))[1] AS a FROM orders o GROUP BY o.status ORDER BY 1 LIMIT 3" },
+  { name: "an equal key: a qualified key against an unqualified output, and an implicit cast against an explicit one", sql: "SELECT customer_id, o.id::numeric + 1.5 AS v FROM orders o ORDER BY o.customer_id DESC, o.id + 1.5 LIMIT 5" },
   // no oracle table has a composite key: tests/duck-wire.test.ts holds the whole and the partial composite key over late_p
   { name: "key-first GROUP BY: no primary key grouped stays as it was", sql: "SELECT i.order_id, i.product, count(*) AS n FROM order_items i GROUP BY i.order_id, i.product ORDER BY 1, 2 LIMIT 6" },
   { name: "key-first GROUP BY: the nulls idiom over a fetched column", sql: "SELECT o.id, o.status, sum(i.quantity) AS q FROM orders o LEFT JOIN order_items i ON i.order_id = o.id GROUP BY o.id ORDER BY (o.status) IS NULL ASC, o.status DESC, o.id LIMIT 10" },
