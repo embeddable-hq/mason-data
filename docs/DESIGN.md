@@ -2046,6 +2046,13 @@ Inside the agents the largest single cost was test runs: a 100 s test file run w
 per proof, 36 min of one issue's agents in three proofs (2, 13 and 20 min, each of which built a
 copy of the tree as well); 43 min of commands ran past their own foreground limit and were moved to the background.
 
+The same day the waits that replaced those gaps were found late twice over. They slept 120 s between looks, and the
+one on a PR sent back for a fix watched only for its branch's next head, so its CI's red oracle was seen only when the
+next push woke it. And two PRs queued to auto-merge at a reviewed head were found still queued at a later, unread
+head: GitHub keeps a queued auto-merge across a push by someone with write access, and `--match-head-commit` is checked
+only when the merge is queued. The waits became one `gh pr checks --watch --fail-fast` per PR, and a PR sent back has
+its merge withdrawn.
+
 ## A libc order, read level by level
 
 Issue 128: under en_US.utf8 one value holding U+FE0F (`❤️`) or a Thai vowel refused a whole column's sort, group and
