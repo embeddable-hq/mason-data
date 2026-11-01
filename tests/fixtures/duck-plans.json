@@ -332,6 +332,120 @@
       "full_sort": false
     },
     {
+      "name": "a top N over USING, sorted",
+      "sql": "SELECT id, o.meta, o.notes, c.name FROM orders o JOIN customers c USING (id) ORDER BY o.created_at DESC LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.orders",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.customers",
+        "          TOP_N (1 key)",
+        "            PROJECTION",
+        "              HASH_JOIN",
+        "                FILTER",
+        "                  TABLE_SCAN public.orders [top-N filter: created_at]",
+        "                TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "a top N over a FULL USING, by the merged column",
+      "sql": "SELECT id, o.meta, c.name FROM orders o FULL JOIN customers c USING (id) ORDER BY id DESC LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.orders",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.customers",
+        "            TOP_N (1 key)",
+        "              PROJECTION",
+        "                HASH_JOIN",
+        "                  TABLE_SCAN public.orders",
+        "                  TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "a LIMIT with no ORDER BY over a NATURAL join, a *",
+      "sql": "SELECT * FROM orders o NATURAL JOIN order_tags t LIMIT 100",
+      "plan": [
+        "HASH_JOIN",
+        "  TABLE_SCAN public.orders",
+        "  HASH_JOIN",
+        "    TABLE_SCAN public.order_tags",
+        "    LIMIT",
+        "      CROSS_PRODUCT",
+        "        TABLE_SCAN public.orders",
+        "        TABLE_SCAN public.order_tags"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "a top N over joins by a computed output's name",
+      "sql": "SELECT o.id, o.meta, c.name, o.amount * 2 AS twice FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY twice DESC, o.id LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      PROJECTION",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.orders",
+        "          HASH_JOIN",
+        "            TABLE_SCAN public.customers",
+        "            TOP_N (2 keys)",
+        "              PROJECTION",
+        "                HASH_JOIN",
+        "                  TABLE_SCAN public.orders",
+        "                  TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "a top N over joins by a computed key no output shows",
+      "sql": "SELECT o.id, o.meta, c.name FROM orders o LEFT JOIN customers c ON c.id = o.customer_id ORDER BY date_trunc('day', o.created_at) DESC, o.id LIMIT 100",
+      "plan": [
+        "PROJECTION",
+        "  ORDER_BY",
+        "    PROJECTION",
+        "      HASH_JOIN",
+        "        TABLE_SCAN public.orders",
+        "        HASH_JOIN",
+        "          TABLE_SCAN public.customers",
+        "          TOP_N (2 keys)",
+        "            PROJECTION",
+        "              HASH_JOIN",
+        "                TABLE_SCAN public.orders",
+        "                TABLE_SCAN public.customers"
+      ],
+      "calls": [],
+      "sends": [
+        "date_trunc",
+        "make_timestamptz",
+        "epoch_us",
+        "current_setting"
+      ],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "a tool's wrapper of a many-to-many join, no sort",
       "sql": "SELECT * FROM (SELECT c.id, o.meta FROM customers c JOIN orders o ON c.tenant_id = o.tenant_id) t LIMIT 100",
       "plan": [
@@ -1640,6 +1754,22 @@
       "sends": [],
       "delim_join": false,
       "full_sort": false
+    },
+    {
+      "name": "BI shape: jsonb #>> array[…] grouped",
+      "sql": "SELECT o.meta #>> array['status'] AS s, count(*) AS n FROM orders o GROUP BY o.meta #>> array['status'] ORDER BY s",
+      "plan": [
+        "ORDER_BY",
+        "  HASH_GROUP_BY",
+        "    PROJECTION calls __mason_json_get, __mason_turn",
+        "      TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_json_get"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
     },
     {
       "name": "BI shape: jsonb @>",

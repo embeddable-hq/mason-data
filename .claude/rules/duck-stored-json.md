@@ -68,7 +68,7 @@ paths:
   server: one review filling for an hour left the waiting rows an hour stale, and a path that qualified was stored only
   at the next start.)
 - **A hidden column is never listed**: a statement that lists a table's columns without naming them (`*` over a table,
-  `t.*`, a NATURAL JOIN, a whole row) reads the copy's view of its visible columns (`__mason_visible`, `hideKept`), and
+  an arm of a set operation's included, `t.*`, a NATURAL JOIN, a whole row) reads the copy's view of its visible columns (`__mason_visible`, `hideKept`), and
   every copy served has that view. PGlite's catalog never has the column (`schemaBuilt` reads the copy's recorded
   columns), and nothing else may `SELECT *` a copy into an answer.
 - **A jsonb's order is stored as a read like a path's** (`ORDER_STEPS`, src/duck/kept-route.ts; the PR's measurement:

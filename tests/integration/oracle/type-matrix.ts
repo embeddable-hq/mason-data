@@ -98,6 +98,32 @@ export const JORDER: Array<string | null> = [
   '["e\u0301"]', '["\u2764\ufe0f"]', '["\u2764"]', '{"k": "\u0e40\u0e01"}', '{"k": "\u0e01"}',
 ];
 
+/**
+ * A JSON READ'S PATH, THE SHAPES IT MUST HOLD (issue 130): a value of every kind at a key, a number's key beside an
+ * array's index on one document, a key with a dot or a quote, a key held twice (`json` keeps both, jsonb the last),
+ * white space around a `json` value, a scalar and an array as the whole document, a key's text a collation orders
+ * otherwise than its bytes. One document as a jsonb and as a json.
+ */
+export const JPATH: Array<string | null> = [
+  String.raw`{"k": "alpha", "n": 7.00, "t": true, "f": false, "z": null, "o": {"b": "deep", "0": "key0"}, "a": ["x", "y", {"0": "in"}], "0": "zero", "1": "one", "a.b": "dot", "q\"r": "quote", "o.b": "flat", "e": "esc\"aped\n"}`,
+  String.raw`{"k": "Beta", "k": "dup", "o": {"b": 1, "b": 2}, "a": [1, 2.50, null, "s", [1,  2], {"x":  1}]}`,
+  String.raw` { "k" : "Zed" , "o" :  { "b" : [ 1 , 2 ] } , "a" : { "0" : "object", "1" : "other" } , "0" : ["nested"] } `,
+  '{"k": "éa", "o": null, "a": []}',
+  '{"k": "ea", "o": {}, "a": {}}',
+  '{"k": 12, "o": "text"}',
+  '{"k": null}',
+  '{"k": {"b": "object"}}',
+  '{"k": ["array"]}',
+  '{}',
+  '[]',
+  '["first", "second", ["third", {"k": "inner"}]]',
+  '"scalar"',
+  '5',
+  'true',
+  'null',
+  null,
+];
+
 export const COLL: Array<[number, string | null]> = [
   [1, "대지"], [2, "Animal"], [3, "zebra"], [4, "Dob"], [5, "Do\uFFFDa"], [6, "$x"], [7, "€x"], [8, "@x"], [9, "~x"], [10, "ab"],
   [11, "a-b"], [12, "a b"], [13, "가나"], [14, "나"], [15, "가가"], [16, "-"], [17, "--"], [18, "-@"], [19, "@"], [20, "三"],
@@ -220,6 +246,10 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   `CREATE TABLE public.jcased (id int PRIMARY KEY, "JB" jsonb, "J" json); INSERT INTO public.jcased VALUES ` +
   `(1, '{"a": "upper", "1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}', '{"a": "upper", "1 ": "trailing", " 1": "leading", "+1": "plus", "a": "last"}'), ` +
   `(4, '["x", "y", "z"]', '["x", "y", "z"]'), (5, NULL, NULL), (6, '{"a": "p", "o": {"a": "q", "b": ["r", "s"]}}', '{"o": {"a": "q", "a": "q2"}}');` +
+  // a json read's path (issue 130), and read through a view grouped by it
+  `CREATE TABLE public.jpath (id int PRIMARY KEY, jb jsonb, j json); INSERT INTO public.jpath VALUES ${JPATH.map((d, i) => `(${i + 1}, ${d === null ? "NULL, NULL" : `'${d.replace(/'/g, "''")}', '${d.replace(/'/g, "''")}'`})`).join(", ")};` +
+  "CREATE VIEW public.jpath_by_array AS SELECT jb #>> ARRAY['k'] AS v, count(*) AS n FROM public.jpath GROUP BY 1; " +
+  "CREATE VIEW public.jpath_by_literal AS SELECT j #>> '{o,b}'::text[] AS v, count(*) AS n FROM public.jpath GROUP BY 1;" +
   // TEXT IN THE DATABASE'S ORDER (the BI-tools test of #517): what a glibc locale orders otherwise than ICU
   // and than its bytes — Hangul (no letter weight), $ and € (a letter-level weight, @ and ~ none), U+FFFD (after the
   // letters), ß = ss, CJK (no last-level weight), punctuation runs, case; from 50 issue 128's (COLL says each); 99 a
@@ -340,6 +370,79 @@ const LITERALS: Partial<Record<Col, string[]>> = {
   // a jsonb by its own order: an object equal to two of typed's at another scale, a raw scalar, an empty array
   jb: ["'{\"a\": 1.00}'", "'1.5'", "'[]'"],
 };
+
+/**
+ * A JSON READ'S PATH, HOWEVER IT IS SPELLED (issue 130, src/duck/rewrite.ts `jsonPath`): every spelling of one path is
+ * one read, so each is held over every path on both types; then what must NOT read as a constant (a cast that changes the
+ * value, an element a row holds), the NULLs, the functions, and the shapes a tool groups and sorts by.
+ */
+function* jsonPathCases(): Generator<Matrixed> {
+  const paths: string[][] = [["k"], ["n"], ["t"], ["f"], ["z"], ["o"], ["a"], ["missing"], ["o", "b"], ["o", "0"], ["o", "missing"], ["k", "b"], ["0"], ["1"], ["-1"], ["2"],
+    ["a", "0"], ["a", "1"], ["a", "2", "0"], ["a", "-1"], ["a", "-7"], ["a", "4", "1"], ["a", "5", "x"], ["2", "1"], ["2", "2", "1"], ["a.b"], ['q"r'], ["o.b"], ["e"], ["k", "0"], ["+1"], [" 1"], ["1 "], ["01"], [""]];
+  const array = (p: string[]): string => `ARRAY[${p.map((e) => `'${e}'`).join(", ")}]`;
+  const literal = (p: string[]): string => `'{${p.map((e) => `"${e.replaceAll('"', '\\"')}"`).join(",")}}'`;
+  const spellings: Array<[string, (p: string[]) => string]> = [
+    ["a literal", literal], ["an array", array], ["an array cast", (p) => `${array(p)}::text[]`], ["a literal cast", (p) => `${literal(p)}::text[]`],
+    ["an array of casts", (p) => `ARRAY[${p.map((e) => `'${e}'::text`).join(", ")}]`], ["a varchar array", (p) => `${array(p)}::varchar[]`],
+  ];
+  for (const c of ["j", "jb"]) for (const [name, spell] of spellings) {
+    yield q(`a path as ${name}, ->> ${c}`, `SELECT id, ${paths.map((p) => `${c} #>> ${spell(p)}`).join(", ")} FROM jpath ORDER BY id`);
+    yield q(`a path as ${name}, -> ${c}`, `SELECT id, ${paths.map((p) => `${c} #> ${spell(p)}`).join(", ")} FROM jpath ORDER BY id`);
+  }
+  for (const c of ["j", "jb"]) {
+    const fn = c === "j" ? "json" : "jsonb";
+    // the empty path and the NULLs
+    yield q(`an empty path, ${c}`, `SELECT id, ${c} #>> '{}', ${c} #> '{}', ${c} #>> '{}'::text[], ${c} #> ARRAY[]::text[], ${c} #>> ARRAY[]::text[], ${c} #>> ARRAY[]::varchar[], ${fn}_extract_path(${c}, VARIADIC '{}'), ${fn}_extract_path_text(${c}, VARIADIC ARRAY[]::text[]) FROM jpath ORDER BY id`);
+    yield q(`a NULL path or element, ${c}`, `SELECT id, ${c} #>> NULL, ${c} #> NULL, ${c} #>> NULL::text[], ${c} #> ARRAY['k', NULL], ${c} #>> ARRAY[NULL, 'k'], ${c} #>> ARRAY[NULL]::text[], ${c} #> '{k,NULL}', ${c} #>> '{NULL}'::text[], ${c} #>> '{"NULL"}', ${c} #>> ARRAY['NULL'], ${c} #>> ARRAY['k', NULL::text], ${c} #>> CAST(NULL AS text[]) FROM jpath ORDER BY id`);
+    // what must not read as the text it was written with: the cast changes it, or a row holds it
+    yield q(`a cast that cuts a key, ${c}`, `SELECT id, ${c} #>> ARRAY['kk'::varchar(1)], ${c} ->> 'kk'::varchar(1), ${c} ->> 'k '::char(2), ${c} -> 'kk'::varchar(1), ${fn}_extract_path_text(${c}, 'kk'::varchar(1)), ${c} #>> ARRAY['k ']::text[] FROM jpath ORDER BY id`);
+    for (const path of ["ARRAY['kk']::varchar(1)[]", "'{kk}'::varchar(1)[]", "ARRAY['kk']::char(1)[]", "'{kk}'::char(1)[]", "ARRAY['kk']::text[]::varchar(1)[]", "ARRAY['k ']::char(2)[]", "ARRAY['k '::char(2)]", "ARRAY['k']::name[]"]) {
+      yield q(`a path through a type that changes it, ${c}: ${path}`, `SELECT id, ${c} #>> ${path} FROM jpath ORDER BY id`);
+    }
+    yield q(`a path a row or an expression holds, ${c}`, `SELECT id, ${c} #>> ARRAY[CASE WHEN id % 2 = 0 THEN 'k' ELSE 'o' END], ${c} #>> ARRAY['o', id::text], ${c} #> ARRAY['k' || ''], ${c} #>> ARRAY[lower('K')], ${c} #>> string_to_array('o,b', ','), ${c} #>> ARRAY[NULLIF('k', 'k')], ${c} #>> CASE WHEN id > 3 THEN '{k}'::text[] END FROM jpath ORDER BY id`);
+    // an array literal as array_in reads it
+    yield q(`a path literal as array_in reads it, ${c}`, `SELECT id, ${c} #>> '[2:3]={o,b}', ${c} #>> ' { o , b } ', ${c} #>> '{"o",b}', ${c} #>> E'{o,\\b}', ${c} #>> '[0:0]={k}'::text[], ${c} #> '{"a.b"}', ${c} #> E'{"q\\"r"}', ${c} #>> '{Null}' FROM jpath ORDER BY id`);
+    yield q(`a path of two dimensions, ${c}`, `SELECT ${c} #>> '{{a},{b}}' FROM jpath ORDER BY id`);
+    yield q(`a path array of arrays, ${c}`, `SELECT ${c} #>> ARRAY[ARRAY['a'], ARRAY['b']] FROM jpath ORDER BY id`);
+    // a chain: each read folded, and the path read off a read
+    yield q(`a chain of path reads, ${c}`, `SELECT id, ${c} #> ARRAY['o'] #>> ARRAY['b'], ${c} #> '{o}'::text[] #>> '{b}', ${c} #> ARRAY['a'] #>> ARRAY['0'], ${c} #> ARRAY[]::text[] #>> ARRAY['k'], ${c} #> ARRAY['o'] #> ARRAY['b'] #>> ARRAY[]::text[], ${c} #> ARRAY['o', NULL] #>> ARRAY['b'], ${c} -> 'o' #>> ARRAY['b'], ${c} #> ARRAY['o'] ->> 'b', ${c} -> 'a'::text -> 0 ->> '0'::text FROM jpath ORDER BY id`);
+    // the functions take the same route
+    yield q(`${fn}_extract_path, every spelling`, `SELECT id, ${fn}_extract_path(${c}, 'o', 'b'), ${fn}_extract_path_text(${c}, 'o', 'b'), ${fn}_extract_path(${c}, 'o'::text, 'b'::text), ${fn}_extract_path_text(${c}, 'k'::varchar), ${fn}_extract_path_text(${c}, VARIADIC ARRAY['o', 'b']), ${fn}_extract_path(${c}, VARIADIC ARRAY['o', 'b']::text[]), ${fn}_extract_path_text(${c}, VARIADIC '{o,b}'), ${fn}_extract_path(${c}, VARIADIC '{a,0}'::text[]), ${fn}_extract_path_text(${c}, 'a', '0'), ${fn}_extract_path_text(${c}, '1'), ${fn}_extract_path_text(${c}, 'a', '-1'), ${fn}_extract_path_text(${c}, 'a.b'), ${fn}_extract_path_text(${c}, 'q"r') FROM jpath ORDER BY id`);
+    yield q(`${fn}_extract_path, the NULLs and a row's element`, `SELECT id, ${fn}_extract_path(${c}, 'k', NULL), ${fn}_extract_path_text(${c}, NULL), ${fn}_extract_path_text(${c}, NULL::text), ${fn}_extract_path_text(${c}, 'o', NULL::text), ${fn}_extract_path(${c}, VARIADIC ARRAY['k', NULL]), ${fn}_extract_path_text(${c}, VARIADIC NULL), ${fn}_extract_path_text(${c}, VARIADIC NULL::text[]), ${fn}_extract_path_text(${c}, 'o', id::text), ${fn}_extract_path_text(${c}, VARIADIC ARRAY['o', id::text]), ${fn}_extract_path_text(${c}, 'kk'::varchar(1)) FROM jpath ORDER BY id`);
+    // a path grouped, ordered and filtered on, as a tool sends it
+    for (const [name, path] of [["an array", "ARRAY['k']"], ["an array cast", "ARRAY['k']::text[]"], ["a literal", "'{k}'"], ["two keys", "ARRAY['o', 'b']"], ["an index", "ARRAY['a', '0']"]] as const) {
+      const v = `${c} #>> ${path}`;
+      yield q(`${c} #>> ${name}: grouped, by the ordinal`, `SELECT ${v}, count(*) FROM jpath GROUP BY 1 ORDER BY 1`);
+      yield q(`${c} #>> ${name}: grouped, by the output name`, `SELECT ${v} AS v, count(*) FROM jpath GROUP BY v ORDER BY v DESC NULLS LAST`);
+      yield q(`${c} #>> ${name}: grouped by the expression, ordered by the name`, `SELECT ${v} AS v, count(*) AS n FROM jpath GROUP BY ${v} ORDER BY v`);
+      yield q(`${c} #>> ${name}: grouped by the expression, ordered by it`, `SELECT ${v}, count(*) FROM jpath GROUP BY ${v} ORDER BY ${v} NULLS FIRST`);
+      yield q(`${c} #>> ${name}: ordered by the output name`, `SELECT id, ${v} AS v FROM jpath ORDER BY v, id`);
+      yield q(`${c} #>> ${name}: ordered by it, the nulls idiom`, `SELECT id FROM jpath ORDER BY (${v}) IS NULL, ${v}, id`);
+      yield q(`${c} #>> ${name}: filtered`, `SELECT id FROM jpath WHERE ${v} = 'alpha' OR ${v} IN ('Zed', '12') OR ${v} LIKE '%ea' ORDER BY id`);
+      yield q(`${c} #>> ${name}: DISTINCT and an aggregate`, `SELECT DISTINCT ${v} FROM jpath ORDER BY 1`);
+      yield q(`${c} #>> ${name}: min, max and count(DISTINCT)`, `SELECT min(${v}), max(${v}), count(DISTINCT ${v}) FROM jpath`);
+      // (the database's: a libc order in CI's Postgres, oracle/README)
+      for (const [kind, coll] of [["bytes", '"C"'], ["ICU", '"und-x-icu"'], ["the database's order", '"default"']] as const) {
+        yield q(`${c} #>> ${name}: ordered under ${kind}`, `SELECT id, ${v} AS v FROM jpath ORDER BY v COLLATE ${coll}, id`);
+        yield q(`${c} #>> ${name}: compared under ${kind}`, `SELECT id FROM jpath WHERE (${v}) COLLATE ${coll} > 'b' ORDER BY id`);
+        yield q(`${c} #>> ${name}: grouped, ordered under ${kind}`, `SELECT ${v} AS v, count(*) FROM jpath GROUP BY 1 ORDER BY v COLLATE ${coll}`);
+      }
+    }
+  }
+  yield q("jb #> an array: grouped by its output name", "SELECT jb #> ARRAY['o'] AS v, count(*) FROM jpath GROUP BY v ORDER BY v");
+  yield q("jb #> an array: ordered by its output name", "SELECT id, jb #> ARRAY['a', '0'] AS v FROM jpath ORDER BY v, id");
+  yield q("j #> an array: grouped, which json refuses", "SELECT j #> ARRAY['o'] AS v, count(*) FROM jpath GROUP BY v");
+  yield q("j #> an array as text: grouped by its output name", "SELECT (j #> ARRAY['o'])::text AS v, count(*) FROM jpath GROUP BY v ORDER BY v");
+  yield q("#> an array compared", "SELECT id FROM jpath WHERE jb #> ARRAY['k'] = '\"alpha\"'::jsonb OR jb #> ARRAY['o'] = '{}' ORDER BY id");
+  yield q("a grouped view by an array path, ordered by its output name", "SELECT * FROM jpath_by_array ORDER BY v");
+  yield q("a grouped view by an array path, its columns, descending", "SELECT v, n FROM jpath_by_array ORDER BY v DESC NULLS LAST");
+  yield q("a grouped view by a literal path, ordered by its output name", "SELECT v, n FROM jpath_by_literal ORDER BY v");
+  yield q("a grouped view by an array path, ordered under ICU", `SELECT v, n FROM jpath_by_array ORDER BY v COLLATE "und-x-icu"`);
+  yield q("a path in a subquery, grouped by its output name", "SELECT s.v, count(*) FROM (SELECT jb #>> ARRAY['k'] AS v FROM jpath) s GROUP BY s.v ORDER BY s.v");
+  yield q("a path read beside a * of the same table", "SELECT *, jb #>> ARRAY['k'] AS v FROM jpath ORDER BY v, id");
+  yield q("a ->> read beside a * of the same table", "SELECT *, jb ->> 'k' AS v FROM jpath ORDER BY v, id");
+  yield q("a path off a computed document", "SELECT id, ('{\"a\": 1}'::jsonb) #>> ARRAY['a'], jsonb_build_object('a', 'p', 'a', 'q') #>> ARRAY['a'] FROM jpath WHERE id < 3 ORDER BY id");
+}
 
 /** each column of `mapped`, every way a tool reads one (the issue's list: the statement a BI tool's fingerprint, breakout
  *  and filter send) */
@@ -586,6 +689,7 @@ function* matrix(): Generator<Matrixed> {
   // a `#>` element is an index as Postgres's strtoint reads one: a sign and white space before it, nothing after it
   yield q("#> path elements read as an array index", "SELECT id, " + ["{+1}", "{\" 1\"}", "{\"1 \"}", "{01}", "{-1}", "{\" -1\"}", "{+-1}", "{1.0}", "{99999999999}"]
     .flatMap((e) => [`"JB" #>> '${e}'`, `"J" #>> '${e}'`]).join(", ") + ", jsonb_extract_path_text(\"JB\", '+1'), json_extract_path_text(\"J\", ' 1'), \"JB\" #>> '{o,b,+1}' FROM jcased ORDER BY id");
+  yield* jsonPathCases();
   yield q("jsonb operators", "SELECT id, jb @> '{\"a\": 1}', jb <@ '{\"a\": 1, \"b\": 2}', jb ? 'a', jb ?| ARRAY['a', 'z'], jb ?& ARRAY['a', 'b'], jb || '{\"z\": 0}', jb - 'a' FROM typed ORDER BY id");
   yield q("jsonb sorted", "SELECT id, jb FROM typed ORDER BY jb, id");
   // ---- jsonb's order and equality (src/duck/jsonb-order.ts), over JORDER: every pair compared, sorted every way ----
@@ -966,7 +1070,7 @@ function* matrix(): Generator<Matrixed> {
   yield q("top N over joins: a FULL join", "SELECT a.id, a.note, b.id, b.amount FROM top_a a FULL JOIN top_b b ON a.id = b.a_id ORDER BY a.id NULLS FIRST, b.id NULLS FIRST LIMIT 9");
   yield q("top N over joins: an expression over a wide column, and exact numerics", "SELECT a.id, upper(a.note), length(c.doc::text), (b.payload ->> 'n')::int + 1 AS n, b.amount / 3, round(b.amount * 1.1, 1) " + `${JOINED} ORDER BY ${TOTAL} LIMIT 10`);
   yield q("top N over joins: a sort by an expression, an ordinal and an output's name", `SELECT a.id AS key, b.id, c.label AS tag, b.payload ${JOINED} ORDER BY lower(a.name) NULLS FIRST, 1, tag NULLS FIRST, 2 NULLS FIRST, c.id NULLS FIRST LIMIT 11`);
-  yield q("top N over joins: a sort by a computed output is left as it was", "SELECT a.id, b.id, b.id * 2 AS twice, c.doc FROM top_a a JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON c.b_id = b.id ORDER BY twice DESC, 1, c.id LIMIT 5");
+  yield q("top N over joins: a sort by a computed output", "SELECT a.id, b.id, b.id * 2 AS twice, c.doc FROM top_a a JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON c.b_id = b.id ORDER BY twice DESC, 1, c.id LIMIT 5");
   yield q("top N over joins: bare names", "SELECT note, payload, doc, label FROM top_a a JOIN top_b b ON a.id = b.a_id JOIN top_c c ON b.id = c.b_id ORDER BY made DESC NULLS LAST, c.id LIMIT 6");
   yield q("top N over joins: a jsonb key and a filter on the wide column", `SELECT a.id, b.payload, c.id ${JOINED} WHERE b.payload ->> 'k' <> 'v3' ORDER BY b.payload, ${TOTAL} LIMIT 7`);
   yield q("top N over joins: a date's text, a timestamptz in a session's zone", `SELECT a.made, b.seen, to_char(a.made, 'YYYY-MM-DD HH24') ${JOINED} ORDER BY date_trunc('day', a.made) DESC NULLS LAST, ${TOTAL} LIMIT 12`, "America/New_York");
@@ -1153,7 +1257,7 @@ function* matrix(): Generator<Matrixed> {
   yield q("star sort: a subquery of no name", "SELECT * FROM (SELECT id, name FROM star_o) ORDER BY 2 NULLS FIRST, 1");
   yield q("star sort: a parameter-free filter on the same column", "SELECT * FROM star_o WHERE name <> 'Z' ORDER BY name NULLS FIRST, id");
   yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
-  yield q("top N over joins: NATURAL and USING stay as they were", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
+  yield q("top N over joins: USING of two tables, a *", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
   yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);
   yield q("top N over joins: GROUP BY takes another path", `SELECT a.id, count(c.id), max(c.label) ${JOINED} GROUP BY a.id ORDER BY 2 DESC, 1 LIMIT 4`);
   yield q("top N over joins: a window takes another path", `SELECT a.id, b.id, row_number() OVER (PARTITION BY a.id ORDER BY b.id, c.id) ${JOINED} ORDER BY a.id, b.id NULLS FIRST, c.id NULLS FIRST LIMIT 6`);

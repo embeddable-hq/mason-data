@@ -105,7 +105,7 @@ paths:
   - **a top N over joined tables chooses its rows by row number** (`joinRows`, src/duck/late.ts, issue 105): DuckDB's own
     late materialization stops at a join, so the join and the top N are run on each table's `rowid` and the sort keys, and
     the list is read from a LEFT JOIN of each table it reads on that `rowid`, the keys sorted again outside. Only joined
-    on conditions, no table with a column named `rowid` in any case, and never over a whole row of a table; a `*` is
+    by no join's own name, no table with a column named `rowid` in any case, and never over a whole row of a table; a `*` is
     written out from the analysis, because a copy's view of its visible columns has no `rowid`. Same rows; equal keys
     are in no defined order. **Every FROM item is a table, a plain derived read or carried** (issue 134, step 2): a
     derived table, a view or a WITH query read once and not MATERIALIZED, a projection and a WHERE over one table with
@@ -115,7 +115,13 @@ paths:
     or MATERIALIZED, a join) has its read columns carried through as `__mason_c<i>`; a function or VALUES item leaves the
     statement as it was. A query of one such FROM item over a projection and a WHERE is FOLDED into it first (`fold`: a
     wrapper, a view of a join, a WITH of a join, a view of a view), each column read as its expression, and only as a
-    whole: a form it cannot write stays as it was. **A statement with a role's filtered read keeps its form**
+    whole: a form it cannot write stays as it was. **`USING` and `NATURAL` stay as written inside** (issue 134, step 3): a
+    merged column of the list is read through Postgres's join alias variables (left for INNER and LEFT, right for RIGHT,
+    `coalesce` for FULL, the join's own cast added), never a column the fetch guesses, a NATURAL arrives as the USING of
+    the columns Postgres merged (`ON true` for none: the rewrite's `naturalWritten`, in EVERY statement), and a cast `mergedRead` cannot write is carried. **A computed output
+    that is a sort key is one key by name, number or repeated expression, shown from `__mason_o<i>`, one value**; a
+    volatile key (`computedSorts`, pg_proc's `provolatile`) is sorted by its output's name inside, and one a collation's
+    keys would repeat stays as it was. Over one table a computed output's sort stays as it was. **A statement with a role's filtered read keeps its form**
     (`tablesOnly`): the filtered read needs a review of its own (step 4). A list of a derived read now raises on the rows
     chosen alone (`limit-errors`). A LIMIT with no ORDER BY takes the same path: sorted by the row numbers of the
     tables read ONLY where `fanOutBounded` (src/duck/distinct-key.ts) proves the join bounded, from the analysis and the
@@ -177,7 +183,13 @@ paths:
     rows: 0.21 s native, 8.8 s through the function. A new native read is held to Postgres by `tests/duck-wire.test.ts`
     "a ->> of a column is DuckDB's own read" (every shape, against PGlite, and the hops counted:
     `DuckStore.functionCalls`) and by the oracle. A test that must EXERCISE the function (a cancel, a timeout) reads
-    with `->` or a number, never a string's `->>`;
+    with `->` or a number, never a string's `->>`. **A constant path has one route however it is spelled**
+    (`Rewriter.jsonPath`, `constRead`; issue 130): `'{a,b}'`, `ARRAY['a', 'b']`, either cast to `text[]`, `'a'::text`, the
+    json_extract_path family, read from the analysis (`Typed.text`, `Typed.textArray`, the Const's own bytes), never
+    the statement's text, so array_in's reading of a literal is Postgres's own. A path the Parse cannot see (a parameter,
+    a row's element) is computed; a text[] parameter is bound as the JSON Postgres read it to (`readParameters`,
+    `from_json`); a cast that changes the text (`varchar(n)[]`, `char(n)[]`, `name[]`) is refused, `json-path-type`.
+    The oracle's `jsonPathCases` holds every spelling on both types;
   - **the JSON paths statements keep reading are stored as columns** (`.claude/rules/duck-stored-json.md`), which answers a number's digits and
     the rest from a plain column. ("The executor worker", "A `->>` is DuckDB's own read")
 - **A jsonb is sorted, grouped and compared by ONE key, `jsonbKey` (src/duck/jsonb-order.ts), never by its text**:

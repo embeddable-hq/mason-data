@@ -2157,6 +2157,8 @@ class Session {
       if (p === null) return null;
       const format = m.paramFormats.length === 0 ? 0 : m.paramFormats.length === 1 ? m.paramFormats[0]! : m.paramFormats[i] ?? 0;
       if (format === 0) return p.toString("utf8");
+      const oid = statement.paramOids[i] || planned?.params[i] || 0;
+      if (TEXT_ARRAYS.has(oid)) return textArrayFromBinary(p, i, oid === 1015 ? 1043 : 25);
       const type = oidOf(statement.paramOids[i] ?? 0) ?? (planned !== undefined ? oidOf(planned.params[i] ?? 0) : undefined) ?? "text";
       return decodeBinaryParam(type, p, i);
     });
@@ -2470,6 +2472,91 @@ function statementText(sql: string, raw: RawStmt): string {
 const oidOf = (oid: number): PgApiType | undefined => (Object.keys(OID) as PgApiType[]).find((t) => OID[t].oid === oid);
 
 const PG_EPOCH_MS = Date.UTC(2000, 0, 1);
+
+/** an element type's name, as array_recv's 42804 says it */
+const ELEMENT_NAMES: Record<number, string> = { 25: "text", 1043: "character varying", 16: "boolean", 20: "bigint", 21: "smallint", 23: "integer", 700: "real", 701: "double precision", 1700: "numeric", 2950: "uuid", 1082: "date", 1114: "timestamp without time zone", 1184: "timestamp with time zone", 3802: "jsonb", 114: "json" };
+
+/** text[] and varchar[], the array types whose binary form a Bind is decoded from (textArrayFromBinary) */
+const TEXT_ARRAYS = new Set([1009, 1015]);
+
+/**
+ * A BINARY text[] (or varchar[]) PARAMETER, as the literal array_in reads to the same array (Npgsql sends every
+ * parameter binary): array_send's form, its dimensions, a NULL flag, the element type, each dimension's length and lower
+ * bound, then each element's length (-1 a NULL) and bytes. Every element is quoted, so any character is itself; a lower
+ * bound other than 1 and a second dimension are written as array_in reads them, and refused where every text[] value is
+ * (src/duck/analyze.ts readParameters). Bytes that are no such array are refused as array_recv refuses them, in its
+ * order: too few 08P01 (22P03 within an element), flags other than 0 or 1 22P03, an element type other than the
+ * parameter's own 42804, a negative or too large dimension 54000, an element that is no UTF-8 or holds a NUL 22021, too
+ * many bytes 22P03 naming the parameter.
+ */
+function textArrayFromBinary(bytes: Buffer, i: number, expected: 25 | 1043): string {
+  const bad = (): PgError => new PgError({ code: "22P03", message: `incorrect binary data format in bind parameter ${i + 1}` });
+  const short = (): PgError => new PgError({ code: "08P01", message: "insufficient data left in message" });
+  let at = 0;
+  const int = (): number => { if (at + 4 > bytes.length) throw short(); const v = bytes.readInt32BE(at); at += 4; return v; };
+  const ndim = int();
+  if (ndim < 0 || ndim > 6) throw new PgError({ code: ndim < 0 ? "22P03" : "54000", message: ndim < 0 ? `invalid number of dimensions: ${ndim}` : `number of array dimensions (${ndim}) exceeds the maximum allowed (6)` });
+  // array_recv's order: the dimensions, the flags, the element type, then each dimension's size
+  const flags = int();
+  if (flags !== 0 && flags !== 1) throw new PgError({ code: "22P03", message: "invalid array flags" });
+  const element = int() >>> 0;
+  if (element !== expected) {
+    throw new PgError({ code: "42804", message: `binary data has array element type ${element} (${ELEMENT_NAMES[element] ?? "another type"}) instead of expected ${expected} (${ELEMENT_NAMES[expected]})` });
+  }
+  const dims: Array<{ length: number; lower: number }> = [];
+  for (let d = 0; d < ndim; d++) { const length = int(); dims.push({ length, lower: int() }); }
+  // ArrayGetNItems: a negative dimension, a product past an int32 at any step, or past MaxArraySize at the end
+  const MAX_ARRAY_SIZE = 268435455;
+  const tooBig = (): PgError => new PgError({ code: "54000", message: `array size exceeds the maximum allowed (${MAX_ARRAY_SIZE})` });
+  let items = 1;
+  for (const d of dims) {
+    if (d.length < 0) throw tooBig();
+    items *= d.length;
+    if (items > 0x7fffffff) throw tooBig();
+  }
+  if (items > MAX_ARRAY_SIZE) throw tooBig();
+  const elementText = (): string => {
+    const length = int();
+    if (length === -1) return "NULL";
+    // ReadArrayBinary's own check is 22P03, where reading a length past the end is pq_getmsgint's 08P01
+    if (length < 0 || at + length > bytes.length) throw new PgError({ code: "22P03", message: "insufficient data left in message" });
+    const text = utf8Element(bytes.subarray(at, at + length)); at += length;
+    return `"${text.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
+  };
+  const level = (d: number): string => `{${Array.from({ length: dims[d]!.length }, () => d === ndim - 1 ? elementText() : level(d + 1)).join(",")}}`;
+  const body = ndim === 0 || dims.some((d) => d.length === 0) ? "{}" : level(0);
+  if (at !== bytes.length) throw bad();
+  const bounds = dims.every((d) => d.lower === 1) || body === "{}" ? "" : `${dims.map((d) => `[${d.lower}:${d.lower + d.length - 1}]`).join("")}=`;
+  return bounds + body;
+}
+
+const fatalUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * An element's text, as textrecv reads it (pg_verify_mbstr): bytes that are no UTF-8, or a NUL, are refused 22021 naming
+ * the first bad character's bytes (report_invalid_encoding: as many as its lead byte says, as many as are left), never
+ * decoded with a replacement character.
+ */
+function utf8Element(bytes: Uint8Array): string {
+  if (!bytes.includes(0)) {
+    // a fatal TextDecoder throws exactly TypeError on bytes that are no UTF-8: the scan below names them
+    try { return fatalUtf8.decode(bytes); } catch (err) { if (!(err instanceof TypeError)) throw err; }
+  }
+  // find the first character Postgres refuses: a NUL, or a character no UTF-8 decoder reads alone
+  for (let at = 0; at < bytes.length;) {
+    const b = bytes[at]!;
+    const length = b < 0x80 ? 1 : (b & 0xe0) === 0xc0 ? 2 : (b & 0xf0) === 0xe0 ? 3 : (b & 0xf8) === 0xf0 ? 4 : 1;
+    const char = bytes.subarray(at, at + length);
+    let legal = b !== 0 && char.length === length;
+    if (legal && b >= 0x80) { try { fatalUtf8.decode(char); } catch (err) { if (!(err instanceof TypeError)) throw err; legal = false; } }
+    if (!legal) {
+      const shown = Array.from(char, (c) => `0x${c.toString(16).padStart(2, "0")}`).join(" ");
+      throw new PgError({ code: "22021", message: `invalid byte sequence for encoding "UTF8": ${shown}` });
+    }
+    at += length;
+  }
+  throw new PgError({ code: "XX000", message: "a text[] element failed to decode as UTF-8 at no character: report it" });
+}
 
 /** A binary-format parameter, as text Postgres's input function reads (DuckOptions.parameters). */
 function decodeBinaryParam(type: PgApiType, bytes: Buffer, i: number): string {

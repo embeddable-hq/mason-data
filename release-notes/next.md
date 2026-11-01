@@ -66,8 +66,26 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   ORDER BY now pays for the join's whole output where the join is proved bounded: a few milliseconds at a LIMIT alone, and
   a deep OFFSET can take about twice as long. A column of an aggregated side, and a statement of a role that filters
   rows, are read as before. Nothing to do on upgrade.
+- **A LIMIT over `JOIN … USING`, a `NATURAL JOIN` or a sort by a computed column of a join no longer reads every wide column to
+  keep 100 rows**: seconds and gigabytes of spill are now a fraction of a second and none, and such a statement that failed
+  for memory now answers, whether the sort names the computed column by its alias, its position or its expression. A
+  `NATURAL JOIN` of two tables with no column in common now answers as Postgres does, every row paired, where it was
+  refused ("No columns found to join on"). A statement of a role that filters rows
+  is read as before. Nothing to do on upgrade.
 - **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
   raises there, sorting every row first. This is the decided difference `limit-errors` (docs/SQL-SUPPORT.md), wider.
+- **`#>> array['k']`, the form BI tools send for a JSON field, is as fast as `->> 'k'`**: on 20 M rows a `GROUP BY` of it
+  took 45-90 s and now takes about 1.2 s. The same holds for `'{k}'::text[]`, `array['k']::text[]` and
+  `json_extract_path_text(j, VARIADIC array['k'])`, and each now reads a stored JSON path where there is one. `#>` with
+  a constant path reads what `->` reads. Nothing to do on upgrade.
+- **A `text[]` parameter works as a prepared statement's value**, where it failed: a JSON path bound as `$1`, and any
+  other array of text bound the same way, sent as text or in binary (as Npgsql sends every parameter). One of two
+  dimensions (`{{a},{b}}`) or whose subscripts do not start at 1 (`[2:3]={a,b}`) is refused by name
+  (`multidim-array`, `array-lower-bound`). Nothing to do on upgrade.
+- **A JSON path cast to `varchar(n)[]`, `char(n)[]` or `name[]` is refused by name (`json-path-type`)**, where it read the
+  path uncut or failed. Cast it to `text[]`.
+- **`SELECT *` in an arm of a UNION no longer lists a stored JSON path's hidden column**, which failed or added a column
+  once a table had one stored. Nothing to do on upgrade.
 
 ## Known
 

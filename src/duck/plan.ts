@@ -128,6 +128,12 @@ export async function duckParameters(catalog: (bytes: Uint8Array) => Promise<Uin
     const f = read.refused;
     throw new StatementError({ code: f.C ?? "22P02", message: f.M ?? "invalid parameter value", ...(f.D ? { detail: f.D } : {}), ...(f.H ? { hint: f.H } : {}) }, "");
   }
+  // a text[] value DuckDB's list cannot hold as Postgres read it: refused by name, as its literal is
+  if ("gap" in read) {
+    throw read.gap === "multidim-array"
+      ? gapRefusal("multidim-array", `a multi-dimensional array as parameter $${read.parameter} is not supported by Mason`, "bind a one-dimensional array")
+      : gapRefusal("array-lower-bound", `an array whose subscripts do not start at 1 as parameter $${read.parameter} is not supported by Mason`, "bind the array without its bounds ('{a,b}', not '[2:3]={a,b}')");
+  }
   return values.map((v, i) => {
     const r = read.values[i];
     if (v === null || r === undefined || r === null) return v;

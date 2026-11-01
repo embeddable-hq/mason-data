@@ -110,6 +110,11 @@ export interface Typed {
   levelsUp: number | null;
   /** a CONST's value as Postgres parsed it, its bytes (`constvalue`: `8 [ 0 -48 70 … ]`); null when NULL or not a CONST */
   datum: number[] | null;
+  /** a text or varchar CONST's value as Postgres read it, null for its NULL; absent on anything else (`constText`) */
+  text?: string | null;
+  /** a text[] or varchar[] that is constant, as Postgres read it: a CONST's elements or an ARRAY[…] of constants, null
+   *  for an element's NULL; null for the array's own NULL; absent on anything else (`constTextArray`) */
+  textArray?: ReadonlyArray<string | null> | null;
   /** a VAR's FROM item by the name the query calls it (`u` in `FROM ua u`), when another FROM item of its query has a
    *  column of the same name but another case (`email` beside `"Email"`), its own or a subquery's it is read from: DuckDB binds names case-insensitively, so
    *  the bare name is ambiguous there and is qualified (src/duck/rewrite.ts) */
@@ -140,6 +145,72 @@ export function datumBytes(v: TreeValue | undefined): number[] | null {
   if (typeof v !== "string") return null;
   const m = /^\s*\d+\s*\[([-\d\s]*)\]\s*$/.exec(v);
   return m ? m[1]!.trim().split(/\s+/).filter((x) => x !== "").map((x) => Number(x) & 255) : null;
+}
+
+const [TEXT, VARCHAR, TEXT_ARRAY, VARCHAR_ARRAY] = [25, 1043, 1009, 1015];
+const int32 = (b: readonly number[], at: number): number => ((b[at] ?? 0) | ((b[at + 1] ?? 0) << 8) | ((b[at + 2] ?? 0) << 16) | ((b[at + 3] ?? 0) << 24)) >>> 0;
+
+/** a varlena's text and the bytes it takes, in a datum's bytes at `at`; null for a form no constant is written in
+ *  (compressed, external), which the caller reads as no constant */
+function varlena(b: readonly number[], at: number): { text: string; size: number } | null {
+  const first = b[at];
+  if (first === undefined) return null;
+  // a 1-byte header (low bit 1) holds its length, itself included, in the seven bits above; 0x01 is an external pointer
+  const short = (first & 1) === 1;
+  if (first === 1 || (!short && (first & 3) !== 0)) return null;
+  const size = short ? first >>> 1 : int32(b, at) >>> 2, head = short ? 1 : 4;
+  if (size < head || at + size > b.length) return null;
+  return { text: Buffer.from(b.slice(at + head, at + size)).toString("utf8"), size };
+}
+
+/**
+ * A text[] or varchar[] datum's elements as `array_in` read them (array.h: the varlena header, ndim, dataoffset,
+ * elemtype, the dims and lower bounds, the null bitmap where dataoffset is set, then the elements, each aligned to 4
+ * bytes; the catalog is little-endian). Null for what is not a plain array of at most one dimension.
+ */
+export function textArrayElements(b: readonly number[]): Array<string | null> | null {
+  if (b.length < 16) return null;
+  const ndim = int32(b, 4), offset = int32(b, 8), element = int32(b, 12);
+  if (ndim > 1 || (element !== TEXT && element !== VARCHAR)) return null;
+  if (ndim === 0) return [];
+  if (b.length < 24) return null;
+  const count = int32(b, 16), bitmap = 24;
+  let at = offset !== 0 ? offset : 24;
+  const out: Array<string | null> = [];
+  for (let i = 0; i < count; i++) {
+    if (offset !== 0 && (((b[bitmap + (i >> 3)] ?? 0) >> (i & 7)) & 1) === 0) { out.push(null); continue; }
+    const v = varlena(b, at);
+    if (v === null) return null;
+    out.push(v.text);
+    at = (at + v.size + 3) & ~3;
+  }
+  return out;
+}
+
+/** a CONST of text or varchar as Postgres read it; undefined for any other node */
+function constText(v: TreeValue): string | null | undefined {
+  if (!isNode(v) || v._node !== "CONST" || (num(v.consttype) !== TEXT && num(v.consttype) !== VARCHAR)) return undefined;
+  if (v.constisnull === "true") return null;
+  const b = datumBytes(v.constvalue);
+  return (b === null ? null : varlena(b, 0))?.text;
+}
+
+/** a text[] or varchar[] that is constant, as Postgres read it; undefined for any other node */
+function constTextArray(v: TreeNode): ReadonlyArray<string | null> | null | undefined {
+  if (v._node === "CONST") {
+    if (num(v.consttype) !== TEXT_ARRAY && num(v.consttype) !== VARCHAR_ARRAY) return undefined;
+    if (v.constisnull === "true") return null;
+    const b = datumBytes(v.constvalue);
+    return (b === null ? null : textArrayElements(b)) ?? undefined;
+  }
+  if (v._node !== "ARRAYEXPR" || v.multidims === "true" || (num(v.array_typeid) !== TEXT_ARRAY && num(v.array_typeid) !== VARCHAR_ARRAY)) return undefined;
+  const out: Array<string | null> = [];
+  for (const e of Array.isArray(v.elements) ? v.elements : []) {
+    const text = constText(e);
+    if (text === undefined) return undefined;
+    out.push(text);
+  }
+  return out;
 }
 
 const BOOL = 16;
@@ -245,6 +316,10 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
     qualifier: v._node === "VAR" ? qualifierOf(v, rtables) : null,
     renamed: v._node === "VAR" ? renamedOf(v, rtables) : null,
   };
+  const text = constText(v);
+  if (text !== undefined) typed.text = text;
+  const textArray = constTextArray(v);
+  if (textArray !== undefined) typed.textArray = textArray;
   const relation = v._node === "VAR" ? relationOf(v, rtables) : null;
   if (relation !== null) typed.relation = relation;
   const column = v._node === "VAR" ? columnOf(v, rtables) : null;
@@ -260,6 +335,9 @@ export interface QueryOutputs {
   columns: Array<Typed | null>;
   /** how many columns a `t.*` lists, by the FROM item's name */
   widths: Map<string, number>;
+  /** each JOIN's merged columns as Postgres found them (`joinmergedcols`), in its range table's order: a JOIN's sides
+   *  before it, left to right, as the FROM clause holds them. A NATURAL JOIN is written as these (src/duck/rewrite.ts) */
+  joins: string[][];
 }
 
 /**
@@ -283,9 +361,14 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
         const eref = rte.eref ?? null;
         if (isNode(eref) && typeof eref.aliasname === "string" && !widths.has(eref.aliasname)) widths.set(eref.aliasname, strings(eref.colnames).filter((c) => c !== "").length);
       }
+      const joins = rtable.filter((rte) => num(rte.rtekind ?? null) === RTE_JOIN).map((rte) => {
+        const eref = rte.eref ?? null;
+        return isNode(eref) ? strings(eref.colnames).slice(0, num(rte.joinmergedcols ?? null) ?? 0) : [];
+      });
       const outputs: QueryOutputs = {
         columns: exprs.map((e) => { const t = isNode(e) && e._node === "VAR" ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable]); }),
         widths,
+        joins,
       };
       const offsets = (x: TreeValue): void => {
         if (Array.isArray(x)) { x.forEach(offsets); return; }

@@ -58,9 +58,9 @@ import { normalise, same } from "./oracle/compare.ts";
 import { CASES, MIXED_SCALE, QUERY_CASES, REFUSED_CASES, T, U, Z } from "./postgres-cases.ts";
 import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
-import { UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
+import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
-import { SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
+import { refusedAsNamed, SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
 import { collationMet, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
@@ -113,7 +113,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "coll", "moods", "defaults", "late", "late_c", "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
+const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -926,8 +926,11 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         for (const step of script.steps) {
           steps++;
           const [want, got] = [await traceStep(sourceT, step), await traceStep(masonT, step)];
-          if (JSON.stringify(want) === JSON.stringify(got)) continue;
-          differences.push({ phase: "settings", group: "setting case", kind: "text", name: `setting case: ${script.name}`, detail: `${JSON.stringify(got)} where Postgres answers ${JSON.stringify(want)}`, sql: stepText(step) });
+          // a value Mason refuses by name where Postgres answers: met as its gap, the session going on alike after
+          const named = refusedAsNamed(step, got);
+          if (named !== null && named.differs === null) { meet("refused", named.gap, "setting case", false); continue; }
+          if (named === null && JSON.stringify(want) === JSON.stringify(got)) continue;
+          differences.push({ phase: "settings", group: "setting case", kind: "text", name: `setting case: ${script.name}`, detail: named?.differs ?? `${JSON.stringify(got)} where Postgres answers ${JSON.stringify(want)}`, sql: stepText(step) });
           break;   // what follows in a session parted from Postgres's says nothing more
         }
       } finally { await sourceT.end(); await masonT.end(); }

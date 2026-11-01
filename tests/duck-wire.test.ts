@@ -2250,6 +2250,208 @@ test("an output of a * is read by its number and its bare name as the column it 
 
 // ISSUE 105: a table preview over joined tables carried every row's wide columns through the join and the top N to
 // choose 100, and its spill filled the disk. The rows are chosen by row number, the columns read for those alone
+// ISSUE 134, STEP 3: a merged column is read through Postgres's join alias variables; a computed key is the output it is,
+// one value; a volatile value is never computed twice
+test("USING and NATURAL choose their rows by row number, and a merged column is read as the join kind reads it", async () => {
+  const c = await client();
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const each = async (form: RegExp, sql: string): Promise<void> => {
+    assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    assert.match(await sent(sql), form, sql);
+  };
+  const ROWS = /rowid AS __mason_r1.*\) AS __mason_late LEFT JOIN /;
+  try {
+    // inner and LEFT read the left side, RIGHT the right, FULL both: a fetch of the other side would read NULL
+    const merged = [["JOIN", /SELECT l\.id AS id, /], ["LEFT JOIN", /SELECT l\.id AS id, /], ["RIGHT JOIN", /SELECT lc\.id AS id, /], ["FULL JOIN", /SELECT COALESCE\(l\.id, lc\.id\) AS id, /]] as const;
+    for (const [join, read] of merged) {
+      const sql = `SELECT id, l.k, lc.name FROM late l ${join} late_c lc USING (id) ORDER BY id DESC NULLS LAST, l.k LIMIT 3 OFFSET 40`;
+      await each(ROWS, sql);
+      assert.match(await sent(sql), read, sql);
+      assert.match(await sent(sql), /FROM late AS l .*JOIN late_c AS lc USING \(id\)/, `the join stays as it was written, inside: ${sql}`);
+    }
+    // the rows come from a side the other has not: NULLs on either side of a FULL join, sorted by the merged column
+    await each(ROWS, "SELECT id, l.k, lc.name FROM late l FULL JOIN (SELECT id + 45 AS id, name FROM late_c) lc USING (id) ORDER BY id NULLS FIRST, l.k LIMIT 8 OFFSET 40");
+    // a `*` lists the merged column first, once
+    await each(ROWS, "SELECT * FROM late l JOIN late_c lc USING (id) ORDER BY id LIMIT 2");
+    await each(ROWS, "SELECT * FROM late_p p NATURAL JOIN (SELECT c, k FROM late WHERE id < 5) l ORDER BY c, line LIMIT 2");
+    // NATURAL as the columns Postgres found: none in common is every pair, where DuckDB takes it for a mistake
+    await each(/JOIN late_n USING \(id, c\)/, "SELECT id, c, k FROM late NATURAL JOIN late_n ORDER BY id LIMIT 2");
+    for (const sql of ["SELECT l.id, lc.c, lc.note FROM late_c l NATURAL JOIN late_p lc ORDER BY l.id, lc.c, lc.line LIMIT 3",
+      "SELECT l.id, lc.c FROM late_c l NATURAL LEFT JOIN late_p lc ORDER BY l.id DESC, lc.c, lc.line LIMIT 3"]) await each(/late_p AS lc ON true/, sql);
+    assert.equal((await answer(c, "SELECT l.id FROM late_c l NATURAL JOIN late_p lc LIMIT 3")).rows.length, 3, "a NATURAL of nothing in common, no sort");
+    // two joins of one name: the outer one's, each join kind through the other
+    await each(ROWS, "SELECT id, l.k, x.name, p.name AS other FROM late l LEFT JOIN late_c x USING (id) RIGHT JOIN late_c p USING (id) ORDER BY id LIMIT 3");
+    // a USING between types: the cast the join adds, and an int's text under a numeric
+    await each(/CAST\(lc\.id AS int8\)|lc\.id::int8/, "SELECT id, o.status FROM late_c lc LEFT JOIN orders o USING (id) ORDER BY id LIMIT 2");
+    // (an inner join needs none: Postgres reads the side of the type already)
+    await each(/SELECT o\.id AS id, /, "SELECT id, o.status FROM late_c lc JOIN orders o USING (id) ORDER BY id LIMIT 2");
+    await each(/COALESCE\((CAST\(lc\.id AS int8\)|lc\.id::int8), o\.id\)/, "SELECT id, lc.name, o.status FROM late_c lc FULL JOIN orders o USING (id) ORDER BY id LIMIT 2");
+    // an output's name before the merged column it shadows, a column of a side read apart
+    await each(ROWS, "SELECT lc.name AS id, l.id AS l FROM late l JOIN late_c lc USING (id) ORDER BY id DESC, l LIMIT 2");
+    await each(ROWS, "SELECT id, lc.id AS r, l.id AS l FROM late l RIGHT JOIN late_c lc USING (id) ORDER BY id LIMIT 2");
+    // a wrapper and a view of one fold, and a role is held in tests/duck-roles-barrier-wire.test.ts
+    await each(ROWS, "SELECT * FROM (SELECT * FROM late l JOIN late_c lc USING (id)) t ORDER BY id LIMIT 2");
+    // a join's own name is read by that name: it stays as it was
+    for (const sql of ["SELECT j.id FROM (late l JOIN late_c lc USING (id)) AS j ORDER BY j.id LIMIT 2"]) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
+    }
+  } finally { await c.end(); }
+});
+
+test("a NATURAL JOIN is the columns Postgres merged in every statement, none in common every pair, with or without a LIMIT", async () => {
+  const c = await client();
+  const each = async (form: RegExp, sql: string): Promise<void> => {
+    assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    assert.match(line, form, sql);
+    assert.doesNotMatch(line, /NATURAL/, sql);
+  };
+  try {
+    // nothing in common: DuckDB refused the statement ("No columns found to join on") where Postgres pairs every row
+    const NONE = /late_p AS lc ON true/;
+    await each(NONE, "SELECT count(*) FROM late_c l NATURAL JOIN late_p lc");
+    await each(NONE, "SELECT l.id FROM late_c l NATURAL JOIN late_p lc WHERE l.id < 3 ORDER BY l.id, lc.c, lc.line");
+    await each(NONE, "SELECT 1 AS one FROM late_c l NATURAL JOIN late_p lc LIMIT 3");
+    await each(NONE, "SELECT l.id, lc.c FROM late_c l NATURAL FULL JOIN late_p lc WHERE l.id < 2 ORDER BY 1, 2, lc.line");
+    await each(NONE, "SELECT count(*) FROM late_c WHERE id IN (SELECT l.id FROM late_c l NATURAL JOIN late_p lc)");
+    // columns in common, each join kind, and a `*` with the merged columns first
+    const SOME = /late_n USING \(id, c\)/;
+    for (const join of ["JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"]) {
+      await each(SOME, `SELECT id, c, l.k FROM late l NATURAL ${join} late_n WHERE id < 60 OR id IS NULL ORDER BY id, c`);
+    }
+    // (the merged columns in the left side's order, as Postgres lists them)
+    await each(/late_n USING \(c, id\)/, "SELECT * FROM (SELECT k, c, id FROM late) l NATURAL FULL JOIN late_n ORDER BY id, c");
+    await each(SOME, "SELECT count(*) FROM late NATURAL JOIN late_n");
+  } finally {
+    await c.end();
+  }
+});
+
+test("a computed sort key is the output it spells, one value through every spelling, read from the key", async () => {
+  const c = await client();
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const FROM = "FROM late l JOIN late_c lc ON lc.id = l.c";
+  const SHOWN = /SELECT __mason_late\.__mason_o1 AS x, .*AS __mason_o1, .*\) AS __mason_late LEFT JOIN /;
+  try {
+    // ONE OUTPUT, THREE SPELLINGS: the same statement inside and out, by name, ordinal and repeated expression
+    const value = "l.k + 1";
+    const spelled: string[] = [];
+    for (const order of ["x", "1", value]) {
+      for (const dir of ["", " DESC", " DESC NULLS LAST", " ASC NULLS FIRST"]) {
+        const sql = `SELECT ${value} AS x, l.id, l.j ${FROM} ORDER BY ${order}${dir}, l.id LIMIT 3 OFFSET 1`;
+        assert.deepEqual((await answer(c, sql)).rows.map((r) => r.slice(0, 2)), (await postgres(sql)).rows.map((r) => r.slice(0, 2)), sql);
+        const line = await sent(sql);
+        assert.match(line, SHOWN, sql);
+        if (dir === "") spelled.push(line.replace(/^statement: [^—]*— /, ""));
+      }
+    }
+    assert.equal(new Set(spelled).size, 1, `one output, one form: ${spelled.join("\n")}`);
+    // the key beside a `*`, by a number past it, and a wrapper's output by name and by the qualified column: step 2 left these
+    for (const sql of [`SELECT *, l.k + 1 AS x ${FROM} ORDER BY 7, 1 LIMIT 3`, `SELECT *, l.k + 1 AS x ${FROM} ORDER BY x, 1 LIMIT 3`,
+      "SELECT t.x, t.id FROM (SELECT l.id, upper(lc.name) AS x, l.j FROM late l JOIN late_c lc ON lc.id = l.c) t ORDER BY x DESC, t.id LIMIT 2",
+      "SELECT t.x, t.id FROM (SELECT l.id, upper(lc.name) AS x, l.j FROM late l JOIN late_c lc ON lc.id = l.c) t ORDER BY t.x DESC, t.id LIMIT 2",
+      "SELECT id, shout FROM late_joined_again ORDER BY shout, id LIMIT 2"]) {
+      assert.deepEqual((await answer(c, sql)).rows.map((r) => JSON.stringify(r)).length, (await postgres(sql)).rows.length, sql);
+      assert.match(await sent(sql), /__mason_r1/, sql);
+    }
+    // a key of a table the list shows through the key alone: the table is not read again
+    assert.doesNotMatch(await sent(`SELECT l.k + 1 AS x, lc.name ${FROM} ORDER BY x, 2 LIMIT 2`), /LEFT JOIN late /);
+    // over one table a computed output is computed for every row anyway: as it was
+    assert.doesNotMatch(await sent("SELECT l.k + 1 AS x, l.j FROM late l ORDER BY x LIMIT 2"), /__mason_late/);
+    // a key that raises raises, on a row the LIMIT leaves out too: every row is sorted, as on Postgres
+    await assert.rejects(answer(c, `SELECT 1 / (l.id - 2) AS x, l.j ${FROM} ORDER BY x LIMIT 1`), (e: pg.DatabaseError) => e.code === "22012");
+    await assert.rejects(answer(c, `SELECT l.j ${FROM} ORDER BY 1 / (l.id - 2) LIMIT 1`), (e: pg.DatabaseError) => e.code === "22012");
+  } finally { await c.end(); }
+});
+
+test("a volatile value a sort reads is one value: the rows shown are in the order of what they show", async () => {
+  const c = await client();
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const FROM = "FROM late l JOIN late_c lc ON lc.id = l.c";
+  try {
+    for (const order of ["r", "1", "random()"]) {
+      for (const dir of ["", " DESC"]) {
+        const sql = `SELECT random() AS r, l.id, l.j ${FROM} ORDER BY ${order}${dir} LIMIT 8`;
+        const shown = (await c.query({ text: sql, rowMode: "array" })).rows.map((r: unknown[]) => r[0] as number);
+        assert.equal(shown.length, 8, sql);
+        assert.deepEqual(shown, [...shown].sort((a, b) => dir === "" ? a - b : b - a), `${sql}: the value shown is the value sorted`);
+        const line = await sent(sql);
+        assert.match(line, /SELECT __mason_late\.__mason_o1 AS r, /, sql);
+        assert.match(line, /ORDER BY __mason_o1( DESC)? LIMIT 8 \) AS __mason_late/, `${sql}: said once, in the inner query`);
+      }
+    }
+    // a key no output shows is sorted by its one value too
+    assert.match(await sent(`SELECT l.id ${FROM} ORDER BY random() LIMIT 2`), /random\(\) AS __mason_o1 .*ORDER BY __mason_o1 LIMIT 2/);
+    // a volatile output no sort reads is computed once, after the limit
+    const list = await sent(`SELECT random() AS r, l.id ${FROM} ORDER BY l.id LIMIT 2`);
+    assert.equal(list.match(/random\(\)/g)?.length, 1, list);
+    // two of one expression are two values: a number takes the one it names
+    const two = (await c.query({ text: `SELECT random() AS a, random() AS b, l.id ${FROM} ORDER BY 2 LIMIT 6`, rowMode: "array" })).rows.map((r: unknown[]) => r[1] as number);
+    assert.deepEqual(two, [...two].sort((a, b) => a - b));
+    // a volatile key a form cannot show as one value stays as it was: its sort is the collation's key of it, no output
+    const stays = `SELECT random()::text COLLATE "und-x-icu" AS r, l.id ${FROM} ORDER BY r LIMIT 2`;
+    assert.doesNotMatch(await sent(stays), /__mason_r1/);
+    // now() is one value in any case, and the statement's clock
+    const now = `SELECT now() AS t, l.id ${FROM} ORDER BY t, l.id LIMIT 3`;
+    assert.equal(new Set((await c.query({ text: now, rowMode: "array", types: raw } as pg.QueryConfig)).rows.map((r: unknown[]) => r[0])).size, 1);
+    assert.match(await sent(now), /__mason_r1/);
+  } finally { await c.end(); }
+});
+
+test("a computed key and a merged column in a prepared statement run after a SET, and in two session zones", async () => {
+  const c = await client();
+  try {
+    await truth.exec("SET TimeZone = 'UTC'");
+    const statements = [
+      ["computed", "SELECT date_trunc('day', i.at) AS d, i.id, n.t FROM instants i LEFT JOIN nullish n ON n.id = i.id ORDER BY d DESC, i.id LIMIT 4"],
+      ["ordinal", "SELECT date_trunc('day', i.at) AS d, i.id, n.t FROM instants i LEFT JOIN nullish n ON n.id = i.id ORDER BY 1, 2 LIMIT 4"],
+      ["merged", "SELECT id, date_trunc('day', i.at) AS d, n.t FROM instants i JOIN nullish n USING (id) ORDER BY d, id LIMIT 4"],
+      ["full", "SELECT id, i.at, n.t FROM instants i FULL JOIN nullish n USING (id) ORDER BY id LIMIT 4"],
+    ] as const;
+    for (const [name, text] of statements) {
+      const first = await c.query({ name, text, rowMode: "array", types: raw } as pg.QueryConfig);
+      assert.deepEqual(first.rows, (await postgres(text)).rows, `${name}, in UTC`);
+      logged.length = 0;
+      await c.query(text);
+      assert.match(logged.findLast((l) => l.startsWith("statement: ")) ?? "", /__mason_r1/, `${name}: by row number`);
+    }
+    for (const zone of ["Asia/Kathmandu", "America/New_York"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      try {
+        for (const [name, text] of statements) {
+          const again = await c.query({ name, text, rowMode: "array", types: raw } as pg.QueryConfig);
+          assert.deepEqual(again.rows, (await postgres(text)).rows, `${name}, prepared before SET TimeZone = ${zone}`);
+          assert.deepEqual((await answer(c, text)).rows, (await postgres(text)).rows, `${name}, in ${zone}`);
+        }
+      } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    }
+  } finally { await c.end(); }
+});
+
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
   const c = await client();
   // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison
@@ -2282,13 +2484,8 @@ test("a top N over joined tables chooses its rows by row number and reads the co
     const one = await sent("SELECT l.j FROM late l JOIN late_c c ON c.id = l.c ORDER BY c.name, l.id LIMIT 2");
     assert.match(one, /l\.rowid AS __mason_r1,/);
     assert.doesNotMatch(one, /__mason_r2|c\.rowid/);
-    // the shapes that stay as they were: a row number exists of a table alone, a whole row is not listed, and a sort by
-    // a computed output is one value
-    for (const sql of ["SELECT l.id, name FROM late l JOIN late_c USING (id) ORDER BY l.id LIMIT 2",
-      // a computed output beside a *: its number stays, a value of the list
-      "SELECT *, l.k + 1 AS next FROM late l JOIN late_c c ON c.id = l.c ORDER BY 7, 1 LIMIT 3",
-      'SELECT r.id, r."RowId", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.id DESC LIMIT 2',
-      "SELECT l.id * 2 AS d, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY d LIMIT 2",
+    // the shapes that stay as they were: a row number exists of a table alone, and a whole row is not listed
+    for (const sql of ['SELECT r.id, r."RowId", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.id DESC LIMIT 2',
       "SELECT l.id FROM late l ORDER BY l.id LIMIT 2",
       "SELECT DISTINCT l.c, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 LIMIT 2",
       "SELECT l.c, count(*) FROM late l JOIN late_c c ON c.id = l.c GROUP BY 1 ORDER BY 1 LIMIT 2",
@@ -2536,7 +2733,7 @@ test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number
     // a row number exists of a table alone, and a statement with no limit in fact has nothing to choose
     for (const sql of [`SELECT l.id, c.name ${JOINS}`, `SELECT l.id, c.name ${JOINS} OFFSET 1990`, `SELECT l.id, c.name ${JOINS} LIMIT ALL`, `SELECT l.id, c.name ${JOINS} LIMIT NULL`,
       `SELECT l.id, c.name ${JOINS} LIMIT NULL::int OFFSET 1990`, "SELECT l.id, l.j ->> 'n' FROM late l LIMIT 3",
-      "SELECT l.id, name FROM late l JOIN late_c USING (id) LIMIT 3", `SELECT DISTINCT l.c ${JOINS} LIMIT 3`, `SELECT 1 ${JOINS} LIMIT 3`]) {
+      `SELECT DISTINCT l.c ${JOINS} LIMIT 3`, `SELECT 1 ${JOINS} LIMIT 3`]) {
       assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
       assert.equal((await answer(c, sql)).rows.length, (await postgres(sql)).rows.length, sql);
     }
@@ -2578,6 +2775,137 @@ test("a ->> of a column is DuckDB's own read where it is Postgres's answer, the 
     for (const read of ["j ->> 'a'", "j -> 'o' ->> 'k'", "j ->> 'missing'", "json_extract_path_text(j, 'o', 'k')"]) assert.equal(await hops(read, "WHERE id <> 1"), 0, `${read} reached the function`);
     for (const read of ["b ->> 'n'", "j ->> 'a'", "j -> 'o' ->> 'k'", "b -> 'arr' ->> 0", "b #>> '{arr,0}'", "b -> 'o'", "'{\"a\": \"x\"}'::jsonb ->> 'a'"]) assert.ok(await hops(read) > 0, `${read} never reached the function`);
   } finally { await c.end(); }
+});
+
+// A PATH HAS ONE ROUTE HOWEVER IT IS SPELLED (issue 130): a BI tool's `#>> array['k']` was a to_json of the list, every
+// row through the function, where `->> 'k'` is DuckDB's own read. Read from the analysis, so a cast that changes the
+// text is never read as what was written, and a value only known at the Bind stays computed.
+test("a constant path is the read ->> is, however it is spelled: no row reaches the function, answers as Postgres's", async () => {
+  const c = await client();
+  try {
+    const native = ["b #>> ARRAY['o', 'b']", "b #>> ARRAY['o', 'b']::text[]", "b #>> ARRAY['o'::text, 'b'::text]", "b #>> '{o,b}'::text[]", "b #>> ARRAY['o', 'b']::varchar[]", "b #>> ARRAY['a.b']", "b ->> 'a'::text", "b ->> 'a'::varchar",
+      "jsonb_extract_path_text(b, 'o'::text, 'b'::text)", "jsonb_extract_path_text(b, VARIADIC ARRAY['o', 'b'])", "jsonb_extract_path_text(b, VARIADIC '{o,b}'::text[])", "b #> ARRAY['o'] #>> ARRAY['b']"];
+    const others = ["b #>> ARRAY['arr', '0']", "b #>> ARRAY['arr', '-1']", "b #> ARRAY['o']", "b #>> ARRAY[]::text[]", "b #> '{}'::text[]", "b #>> NULL::text[]", "b #>> ARRAY['o', NULL]", "b #>> '{o,NULL}'", "jsonb_extract_path_text(b, 'o', NULL)", "jsonb_extract_path_text(b, VARIADIC NULL::text[])",
+      "b #>> '[2:3]={o,b}'", "b #>> ARRAY[lower('O'), 'b']", "b #>> ARRAY['o', id::text]", "j #>> ARRAY['o', 'k']", "j #> ARRAY['o']", "j #>> ARRAY['a']", "j #>> ARRAY['1']", "j #>> ARRAY[]::text[]"];
+    const sql = `SELECT id, ${[...native, ...others].join(", ")} FROM jdocs ORDER BY id`;
+    const [got, want] = [await answer(c, sql), await postgres(sql)];
+    const named = ["id", ...native, ...others];
+    for (const [i, row] of want.rows.entries()) for (const [k, v] of row.entries()) assert.equal(got.rows[i]![k], v, `row ${row[0]}: ${named[k]}`);
+    assert.deepEqual(got.fields, want.fields);
+    const calls = async (): Promise<number> => (await store.functionCalls()).get("__mason_json_get") ?? 0;
+    for (const read of native) {
+      const before = await calls();
+      await answer(c, `SELECT ${read} FROM jdocs WHERE id <> 5`);
+      assert.equal(await calls() - before, 0, `${read} reached the function`);
+    }
+    // a value the Parse cannot see stays computed, row by row or at the Bind, and is Postgres's
+    for (const read of ["b #>> ARRAY['o', id::text]"]) {
+      const before = await calls();
+      await answer(c, `SELECT ${read} FROM jdocs`);
+      assert.ok(await calls() > before, `${read} is computed`);
+    }
+    // the expression repeated in the GROUP BY and the ORDER BY is the one read: an array's own offsets are no part of it
+    for (const statement of ["SELECT b #>> ARRAY['a'] AS v, count(*) AS n FROM jdocs GROUP BY b #>> ARRAY['a'] ORDER BY v", "SELECT b #>> ARRAY['a'], count(*) FROM jdocs GROUP BY b #>> ARRAY['a'] ORDER BY b #>> ARRAY['a']", "SELECT id FROM jdocs ORDER BY b #>> ARRAY['a'], id"]) {
+      assert.deepEqual((await answer(c, statement)).rows, (await postgres(statement)).rows, statement);
+    }
+    // a text[] at the Bind: read by Postgres (a quote, a NULL element, an empty array), the plan made at the Parse
+    const list = "SELECT id::text, b #>> $1::text[] AS a, (j #> $1::text[])::text AS b, jsonb_extract_path_text(b, VARIADIC $1::text[]) AS c FROM jdocs ORDER BY id";
+    for (const value of ['{o,b}', '{arr,0}', '{"a.b"}', '{}', '{o,NULL}']) {
+      const wanted = await postgres(list.replaceAll("$1::text[]", `'${value}'::text[]`));
+      assert.deepEqual((await c.query({ text: list, values: [value], rowMode: "array" })).rows, wanted.rows, value);
+    }
+    // the same binding beside a list read as a list
+    for (const value of ["{1,2}", "{}", "{NULL}"]) {
+      const statement = "SELECT id::text FROM jdocs WHERE id::text = ANY($1::text[]) ORDER BY id";
+      assert.deepEqual((await c.query({ text: statement, values: [value], rowMode: "array" })).rows, (await postgres(statement.replace("$1::text[]", `'${value}'::text[]`))).rows, value);
+    }
+    // a cast that changes the text is refused by name, never read as what was written
+    for (const path of ["ARRAY['kk']::varchar(1)[]", "'{kk}'::char(1)[]", "ARRAY['k']::name[]"]) {
+      await assert.rejects(answer(c, `SELECT b #>> ${path} FROM jdocs`), (e: Error & { code?: string; detail?: string }) => e.code === "0A000" && /json-path-type/.test(`${e.message} ${e.detail ?? ""}`), path);
+    }
+  } finally { await c.end(); }
+});
+
+// A TEXT[] PARAMETER IS ONE LIST OF DUCKDB'S (the review of issue 130): a value of two dimensions, or whose subscripts
+// do not start at 1, is no such list — read as one it answered wrong (an inner array a string of its JSON, the bounds
+// dropped), so it is refused by name, as its literal is. In binary (Npgsql sends every parameter so) it is array_send's
+// bytes, decoded to the literal Postgres reads, and refused alike.
+test("a text[] parameter of two dimensions or other bounds is refused by name", async () => {
+  const c = await client();
+  try {
+    const named = (gap: string) => (e: Error & { code?: string; detail?: string }): boolean => e.code === "0A000" && new RegExp(`Mason gap ${gap}\\b`).test(e.detail ?? "");
+    for (const sql of ["SELECT id::text, id::text = ANY($1::text[]), id::text <> ALL($1::text[]) FROM jdocs WHERE id < 4 ORDER BY id", "SELECT $1::text[], ($1::text[])[1], array_position($1::text[], '1') FROM jdocs WHERE id = 1"]) {
+      for (const [value, gap] of [["{{1},{2}}", "multidim-array"], ["[2:3]={1,2}", "array-lower-bound"], ["[1:1][1:1]={{1}}", "multidim-array"]] as const) {
+        await assert.rejects(answer(c, sql, [value]), named(gap), `${value}: ${sql}`);
+      }
+      // a one-dimensional value from 1, its bounds written or not, is answered as Postgres answers it
+      for (const value of ["{1,2}", "[1:2]={1,2}"]) assert.deepEqual((await answer(c, sql, [value])).rows, (await postgres(sql, [value])).rows, value);
+    }
+  } finally { await c.end(); }
+});
+
+test("a binary text[] parameter is read as Postgres reads it, refused as it refuses, two dimensions or other bounds by name", async () => {
+  const s = await rawSession();
+  try {
+    // the same Bind to Postgres and to Mason, the same rows
+    const sql = "SELECT id::text, b #>> $1::text[] AS a, array_to_string($1::text[], '|', '*') AS s, (id::text = ANY($1::text[]))::text AS k FROM jdocs ORDER BY id";
+    const send = async (array: string): Promise<Buffer> => Buffer.from((await truth.query<{ b: Uint8Array }>(`SELECT array_send(${array}) AS b`)).rows[0]!.b);
+    const rows = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "DataRow" ? [JSON.stringify(m.values.map((v) => v === null ? null : String(v)))] : m.type === "ErrorResponse" ? [`error ${m.fields.C} ${m.fields.M}`] : []);
+    for (const array of ["ARRAY['o', 'b']::text[]", "ARRAY['a\"b\\c', NULL, 'NULL', '', ' x ', '{,}']::text[]", "ARRAY['1', '3']::varchar[]::text[]", "ARRAY[]::text[]", "ARRAY[NULL]::text[]"]) {
+      const bind = wire.extended(sql, [await send(array)], [0], 1);
+      const want = rows(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(rows(await s.untilReady()), want, array);
+      assert.ok(want.length > 0 && !want[0]!.startsWith("error"), array);
+    }
+    for (const [array, gap] of [["'{{1},{2}}'::text[]", "multidim-array"], ["'[2:3]={1,2}'::text[]", "array-lower-bound"]] as const) {
+      s.socket.write(wire.extended(sql, [await send(array)], [0], 1));
+      const error = (await s.untilReady()).find((m) => m.type === "ErrorResponse") as Extract<BackendMessage, { type: "ErrorResponse" }> | undefined;
+      assert.equal(error?.fields.C, "0A000", array);
+      assert.match(error?.fields.D ?? "", new RegExp(`Mason gap ${gap}\\b`), array);
+    }
+    // bytes that are no text[]: refused as Postgres's array_recv refuses them (too few, too many, another element type)
+    for (const bytes of [Buffer.from([0, 0, 0]), await send("ARRAY['a', 'b']::text[]").then((b) => b.subarray(0, b.length - 1)), Buffer.concat([await send("ARRAY['a']::text[]"), Buffer.from([0])]), await send("ARRAY[1]::int4[]")]) {
+      const bind = wire.extended(sql, [bytes], [0], 1);
+      const want = rows(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(rows(await s.untilReady()), want, bytes.toString("hex"));
+      assert.match(want[0] ?? "", /^error /, bytes.toString("hex"));
+    }
+  } finally { s.end(); }
+});
+
+// array_recv's own refusals, each of a binary text[] whose bytes array_send never writes (the second review of PR 149):
+// an element that is no UTF-8 or holds a NUL (it was decoded with U+FFFD, or truncated the catalog's query), an element
+// type other than the parameter's, flags other than 0 or 1, a dimension too large or negative. Each is Postgres's
+// SQLSTATE and message, read from the same Bind.
+test("a binary text[] parameter's bad element bytes, element type, flags and dimension are refused as Postgres's array_recv refuses them", async () => {
+  const s = await rawSession();
+  try {
+    const sql = "SELECT id::text, array_to_string($1::text[], '|') AS s FROM jdocs ORDER BY id";
+    const array = (flags: number, element: number, dims: Array<[number, number]>, items: Buffer[]): Buffer => {
+      const int = (v: number): Buffer => { const b = Buffer.alloc(4); b.writeInt32BE(v); return b; };
+      return Buffer.concat([int(dims.length), int(flags), int(element), ...dims.flatMap(([n, l]) => [int(n), int(l)]), ...items.flatMap((x) => [int(x.length), x])]);
+    };
+    const errors = (ms: BackendMessage[]): string[] => ms.flatMap((m) => m.type === "ErrorResponse" ? [`${m.fields.C} ${m.fields.M}`] : []);
+    const cases: Array<[string, Buffer, string]> = [
+      ["not UTF-8", array(0, 25, [[1, 1]], [Buffer.from([0x61, 0xff, 0x62])]), "22021"],
+      ["a NUL", array(0, 25, [[1, 1]], [Buffer.from([0x61, 0x00, 0x62])]), "22021"],
+      ["a bad three-byte character", array(0, 25, [[2, 1]], [Buffer.from("ok"), Buffer.from([0x78, 0xe2, 0x28, 0xa1])]), "22021"],
+      ["a character cut short", array(0, 25, [[1, 1]], [Buffer.from([0x78, 0xe2, 0x82])]), "22021"],
+      ["varchar elements", array(0, 1043, [[1, 1]], [Buffer.from("a")]), "42804"],
+      ["flags 2", array(2, 25, [[1, 1]], [Buffer.from("a")]), "22P03"],
+      ["a dimension past the maximum", array(0, 25, [[268435456, 1]], []), "54000"],
+      ["a negative dimension", array(0, 25, [[-1, 1]], []), "54000"],
+    ];
+    for (const [name, bytes, code] of cases) {
+      const bind = wire.extended(sql, [bytes], [0], 1);
+      const want = errors(wire.replies(await truth.execProtocolRaw(bind)));
+      s.socket.write(bind);
+      assert.deepEqual(errors(await s.untilReady()), want, name);
+      assert.match(want[0] ?? "", new RegExp(`^${code} `), name);
+    }
+  } finally { s.end(); }
 });
 
 // THE REVIEW OF THE NATIVE READ: two classes it broke, each shape answered as Postgres answers it.

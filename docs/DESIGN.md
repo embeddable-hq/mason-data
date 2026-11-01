@@ -1111,6 +1111,25 @@ writes `7.00` as `7.0`), an object, an array, an index step, a document that may
 
 **Where.** `src/duck/rewrite.ts` (`jsonGet`); `tests/duck-wire.test.ts` "a ->> of a column is DuckDB's own read".
 
+**A path has one route however it is spelled** (issue 130). Only a literal `'{k}'` reached the route above; `array['k']`,
+which BI tools send, was a `to_json` of a list, so no native read, no stored path and one path counted as none. The
+constant is now read from the analysed tree (the Const's array bytes, an ARRAY's Consts), so `array_in` decides what a
+literal says. `GROUP BY` over 20 M rows of a 190-byte jsonb, wall time of a laptop shared with other work, nothing
+stored, then the path stored:
+
+| statement | before | after | stored |
+|---|---|---|---|
+| `meta ->> 'k'` | 3.2-6.7 s | 1.3-2.1 s | 0.13-0.16 s |
+| `meta #>> array['k']` | 58-89 s | 1.2-1.3 s | 0.17-0.19 s |
+| `meta #>> array['k']::text[]` | 45-70 s | 1.2 s | |
+| `meta #>> array['order','status']` | 44-55 s | 1.3-1.4 s | |
+| `jsonb_extract_path_text(meta, VARIADIC array[…])` | 54-60 s | 1.4-1.6 s | |
+| `count(meta #> array['k'])` | | | 0.05-0.07 s |
+
+`#>`, like `->`, stays the function until the path is stored: it answers a value's JSON text, which DuckDB's writer
+would respell. `(meta #> array['k'])::text` and `(meta -> 'k')::text` took 48-82 s and up to 168 s by the function
+(both the same route, the spread the machine's), and 7-14 s stored, where the rest is the cast's own function.
+
 ### What a stored path is
 
 **Decision.** A hidden VARCHAR column of the copy (`__mason_json_` + 12 hex digits of a SHA-256 of table and path)
@@ -2195,9 +2214,33 @@ two columns of one name by position; the substitution is sound because nothing f
 from outside it. A fetch keeps a nullable side's derived form, and DuckDB moved a computed list above the join in every
 plan measured, so a raising value on a row left out stayed unread (`limit-errors`, held by the oracle). A plain read
 counts for `fanOutBounded`, its bare outputs as its table's columns; what is carried has no row number and goes unsorted
-even where the proof holds. A statement with a role's filtered read keeps its form until step 4 reviews the barrier. A
-folded wrapper sorted by a bare computed output's name is not rewritten (`sortKeys`), while `ORDER BY t.shout` is; computed
-keys are step 3.
+even where the proof holds. A statement with a role's filtered read keeps its form until step 4 reviews the barrier.
+
+**Step 3: `USING`, `NATURAL` and computed keys.** Through the listener, a 2 GB limit, 8 M facts beside 3 M rows of about 3 kB
+that compress well (346 MB on disk, so the spill and the seconds before are smaller than the issue's 9.1 GB of noise; the
+minimum of warm runs, a machine at load 28):
+
+| Shape | Before | After |
+|---|---|---|
+| `USING`, sorted | 3.7 s, 2.5 GiB | 0.15 s, none |
+| `USING`, LEFT, no sort | 1.9 s, 2.1 GiB | 0.05 s, none |
+| FULL `USING`, by the merged column | 3.5 s, 2.3 GiB | 0.16 s, none |
+| `NATURAL`, sorted | 2.7 s, 2.3 GiB | 0.16 s, none |
+| A `*`, `USING` | 3.9 s, 2.4 GiB | 0.16 s, none |
+| Computed output, by name / ordinal | 2.7 / 3.1 s, 2.3 GiB | 0.13 / 0.17 s, none |
+| Computed output, a wrapper's, by name | 5.0 s, 2.2 GiB | 0.10 s, none |
+| Computed key, repeated expression (already by row number) | 0.22 s | 0.15 s |
+| Narrow `USING`, `LIMIT 100` / `OFFSET 2,000,000` | 31 / 188 ms | 38 / 153 ms |
+| Narrow computed output | 27 ms | 25 ms |
+
+Decided: a merged column is read through Postgres's join alias variables and never named by a side the fetch picks,
+because only the analysis knows the side (an inner join prefers the side that needs no cast, so `int JOIN bigint` reads the
+bigint). A computed key is read from the analysis as well as the tree: the tree alone cannot tell a collation's second key
+from a value, so a volatile key the rewrite wrote as several keys stays as it was. `NATURAL` becomes the USING of the
+columns Postgres merged because a copy's own table has hidden columns a NATURAL would join on, and because DuckDB refuses a
+NATURAL of no column in common, which Postgres reads as every pair. It is written so in EVERY statement, by the rewrite
+(`naturalWritten`), not by the rows a LIMIT chooses alone: written there first, a count, a sort with no LIMIT and a list
+that reads no table still reached DuckDB as NATURAL and were refused (the review of PR 155).
 
 ### First copy, and the poll's cost on the source
 

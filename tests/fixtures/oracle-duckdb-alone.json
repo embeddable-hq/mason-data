@@ -1,19 +1,19 @@
 {
-  "statements": 5686,
+  "statements": 6233,
   "mason": {
-    "exact": 5208,
-    "decided": 50,
-    "refused": 428,
+    "exact": 5739,
+    "decided": 48,
+    "refused": 446,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1530,
-    "name": 1228,
-    "refused": 997,
-    "value": 754,
-    "rows": 530,
+    "exact": 1716,
+    "name": 1231,
+    "refused": 1224,
+    "value": 805,
+    "rows": 538,
     "text": 153,
-    "other": 494
+    "other": 566
   },
   "gaps": {
     "copyPhase": {
@@ -35,11 +35,12 @@
         "interval-aggregates": { "planted": 0, "natural": 1 },
         "json-agg-distinct": { "planted": 1, "natural": 0 },
         "json-of-type": { "planted": 1, "natural": 1 },
+        "json-path-type": { "planted": 0, "natural": 16 },
         "json-rows-in-select": { "planted": 1, "natural": 0 },
         "jsonb-compare": { "planted": 1, "natural": 2 },
         "jsonb-set": { "planted": 0, "natural": 1 },
         "like-any-array": { "planted": 1, "natural": 0 },
-        "multidim-array": { "planted": 0, "natural": 3 },
+        "multidim-array": { "planted": 0, "natural": 5 },
         "numeric-exact-sum": { "planted": 1, "natural": 0 },
         "numeric-math": { "planted": 1, "natural": 0 },
         "numeric-special": { "planted": 0, "natural": 2 },
@@ -69,7 +70,7 @@
       "decided": {
         "char-n-minmax": { "planted": 0, "natural": 2 },
         "domain-column": { "planted": 1, "natural": 8 },
-        "float-last-digit": { "planted": 0, "natural": 3 },
+        "float-last-digit": { "planted": 0, "natural": 2 },
         "float-overflow": { "planted": 0, "natural": 3 },
         "fromless-text-order": { "planted": 1, "natural": 0 },
         "libc-mark-run-form": { "planted": 1, "natural": 0 },
@@ -79,7 +80,7 @@
         "limit-lateral-filter": { "planted": 0, "natural": 2 },
         "min-max-scale-tie": { "planted": 1, "natural": 0 },
         "mixed-scale-numeric": { "planted": 1, "natural": 2 },
-        "negative-zero": { "planted": 0, "natural": 10 },
+        "negative-zero": { "planted": 0, "natural": 9 },
         "nested-exact-numeric": { "planted": 1, "natural": 0 },
         "numeric-stddev": { "planted": 0, "natural": 2 },
         "show-all": { "planted": 1, "natural": 0 },
@@ -88,8 +89,9 @@
       }
     },
     "everyAsk": {
-      "asked": 39158,
+      "asked": 42890,
       "refused": {
+        "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
         "bytea-forms": { "planted": 3, "natural": 0 },
@@ -107,11 +109,12 @@
         "interval-aggregates": { "planted": 0, "natural": 3 },
         "json-agg-distinct": { "planted": 3, "natural": 0 },
         "json-of-type": { "planted": 3, "natural": 3 },
+        "json-path-type": { "planted": 0, "natural": 48 },
         "json-rows-in-select": { "planted": 3, "natural": 0 },
         "jsonb-compare": { "planted": 3, "natural": 6 },
         "jsonb-set": { "planted": 0, "natural": 3 },
         "like-any-array": { "planted": 3, "natural": 0 },
-        "multidim-array": { "planted": 0, "natural": 9 },
+        "multidim-array": { "planted": 0, "natural": 17 },
         "numeric-exact-sum": { "planted": 3, "natural": 0 },
         "numeric-math": { "planted": 3, "natural": 0 },
         "numeric-special": { "planted": 0, "natural": 6 },
@@ -141,7 +144,7 @@
       "decided": {
         "char-n-minmax": { "planted": 0, "natural": 6 },
         "domain-column": { "planted": 3, "natural": 24 },
-        "float-last-digit": { "planted": 0, "natural": 8 },
+        "float-last-digit": { "planted": 0, "natural": 3 },
         "float-overflow": { "planted": 0, "natural": 9 },
         "fromless-text-order": { "planted": 3, "natural": 0 },
         "libc-mark-run-form": { "planted": 3, "natural": 0 },
@@ -151,7 +154,7 @@
         "limit-lateral-filter": { "planted": 0, "natural": 8 },
         "min-max-scale-tie": { "planted": 3, "natural": 0 },
         "mixed-scale-numeric": { "planted": 3, "natural": 6 },
-        "negative-zero": { "planted": 0, "natural": 26 },
+        "negative-zero": { "planted": 0, "natural": 25 },
         "nested-exact-numeric": { "planted": 3, "natural": 0 },
         "numeric-stddev": { "planted": 0, "natural": 6 },
         "show-all": { "planted": 3, "natural": 0 },
@@ -162,8 +165,8 @@
   },
   "measured": {
     "what": "the copy phase of tests/integration/duck-oracle.itest.ts, each statement as written to a plain DuckDB connection over the same copy",
-    "machine": "darwin arm64",
-    "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on aarch64-unknown-linux-gnu",
+    "machine": "linux x64",
+    "postgres": "PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2) on x86_64-pc-linux-gnu",
     "collation": "en_US.utf8 (c)",
     "shapes": true
   }
