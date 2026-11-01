@@ -438,6 +438,31 @@ could not see, so a run's classes carry to the PR stacked on it. The coordinator
 agent and the scripts' logic held by `tests/workflows.test.ts`. The brief and the plan moved to Opus with implementation, and Fable is kept for the reviews,
 where outreading the author is the point.
 
+**Passing the review the first time (Tom, 2026-11-01).** Of the last 25 merged PRs that change `src/`, about 45%
+needed at most one fix round and about 55% at most two; PR 170 took 16 commits, PR 156 eight, PRs 149, 109, 163, 135
+and 202 five to seven each. The aim is about 90% passing Fable's review the first or second time. PR 202 (generated
+tables, stage 3) took six review rounds, and its root cause was a design nobody reviewed: its refusal reasons were
+decided by a walk over the raw parse tree, guessing types from lists of function names, where Postgres's analysis
+already held every node's result type (`src/duck/pgtree.ts` reads them) and "Postgres decides" is the first
+principle. Every round's wording finding traced back to that guess; each fix layered another guess on it, and each
+class round's brief described the syntax walk as the decision, so the class rounds built more of the wrong design.
+What the reviews caught, the brief had never given the author: a rule the project already has, not applied ("Postgres
+decides", "a fact derived in several places", "an error in Postgres's words", "an approximate value never compared as
+exact"); the reviewer's probes, which the author never ran (wrap the expression in `* 2`, coalesce or round, nest it,
+change the input type, put the table on an outer join's nullable side, pass a parameter, prepare before a SET, run the
+real run and not only the unit world); unverified assumptions about the engine or the real run; and context lost
+between rounds, each fix round a fresh agent seeing only the latest findings. CI was red from PR 202's first push, and
+rounds 1 and 2 never heard of it, since the loop read CI only once the reviews were clean. So `pr-loop.js` gained four
+stages. A **design note** comes before code, naming each fact's authority, and Fable reviews it against that code,
+twice at most. A **probe** runs before every review: a fresh Opus with no stake in the code runs the
+`## What review probes` of the rules files the diff touches, and its findings are fixed before Fable reads the head, in
+rounds counted apart from the review's. Every fix round is handed the note and **every earlier round**, and CI is read
+beside each review, its failure sent back in the same fix. Each class met is **learnt** as a probe in its rules file,
+so the next PR's probe runs it (`tests/workflows.test.ts` holds every rules file to the heading). Each run posts a
+`Review record` on its PR, and `scripts/review-stats.ts` turns the records into the first-pass rate, the number that
+says whether this worked. PR 202 also said "Part of #175", which GitHub does not link, and the board never saw it: the
+prompt asked for `Closes` and nothing read it, so the run now asks GitHub whether the PR closes its sub-issue.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
