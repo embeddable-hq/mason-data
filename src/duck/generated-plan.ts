@@ -142,7 +142,9 @@ export async function sessionReads(rows: Planner["rows"], keys: readonly string[
   const allowed = NOT_THE_SESSION.map((s) => `'${s}'::regprocedure::oid`).join(", ");
   const denied = READS_ZONE_ANYWAY.map((s) => `'${s}'::regprocedure::oid`).join(", ");
   if (procs.length > 0) {
-    const hit = await rows(`SELECT oid::text FROM pg_proc WHERE oid IN (${procs.join(", ")}) AND (oid IN (${denied}) OR (provolatile <> 'i' AND oid NOT IN (${allowed})))`);
+    // a stable function over "any" or a polymorphic type is stable for its arguments' text alone: `textReads` judges it
+    const hit = await rows(`SELECT p.oid::text FROM pg_proc p WHERE p.oid IN (${procs.join(", ")}) AND (p.oid IN (${denied}) OR (p.provolatile <> 'i' AND p.oid NOT IN (${allowed}) ` +
+      `AND NOT (p.provolatile = 's' AND ${FOR_ITS_ARGUMENTS})))`);
     const set = new Set(hit.map(([o]) => o));
     for (const k of keys) { const v = k.slice(k.indexOf(":") + 1); if (/^(function|aggregate|window):/.test(k) && set.has(v)) out.push(k); }
   }
@@ -167,6 +169,42 @@ export async function sessionReads(rows: Planner["rows"], keys: readonly string[
 /** a definition that reads a session, `session` what it reads as a person reads each */
 const sessionRefusal = (session: readonly string[]): GeneratedRefusal =>
   ({ key: "sql", message: `it reads a session: ${session.slice(0, 5).join("; ")}`, why: THE_SESSION_WHY, options: THE_SESSION_WAYS });
+
+/** a function (`p`) taking "any" or a polymorphic type: Postgres marks one stable when an argument's text may read a
+ *  setting (`jsonb_build_object`, `concat`, `format`, `to_jsonb`, `jsonb_agg`) */
+const FOR_ITS_ARGUMENTS = "EXISTS (SELECT 1 FROM unnest(p.proargtypes::oid[] || p.provariadic) AS a(t) JOIN pg_type y ON y.oid = a.t WHERE y.typtype = 'p')";
+
+/**
+ * What a stable function over "any" or a polymorphic type reads of a session through its arguments' text, as a person
+ * reads each (none: nothing): a function given an argument whose type's text Postgres writes by a setting (a timestamptz,
+ * an interval, a date, an array or row of one). Judged by each argument the statement gives it (`argTypes`, src/duck/resolved.ts
+ * `argumentTypes`), from the type's own output function, as `sessionReads` judges a cast through text.
+ */
+export async function textReads(rows: Planner["rows"], keys: readonly string[], argTypes: readonly string[]): Promise<string[]> {
+  const procs = keys.filter((k) => /^(function|aggregate|window):\d+$/.test(k)).map((k) => k.slice(k.indexOf(":") + 1));
+  if (procs.length === 0) return [];
+  const flagged = new Set((await rows(`SELECT p.oid::text FROM pg_proc p WHERE p.oid IN (${procs.join(", ")}) AND p.provolatile = 's' AND ${FOR_ITS_ARGUMENTS}`)).map(([o]) => o!));
+  if (flagged.size === 0) return [];
+  const pairs = argTypes.map((a) => a.split(":")).filter((x): x is [string, string] => x.length === 2 && flagged.has(x[0]!) && /^\d+$/.test(x[1]!));
+  const out: string[] = [];
+  // a function the statement gives no argument of a known type: nothing shows what it reads, so it is refused
+  const unknown = [...flagged].filter((f) => !pairs.some(([g]) => g === f));
+  if (unknown.length > 0) for (const [n] of await rows(`SELECT oid::regprocedure::text FROM pg_proc WHERE oid IN (${unknown.join(", ")})`)) out.push(n!);
+  if (pairs.length > 0) {
+    const hit = await rows(`SELECT DISTINCT format('%s over %s', (SELECT proname FROM pg_proc WHERE oid = a.f), format_type(a.t, NULL)) FROM (VALUES ${pairs.map(([f, t]) => `(${f}::oid, ${t}::oid)`).join(", ")}) AS a(f, t) ` +
+      `JOIN pg_type y ON y.oid = a.t JOIN pg_proc o ON o.oid = y.typoutput LEFT JOIN pg_type el ON y.typelem <> 0 AND el.oid = y.typelem LEFT JOIN pg_proc eo ON eo.oid = el.typoutput ` +
+      `WHERE CASE WHEN y.typcategory = 'A' THEN coalesce(eo.provolatile, 'v') <> 'i' ELSE o.provolatile <> 'i' END`);
+    for (const [n] of hit) out.push(n!);
+  }
+  return out;
+}
+
+/** a definition whose function reads a session through an argument's text */
+const textRefusal = (reads: readonly string[]): GeneratedRefusal => ({
+  key: "sql", message: `it calls ${reads.slice(0, 3).join("; ")}, a type whose text Postgres writes by the session's settings`,
+  why: "Postgres writes that value's text by the session's DateStyle, TimeZone or IntervalStyle, and a generated table has no session.",
+  options: ["give it that value as text you write, with the zone named: to_char(t AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')", "or call it in the statement that reads the table, over the column this one stores"],
+});
 
 /** the reason a table's column cannot be stored, with its ways out; null: it can */
 function columnProblem(f: { name: string; oid: number }, typeName: string): GeneratedRefusal | null {
@@ -212,6 +250,8 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
   if (chained.length > 0) refused.push(readsGenerated(chained.join(" and ")));
   const session = await sessionReads(p.rows, plan.resolved);
   if (session.length > 0) refused.push(sessionRefusal(session));
+  const text = await textReads(p.rows, plan.resolved, plan.argumentTypes ?? []);
+  if (text.length > 0) refused.push(textRefusal(text));
   if (plan.clock?.parse !== undefined) refused.push({ key: "sql", message: "it reads a relative literal ('now', 'today')", why: THE_SESSION_WHY, options: ["use now(), as of the run, with the zone named if it reads a day: (now() AT TIME ZONE 'UTC')::date"] });
   if (plan.dropLast) refused.push({ key: "sql", message: "it ends in FETCH … WITH TIES", why: "That row count isn't a table's to keep.", options: ["use LIMIT, with an ORDER BY that decides every row"] });
   const fields = plan.fields ?? [];

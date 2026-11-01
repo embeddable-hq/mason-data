@@ -12,8 +12,9 @@ import { spawnSync } from "node:child_process";
 import type pg from "pg";
 import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { stopParser } from "../src/api/postgres/parser.ts";
-import { GENERATED_DIR, parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
-import { withoutValues, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
+import { GENERATED_DIR, GENERATED_KEYS, parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
+import type { AddedTable } from "../src/duck/sync.ts";
+import { REVIEW_MS, withoutValues, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
 import { definitionStatement, refusalText, type GeneratedRefusal } from "../src/duck/generated-plan.ts";
 import { parseLag, parseSync } from "../src/lib/table-sync.ts";
 import { generatedLines } from "../src/cli/commands.ts";
@@ -506,4 +507,86 @@ test("a top-level ORDER BY with no LIMIT is said, once, pointing at order_by, an
     refusedAt(missing, "sql", /column "not_synced" does not exist/);
     assert.ok(missing[0]!.options.some((o) => /exclude:.*sources file/.test(o)), JSON.stringify(missing));
   });
+});
+
+test("a synced table that takes a generated table's name is never written over: the generated one is let go, ledger and all", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-held-"));
+  try {
+    await withWorld({ counts: COUNTS }, async (w) => {
+      await w.until(built);
+      // `mason add counts`: the copy's swap puts the synced table at public.counts, with its ledger rows
+      await w.store.writer.run("DROP TABLE public.counts");
+      await w.store.writer.run("CREATE TABLE public.counts (x INTEGER)");
+      await w.store.writer.run("INSERT INTO public.counts VALUES (101), (102), (103)");
+      await w.store.writer.run(`INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.counts', 'copied', 3, 0, 1.0, now(), NULL, '[{"name":"x","type":"integer","notNull":false,"comment":null}]')`);
+      await w.store.writer.run(`INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES ('public.counts', '100:100:', now(), 'off')`);
+    }, { dir });
+    const copy: AddedTable = { source: "public.counts", schema: "public", table: "counts", key: ["x"], columns: [{ name: "x", type: "integer", notNull: false, comment: null }], foreignKeys: [], bytes: 0, rows: 3 };
+    await withWorld({}, async (w) => {
+      const s = await w.until((x) => x.state === "refused");
+      refusedAt(s.refusals, null, /is a table the sources file syncs/);
+      assert.equal(s.serving, false, "the generated table is no longer kept");
+      // a change to its old base, past its target: nothing runs over the name
+      await w.store.writer.run("INSERT INTO public.events VALUES (14, 9, 'query', 'ok', '14', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+      w.sync.generated.changed("public.events");
+      for (const end = Date.now() + 1_500; Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 50)); }
+      assert.ok(!w.reached.includes("swapped"), "no run swapped anything in");
+      assert.deepEqual(await w.rows("SELECT x FROM public.counts ORDER BY x"), [[101], [102], [103]], "the synced table's rows stay");
+      assert.deepEqual(await w.rows(`SELECT count(*) FROM ${MASON_SCHEMA}.generated_tables`), [[0n]], "its ledger row is gone");
+    }, { dir, again: true, tables: [copy] });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a function stable only for its arguments' text is built over types whose text reads no setting, and refused with a way out that works otherwise", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await withWorld({
+    plainjson: `${lag}sql: SELECT id, jsonb_build_object('a', tenant_id, 'k', kind) AS doc, concat(id, '-', kind) AS label FROM events\n`,
+    stampjson: `${lag}sql: SELECT id, jsonb_build_object('at', started_at) AS doc FROM events\n`,
+    fixedjson: `${lag}sql: SELECT id, jsonb_build_object('at', to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')) AS doc FROM events\n`,
+  }, async (w) => {
+    const plainjson = await w.until(built, "public.plainjson");
+    assert.equal(plainjson.lastRun?.rows, 4);
+    assert.deepEqual(await w.rows("SELECT label FROM public.plainjson ORDER BY id LIMIT 1"), [["1-query"]]);
+    const stamp = await w.until((s) => s.state === "refused", "public.stampjson");
+    refusedAt(stamp.refusals, "sql", /calls jsonb_build_object over timestamp with time zone, a type whose text Postgres writes by the session's settings/);
+    assert.ok(stamp.refusals[0]!.options.some((o) => o.includes("to_char(t AT TIME ZONE 'UTC'")), JSON.stringify(stamp.refusals));
+    // the way out it gives, written: built
+    assert.equal((await w.until(built, "public.fixedjson")).lastRun?.rows, 4);
+  });
+});
+
+test("after a restart, a base whose last sync is not the one the snapshot saw counts as changed, though that sync began before the snapshot", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-began-"));
+  try {
+    let hold: Promise<void> | null = null;
+    let first: string | undefined;
+    await withWorld({ counts: COUNTS }, async (w) => {
+      first = (await w.until(built)).lastRun?.at;
+      let release = (): void => undefined;
+      hold = new Promise<void>((r) => { release = r; });
+      w.sync.generated.changed("public.events");
+      w.reached.length = 0;
+      try {
+        for (const end = Date.now() + 10_000; !w.reached.includes("snapshot") && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
+        assert.ok(w.reached.includes("snapshot"));
+        // a poll that began before the snapshot commits after it: its time is its start, before the snapshot, and its
+        // mark dies with the process
+        await w.store.writer.run("INSERT INTO public.events VALUES (15, 10, 'query', 'ok', '15', '2026-01-03 00:00:00+00', NULL, 1, NULL)");
+        await w.store.writer.run(`UPDATE ${MASON_SCHEMA}.poll_state SET polled_at = now() - INTERVAL 1 SECOND WHERE source = 'public.events'`);
+      } finally { hold = null; release(); }
+      const done = await w.until((s) => s.lastRun?.at !== first);
+      first = done.lastRun?.at;
+      assert.equal(done.lastRun?.rows, 2, "the run's snapshot did not hold the poll's row");
+    }, { dir, onStep: (s) => s === "snapshot" ? hold ?? undefined : undefined });
+    await withWorld({}, async (w) => {
+      assert.ok(w.status().behindSeconds > 0, "the base's last sync is another than the snapshot saw");
+      const after = await w.until((s) => s.lastRun?.at !== first);
+      assert.equal(after.lastRun?.rows, 3);
+    }, { dir, again: true });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("target_lag's floor is said at the key: Mason looks every REVIEW_MS", () => {
+  assert.equal(REVIEW_MS, 5_000);
+  assert.match(GENERATED_KEYS.target_lag, /every 5s/);
 });

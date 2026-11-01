@@ -34,7 +34,7 @@ export const generatedDir = (folder: string): string => path.join(folder, GENERA
 export const GENERATED_KEYS = {
   kind: "required: how the table stays current. scheduled: any SELECT, up to target_lag behind its base. live is not available yet",
   sql: "required: the one SELECT that gives the table, over the tables the sources file syncs",
-  target_lag: "required for scheduled: how far behind its base it may be, like 30s, 5m or 1h (at least 1s, at most 24h)",
+  target_lag: "required for scheduled: how far behind its base it may be, like 30s, 5m or 1h (at least 1s, at most 24h). Mason looks at each table every 5s, so a table under 5s can be up to 5s behind",
   order_by: "optional: the table's rows are written in this order, as what follows ORDER BY, over its columns, one SQL string",
   comment: "optional: the table's comment, as COMMENT ON TABLE",
 } as const;

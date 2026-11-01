@@ -48,7 +48,7 @@ export interface World {
 }
 
 /** `again`: over the file of an earlier world in that folder, as a restart finds it */
-export async function withWorld(files: Record<string, string>, use: (w: World) => Promise<void>, o: { dir?: string; again?: boolean; onStep?: GeneratedOptions["onStep"] } = {}): Promise<void> {
+export async function withWorld(files: Record<string, string>, use: (w: World) => Promise<void>, o: { dir?: string; again?: boolean; onStep?: GeneratedOptions["onStep"]; tables?: AddedTable[] } = {}): Promise<void> {
   const dir = o.dir ?? fs.mkdtempSync(path.join(os.tmpdir(), "mason-generated-"));
   const folder = path.join(dir, "mason"), tables = path.join(folder, GENERATED_DIR);
   fs.mkdirSync(tables, { recursive: true });
@@ -61,7 +61,7 @@ export async function withWorld(files: Record<string, string>, use: (w: World) =
     const open = async (): Promise<Sync> => { const s = new Sync(store, source, "app", (l) => logged.push(l), 3_600_000, "poll", null, { generated: { reviewMs: 0, onStep: async (s, n) => { reached.push(s); await o.onStep?.(s, n); } }, onEvent: (e) => { recorded.push(e); } }); await s.open(); return s; };
     if (first) { await (await open()).stop(); for (const sql of SEED) await store.writer.run(sql); }
     sync = await open();
-    await sync.setTables([events]);
+    await sync.setTables([events, ...(o.tables ?? [])]);
     const live = sync;
     const copies = (): CopyState[] => [...live.state(), ...live.generated.copies()];
     api = await startPostgresApi({

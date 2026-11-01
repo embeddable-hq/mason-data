@@ -37,7 +37,7 @@ import type { CopyState } from "./sync.ts";
 
 export const GENERATED_LEDGER = `${MASON_SCHEMA}.generated_tables`;
 const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS ${GENERATED_LEDGER} (name VARCHAR PRIMARY KEY, file VARCHAR, sql VARCHAR, order_by VARCHAR, target_every VARCHAR, target_seconds BIGINT, comment VARCHAR, ` +
-  `fingerprint VARCHAR, columns VARCHAR, bases VARCHAR, snapshot_at TIMESTAMPTZ, built_at TIMESTAMPTZ, "rows" BIGINT, seconds DOUBLE)`;
+  `fingerprint VARCHAR, columns VARCHAR, bases VARCHAR, snapshot_at TIMESTAMPTZ, built_at TIMESTAMPTZ, "rows" BIGINT, seconds DOUBLE, bases_synced VARCHAR)`;
 /** the table a run writes, beside the one served until the swap */
 const SIDE_SUFFIX = "__mason_generated";
 /** how often the folder is read and each table's due time looked at */
@@ -99,6 +99,9 @@ interface Deployed {
   fingerprint: string;
   columns: GeneratedColumn[];
   bases: string[];
+  /** each base's last sync as the sync said it on the snapshot's turn (ms, null: not known): a base whose last sync is
+   *  another one at a restart may hold a commit the snapshot missed, whenever that sync began */
+  basesSynced: Record<string, number | null>;
   snapshotAt: number;
   builtAt: number;
   rows: number;
@@ -190,16 +193,19 @@ export class GeneratedTables {
   async open(): Promise<void> {
     const w = this.store.writer;
     await w.run(LEDGER_DDL);
-    const rows = (await w.runAndReadAll(`SELECT name, file, sql, order_by, target_every, target_seconds, comment, fingerprint, columns, bases, epoch_ms(snapshot_at), epoch_ms(built_at), "rows", seconds FROM ${GENERATED_LEDGER}`)).getRowsJS() as
-      Array<[string, string, string, string | null, string, bigint, string | null, string, string, string, number | bigint, number | bigint, bigint, number]>;
-    for (const [name, file, sql, orderBy, every, seconds, comment, fingerprint, columns, bases, snapshotAt, builtAt, count, took] of rows) {
+    const rows = (await w.runAndReadAll(`SELECT name, file, sql, order_by, target_every, target_seconds, comment, fingerprint, columns, bases, epoch_ms(snapshot_at), epoch_ms(built_at), "rows", seconds, bases_synced FROM ${GENERATED_LEDGER}`)).getRowsJS() as
+      Array<[string, string, string, string | null, string, bigint, string | null, string, string, string, number | bigint, number | bigint, bigint, number, string | null]>;
+    for (const [name, file, sql, orderBy, every, seconds, comment, fingerprint, columns, bases, snapshotAt, builtAt, count, took, basesSynced] of rows) {
       const at = name.indexOf(".");
       const entry = this.entry(name);
       const snapshot = Number(snapshotAt);
       entry.deployed = { definition: { name, schema: name.slice(0, at), table: name.slice(at + 1), file, sql, orderBy, targetLag: { every, seconds: Number(seconds) }, comment },
-        fingerprint, columns: JSON.parse(columns) as GeneratedColumn[], bases: JSON.parse(bases) as string[], snapshotAt: snapshot, builtAt: Number(builtAt), rows: Number(count), seconds: took };
-      // marks die with a run: a base synced since this was built may have changed since
-      const since = entry.deployed.bases.some((b) => { const s = this.host.syncedAt(b); return s === null || Date.parse(s) > snapshot; });
+        fingerprint, columns: JSON.parse(columns) as GeneratedColumn[], bases: JSON.parse(bases) as string[], basesSynced: basesSynced === null ? {} : JSON.parse(basesSynced) as Record<string, number | null>, snapshotAt: snapshot, builtAt: Number(builtAt), rows: Number(count), seconds: took };
+      // marks die with a run: a base whose last sync is not the one the snapshot saw may have changed since. Never "synced
+      // after the snapshot": a poll's time is its start, so one that began before the snapshot and committed after it would
+      // be missed
+      const was = entry.deployed.basesSynced;
+      const since = entry.deployed.bases.some((b) => { const s = this.syncedMs(b); return s === null || was[b] === undefined || was[b] !== s; });
       if (since) entry.dirtySince = snapshot;
     }
     const left = (await w.runAndReadAll(`SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = current_database() AND table_name LIKE '%${SIDE_SUFFIX}'`)).getRowsJS() as Array<[string, string]>;
@@ -209,6 +215,9 @@ export class GeneratedTables {
     await c.run("SET default_null_order = 'nulls_last_on_asc_first_on_desc'");
     await c.run("SET TimeZone = 'UTC'");
   }
+
+  /** a base's last sync, ms; null: not known */
+  private syncedMs(base: string): number | null { const s = this.host.syncedAt(base); return s === null ? null : Date.parse(s); }
 
   /** From here on the folder is read (`read`) and each definition held to the listener's catalog (`planner`). Resolves once
    *  they have been looked at, so a start can say what is refused. */
@@ -317,6 +326,8 @@ export class GeneratedTables {
     const wanted = new Map(read.definitions.map((d) => [d.name, d])), refused = new Map(read.refused.map((r) => [r.name, r]));
     for (const name of new Set([...wanted.keys(), ...refused.keys()])) this.entry(name);
     for (const e of [...this.entries.values()]) {
+      // a stop mid-review: the listener's catalog may be closing, and nothing is planned on it
+      if (this.stopped) return;
       e.wanted = wanted.get(e.name) ?? null;
       e.fileRefused = refused.get(e.name) ?? null;
       this.say(e);
@@ -369,6 +380,7 @@ export class GeneratedTables {
     const held = this.host.added(e.name);
     if (held !== null) {
       e.checked = null; e.seen = null; e.waitingFor = null;
+      await this.release(e);
       e.refusals = [{ key: null, message: `${e.name} is a ${held === "view" ? "view of the database" : "table the sources file syncs"}`, why: "A name holds one table.", options: ["rename this file", "or take the table out of the sources file"] }];
       this.say(e);
       return;
@@ -401,8 +413,22 @@ export class GeneratedTables {
    *  synced table's name names no generated table */
   private names(self: string): Set<string> { return new Set([...this.entries.keys(), self].filter((n) => this.host.added(n) === null)); }
 
-  /** what to build from now: the file's definition where the catalog passed it, else what was deployed */
+  /**
+   * A NAME A SYNCED TABLE NOW HOLDS (`mason add` of the generated table's name): the synced table wins, so what was deployed
+   * is forgotten, its ledger row with it, and the table under that name, now the copy's, is never touched. Not while a run
+   * has it: the run's end looks again, and `buildable` keeps it from swapping.
+   */
+  private async release(e: Entry): Promise<void> {
+    if (e.deployed === null || e.running || e.queued) return;
+    e.deployed = null; e.dirtySince = null; e.taken = null; e.error = null;
+    await this.host.onWriter(() => this.store.writer.run(`DELETE FROM ${GENERATED_LEDGER} WHERE name = ${literal(e.name)}`));
+    this.host.log(`${e.name}: a synced table now holds its name, so the generated table is no longer kept`);
+  }
+
+  /** what to build from now: the file's definition where the catalog passed it, else what was deployed; nothing where a
+   *  synced table holds the name */
   private buildable(e: Entry): { definition: GeneratedDefinition; fingerprint: string } | null {
+    if (this.host.added(e.name) !== null) return null;
     if (e.checked !== null && e.refusals.length === 0 && e.fileRefused === null) return { definition: e.checked.definition, fingerprint: e.checked.fingerprint };
     return e.deployed === null ? null : { definition: e.deployed.definition, fingerprint: e.deployed.fingerprint };
   }
@@ -446,11 +472,11 @@ export class GeneratedTables {
       const clock = await this.host.onWriter(async () => {
         await c.runAndReadAll(`SELECT count(*) FROM ${GENERATED_LEDGER}`);
         e.taken = e.dirtySince; e.dirtySince = null;
-        return Date.now();
+        return { at: Date.now(), synced: Object.fromEntries(bases.map((x) => [x, this.syncedMs(x)])) };
       });
       await this.onStep("snapshot", name);
       const params: string[] = [];
-      if (plan.clock?.exec !== undefined) params[plan.clock.exec - 1] = new Date(clock).toISOString();
+      if (plan.clock?.exec !== undefined) params[plan.clock.exec - 1] = new Date(clock.at).toISOString();
       const aliases = columns.map((_, i) => `__mason_c${i}`);
       const sql = `CREATE OR REPLACE TABLE ${side} (${columns.map((x) => ident(x.name)).join(", ")}) AS SELECT ${columns.map((x, i) => `CAST(${aliases[i]!} AS ${x.duck})`).join(", ")} ` +
         `FROM (${plan.sql.text}) AS __mason_output(${aliases.join(", ")})`;
@@ -460,7 +486,7 @@ export class GeneratedTables {
       open = false;
       await this.onStep("committed", name);
       const seconds = (Date.now() - started) / 1000;
-      const deployed: Deployed = { definition: d, fingerprint: b.fingerprint, columns, bases, snapshotAt: clock, builtAt: Date.now(), rows: Number(rowsChanged), seconds };
+      const deployed: Deployed = { definition: d, fingerprint: b.fingerprint, columns, bases, basesSynced: clock.synced, snapshotAt: clock.at, builtAt: Date.now(), rows: Number(rowsChanged), seconds };
       await this.host.onWriter(() => this.swap(e, deployed, side, target));
       await this.onStep("swapped", name);
       const was = e.error;
@@ -501,9 +527,9 @@ export class GeneratedTables {
     try {
       await w.run(`DROP TABLE IF EXISTS ${target}`);
       await w.run(`ALTER TABLE ${side} RENAME TO ${ident(d.table)}`);
-      await w.run(`INSERT OR REPLACE INTO ${GENERATED_LEDGER} VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::TIMESTAMPTZ, $12::TIMESTAMPTZ, $13, $14)`,
+      await w.run(`INSERT OR REPLACE INTO ${GENERATED_LEDGER} VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::TIMESTAMPTZ, $12::TIMESTAMPTZ, $13, $14, $15)`,
         [e.name, d.file, d.sql, d.orderBy, d.targetLag.every, d.targetLag.seconds, d.comment, n.fingerprint, JSON.stringify(n.columns), JSON.stringify(n.bases),
-          new Date(n.snapshotAt).toISOString(), new Date(n.builtAt).toISOString(), n.rows, n.seconds]);
+          new Date(n.snapshotAt).toISOString(), new Date(n.builtAt).toISOString(), n.rows, n.seconds, JSON.stringify(n.basesSynced)]);
       await w.run("COMMIT");
     } catch (x) { await w.run("ROLLBACK"); throw x; }
   }

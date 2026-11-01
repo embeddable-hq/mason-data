@@ -661,6 +661,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       void (async () => {
         // before the listener: a share's command is told why, and its tunnel client stopped
         try { await shares?.closeAll("Mason is stopping"); } catch (e) { say(`  closing the share: ${(e as Error).message}`); }
+        // before the listener: a generated table's review plans on its catalog, so it ends first
+        try { await sync.generated.stop(); } catch (e) { say(`  stopping the generated tables: ${(e as Error).message}`); }
         try { await api.close(); } catch (e) { say(`  closing the listener: ${(e as Error).message}`); }
         // after the listener: its last statements' rows are written before the file closes
         try { await requests.close(); } catch (e) { say(`  closing the request log: ${(e as Error).message}`); }

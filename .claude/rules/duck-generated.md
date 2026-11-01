@@ -25,14 +25,18 @@ scheduled` re-runs the whole SELECT. `kind: live` is refused until its write pat
   RESOLVED, by `pg_proc.provolatile` and the cast's functions, never a list of names (`sessionReads`). `now()` is the run's
   own clock, and a stable function that reads no session goes on `NOT_THE_SESSION`; one marked immutable that reads the
   zone goes on `READS_ZONE_ANYWAY`. A statement the allowlist refuses (`current_time`'s timetz) that also reads a session
-  is refused for the session, with its way out: verifying it would not make it a table's to hold.
+  is refused for the session, with its way out: verifying it would not make it a table's to hold. A function Postgres
+  marks stable for its arguments' text alone (one over `"any"` or a polymorphic type: `jsonb_build_object`, `concat`) is
+  judged by each argument's type's output function (`textReads`, from the plan's `argumentTypes`).
 - **Only what a stored cell gives back as Postgres's text is stored** (`STORED_TYPES`): a type goes on it once the oracle
   holds it over a generated table. A cell the plan fills after the engine's answer (`DuckPlan.exact`, `dropLast`) is
   refused, because a plain write would store another value.
 - **A run takes its snapshot and its marks on ONE writer's turn**: a commit is in the snapshot or marked for the next
   run, never neither. DuckDB's snapshot is a transaction's first read of a table, never its BEGIN, so the run reads the
   ledger there. A commit that changes a base marks it AFTER that commit, on that writer's turn, in memory, adding nothing
-  to a batch's transaction. **A new write path to a copy calls `generated.changed`.** Detector: the itest's poll, stream
+  to a batch's transaction. **A new write path to a copy calls `generated.changed`.** At a restart a base counts as
+  changed when its last sync is another than the one the snapshot's turn saw (`basesSynced`), never when it is "after the
+  snapshot": a poll's time is its start. Detector: the itest's poll, stream
   batch, held changes and copy made again, each followed by the statements held to Postgres.
 - **Lag is the age of the oldest base change not in the table** (`oldest`: a run's changes count until its swap), never
   the snapshot's age: over an idle base nothing is behind and nothing runs.
@@ -42,4 +46,5 @@ scheduled` re-runs the whole SELECT. `kind: live` is refused until its write pat
 - **A failed run keeps the old table, says why and never quotes a row** (`withoutValues`), and waits the back-off a failed
   copy waits. The event is `generated_failed`.
 - **A file's name is its table.** A name a synced table holds is refused, and the synced table wins the catalog
-  (`served`, `names`).
+  (`served`, `names`) and the table: what was deployed under that name is let go with its ledger row (`release`), and
+  nothing is built or swapped over it (`buildable`).
