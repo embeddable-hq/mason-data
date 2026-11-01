@@ -2893,6 +2893,11 @@ test("a key bound to an output is that output: by alias, number or an equal expr
       assert.equal(shown.length, 5, sql);
       assert.deepEqual(shown, [...shown].sort((a, b) => sql.includes("DESC") ? b - a : a - b), `${sql}: the value shown is the value sorted`);
     }
+    // WITH TIES over a volatile key: its window would draw the value again, so refused by name, never DuckDB's raw 42804
+    for (const key of ["r", "1", "random()"]) {
+      const sql = `SELECT count(*) FROM (SELECT random() AS r, l.id FROM late l ORDER BY ${key} FETCH FIRST 3 ROWS WITH TIES) s`;
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap volatile-window/.test(e.detail ?? ""), sql);
+    }
     // said once: the key is the output's number
     logged.length = 0;
     await c.query("SELECT random() AS r, l.id FROM late l ORDER BY random() LIMIT 5");
