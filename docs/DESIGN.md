@@ -2276,6 +2276,16 @@ table 177 ms, the statistics wall 190 ms, the whole filtered read 145 ms. The fi
 no new argument: the fetch never hands a list expression the table-wide statistics the wall hides, nor a row the filter
 drops, so what the barrier and the wall already proved holds for the fetch unchanged.
 
+**Key-first grouping (issue 134, step 6), decided 2026-11-01.** `GROUP BY` a table's primary key with its wide columns
+in the list and a LIMIT carried every wide value through the hash aggregate (the rewrite's `any_value` of each) for every
+group, before the limit kept a hundred: on issue 134's dataset it failed with 53400 after 120 s and 29 GiB of spill,
+where the hand rewrite took 0.76 s with none. So `keyFirst` (src/duck/late.ts) groups on the whole primary key with
+`any_value(rowid)`, applies the HAVING, sort and LIMIT, then fetches the kept groups' rows by row number. It reads
+`any_value(rowid)` rather than grouping by `rowid` too, because the copy can briefly hold a key twice, and a group split
+by row number would answer two rows where the source answers one. That moment is the reason `distinct-key.ts` trusts no
+UNIQUE index that is not the key, since a column the copy is not written by may hold one value twice; the primary key it
+does trust because the copy is written by it, and the swap checks as many distinct keys as rows.
+
 **Step 3: `USING`, `NATURAL` and computed keys.** Through the listener, a 2 GB limit, 8 M facts beside 3 M rows of about 3 kB
 that compress well (346 MB on disk, so the spill and the seconds before are smaller than the issue's 9.1 GB of noise; the
 minimum of warm runs, a machine at load 28):

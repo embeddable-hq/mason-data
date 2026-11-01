@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as net from "node:net";
 import * as path from "node:path";
+import * as util from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import pg from "pg";
 import { PGlite } from "@electric-sql/pglite";
@@ -29,6 +30,7 @@ import type { ApiLogRow } from "../src/api/request-log.ts";
 import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
+import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -46,6 +48,13 @@ const JDOCS: Array<[number, string | null, string | null]> = [
   [6, '["x", "y", "z"]', '["x", "y", "z"]'],
   [7, '{"1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}', '{"1": "one", "1 ": "trailing", " 1": "leading", "+1": "plus", "01": "zero-one"}'],
 ];
+/** jq's documents: a key `k` of every jsonb kind, three of them equal numbers spelled apart (1, 1.0, 1.00), a string
+ *  twice and once in another case, a JSON null, an empty object, and a NULL row (the class "an output not resolved to
+ *  its column": a DISTINCT ON or ORDER BY key named by an alias of `v -> 'k'` is jsonb's equality and order) */
+const JQ: Array<[number, string | null]> = [[1, '{"k": 1}'], [2, '{"k": "a"}'], [3, '{"k": 1.0}'], [4, '{"k": [1]}'], [5, '{"k": null}'],
+  [6, '{"k": "a"}'], [7, '{"k": {"a": 1}}'], [8, '{"k": {}}'], [9, '{"k": true}'], [10, '{"k": "A"}'], [11, '{"k": 2}'], [12, null],
+  [13, '{"k": 1.00}'], [14, '{"k": "b"}']];
+const jqInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jq VALUES ${JQ.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${asHeld(v)}'`})`).join(", ")}`;
 const jdocsInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jdocs VALUES ${JDOCS.map(([id, b, j]) => `(${id}, ${b === null ? "NULL" : `'${asHeld(b)}'`}, ${j === null ? "NULL" : `'${j}'`})`).join(", ")}`;
 /** instants a truncation meets at its edges: each side of a daylight-saving change (Europe/Berlin's 2026-03-29 02:00
  *  and 2026-10-25 03:00, America/New_York's), a repeated hour's two halves, before 1970, a zone's local mean time
@@ -115,9 +124,14 @@ const DDL = [
   "INSERT INTO public.late_p SELECT (range % 50)::INTEGER, (range // 50)::INTEGER, 'n' || range FROM range(200)",
   "CREATE TABLE public.late_n (id INTEGER, c INTEGER)",
   "INSERT INTO public.late_n SELECT range::INTEGER, (range % 50)::INTEGER FROM range(50)",
+  // a key the copy holds twice for a moment (a change applied in pieces): the catalog declares it the key, the copy holds row 1 twice
+  "CREATE TABLE public.late_d (id INTEGER, w VARCHAR)",
+  "INSERT INTO public.late_d VALUES (1, 'one'), (1, 'one'), (2, 'two'), (3, 'three')",
   'CREATE TABLE public.rowid_cased (id INTEGER PRIMARY KEY, "RowId" INTEGER)',
   'INSERT INTO public.rowid_cased SELECT range::INTEGER, 5 FROM range(1, 7)',
   "INSERT INTO public.late_c SELECT range::INTEGER, 'c' || range FROM range(50)",
+  "CREATE TABLE public.jq (id INTEGER PRIMARY KEY, v JSON)",
+  jqInsert(jsonbText),
   "CREATE TABLE public.jdocs (id INTEGER PRIMARY KEY, b JSON, j JSON)",
   jdocsInsert(jsonbText),
   // a jsonb column whose name is jdocs.b's in another case: a bare "B" beside b is ambiguous to DuckDB
@@ -172,6 +186,8 @@ const PG_DDL = [
   "INSERT INTO public.late_p SELECT g % 50, g / 50, 'n' || g FROM generate_series(0, 199) g",
   "CREATE TABLE public.late_n (id integer, c integer)",
   "INSERT INTO public.late_n SELECT g, g % 50 FROM generate_series(0, 49) g",
+  "CREATE TABLE public.jq (id integer PRIMARY KEY, v jsonb)",
+  jqInsert((doc) => doc),
   "CREATE TABLE public.jdocs (id integer PRIMARY KEY, b jsonb, j json)",
   jdocsInsert((doc) => doc),
   "CREATE TABLE public.jcase (id integer PRIMARY KEY, \"B\" jsonb)",
@@ -230,7 +246,9 @@ const schema: PgSchema = {
     { name: "late_c", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "name", type: "text" }] },
     { name: "late_p", primaryKey: ["c", "line"], joins: [], columns: [{ name: "c", type: "int4" }, { name: "line", type: "int4" }, { name: "note", type: "text" }] },
     { name: "late_n", primaryKey: [], joins: [], columns: [{ name: "id", type: "int4" }, { name: "c", type: "int4" }] },
+    { name: "late_d", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "w", type: "text" }] },
     { name: "rowid_cased", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "RowId", type: "int4" }] },
+    { name: "jq", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "jsonb" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
@@ -402,7 +420,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -2249,6 +2267,319 @@ test("a sorted, limited select list is computed for the rows the limit keeps, as
   } finally { await c.end(); }
 });
 
+// a sort key written as a bare literal: an output holding a constant, sorted by its name or number, was written into the
+// inner ORDER BY as the literal, which DuckDB reads as an ordinal (an integer: the first inner column, a row number) or
+// refuses (42804, "non-integer literal"); a constant orders nothing, so it is no key at all
+test("a sort key that is an output holding a constant orders nothing: by name and by number, before the real keys", async () => {
+  const c = await client();
+  try {
+    for (const v of ["1 AS v", "'x' AS v", "true AS v", "2::bigint AS v", "'x'::text AS v"]) {
+      for (const sql of [
+        // the GROUP BY form (keyFirst)
+        `SELECT l.id, l.k, ${v}, count(*) AS n FROM late l GROUP BY l.id ORDER BY v, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${v}, count(*) AS n FROM late l GROUP BY l.id ORDER BY 3, 1 DESC LIMIT 3`,
+        // the join (joinRows)
+        `SELECT l.id, l.k, ${v} FROM late l JOIN late_c c ON c.id = l.c ORDER BY v, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${v}, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3, l.k, 1 LIMIT 3`,
+        // one table, a computed list (afterLimit) and a plain one
+        `SELECT l.id, l.j ->> 'n' AS n, ${v} FROM late l ORDER BY v, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${v} FROM late l ORDER BY 3, l.k LIMIT 2`,
+        // no LIMIT: no rewrite of the sort, and the engine's own reading of it
+        `SELECT l.id, l.k, ${v} FROM late l WHERE l.id < 5 ORDER BY v, l.id DESC`,
+        `SELECT l.id, l.k, ${v}, c.name FROM late l JOIN late_c c ON c.id = l.c WHERE l.id < 5 ORDER BY 3, l.id DESC`,
+      ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+    // a constant cast, written as the key itself: an expression to Postgres, ordering nothing
+    for (const sql of ["SELECT l.id, l.k FROM late l ORDER BY 'x'::text, l.id DESC LIMIT 3",
+      "SELECT l.id, l.k, count(*) AS n FROM late l GROUP BY l.id ORDER BY 1::int, l.id DESC LIMIT 3",
+      "SELECT l.id, l.j ->> 'n' AS n FROM late l JOIN late_c c ON c.id = l.c ORDER BY true::boolean, l.id DESC LIMIT 3"]) {
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+    // every key a constant: no order at all, so any 3 rows are Postgres's; the written sort never reaches the inner
+    for (const sql of ["SELECT l.id, l.k, 1 AS one FROM late l JOIN late_c c ON c.id = l.c ORDER BY one DESC LIMIT 3",
+      "SELECT l.id, l.k, 1 AS one FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3 LIMIT 3",
+      "SELECT l.id, l.k, 'x' AS t FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY t LIMIT 3",
+      "SELECT l.id, l.k, true AS b FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY 3 DESC LIMIT 3"]) {
+      assert.equal((await answer(c, sql)).rows.length, 3, sql);
+    }
+  } finally { await c.end(); }
+});
+
+// A SORT KEY WRITTEN AS A BARE LITERAL, its third instance (CI on PR 170): inside a subquery the late rewrites do not
+// apply, and the collation's sort key was written over the constant — `ORDER BY one DESC, __mason_libc_key(…, 'x'), 'x'`,
+// refused 42804. The rewrite drops a constant key wherever a SELECT's keys are written: at the top and at any depth, by
+// name and by number, under each collation kind, with no key left no ORDER BY, the LIMIT kept
+test("a constant sort key orders nothing at any depth: by name and by number, under C, ICU and the database's libc collation", async () => {
+  const libc = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => schema, record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
+    duck: await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined,
+      handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" "], { collate: "en_US.utf8" }), () => copies),
+  });
+  const bytes = await client();
+  const onLibc = new pg.Client({ host: "127.0.0.1", port: libc.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+  await onLibc.connect();
+  try {
+    for (const [c, database] of [[bytes, "C"], [onLibc, "libc"]] as const) {
+      for (const v of ["'x' AS v", `'x' COLLATE "C" AS v`, `'x' COLLATE "und-x-icu" AS v`, "'x'::text AS v", "7 AS v", "true AS v"]) {
+        const say = (sql: string): string => `${sql} (the database's collation ${database})`;
+        // answered as Postgres answers: the keys left decide the order
+        for (const sql of [
+          `SELECT l.id, l.k, ${v} FROM late l ORDER BY v DESC, l.id LIMIT 3`,
+          `SELECT l.id, l.k, ${v} FROM late l ORDER BY 3, 1 DESC LIMIT 3`,
+          `SELECT l.id, l.k, ${v} FROM late l WHERE l.id < 5 ORDER BY v, l.id DESC`,
+          `SELECT l.id, l.k, ${v} FROM late l WHERE l.id < 5 ORDER BY 3 DESC, 1`,
+          `SELECT s.id FROM (SELECT l.id, ${v} FROM late l ORDER BY v, l.id DESC LIMIT 4) s ORDER BY s.id`,
+          `SELECT s.id FROM (SELECT l.id, ${v} FROM late l ORDER BY 2 DESC, 1 LIMIT 4) s ORDER BY s.id`,
+          `SELECT count(*) FROM (SELECT l.id, l.k, ${v} FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY v DESC LIMIT 3) s`,
+          `SELECT count(*) FROM (SELECT l.id, l.k, ${v} FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY 3 LIMIT 3) s`,
+          `SELECT count(*) FROM (SELECT l.id, ${v} FROM late l ORDER BY v) s`,
+          `SELECT count(*) FROM (SELECT l.id, ${v} FROM late l ORDER BY 2 DESC) s`,
+          // every key a constant, as WITH TIES reads it: every row ties
+          `SELECT count(*) FROM (SELECT l.id, ${v} FROM late l ORDER BY v FETCH FIRST 2 ROWS WITH TIES) s`,
+        ]) assert.deepEqual(await answer(c, sql), await postgres(sql), say(sql));
+        // every key a constant: no order at all, so any 3 rows are Postgres's
+        for (const sql of [`SELECT l.id, l.k, ${v} FROM late l ORDER BY v LIMIT 3`, `SELECT l.id, l.k, ${v} FROM late l ORDER BY 3 DESC LIMIT 3`]) {
+          assert.equal((await answer(c, sql)).rows.length, 3, say(sql));
+        }
+      }
+      // CI's statement: an integer and a text constant, by name and by number, in a subquery under a LEFT JOIN
+      const ci = "SELECT count(*) FROM (SELECT l.id, l.k, 1 AS one, 'x' AS t FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY one DESC, 4 LIMIT 3) s";
+      assert.deepEqual(await answer(c, ci), await postgres(ci), `${ci} (${database})`);
+      // a derived table's constant read through the table around it: the fold makes `s.one` the literal, an ordinal to the
+      // sort below it (the re-check of ca748c6: ids 2000, 1999, 1998 where Postgres answers 1, 2, 3); by name and number too
+      for (const k of ["1", "2", "'x'", "true"]) {
+        for (const order of ["s.one DESC, s.id", "s.one, s.id DESC", "one DESC, s.id", "2, s.id DESC", "s.one, 2 DESC, s.id"]) {
+          const sql = `SELECT s.id, s.one FROM (SELECT l.id, c.name, ${k} AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY ${order} LIMIT 3`;
+          assert.deepEqual(await answer(c, sql), await postgres(sql), `${sql} (${database})`);
+        }
+      }
+      // a chain of casts is no constant: it runs, and raises as Postgres's does
+      const chain = "SELECT l.id FROM late l ORDER BY 'abc'::text::int, l.id LIMIT 3";
+      await assert.rejects(postgres(chain), /invalid input syntax for type integer: "abc"/);
+      await assert.rejects(c.query(chain), (e: pg.DatabaseError) => e.code === "22P02", `${chain} (${database})`);
+      // a cast of a typed literal Postgres evaluates at planning, and raises there: no constant, it is evaluated and raises
+      for (const sql of ["SELECT l.id FROM late l ORDER BY 2147483648::int, l.id LIMIT 3",
+        "SELECT l.id FROM late l ORDER BY (2147483648::int), l.id LIMIT 3",
+        "SELECT l.id FROM late l ORDER BY 12345::numeric(3), l.id LIMIT 3",
+        "SELECT s.id FROM (SELECT l.id, c.name, 2147483648::int AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY s.one, s.id LIMIT 3"]) {
+        const code = await postgres(sql).then(() => "answered", (e: { code?: string }) => e.code);
+        assert.equal(code, "22003", sql);
+        await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === code, `${sql} (${database})`);
+      }
+    }
+  } finally { await bytes.end(); await onLibc.end(); await libc.close(); }
+});
+
+// THE CLASS ROUND (PR 170, a fact derived in several places: whether a sort key is constant). Five findings in four
+// rounds were each a spelling `constantKey` matched or missed (the last: `1.5::numeric`, a CONST to Postgres, written as
+// the bare 1.5 DuckDB refuses, 42804). A key is constant where Postgres's ANALYSIS put a Const, read in one place; every
+// spelling of the class is held here against Postgres, as the key itself, by output name and by number, under each shape
+const constantKeys = [
+  // a cast of an untyped literal: folded by the analysis into a Const
+  "'x'::text", "'1.5'::numeric", "NULL::int", "NULL::text",
+  // a cast of a typed literal to its own type leaves the Const (int, numeric, bool); to another type it is a function
+  // Postgres evaluates (at planning: folded there, and it could raise there)
+  "1::int", "1::bigint", "1.5::numeric", "0.5::numeric", "1.5::decimal", "1.5::numeric(3,1)", "1.5::float8", "true::bool",
+  "'x'::text::text", "'x'::text::varchar",
+  // a chain of casts
+  "'1.5'::numeric::numeric", "1.5::numeric::float8", "1::int::bigint", "'1.5'::text::numeric", "'2'::text::int",
+  // COLLATE, parentheses
+  "'x' COLLATE \"C\"", "'x'::text COLLATE \"C\"", "(1.5::numeric)", "((1.5)::numeric)", "('x'::text)",
+  // a constant expression: Postgres folds it at planning
+  "1 + 0", "1.5::numeric + 0",
+];
+test("a constant sort key is the analysis's Const, however it is spelled: the key, its output's name and number, under every shape", async () => {
+  const c = await client();
+  const outcome = (p: Promise<unknown>): Promise<unknown> => p.then((r) => r, (e: { code?: string }) => ({ error: e.code }));
+  const wrong: string[] = [];
+  const alike = async (sql: string, values?: unknown[]): Promise<void> => {
+    const [mason, pg] = [await outcome(answer(c, sql, values)), await outcome(postgres(sql, values))];
+    try { assert.deepEqual(mason, pg); } catch { wrong.push(`${sql}${values !== undefined ? ` ${JSON.stringify(values)}` : ""}: Mason ${JSON.stringify(mason)}, Postgres ${JSON.stringify(pg)}`); }
+  };
+  try {
+    for (const k of constantKeys) {
+      for (const sql of [
+        // the key itself: one table (afterLimit), DESC, the join (joinRows), a computed list, the GROUP BY form
+        // (keyFirst), DISTINCT ON, WITH TIES, no LIMIT
+        `SELECT l.id, l.k FROM late l ORDER BY ${k}, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k FROM late l ORDER BY ${k} DESC, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k FROM late l JOIN late_c c ON c.id = l.c ORDER BY ${k}, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.j ->> 'n' AS n FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY ${k} DESC, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, count(*) AS n FROM late l GROUP BY l.id ORDER BY ${k}, l.id DESC LIMIT 3`,
+        `SELECT DISTINCT ON (l.c) l.c, l.id FROM late l ORDER BY l.c DESC, ${k}, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k FROM late l ORDER BY ${k}, l.k FETCH FIRST 3 ROWS WITH TIES`,
+        `SELECT l.id, l.k FROM late l WHERE l.id < 5 ORDER BY ${k}, l.id DESC`,
+        // by output name and by number
+        `SELECT l.id, l.k, ${k} AS v FROM late l ORDER BY v, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${k} AS v FROM late l ORDER BY 3 DESC, 1 DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${k} AS v FROM late l JOIN late_c c ON c.id = l.c ORDER BY v DESC, l.id DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${k} AS v, count(*) AS n FROM late l GROUP BY l.id ORDER BY 3, 1 DESC LIMIT 3`,
+        `SELECT l.id, l.k, ${k} AS v FROM late l WHERE l.id < 5 ORDER BY 3, l.id DESC`,
+        // at depth, and a derived table's constant read through the table around it (late.ts's fold)
+        `SELECT s.id FROM (SELECT l.id, ${k} AS v FROM late l ORDER BY v DESC, l.id LIMIT 4) s ORDER BY s.id`,
+        `SELECT s.id, s.one FROM (SELECT l.id, c.name, ${k} AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY s.one, s.id DESC LIMIT 3`,
+        `SELECT s.id, s.one FROM (SELECT l.id, c.name, ${k} AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY 2 DESC, s.id DESC LIMIT 3`,
+      ]) await alike(sql);
+    }
+    // a bare literal or NULL as the key itself is Postgres's own refusal (42601) or an ordinal; by name and number it is a constant
+    for (const k of ["1.5", "'x'", "NULL", "true", "(1.5)", "(2)"]) {
+      await alike(`SELECT l.id, l.k FROM late l ORDER BY ${k}, l.id DESC LIMIT 3`);
+      await alike(`SELECT l.id, l.k, ${k} AS v FROM late l ORDER BY v, l.id DESC LIMIT 3`);
+      await alike(`SELECT l.id, l.k, ${k} AS v FROM late l JOIN late_c c ON c.id = l.c ORDER BY 3, l.id DESC LIMIT 3`);
+    }
+    // a parameter: a Param to the analysis, evaluated, ordering nothing whatever its value
+    for (const [k, v] of [["$1", "2"], ["$1::int", 2], ["$1::numeric", "1.5"], ["$1::text", "x"]] as const) {
+      await alike(`SELECT l.id, l.k FROM late l ORDER BY ${k}, l.id DESC LIMIT 3`, [v]);
+      await alike(`SELECT l.id, l.k FROM late l JOIN late_c c ON c.id = l.c ORDER BY ${k}, l.id DESC LIMIT 3`, [v]);
+      await alike(`SELECT l.id, l.k FROM late l WHERE l.id < 5 ORDER BY ${k}, l.id DESC`, [v]);
+    }
+    // a key Postgres evaluates at planning, and raises there: evaluated, never dropped as a constant nor read as an ordinal
+    for (const k of ["2147483648::int", "12345::numeric(3)", "'abc'::text::int", "'abc'::text::numeric", "1 / 0", "(2147483648::int)"]) {
+      await alike(`SELECT l.id FROM late l ORDER BY ${k}, l.id LIMIT 3`);
+      await alike(`SELECT l.id, ${k} AS v FROM late l JOIN late_c c ON c.id = l.c ORDER BY v, l.id LIMIT 3`);
+      await alike(`SELECT s.id FROM (SELECT l.id, c.name, ${k} AS one FROM late l LEFT JOIN late_c c ON c.id = l.c) s ORDER BY s.one, s.id LIMIT 3`);
+    }
+    assert.deepEqual(wrong, []);
+  } finally { await c.end(); }
+});
+
+// THE SECOND CLASS ROUND (PR 170, the class widened: a constant key written into the engine as a bare literal, in ANY
+// clause). The sixth finding was a DISTINCT ON key (`DISTINCT ON (1.5::numeric)`, a Const to Postgres, written as the
+// bare 1.5 the engine refuses, 42804). Every clause where a key can be an analysed Const is held here against Postgres
+const constantKeysAnyClause = ["1.5::numeric", "'1.5'::numeric", "(1.5::numeric)", "1::int", "'x'::text", "NULL::int"];
+test("a constant key in any clause is the analysis's Const: DISTINCT ON, GROUP BY, grouping sets, a window, a set operation, an aggregate's ORDER BY", async () => {
+  const c = await client();
+  const outcome = (p: Promise<unknown>): Promise<unknown> => p.then((r) => r, (e: { code?: string }) => ({ error: e.code }));
+  const wrong: string[] = [];
+  const alike = async (sql: string, values?: unknown[]): Promise<void> => {
+    const [mason, pg] = [await outcome(answer(c, sql, values)), await outcome(postgres(sql, values))];
+    try { assert.deepEqual(mason, pg); } catch { wrong.push(`${sql}${values !== undefined ? ` ${JSON.stringify(values)}` : ""}: Mason ${JSON.stringify(mason)}, Postgres ${JSON.stringify(pg)}`); }
+  };
+  try {
+    for (const k of constantKeysAnyClause) {
+      for (const sql of [
+        // A. DISTINCT ON: the key alone (one row), beside a column key, by output number and name, no LIMIT, at depth
+        `SELECT DISTINCT ON (${k}) l.id FROM late l ORDER BY ${k}, l.id DESC LIMIT 3`,
+        `SELECT DISTINCT ON (${k}) l.id FROM late l ORDER BY ${k}, l.id LIMIT 3`,
+        `SELECT DISTINCT ON (${k}, l.c) l.c, l.id FROM late l ORDER BY ${k}, l.c DESC, l.id LIMIT 3`,
+        `SELECT DISTINCT ON (l.c, ${k}) l.c, l.id FROM late l ORDER BY l.c, ${k}, l.id DESC LIMIT 3`,
+        `SELECT DISTINCT ON (2) l.id, ${k} AS v FROM late l ORDER BY 2, l.id DESC LIMIT 3`,
+        `SELECT DISTINCT ON (v, l.c) l.c, ${k} AS v, l.id FROM late l ORDER BY v, l.c DESC, l.id LIMIT 3`,
+        `SELECT DISTINCT ON (${k}, l.c) l.c, l.id FROM late l WHERE l.id < 120 ORDER BY ${k}, l.c, l.id DESC`,
+        `SELECT count(*) FROM (SELECT DISTINCT ON (${k}) l.id FROM late l) s`,
+        // B. GROUP BY: by expression alone (one group) and beside a column, by number, by output name, the key-first form
+        `SELECT count(*) AS n FROM late l GROUP BY ${k}`,
+        `SELECT l.c, count(*) AS n FROM late l GROUP BY ${k}, l.c ORDER BY l.c DESC LIMIT 3`,
+        `SELECT ${k} AS v, count(*) FROM late l GROUP BY 1`,
+        `SELECT ${k} AS v, l.c, count(*) FROM late l GROUP BY v, 2 ORDER BY 2 LIMIT 3`,
+        `SELECT l.id, l.k FROM late l GROUP BY l.id, ${k} ORDER BY l.id DESC LIMIT 3`,
+        // C. grouping sets: ROLLUP, CUBE, GROUPING SETS with a constant key beside a column
+        `SELECT l.c, count(*) FROM late l WHERE l.c < 3 GROUP BY ROLLUP (${k}, l.c) ORDER BY 1 NULLS FIRST, 2`,
+        `SELECT l.c, count(*) FROM late l WHERE l.c < 3 GROUP BY CUBE (${k}, l.c) ORDER BY 1 NULLS FIRST, 2`,
+        `SELECT l.c, count(*) FROM late l WHERE l.c < 3 GROUP BY GROUPING SETS ((${k}), (l.c), ()) ORDER BY 1 NULLS FIRST, 2`,
+        // D. a window's ORDER BY: alone (every row a peer) and before a column
+        `SELECT l.id, row_number() OVER (ORDER BY ${k}, l.id DESC) AS r FROM late l ORDER BY l.id LIMIT 3`,
+        `SELECT l.id, sum(l.k) OVER (ORDER BY ${k}) AS s, rank() OVER (ORDER BY ${k}) AS r FROM late l WHERE l.id < 10 ORDER BY l.id`,
+        // E. a window's PARTITION BY: alone, beside a column, a named window
+        `SELECT l.id, count(*) OVER (PARTITION BY ${k}) AS n FROM late l WHERE l.id < 5 ORDER BY 1`,
+        `SELECT l.id, row_number() OVER (PARTITION BY ${k}, l.c ORDER BY l.id) AS r FROM late l WHERE l.id < 120 ORDER BY 1 DESC LIMIT 3`,
+        `SELECT l.id, sum(l.k) OVER w AS s FROM late l WHERE l.id < 5 WINDOW w AS (PARTITION BY ${k} ORDER BY ${k}, l.id) ORDER BY 1`,
+        // H. a set operation's ORDER BY, by number and by name of an output each branch makes a constant
+        `SELECT l.id, ${k} AS v FROM late l WHERE l.id < 3 UNION ALL SELECT l.id, ${k} FROM late l WHERE l.id > 1998 ORDER BY 2, 1 DESC LIMIT 3`,
+        `SELECT l.id, ${k} AS v FROM late l WHERE l.id < 3 UNION SELECT l.id, ${k} FROM late l WHERE l.id > 1998 ORDER BY v DESC, id LIMIT 3`,
+        // I. an aggregate's ORDER BY (an integer there is no ordinal to Postgres); J. an ordered-set aggregate's
+        `SELECT string_agg(l.id::text, ',' ORDER BY ${k}, l.id DESC) AS s FROM late l WHERE l.id < 5`,
+        `SELECT l.c, array_agg(l.id ORDER BY ${k}, l.id DESC)::text AS a FROM late l WHERE l.id < 120 GROUP BY l.c ORDER BY 1 LIMIT 3`,
+        `SELECT string_agg(DISTINCT ${k}::text, ',') AS s FROM late l`, `SELECT array_length(array_agg(DISTINCT ${k}), 1) AS a, array_agg(DISTINCT ${k}) IS NULL AS b FROM late l`,
+        `SELECT mode() WITHIN GROUP (ORDER BY ${k}) AS m FROM late l`,
+        `SELECT l.c, mode() WITHIN GROUP (ORDER BY ${k}) AS m, percentile_disc(0.5) WITHIN GROUP (ORDER BY ${k}) AS p FROM late l WHERE l.id < 120 GROUP BY l.c ORDER BY 1 LIMIT 3`,
+        `SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${k}) AS p FROM late l WHERE l.id < 0`,
+      ]) await alike(sql);
+    }
+    // a bare literal as a DISTINCT ON or GROUP BY key is Postgres's own refusal (42601), or an ordinal
+    for (const k of ["1.5", "'x'", "(1.5)", "NULL"]) {
+      await alike(`SELECT DISTINCT ON (${k}) l.id FROM late l ORDER BY l.id LIMIT 3`);
+      await alike(`SELECT count(*) FROM late l GROUP BY ${k}`);
+    }
+    // a parameter: evaluated, partitioning and ordering nothing whatever its value (never an ordinal)
+    for (const [k, v] of [["$1::numeric", "1.5"], ["$1::int", 1], ["$1::text", "x"]] as const) {
+      await alike(`SELECT DISTINCT ON (${k}, l.c) l.c, l.id FROM late l ORDER BY ${k}, l.c DESC, l.id LIMIT 3`, [v]);
+      await alike(`SELECT l.id, count(*) OVER (PARTITION BY ${k}) AS n FROM late l WHERE l.id < 5 ORDER BY 1`, [v]);
+      await alike(`SELECT string_agg(l.id::text, ',' ORDER BY ${k}, l.id DESC) AS s FROM late l WHERE l.id < 5`, [v]);
+    }
+    // F. a window's frame offset spelled as a cast: a value, never a key
+    await alike("SELECT l.id, sum(l.k) OVER (ORDER BY l.id ROWS BETWEEN 1::int PRECEDING AND CURRENT ROW) AS s FROM late l WHERE l.id < 5 ORDER BY 1");
+    await alike("SELECT l.id, sum(l.k) OVER (ORDER BY l.id::numeric RANGE BETWEEN 1.5::numeric PRECEDING AND CURRENT ROW) AS s FROM late l WHERE l.id < 5 ORDER BY 1");
+    assert.deepEqual(wrong, []);
+  } finally { await c.end(); }
+});
+
+// THE THIRD CLASS ROUND (PR 170; CI's oracle leg 2 and the review): a key Postgres binds to an output, or to another
+// clause's key, by EQUALITY OF THE ANALYSED EXPRESSIONS (findTargetlistEntrySQL99) has no node of its own at its offset.
+// Spelled unlike the expression it equals (`'1.5'::numeric` beside `1.5::numeric AS v`), a syntactic match missed it, no
+// analysis was read there, and the constant was written bare: 42804, or an integer read as an ordinal. The second
+// instance of the class "an output not resolved to its column"; the case list is PR 170's (K1-K8, N1-N3)
+const equalSpellings = { numeric: ["1.5::numeric", "'1.5'::numeric", "CAST('1.5' AS numeric)", "numeric '1.5'", "CAST(1.5 AS numeric)"], int: ["1::int", "'1'::int", "CAST(1 AS int)", "int '1'"] };
+test("a key equal to an output or another key by the analysis is resolved to it, however each is spelled", async () => {
+  const c = await client();
+  const outcome = (p: Promise<unknown>): Promise<unknown> => p.then((r) => r, (e: { code?: string }) => ({ error: e.code }));
+  const wrong: string[] = [];
+  const alike = async (sql: string): Promise<void> => {
+    const [mason, pg] = [await outcome(answer(c, sql)), await outcome(postgres(sql))];
+    try { assert.deepEqual(mason, pg); } catch { wrong.push(`${sql}: Mason ${JSON.stringify(mason)}, Postgres ${JSON.stringify(pg)}`); }
+  };
+  try {
+    for (const spellings of Object.values(equalSpellings)) {
+      for (const out of spellings) {
+        for (const key of spellings) {
+          if (key === out) continue;
+          // K1-K3: ORDER BY against an output, plain, under a join, under GROUP BY, at depth
+          await alike(`SELECT l.id, ${out} AS v FROM late l ORDER BY ${key}, l.id DESC LIMIT 3`);
+          await alike(`SELECT l.id, ${out} AS v FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY ${key}, l.id DESC LIMIT 3`);
+          await alike(`SELECT l.c, ${out} AS v, count(*) AS n FROM late l GROUP BY l.c ORDER BY ${key}, l.c DESC LIMIT 3`);
+          await alike(`SELECT s.id FROM (SELECT l.id, ${out} AS v FROM late l ORDER BY ${key}, l.id DESC LIMIT 3) s ORDER BY s.id`);
+          // K4: a key against a key of the same clause
+          await alike(`SELECT l.id FROM late l ORDER BY ${out}, ${key}, l.id DESC LIMIT 3`);
+          // K5, K6: DISTINCT ON against an output, against the ORDER BY's key, the ORDER BY by expression and by number
+          await alike(`SELECT DISTINCT ON (${key}, l.c) l.c, ${out} AS v, l.id FROM late l ORDER BY ${out}, l.c DESC, l.id LIMIT 3`);
+          await alike(`SELECT DISTINCT ON (${key}, l.c) l.c, ${out} AS v, l.id FROM late l ORDER BY 2, l.c DESC, l.id LIMIT 3`);
+          await alike(`SELECT DISTINCT ON (${key}, l.c) l.c, l.id FROM late l ORDER BY ${out}, l.c DESC, l.id LIMIT 3`);
+          await alike(`SELECT DISTINCT ON (l.c, ${key}) l.c, l.id FROM late l ORDER BY l.c DESC, ${out}, l.id LIMIT 3`);
+          // K7: an aggregate's ORDER BY against its argument
+          await alike(`SELECT l.c, (array_agg(${out} ORDER BY ${key}, l.id DESC))[1] AS a, count(*) AS n FROM late l GROUP BY l.c ORDER BY 1 LIMIT 3`);
+          // K8: the fold, a wrapper's key against its output over a derived table
+          await alike(`SELECT s.id, ${out} AS k FROM (SELECT l.id, l.c FROM late l) s ORDER BY ${key}, s.id DESC LIMIT 3`);
+          await alike(`SELECT s.id, s.v FROM (SELECT l.id, ${out} AS v FROM late l) s ORDER BY ${key}, s.id DESC LIMIT 3`);
+        }
+      }
+    }
+    // N1-N3: an expression equal to an output, no constant: it still orders, as the output it is
+    for (const sql of [
+      "SELECT c, l.id FROM late l ORDER BY l.c DESC, l.id LIMIT 3",
+      "SELECT l.c, id FROM late l ORDER BY c DESC, l.id DESC LIMIT 3",
+      "SELECT DISTINCT ON (l.c) c, l.id FROM late l ORDER BY c DESC, l.id DESC LIMIT 3",
+      "SELECT DISTINCT ON (c) l.c, l.id FROM late l ORDER BY l.c DESC, l.id LIMIT 3",
+      "SELECT l.id, l.id::numeric + 1.5 AS v FROM late l ORDER BY l.id + 1.5 DESC LIMIT 3",
+      "SELECT l.id, l.id + 1.5 AS v FROM late l ORDER BY l.id::numeric + 1.5 DESC LIMIT 3",
+      "SELECT DISTINCT ON (l.id + 1.5) l.id, l.id::numeric + 1.5 AS v FROM late l ORDER BY l.id::numeric + 1.5 DESC LIMIT 3",
+      "SELECT name, c.id FROM late_c c ORDER BY c.name DESC LIMIT 3",
+      "SELECT c.name, id FROM late_c c ORDER BY name COLLATE \"C\" DESC, c.id LIMIT 3",
+      // a Const output beside an equal-by-analysis column key: the Const is dropped, the column orders
+      "SELECT l.id, 1.5::numeric AS v, c FROM late l ORDER BY '1.5'::numeric, l.c DESC, id DESC LIMIT 3",
+      // K8, the fold: a derived table's Const column read by a key spelled unlike the wrapper's output (a cast to its own
+      // type is the column to Postgres), which the fold makes the literal
+      ...["1 AS one", "'x'::text AS one", "1.5::numeric AS one"].flatMap((one) => [
+        `SELECT s.id, s.one FROM (SELECT l.id, ${one} FROM late l) s ORDER BY CAST(s.one AS ${one.includes("'") ? "text" : one.includes(".") ? "numeric" : "int"}), s.id DESC LIMIT 3`,
+        `SELECT s.id, s.one AS w FROM (SELECT l.id, ${one} FROM late l) s ORDER BY (one), s.id DESC LIMIT 3`,
+        `SELECT s.id, one FROM (SELECT l.id, ${one} FROM late l) s ORDER BY s.one, 1 DESC LIMIT 3`,
+      ]),
+    ]) await alike(sql);
+    assert.deepEqual(wrong, []);
+  } finally { await c.end(); }
+});
+
 // ISSUE 112: an output's number or bare name beside a * reached the engine as written: no rule met the column it is
 test("an output of a * is read by its number and its bare name as the column it is", async () => {
   const c = await client();
@@ -2486,6 +2817,95 @@ test("a volatile value a sort reads is one value: the rows shown are in the orde
   } finally { await c.end(); }
 });
 
+// THE CLASS "AN OUTPUT NOT RESOLVED TO ITS COLUMN", its fourth round: a key bound to an output, by its alias, its number,
+// an equal expression, an alias that is also an input column, or over a derived table, IS that output, written through
+// the one binding in every clause (src/duck/rewrite.ts `keysBound`)
+test("a key bound to an output is that output: by alias, number or an equal expression, in DISTINCT ON and ORDER BY", async () => {
+  const c = await client();
+  try {
+    // (every statement is run, and those that differ named together: one report of the class, not its first case)
+    const differ: string[] = [];
+    const alike = async (sql: string): Promise<void> => {
+      const [got, want] = [await answer(c, sql).catch((e: Error) => e.message), await postgres(sql)];
+      if (!util.isDeepStrictEqual(got, want)) differ.push(sql);
+    };
+    // a jsonb output: DISTINCT ON is jsonb's equality (1, 1.0 and 1.00 one row), ORDER BY its order, however named
+    const ON = "SELECT DISTINCT ON (k) q.v -> 'k' AS k, q.id FROM jq q";
+    for (const sql of [
+      `${ON} ORDER BY k, q.id LIMIT 8`,
+      `${ON} ORDER BY k DESC, q.id`,
+      `${ON} ORDER BY q.v -> 'k', q.id`,
+      `${ON} ORDER BY 1, 2`,
+      "SELECT DISTINCT ON (1) q.v -> 'k' AS k, q.id FROM jq q ORDER BY k, q.id",
+      "SELECT DISTINCT ON (q.v -> 'k') q.v -> 'k' AS k, q.id FROM jq q ORDER BY k DESC, q.id",
+      // an alias that is also an input column: an ORDER BY's and a DISTINCT ON's bare name is the output first
+      "SELECT DISTINCT ON (v) q.v -> 'k' AS v, q.id FROM jq q ORDER BY v, q.id",
+      "SELECT q.v -> 'k' AS v, q.id FROM jq q ORDER BY v DESC, q.id",
+      "SELECT q.id % 3 AS id, q.id AS n FROM jq q ORDER BY id DESC, n",
+      "SELECT DISTINCT ON (id) q.id % 3 AS id, q.id AS n FROM jq q ORDER BY id, n DESC",
+      // GROUP BY's bare name is the input column, its ORDER BY's the output; and an expression equal to an output
+      "SELECT q.id % 3 AS id, count(*) AS n FROM jq q GROUP BY id ORDER BY id DESC, n",
+      "SELECT q.id % 3 AS g, count(*) AS n FROM jq q GROUP BY q.id % 3 ORDER BY q.id % 3 DESC",
+      "SELECT q.v -> 'k' AS k, count(*) AS n FROM jq q GROUP BY 1 ORDER BY q.v -> 'k' DESC",
+      // over a derived table
+      "SELECT DISTINCT ON (s.k) s.k, s.id FROM (SELECT v -> 'k' AS k, id FROM jq) s ORDER BY s.k, s.id",
+      "SELECT DISTINCT ON (k) s.k AS k, s.id FROM (SELECT v -> 'k' AS k, id FROM jq) s ORDER BY k DESC, s.id",
+      // a citext output and a collated one, named by alias and by an equal expression
+      "SELECT a.status AS s, a.id FROM accounts a ORDER BY s, a.id",
+      "SELECT a.status AS s, a.id FROM accounts a ORDER BY a.status DESC, a.id",
+      "SELECT t.s COLLATE \"und-x-icu\" AS s, t.id FROM texts t ORDER BY s, t.id",
+      "SELECT t.s COLLATE \"und-x-icu\" AS x, t.id FROM texts t ORDER BY t.s COLLATE \"und-x-icu\" DESC, t.id",
+      // EVERY READER OF THE SORT LIST reads a key as the SELECT's ORDER BY does, by name, number or equal expression:
+      // WITH TIES's rank window (an ordinal there is a constant, every row a tie), late.ts's fetch under a join
+      // (with an OFFSET: withTies read the offset node in two places, the detector below)
+      ...["m", "1", "l.k % 5", "l.k % 5 + 0 DESC", "m DESC, 2"].flatMap((key) => [
+        `SELECT count(*) FROM (SELECT l.k % 5 AS m, l.id FROM late l ORDER BY ${key} FETCH FIRST 3 ROWS WITH TIES) s`,
+        `SELECT count(*) FROM (SELECT l.k % 5 AS m, l.id FROM late l ORDER BY ${key} OFFSET 2 FETCH FIRST 3 ROWS WITH TIES) s`,
+        `SELECT l.k % 5 AS m, l.id, lc.name FROM late l JOIN late_c lc ON lc.id = l.c ORDER BY ${key}, l.id LIMIT 6`,
+      ]),
+      "SELECT count(*) FROM (SELECT l.k, l.id FROM late l ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s",
+      "SELECT count(*) FROM (SELECT l.k % 5 AS m, count(*) AS n FROM late l GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 2 ROWS WITH TIES) s",
+      // a key built over a grouped output: the collation's keys read the grouped value, by number, name or expression
+      "SELECT t.s COLLATE \"und-x-icu\" AS x, count(*) AS n FROM texts t GROUP BY 1 ORDER BY 1",
+      "SELECT t.s COLLATE \"und-x-icu\" AS x, count(*) AS n FROM texts t GROUP BY x ORDER BY x DESC",
+      "SELECT t.s COLLATE \"und-x-icu\" AS x, count(*) AS n FROM texts t GROUP BY 1 ORDER BY t.s COLLATE \"und-x-icu\" DESC",
+      "SELECT t.s AS x, count(*) AS n FROM texts t GROUP BY t.s ORDER BY t.s COLLATE \"und-x-icu\" DESC",
+      "SELECT q.v -> 'k' AS k, count(*) AS n FROM jq q GROUP BY k ORDER BY k DESC",
+    ]) await alike(sql);
+    assert.deepEqual(differ, [], "each of these answers unlike Postgres");
+    // a citext output grouped and ordered by its number or name: Postgres's answer, or refused as the citext it is
+    for (const sql of ["SELECT a.status AS s, count(*) AS n FROM accounts a GROUP BY 1 ORDER BY 1", "SELECT a.status AS s, count(*) AS n FROM accounts a GROUP BY s ORDER BY s DESC"]) {
+      const got = await answer(c, sql).catch((e: pg.DatabaseError) => e);
+      if (got instanceof Error) assert.ok((got as pg.DatabaseError).code === "0A000" && /citext-forms/.test((got as pg.DatabaseError).detail ?? ""), `${sql}: ${got.message}`);
+      else assert.deepEqual(got, await postgres(sql), sql);
+    }
+    // a citext output named by its alias in DISTINCT ON: refused as the citext it is, never DISTINCT by its text
+    await assert.rejects(answer(c, "SELECT DISTINCT ON (s) a.status AS s, a.id FROM accounts a ORDER BY s, a.id"), (e: pg.DatabaseError) => e.code === "0A000" && /citext-forms/.test(e.detail ?? ""));
+    // a volatile output: a key bound to it by equality is it, one value a row, so what is shown is what was sorted
+    for (const sql of [
+      "SELECT random() AS r, l.id FROM late l ORDER BY random() LIMIT 5",
+      "SELECT random() AS r, l.id FROM late l ORDER BY random() DESC LIMIT 5",
+      "SELECT random() AS r, l.id FROM late l ORDER BY random(), l.id LIMIT 5",
+      "SELECT DISTINCT random() AS r FROM late l ORDER BY random() LIMIT 5",
+      "SELECT s.r FROM (SELECT random() AS r, l.id FROM late l ORDER BY random() LIMIT 5) s",
+    ]) {
+      const shown = (await c.query({ text: sql, rowMode: "array" })).rows.map((r: unknown[]) => r[0] as number);
+      assert.equal(shown.length, 5, sql);
+      assert.deepEqual(shown, [...shown].sort((a, b) => sql.includes("DESC") ? b - a : a - b), `${sql}: the value shown is the value sorted`);
+    }
+    // WITH TIES over a volatile key: its window would draw the value again, so refused by name, never DuckDB's raw 42804
+    for (const key of ["r", "1", "random()"]) {
+      const sql = `SELECT count(*) FROM (SELECT random() AS r, l.id FROM late l ORDER BY ${key} FETCH FIRST 3 ROWS WITH TIES) s`;
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap volatile-window/.test(e.detail ?? ""), sql);
+    }
+    // said once: the key is the output's number
+    logged.length = 0;
+    await c.query("SELECT random() AS r, l.id FROM late l ORDER BY random() LIMIT 5");
+    const line = logged.findLast((l) => l.startsWith("statement: ")) ?? "";
+    assert.equal(line.match(/random\(\)/g)?.length, 1, line);
+  } finally { await c.end(); }
+});
+
 test("a computed key and a merged column in a prepared statement run after a SET, and in two session zones", async () => {
   const c = await client();
   try {
@@ -2514,6 +2934,68 @@ test("a computed key and a merged column in a prepared statement run after a SET
         }
       } finally { await truth.exec("SET TimeZone = 'UTC'"); }
     }
+  } finally { await c.end(); }
+});
+
+test("a GROUP BY a table's whole primary key with a LIMIT groups on the key and reads that table's columns after the limit (issue 134, step 6)", async () => {
+  const c = await client();
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const KEYED = /any_value\(\w+\.rowid\) AS __mason_r1.*\) AS __mason_late LEFT JOIN \w+ AS (\w+) ON \1\.rowid = __mason_late\.__mason_r1/;
+  try {
+    const answered = [
+      // the key and other columns of its table, sorted, by a column, an aggregate's name and an ordinal
+      "SELECT l.id, l.j, l.k, count(c.id) AS n FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY l.id ORDER BY l.id DESC LIMIT 4",
+      "SELECT l.id, l.j, count(*) AS n FROM late l JOIN late_c c ON c.id = l.c GROUP BY l.id ORDER BY n DESC, l.id LIMIT 3 OFFSET 2",
+      "SELECT l.j, l.k, l.id FROM late l GROUP BY l.id ORDER BY 2, 3 LIMIT 3",
+      // the other columns grouped beside the key, by their ordinals (a tool groups by every column it shows)
+      "SELECT l.id, l.j, l.k, max(c.name) AS m FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY 1, 2, 3 ORDER BY 1 LIMIT 3",
+      // a key of one table beside a column of another, grouped: a NULL in that grouped column of the outer join
+      "SELECT l.id, l.j, c.name, count(*) AS n FROM late l LEFT JOIN late_c c ON c.id = l.c + 40 GROUP BY l.id, c.name ORDER BY c.name NULLS FIRST, l.id LIMIT 5 OFFSET 8",
+      // the keyed table on the nullable side: its group of no row reads NULL
+      "SELECT c.id, l.id AS l, l.j, count(c.id) AS n FROM late_c c LEFT JOIN late l ON l.c = c.id AND l.id < 0 GROUP BY c.id, l.id ORDER BY c.id DESC LIMIT 3",
+      // the nulls idiom over a fetched column, and a HAVING
+      "SELECT l.id, l.k, sum(c.id) AS s FROM late l JOIN late_c c ON c.id = l.c GROUP BY l.id HAVING sum(c.id) > 10 ORDER BY (l.k) IS NULL ASC, l.k DESC LIMIT 3",
+      // a composite key, whole, grouped with another column of its table
+      "SELECT p.c, p.line, p.note FROM late_p p GROUP BY p.c, p.note, p.line ORDER BY 1, 2 LIMIT 3",
+    ];
+    for (const sql of answered) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      assert.match(await sent(sql), KEYED, sql);
+    }
+    // the grouped columns of the table the list alone reads are left out of the grouping: the key decides them
+    assert.match(await sent("SELECT l.id, l.j, l.k, max(c.name) AS m FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY 1, 2, 3 ORDER BY 1 LIMIT 3"), /GROUP BY l\.id ORDER BY/);
+    // unsorted: as many rows, each a group of the whole answer
+    const unsorted = await answer(c, "SELECT l.id, l.j, count(*) AS n FROM late l GROUP BY l.id LIMIT 5");
+    assert.equal(unsorted.rows.length, 5);
+    const whole = held(await postgres("SELECT l.id, l.j, count(*) AS n FROM late l GROUP BY l.id")) as { rows: unknown[][] };
+    for (const r of (held(unsorted) as { rows: unknown[][] }).rows) assert.ok(whole.rows.some((w) => JSON.stringify(w) === JSON.stringify(r)), JSON.stringify(r));
+    // a key the copy holds twice for a moment is one group, read of one of its rows: never split by a row number
+    assert.deepEqual((await answer(c, "SELECT d.id, d.w, count(*) AS n FROM late_d d GROUP BY d.id ORDER BY d.id LIMIT 5")).rows, [["1", "one", "2"], ["2", "two", "1"], ["3", "three", "1"]]);
+    assert.match(await sent("SELECT d.id, d.w, count(*) AS n FROM late_d d GROUP BY d.id ORDER BY d.id LIMIT 5"), /any_value\(d\.rowid\) AS __mason_r1.* GROUP BY d\.id /);
+    // what stays as it was: a key in part, no key, no LIMIT, grouping sets, a key's column grouped as an expression
+    for (const sql of ["SELECT p.c, p.note FROM late_p p GROUP BY p.c, p.note ORDER BY 1, 2 LIMIT 3",
+      "SELECT p.c, max(p.note) AS m FROM late_p p GROUP BY p.c ORDER BY 1 LIMIT 3",
+      "SELECT n.id, count(*) AS k FROM late_n n GROUP BY n.id ORDER BY 1 LIMIT 3",
+      "SELECT l.id, l.j FROM late l GROUP BY l.id ORDER BY l.id",
+      "SELECT l.id, count(*) AS n FROM late l GROUP BY ROLLUP (l.id) ORDER BY 1 NULLS FIRST LIMIT 3",
+      "SELECT l.id + 0 AS i, count(*) AS n FROM late l GROUP BY l.id + 0 ORDER BY 1 LIMIT 3"]) {
+      assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    }
+    // a statement prepared, run after a SET: the same plan
+    await c.query({ name: "keyfirst", text: "SELECT l.id, l.j, count(c.id) AS n FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY l.id ORDER BY l.id LIMIT $1", values: [2] });
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    logged.length = 0;
+    const again = await c.query({ name: "keyfirst", text: "SELECT l.id, l.j, count(c.id) AS n FROM late l LEFT JOIN late_c c ON c.id = l.c GROUP BY l.id ORDER BY l.id LIMIT $1", values: [3], rowMode: "array" });
+    assert.equal(again.rows.length, 3);
+    assert.match(logged.findLast((l) => l.startsWith("statement: ")) ?? "", KEYED);
   } finally { await c.end(); }
 });
 
@@ -3989,4 +4471,28 @@ test("the statements running now, by session; a cancel by session stops one as a
     assert.ok("cancelled" in api.cancel(s.pid));
     await s.untilReady();
   } finally { s.end(); }
+});
+
+// THE GROUPED COLLATED INNER ORDER under a libc database (PR 170's oracle statements "a bound key: a collated output
+// grouped and ordered by …", mirrored): the keys bound to the output, by number, name or expression, sort by its ICU
+// collation (a space counts: ' alpha' before '10'), never the database's. A last key that is no output keeps the
+// oracle from re-sorting the derived column outside, which is #213's
+test("a grouped collated output ordered by number, name or expression is its collation's order on a libc database", async () => {
+  const libc = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => schema, record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
+    duck: await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined,
+      handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" "], { collate: "en_US.utf8" }), () => copies),
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: libc.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+  await c.connect();
+  try {
+    for (const sql of [
+      "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY 1 ORDER BY 1, min(a.id) LIMIT 8",
+      "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY 1 ORDER BY 1 DESC, min(a.id) LIMIT 8",
+      "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY n ORDER BY a.team COLLATE \"und-x-icu\", n, min(a.id) LIMIT 8",
+      "SELECT a.team COLLATE \"und-x-icu\" AS n, count(*) AS k FROM accounts a GROUP BY n ORDER BY n DESC, min(a.id) LIMIT 8",
+    ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  } finally { await c.end(); await libc.close(); }
 });

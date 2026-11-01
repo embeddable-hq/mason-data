@@ -416,15 +416,15 @@ function postgresWording(kind: string, message: string): { code: string; message
   // make_date / make_timestamp of a field out of range
   const field = /^Date out of range: (.*)$/.exec(message);
   if (field) return { code: "22008", message: `date field value out of range: ${field[1]}` };
-  // a cast to numeric(p, s) of a value with more than p - s integer digits
   // an exact sum past DuckDB's 38 digits (a text read as numeric is summed as a DECIMAL(38,18), src/duck/rewrite.ts summed)
   if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past the engine's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
   // a numeric(p, s) read from a text holding NaN or Infinity (src/duck/rewrite.ts pgInput): DuckDB's decimal has none
   if (/Could not convert string ['"](NaN|-?Infinity)['"] to DECIMAL/.test(message)) return { code: "0A000", message: `a numeric NaN or Infinity read from a text is not supported by Mason (${gapMark("numeric-special")})`, gap: "numeric-special" };
   // A NUMERIC PAST ITS DIGITS, in every spelling the engine gives (a generated table's run stores one, src/duck/generated.ts
   // failureWords): a cast to numeric(p, s), of a value or a text, with more than p - s digits before the point, said
-  // with Postgres's DETAIL; past the 38 digits the engine computes a numeric with, by an operation, a ROUND or a cast
-  const typmod = /(?:Casting value "[^"]*" to type|Could not convert string ['"].*['"] to) DECIMAL\((\d+),\s*(\d+)\)/.exec(message);
+  // with Postgres's DETAIL (and a number constant that does not fit: `12345::numeric(3)`, DuckDB's "Could not cast value
+  // 12345 to DECIMAL(3,0)"); past the 38 digits the engine computes a numeric with, by an operation, a ROUND or a cast
+  const typmod = /(?:Casting value "[^"]*" to type|Could not convert string ['"].*['"] to|^Could not cast value \S+ to) DECIMAL\((\d+),\s*(\d+)\)/.exec(message);
   if (typmod !== null && Number(typmod[1]) < 38) {
     const [p, s] = [Number(typmod[1]), Number(typmod[2])];
     return { code: "22003", message: "numeric field overflow", detail: `A field with precision ${p}, scale ${s} must round to an absolute value less than ${p === s ? "1" : `10^${p - s}`}.` };

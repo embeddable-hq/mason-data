@@ -1,1 +1,21 @@
-{}
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/test-timeout.ts\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/merge-head.ts\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/no-rerun.ts\"" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/wake-up.ts\"" }
+        ]
+      }
+    ]
+  }
+}

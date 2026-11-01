@@ -13,6 +13,8 @@
  * characters that would end one), or a datum `N [ b b … ]` (a Const's value).
  */
 
+import { constantExpression } from "./constant-key.ts";
+
 export type TreeValue = TreeNode | TreeValue[] | string | null;
 export interface TreeNode { readonly _node: string; readonly [field: string]: TreeValue }
 
@@ -123,6 +125,8 @@ export interface Typed {
    *  name but another case (`"T"` beside `t`), which DuckDB cannot tell apart: the item's columns are renamed alike
    *  (caseTwins) */
   renamed: string | null;
+  /** a Const of the analysis (under a COLLATE): a sort key that orders nothing, by ONE reader (src/duck/constant-key.ts) */
+  constant?: true;
   /** a VAR as DuckDB can name it: the FROM item it is read from and the column's name there (an alias list's); a merged
    *  column of a join by the join's name, or null for that of a join (or a VALUES, a subquery) with none, which only its
    *  bare name reads. A join's name hides what it joins, so a column of a named join is read by that name, and `twin`
@@ -138,6 +142,65 @@ export interface Typed {
    *  by its FROM name alone (`e`), which Postgres analyses as that column (makeWholeRowVar): a one-part name that is
    *  not the column's is that whole row (src/duck/rewrite.ts) */
   functionColumn?: { alias: string; column: string };
+  /** an AGGREF's arguments as its ORDER BY binds to them (`Keys`: `sorted` its ORDER BY, `distinct` its DISTINCT) */
+  keys?: Keys;
+}
+
+/**
+ * THE KEYS OF A SORT, AS POSTGRES BOUND THEM (the class "an output not resolved to its column"): a SELECT's ORDER BY and
+ * DISTINCT ON, or an aggregate's ORDER BY, over its target entries. A key equal to an entry by its ANALYSED expression
+ * (findTargetlistEntrySQL99: `'1.5'::numeric` to `1.5::numeric AS v`) is that entry, and leaves no node at its own
+ * offset; one equal to none is a junk entry of its own. Read by ONE resolver, `keysConstant` (src/duck/constant-key.ts).
+ */
+export interface Keys {
+  /** each target entry, the junk ones too, in its list's order: whether the analysis made it a Const, the offset of its
+   *  expression (null for none), the first entry whose analysed expression is equal (the one a key binds to), and
+   *  whether it reads a column of its own query (a VAR outside a subquery), and whether it is an OUTPUT (no junk entry:
+   *  the rewrite may add targets of its own after them, so its list's length cannot tell) */
+  entries: Array<{ constant: boolean; at: number | null; first: number; reads: boolean; output: boolean }>;
+  /** the entries the ORDER BY sorts by, in order: Postgres drops a key whose entry an earlier key sorts by */
+  sorted: number[];
+  /** the entries a DISTINCT ON (an aggregate's DISTINCT) compares, a set: ORDER BY's first, then the rest */
+  distinct: number[];
+}
+
+/** Keys: `targets` a TARGETENTRY list, `sort` and `distinct` SORTGROUPCLAUSE lists over it */
+function keysOf(targets: TreeValue | undefined, sort: TreeValue | undefined, distinct: TreeValue | undefined, rtable: TreeNode[]): Keys {
+  const list = Array.isArray(targets) ? targets.filter(isNode) : [];
+  // (a grouped key's entry is a VAR of the GROUP entry by the time the tree is printed; it was bound as what it groups)
+  const exprs = list.map((t) => ungrouped(t.expr ?? null, rtable));
+  const entries = exprs.map((e, i) => ({
+    constant: constantExpression(e),
+    at: isNode(e) ? num(e.location) : null,
+    first: exprs.findIndex((o, j) => j <= i && sameExpression(o, e)),
+    reads: readsVar(e),
+    output: list[i]!.resjunk !== "true",
+  }));
+  const refs = (v: TreeValue | undefined): number[] => (Array.isArray(v) ? v.filter(isNode) : []).map((c) => {
+    const ref = num(c.tleSortGroupRef ?? null);
+    return list.findIndex((t) => ref !== null && ref !== 0 && num(t.ressortgroupref ?? null) === ref);
+  });
+  return { entries, sorted: refs(sort), distinct: refs(distinct) };
+}
+
+/** whether an analysed expression reads a column: a VAR outside a subquery's own QUERY */
+function readsVar(v: TreeValue | undefined): boolean {
+  if (Array.isArray(v)) return v.some(readsVar);
+  if (v === undefined || !isNode(v) || v._node === "QUERY") return false;
+  return v._node === "VAR" || Object.entries(v).some(([k, x]) => k !== "_node" && readsVar(x));
+}
+
+/** Postgres's equal() of two analysed expressions: alike in every field but an offset and a cast's form (`::` or an
+ *  implicit cast, which its equal() ignores too: COMPARE_COERCIONFORM_FIELD) */
+const IGNORED = new Set(["location", "funcformat", "relabelformat", "coerceformat", "convertformat", "row_format"]);
+function sameExpression(a: TreeValue | undefined, b: TreeValue | undefined): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => sameExpression(x, b[i]));
+  }
+  if (a === undefined || b === undefined || !isNode(a) || !isNode(b)) return false;
+  const ka = Object.keys(a).filter((k) => !IGNORED.has(k)), kb = Object.keys(b).filter((k) => !IGNORED.has(k));
+  return ka.length === kb.length && ka.every((k) => sameExpression(a[k], b[k]));
 }
 
 /** a `constvalue`'s bytes: `<length> [ b0 b1 … ]`, each a signed byte */
@@ -316,6 +379,8 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
     qualifier: v._node === "VAR" ? qualifierOf(v, rtables) : null,
     renamed: v._node === "VAR" ? renamedOf(v, rtables) : null,
   };
+  if (constantExpression(v)) typed.constant = true;
+  if (v._node === "AGGREF") typed.keys = keysOf(v.args, v.aggorder, v.aggdistinct, []);
   const text = constText(v);
   if (text !== undefined) typed.text = text;
   const textArray = constTextArray(v);
@@ -338,6 +403,8 @@ export interface QueryOutputs {
   /** each JOIN's merged columns as Postgres found them (`joinmergedcols`), in its range table's order: a JOIN's sides
    *  before it, left to right, as the FROM clause holds them. A NATURAL JOIN is written as these (src/duck/rewrite.ts) */
   joins: string[][];
+  /** its ORDER BY and DISTINCT ON keys as Postgres bound them */
+  keys: Keys;
 }
 
 /**
@@ -369,6 +436,7 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
         columns: exprs.map((e) => { const t = isNode(e) && e._node === "VAR" ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable]); }),
         widths,
         joins,
+        keys: keysOf(v.targetList, v.sortClause, v.distinctClause, rtable),
       };
       const offsets = (x: TreeValue): void => {
         if (Array.isArray(x)) { x.forEach(offsets); return; }
