@@ -131,6 +131,8 @@ const ARRAYS = new Set([1000, 1001, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 10
 /** inet[], which the copy holds as a list of its text (src/duck/sync.ts KEPT_ARRAYS) */
 const INET_ARRAY = 1041;
 const TIMETZ = 1266;
+/** time[] and timetz[] */
+const TIME_ARRAY = 1183, TIMETZ_ARRAY = 1270;
 /** numeric[] and record[] */
 const NUMERIC_ARRAY = 1231, RECORD_ARRAY = 2287;
 /** pg_collation's C and POSIX: byte order */
@@ -2380,6 +2382,8 @@ class Rewriter {
     if (["array_position", "array_positions", "array_remove", "array_replace"].includes(name) && args[0] !== undefined && this.typeOf(args[0]) === JSONB_ARRAY) {
       throw new Unrewritable(`${name}() of a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's equality)`, "compare an element: a[1] = '…'::jsonb", "jsonb-compare");
     }
+    // timetz(tm) (time_timetz, function 2047) in any spelling: the cast's rule
+    if (t !== null && t.node === "FUNCEXPR" && t.oid === 2047 && args.length === 1) return this.timeAsTimetz(args[0]!);
     // a function-style cast (`date(x)`, `text(x)`, `numeric(x)`) is the cast
     if (t !== null && (t.node === "COERCEVIAIO" || t.node === "RELABELTYPE" || (t.node === "FUNCEXPR" && t.format !== null && t.format !== 0 && t.format !== 3)) && args.length === 1) {
       if (t.type === TEXT || t.type === VARCHAR) { const text = this.pgText(args[0]!, this.typeOf(args[0]!), true); if (text !== null) return text; }
@@ -2921,6 +2925,28 @@ class Rewriter {
     return caseWhen([[fn("isfinite", [this.cp(x)]), op("+", this.cp(x), fn("to_microseconds", [op("-", rounded, e())]))]], x);
   }
 
+  /**
+   * A TIME AS A TIMETZ (time_timetz, function 2047, and the cast): the session zone's offset on the transaction's date
+   * in that zone AT THE VALUE'S OWN TIME OF DAY (GetCurrentDateTime, then DetermineTimeZoneOffset). DuckDB's own cast
+   * takes the offset of the current instant, which differs on a day the clocks change (issue 162: 12:30 answered -04
+   * at 00:31 EDT on 2026-11-01, where Postgres has -05). The offset is the wall time less the instant it names in the
+   * session's zone, which resolves a repeated hour to its second (standard) half and a skipped one to the offset before
+   * the change, keeping the value's own time (02:30-05 on 2026-03-08 in New York), as DetermineTimeZoneOffset does;
+   * the instant's own timetz would be 03:30-04 there. The date and the zone are the execution's (`now("exec")` read in
+   * DuckDB's session zone), as CURRENT_DATE's. The result is the value's OWN time of day beside that offset, written
+   * as `<time><±hh:mm:ss>` and read as a timetz: 24:00 stays 24:00 (time_timetz copies the time), where the instant's
+   * timetz would roll it to the next midnight's 00:00. DuckDB has no constructor of a timetz from a time and an offset.
+   */
+  private timeAsTimetz(x: AstNode): AstNode {
+    const wall = (v: AstNode): AstNode => op("+", cast(this.now("exec"), ["date"]), v);
+    const instant = (v: AstNode): AstNode => cast(wall(v), ["timestamptz"]);
+    const seconds = (): AstNode => op("//", op("-", fn("epoch_us", [wall(this.cp(x))]), fn("epoch_us", [instant(this.cp(x))])), intConst(1000000));
+    const abs = (): AstNode => fn("abs", [seconds()]);
+    const zone = fn("printf", [strConst("%s%02d:%02d:%02d"), caseWhen([[op("<", seconds(), intConst(0)), strConst("-")]], strConst("+")),
+      op("//", abs(), intConst(3600)), op("%", op("//", abs(), intConst(60)), intConst(60)), op("%", abs(), intConst(60))]);
+    return cast(op("||", cast(x, ["varchar"]), zone), ["timetz"]);
+  }
+
   /** a text read as `type` (with `typmod`) by Postgres's own input function, a chunk at a time (`__mason_pg_*`,
    *  src/duck/functions.ts), under the zone DuckDB's session has; null for a type DuckDB reads as Postgres does */
   pgInput(arg: AstNode, type: number, typmod: number): AstNode | null {
@@ -2965,6 +2991,17 @@ class Rewriter {
     // only Postgres's input function reads a text as one, and it is the session's offset where the text has none
     if (t !== null && t.type === TIMETZ && from !== null && TEXTS.has(from)) throw new Unrewritable("a text read as a timetz is not supported by Mason", "compare the text, or write a literal", "held-type-compare");
     if (t !== null && t.type === TIMETZ && t.typmod >= 0) throw new Unrewritable("a timetz(n) of a value is not supported by Mason", "cast to timetz with no precision", "held-type-compare");
+    if (t !== null && t.type === TIMETZ && from === TIME) return this.timeAsTimetz(arg);
+    // ARRAY[tm, …]::timetz[]: Postgres casts each element (transformArrayExpr), so each time element by the same rule
+    if (t !== null && t.type === TIMETZ_ARRAY && kindOf(arg) === "A_ArrayExpr") {
+      const elements = (bodyOf(arg).elements ?? []) as AstNode[];
+      if (elements.some((e) => this.typeOf(e) === TIME)) return arrayCast(arrayOf(elements.map((e) => this.typeOf(e) === TIME ? this.timeAsTimetz(e) : e)), "timetz");
+    }
+    // a time[] value as a timetz[]: each element by the same rule (an element's NULL stays NULL)
+    if (t !== null && t.type === TIMETZ_ARRAY && from === TIME_ARRAY) {
+      const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_t")] } });
+      return fn("list_transform", [arg, op("->", each(), this.timeAsTimetz(each()))]);
+    }
     // to an enum (or an array of one): a label, a text read by Postgres's rules, or the enum it already is
     if (t !== null && (this.enums.labels.has(t.type) || this.enums.arrays.has(t.type))) {
       if (from === t.type) return arg;

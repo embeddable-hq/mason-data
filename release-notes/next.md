@@ -84,6 +84,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   path uncut or failed. Cast it to `text[]`.
 - **`SELECT *` in an arm of a UNION no longer lists a stored JSON path's hidden column**, which failed or added a column
   once a table had one stored. Nothing to do on upgrade.
+- **A `time` cast to `timetz` takes the session zone's offset for today at the value's own time of day**, as Postgres
+  does. On a day the clocks change it took the offset of the moment the query ran, so before the change `12:30` was
+  answered `-04` in New York where Postgres has `-05`. Nothing to do on upgrade.
 
 ## Known
 
