@@ -107,8 +107,12 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push; the harness's Learn step adds to this list.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
-- jsonb values Postgres holds equal but whose text differs (`{"k": 1}`, `{"k": 1.0}`, `{"k": 1.00}`; one object's keys in two orders) under DISTINCT, DISTINCT ON and GROUP BY, by name, by number and as the expression: equality taken on the text (PR 170, 207).
-- `(j -> 'r')::text` under a GROUP BY of another expression: the engine's text (`2.45`), not Postgres's (`2.450`) (PR 170; issue 212).
+- jsonb values Postgres holds equal but whose text differs (`{"k": 1}`, `{"k": 1.0}`, `{"k": 1.00}`; one object's keys
+  in two orders) under DISTINCT, DISTINCT ON and GROUP BY, by name, by number and as the expression: equality taken on
+  the text (PR 170, 207).
+- `(j -> 'r')::text` under a GROUP BY of another expression: the engine's text (`2.45`), not Postgres's (`2.450`) (PR
+  170; issue 212).
 - A stored path's fill given NULL over several rows: the NULL written in the column's own type (PR 144).

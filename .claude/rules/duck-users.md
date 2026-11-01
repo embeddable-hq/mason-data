@@ -33,6 +33,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push; the harness's Learn step adds to this list.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
-- A share's password on the run's port, a user's password or a token on a share, a share whose role the roles file changes while it is open: a refusal that names what it was given and its way out (PR 142; issue 91).
+- A share's password on the run's port, a user's password or a token on a share, a share whose role the roles file
+  changes while it is open: a refusal that names what it was given and its way out (PR 142; issue 91).

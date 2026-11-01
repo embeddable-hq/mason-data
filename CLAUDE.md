@@ -100,29 +100,31 @@ docs/DESIGN.md ("The independent review", "Local gates").
    (`.claude/rules/duck-rewrite.md` lists them for a rewrite), and the tests the runs use, by `--test-name-pattern` and
    `IT_ORACLE_ONLY`. Then a **design note**, before any code: the decision; for each fact the change needs, the module
    that is its AUTHORITY (Postgres's analysis, `pgErrorOf`, the engine's prepared types), never a new derivation; the
-   principles and named classes it honours; the shapes (forms × wrappers × types, the real run and the unit world); what
-   is out of scope. Fable reviews the note against the code it names, twice at most.
+   principles and named classes it honours; the shapes (each form, wrapper and type, in the real run and the unit
+   world); what is out of scope. Fable reviews the note against the code it names; after two rounds the work goes on,
+   carrying what is still open.
 2. **Implement**, on Opus 5.5 (`model: "opus"` on an agent; `model: "claude-opus-5-5"` on a session, which otherwise
    inherits the coordinator's), in its own worktree, ending at the push with the PR and its head; the note goes in its
    body under `## Design`. Push as soon as the first commit is green locally ("Local gates" says which gate when); the
    review runs while CI does. Independent pieces run side by side: a batch lands in its slowest piece plus one review,
-   never the sum. Before every review a fresh
-   Opus **probes** the head with the `## What review probes` of each rules file its paths fall under, and what it finds
-   is fixed first: two rounds a push, never counted as review rounds.
+   never the sum. Before each push the author runs the `## What review probes` of each rules file its paths fall
+   under; before every review a fresh Opus **probes** the head with them again, and what it finds of the PR's is fixed
+   first: at most two rounds a push, never counted as review rounds. A probe that fails is noted, never a stop.
 3. **Review**, by Fable (the coordinating session or a Fable agent, never Opus: the reader must outread the author),
    in a fresh context given the diff and the code, never the author's report. Its ONE report gives, for each finding,
    the failing input and the two answers (for the engine: the statement, Postgres's answer and Mason's) and the
    finding's class; and what it judged correct, so nobody checks that twice. Each confirmed finding becomes a test and,
-   for the engine, an oracle statement. CI is read beside it, and a red run joins the findings.
+   for the engine, an oracle statement. CI is read beside it: a red run goes back with the review's findings, and
+   beside a clean review it is read again by the CI stage.
 4. **Fix.** The findings go to the author in ONE message, as failures and their class, never the edit (for a change to
    prose, the words are the failure): an author handed a patch applies it, and the class goes unfixed. The message
    carries the note and every earlier round's findings and judged-correct list. The author comes back in ONE push, not
    one per finding. The second finding of a class on a PR makes the next round a CLASS round: it first writes down
    every case of the class, in the PR, gives each a test, then fixes the decision that makes the class impossible,
-   naming its authority and checked against the note; give it room (about 60 calls). Every fix commit gets
-   a narrow re-check, the same way. Once the reviews are clean, each class met is **learnt**: a bullet in its rules
-   file's `## What review probes` (a synthetic shape, the class, the PR), in one docs-only commit before CI. Detector:
-   the reviewer's classes, read across a PR's rounds.
+   naming its authority and checked against the note; give it room (about 60 calls). Every fix commit gets a narrow
+   re-check, the same way. Once the reviews are clean, each class met is **learnt**: a bullet in its rules file's
+   `## What review probes` (a synthetic shape, the class, the PR), in one commit before CI whose files, read from git,
+   must all be under `.claude/rules/`. Detector: the reviewer's classes, read across a PR's rounds.
 5. **Merge.** Read the diff in full, then queue it pinned to the head read:
    `gh pr merge <n> --auto --merge --match-head-commit <sha>`. A queued merge survives a later push, so a PR sent back
    has it withdrawn (`gh pr merge <n> --disable-auto`) and queued again once the fix is read; who may merge what is
@@ -137,11 +139,12 @@ docs/DESIGN.md ("The independent review", "Local gates").
 
 The coordinator runs the loop with the Workflow tool: `.claude/workflows/pr-loop.js` for one PR, and
 `.claude/workflows/issue-loop.js` for an issue's tasks, planned first and read by the coordinator, then run. In them
-the brief, the plan and the design note are Opus's and only the reviews are Fable's. After the implement push, GitHub
-itself must list the PR as closing its sub-issue (`closedByPullRequestsReferences`), or the body is fixed, or the run
-stops. Every exit posts a `Review record` comment on the PR, whose `json mason-review-record` block
-`scripts/review-stats.ts` reads: the share of PRs that pass the first and second review is the number to watch. A
-finding the base already has is filed, one issue
+the brief, the plan and the design note are Opus's and only the reviews, the design's included, are Fable's. After the
+implement push, GitHub itself must list the PR as closing its sub-issue (`closedByPullRequestsReferences`; for a
+stacked PR, which GitHub links only once it targets the default branch, the body must say `Closes`), or the body is
+fixed, or the run stops. Every exit with a PR posts a `Review record` comment on it, whose `json mason-review-record`
+block `scripts/review-stats.ts` reads. The number to watch: of the PRs that reached a review, the share whose first
+review found nothing of theirs, and whose first or second did. A finding the base already has is filed, one issue
 per class, at whatever exit the run takes, and is never fixed in the PR nor counted toward its class rule: a PR that
 chases a class it did not make grows each round. Classes carry across a stack, so a class met on the PR below counts
 on the one above. A teammate needs Claude Code with the Workflow tool, the Opus and Fable models, and `gh`

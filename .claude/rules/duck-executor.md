@@ -116,9 +116,14 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push; the harness's Learn step adds to this list.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
-- A native scalar function given NULL over several rows (`__mason_turn(NULL, j)`): its output vector written in its own type, not a NULL-typed value (PR 144).
-- `@duckdb/node-bindings` as pinned in the root and in `cli/`, against node-api's own dependency: two copies of the addon (PR 144).
-- Five or more heavy per-row statements beside a small one, with `UV_THREADPOOL_SIZE` at 1, at 64 and under a container's pids limit: the small one stalled, or an exit with no message (PR 144, 148).
-- A client leaving during a store's first function-calling statement, and a cancel under heavy load: a slow release, or the watchdog's false alarm (issues 58, 117).
+- A native scalar function given NULL over several rows (`__mason_turn(NULL, j)`): its output vector written in its own
+  type, not a NULL-typed value (PR 144).
+- `@duckdb/node-bindings` as pinned in the root and in `cli/`, against node-api's own dependency: two copies of the
+  addon (PR 144).
+- Five or more heavy per-row statements beside a small one, with `UV_THREADPOOL_SIZE` at 1, at 64 and under a
+  container's pids limit: the small one stalled, or an exit with no message (PR 144, 148).
+- A client leaving during a store's first function-calling statement, and a cancel under heavy load: a slow release, or
+  the watchdog's false alarm (issues 58, 117).

@@ -229,7 +229,8 @@ adds pages, not endpoints.
 
 ## What review probes
 
-Run each probe that applies before a push; the harness's Learn step adds to this list.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
 - A field `mason status --json` gained: shown on the page in the CLI's words, with a fixture that carries it (PR 135).
 - Enter or Space on a row's `<summary>`, then Tab: the focus kept on that row (issue 70).

@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import ts from "typescript";
-import { parseRecords, stats, type ReviewRecord } from "../scripts/review-stats.ts";
+import { parseRecords, recordsOfComment, stats, type ReviewRecord } from "../scripts/review-stats.ts";
 
 // The coordinator's Workflow scripts, .claude/workflows/pr-loop.js and issue-loop.js, run CLAUDE.md "The loop" with
 // agents. Nothing else reads them before a run, and a run costs hours, so this is their detector: each is loaded as the
@@ -133,6 +133,7 @@ const DEFAULTS: Array<[RegExp, unknown]> = [
   [/^probe \d+$/, clean],
   [/^CI read r\d+$/, green],
   [/^learn$/, pushed("f")],
+  [/^learn check$/, { files: [".claude/rules/duck-rewrite.md"] }],
   [/^record$/, { url: "https://github.com/embeddable-hq/mason-data/pull/900#issuecomment-1" }],
 ];
 /** The labels of the stages the older tests were written for: brief, implement, review, fix, CI and file. */
@@ -168,7 +169,7 @@ test("pr-loop: a finding the base has is filed once and never fixed, never count
   });
   assert.deepEqual(labels, [
     "brief", "design d1", "design review d1", "implement", "link", "probe 1", "review r1", "CI read r1", "fix r1",
-    "probe 2", "review r2", "CI read r2", "learn", "CI 1", "CI fix 1", "probe 3", "review r3", "CI read r3", "CI 2", "file", "record",
+    "probe 2", "review r2", "CI read r2", "learn", "learn check", "CI 1", "CI fix 1", "probe 3", "review r3", "CI read r3", "CI 2", "file", "record",
   ]);
 
   for (const c of calls.filter((c) => /^(fix|CI fix|probe fix|learn|record)/.test(c.opts.label))) assert.ok(!c.prompt.includes(base.input), `"${c.opts.label}" was handed the base's finding`);
@@ -185,7 +186,7 @@ test("pr-loop: a finding the base has is filed once and never fixed, never count
     assert.ok(prompt(l).includes(`scripts/board.ts status 301 "${status}"`), `"${l}" moves the card to ${status}`);
   }
   for (const c of calls) {
-    const writes = /^(implement|fix|CI fix|probe fix|learn)/.test(c.opts.label);
+    const writes = /^(implement|fix|CI fix|probe fix|learn$)/.test(c.opts.label);
     assert.equal(c.opts.isolation === "worktree", writes, `"${c.opts.label}": every writer, and only a writer, works in a worktree of its own`);
     assert.equal(c.opts.model === "fable", /^(review|design review)/.test(c.opts.label), `"${c.opts.label}": only reviews are Fable's`);
   }
@@ -492,7 +493,7 @@ test("pr-loop: learn turns every finding of the PR into a review probe, before C
     "review r1": { findings: [finding({ classKey: "a", input: "SELECT review_found FROM t" })], judgedCorrect: [] },
     "fix r1": pushed("c"), "review r2": clean, "CI 1": green,
   });
-  assert.deepEqual(r.labels.slice(-4), ["CI read r2", "learn", "CI 1", "record"]);
+  assert.deepEqual(r.labels.slice(-5), ["CI read r2", "learn", "learn check", "CI 1", "record"]);
   const learn = r.prompt("learn");
   for (const s of ["SELECT probe_found FROM t", "SELECT review_found FROM t", designFinding.problem, "PR 900", "## What review probes", "## Detector wanted", "synthetic"]) {
     assert.ok(learn.includes(s), `learn is told ${s}`);
@@ -518,7 +519,7 @@ test("pr-loop: every exit with a PR posts one Review record, whose block review-
     ["green", { ...START, "review r1": clean, "CI 1": green }],
     ["CI null", { ...START, "review r1": clean, "CI 1": null }],
     ["review failed", { ...START, "review r1": null }],
-    ["probe failed", { ...START, "probe 1": null }],
+    ["learn outside the rules", { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "learn check": { files: ["src/duck/plan.ts"] } }],
     ["not linked", { ...START, link: { linked: false, bodyFixed: true, detail: "listed none" } }],
   ];
   for (const [name, answers] of exits) {
@@ -569,7 +570,7 @@ test("every .claude/rules/ file has a `## What review probes` section, which the
   assert.deepEqual(missing, [], "a rules file without the section gives the Probe stage nothing to run for its paths");
 });
 
-test("review-stats: a record's block is parsed, a malformed one is refused by name, and the last record of a PR is its own", () => {
+test("review-stats: a record's block is parsed, a malformed one is refused by name, the last record of a PR is its own, and a PR that never reached a review never counts as passing", () => {
   const rec = (o: Partial<ReviewRecord>): ReviewRecord => ({ pr: 1, designRounds: 1, probeRounds: 1, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed", ...o });
   const block = (r: unknown) => "```json mason-review-record\n" + JSON.stringify(r) + "\n```";
   const body = `### From Claude (Sonnet 5.5)\n## Review record\n\ntext\n\n${block(rec({ pr: 7 }))}\n\nmore\n${block(rec({ pr: 8 }))}`;
@@ -579,18 +580,88 @@ test("review-stats: a record's block is parsed, a malformed one is refused by na
   assert.throws(() => parseRecords(block({ pr: 1 })), /malformed: designRounds is not a number/);
   assert.throws(() => parseRecords(block({ ...rec({}), findings: [{ round: 1, stage: "lunch", classKey: "k" }] })), /a finding is not/);
 
+  const rev = (round: number, classKey = "k") => ({ round, stage: "review" as const, classKey });
   const s = stats([
-    rec({ pr: 1, reviewRounds: 4, findings: [{ round: 1, stage: "review", classKey: "k" }] }),
+    rec({ pr: 1, reviewRounds: 4, findings: [rev(1)] }),
     rec({ pr: 1, reviewRounds: 1, findings: [{ round: 1, stage: "probe", classKey: "k" }] }), // a resume: the last is the PR's
-    rec({ pr: 2, reviewRounds: 2, probeRounds: 3, findings: [{ round: 1, stage: "review", classKey: "j" }, { round: 1, stage: "design", classKey: "k" }] }),
-    rec({ pr: 3, reviewRounds: 3 }),
-    rec({ pr: 4, reviewRounds: 1 }),
+    // a clean first review, then a CI fix whose narrow re-check is round 2: passed the first review
+    rec({ pr: 2, reviewRounds: 2, probeRounds: 3, ciFixes: 1, findings: [{ round: 1, stage: "design", classKey: "k" }] }),
+    // round 1 found one, round 2 found nothing: passed by the second
+    rec({ pr: 3, reviewRounds: 2, findings: [rev(1, "j")] }),
+    // round 1 found one, and its fix pushed nothing: one review round, not passed
+    rec({ pr: 4, reviewRounds: 1, findings: [rev(1, "j")], status: "fix round 1 pushed nothing: the coordinator decides" }),
+    // stopped at the link check, a failed review: no review, counted apart, never as passing
+    rec({ pr: 5, reviewRounds: 0, status: "PR 5 is not linked to #1" }),
+    rec({ pr: 6, reviewRounds: 0, status: "review r1 failed" }),
+    // round 1 and round 2 both found one
+    rec({ pr: 7, reviewRounds: 3, findings: [rev(1, "j"), rev(2, "j")] }),
   ]);
-  assert.equal(s.prs, 4);
-  assert.equal(s.firstPass, 0.5);
-  assert.equal(s.bySecond, 0.75);
-  assert.equal(s.meanReviewRounds, 7 / 4);
-  assert.equal(s.meanProbeRounds, 6 / 4);
-  assert.deepEqual(s.topClasses, [{ classKey: "k", count: 2 }, { classKey: "j", count: 1 }]);
+  assert.deepEqual([s.prs, s.reviewed, s.neverReviewed], [7, 5, 2]);
+  assert.equal(s.firstPass, 2 / 5, "PRs 1 and 2");
+  assert.equal(s.bySecond, 3 / 5, "PRs 1, 2 and 3");
+  assert.equal(s.meanReviewRounds, (1 + 2 + 2 + 1 + 3) / 5, "over the PRs reviewed");
+  assert.deepEqual(s.topClasses, [{ classKey: "j", count: 4 }, { classKey: "k", count: 2 }]);
   assert.equal(stats([]).firstPass, 0);
+});
+
+test("review-stats: a record counts for the PR whose comment holds it, and a quoted record is no block", () => {
+  const rec = (pr: number) => JSON.stringify({ pr, designRounds: 1, probeRounds: 1, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed" });
+  const url = (n: number) => `https://api.github.com/repos/embeddable-hq/mason-data/issues/${n}`;
+  const own = "```json mason-review-record\n" + rec(9) + "\n```";
+  // a record of PR 9 quoted on PR 12: not PR 12's, and not credited to PR 9 from there
+  assert.deepEqual(recordsOfComment({ issue_url: url(12), body: own }), { records: [], quoted: 1 });
+  assert.deepEqual(recordsOfComment({ issue_url: url(9), body: own }).records.map((r) => r.pr), [9]);
+  // a quoted opener whose closing fence is not quoted: the quote is no block, and the real record after it is read
+  const body = "> ```json mason-review-record\n> " + rec(3) + "\n```\n\nours:\n" + "```json mason-review-record\n" + rec(12) + "\n```";
+  assert.deepEqual(recordsOfComment({ issue_url: url(12), body }), { records: [JSON.parse(rec(12))], quoted: 0 });
+  assert.throws(() => parseRecords("```json mason-review-record\n" + rec(1)), /never closes/);
+  assert.throws(() => recordsOfComment({ issue_url: "https://example.com/x", body: own }), /names no PR/);
+});
+
+test("pr-loop: a probe that fails, or whose fix fails or pushes nothing, is noted and the review goes on", async () => {
+  const cases: Array<[string, Answers, RegExp]> = [
+    ["probe null", { "probe 1": null }, /probe 1 failed: the review read head aaaaaaa unprobed/],
+    ["probe fix null", { "probe 1": f("p"), "probe fix 1": null }, /probe fix 1 failed: its findings went to the review unfixed/],
+    ["probe fix pushed nothing", { "probe 1": f("p"), "probe fix 1": pushed("a") }, /probe fix 1 pushed nothing/],
+  ];
+  for (const [name, answers, note] of cases) {
+    const r = await run("pr-loop", { ...PR }, { ...START, ...answers, "review r1": clean, "CI 1": green });
+    assert.ok(r.labels.includes("review r1") && r.labels.includes("CI 1"), `${name}: the review and CI still run`);
+    assert.match(String(r.result["status"]), /^reviewed/, name);
+    assert.match(String(r.result["status"]), note, name);
+    assert.match(parseRecords(r.prompt("record"))[0]!.status, note, `${name}: the record says it too`);
+  }
+});
+
+test("pr-loop: Learn's commit is read from git, and a head that changed anything outside .claude/rules/ is never reported ready", async () => {
+  const learnt: Answers = { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green };
+  let r = await run("pr-loop", { ...PR }, learnt);
+  assert.deepEqual(r.labels.slice(-4), ["learn", "learn check", "CI 1", "record"]);
+  assert.ok(r.prompt("learn check").includes(`diff --name-only ${sha("b")} ${sha("f")}`), "the files are read from the commit range");
+  assert.match(String(r.result["status"]), /^reviewed/);
+  // a learn that touched a test: stopped before CI, at learn's head
+  r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": { files: [".claude/rules/cli.md", "tests/workflows.test.ts"] } });
+  assert.deepEqual(r.labels.slice(-2), ["learn check", "record"]);
+  assert.match(String(r.result["status"]), /^learn's commit fffffff changed tests\/workflows\.test\.ts outside \.claude\/rules\//);
+  assert.equal(r.result["head"], sha("f"));
+  // the files could not be read: not known, never ready
+  r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": null });
+  assert.match(String(r.result["status"]), /could not be read: whether it touched only \.claude\/rules\/ is not known/);
+  assert.ok(!r.labels.includes("CI 1"));
+});
+
+test("pr-loop: a red CI beside a clean review goes to the CI stage, which reads it and sends it to a CI fix", async () => {
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": clean, "CI read r1": { state: "failed", detail: "tests/workflows.test.ts: red" },
+    "CI 1": { state: "failed", detail: "tests/workflows.test.ts: red" }, "CI fix 1": { ...pushed("b"), flake: false }, "review r2": clean, "CI 2": green,
+  });
+  assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "CI fix 1", "review r2", "CI 2"], "no review fix round for a clean review");
+  assert.match(String(r.result["status"]), /^reviewed/);
+});
+
+test("pr-loop: the author is told to run the rules' review probes before every push", async () => {
+  const r = await run("pr-loop", { ...PR }, {
+    ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green,
+  });
+  for (const l of ["implement", "fix r1", "CI fix 1"]) assert.match(r.prompt(l), /Before the push, run the `## What review probes`/, l);
 });

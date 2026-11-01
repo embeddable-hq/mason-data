@@ -50,6 +50,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push; the harness's Learn step adds to this list.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
-- Many heavy statements at once (64 with the pool) under one `MASON_DUCKDB_MEMORY`: out-of-memory failures or spills where a queue used to make them wait (PR 148).
+- Many heavy statements at once (64 with the pool) under one `MASON_DUCKDB_MEMORY`: out-of-memory failures or spills
+  where a queue used to make them wait (PR 148).

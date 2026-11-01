@@ -61,6 +61,7 @@ const ON = {
   ci: { model: 'sonnet', effort: 'low' },
   file: { model: 'sonnet', effort: 'medium' },
   record: { model: 'sonnet', effort: 'low' },
+  learnCheck: { model: 'sonnet', effort: 'low' },
 }
 const signed = (on) => `### From Claude (${SIGNS[on.model]})`
 const coAuthor = (on) => `Co-Authored-By: Claude ${SIGNS[on.model]} <noreply@anthropic.com>`
@@ -88,7 +89,7 @@ If the tool refuses the loop (a foreground \`sleep\`), run the same chunk with r
 // pushes HEAD to it, since a branch can be checked out in one worktree only.
 const WORKTREE = (from) => `You run in a git worktree made for you; work only there, never in another worktree. Start with \`git fetch origin ${A.branch} ${A.base} && git checkout --detach ${from}\`, and push with \`git push origin HEAD:${A.branch}\`. Never \`git checkout ${A.branch}\` (a branch can be checked out in one worktree only).`
 // the gates of a fix round (CLAUDE.md "Local gates"): the change's tests, typecheck and the two fast convention files
-const FIX_GATES = 'Bound every test run. Run the tests of the change by --test-name-pattern, `npm run typecheck`, and `node --test --test-timeout=120000 tests/conventions.test.ts tests/cli-state-matrix.test.ts`; fails-without once on the final tree.'
+const FIX_GATES = 'Before the push, run the `## What review probes` of each .claude/rules/ file whose `paths:` the change falls under. Bound every test run. Run the tests of the change by --test-name-pattern, `npm run typecheck`, and `node --test --test-timeout=120000 tests/conventions.test.ts tests/cli-state-matrix.test.ts`; fails-without once on the final tree.'
 // a probe and a review run their statements in throwaway worktrees, never under a home path, and leave nothing behind
 const PROBE_TREES = `in two worktrees of your own under the system temp dir (\`git -C ${REPO} worktree add "$(mktemp -d)/head" <sha>\`), never under a home path, one at the head and one at origin/${A.base}, both removed afterwards (\`git -C ${REPO} worktree remove\`)`
 // the probes every review ran that PR 202's author never did; each rules file's "## What review probes" adds its own
@@ -138,7 +139,7 @@ const CI_FIXED = { ...PUSHED, required: [...PUSHED.required, 'flake'], propertie
   flake: { type: 'boolean', description: 'true when the failure is a flake and nothing was pushed; head is then the unchanged head' },
 } }
 const LINKED = { type: 'object', required: ['linked', 'bodyFixed', 'detail'], properties: {
-  linked: { type: 'boolean', description: "true only when GitHub's closedByPullRequestsReferences lists the PR" },
+  linked: { type: 'boolean', description: "true only when GitHub's closedByPullRequestsReferences lists the PR; for a stacked PR, whose link GitHub makes only once it targets the default branch, when its body says Closes #<issue>" },
   bodyFixed: { type: 'boolean', description: 'true when the PR body was edited to say Closes' },
   detail: { type: 'string', description: 'the numbers each query listed, and what was edited' },
 } }
@@ -163,6 +164,9 @@ const FILED = { type: 'object', required: ['issues'], properties: {
 const CI = { type: 'object', required: ['state', 'detail'], properties: {
   state: { type: 'string', enum: ['green', 'failed', 'timeout'] },
   detail: { type: 'string', description: 'for failed: each failing job, its failing test name and assertion text' },
+} }
+const CHANGED = { type: 'object', required: ['files'], properties: {
+  files: { type: 'array', items: { type: 'string' }, description: 'every path git diff --name-only printed, exactly' },
 } }
 const POSTED = { type: 'object', required: ['url'], properties: { url: { type: 'string', description: "the comment's URL" } } }
 
@@ -302,7 +306,9 @@ END`,
 // ---------------------------------------------------------------- Probe: the author's side, before every review
 // A fresh Opus with no stake in the code runs every probe the rules files list for the paths the diff touches, and
 // the shapes reviews used and authors never ran. What it finds of this PR's is fixed before Fable reads the head;
-// what the base has joins fromBase. At most PROBE_ROUNDS a push; none counts toward MAX_ROUNDS.
+// what the base has joins fromBase. At most PROBE_ROUNDS a push; none counts toward MAX_ROUNDS. The probe is the
+// author's own check and the review is the gate: a probe or probe fix that fails, or pushes nothing, is said in the
+// run's notes and the review goes on, never a stop (one failed probe would otherwise end a whole issue-loop stack).
 async function probeAndFix(base) {
   for (let n = 1; n <= PROBE_ROUNDS; n++) {
     const p = probeRounds.length + 1
@@ -314,21 +320,25 @@ Compare with a real Postgres as the tests do, ${PROBE_TREES}. Do not edit or pus
   ${knownList()}
 Give no fix. List what you ran and judged correct. About 30 tool calls.`,
       { label: `probe ${p}`, phase: 'Probe', ...ON.probe, schema: FINDINGS })
-    if (!probe) return `probe ${p} failed`
+    if (!probe) {
+      notes.push(`probe ${p} failed: the review read head ${last.head.slice(0, 7)} unprobed`)
+      return
+    }
     const { mine, repeated } = tally(probe.findings)
     const entry = { round: p, label: `probe ${p}`, head: last.head, findings: mine, base: probe.findings.length - mine.length, judgedCorrect: probe.judgedCorrect, classRound: repeated.length > 0 }
     probeRounds.push(entry)
     history.push(entry)
     log(`probe ${p}: ${mine.length} finding(s) of this PR, ${entry.base} of the base`)
-    if (mine.length === 0) return null
+    if (mine.length === 0) return
     const fixed = await agent(fixPrompt(`Probe fix ${p}`, ON.probeFix, entry, repeated, null),
       { label: `probe fix ${p}${entry.classRound ? ' (class)' : ''}`, phase: 'Probe', ...ON.probeFix, schema: PUSHED })
-    if (!fixed) return `probe fix ${p} failed`
-    if (fixed.head === last.head) return `probe fix ${p} pushed nothing: the coordinator decides`
+    if (!fixed || fixed.head === last.head) {
+      notes.push(`probe fix ${p} ${fixed ? 'pushed nothing' : 'failed'}: its findings went to the review unfixed`)
+      return
+    }
     last = fixed
   }
   log(`${PROBE_ROUNDS} probe rounds on this push: the review reads the last probe fix`)
-  return null
 }
 
 // ---------------------------------------------------------------- Review and fix rounds, with the class rule
@@ -337,16 +347,15 @@ Give no fix. List what you ran and judged correct. About 30 tool calls.`,
 // main's since before the PR, took three rounds and grew each one). Returns null when a review finds nothing of this
 // PR's, else the status to stop with. `start` is the first review: { kind: 'full' }, or { kind: 'narrow', base, what }
 // for a re-check of the commits since `base`, `what` saying what they were meant to fix. Every push is probed first,
-// and CI is read beside each review, so a red CI goes back in the same fix round (PR 202 was red from its first push,
-// and rounds 1 and 2 never heard of it).
+// and CI is read beside each review, so a red CI goes back in the review's fix round when there is one (PR 202 was
+// red from its first push, and rounds 1 and 2 never heard of it); beside a clean review the CI stage reads it again.
 let round = 0
 async function reviewAndFix(start) {
   let { kind, base, what } = start
   for (;;) {
     if (round >= MAX_ROUNDS) return `${round} review rounds reached; head ${last.head.slice(0, 7)} is not re-checked: the coordinator decides`
     const probedFrom = last.head
-    const probed = await probeAndFix(base)
-    if (probed) return probed
+    await probeAndFix(base)
     const probeFixed = last.head !== probedFrom
     round++
     phase('Review')
@@ -443,6 +452,7 @@ ${noteText()}
 Shapes the tests must hold (each a test against Postgres, and for the engine an oracle statement):
 ${brief.shapes.map((s) => '- ' + s).join('\n')}
 
+Before the push, run the \`## What review probes\` of each .claude/rules/ file whose \`paths:\` your change falls under: the probe after you runs them, and so does the review.
 Test runs: ${brief.tests.join('; ')}. Bound every run (\`node --test --test-timeout=<ms> ...\`). Follow CLAUDE.md "Local gates": the nearest tests, one full \`npm run check\` before the first push, no full oracle locally, scripts/fails-without.ts once on the final tree by --test-name-pattern. A product change adds its line to release-notes/next.md.
 Push with \`git push -u origin ${A.branch}\`, and open the PR with \`gh pr create --base ${A.base} --head ${A.branch}\`. Its body starts \`${signed(ON.implement)}\`, says \`Closes #${A.issue}\`${A.stackedOn ? ` and that it is stacked on PR ${A.stackedOn}` : ''}, carries the design note and the fails-without verdict, and ends with the Claude Code line. The commit ends with \`${coAuthor(ON.implement)}\`. Do not merge.`,
   { label: 'implement', phase: 'Implement', ...ON.implement, schema: PUSHED })
@@ -484,7 +494,19 @@ ${learnable.map((h) => `### ${h.label}\n${asFailures(h.findings)}`).join('\n\n')
     { label: 'learn', phase: 'Learn', ...ON.learn, schema: PUSHED })
   if (!learned) notes.push('learn failed: its findings are in rounds, probeRounds and designRounds')
   else if (learned.head === last.head) notes.push('learn pushed nothing')
-  else last = learned
+  else {
+    // Learn's commit is neither probed nor reviewed, so it may touch .claude/rules/ only, and that is read from git,
+    // never taken from the agent's word: a head that changed anything else, or whose files could not be read, is not
+    // reported ready for the merge decision.
+    const prev = last.head
+    last = learned
+    const check = await agent(
+      `${WHERE}Run \`git -C ${REPO} fetch origin ${A.branch}\` and \`git -C ${REPO} diff --name-only ${prev} ${learned.head}\`, and return every path it prints, exactly. Change nothing. Move no card on the board.`,
+      { label: 'learn check', phase: 'Learn', ...ON.learnCheck, schema: CHANGED })
+    if (!check) return await finish(`learn's commit ${learned.head.slice(0, 7)} could not be read: whether it touched only .claude/rules/ is not known, and that head is neither probed nor reviewed: the coordinator decides`)
+    const outside = check.files.filter((f) => !f.startsWith('.claude/rules/'))
+    if (outside.length) return await finish(`learn's commit ${learned.head.slice(0, 7)} changed ${outside.join(', ')} outside .claude/rules/, and that head is neither probed nor reviewed: the coordinator decides`)
+  }
 }
 
 // ---------------------------------------------------------------- CI, until green, failures sent back as failures

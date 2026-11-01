@@ -289,22 +289,47 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push; the harness's Learn step adds to this list.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
-- A constant as a key in ORDER BY, DISTINCT ON, WITH TIES and a window, by name, by number and as itself (`1 AS one`, `1.5::numeric`, `'1.5'::numeric`, `2147483648::int`, `'abc'::text::int`, every key a constant): a literal the engine reads as an ordinal or refuses (42804), or a cast Postgres raises at planning dropped (PR 170, 197).
-- A key equal to an output but spelled otherwise (`'1.5'::numeric` beside `1.5::numeric AS v`, `0 + l.c` beside `l.c + 0`), named by a bare output name, or by number beside a `*`: an output resolved by syntax, not by Postgres's analysed equality (PR 170, 207).
-- A type-dependent key (jsonb, citext, a collated text) as a DISTINCT ON or sort key by bare output name, by number and as the expression: a rule applied to one spelling only (PR 170, 207).
-- A volatile output as a key (`random() AS r … ORDER BY random()`, `ORDER BY r`, `ORDER BY 1`), also under WITH TIES: evaluated twice (PR 170).
-- `SELECT * … GROUP BY name, id` (keys not the star's leading columns in order), `b.*, count(*)`, a `*` beside a computed output ordered by number: outputs taken in the tree's order, not the target list's (PR 120, 170).
-- Each shape above inside a scalar subquery, `ARRAY(…)`, `EXISTS` or `IN` in the SELECT list: the inner query resolved against the outer (PR 120).
+- A constant as a key in ORDER BY, DISTINCT ON, WITH TIES and a window, by name, by number and as itself (`1 AS one`,
+  `1.5::numeric`, `'1.5'::numeric`, `2147483648::int`, `'abc'::text::int`, every key a constant): a literal the engine
+  reads as an ordinal or refuses (42804), or a cast Postgres raises at planning dropped (PR 170, 197).
+- A key equal to an output but spelled otherwise (`'1.5'::numeric` beside `1.5::numeric AS v`, `0 + l.c` beside `l.c +
+  0`), named by a bare output name, or by number beside a `*`: an output resolved by syntax, not by Postgres's analysed
+  equality (PR 170, 207).
+- A type-dependent key (jsonb, citext, a collated text) as a DISTINCT ON or sort key by bare output name, by number and
+  as the expression: a rule applied to one spelling only (PR 170, 207).
+- A volatile output as a key (`random() AS r … ORDER BY random()`, `ORDER BY r`, `ORDER BY 1`), also under WITH TIES:
+  evaluated twice (PR 170).
+- `SELECT * … GROUP BY name, id` (keys not the star's leading columns in order), `b.*, count(*)`, a `*` beside a
+  computed output ordered by number: outputs taken in the tree's order, not the target list's (PR 120, 170).
+- Each shape above inside a scalar subquery, `ARRAY(…)`, `EXISTS` or `IN` in the SELECT list: the inner query resolved
+  against the outer (PR 120).
 - A citext, collated or jsonb column ordered by number through `UNION ALL … ORDER BY 2`: sorted as bytes (PR 120).
-- A numeric quotient or text-read numeric (`o.amount / 3`, `l.k / 7.0`, `t::numeric`) under DISTINCT, DISTINCT ON, GROUP BY, UNION ALL, USING, `::text`, a row value, `= $1`, `= (SELECT …)`, through a derived table or CTE: approximate printed or compared as exact (PR 197, 207; issues 212, 218).
-- A numeric past the engine's 38 digits (`x * x` over `numeric(30,20)`, `power(x, 400)`): the engine's error or its double (PR 207; issues 214, 217).
-- A form the change fixes under a LIMIT, tried with no LIMIT, no ORDER BY and a list that reads no table (`SELECT count(*) FROM late_c l NATURAL JOIN late_p lc`): fixed in one path only (PR 155).
-- A LIMIT over a join (late.ts) with a CTE read only by a list subquery, a LATERAL plain read, `schema.table.column`, the keyed table on a LEFT or FULL join's nullable side, OFFSET past the end, LIMIT 0, a DISTINCT ON whose ON list the ORDER BY lacks: a scope moved, or a sort narrower than Postgres's (PR 146, 163, 164, 207).
-- No ORDER BY, a deep `OFFSET 2000000`, a small table LEFT JOINed to a 50 M-row one: a sort over the whole join where the old plan stopped early (PR 118, 146).
-- A coercion Postgres adds that the raw tree lacks (`tm = '12:30-04'::timetz`, a UNION of time and timetz, `CASE … tm::timetz ELSE tm END`), and every spelling of one cast (`timetz(tm)`, `tm::timetz`, `ARRAY[tm]::timetz[]`): the analysed node unread; one input through two paths (PR 166; issue 167).
-- A type's edge values (`'24:00'::time`, NaN, ±Infinity, a bigint sum past 2^53 under `floor`/`ceil`, `1e400`): a value rolled over, or a double's digits (PR 166, 202; issue 203).
-- An engine error a statement can meet (`ORDER BY x USING <`, a scalar subquery returning two rows, a CASE mixing time and timetz, `l.k::numeric(2,0)` overflowing from a column, `'NaN'::float8::numeric(5,0)`): an error in the engine's words or the wrong SQLSTATE (PR 164, 166, 170; issues 165, 204, 208).
-- A set operation under a clause written for a plain SELECT (`… UNION ALL … ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES`), a collated output under ROLLUP ordered by itself: a crash, or the engine's GROUP BY error (PR 170; issue 211).
-- A libc collation: en_US over symbols (`㊿`, `€`, `½`), private use and NFD marks (`E'ä6ß'`), a non-glibc en_US, the source's glibc upgraded; tr_TR and sv_SE over ASCII pairs: en_US refused, or another locale differing unsaid (PR 135).
+- A numeric quotient or text-read numeric (`o.amount / 3`, `l.k / 7.0`, `t::numeric`) under DISTINCT, DISTINCT ON, GROUP
+  BY, UNION ALL, USING, `::text`, a row value, `= $1`, `= (SELECT …)`, through a derived table or CTE: approximate
+  printed or compared as exact (PR 197, 207; issues 212, 218).
+- A numeric past the engine's 38 digits (`x * x` over `numeric(30,20)`, `power(x, 400)`): the engine's error or its
+  double (PR 207; issues 214, 217).
+- A form the change fixes under a LIMIT, tried with no LIMIT, no ORDER BY and a list that reads no table (`SELECT
+  count(*) FROM late_c l NATURAL JOIN late_p lc`): fixed in one path only (PR 155).
+- A LIMIT over a join (late.ts) with a CTE read only by a list subquery, a LATERAL plain read, `schema.table.column`,
+  the keyed table on a LEFT or FULL join's nullable side, OFFSET past the end, LIMIT 0, a DISTINCT ON whose ON list the
+  ORDER BY lacks: a scope moved, or a sort narrower than Postgres's (PR 146, 163, 164, 207).
+- No ORDER BY, a deep `OFFSET 2000000`, a small table LEFT JOINed to a 50 M-row one: a sort over the whole join where
+  the old plan stopped early (PR 118, 146).
+- A coercion Postgres adds that the raw tree lacks (`tm = '12:30-04'::timetz`, a UNION of time and timetz, `CASE …
+  tm::timetz ELSE tm END`), and every spelling of one cast (`timetz(tm)`, `tm::timetz`, `ARRAY[tm]::timetz[]`): the
+  analysed node unread; one input through two paths (PR 166; issue 167).
+- A type's edge values (`'24:00'::time`, NaN, ±Infinity, a bigint sum past 2^53 under `floor`/`ceil`, `1e400`): a value
+  rolled over, or a double's digits (PR 166, 202; issue 203).
+- An engine error a statement can meet (`ORDER BY x USING <`, a scalar subquery returning two rows, a CASE mixing time
+  and timetz, `l.k::numeric(2,0)` overflowing from a column, `'NaN'::float8::numeric(5,0)`): an error in the engine's
+  words or the wrong SQLSTATE (PR 164, 166, 170; issues 165, 204, 208).
+- A set operation under a clause written for a plain SELECT (`… UNION ALL … ORDER BY 1 FETCH FIRST 3 ROWS WITH
+  TIES`), a collated output under ROLLUP ordered by itself: a crash, or the engine's GROUP BY error (PR 170; issue
+  211).
+- A libc collation: en_US over symbols (`㊿`, `€`, `½`), private use and NFD marks (`E'ä6ß'`), a non-glibc en_US,
+  the source's glibc upgraded; tr_TR and sv_SE over ASCII pairs: en_US refused, or another locale differing unsaid
+  (PR 135).

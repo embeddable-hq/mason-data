@@ -113,6 +113,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push; the harness's Learn step adds to this list.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
-- A table holding every held built-in type and its array (point, money, macaddr, cidr, bit, tsvector, a range, `oid[]`): the copy writes what the poll and the stream write, and an older copy's layout is caught (PR 153).
+- A table holding every held built-in type and its array (point, money, macaddr, cidr, bit, tsvector, a range, `oid[]`):
+  the copy writes what the poll and the stream write, and an older copy's layout is caught (PR 153).

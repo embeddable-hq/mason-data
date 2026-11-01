@@ -320,12 +320,19 @@ A new refusal a developer can meet gets a test asserted on its whole text (`test
 
 ## What review probes
 
-Run each probe that applies before a push; the harness's Learn step adds to this list.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
+again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
-- An operator setting given junk (`abc`, `0`, `-1`, `1.5`, `2000`): refused naming the variable and its range, never run on a library's reading of it (PR 148).
-- Every entrance with a new setting or start-up step (`npx`, the package's bin, the image's `mason`, the run `mason start` spawns, its supervisor, Windows): one entrance skipped (PR 148).
-- `mason wait <table>` in each state (refused before it was built, a parent refused, deployed but refused, failed with the old table serving, a wait past 30 s): an exit code `mason status` contradicts, or output that goes quiet (PR 171).
-- A usage text, guide or release-note line beside the code's branches (an exit-1 list, a thread count measured only at 2 to 10 CPUs): a claim wider or narrower than the code (PR 146, 148, 171).
-- A field added to `mason status --json`: on the web page too, carried by a test fixture, and said once, not as a row and a warning (PR 135).
-- A README or docs command block run top to bottom on a clean machine: a command that holds the terminal, needs ssh or the internet, or prints other than the text says (PR 136, 138).
+- An operator setting given junk (`abc`, `0`, `-1`, `1.5`, `2000`): refused naming the variable and its range, never run
+  on a library's reading of it (PR 148).
+- Every entrance with a new setting or start-up step (`npx`, the package's bin, the image's `mason`, the run `mason
+  start` spawns, its supervisor, Windows): one entrance skipped (PR 148).
+- `mason wait <table>` in each state (refused before it was built, a parent refused, deployed but refused, failed with
+  the old table serving, a wait past 30 s): an exit code `mason status` contradicts, or output that goes quiet (PR 171).
+- A usage text, guide or release-note line beside the code's branches (an exit-1 list, a thread count measured only at 2
+  to 10 CPUs): a claim wider or narrower than the code (PR 146, 148, 171).
+- A field added to `mason status --json`: on the web page too, carried by a test fixture, and said once, not as a row
+  and a warning (PR 135).
+- A README or docs command block run top to bottom on a clean machine: a command that holds the terminal, needs ssh or
+  the internet, or prints other than the text says (PR 136, 138).
 - A source file the convention scans skip (a `.cjs` beside the `.ts`): outside every convention test (PR 148).

@@ -1330,6 +1330,43 @@ test("the duration guard would catch the real thing", () => {
 });
 
 /**
+ * A REVIEW PROBE SAYS WHERE IT WAS MET (.claude/workflows/pr-loop.js, its Probe and Learn stages): each bullet of a
+ * rules file's `## What review probes` section names the PR or issue it came from, so a probe the Learn step writes and
+ * one edited by hand stay traceable to the review that found it. The one exception is a section whose only bullet is
+ * the placeholder "None recorded yet". Returns each bullet that names neither, or the section's absence.
+ */
+function probesWithoutProvenance(text: string): string[] {
+  const m = /^## What review probes\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(text);
+  if (!m) return ["(no `## What review probes` section)"];
+  const bullets: string[] = [];
+  for (const line of m[1]!.split("\n")) {
+    if (line.startsWith("- ")) bullets.push(line.slice(2));
+    else if (/^\s+\S/.test(line) && bullets.length) bullets[bullets.length - 1] += ` ${line.trim()}`;
+  }
+  if (bullets.length === 1 && /^None recorded yet\b/.test(bullets[0]!)) return [];
+  if (!bullets.length) return ["(no bullet)"];
+  return bullets.filter((b) => !/\b(PRs?|issues?) #?\d+/.test(b)).map((b) => b.slice(0, 70));
+}
+
+test("every review probe in .claude/rules/ names the PR or issue it was met in", () => {
+  const dir = path.join(ROOT, ".claude", "rules");
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".md"))) {
+    assert.deepEqual(probesWithoutProvenance(fs.readFileSync(path.join(dir, f), "utf8")), [], `${f}: a probe with no PR or issue cannot be traced to its review`);
+  }
+});
+
+test("the probe provenance guard would catch the real thing", () => {
+  const sec = (body: string) => `# Rules\n\ntext\n\n## What review probes\n\nRun each probe.\n\n${body}\n`;
+  assert.deepEqual(probesWithoutProvenance(sec("- A shape (PR 120, 170).\n- Another,\n  wrapped over two lines (issue 91).")), []);
+  assert.deepEqual(probesWithoutProvenance(sec("- A shape (PR 120).\n- A shape met somewhere.")), ["A shape met somewhere."]);
+  assert.deepEqual(probesWithoutProvenance(sec("- A shape whose number is on its\n  second line (PRs 146, 148).")), [], "a wrapped bullet is read whole");
+  assert.deepEqual(probesWithoutProvenance(sec("- None recorded yet; the Learn step adds them.")), []);
+  assert.deepEqual(probesWithoutProvenance(sec("- None recorded yet.\n- A shape.")), ["None recorded yet.", "A shape."], "the placeholder only alone");
+  assert.deepEqual(probesWithoutProvenance(sec("") + "\n## Next\n\n- (PR 1) not this section's"), ["(no bullet)"]);
+  assert.deepEqual(probesWithoutProvenance("# Rules\n"), ["(no `## What review probes` section)"]);
+});
+
+/**
  * A REFUSAL RAISED AT A ROW NEVER QUOTES IT (issue 128; `tests/duck-refusal-values.test.ts` holds it on the wire). The
  * class: a Mason refusal, 0A000, raised while rows are read reaches any user, and a role may hide the row. So where a
  * row's value is in reach — a `PgEvalError` or `NumericError` of 0A000 (raised by a function of a row) and the engine's
