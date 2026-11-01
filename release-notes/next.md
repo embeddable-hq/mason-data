@@ -61,6 +61,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   ORDER BY now pays for the join's whole output where the join is proved bounded: a few milliseconds at a LIMIT alone, and
   a deep OFFSET can take about twice as long. A column of an aggregated side, and a statement of a role that filters
   rows, are read as before. Nothing to do on upgrade.
+- **A LIMIT over `JOIN … USING`, a `NATURAL JOIN` or a sort by a computed column of a join no longer reads every wide column to
+  keep 100 rows**: seconds and gigabytes of spill are now a fraction of a second and none, and such a statement that failed
+  for memory now answers, whether the sort names the computed column by its alias, its position or its expression. A
+  `NATURAL JOIN` of two tables with no column in common now answers as Postgres does, every row paired, where it was
+  refused ("No columns found to join on"). A statement of a role that filters rows
+  is read as before. Nothing to do on upgrade.
 - **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
   raises there, sorting every row first. This is the decided difference `limit-errors` (docs/SQL-SUPPORT.md), wider.
 - **`#>> array['k']`, the form BI tools send for a JSON field, is as fast as `->> 'k'`**: on 20 M rows a `GROUP BY` of it

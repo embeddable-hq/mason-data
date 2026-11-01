@@ -335,6 +335,9 @@ export interface QueryOutputs {
   columns: Array<Typed | null>;
   /** how many columns a `t.*` lists, by the FROM item's name */
   widths: Map<string, number>;
+  /** each JOIN's merged columns as Postgres found them (`joinmergedcols`), in its range table's order: a JOIN's sides
+   *  before it, left to right, as the FROM clause holds them. A NATURAL JOIN is written as these (src/duck/rewrite.ts) */
+  joins: string[][];
 }
 
 /**
@@ -358,9 +361,14 @@ export function outputsByLocation(tree: TreeValue): Map<number, QueryOutputs> {
         const eref = rte.eref ?? null;
         if (isNode(eref) && typeof eref.aliasname === "string" && !widths.has(eref.aliasname)) widths.set(eref.aliasname, strings(eref.colnames).filter((c) => c !== "").length);
       }
+      const joins = rtable.filter((rte) => num(rte.rtekind ?? null) === RTE_JOIN).map((rte) => {
+        const eref = rte.eref ?? null;
+        return isNode(eref) ? strings(eref.colnames).slice(0, num(rte.joinmergedcols ?? null) ?? 0) : [];
+      });
       const outputs: QueryOutputs = {
         columns: exprs.map((e) => { const t = isNode(e) && e._node === "VAR" ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable]); }),
         widths,
+        joins,
       };
       const offsets = (x: TreeValue): void => {
         if (Array.isArray(x)) { x.forEach(offsets); return; }

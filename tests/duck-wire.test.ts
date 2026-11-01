@@ -2250,6 +2250,208 @@ test("an output of a * is read by its number and its bare name as the column it 
 
 // ISSUE 105: a table preview over joined tables carried every row's wide columns through the join and the top N to
 // choose 100, and its spill filled the disk. The rows are chosen by row number, the columns read for those alone
+// ISSUE 134, STEP 3: a merged column is read through Postgres's join alias variables; a computed key is the output it is,
+// one value; a volatile value is never computed twice
+test("USING and NATURAL choose their rows by row number, and a merged column is read as the join kind reads it", async () => {
+  const c = await client();
+  const held = (a: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ ...a, rows: a.rows.map((r) => r.map((v) => typeof v === "string" ? v.replaceAll('": ', '":') : v)) });
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const each = async (form: RegExp, sql: string): Promise<void> => {
+    assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+    assert.match(await sent(sql), form, sql);
+  };
+  const ROWS = /rowid AS __mason_r1.*\) AS __mason_late LEFT JOIN /;
+  try {
+    // inner and LEFT read the left side, RIGHT the right, FULL both: a fetch of the other side would read NULL
+    const merged = [["JOIN", /SELECT l\.id AS id, /], ["LEFT JOIN", /SELECT l\.id AS id, /], ["RIGHT JOIN", /SELECT lc\.id AS id, /], ["FULL JOIN", /SELECT COALESCE\(l\.id, lc\.id\) AS id, /]] as const;
+    for (const [join, read] of merged) {
+      const sql = `SELECT id, l.k, lc.name FROM late l ${join} late_c lc USING (id) ORDER BY id DESC NULLS LAST, l.k LIMIT 3 OFFSET 40`;
+      await each(ROWS, sql);
+      assert.match(await sent(sql), read, sql);
+      assert.match(await sent(sql), /FROM late AS l .*JOIN late_c AS lc USING \(id\)/, `the join stays as it was written, inside: ${sql}`);
+    }
+    // the rows come from a side the other has not: NULLs on either side of a FULL join, sorted by the merged column
+    await each(ROWS, "SELECT id, l.k, lc.name FROM late l FULL JOIN (SELECT id + 45 AS id, name FROM late_c) lc USING (id) ORDER BY id NULLS FIRST, l.k LIMIT 8 OFFSET 40");
+    // a `*` lists the merged column first, once
+    await each(ROWS, "SELECT * FROM late l JOIN late_c lc USING (id) ORDER BY id LIMIT 2");
+    await each(ROWS, "SELECT * FROM late_p p NATURAL JOIN (SELECT c, k FROM late WHERE id < 5) l ORDER BY c, line LIMIT 2");
+    // NATURAL as the columns Postgres found: none in common is every pair, where DuckDB takes it for a mistake
+    await each(/JOIN late_n USING \(id, c\)/, "SELECT id, c, k FROM late NATURAL JOIN late_n ORDER BY id LIMIT 2");
+    for (const sql of ["SELECT l.id, lc.c, lc.note FROM late_c l NATURAL JOIN late_p lc ORDER BY l.id, lc.c, lc.line LIMIT 3",
+      "SELECT l.id, lc.c FROM late_c l NATURAL LEFT JOIN late_p lc ORDER BY l.id DESC, lc.c, lc.line LIMIT 3"]) await each(/late_p AS lc ON true/, sql);
+    assert.equal((await answer(c, "SELECT l.id FROM late_c l NATURAL JOIN late_p lc LIMIT 3")).rows.length, 3, "a NATURAL of nothing in common, no sort");
+    // two joins of one name: the outer one's, each join kind through the other
+    await each(ROWS, "SELECT id, l.k, x.name, p.name AS other FROM late l LEFT JOIN late_c x USING (id) RIGHT JOIN late_c p USING (id) ORDER BY id LIMIT 3");
+    // a USING between types: the cast the join adds, and an int's text under a numeric
+    await each(/CAST\(lc\.id AS int8\)|lc\.id::int8/, "SELECT id, o.status FROM late_c lc LEFT JOIN orders o USING (id) ORDER BY id LIMIT 2");
+    // (an inner join needs none: Postgres reads the side of the type already)
+    await each(/SELECT o\.id AS id, /, "SELECT id, o.status FROM late_c lc JOIN orders o USING (id) ORDER BY id LIMIT 2");
+    await each(/COALESCE\((CAST\(lc\.id AS int8\)|lc\.id::int8), o\.id\)/, "SELECT id, lc.name, o.status FROM late_c lc FULL JOIN orders o USING (id) ORDER BY id LIMIT 2");
+    // an output's name before the merged column it shadows, a column of a side read apart
+    await each(ROWS, "SELECT lc.name AS id, l.id AS l FROM late l JOIN late_c lc USING (id) ORDER BY id DESC, l LIMIT 2");
+    await each(ROWS, "SELECT id, lc.id AS r, l.id AS l FROM late l RIGHT JOIN late_c lc USING (id) ORDER BY id LIMIT 2");
+    // a wrapper and a view of one fold, and a role is held in tests/duck-roles-barrier-wire.test.ts
+    await each(ROWS, "SELECT * FROM (SELECT * FROM late l JOIN late_c lc USING (id)) t ORDER BY id LIMIT 2");
+    // a join's own name is read by that name: it stays as it was
+    for (const sql of ["SELECT j.id FROM (late l JOIN late_c lc USING (id)) AS j ORDER BY j.id LIMIT 2"]) {
+      assert.deepEqual(held(await answer(c, sql)), held(await postgres(sql)), sql);
+      assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
+    }
+  } finally { await c.end(); }
+});
+
+test("a NATURAL JOIN is the columns Postgres merged in every statement, none in common every pair, with or without a LIMIT", async () => {
+  const c = await client();
+  const each = async (form: RegExp, sql: string): Promise<void> => {
+    assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    assert.match(line, form, sql);
+    assert.doesNotMatch(line, /NATURAL/, sql);
+  };
+  try {
+    // nothing in common: DuckDB refused the statement ("No columns found to join on") where Postgres pairs every row
+    const NONE = /late_p AS lc ON true/;
+    await each(NONE, "SELECT count(*) FROM late_c l NATURAL JOIN late_p lc");
+    await each(NONE, "SELECT l.id FROM late_c l NATURAL JOIN late_p lc WHERE l.id < 3 ORDER BY l.id, lc.c, lc.line");
+    await each(NONE, "SELECT 1 AS one FROM late_c l NATURAL JOIN late_p lc LIMIT 3");
+    await each(NONE, "SELECT l.id, lc.c FROM late_c l NATURAL FULL JOIN late_p lc WHERE l.id < 2 ORDER BY 1, 2, lc.line");
+    await each(NONE, "SELECT count(*) FROM late_c WHERE id IN (SELECT l.id FROM late_c l NATURAL JOIN late_p lc)");
+    // columns in common, each join kind, and a `*` with the merged columns first
+    const SOME = /late_n USING \(id, c\)/;
+    for (const join of ["JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"]) {
+      await each(SOME, `SELECT id, c, l.k FROM late l NATURAL ${join} late_n WHERE id < 60 OR id IS NULL ORDER BY id, c`);
+    }
+    // (the merged columns in the left side's order, as Postgres lists them)
+    await each(/late_n USING \(c, id\)/, "SELECT * FROM (SELECT k, c, id FROM late) l NATURAL FULL JOIN late_n ORDER BY id, c");
+    await each(SOME, "SELECT count(*) FROM late NATURAL JOIN late_n");
+  } finally {
+    await c.end();
+  }
+});
+
+test("a computed sort key is the output it spells, one value through every spelling, read from the key", async () => {
+  const c = await client();
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const FROM = "FROM late l JOIN late_c lc ON lc.id = l.c";
+  const SHOWN = /SELECT __mason_late\.__mason_o1 AS x, .*AS __mason_o1, .*\) AS __mason_late LEFT JOIN /;
+  try {
+    // ONE OUTPUT, THREE SPELLINGS: the same statement inside and out, by name, ordinal and repeated expression
+    const value = "l.k + 1";
+    const spelled: string[] = [];
+    for (const order of ["x", "1", value]) {
+      for (const dir of ["", " DESC", " DESC NULLS LAST", " ASC NULLS FIRST"]) {
+        const sql = `SELECT ${value} AS x, l.id, l.j ${FROM} ORDER BY ${order}${dir}, l.id LIMIT 3 OFFSET 1`;
+        assert.deepEqual((await answer(c, sql)).rows.map((r) => r.slice(0, 2)), (await postgres(sql)).rows.map((r) => r.slice(0, 2)), sql);
+        const line = await sent(sql);
+        assert.match(line, SHOWN, sql);
+        if (dir === "") spelled.push(line.replace(/^statement: [^—]*— /, ""));
+      }
+    }
+    assert.equal(new Set(spelled).size, 1, `one output, one form: ${spelled.join("\n")}`);
+    // the key beside a `*`, by a number past it, and a wrapper's output by name and by the qualified column: step 2 left these
+    for (const sql of [`SELECT *, l.k + 1 AS x ${FROM} ORDER BY 7, 1 LIMIT 3`, `SELECT *, l.k + 1 AS x ${FROM} ORDER BY x, 1 LIMIT 3`,
+      "SELECT t.x, t.id FROM (SELECT l.id, upper(lc.name) AS x, l.j FROM late l JOIN late_c lc ON lc.id = l.c) t ORDER BY x DESC, t.id LIMIT 2",
+      "SELECT t.x, t.id FROM (SELECT l.id, upper(lc.name) AS x, l.j FROM late l JOIN late_c lc ON lc.id = l.c) t ORDER BY t.x DESC, t.id LIMIT 2",
+      "SELECT id, shout FROM late_joined_again ORDER BY shout, id LIMIT 2"]) {
+      assert.deepEqual((await answer(c, sql)).rows.map((r) => JSON.stringify(r)).length, (await postgres(sql)).rows.length, sql);
+      assert.match(await sent(sql), /__mason_r1/, sql);
+    }
+    // a key of a table the list shows through the key alone: the table is not read again
+    assert.doesNotMatch(await sent(`SELECT l.k + 1 AS x, lc.name ${FROM} ORDER BY x, 2 LIMIT 2`), /LEFT JOIN late /);
+    // over one table a computed output is computed for every row anyway: as it was
+    assert.doesNotMatch(await sent("SELECT l.k + 1 AS x, l.j FROM late l ORDER BY x LIMIT 2"), /__mason_late/);
+    // a key that raises raises, on a row the LIMIT leaves out too: every row is sorted, as on Postgres
+    await assert.rejects(answer(c, `SELECT 1 / (l.id - 2) AS x, l.j ${FROM} ORDER BY x LIMIT 1`), (e: pg.DatabaseError) => e.code === "22012");
+    await assert.rejects(answer(c, `SELECT l.j ${FROM} ORDER BY 1 / (l.id - 2) LIMIT 1`), (e: pg.DatabaseError) => e.code === "22012");
+  } finally { await c.end(); }
+});
+
+test("a volatile value a sort reads is one value: the rows shown are in the order of what they show", async () => {
+  const c = await client();
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  const FROM = "FROM late l JOIN late_c lc ON lc.id = l.c";
+  try {
+    for (const order of ["r", "1", "random()"]) {
+      for (const dir of ["", " DESC"]) {
+        const sql = `SELECT random() AS r, l.id, l.j ${FROM} ORDER BY ${order}${dir} LIMIT 8`;
+        const shown = (await c.query({ text: sql, rowMode: "array" })).rows.map((r: unknown[]) => r[0] as number);
+        assert.equal(shown.length, 8, sql);
+        assert.deepEqual(shown, [...shown].sort((a, b) => dir === "" ? a - b : b - a), `${sql}: the value shown is the value sorted`);
+        const line = await sent(sql);
+        assert.match(line, /SELECT __mason_late\.__mason_o1 AS r, /, sql);
+        assert.match(line, /ORDER BY __mason_o1( DESC)? LIMIT 8 \) AS __mason_late/, `${sql}: said once, in the inner query`);
+      }
+    }
+    // a key no output shows is sorted by its one value too
+    assert.match(await sent(`SELECT l.id ${FROM} ORDER BY random() LIMIT 2`), /random\(\) AS __mason_o1 .*ORDER BY __mason_o1 LIMIT 2/);
+    // a volatile output no sort reads is computed once, after the limit
+    const list = await sent(`SELECT random() AS r, l.id ${FROM} ORDER BY l.id LIMIT 2`);
+    assert.equal(list.match(/random\(\)/g)?.length, 1, list);
+    // two of one expression are two values: a number takes the one it names
+    const two = (await c.query({ text: `SELECT random() AS a, random() AS b, l.id ${FROM} ORDER BY 2 LIMIT 6`, rowMode: "array" })).rows.map((r: unknown[]) => r[1] as number);
+    assert.deepEqual(two, [...two].sort((a, b) => a - b));
+    // a volatile key a form cannot show as one value stays as it was: its sort is the collation's key of it, no output
+    const stays = `SELECT random()::text COLLATE "und-x-icu" AS r, l.id ${FROM} ORDER BY r LIMIT 2`;
+    assert.doesNotMatch(await sent(stays), /__mason_r1/);
+    // now() is one value in any case, and the statement's clock
+    const now = `SELECT now() AS t, l.id ${FROM} ORDER BY t, l.id LIMIT 3`;
+    assert.equal(new Set((await c.query({ text: now, rowMode: "array", types: raw } as pg.QueryConfig)).rows.map((r: unknown[]) => r[0])).size, 1);
+    assert.match(await sent(now), /__mason_r1/);
+  } finally { await c.end(); }
+});
+
+test("a computed key and a merged column in a prepared statement run after a SET, and in two session zones", async () => {
+  const c = await client();
+  try {
+    await truth.exec("SET TimeZone = 'UTC'");
+    const statements = [
+      ["computed", "SELECT date_trunc('day', i.at) AS d, i.id, n.t FROM instants i LEFT JOIN nullish n ON n.id = i.id ORDER BY d DESC, i.id LIMIT 4"],
+      ["ordinal", "SELECT date_trunc('day', i.at) AS d, i.id, n.t FROM instants i LEFT JOIN nullish n ON n.id = i.id ORDER BY 1, 2 LIMIT 4"],
+      ["merged", "SELECT id, date_trunc('day', i.at) AS d, n.t FROM instants i JOIN nullish n USING (id) ORDER BY d, id LIMIT 4"],
+      ["full", "SELECT id, i.at, n.t FROM instants i FULL JOIN nullish n USING (id) ORDER BY id LIMIT 4"],
+    ] as const;
+    for (const [name, text] of statements) {
+      const first = await c.query({ name, text, rowMode: "array", types: raw } as pg.QueryConfig);
+      assert.deepEqual(first.rows, (await postgres(text)).rows, `${name}, in UTC`);
+      logged.length = 0;
+      await c.query(text);
+      assert.match(logged.findLast((l) => l.startsWith("statement: ")) ?? "", /__mason_r1/, `${name}: by row number`);
+    }
+    for (const zone of ["Asia/Kathmandu", "America/New_York"]) {
+      await c.query(`SET TimeZone = '${zone}'`);
+      await truth.exec(`SET TimeZone = '${zone}'`);
+      try {
+        for (const [name, text] of statements) {
+          const again = await c.query({ name, text, rowMode: "array", types: raw } as pg.QueryConfig);
+          assert.deepEqual(again.rows, (await postgres(text)).rows, `${name}, prepared before SET TimeZone = ${zone}`);
+          assert.deepEqual((await answer(c, text)).rows, (await postgres(text)).rows, `${name}, in ${zone}`);
+        }
+      } finally { await truth.exec("SET TimeZone = 'UTC'"); }
+    }
+  } finally { await c.end(); }
+});
+
 test("a top N over joined tables chooses its rows by row number and reads the columns for those alone", async () => {
   const c = await client();
   // this file's copy holds a jsonb as DuckDB wrote it, where a real copy holds Postgres's text: one spelling for the comparison
@@ -2282,13 +2484,8 @@ test("a top N over joined tables chooses its rows by row number and reads the co
     const one = await sent("SELECT l.j FROM late l JOIN late_c c ON c.id = l.c ORDER BY c.name, l.id LIMIT 2");
     assert.match(one, /l\.rowid AS __mason_r1,/);
     assert.doesNotMatch(one, /__mason_r2|c\.rowid/);
-    // the shapes that stay as they were: a row number exists of a table alone, a whole row is not listed, and a sort by
-    // a computed output is one value
-    for (const sql of ["SELECT l.id, name FROM late l JOIN late_c USING (id) ORDER BY l.id LIMIT 2",
-      // a computed output beside a *: its number stays, a value of the list
-      "SELECT *, l.k + 1 AS next FROM late l JOIN late_c c ON c.id = l.c ORDER BY 7, 1 LIMIT 3",
-      'SELECT r.id, r."RowId", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.id DESC LIMIT 2',
-      "SELECT l.id * 2 AS d, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY d LIMIT 2",
+    // the shapes that stay as they were: a row number exists of a table alone, and a whole row is not listed
+    for (const sql of ['SELECT r.id, r."RowId", l.id FROM rowid_cased r JOIN late l ON l.id = r.id ORDER BY r.id DESC LIMIT 2',
       "SELECT l.id FROM late l ORDER BY l.id LIMIT 2",
       "SELECT DISTINCT l.c, c.name FROM late l JOIN late_c c ON c.id = l.c ORDER BY 1 LIMIT 2",
       "SELECT l.c, count(*) FROM late l JOIN late_c c ON c.id = l.c GROUP BY 1 ORDER BY 1 LIMIT 2",
@@ -2536,7 +2733,7 @@ test("a LIMIT with no ORDER BY over joined tables chooses its rows by row number
     // a row number exists of a table alone, and a statement with no limit in fact has nothing to choose
     for (const sql of [`SELECT l.id, c.name ${JOINS}`, `SELECT l.id, c.name ${JOINS} OFFSET 1990`, `SELECT l.id, c.name ${JOINS} LIMIT ALL`, `SELECT l.id, c.name ${JOINS} LIMIT NULL`,
       `SELECT l.id, c.name ${JOINS} LIMIT NULL::int OFFSET 1990`, "SELECT l.id, l.j ->> 'n' FROM late l LIMIT 3",
-      "SELECT l.id, name FROM late l JOIN late_c USING (id) LIMIT 3", `SELECT DISTINCT l.c ${JOINS} LIMIT 3`, `SELECT 1 ${JOINS} LIMIT 3`]) {
+      `SELECT DISTINCT l.c ${JOINS} LIMIT 3`, `SELECT 1 ${JOINS} LIMIT 3`]) {
       assert.doesNotMatch(await sent(sql), /__mason_r1/, sql);
       assert.equal((await answer(c, sql)).rows.length, (await postgres(sql)).rows.length, sql);
     }

@@ -32,7 +32,7 @@ import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf as cellsOfProgram, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { caseTwins, joinsUsing, type Typed } from "./pgtree.ts";
+import { caseTwins, joinsUsing, type QueryOutputs, type Typed } from "./pgtree.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
@@ -817,6 +817,7 @@ class Rewriter {
       b.sortClause = nullsKeyFolded(b.sortClause as AstNode[], b);
       for (const s of b.sortClause as AstNode[]) this.original.add(bodyOf(s));
     }
+    this.naturalWritten(b);
     this.namedThroughStar(b);
     this.starWrittenOut(b);
     this.rowValues(b);
@@ -876,13 +877,7 @@ class Rewriter {
    */
   private outputs(targets: readonly AstNode[]): Output[] {
     const stars = targets.filter((t) => hasStar(bodyOf(t).val));
-    const held = (n: unknown): number[] => {
-      if (Array.isArray(n)) return n.flatMap(held);
-      if (n === null || typeof n !== "object") return [];
-      // (a subquery's targets are its own: this SELECT's offsets alone find this SELECT's query)
-      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? [x] : k === "subselect" || k === "SelectStmt" ? [] : held(x));
-    };
-    const query = stars.length === 0 ? undefined : held(targets).map((l) => this.analysed.get(l - this.base)).find((q) => q !== undefined);
+    const query = stars.length === 0 ? undefined : this.analysedQuery(targets);
     const widthOf = (t: AstNode): number | null => {
       const f = bodyOf(bodyOf(t).val as AstNode).fields as AstNode[];
       return f.length < 2 ? null : query?.widths.get(String(bodyOf(f[f.length - 2]!).sval)) ?? 0;
@@ -908,6 +903,47 @@ class Rewriter {
       at += width;
     });
     return out;
+  }
+
+  /** a SELECT's query in Postgres's analysis, found by an offset its targets hold, or undefined for a list with none */
+  private analysedQuery(targets: readonly AstNode[]): QueryOutputs | undefined {
+    const held = (n: unknown): number[] => {
+      if (Array.isArray(n)) return n.flatMap(held);
+      if (n === null || typeof n !== "object") return [];
+      // (a subquery's targets are its own: this SELECT's offsets alone find this SELECT's query)
+      return Object.entries(n).flatMap(([k, x]) => k === "location" && typeof x === "number" ? [x] : k === "subselect" || k === "SelectStmt" ? [] : held(x));
+    };
+    return held(targets).map((l) => this.analysed.get(l - this.base)).find((q) => q !== undefined);
+  }
+
+  /**
+   * A NATURAL JOIN WRITTEN AS THE COLUMNS POSTGRES MERGED, in every statement: `USING (<them>)`, or `ON true` where it
+   * found none, which DuckDB refuses ("No columns found to join on in NATURAL JOIN"); so a copy's hidden columns
+   * (src/duck/kept-route.ts) are never joined on either. The join's body is changed in place, so what is known of it by
+   * identity still holds. A SELECT whose list holds no offset (`SELECT FROM …`) keeps its NATURAL as written.
+   */
+  private naturalWritten(b: Body): void {
+    const from = b.fromClause as unknown[] | undefined;
+    const natural = (x: unknown): boolean => isNode(x) && kindOf(x) === "JoinExpr" && (bodyOf(x).isNatural === true || natural(bodyOf(x).larg) || natural(bodyOf(x).rarg));
+    if (!Array.isArray(from) || !from.some(natural)) return;
+    const joins = this.analysedQuery((b.targetList ?? []) as AstNode[])?.joins;
+    if (joins === undefined) return;
+    // each JOIN after its sides, left to right: the order Postgres's range table holds them
+    const found: Body[] = [];
+    const walk = (x: unknown): void => {
+      if (!isNode(x) || kindOf(x) !== "JoinExpr") return;
+      walk(bodyOf(x).larg); walk(bodyOf(x).rarg);
+      found.push(bodyOf(x));
+    };
+    from.forEach(walk);
+    if (found.length !== joins.length) return;
+    found.forEach((j, at) => {
+      if (j.isNatural !== true) return;
+      const columns = joins[at]!;
+      delete j.isNatural;
+      if (columns.length > 0) j.usingClause = columns.map(S);
+      else j.quals = { A_Const: { boolval: { boolval: true } } };
+    });
   }
 
   /**

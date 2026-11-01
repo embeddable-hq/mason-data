@@ -1070,7 +1070,7 @@ function* matrix(): Generator<Matrixed> {
   yield q("top N over joins: a FULL join", "SELECT a.id, a.note, b.id, b.amount FROM top_a a FULL JOIN top_b b ON a.id = b.a_id ORDER BY a.id NULLS FIRST, b.id NULLS FIRST LIMIT 9");
   yield q("top N over joins: an expression over a wide column, and exact numerics", "SELECT a.id, upper(a.note), length(c.doc::text), (b.payload ->> 'n')::int + 1 AS n, b.amount / 3, round(b.amount * 1.1, 1) " + `${JOINED} ORDER BY ${TOTAL} LIMIT 10`);
   yield q("top N over joins: a sort by an expression, an ordinal and an output's name", `SELECT a.id AS key, b.id, c.label AS tag, b.payload ${JOINED} ORDER BY lower(a.name) NULLS FIRST, 1, tag NULLS FIRST, 2 NULLS FIRST, c.id NULLS FIRST LIMIT 11`);
-  yield q("top N over joins: a sort by a computed output is left as it was", "SELECT a.id, b.id, b.id * 2 AS twice, c.doc FROM top_a a JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON c.b_id = b.id ORDER BY twice DESC, 1, c.id LIMIT 5");
+  yield q("top N over joins: a sort by a computed output", "SELECT a.id, b.id, b.id * 2 AS twice, c.doc FROM top_a a JOIN top_b b ON a.id = b.a_id LEFT JOIN top_c c ON c.b_id = b.id ORDER BY twice DESC, 1, c.id LIMIT 5");
   yield q("top N over joins: bare names", "SELECT note, payload, doc, label FROM top_a a JOIN top_b b ON a.id = b.a_id JOIN top_c c ON b.id = c.b_id ORDER BY made DESC NULLS LAST, c.id LIMIT 6");
   yield q("top N over joins: a jsonb key and a filter on the wide column", `SELECT a.id, b.payload, c.id ${JOINED} WHERE b.payload ->> 'k' <> 'v3' ORDER BY b.payload, ${TOTAL} LIMIT 7`);
   yield q("top N over joins: a date's text, a timestamptz in a session's zone", `SELECT a.made, b.seen, to_char(a.made, 'YYYY-MM-DD HH24') ${JOINED} ORDER BY date_trunc('day', a.made) DESC NULLS LAST, ${TOTAL} LIMIT 12`, "America/New_York");
@@ -1257,7 +1257,7 @@ function* matrix(): Generator<Matrixed> {
   yield q("star sort: a subquery of no name", "SELECT * FROM (SELECT id, name FROM star_o) ORDER BY 2 NULLS FIRST, 1");
   yield q("star sort: a parameter-free filter on the same column", "SELECT * FROM star_o WHERE name <> 'Z' ORDER BY name NULLS FIRST, id");
   yield q("top N over joins: a table's whole row stays as it was", "SELECT row_to_json(a), b.id FROM top_a a JOIN top_b b ON a.id = b.a_id ORDER BY b.id LIMIT 3");
-  yield q("top N over joins: NATURAL and USING stay as they were", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
+  yield q("top N over joins: USING of two tables, a *", "SELECT * FROM top_a a JOIN top_b b USING (id) ORDER BY id LIMIT 3");
   yield q("top N over joins: DISTINCT takes another path", `SELECT DISTINCT a.id, b.payload ->> 'k' AS k ${JOINED} ORDER BY a.id, k NULLS FIRST LIMIT 6`);
   yield q("top N over joins: GROUP BY takes another path", `SELECT a.id, count(c.id), max(c.label) ${JOINED} GROUP BY a.id ORDER BY 2 DESC, 1 LIMIT 4`);
   yield q("top N over joins: a window takes another path", `SELECT a.id, b.id, row_number() OVER (PARTITION BY a.id ORDER BY b.id, c.id) ${JOINED} ORDER BY a.id, b.id NULLS FIRST, c.id NULLS FIRST LIMIT 6`);
