@@ -443,8 +443,10 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the late select list, which then reads the columns this leaves
   if (kept !== null) hideKept(tree, { visible: kept.visible(), searchPath: searchSchemas(searchPath) });
   // a sorted, limited select list is computed over the rows the limit keeps (src/duck/late.ts)
+  // (a role's walled read it fetches through itself is one more wall: counted, so `wallStatistics` still walls every one)
+  const lateWall = walls !== null ? { alias: walls.alias, added: 0 } : null;
   tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree),
-    { volatile: (functions) => volatileFunctions(catalog, functions), tablesOnly: walls !== null }) ?? tree;
+    { volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall }) ?? tree;
   // ONLY WHAT THE ORACLE VERIFIED: after the rewrite, so a construct the rewrite refuses by name (with its own way out)
   // says so first
   const keys = [...resolved].sort();
@@ -458,7 +460,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
       text, `: ${unverified.join(", ")}`);
   }
   // only a statement with its filtered reads in place: no other statement's text changes, whatever it names its subqueries
-  if (walls !== null && wallSwitch.statistics) wallStatistics(tree, walls);
+  if (walls !== null && wallSwitch.statistics) wallStatistics(tree, { alias: walls.alias, reads: walls.reads + (lateWall?.added ?? 0) });
   // on the finished tree, so no rule above meets it; `masonCalls` below does not count it as a function called
   giveTurns(tree);
   if (relations !== undefined && relations.size > 0) swapRelations(tree, relations, searchSchemas(searchPath));

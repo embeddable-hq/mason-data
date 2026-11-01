@@ -121,8 +121,12 @@ paths:
     the columns Postgres merged (`ON true` for none: the rewrite's `naturalWritten`, in EVERY statement), and a cast `mergedRead` cannot write is carried. **A computed output
     that is a sort key is one key by name, number or repeated expression, shown from `__mason_o<i>`, one value**; a
     volatile key (`computedSorts`, pg_proc's `provolatile`) is sorted by its output's name inside, and one a collation's
-    keys would repeat stays as it was. Over one table a computed output's sort stays as it was. **A statement with a role's filtered read keeps its form**
-    (`tablesOnly`): the filtered read needs a review of its own (step 4). A list of a derived read now raises on the rows
+    keys would repeat stays as it was. Over one table a computed output's sort stays as it was. **A role's filtered read is WALLED, never folded, flattened or
+    carried** (issue 134, step 4): its row number is exposed inside the barrier (`__mason_rid` beside its `*`), and its
+    rows are fetched through the same filter, LIMIT barrier and statistics wall, never the bare table, so a list
+    expression meets only the rows the filter keeps and none of the table-wide statistics the wall hides; one whose
+    filter holds a volatile function keeps its form, since read twice it could keep other rows, and each walled read
+    fetched is one more wall `wallStatistics` is told of (`LateContext.wall`), so every one is still walled. A list of a derived read now raises on the rows
     chosen alone (`limit-errors`). A LIMIT with no ORDER BY takes the same path: sorted by the row numbers of the
     tables read ONLY where `fanOutBounded` (src/duck/distinct-key.ts) proves the join bounded, from the analysis and the
     catalog's pg_index (every join equates a whole primary key of a table, or of a plain read of one by a bare output
