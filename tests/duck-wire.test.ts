@@ -648,6 +648,65 @@ test("round 9: a WITH query read by one, two or three UNION ALL arms, directly o
   }
 });
 
+// review round 10 of PR 202: round 9 gave a WITH query's later readers the programs its first read derived, but derived
+// their FIELDS again, from the WITH query as the first read had left it (its cells appended), which cannot be typed: the
+// later reader answered none, the arms disagreed, and the union was the engine's double. Everything a later reader is
+// given, its fields too, is the one derivation's. Held in every wrapper the oracle puts a statement in (CI's red was its
+// union shape), each value's text exactly, Postgres's (the multiset: the rows' order is the engine's where none is asked)
+test("round 10: a WITH query read again, through another or in a wrapper, answers Postgres's digits", async () => {
+  const c = await client();
+  try {
+    const sorted = (rows: unknown[][]): unknown[][] => [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const wrong: Array<{ sql: string; mine: unknown; postgres: unknown; held: string[] }> = [];
+    const same = async (sql: string, column: string[]): Promise<void> => {
+      const [mine, theirs] = [await answer(c, sql), await postgres(sql)];
+      const [m, p] = [{ fields: mine.fields, rows: sorted(mine.rows) }, { fields: theirs.fields, rows: sorted(theirs.rows) }];
+      if (!util.isDeepStrictEqual(m, p) || !util.isDeepStrictEqual(m.rows.map((r) => r[0]), [...column].sort())) wrong.push({ sql, mine: m, postgres: p, held: column });
+    };
+    const THIRDS = ["14.0000000000000000", "26.8333333333333333", "40.0000000000000000"];
+    const SEVENTHS = ["11.5000000000000000", "17.1428571428571429", "6.0000000000000000"];
+    const ROOTS = ["10.954451150103322", "6.480740698407860", "8.972179222463180"];
+    const times = (column: string[], n: number): string[] => Array.from({ length: n }, () => column).flat();
+    const T = "WITH t AS (SELECT amount / 3 AS v FROM orders) ";
+    const TU = "WITH t AS (SELECT amount / 7 AS v FROM orders), u AS (SELECT v FROM t) ";
+    const S = "WITH t AS (SELECT sqrt(abs(amount)) AS v FROM orders) ";
+    const round10: Array<[string, string[]]> = [
+      // a WITH query read through another, the other read twice; then with the first between; then through a third
+      [`${TU}SELECT v AS x FROM u UNION ALL SELECT v FROM u`, times(SEVENTHS, 2)],
+      [`${TU}SELECT v AS x FROM u UNION ALL SELECT v FROM t UNION ALL SELECT v FROM u`, times(SEVENTHS, 3)],
+      ["WITH t AS (SELECT amount / 7 AS v FROM orders), u AS (SELECT v FROM t), w AS (SELECT * FROM u) SELECT v AS x FROM w UNION ALL SELECT v FROM u UNION ALL SELECT v FROM t", times(SEVENTHS, 3)],
+      // a WITH query's sqrt (a text cell) read by two arms
+      [`${S}SELECT v AS x FROM t UNION ALL SELECT v FROM t`, times(ROOTS, 2)],
+    ];
+    const round9: Array<[string, string[]]> = [
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT amount / 3 FROM orders`, times(THIRDS, 2)],
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT amount / 3 FROM orders UNION ALL SELECT v FROM t`, times(THIRDS, 3)],
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM t`, times(THIRDS, 2)],
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM t UNION ALL SELECT v FROM t`, times(THIRDS, 3)],
+      [`${T}SELECT v AS x FROM (SELECT * FROM t) s UNION ALL SELECT v FROM t`, times(THIRDS, 2)],
+      [`${T}SELECT v AS x FROM t UNION ALL SELECT v FROM (SELECT * FROM t) s`, times(THIRDS, 2)],
+      [`${TU}SELECT v AS x FROM u UNION ALL SELECT v FROM t`, times(SEVENTHS, 2)],
+      [`${TU}SELECT v AS x FROM t UNION ALL SELECT v FROM u`, times(SEVENTHS, 2)],
+      ["WITH t AS (SELECT amount AS v FROM orders) SELECT v AS x FROM t UNION ALL SELECT v FROM t", times(["120.00", "42.00", "80.50"], 2)],
+      [`${S}SELECT v AS x FROM t UNION ALL SELECT sqrt(abs(amount)) FROM orders`, times(ROOTS, 2)],
+    ];
+    for (const [sql, column] of round10) await same(sql, column);
+    // every statement as written with the oracle's ORDER BY x, and in the oracle's wrappers (tests/integration/oracle/shapes.ts)
+    for (const [plain, column] of [...round10, ...round9]) {
+      const sql = `${plain} ORDER BY x`;
+      await same(sql, column);
+      await same(`(${sql}) UNION ALL (${sql})`, times(column, 2));
+      await same(`SELECT * FROM (${sql}) AS mason_shape`, column);
+      await same(`WITH mason_shape AS (${sql}) SELECT * FROM mason_shape`, column);
+      await same(`SELECT mason_shape."x" FROM (${sql}) AS mason_shape`, column);
+      await same(`SELECT * FROM (${sql}) AS mason_shape ORDER BY mason_shape."x"`, column);
+    }
+    assert.deepEqual(wrong.map((w) => w.sql), [], util.inspect(wrong, { depth: 5 }));
+  } finally {
+    await c.end();
+  }
+});
+
 test("the corpus rerun: what reached DuckDB and failed, answered as Postgres answers", async () => {
   const c = await client();
   try {

@@ -92,6 +92,9 @@ export interface ExactColumn {
   text: boolean;
 }
 
+/** a query's output columns' types, as `exactThrough` reads them */
+type Fields = ReadonlyArray<{ oid: number; typmod?: number }>;
+
 /** a column of a table's row type, as the catalog has it */
 export interface RowColumn { name: string; type: number; typmod: number }
 
@@ -1349,7 +1352,8 @@ class Rewriter {
     const plainDistinct = Array.isArray(b.distinctClause) && !b.distinctClause.every(isNode);
     const targets = (b.targetList ?? []) as AstNode[];
     // a query that selects cells already is never given them twice. No WITH query read twice reaches here: its programs
-    // are derived once and every later reader is given them (`exactThrough`'s `derived`), never this empty answer
+    // and its fields are derived once and every later reader is given them (`exactThrough`'s `derived`, read before
+    // anything is derived from the query again), never this empty answer
     if (targets.some((t) => typeof bodyOf(t).name === "string" && (bodyOf(t).name as string).startsWith("__mason_cell_"))) return [];
     if (targets.length !== fields.length || targets.some((t) => hasStar(bodyOf(t).val))) return [];
     const grouped = (Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val));
@@ -1398,23 +1402,30 @@ class Rewriter {
    * after its own columns, and the programs are the inner's at the outer's column. Anything else that computes over an
    * inner exact numeric reads DuckDB's value (docs/SQL-SUPPORT.md `nested-exact-numeric`).
    */
-  exactThrough(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }> | null): ExactColumn[] {
-    if (fields === null || kindOf(stmt) !== "SelectStmt") return [];
-    // DERIVED ONCE: a query read again (a WITH query two arms of a UNION ALL read, directly or through another query)
-    // is given the programs its first read derived, whichever arm read it first. Derived again, it selected its cells
-    // already and answered none, so the arms disagreed and the union was the engine's double (PR 202 round 9)
+  exactThrough(stmt: AstNode, fields: Fields | null | (() => Fields | null)): ExactColumn[] {
+    if (kindOf(stmt) !== "SelectStmt") return [];
+    // DERIVED ONCE, AND EVERYTHING A LATER READER IS GIVEN WITH IT: a query read again (a WITH query two arms of a UNION
+    // ALL read, directly, through another WITH query or a subquery) is given what its first read derived, whichever arm
+    // read it first, before anything is derived from it again. Its programs derived again answered none (it selected
+    // its cells already: PR 202 round 9); its FIELDS derived again (`outputFields`, a FROM item's reader) were typed over
+    // the cells the first read appended, which cannot be: null, none, the arms disagreed and the union was the engine's
+    // double (round 10). So a reader's fields are asked for only when nothing is derived yet (a function, `innerExact`)
     const known = this.derived.get(bodyOf(stmt));
     if (known !== undefined) return known.map((e) => ({ ...e }));
-    // the query's CTEs are visible to every query inside it (`WITH base AS (…) SELECT b.x FROM (SELECT * FROM base) b`)
-    const ctes = bodyOf(stmt).withClause?.recursive === true ? [] : ((bodyOf(stmt).withClause?.ctes ?? []) as AstNode[]);
-    this.cteScope.push(ctes);
-    let out: ExactColumn[];
-    try { out = this.exactThroughIn(stmt, fields); } finally { this.cteScope.pop(); }
+    const typed = typeof fields === "function" ? fields() : fields;
+    let out: ExactColumn[] = [];
+    if (typed !== null) {
+      // the query's CTEs are visible to every query inside it (`WITH base AS (…) SELECT b.x FROM (SELECT * FROM base) b`)
+      const ctes = bodyOf(stmt).withClause?.recursive === true ? [] : ((bodyOf(stmt).withClause?.ctes ?? []) as AstNode[]);
+      this.cteScope.push(ctes);
+      try { out = this.exactThroughIn(stmt, typed); } finally { this.cteScope.pop(); }
+    }
     this.derived.set(bodyOf(stmt), out);
     return out.map((e) => ({ ...e }));
   }
 
-  /** each query's exact columns as `exactThrough` first derived them, by the query (a trial's copy is its own query) */
+  /** each query's exact columns as `exactThrough` first derived them, by the query (a trial's copy is its own query):
+   *  the one record of them, which every reader (an arm, a FROM item's `innerExact`, a carry) reads */
   private readonly derived = new WeakMap<object, ExactColumn[]>();
 
   /** the CTEs of the queries `exactThrough` is inside, outermost first (a recursive WITH's are none: never read whole) */
@@ -1430,8 +1441,6 @@ class Rewriter {
   private readonly frames = new WeakMap<Body, Frame[]>();
   /** every query that reads a WITH query in its FROM, by the WITH query */
   private readonly cteReaders = new Map<Body, Body[]>();
-  /** the exact columns of each FROM item's query whose cells ride beside its columns (`innerExact`), made once */
-  private readonly innerExacts = new Map<Body, ExactColumn[]>();
   /** whether a FROM item's query's cells may ride, decided at its first column read (`carry`): true, or why not */
   private readonly rides = new Map<Body, true | string>();
   /** why each FROM item's column could not be carried, in the developer's words (`refuseUncarried`) */
@@ -1696,12 +1705,10 @@ class Rewriter {
     return rides;
   }
 
-  /** a FROM item's query's exact columns, its cells appended to its SELECT list once (`exactThrough`) */
+  /** a FROM item's query's exact columns, its cells appended to its SELECT list once (`exactThrough`'s one derivation:
+   *  its fields are typed only before it, over the query as written) */
   private innerExact(query: AstNode): ExactColumn[] {
-    const b = bodyOf(query);
-    let made = this.innerExacts.get(b);
-    if (made === undefined) { made = this.exactThrough(query, this.outputFields(query)); this.innerExacts.set(b, made); }
-    return made;
+    return this.exactThrough(query, () => this.outputFields(query));
   }
 
   private exactThroughIn(stmt: AstNode, fields: ReadonlyArray<{ oid: number; typmod?: number }>): ExactColumn[] {
@@ -1787,7 +1794,9 @@ class Rewriter {
     // to. A trial that wrote the real CTE left it selecting cells its arm, built again below, never read: arms of
     // different widths, which the engine refused (`WITH t AS (… sqrt(abs(x)) AS v …) SELECT v FROM t UNION ALL SELECT
     // sqrt(abs(x)) …`, PR 202 round 8). The copies are shared across the arms as the real CTEs are, so the trial is the
-    // real pass run on a copy, and what it finds is what the real pass will
+    // real pass run on a copy, and what it finds is what the real pass will. (A column an arm's copy CARRIES out of a
+    // WITH query is resolved by where it is written, `carry`'s `scopes`: the real WITH query, derived once there, and
+    // the real pass is given that one derivation, `exactThrough`'s `derived`)
     const real = this.cteScope.splice(0);
     this.cteScope.push(...real.map((list) => this.clone(list)));
     let trial: Array<{ made: ExactColumn[]; listed: number }>;
