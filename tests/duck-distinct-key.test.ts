@@ -250,8 +250,10 @@ test("the keys are read only for a statement the list after the limit may write:
     "SELECT * FROM (SELECT tenant_id, count(*) FROM orders GROUP BY tenant_id) t LIMIT 3",
     "SELECT row_number() OVER () FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3",
     "SELECT generate_series(1, 2) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3",
-    "SELECT (SELECT 1) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3"]) assert.equal(await reads(sql), 0, sql);
+    "SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id IN (SELECT 1) LIMIT 3"]) assert.equal(await reads(sql), 0, sql);
   assert.equal(await reads("SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3"), 1, "a row-wise statement reads them once");
+  // a subquery in the select list alone runs for the chosen rows (issue 134, step 5)
+  assert.equal(await reads("SELECT (SELECT 1) FROM orders o JOIN customers c ON c.id = o.customer_id LIMIT 3"), 1, "a list subquery reads them once");
 });
 
 test("a count(DISTINCT x) of a primary key over its table alone is count(x): filtered, grouped, in HAVING, with a FILTER, in a subquery", async () => {

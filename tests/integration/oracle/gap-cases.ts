@@ -47,6 +47,7 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "limit-errors", sql: "SELECT l.id, (l.j ->> 'n')::int, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.k DESC LIMIT 3" },
   { gap: "limit-errors", sql: "SELECT c.id, d.id AS d, d.n FROM late_c c JOIN (SELECT l.id, l.k, l.c, (l.j ->> 'n')::int AS n FROM late l) d ON d.c = c.id ORDER BY d.k DESC LIMIT 3" },
   { gap: "limit-errors", sql: "SELECT * FROM (SELECT l.id, (l.j ->> 'n')::int AS n, l.k, c.name FROM late l JOIN late_c c ON c.id = l.c) t ORDER BY t.k DESC LIMIT 3" },
+  { gap: "limit-errors", sql: "SELECT a.id, (SELECT 1 / (a.id - 7)) AS x FROM top_a a LEFT JOIN top_b b ON b.a_id = a.id ORDER BY a.name, a.id, b.id LIMIT 2" },
   { gap: "volatile-window", sql: "SELECT id, row_number() OVER (PARTITION BY b ORDER BY random()) FROM typed" },
   { gap: "min-max-scale-tie", sql: "SELECT min(a / b), max(a / b) FROM public.one, (VALUES (0::numeric, 7::numeric), (0, 1000000)) AS v(a, b)" },
   { gap: "nested-exact-numeric", sql: "SELECT x * 2 FROM (SELECT 7 / 3.0 AS x FROM public.one) AS s" },

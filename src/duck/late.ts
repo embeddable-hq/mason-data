@@ -134,6 +134,18 @@
  * filtered table) is fetched the same way, through it. Each walled read fetched is one more wall in the statement: the
  * plan's count of them (`wallStatistics`) is told so by `LateContext.wall`. A walled read whose filter holds a volatile
  * function stays as it was: read twice, it could keep other rows.
+ *
+ * A SUBQUERY IN THE SELECT LIST RUNS FOR THE CHOSEN ROWS (issue 134, step 5: a correlated subquery in a top N's list was
+ * computed for every row of the join below the sort, 57 s and 26 GiB spilled against 0.10 s). Where every subquery of
+ * a query stands in its select list, shown and no sort or group key (`listSubLinkReads`, from Postgres's analysis), the
+ * rows are chosen on keys alone as above, and the list, its subqueries as written, is computed in the fetch: each FROM
+ * item a subquery reads (by the analysis's columns of the query, as many levels up as the subquery sits) is fetched
+ * under its own alias, so the subquery reads the row's own columns, and NULL where an outer join supplied no row. One
+ * table alone is written so too. What stays as it was: a subquery anywhere else (a WHERE, a join's condition, a sort
+ * key, a FROM item's function), one that reads a carried item, a join's merged column (a FULL join's, or one of a cast),
+ * a whole row or a query outside its own, a wrapper folded away (its columns are names inside the subquery a fold does
+ * not know), and one a rewrite wrote that the analysis has not. A subquery's own SELECT is never rewritten. A subquery
+ * that raises on a row the limit leaves out answers here (`limit-errors`).
  */
 import type { TreeNode, TreeValue } from "./pgtree.ts";
 import { fanOutBounded, projectionOnly } from "./distinct-key.ts";
@@ -174,12 +186,67 @@ function rowWiseStatement(tree: TreeValue): boolean {
   return ok && queries > 0;
 }
 
+/** A QUERY'S SUBQUERIES IN ITS SELECT LIST ALONE (issue 134, step 5): the FROM items they read of `q`, by alias, from
+ *  Postgres's analysis; [] for a query with none; null where a subquery stands anywhere else (a WHERE, a join, a sort or
+ *  group key, a FROM item's function), or one reads a join's merged column or a query outside `q` */
+function listSubLinkReads(q: TreeNode): string[] | null {
+  if (q.hasSubLinks === "false") return [];
+  const rtable = treeList(q.rtable);
+  const reads = new Set<string>();
+  let ok = true, elsewhere = false;
+  // anything of `q` but its select list: a subquery there is elsewhere (its FROM items' own queries are their own)
+  const outside = (v: TreeValue | undefined): void => {
+    if (elsewhere) return;
+    if (Array.isArray(v)) { for (const x of v) outside(x); return; }
+    if (!isTreeNode(v)) return;
+    if (v._node === "SUBLINK") { elsewhere = true; return; }
+    if (v._node === "QUERY") return;
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") outside(x);
+  };
+  for (const [k, x] of Object.entries(q)) {
+    if (k === "_node" || k === "targetList" || k === "cteList") continue;
+    if (k === "rtable") { for (const e of rtable) if (isTreeNode(e)) for (const [f, y] of Object.entries(e)) if (f !== "subquery" && f !== "_node") outside(y); continue; }
+    outside(x);
+  }
+  // a subselect's columns of `q`: a VAR as many levels up as it sits below `q`
+  const inner = (v: TreeValue | undefined, depth: number): void => {
+    if (!ok) return;
+    if (Array.isArray(v)) { for (const x of v) inner(x, depth); return; }
+    if (!isTreeNode(v)) return;
+    if (v._node === "VAR") {
+      const up = Number(v.varlevelsup ?? 0);
+      if (up > depth) { ok = false; return; }
+      if (up === depth && depth > 0) {
+        const e = rtable[Number(v.varno) - 1];
+        // a whole row of the table read itself would list what its view of visible columns does not
+        if (!isTreeNode(e) || e.rtekind === RTE_JOIN || v.varattno === "0" || !isTreeNode(e.eref) || typeof e.eref.aliasname !== "string") { ok = false; return; }
+        reads.add(e.eref.aliasname);
+      }
+    }
+    const below = v._node === "QUERY" ? depth + 1 : depth;
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") inner(x, below);
+  };
+  for (const t of treeList(q.targetList)) {
+    if (!isTreeNode(t)) continue;
+    let held = false;
+    walkTree(t.expr, (n) => { held ||= n._node === "SUBLINK"; });
+    if (!held) continue;
+    // a sort or group key, or an entry the list does not show (a sort's own): elsewhere
+    if (t.resjunk === "true" || (t.ressortgroupref !== undefined && t.ressortgroupref !== "0")) return null;
+    inner(t.expr, 0);
+  }
+  return ok && !elsewhere ? [...reads].sort() : null;
+}
+
+/** each row of the query is one row of its FROM, its list reading that row alone, a subquery in it as `listSubLinkReads` says */
+const rowWiseQuery = (q: TreeNode): boolean => ["hasAggs", "hasWindowFuncs", "hasTargetSRFs"].every((f) => q[f] === "false") && listSubLinkReads(q) !== null;
+
 /** `rowWiseStatement`, with what a joined query carries set apart: a derived read beside another FROM item may hold
- *  anything, because its columns pass through unchanged. A wrapper of one item or a set operation's arm has no such side */
+ *  anything, because its columns pass through unchanged. A wrapper of one item or a set operation's arm has no such side.
+ *  A subquery in a select list is allowed here (the list is computed for the chosen rows, `joinRows`), never in it */
 function rowWiseAround(tree: TreeValue): boolean {
-  const flags = ["hasAggs", "hasWindowFuncs", "hasTargetSRFs", "hasSubLinks"];
   const query = (q: TreeNode): boolean => {
-    if (flags.some((f) => q[f] !== "false")) return false;
+    if (!rowWiseQuery(q)) return false;
     const rtable = (Array.isArray(q.rtable) ? q.rtable : []).filter((e): e is TreeNode => isTreeNode(e));
     const beside = q.setOperations === null && rtable.filter((e) => e.rtekind !== RTE_JOIN).length >= 2;
     const inner = [...rtable.flatMap((e) => isTreeNode(e.subquery) ? [e.subquery] : []),
@@ -189,8 +256,9 @@ function rowWiseAround(tree: TreeValue): boolean {
   return isTreeNode(tree) && tree._node === "QUERY" && query(tree);
 }
 
-/** every node of a select-list expression is row-wise, and it computes something (a plain column needs no deferring) */
-function rowWise(n: unknown): { ok: boolean; computes: boolean } {
+/** every node of a select-list expression is row-wise, and it computes something (a plain column needs no deferring).
+ *  With `subLinks`, a subquery is too: its own select is not looked into, only what it tests (`x IN (…)`'s x) */
+function rowWise(n: unknown, subLinks = false): { ok: boolean; computes: boolean } {
   let ok = true, computes = false;
   const visit = (v: unknown): void => {
     if (!ok) return;
@@ -198,8 +266,9 @@ function rowWise(n: unknown): { ok: boolean; computes: boolean } {
     if (!isObject(v)) return;
     const k = kindOf(v)!;
     if (/^[A-Z]/.test(k) && isObject(v[k])) {
-      if (!ROW_WISE.has(k)) { ok = false; return; }
       const b = bodyOf(v);
+      if (k === "SubLink" && subLinks) { computes = true; visit(b.testexpr); return; }
+      if (!ROW_WISE.has(k)) { ok = false; return; }
       if (k === "FuncCall") {
         const name = (b.funcname as unknown[]).map((x) => (bodyOf(x).sval as string)).join(".").toLowerCase();
         if (b.over !== undefined || b.agg_star === true || b.agg_distinct === true || b.agg_order !== undefined || b.agg_filter !== undefined || SETS.has(name)) { ok = false; return; }
@@ -255,7 +324,7 @@ export async function selectListAfterLimit(tree: AstNode, analysis: TreeValue, k
   // bottom up: a SELECT's derived tables and WITH queries first, then the SELECT (never what it was written as)
   const visit = (n: unknown): unknown => {
     if (Array.isArray(n)) return n.map(visit);
-    if (!isObject(n)) return n;
+    if (!isObject(n) || kindOf(n) === "SubLink") return n;
     const out = Object.fromEntries(Object.entries(n).map(([k, v]) => [k, visit(v)]));
     if (kindOf(out) !== "SelectStmt") return out;
     // a set operation's arms are SELECT bodies of their own (libpg-query writes them unwrapped)
@@ -393,7 +462,7 @@ const MATERIALIZED = "1";
  *  only the join can (it is carried). `joins` is each JOIN's merged columns, in the order the tree meets its joins.
  *  `volatileOutputs` is the outputs a sort reads that hold a volatile function, by place, `volatileKeys` whether any sort
  *  key does, and `sorts` how many keys Postgres sorts by: a rewrite that wrote them as others (a collation's) repeats a value */
-interface Query { items: Relation[]; bounded: boolean; rowWise: boolean; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number }
+interface Query { items: Relation[]; bounded: boolean; rowWise: boolean; listReads: string[]; listSubLinks: number; merged: Array<[string, AstNode | null]>; joins: string[][]; volatileOutputs: number[]; volatileKeys: boolean; sorts: number }
 
 function isTreeNode(v: TreeValue | undefined): v is TreeNode { return typeof v === "object" && v !== null && !Array.isArray(v); }
 const treeList = (v: TreeValue | undefined): TreeValue[] => Array.isArray(v) ? v : [];
@@ -546,12 +615,13 @@ function relationsOf(analysis: TreeValue, keys: PrimaryKeys, volatile: ReadonlyS
     };
     const items = treeList(q.rtable).filter((e): e is TreeNode => isTreeNode(e) && e.rtekind !== RTE_JOIN).map(relation);
     const computed = computedSorts(q).filter((c) => holdsVolatile(c.expr, volatile));
-    return { items, bounded: fanOutBounded(q, keys), rowWise: ["hasAggs", "hasWindowFuncs", "hasTargetSRFs", "hasSubLinks"].every((f) => q[f] === "false"), ...mergedColumns(q),
+    return { items, bounded: fanOutBounded(q, keys), rowWise: rowWiseQuery(q), listReads: listSubLinkReads(q) ?? [], listSubLinks: subLinksIn(treeList(q.targetList)), ...mergedColumns(q),
       volatileOutputs: computed.flatMap((c) => c.output === null ? [] : [c.output]), volatileKeys: computed.length > 0, sorts: treeList(q.sortClause).length };
   };
   const visit = (v: TreeValue | undefined, enclosing: readonly TreeValue[][]): void => {
     if (Array.isArray(v)) { for (const x of v) visit(x, enclosing); return; }
-    if (!isTreeNode(v)) return;
+    // a subquery's own SELECTs are never written (`selectListAfterLimit` leaves a SubLink as it is)
+    if (!isTreeNode(v) || v._node === "SUBLINK") return;
     if (v._node === "QUERY" && Array.isArray(v.rtable)) out.push(queryOf(v, enclosing));
     const inner = v._node === "QUERY" ? [treeList(v.cteList), ...enclosing] : enclosing;
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x, inner);
@@ -611,7 +681,7 @@ function mergedOver(n: unknown, merged: ReadonlyMap<string, AstNode | null>, car
     const read = merged.get(name);
     return read === undefined ? n : read === null ? carried(name) : structuredClone(read);
   }
-  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, mergedOver(v, merged, carried)]));
+  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, k === "subselect" ? v : mergedOver(v, merged, carried)]));
 }
 
 const aliasOfTable = (t: Body): string => isObject(t.alias) ? String(t.alias.aliasname) : String(t.relname);
@@ -636,8 +706,10 @@ const ownName = (name: string): boolean => name.startsWith("__mason_");
 /** an item as a select list reads it */
 interface Listed { alias: string; columns: string[] }
 
-/** the select list with every `*` written out; the tables it reads by name; null where it reads a whole row, or holds what the list after the limit may not */
-function writtenOut(targets: AstNode[], tables: readonly Listed[], tablesAlone = true): { list: AstNode[]; read: Set<string> } | null {
+/** the select list with every `*` written out; the tables it reads by name; null where it reads a whole row, or holds what the list after the limit may not.
+ *  With `subLinks` (the items its subqueries read, from Postgres's analysis: `listSubLinkReads`), a subquery may stand in
+ *  it, its own select not read here */
+function writtenOut(targets: AstNode[], tables: readonly Listed[], tablesAlone = true, subLinks: readonly string[] | null = null): { list: AstNode[]; read: Set<string> } | null {
   const aliases = new Set(tables.map((t) => t.alias));
   const read = new Set<string>();
   const list: AstNode[] = [];
@@ -660,6 +732,7 @@ function writtenOut(targets: AstNode[], tables: readonly Listed[], tablesAlone =
       read.add(owner);
       return true;
     }
+    if (kindOf(n) === "SubLink") return subLinks !== null && reads(bodyOf(n).testexpr);
     return Object.values(n).every(reads);
   };
   for (const t of targets) {
@@ -675,10 +748,25 @@ function writtenOut(targets: AstNode[], tables: readonly Listed[], tablesAlone =
       }
       continue;
     }
-    if (!rowWise(val).ok || !reads(val)) return null;
+    if (!rowWise(val, subLinks !== null).ok || !reads(val)) return null;
     list.push(t);
   }
+  for (const alias of subLinks ?? []) { if (!aliases.has(alias)) return null; read.add(alias); }
   return { list, read };
+}
+
+/** how many subquery expressions a tree holds, not counting those inside one */
+function holdsSubLink(n: unknown): number {
+  if (Array.isArray(n)) return n.reduce((sum: number, x) => sum + holdsSubLink(x), 0);
+  if (!isObject(n)) return 0;
+  return kindOf(n) === "SubLink" ? 1 : holdsSubLink(Object.values(n));
+}
+
+/** how many subquery expressions an analysed tree holds, not counting those inside one */
+function subLinksIn(v: TreeValue | undefined): number {
+  if (Array.isArray(v)) return v.reduce((sum: number, x) => sum + subLinksIn(x), 0);
+  if (!isTreeNode(v)) return 0;
+  return v._node === "SUBLINK" ? 1 : subLinksIn(Object.entries(v).flatMap(([k, x]) => k === "_node" ? [] : [x]));
 }
 
 /** the name a target is read by from outside its SELECT */
@@ -869,7 +957,7 @@ function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string
     if (at === undefined) { at = { name: `__mason_c${columns.size + 1}`, val: ref(owner.alias, column) }; columns.set(key, at); }
     return ref(LATE, at.name);
   }
-  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, overCarried(v, carried, columns)]));
+  return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, k === "subselect" ? v : overCarried(v, carried, columns)]));
 }
 
 /** one SELECT over joined FROM items written with its rows chosen by row number (see above), or null where it is not so shaped */
@@ -891,7 +979,15 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   if (opened === null) return null;
   const { s, query } = opened;
   const items = fromItems(s.fromClause)!;
-  if (items.length < 2) return null;
+  // a subquery in the list (issue 134, step 5): run for the chosen rows alone, a table's own too
+  const subLinks = [...new Set(named.flatMap((q) => q.listReads))].sort();
+  const listed0 = (s.targetList as AstNode[] | undefined) ?? [];
+  const subqueried = holdsSubLink(listed0) > 0;
+  // a wrapper folded away is an item its subqueries may read, by names inside them a fold does not know
+  if (subqueried && query !== first) return null;
+  // each the analysis's own, never one a rewrite wrote: what it reads of the FROM items is what the analysis says
+  if (subqueried && named.some((q) => q.listSubLinks !== holdsSubLink(listed0))) return null;
+  if (items.length < (subqueried ? 1 : 2)) return null;
   const aliases = items.map(aliasOfItem);
   if (new Set(aliases).size !== aliases.length) return null;
   const relation = query.items;
@@ -906,7 +1002,9 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   const carried = listed.filter((r, i) => r.kind === "derived" && sides[i] === null);
   if (listed.some((r) => r.kind === "derived" && new Set(r.columns.map((c) => c.toLowerCase())).size !== r.columns.length)) return null;
   const tablesAlone = listed.every((r) => r.kind === "table");
-  const outputs = writtenOut(s.targetList as AstNode[], listed, tablesAlone);
+  // a subquery reads a carried item's columns by the names inside it, which the fetch has not
+  if (subLinks.some((a) => { const i = aliases.indexOf(a); return i < 0 || (listed[i]!.kind === "derived" && sides[i] === null); })) return null;
+  const outputs = writtenOut(s.targetList as AstNode[], listed, tablesAlone, subqueried ? subLinks : null);
   if (outputs === null) return null;
   const sorts = (s.sortClause as AstNode[] | undefined) ?? [];
   // the keys are read from the outputs as the join reads them: a bare merged column is the join's, inside
@@ -928,7 +1026,7 @@ function joinRows(select: AstNode, relations: Query[], wall: string | null): { s
   const written = writtenOut(outputs.list.map((t, i) => {
     const at = shown?.get(i);
     return { ResTarget: { ...bodyOf(t), val: at !== undefined ? ref(LATE, `__mason_o${at + 1}`) : mergedOver(bodyOf(t).val, merged, carriedMerge) } };
-  }), listed, tablesAlone);
+  }), listed, tablesAlone, subqueried ? subLinks : null);
   if (written === null) return null;
   const isFetched = (i: number): boolean => written.read.has(aliases[i]!) && (listed[i]!.kind !== "derived" || sides[i] !== null);
   const fetched = items.flatMap((n, i) => isFetched(i) ? [{ node: n, at: i, alias: aliases[i]!, id: listed[i]!.kind === "table" ? rowNumber(aliases[i]!) : ref(aliases[i]!, ROW_ID) }] : []);
