@@ -180,6 +180,28 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   // a prepared statement Parsed once and Executed twice, with other values: the filter is in its plan both times
   { name: "a prepared statement executed twice", sql: "SELECT count(*), sum(amount) FROM shop.orders WHERE placed_on >= $1::date", prepared: ["2026-02-01", "2026-03-15"] },
   { name: "information_schema of a filtered table", sql: "SELECT column_name::text FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'customers' ORDER BY ordinal_position" },
+  // issue 134, step 4: a top N over a role's filtered reads chooses its rows by row number behind the wall and fetches
+  // them through the same filtered read (src/duck/late.ts), each join kind and FROM item, with a list that computes
+  { name: "top N, filtered: inner join, a computed list, OFFSET", sql: "SELECT o.id, o.status, c.name, upper(c.name) AS u FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY o.id LIMIT 6 OFFSET 2" },
+  { name: "top N, filtered: LEFT JOIN", sql: "SELECT c.id, c.name, o.id AS oid, o.amount * 2 AS twice FROM shop.customers c LEFT JOIN shop.orders o ON o.customer_id = c.id ORDER BY c.id, o.id NULLS FIRST LIMIT 8" },
+  { name: "top N, filtered: RIGHT JOIN", sql: "SELECT o.id, c.name, length(c.name) AS n FROM shop.customers c RIGHT JOIN shop.orders o ON o.customer_id = c.id ORDER BY o.id DESC LIMIT 6" },
+  { name: "top N, filtered: FULL JOIN", sql: "SELECT c.id AS cid, o.id AS oid, coalesce(c.name, 'none') AS name FROM shop.customers c FULL JOIN shop.orders o ON o.customer_id = c.id ORDER BY o.id NULLS FIRST, c.id NULLS FIRST LIMIT 8" },
+  { name: "top N, filtered: comma join, through:", sql: "SELECT o.id, i.id AS iid, i.quantity * i.unit_price AS total FROM shop.orders o, shop.order_items i WHERE i.order_id = o.id ORDER BY i.id LIMIT 6" },
+  { name: "top N, filtered: a join that multiplies", sql: "SELECT a.id, b.id AS other, a.status || '/' || b.status AS pair FROM shop.orders a JOIN shop.orders b ON b.tenant_id = a.tenant_id ORDER BY a.id, b.id LIMIT 7" },
+  { name: "top N, filtered: a table joined to itself", sql: "SELECT a.id, b.amount, b.amount - a.amount AS diff FROM shop.orders a JOIN shop.orders b ON b.id = a.id + 1 ORDER BY a.id DESC LIMIT 5" },
+  { name: "top N, filtered: a derived side, computed and WHERE", sql: "SELECT c.name, d.id, d.doubled FROM shop.customers c JOIN (SELECT id, customer_id, amount * 2 AS doubled FROM shop.orders WHERE status IS NOT NULL) d ON d.customer_id = c.id ORDER BY d.id LIMIT 6" },
+  { name: "top N, filtered: a nullable derived side's constant", sql: "SELECT c.id, d.one FROM shop.customers c LEFT JOIN (SELECT customer_id, 1 AS one FROM shop.orders WHERE amount > 900) d ON d.customer_id = c.id ORDER BY c.id, d.one NULLS FIRST LIMIT 10" },
+  { name: "top N, filtered: a view joined", sql: "SELECT p.id, p.amount, c.name FROM shop.paid_orders p JOIN shop.customers c ON c.id = p.customer_id ORDER BY p.id LIMIT 6" },
+  { name: "top N, filtered: a WITH query joined", sql: "WITH w AS (SELECT id, customer_id, status FROM shop.orders WHERE amount > 100) SELECT w.id, upper(w.status) AS s, c.name FROM w JOIN shop.customers c ON c.id = w.customer_id ORDER BY w.id LIMIT 6" },
+  { name: "top N, filtered: a wrapper of a join", sql: "SELECT * FROM (SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id) t ORDER BY id LIMIT 5" },
+  { name: "top N, filtered: USING", sql: "SELECT id, o.status, i.sku FROM shop.orders o JOIN (SELECT order_id AS id, sku FROM shop.order_items) i USING (id) ORDER BY id, i.sku LIMIT 6" },
+  { name: "top N, filtered: through: joined to its parent", sql: "SELECT i.id, i.sku, o.status FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id ORDER BY i.id DESC LIMIT 5" },
+  { name: "top N, filtered: a grouped view ordered by its output name", sql: "SELECT g.s, g.n, c.name FROM (SELECT customer_id AS s, count(*) AS n FROM shop.orders GROUP BY customer_id) g JOIN shop.customers c ON c.id = g.s ORDER BY s LIMIT 5" },
+  { name: "top N, filtered: the nulls idiom", sql: "SELECT o.id, o.status, c.name FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id ORDER BY o.status IS NULL, o.status DESC, o.id LIMIT 6" },
+  { name: "top N, filtered: a C collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name COLLATE \"C\" DESC, o.id LIMIT 5" },
+  { name: "top N, filtered: an ICU collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name COLLATE \"und-x-icu\", o.id LIMIT 5" },
+  { name: "top N, filtered: the database's collation", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id ORDER BY c.name, o.id LIMIT 5" },
+  { name: "top N, filtered: a prepared statement executed twice", sql: "SELECT o.id, c.name FROM shop.orders o JOIN shop.customers c ON c.id = o.customer_id WHERE o.amount > $1 ORDER BY o.id LIMIT 4", prepared: ["100", "500"] },
 ];
 
 /** raises on the value hidden rows hold, every hundredth of them; 1 on every visible row */
@@ -212,6 +234,13 @@ export const BARRIER_SHAPES: ReadonlyArray<{ name: string; sql: string }> = [
   { name: "barrier: two filtered tables", sql: `SELECT count(*) FROM shop.invoices o JOIN shop.invoice_lines i ON i.invoice_id = o.id WHERE ${R} > 0 AND ${Q} > 0` },
   { name: "barrier: a table read twice", sql: `SELECT count(*) FROM shop.invoices a JOIN shop.invoices b ON a.id = b.id WHERE ${RAISES("a.marker")} > 0 AND ${RAISES("b.marker")} > 0` },
   { name: "barrier: UNION ALL branches", sql: `SELECT count(*) FROM (SELECT id FROM shop.invoices WHERE ${R} > 0 UNION ALL SELECT id FROM shop.invoice_lines WHERE ${Q} > 0) u` },
+  // issue 134, step 4: a top N's list over filtered reads, fetched through them (src/duck/late.ts): it never meets a hidden
+  // row. Sorted by id ascending, so the open user's first row raises on both
+  { name: "barrier: a top N's list, two filtered tables", sql: `SELECT o.id, ${R} AS r, ${Q} AS q FROM shop.invoices o JOIN shop.invoice_lines i ON i.invoice_id = o.id ORDER BY o.id LIMIT 5` },
+  { name: "barrier: a top N's list, LEFT JOIN", sql: `SELECT o.id, ${R} AS r, i.qty FROM shop.invoices o LEFT JOIN shop.invoice_lines i ON i.invoice_id = o.id ORDER BY o.id LIMIT 5` },
+  { name: "barrier: a top N's list, a view joined", sql: `SELECT m.id, ${R} AS r FROM shop.marked_invoices m JOIN shop.invoice_lines i ON i.invoice_id = m.id ORDER BY m.id LIMIT 4` },
+  { name: "barrier: a top N's list, a derived side's column", sql: `SELECT d.id, d.x, i.qty FROM (SELECT id, ${R} AS x FROM shop.invoices) d JOIN shop.invoice_lines i ON i.invoice_id = d.id ORDER BY d.id LIMIT 4` },
+  { name: "barrier: a top N's list, the statistics wall's shape", sql: `SELECT o.id, ${R} AS r FROM shop.invoices o JOIN shop.invoice_lines i ON i.invoice_id = o.id WHERE o.marker > 98 ORDER BY o.id LIMIT 3` },
 ];
 
 /** an enum attribute, scalar and list, and <> ALL over an integer list, one predicate: `tiers` reads shop.accounts alone */
@@ -231,4 +260,6 @@ export const HIDDEN_SHAPES: ReadonlyArray<{ name: string; sql: string }> = [
   { name: "hidden: SELECT * sorted by a number, refused alike", sql: "SELECT * FROM shop.customers ORDER BY 3, 1" },
   { name: "hidden: SELECT * sorted by a bare name, refused alike", sql: "SELECT * FROM shop.customers ORDER BY name, id" },
   { name: "hidden: a table the role lacks", sql: "SELECT count(*) FROM shop.orders" },
+  { name: "hidden: a top N of a table joined to itself", sql: "SELECT a.id, b.name, upper(b.name) AS u FROM shop.customers a JOIN shop.customers b ON b.id = a.id ORDER BY a.id LIMIT 5" },
+  { name: "hidden: a top N's * of a table joined to itself, refused alike", sql: "SELECT a.*, b.id FROM shop.customers a JOIN shop.customers b ON b.id = a.id ORDER BY 2 LIMIT 3" },
 ];

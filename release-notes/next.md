@@ -65,8 +65,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   keep 100 rows**: seconds and gigabytes of spill are now a fraction of a second and none, and such a statement that failed
   for memory now answers, whether the sort names the computed column by its alias, its position or its expression. A
   `NATURAL JOIN` of two tables with no column in common now answers as Postgres does, every row paired, where it was
-  refused ("No columns found to join on"). A statement of a role that filters rows
-  is read as before. Nothing to do on upgrade.
+  refused ("No columns found to join on"). Nothing to do on upgrade.
+- **A user whose role filters rows gets the same: a LIMIT over a join of filtered tables no longer reads every column of
+  every visible row to keep 100** (about 2 s now a tenth of that, on a 3.4 kB-a-row table filtered to a tenth). Which rows
+  the user sees is unchanged: the rows are chosen, and their columns read, through the role's filter alone, and the
+  statement's expressions still never run on a row the filter hides. Nothing to do on upgrade.
 - **A value that raises in such a derived list no longer fails the statement when the LIMIT leaves its row out**: Postgres
   raises there, sorting every row first. This is the decided difference `limit-errors` (docs/SQL-SUPPORT.md), wider.
 - **`#>> array['k']`, the form BI tools send for a JSON field, is as fast as `->> 'k'`**: on 20 M rows a `GROUP BY` of it

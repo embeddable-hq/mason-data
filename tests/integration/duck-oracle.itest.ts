@@ -724,7 +724,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
       for (const c of [source, mason]) { await c.connect(); clients.push(c); await c.query("SET TimeZone = 'UTC'"); }
       pair.set(u.key, { source, mason });
     }
-    let asked = 0, refusedAlike = 0;
+    let asked = 0, refusedAlike = 0, preparedNames = 0;
     const answers = new Map<string, Answer>();
     const hold = (n: string, sql: string, want: Answer, got: Answer): void => {
       asked++;
@@ -742,9 +742,11 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
         if (ONLY !== null && !ONLY.test(n)) continue;
         const prepared = q.prepared;
         if (prepared !== undefined) {
-          // Parsed once under the statement's name, Bound and Executed with each value in turn
+          // Parsed once under the statement's name, Bound and Executed with each value in turn. The name is the
+          // statement's own: node-pg ties a name to one SQL text per client, and refuses a second text under it
+          const statement = `rows_prepared_${preparedNames++}`;
           for (const [i, value] of prepared.entries()) {
-            const [want, got] = [await ask(source, q.sql, [value], "rows_prepared"), await ask(mason, q.sql, [value], "rows_prepared")];
+            const [want, got] = [await ask(source, q.sql, [value], statement), await ask(mason, q.sql, [value], statement)];
             hold(`${n} (execution ${i + 1})`, q.sql, want, got);
           }
           continue;

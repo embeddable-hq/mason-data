@@ -197,7 +197,7 @@ test("a statement's functions are asked of the catalog only where a limited quer
     const a = await analyze(catalog, sql, []);
     assert.ok(!("refused" in a), sql);
     const seen: number[][] = [];
-    await selectListAfterLimit({}, a.tree, async () => new Map(), { volatile: async (functions) => { seen.push(functions); return new Set(); }, tablesOnly: false });
+    await selectListAfterLimit({}, a.tree, async () => new Map(), { volatile: async (functions) => { seen.push(functions); return new Set(); }, wall: null });
     assert.equal(seen.length, 1, sql);
     return seen[0]!;
   };
