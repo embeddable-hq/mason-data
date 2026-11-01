@@ -1219,7 +1219,14 @@ ledger row moves with the swap, so the table and its row never disagree. `open` 
 the engine answers (`src/lib/pg-numeric.ts`), and a plain write would store DuckDB's double. A type joins `STORED_TYPES`
 when a statement over it is held to Postgres.
 
-**Not yet**, by stage: chains, numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
+**Chains (stage 2a).** A child built in the same run as its parent reads the parent's side table, never the served one:
+the child's plan names the parent, and the served parent is the OLD one until the swap, so the plan's tree is changed
+after the rewrite to read the side table under the parent's name (src/duck/plan.ts `swapRelations`, held by the same
+read-back as any plan). The whole chain is one transaction on the run's connection, so parent and child are one
+snapshot, and one swap transaction on one writer's turn. A parent's new definition swaps in alone: its children's plans
+need the catalog to say its columns first.
+
+**Not yet**, by stage: a child's target against its parent's, lag across a chain and `mason wait` (2b), numeric and user types, `latest`, `live`, by-group recomputes. The issue has the order.
 
 ## The Postgres API
 

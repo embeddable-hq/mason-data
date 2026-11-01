@@ -298,8 +298,8 @@ export class DuckStore {
     return {
       collation: c,
       open: () => this.runner(),
-      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants) =>
-        planDuck({ catalog, text, stmt, base, paramOids, searchPath, timeZone, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants }),
+      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants, relations) =>
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath, timeZone, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }) }),
       parameters: duckParameters,
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,

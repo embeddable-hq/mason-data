@@ -12,7 +12,7 @@ paths:
 # Generated tables (`mason/generated_tables/`, issue 124, docs/DESIGN.md "Generated tables")
 
 A file names a table and the SELECT that gives it; Mason keeps that table within `target_lag:` of its bases. `kind:
-scheduled` re-runs the whole SELECT. `kind: live` is refused until its write path exists.
+scheduled` re-runs the whole SELECT, and may read another generated table (a chain). `kind: live` is refused until its write path exists.
 
 - **A definition is held to the listener's catalog, as a statement is** (`planDefinition`): the same plan, so the same
   rewrite, the same allowlist and the same text order as a statement of that SQL. A plan is never stored: a run plans
@@ -45,6 +45,17 @@ scheduled` re-runs the whole SELECT. `kind: live` is refused until its write pat
   leaves the old table and at worst a side table, which `open` drops. Detector: a SIGKILL at each `GeneratedStep`.
 - **A failed run keeps the old table, says why and never quotes a row** (`withoutValues`), and waits the back-off a failed
   copy waits. The event is `generated_failed`.
+- **A chain is built parents first, at ONE snapshot, and swapped in on ONE writer's turn** (stage 2a). A run of a parent
+  builds every child after it in the same transaction (`unitOf`), each planned over its parents' SIDE tables by a change
+  to the plan's tree (src/duck/plan.ts `swapRelations`, which throws for a parent it could not swap): never the served
+  parent, which is the old one until the swap. A child that comes due while a parent has changes not in it hands its
+  run to that parent (`rootOf`). A new definition of a parent swaps in alone and marks its children, whose plans need
+  the catalog to say its columns first. A child of a parent refused or failed is not run, and says why in `waitingFor`
+  (`blocker`); a child that fails is taken out of its parent's run, which goes on without it. Detector: the chain tests
+  of tests/duck-generated.test.ts, and the itest's children held to Postgres over the parent's view.
+- **A cycle is refused by name, with the tables in it**: from the SQL's names when the folder is read (`readsByName`,
+  `findCycles`), else from what the plan reads at the check (`cycleOf`). A refused table keeps serving what it was built
+  from, as any refusal does.
 - **A file's name is its table.** A name a synced table holds is refused, and the synced table wins the catalog
   (`served`, `names`) and the table: what was deployed under that name is let go with its ledger row (`release`), and
   nothing is built or swapped over it (`buildable`).
