@@ -52,8 +52,9 @@ export const LATEST_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "latest: a group all NULL", sql: "SELECT latest(b ORDER BY a, id), latest(b ORDER BY a DESC, id) FROM latest_t WHERE g = 3" },
   { name: "latest: DISTINCT", sql: "SELECT latest(DISTINCT b ORDER BY b) FROM latest_t" },
   // and a numeric whose rows' scales differ (a coalesce or a CASE of n and a literal), at the picked row's scale: 0
-  // where the literal 0 was taken, never n's 0.00 (PR 274's review, round 1), in both rewrites
-  { name: "latest: wrapped (* 2, coalesce, round), and of a coalesce or a CASE over a literal", sql: "SELECT g, latest(n ORDER BY a, id) * 2, coalesce(latest(b ORDER BY a DESC, id), 0), round(latest(n ORDER BY ts, id), 1), latest(coalesce(n, 0) ORDER BY a, id), latest(CASE WHEN ok THEN n ELSE 0 END ORDER BY a, id), latest(coalesce(n, 1.5) ORDER BY a DESC, id) FROM latest_t GROUP BY g ORDER BY g" },
+  // where the literal 0 was taken, never n's 0.00 (PR 274's review, round 1), in both rewrites; NULL where a FILTER
+  // keeps no row of a group (g 3), never the coalesce of no row's n
+  { name: "latest: wrapped (* 2, coalesce, round), and of a coalesce or a CASE over a literal", sql: "SELECT g, latest(n ORDER BY a, id) * 2, coalesce(latest(b ORDER BY a DESC, id), 0), round(latest(n ORDER BY ts, id), 1), latest(coalesce(n, 0) ORDER BY a, id), latest(CASE WHEN ok THEN n ELSE 0 END ORDER BY a, id), latest(coalesce(n, 1.5) ORDER BY a DESC, id), latest(coalesce(n, 0) ORDER BY a, id) FILTER (WHERE ok) FROM latest_t GROUP BY g ORDER BY g" },
   { name: "latest: a scalar subquery", sql: "SELECT o.g, (SELECT latest(b ORDER BY a, id) FROM latest_t i WHERE i.g = o.g) FROM latest_g o ORDER BY o.g" },
   { name: "latest: each operand, then divided (latest-computed-numeric's way out)", sql: "SELECT g, latest(n ORDER BY a, id) / latest(3 ORDER BY a, id) FROM latest_t GROUP BY g ORDER BY g" },
 ];

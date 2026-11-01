@@ -2450,7 +2450,16 @@ class Rewriter {
               return call;
             };
             const built = this.exactOf(args[0]!, (m, conv) => cell(picked(m), conv));
-            return built === null ? asCell() : numeric(built.p);
+            if (built === null) return asCell();
+            // no row (an empty group, or none its FILTER keeps) is latest's NULL, where the program over the picked
+            // operands' NULLs need not be (coalesce(NULL, 0) is 0): the program only where a row was aggregated
+            const rows: AstNode = { FuncCall: { funcname: [S("count")], agg_star: true, ...(b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) }) } };
+            this.synthetic.set(bodyOf(rows), { node: "AGGREF", type: INT8, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
+              levelsUp: null, datum: null, qualifier: null, renamed: null });
+            const any = caseWhen([[op(">", rows, intConst(0)), intConst(0)]], null);
+            this.synthetic.set(bodyOf(any), { node: "CASEEXPR", type: INT4, typmod: -1, args: [], oid: null, format: null, collation: 0, inputCollation: 0,
+              levelsUp: null, datum: null, qualifier: null, renamed: null });
+            return numeric({ op: "pick", index: cell(any), args: [built.p] });
           }
           default: return asCell();
         }

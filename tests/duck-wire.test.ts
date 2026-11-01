@@ -1943,6 +1943,9 @@ test("latest(x ORDER BY …) is the x of the row that sorts last, by Postgres's 
       ["SELECT latest(coalesce(CASE WHEN qty > 2 THEN amount END, 1.5) ORDER BY id DESC), latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY created_at DESC, id) FROM orders", sorted],
       ["SELECT latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY id) FILTER (WHERE status = 'paid'), latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id) * 2 FROM orders", tuple],
       ["SELECT * FROM (SELECT status, latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY qty DESC, id) AS l FROM orders GROUP BY 1) q ORDER BY status", sorted],
+      // no row (none at all, or none a group's FILTER keeps) is NULL, never the coalesce of no row's operands
+      ["SELECT latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id) FROM orders WHERE false", tuple],
+      ["SELECT status, latest(coalesce(CASE WHEN qty > 1 THEN amount END, 0) ORDER BY id DESC) FILTER (WHERE qty > 2) FROM orders GROUP BY 1 ORDER BY 1", sorted],
     ];
     // of ties the keys leave open, any tied row's value, at that row's scale (ids 1 and 2 are both 'paid')
     assert.ok(["120.00", "0"].includes(String((await answer(c, "SELECT latest(CASE WHEN qty > 1 THEN amount ELSE 0 END ORDER BY status) FROM orders WHERE status = 'paid'")).rows[0]![0])));
