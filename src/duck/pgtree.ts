@@ -585,6 +585,25 @@ export function joinsUsing(tree: TreeValue, types: ReadonlySet<number>): boolean
   return visit(tree);
 }
 
+/**
+ * The analysed expression of each output column, in order (resjunk ones left out): what computes its value, every node
+ * with the type Postgres gave it. A column read whole from a FROM subquery (a generated table's `order_by:` shell,
+ * `SELECT * FROM (…) AS s ORDER BY …`) is followed into that subquery's own expression. Null for no query.
+ */
+export function outputExpressions(tree: TreeValue): Array<TreeNode | null> | null {
+  if (!isNode(tree) || tree._node !== "QUERY" || !Array.isArray(tree.targetList)) return null;
+  const follow = (q: TreeNode, e: TreeNode): TreeNode => {
+    if (e._node !== "VAR" || (num(e.varlevelsup ?? null) ?? 0) !== 0 || !Array.isArray(q.rtable)) return e;
+    const rte = q.rtable[(num(e.varno ?? null) ?? 0) - 1];
+    if (rte === undefined || !isNode(rte) || num(rte.rtekind ?? null) !== RTE_SUBQUERY || !isNode(rte.subquery ?? null)) return e;
+    const sub = rte.subquery as TreeNode, attno = num(e.varattno ?? null);
+    const entry = Array.isArray(sub.targetList) ? sub.targetList.find((t) => isNode(t) && num(t.resno ?? null) === attno) : undefined;
+    return entry !== undefined && isNode(entry) && isNode(entry.expr ?? null) ? follow(sub, entry.expr as TreeNode) : e;
+  };
+  return tree.targetList.filter((e): e is TreeNode => isNode(e) && e.resjunk !== "true").map((e) => isNode(e.expr ?? null) ? follow(tree, e.expr as TreeNode) : null);
+}
+const RTE_SUBQUERY = 1;
+
 /** The analysed query's output columns, in order (resjunk ones, which a sort may add, left out): their types. */
 export function outputTypes(tree: TreeValue): Array<{ name: string | null; type: number; typmod: number }> | null {
   if (!isNode(tree) || tree._node !== "QUERY" || !Array.isArray(tree.targetList)) return null;

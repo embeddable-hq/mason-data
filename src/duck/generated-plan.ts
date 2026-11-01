@@ -27,6 +27,7 @@ import { treeDifference } from "./rewrite.ts";
 import { StatementError, type DuckPlan } from "./statement.ts";
 import type { NumericProgram } from "../lib/pg-numeric.ts";
 import type { CellConv } from "./types.ts";
+import { exprType, type TreeNode, type TreeValue } from "./pgtree.ts";
 
 /** A refusal of a generated table: its key in the file (null: the file itself), what is wrong, why, and the ways out. */
 export interface GeneratedRefusal { key: string | null; message: string; why: string | null; options: string[] }
@@ -60,82 +61,157 @@ export interface DefinitionPlan {
   /** each numeric column computed after the engine's answer (`DuckPlan.exact`): its `expr` is written over the engine
    *  types the plan's SQL has (`storedColumns`), at the check where a `describe` is given and at the write */
   numerics: Array<{ column: number; program: NumericProgram; cells: readonly CellConv[] }>;
-  /** each output column's FORM, carried up from the node of its SQL the engine can't store through every wrapper over it
-   *  (`formsOf`), else null: what a refusal's reason and way out are said from wherever the engine computes the value */
+  /** each output column's FORM, read from its ANALYSED expression by the type Postgres gave each node and carried up
+   *  through every wrapper over it, with its way out in the user's own expression (`formsOf`), else null: what a
+   *  refusal's reason and way out are said from wherever the engine computes the value */
   forms: Array<Form | null>;
 }
 
 /**
- * WHAT A NUMERIC IS, AS WRITTEN: the node of a column's SQL whose value the engine computes and Postgres computes
- * exactly (a variance; sqrt, exp, ln, log or power, at decimals picked per value; a JSON number's text with no scale; a
- * division; a cast from a double), carried up through every node over it: an operator, a coalesce, a round, a cast, an
- * aggregate. `fn` and `args` are the user's own function, `fixed` that a round, a trunc, floor, ceil or a typmod is over
- * it, `agg` the aggregate over it (`max`), so the way out is written in the user's own words.
+ * WHAT A NUMERIC IS, AS POSTGRES TYPES IT: the node of a column's ANALYSED expression (`DuckPlan.outputs`, every node with
+ * the type Postgres gave it, src/duck/pgtree.ts) whose value the engine can't store, carried up through every node over
+ * it. The TYPE decides: a node Postgres types as a double is a double whatever its kind (`sqrt(float8)`, `avg(float8)`,
+ * `float8 / n`, `coalesce(numeric, float8)`), and a numeric cast from one is "double"; only a node Postgres types as an
+ * exact numeric over exact inputs is said by its own kind (a variance; sqrt, exp, ln, log or power; avg or `/`; a text
+ * read as a numeric). A name never decides a type here: it only chooses the words, once the type has said what the value
+ * is (`fn` the user's own function, `fixed` that a round, a trunc, floor, ceil or a typmod is over it, `agg` the aggregate
+ * over it). `at` is the node's offset in the statement's text, where the way out is written (`wayOut`).
  */
-export type Form = { why: "variance" | "per-value" | "text" | "divides" | "double"; fn: string; args: number; fixed: boolean; agg: string | null };
-/** a form still being made (a double, a `->>`'s text) that only a cast to numeric over it makes one */
-type Partial = { why: "float" | "json" | "text-typmod" };
-type Seen = Form | Partial;
+export type Form = { why: "variance" | "per-value" | "text" | "divides" | "double"; fn: string; fixed: boolean; agg: string | null; at: number; way: string | null };
+type Seen = Form | "double" | null;
 
 const PER_VALUE = new Set(["sqrt", "exp", "ln", "log", "log10", "power", "pow"]);
 const FIXES = new Set(["round", "trunc", "floor", "ceil", "ceiling"]);
 const AGGREGATES = new Set(["sum", "min", "max"]);
+const DOUBLES = new Set([700, 701]);
+const TEXTS = new Set([25, 1042, 1043]);
 const rec = (v: unknown): Record<string, unknown> => typeof v === "object" && v !== null ? v as Record<string, unknown> : {};
 const lastName = (names: unknown): string => {
   const list = Array.isArray(names) ? names as unknown[] : [];
   const s = rec(rec(list[list.length - 1]).String).sval;
   return typeof s === "string" ? s.toLowerCase() : "";
 };
-const isForm = (s: Seen | null): s is Form => s !== null && "fn" in s;
-/** the innermost form among nodes, else what is still being made */
-const among = (xs: readonly unknown[]): Seen | null => {
-  let partial: Seen | null = null;
-  for (const x of xs) { const s = seen(x); if (isForm(s)) return s; partial ??= s; }
-  return partial;
-};
-const form = (why: Form["why"], fn = "", args = 1): Form => ({ why, fn, args, fixed: false, agg: null });
+const isForm = (s: Seen): s is Form => s !== null && s !== "double";
+const isTree = (v: TreeValue | undefined): v is TreeNode => v !== undefined && v !== null && typeof v === "object" && !Array.isArray(v);
+const int = (v: TreeValue | undefined): number => typeof v === "string" && /^-?\d+$/.test(v) ? Number(v) : -1;
 
-/** the walk: each node passes up the form below it, marked by what it is (a round fixes it, an aggregate names itself) */
-function seen(v: unknown): Seen | null {
-  if (Array.isArray(v)) return among(v);
-  if (typeof v !== "object" || v === null) return null;
-  const node = v as Record<string, unknown>;
-  if ("FuncCall" in node) {
-    const call = rec(node.FuncCall), name = lastName(call.funcname), args = Array.isArray(call.args) ? call.args as unknown[] : [];
-    const below = among(args);
-    if (isForm(below)) return { ...below, fixed: below.fixed || FIXES.has(name), agg: below.agg ?? (AGGREGATES.has(name) ? name : null) };
-    if (VARIANCES.has(name)) return form("variance", name);
-    if (PER_VALUE.has(name)) return form("per-value", name, args.length);
-    if (name === "avg" || name === "div") return form("divides", name);
-    // a double through an aggregate is a double still; a JSON number's text with a scale is stored, and so through max
-    return below !== null && (below.why === "float" || (below.why === "text-typmod" && AGGREGATES.has(name))) ? below : null;
-  }
-  if ("A_Expr" in node) {
-    const e = rec(node.A_Expr), op = lastName(e.name), below = among([e.lexpr, e.rexpr]);
-    if (isForm(below)) return below;
-    if (op === "/") return form("divides", "/");
-    if (op === "->>") return { why: "json" };
-    return below?.why === "float" ? below : null;
-  }
-  if ("TypeCast" in node) {
-    const c = rec(node.TypeCast), type = rec(c.typeName), to = lastName(type.names);
-    const typmod = Array.isArray(type.typmods) && type.typmods.length > 0, below = seen(c.arg);
-    if (isForm(below)) return { ...below, fixed: below.fixed || (to === "numeric" && typmod) };
-    if (to === "float8" || to === "float4") return { why: "float" };
-    if (to !== "numeric") return null;
-    if (below?.why === "float") return { ...form("double"), fixed: typmod };
-    if (below?.why === "json") return typmod ? { why: "text-typmod" } : form("text");
-    return null;
-  }
-  return among(Object.values(node));
+/** the nodes whose values an analysed node computes from: a call's or an operator's arguments, an aggregate's, the
+ *  results of a CASE (never its conditions), a coercion's argument */
+function inputsOf(n: TreeNode): TreeNode[] {
+  if (n._node === "AGGREF") return (Array.isArray(n.args) ? n.args : []).map((e) => isTree(e) && isTree(e.expr) ? e.expr : null).filter(isTree);
+  if (n._node === "CASEEXPR") return [...(Array.isArray(n.args) ? n.args : []).map((w) => isTree(w) ? w.result : null), n.defresult].filter(isTree);
+  if (Array.isArray(n.args)) return n.args.filter(isTree);
+  return isTree(n.arg) ? [n.arg] : [];
 }
 
-/** each output column's form (`DefinitionPlan.forms`): null where it has none, or the columns are not one target each
- *  (a star, a set operation) */
-function formsOf(stmt: unknown, n: number): Array<Form | null> {
-  const targets = rec(rec(stmt).SelectStmt).targetList;
-  if (!Array.isArray(targets) || targets.length !== n) return Array<Form | null>(n).fill(null);
-  return targets.map((t) => { const s = seen(rec(rec(t).ResTarget).val); return isForm(s) ? s : null; });
+/** the walk: each node's type first (a double is a double, anything but a numeric carries nothing), then the form below
+ *  it passed up, marked by what is over it; `names` the functions' and operators' names, by `f<oid>` and `o<oid>` */
+function seen(n: TreeNode, names: ReadonlyMap<string, string>): Seen {
+  const t = exprType(n);
+  if (t !== null && DOUBLES.has(t.type)) return "double";
+  if (t === null || t.type !== NUMERIC_OID) return null;
+  const inputs = inputsOf(n), below = inputs.map((x) => seen(x, names));
+  const inner = below.find(isForm) ?? null, at = int(n.location);
+  const born = (why: Form["why"], fn: string): Form => ({ why, fn, fixed: false, agg: null, at, way: null });
+  switch (n._node) {
+    case "FUNCEXPR": {
+      const cast = int(n.funcformat) === 1 || int(n.funcformat) === 2, typmod = t.typmod >= 0;
+      if (cast) {
+        // a numeric cast from a double; a typmod over a text read as a numeric gives it its one scale
+        if (below[0] === "double") return { ...born("double", ""), fixed: typmod };
+        return inner === null || (inner.why === "text" && typmod) ? null : { ...inner, fixed: inner.fixed || typmod };
+      }
+      const name = names.get(`f${int(n.funcid)}`) ?? "";
+      if (inner !== null) return { ...inner, fixed: inner.fixed || FIXES.has(name) };
+      return PER_VALUE.has(name) ? born("per-value", name) : name === "div" ? born("divides", name) : null;
+    }
+    case "AGGREF": {
+      const name = names.get(`f${int(n.aggfnoid)}`) ?? "";
+      if (inner !== null) return { ...inner, agg: inner.agg ?? (AGGREGATES.has(name) ? name : null) };
+      return VARIANCES.has(name) ? born("variance", name) : name === "avg" ? born("divides", name) : null;
+    }
+    case "OPEXPR": return inner ?? (names.get(`o${int(n.opno)}`) === "/" ? born("divides", "/") : null);
+    // a text read as a numeric keeps the decimals each value's text has
+    case "COERCEVIAIO": return inputs[0] !== undefined && TEXTS.has(exprType(inputs[0])?.type ?? -1) ? born("text", "") : inner;
+    // a coalesce, a greatest or least, a CASE's results, a relabel: the value it takes
+    default: return inner;
+  }
+}
+
+/** the functions and operators of analysed expressions, as `f<oid>` and `o<oid>` */
+function oidsOf(v: TreeValue | undefined, out: { f: Set<number>; o: Set<number> }): void {
+  if (Array.isArray(v)) { for (const x of v) oidsOf(x, out); return; }
+  if (!isTree(v)) return;
+  if (v._node === "FUNCEXPR" && int(v.funcid) > 0) out.f.add(int(v.funcid));
+  if (v._node === "AGGREF" && int(v.aggfnoid) > 0) out.f.add(int(v.aggfnoid));
+  if (v._node === "OPEXPR" && int(v.opno) > 0) out.o.add(int(v.opno));
+  for (const [k, x] of Object.entries(v)) if (k !== "_node") oidsOf(x, out);
+}
+
+/** the user's own expression of each output column (the raw tree's targets: under an `order_by:`, the shell's subquery's) */
+function rawTargets(stmt: unknown): unknown[] | null {
+  const body = rec(rec(stmt).SelectStmt), targets = body.targetList;
+  if (!Array.isArray(targets)) return null;
+  const from = Array.isArray(body.fromClause) ? body.fromClause as unknown[] : [];
+  const sub = rec(rec(from[0]).RangeSubselect);
+  const star = rec(rec(rec(rec(targets[0]).ResTarget).val).ColumnRef).fields;
+  if (targets.length === 1 && from.length === 1 && rec(sub.alias).aliasname === SHELL_ALIAS && Array.isArray(star) && "A_Star" in rec(star[0])) return rawTargets(sub.subquery);
+  return targets.map((t) => rec(rec(t).ResTarget).val);
+}
+
+const DOUBLE_TYPE = { names: [{ String: { sval: "pg_catalog" } }, { String: { sval: "float8" } }], typemod: -1 };
+const isNumericCast = (n: unknown): boolean => "TypeCast" in rec(n) && lastName(rec(rec(rec(n).TypeCast).typeName).names) === "numeric";
+
+/**
+ * THE WAY OUT IN THE USER'S OWN WORDS: their expression with only the cast moved, every aggregate and wrapper kept. The
+ * value is cast to double precision at the node the engine can't store (`at`), or above the outermost round, trunc, floor,
+ * ceil or numeric cast over it (a round of a double takes no decimals, and a numeric cast would make it a numeric again):
+ * a numeric cast there is made the cast to double, and a numeric cast from a double, with nothing over it, is taken away.
+ * Null where the node is not found in the user's text.
+ */
+function wayOut(root: unknown, at: number): string | null {
+  const path: unknown[] = [];
+  const find = (v: unknown): boolean => {
+    if (Array.isArray(v)) return v.some(find);
+    if (typeof v !== "object" || v === null) return false;
+    const o = v as Record<string, unknown>;
+    const kind = ["FuncCall", "TypeCast", "A_Expr"].find((k) => k in o);
+    path.push(v);
+    if (kind !== undefined && rec(o[kind]).location === at) return true;
+    if (Object.values(o).some(find)) return true;
+    path.pop();
+    return false;
+  };
+  if (!find(root)) return null;
+  const nodes = path.filter((v) => !Array.isArray(v) && ["FuncCall", "TypeCast", "A_Expr", "CoalesceExpr", "MinMaxExpr", "CaseExpr"].some((k) => k in rec(v)));
+  const target = nodes[nodes.length - 1]!;
+  const fixer = nodes.slice(0, -1).find((n) => isNumericCast(n) || ("FuncCall" in rec(n) && FIXES.has(lastName(rec(rec(n).FuncCall).funcname))));
+  const asDouble = (n: unknown): unknown => ({ TypeCast: { arg: n, typeName: DOUBLE_TYPE } });
+  const [at2, replacement] = fixer !== undefined
+    ? [fixer, isNumericCast(fixer) ? { TypeCast: { ...rec(rec(fixer).TypeCast), typeName: DOUBLE_TYPE } } : asDouble(fixer)]
+    : [target, isNumericCast(target) ? rec(rec(target).TypeCast).arg : asDouble(target)];
+  const swap = (v: unknown): unknown => v === at2 ? replacement : Array.isArray(v) ? v.map(swap)
+    : typeof v === "object" && v !== null ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, swap(x)])) : v;
+  const text = deparseSync({ SelectStmt: { targetList: [{ ResTarget: { val: swap(root) } }], limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE" } } as unknown as Node, { pretty: false });
+  return text.replace(/^SELECT /, "");
+}
+
+/** each output column's form (`DefinitionPlan.forms`), read from its analysed expression, with its way out written over
+ *  the user's own: null where it has none */
+async function formsOf(rows: Planner["rows"], outputs: ReadonlyArray<TreeNode | null> | undefined, stmt: unknown, n: number): Promise<Array<Form | null>> {
+  if (outputs === undefined || outputs.length !== n) return Array<Form | null>(n).fill(null);
+  const oids = { f: new Set<number>(), o: new Set<number>() };
+  oidsOf(outputs as TreeValue[], oids);
+  const names = new Map<string, string>(oids.f.size + oids.o.size === 0 ? [] : (await rows(
+    `SELECT 'f' || oid::text, proname::text FROM pg_proc WHERE oid IN (${[0, ...oids.f].join(", ")}) UNION ALL SELECT 'o' || oid::text, oprname::text FROM pg_operator WHERE oid IN (${[0, ...oids.o].join(", ")})`))
+    .map(([k, name]) => [k!, name!] as const));
+  const raw = rawTargets(stmt);
+  return outputs.map((e, i) => {
+    const s = e === null ? null : seen(e, names);
+    if (!isForm(s)) return null;
+    const root = raw !== null && raw.length === n ? raw[i] : undefined;
+    return { ...s, way: root === undefined || s.at < 0 ? null : wayOut(root, s.at) };
+  });
 }
 
 /** What a plan is asked of: the listener's catalog (src/api/postgres/server.ts `planner`). */
@@ -456,7 +532,8 @@ function verdict(s: Stored): NotStored | null {
 function notStoredRefusal(name: string, n: NotStored, f: Form | null): GeneratedRefusal {
   const double = `or read it as ${name}::double precision if it need not be exact`;
   const atRead = "or compute it in the statement that reads the synced table";
-  const asDouble = (fn: string, args: string): string => `store it as a double if it need not be exact: ${fn}(${args})::double precision AS ${name}`;
+  // the user's own expression as a double (`Form.way`), or where it is not found in their text, the column read as one
+  const asDouble = (way: string | null): string => way === null ? double : `store it as a double if it need not be exact: ${way} AS ${name}`;
   // a value the engine computes (a variance, sqrt and its kin, a double) is its form's reason, whatever the program saw around it
   // (a sum of sqrt's texts is "the rows decide" to the program, and no scale given to its rows would store it)
   const why = n.why === "engine" ? f?.why ?? "engine" : n.why === "text" ? "text" : f !== null && (f.why === "variance" || f.why === "per-value" || f.why === "double") ? f.why : null;
@@ -464,15 +541,12 @@ function notStoredRefusal(name: string, n: NotStored, f: Form | null): Generated
     case "variance": return { key: "sql",
       message: `column ${name} is a ${f!.fn}, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double`,
       why: "A stored numeric keeps one scale for every row, and a stored double holds neither Postgres's digits nor its type.",
-      options: [asDouble(f!.fn, "x"), atRead] };
-    case "per-value": {
-      const args = f!.fn === "power" || f!.fn === "pow" ? "x, y" : f!.args === 2 ? "b, x" : "x";
-      return f!.fixed
-        ? { key: "sql", message: `column ${name} rounds or casts a numeric Postgres computes for each row at decimals it picks (${f!.fn}), which the engine computes as a double`, why: "Postgres's digits for it are worked out when a statement is answered, and a stored column skips that step.",
-          options: [asDouble(f!.fn, args), atRead] }
-        : { key: "sql", message: `column ${name} is a numeric whose decimals Postgres picks by the size of each value (${f!.fn})`, why: "A stored numeric keeps one scale for every row.",
-          options: [asDouble(f!.fn, args), atRead] };
-    }
+      options: [asDouble(f!.way), atRead] };
+    case "per-value": return f!.fixed
+      ? { key: "sql", message: `column ${name} rounds or casts a numeric Postgres computes for each row at decimals it picks (${f!.fn}), which the engine computes as a double`, why: "Postgres's digits for it are worked out when a statement is answered, and a stored column skips that step.",
+        options: [asDouble(f!.way), atRead] }
+      : { key: "sql", message: `column ${name} is a numeric whose decimals Postgres picks by the size of each value (${f!.fn})`, why: "A stored numeric keeps one scale for every row.",
+        options: [asDouble(f!.way), atRead] };
     case "text": {
       const agg = f?.why === "text" ? f.agg : null;
       return { key: "sql", message: `column ${name} is a numeric read from text (a JSON number's ->> cast to numeric), which keeps the decimals each value's text has`, why: "A stored numeric keeps one scale for every row.",
@@ -480,7 +554,7 @@ function notStoredRefusal(name: string, n: NotStored, f: Form | null): Generated
     }
     case "divides": return divides(name, double);
     case "double": return { key: "sql", message: `column ${name} is a numeric cast from a double precision value (x::float8::numeric)`, why: "Postgres writes such a numeric from the double's digits when a statement is answered, a step a stored column skips.",
-      options: [`read it as ${name}::double precision`, atRead] };
+      options: [f?.way === null || f?.way === undefined ? `read it as ${name}::double precision` : `store the double it is: ${f.way} AS ${name}`, atRead] };
     case "engine": return { key: "sql", message: `column ${name} is a numeric the engine computes as a double, where Postgres computes it exactly`, why: "A stored double would hold neither Postgres's digits nor its type.",
       options: [double, atRead] };
     case null: break;
@@ -613,7 +687,7 @@ export async function planDefinition(p: Planner, sql: string, orderBy: string | 
     numerics.push({ column: e.column, program: e.program, cells: e.cells });
   }
   if (refused.length > 0) return { refused };
-  const definition: DefinitionPlan = { plan, bases, warnings: statement.warnings, numerics, forms: formsOf(statement.stmt, fields.length),
+  const definition: DefinitionPlan = { plan, bases, warnings: statement.warnings, numerics, forms: await formsOf(p.rows, plan.outputs, statement.stmt, fields.length),
     columns: fields.map((f, i) => ({ name: f.name, type: typeNames.get(i)!, duck: numerics.some((n) => n.column === i) ? null : STORED_TYPES.get(f.oid) ?? null })) };
   if (describe === undefined || !definition.columns.some(isNumeric)) return { definition };
   const stored = storedColumns(definition, await describe(plan.sql.text));

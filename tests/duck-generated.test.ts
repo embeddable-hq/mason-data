@@ -17,6 +17,8 @@ import type { AddedTable } from "../src/duck/sync.ts";
 import * as generatedModule from "../src/duck/generated.ts";
 import { REVIEW_MS, withoutValues, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
 import { definitionStatement, refusalText, type GeneratedRefusal } from "../src/duck/generated-plan.ts";
+import { deparseSync } from "pgsql-deparser";
+import { parseSql } from "../src/api/postgres/parser.ts";
 import { parseLag, parseSync } from "../src/lib/table-sync.ts";
 import { generatedLines } from "../src/cli/commands.ts";
 import { guideText } from "../src/cli/guides.ts";
@@ -1077,10 +1079,10 @@ test("a numeric the types don't fix is refused with its own reason: a division, 
     says("wide", /^column total has 30 decimals, more than the 18 a stored numeric keeps$/, "round(");
     says("texts", /^column total sums values Postgres keeps at differing scales, so the rows decide its decimals$/, "::numeric(20,4)");
     says("larger", /^column top is whichever value a GREATEST, LEAST, COALESCE or CASE takes, at that value's own decimals, and its values have differing ones$/, "::numeric(12,2)");
-    says("spread", /^column sd is a stddev, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double$/, "stddev(x)::double precision");
-    says("varied", /^column v is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "variance(x)::double precision");
+    says("spread", /^column sd is a stddev, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double$/, "CAST(stddev(amount) AS double precision) AS sd");
+    says("varied", /^column v is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "CAST(variance(amount) AS double precision) AS v");
     for (const [name, col] of [["idwide", "a"], ["bigwide", "b"], ["timeswide", "m"], ["negwide", "n"]]) says(name!, new RegExp(`^column ${col} has 30 decimals, more than the 18`), "round(");
-    says("floated", /^column d is a numeric cast from a double precision value/, "::double precision");
+    says("floated", /^column d is a numeric cast from a double precision value/, "store the double it is: sum(n::float8) AS d");
     for (const name of Object.keys(refusedFiles)) assert.doesNotMatch(JSON.stringify(r(name).refusals), name === "mean" ? /no fixed scale|can't store exactly yet/ : /no fixed scale|can't store exactly yet|divides a numeric/, name);
     // each refusal's way out is stored: a sum of an unconstrained numeric's synced column is one cell at the scale its
     // DECIMAL holds; a stddev as a double; the 30 decimals rounded; a picked value given one scale (#205: `served`, not `built`)
@@ -1156,7 +1158,7 @@ test("a numeric the engine answers itself is held to its engine type: a variance
     for (const [name, col] of [["sb", "sb"], ["vw", "vw"]] as const) {
       const refusals = w.status(`public.${name}`).refusals;
       refusedAt(refusals, "sql", new RegExp(`^column ${col} is a (stddev|variance), which Postgres computes as an exact numeric at decimals it picks`));
-      assert.ok(refusals[0]!.options.some((o) => o.includes("::double precision")), JSON.stringify(refusals));
+      assert.ok(refusals[0]!.options.some((o) => o.includes("AS double precision) AS")), JSON.stringify(refusals));
     }
   });
 });
@@ -1232,12 +1234,12 @@ test("a numeric's refusal is said from its form: a JSON number's text, the varia
   const files: Record<string, [string, RegExp, string]> = {
     jsonbare: ["SELECT id, (payload ->> 'a')::numeric AS x FROM events", /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\), which keeps the decimals each value's text has/, "(x)::numeric(20,4) AS x"],
     jsonround: ["SELECT round((payload ->> 'a')::numeric, 2) AS x FROM events", /^column x is a numeric read from text/, "(x)::numeric(20,4) AS x"],
-    var1: ["SELECT variance(amount) AS x FROM ledger", /^column x is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "variance(x)::double precision AS x"],
-    var2: ["SELECT stddev(n) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
-    var3: ["SELECT stddev(big) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
-    var4: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
-    root: ["SELECT sqrt(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value \(sqrt\)/, "sqrt(x)::double precision AS x"],
-    rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks \(sqrt\)/, "sqrt(x)::double precision AS x"],
+    var1: ["SELECT variance(amount) AS x FROM ledger", /^column x is a variance, which Postgres computes as an exact numeric at decimals it picks by the size of each value, and the engine only as a double/, "CAST(variance(amount) AS double precision) AS x"],
+    var2: ["SELECT stddev(n) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "CAST(stddev(n) AS double precision) AS x"],
+    var3: ["SELECT stddev(big) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "CAST(stddev(big) AS double precision) AS x"],
+    var4: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "CAST(round(stddev(amount), 2) AS double precision) AS x"],
+    root: ["SELECT sqrt(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value \(sqrt\)/, "CAST(sqrt(abs(amount)) AS double precision) AS x"],
+    rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks \(sqrt\)/, "CAST(round(sqrt(abs(amount)), 4) AS double precision) AS x"],
   };
   // each way out, written over the same columns: stored
   const ways: Record<string, string> = {
@@ -1316,22 +1318,7 @@ const ROWS = /^column x sums values Postgres keeps at differing scales, so the r
 const PICKS = /^column x is whichever value a GREATEST, LEAST, COALESCE or CASE takes/;
 const DOUBLE = /^column x is a numeric cast from a double precision value/;
 const REASONS: Record<string, [string, RegExp, string]> = {
-  vbare: ["SELECT stddev(big) AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
-  vop: ["SELECT stddev(big) * 2 AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
-  vco: ["SELECT coalesce(stddev(big), 0) AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
-  vround: ["SELECT round(stddev(big), 2) AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
-  vtyp: ["SELECT stddev(big)::numeric(20,4) AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
-  vop2: ["SELECT var_pop(amount) + 1 AS x FROM ledger", VAR("var_pop"), "var_pop(x)::double precision AS x"],
-  vco2: ["SELECT coalesce(var_samp(amount), 0) AS x FROM ledger", VAR("var_samp"), "var_samp(x)::double precision AS x"],
-  ppow: ["SELECT power(amount, 2) AS x FROM ledger", PER("power"), "power(x, y)::double precision AS x"],
-  plog: ["SELECT log(10, abs(amount)) AS x FROM ledger", PER("log"), "log(b, x)::double precision AS x"],
-  pexp: ["SELECT exp(amount) AS x FROM ledger", PER("exp"), "exp(x)::double precision AS x"],
-  pop: ["SELECT ln(abs(amount)) + 1 AS x FROM ledger", PER("ln"), "ln(x)::double precision AS x"],
-  pco: ["SELECT coalesce(sqrt(abs(amount)), 0) AS x FROM ledger", PER("sqrt"), "sqrt(x)::double precision AS x"],
-  pround: ["SELECT round(log(abs(amount)), 2) AS x FROM ledger", PERFIX("log"), "log(x)::double precision AS x"],
-  ptyp: ["SELECT exp(amount)::numeric(10,2) AS x FROM ledger", PERFIX("exp"), "exp(x)::double precision AS x"],
-  psum: ["SELECT sum(sqrt(abs(amount))) AS x FROM ledger", PER("sqrt"), "sqrt(x)::double precision AS x"],
-  pmax: ["SELECT max(ln(abs(amount))) AS x FROM ledger", PER("ln"), "ln(x)::double precision AS x"],
+  // (the variance family, sqrt and its kin, and a cast from a double: round 6's table, which holds each way out whole)
   tbare: ["SELECT (payload ->> 'a')::numeric AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
   top: ["SELECT (payload ->> 'a')::numeric + 1 AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
   tco: ["SELECT coalesce((payload ->> 'a')::numeric, 0) AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
@@ -1357,26 +1344,15 @@ const REASONS: Record<string, [string, RegExp, string]> = {
   kbare: ["SELECT greatest(amount, 1) AS x FROM ledger", PICKS, "::numeric(12,2)"],
   kop: ["SELECT greatest(amount, 1) + 1 AS x FROM ledger", PICKS, "::numeric(12,2)"],
   kco: ["SELECT coalesce(amount, 0) AS x FROM ledger", PICKS, "::numeric(12,2)"],
-  fbare: ["SELECT amount::float8::numeric AS x FROM ledger", DOUBLE, "x::double precision"],
-  fop: ["SELECT amount::float8::numeric + 1 AS x FROM ledger", DOUBLE, "x::double precision"],
-  fco: ["SELECT coalesce(amount::float8::numeric, 0) AS x FROM ledger", DOUBLE, "x::double precision"],
-  fround: ["SELECT round(amount::float8::numeric, 2) AS x FROM ledger", DOUBLE, "x::double precision"],
-  ftyp: ["SELECT amount::float8::numeric(10,2) AS x FROM ledger", DOUBLE, "x::double precision"],
-  fsum: ["SELECT sum(n::float8)::numeric AS x FROM ledger", DOUBLE, "x::double precision"],
-  fmax: ["SELECT max(amount::float8::numeric) AS x FROM ledger", DOUBLE, "x::double precision"],
 };
 // each way out, written over the same columns as the user would: stored
 const WAYS_OUT: Record<string, string> = {
-  wvar: "SELECT stddev(big)::double precision * 2 AS x, coalesce(var_samp(amount)::double precision, 0) AS y, var_pop(amount)::double precision + 1 AS z FROM ledger",
-  wper: "SELECT power(amount, 2)::double precision AS a, log(10, abs(amount))::double precision AS b, exp(amount)::double precision AS c, ln(abs(amount))::double precision + 1 AS d FROM ledger",
-  wperagg: "SELECT sum(sqrt(abs(amount))::double precision) AS a, max(ln(abs(amount))::double precision) AS b FROM ledger",
   wtext: "SELECT max((payload ->> 'a')::numeric(20,4)) AS x, min((payload ->> 'a')::numeric(20,4)) AS y FROM events",
   wtextop: "SELECT id, (payload ->> 'a')::numeric(20,4) + 1 AS x, coalesce((payload ->> 'a')::numeric(20,4), 0.0000) AS y FROM events",
   wdiv: "SELECT sum(amount) AS total, count(amount) AS n FROM ledger",
   wscale: "SELECT round(sum(wide), 2) AS x FROM ledger",
   wrows: "SELECT sum((payload ->> 'a')::numeric(20,4)) + 1 AS x FROM events",
   wpicks: "SELECT greatest(amount, 1)::numeric(12,2) AS x FROM ledger",
-  wdouble: "SELECT sum(n::float8) AS x, max(amount::float8) AS y FROM ledger",
 };
 // every function a way out may name: one the user did not write is never named
 const FUNCTIONS = ["stddev", "var_pop", "var_samp", "variance", "sqrt", "exp", "ln", "log", "power", "max", "min"];
@@ -1398,8 +1374,6 @@ test("round 5: every reason against every wrapper says the form's reason and a w
     assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
     for (const name of Object.keys(WAYS_OUT)) await w.until(served(w.logged), `public.${name}`);
     assert.deepEqual((await typed(w, "SELECT x, y FROM wtext")).rows, [["2.0000", "1.0000"]]);
-    assert.deepEqual((await typed(w, "SELECT x, y, z FROM wvar")).fields.map(([, oid]) => oid), [701, 701, 701]);
-    assert.deepEqual((await typed(w, "SELECT a, b, c, d FROM wper")).fields.map(([, oid]) => oid), [701, 701, 701, 701]);
   });
 });
 
@@ -1422,5 +1396,99 @@ test("round 5: a run's failure is Postgres's error, by the wire's one mapping: a
       assert.match(error, words, name);
       assert.doesNotMatch(error, /Overflow in|INT64|INT32|TRY\(|error_on_division|mason\[|Invalid Input|Conversion Error|DECIMAL|__mason_|query/, `${name}: ${error}`);
     }
+  });
+});
+
+// review round 6 of PR 202, class A: the reason is what each node computes AS POSTGRES TYPES IT (a node over a double is a
+// double, whatever its kind; a name the statement resolves only to a double-returning function is one), and the way out
+// is the user's own expression with only the cast moved, every aggregate and wrapper kept: each case's reason, its way
+// out exactly (compared as Postgres reads it back), and each way out written as a table and held stored (round 5's
+// variance, sqrt-and-kin and double rows moved here, where the way out is held whole)
+const R6: Record<string, [string, RegExp, string | null]> = {
+  // a double carried up from below: whatever the node's own kind, Postgres computes a double, and the numeric is its cast
+  davg: ["avg(amount::float8)::numeric", DOUBLE, "avg(amount::float8)"],
+  ddiv: ["(amount::float8 / 2)::numeric", DOUBLE, "amount::float8 / 2"],
+  dsqrt: ["sqrt(amount::float8)::numeric", DOUBLE, "sqrt(amount::float8)"],
+  dresolved: ["sqrt(n)::numeric", DOUBLE, "sqrt(n)"],
+  dstddev: ["stddev(big)::float8::numeric", DOUBLE, "stddev(big)::float8"],
+  dvariance: ["variance(amount::float8)::numeric(20,4)", DOUBLE, "variance(amount::float8)"],
+  dround: ["round(exp(amount::float8)::numeric, 2)", DOUBLE, "round(exp(amount::float8)::numeric, 2)::double precision"],
+  dsum: ["sum(ln(abs(amount))::float8)::numeric", DOUBLE, "sum(ln(abs(amount))::float8)"],
+  dgreatest: ["greatest(amount / 3, amount::float8)::numeric", DOUBLE, "greatest(amount / 3, amount::float8)"],
+  dcoalesce: ["coalesce(stddev(big), max(amount)::float8)::numeric", DOUBLE, "coalesce(stddev(big), max(amount)::float8)"],
+  // a count over a double is a bigint, and what divides it is an exact division
+  dcount: ["count(amount::float8)::numeric / 3", DIV, null],
+  // sqrt and its kin over an exact numeric: the cast on the function, the aggregate and the wrapper kept
+  psum: ["sum(sqrt(abs(amount)))", PER("sqrt"), "sum(sqrt(abs(amount))::double precision)"],
+  pmax: ["max(ln(abs(amount)))", PER("ln"), "max(ln(abs(amount))::double precision)"],
+  psumround: ["round(sum(sqrt(abs(amount))), 2)", PERFIX("sqrt"), "round(sum(sqrt(abs(amount))), 2)::double precision"],
+  pbare: ["sqrt(abs(amount))", PER("sqrt"), "sqrt(abs(amount))::double precision"],
+  pexp: ["exp(amount)", PER("exp"), "exp(amount)::double precision"],
+  pop: ["ln(abs(amount)) + 1", PER("ln"), "ln(abs(amount))::double precision + 1"],
+  pco: ["coalesce(sqrt(abs(amount)), 0)", PER("sqrt"), "coalesce(sqrt(abs(amount))::double precision, 0)"],
+  ppow: ["power(amount, 2)", PER("power"), "power(amount, 2)::double precision"],
+  plog: ["log(10, abs(amount))", PER("log"), "log(10, abs(amount))::double precision"],
+  pround: ["round(log(abs(amount)), 2)", PERFIX("log"), "round(log(abs(amount)), 2)::double precision"],
+  ptyp: ["exp(amount)::numeric(10,2)", PERFIX("exp"), "exp(amount)::double precision"],
+  // the variance family over an exact numeric
+  vbare: ["stddev(big)", VAR("stddev"), "stddev(big)::double precision"],
+  vop: ["stddev(big) * 2", VAR("stddev"), "stddev(big)::double precision * 2"],
+  vco: ["coalesce(stddev(big), 0)", VAR("stddev"), "coalesce(stddev(big)::double precision, 0)"],
+  vround: ["round(stddev(big), 2)", VAR("stddev"), "round(stddev(big), 2)::double precision"],
+  vtyp: ["stddev(big)::numeric(20,4)", VAR("stddev"), "stddev(big)::double precision"],
+  vop2: ["var_pop(amount) + 1", VAR("var_pop"), "var_pop(amount)::double precision + 1"],
+  vco2: ["coalesce(var_samp(amount), 0)", VAR("var_samp"), "coalesce(var_samp(amount)::double precision, 0)"],
+  // a numeric cast from a double: the cast taken away, a round over it kept with the cast to double above it
+  fbare: ["amount::float8::numeric", DOUBLE, "amount::float8"],
+  fop: ["amount::float8::numeric + 1", DOUBLE, "amount::float8 + 1"],
+  fco: ["coalesce(amount::float8::numeric, 0)", DOUBLE, "coalesce(amount::float8, 0)"],
+  fround: ["round(amount::float8::numeric, 2)", DOUBLE, "round(amount::float8::numeric, 2)::double precision"],
+  ftyp: ["amount::float8::numeric(10,2)", DOUBLE, "amount::float8"],
+  fsum: ["sum(n::float8)::numeric", DOUBLE, "sum(n::float8)"],
+  fmax: ["max(amount::float8::numeric)", DOUBLE, "max(amount::float8)"],
+};
+/** an expression as Postgres reads it back: one spelling for `::float8`, `CAST(… AS double precision)` and the rest; a
+ *  text that is not SQL is itself, and so never equal to the way out */
+const asRead = async (expr: string): Promise<string> => {
+  try { return deparseSync((await parseSql(`SELECT ${expr} AS x`)).stmts![0]!.stmt!, { pretty: false }); }
+  catch { return `not SQL: ${expr}`; }
+};
+test("round 6: a numeric's reason is the type each node computes as Postgres types it, and its way out is the user's own expression, aggregate kept, and stores", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(R6)) w.write(name, `${lag}sql: SELECT ${sql} AS x FROM ledger\n`);
+    for (const name of Object.keys(R6)) await w.until((s) => s.state === "refused" || s.serving, `public.${name}`);
+    const wrong: string[] = [];
+    for (const [name, [sql, reason, way]] of Object.entries(R6)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      const said = refusals.map((r) => `${r.message} | ${r.options.join(" | ")}`).join(" || ");
+      const given = refusals[0]?.options.map((o) => /: (.+) AS x$/.exec(o)?.[1]).find((o) => o !== undefined);
+      const ok = refusals.length === 1 && reason.test(refusals[0]!.message)
+        && (way === null || (given !== undefined && await asRead(given) === await asRead(way)));
+      if (!ok) wrong.push(`${name}: ${sql}\n    ${said || "(not refused)"}`);
+    }
+    assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
+    // each way out, as the refusal gives it: stored, as a double
+    const ways = Object.entries(R6).filter(([, [, , way]]) => way !== null);
+    for (const [name, [, , way]] of ways) w.write(`w${name}`, `${lag}sql: SELECT ${way} AS x FROM ledger\n`);
+    for (const [name] of ways) await w.until(served(w.logged), `public.w${name}`);
+    for (const [name] of ways) assert.deepEqual((await typed(w, `SELECT x FROM w${name}`)).fields.map(([, oid]) => oid), [701], name);
+  });
+});
+
+// review round 6 of PR 202, class B: a numeric field overflow is ONE wording, Postgres's message and DETAIL, whichever path
+// raises it: the engine's DECIMAL cast, and a Mason function's error carried as mason[22003]
+test("round 6: a numeric field overflow says Postgres's DETAIL on every path: the engine's cast, and a cast a Mason function computes", async () => {
+  const words = /^numeric field overflow \(SQLSTATE 22003\)\. A field with precision 10, scale 3 must round to an absolute value less than 10\^7\. Give the value/;
+  const files: Record<string, string> = {
+    oengine: "SELECT (id::text || '00000000000')::numeric(10,3) AS x FROM ledger",
+    ofunction: "SELECT (id::text || '00000000000')::numeric(10,3)::double precision AS x FROM ledger",
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, sql] of Object.entries(files)) w.write(name, `kind: scheduled\ntarget_lag: 1h\nsql: ${sql}\n`);
+    for (const name of Object.keys(files)) await w.until((s) => s.state === "failed", `public.${name}`);
+    for (const name of Object.keys(files)) assert.match(w.status(`public.${name}`).error ?? "", words, name);
   });
 });

@@ -469,7 +469,7 @@ function scalar(conn: DuckDBConnection, name: string, params: Array<typeof VARCH
       } catch (e) {
         // Postgres's own message where the function raises one (src/duck/store.ts postgresWording reads the prefix), and
         // its SQLSTATE where the function says it
-        info.setError(e instanceof PgEvalError ? `mason[${e.code}]: ${e.message}` : `mason: ${(e as Error).message}`);
+        info.setError(raised(e));
       }
     },
   }));
@@ -559,7 +559,7 @@ function viaPostgres(conn: DuckDBConnection, kind: PgKind): void {
         out.flush();
       } catch (e) {
         // Postgres's SQLSTATE and words (src/duck/store.ts postgresWording reads them back)
-        info.setError(e instanceof PgEvalError ? `mason[${e.code}]: ${e.message}` : `mason: ${(e as Error).message}`);
+        info.setError(raised(e));
       }
     },
   }));
@@ -616,6 +616,10 @@ export const TURN_FUNCTION = "__mason_turn";
  *  `duckSession`): set on a session's connection before each statement that finds them changed (src/duck/store.ts
  *  `settle`), read by the rewrite's `settingRead` (src/duck/rewrite.ts) */
 export const SETTINGS_VARIABLE = "__mason_settings";
+/** a Mason function's error as DuckDB carries it: Postgres's SQLSTATE, message and DETAIL where the function says them
+ *  (src/duck/store.ts postgresWording reads the prefix and the DETAIL's line), else its message */
+const raised = (e: unknown): string => e instanceof PgEvalError
+  ? `mason[${e.code}]: ${e.message}${e.detail === undefined ? "" : `\nDETAIL: ${e.detail}`}` : `mason: ${(e as Error).message}`;
 export const CANCELLED = "mason[57014]: canceling statement due to user request";
 /** how many vectors each function was called with (a call is a hop to the main thread): what a test or a measurement
  *  reads to know whether a statement reached a function at all (the rewrite answers a `->>` natively where it can) */
@@ -770,7 +774,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
       return q === 0 ? 0 : q;
     }
     try { return Number(numericText(div(parseNumeric(x), parseNumeric(y)))); }
-    catch (e) { if (e instanceof NumericError) throw new PgEvalError(e.sqlstate, e.message); throw e; }
+    catch (e) { if (e instanceof NumericError) throw new PgEvalError(e.sqlstate, e.message, e.detail); throw e; }
   });
   // a numeric Postgres's own function computed, summed (src/duck/rewrite.ts summed): numeric_out's text as two parts
   // DuckDB's DECIMAL(38,18) holds exactly — its integer digits and first 18 decimals (part 0), and its next 18 decimals
@@ -798,7 +802,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
   scalar(conn, "__mason_numeric_program", [], VARCHAR, ([program, ...cells]) => {
     const values = Object.fromEntries(cells.map((c, i) => [String(i), text(c)]));
     try { return evaluateText(JSON.parse(String(program)) as NumericProgram, values); }
-    catch (e) { if (e instanceof NumericError) throw new PgEvalError(e.sqlstate, e.message); throw e; }
+    catch (e) { if (e instanceof NumericError) throw new PgEvalError(e.sqlstate, e.message, e.detail); throw e; }
   }, { nulls: "pass", varargs: true });
   // the decimals of numeric_out's text: the value's display scale (`2.450` has 3)
   scalar(conn, "__mason_numeric_scale", [VARCHAR], INTEGER, ([t]) => { const at = String(t).indexOf("."); return at < 0 ? 0 : String(t).length - at - 1; });

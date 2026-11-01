@@ -33,7 +33,7 @@ import { dataRow } from "../api/postgres/protocol.ts";
 import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } from "./types.ts";
 import type { ExactColumn } from "./rewrite.ts";
 import { gapIn, gapMark, type GapId } from "./gaps.ts";
-import { cellsOf, evaluateText, NumericError } from "../lib/pg-numeric.ts";
+import { cellsOf, evaluateText, fieldOverflow, NumericError } from "../lib/pg-numeric.ts";
 import { explainJson, explainText, planNodes, profiled, qualifiedName, scannedTables, type Copy, type CopyFacts, type Explained, type PlanNode, type TableName } from "./explain.ts";
 import type { PlannedSql } from "./plan.ts";
 import * as fs from "node:fs";
@@ -426,8 +426,7 @@ function postgresWording(kind: string, message: string): { code: string; message
   // 12345 to DECIMAL(3,0)"); past the 38 digits the engine computes a numeric with, by an operation, a ROUND or a cast
   const typmod = /(?:Casting value "[^"]*" to type|Could not convert string ['"].*['"] to|^Could not cast value \S+ to) DECIMAL\((\d+),\s*(\d+)\)/.exec(message);
   if (typmod !== null && Number(typmod[1]) < 38) {
-    const [p, s] = [Number(typmod[1]), Number(typmod[2])];
-    return { code: "22003", message: "numeric field overflow", detail: `A field with precision ${p}, scale ${s} must round to an absolute value less than ${p === s ? "1" : `10^${p - s}`}.` };
+    return { code: "22003", ...fieldOverflow(Number(typmod[1]), Number(typmod[2])) };
   }
   if (typmod !== null || /Overflow in (?:\w+ )?(?:addition|subtraction|multiplication|negation|ROUND|cast)\b.*DECIMAL|Overflow in HUGEINT \w+|out of range for (?:the desired )?DECIMAL|Could not cast value .* to DECIMAL/i.test(message)) {
     return { code: "22003", message: "numeric field overflow", detail: "The value has more than the 38 digits Mason's engine computes a numeric with." };
@@ -439,8 +438,9 @@ function postgresWording(kind: string, message: string): { code: string; message
   }
   // a Mason function's own error (src/duck/functions.ts): Postgres's words after the prefix
   // Postgres's own error, from its own function (src/duck/pg-eval.ts): its SQLSTATE, said
-  const pg = /^mason\[([0-9A-Z]{5})\]: (.*)$/s.exec(message);
-  if (pg) return { code: pg[1]!, message: pg[2]! };
+  // (and its DETAIL on a line of its own, src/duck/functions.ts `raised`)
+  const pg = /^mason\[([0-9A-Z]{5})\]: (.*?)(?:\nDETAIL: (.*))?$/s.exec(message);
+  if (pg) return { code: pg[1]!, message: pg[2]!, ...(pg[3] === undefined ? {} : { detail: pg[3] }) };
   const own = /^mason: (.*)$/s.exec(message);
   if (own) return { code: /^cannot |argument list|key must not be null/.test(own[1]!) ? "22023" : /^invalid input syntax/.test(own[1]!) ? "22P02" : / is not supported| not supported for type /.test(own[1]!) ? "0A000" : "XX000", message: own[1]! };
   // the rewrite's own error() calls carry Postgres's message (src/duck/rewrite.ts)
@@ -930,7 +930,7 @@ function exactRows(computed: ComputedColumns, rows: DuckDBValue[][], base: numbe
     for (const e of computed.columns) {
       try { out[e.column] = evaluateText(e.program, values); }
       catch (err) {
-        if (err instanceof NumericError) throw new StatementError({ code: err.sqlstate, message: err.message }, sql, err.gap);
+        if (err instanceof NumericError) throw new StatementError({ code: err.sqlstate, message: err.message, ...(err.detail === undefined ? {} : { detail: err.detail }) }, sql, err.gap);
         throw err;
       }
     }

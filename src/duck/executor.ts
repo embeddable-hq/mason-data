@@ -145,12 +145,12 @@ export function valueFromClone(v: DuckDBValue, t: DuckDBType): DuckDBValue {
 /** what the worker answers a failure with: the error's own class where the listener tells it apart (a StatementError's
  *  fields, an EncodeError's or a NumericError's code: src/api/postgres/server.ts pgErrorOf), else its message */
 export type WireError = { kind: "statement"; fields: StatementError["fields"]; sql: string; gap: StatementError["gap"] } | { kind: "encode"; message: string; code: string; gap: EncodeError["gap"] }
-  | { kind: "numeric"; message: string; sqlstate: string; gap: NumericError["gap"] } | { kind: "error"; message: string; name: string };
+  | { kind: "numeric"; message: string; sqlstate: string; gap: NumericError["gap"]; detail?: string } | { kind: "error"; message: string; name: string };
 
 export function wireError(e: unknown): WireError {
   if (e instanceof StatementError) return { kind: "statement", fields: e.fields, sql: e.sql, gap: e.gap };
   if (e instanceof EncodeError) return { kind: "encode", message: e.message, code: e.code, gap: e.gap };
-  if (e instanceof NumericError) return { kind: "numeric", message: e.message, sqlstate: e.sqlstate, gap: e.gap };
+  if (e instanceof NumericError) return { kind: "numeric", message: e.message, sqlstate: e.sqlstate, gap: e.gap, ...(e.detail === undefined ? {} : { detail: e.detail }) };
   return { kind: "error", message: e instanceof Error ? e.message : String(e), name: e instanceof Error ? e.name : "Error" };
 }
 export type Reply = { id: number; ok: true; value: unknown } | { id: number; ok: false; error: WireError } | { log: string } | { pong: true };
@@ -170,7 +170,7 @@ export const STOPPING: StatementError["fields"] = { code: "57P01", message: "ter
 const errorOf = (e: WireError): Error => {
   if (e.kind === "statement") return new StatementError(e.fields, e.sql, e.gap);
   if (e.kind === "encode") return new EncodeError(e.message, e.code, e.gap);
-  if (e.kind === "numeric") return new NumericError(e.message, e.sqlstate, e.gap);
+  if (e.kind === "numeric") return new NumericError(e.message, e.sqlstate, e.gap, e.detail);
   const err = new Error(e.message);
   err.name = e.name;
   return err;
