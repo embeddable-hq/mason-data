@@ -1198,7 +1198,7 @@ test("a numeric that overflows the stored numeric at the write fails naming its 
     await w.until((s) => s.state === "failed", "public.squares");
     const s = w.status("public.squares");
     assert.deepEqual(s.refusals, [], "data-dependent: a failure, not a refusal of the definition");
-    assert.match(s.error ?? "", /^a numeric it computes has more than the 38 digits a stored numeric holds\. Cast it to double precision if it need not be exact/);
+    assert.match(s.error ?? "", /^numeric field overflow \(SQLSTATE 22003\)\. The value has more than the 38 digits .* cast it to double precision if it need not be exact/);
     assert.ok(s.retryAt !== null, "run again on the back-off");
   });
 });
@@ -1236,8 +1236,8 @@ test("a numeric's refusal is said from its form: a JSON number's text, the varia
     var2: ["SELECT stddev(n) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
     var3: ["SELECT stddev(big) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
     var4: ["SELECT round(stddev(amount), 2) AS x FROM ledger", /^column x is a stddev, which Postgres computes as an exact numeric at decimals it picks/, "stddev(x)::double precision AS x"],
-    root: ["SELECT sqrt(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value \(sqrt, exp, ln, log or power\)/, "sqrt(x)::double precision AS x"],
-    rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks \(sqrt, exp, ln, log or power\)/, "sqrt(x)::double precision AS x"],
+    root: ["SELECT sqrt(abs(amount)) AS x FROM ledger", /^column x is a numeric whose decimals Postgres picks by the size of each value \(sqrt\)/, "sqrt(x)::double precision AS x"],
+    rootround: ["SELECT round(sqrt(abs(amount)), 4) AS x FROM ledger", /^column x rounds or casts a numeric Postgres computes for each row at decimals it picks \(sqrt\)/, "sqrt(x)::double precision AS x"],
   };
   // each way out, written over the same columns: stored
   const ways: Record<string, string> = {
@@ -1276,22 +1276,151 @@ test("a run's failure says a cast's overflow in the user's words, and no recorde
     'Conversion Error: Could not convert string "NaN" to DECIMAL(20,4)',
     "Conversion Error: Could not cast value 1e40 to DECIMAL(38,0)",
     "Binder Error: Referenced column __mason_cell_3 not found",
+    // review round 5: what is not a DECIMAL is said through the same one mapping
+    "Out of Range Error: Overflow in multiplication of INT64 (9223372036854775807 * 2)!",
+    "Invalid Input Error: Division by zero in expression (10 // 0). Use TRY(...) or SET error_on_division_by_zero",
+    'Invalid Input Error: mason[22P02]: invalid input syntax for type integer: "abc"',
   ];
   // read through the module, so the file loads where the function is missing and this test fails by name (fails-without)
-  const failureWords = (generatedModule as { failureWords?: (message: string) => string }).failureWords;
+  const failureWords = (generatedModule as { failureWords?: (error: unknown) => string }).failureWords;
   assert.ok(failureWords !== undefined, "the one function a run's failure is said through");
   for (const m of spellings) {
     const said = failureWords(m);
-    assert.doesNotMatch(said, /__mason_|DECIMAL|HUGEINT/, `${m} -> ${said}`);
+    assert.doesNotMatch(said, /__mason_|DECIMAL|HUGEINT|INT64|Overflow in|TRY\(|mason\[|Error:|abc/, `${m} -> ${said}`);
+    assert.match(said, /\(SQLSTATE [0-9A-Z]{5}\)/, `${m} -> ${said}`);
   }
-  assert.match(failureWords(spellings[0]!), /^a numeric it computes has more than the 3 digits before the point its numeric\(5,2\) holds \(Postgres: numeric field overflow\)/);
+  assert.match(failureWords(spellings[0]!), /^numeric field overflow \(SQLSTATE 22003\)\. A field with precision 5, scale 2 must round to an absolute value less than 10\^3\./);
   await overLedger({ nums: NUMS }, async (w, restarted) => {
     if (restarted) return;
     w.write("narrow", "kind: scheduled\ntarget_lag: 1h\nsql: SELECT big::numeric(5,2) AS c FROM ledger\n");
     await w.until((s) => s.state === "failed", "public.narrow");
     const s = w.status("public.narrow");
-    assert.match(s.error ?? "", /numeric\(5,2\) holds \(Postgres: numeric field overflow\)/);
+    assert.match(s.error ?? "", /^numeric field overflow \(SQLSTATE 22003\)\. A field with precision 5, scale 2 must round/);
     assert.doesNotMatch(s.error ?? "", /__mason_|DECIMAL/);
     assert.ok(!w.logged.some((l) => l.includes("public.narrow") && /__mason_/.test(l)), "the log names no hidden column");
+  });
+});
+
+// review round 5 of PR 202, class A: a refusal's reason and way out come from the form the walk carried up, through any
+// wrapper (an operator, a coalesce, a round or trunc, a cast with a typmod, an aggregate), never from the engine type,
+// the outermost node or a constant: every reason against every wrapper that reaches it, the way out naming the user's
+// own function, and each way out built and stored
+const VAR = (fn: string): RegExp => new RegExp(`^column x is a ${fn}, which Postgres computes as an exact numeric at decimals it picks`);
+const PER = (fn: string): RegExp => new RegExp(`^column x is a numeric whose decimals Postgres picks by the size of each value \\(${fn}\\)`);
+const PERFIX = (fn: string): RegExp => new RegExp(`^column x rounds or casts a numeric Postgres computes for each row at decimals it picks \\(${fn}\\)`);
+const TEXT = /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\)/;
+const DIV = /^column x divides a numeric, which the engine computes as a double$/;
+const SCALE = (n: number): RegExp => new RegExp(`^column x has ${n} decimals, more than the 18`);
+const HELD = (n: number): RegExp => new RegExp(`^column x is computed at ${n} decimals on the way to its own`);
+const ROWS = /^column x sums values Postgres keeps at differing scales, so the rows decide its decimals$/;
+const PICKS = /^column x is whichever value a GREATEST, LEAST, COALESCE or CASE takes/;
+const DOUBLE = /^column x is a numeric cast from a double precision value/;
+const REASONS: Record<string, [string, RegExp, string]> = {
+  vbare: ["SELECT stddev(big) AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
+  vop: ["SELECT stddev(big) * 2 AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
+  vco: ["SELECT coalesce(stddev(big), 0) AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
+  vround: ["SELECT round(stddev(big), 2) AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
+  vtyp: ["SELECT stddev(big)::numeric(20,4) AS x FROM ledger", VAR("stddev"), "stddev(x)::double precision AS x"],
+  vop2: ["SELECT var_pop(amount) + 1 AS x FROM ledger", VAR("var_pop"), "var_pop(x)::double precision AS x"],
+  vco2: ["SELECT coalesce(var_samp(amount), 0) AS x FROM ledger", VAR("var_samp"), "var_samp(x)::double precision AS x"],
+  ppow: ["SELECT power(amount, 2) AS x FROM ledger", PER("power"), "power(x, y)::double precision AS x"],
+  plog: ["SELECT log(10, abs(amount)) AS x FROM ledger", PER("log"), "log(b, x)::double precision AS x"],
+  pexp: ["SELECT exp(amount) AS x FROM ledger", PER("exp"), "exp(x)::double precision AS x"],
+  pop: ["SELECT ln(abs(amount)) + 1 AS x FROM ledger", PER("ln"), "ln(x)::double precision AS x"],
+  pco: ["SELECT coalesce(sqrt(abs(amount)), 0) AS x FROM ledger", PER("sqrt"), "sqrt(x)::double precision AS x"],
+  pround: ["SELECT round(log(abs(amount)), 2) AS x FROM ledger", PERFIX("log"), "log(x)::double precision AS x"],
+  ptyp: ["SELECT exp(amount)::numeric(10,2) AS x FROM ledger", PERFIX("exp"), "exp(x)::double precision AS x"],
+  psum: ["SELECT sum(sqrt(abs(amount))) AS x FROM ledger", PER("sqrt"), "sqrt(x)::double precision AS x"],
+  pmax: ["SELECT max(ln(abs(amount))) AS x FROM ledger", PER("ln"), "ln(x)::double precision AS x"],
+  tbare: ["SELECT (payload ->> 'a')::numeric AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
+  top: ["SELECT (payload ->> 'a')::numeric + 1 AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
+  tco: ["SELECT coalesce((payload ->> 'a')::numeric, 0) AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
+  tround: ["SELECT trunc((payload ->> 'a')::numeric, 2) AS x FROM events", TEXT, "(x)::numeric(20,4) AS x"],
+  tmax: ["SELECT max((payload ->> 'a')::numeric) AS x FROM events", TEXT, "max((x)::numeric(20,4)) AS x"],
+  tmin: ["SELECT min((payload ->> 'a')::numeric) AS x FROM events", TEXT, "min((x)::numeric(20,4)) AS x"],
+  tsum: ["SELECT sum((payload ->> 'a')::numeric) AS x FROM events", ROWS, "sum(x::numeric(20,4)) AS x"],
+  dbare: ["SELECT amount / 3 AS x FROM ledger", DIV, "count("],
+  dop: ["SELECT amount / 3 + 1 AS x FROM ledger", DIV, "count("],
+  dco: ["SELECT coalesce(amount / 3, 0) AS x FROM ledger", DIV, "count("],
+  dround: ["SELECT round(amount / 3, 2) AS x FROM ledger", DIV, "count("],
+  dtyp: ["SELECT (amount / 3)::numeric(10,2) AS x FROM ledger", DIV, "count("],
+  dsum: ["SELECT sum(amount / 3) AS x FROM ledger", DIV, "count("],
+  dmax: ["SELECT max(amount / 3) AS x FROM ledger", DIV, "count("],
+  davg: ["SELECT avg(amount) AS x FROM ledger", DIV, "count("],
+  sop: ["SELECT wide + 1 AS x FROM ledger", SCALE(30), "round("],
+  sco: ["SELECT coalesce(wide * 1, wide) AS x FROM ledger", SCALE(30), "round("],
+  styp: ["SELECT (wide + 1)::numeric(40,20) AS x FROM ledger", SCALE(20), "round("],
+  ssum: ["SELECT sum(wide) AS x FROM ledger", SCALE(30), "round("],
+  rop: ["SELECT sum((payload ->> 'a')::numeric) + 1 AS x FROM events", ROWS, "::numeric(20,4)"],
+  rco: ["SELECT coalesce(sum((payload ->> 'a')::numeric), 0) AS x FROM events", ROWS, "::numeric(20,4)"],
+  rround: ["SELECT round(sum((payload ->> 'a')::numeric), 2) AS x FROM events", HELD(36), "::numeric(20,4)"],
+  kbare: ["SELECT greatest(amount, 1) AS x FROM ledger", PICKS, "::numeric(12,2)"],
+  kop: ["SELECT greatest(amount, 1) + 1 AS x FROM ledger", PICKS, "::numeric(12,2)"],
+  kco: ["SELECT coalesce(amount, 0) AS x FROM ledger", PICKS, "::numeric(12,2)"],
+  fbare: ["SELECT amount::float8::numeric AS x FROM ledger", DOUBLE, "x::double precision"],
+  fop: ["SELECT amount::float8::numeric + 1 AS x FROM ledger", DOUBLE, "x::double precision"],
+  fco: ["SELECT coalesce(amount::float8::numeric, 0) AS x FROM ledger", DOUBLE, "x::double precision"],
+  fround: ["SELECT round(amount::float8::numeric, 2) AS x FROM ledger", DOUBLE, "x::double precision"],
+  ftyp: ["SELECT amount::float8::numeric(10,2) AS x FROM ledger", DOUBLE, "x::double precision"],
+  fsum: ["SELECT sum(n::float8)::numeric AS x FROM ledger", DOUBLE, "x::double precision"],
+  fmax: ["SELECT max(amount::float8::numeric) AS x FROM ledger", DOUBLE, "x::double precision"],
+};
+// each way out, written over the same columns as the user would: stored
+const WAYS_OUT: Record<string, string> = {
+  wvar: "SELECT stddev(big)::double precision * 2 AS x, coalesce(var_samp(amount)::double precision, 0) AS y, var_pop(amount)::double precision + 1 AS z FROM ledger",
+  wper: "SELECT power(amount, 2)::double precision AS a, log(10, abs(amount))::double precision AS b, exp(amount)::double precision AS c, ln(abs(amount))::double precision + 1 AS d FROM ledger",
+  wperagg: "SELECT sum(sqrt(abs(amount))::double precision) AS a, max(ln(abs(amount))::double precision) AS b FROM ledger",
+  wtext: "SELECT max((payload ->> 'a')::numeric(20,4)) AS x, min((payload ->> 'a')::numeric(20,4)) AS y FROM events",
+  wtextop: "SELECT id, (payload ->> 'a')::numeric(20,4) + 1 AS x, coalesce((payload ->> 'a')::numeric(20,4), 0.0000) AS y FROM events",
+  wdiv: "SELECT sum(amount) AS total, count(amount) AS n FROM ledger",
+  wscale: "SELECT round(sum(wide), 2) AS x FROM ledger",
+  wrows: "SELECT sum((payload ->> 'a')::numeric(20,4)) + 1 AS x FROM events",
+  wpicks: "SELECT greatest(amount, 1)::numeric(12,2) AS x FROM ledger",
+  wdouble: "SELECT sum(n::float8) AS x, max(amount::float8) AS y FROM ledger",
+};
+// every function a way out may name: one the user did not write is never named
+const FUNCTIONS = ["stddev", "var_pop", "var_samp", "variance", "sqrt", "exp", "ln", "log", "power", "max", "min"];
+test("round 5: every reason against every wrapper says the form's reason and a way out naming the user's own function, and each way out is stored", async () => {
+  const lag = "kind: scheduled\ntarget_lag: 1h\n";
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(REASONS)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const [name, sql] of Object.entries(WAYS_OUT)) w.write(name, `${lag}sql: ${sql}\n`);
+    for (const name of Object.keys(REASONS)) await w.until((s) => s.state === "refused" || s.serving, `public.${name}`);
+    const wrong: string[] = [];
+    for (const [name, [sql, reason, way]] of Object.entries(REASONS)) {
+      const refusals = w.status(`public.${name}`).refusals;
+      const said = refusals.map((r) => `${r.message} | ${r.options.join(" | ")}`).join(" || ");
+      const strays = FUNCTIONS.filter((f) => !sql.includes(`${f}(`) && new RegExp(`\\b${f}\\(`).test(said));
+      if (refusals.length !== 1 || !reason.test(refusals[0]!.message) || !refusals[0]!.options.some((o) => o.includes(way)) || strays.length > 0
+        || /engine computes as a double \(|\(…\)|holds as a double/.test(said)) wrong.push(`${name}: ${sql}\n    ${said || "(not refused)"}`);
+    }
+    assert.deepEqual(wrong, [], `\n${wrong.join("\n")}`);
+    for (const name of Object.keys(WAYS_OUT)) await w.until(served(w.logged), `public.${name}`);
+    assert.deepEqual((await typed(w, "SELECT x, y FROM wtext")).rows, [["2.0000", "1.0000"]]);
+    assert.deepEqual((await typed(w, "SELECT x, y, z FROM wvar")).fields.map(([, oid]) => oid), [701, 701, 701]);
+    assert.deepEqual((await typed(w, "SELECT a, b, c, d FROM wper")).fields.map(([, oid]) => oid), [701, 701, 701, 701]);
+  });
+});
+
+// review round 5 of PR 202, class B: a run's failure is said through the ONE mapping a statement on the wire gets
+// (src/duck/store.ts `pgErrorOf`): Postgres's message and SQLSTATE, never the engine's words or Mason's own marker
+test("round 5: a run's failure is Postgres's error, by the wire's one mapping: an integer's overflow, a division by zero, a text that is not a number", async () => {
+  const files: Record<string, [string, RegExp]> = {
+    i8: ["SELECT id * 2 AS x FROM ledger", /^bigint out of range \(SQLSTATE 22003\)/],
+    i4: ["SELECT n * 2 AS x FROM ledger", /^integer out of range \(SQLSTATE 22003\)/],
+    zero: ["SELECT 10 / (id - 1) AS x FROM ledger", /^division by zero \(SQLSTATE 22012\)/],
+    tnum: ["SELECT kind::numeric(10,3) AS x FROM events", /^invalid input syntax for type numeric: … \(SQLSTATE 22P02\)/],
+    tint: ["SELECT kind::int AS x FROM events", /^invalid input syntax for type integer: … \(SQLSTATE 22P02\)/],
+  };
+  await overLedger({ counts: COUNTS }, async (w, restarted) => {
+    if (restarted) return;
+    for (const [name, [sql]] of Object.entries(files)) w.write(name, `kind: scheduled\ntarget_lag: 1h\nsql: ${sql}\n`);
+    for (const name of Object.keys(files)) await w.until((s) => s.state === "failed", `public.${name}`);
+    for (const [name, [, words]] of Object.entries(files)) {
+      const error = w.status(`public.${name}`).error ?? "";
+      assert.match(error, words, name);
+      assert.doesNotMatch(error, /Overflow in|INT64|INT32|TRY\(|error_on_division|mason\[|Invalid Input|Conversion Error|DECIMAL|__mason_|query/, `${name}: ${error}`);
+    }
   });
 });

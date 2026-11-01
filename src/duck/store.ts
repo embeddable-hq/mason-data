@@ -359,7 +359,8 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
   // a refusal raised inside DuckDB (a Mason function's, the rewrite's error() call) crossed it as its text alone: the
   // entry its text names (gapIn), read here, the one place that text becomes a statement's error
   // (Mason's own refusal keeps the engine's text out of the DETAIL: it may quote the row, tests/conventions.test.ts)
-  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, ...(pg.code === "0A000" ? {} : { detail: `the engine: ${message}` }) }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
+  // Postgres's own DETAIL where it has one (a numeric field's digits), which quotes no value
+  if (pg !== null) return new StatementError({ code: pg.code, message: pg.message, ...(pg.detail !== undefined ? { detail: pg.detail } : pg.code === "0A000" ? {} : { detail: `the engine: ${message}` }) }, sql, pg.gap ?? (pg.code === "0A000" ? gapIn(pg.message) : null));
   const fn = /(?:Scalar|Aggregate|Table) Function with name "?([A-Za-z_][\w]*)"? does not exist/.exec(message)?.[1];
   if (fn !== undefined) {
     // what reaches DuckDB was verified against Postgres (src/duck/verified.ts), so a function DuckDB lacks is a gap in
@@ -403,7 +404,7 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
 }
 
 /** The errors DuckDB raises for what Postgres raises too, in Postgres's code and words (a tool or a person matches them). */
-function postgresWording(kind: string, message: string): { code: string; message: string; gap?: GapId | null } | null {
+function postgresWording(kind: string, message: string): { code: string; message: string; detail?: string; gap?: GapId | null } | null {
   if (/^Division by zero\b/i.test(message) || message === "division by zero") return { code: "22012", message: "division by zero" };
   const zone = /Unknown TimeZone '([^']*)'/.exec(message);
   if (zone) return { code: "22023", message: `time zone "${zone[1]}" not recognized` };
@@ -416,11 +417,21 @@ function postgresWording(kind: string, message: string): { code: string; message
   const field = /^Date out of range: (.*)$/.exec(message);
   if (field) return { code: "22008", message: `date field value out of range: ${field[1]}` };
   // a cast to numeric(p, s) of a value with more than p - s integer digits
-  if (/Casting value "[^"]*" to type DECIMAL\(\d+,\s*\d+\) failed: value is out of range/.test(message)) return { code: "22003", message: "numeric field overflow" };
   // an exact sum past DuckDB's 38 digits (a text read as numeric is summed as a DECIMAL(38,18), src/duck/rewrite.ts summed)
   if (/^Overflow in HUGEINT addition\b/.test(message)) return { code: "0A000", message: `a sum past the engine's 38 digits is not supported by Mason (${gapMark("numeric-exact-sum")})`, gap: "numeric-exact-sum" };
   // a numeric(p, s) read from a text holding NaN or Infinity (src/duck/rewrite.ts pgInput): DuckDB's decimal has none
   if (/Could not convert string ['"](NaN|-?Infinity)['"] to DECIMAL/.test(message)) return { code: "0A000", message: `a numeric NaN or Infinity read from a text is not supported by Mason (${gapMark("numeric-special")})`, gap: "numeric-special" };
+  // A NUMERIC PAST ITS DIGITS, in every spelling the engine gives (a generated table's run stores one, src/duck/generated.ts
+  // failureWords): a cast to numeric(p, s), of a value or a text, with more than p - s digits before the point, said
+  // with Postgres's DETAIL; past the 38 digits the engine computes a numeric with, by an operation, a ROUND or a cast
+  const typmod = /(?:Casting value "[^"]*" to type|Could not convert string ['"].*['"] to) DECIMAL\((\d+),\s*(\d+)\)/.exec(message);
+  if (typmod !== null && Number(typmod[1]) < 38) {
+    const [p, s] = [Number(typmod[1]), Number(typmod[2])];
+    return { code: "22003", message: "numeric field overflow", detail: `A field with precision ${p}, scale ${s} must round to an absolute value less than ${p === s ? "1" : `10^${p - s}`}.` };
+  }
+  if (typmod !== null || /Overflow in (?:\w+ )?(?:addition|subtraction|multiplication|negation|ROUND|cast)\b.*DECIMAL|Overflow in HUGEINT \w+|out of range for (?:the desired )?DECIMAL|Could not cast value .* to DECIMAL/i.test(message)) {
+    return { code: "22003", message: "numeric field overflow", detail: "The value has more than the 38 digits Mason's engine computes a numeric with." };
+  }
   const conv = /Could not convert string '((?:[^']|'')*)' to (INT16|INT32|INT64|DOUBLE|FLOAT|DATE|TIMESTAMP|UUID|BOOL)/.exec(message);
   if (conv) {
     const t = { INT16: "smallint", INT32: "integer", INT64: "bigint", DOUBLE: "double precision", FLOAT: "real", DATE: "date", TIMESTAMP: "timestamp", UUID: "uuid", BOOL: "boolean" }[conv[2] as "INT16"];

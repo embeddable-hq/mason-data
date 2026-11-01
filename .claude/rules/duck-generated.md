@@ -41,24 +41,33 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   among them: a DECIMAL stored, an integer as HUGEINT, a double refused, never stored as a double under a numeric's
   name). A scale is a number or what decides it per row ("value", "rows", "picks"), never unknown: a null that meant both
   let 30 decimals through. What is not stored says ITS OWN reason (`verdict`, `notStoredRefusal`: a division; the
-  variance family in ONE wording, whichever path saw it (a program, or the engine's double, told by the column's
-  outermost function, `DefinitionPlan.forms`); sqrt, exp, ln, log or power picking decimals per value (a round over one
-  says what still stands); a JSON number's text with no scale; a scale past 18 at the end or on the way; a scale a sum's
-  rows or a picked value decide; a cast from a double), and the guide and the release note name the same shapes: one
-  refusal's reason for every shape was a false one, four times. **A reason and its way out come from the FORM seen,
-  carried with it** (a text cell's `CellConv`: "parsed" for a text read as a numeric, stored under a typmod, "text" for
-  a function the catalog's Postgres computes; a variance program's name), never from a type several forms share (a
-  VARCHAR cell is both). Each reason is tested against each form that reaches it, and each way out is tested stored.
+  variance family in ONE wording; sqrt, exp, ln, log or power picking decimals per value (a round over one says what
+  still stands); a JSON number's text with no scale; a scale past 18 at the end or on the way; a scale a sum's rows or
+  a picked value decide; a cast from a double), and the guide and the release note name the same shapes.
+- **A reason and its way out come from the FORM, carried up by ONE walk of the column's SQL** (`formsOf`, `Form`): each
+  node passes up the form below it (a round, a trunc or a cast with a typmod marks it fixed, an aggregate names
+  itself), the innermost form wins, and the way out names the user's own function (`log(b, x)`,
+  `max((x)::numeric(20,4))`). Where the engine computes a value (a double cell, a cell the catalog's Postgres computes, a
+  variance's program, a column the engine answers as a double), its engine type says only that it is not stored; why is
+  the form's, and a variance, sqrt and its kin, or a double outranks a scale the program saw around it. Never a reason
+  from an engine type (a DOUBLE is a variance, a sqrt and a cast), the outermost node or a constant: one refusal's
+  reason was a false one five times. Detector: tests/duck-generated.test.ts "round 5: every reason against every
+  wrapper", each reason against each wrapper, and each way out built and stored.
 - **The run's connection is a session's, set up by the ONE set-up** (src/duck/store.ts `SessionSetup`: the session
   variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`
   reads), never by hand: a connection without `__mason_session` answers NULL from every Mason function (DuckDB's NULL in,
   NULL out), and a JSON number's cast stored NULL in every row with no error. What reads a session's settings is refused
-  at the plan ("it reads a session"). A run's failure is said in the user's words (`failureWords`): every DECIMAL
-  overflow spelling mapped, and no `__mason_` name in what is recorded. A refusal at the write
-  is the table's refusal with its options; a value past 38 digits fails the run naming its cause, on the back-off.
-  A made type is judged by the catalog's type of its NAME, never the field's OID, which is the source's (and an oid
-  is a string in Postgres's JSON: a number from the entrance, `readSourceFacts`). `dropLast` is refused. A
-  domain and a composite stay refused by name. Detector: tests/duck-generated.test.ts, a test per shape.
+  at the plan ("it reads a session"). Detector: tests/duck-generated.test.ts, the run's session variables.
+- **A run's failure is Postgres's error, by the ONE mapping a statement on the wire gets** (src/duck/store.ts
+  `pgErrorOf`; `failureWords` reads it and matches no engine spelling): its message and SQLSTATE, Postgres's DETAIL
+  where it has one, the way out its SQLSTATE has, no value of a row and no `__mason_` name. An engine error said in
+  Postgres's words is added to that mapping, never here: the DECIMAL family was mapped here alone, and an integer's
+  overflow, a division by zero and Mason's own `mason[22P02]` marker reached the ledger in the engine's words. A
+  refusal at the write is the table's refusal with its options; a failure is run again on the back-off. Detector:
+  tests/duck-generated.test.ts "round 5: a run's failure is Postgres's error".
+- **A made type is judged by the catalog's type of its NAME**, never the field's OID, which is the source's (and an oid
+  is a string in Postgres's JSON: a number from the entrance, `readSourceFacts`). `dropLast` is refused. A domain and a
+  composite stay refused by name. Detector: tests/duck-generated.test.ts, a test per shape.
 - **One source of an enum's labels, the synced table's ENUM.** A generated table stores the ENUM it was built with; a
   value added since is declared by the synced column (`schemaBuilt` hands the generated column its labels; `catalogDdl`
   keeps the first declaration). Such a table answers as a stale table until the re-copy's mark runs it. Detector: the

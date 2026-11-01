@@ -37,7 +37,7 @@ import { createHash } from "node:crypto";
 import type { DuckConnection } from "./executor.ts";
 import type { Planner, GeneratedColumn, GeneratedRefusal, DefinitionPlan as DefinitionPlanOf } from "./generated-plan.ts";
 import { cycleRefusal, isNumeric, planDefinition, readsByName, refusalOf, refusalText, storedColumns, type EngineTypes } from "./generated-plan.ts";
-import { MASON_SCHEMA, type DuckStore } from "./store.ts";
+import { MASON_SCHEMA, pgErrorOf, type DuckStore } from "./store.ts";
 import { StatementError } from "./statement.ts";
 import type { SyncEventInput } from "./events.ts";
 import type { CopyState } from "./sync.ts";
@@ -203,28 +203,24 @@ class RefusedAtWrite extends Error {
 }
 
 /**
- * A RUN'S FAILURE IN THE USER'S WORDS, never the engine's (CLAUDE.md "Nothing a user sees is named for DuckDB"): every
- * spelling DuckDB gives a DECIMAL past its digits, each said with its cause and way out, and no name Mason keeps for
- * itself (`__mason_cell_0`, a hidden column of the plan) in what is recorded. What else fails is said without its values
- * (`withoutValues`). The spellings: an operation's (`Overflow in multiplication of DECIMAL(38)`, `Overflow in ROUND of
- * DECIMAL(38)`), a sum's (`Overflow in HUGEINT addition`), a cast's at the write or a typmod (`Casting value … to type
- * DECIMAL(5,2) failed: value is out of range! when casting from source column __mason_cell_0`, `… out of range for the
- * desired DECIMAL`, `Could not cast value … to DECIMAL`), and a text read as one (`Could not convert string … to DECIMAL`).
+ * A RUN'S FAILURE IN POSTGRES'S WORDS, never the engine's (CLAUDE.md "Nothing a user sees is named for DuckDB"): the ONE
+ * mapping a statement on the wire gets (src/duck/store.ts `pgErrorOf`) gives its SQLSTATE, message and Postgres's own
+ * DETAIL, and nothing here reads an engine spelling. Said without the run's values (`withoutValues`: Postgres's message
+ * may quote one), with no name Mason keeps for itself (`__mason_cell_0`), and the way out its SQLSTATE has.
  */
-export function failureWords(message: string): string {
-  const typmod = /to type DECIMAL\((\d+),(\d+)\) failed: value is out of range/i.exec(message);
-  const words = typmod !== null && Number(typmod[1]) < 38
-    ? `a numeric it computes has more than the ${Number(typmod[1]) - Number(typmod[2])} digits before the point its numeric(${typmod[1]},${typmod[2]}) holds (Postgres: numeric field overflow). ` +
-      "Give the cast more digits, cast it to double precision if it need not be exact, or compute it in the statement that reads the synced table"
-    : /Could not convert string .* to DECIMAL/i.test(message)
-      ? "a numeric it reads from text does not fit the numeric it is cast to: past its digits, or NaN or Infinity, which a stored numeric does not hold. " +
-        "Give the cast more digits, or cast it to double precision if it need not be exact"
-      : NUMERIC_OVERFLOW.test(message) ? OVERFLOW_WORDS : withoutValues(message);
-  return words.replace(/ when casting from source column __mason_\w+/g, "").replace(/__mason_\w+/g, "a value it computes");
+export function failureWords(err: unknown): string {
+  const { code, message, detail } = pgErrorOf(err, "").fields;
+  // the mapping's own DETAIL is Postgres's; one that carries the engine's text is the engine's, and stays out
+  const theirs = detail === undefined || detail.startsWith("the engine") ? "" : ` ${detail}`;
+  const way = WAY_OUT[code];
+  return `${withoutValues(message)} (SQLSTATE ${code}).${theirs}${way === undefined ? "" : ` ${way}`}`.replace(/__mason_\w+/g, "a value it computes");
 }
-const NUMERIC_OVERFLOW = /Overflow in (?:\w+ )?(?:addition|subtraction|multiplication|negation|ROUND|cast)\b.*DECIMAL|Overflow in HUGEINT \w+|out of range for (?:the desired )?DECIMAL|to type DECIMAL\(\d+,\d+\) failed: value is out of range|Could not cast value .* to DECIMAL/i;
-const OVERFLOW_WORDS = "a numeric it computes has more than the 38 digits a stored numeric holds. " +
-  "Cast it to double precision if it need not be exact, or compute it in the statement that reads the synced table";
+/** what to do about a run's failure, by its SQLSTATE: the data's, so the run is tried again on the back-off meanwhile */
+const WAY_OUT: Readonly<Record<string, string>> = {
+  "22003": "Give the value more digits (a wider type or typmod), cast it to double precision if it need not be exact, or compute it in the statement that reads the synced table.",
+  "22012": "Guard the divisor (x / nullif(y, 0)), or compute it in the statement that reads the synced table.",
+  "22P02": "Cast only the values that are of that type (a CASE over the text), or compute it in the statement that reads the synced table.",
+};
 
 /** the engine type of each column a plan's SQL computes, as DuckDB says when it prepares it (`EngineTypes`) */
 async function engineTypes(c: DuckConnection, sql: string): Promise<EngineTypes> {
@@ -851,10 +847,9 @@ export class GeneratedTables {
       at.failures++;
       const attempt = Date.now() - started;
       at.retryAt = Date.now() + this.host.retryDelayMs(at.failures, attempt);
-      const fields = x instanceof StatementError ? x.fields.message : x instanceof Error ? x.message : String(x);
       // a numeric past the 38 digits a stored DECIMAL holds is the data's, not the definition's: said with its way out,
       // and run again on the back-off, since a change to the rows can bring it back within them
-      at.error = failureWords(fields);
+      at.error = failureWords(x);
       const m = `its re-run failed (it serves what it last held; tried again after ${new Date(at.retryAt).toISOString()}): ${at.error}`;
       this.host.log(`${at.name}: ${m}`);
       this.host.event({ kind: "generated_failed", table: at.name, message: m });
