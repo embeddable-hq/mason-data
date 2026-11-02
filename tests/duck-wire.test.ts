@@ -5955,6 +5955,9 @@ test("collation resolver: a column's own collation, a COLLATE on either side, a 
       "SELECT id, greatest(d::char(4) COLLATE \"und-x-icu\", 'b'), least(d::char(4), 'B' COLLATE \"und-x-icu\") FROM colls ORDER BY id",
       // two equal char(n) values of another padding: the first argument, as Postgres keeps it
       "SELECT id, least(d::char(6) COLLATE \"und-x-icu\", d::char(2)), greatest(d::char(2) COLLATE \"und-x-icu\", d::char(6)) FROM colls ORDER BY id",
+      // ... under byte order too, and a char(n) beside a text, which Postgres compares as a char(n)
+      "SELECT id, least(d::char(6) COLLATE \"C\", d::char(2)), greatest(d::char(2) COLLATE \"C\", d::char(6)) FROM colls ORDER BY id",
+      "SELECT id, least(d::char(6) COLLATE \"C\", d), greatest(d::char(4), d COLLATE \"C\") FROM colls ORDER BY id",
       // #213 a derived table's COLLATE, read through the table around it
       "SELECT * FROM (SELECT a.d COLLATE \"und-x-icu\" AS n FROM colls a ORDER BY 1 LIMIT 8) s ORDER BY s.n",
       "SELECT * FROM (SELECT d COLLATE \"und-x-icu\" AS n, count(*) AS k FROM colls GROUP BY 1) s ORDER BY s.n",

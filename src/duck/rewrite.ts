@@ -3337,11 +3337,15 @@ class Rewriter {
    *  null where the key is only compared, never read back (a row comparison), so equal char(n) values have equal keys.
    *  `padded`: the comparison is of char(n), as the CALLER read it from Postgres's analysis of the comparison, never
    *  this value's own type (two sides of one comparison keyed in two shapes never compare equal) */
-  private textKey(a: AstNode, c: Exclude<DuckCollation, { kind: "bytes" }>, padded: boolean, tie: string | null): AstNode {
+  private textKey(a: AstNode, c: DuckCollation, padded: boolean, tie: string | null): AstNode {
     const v = strip(a);
-    if (!padded) return c.kind === "libc" ? libcKey(this.cp, v, c.collate) : icuKey(this.cp, v, c.name);
+    if (!padded) {
+      if (c.kind === "bytes") throw new Error("a text key under byte order is the value itself: only a char(n) is keyed (minMax)");
+      return c.kind === "libc" ? libcKey(this.cp, v, c.collate) : icuKey(this.cp, v, c.name);
+    }
     const trimmed = (): AstNode => fn("rtrim", [this.cp(v)]);
-    const key = c.kind === "libc" ? fn("__mason_libc_key", [trimmed(), strConst(c.collate)]) : fn("icu_sort_key", [trimmed(), strConst(c.name)]);
+    // (under byte order the trimmed bytes are the order: their hex, a fixed two characters a byte, orders as they do)
+    const key = c.kind === "bytes" ? strConst("") : c.kind === "libc" ? fn("__mason_libc_key", [trimmed(), strConst(c.collate)]) : fn("icu_sort_key", [trimmed(), strConst(c.name)]);
     // (compared, never read back: two char(n) values of another padding are EQUAL, so the key ends at the trimmed bytes)
     if (tie === null) return concat(key, strConst(" "), fn("hex", [trimmed()]));
     return concat(key, strConst(" "), fn("hex", [trimmed()]), strConst(` ${tie} `), fn("hex", [v]));
@@ -3357,7 +3361,9 @@ class Rewriter {
     if (t === null || !TEXTS.has(t.type)) return null;
     // under the collation the GREATEST compared under (its inputcollid), never the database's whatever the arguments
     const c = this.inputCollationOf(t);
-    if (c === null || c.kind === "bytes") return null;
+    // (under byte order a text's own order is the engine's; a char(n)'s is not: its padding is ignored, and of equal
+    // values of another padding Postgres keeps the first argument, so it is keyed as under any other collation)
+    if (c === null || (c.kind === "bytes" && t.type !== BPCHAR)) return null;
     // the greatest (least) of the values' keys, which end in the value's own bytes: the value is read back from them
     // (equal char(n) values of another padding: Postgres keeps the first argument, which `tie` makes the least, or
     // the greatest, of the equal keys)
