@@ -2295,6 +2295,28 @@ class Rewriter {
   /** the values a query's i-th output can be: each arm's of a set operation, each row's of a VALUES list, through a
    *  `*` pass-through; a `*` beside other columns by the output Postgres's analysis puts there. Null where the output
    *  is a column a `*` lists (decided where it is read), or none is found */
+  /** whether a value reads, at any depth outside a subquery or through a FROM item's column, a percentile_disc or mode()
+   *  WITHIN GROUP whose ORDER BY the rewrite sorts by its exact order key (`exactOrderKey`, the one decider): the
+   *  engine answers that key's bytes (issue 486), which no numeric reader can read */
+  private readsOrderBytes(n: unknown, depth: number): boolean {
+    if (depth > 32) return false;
+    if (Array.isArray(n)) return n.some((x) => this.readsOrderBytes(x, depth));
+    if (!isNode(n)) return false;
+    const k = kindOf(n), b = bodyOf(n);
+    if (k === "SubLink" || k === "SelectStmt") return false;
+    if (k === "FuncCall" && b.agg_within_group === true && ["percentile_disc", "mode"].includes(lastName(b.funcname))) {
+      const by = ((b.agg_order ?? []) as AstNode[])[0];
+      const key = by === undefined ? undefined : bodyOf(by).node;
+      if (isNode(key) && this.typeOf(key) === NUMERIC && this.exactOrderKey(key, null) !== null) return true;
+    }
+    if (k === "ColumnRef") {
+      const found = this.fromColumn(n);
+      const values = found === null ? null : this.valuesAt(found.query, found.index);
+      return values !== null && values.some((v) => this.readsOrderBytes(v, depth + 1));
+    }
+    return Object.values(b).some((x) => this.readsOrderBytes(x, depth));
+  }
+
   private valuesAt(query: AstNode, index: number): AstNode[] | null {
     // (an arm `exactArms` wrapped: the arm it reads)
     const b = this.armWrapped.get(bodyOf(query)) ?? bodyOf(query);
@@ -5273,6 +5295,14 @@ class Rewriter {
       // (`__mason_numeric_int_of`, src/duck/functions.ts)
       else if (INTEGERS.has(t.type)) {
         const [bits, name] = t.type === INT2 ? [16, "smallint"] : t.type === INT4 ? [32, "integer"] : [64, "bigint"];
+        // what the REWRITE itself makes bytes, it knows before the engine runs (review r2 of PR 506, the class
+        // runtime-refusal-preempted-by-engine-error): percentile_disc or mode() ordered by an exact order key answer
+        // that key's bytes, so a cast of them, or of anything over them, is refused here by name, never left to the
+        // engine's own error over bytes; the run's `typeof` decides only what the rewrite cannot type
+        if (this.readsOrderBytes(arg, 0)) {
+          throw new Unrewritable(`a numeric Mason cannot compute exactly (percentile_disc or mode() of a value Mason orders by its exact digits), cast to ${name as string}, is not supported by Mason (Postgres rounds the exact value half away from zero)`,
+            "cast the value to an integer inside the aggregate: percentile_disc(0.5) WITHIN GROUP (ORDER BY (a / b)::int), which picks the same row's integer", "numeric-double-integer");
+        }
         return cast(fn("__mason_numeric_int_of", [fn("typeof", [this.clone(arg)]), cast(arg, ["varchar"]), intConst(bits as number)]), [name as string]);
       }
     }

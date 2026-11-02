@@ -174,7 +174,7 @@ const ROUNDED_READS = {
   scalar: scheduledH("SELECT id, (SELECT nullif(l2.amount / 1.6, 0)::int FROM ledger l2 WHERE l2.id = ledger.id) AS x FROM ledger", "id"),
 };
 
-test("issue 242: an integer cast of a numeric the engine holds as a double is stored rounded half away from zero, or refused at load by name", async () => {
+test("issue 242: an integer cast of a numeric the engine holds as a double is stored rounded half away from zero, or refused by name", async () => {
   await overLedger({ rounded: ROUNDED, roundedtotals: ROUNDED_TOTALS, ...ROUNDED_READS }, async (w, restarted) => {
     const r = await typed(w, "SELECT * FROM rounded ORDER BY id");
     assert.deepEqual(r.fields.map(([n, oid]) => [n, oid]).slice(1, 5), [["q4", 23], ["q8", 20], ["c4", 23], ["c8", 20]]);
@@ -193,20 +193,24 @@ test("issue 242: an integer cast of a numeric the engine holds as a double is st
     assert.deepEqual((await typed(w, "SELECT id, x FROM unioned ORDER BY id, x")).rows.map((x) => text(x[1])), ["1", "1", null, null, "-3", "-2", "3", "4"]);
     assert.deepEqual((await typed(w, "SELECT x, c FROM grouped ORDER BY x NULLS FIRST")).rows.map((x) => x.map(text)), [[null, "1"], ["-2", "1"], ["1", "1"], ["3", "1"]]);
     if (restarted) return;
-    // no program computes it and the engine holds it as bytes or a double (review r1 of PR 506: the engine's type decides,
-    // so it is known with the rows): the build fails naming the gap and its way out, never stored from the double
+    // the bytes the rewrite makes (percentile_disc / mode() of a quotient, and any expression over them): refused AT LOAD,
+    // by the gap's words and its way out (review r2 of PR 506); a double the engine computes (a stddev of an unconstrained
+    // numeric) is known only with the rows: its build fails naming the gap; neither is ever stored from the double
     w.write("pdisc", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount / 1.6))::int AS x FROM ledger"));
-    w.write("moded", scheduledH("SELECT (mode() WITHIN GROUP (ORDER BY amount / 1.6))::int AS x FROM ledger"));
+    w.write("moded", scheduledH("SELECT (mode() WITHIN GROUP (ORDER BY amount / 1.6) * 2)::int AS x FROM ledger"));
+    w.write("spreadint", scheduledH("SELECT stddev(big)::int AS x FROM ledger"));
     // a NULLIF's numeric, printed, is a division's column still
     w.write("nulled", scheduledH("SELECT id, nullif(amount / 1.6, 0) AS x FROM ledger"));
     // percentile_disc of a DECIMAL column is the column's own value, cast as Postgres casts it
     w.write("pdiscol", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount))::int AS p, (percentile_disc(0.1) WITHIN GROUP (ORDER BY amount))::int8 AS m FROM ledger"));
-    for (const name of ["pdisc", "moded"]) await w.until((s) => s.state === "failed", `public.${name}`);
-    await w.until((s) => s.state === "refused", "public.nulled");
+    for (const name of ["pdisc", "moded", "nulled"]) await w.until((s) => s.state === "refused", `public.${name}`);
     for (const name of ["pdisc", "moded"]) {
-      const s = w.status(`public.${name}`);
-      assert.match(s.error ?? "", /cast to an integer type is not supported by Mason \(Mason gap numeric-double-integer\).*ORDER BY \(a \/ b\)::int/, JSON.stringify(s));
+      const refusals = w.status(`public.${name}`).refusals;
+      refusedAt(refusals, "sql", /^a numeric Mason cannot compute exactly \(percentile_disc or mode\(\) of a value Mason orders by its exact digits\), cast to integer, is not supported by Mason/);
+      assert.ok(refusals[0]!.options.some((o) => o.includes("ORDER BY (a / b)::int")), JSON.stringify(refusals));
     }
+    await w.until((s) => s.state === "failed", "public.spreadint");
+    assert.match(w.status("public.spreadint").error ?? "", /cast to an integer type is not supported by Mason \(Mason gap numeric-double-integer\)/, JSON.stringify(w.status("public.spreadint")));
     refusedAt(w.status("public.nulled").refusals, "sql", /^column x divides a numeric, which the engine computes as a double$/);
     await w.until(served(w.logged), "public.pdiscol");
     assert.deepEqual((await typed(w, "SELECT p, m FROM pdiscol")).rows.map((x) => x.map(text)), [["1", "-3"]]);

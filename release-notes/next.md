@@ -237,7 +237,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   was `2` and is `3` (half away from zero), in a query and in a generated table, and `nullif(x / y, 0)` shows
   Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. A cast to an integer of a numeric Mason
   cannot compute exactly (`percentile_disc` or `mode()` of a division) is refused by name (`numeric-double-integer`)
-  rather than failing with the engine's error; a generated table with one fails its build saying so. Nothing to do
+  rather than failing with the engine's error; a generated table with one is refused when it is loaded, or, for a double only the rows show, fails its build saying so. Nothing to do
   on upgrade.
 - **A numeric `power`, `^` or `exp` past a double's range, cast to `double precision`, now raises Postgres's error.**
   `power(x, 400)::double precision` answered `Infinity`, and a value too small for a double (`(0.01 ^ 170)::float8`)
