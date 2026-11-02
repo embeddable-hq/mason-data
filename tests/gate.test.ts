@@ -12,6 +12,8 @@ import * as path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ALWAYS, CI_FILE, GateRefusal, NODE_PIN, ORACLE, UsageError, buildPlan, changedFiles, chooseTests, ciFacts, ensureNode, importsOf, oracleAskedNothing, parseArgs, parseMappedPort, pinProblem, runGate, type Config, type Plan, type Step } from "../scripts/gate.ts";
+// a namespace, not a named import: a tree whose gate.ts lacks the constant still loads, and the test fails by name
+import * as gate from "../scripts/gate.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** The file names below are invented, under t/ and p/: a real-looking path to nothing fails the conventions' path guard. */
@@ -176,6 +178,16 @@ test("the plan: typecheck first, one file at a time, IT_ORACLE_ONLY only with --
   assert.ok([...plain.first, ...plain.integration].every((s) => s.boundMs > 0), "every step has a bound");
   assert.equal(plain.first[1]?.cmd, "/n/bin/node", "a test runs under the pinned Node");
   assert.deepEqual(plain.first[1]?.args.slice(0, 2), ["--test", "--test-concurrency=1"]);
+  // a unit file carries the per-test pair BEFORE the file (Node ignores it after); an integration file does not (issue 139)
+  assert.deepEqual(gate.TEST_BOUND_ARGS, ["--test-timeout=300000", "--test-force-exit"]);
+  for (const step of plain.first.slice(1)) {
+    assert.deepEqual(step.args, ["--test", "--test-concurrency=1", ...gate.TEST_BOUND_ARGS, "--test-reporter=spec", step.label], step.label);
+  }
+  const integrationTests = plain.integration.filter((s) => s.args[0] === "--test");
+  assert.ok(integrationTests.length >= 2 && integrationTests.some((s) => s.label === ORACLE), integrationTests.map((s) => s.label).join(", "));
+  for (const step of [...integrationTests, ...buildPlan(choose([], [], true), { ...opts, oracleOnly: "x" }).integration.filter((s) => s.args[0] === "--test")]) {
+    assert.ok(step.args.every((a) => !a.startsWith("--test-timeout") && a !== "--test-force-exit"), `${step.label}: ${step.args.join(" ")}`);
+  }
   assert.deepEqual(plain.integration.slice(0, 2).map((s) => s.required), [true, true], "the extensions are built as CI does, or nothing after runs");
   assert.equal(plain.integration.find((s) => s.label === ORACLE)?.env, undefined);
 

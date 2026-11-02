@@ -20,7 +20,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ORACLE } from "./gate.ts";
+import { ORACLE, TEST_BOUND_ARGS } from "./gate.ts";
 import { SHARDS, reportName } from "./ci-layout.ts";
 
 export { SHARDS };
@@ -107,10 +107,11 @@ export function shardFiles(kind: Kind, shard: number, root: string): string[] {
 }
 
 /** The `node` arguments of a shard. Integration files run one at a time (tests/integration/README.md); `--test` with no
- *  file would run every test in the tree, so an empty shard is an error, not a pass. */
+ *  file would run every test in the tree, so an empty shard is an error, not a pass. A unit shard carries the per-test
+ *  bound before its files (TEST_BOUND_ARGS, scripts/gate.ts): CI never runs `npm test`, so this is where CI holds it. */
 export function shardCommand(kind: Kind, shard: number, files: readonly string[], out: string): { args: string[]; env: Record<string, string> } {
   if (files.length === 0) throw new Error(`${kind} shard ${shard} has no file: \`node --test\` would run every test in the tree`);
-  return { args: ["--test", ...(kind === "unit" ? [] : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}`, IT_ORACLE_LEG_REPORT: path.join(out, reportName(shard)) } : {} };
+  return { args: ["--test", ...(kind === "unit" ? TEST_BOUND_ARGS : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}`, IT_ORACLE_LEG_REPORT: path.join(out, reportName(shard)) } : {} };
 }
 
 /** What a shard wrote of itself */

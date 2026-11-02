@@ -42,6 +42,7 @@ function repo(t: { after: (fn: () => void) => void }): Repo {
   fs.mkdirSync(path.join(dir, "src"));
   fs.mkdirSync(path.join(dir, "tests"));
   fs.copyFileSync(SCRIPT, path.join(dir, "scripts", "fails-without.ts"));
+  fs.copyFileSync(path.join(ROOT, "scripts", "gate.ts"), path.join(dir, "scripts", "gate.ts")); // its per-test bound
   fs.writeFileSync(path.join(dir, ".gitignore"), "ignored.txt\n");
   fs.writeFileSync(path.join(dir, "ignored.txt"), "linked, not committed\n");
   fs.writeFileSync(path.join(dir, MODULE), BUGGY);
@@ -109,7 +110,7 @@ test("git reads a repository of its own", () => {
   assert.equal(git("rev-parse", "HEAD").trim(), process.env.HEAD_THERE);
 });
 test("its tracked files are the tree's, the staged one too", () => {
-  assert.deepEqual(git("ls-files").trim().split("\\n"), [".gitignore", "scripts/fails-without.ts", "src" + "/double.ts", "staged.txt"]);
+  assert.deepEqual(git("ls-files").trim().split("\\n"), [".gitignore", "scripts/fails-without.ts", "scripts/gate.ts", "src" + "/double.ts", "staged.txt"]);
 });
 test("what is uncommitted reads as uncommitted", () => {
   assert.match(git("status", "--porcelain"), /^\\?\\? tests\\/$/m);
@@ -240,6 +241,36 @@ test("with --skip-now a named failure at the commit is still PROVED", (t) => {
   const { code, out } = run(r, FILE, "--skip-now");
   assert.equal(code, 0, out);
   assert.match(out, /PROVED: 2 test\(s\)/);
+});
+
+test("a test that hangs at the commit holding a handle fails there by name, and the run ends: PROVED", async (t) => {
+  const base = repo(t);
+  // at the commit `settle` never settles and holds an interval, as issue 139's hang did; on the tree it settles. The
+  // interval ends its own process once its runner is gone or after 90 s (past the 60 s bound below), so a killed run
+  // of this file leaves no process behind
+  const SETTLE = path.join("src", "settle.ts");
+  fs.writeFileSync(path.join(base.dir, SETTLE), `const born = Date.now(), runner = process.ppid;
+export const settle = (): Promise<void> => new Promise(() => { setInterval(() => { if (process.ppid !== runner || Date.now() - born > 90_000) process.exit(3); }, 500); });\n`);
+  base.git("add", SETTLE);
+  base.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-m", "hangs");
+  const r = { ...base, commit: base.git("rev-parse", "HEAD").trim() };
+  fs.writeFileSync(path.join(r.dir, SETTLE), `export const settle = async (): Promise<void> => {};\n`);
+  const HUNG = path.join("tests", "settle.test.ts");
+  fs.writeFileSync(path.join(r.dir, HUNG), `import { test } from "node:test";
+import { settle } from "${"../" + "src"}/settle.ts";
+test("hangs at the commit", { timeout: 1000 }, async () => { await settle(); });
+`);
+  // bounded here, its process group killed past the bound: a run that never ends fails this test instead of hanging it
+  const child = spawn(process.execPath, ["scripts/fails-without.ts", r.commit, HUNG], { cwd: r.dir, env: r.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout!.on("data", (b: Buffer) => { out += b.toString(); });
+  child.stderr!.on("data", (b: Buffer) => { out += b.toString(); });
+  const exit = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
+  const ended = await Promise.race([exit, new Promise<"bound">((resolve) => setTimeout(resolve, 60_000, "bound").unref())]);
+  if (ended === "bound") process.kill(-child.pid!, "SIGKILL");
+  assert.equal(ended, 0, `the run ends within 60 s, PROVED:\n${out}`);
+  assert.match(out, /PROVED: 1 test\(s\)/);
+  assert.match(out, /- hangs at the commit/);
 });
 
 test("--paths takes a single file from the commit", (t) => {

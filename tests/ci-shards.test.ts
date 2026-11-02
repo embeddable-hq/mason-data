@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { SHARDS, coverageProblems, needsProblems, partition, shardCommand, shardFiles, testFiles, weightOf, type ShardRecord } from "../scripts/ci-shards.ts";
 import { ORACLE } from "../scripts/gate.ts";
+// a namespace, not a named import: a tree whose gate.ts lacks the constant still loads, and the test fails by name
+import * as gate from "../scripts/gate.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { PHASES, STAGES, statementId, type LegReport } from "../scripts/oracle-legs.ts";
 import { GAPS } from "../src/duck/gaps.ts";
@@ -55,7 +57,9 @@ test("a new file lands in a shard by itself, and the partition is a function of 
 
 test("a shard with no file is an error: `node --test` alone would run every test in the tree", () => {
   assert.throws(() => shardCommand("unit", 1, [], "o"), /has no file/);
-  assert.deepEqual(shardCommand("unit", 1, ["a"], "o"), { args: ["--test", "a"], env: {} });
+  // CI never runs `npm test`: a unit shard carries the per-test pair itself, before its files (issue 139)
+  assert.deepEqual(gate.TEST_BOUND_ARGS, ["--test-timeout=300000", "--test-force-exit"]);
+  assert.deepEqual(shardCommand("unit", 1, ["a"], "o"), { args: ["--test", ...gate.TEST_BOUND_ARGS, "a"], env: {} });
   assert.deepEqual(shardCommand("rest", 2, ["a"], "o"), { args: ["--test", "--test-concurrency=1", "a"], env: {} });
   assert.deepEqual(shardCommand("oracle", 2, ["a"], "o").env, { IT_ORACLE_LEG: "2/2", IT_ORACLE_LEG_REPORT: path.join("o", "duck-oracle-leg-2.json") });
 });

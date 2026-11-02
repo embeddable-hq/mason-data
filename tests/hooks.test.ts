@@ -10,8 +10,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+// a namespace, not a named import: a tree whose gate.ts lacks the constant still loads, and the test fails by name
+import * as gate from "../scripts/gate.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hook = (name: string): string => path.join(ROOT, "scripts", "hooks", `${name}.ts`);
@@ -38,7 +40,13 @@ function assertAllowed(name: string, command: string): void {
 
 // ------------------------------------------------------------------ the test time limit
 
-test("test-timeout: node --test with no --test-timeout before the files is blocked, in every shape a session types", () => {
+/** The way out both messages give: the constant of scripts/gate.ts, which the hook writes as a literal. */
+const wayOut = (): string => `node --test --test-timeout=${gate.TEST_TIMEOUT_MS} --test-force-exit <files>`;
+const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+test("test-timeout: node --test without --test-timeout and --test-force-exit before the files is blocked, in every shape a session types", () => {
+  assert.equal(gate.TEST_TIMEOUT_MS, 300_000, "the default the hook suggests");
+  const says = new RegExp(`^node --test needs --test-timeout=<ms> and --test-force-exit before the files.*: ${escape(wayOut())}`);
   for (const command of [
     "node --test tests/hooks.test.ts",
     "node --test tests/hooks.test.ts --test-timeout=120000",
@@ -51,22 +59,39 @@ test("test-timeout: node --test with no --test-timeout before the files is block
     "npm run typecheck && /usr/local/bin/node --test tests/hooks.test.ts",
     "sh -c 'node --test tests/hooks.test.ts'",
     "node --test",
-  ]) assertBlocked("test-timeout", command, /^node --test needs --test-timeout=<ms> before the files .*node --test --test-timeout=120000 <files>/);
+    // one of the pair alone, or after the files, or a limit that is no bound
+    "node --test --test-timeout=300000 tests/hooks.test.ts",
+    "node --test --test-force-exit tests/hooks.test.ts",
+    "node --test --test-timeout=300000 tests/hooks.test.ts --test-force-exit",
+    "node --test --test-timeout=0 --test-force-exit tests/hooks.test.ts",
+    "node --test --test-timeout=abc --test-force-exit tests/hooks.test.ts",
+  ]) assertBlocked("test-timeout", command, says);
 });
 
-test("test-timeout: npm test and npm run test are blocked, whatever is appended", () => {
-  for (const command of ["npm test", "npm run test", "npm t", "npm test -- --test-timeout=1000", "cd x && npm run-script test | tail"]) {
-    assertBlocked("test-timeout", command, /^npm test runs node --test with no time limit.*node --test --test-timeout=120000 <files>, or npm run check/);
-  }
-});
-
-test("test-timeout: a run with its limit before the files, the gates and the scripts that bound themselves are allowed", () => {
+test("test-timeout: npm test with anything appended is blocked: it runs the whole suite and Node ignores what lands after the files", () => {
+  const says = new RegExp(`^npm test runs the whole suite.*${escape(wayOut())}`);
   for (const command of [
-    "node --test --test-timeout=120000 tests/hooks.test.ts tests/conventions.test.ts",
-    "node --test --test-timeout 120000 tests/hooks.test.ts",
-    "node --test --test-name-pattern foo --test-timeout=120000 tests/hooks.test.ts",
-    "node --test --test-timeout=120000 --test-name-pattern='a b' tests/hooks.test.ts",
-    "cd /tmp/x && IT_ORACLE_ONLY=json node --test --test-timeout=600000 tests/integration/duck-oracle.itest.ts 2>&1 | tail",
+    "npm test -- --test-name-pattern foo",
+    "npm test -- tests/hooks.test.ts",
+    "npm run test -- --test-timeout=1000",
+    "npm test -- --test-timeout=1000",
+    "cd x && npm run-script test -- x | tail",
+  ]) assertBlocked("test-timeout", command, says);
+});
+
+test("test-timeout: a run with the pair before the files, npm test alone, the gates and the scripts that bound themselves are allowed", () => {
+  for (const command of [
+    "npm test",
+    "npm run test",
+    "npm t",
+    "npm run-script test",
+    "npm test 2>&1 | tail -40",
+    "cd /tmp/x && npm test",
+    "node --test --test-timeout=300000 --test-force-exit tests/hooks.test.ts tests/conventions.test.ts",
+    "node --test --test-timeout 300000 --test-force-exit tests/hooks.test.ts",
+    "node --test --test-force-exit --test-name-pattern foo --test-timeout=120000 tests/hooks.test.ts",
+    "node --test --test-timeout=120000 --test-force-exit --test-name-pattern='a b' tests/hooks.test.ts",
+    "cd /tmp/x && IT_ORACLE_ONLY=json node --test --test-timeout=600000 --test-force-exit tests/integration/duck-oracle.itest.ts 2>&1 | tail",
     "npm run check",
     "npm run gate",
     "npm run typecheck",
@@ -79,6 +104,34 @@ test("test-timeout: a run with its limit before the files, the gates and the scr
     "echo 'node --test a.ts'",
     "git commit -m 'npm test is blocked'",
   ]) assertAllowed("test-timeout", command);
+});
+
+/**
+ * Every test command the docs and the harness tell a session to run: a `node --test …` or `npm test …` that opens a
+ * backtick span (a prompt's escaped one too) or a line (a code block's, after its VAR=value words), up to the span's
+ * end, a comment or the line's end. `node --test` alone names the runner, not a command; `<ms>` is a placeholder.
+ */
+function instructedTestCommands(): { where: string; command: string }[] {
+  const files = execFileSync("git", ["ls-files", "-z", "*.md", ".claude/"], { cwd: ROOT, encoding: "utf8" }).split("\0")
+    .filter((f) => /\.(md|js)$/.test(f));
+  const found: { where: string; command: string }[] = [];
+  for (const file of files) {
+    fs.readFileSync(path.join(ROOT, file), "utf8").split("\n").forEach((line, i) => {
+      for (const m of line.matchAll(/(?:^\s*|`)((?:[A-Z_]+=\S*\s+)*(?:node --test\b|npm (?:run |run-script )?t(?:est)?(?![\w:-]))[^`#\\\n]*)/g)) {
+        const command = m[1]!.trim().replaceAll("<ms>", "1000");
+        if (command !== "node --test") found.push({ where: `${file}:${i + 1}`, command });
+      }
+    });
+  }
+  return found;
+}
+
+test("test-timeout: every test command the docs and the harness instruct is one the hook lets through", () => {
+  const commands = instructedTestCommands();
+  assert.ok(commands.some((c) => c.where.startsWith(".claude/workflows/pr-loop.js")), "the reader finds the harness's commands");
+  assert.ok(commands.some((c) => c.where.startsWith("CLAUDE.md")), "the reader finds CLAUDE.md's commands");
+  const blocked = commands.filter(({ command }) => run("test-timeout", bash(command)).code !== 0);
+  assert.deepEqual(blocked, [], "each of these would be blocked by the hook: give it --test-timeout=<ms> --test-force-exit before its files");
 });
 
 // ------------------------------------------------------------------ merge only the commit read

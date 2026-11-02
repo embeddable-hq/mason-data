@@ -220,10 +220,14 @@ reads. Some detectors are Claude Code hooks, wired in `.claude/settings.json` fr
 Stop hook only warns. They resolve against `$CLAUDE_PROJECT_DIR`, the main checkout even from a worktree, so a main
 checkout on a branch without `scripts/hooks/` prints a hook error on each Bash call and each turn's end (not a block).
 
-- **While working, the tests nearest the change**: `node --test --test-timeout=<ms> <file>`, with
-  `--test-name-pattern` for one test, and `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. The
-  timeout goes BEFORE the files, since Node ignores it after them, so `npm test` cannot take one (issue 139); the hook
-  `scripts/hooks/test-timeout.ts` blocks a `node --test` without it before its files, and `npm test`. **A full
+- **While working, the tests nearest the change**: `node --test --test-timeout=<ms> --test-force-exit <file>`, with
+  `--test-name-pattern` for one test, and `IT_ORACLE_ONLY=<regex>` for the oracle's statements it touches. Both flags
+  go BEFORE the files, since Node ignores them after; the second is needed because a hung test that holds a handle (an
+  interval, a socket, a worker) is named by the timeout but keeps its process, and the run, alive for ever (issue 139).
+  `npm test` carries the default before its files: 300000 ms, twice CI's slowest unit test (`TEST_TIMEOUT_MS`,
+  `scripts/gate.ts`), so it takes no argument. The hook `scripts/hooks/test-timeout.ts` blocks a `node --test` without
+  both flags before its files, and `npm test` with anything appended. A test known to take longer than half the
+  default sets its own `{ timeout }`, twice its CI max. **A full
   integration run is not an iteration tool**, and neither is the full oracle. A measurement's dataset is built once and
   kept until the PR is pushed. Nothing detects that; a transcript found it.
 - **A test past its bound is read, not repeated.** Compare CPU with elapsed time on the test's own process, not the
@@ -237,7 +241,7 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
   the conflict and the way out (merge the base and push); UNKNOWN, computed lazily after a push, is a wait. Detector:
   `tests/workflows.test.ts` runs the harness's wait against a stub `gh`; a wait by hand, nothing detects.
 - **One full `npm run check`, before a PR's first push.** A fix round after a review or a merge of main gets
-  `npm run typecheck`, `node --test tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
+  `npm run typecheck`, `node --test --test-timeout=300000 --test-force-exit tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
   change, and CI carries the full suite: the few real catches a full local run made in another file were all such fast
   checks. Which files are nearest is the author's judgement, not a guarantee: a recent change imports its way to most of
   the unit tests, so no list can be computed, and CI catches the rest. Detector: `checks` red on the PR.

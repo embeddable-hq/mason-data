@@ -47,6 +47,21 @@ export const CI_FILE = ".github/workflows/ci.yml";
 /** The bounds, in ms. A test file's bound is generous: the machine is shared, and a false HUNG costs a whole run. */
 export const BOUNDS = { install: 600_000, typecheck: 600_000, unit: 600_000, integration: 900_000, oracle: 1_800_000, docker: 300_000, postgresReady: 180_000, grace: 10_000 };
 
+/**
+ * A unit test's own bound, in ms, and the pair of `node --test` options that carries it (issue 139). Every unit run
+ * reads it: package.json's `test` (held to it by tests/gate-slot.test.ts, since a package.json cannot import), the
+ * gate's unit steps, CI's unit shards (scripts/ci-shards.ts), scripts/fails-without.ts and the hook's way out
+ * (scripts/hooks/test-timeout.ts). Both options go BEFORE the files: Node ignores them after.
+ *
+ * `--test-timeout` names a hung test, and `--test-force-exit` ends its file's process: without it a test that leaves a
+ * handle open (an interval, a socket, a worker) keeps the run alive for ever, the test named and the run never over.
+ * The bound is per test (and hook and suite), never per file. 300 s is twice the slowest unit test CI ran (150.0 s, the
+ * state matrix, across main's five latest green runs, 2026-11-02). A test whose CI max passes half of it sets its own
+ * `{ timeout }`, twice that max; CI's unit shards carry the same pair, so one that outgrows it fails there by name.
+ */
+export const TEST_TIMEOUT_MS = 300_000;
+export const TEST_BOUND_ARGS: readonly string[] = [`--test-timeout=${TEST_TIMEOUT_MS}`, "--test-force-exit"];
+
 /** A failure the gate can say on one report: what is wrong and the way out. */
 export class GateRefusal extends Error {}
 
@@ -153,8 +168,9 @@ export interface Plan { first: Step[]; integration: Step[] }
 
 export function buildPlan(choice: Choice, opts: { nodeBin: string; hasNodeModules: boolean; oracleOnly: string | null; timeoutMs: number | null; platform: string }): Plan {
   const node = path.join(opts.nodeBin, "node");
-  const testStep = (file: string, boundMs: number): Step => ({
-    label: file, cmd: node, args: ["--test", "--test-concurrency=1", "--test-reporter=spec", file], boundMs: opts.timeoutMs ?? boundMs,
+  // a unit file carries the per-test pair; an integration file is bounded by its step's bound alone
+  const testStep = (file: string, boundMs: number, perTest: readonly string[] = []): Step => ({
+    label: file, cmd: node, args: ["--test", "--test-concurrency=1", ...perTest, "--test-reporter=spec", file], boundMs: opts.timeoutMs ?? boundMs,
   });
   const integration = choice.integration.map(({ file }) => file !== ORACLE ? testStep(file, BOUNDS.integration)
     : opts.oracleOnly === null ? testStep(file, BOUNDS.oracle)
@@ -163,7 +179,7 @@ export function buildPlan(choice: Choice, opts: { nodeBin: string; hasNodeModule
     first: [
       ...(opts.hasNodeModules ? [] : [{ label: "npm ci", cmd: path.join(opts.nodeBin, "npm"), args: ["ci"], boundMs: BOUNDS.install, required: true }]),
       { label: "typecheck", cmd: node, args: ["node_modules/typescript/bin/tsc"], boundMs: BOUNDS.typecheck },
-      ...choice.unit.map(({ file }) => testStep(file, BOUNDS.unit)),
+      ...choice.unit.map(({ file }) => testStep(file, BOUNDS.unit, TEST_BOUND_ARGS)),
     ],
     integration: integration.length === 0 ? [] : [
       // as CI does: this platform's package built, then installed, so every file runs what a user's install runs
