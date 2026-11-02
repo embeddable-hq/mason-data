@@ -1690,7 +1690,7 @@ test("a chunk out of memory at one page read alone fails with the operator's way
       const [state] = sync.state();
       assert.equal(state?.phase, "failed", said);
       const error = state?.error ?? "";
-      assert.match(error, /^the rows of public\.big are too large for the memory the synced data may use: one page of its table \(about \d+ row\(s\)\), read alone, ran out of memory, in [\d.]+ [KMG]iB \(MASON_DUCKDB_MEMORY; half the machine's RAM when unset\)\. Raise MASON_DUCKDB_MEMORY and start mason again, or mason add public\.big --columns … without its widest columns \(tried again after \d\d:\d\d UTC \(failure 1 in a row\)/, said);
+      assert.match(error, /^the rows of public\.big are too large for the memory the synced data may use: one page of its table \(about \d+ row\(s\)\), read alone, ran out of memory, in [\d.]+ [KMG]iB \(MASON_DUCKDB_MEMORY; unset, half the container's memory limit, else of the machine's RAM, or what leaves [\d.]+ GiB beside it when that is less, never under [\d.]+ MiB\)\. Raise MASON_DUCKDB_MEMORY and start mason again, or mason add public\.big --columns … without its widest columns \(tried again after \d\d:\d\d UTC \(failure 1 in a row\)/, said);
       assert.doesNotMatch(error, /threads|preserve_insertion_order|PRAGMA|SET |DuckDB|duckdb/);
       assert.ok(logged.some((l) => /ran out of memory: reading on one chunk at a time, 1 page\(s\) each$/.test(l)), `halved down to one page\n${said}`);
       const kept = Number((await reader.runAndReadAll("SELECT count(*) FROM _mason.copy_chunks")).getRowsJS()[0]![0]);

@@ -39,7 +39,8 @@ import { commandPinProblem } from "./pin.ts";
 import { recordRefusal } from "./replication-mode.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
-import { memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES, MIN_SHARE_BYTES, OUTSIDE_RESERVE_BYTES } from "../duck/store.ts";
+import { DEFAULT_MEMORY_RULE, memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES } from "../duck/store.ts";
+import { wrap } from "./style.ts";
 import { runningVersion, version, type RunningVersion } from "./version.ts";
 import { phaseCounts } from "./readiness.ts";
 import { METRICS_CONTENT_TYPE, metricsText, type RunMetrics } from "./metrics.ts";
@@ -80,10 +81,7 @@ export const SERVE: CommandSpec = {
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
-    MASON_DUCKDB_MEMORY     the engine's memory, 4GB or 512MiB (default half the container's memory limit, else of the
-                            machine's RAM, or what leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} beside it when that is less, never under
-                            ${memorySize(MIN_SHARE_BYTES)}; mason doctor says it); a statement past it fails alone with 53200. Unset,
-                            under ${memorySize(MEMORY_FLOOR_BYTES)} Mason starts and warns: the system may stop it
+    MASON_DUCKDB_MEMORY     ${wrap(`the engine's memory, 4GB or 512MiB (default ${DEFAULT_MEMORY_RULE}; mason doctor says it); a statement past it fails alone with 53200. Unset, under ${memorySize(MEMORY_FLOOR_BYTES)} Mason starts and warns: the system may stop it`, 120, 28)}
     MASON_SPILL_LIMIT       what statements may spill to disk, 40GB or 512MiB (default half of what is free, followed as
                             the disk fills; never past 90% of it); a statement past it fails alone with 53400
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)

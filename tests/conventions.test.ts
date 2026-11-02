@@ -1471,3 +1471,23 @@ test("session state: the session's zone, path and order are read from Vars only 
   const outside = reads.filter((i) => !ranges.some(([from, to]) => i > from && i < to)).map((i) => src.slice(0, i).split("\n").length);
   assert.deepEqual(outside, [], "read the session's state by sessionState() (one reader, sessionSetting's)");
 });
+
+/** WORDS THAT STATE THE DEFAULT MEMORY LIMIT'S RULE ("half the machine's RAM", "half of it by default"): src/ says the
+ *  rule only through store.ts's DEFAULT_MEMORY_RULE, which is beside `defaultMemoryLimit`, the rule itself (a fact derived
+ *  in several places: PR 380's first-sync refusal said "half the machine's RAM when unset" after PR 382 changed the
+ *  default). Spill's "half of what is free" is another limit, and does not match. */
+export const DEFAULT_RULE_WORDS = /\bhalf (?:of )?(?:the|it|its)\b[^.;()]*?\b(?:RAM|machine|memory|container|limit)\b|\bhalf of it by default\b/i;
+
+test("the default memory limit's rule is said in src/ only through store.ts's DEFAULT_MEMORY_RULE (issue 301, PR 380)", () => {
+  // the detector meets the words it is for, and passes the spill's
+  assert.ok(DEFAULT_RULE_WORDS.test("(MASON_DUCKDB_MEMORY; half the machine's RAM when unset)"));
+  assert.ok(DEFAULT_RULE_WORDS.test("memory (the engine uses up to half of it by default"));
+  assert.ok(DEFAULT_RULE_WORDS.test("the engine may use half the container's memory limit by default"));
+  assert.ok(!DEFAULT_RULE_WORDS.test("what statements may spill to disk (default half of what is free, followed as the disk fills)"));
+  const store = fs.readFileSync(path.join(ROOT, "src/duck/store.ts"), "utf8");
+  assert.ok(literals(store).some((l) => DEFAULT_RULE_WORDS.test(l.text)), "store.ts says the rule, in DEFAULT_MEMORY_RULE");
+  const hits = scannedFiles(["src"]).filter((f) => f.name !== "src/duck/store.ts").flatMap((f) =>
+    (f.name.endsWith(".html") ? f.src.split("\n").map((text, n) => ({ line: n + 1, text })) : literals(f.src))
+      .filter((l) => DEFAULT_RULE_WORDS.test(l.text)).map((l) => `${f.name}:${l.line}: ${l.text}`));
+  assert.deepEqual(hits, [], "say the default through DEFAULT_MEMORY_RULE (src/duck/store.ts), never in words of its own");
+});

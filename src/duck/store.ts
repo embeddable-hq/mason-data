@@ -128,9 +128,13 @@ function memorySet(env: Readonly<Record<string, string | undefined>>): string | 
 export function memorySettingWrong(text: string): MemoryProblem {
   return { message: `MASON_DUCKDB_MEMORY=${JSON.stringify(text)} is not an amount of memory`,
     why: "it is the memory the synced data's statements may use before they spill to disk",
-    fix: `write it as 8GB or 512MiB, or unset it for the default (${DEFAULT_MEMORY_LIMIT} here: ${DEFAULT_RULE})` };
+    fix: `write it as 8GB or 512MiB, or unset it for the default (${DEFAULT_MEMORY_LIMIT} here: ${DEFAULT_MEMORY_RULE})` };
 }
-const DEFAULT_RULE = `half the memory, or what leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} beside it when that is less`;
+/** THE DEFAULT'S RULE IN WORDS, the one text every message, help and guide that states the default says (a fact derived
+ *  in several places: PR 380's first-sync refusal said "half the machine's RAM" after the default had changed);
+ *  `defaultMemoryLimit` is the rule, and `tests/conventions.test.ts` holds src/ to saying it only through this */
+export const DEFAULT_MEMORY_RULE = `half the container's memory limit, else of the machine's RAM, or what leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} ` +
+  `beside it when that is less, never under ${memorySize(MIN_SHARE_BYTES)}`;
 
 /**
  * WHAT A START REFUSES OF THE MEMORY (mason serve's one report; mason start and mason doctor take the first):

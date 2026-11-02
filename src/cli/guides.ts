@@ -8,7 +8,7 @@
  * A guide's name is never a command's (tests/cli-help.test.ts): one word never means two pages.
  */
 import { DEMO_ADDED_TABLES, DEMO_TABLES, DEMO_TABLE_TO_ADD } from "../demo/seed.ts";
-import { memorySize, MEMORY_FLOOR_BYTES, MIN_SHARE_BYTES, OUTSIDE_RESERVE_BYTES } from "../duck/store.ts";
+import { DEFAULT_MEMORY_RULE, memorySize, MEMORY_FLOOR_BYTES, OUTSIDE_RESERVE_BYTES } from "../duck/store.ts";
 
 /** The guides, by the name `mason help <guide>` takes. */
 export const GUIDES = {
@@ -254,8 +254,8 @@ names the tables the server syncs, and its url: names the variable that holds th
    GET /healthz on MASON_HEALTH_PORT (4140) answers 503 while it starts and 200 once it serves; the first start takes
    about 15 seconds before that, then syncs the tables. GET /metrics on the same port is for Prometheus: numbers only
    (tables by phase, lag, ages, sizes, statements), never a table's or a user's name, so it needs no secret.
-   MEMORY: the engine may use half the container's memory limit by default (else half the machine's RAM), or what
-   leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} beside it when that is less, never under ${memorySize(MIN_SHARE_BYTES)}; the rest is the page cache, Node and the catalog (~820 MB).
+   MEMORY: by default the engine may use ${DEFAULT_MEMORY_RULE};
+   the rest is the page cache, Node and the catalog (~820 MB).
    Give it ${memorySize(MEMORY_FLOOR_BYTES)} or more (Mason itself was measured using up to 2.3 GiB beside the engine, and the kernel
    killed it in less): under it, with MASON_DUCKDB_MEMORY unset, a start goes on and warns, in the log, mason status and
    mason doctor, that the system may stop it. Set, it is your word at any size, and mason doctor says what it leaves. Give the container enough that the page cache holds the

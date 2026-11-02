@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as syncModule from "../src/duck/sync.ts";
+import * as storeModule from "../src/duck/store.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 type Sized = { source: string; rows: number | null; bytes: number };
@@ -376,4 +377,8 @@ test("a table too large for the memory is said in the operator's words, never th
   assert.match(m, /mason add public\.big --columns/);
   assert.match(m, /128\.0 MiB/);
   assert.doesNotMatch(m, /threads|preserve_insertion_order|PRAGMA|SET |DuckDB|duckdb|\bcopy\b/);
+  // the default, when unset, in the one text store.ts derives beside the rule itself (issue 301: never "half the RAM")
+  const rule = (storeModule as unknown as { DEFAULT_MEMORY_RULE?: string }).DEFAULT_MEMORY_RULE;
+  assert.ok(rule !== undefined, "store.ts says the default's rule");
+  assert.ok(m.includes(`(MASON_DUCKDB_MEMORY; unset, ${rule})`), m);
 });

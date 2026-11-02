@@ -51,7 +51,7 @@ mason user add metabase      # the BI tool's user: URL and password, printed onc
   an image that carries it ([`deploy/fly/README.md`](../fly/README.md#the-project-folder) has the two-line Dockerfile)
   and remove `MASON_PROJECT`.
 - **Memory**: `MASON_DUCKDB_MEMORY` is said explicitly (4 GB). Left unset, the copy takes half of the limit it reads
-  from the container, and what Railway's container shows there is not documented: `mason doctor` in the service's shell
+  from the container (or what leaves 2.5 GiB beside it when that is less), and what Railway's container shows there is not documented: `mason doctor` in the service's shell
   says what the copy may use; if it shows the machine's RAM rather than the plan's limit, set it to half the plan's
   limit yourself. Pro allows up to 24 GB a replica; raise the copy's share with the plan, keeping about half for the
   page cache ([`deploy/mason-data/README.md`](../mason-data/README.md#memory)).

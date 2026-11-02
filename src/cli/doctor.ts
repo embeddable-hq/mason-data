@@ -29,8 +29,8 @@ export const NODE_MIN = "22.13";
 
 export const DOCTOR_USAGE = `usage: mason doctor [--json]
 
-  Says whether this machine is ready for Mason — Node ${NODE_MIN} or later, memory (the engine uses up to half of it by
-  default; MASON_DUCKDB_MEMORY=4GiB sets it), Mason's postgres and inet extensions (installed with Mason for this
+  Says whether this machine is ready for Mason — Node ${NODE_MIN} or later, memory (what the engine may use and what it
+  leaves beside it; MASON_DUCKDB_MEMORY=4GiB sets it), Mason's postgres and inet extensions (installed with Mason for this
   platform, so nothing is downloaded; else the first sync downloads them), the ports Mason listens on — with the way
   out for anything missing. In a
   project's folder it checks the project's database too; with Mason running for it, the run in a few lines instead: its
