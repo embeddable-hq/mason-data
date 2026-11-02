@@ -16,11 +16,15 @@ to the agent that wrote the code. A coordinator holding that agent can, and this
 
 **The one rule: never write a prompt yourself.** Every stage's prompt, its model, effort and isolation, the order of
 the stages, the class rule, the severity rule, the round bounds, the `unreviewed` stop, filing and the Review record
-are all `pr-loop-slim.js`'s. The render command below REPLAYS that script, as `tests/workflows.test.ts` loads it,
-against the results you have recorded. It writes out the whole prompt of each stage the script would start next. The
-review's text (`EVIDENCE`, `VARIANT_FORMS`, `SEVERITY_RULE`, the `FINDINGS` schema) and the record's
-`json mason-review-record` block therefore come from the same code as in the other arm. You paste a rendered prompt
-unchanged and add nothing to it, so the two arms differ only in who receives each prompt.
+are all `pr-loop-slim.js`'s. The render below REPLAYS that script, as `tests/workflows.test.ts` loads it, against the
+results recorded so far. It writes out the whole prompt of each stage the script would start next. The review's text
+(`EVIDENCE`, `VARIANT_FORMS`, `SEVERITY_RULE`, the `FINDINGS` schema) and the record's `json mason-review-record`
+block therefore come from the same code as in the other arm. Each agent reads its rendered prompt from the file
+unchanged, and you add nothing to it, so the two arms differ only in who receives each prompt.
+
+**Content goes between agents by path; you read only control lines** (issue 304). Prompts and results stay on disk:
+you never read a prompt file or a result file, and never paste either into a message. A coordinator that carried them
+spent a third of the implementer's output tokens doing it.
 
 ## 1. Set up the run
 
@@ -33,104 +37,60 @@ Make a run folder in your scratchpad. In it, write `args.json` with pr-loop-slim
 - `brief`: in the race, the ONE brief both arms share, in pr-loop's BRIEF shape (`{ brief, shapes, tests }`). Write it
   yourself as CLAUDE.md "The loop" step 1 says, and give the other arm the same object.
 
-Then write `answers.json` holding `{}`, and PIN the script: copy `<repo>/.claude/workflows/pr-loop-slim.js` into the
-run folder, as `pr-loop-slim.js`, at the same commit the other arm starts from. Note that commit in the race log
-(`git -C <repo> rev-parse HEAD`). The render reads only that copy, as the Workflow tool loads its script once, so a
-main that moves during the race cannot change a later stage's prompt or labels.
+Then write `answers.json` holding `{}`, make `results/` (each agent writes its result there), and PIN the script and
+its render: copy `.claude/workflows/pr-loop-slim.js` and `.claude/skills/pr-persistent/render.mjs` into the run folder,
+both from the commit the other arm starts from, and note that commit in the race log:
+
+```sh
+SHA=$(git -C <repo> rev-parse HEAD)
+git -C <repo> show "$SHA:.claude/workflows/pr-loop-slim.js" > "$RUN/pr-loop-slim.js"
+git -C <repo> show "$SHA:.claude/skills/pr-persistent/render.mjs" > "$RUN/render.mjs"
+mkdir -p "$RUN/results"
+```
+
+The render reads only those copies, as the Workflow tool loads its script once, so a main that moves during the race
+cannot change a later stage's prompt or labels.
 
 Keep a race log there too. For each stage, note its wall-clock start and end (`date -u +%FT%TZ`) and the tokens and
 tool uses that the agent's completion notification reports. Each SendMessage round to the implementer is a row of its
-own, and so is Learn.
+own, and so is Learn. The last row is your own: the coordinator's output tokens, cache writes and cache reads, as your
+session's usage reports them at the end. A coordinator that carried every prompt and result through its context spent
+49 k output, 0.70 M cache writes and 7.7 M cache reads (issue 304), and this row is measured against those numbers.
 
 ## 2. The loop: render, dispatch, record
 
 ```sh
-# render-stage: replays $RUN/pr-loop-slim.js (the pinned copy) against $RUN/answers.json, and writes the prompt of
-# each stage it starts next. Export RUN (the run folder) first.
-node --input-type=module <<'EOF'
-import fs from "node:fs";
-const { RUN } = process.env;
-if (!RUN) throw new Error("export RUN (the run folder) first");
-const read = (f) => JSON.parse(fs.readFileSync(`${RUN}/${f}`, "utf8"));
-const args = read("args.json"), answers = read("answers.json");
-const src = fs.readFileSync(`${RUN}/pr-loop-slim.js`, "utf8");
-if (!/^export const meta = /.test(src)) throw new Error("pr-loop-slim.js no longer begins with `export const meta`: fix this command");
-const run = new (Object.getPrototypeOf(async () => {}).constructor)("args", "agent", "phase", "log", "workflow", "parallel", src.replace(/^export const meta/, "const meta"));
-// An answer is read as the Workflow tool reads an agent's result: one that fails the schema its agent() call carries
-// is null, the result of an agent that failed. Why it failed is the first thing printed.
-const problem = (v, s, at) => {
-  if (s.enum && !s.enum.includes(v)) return `${at} is ${JSON.stringify(v)}, not one of ${s.enum.join(", ")}`;
-  const min = (x) => (s.minimum !== undefined && x < s.minimum ? `${at} is below ${s.minimum}` : null);
-  switch (s.type) {
-    case "object": {
-      if (!v || typeof v !== "object" || Array.isArray(v)) return `${at} is not an object`;
-      const gone = (s.required ?? []).find((k) => !Object.hasOwn(v, k));
-      if (gone) return `${at}.${gone} is missing`;
-      for (const [k, p] of Object.entries(s.properties ?? {})) { const w = Object.hasOwn(v, k) ? problem(v[k], p, `${at}.${k}`) : null; if (w) return w; }
-      return null;
-    }
-    case "array": {
-      if (!Array.isArray(v)) return `${at} is not an array`;
-      for (const [i, x] of v.entries()) { const w = s.items ? problem(x, s.items, `${at}[${i}]`) : null; if (w) return w; }
-      return null;
-    }
-    case "string": return typeof v === "string" ? null : `${at} is not a string`;
-    case "number": return typeof v === "number" && Number.isFinite(v) ? min(v) : `${at} is not a number`;
-    case "integer": return Number.isInteger(v) ? min(v) : `${at} is not an integer`;
-    case "boolean": return typeof v === "boolean" ? null : `${at} is not a boolean`;
-    default: return null;
-  }
-};
-const STOP = Symbol("stop"), next = [];
-const agent = async (prompt, opts) => {
-  if (Object.hasOwn(answers, opts.label)) {
-    const a = answers[opts.label];
-    const why = a === null || !opts.schema ? null : problem(a, opts.schema, "answer");
-    if (why) console.log(`NULL ${JSON.stringify(opts.label)}: ${why}; read as null, an agent that failed, as the Workflow tool would`);
-    return why ? null : a;
-  }
-  next.push({ prompt, opts });
-  throw STOP;
-};
-const parallel = (thunks) => Promise.all(thunks.map((t) => t()));
-const name = (label) => label.replace(/[^a-z0-9]+/gi, "-").replace(/-$/, "");
-fs.rmSync(`${RUN}/next`, { recursive: true, force: true });
-fs.mkdirSync(`${RUN}/next`);
-try {
-  const result = await run(args, agent, () => {}, () => {}, () => { throw new Error("pr-loop-slim calls no workflow"); }, parallel);
-  fs.writeFileSync(`${RUN}/result.json`, JSON.stringify(result, null, 2));
-  console.log(`DONE: ${result.status}`);
-} catch (e) {
-  if (e !== STOP) throw e;
-  for (const { prompt, opts } of next) {
-    const { label, phase, schema, ...on } = opts;
-    fs.writeFileSync(`${RUN}/next/${name(label)}.md`, `${prompt}\n\nEnd your report with ONE fenced json block holding your result, which must match this JSON schema (the Workflow tool enforces it on pr-loop-slim's agents): ${JSON.stringify(schema)}`);
-    console.log(`STAGE ${JSON.stringify(label)} (${phase}) ${JSON.stringify(on)}: ${RUN}/next/${name(label)}.md`);
-  }
-}
-EOF
+# render-stage: replays the pinned pr-loop-slim.js against answers.json, both beside it in the run folder, and writes
+# each next stage's prompt to next/. It prints only STAGE, NULL and DONE lines.
+node "$RUN/render.mjs"
 ```
 
-Export RUN, then run the render. It prints `DONE: <status>` when the run is over, or one `STAGE` line for each stage
-the script starts next. Before those, it prints a `NULL` line for each recorded answer that fails its stage's schema:
-that answer was read as `null`, a failed agent, exactly as the Workflow tool reads it. A review and the CI read beside it come as two stages together. Each `STAGE` line gives the stage's label, its
-options and the file that holds its whole prompt. Dispatch each stage as its label says, with that file's content as
-the message, unchanged:
+It prints `DONE: <status>` when the run is over, or one `STAGE` line for each stage the script starts next. Before
+those, it prints a `NULL` line for each recorded answer read as `null`, a failed agent, exactly as the Workflow tool
+reads it: its result file is missing, is not JSON, or fails its stage's schema. A review and the CI read beside it come
+as two stages together. Each `STAGE` line gives the stage's label, its options and the file that holds its whole
+prompt. A render that exits non-zero prints one line saying what is wrong and what to do: do that, and render again.
+
+Dispatch each stage as its label says. The message is this one sentence, with the path from its `STAGE` line, and
+nothing else: `Your instructions are in <path>: read the whole file, then follow it.`
 
 - **`implement`**: start ONE implementer with the Agent tool and the printed options (`model: "opus"`,
   `effort: "high"`, `isolation: "worktree"`; the tool's `effort` is set because this skill asks for it). Keep its
   agent ID: this agent is the PR's author until the end.
-- **`fix r<n>`, `fix r<n> (class)` and `CI fix <n>`**: send the prompt to THE SAME implementer with SendMessage, never
+- **`fix r<n>`, `fix r<n> (class)` and `CI fix <n>`**: send the sentence to THE SAME implementer with SendMessage, never
   to a new agent. Tell it once, in the first such message, that it keeps its worktree and its context between
   rounds. That sentence is the only thing you add, and it is what this arm measures.
 - **Every other stage** (`review r<n>`, `CI read r<n>`, `link`, `learn`, `learn check`, `CI <n>`, `file`, `record`):
   a FRESH agent with the Agent tool, with the printed options. A review is `model: "fable"`, `effort: "medium"`.
 
-When an agent reports, take the fenced json block at the end of its report. Add it to `answers.json` under the
-stage's label exactly as printed, or `null` when the agent failed or gave no block. Then render again. Never judge
-whether a block is valid by eye: the render checks each answer against the schema its stage carries. A review's block is its `FINDINGS`; the implementer's and a fixer's carry the handoff, which
-the next fix prompt pastes verbatim. Record each answer as the agent gave it, and never edit one. The script itself
-decides what happens next from those answers: a class round, a deferral, the 4-round bound, the `unreviewed` stop,
+Each rendered prompt ends by telling its agent to write its result, ONE JSON value, to `results/<name>.json` in the run
+folder, and to end its report with that path. When an agent reports, record under the stage's label in `answers.json`,
+exactly as printed, the results path its report ends with, or `null` when the agent failed or named no path. Then
+render again. Record a path, never the JSON: the render refuses any value but that label's own results path or
+`null`, since another stage's file would be read as this stage's answer. Never judge whether a result is valid by eye:
+the render checks each against the schema its stage carries. A review's result is its `FINDINGS`; the implementer's
+and a fixer's carry the handoff, which the next fix prompt pastes verbatim. Never edit a result. The script itself
+decides what happens next from those results: a class round, a deferral, the 4-round bound, the `unreviewed` stop,
 CI, Learn, filing and the record.
 
 Nothing waits unwatched: every agent you start notifies you when it reports, and each CI stage is an agent with its
@@ -139,8 +99,8 @@ own bounded wait.
 ## 3. When the render says DONE
 
 - Post the race log as ONE comment on the PR, headed `### From Claude (<your model>)` and `## Race log`. Give each
-  stage's wall time, Learn's own time on its own row, and each agent's tokens. The Review record is the `record`
-  stage's comment, as rendered, so do not add the log to it.
+  stage's wall time, Learn's own time on its own row, each agent's tokens, and your own on the last row. The Review
+  record is the `record` stage's comment, as rendered, so do not add the log to it.
 - **Merge** under CLAUDE.md "Who merges what". Read the diff in full. A PR that changes `src/` waits for the owner's
   word (`Needs Tom` on the board). When the PR may merge, queue it pinned,
   `gh pr merge <n> --auto --merge --match-head-commit <sha>`, and leave a bounded background job on

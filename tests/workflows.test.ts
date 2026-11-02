@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1644,27 +1644,69 @@ test("pr-loop-slim: its review, re-check and CI read are pr-loop's word for word
 // slim's prompt text.
 const SKILL = path.join(ROOT, ".claude", "skills", "pr-persistent", "SKILL.md");
 const skillText = (): string => fs.readFileSync(SKILL, "utf8");
+// Issue 304: the coordinator carried every prompt and result through its own context, a third of the implementer's
+// output tokens, only to forward them. Content now goes between agents by path: the render is a script file pinned
+// into the run folder, its stdout only control lines, each prompt a file, each result a file the agent writes.
+const RENDER = path.join(ROOT, ".claude", "skills", "pr-persistent", "render.mjs");
 /** The skill's render command, the ```sh block that begins `# render-stage`. */
 function renderCommand(): string {
   const m = /```sh\n(# render-stage[\s\S]*?)\n```/.exec(skillText());
   assert.ok(m, "the skill has the render command, in a ```sh block that begins `# render-stage`");
   return m[1]!;
 }
-/** The skill's render, run over args and answers in a run folder of its own, which holds the pinned copy of slim (this
- * tree's, or `slimSrc`): what it printed, and the files it wrote. */
-function renderStage(args: Record<string, unknown>, answers: Answers, slimSrc = source("pr-loop-slim")): { out: string; files: Record<string, string>; dir: string } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-persistent-"));
+/** A run folder of its own, as SKILL.md sets one up: args.json, the pinned copy of slim (this tree's, or `slimSrc`),
+ * render.mjs and results/. Its real path, as the render names it from import.meta.url. */
+function runFolder(args: Record<string, unknown>, slimSrc = source("pr-loop-slim")): string {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pr-persistent-")));
   fs.writeFileSync(path.join(dir, "args.json"), JSON.stringify(args));
-  fs.writeFileSync(path.join(dir, "answers.json"), JSON.stringify(answers));
   fs.writeFileSync(path.join(dir, "pr-loop-slim.js"), slimSrc);
-  const env: Record<string, string | undefined> = { ...process.env, RUN: dir };
-  delete env["REPO"];
-  const out = execFileSync("bash", ["-c", renderCommand()], { env, encoding: "utf8" });
-  const next = path.join(dir, "next");
-  const files = Object.fromEntries(fs.readdirSync(next).map((f) => [f, fs.readFileSync(path.join(next, f), "utf8")]));
-  return { out, files, dir };
+  fs.copyFileSync(RENDER, path.join(dir, "render.mjs"));
+  fs.mkdirSync(path.join(dir, "results"));
+  return dir;
 }
-const RESULT_TRAILER = "\n\nEnd your report with ONE fenced json block holding your result, which must match this JSON schema (the Workflow tool enforces it on pr-loop-slim's agents): ";
+const fileName = (label: string) => label.replace(/[^a-z0-9]+/gi, "-").replace(/-$/, "");
+/** Where the agent of `label` writes its result, and the one value besides null answers.json may record for it. */
+const resultPath = (dir: string, label: string) => path.join(dir, "results", `${fileName(label)}.json`);
+type Rendered = { out: string; err: string; status: number | null; files: Record<string, string>; dir: string };
+/** `node <dir>/render.mjs` with answers.json holding `recorded` as is, run from another folder, with no RUN or REPO in
+ * its environment: the run folder is the one the script sits in. */
+function renderRaw(dir: string, recorded: Record<string, unknown>): Rendered {
+  fs.writeFileSync(path.join(dir, "answers.json"), JSON.stringify(recorded));
+  const env: Record<string, string | undefined> = { ...process.env };
+  delete env["RUN"];
+  delete env["REPO"];
+  const r = spawnSync(process.execPath, [path.join(dir, "render.mjs")], { env, cwd: os.tmpdir(), encoding: "utf8" });
+  const next = path.join(dir, "next");
+  const files = fs.existsSync(next) ? Object.fromEntries(fs.readdirSync(next).map((f) => [f, fs.readFileSync(path.join(next, f), "utf8")])) : {};
+  return { out: r.stdout, err: r.stderr, status: r.status, files, dir };
+}
+/** The skill's render over args and answers, recorded as the coordinator records them: each answer written to its
+ * stage's results file by "the agent", and that path (or null for a failed agent) in answers.json. */
+function renderStage(args: Record<string, unknown>, answers: Answers, slimSrc = source("pr-loop-slim")): Rendered {
+  const dir = runFolder(args, slimSrc);
+  const recorded: Record<string, string | null> = {};
+  for (const [label, a] of Object.entries(answers)) {
+    if (a === null) { recorded[label] = null; continue; }
+    fs.writeFileSync(resultPath(dir, label), JSON.stringify(a));
+    recorded[label] = resultPath(dir, label);
+  }
+  const r = renderRaw(dir, recorded);
+  assert.equal(r.status, 0, `the render exits 0: ${r.err}`);
+  assert.equal(r.err, "", "the render prints nothing on stderr when nothing is wrong");
+  return r;
+}
+/** What the render appends to slim's prompt of `label`, up to its schema: where the agent writes its result. */
+const RESULT_TRAILER = (dir: string, label: string) =>
+  `\n\nWrite your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(dir, label)}, and end your report with that path. The schema: `;
+/** The coordinator reads stdout, so it holds control lines only, and no sentence of any prompt it rendered. */
+function onlyControlLines(r: Rendered, what: string): void {
+  for (const line of r.out.split("\n").filter(Boolean)) assert.match(line, /^(STAGE |DONE: |NULL )/, `${what}: a stdout line that is not a control line: ${line}`);
+  for (const text of Object.values(r.files)) {
+    for (const s of text.split(/(?<=[.:])\s+|\n/).map((x) => x.trim()).filter((x) => x.length >= 30)) {
+      assert.ok(!r.out.includes(s), `${what}: stdout carries a sentence of a prompt: ${s}`);
+    }
+  }
+}
 
 test("the pr-persistent skill: valid frontmatter, and it names where its text comes from without restating it", async () => {
   assert.ok(fs.existsSync(SKILL), "the skill exists at .claude/skills/pr-persistent/SKILL.md");
@@ -1676,13 +1718,29 @@ test("the pr-persistent skill: valid frontmatter, and it names where its text co
   assert.ok((fields["description"] ?? "").length > 40, "a description that says when to use it");
   assert.doesNotMatch(fields["description"]!, /: /, "the description is one plain YAML scalar");
   for (const s of [".claude/workflows/pr-loop-slim.js", "EVIDENCE", "VARIANT_FORMS", "SEVERITY_RULE", "FINDINGS", "json mason-review-record", "SendMessage",
-    'process: "pr-persistent"', "THE SAME implementer", "--match-head-commit", "Race log", "Learn"]) {
+    'process: "pr-persistent"', "THE SAME implementer", "--match-head-commit", "Race log", "Learn", "--json state,mergeable"]) {
     assert.ok(text.includes(s), `the skill says ${s}`);
   }
 });
 
-test("the pr-persistent skill restates no sentence of a prompt pr-loop-slim.js gives its agents (PR 258's class)", async () => {
-  const text = skillText();
+test("the pr-persistent skill: the render is one command, each stage is dispatched by path, and the run is pinned and measured", () => {
+  const cmd = renderCommand();
+  assert.ok(cmd.includes('node "$RUN/render.mjs"'), "the render is the pinned script, run by path");
+  assert.doesNotMatch(cmd, /<</, "no heredoc: the coordinator never re-emits the render's source");
+  assert.deepEqual(cmd.split("\n").filter((l) => !l.startsWith("#")), ['node "$RUN/render.mjs"'], "the block is that one command");
+  const text = skillText(), prose = text.replace(/\s+/g, " ");
+  for (const s of ["Your instructions are in", "read the whole file, then follow it", "results/", "PIN the script and its render",
+    ".claude/skills/pr-persistent/render.mjs", "never the JSON", "cache writes", "cache reads"]) {
+    assert.ok(prose.includes(s), `the skill says ${s}`);
+  }
+  // both files are pinned from one commit, as the Workflow tool loads its script once
+  assert.match(text, /show "\$SHA:\.claude\/workflows\/pr-loop-slim\.js" > "\$RUN\/pr-loop-slim\.js"/);
+  assert.match(text, /show "\$SHA:\.claude\/skills\/pr-persistent\/render\.mjs" > "\$RUN\/render\.mjs"/);
+  assert.doesNotMatch(text, /fenced json block/, "a result travels by file, never in the report");
+});
+
+test("the pr-persistent skill and its render restate no sentence of a prompt pr-loop-slim.js gives its agents (PR 258's class)", async () => {
+  const text = skillText() + "\n" + fs.readFileSync(RENDER, "utf8");
   const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green });
   const sentences = new Set(r.calls.flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50));
   assert.ok(sentences.size > 100);
@@ -1727,23 +1785,36 @@ test("the pr-persistent skill: every stage's prompt and options, rendered by the
   for (const [i, call] of slim.calls.entries()) {
     const { label, phase, schema, ...on } = call.opts;
     const before = Object.fromEntries(slim.labels.slice(0, i).map((l) => [l, answers[l]]));
-    const { out, files } = renderStage(args, before);
+    const r = renderStage(args, before);
+    const { out, files, dir } = r;
     assert.match(out, new RegExp(`^STAGE ${JSON.stringify(label).replace(/[()]/g, "\\$&")} \\(${phase}\\) `), `${label}: the render's next stage`);
     assert.ok(out.split("\n")[0]!.includes(JSON.stringify(on)), `${label}: the options slim gives it (${JSON.stringify(on)})`);
-    assert.equal(files[fileOf(label)], call.prompt + RESULT_TRAILER + JSON.stringify(schema), `${label}: the rendered prompt is slim's, whole`);
+    assert.ok(out.split("\n")[0]!.endsWith(`: ${path.join(dir, "next", fileOf(label))}`), `${label}: the STAGE line names its prompt's file`);
+    assert.equal(files[fileOf(label)], call.prompt + RESULT_TRAILER(dir, label) + JSON.stringify(schema), `${label}: the rendered prompt is slim's, whole`);
+    // the trailer sends the result to a file, by an absolute path the render reads back, and never into the report
+    const trailer = files[fileOf(label)]!.slice(call.prompt.length);
+    assert.ok(path.isAbsolute(resultPath(dir, label)) && trailer.includes(resultPath(dir, label)), `${label}: the trailer names its results file`);
+    assert.doesNotMatch(trailer, /fenced json block/, `${label}: the result goes to a file`);
+    onlyControlLines(r, label);
   }
+  assert.ok(!renderStage(args, {}).out.includes("Implement ONE PR in the Mason repo"), "the implement prompt stays on disk");
   // a review and the CI read beside it are rendered together, as slim starts them together
   const together = renderStage(args, Object.fromEntries(slim.labels.slice(0, 2).map((l) => [l, answers[l]])));
   assert.deepEqual(Object.keys(together.files).sort(), ["CI-read-r1.md", "review-r1.md"]);
+  assert.deepEqual(together.out.split("\n").filter(Boolean).map((l) => l.replace(/ \(.*$/, "")), ['STAGE "review r1"', 'STAGE "CI read r1"']);
+  onlyControlLines(together, "review and CI read");
   // the record is rendered too: pr-loop's block, for the PR it is posted on, saying which arm wrote it
-  const record = renderStage(args, Object.fromEntries(slim.labels.slice(0, -1).map((l) => [l, answers[l]]))).files["record.md"]!;
+  const recorded = renderStage(args, Object.fromEntries(slim.labels.slice(0, -1).map((l) => [l, answers[l]])));
+  onlyControlLines(recorded, "record");
+  const record = recorded.files["record.md"]!;
   const rec = parseRecords(record);
   assert.equal(rec.length, 1);
   assert.equal(rec[0]!.pr, 900, "the record names the PR, read from the implementer's answer");
   assert.match(record, /pr-persistent \(pr-loop-slim's prompts, with ONE implementer kept alive across the fix rounds\)/);
   // and when every stage is answered, the run is over, with slim's status
   const done = renderStage(args, answers);
-  assert.equal(done.out.trim(), `DONE: ${String(slim.result["status"])}`);
+  onlyControlLines(done, "done");
+  assert.equal(done.out, `DONE: ${String(slim.result["status"])}\n`);
   assert.equal(JSON.parse(fs.readFileSync(path.join(done.dir, "result.json"), "utf8")).status, slim.result["status"]);
 });
 
@@ -1765,15 +1836,17 @@ async function slimNext(args: Record<string, unknown>, answers: Answers): Promis
   }
 }
 /** The skill's render and slim agree on what comes next: the same stage with the same whole prompt, or the same end. */
-async function sameNext(answers: Answers, expect: Answers, what: string): Promise<string> {
+async function sameNext(answers: Answers | Rendered, expect: Answers, what: string): Promise<string> {
   const want = await slimNext(RACE_ARGS, expect);
-  const got = renderStage(RACE_ARGS, answers);
+  const got = typeof answers["out"] === "string" && typeof answers["dir"] === "string" ? answers as Rendered : renderStage(RACE_ARGS, answers);
+  assert.equal(got.status, 0, `${what}: the render exits 0: ${got.err}`);
+  onlyControlLines(got, what);
   if ("done" in want) {
     assert.equal(got.out.split("\n").filter((l) => !l.startsWith("NULL ")).join("\n").trim(), `DONE: ${want.done}`, what);
   } else {
     const { label, phase, schema } = want.opts;
     assert.match(got.out, new RegExp(`^STAGE ${JSON.stringify(label).replace(/[()]/g, "\\$&")} \\(${phase}\\) `, "m"), `${what}: the next stage is ${label}`);
-    assert.equal(got.files[fileOf(label)], want.prompt + RESULT_TRAILER + JSON.stringify(schema), `${what}: ${label}'s prompt, whole`);
+    assert.equal(got.files[fileOf(label)], want.prompt + RESULT_TRAILER(got.dir, label) + JSON.stringify(schema), `${what}: ${label}'s prompt, whole`);
   }
   return got.out;
 }
@@ -1829,11 +1902,65 @@ test("the pr-persistent skill's render reads an answer that fails its stage's sc
 test("the pr-persistent skill's render reads only the run folder's pinned pr-loop-slim.js, never the checkout's", () => {
   const marked = source("pr-loop-slim").replace("Implement ONE PR in the Mason repo", "Implement ONE PINNED PR in the Mason repo");
   assert.notEqual(marked, source("pr-loop-slim"));
-  const { files } = renderStage(RACE_ARGS, {}, marked);
+  // renderStage runs the render from another folder with no RUN or REPO in its environment
+  const { files, dir } = renderStage(RACE_ARGS, {}, marked);
   assert.match(files["implement.md"]!, /Implement ONE PINNED PR/, "the stage is rendered from the copy in the run folder");
-  assert.match(renderCommand(), /\$\{RUN\}\/pr-loop-slim\.js/);
-  assert.doesNotMatch(renderCommand(), /REPO|\.claude\/workflows/, "the render reads nothing from a checkout");
+  assert.ok(fs.existsSync(path.join(dir, "next", "implement.md")), "into its own folder");
+  const src = fs.readFileSync(RENDER, "utf8");
+  assert.match(src, /import\.meta\.url/, "the run folder is the one the script sits in");
+  assert.doesNotMatch(src, /REPO|\.claude\/workflows|process\.env/, "the render reads nothing from a checkout or the environment");
+  assert.doesNotMatch(src, /from "\.{1,2}\//, "it imports nothing relative: it runs from a scratchpad folder");
   assert.match(skillText(), /PIN the script/);
+});
+
+// Issue 304: the coordinator records a path, never the JSON, and the render reads the file at that path as the
+// Workflow tool reads an agent's result: missing or not JSON is a failed agent, said on a NULL line.
+test("the pr-persistent render reads a missing or invalid result file as null, as a failed agent", async () => {
+  let dir = runFolder(RACE_ARGS);
+  let out = await sameNext(renderRaw(dir, { implement: resultPath(dir, "implement") }), { implement: null }, "implement's file absent");
+  assert.match(out, new RegExp(`^NULL "implement": the result file ${resultPath(dir, "implement").replace(/[.]/g, "\\.")} does not exist; read as null`, "m"));
+  dir = runFolder(RACE_ARGS);
+  fs.writeFileSync(resultPath(dir, "implement"), "not json");
+  out = await sameNext(renderRaw(dir, { implement: resultPath(dir, "implement") }), { implement: null }, "implement's file not JSON");
+  assert.match(out, /^NULL "implement": the result file \S+ is not JSON \([^\n]*\); read as null/m);
+  // a recorded null is a failed agent, and says nothing: the coordinator knew it
+  out = await sameNext({ implement: null }, { implement: null }, "implement null");
+  assert.doesNotMatch(out, /^NULL /m);
+});
+
+test("the pr-persistent render refuses an answer that is not its label's results path, before anything runs", () => {
+  // the old flow's raw JSON
+  let dir = runFolder(RACE_ARGS);
+  let r = renderRaw(dir, { implement: RACE_ANSWERS["implement"] });
+  assert.notEqual(r.status, 0, "the render exits non-zero");
+  assert.doesNotMatch(r.out, /^(STAGE|DONE)/m, "and starts nothing");
+  assert.deepEqual(r.files, {}, "and renders no prompt");
+  assert.equal(r.err.trim().split("\n").length, 1, `ONE stderr line: ${r.err}`);
+  assert.match(r.err, /"implement"/);
+  assert.match(r.err, /record the results path/);
+  assert.match(r.err, /never the JSON/);
+  assert.ok(r.err.includes(resultPath(dir, "implement")), "it names the path to record");
+  // another stage's file: a review would read the fix's result as its own, silently
+  dir = runFolder(RACE_ARGS);
+  const answers = upTo("review r1", null);
+  const recorded: Record<string, unknown> = {};
+  for (const [l, a] of Object.entries(answers)) {
+    if (a !== null) fs.writeFileSync(resultPath(dir, l), JSON.stringify(a));
+    recorded[l] = a === null ? null : resultPath(dir, l);
+  }
+  fs.writeFileSync(resultPath(dir, "fix r1"), JSON.stringify(RACE_ANSWERS["fix r1"]));
+  r = renderRaw(dir, { ...recorded, "review r1": resultPath(dir, "fix r1") });
+  assert.notEqual(r.status, 0);
+  assert.doesNotMatch(r.out, /^(STAGE|DONE)/m);
+  assert.match(r.err, /"review r1"/);
+  assert.ok(r.err.includes(resultPath(dir, "review r1")), `it names the path it expects: ${r.err}`);
+  // a bad answers.json is one line too, never a stack
+  dir = runFolder(RACE_ARGS);
+  fs.writeFileSync(path.join(dir, "answers.json"), "{");
+  const bad = spawnSync(process.execPath, [path.join(dir, "render.mjs")], { encoding: "utf8" });
+  assert.notEqual(bad.status, 0);
+  assert.equal(bad.stdout, "");
+  assert.match(bad.stderr, /^render\.mjs: \S+answers\.json is not JSON \([^\n]*\): [^\n]+\n$/);
 });
 
 test("pr-loop-slim: args.process names the arm in the record's text, and an unknown one stops the run", async () => {
