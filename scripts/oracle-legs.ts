@@ -10,6 +10,11 @@
  *
  *   node scripts/oracle-legs.ts <folder>    exit 0: the legs are the whole, and hold what a whole run holds; exit 1: not
  *
+ * and then says how far apart the legs ran (`balanceLines`): each leg's statements and stages as run and in ONE MACHINE'S
+ * seconds (`legScales`: hosted runners differ by up to 1.6x, and the setup, alike in every leg, measures by how much),
+ * and a GitHub warning naming `--weights` when the scaled gap passes LEGS_APART_MS. Balance is a cost, never coverage: it
+ * never moves the exit code, and when it cannot be told (a report without times or a setup) it says "not measured".
+ *
  * WHAT A WHOLE RUN REGENERATES COMES FROM THE LEGS TOO, since no session runs the whole oracle locally (CLAUDE.md "Local
  * gates"): each leg reports its part of src/duck/verified.ts (the keys and what each names) and of the fixture's
  * tallies, and
@@ -97,7 +102,12 @@ export interface LegReport {
 /** What a leg's time went on, in ms: each statement text it asked by `weightKey` (every ask of it in every phase, the
  *  DuckDB-alone ask and the shapes; an unordered limit's pages too) with the name it was first asked by, each stage of
  *  one session, and what every leg pays alike (the setup, the first sync, each round of changes) */
-export interface Times { fixed: Record<string, number>; stages: Partial<Record<(typeof STAGES)[number], number>>; statements: Record<string, { ms: number; name: string }> }
+export interface Times {
+  fixed: Record<string, number>; stages: Partial<Record<(typeof STAGES)[number], number>>; statements: Record<string, { ms: number; name: string }>;
+  /** the runner's CPU, its model and count (`os.cpus()`), to read beside the setup: absent in a report from before it.
+   *  Never in `measured`, which `--write` holds equal across the legs, and the legs draw their runners apart */
+  cpu?: string;
+}
 
 /** tests/fixtures/oracle-weights.json: what `partition` balances by, written by `--weights` from a run's `times` */
 export interface Weights {
@@ -116,6 +126,14 @@ export const WEIGHTS_FILE = "tests/fixtures/oracle-weights.json";
  *  gap of about 2 min between the legs (PR 321's second run): the unlisted mass is not alike, and 500 ms, about 450 texts, closed it to under 25 s
  *  across PR 321's two runs, each judged by the other's weights */
 export const WEIGHTS_ABOVE_MS = 500;
+/** THE LEGS' BALANCE TARGET: how far apart the legs' statements and stages may be, in ONE MACHINE'S ms (each leg's
+ *  scaled by `legScales`), before the folder check warns to rebalance. Not in seconds as run: hosted runners differ by up
+ *  to 1.6x in speed (run 41389723050: setup 68.3 s in one leg, 42.3 s in the other), so the same split ran 152 s apart
+ *  as run and 26 s apart scaled (run 41393151088), 153 s and 11 s (41396664763), 24 s and 36 s (41396965861), where 1000 ms
+ *  weights left 116 s scaled (41391539636). Nor does the gap set CI's wall time: in five runs of six a unit shard or a rest
+ *  shard was slower than both legs (docs/DESIGN.md "The oracle's legs and their runners"). 60 s is PR 321's target; the
+ *  fixed costs (setup, first sync, changes) are alike in every leg, and left out of the load. */
+export const LEGS_APART_MS = 60_000;
 
 const sha = (text: string): Buffer => createHash("sha256").update(text).digest();
 
@@ -182,7 +200,57 @@ export function timesLine(t: Times, slowest = 8): string {
   const all = Object.values(t.statements).sort((a, b) => b.ms - a.ms);
   return `fixed: ${Object.entries(t.fixed).map(([k, ms]) => `${k} ${s(ms)}`).join(", ") || "none"}; ` +
     `stages: ${Object.entries(t.stages).map(([k, ms]) => `${k} ${s(ms!)}`).join(", ") || "none"}; ` +
-    `statements: ${s(all.reduce((n, x) => n + x.ms, 0))} over ${all.length} texts; slowest: ${all.slice(0, slowest).map((x) => `${JSON.stringify(x.name)} ${s(x.ms)}`).join(", ") || "none"}`;
+    `statements: ${s(all.reduce((n, x) => n + x.ms, 0))} over ${all.length} texts; slowest: ${all.slice(0, slowest).map((x) => `${JSON.stringify(x.name)} ${s(x.ms)}`).join(", ") || "none"}` +
+    (t.cpu === undefined ? "" : `; runner: ${t.cpu}`);
+}
+
+/** THE ONE SCALE of each leg's times to ONE MACHINE'S ms, in the reports' order, read by `--weights` and the balance
+ *  alike: each leg ran on a runner of its own, and runners differ (PR 321's first run: the same setup took 68 s in one leg
+ *  and 42 s in the other, and every percentile of the statements differed by that factor). The setup is the same work in
+ *  every leg, so a leg's times are scaled by the legs' mean setup over its own. UNKNOWN (null) when any leg has no times
+ *  or no positive setup: there is nothing to scale by, and each caller says what it does then. */
+export function legScales(reports: readonly LegReport[]): number[] | null {
+  const setups = reports.map((r) => r.times?.fixed.setup);
+  if (reports.length === 0 || !setups.every((s): s is number => s !== undefined && s > 0)) return null;
+  const mean = setups.reduce((n, x) => n + x, 0) / setups.length;
+  return setups.map((s) => mean / s);
+}
+
+/** a leg's stages, in ms as run: what `--weights` gives leg FIRST_LEG_RUNS_STAGES's head start from */
+const stagesMs = (t: Times): number => Object.values(t.stages).reduce((m, ms) => m + (ms ?? 0), 0);
+/** what `partition` balances, of one leg, in ms as run: its statements and its stages (the fixed costs are alike in every
+ *  leg, and left out) */
+const legLoad = (t: Times): number => Object.values(t.statements).reduce((n, x) => n + x.ms, 0) + stagesMs(t);
+
+/** The legs' balance: each leg's setup, load as run and scaled (`legScales`), its runner; the gap between the heaviest and
+ *  the lightest, as run and scaled. NOT MEASURED, with why, when it cannot be told: the legs not each present once, a
+ *  report with no times, a setup missing or 0. Never a gap of 0 in place of "couldn't tell". */
+export type Balance =
+  | { measured: false; why: string }
+  | { measured: true; legs: Array<{ leg: number; setup: number; asRun: number; scaled: number; cpu?: string }>; apartAsRun: number; apart: number };
+export function legsBalance(reports: readonly LegReport[]): Balance {
+  const legs = reports.map((r) => r.leg).sort((a, b) => a - b);
+  if (reports.length === 0 || legs.some((l, i) => l !== i + 1) || reports.some((r) => r.of !== reports.length)) return { measured: false, why: `the reports are of leg(s) ${legs.join(", ") || "none"}, not each leg of ${reports[0]?.of ?? "the oracle"} once` };
+  const untimed = reports.filter((r) => r.times === undefined).map((r) => r.leg);
+  if (untimed.length > 0) return { measured: false, why: `the report of leg(s) ${untimed.join(", ")} has no times (a run from before the timing)` };
+  const scales = legScales(reports);
+  if (scales === null) return { measured: false, why: `the report of leg(s) ${reports.filter((r) => !((r.times!.fixed.setup ?? 0) > 0)).map((r) => r.leg).join(", ")} has no setup time to scale by` };
+  const each = reports.map((r, i) => ({ leg: r.leg, setup: r.times!.fixed.setup!, asRun: legLoad(r.times!), scaled: legLoad(r.times!) * scales[i]!, ...(r.times!.cpu === undefined ? {} : { cpu: r.times!.cpu }) })).sort((a, b) => a.leg - b.leg);
+  const apart = (xs: number[]): number => Math.max(...xs) - Math.min(...xs);
+  return { measured: true, legs: each, apartAsRun: apart(each.map((l) => l.asRun)), apart: apart(each.map((l) => l.scaled)) };
+}
+
+/** The folder check's balance lines, after its coverage verdict: one a leg and one of the gap, and, when the scaled gap
+ *  passes LEGS_APART_MS, a GitHub warning naming the command that rebalances (`runId`: GITHUB_RUN_ID, in CI this run).
+ *  A cost, never coverage: nothing here moves the exit code, so runner noise never turns a required check red. */
+export function balanceLines(reports: readonly LegReport[], runId: string | undefined): string[] {
+  const b = legsBalance(reports);
+  if (!b.measured) return [`oracle legs: balance: not measured: ${b.why}`];
+  const s = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
+  const lines = b.legs.map((l) => `oracle leg ${l.leg}: balance: setup ${s(l.setup)}; statements and stages ${s(l.asRun)} as run, ${s(l.scaled)} in one machine's seconds; runner: ${l.cpu ?? "not reported"}`);
+  lines.push(`oracle legs: balance: ${s(b.apartAsRun)} apart as run, ${s(b.apart)} in one machine's seconds (the target: ${s(LEGS_APART_MS)} or less)`);
+  if (b.apart > LEGS_APART_MS) lines.push(`::warning title=oracle legs::the legs are ${s(b.apart)} apart in one machine's seconds, past the target of ${s(LEGS_APART_MS)}: rebalance with \`node scripts/oracle-legs.ts --weights ${runId ?? "<run-id>"}\` (from this run's oracle legs), read the diff of ${WEIGHTS_FILE}, and commit it`);
+  return lines;
 }
 
 /** `--weights`: the weights from the legs' `times`, or why the reports cannot give them. `from` names the run or folder. */
@@ -191,17 +259,15 @@ export function weightsFromLegs(reports: readonly LegReport[], want: number, fro
   if (partitioned.length > 0) return { problems: partitioned };
   const untimed = reports.filter((r) => r.times === undefined).map((r) => r.leg);
   if (untimed.length > 0) return { problems: [`the report of leg(s) ${untimed.join(", ")} of ${from} has no times: the run predates the timing. Use a run of a commit that times its statements`] };
-  // ONE MACHINE'S MILLISECONDS: each leg ran on a runner of its own, and runners differ (PR 321's first run: the same
-  // setup took 68 s in one leg and 42 s in the other, and every percentile of the statements differed by that factor).
-  // The setup is the same work in every leg, so each leg's times are scaled by the legs' mean setup over its own
-  const setups = reports.map((r) => r.times!.fixed.setup);
+  // ONE MACHINE'S MILLISECONDS (`legScales`); a leg with no setup to scale by counts as run, as before the scale
+  const scales = legScales(reports);
+  const scale = (i: number): number => scales?.[i] ?? 1;
   const mean = (xs: number[]): number => xs.reduce((n, x) => n + x, 0) / xs.length;
-  const scale = (r: LegReport): number => setups.every((s) => s !== undefined && s > 0) ? mean(setups as number[]) / r.times!.fixed.setup! : 1;
-  const spent = reports.flatMap((r) => Object.entries(r.times!.statements).map(([k, x]): [string, { ms: number; name: string }] => [k, { ms: x.ms * scale(r), name: x.name }]));
+  const spent = reports.flatMap((r, i) => Object.entries(r.times!.statements).map(([k, x]): [string, { ms: number; name: string }] => [k, { ms: x.ms * scale(i), name: x.name }]));
   const listed = spent.filter(([, x]) => x.ms >= above).sort(([a, x], [b, y]) => y.ms - x.ms || (a < b ? -1 : 1));
   const rest = spent.filter(([, x]) => x.ms < above);
   const restMean = rest.length === 0 ? above : mean(rest.map(([, x]) => x.ms));
-  const stages = reports.reduce((n, r) => n + scale(r) * Object.values(r.times!.stages).reduce((m, ms) => m + (ms ?? 0), 0), 0);
+  const stages = reports.reduce((n, r, i) => n + scale(i) * stagesMs(r.times!), 0);
   return { weights: { from, above, stages: Math.round(stages), default: Math.max(1, Math.round(restMean)), statements: Object.fromEntries(listed.map(([k, x]) => [k, { ms: Math.round(x.ms), name: x.name }])) } };
 }
 
@@ -461,10 +527,10 @@ if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLTo
   const fixture = JSON.parse(fs.readFileSync(path.join(root, "tests/fixtures/oracle-duckdb-alone.json"), "utf8")) as Pick<Tallies, "mason" | "duckdb">;
   const problems = foldProblems(reports, SHARDS.oracle, fixture, VERIFIED);
   for (const r of reports) console.log(`oracle leg ${r.leg}: ${r.tallies.statements} tallied of ${r.whole.length} statements, ${r.shaped} in other shapes, ${r.differences} differ; stages: ${Object.keys(r.stages).join(", ") || "none"}`);
-  if (problems.length > 0) {
-    for (const p of problems) console.error(`oracle legs: ${p}`);
-    process.exit(1);
-  }
-  console.log(`oracle legs: ${reports.map((r) => (r.asked[PHASES[0]] ?? []).length).join(" + ")} = ${reports[0]!.whole.length} statements, each asked in all ${PHASES.length} phases by exactly one leg; ` +
+  for (const p of problems) console.error(`oracle legs: ${p}`);
+  if (problems.length === 0) console.log(`oracle legs: ${reports.map((r) => (r.asked[PHASES[0]] ?? []).length).join(" + ")} = ${reports[0]!.whole.length} statements, each asked in all ${PHASES.length} phases by exactly one leg; ` +
     `${reports.reduce((n, r) => n + r.shaped, 0)} in other shapes; no stale decision, no dead gap, src/duck/verified.ts and the fixture's tallies hold`);
+  // the balance, after the verdict and whatever it was: a cost, said and warned of, never the exit code
+  for (const l of balanceLines(reports, process.env.GITHUB_RUN_ID)) console.log(l);
+  process.exit(problems.length > 0 ? 1 : 0);
 }

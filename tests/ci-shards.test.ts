@@ -174,6 +174,29 @@ test("scripts/oracle-legs.ts run as CI runs it: exit 0 on legs that are the whol
   assert.equal(fs.readFileSync(path.join(ROOT, WEIGHTS_FILE), "utf8"), weights);
 });
 
+test("scripts/oracle-legs.ts run as CI runs it says the legs' balance after the verdict, warns past the target, and never moves the exit code", (t) => {
+  const { dir, reports } = legsFolder(t);
+  write(dir, reports);
+  const untimed = program("oracle-legs.ts", [dir]);
+  assert.equal(untimed.status, 0, untimed.out);
+  assert.match(untimed.out, /oracle legs: balance: not measured: the report of leg\(s\) 1, 2 has no times/);
+  assert.doesNotMatch(untimed.out, /::warning/);
+  // 120 s apart on alike runners: warned, naming this run's --weights, and still 0
+  const timed = reports.map((r, i) => ({ ...r, times: { fixed: { setup: 68000 }, stages: {}, statements: { [`k${i}`]: { ms: i === 0 ? 750000 : 630000, name: `statement ${i + 1}` } }, cpu: "c × 4" } }));
+  write(dir, timed);
+  const apart = program("oracle-legs.ts", [dir], { GITHUB_RUN_ID: "123" });
+  assert.equal(apart.status, 0, apart.out);
+  assert.match(apart.out, /oracle legs: 1 \+ 1 = 2 statements[\s\S]*oracle leg 1: balance: setup 68\.0 s; statements and stages 750\.0 s as run, 750\.0 s in one machine's seconds; runner: c × 4\n[\s\S]*oracle legs: balance: 120\.0 s apart as run, 120\.0 s in one machine's seconds/);
+  assert.match(apart.out, /^::warning title=oracle legs::the legs are 120\.0 s apart in one machine's seconds, past the target of 60\.0 s: rebalance with `node scripts\/oracle-legs\.ts --weights 123`/m);
+  // the imbalance and a statement left out: 1, by the coverage line, and the warning beside it
+  timed[1]!.asked[PHASES[2]] = [];
+  write(dir, timed);
+  const both = program("oracle-legs.ts", [dir], { GITHUB_RUN_ID: "123" });
+  assert.equal(both.status, 1, both.out);
+  assert.match(both.out, /no leg asked "statement 2"/);
+  assert.match(both.out, /::warning title=oracle legs::/);
+});
+
 test("scripts/ci-shards.ts run as CI runs it: files, needs and verify each end with their exit code", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-shards-"));
   t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });

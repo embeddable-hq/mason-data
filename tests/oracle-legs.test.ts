@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
 import { emptyShapeCount, NEW_SHAPES, shapeProblems, sumShapeTallies, type ShapeTally } from "./integration/oracle/shape-names.ts";
-import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, Clock, FIRST_LEG_RUNS_STAGES, partition, readWeights, timesLine, weightKey, weightsFromLegs, weightsText, writeWeights, WEIGHTS_FILE, type Decision, type LegReport, type Measured, type Tallies, type Weights } from "../scripts/oracle-legs.ts";
+import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, Clock, FIRST_LEG_RUNS_STAGES, partition, readWeights, timesLine, weightKey, weightsFromLegs, legScales, legsBalance, balanceLines, LEGS_APART_MS, weightsText, writeWeights, WEIGHTS_FILE, type Decision, type LegReport, type Measured, type Tallies, type Weights } from "../scripts/oracle-legs.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import type { GapTally } from "./integration/oracle/gap-tally.ts";
@@ -500,4 +500,93 @@ test("every shape's liveness can be reached by deciding a difference the base al
   assert.deepEqual(shapeProblems(unbounded("22P02")), []);
   assert.deepEqual(shapeProblems(unbounded("22012")), []);
   assert.match(shapeProblems(unbounded("42601")).join("\n"), /the shape count-null is misspelt: Postgres refused it 1 time\(s\) with 42601/);
+});
+
+// THE LEGS' BALANCE (issue 326): the folder check says how far apart the legs ran, in one machine's seconds, and warns past
+// LEGS_APART_MS; a cost, never coverage. Each leg's load is its statements and stages; the setup scales it (`legScales`)
+/** the legs of `timed()`, leg n's setup and its statements and stages totalling `load[n - 1]` ms as run (one text and
+ *  one stage carry it), and its CPU when given */
+const balanced = (setup: number[], load: number[], cpu: Array<string | undefined> = []): LegReport[] => setup.map((ms, i) => {
+  const r = report(i + 1, setup.length, partition([...statements, ...apart], setup.length, NONE));
+  return { ...r, times: { fixed: { setup: ms, "first sync": 5000 }, stages: i === 0 ? { roles: 1000 } : {},
+    statements: { [weightKey(`SELECT ${i}`)]: { ms: load[i]! - (i === 0 ? 1000 : 0), name: `statement ${i}` } }, ...(cpu[i] === undefined ? {} : { cpu: cpu[i] }) } };
+});
+const warning = (lines: string[]): string[] => lines.filter((l) => l.startsWith("::warning"));
+
+test("balance: one scale of a leg's times to one machine's, the mean setup over its own, UNKNOWN with no setup; --weights reads the same", () => {
+  assert.deepEqual(legScales(balanced([30000, 10000], [1, 1])), [20000 / 30000, 20000 / 10000]);
+  for (const setup of [[0, 10000], [10000, -1]]) assert.equal(legScales(balanced(setup, [1, 1])), null, `${setup}`);
+  const [a, b] = balanced([30000, 10000], [1, 1]);
+  assert.equal(legScales([{ ...a!, times: { ...a!.times!, fixed: {} } }, b!]), null);
+  const { times: _t, ...old } = b!;
+  assert.equal(legScales([a!, old]), null);
+  assert.equal(legScales([]), null);
+});
+
+test("balance: equal runners and a balanced load, 10 s apart: said, no warning", () => {
+  const lines = balanceLines(balanced([60000, 60000], [600000, 610000]), "123");
+  assert.deepEqual(warning(lines), []);
+  assert.match(lines.join("\n"), /oracle legs: balance: 10\.0 s apart as run, 10\.0 s in one machine's seconds \(the target: 60\.0 s or less\)/);
+  assert.match(lines[0]!, /^oracle leg 1: balance: setup 60\.0 s; statements and stages 600\.0 s as run, 600\.0 s in one machine's seconds; runner: not reported$/);
+});
+
+test("balance: leg 1 on a 1.24x faster runner with the same work (run 41393151088's shape) is 152 s apart as run and 26 s scaled: no warning", () => {
+  const b = legsBalance(balanced([55200, 68300], [520400, 672800], ["AMD EPYC 7763 64-Core Processor × 4", "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz × 4"]));
+  assert.ok(b.measured, JSON.stringify(b));
+  assert.equal(Math.round(b.apartAsRun / 1000), 152);
+  assert.equal(Math.round(b.apart / 1000), 26);
+  assert.ok(b.apart < LEGS_APART_MS);
+  const lines = balanceLines(balanced([55200, 68300], [520400, 672800], ["AMD EPYC 7763 64-Core Processor × 4", "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz × 4"]), "123");
+  assert.deepEqual(warning(lines), []);
+  assert.match(lines[0]!, /runner: AMD EPYC 7763 64-Core Processor × 4$/);
+  assert.match(lines[1]!, /^oracle leg 2: balance: setup 68\.3 s; statements and stages 672\.8 s as run, 608\.\d s in one machine's seconds; runner: Intel/);
+});
+
+test("balance: a real imbalance on alike runners, 120 s apart, warns once naming --weights with this run, or <run-id> outside CI", () => {
+  const legs120 = balanced([68000, 68000], [750000, 630000]);
+  const lines = balanceLines(legs120, "123");
+  assert.deepEqual(warning(lines), ["::warning title=oracle legs::the legs are 120.0 s apart in one machine's seconds, past the target of 60.0 s: rebalance with `node scripts/oracle-legs.ts --weights 123` (from this run's oracle legs), read the diff of tests/fixtures/oracle-weights.json, and commit it"]);
+  assert.match(warning(balanceLines(legs120, undefined))[0]!, /--weights <run-id>`/);
+});
+
+test("balance: not measured, and why, never a gap of 0 or a scale of 1: a report with no times, a setup missing or 0, the legs not each present once", () => {
+  const [a, b] = balanced([60000, 60000], [600000, 900000]);
+  const { times: _t, ...old } = b!;
+  assert.deepEqual(balanceLines([a!, old], "1"), ["oracle legs: balance: not measured: the report of leg(s) 2 has no times (a run from before the timing)"]);
+  for (const fixed of [{}, { setup: 0 }]) {
+    const lines = balanceLines([a!, { ...b!, times: { ...b!.times!, fixed } }], "1");
+    assert.deepEqual(lines, ["oracle legs: balance: not measured: the report of leg(s) 2 has no setup time to scale by"], JSON.stringify(fixed));
+  }
+  assert.match(balanceLines([b!], "1")[0]!, /^oracle legs: balance: not measured: the reports are of leg\(s\) 2, not each leg of 2 once$/);
+  assert.match(balanceLines([], "1")[0]!, /not measured: the reports are of leg\(s\) none/);
+  // --weights over the same reports still scales by 1, as it did before the shared scale
+  const t = timed();
+  const noSetup = weightsFromLegs([{ ...t[0], times: { ...t[0].times!, fixed: { setup: 0 } } }, t[1]], 2, "7", 1000);
+  assert.ok("weights" in noSetup && noSetup.weights.stages === 50000 && noSetup.weights.default === 200, JSON.stringify(noSetup).slice(0, 300));
+});
+
+test("balance: three legs, every leg named and the gap the heaviest scaled load less the lightest", () => {
+  const three = balanced([40000, 60000, 80000], [400000, 600000, 1000000]);
+  const b = legsBalance(three);
+  assert.ok(b.measured, JSON.stringify(b));
+  // mean setup 60 s: scales 1.5, 1, 0.75; loads 600, 600, 750 s
+  assert.deepEqual(b.legs.map((l) => [l.leg, Math.round(l.scaled)]), [[1, 600000], [2, 600000], [3, 750000]]);
+  assert.equal(Math.round(b.apart), 150000);
+  assert.equal(b.apartAsRun, 600000);
+  const lines = balanceLines(three, "9");
+  assert.deepEqual(lines.filter((l) => /^oracle leg \d: balance/.test(l)).map((l) => l.slice(0, 12)), ["oracle leg 1", "oracle leg 2", "oracle leg 3"]);
+  assert.equal(warning(lines).length, 1);
+});
+
+test("the runner's CPU: on the time line when reported, the line as before when not; never in `measured`, so --write and --weights take legs of different CPUs", () => {
+  const t = { fixed: { setup: 1500 }, stages: {}, statements: {} };
+  assert.equal(timesLine(t), "fixed: setup 1.5 s; stages: none; statements: 0.0 s over 0 texts; slowest: none");
+  assert.equal(timesLine({ ...t, cpu: "AMD EPYC 7763 64-Core Processor × 4" }), "fixed: setup 1.5 s; stages: none; statements: 0.0 s over 0 texts; slowest: none; runner: AMD EPYC 7763 64-Core Processor × 4");
+  const [c, d] = legsOfTheRepo();
+  const cpus = [{ ...c, times: { ...t, cpu: "AMD EPYC 7763 64-Core Processor × 4" } }, { ...d, times: { ...t, cpu: "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz × 4" } }];
+  assert.ok(!("problems" in filesFromLegs(cpus, 2, fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8"))), "legs of different CPUs, measured alike, write verified.ts and the fixture");
+  assert.ok(!("problems" in filesFromLegs([cpus[0]!, d], 2, fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8"))), "one leg with a CPU and one without");
+  const [a, b] = timed();
+  const got = weightsFromLegs([{ ...a, times: { ...a.times!, cpu: "x × 4" } }, b], 2, "123", 1000);
+  assert.deepEqual(got, weightsFromLegs(timed(), 2, "123", 1000), "a CPU moves no weight");
 });

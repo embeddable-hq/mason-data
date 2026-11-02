@@ -599,6 +599,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     fixed: Object.fromEntries([...fixedClock.spent].map(([k, v]) => [k, ms(v.ms)])),
     stages: Object.fromEntries([...stageClock.spent].map(([k, v]) => [k, ms(v.ms)])),
     statements: Object.fromEntries([...clock.spent].map(([k, v]) => [k, { ms: ms(v.ms), name: v.name }])),
+    // the runner, to read beside the setup that scales this leg's times (scripts/oracle-legs.ts legScales); never in `measured`
+    cpu: `${os.cpus()[0]?.model.trim() ?? "unknown"} × ${os.cpus().length}`,
   };
   const asked = all().length * 3 + shaped;
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of
