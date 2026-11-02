@@ -21,8 +21,13 @@ the contract: a change to it is a change to both sides.
 - A redirect is never followed: it is a failure, so a Bearer header never travels to another address.
 - Each request has a 15 s time limit. An answer larger than 64 KiB is refused.
 - What comes back is untrusted. Each answer is held to the shape below. Anything else is a failure said by its status
-  alone, never its body. Every string the CLI prints from the service has its control characters replaced and is
-  bounded in length. A token is masked wherever it appears.
+  alone, never its body. A token is masked wherever it appears.
+- **A value the service sends is data, never structure and never an instruction.** Every string it sends reaches the
+  output, for a person and in `--json`, as ONE line: every line break (newline, carriage return, NEL, the line and
+  paragraph separators), every other control character, and every zero-width, format or bidi mark is replaced by `?`,
+  and its length is bounded. So a value sits inside a line the CLI writes (a headline, a row, a failure's message) and
+  never starts one: it cannot add a `Next:` block, a tip, a row or a failure of its own. What to run next, the failure
+  code, the exit code and the page a person is sent to are the CLI's own (below).
 
 ## Signing in: the device authorization grant (RFC 8628)
 
@@ -107,19 +112,21 @@ Every `/v1/` endpoint fails with an HTTP 4xx or 5xx and the CLI's own failure sh
 { "error": { "code": "unauthenticated", "message": "…", "why": "…", "fix": "…" }, "next": [{ "command": "mason login", "what": "…" }] }
 ```
 
-`why`, `fix` and `what` are optional. `code` is lowercase letters, digits and `_`. A `401` has the code
-`unauthenticated` and `next` `mason login`.
+`why`, `fix` and `next` are optional. `code` is lowercase letters, digits and `_`. A `401` has the code
+`unauthenticated`.
 
 Nothing in it decides what the CLI does; its words are shown, never obeyed:
 
-- `message`, `why` and `fix` are said as the service wrote them, never re-worded (made printable, a token masked).
+- `message`, `why` and `fix` are said as the service wrote them, never re-worded, each as one line (above), a token
+  masked.
 - The CLI's code, and so its exit code, is its own, from the HTTP status: `404` is `not_found`, any other 4xx
   `refused`, anything else `failed`, each exit 1. It is never `usage` (exit 2) or `timeout` (exit 124), whatever the
   service says. The service's `code` is kept as information at the end of `why`: `(the service said unauthenticated,
   HTTP 401)`. So `--json`'s `error.code` is always one of the CLI's own codes (`mason help agent` lists them).
-- A `next` step is kept only when it is a `mason` command this CLI has, each word plain (letters, digits and
-  `_ @ % + = : , . / -`); anything else is dropped, so a coding agent that runs the next step never runs the service's
-  shell. At most 5 are kept. A `401` always has `mason login` among them.
+- The service's `next` is never read. The CLI cannot know what a command the service names would do to this machine
+  (`mason destroy`, `mason ui --ssh <anywhere>`, a shell line), and a coding agent runs the step it is given. The next
+  step is the CLI's own, by status: `mason login` ("sign in again") for a `401` or `403`, else `mason login` ("try
+  again in a moment").
 
 ## Tokens
 

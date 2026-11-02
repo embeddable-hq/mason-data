@@ -303,11 +303,15 @@ CLI lacks).
   (docs/HOSTED-API.md; src/cli/login.ts, src/cli/hosted.ts): no project needed. The service is `MASON_CLOUD_URL`, else
   `DEFAULT_SERVICE_URL`, its one constant, read by ONE function (`serviceOf`): https, or http to this machine, the
   address alone, refused before any byte is sent. Every answer is untrusted: held to its documented shape, a redirect
-  never followed, every string printed made printable and bounded and every token masked (`serviceText`).
-  **What the service sends is shown, never obeyed**: a `/v1/` failure's words are the service's, but its code and exit
-  are the CLI's own by HTTP status (`codeOfStatus`, never `usage` or `timeout`; the service's code kept in `why`), its
-  next steps only `mason` commands of the registry (`serviceFailure`), and the page a person is sent to and a browser
-  opens is on the service's own origin (`pageUrl`, refused naming both). **The login is the person's, never a project's**
+  never followed, every token masked. **A service's value is data, never structure and never an instruction**
+  (src/cli/hosted.ts's header, PR 481): every string it sends leaves that module as ONE line (`serviceText`, applied at
+  the boundary: no line break, control, format or bidi character), so it sits inside a line the CLI writes and never
+  starts one — no forged `Next:`, tip, row or failure, for a person or in `--json`; and what to run next, the code and
+  the exit, and the page a person is sent to are the CLI's own: the code by HTTP status (`codeOfStatus`, never `usage`
+  or `timeout`, the service's code kept in `why`), the next step by status (`serviceNext`, the service's `next` never
+  read), the page on the service's own origin (`pageUrl`, refused naming both). tests/cli-login.test.ts holds every
+  run to it (`mason`: no line begins with a hostile value, one `Next:` of the CLI's own steps, no `--json` string with a
+  line break). **The login is the person's, never a project's**
   (src/cli/credentials.ts: `$XDG_CONFIG_HOME/mason/credentials.json`, else `~/.config/mason/`, 0600 in 0700, renamed
   over, keyed by the base URL): a file or folder others can read is refused with the chmod, one that cannot be parsed
   with its path, both checked before the device code is asked for. **A token never reaches a command line, the output

@@ -11,16 +11,23 @@
  * where one is sent, and a redirect is never followed (a Bearer header must not travel to another origin, nor https
  * fall back to http). Every request has a time limit, and an answer is read up to `MAX_BODY_BYTES`.
  *
- * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, every string the CLI prints is made
- * printable and bounded (`serviceText`: no control or bidi character reaches a terminal), and the token — the one this
- * request carries, and anything shaped as a documented token — is masked in it. A `/v1/` failure's words are said as the
- * service worded them (`serviceFailure`), never re-worded.
+ * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, and the token — the one this request
+ * carries, and anything shaped as a documented token — is masked in all of it.
  *
- * NOTHING THE SERVICE SENDS DECIDES WHAT THE CLI DOES: its text is shown, never obeyed. A failure's CODE, and so its
- * exit code, is the CLI's own, from the HTTP status (`codeOfStatus`, one place), the service's own code kept as
- * information in `why`; a next step is kept only when it is a `mason` command this CLI has, its words plain; the page a
- * person is sent to, and that a browser opens, is on the service's own origin (`pageUrl`); every number that times the
- * poll is bounded here.
+ * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (the decision of PR 481's class round: a
+ * service forged a block of next steps with a newline in an email, and offered `mason destroy` as a next step). Two
+ * rules make that hold, each in one place:
+ *
+ *   - EVERY STRING THE SERVICE SENDS LEAVES THIS MODULE AS ONE LINE, through `serviceText` alone, which it applies at
+ *     the boundary (`whoAmI`, `serviceFailure`, `oauthFailure`, `call`, `revoke`): no line break of any kind, no
+ *     control, format or bidi character, bounded, masked. A value can sit INSIDE a line the CLI writes — a headline,
+ *     a row's value, a failure's message — and never start one, so it can never be a block of next steps, a tip,
+ *     a row or a failure of its own, for a person or in `--json`.
+ *   - WHAT TO RUN NEXT, WHAT THE CODE AND THE EXIT ARE, AND WHERE A PERSON IS SENT ARE THE CLI'S OWN: a failure's
+ *     code by the HTTP status (`codeOfStatus`), the service's own code kept in `why` as information; its next step
+ *     the CLI's (`serviceNext`), the service's `next` never read, since a CLI cannot know what a command the service
+ *     names would do to this machine (`mason destroy`, `mason ui --ssh <anywhere>`); the page printed and opened on
+ *     the service's own origin (`pageUrl`); every number that times the poll bounded here.
  */
 import * as os from "node:os";
 import type { Failure, FailureCode, NextStep } from "./command.ts";
@@ -75,16 +82,18 @@ export function serviceOf(env: NodeJS.ProcessEnv = process.env): Service | Failu
 }
 
 /**
- * TEXT FROM THE SERVICE, AS IT MAY BE PRINTED: control and bidi characters replaced (none can move a cursor, clear a
- * line or reorder what a person reads), at most `max` characters, and every secret masked — the ones named, and
- * anything shaped as a documented token.
+ * TEXT FROM THE SERVICE, AS IT MAY BE PRINTED: ONE LINE (above: data, never structure) — every control character, the
+ * newline and the carriage return included, and every line or paragraph separator, format or bidi mark replaced by
+ * `?`, so none can end a line, move a cursor, clear a screen or reorder what a person reads; at most `max` characters;
+ * and every secret masked — the ones named, and anything shaped as a documented token.
  */
 export function serviceText(s: string, max: number, secrets: readonly string[] = []): string {
   let t = s;
   for (const secret of secrets) if (secret) t = t.split(secret).join("****");
   t = t.replace(TOKEN_SHAPE, "masondata_$1_****");
-  // C0 but the newline, DEL and C1; the bidi embeddings, overrides and isolates; the line and paragraph separators
-  t = t.replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g, "?");
+  // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
+  // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
+  t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
   const chars = [...t];
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
 }
@@ -182,40 +191,28 @@ export function codeOfStatus(status: number): FailureCode {
   return "failed";
 }
 
-/** A next step the service names, when it is one this CLI can take: `mason <one of commands>`, each word plain (no
- *  shell syntax), at most 300 characters; null for anything else. */
-function nextCommand(v: unknown, commands: readonly string[]): string | null {
-  if (!str(v, 300)) return null;
-  const words = v.trim().split(/ +/);
-  if (words[0] !== "mason" || !commands.includes(words[1] ?? "")) return null;
-  return words.every((w) => /^[\w@%+=:,./-]+$/.test(w)) ? words.join(" ") : null;
+/**
+ * WHAT TO RUN AFTER A SERVICE'S FAILURE: the CLI's own step, by the HTTP status (the one place it is decided). The
+ * service's `next` is never read: whatever it names, the CLI cannot know what it would do to this machine, and a coding
+ * agent runs the step it is given.
+ */
+export function serviceNext(status: number): NextStep[] {
+  return [status === 401 || status === 403 ? ["mason login", "sign in again"] : ["mason login", "try again in a moment"]];
 }
 
 /**
  * A `/v1/` FAILURE: `{ error: { code, message, why?, fix? }, next: [{ command, what? }] }`, its message, why and fix
- * said as the service worded them (made printable, masked); its CODE the CLI's own (`codeOfStatus`), the service's kept
- * in `why`; its next steps those that are a `mason` command of `commands`, and `mason login` for a 401 (the service no
- * longer takes this login). Null when the answer is not that shape.
+ * said as the service worded them, each one line (`serviceText`); its CODE the CLI's own (`codeOfStatus`), the
+ * service's kept in `why`; its next step the CLI's own (`serviceNext`). Null when the answer is not that shape.
  */
-export function serviceFailure(a: Answer, secrets: readonly string[], commands: readonly string[]): Failure | null {
+export function serviceFailure(a: Answer, secrets: readonly string[]): Failure | null {
   if (a.status < 400 || !obj(a.json) || !obj(a.json.error)) return null;
   const e = a.json.error;
   if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || !str(e.message, 2000)) return null;
   const text = (v: unknown, max: number): string | undefined => typeof v === "string" && v ? serviceText(v, max, secrets) : undefined;
-  const next: NextStep[] = [];
-  if (Array.isArray(a.json.next)) {
-    for (const n of a.json.next.slice(0, 10)) {
-      if (!obj(n)) return null;
-      const command = nextCommand(n.command, commands);
-      if (command === null || next.some(([c]) => c === command) || next.length >= 5) continue;
-      const what = text(n.what, 300);
-      next.push(what ? [command, what] : [command]);
-    }
-  }
-  if (a.status === 401 && !next.some(([c]) => c === "mason login")) next.unshift(["mason login", "sign in again"]);
   const why = text(e.why, 2000);
   const said = `the service said ${e.code}, HTTP ${a.status}`;
-  return { message: serviceText(e.message, 2000, secrets), code: codeOfStatus(a.status), why: why ? `${why} (${said})` : said, fix: text(e.fix, 2000), next };
+  return { message: serviceText(e.message, 2000, secrets), code: codeOfStatus(a.status), why: why ? `${why} (${said})` : said, fix: text(e.fix, 2000), next: serviceNext(a.status) };
 }
 
 /** The device code the service gave: the code a person approves, where, and for how long. */
@@ -232,7 +229,7 @@ function pageUrl(service: Service, v: unknown): { href: string } | { elsewhere: 
   let u: URL;
   try { u = new URL(v); } catch { return null; }
   if (u.origin !== service.base) return { elsewhere: u.protocol === "https:" || u.protocol === "http:" ? u.origin : `${u.protocol}//` };
-  return u.username || u.password ? null : { href: u.href };
+  return u.username || u.password ? null : { href: serviceText(u.href, 2048) };
 }
 
 /** `POST /oauth/device/code`: a device code, or a Failure. */
@@ -317,18 +314,17 @@ export interface Me { email: string; name: string; orgs: Array<{ slug: string; n
 export async function whoAmI(service: Service, token: string): Promise<Me | Failure> {
   const a = await call(service, "GET", "/v1/me", { token });
   if (isFailure(a)) return a;
-  if (a.status !== 200) {
-    // the commands a failure's next step may name: this CLI's own (read when needed: the registry imports this module)
-    const { COMMANDS } = await import("./registry.ts");
-    return serviceFailure(a, [token], COMMANDS.map((c) => c.name)) ?? unexpected(service, a, "the account signed in was asked for");
-  }
+  if (a.status !== 200) return serviceFailure(a, [token]) ?? unexpected(service, a, "the account signed in was asked for");
   const j = a.json;
   const orgs = obj(j) && Array.isArray(j.orgs) ? j.orgs : null;
   if (!obj(j) || !str(j.email, 320) || typeof j.name !== "string" || j.name.length > 300 || orgs === null || orgs.length > 1000
     || !orgs.every((o) => obj(o) && str(o.slug, 200) && typeof o.name === "string" && o.name.length <= 300 && str(o.role, 32))) {
     return unexpected(service, a, "the account signed in was asked for");
   }
-  return { email: j.email, name: j.name, orgs: (orgs as Array<Record<string, string>>).map((o) => ({ slug: o.slug!, name: o.name!, role: o.role! })) };
+  // at the boundary: who signed in leaves here as one line each, the token masked in it (above), for every reader
+  const line = (v: string, max: number): string => serviceText(v, max, [token]);
+  return { email: line(j.email, 320), name: line(j.name, 300),
+    orgs: (orgs as Array<Record<string, string>>).map((o) => ({ slug: line(o.slug!, 200), name: line(o.name!, 200), role: line(o.role!, 32) })) };
 }
 
 /** `POST /oauth/revoke` (RFC 7009): null once the service took it, else why it did not (a revoke is best effort). */
