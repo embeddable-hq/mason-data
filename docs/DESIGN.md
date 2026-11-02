@@ -2262,6 +2262,45 @@ A brief names the shapes its tests must hold because on each of the three PRs of
 a shape its brief had left out, and the tests its runs use because one issue's agents spent 36 min proving a whole slow
 file twice.
 
+### The oracle's legs and their runners (2026-11-02, issue 326)
+
+**Decision: accept the runners' spread, and hold the legs' balance in one machine's seconds.** PR 321 split the oracle's
+statements by measured cost, and its legs still finished minutes apart. The gap is the runners, not the split: hosted
+runners drew for one run differ by up to 1.6x in speed, and the setup, the same work in every leg, measures by how much.
+Each leg's statements and stages, scaled by the legs' mean setup over its own (`legScales` in `scripts/oracle-legs.ts`,
+the one scale `--weights` reads too), were within 36 s of each other in three runs, where as run they were up to 171 s
+apart:
+
+| run | setup, leg 1 / 2 | statements + stages as run | scaled | job wall, leg 1 / 2 | slowest job |
+|---|---|---|---|---|---|
+| 41393151088 | 55.2 / 68.3 s | 520 / 673 s (152 apart) | 582 / 608 s (26) | 612 / 783 s | unit (2), 1067 s |
+| 41396664763 | 69.2 / 53.9 s | 649 / 496 s (153) | 577 / 566 s (11) | 759 / 594 s | unit (2), 1110 s |
+| 41396965861 | 68.7 / 63.1 s | 711 / 687 s (24) | 682 / 717 s (36) | 825 / 796 s | rest shard 2, 845 s |
+| 41389723050 | 68.3 / 42.3 s | (1000 ms weights) | | | |
+| 41391539636 | | (1000 ms weights) | 116 s apart | leg 1 858 s | oracle leg 1, 19 s over rest shard 2 |
+
+Nor does the gap set CI's wall time: in five runs of six (with 41393819569, unit (2) 1090 s, and 41393681888, unit (2)
+1032 s) another job was slower than both legs, so a perfect balance would have saved 0 s in five and 19 s in one.
+
+**The detector and its response.** The folder check `node scripts/oracle-legs.ts <folder>`, the `integration (oracle)`
+job's last step, prints after its coverage verdict one line a leg (its setup, its statements and stages as run and
+scaled, its runner's CPU, which a leg's report now carries in `times.cpu`) and one line of the gap, as run and scaled.
+Past `LEGS_APART_MS` (60 s, scaled) it prints a GitHub warning naming `node scripts/oracle-legs.ts --weights <run-id>`.
+It never moves the exit code: balance is a cost, never coverage, and a red required check on runner noise would be a
+flake. When it cannot tell (a report without times, a setup missing or 0, a leg missing) it says "not measured", never
+a gap of 0. The CPU is never in `measured`, which `--write` holds equal across the legs: two legs on different CPUs
+would refuse to write.
+
+**Rejected.** A shared queue, each leg taking the next statement as it frees: two hosted jobs share no state but
+artifacts, read only after a job ends, so it needs a coordinator they do not have; and one job running both halves on a
+4-vCPU runner is one runner doing both legs' work. A third leg: each leg pays about 35 s of job overhead and 78 s of
+setup, first sync and changes, so three legs are about 560 s on a mean runner and 700 s on a slow one, under rest shard
+2 and unit (2) either way: no wall-time gain while those are the critical path, for one more runner. Larger runners cost
+money, and are the owner's call.
+
+**Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
+and their spread is worth a third leg or a queue.
+
 ## A libc order, read level by level
 
 Issue 128: under en_US.utf8 one value holding U+FE0F (`❤️`) or a Thai vowel refused a whole column's sort, group and
