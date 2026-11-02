@@ -14,13 +14,13 @@ import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { stopParser } from "../src/api/postgres/parser.ts";
 import { GENERATED_DIR, GENERATED_KEYS, parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
 import type { AddedTable, CopyState } from "../src/duck/sync.ts";
-import { REVIEW_MS, withoutValues, type GeneratedStatus } from "../src/duck/generated.ts";
+import { REVIEW_MS, withoutValues, type GeneratedStatus, type GeneratedStep } from "../src/duck/generated.ts";
 import { definitionStatement, refusalText, type GeneratedRefusal, type Planner } from "../src/duck/generated-plan.ts";
 import { generatedReadiness } from "../src/cli/readiness.ts";
 import { parseLag, parseSync } from "../src/lib/table-sync.ts";
 import { generatedLines } from "../src/cli/commands.ts";
 import { guideText } from "../src/cli/guides.ts";
-import { built, COUNTS, plain, refusedAt, served, withWorld, type World } from "./duck-generated-world.ts";
+import { BUILD_BOUND_MS, built, COUNTS, plain, refusedAt, served, withWorld, type World } from "./duck-generated-world.ts";
 
 after(() => stopParser());
 
@@ -562,9 +562,84 @@ async function lands(w: World, t: AddedTable, ddl: string, rows: string, hold: b
   return async () => { release(); await rebuilt; };
 }
 
-test("a definition over a synced table the catalog does not hold yet waits for it, never refused, then builds (the catalog holds it)", async () => {
+/**
+ * ISSUE 482: WHERE A BUILD'S TIME GOES, said in CI's spec log by the test's t.diagnostic, from which BUILD_BOUND_MS is
+ * read again. Each table's LAST run, by the run's own steps (`onStep`), its start being `committed` less
+ * `lastRun.seconds` (what build() times, from its first line to its COMMIT): start to snapshot is the planning,
+ * host.settle() and the writer's turn; snapshot to written the CREATE TABLE AS; written to committed the COMMIT;
+ * committed to swapped the swap's turn on the writer. With `watch()`, every plan through the listener's planner (a
+ * review's checks and a run's own) is timed, and every rebuild of the catalog counted: a run's "plan" is its last plan
+ * call inside start..snapshot, "wait" what came before that call, and the rest of the span host.settle() and the
+ * writer's turn. Times are ms after `start()` (the release of what the tables wait for), a table's first serving as the
+ * loop saw it. It measures; it decides nothing a test asserts.
+ */
+class BuildClock {
+  private readonly steps = new Map<string, Partial<Record<GeneratedStep, number>>>();
+  private readonly runs = new Map<string, number>();
+  private readonly serving = new Map<string, number>();
+  private readonly plans: Array<[number, number]> = [];
+  private readonly rebuilds: number[] = [];
+  private from = Date.now();
+  private reviews = 0;
+  private reviewMs = 0;
+  private reviewMax = 0;
+  /** withWorld's onStep, composed with a test's own by calling both */
+  readonly onStep = (s: GeneratedStep, n: string): void => {
+    if (s === "snapshot") { this.steps.set(n, {}); this.runs.set(n, (this.runs.get(n) ?? 0) + 1); }
+    const m = this.steps.get(n);
+    if (m !== undefined) m[s] = Date.now();
+  };
+  /** every plan the generated tables make through the listener's planner, timed (wrapping the planner they hold), and
+   *  every rebuild of the catalog asked, counted (wrapping the sync's, which the run's and the copy's call) */
+  watch(w: World): void {
+    const g = w.sync.generated as unknown as { planner: Planner };
+    const planner = g.planner;
+    g.planner = { ...planner, plan: async (text, stmt, relations) => {
+      const at = Date.now();
+      try { return await planner.plan(text, stmt, relations); } finally { this.plans.push([at, Date.now()]); }
+    } };
+    const sync = w.sync as unknown as SyncInside;
+    const rebuild = sync.rebuildSchema.bind(sync);
+    sync.rebuildSchema = () => { this.rebuilds.push(Date.now()); return rebuild(); };
+  }
+  start(): void { this.from = Date.now(); this.serving.clear(); this.reviews = 0; this.reviewMs = 0; this.reviewMax = 0; }
+  /** one review, timed, and what serves after it */
+  async review(w: World, names: readonly string[]): Promise<void> {
+    const at = Date.now();
+    await w.sync.generated.review();
+    const ms = Date.now() - at;
+    this.reviews++; this.reviewMs += ms; this.reviewMax = Math.max(this.reviewMax, ms);
+    this.saw(w, names);
+  }
+  saw(w: World, names: readonly string[]): void {
+    const now = Date.now();
+    for (const n of names) if (!this.serving.has(n) && w.status(n).serving) this.serving.set(n, now);
+  }
+  line(w: World, label: string, names: readonly string[]): string {
+    this.saw(w, names);
+    const after = (x: number | undefined): string => { if (x === undefined) return "?"; const d = Math.round(x - this.from); return d < 0 ? String(d) : `+${d}`; };
+    const span = (a: number | undefined, b: number | undefined): string => a === undefined || b === undefined ? "?" : String(Math.round(b - a));
+    const each = names.map((n) => {
+      const secs = w.status(n).lastRun?.seconds, m = this.steps.get(n) ?? {};
+      const start = m.committed !== undefined && secs !== undefined ? m.committed - secs * 1000 : undefined;
+      const own = start === undefined || m.snapshot === undefined ? undefined : this.plans.filter(([a, b]) => a >= start - 1 && b <= m.snapshot!).at(-1);
+      const before = own === undefined ? `plan+settle+writer ${span(start, m.snapshot)}` : `wait ${span(start, own[0])}, plan ${span(own[0], own[1])}, settle+writer ${span(own[1], m.snapshot)}`;
+      return `${n.replace(/^public\./, "")}: run ${secs === undefined ? "?" : secs.toFixed(2)} s x${this.runs.get(n) ?? 0} ` +
+        `[start ${after(start)}, ${before}, write ${span(m.snapshot, m.written)}, commit ${span(m.written, m.committed)}, swap ${span(m.committed, m.swapped)}] served ${after(this.serving.get(n))}`;
+    });
+    const reviews = this.reviews === 0 ? "" : `, ${this.reviews} review(s) ${this.reviewMs} ms (max ${this.reviewMax})`;
+    const mine = this.plans.filter(([a]) => a >= this.from).map(([a, b]) => b - a);
+    const plans = mine.length === 0 ? "" : `, ${mine.length} plan(s) ${mine.reduce((x, y) => x + y, 0)} ms (max ${Math.max(...mine)}, ${mine.filter((x) => x > 100).length} over 100 ms)`;
+    const rebuilds = this.rebuilds.length === 0 ? "" : `, ${this.rebuilds.filter((x) => x >= this.from).length} catalog rebuild(s)`;
+    return `issue 482 ${label}: ${Date.now() - this.from} ms of ${BUILD_BOUND_MS}${reviews}${plans}${rebuilds}; ${each.join("; ")}`;
+  }
+}
+
+test("a definition over a synced table the catalog does not hold yet waits for it, never refused, then builds (the catalog holds it)", async (t) => {
   const since = Date.now();
+  const clock = new BuildClock();
   await withWorld({}, async (w) => {
+    clock.watch(w);
     // THE COPY'S WINDOW: public.late recorded copied, the catalog's rebuild over it held
     const release = await lands(w, late, LATE_DDL, LATE_ROWS, true);
     const said = (l: string): boolean => /late_(daily|q|join|parent|child)\.yml: (sql: relation "late" does not exist|no longer refused)/.test(l);
@@ -596,26 +671,30 @@ test("a definition over a synced table the catalog does not hold yet waits for i
       assert.ok(!w.logged.some(said), w.logged.join("\n"));
     } finally {
       // the catalog holds it (and the sync's stop waits for the catalog's last rebuild, so a failure above lets it go too)
+      clock.start();
       await release();
     }
     // each built, with no refusal at any review on the way
     const all = [...waiting, "public.late_child"];
-    for (const end = Date.now() + 20_000; !all.every((n) => built(w.status(n)));) {
-      assert.ok(Date.now() < end, `never built: ${JSON.stringify(all.map((n) => w.status(n)))}\n${w.logged.join("\n")}`);
-      await w.sync.generated.review();
-      for (const n of all) assert.notEqual(w.status(n).state, "refused", JSON.stringify(w.status(n)));
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    try {
+      for (const end = Date.now() + BUILD_BOUND_MS; !all.every((n) => built(w.status(n)));) {
+        assert.ok(Date.now() < end, `never built: ${JSON.stringify(all.map((n) => w.status(n)))}\n${w.logged.join("\n")}`);
+        await clock.review(w, all);
+        for (const n of all) assert.notEqual(w.status(n).state, "refused", JSON.stringify(w.status(n)));
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    } finally { t.diagnostic(clock.line(w, "build after release", all)); }
     assert.equal(w.status("public.late_daily").lastRun?.rows, LATE_GROUPS);
     assert.deepEqual(await w.rows("SELECT strftime(day, '%Y-%m-%d'), status, orders, revenue::VARCHAR FROM public.late_daily ORDER BY day NULLS LAST, status NULLS LAST"),
       [["2026-01-01", "paid", 2n, "15.75"], ["2026-01-01", null, 1n, "7.00"], ["2026-01-02", "paid", 1n, "1.00"], [null, "refunded", 1n, null]]);
     assert.equal(w.status("public.late_child").lastRun?.rows, 1);
     assert.ok(!w.logged.some(said), w.logged.join("\n"));
     assert.equal(w.status("public.unknown_base").state, "refused");
-  });
+  }, { onStep: clock.onStep });
 });
 
-test("a definition whose check was planned before its base reached the catalog waits for it, never refused (the catalog the check planned on holds it)", async () => {
+test("a definition whose check was planned before its base reached the catalog waits for it, never refused (the catalog the check planned on holds it)", async (t) => {
+  const clock = new BuildClock();
   await withWorld({}, async (w) => {
     // THE CHECK'S WINDOW, the demo's: the plan is made over a catalog without public.late, and the copy lands, the
     // catalog rebuilt over it, before the check reads what the 42P01 means
@@ -631,7 +710,9 @@ test("a definition whose check was planned before its base reached the catalog w
     assert.ok(landed, "the copy landed while the check planned");
     const s = w.status("public.late_daily");
     assert.deepEqual([s.state, s.waitingFor, s.refusals], ["waiting", "public.late", []], `${JSON.stringify(s)}\n${w.logged.join("\n")}`);
-    assert.equal((await w.until(built, "public.late_daily")).lastRun?.rows, LATE_GROUPS);
+    clock.start();
+    try { assert.equal((await w.until(built, "public.late_daily")).lastRun?.rows, LATE_GROUPS); }
+    finally { clock.saw(w, ["public.late_daily"]); t.diagnostic(clock.line(w, "until built after the check", ["public.late_daily"])); }
     assert.ok(!w.logged.some((l) => /late_daily\.yml: (sql: relation "late" does not exist|no longer refused)/.test(l)), w.logged.join("\n"));
     // kept as a refusal: an unqualified name whose only synced table is in another schema (Postgres's search_path is
     // public), the catalog moving or not
@@ -641,19 +722,22 @@ test("a definition whose check was planned before its base reached the catalog w
     refusedAt((await w.until((x) => x.state === "refused", "public.bills")).refusals, "sql", /relation "invoices" does not exist/);
     w.write("bills_q", "kind: scheduled\ntarget_lag: 30s\nsql: SELECT count(*) AS n FROM billing.invoices\n");
     await w.until(built, "public.bills_q");
-  });
+  }, { onStep: clock.onStep });
 });
 
 // ISSUE 474: a GENERATED parent is set deployed, so serving, by its run BEFORE that run's rebuild of the catalog (which
 // reads `served()`, so it must), and that rebuild waits behind any other. A child checked in the window met 42P01 for a
 // parent its copies() called built, and was refused until the catalog moved again: said refused in the log at a chain's
 // first build, and `mason wait` exited 1. Held here deterministically: the catalog's rebuild after the parent's swap.
-test("a child of a generated table built but not yet in the catalog waits for it, never refused, then builds (issue 474)", async () => {
+test("a child of a generated table built but not yet in the catalog waits for it, never refused, then builds (issue 474)", async (t) => {
   const since = Date.now();
+  const clock = new BuildClock();
+  let window = "";
   // the catalog's rebuild after late_parent's first swap, held as one chained behind another is: armed by the test
   let onSwap: (() => void) | null = null, release = (): void => undefined;
   await withWorld({}, async (w) => {
     const sync = w.sync as unknown as SyncInside;
+    clock.watch(w);
     await (await lands(w, late, LATE_DDL, LATE_ROWS, false))();
     const invoices: AddedTable = { source: "billing.invoices", schema: "billing", table: "invoices", key: ["id"], columns: [{ name: "id", type: "integer", notNull: false, comment: null }], foreignKeys: [], bytes: 0, rows: 1 };
     await (await lands(w, invoices, "CREATE TABLE billing.invoices (id INTEGER)", "(1)", false))();
@@ -669,14 +753,18 @@ test("a child of a generated table built but not yet in the catalog waits for it
     onSwap = () => { onSwap = null; const held = new Promise<void>((r) => { release = r; }); sync.schemaBuild = sync.schemaBuild.then(() => held); };
     try {
       // THE RUN'S WINDOW: late_parent swapped in and serving, the catalog's rebuild after it held
-      for (const end = Date.now() + 20_000; ;) {
-        await w.sync.generated.review();
-        const s = w.status("public.late_waiting");
-        assert.deepEqual([s.state, s.waitingFor, s.refusals], ["waiting", "public.late_parent", []], JSON.stringify(s));
-        if (w.status("public.late_parent").serving) break;
-        assert.ok(Date.now() < end, `late_parent never served: ${JSON.stringify(w.status("public.late_parent"))}\n${w.logged.join("\n")}`);
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      clock.start();
+      try {
+        for (const end = Date.now() + BUILD_BOUND_MS; ;) {
+          await clock.review(w, ["public.late_parent"]);
+          const s = w.status("public.late_waiting");
+          assert.deepEqual([s.state, s.waitingFor, s.refusals], ["waiting", "public.late_parent", []], JSON.stringify(s));
+          if (w.status("public.late_parent").serving) break;
+          assert.ok(Date.now() < end, `late_parent never served: ${JSON.stringify(w.status("public.late_parent"))}\n${w.logged.join("\n")}`);
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      } catch (x) { t.diagnostic(clock.line(w, "serve before release", ["public.late_parent"])); throw x; }
+      window = clock.line(w, "serve before release", ["public.late_parent"]);
       assert.equal(onSwap, null, "the rebuild after late_parent's swap is held");
       assert.ok(!w.sync.schema().tables.some((t) => t.name === "late_parent"), "the catalog does not hold public.late_parent yet");
       w.write("late_child", s30("SELECT sum(n) AS total FROM late_parent"));
@@ -711,17 +799,20 @@ test("a child of a generated table built but not yet in the catalog waits for it
     } finally {
       // the catalog holds it (and the sync's stop waits for the catalog's last rebuild, so a failure above lets it go too)
       onSwap = null;
+      clock.start();
       release();
       await sync.schemaBuild;
     }
     // each built, with no refusal at any review on the way
     const all = ["public.late_parent", "public.late_child", "public.late_qual", "public.late_waiting", "public.late_mixed", "public.late_grand", "public.bills_q"];
-    for (const end = Date.now() + 20_000; !all.every((n) => built(w.status(n)));) {
-      assert.ok(Date.now() < end, `never built: ${JSON.stringify(all.map((n) => w.status(n)))}\n${w.logged.join("\n")}`);
-      await w.sync.generated.review();
-      for (const n of all) assert.notEqual(w.status(n).state, "refused", JSON.stringify(w.status(n)));
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    try {
+      for (const end = Date.now() + BUILD_BOUND_MS; !all.every((n) => built(w.status(n)));) {
+        assert.ok(Date.now() < end, `never built: ${JSON.stringify(all.map((n) => w.status(n)))}\n${w.logged.join("\n")}`);
+        await clock.review(w, all);
+        for (const n of all) assert.notEqual(w.status(n).state, "refused", JSON.stringify(w.status(n)));
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    } finally { t.diagnostic(`${window} | ${clock.line(w, "build after release", all)}`); }
     assert.ok(!w.logged.some(said), w.logged.join("\n"));
     assert.equal(w.status("public.late_parent").lastRun?.rows, 3);
     for (const n of ["late_child", "late_qual", "late_waiting"]) {
@@ -741,5 +832,5 @@ test("a child of a generated table built but not yet in the catalog waits for it
     await w.until((s) => s.waitingFor === "public.gone_parent, which is refused", "public.gone_child");
     w.remove("gone_parent");
     refusedAt((await w.until((s) => s.state === "refused", "public.gone_child")).refusals, "sql", /relation "gone_parent" does not exist/);
-  }, { onStep: (s, n) => { if (s === "swapped" && n === "public.late_parent") onSwap?.(); } });
+  }, { onStep: (s, n) => { clock.onStep(s, n); if (s === "swapped" && n === "public.late_parent") onSwap?.(); } });
 });

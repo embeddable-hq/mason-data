@@ -256,8 +256,20 @@ paths:
     `strtoint`), which the function and the native read both ask (`tests/conventions.test.ts`). Measured, 5 M
     rows: 0.21 s native, 8.8 s through the function. A new native read is held to Postgres by `tests/duck-wire.test.ts`
     "a ->> of a column is DuckDB's own read" (every shape, against PGlite, and the hops counted:
-    `DuckStore.functionCalls`) and by the oracle. A test that must EXERCISE the function (a cancel, a timeout) reads
-    with `->` or a number, never a string's `->>`. **A constant path has one route however it is spelled**
+    `DuckStore.functionCalls`) and by the oracle. **A copied jsonb's `->`, a `->`/`#>` read's nullness and an `@>` of a
+    constant object of scalars are DuckDB's own too** (issue 130: over 20 kB documents each vector of the function held
+    every other session's statement ~200 ms, a small `SELECT` 10 s and more): `jsonValueRead` (an integer, a boolean,
+    a JSON null, a string DuckDB writes alike; the rest the ELSE's), `jsonNullTest` (`json_extract(doc, path) IS
+    NULL`), `nativeContains` (the AND over the template's leaves, a DOUBLE equal to the template's double the ELSE's).
+    Every key path is written by ONE writer, `duckJsonPath`, from steps read by ONE reader, `stepKeys`; the template is
+    read as the function reads it (`jsonbText`, `parseJson`); each document is extracted ONCE (`json_extract(doc,
+    [p1, …])` through a lambda, `bound`: every json_* call parses the whole document again). Held by
+    `tests/duck-wire.test.ts` "a -> and an @> of a copied jsonb are DuckDB's own read", the plan fixture's FUNCTION_ROWS
+    0 and `tests/duck-executor-starve.test.ts` "wide jsonb". A test that must EXERCISE the function (a cancel, a
+    timeout) reads `CALLED` (tests/duck-executor-harness.ts: an array element's `->>`, an index step, one call a row), which
+    the harness holds to a call — never a string's or an integer's `->`, a `->>` of a string, or a read's nullness. **A lambda's
+    parameter is the rewrite's own name** (`__mason_*`), never a table's column to src/duck/late.ts (`ownName`): a late
+    page carried `__mason_v` as a column (42703, PR for issue 130). **A constant path has one route however it is spelled**
     (`Rewriter.jsonPath`, `constRead`; issue 130): `'{a,b}'`, `ARRAY['a', 'b']`, either cast to `text[]`, `'a'::text`, the
     json_extract_path family, read from the analysis (`Typed.text`, `Typed.textArray`, the Const's own bytes), never
     the statement's text, so array_in's reading of a literal is Postgres's own. A path the Parse cannot see (a parameter,
@@ -330,7 +342,11 @@ paths:
   max), a FROM item's column (`carry`), a key (`exactKey`), a union arm's value, a function's argument (`pgNumeric`) —
   asks it, never a property of its own (a declared scale, a column's kind). Unknown is not exact. A WITH query a FROM
   name reads is resolved by one resolver (`cteOf`), and a carry is decided from the cells its item EXPOSES, as written
-  (`exposedCells`). `tests/duck-wire.test.ts` "fourth round".
+  (`exposedCells`). `tests/duck-wire.test.ts` "fourth round". A FROM item's column is decided ONCE per (query body,
+  output index) — `outputExact`, `approximateAt`, `scalesDiffer`, one record (`decided`) copied by `clone` as `derived`
+  is — never recorded from inside an open recursive cycle (`over`'s provisional answer) or from `carry`'s walk-time
+  guard, and dropped when a `*` is written out in place; issue 244 (#483), detector tests/duck-plan-time.test.ts and
+  `tests/duck-wire.test.ts` "issue 244".
 
 ## What a column is
 
