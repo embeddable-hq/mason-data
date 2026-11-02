@@ -53,7 +53,7 @@
  * Read-only on the source (CLAUDE.md): only SELECTs, through a READ_ONLY attachment.
  */
 import type { DuckStore } from "./store.ts";
-import { freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, pgErrorOf, SessionSetup } from "./store.ts";
+import { DEFAULT_MEMORY_RULE, freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, pgErrorOf, SessionSetup } from "./store.ts";
 
 /** the session the generated tables' run passes the Mason functions: no slot of the cancel table (src/duck/cancel.ts
  *  `slotOf`), so never cancelled through it; a stop interrupts the run's connection instead */
@@ -500,7 +500,7 @@ export function chunkCeiling(pages: number, rows: number | null, outOfLine: numb
  *  operator's words, never the engine's own remedies (its threads, its settings) */
 export function tooLargeText(source: string, what: string, memoryLimitBytes: number): string {
   return `the rows of ${source} are too large for the memory the synced data may use: ${what}, in ${humanBytes(memoryLimitBytes)} ` +
-    `(MASON_DUCKDB_MEMORY; half the machine's RAM when unset). Raise MASON_DUCKDB_MEMORY and start mason again, or ` +
+    `(MASON_DUCKDB_MEMORY; unset, ${DEFAULT_MEMORY_RULE}). Raise MASON_DUCKDB_MEMORY and start mason again, or ` +
     `mason add ${source} --columns … without its widest columns`;
 }
 

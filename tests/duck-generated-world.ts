@@ -1,6 +1,7 @@
 /**
- * THE WORLD tests/duck-generated.test.ts AND ITS CRASH CHILD SHARE: a real file, a real listener and its catalog, and a Sync
- * whose base is made by hand, as the wire tests make theirs.
+ * THE WORLD THE PIECES OF tests/duck-generated*.test.ts AND THEIR CRASH CHILD SHARE (tests/duck-generated-crash-child.ts):
+ * a real file, a real listener and its catalog, and a Sync whose base is made by hand, as the wire tests make theirs. What
+ * the pieces share beyond it is tests/duck-generated-ledger.ts's.
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
