@@ -643,3 +643,103 @@ test("a definition whose check was planned before its base reached the catalog w
     await w.until(built, "public.bills_q");
   });
 });
+
+// ISSUE 474: a GENERATED parent is set deployed, so serving, by its run BEFORE that run's rebuild of the catalog (which
+// reads `served()`, so it must), and that rebuild waits behind any other. A child checked in the window met 42P01 for a
+// parent its copies() called built, and was refused until the catalog moved again: said refused in the log at a chain's
+// first build, and `mason wait` exited 1. Held here deterministically: the catalog's rebuild after the parent's swap.
+test("a child of a generated table built but not yet in the catalog waits for it, never refused, then builds (issue 474)", async () => {
+  const since = Date.now();
+  // the catalog's rebuild after late_parent's first swap, held as one chained behind another is: armed by the test
+  let onSwap: (() => void) | null = null, release = (): void => undefined;
+  await withWorld({}, async (w) => {
+    const sync = w.sync as unknown as SyncInside;
+    await (await lands(w, late, LATE_DDL, LATE_ROWS, false))();
+    const invoices: AddedTable = { source: "billing.invoices", schema: "billing", table: "invoices", key: ["id"], columns: [{ name: "id", type: "integer", notNull: false, comment: null }], foreignKeys: [], bytes: 0, rows: 1 };
+    await (await lands(w, invoices, "CREATE TABLE billing.invoices (id INTEGER)", "(1)", false))();
+    const said = (l: string): boolean => /late_(child|qual|waiting|mixed|grand)\.yml: (sql: relation "\w+" does not exist|no longer refused)/.test(l);
+    const s30 = (sql: string): string => `kind: scheduled\ntarget_lag: 30s\nsql: ${sql}\n`;
+    w.write("late_other", s30("SELECT count(*) AS n FROM late"));
+    w.write("late_parent", s30("SELECT status, count(*) AS n FROM late GROUP BY 1"));
+    // a child already waiting for the parent before its swap
+    w.write("late_waiting", s30("SELECT sum(n) AS total FROM late_parent"));
+    // a refused parent: its child waits, said by the parent's state, and is counted failed (unchanged)
+    w.write("bad_parent", s30("SELECT nosuchcol FROM late"));
+    w.write("bad_child", s30("SELECT count(*) FROM bad_parent"));
+    onSwap = () => { onSwap = null; const held = new Promise<void>((r) => { release = r; }); sync.schemaBuild = sync.schemaBuild.then(() => held); };
+    try {
+      // THE RUN'S WINDOW: late_parent swapped in and serving, the catalog's rebuild after it held
+      for (const end = Date.now() + 20_000; ;) {
+        await w.sync.generated.review();
+        const s = w.status("public.late_waiting");
+        assert.deepEqual([s.state, s.waitingFor, s.refusals], ["waiting", "public.late_parent", []], JSON.stringify(s));
+        if (w.status("public.late_parent").serving) break;
+        assert.ok(Date.now() < end, `late_parent never served: ${JSON.stringify(w.status("public.late_parent"))}\n${w.logged.join("\n")}`);
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(onSwap, null, "the rebuild after late_parent's swap is held");
+      assert.ok(!w.sync.schema().tables.some((t) => t.name === "late_parent"), "the catalog does not hold public.late_parent yet");
+      w.write("late_child", s30("SELECT sum(n) AS total FROM late_parent"));
+      w.write("late_qual", s30("SELECT sum(n) AS total FROM public.late_parent"));
+      w.write("late_mixed", s30("SELECT p.status, p.n, count(*) AS events FROM late_parent p JOIN late l ON l.status = p.status GROUP BY 1, 2"));
+      w.write("late_grand", s30("SELECT total FROM late_child"));
+      w.write("unknown_base", s30("SELECT count(*) FROM nosuch"));
+      w.write("unknown_near", s30("SELECT count(*) FROM late_parentx"));
+      w.write("bills", s30("SELECT count(*) AS n FROM invoices"));
+      w.write("bills_q", s30("SELECT count(*) AS n FROM billing.invoices"));
+      for (let i = 0; i < 3; i++) {
+        // the second pass moves every entry's seen.json (the target_lag of a table nothing reads), so each is checked again
+        if (i === 1) w.write("late_other", "kind: scheduled\ntarget_lag: 1m\nsql: SELECT count(*) AS n FROM late\n");
+        await w.sync.generated.review();
+        assert.ok(!w.sync.schema().tables.some((t) => t.name === "late_parent"), "the catalog's rebuild is still held");
+        assert.ok(w.status("public.late_parent").serving);
+        for (const name of ["public.late_child", "public.late_qual", "public.late_waiting", "public.late_mixed", "public.late_grand"]) {
+          const s = w.status(name), parent = name === "public.late_grand" ? "public.late_child" : "public.late_parent";
+          assert.deepEqual([s.state, s.waitingFor, s.refusals, s.serving], ["waiting", parent, [], false], `${name} (pass ${i}): ${JSON.stringify(s)}\n${w.logged.join("\n")}`);
+          const r = generatedReadiness(s, since);
+          assert.deepEqual([r.ready, r.failed, r.waiting], [false, [], [`${name}: waiting for ${parent}`]]);
+        }
+        refusedAt(w.status("public.unknown_base").refusals, "sql", /relation "nosuch" does not exist/);
+        refusedAt(w.status("public.unknown_near").refusals, "sql", /relation "late_parentx" does not exist/);
+        refusedAt(w.status("public.bills").refusals, "sql", /relation "invoices" does not exist/);
+        refusedAt(w.status("public.bad_parent").refusals, "sql", /column "nosuchcol" does not exist/);
+        const bad = w.status("public.bad_child");
+        assert.deepEqual([bad.state, bad.waitingFor, bad.refusals], ["waiting", "public.bad_parent, which is refused", []], JSON.stringify(bad));
+        assert.deepEqual(generatedReadiness(bad, since).failed, ["public.bad_child: not run, because public.bad_parent, which is refused"]);
+      }
+      assert.ok(!w.logged.some(said), w.logged.join("\n"));
+    } finally {
+      // the catalog holds it (and the sync's stop waits for the catalog's last rebuild, so a failure above lets it go too)
+      onSwap = null;
+      release();
+      await sync.schemaBuild;
+    }
+    // each built, with no refusal at any review on the way
+    const all = ["public.late_parent", "public.late_child", "public.late_qual", "public.late_waiting", "public.late_mixed", "public.late_grand", "public.bills_q"];
+    for (const end = Date.now() + 20_000; !all.every((n) => built(w.status(n)));) {
+      assert.ok(Date.now() < end, `never built: ${JSON.stringify(all.map((n) => w.status(n)))}\n${w.logged.join("\n")}`);
+      await w.sync.generated.review();
+      for (const n of all) assert.notEqual(w.status(n).state, "refused", JSON.stringify(w.status(n)));
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(!w.logged.some(said), w.logged.join("\n"));
+    assert.equal(w.status("public.late_parent").lastRun?.rows, 3);
+    for (const n of ["late_child", "late_qual", "late_waiting"]) {
+      assert.equal(w.status(`public.${n}`).lastRun?.rows, 1);
+      assert.deepEqual(await w.rows(`SELECT total::VARCHAR FROM public.${n}`), [["5"]]);
+    }
+    assert.deepEqual(await w.rows("SELECT status, n, events FROM public.late_mixed ORDER BY status"), [["paid", 3n, 3n], ["refunded", 1n, 1n]]);
+    assert.deepEqual(await w.rows("SELECT total::VARCHAR FROM public.late_grand"), [["5"]]);
+    for (const [n, re] of [["unknown_base", /relation "nosuch" does not exist/], ["unknown_near", /relation "late_parentx" does not exist/], ["bills", /relation "invoices" does not exist/]] as const) {
+      refusedAt(w.status(`public.${n}`).refusals, "sql", re);
+    }
+    const bad = w.status("public.bad_child");
+    assert.deepEqual([bad.state, bad.waitingFor], ["waiting", "public.bad_parent, which is refused"]);
+    // a parent whose file is gone, never built: no file defines it, so its child is Postgres's refusal, never a wait
+    w.write("gone_parent", s30("SELECT nosuchcol FROM late"));
+    w.write("gone_child", s30("SELECT count(*) FROM gone_parent"));
+    await w.until((s) => s.waitingFor === "public.gone_parent, which is refused", "public.gone_child");
+    w.remove("gone_parent");
+    refusedAt((await w.until((s) => s.state === "refused", "public.gone_child")).refusals, "sql", /relation "gone_parent" does not exist/);
+  }, { onStep: (s, n) => { if (s === "swapped" && n === "public.late_parent") onSwap?.(); } });
+});
