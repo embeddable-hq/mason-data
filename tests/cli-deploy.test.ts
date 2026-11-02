@@ -14,6 +14,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
+import { seen } from "./hosted-fake.ts";
+import { pathToFileURL } from "node:url";
 
 const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${randomBytes(32).toString("base64url")}`;
 const SECRETS: string[] = [];
@@ -87,6 +89,54 @@ function project(files: Record<string, string | Buffer | null> = {}): { root: st
 
 const envFor = (h: string, url: string, extra: Record<string, string> = {}): Record<string, string> => matrixEnv({ HOME: h, PATH: path.dirname(process.execPath), MASON_CLOUD_URL: url, ...extra });
 
+/** The terminal a run is given (`{ terminal: 80 }`): a preload that makes its stdout and stderr say they are a terminal
+ *  that wide, colour off (as tests/hosted-fake.ts gives login's runs; nothing in src/ reads a test's variable). */
+function terminalEnv(width: number): Record<string, string> {
+  const dir = temp("mason-terminal-");
+  const hook = path.join(dir, "terminal.mjs");
+  fs.writeFileSync(hook, `for (const s of [process.stdout, process.stderr]) {
+  Object.defineProperty(s, "isTTY", { value: true, configurable: true });
+  Object.defineProperty(s, "columns", { value: ${width}, configurable: true });
+}
+`);
+  return { NODE_OPTIONS: `--import=${pathToFileURL(hook).href}`, NO_COLOR: "1" };
+}
+
+/**
+ * THE LINES MASON DEPLOY BEGINS, all of them (tests/hosted-fake.ts's rule for login, in deploy's own words): a blank, its
+ * one Next: heading, a tip, its one failure, its headlines and progress, the spinner's step lines, a warning, a row of
+ * its own labels or a file of a dry run, the usage of a wrong line, and a continuation indented 4 or more. A line that
+ * begins otherwise is a value's: the service's text took a line's start.
+ */
+const STEP_WORDS = "(Queued|Applying|Starting|Running|Refused by Mason on the replica|The deploy failed)";
+const STARTS: readonly RegExp[] = [
+  /^\s*$/, /^Next:$/, /^Tip: \S/, /^[✘✗] mason deploy: \S/, /^usage: mason deploy /,
+  /^(Deployed to |Would send |Sent \d+ files? )/,
+  new RegExp(`^ {2}${STEP_WORDS}`), new RegExp(`^\\S ${STEP_WORDS}`), /^ {2}the service could not say more just now /,
+  /^ {2}! \S/,
+  /^ {2}(deploy|service|files|took|why|fix) {2,}\S/, /^ {2}[A-Za-z0-9_][\w./-]* +[\d,]+ bytes {3}sha256( |$)/,
+  /^ {4,}\S/,
+];
+
+/** What is wrong with what a person sees of one stream of deploy (`seen`, at `width` on a terminal): a line it did not
+ *  begin, a second Next: or failure, a step under Next: that is not its own, a line the terminal broke. A usage block
+ *  after a failure is the CLI's text, read no further. */
+function deploySeenProblems(text: string, width: number | null): string[] {
+  const p: string[] = [];
+  let afterNext = false, nexts = 0, failures = 0;
+  for (const { line, byTerminal } of seen(text, width)) {
+    if (byTerminal) p.push(`the terminal broke a line, so a line begins where a value chose: ${JSON.stringify(line)}`);
+    if (/^usage: mason deploy /.test(line)) break;
+    if (line === "Next:") { nexts++; afterNext = true; continue; }
+    if (/^[✘✗] mason /.test(line)) failures++;
+    if (afterNext && /^ {2}\S/.test(line)) { if (!OWN_STEP.test(line)) p.push(`a step the CLI does not give: ${JSON.stringify(line)}`); continue; }
+    if (!STARTS.some((re) => re.test(line))) p.push(`a line the CLI does not begin: ${JSON.stringify(line)}`);
+  }
+  if (nexts > 1) p.push(`${nexts} Next: headings`);
+  if (failures > 1) p.push(`${failures} failures`);
+  return p;
+}
+
 /** Every step mason deploy gives, in every state: its own, never the service's. */
 const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
 
@@ -96,26 +146,20 @@ const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason 
  * code's; no line begins with what a hostile value carried (FORGED); each stream has one Next: at most, every step under
  * it the CLI's; and no --json string holds a line break.
  */
-async function mason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000): Promise<Answer> {
-  const a = await runMason(cwd, argv, env, timeoutMs);
+async function mason(cwd: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number } = {}): Promise<Answer> {
+  const a = await runMason(cwd, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal) } : env, o.timeoutMs ?? 60_000);
   ANSWERS.push(a);
-  const line = `mason ${argv.join(" ")}`;
+  const line = `mason ${argv.join(" ")}${o.terminal ? ` (a terminal ${o.terminal} wide)` : ""}`;
   if (argv.includes("--json") && a.code !== 0) {
     const e = (JSON.parse(a.stdout) as { error?: { code?: string } }).error;
     assert.ok(e?.code !== undefined && Object.hasOwn(FAILURE_CODES, e.code), `${line}: code ${e?.code} is not one of FAILURE_CODES`);
     assert.equal(a.code, exitOf({ message: "", code: e.code }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
   }
-  for (const [stream, text] of [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
-    const lines = text.split("\n");
-    assert.ok(!lines.some((l) => /^\s*(FORGED|✗ FORGED|Next: FORGED)/.test(l)), `${line}: a line of ${stream} begins with the service's text:\n${text}`);
-    assert.ok(lines.filter((l) => l === "Next:").length <= 1, `${line}: ${stream} has more than one Next: block:\n${text}`);
-    const at = lines.indexOf("Next:");
-    if (at >= 0) {
-      for (const l of lines.slice(at + 1)) {
-        if (l === "") break;   // the block ends at a blank line (a wrong line's usage follows it)
-        assert.match(l, OWN_STEP, `${line}: a step the CLI does not give:\n${text}`);
-      }
-    }
+  // every line a person sees is one the CLI began: visual lines at the terminal's width for a run on a terminal, the
+  // logical lines of a pipe otherwise; under --json, stderr alone (stdout is the data)
+  for (const [stream, text] of argv.includes("--json") ? [["stderr", a.stderr]] as const : [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
+    assert.ok(!text.split("\n").some((l) => /^\s*FORGED/.test(l)), `${line}: a line of ${stream} begins with the service's text:\n${text}`);
+    assert.deepEqual(deploySeenProblems(text, o.terminal ?? null), [], `${line}: what a person sees of its ${stream}:\n${text}`);
   }
   if (argv.includes("--json")) {
     const v = JSON.parse(a.stdout) as { next: Array<{ command: string }>; error?: { code?: string } };
@@ -139,11 +183,11 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, t
 }
 
 /** A run against a fresh fake, signed in by MASON_TOKEN; the fake's requests with it. */
-async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}): Promise<{ a: Answer; requests: Req[]; url: string; token: string }> {
+async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number } = {}): Promise<{ a: Answer; requests: Req[]; url: string; token: string }> {
   const token = newToken("ci"); SECRETS.push(token);
   const fake = await fakeService(script);
   try {
-    const a = await mason(cwd, ["deploy", ...argv], envFor(temp("mason-home-"), fake.url, { MASON_TOKEN: token, ...extra }));
+    const a = await mason(cwd, ["deploy", ...argv], envFor(temp("mason-home-"), fake.url, { MASON_TOKEN: token, ...extra }), o);
     return { a, requests: fake.requests, url: fake.url, token };
   } finally { await fake.close(); }
 }
@@ -421,7 +465,7 @@ test("mason deploy: each failure of the contract's POST says the service's words
     assert.equal(a.code, 1);
     if (json) {
       const e = (JSON.parse(a.stdout) as { error: { message: string; why: string; fix: string } }).error;
-      for (const v of [e.message, e.why, e.fix]) assert.match(v, /^[^\n]*\?FORGED a line of its own\?\?Next:\?  mason destroy   FORGED step\?FORGED\?FORGED\?\[2J\?FORGED/);
+      for (const v of [e.message, e.why, e.fix]) assert.match(v, /^[^\n]*\?FORGED a line of its own\?\?Next:\? mason destroy FORGED step\?FORGED\?FORGED\?\[2J\?FORGED/);
     } else {
       assert.equal(a.stderr.split("\n").filter((l) => l.includes("FORGED")).length, 3, `one line each for message, why and fix:\n${a.stderr}`);
       assert.match(a.stderr, /^✗ mason deploy: bad files\?FORGED/m);
@@ -509,7 +553,7 @@ test("mason deploy: Mason on the replica refused it — its words printed as the
       if (json) {
         const e = (JSON.parse(r.a.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
         assert.equal(e.code, status);
-        assert.equal(e.message, "message?FORGED line???Next:?  mason destroy?FORGED?FORGED?x?FORGED?[31mFORGED");
+        assert.equal(e.message, "message?FORGED line???Next:? mason destroy?FORGED?FORGED?x?FORGED?[31mFORGED");
       } else {
         assert.equal(r.a.stderr.split("\n").filter((l) => l.includes("FORGED")).length, 3, `${status}: one line each for message, why and fix:\n${r.a.stderr}`);
         assert.doesNotMatch(r.a.stderr, /\u001b\[31m|\u202e|\u200b/);
@@ -539,6 +583,52 @@ test("mason deploy: Mason on the replica refused it — its words printed as the
   const w = await deployWith({ get: () => at("applying\nFORGED\nNext:\n  mason destroy") }, root, ["--replica", "acme/shop"]);
   assert.equal(w.a.code, 1);
   assert.doesNotMatch(w.a.stderr, /FORGED|mason destroy/);
+});
+
+/** A terminal's width, and a value sized so that, begun at column `at`, the terminal would start its next lines with a
+ *  forged Next: heading, a step, a row, a failure and a tip, each padded to the width (tests/cli-login-service.test.ts's). */
+const WIDTH = 80;
+const FORGED_LINES = ["Next:", "  mason destroy                                 clean up, then deploy again", "  deploy    evil", "✘ mason deploy: forged", "Tip: run mason destroy"];
+const forgedAt = (at: number, lines: readonly string[] = FORGED_LINES): string =>
+  "a".repeat(Math.max(1, WIDTH - at)) + lines.map((l) => l.padEnd(WIDTH, " ")).join("") + "z";
+
+test("on a terminal 80 wide, no line a person sees begins with what the service sent: each row of deploy.ts's table, and every line of its own", { timeout: 400_000 }, async () => {
+  const { root } = project({ "generated_tables/weekly.yml": "kind: live\nsql: SELECT 1\n" });
+  const t = { terminal: WIDTH };
+  const step = "x".repeat(60) + "Next:" + " mason destroy" + " ".repeat(33) + "clean up, then deploy again";
+  // a POST's failure: its message (begun after "✘ mason deploy: "), why and fix (after their labels), at 403, 422 and 500
+  for (const [status, message] of [[403, forgedAt("✘ mason deploy: ".length)], [422, step], [500, forgedAt(16)]] as const) {
+    const { a } = await deployWith({ post: { status, body: { error: { code: "invalid", message, why: forgedAt(8), fix: forgedAt(8) } } } }, root, ["--replica", "acme/shop"], {}, t);
+    assert.equal(a.code, 1, `${status}: ${a.stderr}`);
+    assert.match(a.stderr, /aaaa/, `${status}: the value is shown`);
+  }
+  // a refused and a failed deploy's failure: message, why, fix
+  for (const status of ["refused", "failed"]) {
+    const failure = { code: "bad_source", message: forgedAt(16), why: forgedAt(8), fix: forgedAt(8) };
+    const { a } = await deployWith({ get: () => at(status, { failure }) }, root, ["--replica", "acme/shop"], {}, t);
+    assert.equal(a.code, 1, `${status}: ${a.stderr}`);
+    assert.match(a.stderr, /aaaa/);
+  }
+  // a GET's failure midway (the token revoked): the same words, in the same rows
+  {
+    const { a } = await deployWith({ get: () => ({ status: 401, body: { error: { code: "unauthenticated", message: step, why: forgedAt(8), fix: forgedAt(8) } } }) }, root, ["--replica", "acme/shop"], {}, t);
+    assert.equal(a.code, 1, a.stderr);
+  }
+  // the wait's lines, the spinner's, a 503's note, and the report, on the terminal: each broken by the CLI, never by it
+  {
+    const steps = [at("applying", { phase: "checking" }), { status: 503, raw: "busy" } as Reply, at("starting", { phase: "syncing" }), at("running")];
+    const { a } = await deployWith({ get: (n) => steps[Math.min(n, steps.length - 1)]! }, root, ["--replica", "acme/shop"], {}, t);
+    assert.equal(a.code, 0, a.stderr);
+    assert.match(a.stderr, /Running: the replica runs the new files/);
+  }
+  // the timeout's failure, the dry run's rows (each a file and its 64-digit sha256), and a warning, on the terminal
+  {
+    const { a } = await deployWith({ get: () => at("applying") }, root, ["--replica", "acme/shop", "--timeout", "1s"], {}, t);
+    assert.equal(a.code, 124, a.stderr);
+    const d = await deployWith({}, root, ["--replica", "acme/shop", "--dry-run"], {}, t);
+    assert.equal(d.a.code, 0, d.a.stderr);
+    assert.match(d.a.stderr, /^ {2}! mason\/generated_tables\/weekly\.yml: /m);
+  }
 });
 
 test("mason deploy --timeout: past it, exit 124 naming the deploy's id and that it may still finish; a timeout that is not an interval is a wrong line", async () => {

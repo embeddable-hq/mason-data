@@ -51,7 +51,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { CONTINUATION, errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strictWrap, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { environmentToken, readLogins, TOKEN_ENV } from "./credentials.ts";
 import { call, failureShape, isFailure, serviceFailure, serviceOf, serviceText, unexpected, type Service } from "./hosted.ts";
 import { maskedUrl } from "./preflight.ts";
@@ -66,7 +66,7 @@ import { refusalText } from "../duck/generated-plan.ts";
 import { parseDuration } from "../lib/table-sync.ts";
 import { textEntry } from "../lib/log.ts";
 import { sayAgain } from "./commands.ts";
-import { err as styleErr, out as styleOut, stepRenderer } from "./style.ts";
+import { err as styleErr, out as styleOut, stepRenderer, type Style } from "./style.ts";
 import { version } from "./version.ts";
 
 /** What one part of a replica's name may be: an organisation's slug, a replica's name. */
@@ -88,8 +88,33 @@ const STATUSES = ["queued", "applying", "starting", "running", "refused", "faile
 type Status = typeof STATUSES[number];
 const FINAL: ReadonlySet<Status> = new Set(["running", "refused", "failed"]);
 
+/** Everything this command prints can hold the service's text, so it is ALL drawn in serviceStyle (src/cli/command.ts):
+ *  on a terminal every line is broken by the CLI at the width, never by the terminal, each continuation at column 4 or
+ *  deeper — the report, the progress, the spinner's line, a failure and a warning alike. */
+const outStyle = (): Style => serviceStyle(styleOut());
+const errStyle = (): Style => serviceStyle(styleErr());
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
-const say = (m: string): void => { process.stderr.write(`${m}\n`); };
+/** One line of progress (or several, a line each) on stderr, broken by the CLI at a terminal's width (`strictWrap`):
+ *  a line's own indent kept, its continuations deeper than it and than CONTINUATION. */
+const say = (m: string): void => {
+  const width = errStyle().width;
+  const drawn = width === null ? m : m.split("\n").map((l) => {
+    const lead = /^ */.exec(l)![0];
+    return lead + strictWrap(l.slice(lead.length), width, Math.max(CONTINUATION, lead.length + 2), lead.length);
+  }).join("\n");
+  process.stderr.write(`${drawn}\n`);
+};
+/** A step's label as the spinner draws it on one line (`⠋ label …`): cut to the terminal's width, never broken by it. */
+const clipped = (label: string): string => {
+  const width = errStyle().width;
+  if (width === null) return label;
+  const room = width - 5, chars = [...label];
+  let n = 0, i = 0;
+  for (; i < chars.length; i++) { n += chars[i]!.codePointAt(0)! <= 0x7e ? 1 : 2; if (n > room) break; }
+  return i < chars.length ? `${chars.slice(0, Math.max(0, i - 1)).join("")}…` : label;
+};
+/** A failure said for a person in serviceStyle, or under --json as data. */
+const fail = (f: Failure | Parameters<typeof failed>[1], o: { json: boolean }): number => failed("deploy", f, { json: o.json, style: errStyle() });
 
 export const DEPLOY: CommandSpec & { needs: "project" } = {
   needs: "project",
@@ -348,33 +373,33 @@ export async function deploy(argv: string[]): Promise<number> {
   if (typeof f === "number") return f;
   const json = f.values.json === true;
   const dryRun = f.values["dry-run"] === true;
-  if (f.positionals.length) return failed("deploy", { message: "it takes no argument", code: "usage", why: "the project is the folder's, the replica --replica's", usage: DEPLOY.usage }, { json });
+  if (f.positionals.length) return fail({ message: "it takes no argument", code: "usage", why: "the project is the folder's, the replica --replica's", usage: DEPLOY.usage }, { json });
   const timeoutText = typeof f.values.timeout === "string" ? f.values.timeout : DEFAULT_TIMEOUT;
   const timeout = parseDuration(timeoutText);
-  if ("problem" in timeout) return failed("deploy", { message: `--timeout ${timeout.problem}`, code: "usage", usage: DEPLOY.usage }, { json });
+  if ("problem" in timeout) return fail({ message: `--timeout ${timeout.problem}`, code: "usage", usage: DEPLOY.usage }, { json });
   const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined);
-  if (replica !== null && isFailure(replica)) return failed("deploy", replica, { json });
+  if (replica !== null && isFailure(replica)) return fail(replica, { json });
   if (replica === null && !dryRun) {
-    return failed("deploy", { message: "no replica named", code: "usage", why: "a deploy goes to one replica of the service",
+    return fail({ message: "no replica named", code: "usage", why: "a deploy goes to one replica of the service",
       fix: `name it: mason deploy --replica <org>/<name>, or set ${REPLICA_ENV}=<org>/<name>`, usage: DEPLOY.usage }, { json });
   }
   const service = serviceOf();
-  if (isFailure(service)) return failed("deploy", service, { json });
+  if (isFailure(service)) return fail(service, { json });
 
   // THE PROJECT, checked as a start checks it, offline; then its files
   const t = theProject(process.cwd());
-  if ("problem" in t) return failed("deploy", t, { json });
+  if ("problem" in t) return fail(t, { json });
   const project = t.project;
   const checked = checkProject(project);
-  if (isFailure(checked)) return failed("deploy", checked, { json });
+  if (isFailure(checked)) return fail(checked, { json });
   const files = deployFiles(project, checked.read);
-  if (isFailure(files)) return failed("deploy", files, { json });
+  if (isFailure(files)) return fail(files, { json });
   const totalBytes = files.reduce((n, x) => n + x.size, 0);
   const listed = files.map(({ path: p, size, sha256 }) => ({ path: p, size, sha256 }));
   // --json carries each warning as one line (a string with no line break); a person reads its lines on stderr
   const base = { replica: replica === null ? null : replicaText(replica), service: service.base, files: listed, totalBytes,
     warnings: checked.warnings.map((w) => w.split("\n").map((l) => l.trim()).filter(Boolean).join(" ")) };
-  if (!json) for (const w of checked.warnings) process.stderr.write(textEntry("  ! ", w));
+  if (!json) for (const w of checked.warnings) say(textEntry("  ! ", w).trimEnd());
 
   if (dryRun) {
     const next: NextStep[] = replica === null
@@ -386,12 +411,12 @@ export async function deploy(argv: string[]): Promise<number> {
       headline: `Would send ${files.length} file${files.length === 1 ? "" : "s"}, ${bytes(totalBytes)}, ${replica === null ? `to ${service.base} (no replica named)` : `to ${replicaText(replica)} on ${service.base}`}; nothing was sent`,
       details: files.map((x): [string, string] => [x.path.padEnd(w), `${bytes(x.size).padStart(sw)}   sha256 ${x.sha256}`]),
       next,
-    }, styleOut()));
+    }, outStyle()));
     return 0;
   }
   const r = replica!;
   const token = tokenFor(service);
-  if (isFailure(token)) return failed("deploy", token, { json });
+  if (isFailure(token)) return fail(token, { json });
   const secrets = [token];
   const where = `/v1/replicas/${r.org}/${r.name}/deploys`;
   const started = Date.now(), deadline = started + timeout.seconds * 1000;
@@ -399,16 +424,16 @@ export async function deploy(argv: string[]): Promise<number> {
   // THE DEPLOY, SENT: 201 and its id, else the service's failure as it worded it
   const sent = await call(service, "POST", where, { token, json: { files: files.map(({ path: p, sha256, content }) => ({ path: p, sha256, content })), client: { version: version() } } });
   if (isFailure(sent)) {
-    return failed("deploy", { ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}whether the deploy was made is not known`,
+    return fail({ ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}whether the deploy was made is not known`,
       fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)` }, { json });
   }
-  if (sent.status !== 201) return failed("deploy", serviceFailure(sent, secrets) ?? unexpected(service, sent, "a deploy was sent"), { json });
+  if (sent.status !== 201) return fail(serviceFailure(sent, secrets) ?? unexpected(service, sent, "a deploy was sent"), { json });
   // what to run after a refused or failed deploy: the CLI's own step, never one the service names
   const again: NextStep[] = [[`mason deploy --replica ${replicaText(r)}`, "deploy again, once what it says is fixed"]];
   const first = deployStateOf(sent.json, null, secrets, again);
-  if (first === null || first.status !== "queued") return failed("deploy", unexpected(service, sent, "a deploy was sent"), { json });
+  if (first === null || first.status !== "queued") return fail(unexpected(service, sent, "a deploy was sent"), { json });
   const id = first.id;
-  const s = styleErr();
+  const s = errStyle();
   const terminal = !json && process.stderr.isTTY === true;
   const steps = stepRenderer({ line: say, live: terminal ? process.stderr : null, style: s });
   if (!json) say(`Sent ${files.length} file${files.length === 1 ? "" : "s"} (${bytes(totalBytes)}) to ${replicaText(r)} on ${service.base}: deploy ${id}`);
@@ -417,7 +442,8 @@ export async function deploy(argv: string[]): Promise<number> {
   let state = first, said = "", saidAt = 0, unsure: string | null = null, unsureSaid: string | null = null;
   const show = (line: string): void => {
     if (json) return;
-    if (terminal) { if (line !== said) { steps.begin(line); said = line; } return; }
+    // on a terminal: the step that ends is said whole (a line the CLI breaks), the one that turns cut to one line
+    if (terminal) { if (line !== said) { if (said !== "") steps.done(said); steps.begin(clipped(line)); said = line; } return; }
     if (sayAgain(line, said, saidAt, Date.now())) { say(`  ${line}`); said = line; saidAt = Date.now(); }
   };
   show(stateLine(state));
@@ -432,12 +458,15 @@ export async function deploy(argv: string[]): Promise<number> {
     // the step it ended on: the outcome's own line when it has one, else (a timeout, an answer outside the contract) the last
     const line = FINAL.has(state.status) ? stateLine(state) : null;
     // (on a terminal the step turning is ticked and the outcome is a line of its own; a refusal replaces the step it ended)
-    if (terminal) { if (error === null) { if (line !== null && line !== said) steps.begin(line); steps.done(); } else steps.fail(line ?? undefined); }
+    if (terminal) {
+      if (error === null) { if (line !== null && line !== said) { steps.done(said); steps.begin(clipped(line)); said = line; } steps.done(said); }
+      else steps.fail(line ?? said);
+    }
     else if (line !== null && line !== said) say(`  ${line}`);
-    if (error !== null) return failed("deploy", error, { json: false });
+    if (error !== null) return fail(error, { json: false });
     out(reportText({ headline: `Deployed to ${replicaText(r)}: the replica runs it`,
       details: [["deploy", id], ["service", service.base], ["files", `${files.length} (${bytes(totalBytes)})`], ["took", `${Math.max(1, Math.round((Date.now() - started) / 1000))} s`]],
-      next: NEXT_AGAIN(r) }, styleOut()));
+      next: NEXT_AGAIN(r) }, outStyle()));
     return 0;
   };
   for (;;) {
