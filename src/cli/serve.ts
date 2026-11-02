@@ -30,7 +30,7 @@ import { DEFAULT_UI_PORT, heldText, portHolder } from "./ports.ts";
 import { pgListenerAddress } from "../api/postgres/listener.ts";
 import { dev } from "./dev.ts";
 import { parseSource } from "./preflight.ts";
-import { NAME_RE, newConfig, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
+import { NAME_RE, newConfig, projectReadOnlySetting, projectWriteRefusal, readProject, STATE_DIR, writeConfig, type BrokenProject, type Project, type ProjectConfig } from "./project.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, readSource, sourceFileNames, sourceNameFor, sourcesDir, sourcesTop, writtenDatabase } from "./sources.ts";
 import { connectDatabase, DATABASE_SETTING, databaseNameProblem } from "../lib/database-name.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
@@ -56,7 +56,7 @@ export const SERVE: CommandSpec = {
   GET /metrics for Prometheus (numbers only: no name, no statement), and a clean stop on SIGTERM. The tables it
   syncs are the ones the project folder's sources file names (sources/<name>.yml): make it with mason init and mason
   add on a laptop and commit it, or with mason add beside the running server. A project folder with no sources file
-  gets one, url: \${DATABASE_URL}, with no table yet.
+  gets one, url: \${DATABASE_URL}, with no table yet — unless MASON_PROJECT_READONLY=1, which writes none.
 
     DATABASE_URL=postgres://mason:…@db.internal:5432/app MASON_API_KEY=… mason serve
     docker compose exec mason mason add public.orders     beside it, in its container
@@ -69,6 +69,9 @@ export const SERVE: CommandSpec = {
                             this one), else this; default none: Mason makes its own
     MASON_API_KEY           what the users' passwords are made with (mason user add), at least 32 characters (required)
     MASON_PROJECT           the project folder: sources/, mason.yml (default ./mason)
+    MASON_PROJECT_READONLY  1 when the project folder is deployed as committed (CI, GitOps, a platform that deploys
+                            the folder): every edit of its files is refused — mason add and mason remove, beside it or
+                            on the web page — and says to edit the files and deploy them (default 0)
     MASON_DATA              the folder whose .mason/ holds the synced data and the state: the volume (default .)
     MASON_NAME              the project's name, which the replication slot is named for (default mason); renaming it
                             over the same synced data is refused
@@ -150,6 +153,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // MASON_DUCKDB_MEMORY not an amount (src/duck/store.ts memoryProblems), said here with the rest, before anything is
   // written or connected; a container under the floor starts, and the run warns (memoryWarning)
   wrong.push(...memoryProblems(env).map(memoryProblemText));
+  // the project's files deployed read-only (src/cli/project.ts projectWriteRefusal): 1 or 0, anything else refused here
+  const readOnly = projectReadOnlySetting(env);
+  if (typeof readOnly !== "boolean") wrong.push(readOnly.problem);
   const selfSigned = env.MASON_PG_SELF_SIGNED_TLS || "0";
   if (selfSigned !== "0" && selfSigned !== "1") wrong.push(`MASON_PG_SELF_SIGNED_TLS=${JSON.stringify(selfSigned)}: 1, or 0 (the default)`);
   const portText = env.MASON_HEALTH_PORT || "4140";
@@ -275,6 +281,14 @@ export function serveSource(s: ServeSettings, env: NodeJS.ProcessEnv): { wrote: 
     if (!url) {
       return { message: "DATABASE_URL is not set, and the project folder has no sources file to name the database another way", code: "bad_config",
         fix: "set DATABASE_URL=postgres://user:password@host:5432/app (the sources file mason init writes names it), or mount the project folder with its sources/ (MASON_PROJECT)",
+        next: [["mason serve --help", "every setting, with its default"]] };
+    }
+    // a deployed project's files are its commit's (src/cli/project.ts projectWriteRefusal: this serve's own environment
+    // decides, the config not written yet): a folder deployed without its sources file is said, never filled in
+    const readOnly = projectWriteRefusal(null, env);
+    if (readOnly !== null) {
+      return { ...readOnly, message: `the project folder (${s.project}) has no sources file, and ${readOnly.message}`,
+        fix: "edit the files and deploy them: mason init and mason add where the project is committed write its sources file; commit it, and deploy the folder with it",
         next: [["mason serve --help", "every setting, with its default"]] };
     }
     const p = parseSource(url);

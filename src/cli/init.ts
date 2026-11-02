@@ -30,7 +30,7 @@ import { cliPinProblem, ensurePin } from "./pin.ts";
 import { version } from "./version.ts";
 import { parseVersion, PIN_FILE } from "../lib/project-version.ts";
 import { appDatabaseUrl, appEnvValue, appendEnvLine, ENV_FILE } from "../lib/dotenv.ts";
-import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateDir, nameFromFolder, newConfig, writeConfig } from "./project.ts";
+import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateDir, nameFromFolder, newConfig, projectWriteRefusal, writeConfig } from "./project.ts";
 import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_GENERATED, DEMO_PORT, DEMO_SYNC, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
 import { GENERATED_DIR, generatedDir } from "./generated-files.ts";
 import { freePort } from "./ports.ts";
@@ -211,6 +211,11 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const badDatabase = connectName === null ? null : databaseNameProblem(connectName);
   if (badDatabase !== null) return usage(`--database: ${badDatabase}`);
 
+  // THE PROJECT'S FILES DEPLOYED READ-ONLY (src/cli/project.ts projectWriteRefusal, the one authority): init writes them,
+  // so it writes none — refused before the database is asked, as every writer of a project file is
+  const readOnly = projectWriteRefusal(sourceless?.root ?? null, deps.env ?? process.env);
+  if (readOnly !== null) return failed("init", readOnly, { json, io });
+
   // THE SOURCE FILE: one already here (a clone of the project) is kept; else written, its URL a variable of .env
   const kept = sourceFileNames(folder)[0] ?? null;
   if (demo && kept !== null) {
@@ -364,7 +369,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     const cli = deps.version ?? version();
     const pinFile = rel(path.join(folder, PIN_FILE));
     if (parseVersion(cli) !== null) {
-      await steps.step(`Writing ${pinFile}`, () => ensurePin(folder, cli),
+      await steps.step(`Writing ${pinFile}`, () => ensurePin(folder, cli, root, deps.env ?? process.env),
         (wrote) => wrote ? `Wrote ${pinFile}: version ${cli}, the Mason this project is written for — commit it` : `Kept ${pinFile}`);
       const pinned = cliPinProblem(folder, cli);
       if (pinned) notes.push(pinned);

@@ -18,6 +18,7 @@ import type { SourceTable } from "./preflight.ts";
 import { addedTables, chooseColumns, effectiveSync, entryName, entryProblems, findEntry, parseSourceText, sourceFailure, sourceFileNames, sourcesDir, unaddableReason,
   withEntrySync, withoutTable, withTable, type ProjectSource, type SourceFile } from "./sources.ts";
 import { BIG_TABLE_ROWS, COSTLY_POLL_ROWS, COSTLY_POLL_SECONDS, syncText, type TableSync } from "../lib/table-sync.ts";
+import { projectWriteRefusal } from "./project.ts";
 
 /** A refusal the command shows as it is; `failure` is how the web page says it (the CLI's Failure: why, fix, next), by
  *  default the message alone under the status's code. */
@@ -69,11 +70,15 @@ export function pollCost(t: Pick<SourceTable, "source" | "rows">, sync: TableSyn
 }
 
 /**
- * The project's sources file as it is on disk NOW, its text and what it says — or why it cannot be edited: no folder, not
- * exactly one file, a file with mistakes of its own, a URL that cannot be resolved (`read`, the file read as the run reads
- * it: src/cli/sources.ts readSource).
+ * The project's sources file as it is on disk NOW, its text and what it says — or why it cannot be edited: its files are
+ * read-only here (src/cli/project.ts `projectWriteRefusal`, the one authority, asked FIRST: nothing is read or checked
+ * against the database for an edit that cannot be written), no folder, not exactly one file, a file with mistakes of its
+ * own, a URL that cannot be resolved (`read`, the file read as the run reads it: src/cli/sources.ts readSource). An
+ * `EditTarget` is made here alone, so every edit `addEntry` and `removeEntries` write has asked.
  */
-export function sourceToEdit(folder: string | null, root: string, read: () => ProjectSource | Failure): EditTarget {
+export function sourceToEdit(folder: string | null, root: string, read: () => ProjectSource | Failure, env: Readonly<Record<string, string | undefined>> = process.env): EditTarget {
+  const readOnly = projectWriteRefusal(root, env);
+  if (readOnly !== null) throw new Refusal(409, readOnly.message, readOnly);
   if (!folder) throw new Refusal(409, "choose the project's folder first");
   const names = sourceFileNames(folder);
   if (names.length !== 1) throw new Refusal(409, `${path.relative(root, sourcesDir(folder)) || sourcesDir(folder)}/ has ${names.length ? `${names.length} source files` : "no source file"}: one source per project for now`);
