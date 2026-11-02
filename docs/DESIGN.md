@@ -2277,6 +2277,7 @@ apart:
 | 41396664763 | 69.2 / 53.9 s | 649 / 496 s (153) | 577 / 566 s (11) | 759 / 594 s | unit (2), 1110 s |
 | 41396965861 | 68.7 / 63.1 s | 711 / 687 s (24) | 682 / 717 s (36) | 825 / 796 s | rest shard 2, 845 s |
 | 41400764545 (this PR) | 68.3 / 53.8 s | 711 / 487 s (225) | 636 / 552 s (84) | 825 / 585 s | unit (2), 1069 s |
+| 41402798966 (this PR, new weights) | 68.3 / 42.5 s | 731 / 403 s (328) | 593 / 526 s (67) | 850 / 484 s | unit (2), 1090 s |
 | 41389723050 | 68.3 / 42.3 s | (1000 ms weights) | | | |
 | 41391539636 | | (1000 ms weights) | 116 s apart | leg 1 858 s | oracle leg 1, 19 s over rest shard 2 |
 
@@ -2294,9 +2295,13 @@ would refuse to write.
 
 The PR's own run is the first to name its runners: leg 1 on an AMD EPYC 7763, leg 2 on an AMD EPYC 9V74, 4 vCPUs each.
 The setups were 1.27x apart and the statements and stages 1.46x, so the setup under-corrected the faster CPU, and the
-scaled gap (84 s) passed the target: the warning fired, and the weights were rewritten from that run as it says. Whether
-a CPU model speeds the statements more than the setup on every draw is not known yet; the CPU in each leg's report lets
-the next runs say.
+scaled gap (84 s) passed the target: the warning fired, and the weights were rewritten from that run as it says. The
+next run, on those weights, drew an EPYC 7763 and an EPYC 9V45: setups 1.61x apart, statements and stages 1.81x, scaled
+67 s apart, warned again. In both, the leg on the newer CPU ran its statements faster than its setup says, so the scaled
+gap is at least partly that leg looking light, not the split: the setup is a weaker proxy for the statements' speed across
+CPU generations than across draws of one. Rewriting the weights again from each such run would chase the draw. Not known:
+how often the legs draw different generations, and a better proxy (a fixed piece of the statements' own work, timed in
+each leg); the CPU in each leg's report lets the next runs say. Until then the warning is read beside the two CPUs.
 
 **Rejected.** A shared queue, each leg taking the next statement as it frees: two hosted jobs share no state but
 artifacts, read only after a job ends, so it needs a coordinator they do not have; and one job running both halves on a
