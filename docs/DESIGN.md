@@ -2293,6 +2293,44 @@ strings Postgres orders by their bytes. A sort under ICU now ends in the bytes, 
 
 ## Measurements
 
+### The stored fold, larger than memory (issue 124 stage 5, 2026-11-02)
+
+**The question.** Issue 124's live table would keep a generated table current by folding each stream batch into its stored rows ("How a table stays current", steps 1-7, with the time bound). Does that cost an acceptable writer time per batch, and keep dashboard statements under 3 s at 4 users, when the data does not fit in memory and statements run beside it? `scripts/bench-fold.ts` drives the steps by hand on the real engine. The recompute's SQL comes from the planner over a swapped relation, on one connection set up by `SessionSetup`, in one transaction per batch. The thresholds were set before the run (`THRESHOLDS`).
+
+**The setup.** One `mason-data` container: 4 GiB, no swap, 4 CPUs. The engine's limit was Mason's default, 2.0 GiB. Its data sat on a named volume whose device was throttled to an EBS gp3's 125 MB/s and 3,000 IOPS; the cold read rate measured 123 MB/s. The data, synthetic: 26.1 M events over 90 days in heap order. A ~1.5 kB high-entropy JSON column made the file 20.0 GiB (5.0x the container's memory): the key columns the fold reads take 0.55 GiB, the JSON 19.5 GiB. The generated tables are `requests` (9.39 M rows, ~0.2 GiB) and `daily_durations` (45,000 rows) over it. The clients ran S1-S7 for the largest tenant (8 % of the rows) and the median tenant: S1-S5 over the generated tables, S6 (a JSON key) and S7 (the fold at read time) over the base.
+
+**What it measured.**
+- **A whole re-run of both tables took 15.5 s** (0.34 GiB read from the disk). This is the relevance check, T4: under 60 s, so a scheduled table with `target_lag: 1m` keeps these dashboards within a minute without the fold.
+- **The writer alone** (40 batches each, back to back, p95):
+
+  | batch | base write only | with the fold |
+  |---|---|---|
+  | 6 rows | 9 ms | 289 ms |
+  | 60 rows | 15 ms | 249 ms |
+  | 1,000 rows | 234 ms | 1.44 s |
+
+  The cascade into daily_durations (step 7, which reads the touched days' `requests` rows) is most of the fold: 125-176 ms at p95. Step 1 with the JSON column added to its list read 31 ms at p95 against 6 ms. An unbounded recompute (the touched groups' whole history) took 1.19 s at p95 against the bounded 21 ms, with the same rows in all 20 compared batches.
+- **Beside 4 users the disk was the bottleneck, for both writers.** The throttled disk read 40.4 GiB over the together phase, mostly S6 and S7 reading the wide column over the base. These statements alone already had a set p95 of 3.69 s (7 days) and 57 s (30 days). Results:
+  - The fold's batch p95 was 43.9 s at 6 rows every 0.5 s and 41.0 s at 60 rows every 5 s. Every batch was late, and the lag grew to 4-5 minutes.
+  - Today's base write alone, under the same load, had a p95 of 6.76 s at 6 rows every 0.5 s. Its lag grew to 2.7 minutes.
+  - The 7-day statements over the generated tables (S1-S5) had a p95 of 58 ms alone, 272 ms beside the base write and 1.29 s beside the fold.
+- **Correctness**: after every phase, both stored tables equal their definitions run whole (`EXCEPT ALL` both ways). The bounded recomputes equal the unbounded ones.
+
+**The thresholds.**
+
+| threshold | result |
+|---|---|
+| T1 (writer p95 at most half the interval) | fails: 43.9 s against 250 ms, and 41.0 s against 2.5 s |
+| T2 (fold's added p95 per 60-row batch at most 1 s) | fails: 40.9 s |
+| T3 (S1-S5 p95 at most 3 s, rise at most 25 %) | fails on the rise (58 ms to 1.29 s), although the p95 itself stays under 3 s |
+| T4 (a whole re-run at least 60 s) | 15.5 s: live buys little at this size |
+
+**The decision it informs** (Tom's, issue 124). The numbers argue against stages 6-11 at this size. The fold is cheap alone, but beside statements that read a wide column from a disk of a gp3's rate, it stalls the stream for tens of seconds. It also triples what the stored tables' statements cost. Meanwhile a whole re-run of the same tables takes 15 s. Two caveats are part of the result, not reasons to discount it:
+- Today's writer also falls behind under this load (6.8 s at p95). Part of the failure is the disk shared with S6 and S7's wide reads, not the fold itself.
+- At 6 rows the fold misses T1 even alone (289 ms against 250 ms).
+
+Detector: the report `scripts/bench-fold.ts` writes, re-run with the same command when the shape changes. A wider base, a table whose re-run takes minutes, or a faster disk would each change the answer.
+
 ### A top N over joined tables (issue 105, 2026-10-31)
 
 A table preview over three tables (`a` 17 k rows, `b` 1.4 M, `c` 2.8 M with 4 kB of JSON, 4 M joined rows, synthetic, on a
