@@ -23,8 +23,7 @@ paths:
   `store.spillLimitBytes`. ("A top N over joined tables")
 - **A sizing decision reads `store.memoryLimitBytes`**, never `os.totalmem()` or a constant: the operator may have set
   the limit. The copy reads it: a chunk's values out of line are held to an eighth of it over the readers
-  (`chunkCeiling`, `COPY_CHUNK_MEMORY_SHARE`), and a table whose row group could not be written in it is refused
-  (`COPY_CHECKPOINT_SHARE`; docs/DESIGN.md "Large values out of line").
+  (`chunkCeiling`, `COPY_CHUNK_MEMORY_SHARE`; docs/DESIGN.md "Large values out of line").
 - **A copy shares that limit with the stream, the polls and the BI queries** (it runs beside them):
   what does not fit beside fails its own statement, is said, and is tried again.
 - **What a copy costs the queries beside it is PAGE-CACHE EVICTION, not CPU** (measured on the test server: buffered

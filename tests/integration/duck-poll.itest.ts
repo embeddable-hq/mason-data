@@ -1730,3 +1730,37 @@ test("a chunk past the spill's ceiling is not an out of memory: the sync fails a
     assert.ok(!logged.some((l) => /ran out of memory: reading on one chunk at a time/.test(l)), said);
   } finally { await sync.stop(); store.close(); }
 });
+
+// MANY MODERATE VALUES OUT OF LINE ARE NEVER REFUSED BY ARITHMETIC (review r1 of PR 380): 140,000 rows of ~2 KB stored
+// EXTERNAL (~1,030 heap pages, ~365 MiB out of line) stream through a 128 MB limit, as the base's one chunk did; a
+// refusal is the engine's to say at the write, never a formula over the source's catalog.
+test("a table of many moderate out-of-line values syncs under a 128 MB limit, never refused before it is read", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const db = `${tag}_many`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  psql(url, "CREATE TABLE many (id bigint PRIMARY KEY, v text); ALTER TABLE many ALTER COLUMN v SET STORAGE EXTERNAL");
+  psql(url, "INSERT INTO many SELECT g, repeat(md5(g::text), 64) FROM generate_series(1, 140000) g");
+  psql(url, "VACUUM ANALYZE many");
+  await rowsOlderThanEverySnapshot(url, "many");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const MANY: AddedTable = { source: "public.many", schema: "public", table: "many", key: ["id"], bytes: 0, rows: 140_000, foreignKeys: [],
+    columns: [{ name: "id", type: "bigint", notNull: true, comment: null }, { name: "v", type: "text", notNull: false, comment: null }] };
+  const logged: string[] = [];
+  const file = path.join(dir, "many.db");
+  const store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "128MB" });
+  const sync: Sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3 });
+  try {
+    await sync.open();
+    void sync.setTables([MANY]);
+    await sync.once();
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.many", "copied", null]], logged.join("\n"));
+  } finally { await sync.stop(); store.close(); }
+  // compared at the default memory, after a reopen (its checkpoint and its file read back)
+  const read = await DuckStore.open(file, (l) => logged.push(l));
+  try {
+    const digest = "count(*) || ' ' || md5(string_agg(id::text || ':' || md5(v), ',' ORDER BY id))";
+    assert.equal(String((await read.writer.runAndReadAll(`SELECT ${digest} FROM public.many`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT ${digest} FROM many`), `public.many differs from the source\n${logged.join("\n")}`);
+  } finally { read.close(); }
+});

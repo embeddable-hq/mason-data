@@ -53,10 +53,10 @@ paths:
   53400 is the spill's ceiling, disk, and fails as any error) rolls back, its range is given back (`giveBack`, which keeps
   the gaps tiling), and the copy reads on with ONE reader, each chunk at most half the one that ran out, said once a
   step; a one-page chunk read alone that runs out fails the copy with `tooLargeText` (the limit as set, raise
-  `MASON_DUCKDB_MEMORY`, `mason add … --columns`; never the engine's remedies), its chunks kept, backed off. A table
-  whose out-of-line bytes in one row group (`rowGroupOutOfLine`) times `COPY_CHECKPOINT_SHARE` pass the limit is refused
-  before a page is read: a checkpoint merging small row groups it cannot hold invalidates the whole database (issue
-  371). `duck-poll.itest.ts` holds both shapes and the two out-of-memory paths (docs/DESIGN.md "Large values out of line").
+  `MASON_DUCKDB_MEMORY`, `mason add … --columns`; never the engine's remedies), its chunks kept, backed off. No table is
+  refused before it is read by a formula over the source's catalog: what the engine can write is the engine's to say,
+  at the write (an up-front refusal by TOAST bytes refused 140,000 rows of ~2.6 KB that sync in 128 MB; PR 380). A
+  checkpoint merging small row groups of large values that do not fit invalidates the whole database (issue 371, open). `duck-poll.itest.ts` holds both shapes and the two out-of-memory paths (docs/DESIGN.md "Large values out of line").
 - **A copy's progress is rendered between commits** (`CopyLive`, `copyProgressNow`, `CopyState.progress`): the chunks
   done and about how many in all, the ones reading and how long the oldest has, the readers' measured rate and the time
   the pages left take at it, and the rows the chunks in flight have read by now at that rate, each held under 90 % of

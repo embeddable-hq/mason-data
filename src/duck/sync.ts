@@ -489,22 +489,12 @@ export function chunkCeiling(pages: number, rows: number | null, outOfLine: numb
 }
 
 /**
- * A SYNCED TABLE'S ROW GROUP MUST FIT IN MEMORY WHEN IT IS WRITTEN (measured on DuckDB 2.0.0): chunks of a few large
- * rows each commit a small row group, and a checkpoint merges a table's small row groups into one of up to
- * `ROW_GROUP_ROWS` rows, holding their values at once. When that does not fit, the checkpoint fails and DuckDB
- * INVALIDATES the database (every table, until a restart; issue 371): 30 one-page chunks of 100 KB values (400 MiB)
- * merged under 366 MiB of limit, and failed under 244 MiB (400 MiB) and 122 MiB (182 MiB committed). So a table whose
- * out-of-line bytes in one row group are more than the limit over `COPY_CHECKPOINT_SHARE` is not synced, said with the
- * way out (`tooLargeText`), before a page is read: at the base such a table failed loudly in its one chunk. The
- * source's bytes are the stored ones, so a compressed value (a `jsonb`) is under-counted here.
+ * NO TABLE IS REFUSED BY ARITHMETIC (fix round 1 of PR 380): whether the engine can write a table's values is the
+ * engine's to say, at the write (53200 at a chunk's read or commit, `readChunks`), never a formula over the source's
+ * catalog. A refusal decided up front from the TOAST bytes in a row group, measured on a few rows of ~100 KB, refused
+ * 140,000 rows of ~2.6 KB through a 128 MB limit that the base synced in one chunk. What stays open: a checkpoint
+ * merging a table's small row groups of LARGE values that do not fit invalidates the database (issue 371).
  */
-export const ROW_GROUP_ROWS = 122_880;
-export const COPY_CHECKPOINT_SHARE = 0.75;
-/** the out-of-line bytes one row group of the synced table would hold (null: rows or bytes unknown) */
-export function rowGroupOutOfLine(rows: number | null, outOfLine: number | null): number | null {
-  if (rows === null || rows <= 0 || outOfLine === null) return null;
-  return outOfLine * Math.min(1, ROW_GROUP_ROWS / rows);
-}
 
 /** WHY A TABLE IS NOT SYNCED IN THIS MEMORY (`readChunks`): its rows, the limit as set, and the ways out — in the
  *  operator's words, never the engine's own remedies (its threads, its settings) */
@@ -3273,12 +3263,6 @@ export class Sync {
     const outOfLine = await this.interruptible(this.rebuilder, () => this.outOfLineBytes(pgFrom));
     const limit = this.store.memoryLimitBytes;
     const ceilingOf = (pages: number): number => chunkCeiling(pages, t.rows, outOfLine, chunkBudgetBytes(limit, this.copyParallel), this.copyChunkRows);
-    // A ROW GROUP THE ENGINE COULD NOT WRITE (`COPY_CHECKPOINT_SHARE`): refused before a page is read, as the base's
-    // one chunk would have failed, rather than chunks committed into a checkpoint that invalidates the synced data
-    const grouped = recopy ? null : rowGroupOutOfLine(t.rows, outOfLine);
-    if (grouped !== null && grouped * COPY_CHECKPOINT_SHARE > limit) {
-      throw new Error(tooLargeText(t.source, `about ${humanBytes(grouped)} of its values out of line would be written together (one row group of up to ${ROW_GROUP_ROWS.toLocaleString("en-US")} rows)`, limit));
-    }
     if (recopy) await w.run("BEGIN TRANSACTION");
     try {
       let begun = from;
@@ -3506,7 +3490,7 @@ export class Sync {
   }
 
   /** THE SOURCE TABLE'S VALUES OUT OF LINE, in bytes: its TOAST table's (`pg_table_size`, no index), 0 with none; the
-   *  one reading of it (`chunkCeiling`, `rowGroupOutOfLine`) */
+   *  one reading of it (`chunkCeiling`) */
   private async outOfLineBytes(pgFrom: string): Promise<number> {
     const r = await this.rebuilder.conn.runAndReadAll(`SELECT * FROM ${pq(`SELECT COALESCE((SELECT pg_table_size(reltoastrelid) FROM pg_class WHERE oid = ${pgLiteral(pgFrom)}::regclass AND reltoastrelid <> 0), 0)::bigint`)}`);
     return Number(r.getRowsJS()[0]![0]);

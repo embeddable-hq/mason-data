@@ -139,8 +139,8 @@ rows sent the bar back to 0 % past it. **Where.** `src/duck/sync.ts` (`takeChunk
 of memory (53200, `pgErrorOf`, a commit that cannot pin a block included; never 53400) rolls back, its range is given
 back (`giveBack`), and the copy reads on with one reader, each chunk at most half the one that ran out; a one-page
 chunk read alone that runs out fails the copy with the way out in the operator's words (`tooLargeText`), its chunks
-kept. A table whose out-of-line bytes in one row group times 0.75 are more than the limit is refused before a page is
-read (`rowGroupOutOfLine`, `COPY_CHECKPOINT_SHARE`).
+kept. No table is refused before it is read: whether the engine can write its values is the engine's to say, at the
+write.
 
 **Why.** A deployment's table of ~20,000 rows of ~68 KB of compressed `jsonb` (up to ~20 MB) had a heap of a few
 hundred pages, so its rows ceiling (131,072 pages at most) was the whole table: ONE chunk, which ran out of a 7.8 GiB
@@ -158,9 +158,11 @@ about 5.5 times while it read (an eighth of the limit leaves that room, and the 
 polls and the queries their share). The third row is a limit chunks cannot lift: a checkpoint merges a table's small
 row groups (one a chunk of a few rows) into one of up to 122,880 rows, holding their values at once, and when that does
 not fit DuckDB invalidates the database (issue 371; 400 MiB merged under 366 MiB of limit, failed under 244 and 122 MiB).
-The base never met it for such a table, whose one chunk failed first, loudly; so a table whose row group the merge
-could not hold is refused before it is read, at 0.75 of its bytes (between the 0.67 that failed and the 0.92 that
-passed). The source's bytes are stored ones, so a compressed value is under-counted there (issue 371 keeps that open).
+It stays open there: a first version of this change refused, before reading, a table whose out-of-line bytes in one
+row group times 0.75 passed the limit, and its review found that wrong (fix round 1 of PR 380): 140,000 rows of ~2.6 KB
+stored EXTERNAL (~1,030 heap pages, 365 MiB out of line) sync through a 128 MB limit, at the base in one chunk (4.9 s)
+and here in 37, and their checkpoint and reopen are fine. A formula over the source's catalog measured on one shape is
+no authority for what the engine can write; the engine's own failure at the write is.
 **Where.** `src/duck/sync.ts` (`chunkCeiling`, `readChunks`, `outOfLineBytes`), `src/duck/store.ts` (`pgErrorOf`:
 a commit out of memory is 53200); `tests/duck-copy-order.test.ts`, `tests/integration/duck-poll.itest.ts`.
 

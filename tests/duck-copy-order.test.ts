@@ -302,7 +302,6 @@ test("a copy in progress from the Mason of one reader becomes its committed chun
 const bySize = syncModule as unknown as {
   chunkCeiling?: (pages: number, rows: number | null, outOfLine: number | null, budget: number, target?: number) => number;
   chunkBudgetBytes?: (limit: number, readers: number) => number;
-  rowGroupOutOfLine?: (rows: number | null, outOfLine: number | null) => number | null;
   giveBack?: (gaps: Range[], r: Range) => void;
   tooLargeText?: (source: string, what: string, limit: number) => string;
   nextChunkPages: (ceiling: number, rate: { pagesPerSecond: number; rowsPerSecond: number; bytesPerSecond: number; chunks: number } | null, seconds: number) => number;
@@ -338,15 +337,6 @@ test("a chunk's out-of-line bytes are held to the memory's budget, at least a pa
   assert.equal(chunkBudgetBytes!(128 * MiB, 1), 128 * MiB * bySize.COPY_CHUNK_MEMORY_SHARE!);
   assert.equal(chunkCeiling!(10_000, 100_000, 10_000 * MiB, chunkBudgetBytes!(1024 * MiB, 1)) / 2,
     chunkCeiling!(10_000, 100_000, 10_000 * MiB, chunkBudgetBytes!(512 * MiB, 1)), "half the memory, half the pages");
-});
-
-test("a row group's out-of-line bytes are the table's for fewer rows than a row group, its share for more", () => {
-  const { rowGroupOutOfLine } = bySize;
-  assert.ok(rowGroupOutOfLine !== undefined);
-  assert.equal(rowGroupOutOfLine!(400, 400 * MiB), 400 * MiB);
-  assert.equal(rowGroupOutOfLine!(1_228_800, 1000 * MiB), 100 * MiB, "ten row groups: a tenth each");
-  assert.equal(rowGroupOutOfLine!(null, 400 * MiB), null);
-  assert.equal(rowGroupOutOfLine!(400, null), null);
 });
 
 test("ranges given back after a chunk ran out of memory still tile the heap: every page read exactly once, none skipped", () => {
