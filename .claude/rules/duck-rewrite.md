@@ -305,8 +305,9 @@ paths:
   PR 207's class round): a quotient or an avg the engine holds as a double equates values Postgres tells apart past 17
   digits, so DISTINCT, DISTINCT ON, GROUP BY (beside the value), PARTITION BY, count(DISTINCT), `=` and `<>` read the
   program's value without trailing zeros (`__mason_numeric_key`); a form where no key can be placed (a grouping set,
-  another aggregate's DISTINCT, a set operation without ALL) is refused, `numeric-quotient-equality`; IN, IS DISTINCT
-  FROM, NULLIF, CASE x WHEN, < and > are the listed difference `numeric-quotient-compare`. A new context that
+  another aggregate's DISTINCT, a set operation without ALL, a JOIN … USING or NATURAL JOIN on a subquery's quotient,
+  `refuseMergedExact`) is refused, `numeric-quotient-equality`; IN a list keys every item (issue 358); = ANY, IS
+  DISTINCT FROM, NULLIF, CASE x WHEN, < and > are the listed difference `numeric-quotient-compare`. A new context that
   equates values asks `exactKey` as it asks `equalKey` for a jsonb. `tests/duck-wire.test.ts` "class round".
   **Every other READER asks the same two (issue 252, `exact-numeric-leaves-exact-path`)**: an ORDER BY, a window's
   ORDER BY, FETCH … WITH TIES and min / max sort by `exactOrderKey` (`__mason_numeric_order`, numeric_cmp's order); a
@@ -314,7 +315,15 @@ paths:
   program's text (`typeCast`); a `*` beside a program is written out (`starsWrittenForExact`) so its cells ride. Each
   asks `duckExact` first, so a DECIMAL column, an integer or a sum of one keeps its native plan with no `__mason_*`
   call. The hidden cells are named by `cellPrefix`, which no name the statement writes begins with.
-  `tests/duck-wire.test.ts` "exact path: …".
+  `tests/duck-wire.test.ts` "exact path: …". Round 2 (issue 358) adds: a set operation's ORDER BY, LIMIT and WITH TIES
+  key each output by its record (`recordOrderKey`, `setOperationExactKeys`); a VALUES or nested arm is typed by
+  Postgres's analysis and wrapped to the one cell count (`exactArms`, `armWrapped`); a numeric column whose arms write
+  several scales is each arm's own (`armScales`, `scalesDiffer`, read outside the union through `carry`); a scalar
+  subquery is ONE text cell, its program's text built inside it (`subqueryText`); a window's min / max pick by
+  `arg_min` / `arg_max` over the window and first_value, last_value, nth_value, lag and lead pick each cell (lag /
+  lead's default by the row's existence); array_agg of a quotient is refused, `array-subquery-element`, never a
+  float8[]; a grouped query's ORDER BY of an output is keyed by its analysed expression (`sortBy`).
+  `tests/duck-wire.test.ts` "exact path round 2: …"; oracle shapes `numeric-set-ordered`, `numeric-scalar`.
   **"Decided exactly" is a property of the value's PROGRAM, never of its syntax or its type** (PR 207's third round):
   a column of a subquery or WITH query that holds one is that query's program over its cells, which ride as hidden
   columns of the FROM item (`carry`, decided once per item before the walk, `carryAll`), so it is printed and keyed
@@ -333,7 +342,11 @@ paths:
   max), a FROM item's column (`carry`), a key (`exactKey`), a union arm's value, a function's argument (`pgNumeric`) —
   asks it, never a property of its own (a declared scale, a column's kind). Unknown is not exact. A WITH query a FROM
   name reads is resolved by one resolver (`cteOf`), and a carry is decided from the cells its item EXPOSES, as written
-  (`exposedCells`). `tests/duck-wire.test.ts` "fourth round".
+  (`exposedCells`). `tests/duck-wire.test.ts` "fourth round". A FROM item's column is decided ONCE per (query body,
+  output index) — `outputExact`, `approximateAt`, `scalesDiffer`, one record (`decided`) copied by `clone` as `derived`
+  is — never recorded from inside an open recursive cycle (`over`'s provisional answer) or from `carry`'s walk-time
+  guard, and dropped when a `*` is written out in place; issue 244 (#483), detector tests/duck-plan-time.test.ts and
+  `tests/duck-wire.test.ts` "issue 244".
 
 ## What a column is
 
@@ -447,6 +460,16 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES`, also by `GROUP BY x / 1`, `GROUP BY q`, with HAVING, a rank()
   OVER beside it, two keys, an empty table): the key built without its query's groups, reading the ungrouped column
   (42803 where Postgres answers); `exact-key-built-outside-its-group` (PR 341).
+- A set operation whose one arm reads a numeric's text (`(c / 3)::text`, `avg(c)::text`, `c::text`) beside an arm of
+  arbitrary text (`SELECT b FROM t`, the char(4) `d`, a literal `'abc'`), over `t(id int primary key, a int, b text, c
+  numeric(10,2), d char(4))`: `SELECT (c / 3)::text FROM t UNION ALL SELECT b FROM t ORDER BY 1`, the arms swapped, no
+  ORDER BY, through a derived table: a cell of conv "text" (by contract a NUMERIC's text) given to an arm's plain text and
+  parsed as numeric, 22P02 where the base answered; `text-cell-parsed-as-numeric` (PR 415).
+- A VALUES arm beside a column recorded as a numeric's text (`SELECT (c / 3)::text FROM t UNION ALL VALUES
+  (NULL::text) ORDER BY 1`, `VALUES (NULL)`, `VALUES ((1.5 / 7)::text)`, either arm first, with a quotient column beside
+  it: `SELECT (c / 3)::text, c / 7 FROM t UNION ALL VALUES (NULL::text, 1.5) ORDER BY 2, 1`, through `SELECT * FROM (…)
+  s`): the wrapper's column count and the VALUES rows' appended items derived in two places that disagree, 42804 "has 1
+  columns available but 2 columns specified"; `texts-column-beside-values-arm-width` (PR 415).
 - A collation that is not the database's, in every reader: a column's own (`b text COLLATE "C"` on an ICU or en_US
   database) through `*`, by number and in a join's top N; a `COLLATE` on the RIGHT of `<`, BETWEEN's upper bound, one
   argument of GREATEST, inside min(); a derived table's or a view's `COLLATE` read through `s.n`, `1`, `n` and a

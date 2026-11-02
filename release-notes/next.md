@@ -233,6 +233,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (`3`, half away from zero). A `*` beside a division (`SELECT *, a / 7 AS q …`, `SELECT s.*, 1 …`) showed 15 digits; it
   shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
+- **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
+  `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with
+  "types cannot be matched", and an integer beside a `numeric(12,2)` showed `1.00` where Postgres shows `1`; each now
+  answers as Postgres does. `(SELECT a / 7 FROM …)`, `min` / `max` / `first_value` / `lag` / `lead` of a division
+  over a window, `x / y IN (…)` and a grouped query's `ORDER BY` of a division by its alias now show, compare and sort
+  Postgres's digits. A division or an average rounded to a fixed scale (`round(x / y, 2)`, `trunc(x / y, 2)`,
+  `(x / y)::numeric(10,2)`) is still answered where it is joined by `USING` or `NATURAL JOIN`, or collected by
+  `array_agg`, as before. `array_agg` of an unrounded division, and `JOIN … USING` or `NATURAL JOIN` on a
+  subquery's unrounded division or average, are now refused by name with the way out (`array_agg((x / y)::text)`;
+  `JOIN … ON`), where they answered rounded numbers; `array_length` and `cardinality` of such an `array_agg` still
+  answer. Nothing to do on upgrade.
 
 - **A session's TimeZone, search_path and DateStyle now apply to every statement**, not only one that reads a synced
   table. A statement of no table (`SELECT '2026-01-02 03:04:05+00'::timestamptz`, `SELECT current_schemas(false)`,
@@ -279,6 +290,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   beside one over large JSON documents a `SELECT` of a small table on another session waited 10 s and more. They are
   answered by the synced data's own SQL now; a template holding an array, a template known only from a parameter, and
   a `->` of an object, an array or a decimal number are answered as before. Nothing to do on upgrade.
+- **A statement that reads a numeric through many levels of subqueries or WITH queries plans in milliseconds.** Each
+  level that read the level below more than once (`a + a + a` over a derived table, a chain of WITH queries) multiplied
+  the work: eight levels took about a second to plan and twelve took over a minute, during which every other session's
+  statements waited. A numeric read through a UNION ALL at every level is not yet covered.
 
 ## Known
 
