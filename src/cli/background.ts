@@ -26,6 +26,7 @@ import { recordRefusal } from "./replication-mode.ts";
 import { shownPath } from "./sources.ts";
 import { endText, failed, jsonText, nextBlock, type NextStep } from "./command.ts";
 import { historyDaysSetting } from "../duck/history.ts";
+import { machineMemory, memoryProblems } from "../duck/store.ts";
 import { DEV } from "./registry.ts";
 import { UI } from "./ui.ts";
 import { out as styleOut, stepRenderer } from "./style.ts";
@@ -86,6 +87,10 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   // check (src/duck/history.ts), refused here as in the run
   const days = historyDaysSetting(process.env);
   if (typeof days !== "number") return failed("start", { code: "refused", ...days }, { json: o.json });
+  // the memory (src/duck/store.ts memoryProblems: MASON_DUCKDB_MEMORY not an amount, or under the floor while it is
+  // unset), by the run's own check, refused here as in the run, before anything is spawned or opened
+  const memory = memoryProblems(machineMemory(), process.env)[0];
+  if (memory !== undefined) return failed("start", { code: "refused", ...memory }, { json: o.json });
   // what the config records and the file does not say (src/cli/replication-mode.ts), in the run's order: settings first
   const unsaid = file === null ? null : recordRefusal(t.project.config, file, process.env, shown, "mason start");
   if (unsaid !== null) return failed("start", unsaid, { json: o.json });

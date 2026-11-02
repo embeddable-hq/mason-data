@@ -12,7 +12,7 @@ import { after, before, describe, test } from "node:test";
 import pg from "pg";
 import { SESSION_VARIABLE, TURN_FUNCTION } from "../src/duck/functions.ts";
 import {
-  Batches, CLEANUP_MS, Fold, iso, buildGenerated, containerArgs, foldByKey, openWorld, planPhases, renderReport, statementSet, targetBytes, verdictOf, volumeTooBig, withCleanup,
+  Batches, CLEANUP_MS, Fold, iso, buildGenerated, containerArgs, containerMemoryBytes, foldByKey, openWorld, planPhases, renderReport, statementSet, targetBytes, verdictOf, volumeTooBig, withCleanup,
   type Change, type ContainerSpec, type DockerResult, type EventRow, type FoldOptions, type Names, type Result, type World,
 } from "../scripts/bench-fold.ts";
 
@@ -217,6 +217,17 @@ test("docker: memory without swap, 4 CPUs, a named volume, the throttle, the scr
   assert.ok(after_(a, "-p").every((p) => p.startsWith("127.0.0.1::")) && after_(a, "-p").length === 2);
   assert.throws(() => containerArgs(spec({ volume: "/Users/someone/data" })), /named docker volume/);
   assert.equal(after_(containerArgs(spec({ device: null })), "--device-read-bps").length, 0);
+});
+
+test("docker: --memory <GiB> sizes the container, memory = memory-swap at that size; unset, 3 GiB for the smoke and 4 for the run (issue 301)", () => {
+  assert.equal(containerMemoryBytes(undefined, true), 3 * GIB);
+  assert.equal(containerMemoryBytes(undefined, false), 4 * GIB);
+  for (const [given, mib] of [["1.5", "1536m"], ["2", "2048m"], ["1", "1024m"], ["0.75", "768m"]] as const) {
+    const a = containerArgs(spec({ memoryBytes: containerMemoryBytes(given, true) }));
+    assert.deepEqual(after_(a, "--memory"), [mib], given);
+    assert.deepEqual(after_(a, "--memory-swap"), [mib], `${given}: no swap`);
+  }
+  for (const bad of ["lots", "0.25", "-1", "2GiB", ""]) assert.throws(() => containerMemoryBytes(bad, true), /--memory .*: the container's memory in GiB, 0\.5 or more/, bad);
 });
 
 test("deadline: a phase that cannot finish with 5 min kept for cleanup is dropped, said", () => {

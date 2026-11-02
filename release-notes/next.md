@@ -2,6 +2,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Before you upgrade
 
+- **A container under 3 GiB of memory no longer starts while `MASON_DUCKDB_MEMORY` is unset.** Mason refuses the start
+  and says the size it read, where it read it and the two ways out: give the container 3 GiB or more, or set
+  `MASON_DUCKDB_MEMORY` yourself (`mason doctor` then says what it leaves beside it). Measured, Mason uses up to 2.3 GiB
+  beside its queries' share, and under the old default the kernel killed the whole run at 1, 1.5, 2 and 3 GiB.
+
 - **A database under a glibc locale is read again on the first start, so its source must be reachable.** About 50-60 s
   on a laptop, read-only SELECTs over constants, once for a collation version. If the source cannot be reached then, the
   start exits and says so. Stored jsonb sort keys are dropped and refilled after it.
@@ -14,6 +19,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   them.
 
 ## What changes
+
+- **On a container under 5 GiB the queries' default share of memory is smaller**: half the container's limit, as
+  before, or what leaves 2.5 GiB beside it when that is less: 512 MiB of a 3 GiB container (was 1.5 GiB), 1.5 GiB of
+  4 GiB (was 2 GiB). From 5 GiB up it is half, unchanged. A query that needs more than its share spills to disk or fails
+  on its own (53200) where it used to take the whole run down with it; `MASON_DUCKDB_MEMORY` still sets the share.
+  `mason doctor` says the share and what it leaves, and warns when a share you set leaves under 2.5 GiB.
 
 - **`mason status`, `--json` and the web page now say when a synced table is behind what its `sync:` promises**,
   measured from when it was last synced, with why. A table set to `sync: poll 15m` whose pass of polls takes 13 min is

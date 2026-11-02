@@ -76,12 +76,78 @@ const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compre
 /**
  * DUCKDB'S MEMORY, BOUNDED FOR THIS PROCESS: DuckDB's default is 80% of the machine's RAM, in a process
  * that also holds V8's heap and two PGlites, which ends with the system killing every session and the sync together.
- * Half the RAM unless `MASON_DUCKDB_MEMORY` says (`8GB`, `512MiB`); past it a sort, a join or an aggregate spills to
- * `<file>.tmp` (DuckDB's own default, named here so it is the copy's folder), and what cannot spill fails ITS statement
- * with 53200 and the way out (pgErrorOf), the run going on.
+ * Unless `MASON_DUCKDB_MEMORY` says (`8GB`, `512MiB`), half the memory, or what leaves `OUTSIDE_RESERVE_BYTES` beside
+ * it when that is less (`defaultMemoryLimit`); past it a sort, a join or an aggregate spills to `<file>.tmp` (DuckDB's
+ * own default, named here so it is the copy's folder), and what cannot spill fails ITS statement with 53200 and the way
+ * out (pgErrorOf), the run going on.
+ *
+ * THE ROOM OUTSIDE THE LIMIT (issue 301, docs/DESIGN.md "Memory: the room outside the engine's limit"): the limit counts
+ * DuckDB's buffers, never Node's heap, the catalog's PGlite, the pg-eval PGlite nor what DuckDB allocates outside its
+ * buffer manager, and with half of a 1, 1.5, 2 or 3 GiB container that room was too small: the kernel killed the run in
+ * each. Measured with the limit at 256MiB, the process reached 2.3 GiB beside it (the pg-eval PGlite alone ~0.5 GiB of
+ * WebAssembly memory once a statement handed it 1.5 M values, the catalog's ~0.26 GiB). `OUTSIDE_RESERVE_BYTES` is that
+ * peak with a margin; `MEMORY_FLOOR_BYTES` the smallest container the whole path (a first sync, a generated table's
+ * build, writes on the stream, statements through the listener) ran in under this default. Under the floor, with
+ * `MASON_DUCKDB_MEMORY` unset, a start is refused (`memoryProblems`); set, it is the operator's word at any size.
  */
-/** The default memory limit for a machine with `totalBytes` of RAM: half of it, in MiB (mason doctor says it for any machine). */
-export function defaultMemoryLimit(totalBytes: number): string { return `${Math.floor(totalBytes / 2 / 2 ** 20)}MiB`; }
+export const OUTSIDE_RESERVE_BYTES = 2560 * 2 ** 20;
+export const MEMORY_FLOOR_BYTES = 3072 * 2 ** 20;
+/**
+ * The default memory limit for `totalBytes` of memory, in whole MiB (mason doctor says it for any machine): half of it,
+ * the page cache keeping the other half, or what leaves OUTSIDE_RESERVE_BYTES beside it when that is less (from 5 GiB
+ * up it is half). Under the floor, where a start is refused but a store may be opened all the same (a test, a script),
+ * a quarter.
+ */
+export function defaultMemoryLimit(totalBytes: number): string {
+  const mib = 2 ** 20;
+  if (totalBytes < MEMORY_FLOOR_BYTES) return `${Math.floor(totalBytes / 4 / mib)}MiB`;
+  return `${Math.min(Math.floor(totalBytes / 2 / mib), Math.floor((totalBytes - OUTSIDE_RESERVE_BYTES) / mib))}MiB`;
+}
+
+/** A size as a reader recognises it: GiB to one decimal from 1 GiB up, else MiB. */
+export function memorySize(bytes: number): string {
+  return bytes >= 2 ** 30 ? `${(bytes / 2 ** 30).toFixed(1)} GiB` : `${Math.round(bytes / 2 ** 20)} MiB`;
+}
+
+/** what is wrong with the memory a start would run in, in the failure shape (src/cli/command.ts `Failure`'s words) */
+export interface MemoryProblem { message: string; why: string; fix: string }
+
+/** `MASON_DUCKDB_MEMORY` as it is set: null unset (or set empty, as the run reads it) */
+function memorySet(env: Readonly<Record<string, string | undefined>>): string | null {
+  const v = env.MASON_DUCKDB_MEMORY;
+  return v === undefined || v === "" ? null : v;
+}
+
+/** `MASON_DUCKDB_MEMORY` that is not an amount: the one text, for the store's open, mason serve, mason start and doctor */
+export function memorySettingWrong(text: string): MemoryProblem {
+  return { message: `MASON_DUCKDB_MEMORY=${JSON.stringify(text)} is not an amount of memory`,
+    why: "it is the memory the synced data's statements may use before they spill to disk",
+    fix: `write it as 8GB or 512MiB, or unset it for the default (${DEFAULT_MEMORY_LIMIT} here: ${DEFAULT_RULE})` };
+}
+const DEFAULT_RULE = `half the memory, or what leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} beside it when that is less`;
+
+/**
+ * WHAT A START REFUSES OF THE MEMORY, every problem at once (mason serve's one report; mason start, mason doctor take the
+ * first): `MASON_DUCKDB_MEMORY` that is not an amount, and, while it is unset (or not an amount), `memory` under
+ * MEMORY_FLOOR_BYTES. `memory` is `machineMemory()`, the container's limit where one is set.
+ */
+export function memoryProblems(memory: MachineMemory, env: Readonly<Record<string, string | undefined>>): MemoryProblem[] {
+  const totalBytes = memory.bytes;
+  const out: MemoryProblem[] = [];
+  const set = memorySet(env);
+  if (set !== null && !MEMORY_LIMIT_RE.test(set)) out.push(memorySettingWrong(set));
+  if ((set === null || !MEMORY_LIMIT_RE.test(set)) && totalBytes < MEMORY_FLOOR_BYTES) {
+    out.push({ message: `${memorySize(totalBytes)} of memory is under the ${memorySize(MEMORY_FLOOR_BYTES)} Mason needs`,
+      why: `${memorySize(totalBytes)} is ${memory.from === "container" ? "the container's memory limit" : "the machine's RAM"}; ` +
+        `beside what the synced data's statements may use, Mason itself needs up to ${memorySize(OUTSIDE_RESERVE_BYTES)} (measured, with a margin), ` +
+        "and with less the system stops the whole run, every session with it, when a first sync, a burst of writes or a statement needs the memory",
+      fix: `give it ${memorySize(MEMORY_FLOOR_BYTES)} or more (the container's memory limit), or set MASON_DUCKDB_MEMORY=<n> ` +
+        "to choose the statements' share yourself, the rest left to Mason (mason doctor says what it leaves)" });
+  }
+  return out;
+}
+/** a problem as one line of mason serve's settings report, and mason doctor's detail */
+export function memoryProblemText(p: MemoryProblem): string { return `${p.message}: ${p.why} — ${p.fix}`; }
 
 /**
  * THE MEMORY THIS PROCESS MAY USE: the machine's RAM, or the container's limit where one is set — a cgroup v2
@@ -89,17 +155,21 @@ export function defaultMemoryLimit(totalBytes: number): string { return `${Math.
  * so half of it was more than a limited container had, and the kernel killed the run instead of DuckDB spilling
  * (the review of the cut). `read` is the test's.
  */
-export function machineMemoryBytes(read: (file: string) => string = (f) => fs.readFileSync(f, "utf8"), total: number = os.totalmem()): number {
-  let limit = total;
+export function machineMemory(read: (file: string) => string = (f) => fs.readFileSync(f, "utf8"), total: number = os.totalmem()): MachineMemory {
+  let limit: MachineMemory = { bytes: total, from: "machine" };
   for (const file of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
     let text: string;
     try { text = read(file).trim(); } catch { continue; }   // not a cgroup of that version, or not a container: the machine's RAM
     // v2 says `max` for no limit; v1 says a number near 2^63; either way a number below the RAM is the limit
     const n = Number(text);
-    if (text !== "max" && Number.isFinite(n) && n > 0 && n < limit) limit = n;
+    if (text !== "max" && Number.isFinite(n) && n > 0 && n < limit.bytes) limit = { bytes: n, from: "container" };
   }
   return limit;
 }
+/** the memory this process may use, and where it was read: the container's limit, or the machine's RAM */
+export interface MachineMemory { bytes: number; from: "container" | "machine" }
+/** `machineMemory`'s bytes: the one size the default limit and the floor are read against */
+export function machineMemoryBytes(read?: (file: string) => string, total?: number): number { return machineMemory(read, total).bytes; }
 export const DEFAULT_MEMORY_LIMIT = defaultMemoryLimit(machineMemoryBytes());
 
 /**
@@ -196,7 +266,7 @@ export class DuckStore {
   static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; spillLimit?: string; diskFree?: (dir: string) => number; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions } = {}): Promise<DuckStore> {
     const extensions = options.extensions ?? findExtensions();
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
-    if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(`MASON_DUCKDB_MEMORY=${JSON.stringify(memoryLimit)} is not an amount of memory: write it as 8GB or 512MiB (unset, half the machine's RAM: ${DEFAULT_MEMORY_LIMIT})`);
+    if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(memoryProblemText(memorySettingWrong(memoryLimit)));
     if (options.spillLimit !== undefined && !MEMORY_LIMIT_RE.test(options.spillLimit)) throw new Error(`MASON_SPILL_LIMIT=${JSON.stringify(options.spillLimit)} is not an amount of disk: write it as 40GB or 512MiB (unset, half of what is free on the disk)`);
     const spillSet = options.spillLimit === undefined ? null : memoryLimitBytes(options.spillLimit);
     const diskFree = options.diskFree ?? freeBytesAt;

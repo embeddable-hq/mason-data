@@ -51,7 +51,7 @@ import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
 import { withPlaceholders } from "./pg-url.ts";
 import { UI } from "./ui.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
-import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION } from "../duck/store.ts";
+import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION, machineMemory, memoryProblems } from "../duck/store.ts";
 import { copyChunkSecondsOf, copyParallelOf, humanBytes, Sync, syncModeOf, type CopyState } from "../duck/sync.ts";
 import { storeJsonPathsOf } from "../duck/kept.ts";
 import { libcOrderNote, readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
@@ -226,6 +226,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // before anything opens (src/duck/history.ts); every history below keeps them
   const keptDays = historyDaysSetting(process.env);
   if (typeof keptDays !== "number") return failed("start", { code: "refused", ...keptDays }, { json: false });
+  // the memory (src/duck/store.ts memoryProblems): MASON_DUCKDB_MEMORY not an amount, or under the floor while it is
+  // unset, refused before anything opens (mason serve has said it already, with its other settings)
+  const memory = memoryProblems(machineMemory(), process.env)[0];
+  if (memory !== undefined) return failed("start", { code: "refused", ...memory }, { json: false });
   // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
   // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
   // always was (after the listener's checks): a demo project's port is needed first

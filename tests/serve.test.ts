@@ -18,7 +18,7 @@ import { newConfig, readProject, writeConfig } from "../src/cli/project.ts";
 import { imagePinProblem } from "../src/lib/project-version.ts";
 import type { CopyState } from "../src/duck/sync.ts";
 import { unassignedPort } from "./test-ports.ts";
-import { matrixEnv, runMason } from "./cli-matrix.ts";
+import { containerMemoryEnv, matrixEnv, runMason } from "./cli-matrix.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
 const { serveSettings, serveConfig, serveSource, healthBody } = serveModule as unknown as typeof import("../src/cli/serve.ts");
@@ -447,6 +447,50 @@ test("a MASON_HISTORY_DAYS that is not a number of days refuses mason serve (on 
     assert.deepEqual((JSON.parse(j.stdout) as { error: unknown }).error, { code: "refused", message, why, fix });
     assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("memory under the floor with MASON_DUCKDB_MEMORY unset refuses mason serve on its one report (text and --json), nothing written; set, it starts; not an amount, beside it", async () => {
+  const GIB = 1024 ** 3;
+  const small = { bytes: GIB, from: "container" as const };
+  const floor = "1.0 GiB of memory is under the 3.0 GiB Mason needs: 1.0 GiB is the container's memory limit; beside what the synced data's statements may use, " +
+    "Mason itself needs up to 2.5 GiB (measured, with a margin), and with less the system stops the whole run, every session with it, when a first sync, a burst of writes or a statement needs the memory — " +
+    "give it 3.0 GiB or more (the container's memory limit), or set MASON_DUCKDB_MEMORY=<n> to choose the statements' share yourself, the rest left to Mason (mason doctor says what it leaves)";
+  const alone = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv", small);
+  assert.ok("message" in alone);
+  assert.deepEqual([alone.code, alone.message], ["bad_config", `a setting is missing or wrong: ${floor}`]);
+  // joined with any other wrong setting, on the one report
+  const two = serveSettings({ DATABASE_URL: URL_ }, "/srv", small);
+  assert.ok("message" in two);
+  assert.ok(two.message.startsWith("2 settings are missing or wrong: MASON_API_KEY is not set: "), two.message);
+  assert.ok(two.message.endsWith(`; ${floor}`), two.message);
+  // MASON_DUCKDB_MEMORY set is the operator's word at any size
+  for (const set of ["256MiB", "1900MiB"]) assert.ok(!("message" in serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_DUCKDB_MEMORY: set }, "/srv", small)), set);
+  assert.ok(!("message" in serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv", { bytes: 3 * GIB, from: "container" })), "the floor itself starts");
+  // not an amount: refused as before, and beside the floor where both apply
+  const lots = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_DUCKDB_MEMORY: "lots" }, "/srv", small);
+  assert.ok("message" in lots);
+  assert.ok(lots.message.startsWith('2 settings are missing or wrong: MASON_DUCKDB_MEMORY="lots" is not an amount of memory: '), lots.message);
+  assert.ok(lots.message.endsWith(`; ${floor}`), lots.message);
+  const bigLots = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_DUCKDB_MEMORY: "lots" }, "/srv", { bytes: 32 * GIB, from: "machine" });
+  assert.ok("message" in bigLots && bigLots.message.startsWith('a setting is missing or wrong: MASON_DUCKDB_MEMORY="lots" is not an amount of memory: '));
+  // the process, its memory limit read from its cgroup as in a container: exit 1 in the failure shape, nothing written
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-memory-"));
+  const hooks = fs.mkdtempSync(path.join(os.tmpdir(), "mason-serve-memory-hook-"));
+  try {
+    const data = path.join(dir, "data");
+    fs.mkdirSync(data);
+    const env = { PATH: process.env.PATH ?? "", HOME: dir, DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_DATA: data, ...containerMemoryEnv(hooks, GIB) };
+    const j = await runMason(dir, ["serve", "--json"], env);
+    assert.equal(j.code, 1, j.stdout + j.stderr);
+    const v = JSON.parse(j.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> };
+    assert.deepEqual([v.error.code, v.error.message], ["bad_config", `a setting is missing or wrong: ${floor}`]);
+    assert.deepEqual(v.next.map((n) => n.command), ["mason serve --help"]);
+    const t = await runMason(dir, ["serve"], env);
+    assert.equal(t.code, 1, t.stdout + t.stderr);
+    assert.ok(t.stderr.includes(`✗ mason serve: a setting is missing or wrong: ${floor}\n`), t.stdout + t.stderr);
+    assert.deepEqual(fs.readdirSync(data), [], "nothing written to MASON_DATA");
+    assert.ok(!fs.existsSync(path.join(dir, "mason")), "no project written");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(hooks, { recursive: true, force: true }); }
 });
 
 test("MASON_REQUEST_LOG_DAYS is MASON_HISTORY_DAYS now: set, it refuses mason serve (on its one report) and mason start (before it spawns and in the run), naming the line to write — never runs the default", async () => {

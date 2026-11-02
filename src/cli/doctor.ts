@@ -13,7 +13,7 @@ import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem,
 import { theRun, type DevRun } from "./runs.ts";
 import { projectSource, type Project } from "./project.ts";
 import { DEFAULT_PG_PORT } from "../api/postgres/listener.ts";
-import { defaultMemoryLimit, machineMemoryBytes, MEMORY_LIMIT_RE } from "../duck/store.ts";
+import { defaultMemoryLimit, machineMemory, memoryLimitBytes, memoryProblems, memoryProblemText, memorySize, OUTSIDE_RESERVE_BYTES, type MachineMemory } from "../duck/store.ts";
 import { probeExtensions, type ExtensionProbe } from "../duck/extensions.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -67,19 +67,24 @@ export function nodeCheck(version: string = process.versions.node): Check {
     : { name: "node", ok: false, detail: `Node ${version} is too old: mason needs ${NODE_MIN} or later (nodejs.org, or nvm install ${minMajor})` };
 }
 
-/** The machine's memory and what the copy's engine may use of it (src/duck/store.ts DEFAULT_MEMORY_LIMIT, MASON_DUCKDB_MEMORY). */
-export function memoryCheck(totalBytes: number = machineMemoryBytes(), env: NodeJS.ProcessEnv = process.env): Check {
-  const gib = (totalBytes / 1024 ** 3).toFixed(1);
-  const set = env.MASON_DUCKDB_MEMORY;
-  if (set !== undefined && !MEMORY_LIMIT_RE.test(set)) {
-    return { name: "memory", ok: false, detail: `MASON_DUCKDB_MEMORY=${JSON.stringify(set)} is not a size: write it as 4GiB, 512MiB or 2GB (mason start refuses it too)` };
-  }
-  const share = set ?? defaultMemoryLimit(totalBytes);
-  const low = totalBytes < 2 * 1024 ** 3;
+/**
+ * The machine's memory and what the copy's engine may use of it (src/duck/store.ts DEFAULT_MEMORY_LIMIT,
+ * MASON_DUCKDB_MEMORY): what a start refuses is said in the start's own words (`memoryProblems`, the one function), and
+ * a share the operator set that leaves less than OUTSIDE_RESERVE_BYTES beside it is a warning in the line, never a
+ * failure, since the start honours it.
+ */
+export function memoryCheck(memory: MachineMemory = machineMemory(), env: NodeJS.ProcessEnv = process.env): Check {
+  const problems = memoryProblems(memory, env);
+  if (problems.length) return { name: "memory", ok: false, detail: problems.map(memoryProblemText).join("; ") };
+  const set = env.MASON_DUCKDB_MEMORY || undefined;
+  const share = set ?? defaultMemoryLimit(memory.bytes);
+  const outside = memory.bytes - memoryLimitBytes(share);
   return {
-    name: "memory", ok: !low,
-    detail: `${gib} GiB; the engine uses up to ${share.trim()}${set !== undefined ? " (MASON_DUCKDB_MEMORY)" : " (half, the default; MASON_DUCKDB_MEMORY sets it)"}` +
-      (low ? ". Under 2 GiB, a large table's first sync and a query starve each other: expect statements refused for memory" : ""),
+    name: "memory", ok: true,
+    detail: `${memorySize(memory.bytes)}; the engine uses up to ${share.trim()}${set !== undefined ? " (MASON_DUCKDB_MEMORY)" : " (the default; MASON_DUCKDB_MEMORY sets it)"}, ` +
+      `leaving ${memorySize(Math.max(0, outside))} for Mason beside it` +
+      (outside < OUTSIDE_RESERVE_BYTES ? `, under the ${memorySize(OUTSIDE_RESERVE_BYTES)} it needs (measured, with a margin): the system may stop it in a first sync, ` +
+        "a generated table's build or a burst of writes (a smaller MASON_DUCKDB_MEMORY, or more memory)" : ""),
   };
 }
 

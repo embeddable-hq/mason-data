@@ -94,16 +94,21 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 
 ## Memory
 
+- **The smallest container is 3 GiB.** Beside what the copy may use, Mason itself was measured using up to 2.3 GiB
+  (Node, the catalog, the Postgres that evaluates Postgres's own functions, and the engine's memory its limit does not
+  count), and under less the kernel killed the whole run. With `MASON_DUCKDB_MEMORY` unset, a start under 3 GiB is
+  refused, saying so; set, it is your word at any size, and `mason doctor` says what it leaves beside it.
 - **The default**: the copy may use half the container's memory limit (cgroup v2 `memory.max`, or v1's), else half
-  the machine's RAM. The other half is the page cache, Node and the catalog (about 820 MB while it runs: it starts at
-  a tool's first statement and stops when idle). `docker compose exec mason mason doctor` says what the copy may use.
+  the machine's RAM, or what leaves 2.5 GiB beside it when that is less: 512 MiB of a 3 GiB container, 1.5 GiB of
+  4 GiB, half from 5 GiB up. The rest is the page cache, Node and the catalog (about 820 MB while it runs).
+  `docker compose exec mason mason doctor` says what the copy may use.
 - **How much to give**: enough that the page cache holds the columns your dashboards read. A query over a column it
   does not hold runs at the disk's speed (on an EBS volume at ~125 MB/s, a JSON column of a 28 GB table: 93.5 s for
   22 M rows). The copy is smaller than the tables: the benchmark's was about a fifth of them in Postgres (10.1 GiB →
   1.8 GiB, 3.4 GiB → 0.61 GiB, with a jsonb column), measured on a 15 GiB machine with the copy's limit at 7832 MiB.
   Yours depends on its columns: `mason status` says the copy's size, and each table's.
-- **How to set it**: the container's limit, and `MASON_DUCKDB_MEMORY` at about half of it (or leave it unset: the
-  default is that half). Compose's key is `deploy.resources.limits.memory` (`compose.yml` sets none):
+- **How to set it**: the container's limit, and `MASON_DUCKDB_MEMORY` at about half of it, leaving at least 2.5 GiB
+  beside it (or leave it unset: the default is that). Compose's key is `deploy.resources.limits.memory` (`compose.yml` sets none):
 
   ```yaml
   services:
@@ -160,7 +165,7 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 |---|---|---|
 | `MASON_UI_PORT` | 4039 | another service in the container wants it; the page stays on loopback whatever this says ("The web page") |
 | `MASON_PG_DATABASE` | `mason` | the sources file has no `database:` and a tool must keep the database name it has (a different `database:` in the file is refused) |
-| `MASON_DUCKDB_MEMORY` | half the container's memory limit | the container's limit is not what the copy should have half of ("Memory") |
+| `MASON_DUCKDB_MEMORY` | half the container's memory limit, or what leaves 2.5 GiB beside it when that is less; a start under 3 GiB is refused while it is unset | the container's limit is not what the copy should have half of, or you choose its share under 3 GiB yourself ("Memory") |
 | `MASON_SPILL_LIMIT` | half of what is free on the disk, followed as it fills | statements fail with 53400 on a disk with room to give them (never past 90% of what is free) |
 | `MASON_COPY_PARALLEL` | 3 (1 to 8) | each reader is a backend on your database: fewer when the database has little headroom, more when it has plenty and a copy is slow |
 | `UV_THREADPOOL_SIZE` | 32 (1 to 1024) | each running statement holds one. A run has about 40 threads plus five a CPU (49 at 2, 89 at 10). Under a thread limit (`pids.max`, `Max processes`) Mason lowers the default to fit and says so; a size of your own that does not fit refuses the start, since Node would exit with no message. On Windows it must be set in the shell before `mason` |
