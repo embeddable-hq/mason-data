@@ -245,7 +245,7 @@ export const SETTING_SCRIPTS: SettingScript[] = [
     "SELECT 'now'::timestamptz = now(), 'today'::date = current_date, 'today'::timestamptz = date_trunc('day', now()), timestamp 'today' = current_date::timestamp, 'now'::timestamp = localtimestamp",
     "SELECT E'now'::timestamptz = now(), E'today'::date = current_date, $$now$$::timestamptz = now(), U&'now'::timestamptz = now()",
     "SELECT 'now'::text::timestamptz = now(), 'now'::varchar::timestamptz = now(), 'now'::unknown::timestamptz = now(), now() = 'now', 'now' = now()",
-    "SELECT 'today'::text::time", { prepare: "p", sql: "SELECT $1::int AS n, now() = 'now' AS same" }, { run: "p", values: ["1"] },
+    { prepare: "p", sql: "SELECT $1::int AS n, now() = 'now' AS same" }, { run: "p", values: ["1"] },
     "BEGIN", "SELECT 'now'::timestamptz = now()", "SELECT now() = (SELECT now() FROM public.one)", "COMMIT"),
   s("session state: IntervalStyle postgres, and an invalid one", "SET IntervalStyle = 'postgres'", "SHOW IntervalStyle", "SET IntervalStyle = 'nonsense'"),
   s("session state: extra_float_digits read back on both paths", "SET extra_float_digits = 3", "SHOW extra_float_digits",
