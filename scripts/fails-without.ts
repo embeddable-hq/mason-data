@@ -36,6 +36,7 @@ import * as path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setImmediate as yieldToSignals } from "node:timers/promises";
+import { TEST_BOUND_ARGS } from "./gate.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -138,7 +139,8 @@ function takeCopy(holder: string): void {
 /** the test runner over the copy as it is now: what passed and failed, by name */
 async function run(label: string): Promise<Run> {
   const names = namePatterns.map((p) => `--test-name-pattern=${p}`);
-  const r = spawnSync(process.execPath, ["--test", "--test-reporter=spec", ...names, ...tests], { cwd: COPY, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 28 });
+  // the per-test bound before the files: a test that hangs at the commit, holding a handle, fails by name and the run ends
+  const r = spawnSync(process.execPath, ["--test", ...TEST_BOUND_ARGS, "--test-reporter=spec", ...names, ...tests], { cwd: COPY, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 28 });
   // spawnSync held the event loop, so a signal that came meanwhile is still waiting for its handler: let it run now,
   // before these results are read as a verdict
   await yieldToSignals();

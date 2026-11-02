@@ -12,6 +12,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
+// a namespace, not a named import: a tree whose gate.ts lacks the constant still loads, and the test fails by name
+import * as gatePlan from "../scripts/gate.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "scripts", "gate-slot.ts");
@@ -301,10 +303,64 @@ test("no command is a usage error, not a run", () => {
   assert.match(r.stderr, /usage: scripts\/gate-slot\.ts <command>/);
 });
 
+const packageScripts = (): Record<string, string> =>
+  (JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts;
+
 test("the heavy gates queue, and CI's steps do not need to", () => {
-  const { scripts } = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  const scripts = packageScripts();
   for (const name of ["check", "gate", "test:integration"]) assert.match(scripts[name]!, /^node scripts\/gate-slot\.ts /, `${name} takes a slot`);
   for (const name of ["typecheck", "test"]) assert.doesNotMatch(scripts[name]!, /gate-slot/, `${name} is what CI and a targeted run call: no slot`);
   assert.match(scripts["check"]!, /npm run typecheck && npm test/);
   assert.match(scripts["test:integration"]!, /--test-concurrency=1/);
+  // npm test carries the per-test bound (scripts/gate.ts, which a package.json cannot import) BEFORE its glob, where Node
+  // reads it, and so does npm run check, which runs it (issue 139)
+  assert.equal(scripts["test"], `node --test ${gatePlan.TEST_BOUND_ARGS.join(" ")} 'tests/**/*.test.ts'`);
+  assert.equal(scripts["test"], "node --test --test-timeout=300000 --test-force-exit 'tests/**/*.test.ts'");
+});
+
+/**
+ * A test that never settles and holds an interval, as issue 139's hang did (0.43 s of CPU in 2h07, never exiting). The
+ * interval ends its own process once its runner is gone (its parent is then init) or after 90 s, far past every bound
+ * here, so a run of this file that is itself killed (a gate cut short) leaves no process behind.
+ */
+const HANG = `import { test } from "node:test";
+const born = Date.now(), runner = process.ppid;
+test("hangs", () => new Promise(() => { setInterval(() => { if (process.ppid !== runner || Date.now() - born > 90_000) process.exit(3); }, 500); }));
+test("after", () => {});
+`;
+
+/** Runs npm test's own options (the limit swapped to 1 s) over the hung fixture; its process group, killed if left. */
+function runHung(t: { after: (fn: () => void) => void }, options: (scriptOptions: string[]) => string[]): { child: ChildProcess; out: () => string; exit: Promise<number | null> } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-slot-hang-"));
+  fs.writeFileSync(path.join(dir, "hang.test.mjs"), HANG);
+  const words = packageScripts()["test"]!.split(" ");
+  assert.equal(words[0], "node");
+  const scriptOptions = words.slice(1).filter((w) => w.startsWith("--")).map((w) => w.replace(/^--test-timeout=\d+$/, "--test-timeout=1000"));
+  // NODE_TEST_CONTEXT: this file runs under the test runner, and a runner that inherits it reports to a parent
+  const { NODE_TEST_CONTEXT: _, ...env } = process.env;
+  const child = spawn(process.execPath, [...options(scriptOptions), "hang.test.mjs"], { cwd: dir, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout!.on("data", (b: Buffer) => { out += b.toString(); });
+  child.stderr!.on("data", (b: Buffer) => { out += b.toString(); });
+  const exit = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) process.kill(-child.pid!, "SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return { child, out: () => out, exit };
+}
+
+test("a hung test that holds a handle ends npm test's run, named, and without --test-force-exit it would not", async (t) => {
+  const bounded = runHung(t, (o) => o);
+  const ended = await Promise.race([bounded.exit, new Promise<"bound">((resolve) => setTimeout(resolve, 30_000, "bound").unref())]);
+  assert.equal(ended, 1, `the run ends, failed, within 30 s:\n${bounded.out()}`);
+  assert.match(bounded.out(), /✖ hangs/);
+  assert.match(bounded.out(), /test timed out after 1000ms/);
+
+  // the control: the same options less --test-force-exit name nothing that ends the process, so the run is still there
+  const unbounded = runHung(t, (o) => o.filter((w) => w !== "--test-force-exit"));
+  const still = await Promise.race([unbounded.exit, new Promise<"running">((resolve) => setTimeout(resolve, 5_000, "running").unref())]);
+  assert.equal(still, "running", `without --test-force-exit the run should still be alive after 5 s:\n${unbounded.out()}`);
+  process.kill(-unbounded.child.pid!, "SIGKILL");
+  await unbounded.exit;
 });

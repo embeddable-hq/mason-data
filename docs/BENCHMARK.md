@@ -108,7 +108,7 @@ statements and the same machine, one thing changed per run:
 
 ```bash
 node scripts/bench-replica.ts --label "<the machine>" --target-postgres-seconds 60 … --out tests/fixtures/bench-replica.json
-UPDATE_FIXTURE=1 node --test tests/bench-replica.test.ts    # renders docs/MEASUREMENTS.md and the README's headline from it
+UPDATE_FIXTURE=1 node --test --test-timeout=300000 --test-force-exit tests/bench-replica.test.ts   # renders docs/MEASUREMENTS.md and the README's headline from it
 git diff docs/MEASUREMENTS.md README.md                     # read it
 ```
 

@@ -2215,6 +2215,19 @@ notification; one test had deadlocked, so the job never exited and nothing came.
 shown as completed. Across that day's agents, about 31 of 115 agent-hours were idle until a notification or message
 arrived and about 11 went on sleep loops, against about 4 running the oracle.
 
+**The bound on a test (2026-11-02).** Measured on Node 26.13.0 over a test that never settles and holds an interval:
+`--test-timeout` alone names it (`test timed out after 2000ms`) but its file's process never exits, so the run does
+not end (alarm-killed at 20 s; on Node 24 still alive at 73 s); with `--test-force-exit` beside it the run exits 1 in
+about 3 s, the test listed under `✖ failing tests:`. The 2h07 hang above held a handle (0.43 s of CPU, never exiting,
+where a deadlock with no handle ends by itself with `Promise resolution is still pending`), so the timeout alone would
+not have ended it: the bound is the pair, before the files (after them both are dropped silently, as is a
+`--test-name-pattern`; `--test-timeout=0` is no bound; a test's own `{ timeout }` overrides the default; the bound is
+per test, hook and suite, never per file). The value is read from CI, not guessed: across the 15 unit-shard logs of
+main's five latest green runs the slowest test took 150.0 s (the state matrix), then 143.3 s and 128.0 s, and one test
+varied 1.9x between runs (58.8 to 111.5 s), so the default is twice the slowest, 300 s (`TEST_TIMEOUT_MS`,
+`scripts/gate.ts`), and CI's unit shards carry it. The trade: `--test-force-exit` turns a handle leaked after a file's
+last test from a hang into a pass, and that hang never named anything (only CI's 30-minute job timeout ended it).
+
 **A turn ended with nothing to wake it (2026-11-01).** Two issue leads, each running one Opus agent at a time, were
 read from their transcripts over seven hours: an agent worked 34% and 21% of the wall clock. Of the rest, about 3.5 h
 per lead was two gaps in which nothing woke the coordinator. At 02:07 it queued a PR to auto-merge and ended its turn;
