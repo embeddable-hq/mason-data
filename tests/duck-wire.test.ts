@@ -159,6 +159,11 @@ const DDL = [
   CLOCK_TIMES,
   "CREATE TABLE public.nullish (id INTEGER PRIMARY KEY, ts TIMESTAMP, t VARCHAR, n INTEGER)",
   NULLISH,
+  // session state (GitHub issue 63), last: no OID of the others moves
+  "CREATE TABLE public.invoices (id INTEGER PRIMARY KEY, total DECIMAL(10,3))",
+  "INSERT INTO public.invoices VALUES (7, 70.5)",
+  "CREATE TABLE sales.accounts (id INTEGER PRIMARY KEY, owner VARCHAR)",
+  "INSERT INTO sales.accounts VALUES (1, 'x')",
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -230,6 +235,11 @@ const PG_DDL = [
   "CREATE VIEW public.late_read AS SELECT id, name, 1 AS one, id * 2 AS twice FROM public.late_c WHERE id < 30",
   "CREATE VIEW public.late_read_again AS SELECT one, twice, id, name FROM public.late_read WHERE id > 2",
   "CREATE VIEW public.late_counts AS SELECT c, count(*) AS n FROM public.late GROUP BY c",
+  // session state (GitHub issue 63), last: no OID of the others moves
+  "CREATE TABLE public.invoices (id INTEGER PRIMARY KEY, total DECIMAL(10,3))",
+  "INSERT INTO public.invoices VALUES (7, 70.5)",
+  "CREATE TABLE sales.accounts (id INTEGER PRIMARY KEY, owner VARCHAR)",
+  "INSERT INTO sales.accounts VALUES (1, 'x')",
 ];
 const schema: PgSchema = {
   database: "app",
@@ -280,6 +290,9 @@ const schema: PgSchema = {
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
     { name: "clock_times", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "tm", type: "timestamptz", spelled: "time" }] },
     { name: "nullish", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp" }, { name: "t", type: "text" }, { name: "n", type: "int4" }] },
+    // session state (GitHub issue 63), last: a name in two schemas, of one shape (invoices) and of two (accounts)
+    { name: "invoices", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "total", type: "numeric", spelled: "numeric(10,3)" }] },
+    { name: "accounts", schema: "sales", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "owner", type: "text" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -448,8 +461,8 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
-    const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
 });
@@ -1573,12 +1586,12 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
     schema: () => current,
     record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: { ...duck, open: () => { opened++; return duck.open(); }, plan: async (...a: Parameters<typeof duck.plan>) => {
-      planned.push({ text: a[1], wire: a[8] === true });
-      if (a[8] === true) { under.push(`${a[5]} | ${a[6]}`); await gate; }
-      if (a[8] === true && failWire) throw new StatementError({ code: "0A000", message: "refused for the test" }, a[1]);
+      planned.push({ text: a[1], wire: a[7] === true });
+      if (a[7] === true) { under.push(`${a[5].searchPath} | ${a[5].timeZone}`); await gate; }
+      if (a[7] === true && failWire) throw new StatementError({ code: "0A000", message: "refused for the test" }, a[1]);
       const p = await duck.plan(...a);
       // a schema moved between the Parse and the Execute: the plan made again answers another column
-      return skew && a[8] === true ? { ...p, fields: p.fields!.map((f, i) => i === 0 ? { ...f, name: "moved" } : f) } : p;
+      return skew && a[7] === true ? { ...p, fields: p.fields!.map((f, i) => i === 0 ? { ...f, name: "moved" } : f) } : p;
     } },
   });
   // a portal's statement is logged once its result is released, a moment after its last rows
@@ -1737,14 +1750,15 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
     assert.match(plain.join("\n"), /Sent to the engine: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
     assert.doesNotMatch(plain.join("\n"), /CROSS JOIN LATERAL/, plain.join("\n"));
 
-    // planned again under the search_path and TimeZone of its Parse, never a later SET's
+    // a search_path moved since the Parse: planned again under the session's state now, and the bounded plan under that
+    // same state, never a third (GitHub issue 63)
     const zoned = `${lateral} WHERE t.id > 0`;
     s.socket.write(Buffer.concat([wire.parse("zoned", zoned), wire.sync()]));
     await s.untilReady();
     s.socket.write(wire.query("SET TimeZone = 'Europe/Berlin'; SET search_path = sales, public"));
     await s.untilReady();
     assert.deepEqual((await paged("zoned", "z", 3)).pages.flat(), all);
-    assert.equal(under.at(-1), '"$user", public | UTC');
+    assert.equal(under.at(-1), 'sales, public | Europe/Berlin');
     s.socket.write(wire.query("SET TimeZone = 'UTC'; SET search_path = DEFAULT"));
     await s.untilReady();
 
@@ -5527,6 +5541,43 @@ test("latest(x ORDER BY …) answers the x of the row its ORDER BY sorts last: a
     for (const sql of ["SELECT arg_max_null(id, k) FROM late", "SELECT last(id ORDER BY k) FROM late"]) {
       await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "42883", sql);
     }
+  } finally { await c.end(); }
+});
+
+test("session state: a prepared statement whose search_path moved since its Parse is planned again, as Postgres's plancache; a result that moved is 0A000; a zone alone plans nothing again", async () => {
+  const c = await client();
+  try {
+    const ids = async (q: { name: string; text: string }): Promise<number[]> => (await c.query(q)).rows.map((r: { id: number }) => r.id);
+    const p = { name: "p63", text: "SELECT id, total FROM invoices ORDER BY id" };
+    assert.deepEqual(await ids(p), [7]);
+    await c.query("SET search_path = sales, public");
+    assert.deepEqual(await ids(p), [1, 2], "the path moved: the statement reads sales.invoices");
+    await c.query("RESET search_path");
+    assert.deepEqual(await ids(p), [7]);
+    // a zone alone: the same plan, the same rows
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual(await ids(p), [7]);
+    await c.query("RESET TimeZone");
+    // the path names no schema holding it: Postgres's 42P01, then the statement answers again once the path is back
+    const n = { name: "n63", text: "SELECT count(*)::int AS id FROM invoices" };
+    assert.deepEqual(await ids(n), [1]);
+    await c.query("SET search_path = nowhere");
+    assert.equal(((await c.query(n).catch((e: unknown) => e)) as { code?: string }).code, "42P01");
+    await c.query("RESET search_path");
+    assert.deepEqual(await ids(n), [1]);
+    // another shape under the new path: Postgres's 0A000
+    const a = { name: "a63", text: "SELECT * FROM accounts ORDER BY id" };
+    assert.ok((await c.query(a)).rows.length > 0);
+    await c.query("SET search_path = sales, public");
+    const e = (await c.query(a).catch((x: unknown) => x)) as { code?: string; message?: string };
+    assert.deepEqual([e.code, e.message], ["0A000", "cached plan must not change result type"]);
+    // an unqualified name beside a qualified one
+    await c.query("RESET search_path");
+    const j = { name: "j63", text: "SELECT i.id FROM invoices i JOIN public.invoices o USING (id) ORDER BY 1" };
+    assert.deepEqual(await ids(j), [7]);
+    await c.query("SET search_path = sales, public");
+    assert.deepEqual(await ids(j), [], "sales.invoices beside public.invoices share no id");
+    await c.query("RESET search_path");
   } finally { await c.end(); }
 });
 

@@ -205,6 +205,21 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
 
+- **A session's TimeZone, search_path and DateStyle now apply to every statement**, not only one that reads a synced
+  table. A statement of no table (`SELECT '2026-01-02 03:04:05+00'::timestamptz`, `SELECT current_schemas(false)`,
+  `SELECT 'orders'::regclass`) answered in UTC and under `public` whatever the session set; it now answers in the
+  session's zone, under its search_path (pg_catalog first, as on Postgres: `current_schemas(false)` is `{public}`), and
+  reads a date in its DateStyle's order (`SET DateStyle = 'ISO, DMY'`: `'01/02/2026'::date` is 2026-02-01, on every
+  path, a bound parameter too). `now()`, `CURRENT_DATE` and the like, and `'now'` or `'today'` read as a
+  date or time however the statement writes or computes it, are the transaction's instant on both paths, so two
+  statements of one block agree. A prepared statement whose search_path moved since it was prepared is planned
+  again, as Postgres does: it reads the table the path now names (it read the old one), and answers Postgres's
+  `cached plan must not change result type` (0A000) when its columns moved. `SHOW extra_float_digits`,
+  `SHOW transaction_isolation` and `SHOW default_transaction_isolation` read back what was set (they answered fixed
+  values). `SET IntervalStyle` to anything but `postgres` is now refused by name (`interval-style`), where it was
+  accepted and ignored: every interval is written in Postgres's default style. Nothing to do on upgrade, unless a
+  tool sets IntervalStyle: remove the setting, or set it to `postgres`.
+
 ## Known
 
 - **A generated table can't yet hold a numeric that divides (an average is one); is a variance or a standard deviation, which Postgres computes exactly at decimals it picks per value, rounded, cast to numeric(p,s) or not; is a sqrt, exp, ln, log or power, whose decimals Postgres picks per value, rounded, cast to numeric(p,s) or not, whatever the decimals of what it is computed from; is a JSON number's text cast to numeric with no scale (cast to numeric(p,s), it is stored); has more than 18 decimals, at the end or on the way; sums values whose decimals the rows decide; is a CASE, GREATEST, LEAST or COALESCE of values with differing decimals; or is cast from a double; nor a domain or a composite**, and `kind: live` is refused. Each is refused by file and key before anything is built, said as Postgres types the value (a sqrt or an average of a double is a double, so cast to numeric it is a cast from a double), wherever it sits in the column (under an operator, a coalesce, a round, a cast or an aggregate, or in a scalar subquery, a `WITH` query, a subquery in `FROM` or a `UNION`'s arm), with the way out your own SQL with the cast moved and the aggregate kept (`sum(sqrt(x)::double precision)`), or the `WITH` query, subquery or `UNION` the cast belongs in, given whole. Each of these keeps its reason read back from its text (`::text`, `::varchar`, `|| ''`, a jsonb's `->>`, a `WITH` column), cast to numeric(p,s) or not, so a typmod over a variance's text never stores an approximation; only a stored column's or a JSON number's text read as a numeric is said as a text: a JSON number's, a stored double's or any other. A run that fails (a value past 38 digits, `bigint out of range`, `division by zero`) records Postgres's error, SQLSTATE and DETAIL (`numeric field overflow` says the precision and scale it must fit, on every path), and is tried again after its back-off.
