@@ -2,7 +2,7 @@
 /**
  * THE ORACLE IN LEGS (.github/workflows/ci.yml; tests/integration/README.md). CI runs tests/integration/duck-oracle.itest.ts
  * as two jobs, `IT_ORACLE_LEG=1/2` and `2/2` (`scripts/ci-shards.ts run oracle <n>`), each with its own Postgres, its own copy and both rounds of changes, each
- * asking the statements `legOf` gives it. A statement that no leg asks is a statement nobody holds to Postgres, and a
+ * asking the statements `partition` gives it. A statement that no leg asks is a statement nobody holds to Postgres, and a
  * green run would never say so; and what a whole run asserts at its end (no stale decision, no dead gap, the allowlist
  * exactly what was verified, the tallies the fixture's) is false of a part. So a leg asserts neither, and writes a
  * report instead (`duck-oracle-leg-<n>.json`, at IT_ORACLE_LEG_REPORT); `integration (oracle)` runs this file over the
@@ -22,8 +22,19 @@
  * `fixtureOf`) and in the same order (`writeFromLegs`): exit 0 when what the legs measured now holds, 1 when anything
  * else is wrong (nothing is written when the legs are not the whole, or are another commit's), 2 on a usage error.
  *
+ * WHICH LEG ASKS WHAT IS SPLIT BY MEASURED COST (`partition`): every distinct statement text, the unordered limits'
+ * too, goes to one leg, heaviest first into the lightest, with leg 1 starting from what its stages cost. The costs are
+ * tests/fixtures/oracle-weights.json, written from a finished CI run's legs (each times every statement it asks, its
+ * stages and its fixed costs, `times` in its report), never by hand:
+ *
+ *   node scripts/oracle-legs.ts --weights <run-id | folder> [--above <ms>]
+ *
+ * lists each text that took `--above` ms or more (WEIGHTS_ABOVE_MS when not given) by `weightKey`, and gives every
+ * other the mean of those it left out. A stale or missing weight costs balance, never coverage: the check below holds
+ * every statement to exactly one ask per phase whatever the partition.
+ *
  * The statements are named by what each leg ASKED, recorded where it asks, against the whole list each leg computed
- * before filtering: the check does not trust `legOf`. A whole run, and everything that regenerates a file
+ * before filtering: the check does not trust `partition`. A whole run, and everything that regenerates a file
  * (`UPDATE_VERIFIED=1`, `UPDATE_FIXTURE=1`), stays one process without IT_ORACLE_LEG; a leg refuses to run under them.
  * So does a leg with no IT_ORACLE_LEG_REPORT: nothing would hold its report to the whole, and half the statements
  * passing with no end-of-run assertion must never read as the oracle passing.
@@ -79,16 +90,129 @@ export interface LegReport {
   asks: number;
   measured: Measured;
   differences: number;
+  /** what the leg's time went on, in ms (`Clock`): absent in a report from before the timing, which `--weights` refuses */
+  times?: Times;
 }
+
+/** What a leg's time went on, in ms: each statement text it asked by `weightKey` (every ask of it in every phase, the
+ *  DuckDB-alone ask and the shapes; an unordered limit's pages too) with the name it was first asked by, each stage of
+ *  one session, and what every leg pays alike (the setup, the first sync, each round of changes) */
+export interface Times { fixed: Record<string, number>; stages: Partial<Record<(typeof STAGES)[number], number>>; statements: Record<string, { ms: number; name: string }> }
+
+/** tests/fixtures/oracle-weights.json: what `partition` balances by, written by `--weights` from a run's `times` */
+export interface Weights {
+  /** the run (or folder) it was measured on, and the threshold it listed above */
+  from?: string;
+  above?: number;
+  /** leg FIRST_LEG_RUNS_STAGES's head start: the stages' total */
+  stages: number;
+  /** the weight of a text not listed */
+  default: number;
+  /** each text listed by `weightKey`, its cost and the name it was asked by */
+  statements: Record<string, { ms: number; name: string }>;
+}
+export const WEIGHTS_FILE = "tests/fixtures/oracle-weights.json";
+/** what a text must have cost to be listed by name, when `--weights` is given no `--above` */
+export const WEIGHTS_ABOVE_MS = 1000;
 
 const sha = (text: string): Buffer => createHash("sha256").update(text).digest();
 
 /** a statement's identity: two of one text and one name are one id, and are counted as two */
 export const statementId = (q: { group: string; name: string; sql: string }): string => sha(`${q.group}\0${q.name}\0${q.sql}`).toString("hex").slice(0, 16);
 
-/** The leg that asks a statement, from its text alone: a text asked twice under two names is one leg's, so what a whole
- *  run decides by text (`unproven`, `resolvedOf`) is decided the same in that leg. */
-export const legOf = (sql: string, of: number): number => sha(sql).readUInt32BE(0) % of + 1;
+/** THE ONE KEY of a statement's text in `times` and in the weights: what the leg measures and what the partition reads
+ *  are one spelling */
+export const weightKey = (sql: string): string => sha(sql).toString("hex").slice(0, 16);
+
+/** The leg of every distinct statement text, by measured cost: heaviest first (then by key, then by text, so the list's
+ *  order decides nothing) into the leg whose load is lightest (the lowest on a tie), leg FIRST_LEG_RUNS_STAGES starting
+ *  from the stages' cost. It depends only on the set of texts and the weights, so every leg computes the same split; a
+ *  text asked under two names is one leg's, since what a whole run decides by text (`unproven`, `resolvedOf`, KNOWN)
+ *  must be decided in one leg. */
+export function partition(statements: Iterable<{ sql: string }>, of: number, weights: Weights): Map<string, number> {
+  const texts = [...new Set([...statements].map((q) => q.sql))].map((sql) => {
+    const key = weightKey(sql);
+    return { sql, key, w: weights.statements[key]?.ms ?? weights.default };
+  });
+  texts.sort((a, b) => b.w - a.w || (a.key < b.key ? -1 : a.key > b.key ? 1 : a.sql < b.sql ? -1 : a.sql > b.sql ? 1 : 0));
+  const load = Array.from({ length: of }, (_, i) => i + 1 === FIRST_LEG_RUNS_STAGES ? weights.stages : 0);
+  const legs = new Map<string, number>();
+  for (const t of texts) {
+    let lightest = 0;
+    for (let i = 1; i < of; i++) if (load[i]! < load[lightest]!) lightest = i;
+    load[lightest]! += t.w;
+    legs.set(t.sql, lightest + 1);
+  }
+  return legs;
+}
+
+/** the committed weights (a missing file throws: no leg runs on a split nobody wrote) */
+export const readWeights = (root: string): Weights => JSON.parse(fs.readFileSync(path.join(root, WEIGHTS_FILE), "utf8")) as Weights;
+
+/** Where a leg's time goes: `lap(key, name)` closes the open entry and opens one for `key`, so the time between two
+ *  laps is the first's, whatever its loop body `continue`d past; `stop()` closes the last. Laps of one key add up. */
+export class Clock {
+  readonly spent = new Map<string, { ms: number; name: string }>();
+  private open: { key: string; name: string; at: number } | null = null;
+  private readonly now: () => number;
+  constructor(now: () => number = () => performance.now()) { this.now = now; }
+  lap(key: string, name: string): void {
+    const at = this.now();
+    this.close(at);
+    this.open = { key, name, at };
+  }
+  stop(): void { this.close(this.now()); this.open = null; }
+  /** the time `fn` takes, under `key` */
+  async time<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const at = this.now();
+    try { return await fn(); } finally { this.add(key, key, this.now() - at); }
+  }
+  private close(at: number): void { if (this.open !== null) this.add(this.open.key, this.open.name, at - this.open.at); }
+  private add(key: string, name: string, ms: number): void {
+    const was = this.spent.get(key);
+    this.spent.set(key, { ms: (was?.ms ?? 0) + ms, name: was?.name ?? name });
+  }
+}
+
+/** one line of what a run's time went on: the fixed costs, the stages, the statements and the slowest of them */
+export function timesLine(t: Times, slowest = 8): string {
+  const s = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
+  const all = Object.values(t.statements).sort((a, b) => b.ms - a.ms);
+  return `fixed: ${Object.entries(t.fixed).map(([k, ms]) => `${k} ${s(ms)}`).join(", ") || "none"}; ` +
+    `stages: ${Object.entries(t.stages).map(([k, ms]) => `${k} ${s(ms!)}`).join(", ") || "none"}; ` +
+    `statements: ${s(all.reduce((n, x) => n + x.ms, 0))} over ${all.length} texts; slowest: ${all.slice(0, slowest).map((x) => `${JSON.stringify(x.name)} ${s(x.ms)}`).join(", ") || "none"}`;
+}
+
+/** `--weights`: the weights from the legs' `times`, or why the reports cannot give them. `from` names the run or folder. */
+export function weightsFromLegs(reports: readonly LegReport[], want: number, from: string, above: number): { weights: Weights } | { problems: string[] } {
+  const partitioned = partitionProblems(reports, want);
+  if (partitioned.length > 0) return { problems: partitioned };
+  const untimed = reports.filter((r) => r.times === undefined).map((r) => r.leg);
+  if (untimed.length > 0) return { problems: [`the report of leg(s) ${untimed.join(", ")} of ${from} has no times: the run predates the timing. Use a run of a commit that times its statements`] };
+  const spent = reports.flatMap((r) => Object.entries(r.times!.statements));
+  const listed = spent.filter(([, x]) => x.ms >= above).sort(([a, x], [b, y]) => y.ms - x.ms || (a < b ? -1 : 1));
+  const rest = spent.filter(([, x]) => x.ms < above);
+  const mean = rest.length === 0 ? above : rest.reduce((n, [, x]) => n + x.ms, 0) / rest.length;
+  const stages = reports.reduce((n, r) => n + Object.values(r.times!.stages).reduce((m, ms) => m + (ms ?? 0), 0), 0);
+  return { weights: { from, above, stages: Math.round(stages), default: Math.max(1, Math.round(mean)), statements: Object.fromEntries(listed.map(([k, x]) => [k, { ms: Math.round(x.ms), name: x.name }])) } };
+}
+
+/** the weights file's text: one listed text a line, so its diff can be read */
+export function weightsText(w: Weights): string {
+  const head = Object.entries({ from: w.from, above: w.above, stages: w.stages, default: w.default }).filter(([, v]) => v !== undefined).map(([k, v]) => `  ${JSON.stringify(k)}: ${JSON.stringify(v)},\n`).join("");
+  const listed = Object.entries(w.statements).map(([k, x]) => `    ${JSON.stringify(k)}: ${JSON.stringify(x)}`);
+  return `{\n${head}  "statements": {${listed.length === 0 ? "" : `\n${listed.join(",\n")}\n  `}}\n}\n`;
+}
+
+/** `--weights`: tests/fixtures/oracle-weights.json under `root` from the reports in `dir`, and what to say; nothing is
+ *  written when a report has no times or the legs are not the whole */
+export function writeWeights(dir: string, root: string, from: string, above: number): { code: 0 | 1; out: string[]; err: string[] } {
+  const got = weightsFromLegs(readReports(dir), SHARDS.oracle, from, above);
+  if ("problems" in got) return { code: 1, out: [], err: [...got.problems.map((p) => `oracle legs: ${p}`), "oracle legs: nothing written"] };
+  const w = got.weights;
+  fs.writeFileSync(path.join(root, WEIGHTS_FILE), weightsText(w));
+  return { code: 0, out: [`oracle legs: wrote ${WEIGHTS_FILE}: ${Object.keys(w.statements).length} text(s) of ${above} ms or more listed, every other ${w.default} ms, the stages ${w.stages} ms; read the diff, then commit it`], err: [] };
+}
 
 /** `1/2` → { leg: 1, of: 2 }; absent → null; anything else refuses, or a typo would run the whole oracle unasked */
 export function parseLeg(text: string | undefined): { leg: number; of: number } | null {
@@ -292,26 +416,39 @@ export function writeFromLegs(dir: string, root: string): { code: 0 | 1; out: st
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  /** the folder of a run's `ran-oracle-*` artifacts, downloaded once the run is of this commit and finished; a folder as given */
+  const legsOf = (from: string): string => {
+    if (!/^\d+$/.test(from) || fs.existsSync(from)) { console.log(`oracle legs: ${from} is a folder, not a run: nothing checks that its legs ran on this checkout's commit`); return from; }
+    const view = JSON.parse(execFileSync("gh", ["run", "view", from, "--json", "headSha,status,conclusion"], { cwd: root, encoding: "utf8" })) as Parameters<typeof runProblems>[0];
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const wrong = runProblems(view, head);
+    if (wrong.length > 0) { for (const p of wrong) console.error(`oracle legs: run ${from}: ${p}`); console.error("oracle legs: nothing written"); process.exit(1); }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-legs-"));
+    console.log(`oracle legs: downloading the ran-oracle-* artifacts of run ${from} into ${dir}`);
+    execFileSync("gh", ["run", "download", from, "--pattern", "ran-oracle-*", "--dir", dir], { cwd: root, stdio: "inherit" });
+    return dir;
+  };
+  const say = (r: { code: 0 | 1; out: string[]; err: string[] }): never => {
+    for (const l of r.out) console.log(l);
+    for (const l of r.err) console.error(l);
+    process.exit(r.code);
+  };
   if (process.argv[2] === "--write") {
     const from = process.argv[3];
     if (from === undefined || process.argv.length > 4) { console.error("usage: scripts/oracle-legs.ts --write <run-id | folder of the ran-oracle-* artifacts>"); process.exit(2); }
-    let dir = from;
-    if (/^\d+$/.test(from) && !fs.existsSync(from)) {
-      const view = JSON.parse(execFileSync("gh", ["run", "view", from, "--json", "headSha,status,conclusion"], { cwd: root, encoding: "utf8" })) as Parameters<typeof runProblems>[0];
-      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-      const wrong = runProblems(view, head);
-      if (wrong.length > 0) { for (const p of wrong) console.error(`oracle legs: run ${from}: ${p}`); console.error("oracle legs: nothing written"); process.exit(1); }
-      dir = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-legs-"));
-      console.log(`oracle legs: downloading the ran-oracle-* artifacts of run ${from} into ${dir}`);
-      execFileSync("gh", ["run", "download", from, "--pattern", "ran-oracle-*", "--dir", dir], { cwd: root, stdio: "inherit" });
-    } else console.log(`oracle legs: ${dir} is a folder, not a run: nothing checks that its legs ran on this checkout's commit`);
-    const { code, out, err } = writeFromLegs(dir, root);
-    for (const l of out) console.log(l);
-    for (const l of err) console.error(l);
-    process.exit(code);
+    say(writeFromLegs(legsOf(from), root));
+  }
+  if (process.argv[2] === "--weights") {
+    const [from, flag, ms] = process.argv.slice(3);
+    const above = flag === undefined ? WEIGHTS_ABOVE_MS : Number(ms);
+    if (from === undefined || (flag !== undefined && (flag !== "--above" || !(above > 0))) || process.argv.length > 6) {
+      console.error("usage: scripts/oracle-legs.ts --weights <run-id | folder of the ran-oracle-* artifacts> [--above <ms>]");
+      process.exit(2);
+    }
+    say(writeWeights(legsOf(from), root, from, above));
   }
   const dir = process.argv[2];
-  if (dir === undefined) { console.error("usage: scripts/oracle-legs.ts <folder of duck-oracle-leg-<n>.json>, or --write <run-id | folder>"); process.exit(2); }
+  if (dir === undefined) { console.error("usage: scripts/oracle-legs.ts <folder of duck-oracle-leg-<n>.json>, --write <run-id | folder>, or --weights <run-id | folder> [--above <ms>]"); process.exit(2); }
   const reports = readReports(dir);
   const fixture = JSON.parse(fs.readFileSync(path.join(root, "tests/fixtures/oracle-duckdb-alone.json"), "utf8")) as Pick<Tallies, "mason" | "duckdb">;
   const problems = foldProblems(reports, SHARDS.oracle, fixture, VERIFIED);

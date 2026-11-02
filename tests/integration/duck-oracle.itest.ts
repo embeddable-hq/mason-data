@@ -33,7 +33,10 @@
  *
  * IN CI IT RUNS IN LEGS (scripts/oracle-legs.ts): `IT_ORACLE_LEG=1/2` asks the statements that are that leg's, each after
  * the same copy and through the same rounds of changes, and writes a report instead of what only a whole run can
- * assert; `integration (oracle)` holds the reports to the whole. Without it a run is the whole, as ever.
+ * assert; `integration (oracle)` holds the reports to the whole. Without it a run is the whole, as ever. Which leg asks
+ * a statement is `partition`'s, by measured cost: every run times each statement text, each stage and its fixed costs,
+ * prints them on one `duck oracle: time:` line, and a leg's report carries them (`times`), from which
+ * `node scripts/oracle-legs.ts --weights <run-id>` rewrites tests/fixtures/oracle-weights.json once the legs drift apart.
  *
  * Needs IT_POSTGRES_URL (any wal_level; a database of its own is created and dropped), psql on PATH, and the copy's
  * extensions installed from this platform's package (`node cli/extensions.ts --node-modules node_modules`, once): the
@@ -71,7 +74,7 @@ import { countGap, emptyTally, fixtureText, gapSummary, type Met } from "./oracl
 import { VERIFIED } from "../../src/duck/verified.ts";
 import { describeKeys } from "../../src/duck/resolved.ts";
 import { GAP_MARK, GAPS, type GapId } from "../../src/duck/gaps.ts";
-import { deadGaps, FIRST_LEG_RUNS_STAGES, fixtureOf, legOf, legRefused, movedTallies, parseLeg, PHASES, statementId, verifiedDiff, verifiedText, WRITE_COMMAND, type LegReport, type Measured } from "../../scripts/oracle-legs.ts";
+import { Clock, deadGaps, FIRST_LEG_RUNS_STAGES, fixtureOf, legRefused, movedTallies, parseLeg, partition, PHASES, readWeights, statementId, timesLine, verifiedDiff, verifiedText, weightKey, WRITE_COMMAND, type LegReport, type Measured, type Times } from "../../scripts/oracle-legs.ts";
 import type { RolesLive } from "../../src/duck/grants.ts";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -304,6 +307,10 @@ after(async () => {
 });
 
 test("the DuckDB endpoint answers every statement exactly as Postgres does, before and after changes", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 1_800_000 }, async () => {
+  // WHAT THE RUN'S TIME GOES ON (scripts/oracle-legs.ts Times): each statement text, each stage, and what every leg pays
+  // alike; a leg reports it, and `--weights` makes the legs' split from it
+  const started = performance.now();
+  const clock = new Clock(), stageClock = new Clock(), fixedClock = new Clock();
   psql(adminUrl!, `CREATE DATABASE ${tag}`);
   psql(dbUrl, SCHEMA);
   const s = seed();
@@ -337,7 +344,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   await sync.open();
   sync.setTables([...added, ...shop]);
   sync.setViews(facts.views ?? []);
-  await sync.once();
+  await fixedClock.time("first sync", () => sync!.once());
   assert.deepEqual(sync.state().filter((x) => x.phase !== "copied").map((x) => `${x.source} ${x.phase} ${x.error}`), [], "every table copied");
   // THE ORACLE RUNS AS A USER'S INSTALL DOES, with the copy's extensions from this platform's package (src/duck/extensions.ts):
   // autoinstall off and both files the package's, so every statement it holds equal is answered with nothing
@@ -424,10 +431,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     ...LATEST_CASES.map((q) => ({ group: "latest", name: q.name, sql: q.sql })),
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },
   ];
-  const all = (): ReturnType<typeof every> => every().filter((q) => (ONLY === null || ONLY.test(q.name)) && (LEG === null || legOf(q.sql, LEG.of) === LEG.leg));
-  /** a statement of oracle/unordered-limit.ts: asked apart from `all()`, in every phase, by the leg its text hashes to */
+  const all = (): ReturnType<typeof every> => every().filter((q) => (ONLY === null || ONLY.test(q.name)) && mine(q.sql));
+  /** a statement of oracle/unordered-limit.ts: asked apart from `all()`, in every phase, by the leg the partition gives its text */
   const unorderedSql = (q: UnorderedLimit): string => `${q.head ?? ""}SELECT ${q.list} ${q.from} ${q.tail}`;
   const unorderedStatement = (q: UnorderedLimit): { group: string; name: string; sql: string } => ({ group: "unordered limit", name: `unordered limit: ${q.name}`, sql: unorderedSql(q) });
+  // THE LEGS' SPLIT (scripts/oracle-legs.ts partition): every text, `every()`'s and the unordered limits' together, by
+  // the committed weights, so each leg computes the same split
+  const legs = LEG === null ? null : partition([...every(), ...UNORDERED_LIMITS.map(unorderedStatement)], LEG.of, readWeights(REPO));
+  const mine = (sql: string): boolean => legs === null || legs.get(sql) === LEG!.leg;
   /** the statements as they were asked, by phase, for scripts/oracle-legs.ts to hold to `every` */
   const askedIn: Record<string, string[]> = {};
   /** what each stage of one session asked; a leg without the stages asks none */
@@ -474,6 +485,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   const run = async (phase: string): Promise<void> => {
     const first = phase === PHASES[0];
     for (const q of all()) {
+      clock.lap(weightKey(q.sql), q.name);
       (askedIn[phase] ??= []).push(statementId(q));
       // A STATEMENT ASKED IN A SESSION ZONE OF ITS OWN (`zone`; UTC otherwise): both sessions, and DuckDB alone, set to it
       if ((q.zone ?? "UTC") !== zone) {
@@ -530,6 +542,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
           sql: s.values === undefined ? s.sql : `${s.sql} -- with ${JSON.stringify(s.values)}` });
       }
     }
+    clock.stop();
   };
   /** a LIMIT with no ORDER BY: what is defined of its rows, held (oracle/unordered-limit.ts); null where it holds */
   const unorderedLimit = async (q: UnorderedLimit, source: pg.Client, mason: pg.Client): Promise<string | null> => {
@@ -553,28 +566,40 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     for (const q of UNORDERED_LIMITS) {
       const { name, sql } = unorderedStatement(q);
       if (ONLY !== null && !ONLY.test(name)) continue;
-      if (LEG !== null && legOf(sql, LEG.of) !== LEG.leg) continue;
+      if (!mine(sql)) continue;
+      clock.lap(weightKey(sql), name);
       (askedIn[phase] ??= []).push(statementId(unorderedStatement(q)));
       const wrong = await unorderedLimit(q, source, mason);
       if (wrong !== null) differences.push({ phase, group: "unordered limit", kind: "rows", name, detail: wrong, sql: unorderedSql(q) });
     }
+    clock.stop();
   };
+  // the setup: everything before the first statement but the first sync, timed apart
+  fixedClock.spent.set("setup", { ms: performance.now() - started - (fixedClock.spent.get("first sync")?.ms ?? 0), name: "setup" });
   await run(PHASES[0]);
   await unorderedLimits(PHASES[0]);
   alone.closeSync();
   // sessions asked in order, never divided: each runs whole in one leg (scripts/oracle-legs.ts STAGES)
   if (LEG === null || LEG.leg === FIRST_LEG_RUNS_STAGES) {
-    await roleCases();
-    await rowFilterCases();
-    await settingCases();
-    await settingScripts();
+    await stageClock.time("roles", roleCases);
+    await stageClock.time("row filters", rowFilterCases);
+    await stageClock.time("settings", settingCases);
+    await stageClock.time("setting scripts", settingScripts);
   }
   for (const round of [1, 2]) {
-    psql(dbUrl, mutations(round) + typedMutations(round));
-    await sync.once();
+    await fixedClock.time(`changes round ${round}`, async () => {
+      psql(dbUrl, mutations(round) + typedMutations(round));
+      await theSync.once();
+    });
     await run(PHASES[round]!);
     await unorderedLimits(PHASES[round]!);
   }
+  const ms = (x: number): number => Math.round(x * 10) / 10;
+  const times: Times = {
+    fixed: Object.fromEntries([...fixedClock.spent].map(([k, v]) => [k, ms(v.ms)])),
+    stages: Object.fromEntries([...stageClock.spent].map(([k, v]) => [k, ms(v.ms)])),
+    statements: Object.fromEntries([...clock.spent].map(([k, v]) => [k, { ms: ms(v.ms), name: v.name }])),
+  };
   const asked = all().length * 3 + shaped;
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of
   // play), and the gaps' detail beside them: here, past the last phase, as `everyAsk` counts every phase. A leg reports
@@ -1010,6 +1035,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     [...counted].sort((a, b) => b[1] - a[1]).map(([k, n]) => `  ${n} × ${k}`).join("\n") + "\n\n" +
     differences.map((d) => `[${d.phase}] ${d.group} / ${d.kind}: ${d.name}\n  ${d.detail}\n  ${d.sql.replace(/\s+/g, " ")}`).join("\n\n") + "\n");
   console.log(`duck oracle: ${asked} statements asked, ${differences.length} differ (${report}): ${[...counted].map(([k, n]) => `${n} ${k}`).join(", ")}`);
+  console.log(`duck oracle: time: ${timesLine(times)}`);
   console.log(`duck oracle: shaped ${shaped}; per shape: ${Object.entries(shapeTally).map(([s, c]) => `${s} (${sayShape(c)})`).join("; ") || "none"}`);
   // the first differences in the log too, whichever assertion below fails first (a difference can be why a decision
   // is stale or a verified entry dropped, and CI keeps only the log)
@@ -1054,7 +1080,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     const legReport: LegReport = { ...LEG, whole: [...every().map((q) => ({ id: statementId(q), name: q.name })), ...UNORDERED_LIMITS.map(unorderedStatement).map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))], asked: askedIn, stages: stageAsked, shaped, shapeTally, tallies, copyPhase: copyPhaseGaps, everyAsk: everyAskGaps,
       decisions: KNOWN.map((k) => ({ sql: String(k.sql), ...(k.shape === undefined ? {} : { shape: decidedShapes(k).join(", "), kind: k.kind }), ...(k.issue === undefined ? {} : { issue: k.issue }), why: k.why, ...(k.machineFloat === true || unmet(k) ? { machineFloat: true as const } : {}), differed: known.has(k), decided: decided.has(k) })),
       verified: [...verified], names: Object.fromEntries(await describeKeys(async (sql) => (await source.query({ text: sql, rowMode: "array" })).rows as (string | null)[][], verified)),
-      asks: asked, measured, differences: differences.length };
+      asks: asked, measured, differences: differences.length, times };
     const out = process.env.IT_ORACLE_LEG_REPORT!;   // legRefused: a leg without it does not start
     fs.writeFileSync(out, JSON.stringify(legReport));
     console.log(`duck oracle: leg ${LEG.leg} of ${LEG.of}: ${tallies.statements} statements of ${legReport.whole.filter((w) => w.apart !== true).length}, and those of ${UNORDERED_LIMITS.length} apart that are its own; report in ${out}`);
