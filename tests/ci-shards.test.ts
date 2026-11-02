@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { APART, SHARDS, UNIT_WEIGHTS_FILE, coverageProblems, needsProblems, partition, shardCommand, shardFiles, testFiles, weightOf, type ShardRecord } from "../scripts/ci-shards.ts";
+import { ALONE, APART, NEAR_BOUND_MS, SHARDS, SIDE_BY_SIDE, UNIT_WEIGHTS_FILE, aloneCommand, coverageProblems, nearBoundLines, needsProblems, partition, shardCommand, shardFiles, testFiles, weightOf, type ShardRecord } from "../scripts/ci-shards.ts";
 // a namespace for the docs path's names (issue 339): a tree without them still loads, and their tests fail by name
 import * as shards from "../scripts/ci-shards.ts";
 import { ORACLE } from "../scripts/gate.ts";
@@ -68,6 +68,10 @@ test("a shard with no file is an error: `node --test` alone would run every test
     `--test-reporter=${path.join(ROOT, "scripts", "test-times.ts")}`, `--test-reporter-destination=${path.join("o", "test-times-unit-1.json")}`, "a"], env: {} });
   assert.deepEqual(shardCommand("rest", 2, ["a"], "o"), { args: ["--test", "--test-concurrency=1", "a"], env: {} });
   assert.deepEqual(shardCommand("oracle", 2, ["a"], "o").env, { IT_ORACLE_LEG: "2/2", IT_ORACLE_LEG_REPORT: path.join("o", "duck-oracle-leg-2.json") });
+  // a unit shard's ALONE files: one at a time, under the same bound and the same two reporters, their times apart (issue 338)
+  assert.throws(() => aloneCommand(1, [], "o"), /has no ALONE file/);
+  assert.deepEqual(aloneCommand(3, ["b"], "o"), { args: ["--test", ...gate.TEST_BOUND_ARGS, "--test-concurrency=1", "--test-reporter=spec", "--test-reporter-destination=stdout",
+    `--test-reporter=${path.join(ROOT, "scripts", "test-times.ts")}`, `--test-reporter-destination=${path.join("o", "test-times-unit-3-alone.json")}`, "b"], env: {} });
 });
 
 test("verify fails on a file in no shard, in two, on one not in the tree, and on a shard that left no record", () => {
@@ -260,10 +264,14 @@ test("the timing reporter gives each file its whole time, load and top-level awa
   const files = [T("a.test.ts"), T("b.test.ts")];
   const r = node(shardCommand("unit", 1, files, out).args, root);
   assert.equal(r.status, 0, r.out);
-  const times = JSON.parse(fs.readFileSync(path.join(out, "test-times-unit-1.json"), "utf8")) as Record<string, number>;
+  const { files: times, longest } = JSON.parse(fs.readFileSync(path.join(out, "test-times-unit-1.json"), "utf8")) as { files: Record<string, number>; longest: Record<string, number> };
   assert.deepEqual(Object.keys(times).sort(), files, "a key a file, spelt as testFiles spells it, and no test's name");
   assert.ok(times[T("a.test.ts")]! >= 600, `a.test.ts took its load, its 300 ms await and its tests: ${times[T("a.test.ts")]} ms`);
   assert.ok(times[T("b.test.ts")]! >= 500, `b.test.ts: ${times[T("b.test.ts")]} ms`);
+  // and each file's longest top-level test, what the per-test bound holds: a1's 200 ms, never the file's whole time
+  assert.deepEqual(Object.keys(longest).sort(), files);
+  assert.ok(longest[T("a.test.ts")]! >= 200 && longest[T("a.test.ts")]! < times[T("a.test.ts")]! - 250, JSON.stringify({ times, longest }));
+  assert.ok(longest[T("b.test.ts")]! >= 500, JSON.stringify(longest));
   // the spec reporter is on stdout, and ci.yml's `slowest tests` still reads its lines
   const sed = /sed -nE 's\/(.*)\/\\2 \\1\/p'/.exec(workflow.jobs.unit!.steps!.find((s) => s.name === "slowest tests")!.run!)![1]!;
   const slowest = r.stdout.split("\n").flatMap((l) => { const m = new RegExp(sed).exec(l); return m === null ? [] : [`${m[2]} ${m[1]}`]; });
@@ -284,7 +292,7 @@ test("the timing reporter times a file that cannot load and a file whose test fa
   const out = fs.mkdirSync(path.join(root, "out"), { recursive: true })!;
   const r = node(shardCommand("unit", 2, [T("c.test.ts"), T("d.test.ts")], out).args, root);
   assert.notEqual(r.status, 0, r.out);
-  assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(out, "test-times-unit-2.json"), "utf8")) as object).sort(), [T("c.test.ts"), T("d.test.ts")]);
+  assert.deepEqual(Object.keys((JSON.parse(fs.readFileSync(path.join(out, "test-times-unit-2.json"), "utf8")) as { files: object }).files).sort(), [T("c.test.ts"), T("d.test.ts")]);
 });
 
 test("a unit shard's record carries its files' times, its wall time and its CPU, and only its own files", (t) => {
@@ -318,7 +326,7 @@ test("a stale entry for a file gone moves nothing, and the heaviest files each l
   const fixture = JSON.parse(fs.readFileSync(path.join(ROOT, UNIT_WEIGHTS_FILE), "utf8")) as { default: number; files: Record<string, number> };
   const stale = tree(t, {}, { ...fixture, files: { ...fixture.files, [T("gone.test.ts")]: 900000 } });
   const files = testFiles("unit", ROOT);
-  const split = partition(files, SHARDS.unit, weightOf("unit", stale), APART);
+  const split = partition(files, SHARDS.unit, weightOf("unit", stale), APART, ALONE);
   assert.deepEqual(split, Array.from({ length: SHARDS.unit }, (_, i) => shardFiles("unit", i + 1, ROOT)));
   assert.deepEqual(split.flat().sort(), files);
   const w: Record<string, number> = { a: 500, b: 300, c: 300, d: 100, e: 100 };
@@ -326,6 +334,60 @@ test("a stale entry for a file gone moves nothing, and the heaviest files each l
   assert.equal(new Set(["a", "b", "c"].map((f) => shards.findIndex((s) => s.includes(f)))).size, 3);
   const totals = shards.map((s) => s.reduce((n, f) => n + w[f]!, 0));
   assert.ok(Math.max(...totals) - Math.min(...totals) <= 500, totals.join());
+});
+
+// ── a test near its bound runs by itself (issue 338) ────────────────────────────────────────────────────────────────
+test("an ALONE file counts SIDE_BY_SIDE times over: the files beside it in its shard make up the wall it takes alone", () => {
+  // three files of 100 s, one of them ALONE: it takes 300 s of its shard's wall, so the others go elsewhere first
+  const w: Record<string, number> = { solo: 100, p: 100, q: 100, r: 50, s: 50, u: 50 };
+  const shards = partition(Object.keys(w), 2, (f) => w[f]!, [], ["solo"]);
+  const cost = (s: string[]): number => s.reduce((n, f) => n + w[f]! * (f === "solo" ? SIDE_BY_SIDE : 1), 0);
+  assert.deepEqual(shards, [["solo", "u"], ["p", "q", "r", "s"]], "solo's 300 s and u beside it, against the other four's 300 s");
+  assert.deepEqual(shards.map(cost), [350, 300]);
+  assert.deepEqual(partition(Object.keys(w), 2, (f) => w[f]!), [["p", "solo", "u"], ["q", "r", "s"]], "counted once, it would share its shard with 150 s more");
+  // and two ALONE files go to two shards before anything else is placed, an APART file kept apart beside them
+  const two = partition(["a1", "a2", "x", "y"], 2, () => 10, ["x"], ["a1", "a2"]);
+  assert.notEqual(two.findIndex((s) => s.includes("a1")), two.findIndex((s) => s.includes("a2")), JSON.stringify(two));
+  // the tree's ALONE files are unit test files of this tree, none APART, each in exactly one shard
+  const files = testFiles("unit", ROOT);
+  for (const f of ALONE) assert.ok(files.includes(f) && !APART.includes(f), f);
+  const placed = ALONE.map((f) => [1, 2, 3].filter((n) => shardFiles("unit", n, ROOT).includes(f)));
+  assert.deepEqual(placed.map((p) => p.length), ALONE.map(() => 1));
+  assert.equal(NEAR_BOUND_MS, gate.TEST_TIMEOUT_MS / 2);
+});
+
+test("a unit shard runs its ALONE files after its others, one at a time, and records each file's longest test", (t) => {
+  const solo = ALONE[0]!, other = ALONE[1]!;
+  // each file says when its test ran; with no APART file in the tree, the two ALONE files lead shards 1 and 2
+  const marked = (name: string, ms: number): string => `${SLEEP}import { appendFileSync } from "node:fs";\n` +
+    `test("t", async () => { const s = Date.now(); await sleep(${ms}); appendFileSync(process.env.MARKS!, ${JSON.stringify(name)} + " " + s + " " + Date.now() + "\\n"); });\n`;
+  const names = ["x.test.ts", "y.test.ts", "z.test.ts", "w.test.ts"].map(T);
+  const root = tree(t, { [solo]: marked(solo, 300), [other]: marked(other, 300), ...Object.fromEntries(names.map((f) => [f, marked(f, 200)])) },
+    { default: 1000, files: { [solo]: 100, [other]: 100 } });
+  const shard = [1, 2, 3].find((n) => shardFiles("unit", n, root).includes(solo))!;
+  const mine = shardFiles("unit", shard, root);
+  assert.ok(mine.length > 1, `the ALONE file shares its shard: ${mine.join(", ")}`);
+  const out = path.join(root, "ran"), marks = path.join(root, "marks.txt");
+  const r = node([path.join(root, "scripts", "ci-shards.ts"), "run", "unit", String(shard)], root, { CI_SHARD_DIR: out, MARKS: marks });
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, new RegExp(`1 of them run alone after the others: ${solo}`));
+  const ran = fs.readFileSync(marks, "utf8").trim().split("\n").map((l) => { const [f, s, e] = l.split(" "); return { f: f!, s: Number(s), e: Number(e) }; });
+  const alone = ran.find((m) => m.f === solo)!;
+  for (const m of ran.filter((x) => x.f !== solo)) assert.ok(m.e <= alone.s, `${m.f} ended before ${solo} began: ${JSON.stringify(ran)}`);
+  const record = JSON.parse(fs.readFileSync(path.join(out, `ran-unit-${shard}.json`), "utf8")) as ShardRecord;
+  assert.deepEqual(Object.keys(record.times ?? {}).sort(), [...mine].sort(), "both runs' times in the one record");
+  assert.deepEqual(Object.keys(record.longest ?? {}).sort(), [...mine].sort());
+  assert.ok(record.longest![solo]! >= 300 && record.wallMs! >= record.times![solo]!, JSON.stringify(record));
+  assert.deepEqual(fs.readdirSync(out), [`ran-unit-${shard}.json`], "both reporters' files are read into the record, and only the record is left");
+});
+
+test("verify unit warns of a test near its bound: a file not ALONE is told to be listed, an ALONE one to be made faster", () => {
+  const rec = (shard: number, longest: Record<string, number>): ShardRecord => ({ kind: "unit", shard, files: Object.keys(longest), exit: 0, longest });
+  const lines = nearBoundLines([rec(2, { [T("busy.test.ts")]: NEAR_BOUND_MS + 1000, [T("fine.test.ts")]: NEAR_BOUND_MS - 1000 }), rec(1, { [ALONE[0]!]: NEAR_BOUND_MS + 5000 })]);
+  assert.equal(lines.length, 2, lines.join("\n"));
+  assert.match(lines[0]!, new RegExp(`^::warning title=unit shards::${ALONE[0]}'s longest test took 155\\.0 s in unit shard 1, run alone, past half its bound of 300\\.0 s: .*make that test faster$`));
+  assert.match(lines[1]!, /^::warning title=unit shards::tests\/busy\.test\.ts's longest test took 151\.0 s in unit shard 2, past half its bound of 300\.0 s, beside the shard's other files: add it to ALONE \(scripts\/ci-shards\.ts\)/);
+  assert.deepEqual(nearBoundLines([rec(1, { [T("fine.test.ts")]: NEAR_BOUND_MS }), { kind: "unit", shard: 2, files: [], exit: 0 }]), [], "at the line, or a record from before the longest tests, warns of nothing");
 });
 
 test("the rest shards keep their hand weights: the integration files' partition is the base's", () => {

@@ -190,15 +190,20 @@ docker compose exec mason mason user add metabase   # users are kept on the serv
 <details>
 <summary><b>Sizing: memory and CPU</b></summary>
 
-- **Memory**: By default, Mason may use half of the container's memory limit (or half the machine's RAM if there
-  is no limit). The other half is for the page cache, Node and the catalog. The catalog uses about 820 MB, but only
-  while it is in use. It starts on a tool's first catalog query and stops after 10 minutes without one.
+- **Memory**: By default, Mason's queries may use half of the container's memory limit (or half the machine's RAM if
+  there is no limit), or what leaves 2.5 GiB beside them when that is less. The rest is for the page cache, Node and
+  the catalog. The catalog uses about 820 MB, but only while it is in use. It starts on a tool's first catalog query
+  and stops after 10 minutes without one. The default is never under 128 MiB, which is what a container of 2.5 GiB or
+  less gets. Give it 3 GiB or more: Mason itself was measured using up to 2.3 GiB beside the queries, and in less the kernel
+  killed it. Under 3 GiB, with `MASON_DUCKDB_MEMORY` unset, Mason still starts, and warns in its log, `mason status`
+  and `mason doctor` that the system may stop it.
 
   Give the container enough memory for the page cache to hold the columns your dashboards read. A query on a column
   that is not in the cache runs at disk speed. In the benchmark, the synced data was about a fifth of the tables' size in
   Postgres (10.1 GiB → 1.8 GiB, on a 15 GiB machine). `mason status` shows the size of yours.
 
-  To set the limit yourself, use `MASON_DUCKDB_MEMORY=4GB`, and give the container about twice that. A query that needs
+  To set the limit yourself, use `MASON_DUCKDB_MEMORY=4GB`, and give the container about twice that, never under it
+  plus 2.5 GiB. A query that needs
   more memory fails on its own (53200), one that spills past half of the free disk too (53400, `MASON_SPILL_LIMIT` sets it), and Mason keeps running. If you set the limit close to the container's limit,
   the container can be killed for running out of memory.
 - **CPU**: Memory matters first, then cores. The benchmark machine (4 vCPU Graviton3, 15 GiB) answered 12 queries a

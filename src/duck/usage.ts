@@ -147,7 +147,7 @@ export interface UsageSample {
   /** the run's memory: the process's resident set (the engine's thread included), and the main thread's JavaScript heap */
   rssBytes: number;
   heapUsedBytes: number;
-  /** the copy's memory in use, and its limit (MASON_DUCKDB_MEMORY; half the machine's by default) */
+  /** the copy's memory in use, and its limit (MASON_DUCKDB_MEMORY; by default store.ts's DEFAULT_MEMORY_RULE) */
   copyMemoryBytes: number | null;
   copyMemoryLimitBytes: number;
   /** replication mode: the WAL the slot holds on the database, bytes (`mason status`'s stream line); null when polling,

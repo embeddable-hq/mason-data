@@ -64,7 +64,7 @@ kubectl get service mason-pg                        # EXTERNAL-IP: the address a
 ## Memory
 
 The container's limit is 8 GiB and `MASON_DUCKDB_MEMORY=4GB` is half of it; change the two together (the default reads
-the cgroup limit and takes half, said explicitly here). The request equals the limit, so the pod is never evicted for
+the cgroup limit and takes half from 5 GiB up, said explicitly here). The request equals the limit, so the pod is never evicted for
 memory it was promised. CPU has a request and no limit: one statement may use every core, and a CPU limit would
 throttle it. Which size: enough that the page cache holds the columns your dashboards read, memory before cores;
 [`deploy/mason-data/README.md`](../mason-data/README.md#memory) has the measurements, `kubectl exec statefulset/mason -- mason doctor`

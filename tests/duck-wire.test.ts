@@ -17,7 +17,7 @@ import pg from "pg";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
 import { DuckDBInstance } from "@duckdb/node-api";
-import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes, pgErrorOf } from "../src/duck/store.ts";
+import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, MEMORY_FLOOR_BYTES, memoryLimitBytes, MIN_SHARE_BYTES, OUTSIDE_RESERVE_BYTES, pgErrorOf } from "../src/duck/store.ts";
 import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.ts";
 import { StatementError } from "../src/duck/statement.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
@@ -1106,7 +1106,7 @@ test("DuckDB's memory_limit text is held to the bytes it was set to, to the tent
 });
 
 // DuckDB's default is 80% of the machine's RAM, in the process that holds V8's heap, the PGlites and every session
-test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, spilling beside the copy", async () => {
+test("DuckDB's memory is bounded: half the RAM, or what leaves the reserve, unless MASON_DUCKDB_MEMORY says, spilling beside the copy", async () => {
   const setting = async (st: DuckStore, name: string): Promise<string> => String((await st.writer.runAndReadAll(`SELECT current_setting('${name}')`)).getRows()[0]![0]);
   const own = await DuckStore.open(path.join(dir, "limited.db"), () => undefined, { memoryLimit: "64MiB" });
   try {
@@ -1121,13 +1121,16 @@ test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, 
     const compression = (await own.writer.runAndReadAll("SELECT column_name, compression FROM pragma_storage_info('packed') WHERE segment_type IN ('VARCHAR', 'BIGINT') GROUP BY 1, 2 ORDER BY 1, 2")).getRowsJS();
     assert.deepEqual(compression, [["i", "BitPacking"], ["j", "ZSTD"]], "the string column ZSTD, the integer its own");
   } finally { own.close(); }
-  // the shared store took the default: half the RAM, or of the container's limit (in whole MiB, DEFAULT_MEMORY_LIMIT),
-  // as DuckDB prints it: to a tenth of its unit
-  assert.equal(DEFAULT_MEMORY_LIMIT, defaultMemoryLimit(machineMemoryBytes()));
-  assert.ok(Math.abs(memoryLimitBytes(DEFAULT_MEMORY_LIMIT) - machineMemoryBytes() / 2) < 2 ** 20, `${DEFAULT_MEMORY_LIMIT} is half of ${machineMemoryBytes()} bytes`);
+  // the shared store took the default: half the RAM, or of the container's limit, or what leaves the reserve beside it
+  // when that is less (in whole MiB, DEFAULT_MEMORY_LIMIT; issue 301), as DuckDB prints it: to a tenth of its unit
+  const total = machineMemoryBytes();
+  assert.equal(DEFAULT_MEMORY_LIMIT, defaultMemoryLimit(total));
+  const rule = Math.min(total / 2, Math.max(MIN_SHARE_BYTES, total - OUTSIDE_RESERVE_BYTES));
+  assert.ok(Math.abs(memoryLimitBytes(DEFAULT_MEMORY_LIMIT) - rule) < 2 ** 20, `${DEFAULT_MEMORY_LIMIT} for ${total} bytes`);
+  assert.ok(total < MEMORY_FLOOR_BYTES || total - memoryLimitBytes(DEFAULT_MEMORY_LIMIT) >= OUTSIDE_RESERVE_BYTES, "the reserve is left beside it");
   assert.equal(store.memoryLimitBytes, memoryLimitBytes(DEFAULT_MEMORY_LIMIT));
   assert.ok(withinDuckDBRounding(await setting(store, "memory_limit"), store.memoryLimitBytes), `${await setting(store, "memory_limit")} for ${store.memoryLimitBytes} bytes`);
-  await assert.rejects(DuckStore.open(path.join(dir, "bad.db"), () => undefined, { memoryLimit: "lots" }), /MASON_DUCKDB_MEMORY="lots" is not an amount of memory: write it as 8GB or 512MiB/);
+  await assert.rejects(DuckStore.open(path.join(dir, "bad.db"), () => undefined, { memoryLimit: "lots" }), /^Error: MASON_DUCKDB_MEMORY="lots" is not an amount of memory: it is the memory the synced data's statements may use before they spill to disk — write it as 8GB or 512MiB, or unset it for the default/);
 });
 
 test("a statement past DuckDB's memory fails alone, 53200 with the way out, and the session goes on", async () => {
@@ -3263,16 +3266,57 @@ test("a set operation's ORDER BY sorts its column as Postgres resolved it, and a
 });
 
 /** each statement's answer against Postgres's (PGlite's), or the error each raises as `code: message`; `bag` compares the
- *  rows as a set, where ties leave their order to each engine; the statements that differ, with both answers */
+ *  rows as a set, where ties leave their order to each engine; the statements that differ, with both answers. A
+ *  statement whose LIMIT cuts inside a tie of distinct rows is one too (`cutInsideATie`): its rows are neither engine's
+ *  promise, so comparing them flakes by load (issue 370) */
 async function unlike(c: pg.Client, statements: ReadonlyArray<readonly [string, "ordered" | "bag"]>): Promise<string[]> {
   const differ: string[] = [];
   for (const [sql, how] of statements) {
     const as = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: how === "bag" ? r.rows.map((x) => JSON.stringify(x)).sort() : r.rows });
     const got = await answer(c, sql).then(as, (e: pg.DatabaseError) => `${e.code}: ${e.message}`);
     const want = await postgres(sql).then(as, (e: { code: string; message: string }) => `${e.code}: ${e.message}`);
-    if (!util.isDeepStrictEqual(got, want)) differ.push(`${sql}\n    mason:    ${JSON.stringify(got).slice(0, 300)}\n    postgres: ${JSON.stringify(want).slice(0, 300)}`);
+    // asked whether the answers agree or not, so the reason is named on every run, beside the rows when they differ
+    // (a statement Postgres refuses has no rows to cut: its comparison is the error's)
+    const undecided = typeof want === "string" ? undefined : await cutInsideATie(sql);
+    if (!util.isDeepStrictEqual(got, want)) differ.push(`${sql}\n    mason:    ${JSON.stringify(got).slice(0, 300)}\n    postgres: ${JSON.stringify(want).slice(0, 300)}${undecided === undefined ? "" : `\n    ${undecided}`}`);
+    else if (undecided !== undefined) differ.push(`${sql}\n    ${undecided}`);
   }
   return differ;
+}
+
+/** why the rows of `sql` are decided by neither engine, or undefined when they are (or `sql` ends in no `LIMIT n
+ *  [OFFSET m]` of literal counts under an ORDER BY). Its OUTERMOST query is read from Postgres's parse; what ties is
+ *  Postgres's own sort, asked as `FETCH FIRST j ROWS WITH TIES`, never the keys derived again: `j` rows WITH TIES
+ *  return more than `j` exactly when row `j` ties with row `j + 1`, whatever order either engine reads a tie in. A cut
+ *  (at the OFFSET and at the end of the LIMIT) inside a tie whose rows are not all the same row leaves which of them
+ *  come back to the engine's order. A DISTINCT ON is skipped: its sort holds its ON keys, which WITH TIES does not tie
+ *  on, so its ties are not the rows' (none ends in a LIMIT in this file) */
+async function cutInsideATie(sql: string): Promise<string | undefined> {
+  type Const = { A_Const?: { ival?: { ival?: number }; isnull?: boolean } };
+  const top = ((await parseSql(sql)).stmts?.[0]?.stmt as { SelectStmt?: { sortClause?: unknown[]; distinctClause?: unknown[]; limitOption?: string; limitCount?: Const; limitOffset?: Const } } | undefined)?.SelectStmt;
+  if (top?.limitOption !== "LIMIT_OPTION_COUNT" || top.limitCount === undefined || !top.sortClause?.length) return undefined;
+  // DISTINCT is `[{}]` in the parse, DISTINCT ON its keys
+  if (top.distinctClause?.some((k) => Object.keys(k as object).length > 0)) return undefined;
+  // a literal count: libpg-query's JSON omits a 0 (`{ ival: {} }`), so a present `ival` with none is 0, never absent
+  const literal = (k: Const | undefined): number | undefined => k?.A_Const?.ival !== undefined ? k.A_Const.ival.ival ?? 0 : undefined;
+  const count = literal(top.limitCount), offset = top.limitOffset === undefined ? 0 : literal(top.limitOffset);
+  if (count === undefined || offset === undefined) return undefined;
+  const tail = /\s(?:LIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?|OFFSET\s+(\d+)(?:\s+ROWS?)?\s+LIMIT\s+(\d+))\s*$/i.exec(sql);
+  // the parse says a trailing LIMIT this does not read: couldn't tell, said as such, never taken as decided
+  if (tail === null || Number(tail[1] ?? tail[4]) !== count || Number(tail[2] ?? tail[3] ?? 0) !== offset) return `the LIMIT tie check could not read this statement's LIMIT ${count} OFFSET ${offset}`;
+  const head = sql.slice(0, tail.index);
+  const withTies = async (j: number): Promise<unknown[][]> => (await postgres(`${head} FETCH FIRST ${j} ROWS WITH TIES`)).rows;
+  for (const cut of offset > 0 ? [offset, offset + count] : [count]) {
+    if (cut === 0) continue;
+    const through = await withTies(cut);
+    if (through.length === cut) continue; // row `cut` ties with no row after it
+    // the tie runs from its first row (the least j whose rows WITH TIES are all of `through`) to the end of `through`
+    let first = cut - 1;
+    while (first > 0 && (await withTies(first)).length === through.length) first--;
+    const tied = new Set(through.slice(first).map((r) => JSON.stringify(r)));
+    if (tied.size > 1) return `the LIMIT cuts inside a tie: its rows are decided by neither engine (rows ${first + 1} to ${through.length} tie, ${tied.size} of them distinct, cut after row ${cut})`;
+  }
+  return undefined;
 }
 
 test("a TABLE statement is found in Postgres's analysis: under FETCH … WITH TIES, and as a set operation's SELECT", async () => {
@@ -3353,7 +3397,10 @@ test("FETCH … WITH TIES carries every cell its exact numbers have, in every sh
       [`SELECT s.* FROM ${q} s ORDER BY s.g, 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
       [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
       [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 2, 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
-      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 3`, "bag"],
+      // (a key that decides the rows: `ORDER BY 3 LIMIT 3` cuts inside four rows tied at 3, its rows neither engine's
+      // promise, issue 370; the rows still tied here are one row twice)
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 3`, "ordered"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 3 OFFSET 2`, "ordered"],
       [`SELECT * FROM ${q} s UNION ALL SELECT * FROM ${q} s2 ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
       [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT r.id, r.id % 2, r.a / r.b FROM ratios r ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
       [`SELECT * FROM (SELECT * FROM ${q} s1) s2 ORDER BY 3, 1 FETCH FIRST 2 ROWS WITH TIES`, "bag"],
@@ -3374,6 +3421,43 @@ test("FETCH … WITH TIES carries every cell its exact numbers have, in every sh
       "SELECT r.a / r.b AS q, * FROM ratios r ORDER BY 2 {limit}",
       `SELECT *, s.id * 2 AS j FROM ${q} s ORDER BY 1 {limit}`,
     ]) assert.deepEqual((await answer(c, sql.replace("{limit}", "FETCH FIRST 2 ROWS WITH TIES"))).rows, (await answer(c, sql.replace("{limit}", "LIMIT 2"))).rows, sql);
+  } finally { await c.end(); }
+});
+
+test("a LIMIT that cuts inside a tie of distinct rows is a difference unlike() reports, whatever order either engine reads", async () => {
+  const c = await client();
+  try {
+    const q = "(SELECT r.id, r.id % 2 AS g, r.a / r.b AS q FROM ratios r)";
+    // four rows tie at q = 3 ((1,1,3) twice, (2,0,3) twice) and LIMIT 3 cuts inside them: named on every run, from
+    // Postgres's answer alone, never only by the runs whose engine order differs (issue 370)
+    const undecided = `WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 3`;
+    for (const how of ["bag", "ordered"] as const) {
+      const found = await unlike(c, [[undecided, how]]);
+      assert.equal(found.length, 1, how);
+      assert.match(found[0]!, /the LIMIT cuts inside a tie: its rows are decided by neither engine \(rows 1 to 4 tie, 2 of them distinct, cut after row 3\)/, how);
+    }
+    // a cut at the OFFSET, in either spelling: rows 2 and 3 of the tie are (1,1,3) and (2,0,3) in some order
+    for (const sql of [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 2 OFFSET 2`, `WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 OFFSET 2 LIMIT 2`]) {
+      const found = await unlike(c, [[sql, "bag"]]);
+      assert.equal(found.length, 1, sql);
+      assert.match(found[0]!, /cut after row 2\)/, sql);
+    }
+    // decided: a key that breaks the tie, a tie of one row repeated, no tie at the cut, a LIMIT that takes the whole
+    // tie, a LIMIT of 0, a LIMIT that is not the outermost query's, a WITH TIES
+    assert.deepEqual(await unlike(c, [
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 3`, "ordered"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 3 OFFSET 2`, "ordered"],
+      ["SELECT * FROM late_c UNION ALL TABLE late_c ORDER BY 1 LIMIT 3", "ordered"],
+      ["SELECT * FROM late_c UNION ALL TABLE late_c ORDER BY 2 DESC LIMIT 3", "ordered"],
+      ["SELECT r.id, r.a / r.b AS q FROM ratios r ORDER BY 2, 1 LIMIT 3", "ordered"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 4`, "bag"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 0`, "ordered"],
+      [`SELECT count(*) FROM (WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 3) s`, "ordered"],
+      [`(WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 2) UNION ALL (WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 FETCH FIRST 1 ROWS WITH TIES)`, "bag"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 FETCH FIRST 3 ROWS WITH TIES`, "bag"],
+    ]), []);
+    // a row output Mason refuses by name (`row-value`), whose rows Postgres's tie leaves decided: one row repeated
+    assert.equal(await cutInsideATie("SELECT ROW(l.c, l.k) AS r FROM late l UNION ALL SELECT ROW(l.c, l.k) FROM late l ORDER BY 1 LIMIT 3"), undefined);
   } finally { await c.end(); }
 });
 

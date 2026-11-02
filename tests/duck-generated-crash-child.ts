@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * A RUN KILLED AT A STEP, for tests/duck-generated.test.ts: builds `counts` in `<dir>`, changes its base, and SIGKILLs itself
- * when the next run reaches `<step>`. It exits only by that signal; anything else is the test's failure.
+ * A RUN KILLED AT A STEP, for tests/duck-generated-restart.test.ts: builds `counts` in `<dir>`, changes its base, and
+ * SIGKILLs itself when the next run reaches `<step>`. It exits only by that signal; anything else is the test's failure.
  */
 import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { built, COUNTS, withWorld } from "./duck-generated-world.ts";
