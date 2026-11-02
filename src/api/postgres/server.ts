@@ -832,6 +832,8 @@ class Session {
   clientAddr: string | null;
   /** the PROXY header a named proxy's connection begins with, while it is read: its bytes so far and its deadline */
   private proxyHead: { bytes: Buffer; timer: NodeJS.Timeout } | null = null;
+  /** a named proxy's header was read: a second one is refused as one */
+  private proxied = false;
 
   constructor(socket: net.Socket, server: Server, door: Door) {
     this.server = server;
@@ -905,6 +907,7 @@ class Session {
     this.proxyHead = null;
     if ("refused" in read) { this.proxyRefused(read.refused); return null; }
     this.clientAddr = clientAddress(this.socket.remoteAddress, read.header);
+    this.proxied = true;
     return head.bytes.subarray(read.length);
   }
 
@@ -919,8 +922,9 @@ class Session {
   /** A PROXY header where none is believed: from an address MASON_PG_PROXY_FROM does not name, or a second one. Refused,
    *  never read: a header is a claim about who connected, and only a named proxy may make it. */
   private unbelievedProxy(): void {
-    this.server.log(`session ${this.id} refused: a PROXY protocol header from ${this.clientAddr ?? "an address that is not shown"}, ` +
-      (this.door.proxyFrom === null || this.door.public ? `and ${this.door.public ? "this socket" : "this listener"} believes none` : `which ${PROXY_SETTING} does not name`) +
+    // a share's socket is public: a stranger's bytes write no line of the log there
+    if (!this.door.public) this.server.log(`session ${this.id} refused: a PROXY protocol header from ${this.clientAddr ?? "an address that is not shown"}, ` +
+      (this.proxied ? "after the header its proxy sent: one header a connection" : this.door.proxyFrom === null ? "and this listener believes none" : `which ${PROXY_SETTING} does not name`) +
       ` — a header is believed only from the addresses ${PROXY_SETTING} names: the proxy's own (docs/POSTGRES-API.md "Behind a TCP proxy")`);
     this.fatal("08P01", "a PROXY protocol header, which this server takes only from the addresses of its own proxy");
   }

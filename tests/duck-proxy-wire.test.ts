@@ -180,6 +180,10 @@ test("a named address must begin with a valid v2 header: none, a v1 header, a br
   assert.equal(errorOf(got)?.C, "28P01", "the startup after the header was read: a password asked, and refused");
   assert.deepEqual((await requests()).slice(before).map((r) => [r.method, r.applicationName, r.clientAddress]), [["CONNECT", "split", "203.0.113.8"]],
     "no refused connection is a row: only the login read after a whole header");
+  // two headers: the second is no header the proxy may send, and is refused as one
+  const twice = await closedWith(net.connect(named.port, "127.0.0.1"), wire.proxyV2Inet4("203.0.113.8", 1), wire.proxyV2Inet4("198.51.100.1", 1));
+  assert.equal(errorOf(twice)?.C, "08P01");
+  assert.ok(logs.some((l) => /refused: a PROXY protocol header from 203\.0\.113\.8, after the header its proxy sent: one header a connection/.test(l)), logs.join("\n"));
   // the deadline: half a header, then nothing
   await t.test("a header not whole in time closes the connection", async () => {
     const slow = net.connect(named.port, "127.0.0.1");
@@ -251,4 +255,18 @@ test("a CancelRequest through the proxy carries its header too and stops the sta
     const e = await failed;
     assert.equal(e?.code, "57014");
   } finally { await c.end(); }
+});
+
+test("a share's socket never reads a header, whatever MASON_PG_PROXY_FROM names: one is refused there without a line of the log, and a connection without one starts as before", async () => {
+  const share = await named.openShare({ tls: { cert: Buffer.from(pair.cert), key: Buffer.from(pair.key) }, authenticate: () => ({}), recheck: async () => undefined, loginHint: "" });
+  try {
+    logs.length = 0;
+    const refused = await closedWith(net.connect(share.port, "127.0.0.1"), wire.proxyV2Inet4("203.0.113.40", 1), wire.sslRequest());
+    assert.equal(errorOf(refused)?.C, "08P01", "the share's loopback is the tunnel's, never a named proxy");
+    assert.deepEqual(logs.filter((l) => /PROXY/.test(l)), [], "a stranger's bytes write no line there");
+    const plain = net.connect(share.port, "127.0.0.1");
+    const answer = await new Promise<Buffer>((resolve, reject) => { plain.once("data", resolve); plain.once("error", reject); plain.write(wire.sslRequest()); });
+    plain.destroy();
+    assert.equal(answer.toString("latin1"), "S", "no header asked of it: the SSLRequest is answered");
+  } finally { await share.close(); }
 });
