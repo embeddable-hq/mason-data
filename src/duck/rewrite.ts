@@ -3321,9 +3321,14 @@ class Rewriter {
   }
 
   /** a text value's key under a collation that is not byte order, as ONE text that orders as Postgres does and ends in
-   *  the value's own bytes (`icuKey`, `libcKey`) */
+   *  the value's own bytes (`icuKey`, `libcKey`). A char(n) is ordered without its padding (bpcharcmp: `'b   '` is `'b'`,
+   *  which an ICU key, whose spaces weigh, would put after `'B'`), its value read back whole from the bytes */
   private textKey(a: AstNode, c: Exclude<DuckCollation, { kind: "bytes" }>): AstNode {
-    return c.kind === "libc" ? libcKey(this.cp, strip(a), c.collate) : icuKey(this.cp, strip(a), c.name);
+    const v = strip(a);
+    if (this.typeOf(v) !== BPCHAR) return c.kind === "libc" ? libcKey(this.cp, v, c.collate) : icuKey(this.cp, v, c.name);
+    const trimmed = fn("rtrim", [this.cp(v)]);
+    const key = c.kind === "libc" ? fn("__mason_libc_key", [trimmed, strConst(c.collate)]) : fn("icu_sort_key", [trimmed, strConst(c.name)]);
+    return concat(key, strConst(" "), fn("hex", [v]));
   }
 
   private minMax(b: Body): AstNode | null {

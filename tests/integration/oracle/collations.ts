@@ -49,6 +49,7 @@ export const COLLATION_CASES: Array<{ name: string; sql: string }> = [
   { name: "collation: an ICU char(n) compared", sql: "SELECT id FROM colls WHERE b > 'alpha' ORDER BY id" },
   // #121 min, max, GREATEST, LEAST, a window's max
   { name: "collation: min and max of each column", sql: "SELECT min(c), max(c), min(i), max(i), min(l), max(l), min(d), max(d) FROM colls" },
+  { name: "collation: GREATEST and LEAST of an ICU char(n)", sql: "SELECT id, greatest(b, 'b'), least(b, 'B'), greatest(b COLLATE \"C\", 'b') FROM colls ORDER BY id" },
   { name: "collation: GREATEST and LEAST of collated columns", sql: "SELECT id, greatest(i, 'b'), least(l, 'B'), greatest(c, 'B') FROM colls ORDER BY id" },
   { name: "collation: a window's max of an ICU column", sql: "SELECT id, max(i) OVER (ORDER BY id) FROM colls ORDER BY id" },
   // #121 an aggregate's ORDER BY, WITHIN GROUP

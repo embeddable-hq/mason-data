@@ -5867,6 +5867,8 @@ test("collation resolver: a column's own collation, a COLLATE on either side, a 
       "SELECT id FROM colls WHERE d NOT BETWEEN (' a' COLLATE \"und-x-icu\") AND 'z' ORDER BY id",
       "SELECT id, CASE WHEN d > 'b' COLLATE \"und-x-icu\" THEN 1 ELSE 0 END FROM colls ORDER BY id",
       "SELECT id, greatest(d, 'b' COLLATE \"und-x-icu\") FROM colls ORDER BY id", "SELECT min(d COLLATE \"und-x-icu\") FROM colls",
+      // a char(n) ordered without its padding, its value read back whole
+      "SELECT id, greatest(d::char(4) COLLATE \"und-x-icu\", 'b'), least(d::char(4), 'B' COLLATE \"und-x-icu\") FROM colls ORDER BY id",
       // #213 a derived table's COLLATE, read through the table around it
       "SELECT * FROM (SELECT a.d COLLATE \"und-x-icu\" AS n FROM colls a ORDER BY 1 LIMIT 8) s ORDER BY s.n",
       "SELECT * FROM (SELECT d COLLATE \"und-x-icu\" AS n, count(*) AS k FROM colls GROUP BY 1) s ORDER BY s.n",
