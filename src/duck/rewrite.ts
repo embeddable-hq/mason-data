@@ -2932,25 +2932,33 @@ class Rewriter {
   /**
    * A VALUE POSTGRES TYPES AT A FIXED SCALE, WRITTEN AS THE DECIMAL OF ITS PROGRAM (PR 415's review r3, the class
    * refused-by-type-not-by-program): a cast to numeric(p, s) (p within the engine's 38 digits, `numericCastWrite`'s
-   * "decimal") or round / trunc(x, n) (a constant n, 0 to 38) of a numeric the engine holds as a double whose program
-   * the plan has (`exactText`: a quotient, an avg). The walk writes it `CAST(<its program's text> AS DECIMAL(p, s))`
-   * (`fixedScaleWritten`), so the engine's value IS Postgres's, and `duckExact` says so: every reader (a USING key, an
-   * array_agg's element, a GROUP BY, DISTINCT, =) then reads it as any exact value. Null where it is not one. Its DECIMAL
-   * holds 38 digits: a round(x, n) of 10^(38 - n) or more is the engine's conversion error, where Postgres answers
+   * "decimal") or round / trunc(x, n) (a constant n up to 38; a negative one is scale 0, as Postgres's) of a numeric the
+   * engine holds as a double whose program the plan has (`exactText`: a quotient, an avg), or of another such value.
+   * The walk writes it `CAST(<its program's text> AS DECIMAL(p, s))` (`fixedScaleWritten`), so the engine's value IS
+   * Postgres's, and `duckExact` says so: every reader (a USING key, an array_agg's element, a GROUP BY, DISTINCT, =)
+   * then reads it as any exact value. Null where it is not one. A round's DECIMAL holds 20 whole digits
+   * (`FIXED_SCALE_WHOLE_DIGITS`): one of 10^20 or more is the engine's conversion error, where Postgres answers
    */
   private fixedScale(n: AstNode): { precision: number; scale: number } | null {
     const b = bodyOf(n);
     if (this.fixedScales.has(b)) return this.fixedScales.get(b)!;
     let found: { precision: number; scale: number } | null = null;
-    const programmed = (x: unknown): boolean => isNode(x) && this.typeOf(x) === NUMERIC && !this.duckExact(x) && this.exactText(x) !== null;
+    // (of a double whose program the plan has, or of a value at a fixed scale itself: round((x / 3)::numeric(10,4), 2))
+    const programmed = (x: unknown): boolean => isNode(x) && this.typeOf(x) === NUMERIC && (!this.duckExact(x) || this.fixedScale(x) !== null)
+      && this.exactText(x) !== null;
     if (kindOf(n) === "TypeCast" && ["numeric", "decimal"].includes(lastName(b.typeName?.names)) && programmed(b.arg)) {
       const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], this.typeOf(b.arg as AstNode), constString(b.arg));
       if (w.as === "decimal") found = { precision: w.precision, scale: w.scale };
     } else if (kindOf(n) === "FuncCall" && ["round", "trunc"].includes(lastName(b.funcname)) && b.over === undefined && b.agg_within_group !== true
       && this.typeOf(n) === NUMERIC) {
       const args = (b.args ?? []) as AstNode[];
-      const scale = args.length === 1 ? 0 : args.length === 2 ? constInt(args[1]) : null;
-      if (scale !== null && scale >= 0 && scale <= 38 && programmed(args[0])) found = { precision: 38, scale };
+      // (Postgres's scale is n's, and 0 for a negative n: round(x, -1) is 120. Its 20 whole digits are the exact
+      // sum's, DECIMAL(38,18)'s (`summed`): the engine unifies two DECIMALs in a list's or a subquery's comparison
+      // (= ANY, IN (SELECT …)) by cutting the scale where their width passes 38, so 38 whole digits would cut the other
+      // side's decimals past n, and 20 leave it 18)
+      const n = args.length === 1 ? 0 : args.length === 2 ? constInt(args[1]) : null;
+      const scale = n === null ? null : Math.max(n, 0);
+      if (scale !== null && scale <= 38 && programmed(args[0])) found = { precision: Math.min(38, scale + FIXED_SCALE_WHOLE_DIGITS), scale };
     }
     // (only a found one is kept: a value read before its FROM items are known is decided again once they are)
     if (found !== null) this.fixedScales.set(b, found);
@@ -5674,6 +5682,9 @@ const VALUE_KEEPING = new Set(["sum", "min", "max", "latest", "any_value", "arg_
 const WRITTEN_EXACT = new Set(["count", "extract", "div"]);
 /** the array functions that read an array's shape, never its elements (`elementsUnread`) */
 const ELEMENT_BLIND = new Set(["array_length", "cardinality", "array_ndims", "array_lower", "array_upper"]);
+/** the whole digits a round / trunc at a fixed scale is written with (`Rewriter.fixedScale`): the exact sum's 20
+ *  (DECIMAL(38,18)), so the engine's list and subquery comparisons keep 18 decimals of the other side */
+const FIXED_SCALE_WHOLE_DIGITS = 20;
 /** Mason's functions whose text is an exact decimal's, which a DECIMAL cast reads exactly (`summed`'s parts) */
 const EXACT_TEXTS = new Set(["__mason_numeric_exact"]);
 

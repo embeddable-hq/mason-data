@@ -6053,7 +6053,9 @@ function textColumnCases(): Array<[string, "ordered"]> {
  * trunc(x, n), a cast to numeric(p, s)) of a quotient or an avg, written as its program's DECIMAL; or an array_agg whose
  * elements no reader sees (its length, its bounds). Every reader that refused a numeric it did not hold exactly.
  */
-const FIXED_SCALES = ["round(o.amount / 3, 2)", "round(o.amount / 4, 2)", "trunc(o.amount / 3, 2)", "round(o.amount / 7)", "(o.amount / 3)::numeric(10,2)", "(o.amount / 4)::numeric(10,2)", "CAST(o.amount / 7 AS decimal(12,4))"];
+const FIXED_SCALES = ["round(o.amount / 3, 2)", "round(o.amount / 4, 2)", "trunc(o.amount / 3, 2)", "round(o.amount / 7)", "(o.amount / 3)::numeric(10,2)", "(o.amount / 4)::numeric(10,2)", "CAST(o.amount / 7 AS decimal(12,4))",
+  // (a negative scale is Postgres's 0; a value at a fixed scale of another)
+  "round(o.amount / 3, -1)", "trunc(o.amount / 7, -1)", "round((o.amount / 3)::numeric(10,4), 2)", "round(round(o.amount / 7, 4), 2)"];
 function fixedScaleCases(): Array<[string, "ordered"]> {
   const out: Array<[string, "ordered"]> = [];
   for (const x of FIXED_SCALES) {
@@ -6064,13 +6066,17 @@ function fixedScaleCases(): Array<[string, "ordered"]> {
       // (an array read by its elements' text: the harness's reference parses a numeric[] where it reads Mason's as its
       // text; the oracle holds the array itself, tests/integration/oracle/bi-shapes.ts)
       [`SELECT array_to_string(array_agg(${x} ORDER BY o.id), ',') FROM orders o`, "ordered"],
-      // (a UNION of values of one scale: of two, the listed mixed-scale-numeric, as any exact column's)
+      // (a set operation of values of one scale: of two, the listed mixed-scale-numeric, as any exact column's)
       [`SELECT ${x} FROM orders o UNION SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "ordered"],
       [`SELECT ${x} FROM orders o INTERSECT SELECT ${x} FROM orders o ORDER BY 1`, "ordered"],
-      [`SELECT ${x} FROM orders o EXCEPT SELECT o.amount FROM orders o ORDER BY 1`, "ordered"],
+      [`SELECT ${x} FROM orders o EXCEPT SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "ordered"],
       [`SELECT ${x} AS q, count(*) FROM orders o GROUP BY ROLLUP (1) ORDER BY 1`, "ordered"],
       [`SELECT sum(DISTINCT ${x}), count(DISTINCT ${x}) FROM orders o`, "ordered"],
       [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.67, 6.67, 40.00]) ORDER BY 1`, "ordered"],
+      // (a list's or a subquery's comparison of more decimals than the value's: the engine unifies the two by cutting
+      // a scale where their width passes 38)
+      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.667, 6.6667, 40.001, 2.5]) ORDER BY 1`, "ordered"],
+      [`SELECT o.id FROM orders o WHERE ${x} IN (SELECT (u.amount / 3)::numeric(10,4) FROM orders u) ORDER BY 1`, "ordered"],
       // (compared outside the recursive WITH query that carries it: PR 207's sixth round refused it as a quotient)
       [`WITH RECURSIVE r(q, n) AS (SELECT ${x}, 1 FROM orders o UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT q, count(*) FROM r WHERE r.q = 6.67 OR r.q > 10 GROUP BY q ORDER BY q`, "ordered"],
     );

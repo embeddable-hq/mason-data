@@ -240,7 +240,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   over a window, `x / y IN (…)` and a grouped query's `ORDER BY` of a division by its alias now show, compare and sort
   Postgres's digits. A division or an average rounded to a fixed scale (`round(x / y, 2)`, `trunc(x / y, 2)`,
   `(x / y)::numeric(10,2)`) is now computed exactly as Postgres rounds it, also where it is joined by `USING`, collected by
-  `array_agg`, grouped or compared. `array_agg` of an unrounded division, and `JOIN … USING` or `NATURAL JOIN` on a
+  `array_agg`, grouped or compared. A `round` or `trunc` of a division or an average of 10^20 or more now fails with
+  `numeric field overflow` instead of answering. `array_agg` of an unrounded division, and `JOIN … USING` or `NATURAL JOIN` on a
   subquery's unrounded division or average, are now refused by name with the way out (`array_agg((x / y)::text)`;
   `JOIN … ON`), where they answered rounded numbers; `array_length` and `cardinality` of such an `array_agg` still
   answer. Nothing to do on upgrade.
