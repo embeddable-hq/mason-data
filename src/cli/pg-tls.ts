@@ -35,7 +35,7 @@ export function runListenerSettings(shell: Readonly<Record<string, string | unde
       fix: "drop --self-signed-tls to serve your certificate, or unset MASON_PG_TLS_CERT and MASON_PG_TLS_KEY to serve a self-signed one" };
   }
   const s = pgListenerSettings({
-    MASON_PG_HOST: shell.MASON_PG_HOST, MASON_PG_PORT: String(o.port), MASON_PG_PLAIN: shell.MASON_PG_PLAIN,
+    MASON_PG_HOST: shell.MASON_PG_HOST, MASON_PG_PORT: String(o.port), MASON_PG_PLAIN: shell.MASON_PG_PLAIN, MASON_PG_PROXY_FROM: shell.MASON_PG_PROXY_FROM,
     MASON_PG_TLS_CERT: o.selfSigned ? path.join(o.home, SELF_SIGNED_FILES.cert) : shell.MASON_PG_TLS_CERT,
     MASON_PG_TLS_KEY: o.selfSigned ? path.join(o.home, SELF_SIGNED_FILES.key) : shell.MASON_PG_TLS_KEY,
   }, "127.0.0.1");

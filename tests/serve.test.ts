@@ -644,4 +644,6 @@ test("mason serve --help lists every setting a server sets: PG_PUBLICATION besid
   const usage = (serveModule as unknown as { SERVE: { usage: string } }).SERVE.usage;
   assert.match(usage, /^ {4}DATABASE_URL .*\n.*\n {4}PG_PUBLICATION {10}the publication the tables under sync: replication are read through, the database owner's,\n {28}never altered: the sources file's publication: first \(publication: \$\{PG_PUBLICATION\} reads\n {28}this one\), else this; default none: Mason makes its own\n/m);
   assert.doesNotMatch(usage, /MASON_CHANGES/);
+  // behind a TCP proxy: the PROXY header's addresses, unset by default
+  assert.match(usage, /\n {4}MASON_PG_PROXY_FROM {5}behind a TCP proxy or load balancer that sends the PROXY protocol v2: its own addresses,\n[^]*\(default unset:\n {28}none is read\)\n/);
 });

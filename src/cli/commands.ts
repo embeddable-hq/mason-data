@@ -1555,8 +1555,9 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --running        the statements running now (Mason must be running)
   --json           as data: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no
                    time); with --requests { requests: [{ requestId, startedAt, endedAt, session, applicationName,
-                   tokenName, user (the mason user), role, attributes (the user's values its role's row filters read, or
-                   null), method, outcome (ok, refused, failed, cancelled), status
+                   clientAddress (the client's address; behind a TCP proxy, the one its PROXY header carries),
+                   tokenName, user (the mason user), role, attributes (the user's values its role's row filters
+                   read, or null), method, outcome (ok, refused, failed, cancelled), status
                    (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
                    bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
                    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,

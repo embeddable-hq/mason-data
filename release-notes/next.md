@@ -15,6 +15,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Behind a TCP load balancer or proxy, the request log can name each real client**: set `MASON_PG_PROXY_FROM` to the
+  proxy's own addresses (CIDRs, comma-separated) and turn on its PROXY protocol v2 (an NLB's target group, HAProxy's
+  `send-proxy-v2`). A connection from those addresses must then begin with the header, and one from any other address
+  that sends a header is refused. Every request now records the client's address (`client_addr`, `clientAddress` in
+  `mason logs --requests --json`) and the `connected` log line says `from <address>`. Unset, nothing else changes.
+
 - **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
   COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
   of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE

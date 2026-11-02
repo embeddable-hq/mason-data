@@ -1559,3 +1559,14 @@ test("the default memory limit's rule is said in src/ only through store.ts's DE
       .filter((l) => DEFAULT_RULE_WORDS.test(l.text)).map((l) => `${f.name}:${l.line}: ${l.text}`));
   assert.deepEqual(hits, [], "say the default through DEFAULT_MEMORY_RULE (src/duck/store.ts), never in words of its own");
 });
+
+// THE CLIENT'S ADDRESS HAS ONE READER (src/api/postgres/proxy.ts `clientAddress`; issue 472): behind a TCP proxy the
+// socket's peer is the proxy, so a reader of `remoteAddress` beside it would name the proxy where the request log names
+// the client. Every read of a socket's peer in the listener is an argument of `clientAddress`.
+test("a socket's remoteAddress is read in src/api only as an argument of clientAddress", () => {
+  const files = scannedFiles(["src/api"]);
+  assert.ok(files.some((f) => f.name === "src/api/postgres/server.ts"), "the listener is scanned");
+  const stray = files.flatMap(({ name, src }) => src.split("\n").flatMap((line, i) =>
+    /\bremoteAddress\b/.test(line) && !/clientAddress\([^)]*\bremoteAddress\b/.test(line) && !/^\s*(\*|\/\/|\/\*)/.test(line) ? [`${name}:${i + 1}: ${line.trim()}`] : []));
+  assert.deepEqual(stray, []);
+});

@@ -15,6 +15,7 @@
 import * as fs from "node:fs";
 import { parsePort } from "../../lib/port.ts";
 import { plainListener, type ListenerProblem } from "./plain.ts";
+import { parseProxyFrom, type ProxyFrom } from "./proxy.ts";
 
 export const DEFAULT_PG_PORT = 5433;
 
@@ -27,12 +28,13 @@ export function pgListenerAddress(env: Readonly<Record<string, string | undefine
   return { host: env.MASON_PG_HOST || apiHost, port: port.port };
 }
 
-/** The listener's address and TLS, as configured: the certificate and key as FILES, read by `readPgTls` when it starts. */
-export interface PgListenerSettings extends PgListenerAddress { tls: { cert: string; key: string } | null }
+/** The listener's address and TLS, as configured: the certificate and key as FILES, read by `readPgTls` when it starts;
+ *  and the addresses a PROXY protocol v2 header is believed from (`MASON_PG_PROXY_FROM`, proxy.ts), absent when unset. */
+export interface PgListenerSettings extends PgListenerAddress { tls: { cert: string; key: string } | null; proxyFrom?: ProxyFrom }
 
 /** Where and how the listener listens, from `env` (`MASON_PG_HOST`, `MASON_PG_PORT`, `MASON_PG_TLS_CERT`,
- *  `MASON_PG_TLS_KEY`, `MASON_PG_PLAIN`), or why it cannot: a bad port, half a certificate, plain off loopback. Reads no
- *  file, so a start can be refused before anything is made. */
+ *  `MASON_PG_TLS_KEY`, `MASON_PG_PLAIN`, `MASON_PG_PROXY_FROM`), or why it cannot: a bad port, half a certificate, plain
+ *  off loopback, a proxy's address that is no address. Reads no file, so a start can be refused before anything is made. */
 export function pgListenerSettings(env: Readonly<Record<string, string | undefined>>, apiHost: string): PgListenerSettings | ListenerProblem {
   const address = pgListenerAddress(env, apiHost);
   if ("problem" in address) return { problem: address.problem, kind: "port" };
@@ -40,7 +42,14 @@ export function pgListenerSettings(env: Readonly<Record<string, string | undefin
   if ((cert && !key) || (key && !cert)) return { problem: "MASON_PG_TLS_CERT and MASON_PG_TLS_KEY go together (PEM files): set both, or neither for a plain listener", kind: "tls_pair" };
   const plain = plainListener(address.host, env.MASON_PG_PLAIN, Boolean(cert && key));
   if (plain !== null) return plain;
-  return { ...address, tls: cert && key ? { cert, key } : null };
+  const proxyFrom = parseProxyFrom(env.MASON_PG_PROXY_FROM);
+  if (proxyFrom !== null && "problem" in proxyFrom) {
+    return { problem: proxyFrom.problem, kind: "proxy_from",
+      why: "a PROXY header names the client every statement is recorded as, so it is believed only from the addresses this names",
+      fix: "Name the addresses of your TCP proxy or load balancer alone, comma-separated (MASON_PG_PROXY_FROM=10.0.0.0/16,10.1.0.0/16), " +
+        "or unset it to read no PROXY header — docs/POSTGRES-API.md \"Behind a TCP proxy\"" };
+  }
+  return { ...address, tls: cert && key ? { cert, key } : null, ...(proxyFrom !== null ? { proxyFrom } : {}) };
 }
 
 /** The certificate and key the settings name, read; or why not. */

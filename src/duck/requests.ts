@@ -51,6 +51,9 @@ export interface LedgerRequest {
   session: number | null;
   /** the client's `application_name` ('' when it sent none) */
   applicationName: string;
+  /** the client's address, as pg_stat_activity's client_addr: the socket's peer, or behind a TCP proxy the client its
+   *  PROXY header carries (MASON_PG_PROXY_FROM); null on a share's socket and in a row recorded before it was kept */
+  clientAddress: string | null;
   /** a service token's NAME (never the token); '' for an interactive token */
   tokenName: string;
   /** the `mason user` the session logged in as, or the one a refused login asked for (src/duck/users.ts); '' for a
@@ -87,7 +90,7 @@ export interface LedgerRequest {
 }
 
 const COLUMNS = ["request_id", "started_at", "session", "application_name", "token_name", "user_name", "method", "sqlstate", "message", "detail", "hint",
-  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap", "role", "attributes"] as const;
+  "rows", "duration_ms", "query", "query_truncated", "seq", "json_reads", "bytes_sent", "gap", "role", "attributes", "client_addr"] as const;
 
 /** the ledger's DDL: one row per request, named for a developer who knows pg_stat_activity */
 /** a ledger made before `mason user` gains its column; a column added last is named in every INSERT */
@@ -122,9 +125,14 @@ export const REQUESTS_BYTES_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF N
  *  other refusal; what `unsupported` groups by. A ledger made before gains it; its old rows are NULL. */
 export const REQUESTS_GAP_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS gap VARCHAR`;
 
+/** THE CLIENT'S ADDRESS (ApiLogRow.clientAddress), named as pg_stat_activity names it: behind a TCP proxy the client its
+ *  PROXY header carries, so a deployment behind one can tell who sent what. A ledger made before gains it; its old rows
+ *  are NULL. */
+export const REQUESTS_CLIENT_ADDR_DDL = `ALTER TABLE ${REQUESTS_TABLE} ADD COLUMN IF NOT EXISTS client_addr VARCHAR`;
+
 export const REQUESTS_DDL = `CREATE TABLE IF NOT EXISTS ${REQUESTS_TABLE} (request_id VARCHAR, started_at TIMESTAMPTZ, session INTEGER, ` +
   `application_name VARCHAR, token_name VARCHAR, user_name VARCHAR, method VARCHAR, sqlstate VARCHAR, message VARCHAR, detail VARCHAR, hint VARCHAR, ` +
-  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR, role VARCHAR, attributes VARCHAR)`;
+  `"rows" BIGINT, duration_ms INTEGER, query VARCHAR, query_truncated BOOLEAN, seq BIGINT, json_reads VARCHAR, bytes_sent BIGINT, gap VARCHAR, role VARCHAR, attributes VARCHAR, client_addr VARCHAR)`;
 
 /** a row as the ledger buffers it: the listener's row and its number in arrival order */
 interface Numbered { row: ApiLogRow; seq: number }
@@ -136,7 +144,7 @@ function valuesOf({ row: r, seq }: Numbered): DuckDBValue[] {
     r.sqlstate ?? null, r.error === undefined || r.error === "" ? null : r.error, r.detail ?? null, r.hint ?? null,
     r.rows === undefined ? null : r.rows, Math.round(r.durationMs), r.payload ?? "", r.payloadTruncated === true, seq,
     r.jsonReads === undefined || r.jsonReads.length === 0 ? null : JSON.stringify(r.jsonReads), r.bytesSent === undefined ? null : r.bytesSent, r.gap ?? null, r.role ?? "",
-    r.attributes === undefined || Object.keys(r.attributes).length === 0 ? null : JSON.stringify(r.attributes)];
+    r.attributes === undefined || Object.keys(r.attributes).length === 0 ? null : JSON.stringify(r.attributes), r.clientAddress ?? null];
 }
 
 /** A ledger row as the commands read it. */
@@ -147,7 +155,7 @@ function requestOf(o: Record<string, unknown>): LedgerRequest {
   const startedAt = new Date(String(o.started_at));
   return {
     requestId: String(o.request_id), startedAt: startedAt.toISOString(), session: o.session === null ? null : Number(o.session),
-    applicationName: String(o.application_name ?? ""), tokenName: String(o.token_name ?? ""), user: String(o.user_name ?? ""), role: String(o.role ?? ""),
+    applicationName: String(o.application_name ?? ""), clientAddress: typeof o.client_addr === "string" ? o.client_addr : null, tokenName: String(o.token_name ?? ""), user: String(o.user_name ?? ""), role: String(o.role ?? ""),
     attributes: typeof o.attributes === "string" && o.attributes !== "" ? JSON.parse(o.attributes) as Record<string, string | string[]> : null, method: String(o.method),
     outcome, status: statusOf(outcome), sqlstate, message: text(o.message), detail: text(o.detail), hint: text(o.hint),
     rows: o.rows === null ? null : Number(o.rows), durationMs: Number(o.duration_ms),
@@ -290,7 +298,7 @@ export class RequestLedger {
 
   /** The ledger of a store: its table made, the rows past the retention deleted, and a trim every hour. */
   static async open(store: DuckStore, log: (line: string) => void, options: LedgerOptions): Promise<RequestLedger> {
-    const history = await History.open(store, [REQUESTS_DDL, REQUESTS_USER_DDL, REQUESTS_SEQ_DDL, REQUESTS_JSON_DDL, REQUESTS_BYTES_DDL, REQUESTS_GAP_DDL, REQUESTS_ROLE_DDL, REQUESTS_ATTRIBUTES_DDL]);
+    const history = await History.open(store, [REQUESTS_DDL, REQUESTS_USER_DDL, REQUESTS_SEQ_DDL, REQUESTS_JSON_DDL, REQUESTS_BYTES_DDL, REQUESTS_GAP_DDL, REQUESTS_ROLE_DDL, REQUESTS_ATTRIBUTES_DDL, REQUESTS_CLIENT_ADDR_DDL]);
     const ledger = new RequestLedger(history, log, options);
     ledger.next = Number((await history.reader.runAndReadAll(`SELECT coalesce(max(seq), -1) + 1 FROM ${REQUESTS_TABLE}`)).getRowsJS()[0]![0]);
     await history.keepTrimmed(() => ledger.trim(), (e) => log(`request log: deleting the requests older than ${ledger.days} days failed: ${e.message}`));
