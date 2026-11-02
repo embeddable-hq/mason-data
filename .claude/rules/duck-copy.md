@@ -132,5 +132,5 @@ again before each review. Its Learn step adds to this list; each bullet names th
   the copy writes what the poll and the stream write, and an older copy's layout is caught (PR 153).
 - A table of large out-of-line values (a few rows a heap page, ~1 MB of text `STORAGE EXTERNAL`, or `jsonb` of ~512 KB)
   under a low `MASON_DUCKDB_MEMORY` at `MASON_COPY_PARALLEL` 3: it syncs in chunks of a page's values, or fails with
-  the operator's way out and never the engine's advice, and never ends in a checkpoint that invalidates the database
-  (issue 96).
+  the operator's way out and never the engine's advice (issue 96); and many moderate ones (~2 KB, 140,000 rows) under
+  128 MB, never refused before they are read (PR 380). A checkpoint that invalidates the database is issue 371's.
