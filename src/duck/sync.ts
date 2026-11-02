@@ -63,7 +63,7 @@ import { KeptJsonPaths, type KeptOptions } from "./kept.ts";
 import type { Source, SourceColumnInfo, SourceTable, SourceView } from "../cli/preflight.ts";
 import { DuckDBEnumType, DuckDBListType, type DuckDBType } from "@duckdb/node-api";
 import type { DuckConnection } from "./executor.ts";
-import type { PgApiType, PgColumn, PgJoin, PgSchema, PgTable, PgView } from "../api/postgres/schema.ts";
+import type { PgApiType, PgCollation, PgColumn, PgJoin, PgSchema, PgTable, PgView } from "../api/postgres/schema.ts";
 import { wireColumn } from "./types.ts";
 import { nextPollDelayMs, SNAPSHOT_SQL, snapshotXmin, xmin8Sql, xminBeforeHolds, xminBeforeSql } from "../cdc/poll.ts";
 import { pgIdent } from "../cdc/pg-wire.ts";
@@ -920,6 +920,8 @@ export class Sync {
   private schemaBuild: Promise<void> = Promise.resolve();
   private tables = new Map<string, AddedTable>();
   private views: PgView[] = [];
+  /** the source's collations (src/cli/preflight.ts), which the catalog declares where it lacks one (`setCollations`) */
+  private collations: PgCollation[] = [];
   private readonly states = new Map<string, CopyState>();
   /** each copied table's columns as its copy was made with them (`columnsKey`): a change copies it again */
   private readonly copiedAs = new Map<string, string>();
@@ -1381,6 +1383,11 @@ export class Sync {
    *  pass. A view over a table that is not copied is left out of it (said in the catalog's log) */
   setViews(views: readonly SourceView[]): void {
     this.views = views.map((v) => ({ schema: v.schema, name: v.name, definition: v.definition, ...(v.comment ? { description: v.comment } : {}) }));
+  }
+
+  /** the source's collations (src/duck/collation.ts): the catalog declares each it lacks, from the next pass */
+  setCollations(collations: readonly PgCollation[]): void {
+    this.collations = collations.map((c) => ({ schema: c.schema, name: c.name, provider: c.provider, collate: c.collate, locale: c.locale, deterministic: c.deterministic }));
   }
 
   /** every table read again from the start: the database was restored to another server (src/cli/dev.ts sourceMove) */
@@ -3732,9 +3739,9 @@ export class Sync {
         .map((x) => { const labels = x.enumLabels !== undefined && x.spelled !== undefined ? synced.get(x.spelled.replace(/\[\]$/, "")) : undefined; return labels === undefined ? x : { ...x, enumLabels: labels }; });
       tables.push({ name: g.table, schema: g.schema, primaryKey: [], columns, joins: [], ...(g.comment !== null ? { description: g.comment } : {}) });
     }
-    const views = this.views;
-    const key = JSON.stringify([tables, views]);
-    if (key !== this.schemaKey) { this.schemaKey = key; this.currentSchema = { database: this.currentSchema.database, tables, ...(views.length > 0 ? { views } : {}) }; }
+    const views = this.views, collations = this.collations;
+    const key = JSON.stringify([tables, views, collations]);
+    if (key !== this.schemaKey) { this.schemaKey = key; this.currentSchema = { database: this.currentSchema.database, tables, ...(views.length > 0 ? { views } : {}), ...(collations.length > 0 ? { collations } : {}) }; }
   }
 }
 
@@ -3791,6 +3798,7 @@ function pgColumn(c: SourceColumnInfo, duck: DuckDBType, now: SourceColumnInfo |
   return { name: c.name, type, spelled, ...(c.comment ? { description: c.comment } : {}), ...(labels !== null ? { enumLabels: labels } : {}), ...(made !== undefined ? { made } : {}),
     ...(facts.notNull ? { notNull: true } : {}), ...(facts.default !== undefined ? { default: facts.default } : {}),
     ...(facts.identity !== undefined ? { identity: facts.identity } : {}), ...(facts.sequence !== undefined ? { sequence: facts.sequence } : {}),
+    ...(facts.collation !== undefined ? { collation: facts.collation } : {}),
     // a number, whatever spelling the column's record kept (an oid is a string in Postgres's JSON, and a copy's columns are JSON)
     ...(c.typeOid !== undefined && double === null ? { typeOid: Number(c.typeOid), ...(c.typeArrayOid !== undefined ? { typeArrayOid: Number(c.typeArrayOid) } : {}) } : {}) };
 }

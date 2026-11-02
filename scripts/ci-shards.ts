@@ -299,7 +299,7 @@ export function docsPath(p: string): boolean {
 export const docsOnly = (paths: readonly string[]): boolean => paths.length > 0 && paths.every(docsPath);
 
 /** The jobs a docs-only run skips: ci.yml runs each only when `needs.changes.outputs.docs == 'false'`. */
-export const DOCS_SKIPS: readonly string[] = ["build", "unit", "oracle", "rest"];
+export const DOCS_SKIPS: readonly string[] = ["build", "unit", "oracle", "collation", "rest"];
 
 /**
  * THE DOCS JOB'S TESTS: every unit test file that reads a doc, so a docs-only change still meets each guard over it (the

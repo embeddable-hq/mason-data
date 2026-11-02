@@ -200,8 +200,41 @@ const BYTE_ORDER_SAMPLE = [0x20, 0x21, 0x2d, 0x30, 0x41, 0x5a, 0x5f, 0x61, 0x7a,
 export const closedWeights = (head: readonly number[], classes: readonly number[], lo: number): number[] =>
   lo === 0 ? [...head] : [...head, classes[lo - 1]!];
 
-/** The source's order of text (its default collation), as the module's header says. */
-export async function readLibcOrder(query: SourceQuery, collate: string, version: string | null): Promise<LibcOrder> {
+/**
+ * A READ UNDER A NAMED COLLATION (`collation`, its SQL name: `pg_catalog."fr_FR"`): every text the read compares or
+ * sorts is made of `chr(…)` or of an array of strings, so each of those carries `COLLATE <collation>` (explicit, it
+ * decides every comparison and ORDER BY it is in), outside the read's string literals. A read of the database's own
+ * collation sends its SQL as it is.
+ */
+export function collatedSql(sql: string, collation: string): string {
+  let out = "";
+  for (let i = 0; i < sql.length;) {
+    if (sql[i] === "'") {
+      let j = i + 1;
+      for (; j < sql.length; j++) { if (sql[j] === "'") { if (sql[j + 1] === "'") { j++; continue; } break; } }
+      out += sql.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (sql.startsWith("chr(", i) && !/[\w.]/.test(sql[i - 1] ?? "")) {
+      let depth = 0, j = i + 3;
+      for (; j < sql.length; j++) { if (sql[j] === "(") depth++; else if (sql[j] === ")" && --depth === 0) break; }
+      // (its argument is a code point's number: no text of its own)
+      out += `(${sql.slice(i, j + 1)} COLLATE ${collation})`;
+      i = j + 1;
+      continue;
+    }
+    if (sql.startsWith("]::text[]", i)) { out += `]::text[] COLLATE ${collation}`; i += 9; continue; }
+    out += sql[i];
+    i++;
+  }
+  return out;
+}
+
+/** The source's order of text under its default collation, or under the named `collation` (`collatedSql`), as the
+ *  module's header says: `collate` is the locale (collcollate) it is read and kept under. */
+export async function readLibcOrder(source: SourceQuery, collate: string, version: string | null, collation?: string): Promise<LibcOrder> {
+  const query: SourceQuery = collation === undefined ? source : (sql) => source(collatedSql(sql, collation));
   const o = emptyLibcOrder(collate, version);
   const held = (): Promise<void> => holdLibcOrder(o, async (pairs) => {
     const less = await askedText(query, pairs, "s < t");

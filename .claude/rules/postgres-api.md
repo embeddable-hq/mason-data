@@ -30,8 +30,18 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   a deadline per statement — `statementMs`, `MASON_PG_CATALOG_TIMEOUT_MS` — since it runs synchronously on whatever
   thread hosts it): `pg_catalog` and `information_schema` statements, and a statement that reads no table at all
   (`SELECT version()`, `SELECT 1`, `current_setting(…)`), are forwarded, under per-session statement names, and the
-  reply relayed byte for byte, never hand-answered from text matching. It holds the copied tables' definitions
-  (`schema.ts`, from the copy's own columns and types) and no rows. It is ONE connection every session shares, so the
+  reply relayed byte for byte, never hand-answered from text matching. Its database is C, so a statement of no table
+  whose analysis ORDERS text under a collation that is not byte order (`SELECT 'a' < 'B'` under en_US or ICU, a VALUES
+  sorted, a `COLLATE "und-x-icu"`) is the synced data's instead (`ordersText`, src/duck/plan.ts: one analysis, 5 to
+  13 ms measured on a loaded laptop, so asked only of a statement of no table whose raw tree has a sort, `<`, `>`,
+  BETWEEN, GREATEST / LEAST, min / max or a COLLATE: `mayOrderText`, translate.ts; issue 122); equality and every other
+  one stay the catalog's. A COLLATE naming a collation the resolver refuses (a nondeterministic one) is the synced
+  data's, which refuses it by name, ordered or not. Two stay the catalog's though they order text: one naming a
+  parameter in a simple Query (Postgres's 42P02, the analysis being a Parse's), and one that holds a numeric (a literal
+  such as 1.5 included), which the catalog computes exactly (Mason gap `fromless-numeric-text-order`, its text then in byte order).
+  It holds the copied tables' definitions (`schema.ts`, from the copy's own columns and types, each column's own
+  collation) and the source's collations (`collationDdl`: a locale PGlite lacks is made under its provider's root, so
+  its name and provider are the source's, and Postgres's analysis names it), and no rows. It is ONE connection every session shares, so the
   server keeps its protocol state itself: after an ErrorResponse it sends the Sync Postgres waits for
   (`ignore_till_sync`; without it one refused Parse silenced the catalog for every session), and a `SET` it validates
   runs inside a transaction it rolls back. A view or default of the source the catalog cannot hold is said in one
@@ -244,3 +254,15 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   …`, `SELECT 1; SELECT E'now'::timestamptz = now()`, the same under EXPLAIN, a CTE or a sub-SELECT): a position read
   in the whole text's frame and used in the statement's, or the reverse, so a rewrite lands beside its token instead
   of on it; `offset-mixed-between-two-frames` (PR 333).
+- A statement of no table that only equates, groups, distincts or filters under a nondeterministic collation the
+  catalog declared (`CREATE COLLATION mason_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)`
+  on the source: `SELECT 'a' = 'A' COLLATE mason_ci`, `SELECT 'a' COLLATE mason_ci IN ('A', 'z')`, `SELECT DISTINCT x
+  COLLATE mason_ci FROM (VALUES ('a'), ('A')) AS v(x)`, the same under GROUP BY and WHERE), beside one that orders
+  text: kept as the catalog's because the routing asked only whether text is ORDERED, so PGlite's own locale answers
+  silently where the resolver would have refused the nondeterministic collation by name; any collation beyond 0/100
+  and byte order in the analysis must reach the resolver; `catalog-answers-under-declared-collation` (PR 413).
+- A statement of no table that the catalog's own analysis, as the session would run it, refuses (`SELECT $1::text <
+  $2::text` sent as a simple Query with no parameters: 42P02 "there is no parameter $1"), under each route a
+  statement of no table can take to the synced data (one that orders text, one under a collation): routed before
+  Postgres could refuse it, so the engine's protocol error (08P01) replaces Postgres's SQLSTATE; a statement is routed
+  only once the catalog's analysis of it succeeds; `fromless-routed-before-postgres-refuses` (PR 413).

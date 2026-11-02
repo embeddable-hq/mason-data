@@ -868,3 +868,40 @@ test("session state: the splice of a catalog statement reaches every call of an 
   // a schema of the user's own: never an override
   assert.equal(await splice("SELECT myapp.version(), myapp.now()"), "SELECT myapp.version(), myapp.now()");
 });
+
+// A SELECT OF NO TABLE THAT ORDERS TEXT (issue 122; issue 253 decision B): the catalog's database is C, so a statement
+// whose analysis orders text under a collation that is not byte order is the synced data's, asked of the listener's
+// `ordersText`; every other statement of no table stays the catalog's, and the question is never asked of one that
+// reads a table
+test("no table: a statement that orders text under a collation is the synced data's, every other the catalog's", async () => {
+  const asked: string[] = [], planned: string[] = [];
+  const duck: DuckOptions = {
+    ...listener,
+    ordersText: async (catalog, text, paramOids, under, bindable) => { asked.push(text); return listener.ordersText!(catalog, text, paramOids, under, bindable); },
+    plan: (catalog, text, ...rest) => { planned.push(text); return listener.plan(catalog, text, ...rest); },
+  };
+  const s = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "shop", masonVersion: "test",
+    authenticate: (p) => tokenFor(p), schema: () => SCHEMA, record: () => undefined, log: () => undefined, duck,
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: s.port, user: "anyone", password: "good-token", database: "shop" });
+  await c.connect();
+  try {
+    const rows = async (sql: string, values?: unknown[]): Promise<unknown[][]> => (await c.query({ text: sql, values, rowMode: "array" } as pg.QueryConfig) as unknown as { rows: unknown[][] }).rows;
+    // under ICU's root 'a' sorts before 'B' (the catalog's C would say false), on either protocol
+    assert.deepEqual(await rows("SELECT 'a' < 'B' COLLATE \"und-x-icu\" AS lt"), [[true]]);
+    assert.deepEqual(await rows("SELECT $1::text < 'B' COLLATE \"und-x-icu\" AS lt", ["a"]), [[true]]);
+    assert.deepEqual(await rows("SELECT x FROM (VALUES ('b'), ('A'), ('a')) AS v(x) ORDER BY x COLLATE \"und-x-icu\""), [["a"], ["A"], ["b"]]);
+    assert.deepEqual(planned.filter((p) => p.includes("und-x-icu")).length, 3, planned.join("\n"));
+    // the database's collation here is C: byte order, the catalog's own answer
+    const before = planned.length;
+    assert.deepEqual(await rows("SELECT 'a' < 'B' AS lt, 'a' = 'A' AS eq, 1 AS one"), [[false, false, 1]]);
+    assert.deepEqual(await rows("SELECT relname FROM pg_class WHERE relname = 'pg_type'"), [["pg_type"]]);
+    assert.equal(planned.length, before, "nothing of the catalog's planned for the synced data");
+    // a statement that reads a table is never asked, nor one of no table that nothing in it could order (its analysis
+    // costs milliseconds: `mayOrderText`)
+    await rows("SELECT count(*) FROM orders");
+    for (const sql of ["SELECT 1 AS one", "SELECT version() IS NOT NULL", "SELECT current_setting('TimeZone'), 'a' = 'A', 'x' || 'y'"]) await rows(sql);
+    assert.deepEqual(asked.filter((a) => a.includes("orders") || /^SELECT (1 AS|version|current_setting)/.test(a)), [], asked.join("\n"));
+  } finally { await c.end(); await s.close(); }
+});

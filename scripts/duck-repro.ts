@@ -21,6 +21,7 @@ import { startPostgresApi } from "../src/api/postgres/server.ts";
 import { LATEST_SQL } from "../src/api/postgres/catalog.ts";
 import { readLibcOrder } from "../src/duck/libc-order.ts";
 import { isLibcCollation } from "../src/duck/rewrite.ts";
+import { pgIdent } from "../src/cdc/pg-wire.ts";
 
 const [ddlFile, stmtFile] = process.argv.slice(2);
 const adminUrl = process.env.IT_POSTGRES_URL;
@@ -60,6 +61,7 @@ try {
   await sync.open();
   sync.setTables(facts.tables.filter((t) => t.key.length > 0));
   sync.setViews(facts.views ?? []);
+  sync.setCollations(facts.collations ?? []);
   await sync.once();
   for (const s of sync.state().filter((x) => x.phase !== "copied")) console.log(`NOT COPIED ${s.source}: ${s.error}`);
   const coll = facts.collation;
@@ -73,7 +75,13 @@ try {
   server = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: tag, masonVersion: "repro",
     authenticate: () => ({ filters: [], subject: undefined }), schema: () => theSync.schema(),
-    record: () => undefined, log: (l) => log.push(l), duck: await theStore.listener(facts.collation, null, libc),
+    record: () => undefined, log: (l) => log.push(l),
+    // the source's collations, and a libc one other than the database's read on its first use, as mason start does
+    duck: await theStore.listener(facts.collation, null, libc, undefined, undefined, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc: async (sc) => {
+      const c = await connectSource(parsed.source);
+      if ("failure" in c) throw new Error(c.failure.message);
+      try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, sc.collate ?? "C", sc.version ?? null, `${pgIdent(sc.schema)}.${pgIdent(sc.name)}`); } finally { c.pg.close(); }
+    } }),
   });
   const source = new pg.Client({ connectionString: dbUrl });
   const mason = new pg.Client({ host: "127.0.0.1", port: server.port, database: tag, user: "repro", password: "x" });

@@ -13,6 +13,7 @@
  * extension. It writes only inside databases it creates, `it_djson_<random>*`, and drops them and its slots at the end.
  */
 import { test, after } from "node:test";
+import { CollationResolver } from "../../src/duck/collation.ts";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -119,7 +120,7 @@ async function plannedAlone(store: DuckStore, url: string, kept: unknown, step: 
     const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
     const sql = "SELECT id, j ->> 's' AS s, j #>> '{s}' AS s2, j -> 's' AS s3, j ->> 'n' AS n, j #> '{o,a,0}' AS o, j -> 2 AS second, k -> 'k' AS kk, k ->> 'k' AS kt, k ->> 'n' AS kn " +
       "FROM docs WHERE j ->> 's' IS NOT NULL OR k ->> 'n' IS NOT NULL ORDER BY id";
-    const p = await planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null, kept: kept });
+    const p = await planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null, kept: kept });
     await reader.run("SET search_path = 'public'");
     const plan = JSON.parse(String((await reader.runAndReadAll(`EXPLAIN (FORMAT JSON) ${p.sql.text}`)).getRowsJS()[0]![1])) as unknown;
     const cols: string[] = [];

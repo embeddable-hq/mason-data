@@ -119,6 +119,11 @@ export function catalogDdl(schema: PgSchema): string[] {
   for (const name of [...new Set(schema.tables.map((t) => t.schema).filter((x): x is string => x !== undefined && x !== "public"))]) {
     statements.push(`CREATE SCHEMA IF NOT EXISTS ${ident(name)};`);
   }
+  // THE SOURCE'S COLLATIONS (src/duck/collation.ts), before the tables: each the catalog lacks, declared under its name with
+  // the source's provider, locale and determinism (a locale PGlite cannot open declared on its root locale: what it
+  // MEANS is the source's row of its name, read by the resolver, never this one's), so a column's COLLATE and a
+  // statement's resolve as on the source. In pg_catalog, public, a table's schema, or a column's collation's schema
+  statements.push(...collationDdl(schema));
   // a source enum a column has: the type, its labels in their declared order, before the tables —
   // spelled as the source's format_type spells it (`mood`, `other.level`, `"Odd"`), its schema made first
   const enums = new Map<string, readonly string[]>();
@@ -143,7 +148,11 @@ export function catalogDdl(schema: PgSchema): string[] {
   });
   for (const table of schema.tables) {
     const lines: string[] = [];
-    for (const c of table.columns) lines.push(`${ident(c.name)} ${c.made !== undefined ? `${madeTypeName(c.spelled!)}${c.spelled!.endsWith("[]") ? "[]" : ""}` : c.spelled ?? PG_API_TYPE_SPELLING[c.type]}${c.notNull === true ? " NOT NULL" : ""}`);
+    for (const c of table.columns) {
+      // a column's own collation: the source's, so Postgres's analysis orders it as the source does
+      const collate = c.collation !== undefined ? ` COLLATE ${ident(c.collation.schema)}.${ident(c.collation.name)}` : "";
+      lines.push(`${ident(c.name)} ${c.made !== undefined ? `${madeTypeName(c.spelled!)}${c.spelled!.endsWith("[]") ? "[]" : ""}` : c.spelled ?? PG_API_TYPE_SPELLING[c.type]}${collate}${c.notNull === true ? " NOT NULL" : ""}`);
+    }
     if (table.primaryKey.length > 0) lines.push(`PRIMARY KEY (${table.primaryKey.map(ident).join(", ")})`);
     statements.push(`CREATE TABLE ${qualified(table)} (\n  ${lines.join(",\n  ")}\n);`);
     // the source's unique indexes, under its names: before the foreign keys that may reference them
@@ -178,6 +187,36 @@ export function catalogDdl(schema: PgSchema): string[] {
     }
   }
   return [...statements, ...constraints, ...sourceTypeNames(schema)];
+}
+
+/**
+ * THE SOURCE'S COLLATIONS THE CATALOG LACKS, declared (one DO block: ~800 ICU collations in tens of milliseconds): each
+ * under its schema and name, by the source's provider, locale and determinism, else — a locale PGlite's ICU or libc
+ * cannot open — the same name on the root locale (ICU), C (libc) or C (builtin), which its analysis treats alike: the
+ * resolver reads what a collation means from the SOURCE's row of its name (src/duck/collation.ts), never this one. Only
+ * where a name can be met: pg_catalog, public, a table's schema, and a synced column's collation's own schema.
+ */
+export function collationDdl(schema: PgSchema): string[] {
+  const used = schema.tables.flatMap((t) => t.columns.flatMap((c) => c.collation !== undefined ? [c.collation] : []));
+  const schemas = new Set(["pg_catalog", "public", ...schema.tables.map((t) => t.schema ?? "public"), ...used.map((c) => c.schema)]);
+  const declared = (schema.collations ?? []).filter((c) => c.provider !== "d" && schemas.has(c.schema));
+  if (declared.length === 0) return [];
+  const out: string[] = [];
+  for (const s of new Set(declared.map((c) => c.schema))) if (s !== "pg_catalog" && s !== "public") out.push(`CREATE SCHEMA IF NOT EXISTS ${ident(s)};`);
+  // ONE INSERT of the rows, never a CREATE COLLATION each: a source lists about 1,600 (every ICU locale and every libc
+  // one the OS has), and a CREATE each took the catalog's start past its deadline (about 18 ms each, measured; the
+  // INSERT, 260 ms for 1,600). The catalog only ANALYSES under them: what a statement orders by is the synced data's, so
+  // a locale PGlite has no data for is never opened. A name the catalog has already (`C`, `und-x-icu`) is the source's
+  // too; the OIDs are past any the catalog makes, so none collides
+  const rows = declared.map((c) => ({ schema: c.schema, name: c.name, provider: c.provider, collate: c.collate, locale: c.locale, deterministic: c.deterministic }));
+  out.push(`INSERT INTO pg_catalog.pg_collation (oid, collname, collnamespace, collowner, collprovider, collisdeterministic, collencoding, collcollate, collctype, colllocale)
+SELECT (greatest((SELECT max(oid)::bigint FROM pg_catalog.pg_collation), 3000000000) + row_number() OVER ())::oid, c.name, n.oid, 10, c.provider, c.deterministic,
+  CASE WHEN c.provider = 'c' THEN 6 ELSE -1 END, CASE WHEN c.provider = 'c' THEN c."collate" END, CASE WHEN c.provider = 'c' THEN c."collate" END,
+  CASE WHEN c.provider <> 'c' THEN coalesce(c.locale, c."collate") END
+FROM json_to_recordset(${literal(JSON.stringify(rows))}) AS c(schema text, name text, provider "char", "collate" text, locale text, deterministic boolean)
+JOIN pg_catalog.pg_namespace n ON n.nspname = c.schema
+WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_collation x WHERE x.collnamespace = n.oid AND x.collname = c.name AND x.collencoding IN (-1, 6));`);
+  return out;
 }
 
 /**

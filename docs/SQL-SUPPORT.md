@@ -18,16 +18,16 @@ each). The copy is read-only.
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 87 forms of them verified |
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 254 functions, 387 operators, 96 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 254 functions, 387 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 58 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 6,571 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 6,714 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 6,571 statements | Mason | DuckDB alone |
+| Of 6,714 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 92% | 27% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -35,7 +35,7 @@ each sent as written to Mason and to a plain DuckDB connection over the same cop
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 19% |
 | refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 21% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 13% |
-| wrong rows, or the rows in another order | — | 8% |
+| wrong rows, or the rows in another order | — | 9% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 3% |
 | another error than Postgres's, or answered where Postgres refuses | — | 9% |
 
@@ -68,7 +68,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `set-config-forms` | set_config() anywhere but alone in a SELECT of no table with literal arguments: beside other columns or a FROM, in a subquery, with an expression, a parameter or NULL, under EXPLAIN | sets the parameter (for the transaction, under is_local) and answers its value | refused (SELECT set_config('name', 'value', false) alone is the session's SET, and with true its SET LOCAL, answered with its value as SHOW answers it) | SET name = 'value', or SELECT set_config('name', 'value', false) on its own |
 | `star-join-twin` | a `*` of a named join (`(a JOIN b …) AS j`) with two columns of one name, sorted by an output of the two, or written out over USING, NATURAL or a GROUP BY | answers | refused (no name tells the two apart) | name the join's columns in the SELECT, or leave the join's own name out |
 | `setop-ordinal-star` | ORDER BY a column number of a UNION / INTERSECT / EXCEPT whose first SELECT lists two columns of that name by a * | sorts by that column | refused | name the columns apart in the first SELECT |
-| `collation-unknown` | COLLATE with a collation other than C, POSIX, default or an ICU locale the engine has | sorts and compares under it | refused | COLLATE "C" for byte order, or no COLLATE for the database's |
+| `collation-unknown` | a collation Mason cannot follow: a nondeterministic one anywhere in a statement, and, where text is ordered, an ICU locale with a keyword (`und-u-kn`) or of a language Mason has no collation for | sorts, compares and equates under it | refused (C, POSIX, ucs_basic, the builtin ones, the source's ICU locales and every libc locale, en_US.utf8 included, are followed) | COLLATE "C" for byte order, or COLLATE "und-x-icu" |
 | `like-any-array` | LIKE / ILIKE ANY (or ALL) over an array that is not written out | answers | refused | write the patterns as ARRAY['…', '…'], or OR the LIKEs |
 | `similar-to-forms` | SIMILAR TO with a pattern or ESCAPE that is not a literal, its substring markers, or substring(… SIMILAR … ESCAPE …) | answers | refused | a literal pattern, or ~ with a POSIX regular expression |
 | `array-remove-type` | array_remove of an array of a type other than text, integers, floats, booleans, dates or timestamps | answers | refused | array_remove an array of one of those types |
@@ -89,7 +89,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `to-timestamp-format` | to_timestamp / to_date with a format that is not a literal | answers | refused | write the format as a string literal |
 | `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a character whose order under a libc collation Mason could not read: under a locale other than English's (`en_*`, where it never is, nor is anything refused), a symbol with a first-level weight of its own (`㏩`, `㊿`) or any rare character the read was held to and differed on | answers, in the collation's order | refused when a value holding one is ordered (the order is read from the database, every character held to it, and glibc's every other character is followed) | ORDER BY x COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the character out |
 | `libc-locale-unread` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) under a database whose libc collation Mason's read does not follow: a locale that tailors ASCII or Latin (tr_TR, sv_SE, cs_CZ) or another C library's. An `en_*` locale never is; the read says which at the start and mason status repeats it | answers, in the collation's order | refused whenever text is ordered; everything else is answered, equality, GROUP BY and DISTINCT of text included | add COLLATE "C" or an ICU collation (COLLATE "und-x-icu") to the comparison or the sort |
-| `percentile-text-libc` | percentile_disc / mode() WITHIN GROUP (ORDER BY text) under a libc collation | answers | refused | order by a number, or ORDER BY … LIMIT in a subquery |
+| `hypothetical-set` | a hypothetical-set aggregate: rank, dense_rank, percent_rank or cume_dist(…) WITHIN GROUP (ORDER BY …) | the rank the value would have among the rows | refused | count the rows below the value in a subquery |
 | `infinite-extract` | extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
 | `time-date-trunc` | date_trunc of a time (Postgres truncates it as an interval) | an interval | refused | date_trunc of a timestamp, or extract the parts |
 | `quote-ident` | quote_ident() | quotes an identifier when it must be | refused (it needs Postgres's keyword list) | quote it in the statement, or format('%s', …) |
@@ -122,11 +122,11 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 
 ## Answered differently
 
-20 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
+19 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
-| `fromless-text-order` | a SELECT of no table that compares or sorts text constants (`SELECT 'a' < 'B'`) under a collation other than C | the database's collation | the catalog answers it, in byte order (issue 141) | add COLLATE "C" to say so, or select FROM a table |
+| `fromless-numeric-text-order` | a SELECT of no table that orders text (`'a' < 'B'`, `… FROM (VALUES …) ORDER BY x`) under a collation other than C and also holds a numeric, a literal such as `1.5` included | the collation's order | the catalog answers it, its numerics exact and its text in byte order (a statement of no table that holds no numeric is answered in the collation's order) | add COLLATE "C" to say so, cast the numeric to text or a float, or select FROM a table |
 | `libc-mark-run-form` | text under a libc collation holding a combining mark written apart, then a digit or punctuation, then a letter that is a compatibility form at the third level (`ß`, `ð`, `æ`): `'a6ß'` against `'a' \|\| U+0308 \|\| '6ß'` | the mark's skipped run moves the third levels one along, and glibc compares a letter's with another's on one scale | reads each letter's third level as its own (a read of one scale asks the source of every letter), so such two values compare the other way round | ORDER BY normalize(x, NFC), which spells the mark in its letter, or COLLATE "C" |
 | `libc-rare-letter` | text under an `en_*` collation holding a rare letter or symbol whose weights no spelling of it says, against the same word's near neighbour: `Ꜳ`, `Ꞛ`, `Ꞝ`, `Ꞟ`, an Arabic presentation-form ligature, a Tamil vowel written in two, a CJK compatibility symbol (`㏩`), a circled number (`㊿`, `⑯`) | the table's own weight | the weights the read could confirm: it sorts in its letter's place, and two such neighbours may turn round. mason status says how many pairs of those the read was held to differ | COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the letter out |
 | `limit-errors` | a value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out: in the select list or a plain derived read's list (a view, a WITH query, a tool's wrapper), where no index gives the ORDER BY, a subquery of the select list among them (one Postgres finds cheap, it computes below its sort), and a SELECT DISTINCT ON's list, where the row raising is in a group but not its first; or in the argument of a LEFT JOIN of a list's rows ON TRUE (unnest(ARRAY[…, 'x'::int]), jsonb_each of a non-object), under a LIMIT with no ORDER BY | the select list's raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers); the lateral's answers: it stops at the limit | the select list's answers: a sorted, limited select list, a derived list a join reads by row number, a subquery in the list and a DISTINCT ON's list are computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does; the lateral's raises: DuckDB computes its argument for a whole vector of rows (2,048) before the limit stops it | none needed for the select list's answer; filter the bad rows out to have neither raise |
@@ -141,7 +141,6 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `min-max-scale-tie` | min / max of a numeric expression (a quotient) where equal values have different scales (0 / 7 and 0 / 1000000) | the last of them it reads, so the scan order decides the trailing zeros | the one whose operands are least (min) or greatest (max) | round(min(a / b), n) |
 | `numeric-stddev` | stddev / variance of DISTINCT integers or numerics, or of a numeric declared without a precision or with more than 18 digits: the last digits | exact numeric arithmetic, to its own scale | a double's 15 digits | round(stddev(x), 10) |
 | `jsonb-equal-text` | GROUP BY or DISTINCT of jsonb values that are equal but written apart ('1.0' and '1.00', '{"a": 1}' and '{"a": 1.0}') | one group, written as the value its plan reads first | one group, written as the value DuckDB reads first: either may be any of them | GROUP BY j::text where the text must decide |
-| `char-n-minmax` | greatest / least of a char(n) beside a text | compares without the padding, answers the first of equal values | compares the padded text | cast the char(n) to text first |
 | `numeric-quotient-compare` | a numeric quotient or average compared by IN, = ANY, IS DISTINCT FROM, NULLIF, CASE x WHEN, <, >, <= or >=, beside a value equal to it in its first 17 significant digits | compares the exact values | compares the doubles, which are equal (=, <>, DISTINCT, GROUP BY, PARTITION BY, count(DISTINCT), ORDER BY, a window's ORDER BY, FETCH … WITH TIES and min / max compare the exact values) | x = v OR x = w in place of IN or = ANY; (x = v) IS NOT TRUE in place of IS DISTINCT FROM; CASE WHEN x = v in place of CASE x WHEN (none for NULLIF or <) |
 | `nested-exact-numeric` | a numeric quotient or average a subquery computed (SELECT a / 3 AS x …), outside it: aggregated by an aggregate but count, sum, avg, min and max (SELECT stddev(x) FROM (…) s); read as the subquery's whole row; and a UNION ALL column of a quotient's text beside an arm of other text | exact digits at every step | the subquery's value as the engine computed it (a double's 15 digits); read as it is, through arithmetic, a cast, sum, avg, min / max, a GROUP BY, an ORDER BY, a join, an alias list, a DISTINCT, a * beside other columns or a UNION ALL arm, it is exact | compute it in the outermost query, name the subquery's columns, or round(…, n) inside |
 | `domain-column` | a column of a domain: pg_typeof(x) and information_schema.columns.domain_name | the domain's name | the column is read and declared as its base type, which is what the wire says and what information_schema's data_type says on Postgres too; a cast to the domain's name (`x::my_domain`) is 42704 | none needed: a value of the domain is a value of its base type; cast to the base type |
@@ -162,7 +161,7 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (1143)
+## What is verified (1145)
 
 ### Types (93)
 
@@ -907,7 +906,7 @@ Not about one statement: what the prototype cannot do yet.
 - the operator ~~*(citext,citext) (an extension's)
 - the operator ~~*(text,text)
 
-### Aggregates (96)
+### Aggregates (97)
 
 - the aggregate array_agg(anynonarray)
 - the aggregate avg(bigint)
@@ -969,6 +968,7 @@ Not about one statement: what the prototype cannot do yet.
 - the aggregate mode(anyelement)
 - the aggregate percentile_cont(double precision,double precision)
 - the aggregate percentile_disc(double precision,anyelement)
+- the aggregate percentile_disc(double precision[],anyelement)
 - the aggregate stddev(bigint)
 - the aggregate stddev(double precision)
 - the aggregate stddev(integer)
@@ -1067,7 +1067,7 @@ Not about one statement: what the prototype cannot do yet.
 - the window function sum(smallint)
 - the window function var_pop(numeric)
 
-### Casts (125)
+### Casts (126)
 
 - a cast from a table's row type to text
 - a cast from a type the source made to text
@@ -1138,6 +1138,7 @@ Not about one statement: what the prototype cannot do yet.
 - a cast from numeric to character varying
 - a cast from numeric to numeric
 - a cast from numeric to text
+- a cast from numeric[] to double precision[]
 - a cast from numrange to text
 - a cast from oid to text
 - a cast from oid[] to text

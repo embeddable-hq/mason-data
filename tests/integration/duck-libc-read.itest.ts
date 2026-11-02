@@ -82,3 +82,32 @@ test("the order read compares as the source does, over random strings of each sc
     }
   } finally { await c.end(); }
 });
+
+// A LIBC COLLATION OTHER THAN THE DATABASE'S (issue 253, decision B): on a C database, "en_US" read under its own name
+// (every text the read makes carries the COLLATE: src/duck/libc-order.ts `collatedSql`) is the order Postgres compares
+// under that COLLATE, never the database's byte order
+test("collation: a named libc collation's order is read under its COLLATE on a database of another collation", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 600_000 }, async (t) => {
+  const named = `${tag}_c`;
+  const namedUrl = (() => { const u = new URL(adminUrl!); u.pathname = `/${named}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE "${named}" TEMPLATE template0 LOCALE 'C'`);
+  try {
+    const collate = psql(namedUrl, "SELECT collcollate FROM pg_collation WHERE collname = 'en_US' AND collprovider = 'c' AND collencoding IN (-1, 6)");
+    if (collate === "") { t.skip("the service has no en_US collation"); return; }
+    const c = new pg.Client(namedUrl);
+    await c.connect();
+    try {
+      const read = await readLibcOrder(async (sql) => (await c.query({ text: sql, rowMode: "array" })).rows as Array<Array<string | null>>, collate, null, '"pg_catalog"."en_US"');
+      const o = decodeLibcOrder(encodeLibcOrder(read));
+      assert.equal(o.bytes || o.unread, false, "en_US read as byte order: the read compared under the database's C");
+      let seed = 7;
+      const next = (n: number): number => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+      const pairs: Array<[string, string]> = Array.from({ length: 4000 }, () => [0, 1].map(() => String.fromCodePoint(...Array.from({ length: 1 + next(4) }, () => ASCII[next(ASCII.length)]!))) as [string, string]);
+      const answers = (await c.query({ text: "SELECT CASE WHEN a < b COLLATE \"en_US\" THEN -1 WHEN a > b COLLATE \"en_US\" THEN 1 ELSE 0 END FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS u(a, b, n) ORDER BY n", values: [pairs.map((p) => p[0]), pairs.map((p) => p[1])], rowMode: "array" })).rows as Array<[number]>;
+      const differ = pairs.filter(([s, u], i) => {
+        const [x, y] = [libcKey(o, s), libcKey(o, u)];
+        return (x < y ? -1 : x > y ? 1 : Math.sign(Buffer.compare(Buffer.from(s), Buffer.from(u)))) !== answers[i]![0];
+      });
+      assert.deepEqual(differ.slice(0, 10), [], `${differ.length} of ${pairs.length} ASCII pairs differ from Postgres's COLLATE "en_US"`);
+    } finally { await c.end(); }
+  } finally { psql(adminUrl!, `DROP DATABASE IF EXISTS "${named}" WITH (FORCE)`); }
+});
