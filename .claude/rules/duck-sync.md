@@ -188,8 +188,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
-again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
+again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
 - A store written by the previous release (a `copy_state` row without the new field, a `point` copied as a STRUCT, an
   enum column): synced again exactly where the layout differs, and quiet on the second start (PR 153).

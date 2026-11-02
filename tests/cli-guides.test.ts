@@ -57,6 +57,10 @@ test("the agent's guide says what mason init demo adds and the table it leaves f
   assert.deepEqual([DEMO_ADDED_TABLES, DEMO_TABLE_TO_ADD], [["customers", "products", "orders"], "order_items"]);
   const text = (await guideText("agent")).replace(/\s+/g, " ");
   assert.ok(text.includes("Init adds customers, products, orders; order_items is left to add: mason add order_items --json && mason wait --json, after mason start."), text.slice(-600));
+  // the demo's generated table, named from the seed's constant, with the wait an agent runs on it
+  const { DEMO_GENERATED } = await import("../src/demo/seed.ts" as string) as { DEMO_GENERATED?: { file: string; table: string } };
+  assert.ok(DEMO_GENERATED !== undefined, "src/demo/seed.ts exports DEMO_GENERATED");
+  assert.ok(text.includes(`It also writes a generated table, ${DEMO_GENERATED.table} (mason/generated_tables/${DEMO_GENERATED.file}: orders and revenue per day and status, over the synced orders): mason wait ${DEMO_GENERATED.table} --json, after mason start.`), text.slice(-600));
 });
 
 test("mason help production says where the metrics are, beside the health check, and that they need no secret", async () => {

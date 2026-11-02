@@ -10,9 +10,9 @@ import { BLOCKING, DEFERRED, parseRecords, recordsOfComment, render, stats, type
 import { authority, ENGINE_RULES, globRe, globsOf, HOST_RULES } from "../scripts/evidence-owed.ts";
 import { deepShapes, PLAN_TIME_DEPTHS } from "./deep-chains.ts";
 
-// The coordinator's Workflow scripts, .claude/workflows/pr-loop.js and issue-loop.js, run CLAUDE.md "The loop" with
-// agents. Nothing else reads them before a run, and a run costs hours, so this is their detector: each is loaded as the
-// Workflow harness loads it (the leading `export const meta` made a `const`, the body an async function of args, agent,
+// The loop's one script, .claude/workflows/pr-loop-slim.js, runs CLAUDE.md "The loop" with agents, and the pr-persistent
+// skill renders every prompt from it (issue 386 retired pr-loop.js and issue-loop.js). Nothing else reads it before a
+// run, and a run costs hours, so this is its detector: it is loaded as the Workflow harness loads it (the leading `export const meta` made a `const`, the body an async function of args, agent,
 // phase, log, workflow and parallel), and run against stub agents keyed on their label.
 
 const ROOT = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..");
@@ -72,8 +72,8 @@ function signs(name: string): Record<string, string> {
 const signatures = (prompt: string): string[] =>
   [...prompt.matchAll(/### From Claude \(([^)]*)\)|Co-Authored-By: Claude ([^<`]*?) <|--from "([^"]*)"/g)].map((m) => (m[1] ?? m[2] ?? m[3])!);
 
-/** The scripts that take one PR through the loop: pr-loop, and the slim one raced against it. */
-const PR_LOOPS = ["pr-loop", "pr-loop-slim"];
+/** The scripts that take one PR through the loop: pr-loop-slim alone, since pr-loop.js was retired (issue 386). */
+const PR_LOOPS = ["pr-loop-slim"];
 
 /** A run of a script with stub agents: `answers[label]` is a value or a function of the call; a stage of pr-loop that
  * most tests do not look at (DEFAULTS) answers as a clean run's would, unless `answers` names it. */
@@ -129,22 +129,26 @@ const START: Answers = {
   implement: { pr: 900, head: sha("a"), summary: "done" },
 };
 const pushed = (c: string) => ({ pr: 900, head: sha(c), summary: "fixed" });
+/** A handoff, in the shape Tom named: what the author knows and the code does not say. */
+const H1 = {
+  decisions: [{ what: "the arm's type is read from Postgres's analysis", why: "the analysis already holds it" }],
+  rejected: [], keyFiles: ["src/duck/plan.ts: rewriteSetOp"], risks: ["a char(n) arm beside a text one"],
+};
+/** A run's first two answers, the implementer's carrying its handoff, as pr-loop-slim's schema asks. */
+const SLIM: Answers = { ...START, implement: { ...(START["implement"] as object), handoff: H1 } };
+/** Two pieces of a split (issue 386): the second stacked on the first. */
+const PIECES = [
+  { title: "301 · schema", branch: "issue-301-schema", scope: "the schema", stacked: false, readFirst: "src/duck/plan.ts" },
+  { title: "301 · reader", branch: "issue-301-reader", scope: "the reader", stacked: true, readFirst: "src/duck/sync.ts" },
+];
+/** A Brief that finds the issue too big for one PR, as its schema lets it answer. */
+const SPLIT_BRIEF = { brief: "too big: two pieces", shapes: [], tests: [], split: PIECES };
 const RESULT_KEYS = ["classes", "deferred", "designRounds", "filed", "fromBase", "head", "pr", "probeRounds", "rounds", "status"];
 const shapeOf = (r: Result) => Object.keys(r).sort();
-const NOTE = {
-  decision: "the kind is read from Postgres's analysis",
-  authorities: [{ fact: "a node's result type", authority: "src/duck/pgtree.ts", whyNotAnother: "the analysis already holds it" }],
-  principles: [{ principle: "Postgres decides, DuckDB computes", how: "no type is guessed from syntax" }],
-  shapes: [{ input: "SELECT a * 2 FROM t", form: "select list", wrapper: "* 2", type: "int4", where: "real run" }],
-  outOfScope: ["the stream"],
-};
 const green = { state: "green", detail: "" };
-/** The stages of pr-loop most tests do not look at, answered as a clean run's. */
+/** The stages most tests do not look at, answered as a clean run's. */
 const DEFAULTS: Array<[RegExp, unknown]> = [
-  [/^design d\d+$/, NOTE],
-  [/^design review d\d+$/, { verdict: "sound", findings: [] }],
   [/^link$/, { linked: true, bodyFixed: false, detail: "listed 900" }],
-  [/^probe \d+$/, clean],
   [/^CI read r\d+$/, green],
   [/^learn$/, pushed("f")],
   [/^learn check$/, { files: [".claude/rules/duck-rewrite.md"] }],
@@ -154,7 +158,9 @@ const DEFAULTS: Array<[RegExp, unknown]> = [
 const core = (labels: string[]) => labels.filter((l) => !/^(design|link|probe|CI read|learn|record)/.test(l));
 
 test("every script parses as the harness loads it, with a pure-literal meta naming them, and none of the calls the harness forbids", () => {
-  for (const name of ["pr-loop", "pr-loop-slim", "issue-loop"]) {
+  assert.deepEqual(execFileSync("git", ["ls-files", ".claude/workflows"], { cwd: ROOT, encoding: "utf8" }).trim().split("\n"), [".claude/workflows/pr-loop-slim.js"],
+    "pr-loop-slim.js is the one workflow: pr-loop.js and issue-loop.js are retired (issue 386)");
+  for (const name of PR_LOOPS) {
     assert.equal(typeof load(name), "function");
     meta(name);
     const src = source(name);
@@ -163,14 +169,14 @@ test("every script parses as the harness loads it, with a pure-literal meta nami
     assert.doesNotMatch(src, /\/Users\/|\/home\/|~\/|[A-Z]:\\\\|scratch/, `${name}: a home path or a scratch folder is written in the script`);
   }
   // a script cannot import, so the one table of signatures is written in each, and held equal here
-  for (const name of ["pr-loop", "pr-loop-slim", "issue-loop"]) assert.deepEqual(signs(name), SIGNS, name);
+  for (const name of PR_LOOPS) assert.deepEqual(signs(name), SIGNS, name);
 });
 
-test("pr-loop: a finding the base has is filed once and never fixed, never counted as a class; a CI fix gets its narrow re-check", async () => {
+test("pr-loop-slim: a finding the base has is filed once and never fixed, never counted as a class; a CI fix gets its narrow re-check", async () => {
   const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t", atBase: "2" });
   const mine = finding({ classKey: "new-class", input: "SELECT mine FROM t" });
-  const { result, calls, labels, prompt } = await run("pr-loop", { ...PR }, {
-    ...START,
+  const { result, calls, labels, prompt } = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM,
     "review r1": { findings: [base, mine], judgedCorrect: ["the cast of a text"] },
     "fix r1": pushed("b"),
     // the same input, given another slug by a later round, is the same finding
@@ -182,11 +188,11 @@ test("pr-loop: a finding the base has is filed once and never fixed, never count
     file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
   });
   assert.deepEqual(labels, [
-    "brief", "design d1", "design review d1", "implement", "link", "probe 1", "review r1", "CI read r1", "fix r1",
-    "probe 2", "review r2", "CI read r2", "learn", "learn check", "CI 1", "CI fix 1", "probe 3", "review r3", "CI read r3", "CI 2", "file", "record",
+    "brief", "implement", "link", "review r1", "CI read r1", "fix r1",
+    "review r2", "CI read r2", "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "record",
   ]);
 
-  for (const c of calls.filter((c) => /^(fix|CI fix|probe fix|learn|record)/.test(c.opts.label))) assert.ok(!c.prompt.includes(base.input), `"${c.opts.label}" was handed the base's finding`);
+  for (const c of calls.filter((c) => /^(fix|CI fix|learn|record)/.test(c.opts.label))) assert.ok(!c.prompt.includes(base.input), `"${c.opts.label}" was handed the base's finding`);
   assert.ok(prompt("fix r1").includes(mine.input));
   assert.equal(prompt("file").split(base.input).length - 1, 1, "the base's finding, met in two rounds under two slugs, is filed once");
   assert.ok(prompt("review r2").includes("the cast of a text"), "the narrow re-check is told what the first review judged correct");
@@ -200,14 +206,14 @@ test("pr-loop: a finding the base has is filed once and never fixed, never count
     assert.ok(prompt(l).includes(`scripts/board.ts status 301 "${status}"`), `"${l}" moves the card to ${status}`);
   }
   for (const c of calls) {
-    const writes = /^(implement|fix|CI fix|probe fix|learn$)/.test(c.opts.label);
+    const writes = /^(implement|fix|CI fix|learn$)/.test(c.opts.label);
     assert.equal(c.opts.isolation === "worktree", writes, `"${c.opts.label}": every writer, and only a writer, works in a worktree of its own`);
-    assert.equal(c.opts.model === "fable", /^(review|design review)/.test(c.opts.label), `"${c.opts.label}": only reviews are Fable's`);
+    assert.equal(c.opts.model === "fable", /^review/.test(c.opts.label), `"${c.opts.label}": only reviews are Fable's`);
   }
   const opts = (l: string) => calls.find((c) => c.opts.label === l)!.opts;
-  for (const l of ["brief", "design d1", "implement", "probe 1", "fix r1", "CI fix 1"]) assert.deepEqual([opts(l).model, opts(l).effort], ["opus", "high"], l);
+  for (const l of ["brief", "implement", "fix r1", "CI fix 1"]) assert.deepEqual([opts(l).model, opts(l).effort], ["opus", "high"], l);
   assert.deepEqual([opts("learn").model, opts("learn").effort], ["opus", "medium"]);
-  for (const l of ["review r1", "review r2", "review r3", "design review d1"]) assert.equal(opts(l).effort, "medium", l);
+  for (const l of ["review r1", "review r2", "review r3"]) assert.equal(opts(l).effort, "medium", l);
   for (const l of ["file", "CI 1", "CI read r1", "link", "record"]) assert.equal(opts(l).model, "sonnet", l);
   assert.ok(prompt("fix r1").includes("tests/conventions.test.ts tests/cli-state-matrix.test.ts"), "a fix round runs the gates \"Local gates\" names for one");
 
@@ -220,30 +226,30 @@ test("pr-loop: a finding the base has is filed once and never fixed, never count
   assert.ok(prompt("implement").includes("git rev-parse --path-format=absolute --git-common-dir"));
 });
 
-test("pr-loop: each trigger of the class rule makes the next fix a class round, and a base finding never does", async () => {
+test("pr-loop-slim: each trigger of the class rule makes the next fix a class round, and a base finding never does", async () => {
   const k = (o: Partial<Record<string, string>> = {}) => finding({ classKey: "k", ...o });
   // twice in one review
-  let r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": { findings: [k({ input: "a" }), k({ input: "b" })], judgedCorrect: [] },
+  let r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [k({ input: "a" }), k({ input: "b" })], judgedCorrect: [] },
     "fix r1 (class)": (c: Call) => { assert.match(c.prompt, /CLASS round/); return pushed("b"); }, "review r2": clean, "CI 1": { state: "green", detail: "" },
   });
   assert.ok(r.labels.includes("fix r1 (class)"), "twice in one review");
   // across rounds
-  r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": { findings: [k({ input: "a" })], judgedCorrect: [] }, "fix r1": pushed("b"),
+  r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [k({ input: "a" })], judgedCorrect: [] }, "fix r1": pushed("b"),
     "review r2": { findings: [k({ input: "b" })], judgedCorrect: [] }, "fix r2 (class)": pushed("c"), "review r3": clean, "CI 1": { state: "green", detail: "" },
   });
   assert.deepEqual(r.labels.filter((l) => l.startsWith("fix")), ["fix r1", "fix r2 (class)"], "across rounds");
   // carried in from the stack
-  r = await run("pr-loop", { ...PR, repo: "/srv/checkout", knownClasses: { k: { count: 1, why: "met on the PR below" } } }, {
-    ...START, "review r1": { findings: [k()], judgedCorrect: [] }, "fix r1 (class)": pushed("b"), "review r2": clean, "CI 1": { state: "green", detail: "" },
+  r = await run("pr-loop-slim", { ...PR, repo: "/srv/checkout", knownClasses: { k: { count: 1, why: "met on the PR below" } } }, {
+    ...SLIM, "review r1": { findings: [k()], judgedCorrect: [] }, "fix r1 (class)": pushed("b"), "review r2": clean, "CI 1": { state: "green", detail: "" },
   });
   assert.ok(r.labels.includes("fix r1 (class)"), "carried in from the stack");
   assert.ok(r.prompt("implement").includes("/srv/checkout/scripts/board.ts status 301"), "args.repo is the board's checkout");
   assert.ok(r.calls.every((c) => !c.prompt.includes("<repo>")), "with args.repo no prompt leaves the repository to be found");
   // a base finding of k, in round 1 and twice over, never makes a round of k a class round
-  r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": { findings: [k({ origin: "base", input: "x" }), k({ origin: "base", input: "y" }), finding({ classKey: "j", input: "a" })], judgedCorrect: [] },
+  r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [k({ origin: "base", input: "x" }), k({ origin: "base", input: "y" }), finding({ classKey: "j", input: "a" })], judgedCorrect: [] },
     "fix r1": pushed("b"), "review r2": { findings: [k({ input: "b" })], judgedCorrect: [] }, "fix r2": pushed("c"), "review r3": clean,
     "CI 1": { state: "green", detail: "" }, file: { issues: [] },
   });
@@ -252,37 +258,37 @@ test("pr-loop: each trigger of the class rule makes the next fix a class round, 
   assert.equal((r.result["classes"] as Record<string, { count: number }>)["k"]!.count, 1, "the base's two findings of k are not counted");
 });
 
-test("pr-loop: every exit returns one shape, and the base's findings are filed at every exit", async () => {
+test("pr-loop-slim: every exit returns one shape, and the base's findings are filed at every exit", async () => {
   const base = finding({ origin: "base", classKey: "b", input: "SELECT on_base FROM t" });
   // MAX_ROUNDS: four reviews with findings, three fixes, then a stop that still files
-  const many: Answers = { ...START, file: { issues: [{ classKey: "b", source: "base", issue: 951, action: "filed" }] } };
+  const many: Answers = { ...SLIM, file: { issues: [{ classKey: "b", source: "base", issue: 951, action: "filed" }] } };
   for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [base] : [])], judgedCorrect: [] };
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
-  let r = await run("pr-loop", { ...PR }, many);
+  let r = await run("pr-loop-slim", { ...PR }, many);
   assert.match(String(r.result["status"]), /^still 1 finding\(s\) after 4 rounds/);
   assert.deepEqual(r.labels.slice(-2), ["file", "record"], "the MAX_ROUNDS exit files the base's findings, then posts its record");
   assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
 
   // a CI wait that returns nothing
-  r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": null });
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": null });
   assert.match(String(r.result["status"]), /^CI wait 1 returned nothing/);
   assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
   assert.equal(r.result["head"], sha("a"));
 
   // a CI fix that moves no head, and one that says flake, end the stage: CI is not waited on again for the same failure
   for (const fix of [{ ...pushed("a"), flake: false }, { ...pushed("a"), flake: true }]) {
-    r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": { state: "failed", detail: "flaky" }, "CI fix 1": fix });
+    r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": { state: "failed", detail: "flaky" }, "CI fix 1": fix });
     assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "CI fix 1"]);
     assert.match(String(r.result["status"]), fix.flake ? /flake/ : /pushed nothing/);
     assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
   }
 
   // a fix round that moves no head ends the run too
-  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [finding({})], judgedCorrect: [] }, "fix r1": pushed("a") });
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { findings: [finding({})], judgedCorrect: [] }, "fix r1": pushed("a") });
   assert.match(String(r.result["status"]), /pushed nothing/);
 
   // a brief that fails, before any PR
-  r = await run("pr-loop", { ...PR }, { brief: null });
+  r = await run("pr-loop-slim", { ...PR }, { brief: null });
   assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
   assert.equal(r.result["pr"], null);
 });
@@ -290,36 +296,36 @@ test("pr-loop: every exit returns one shape, and the base's findings are filed a
 const red = { state: "failed", detail: "a test failed" };
 const f = (input: string) => ({ findings: [finding({ classKey: `c-${input}`, input })], judgedCorrect: [] });
 
-test("pr-loop: the round bound is the PR's, counted through a CI fix's re-check", async () => {
+test("pr-loop-slim: the round bound is the PR's, counted through a CI fix's re-check", async () => {
   // two rounds before CI, two in a CI fix's re-check: the fourth is the PR's last, whatever call it falls in
-  let r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false },
+  let r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false },
     "review r3": f("b"), "fix r3": pushed("d"), "review r4": f("c"),
   });
   assert.match(String(r.result["status"]), /^still 1 finding\(s\) after 4 rounds/);
   assert.equal((r.result["rounds"] as unknown[]).length, 4);
   assert.ok(!r.labels.includes("review r5"));
   // the bound already reached when a CI fix lands: no fifth review, and the status says the head was not re-checked
-  r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": f("b"), "fix r2": pushed("c"), "review r3": f("c"), "fix r3": pushed("d"),
+  r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": f("b"), "fix r2": pushed("c"), "review r3": f("c"), "fix r3": pushed("d"),
     "review r4": clean, "CI 1": red, "CI fix 1": { ...pushed("e"), flake: false },
   });
   assert.match(String(r.result["status"]), /^4 review rounds reached; head eeeeeee is not re-checked/);
   assert.equal(r.result["head"], sha("e"));
 });
 
-test("pr-loop: the head, not the flag, says whether a CI fix pushed; the last CI fix's CI is read", async () => {
+test("pr-loop-slim: the head, not the flag, says whether a CI fix pushed; the last CI fix's CI is read", async () => {
   // flake: true with a head that moved: it was pushed, so it is re-checked and its CI read
-  let r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": clean, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: true }, "review r2": clean, "CI 2": { state: "green", detail: "" },
+  let r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": clean, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: true }, "review r2": clean, "CI 2": { state: "green", detail: "" },
   });
   assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "CI fix 1", "review r2", "CI 2"]);
   assert.match(String(r.result["status"]), /^reviewed/);
   assert.equal(r.result["head"], sha("b"));
 
   // three CI fixes: the third one's CI is waited on before "still red"
-  r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": clean, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: false }, "review r2": clean,
+  r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": clean, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: false }, "review r2": clean,
     "CI 2": red, "CI fix 2": { ...pushed("c"), flake: false }, "review r3": clean,
     "CI 3": red, "CI fix 3": { ...pushed("d"), flake: false }, "review r4": clean, "CI 4": red,
   });
@@ -328,161 +334,34 @@ test("pr-loop: the head, not the flag, says whether a CI fix pushed; the last CI
   assert.match(String(r.result["status"]), /^CI still red after 3 fixes/);
 });
 
-test("issue-loop: without tasks it plans and returns, and runs nothing else", async () => {
-  const { result, calls, flowCalls } = await run("issue-loop", { issue: 300 }, {
-    plan: { tasks: [{ title: "300 · a", branch: "issue-300-a", scope: "s", stacked: false, readFirst: "r" }], notes: "" },
-  });
-  assert.deepEqual(calls.map((c) => c.opts.label), ["plan"]);
-  assert.equal(flowCalls.length, 0);
-  assert.match(String(result["status"]), /^planned/);
-  assert.deepEqual([calls[0]!.opts.model, calls[0]!.opts.effort], ["opus", "high"]);
-});
-
-const TASKS = [
-  { title: "300 · a", branch: "issue-300-a", scope: "first", stacked: false, readFirst: "r" },
-  { title: "300 · b", branch: "issue-300-b", scope: "second", stacked: true, readFirst: "r" },
-];
-const SETUP = { setup: { subIssues: [311, 312] } };
-const RUN_KEYS = ["classes", "done", "resume", "status", "tasks"];
-
-test("issue-loop: a stacked task is based on the one before, its PR stacked on that PR, with that PR's classes", async () => {
-  const firstClasses = { "met-below": { count: 2, why: "w" } };
-  const { result, calls, flowCalls } = await run("issue-loop", { issue: 300, tasks: TASKS }, SETUP, [
-    () => ({ status: "reviewed, ...", pr: 401, classes: firstClasses }),
-    () => ({ status: "reviewed, ...", pr: 402, classes: { ...firstClasses, more: { count: 1, why: "w" } } }),
-  ]);
-  assert.deepEqual(calls.map((c) => c.opts.label), ["setup"]);
-  assert.equal(calls[0]!.opts.model, "sonnet");
-  assert.ok(calls[0]!.prompt.includes('board.ts status 300 "In progress"'), "the parent's card is moved to In progress");
-  assert.deepEqual(flowCalls.map((f) => f.spec), ["pr-loop", "pr-loop"], "the named workflow, by default");
-  const [first, second] = flowCalls.map((f) => f.args);
-  assert.deepEqual([first!["base"], first!["stackedOn"], first!["issue"]], ["main", "", 311]);
-  assert.deepEqual([second!["base"], second!["stackedOn"], second!["issue"]], ["issue-300-a", "401", 312]);
-  assert.deepEqual(second!["knownClasses"], firstClasses);
-  for (const a of [first!, second!]) assert.ok(!("scratch" in a) && !("repo" in a), "no scratch folder, and no repo unless given");
-  assert.match(String(result["status"]), /^every task reviewed/);
-  assert.deepEqual(shapeOf(result), RUN_KEYS);
-});
-
-test("issue-loop: a stop returns a resume whose tasks carry their sub-issues, and a resumed Setup that makes another is refused", async () => {
-  const stop = await run("issue-loop", { issue: 300, tasks: TASKS, prLoop: "/x/pr-loop.js", repo: "/srv/checkout" }, SETUP, [
-    () => ({ status: "CI not finished within the bound", pr: 401, classes: {} }),
-  ]);
-  assert.equal(stop.flowCalls.length, 1);
-  assert.deepEqual(stop.flowCalls[0]!.spec, { scriptPath: "/x/pr-loop.js" });
-  assert.equal(stop.flowCalls[0]!.args["repo"], "/srv/checkout");
-  assert.match(String(stop.result["status"]), /^stopped at task 1/);
-  assert.deepEqual(shapeOf(stop.result), RUN_KEYS);
-  const resume = stop.result["resume"] as Record<string, unknown>;
-  assert.equal(resume["from"], 0);
-  assert.deepEqual((resume["tasks"] as Array<{ subIssue: number }>).map((t) => t.subIssue), [311, 312]);
-
-  // run again with the resume: Setup is told the sub-issues, and is held to them
-  const again = await run("issue-loop", resume, { setup: (c: Call) => { assert.ok(c.prompt.includes("(sub-issue #311)") && c.prompt.includes("(sub-issue #312)")); return { subIssues: [311, 312] }; } }, [
-    (_s, a) => { assert.equal(a["issue"], 311); return { status: "reviewed", pr: 401, classes: {} }; },
-    (_s, a) => { assert.equal(a["issue"], 312); return { status: "reviewed", pr: 402, classes: {} }; },
-  ]);
-  assert.match(String(again.result["status"]), /^every task reviewed/);
-  const twice = await run("issue-loop", resume, { setup: { subIssues: [311, 999] } });
-  assert.match(String(twice.result["status"]), /^setup failed: it returned another sub-issue for #312/);
-  assert.equal(twice.flowCalls.length, 0);
-});
-
 // ---------------------------------------------------------------- the first-pass rules (docs/DESIGN.md "The
 // independent review": a design note reviewed before code, a probe before every review, CI read beside it, every
 // round carried to the next fix, each class learnt as a probe, and the record that says how often a PR passes)
 
-const designFinding = { problem: "the type is guessed from a list of function names", class: "type-from-syntax", principle: "Postgres decides" };
-const revise = { verdict: "revise", findings: [designFinding] };
-
-test("pr-loop: the design note is reviewed before any code, revised at most once, then carried to the implementer and every fix", async () => {
-  const r = await run("pr-loop", { ...PR }, {
-    ...START,
-    "design review d1": revise,
-    "design d2": (c: Call) => { assert.ok(c.prompt.includes(designFinding.problem) && c.prompt.includes(NOTE.decision), "the revision is given the note and its findings"); return NOTE; },
-    "design review d2": revise,
-    "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
-  });
-  assert.deepEqual(r.labels.slice(0, 6), ["brief", "design d1", "design review d1", "design d2", "design review d2", "implement"]);
-  assert.ok(!r.labels.includes("design d3"), "two design rounds at most");
-  assert.ok(r.prompt("design review d1").includes(NOTE.authorities[0]!.authority), "the design review reads the note's authorities");
-  for (const l of ["implement", "fix r1"]) {
-    assert.ok(r.prompt(l).includes(NOTE.decision) && r.prompt(l).includes(NOTE.shapes[0]!.input), `"${l}" is given the note`);
-    assert.ok(r.prompt(l).includes(designFinding.problem), `"${l}" is given the design findings still open`);
-  }
-  assert.ok(r.prompt("implement").includes("## Design"), "the note goes in the PR body under ## Design");
-  assert.ok(!r.prompt("design review d2").includes("Open design findings"), "within the design rounds, a finding is the next round's, not open");
-  assert.equal((r.result["designRounds"] as unknown[]).length, 2);
-  assert.match(String(r.result["status"]), /^reviewed.*1 design finding\(s\) still open after 2 design rounds/);
-
-  // a sound note at once: one round, nothing open
-  const once = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
-  assert.deepEqual(once.labels.slice(0, 4), ["brief", "design d1", "design review d1", "implement"]);
-  assert.doesNotMatch(String(once.result["status"]), /design/);
-  // a design review that returns nothing stops before any code, with no PR to post a record on
-  const failed = await run("pr-loop", { ...PR }, { ...START, "design review d1": null });
-  assert.deepEqual(failed.labels, ["brief", "design d1", "design review d1"]);
-  assert.match(String(failed.result["status"]), /^design review d1 failed/);
-  assert.deepEqual(shapeOf(failed.result), RESULT_KEYS);
-});
-
-test("pr-loop: a probe runs before every review, two rounds a push at most, never counted toward MAX_ROUNDS", async () => {
-  // every push's first probe finds one of this PR's, its fix is probed again (clean), then Fable reads it
-  const a: Answers = { ...START };
-  let c = 0;
-  const next = () => pushed(String.fromCharCode(98 + c++));
-  for (let p = 1; p <= 8; p++) a[`probe ${p}`] = p % 2 ? { findings: [finding({ classKey: `p${p}`, input: `probe-${p}` })], judgedCorrect: [] } : clean;
-  for (let p = 1; p <= 8; p += 2) a[`probe fix ${p}`] = next;
-  for (let i = 1; i <= 4; i++) a[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` })], judgedCorrect: [] };
-  for (let i = 1; i <= 3; i++) a[`fix r${i}`] = next;
-  let r = await run("pr-loop", { ...PR }, a);
-  assert.equal((r.result["rounds"] as unknown[]).length, 4, "four review rounds, whatever the probe's rounds");
-  assert.equal((r.result["probeRounds"] as unknown[]).length, 8);
-  assert.match(String(r.result["status"]), /^still 1 finding\(s\) after 4 rounds/);
-  for (const [i, l] of r.labels.entries()) if (/^review r/.test(l)) assert.match(r.labels[i - 1]!, /^probe \d+$/, `"${l}" is probed first`);
-  assert.ok(r.prompt("probe 1").includes("## What review probes") && r.prompt("probe 1").includes(NOTE.shapes[0]!.input), "the probe runs the rules' probes and the note's shapes");
-  assert.match(r.prompt("probe 1"), /outer join's nullable side/);
-
-  // at most two probe rounds on one push: the second fix goes to the review unprobed
-  r = await run("pr-loop", { ...PR }, {
-    ...START,
-    "probe 1": { findings: [finding({ classKey: "x", input: "p1" }), finding({ origin: "base", classKey: "on-base", input: "probe-base" })], judgedCorrect: [] },
-    "probe fix 1": pushed("b"),
-    "probe 2": { findings: [finding({ classKey: "y", input: "p2" })], judgedCorrect: [] },
-    "probe fix 2": pushed("c"),
-    "review r1": clean, "CI 1": green, file: { issues: [{ classKey: "on-base", source: "base", issue: 960, action: "filed" }] },
-  });
-  assert.deepEqual(r.labels.slice(4, 10), ["link", "probe 1", "probe fix 1", "probe 2", "probe fix 2", "review r1"]);
-  assert.ok(r.prompt("review r1").includes(`diff origin/main ${sha("c")}`), "the review reads the last probe fix");
-  assert.ok(r.prompt("file").includes("probe-base"), "a probe's base finding is filed");
-  assert.ok(!r.prompt("probe fix 1").includes("probe-base"), "and never fixed");
-  assert.equal(r.calls.find((x) => x.opts.label === "probe fix 1")!.opts.isolation, "worktree");
-  assert.ok(r.prompt("probe fix 1").includes("tests/conventions.test.ts tests/cli-state-matrix.test.ts"), "a probe fix runs a fix round's gates");
-});
-
-test("pr-loop: every fix carries the note and every earlier round, labelled, with what each judged correct", async () => {
-  const r = await run("pr-loop", { ...PR }, {
-    ...START,
-    "probe 1": { findings: [finding({ classKey: "p", input: "SELECT probe_found FROM t" })], judgedCorrect: ["probe-judged"] },
-    "probe fix 1": pushed("b"),
+test("pr-loop-slim: every fix carries the note and every earlier round, labelled, with what each judged correct", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM,
     "review r1": { findings: [finding({ classKey: "a", input: "SELECT r1_found FROM t" })], judgedCorrect: ["r1-judged"] },
     "fix r1": pushed("c"),
     "review r2": { findings: [finding({ classKey: "b", input: "SELECT r2_found FROM t" })], judgedCorrect: ["r2-judged"] },
     "fix r2": pushed("d"),
-    "review r3": clean, "CI 1": green,
+    "review r3": { findings: [finding({ classKey: "c", input: "SELECT r3_found FROM t" })], judgedCorrect: ["r3-judged"] },
+    "fix r3": pushed("e"),
+    "review r4": clean, "CI 1": green,
   });
-  const fix2 = r.prompt("fix r2");
-  for (const s of ["### probe 1", "SELECT probe_found FROM t", "probe-judged", "### review r1", "SELECT r1_found FROM t", "r1-judged", "SELECT r2_found FROM t", NOTE.decision]) {
-    assert.ok(fix2.includes(s), `fix r2 carries ${s}`);
+  const fix3 = r.prompt("fix r3");
+  for (const s of ["### review r1", "SELECT r1_found FROM t", "r1-judged", "### review r2", "SELECT r2_found FROM t", "r2-judged", "SELECT r3_found FROM t", "`## Design` (`gh pr view 900 --json body`)"]) {
+    assert.ok(fix3.includes(s), `fix r3 carries ${s}`);
   }
-  assert.ok(fix2.indexOf("### probe 1") < fix2.indexOf("### review r1"), "oldest first");
-  assert.ok(r.prompt("fix r1").includes("### probe 1") && !r.prompt("fix r1").includes("### review r1"), "a round is not its own earlier round");
+  assert.ok(fix3.indexOf("### review r1") < fix3.indexOf("### review r2"), "oldest first");
+  assert.ok(r.prompt("fix r2").includes("### review r1") && !r.prompt("fix r2").includes("### review r2"), "a round is not its own earlier round");
+  assert.ok(!r.prompt("fix r1").includes("### review r1"), "the first fix has no earlier round");
 });
 
-test("pr-loop: CI is read beside each review, and its failure goes into that round's fix, in one push", async () => {
+test("pr-loop-slim: CI is read beside each review, and its failure goes into that round's fix, in one push", async () => {
   let ciStarted = false;
-  const r = await run("pr-loop", { ...PR }, {
-    ...START,
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM,
     "review r1": async () => { await new Promise((ok) => setImmediate(ok)); assert.ok(ciStarted, "CI is read while the review runs"); return f("a"); },
     "CI read r1": () => { ciStarted = true; return { state: "failed", detail: "tests/workflows.test.ts: boom" }; },
     "fix r1": pushed("b"), "review r2": clean, "CI read r2": { state: "timeout", detail: "" }, "CI 1": green,
@@ -494,52 +373,49 @@ test("pr-loop: CI is read beside each review, and its failure goes into that rou
   assert.equal(parseRecords(r.prompt("record"))[0]!.ciFixes, 1);
 
   // a CI read that could not tell sends nothing back
-  const unsure = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "CI read r1": null, "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  const unsure = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "CI read r1": null, "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
   assert.doesNotMatch(unsure.prompt("fix r1"), /CI failed/);
 });
 
-test("pr-loop: learn turns every finding of the PR into a review probe, before CI so CI covers it, and only when there was one", async () => {
-  const r = await run("pr-loop", { ...PR }, {
-    ...START,
-    "design review d1": revise, "design d2": NOTE,
-    "probe 1": { findings: [finding({ classKey: "p", input: "SELECT probe_found FROM t" })], judgedCorrect: [] },
-    "probe fix 1": pushed("b"),
+test("pr-loop-slim: learn turns every finding of the PR into a review probe, before CI so CI covers it, and only when there was one", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM,
     "review r1": { findings: [finding({ classKey: "a", input: "SELECT review_found FROM t" })], judgedCorrect: [] },
-    "fix r1": pushed("c"), "review r2": clean, "CI 1": green,
+    "fix r1": pushed("c"), "review r2": { findings: [finding({ classKey: "b", input: "SELECT review2_found FROM t" })], judgedCorrect: [] },
+    "fix r2": pushed("d"), "review r3": clean, "CI 1": green,
   });
-  assert.deepEqual(r.labels.slice(-5), ["CI read r2", "learn", "learn check", "CI 1", "record"]);
+  assert.deepEqual(r.labels.slice(-5), ["CI read r3", "learn", "learn check", "CI 1", "record"]);
   const learn = r.prompt("learn");
-  for (const s of ["SELECT probe_found FROM t", "SELECT review_found FROM t", designFinding.problem, "PR 900", "## What review probes", "## Detector wanted", "synthetic"]) {
+  for (const s of ["SELECT review_found FROM t", "SELECT review2_found FROM t", "PR 900", "## What review probes", "## Detector wanted", "synthetic"]) {
     assert.ok(learn.includes(s), `learn is told ${s}`);
   }
   assert.match(learn, /never a second bullet/);
   assert.match(r.prompt("CI 1"), new RegExp(`at head ${"f".repeat(7)}`), "CI waits on learn's commit");
   const rec = parseRecords(r.prompt("record"))[0]!;
   assert.deepEqual(rec.findings, [
-    { round: 1, stage: "design", classKey: "type-from-syntax" }, { round: 1, stage: "probe", classKey: "p", severity: "wrong-answer" },
-    { round: 1, stage: "review", classKey: "a", severity: "wrong-answer" },
+    { round: 1, stage: "review", classKey: "a", severity: "wrong-answer" }, { round: 2, stage: "review", classKey: "b", severity: "wrong-answer" },
   ]);
   assert.deepEqual(rec.deferred, []);
-  assert.deepEqual([rec.designRounds, rec.probeRounds, rec.reviewRounds], [2, 3, 2]);
+  assert.deepEqual([rec.designRounds, rec.probeRounds, rec.reviewRounds], [0, 0, 3]);
 
   // no finding anywhere: nothing to learn
-  const none = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
+  const none = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
   assert.ok(!none.labels.includes("learn"));
   // a learn that fails is said, and the run goes on to CI
-  const failed = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, learn: null, "CI 1": green });
+  const failed = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, learn: null, "CI 1": green });
   assert.match(String(failed.result["status"]), /^reviewed.*learn failed/);
 });
 
-test("pr-loop: every exit with a PR posts one Review record, whose block review-stats reads", async () => {
+test("pr-loop-slim: every exit with a PR posts one Review record, whose block review-stats reads", async () => {
   const exits: Array<[string, Answers]> = [
-    ["green", { ...START, "review r1": clean, "CI 1": green }],
-    ["CI null", { ...START, "review r1": clean, "CI 1": null }],
-    ["review failed", { ...START, "review r1": null }],
-    ["learn outside the rules", { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "learn check": { files: ["src/duck/plan.ts"] } }],
-    ["not linked", { ...START, link: { linked: false, bodyFixed: true, detail: "listed none" } }],
+    ["green", { ...SLIM, "review r1": clean, "CI 1": green }],
+    ["CI null", { ...SLIM, "review r1": clean, "CI 1": null }],
+    ["review failed", { ...SLIM, "review r1": null }],
+    ["learn outside the rules", { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "learn check": { files: ["src/duck/plan.ts"] } }],
+    ["not linked", { ...SLIM, link: { linked: false, bodyFixed: true, detail: "listed none" } }],
   ];
   for (const [name, answers] of exits) {
-    const r = await run("pr-loop", { ...PR }, answers);
+    const r = await run("pr-loop-slim", { ...PR }, answers);
     assert.equal(r.labels.filter((l) => l === "record").length, 1, name);
     assert.equal(r.labels.at(-1), "record", name);
     const p = r.prompt("record");
@@ -552,38 +428,38 @@ test("pr-loop: every exit with a PR posts one Review record, whose block review-
     assert.match(p, /gh pr comment 900 --body-file/);
   }
   // no PR, no record
-  const r = await run("pr-loop", { ...PR }, { brief: null });
+  const r = await run("pr-loop-slim", { ...PR }, { brief: null });
   assert.ok(!r.labels.includes("record"));
   // a record that is not posted is said
-  const lost = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green, record: null });
+  const lost = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green, record: null });
   assert.match(String(lost.result["status"]), /the Review record was not posted$/);
 });
 
-test("pr-loop: GitHub itself must say the PR closes its sub-issue, or the run stops", async () => {
+test("pr-loop-slim: GitHub itself must say the PR closes its sub-issue, or the run stops", async () => {
   // linked: the run goes on, and the query asked is GitHub's
-  let r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
-  assert.deepEqual(r.labels.slice(3, 6), ["implement", "link", "probe 1"]);
+  let r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
+  assert.deepEqual(r.labels.slice(1, 4), ["implement", "link", "review r1"]);
   const q = r.prompt("link");
   assert.ok(q.includes("`gh issue view 301 --json closedByPullRequestsReferences`"), "the link is read from GitHub");
   assert.ok(q.includes("Closes #301") && q.includes("gh pr edit 900"), "an unlinked body is fixed, then asked again");
   // not linked after the fix: the run stops there, before any review
-  r = await run("pr-loop", { ...PR }, { ...START, link: { linked: false, bodyFixed: true, detail: "listed none" } });
-  assert.deepEqual(r.labels.slice(3), ["implement", "link", "record"]);
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, link: { linked: false, bodyFixed: true, detail: "listed none" } });
+  assert.deepEqual(r.labels.slice(1), ["implement", "link", "record"]);
   assert.match(String(r.result["status"]), /^PR 900 is not linked to #301 after its body was fixed/);
   // no answer is "not known", never linked
-  r = await run("pr-loop", { ...PR }, { ...START, link: null });
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, link: null });
   assert.match(String(r.result["status"]), /whether PR 900 closes #301 is not known/);
   // a stacked PR: GitHub links only into the default branch, so its body's keyword is read
-  r = await run("pr-loop", { ...PR, base: "issue-300-a", stackedOn: "401" }, { ...START, "review r1": clean, "CI 1": green });
+  r = await run("pr-loop-slim", { ...PR, base: "issue-300-a", stackedOn: "401" }, { ...SLIM, "review r1": clean, "CI 1": green });
   assert.ok(r.prompt("link").includes("stacked") && !r.prompt("link").includes("graphql"));
 });
 
-test("every .claude/rules/ file has a `## What review probes` section, which the Probe stage reads and Learn writes", () => {
+test("every .claude/rules/ file has a `## What review probes` section, which the author runs before each push and Learn writes", () => {
   const dir = path.join(ROOT, ".claude", "rules");
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
   assert.ok(files.length > 0);
   const missing = files.filter((f) => !/^## What review probes$/m.test(fs.readFileSync(path.join(dir, f), "utf8")));
-  assert.deepEqual(missing, [], "a rules file without the section gives the Probe stage nothing to run for its paths");
+  assert.deepEqual(missing, [], "a rules file without the section gives the author nothing to run for its paths");
 });
 
 test("review-stats: a record's block is parsed, a malformed one is refused by name, the last record of a PR is its own, and a PR that never reached a review never counts as passing", () => {
@@ -634,47 +510,32 @@ test("review-stats: a record counts for the PR whose comment holds it, and a quo
   assert.throws(() => recordsOfComment({ issue_url: "https://example.com/x", body: own }), /names no PR/);
 });
 
-test("pr-loop: a probe that fails, or whose fix fails or pushes nothing, is noted and the review goes on", async () => {
-  const cases: Array<[string, Answers, RegExp]> = [
-    ["probe null", { "probe 1": null }, /probe 1 failed: the review read head aaaaaaa unprobed/],
-    ["probe fix null", { "probe 1": f("p"), "probe fix 1": null }, /probe fix 1 failed: its findings went to the review unfixed/],
-    ["probe fix pushed nothing", { "probe 1": f("p"), "probe fix 1": pushed("a") }, /probe fix 1 pushed nothing/],
-  ];
-  for (const [name, answers, note] of cases) {
-    const r = await run("pr-loop", { ...PR }, { ...START, ...answers, "review r1": clean, "CI 1": green });
-    assert.ok(r.labels.includes("review r1") && r.labels.includes("CI 1"), `${name}: the review and CI still run`);
-    assert.match(String(r.result["status"]), /^reviewed/, name);
-    assert.match(String(r.result["status"]), note, name);
-    assert.match(parseRecords(r.prompt("record"))[0]!.status, note, `${name}: the record says it too`);
-  }
-});
-
-test("pr-loop: Learn's commit is read from git, and a head that changed anything outside .claude/rules/ is never reported ready", async () => {
-  const learnt: Answers = { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green };
-  let r = await run("pr-loop", { ...PR }, learnt);
+test("pr-loop-slim: Learn's commit is read from git, and a head that changed anything outside .claude/rules/ is never reported ready", async () => {
+  const learnt: Answers = { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green };
+  let r = await run("pr-loop-slim", { ...PR }, learnt);
   assert.deepEqual(r.labels.slice(-4), ["learn", "learn check", "CI 1", "record"]);
   assert.ok(r.prompt("learn check").includes(`diff --no-renames --name-only ${sha("b")} ${sha("f")}`), "the files are read from the commit range");
   assert.match(String(r.result["status"]), /^reviewed/);
   // a learn that touched a test: stopped before CI, at learn's head
-  r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": { files: [".claude/rules/cli.md", "tests/workflows.test.ts"] } });
+  r = await run("pr-loop-slim", { ...PR }, { ...learnt, "learn check": { files: [".claude/rules/cli.md", "tests/workflows.test.ts"] } });
   assert.deepEqual(r.labels.slice(-2), ["learn check", "record"]);
   assert.match(String(r.result["status"]), /^learn's commit fffffff changed tests\/workflows\.test\.ts outside \.claude\/rules\//);
   assert.equal(r.result["head"], sha("f"));
   // the files could not be read: not known, never ready
   // the files could not be read, or no path was read of a head that moved: not known, never ready
   for (const check of [null, { files: [] }]) {
-    r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": check });
+    r = await run("pr-loop-slim", { ...PR }, { ...learnt, "learn check": check });
     assert.match(String(r.result["status"]), /could not be read: whether it touched only \.claude\/rules\/ is not known/, JSON.stringify(check));
     assert.ok(!r.labels.includes("CI 1"), JSON.stringify(check));
   }
   // a rename from outside into .claude/rules/: both ends are paths the check reads, so its source stops the run
-  r = await run("pr-loop", { ...PR }, { ...learnt, "learn check": { files: [".claude/rules/moved.md", "src/duck/plan.ts"] } });
+  r = await run("pr-loop-slim", { ...PR }, { ...learnt, "learn check": { files: [".claude/rules/moved.md", "src/duck/plan.ts"] } });
   assert.match(String(r.result["status"]), /changed src\/duck\/plan\.ts outside/);
 });
 
-test("pr-loop: the Learn check's own git command prints both ends of a rename", async () => {
+test("pr-loop-slim: the Learn check's own git command prints both ends of a rename", async () => {
   // the command the prompt gives, run on a real repository where a file moved from src/ into .claude/rules/
-  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
   const m = /`git (diff [^`]*) \S+ \S+`/.exec(r.prompt("learn check"));
   assert.ok(m, "the learn check names a git diff over the commit range");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-check-"));
@@ -697,9 +558,9 @@ test("pr-loop: the Learn check's own git command prints both ends of a rename", 
   }
 });
 
-test("pr-loop: a red CI beside a clean review goes to the CI stage, which reads it and sends it to a CI fix", async () => {
-  const r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": clean, "CI read r1": { state: "failed", detail: "tests/workflows.test.ts: red" },
+test("pr-loop-slim: a red CI beside a clean review goes to the CI stage, which reads it and sends it to a CI fix", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": clean, "CI read r1": { state: "failed", detail: "tests/workflows.test.ts: red" },
     "CI 1": { state: "failed", detail: "tests/workflows.test.ts: red" }, "CI fix 1": { ...pushed("b"), flake: false }, "review r2": clean, "CI 2": green,
   });
   assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "CI fix 1", "review r2", "CI 2"], "no review fix round for a clean review");
@@ -760,12 +621,12 @@ else { process.stdout.write(s.out + "\\n"); process.exit(s.rc); }
   }
 }
 
-test("pr-loop: the CI wait reads mergeable beside gh pr checks, and a conflicting PR is its own verdict at once", async () => {
+test("pr-loop-slim: the CI wait reads mergeable beside gh pr checks, and a conflicting PR is its own verdict at once", async () => {
   for (const name of PR_LOOPS) {
     // without repo the prompt names <repo>, as BOARD does; with it, the command is the checkout's own script, run as is
-    const bare = await run(name, { ...PR }, { ...(name === "pr-loop" ? START : SLIM), "review r1": clean, "CI 1": green });
+    const bare = await run(name, { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
     assert.equal(ciWaitOf(bare.prompt("CI 1")), "node <repo>/scripts/ci-wait.ts 900 540", `${name}: one plain command`);
-    const r = await run(name, { ...PR, repo: ROOT }, { ...(name === "pr-loop" ? START : SLIM), "review r1": clean, "CI 1": green });
+    const r = await run(name, { ...PR, repo: ROOT }, { ...SLIM, "review r1": clean, "CI 1": green });
     const p = r.prompt("CI 1");
     const cmd = ciWaitOf(p);
     assert.equal(cmd, `node ${ROOT}/scripts/ci-wait.ts 900 540`, name);
@@ -776,7 +637,6 @@ test("pr-loop: the CI wait reads mergeable beside gh pr checks, and a conflictin
     assert.doesNotMatch(p, /run_in_background|a foreground `sleep`/, `${name}: no fallback for a shell sleep the script does not have`);
     const schema = r.calls.find((c) => c.opts.label === "CI 1")!.opts.schema as { properties: { state: { enum: string[] } } };
     assert.deepEqual(schema.properties.state.enum, ["green", "failed", "timeout", "conflict"], `${name}: the CI schema's states`);
-    if (name === "pr-loop-slim") assert.equal(p, (await run("pr-loop", { ...PR, repo: ROOT }, { ...START, "review r1": clean, "CI 1": green })).prompt("CI 1"), "slim's CI prompt is pr-loop's");
 
     // the prompt's own command, run verbatim by bash: no checks reported on a conflicting PR: conflict at once, in one pass
     let w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [NO_CHECKS] });
@@ -856,18 +716,16 @@ test("ci-wait: bounded, a deadline no pass starts after, a gh that never returns
   assert.ok(570 + 2 * 1 + 10 < 600, "a chunk at the cap, its last call's grace and Node's start end inside 600000 ms");
 });
 
-test("pr-loop and pr-loop-slim: a conflict exits the CI stage with the base and the way out, sends nothing to a fix, and issue-loop stops there", async () => {
+test("pr-loop-slim: a conflict exits the CI stage with the base and the way out, and sends nothing to a fix", async () => {
   const conflict = { state: "conflict", detail: "PR 900 conflicts with main" };
   const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
   const common: Answers = {
     "review r1": { findings: [base], judgedCorrect: [] }, "CI 1": conflict,
     file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
   };
-  const statuses: string[] = [];
   for (const name of PR_LOOPS) {
-    const r = await run(name, { ...PR }, { ...(name === "pr-loop" ? START : SLIM), ...common });
+    const r = await run(name, { ...PR }, { ...SLIM, ...common });
     const status = String(r.result["status"]);
-    statuses.push(status);
     assert.match(status, /^conflict/, `${name}: ${status}`);
     assert.ok(status.includes("PR 900 conflicts with main") && status.includes("merge origin/main into issue-300-a-piece"), `${name}: the base and the way out: ${status}`);
     assert.ok(!r.labels.some((l) => /^CI fix/.test(l)), `${name}: a conflict is never sent to a CI fix`);
@@ -876,40 +734,31 @@ test("pr-loop and pr-loop-slim: a conflict exits the CI stage with the base and 
     assert.equal(parseRecords(r.prompt("record"))[0]!.ciFixes, 0);
 
     // stacked: the base below, never main
-    const s = await run(name, { ...PR, base: "issue-300-below", stackedOn: "899" }, { ...(name === "pr-loop" ? START : SLIM), "review r1": clean, "CI 1": { state: "conflict", detail: "conflicts with issue-300-below" } });
+    const s = await run(name, { ...PR, base: "issue-300-below", stackedOn: "899" }, { ...SLIM, "review r1": clean, "CI 1": { state: "conflict", detail: "conflicts with issue-300-below" } });
     assert.ok(String(s.result["status"]).includes("merge origin/issue-300-below into issue-300-a-piece"), String(s.result["status"]));
     assert.ok(!String(s.result["status"]).includes("origin/main"), "a stacked PR merges the branch below");
 
     // a conflict read beside a review is never a CI failure in that round's fix
     const f1 = await run(name, { ...PR }, {
-      ...(name === "pr-loop" ? START : SLIM), "review r1": f("a"), "CI read r1": { state: "conflict", detail: "conflicts with main" },
-      "fix r1": name === "pr-loop" ? pushed("b") : { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green,
+      ...SLIM, "review r1": f("a"), "CI read r1": { state: "conflict", detail: "conflicts with main" },
+      "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green,
     });
     assert.doesNotMatch(f1.prompt("fix r1"), /CI failed|conflicts with main/, `${name}: the fix is told no CI failure`);
     assert.match(String(f1.result["status"]), /^reviewed/);
   }
-  assert.equal(statuses[0], statuses[1], "pr-loop-slim exits as pr-loop does");
-
-  // issue-loop: a conflict is not 'reviewed', so it stops at that task, resumable from it
-  const stop = await run("issue-loop", { issue: 300, tasks: TASKS }, SETUP, [
-    () => ({ status: statuses[0], pr: 401, classes: {} }),
-  ]);
-  assert.equal(stop.flowCalls.length, 1, "task 2 never runs");
-  assert.match(String(stop.result["status"]), /^stopped at task 1: conflict/);
-  assert.equal((stop.result["resume"] as Record<string, unknown>)["from"], 0);
 
   // the rules a person's wait follows say the same
   const claude = fs.readFileSync(path.join(ROOT, "CLAUDE.md"), "utf8");
   const ciBullet = /^- \*\*A wait on CI is[\s\S]*?(?=^- \*\*)/m.exec(claude)?.[0] ?? "";
   assert.ok(ciBullet.includes("mergeable") && ciBullet.includes("CONFLICTING"), "CLAUDE.md's CI wait reads mergeable");
-  const step5 = /^5\. \*\*Merge\.\*\*[\s\S]*?(?=^The coordinator runs)/m.exec(claude)?.[0] ?? "";
+  const step5 = /^5\. \*\*Merge\.\*\*[\s\S]*?(?=^\*\*One process runs the loop\*\*)/m.exec(claude)?.[0] ?? "";
   assert.ok(step5.includes("--json state,mergeable"), "CLAUDE.md's merge wait reads mergeable");
-  assert.ok(skillText().includes("--json state,mergeable"), "the pr-persistent skill's merge wait reads mergeable");
+  assert.ok(upNextText().includes("--json state,mergeable"), "the up-next skill's merge wait reads mergeable: the top session merges");
 });
 
-test("pr-loop: the author is told to run the rules' review probes before every push", async () => {
-  const r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green,
+test("pr-loop-slim: the author is told to run the rules' review probes before every push", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green,
   });
   for (const l of ["implement", "fix r1", "CI fix 1"]) assert.match(r.prompt(l), /Before the push, run the `## What review probes`/, l);
 });
@@ -926,14 +775,14 @@ function listOf(name: string, constName: string): string[] {
 }
 const later = (o: Partial<Record<string, string>>) => finding({ severity: "message", classKey: "wording", ...o });
 
-test("pr-loop: every finding must carry a severity, blocking or not, and the two lists are review-stats' own", async () => {
+test("pr-loop-slim: every finding must carry a severity, blocking or not, and the two lists are review-stats' own", async () => {
   // a script cannot import: its lists are held equal to the ones review-stats reads records with
-  assert.deepEqual(listOf("pr-loop", "BLOCKING"), [...BLOCKING]);
-  assert.deepEqual(listOf("pr-loop", "DEFERRED"), [...DEFERRED]);
+  assert.deepEqual(listOf("pr-loop-slim", "BLOCKING"), [...BLOCKING]);
+  assert.deepEqual(listOf("pr-loop-slim", "DEFERRED"), [...DEFERRED]);
   assert.deepEqual([...BLOCKING], ["wrong-answer", "crash", "data-loss", "security", "regression"]);
   assert.deepEqual([...DEFERRED], ["message", "over-refusal", "docs", "quality"]);
-  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
-  for (const l of ["probe 1", "review r1"]) {
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
+  for (const l of ["review r1"]) {
     const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as
       { properties: { findings: { items: { required: string[]; properties: Record<string, { enum?: string[]; description?: string }> } } } };
     const item = schema.properties.findings.items;
@@ -946,12 +795,12 @@ test("pr-loop: every finding must carry a severity, blocking or not, and the two
   }
 });
 
-test("pr-loop: a round with only non-blocking findings of the PR's is clean: filed as deferred, recorded, never fixed or learnt", async () => {
+test("pr-loop-slim: a round with only non-blocking findings of the PR's is clean: filed as deferred, recorded, never fixed or learnt", async () => {
   const a = later({ input: "SELECT wording_a FROM t" });
   const b = later({ input: "SELECT wording_b FROM t" }); // the same class twice: no class round, since none is fixed
   const o = later({ input: "SELECT refused FROM t", severity: "over-refusal", classKey: "gap" });
-  const r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": { findings: [a, b, o], judgedCorrect: [] }, "CI 1": green,
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [a, b, o], judgedCorrect: [] }, "CI 1": green,
     file: (c: Call) => {
       assert.ok(c.prompt.includes("source 'deferred'") && !c.prompt.includes("source 'base'"), "only the deferred section");
       return { issues: [{ classKey: "wording", source: "deferred", issue: 970, action: "filed" }, { classKey: "gap", source: "deferred", issue: 971, action: "filed" }] };
@@ -978,19 +827,17 @@ test("pr-loop: a round with only non-blocking findings of the PR's is clean: fil
   assert.equal(stats([rec]).firstPass, 1);
 
   // a red CI still blocks: beside a non-blocking-only review it goes to the CI stage and a CI fix
-  const redRun = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": { findings: [a], judgedCorrect: [] }, "CI read r1": red, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: false },
+  const redRun = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [a], judgedCorrect: [] }, "CI read r1": red, "CI 1": red, "CI fix 1": { ...pushed("b"), flake: false },
     "review r2": clean, "CI 2": green, file: { issues: [] },
   });
   assert.deepEqual(core(redRun.labels), ["brief", "implement", "review r1", "CI 1", "CI fix 1", "review r2", "CI 2", "file"]);
 });
 
-test("pr-loop: only a blocking finding of the PR's is fixed and counts toward a class round; the others never reach a fix", async () => {
+test("pr-loop-slim: only a blocking finding of the PR's is fixed and counts toward a class round; the others never reach a fix", async () => {
   const k = later({ classKey: "k", input: "SELECT k_wording FROM t" });
-  const r = await run("pr-loop", { ...PR }, {
-    ...START,
-    // a probe's non-blocking finding: no probe fix, and the review reads the head unchanged
-    "probe 1": { findings: [later({ classKey: "p", input: "SELECT probe_wording FROM t", severity: "docs" })], judgedCorrect: [] },
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM,
     // round 1: one blocking of j, two non-blocking of k (which would make a class round if they counted)
     "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), k, { ...k, input: "SELECT k_wording2 FROM t" }], judgedCorrect: [] },
     "fix r1": pushed("b"),
@@ -999,34 +846,33 @@ test("pr-loop: only a blocking finding of the PR's is fixed and counts toward a 
     "fix r2": pushed("c"),
     "review r3": clean, "CI 1": green, file: { issues: [] },
   });
-  assert.ok(!r.labels.some((l) => l.startsWith("probe fix")), "a probe's non-blocking finding gets no probe fix");
   assert.deepEqual(r.labels.filter((l) => /^fix/.test(l)), ["fix r1", "fix r2"], "no class round: k's earlier findings did not block");
   for (const l of ["fix r1", "fix r2", "learn"]) {
-    for (const s of ["SELECT probe_wording FROM t", "SELECT k_wording FROM t", "SELECT k_wording2 FROM t"]) assert.ok(!r.prompt(l).includes(s), `"${l}" was handed the non-blocking ${s}`);
+    for (const s of ["SELECT k_wording FROM t", "SELECT k_wording2 FROM t"]) assert.ok(!r.prompt(l).includes(s), `"${l}" was handed the non-blocking ${s}`);
   }
   assert.ok(r.prompt("fix r1").includes("SELECT j_wrong FROM t") && r.prompt("fix r2").includes("SELECT k_wrong FROM t"));
   assert.deepEqual(Object.fromEntries(Object.entries(r.result["classes"] as Record<string, { count: number }>).map(([c, v]) => [c, v.count])), { j: 1, k: 1 });
   // a later round is told what is already deferred, and an input met twice is filed once
   assert.ok(r.prompt("review r2").includes("Already deferred as non-blocking") && r.prompt("review r2").includes("SELECT k_wording FROM t"));
   assert.equal(r.prompt("file").split("SELECT k_wording FROM t").length - 1, 1);
-  assert.equal((r.result["deferred"] as unknown[]).length, 3);
+  assert.equal((r.result["deferred"] as unknown[]).length, 2);
   const rec = parseRecords(r.prompt("record"))[0]!;
   assert.deepEqual(rec.findings.map((f) => [f.stage, f.round, f.classKey, f.severity]), [["review", 1, "j", "wrong-answer"], ["review", 2, "k", "crash"]]);
-  assert.deepEqual(rec.deferred!.map((f) => [f.stage, f.round, f.classKey]), [["probe", 1, "p"], ["review", 1, "k"], ["review", 1, "k"]]);
+  assert.deepEqual(rec.deferred!.map((f) => [f.stage, f.round, f.classKey]), [["review", 1, "k"], ["review", 1, "k"]]);
 });
 
-test("pr-loop: a finding with no severity, or one the script does not know, blocks; a base finding is the base's whatever its severity", async () => {
+test("pr-loop-slim: a finding with no severity, or one the script does not know, blocks; a base finding is the base's whatever its severity", async () => {
   for (const severity of [undefined, "cosmetic"]) {
     const { severity: _, ...bare } = finding({ input: "SELECT unsure FROM t" });
-    const r = await run("pr-loop", { ...PR }, {
-      ...START, "review r1": { findings: [severity ? { ...bare, severity } : bare], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+    const r = await run("pr-loop-slim", { ...PR }, {
+      ...SLIM, "review r1": { findings: [severity ? { ...bare, severity } : bare], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
     });
     assert.ok(r.labels.includes("fix r1"), `severity ${severity}: blocking`);
     assert.ok(!r.labels.includes("file"));
   }
   const base = later({ origin: "base", input: "SELECT base_wording FROM t" });
   const mine = later({ input: "SELECT mine_wording FROM t" });
-  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [base, mine], judgedCorrect: [] }, "CI 1": green, file: { issues: [] } });
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { findings: [base, mine], judgedCorrect: [] }, "CI 1": green, file: { issues: [] } });
   const file = r.prompt("file");
   const [onBase, ofPr] = [file.indexOf("## source 'base'"), file.indexOf("## source 'deferred'")];
   assert.ok(onBase >= 0 && ofPr > onBase, "two sections, kept apart");
@@ -1036,7 +882,7 @@ test("pr-loop: a finding with no severity, or one the script does not know, bloc
   assert.deepEqual((r.result["deferred"] as Array<{ input: string }>).map((g) => g.input), [mine.input]);
 });
 
-test("pr-loop, pr-loop-slim: a finding with no origin, or one the script does not know, is the PR's: fixed when it blocks, filed as deferred when not, never dropped", async () => {
+test("pr-loop-slim: a finding with no origin, or one the script does not know, is the PR's: fixed when it blocks, filed as deferred when not, never dropped", async () => {
   // issue 235: only the exact 'base' makes a finding the base's; any other origin, or none, is read as this PR's, as an
   // unknown severity is read as blocking, so no finding falls between fromBase, the fix and deferred
   const withOrigin = (f: ReturnType<typeof finding>, origin: unknown) => {
@@ -1049,7 +895,7 @@ test("pr-loop, pr-loop-slim: a finding with no origin, or one the script does no
     ["Base", "SELECT cased_origin FROM t"], ["this_pr", "SELECT misspelt_origin FROM t"], ["upstream", "SELECT unknown_origin FROM t"],
   ];
   for (const name of PR_LOOPS) {
-    const start = name === "pr-loop" ? START : SLIM;
+    const start = SLIM;
     // a blocking finding of an origin not known, or none, is fixed and counted toward its class
     for (const [origin, input] of odd) {
       const at = `${name}, origin ${JSON.stringify(origin)}`;
@@ -1101,30 +947,24 @@ test("pr-loop, pr-loop-slim: a finding with no origin, or one the script does no
       assert.equal(places, 1, `${name}: ${input} is in exactly one of fromBase, the fix and deferred (in ${places})`);
     }
   }
-
-  // the probe reads origin the same way: pr-loop only, since the slim loop has no probe
-  const p = withOrigin(finding({ input: "SELECT probe_no_origin FROM t" }), "missing");
-  const r = await run("pr-loop", { ...PR }, { ...START, "probe 1": { findings: [p], judgedCorrect: [] }, "probe fix 1": pushed("b"), "review r1": clean, "CI 1": green });
-  assert.ok(r.labels.includes("probe fix 1") && r.prompt("probe fix 1").includes(p.input), "the probe's finding with no origin is fixed");
-  assert.deepEqual(parseRecords(r.prompt("record"))[0]!.findings, [{ round: 1, stage: "probe", classKey: "some-class", severity: "wrong-answer" }]);
 });
 
-test("pr-loop: an input deferred once and found blocking later is fixed, never filed; a failed filing never says filed", async () => {
+test("pr-loop-slim: an input deferred once and found blocking later is fixed, never filed; a failed filing never says filed", async () => {
   const w = later({ input: "SELECT later_blocking FROM t" });
-  const r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), w], judgedCorrect: [] }, "fix r1": pushed("b"),
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), w], judgedCorrect: [] }, "fix r1": pushed("b"),
     "review r2": { findings: [{ ...w, severity: "regression" }], judgedCorrect: [] }, "fix r2": pushed("c"), "review r3": clean, "CI 1": green,
   });
   assert.ok(r.prompt("fix r2").includes(w.input), "the blocking re-report is fixed");
   assert.deepEqual(r.result["deferred"], [], "and no longer deferred");
   assert.ok(!r.labels.includes("file"), "so nothing is filed");
 
-  const lost = await run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": green, file: null });
+  const lost = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": green, file: null });
   assert.match(String(lost.result["status"]), /filing failed: the findings are in fromBase and deferred/);
   assert.doesNotMatch(String(lost.result["status"]), /filed, not fixed/);
 });
 
-test("pr-loop: a deferred input is RUN again by every later probe and review, and re-reported when a fix made it block", async () => {
+test("pr-loop-slim: a deferred input is RUN again by every later review, and re-reported when a fix made it block", async () => {
   // round 1 defers a refusal's wording; fix r1 (for j) turns that refusal into a wrong answer. A reviewer that does
   // what its prompt says reports it again only if the prompt asks for it: the stub holds the prompt to that.
   const x = later({ input: "SELECT x FROM t" });
@@ -1135,9 +975,8 @@ test("pr-loop: a deferred input is RUN again by every later probe and review, an
     assert.doesNotMatch(c.prompt, /do NOT report again/i, `"${c.opts.label}" is never told not to report it, whatever it now answers`);
     assert.doesNotMatch(c.prompt, /deferred as non-blocking and filed/, `"${c.opts.label}" is not told it is filed: nothing is filed before finish`);
   };
-  const r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), x], judgedCorrect: [] }, "fix r1": pushed("b"),
-    "probe 2": (c: Call) => { told(c); return clean; },
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [finding({ classKey: "j", input: "SELECT j_wrong FROM t" }), x], judgedCorrect: [] }, "fix r1": pushed("b"),
     "review r2": (c: Call) => { told(c); return { findings: [{ ...x, severity: "wrong-answer" }], judgedCorrect: [] }; },
     "fix r2": pushed("c"), "review r3": clean, "CI 1": green,
   });
@@ -1146,11 +985,11 @@ test("pr-loop: a deferred input is RUN again by every later probe and review, an
   assert.ok(!r.labels.includes("file"), "and it is not filed");
 });
 
-test("pr-loop: 'filed' is read from the issues the File stage returns, class by class and source by source", async () => {
+test("pr-loop-slim: 'filed' is read from the issues the File stage returns, class by class and source by source", async () => {
   const w = later({ input: "SELECT w FROM t" });
   const g = later({ input: "SELECT g FROM t", severity: "over-refusal", classKey: "gap" });
   const b = later({ origin: "base", input: "SELECT b FROM t", classKey: "on-base" });
-  const go = (issues: unknown[]) => run("pr-loop", { ...PR }, { ...START, "review r1": { findings: [w, g, b], judgedCorrect: [] }, "CI 1": green, file: { issues } });
+  const go = (issues: unknown[]) => run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { findings: [w, g, b], judgedCorrect: [] }, "CI 1": green, file: { issues } });
   const status = async (issues: unknown[]) => String((await go(issues)).result["status"]);
 
   // nothing returned: nothing is said filed, and every class is named as not filed
@@ -1178,28 +1017,28 @@ test("pr-loop: 'filed' is read from the issues the File stage returns, class by 
   assert.doesNotMatch(s, /NOT filed/, s);
 });
 
-test("pr-loop: a fixer is told a severity it was not given, or one not known, is read as blocking", async () => {
-  const r = await run("pr-loop", { ...PR }, {
-    ...START, "review r1": { findings: [finding({ input: "SELECT odd FROM t", severity: "cosmetic" }), finding({ input: "SELECT known FROM t", classKey: "other" })], judgedCorrect: [] },
+test("pr-loop-slim: a fixer is told a severity it was not given, or one not known, is read as blocking", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [finding({ input: "SELECT odd FROM t", severity: "cosmetic" }), finding({ input: "SELECT known FROM t", classKey: "other" })], judgedCorrect: [] },
     "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
   });
   assert.match(r.prompt("fix r1"), /\[class: some-class; cosmetic: not a known severity, read as blocking\]/);
   assert.match(r.prompt("fix r1"), /\[class: other; wrong-answer\]/);
 });
 
-test("pr-loop: a run that stops still files its deferred findings", async () => {
+test("pr-loop-slim: a run that stops still files its deferred findings", async () => {
   const w = later({ input: "SELECT stop_deferred FROM t" });
-  const many: Answers = { ...START, file: { issues: [] } };
+  const many: Answers = { ...SLIM, file: { issues: [] } };
   for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [w] : [])], judgedCorrect: [] };
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
   const exits: Array<[string, Answers, RegExp]> = [
     ["MAX_ROUNDS", many, /^still 1 finding\(s\) after 4 rounds/],
-    ["a review that fails", { ...START, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": null, file: { issues: [] } }, /^review r2 failed/],
-    ["a fix that pushes nothing", { ...START, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("a"), file: { issues: [] } }, /pushed nothing/],
-    ["CI that never finishes", { ...START, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": { state: "timeout", detail: "" }, file: { issues: [] } }, /^CI not finished/],
+    ["a review that fails", { ...SLIM, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": null, file: { issues: [] } }, /^review r2 failed/],
+    ["a fix that pushes nothing", { ...SLIM, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("a"), file: { issues: [] } }, /pushed nothing/],
+    ["CI that never finishes", { ...SLIM, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": { state: "timeout", detail: "" }, file: { issues: [] } }, /^CI not finished/],
   ];
   for (const [name, answers, stop] of exits) {
-    const r = await run("pr-loop", { ...PR }, answers);
+    const r = await run("pr-loop-slim", { ...PR }, answers);
     assert.match(String(r.result["status"]), stop, name);
     assert.deepEqual(r.labels.slice(-2), ["file", "record"], `${name}: the File call happens, then the record`);
     assert.ok(r.prompt("file").includes(w.input), `${name}: the deferred finding is in the filing`);
@@ -1242,8 +1081,8 @@ function arrayOf(name: string, constName: string): string[] {
   return new Function(`return (${m[1]})`)() as string[];
 }
 
-test("pr-loop: one list of variant forms, each concrete synthetic SQL, reaches the probe and the full review", async () => {
-  const forms = arrayOf("pr-loop", "VARIANT_FORMS");
+test("pr-loop-slim: one list of variant forms, each concrete synthetic SQL, reaches the author's check and every review", async () => {
+  const forms = arrayOf("pr-loop-slim", "VARIANT_FORMS");
   assert.ok(forms.length >= 7, "the forms issue 192's checks ran, at least");
   // every form issue 192's checks found wrong answers with
   const all = forms.join("\n");
@@ -1260,8 +1099,8 @@ test("pr-loop: one list of variant forms, each concrete synthetic SQL, reaches t
       for (const m of s.matchAll(/\b(?:FROM|TABLE|JOIN)\s+([a-z_][a-z0-9_.]*)/gi)) assert.ok(["t", "e", "q"].includes(m[1]!), `"${s}" reads ${m[1]}, not a synthetic table`);
     }
   }
-  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
-  for (const l of ["probe 1", "review r1", "probe 2", "review r2"]) {
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  for (const l of ["implement", "review r1", "fix r1", "review r2"]) {
     const p = r.prompt(l);
     for (const v of forms) assert.ok(p.includes(v), `"${l}" is given the variant form ${v}`);
     // the synthetic tables they run over, with the key duck-repro needs to sync a table
@@ -1270,9 +1109,9 @@ test("pr-loop: one list of variant forms, each concrete synthetic SQL, reaches t
   }
 });
 
-test("pr-loop: the probe and every review run their statements batched through duck-repro, at the head and the base, with a regression sweep", async () => {
-  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
-  for (const l of ["probe 1", "review r1", "review r2"]) {
+test("pr-loop-slim: every review runs its statements batched through duck-repro, at the head and the base, with a regression sweep", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  for (const l of ["review r1", "review r2"]) {
     const p = r.prompt(l);
     assert.match(p, /`node --env-file=<env file> <tree>\/scripts\/duck-repro\.ts <ddl\.sql> <statements\.sql> > <out> 2>&1`, one plain command/, `${l}: statements go through duck-repro, one plain command`);
     assert.match(p, /lines holding only `--`/, `${l}: in files, as duck-repro reads them`);
@@ -1291,16 +1130,13 @@ test("pr-loop: the probe and every review run their statements batched through d
   assert.doesNotMatch(r.prompt("review r1"), /About 40 tool calls/, "the reading review's bound is raised to fit");
 });
 
-test("pr-loop: the probe's and the review's schema count the statements run and matched, and the Review record carries them", async () => {
-  const r = await run("pr-loop", { ...PR }, {
-    ...START,
-    "probe 1": { ...f("p"), statementsRun: 120, statementsMatched: 117 }, "probe fix 1": pushed("b"),
-    "probe 2": { ...clean, statementsRun: 40, statementsMatched: 40 },
+test("pr-loop-slim: the review's schema counts the statements run and matched, and the Review record carries them", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM,
     "review r1": { ...f("a"), statementsRun: 340, statementsMatched: 331 }, "fix r1": pushed("c"),
-    "probe 3": { ...clean, statementsRun: 60, statementsMatched: 60 },
     "review r2": { ...clean, statementsRun: 80, statementsMatched: 80 }, "CI 1": green,
   });
-  for (const l of ["probe 1", "review r1"]) {
+  for (const l of ["review r1"]) {
     const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[]; properties: Record<string, { type: string }> };
     for (const k of ["statementsRun", "statementsMatched"]) {
       assert.ok(schema.required.includes(k), `${l}: the schema requires ${k}`);
@@ -1308,14 +1144,14 @@ test("pr-loop: the probe's and the review's schema count the statements run and 
     }
   }
   const rec = parseRecords(r.prompt("record"))[0]!;
-  assert.deepEqual([rec.statementsRun, rec.statementsMatched], [120 + 40 + 340 + 60 + 80, 117 + 40 + 331 + 60 + 80]);
+  assert.deepEqual([rec.statementsRun, rec.statementsMatched], [340 + 80, 331 + 80], "the reviews' statements alone");
   assert.match(r.prompt("record"), /review 1: 1 finding\(s\): c-a[^\n]*; 340 statement\(s\) run, 331 matched/);
 });
 
-test("pr-loop: a review that ran no statement, or gave no valid count, is never a clean round: the run stops unreviewed, and issue-loop goes no further", async () => {
+test("pr-loop-slim: a review that ran no statement, or gave no valid count, is never a clean round: the run stops unreviewed", async () => {
   const none = (o: Record<string, unknown> = {}) => ({ ...clean, statementsRun: 0, statementsMatched: 0, ...o });
   // the first review ran nothing (no psql, no Docker): no CI wait, no learn, a stop that says what to install
-  let r = await run("pr-loop", { ...PR }, { ...START, "review r1": none({ judgedCorrect: ["psql: command not found"] }) });
+  let r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": none({ judgedCorrect: ["psql: command not found"] }) });
   const status = String(r.result["status"]);
   assert.match(status, /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts \(it said: psql: command not found\)/);
   assert.doesNotMatch(status, /^reviewed/);
@@ -1328,50 +1164,39 @@ test("pr-loop: a review that ran no statement, or gave no valid count, is never 
 
   // no valid count at all: missing, or not a count
   for (const bad of [undefined, "many", -1, 2.5]) {
-    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...clean, statementsRun: bad, statementsMatched: 0 } });
+    r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...clean, statementsRun: bad, statementsMatched: 0 } });
     assert.match(String(r.result["status"]), /^unreviewed: review r1 reported no valid count of the statements it ran/, String(bad));
   }
   // a re-check that ran nothing after a fix: the fix is unchecked, so no clean round either
-  r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": none() });
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": none() });
   assert.match(String(r.result["status"]), /^unreviewed: review r2 ran no statement for src\/duck\/plan\.ts, so head bbbbbbb was read and never run/);
   const rec2 = parseRecords(r.prompt("record"))[0]!;
   assert.equal(rec2.reviewRounds, 1);
   assert.equal(stats([rec2]).bySecond, 0, "round 2 ran nothing, so the PR did not pass by the second");
-
-  // issue-loop reads the stop as a stop
-  const stop = await run("issue-loop", { issue: 300, tasks: TASKS }, SETUP, [() => ({ status, pr: 401, classes: {} })]);
-  assert.equal(stop.flowCalls.length, 1, "the next task is not run");
-  assert.match(String(stop.result["status"]), /^stopped at task 1: unreviewed/);
-
-  // a probe is the author's check: one that ran nothing, or gave no count, is noted with what to install, and the review goes on
-  r = await run("pr-loop", { ...PR }, { ...START, "probe 1": none(), "review r1": clean, "CI 1": green });
-  assert.match(String(r.result["status"]), /^reviewed.*probe 1 ran no statement for src\/duck\/plan\.ts: it read the code only \(scripts\/duck-repro\.ts needs `psql` on PATH/);
-  r = await run("pr-loop", { ...PR }, { ...START, "probe 1": { ...clean, statementsRun: undefined }, "review r1": clean, "CI 1": green });
-  assert.match(String(r.result["status"]), /^reviewed.*probe 1 reported no valid count/);
 });
 
 // PR 245, round 2: the evidence a review owes is read from its diff's paths. The engine's and the listener's owe SQL
 // statements; every other path (the CLI, the web page, a script, a workflow, docs) owes checks, what it changed run.
-test("pr-loop: the evidence a review owes is read from its diff's paths: statements for the engine's, checks for every other", async () => {
+test("pr-loop-slim: the evidence a review owes is read from its diff's paths: statements for the engine's, checks for every other", async () => {
   const cli = { ...clean, changedPaths: ["src/cli/command.ts", "tests/cli-commands.test.ts"], statementsRun: 0, statementsMatched: 0, checksRun: 6 };
   // a CLI-only diff, checked and with no statement: a clean review, reviewed and green
-  let r = await run("pr-loop", { ...PR }, { ...START, "probe 1": cli, "review r1": cli, "CI 1": green });
+  let r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": cli, "CI 1": green });
   assert.match(String(r.result["status"]), /^reviewed, no open blocking finding/);
   assert.doesNotMatch(String(r.result["status"]), /ran no|read the code only/);
   let rec = parseRecords(r.prompt("record"))[0]!;
-  assert.deepEqual([rec.reviewRounds, rec.statementsRun, rec.checksRun], [1, 0, 12]);
+  assert.deepEqual([rec.reviewRounds, rec.statementsRun, rec.checksRun], [1, 0, 6]);
   assert.equal(stats([rec]).firstPass, 1);
   // so are a workflow-only diff (this PR) and a docs-only one
-  for (const changedPaths of [[".claude/workflows/pr-loop.js", "scripts/review-stats.ts", "tests/workflows.test.ts"], ["docs/DESIGN.md", "CLAUDE.md"]]) {
-    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths }, "CI 1": green });
+  for (const changedPaths of [[".claude/workflows/pr-loop-slim.js", "scripts/review-stats.ts", "tests/workflows.test.ts"], ["docs/DESIGN.md", "CLAUDE.md"]]) {
+    r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...cli, changedPaths }, "CI 1": green });
     assert.match(String(r.result["status"]), /^reviewed/, changedPaths.join(" "));
   }
   // a CLI-only diff that ran nothing is still no review, and the stop says what to run
-  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, checksRun: 0 } });
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...cli, checksRun: 0 } });
   assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no check for src\/cli\/command\.ts and 1 more path\(s\).*run what the diff changed at the head and the base: the `mason` command/);
   assert.doesNotMatch(String(r.result["status"]), /psql/, "a diff that owes no statement is not told to install psql");
   // an engine diff with checks but no statement still stops unreviewed
-  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: ["src/duck/plan.ts"], checksRun: 9 } });
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...cli, changedPaths: ["src/duck/plan.ts"], checksRun: 9 } });
   assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts.*`psql` on PATH/);
   rec = parseRecords(r.prompt("record"))[0]!;
   assert.equal(rec.reviewRounds, 0);
@@ -1379,19 +1204,19 @@ test("pr-loop: the evidence a review owes is read from its diff's paths: stateme
   // path (src/cli/dev.ts) owes them too while the review waives nothing (checksOnly [], the stub's default): issue 286's
   // cases are the test "a shared path …" below
   for (const p of ["src/api/postgres/server.ts", "src/cdc/poll.ts", "src/cli/dev.ts", "tests/duck-wire.test.ts", "docs/POSTGRES-API.md"]) {
-    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: [p] } });
+    r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...cli, changedPaths: [p] } });
     assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement/, p);
   }
-  r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: ["src/duck/plan.ts", "src/cli/command.ts"], statementsRun: 300, statementsMatched: 300, checksRun: 0 } });
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...cli, changedPaths: ["src/duck/plan.ts", "src/cli/command.ts"], statementsRun: 300, statementsMatched: 300, checksRun: 0 } });
   assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no check for src\/cli\/command\.ts/);
   // the paths not said: what was owed is not known, so no review
   for (const changedPaths of [undefined, [], "src/cli/command.ts"]) {
-    r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths } });
+    r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...cli, changedPaths } });
     assert.match(String(r.result["status"]), /^unreviewed: review r1 did not report the paths its diff changed/, JSON.stringify(changedPaths));
   }
   // the schema asks for both, and the prompt states both kinds and the paths that owe statements
-  r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
-  for (const l of ["probe 1", "review r1"]) {
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
+  for (const l of ["review r1"]) {
     const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[]; properties: Record<string, { type: string; description?: string }> };
     for (const k of ["checksRun", "changedPaths"]) assert.ok(schema.required.includes(k), `${l}: the schema requires ${k}`);
     assert.equal(schema.properties["checksRun"]!.type, "integer");
@@ -1401,8 +1226,8 @@ test("pr-loop: the evidence a review owes is read from its diff's paths: stateme
   }
 });
 
-test("pr-loop: the paths that owe statements are the `paths:` of the engine's and the listener's rules files, and src/cdc/", () => {
-  const listed = arrayOf("pr-loop", "STATEMENT_PATHS");
+test("pr-loop-slim: the paths that owe statements are the `paths:` of the engine's and the listener's rules files, and src/cdc/", () => {
+  const listed = arrayOf("pr-loop-slim", "STATEMENT_PATHS");
   const dir = path.join(ROOT, ".claude", "rules");
   const files = fs.readdirSync(dir);
   const read = (f: string) => fs.readFileSync(path.join(dir, f), "utf8");
@@ -1461,65 +1286,53 @@ test("review-stats: it reads and prints the statements run and matched, and a re
   assert.match(render(stats([legacy!]), 0, 0), /statements run by probes and reviews: none counted/);
 });
 
-test("pr-loop: Postgres for the statements is the itEnv file when given, else a throwaway postgres:18 of the stage's own, and its URL is never printed", async () => {
-  const src = source("pr-loop");
+test("pr-loop-slim: Postgres for the statements is the itEnv file when given, else a throwaway postgres:18 of the stage's own, and its URL is never printed", async () => {
+  const src = source("pr-loop-slim");
   assert.match(src, /^\/\/ args: \{[^}\n]*\bitEnv\?/m, "the args line names itEnv");
   assert.match(src, /^\/\/ {3}itEnv: [^\n]*IT_POSTGRES_URL/m, "and the header says what it is");
   // the container's start and stop are scripts/review-postgres.ts (issue 322), whose own test holds its rules
   const ownPg = [/`node <repo>\/scripts\/review-postgres\.ts start`/, /postgres:18/, /wal_level=logical/, /password passed by the environment and never printed/, /`--env-file=<env file>`/,
     /`node <repo>\/scripts\/review-postgres\.ts stop <name>`, which removes it, checks that `docker inspect --format '\{\{\.State\.Status\}\}' <name>` then fails, and deletes the env file/];
-  const without = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
-  for (const l of ["probe 1", "review r1"]) {
+  const without = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
+  for (const l of ["implement", "review r1"]) {
     const p = without.prompt(l);
     for (const re of ownPg) assert.match(p, re, `${l}: without itEnv, a throwaway Postgres of its own (${re})`);
     assert.match(p, /Never print, echo or log the URL or its password/, l);
   }
-  const given = await run("pr-loop", { ...PR, itEnv: "/srv/it.env" }, { ...START, "review r1": clean, "CI 1": green });
-  for (const l of ["probe 1", "review r1"]) {
+  const given = await run("pr-loop-slim", { ...PR, itEnv: "/srv/it.env" }, { ...SLIM, "review r1": clean, "CI 1": green });
+  for (const l of ["implement", "review r1"]) {
     const p = given.prompt(l);
     assert.match(p, /`--env-file=\/srv\/it\.env`, never a shell's `\.` or `source`/, `${l}: the file is loaded by Node, never sourced`);
     assert.doesNotMatch(p, /docker run|review-postgres/, `${l}: and no container is started`);
     assert.match(p, /Never print, echo or log the URL or its password/, l);
   }
-  // issue-loop passes it on to each pr-loop, as it does repo
-  const { flowCalls } = await run("issue-loop", { issue: 300, tasks: TASKS, itEnv: "/srv/it.env" }, SETUP, [
-    () => ({ status: "reviewed", pr: 401, classes: {} }), () => ({ status: "reviewed", pr: 402, classes: {} }),
-  ]);
-  assert.deepEqual(flowCalls.map((c) => c.args["itEnv"]), ["/srv/it.env", "/srv/it.env"]);
-  assert.match(source("issue-loop"), /^\/\/ args: \{[^}\n]*\bitEnv\?/m, "issue-loop's args line names it too");
 });
 
-// ---------------------------------------------------------------- the race (Tom, 2026-11-01): two ways of running one
-// PR through the loop, raced on issue 176 against pr-loop. On issue 192 one persistent Opus agent, sent the review's
+// ---------------------------------------------------------------- the one process (Tom, 2026-11-02; issue 386): the
+// pr-persistent skill keeps ONE implementer alive and renders every prompt from pr-loop-slim.js, which hands context on
+// in a `## Handoff` PR comment when run by the Workflow tool. On issue 192 one persistent Opus agent, sent the review's
 // findings by message, finished in a third of the harness's time on less than half its Opus tokens, because a fix round
-// rebuilt no context. pr-loop-slim keeps the harness and hands context on in a `## Handoff` PR comment; the
-// pr-persistent skill keeps ONE implementer alive. Both keep pr-loop's review, which runs statements at scale.
+// rebuilt no context. The review is the retired pr-loop's, and runs statements at scale.
 
-/** A handoff, in the shape Tom named: what the author knows and the code does not say. */
-const H1 = {
-  decisions: [{ what: "the arm's type is read from Postgres's analysis", why: "the analysis already holds it" }],
-  rejected: [], keyFiles: ["src/duck/plan.ts: rewriteSetOp"], risks: ["a char(n) arm beside a text one"],
-};
-const SLIM: Answers = { ...START, implement: { ...(START["implement"] as object), handoff: H1 } };
-/** The one sentence pr-loop-slim's review adds to pr-loop's: the handoff is the author's report, never evidence. */
+/** The one sentence pr-loop-slim's review adds to the retired pr-loop's: the handoff is the author's report, never evidence. */
 const NOT_THE_HANDOFF = " The PR's `## Handoff` comment is the author's account too: never read it.";
 
 // Issue 286: PR 280 changed one line of src/cli/dev.ts (a sweep of tunnel files), a path in both an engine rules file's
 // `paths:` and cli.md's, and its review was made to run 332 statements that told it nothing. A SHARED path owes checks
 // only when scripts/evidence-owed.ts found no hunk of it reaching the engine AND the review agreed (checksOnly);
 // everything else, and every engine or listener path whatever is listed, still owes statements.
-test("pr-loop, pr-loop-slim: a shared path owes checks only when the review waives it in checksOnly; an engine path never", async () => {
+test("pr-loop-slim: a shared path owes checks only when the review waives it in checksOnly; an engine path never", async () => {
   const pr280 = { ...clean, changedPaths: ["src/cli/dev.ts", "src/cli/tunnel.ts", "tests/web-page.test.ts"], checksOnly: ["src/cli/dev.ts"], statementsRun: 0, statementsMatched: 0, checksRun: 5 };
   for (const name of PR_LOOPS) {
     const go = (review: object, extra: Answers = {}) =>
-      run(name, { ...PR }, { ...(name === "pr-loop" ? START : SLIM), "probe 1": pr280, "review r1": review, "CI 1": green, ...extra });
+      run(name, { ...PR }, { ...SLIM, "review r1": review, "CI 1": green, ...extra });
     const status = async (review: object, extra: Answers = {}) => String((await go(review, extra)).result["status"]);
     // PR 280's shape: checks, no statement, a clean first review
     const r = await go(pr280);
     assert.match(String(r.result["status"]), /^reviewed, no open blocking finding/, name);
     assert.doesNotMatch(String(r.result["status"]), /ran no|read the code only/, name);
     const rec = parseRecords(r.prompt("record"))[0]!;
-    assert.deepEqual([rec.reviewRounds, rec.statementsRun, rec.checksRun], [1, 0, name === "pr-loop" ? 10 : 5], name);
+    assert.deepEqual([rec.reviewRounds, rec.statementsRun, rec.checksRun], [1, 0, 5], name);
     // nothing waived, or a waiver that cannot be read: statements are owed, as before, and the run does not crash
     for (const checksOnly of [[], undefined, "src/cli/dev.ts", [1]]) {
       assert.match(await status({ ...pr280, checksOnly }), /^unreviewed: review r1 ran no statement for src\/cli\/dev\.ts/, `${name} ${JSON.stringify(checksOnly)}`);
@@ -1534,7 +1347,7 @@ test("pr-loop, pr-loop-slim: a shared path owes checks only when the review waiv
     // a waived shared path owes checks, beside the statements an engine path owes
     assert.match(await status({ ...pr280, changedPaths: ["src/cli/dev.ts", "src/duck/sync.ts"], statementsRun: 300, statementsMatched: 300, checksRun: 0 }), /^unreviewed: review r1 ran no check for src\/cli\/dev\.ts/, name);
     // the schema requires checksOnly, and the prompt names the script and the override
-    for (const l of name === "pr-loop" ? ["probe 1", "review r1"] : ["review r1"]) {
+    for (const l of ["review r1"]) {
       const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[]; properties: Record<string, { type: string; items?: { type: string } }> };
       assert.ok(schema.required.includes("checksOnly"), `${name} ${l}: the schema requires checksOnly`);
       assert.deepEqual([schema.properties["checksOnly"]!.type, schema.properties["checksOnly"]!.items?.type], ["array", "string"]);
@@ -1542,15 +1355,9 @@ test("pr-loop, pr-loop-slim: a shared path owes checks only when the review waiv
       assert.match(r.prompt(l), /Leave a path out, and it owes statements/, `${name} ${l}`);
       assert.match(r.prompt(l), /except a shared path you report in checksOnly/, `${name} ${l}`);
     }
-    if (name === "pr-loop-slim") {
-      assert.ok(r.prompt("implement").includes("node scripts/evidence-owed.ts origin/main HEAD"), "slim's SELF_CHECK names the script");
-      assert.match(r.prompt("implement"), /Leave a path out, and it owes statements[^\n]*\nFor each changed path[^\n]*except a shared path you report in checksOnly/);
-    }
+    assert.ok(r.prompt("implement").includes("node scripts/evidence-owed.ts origin/main HEAD"), `${name}: the author's SELF_CHECK names the script`);
+    assert.match(r.prompt("implement"), /Leave a path out, and it owes statements[^\n]*\nFor each changed path[^\n]*except a shared path you report in checksOnly/);
   }
-  // the probe's round reads the same waiver: no 'ran no statement' note
-  const p = await run("pr-loop", { ...PR }, { ...START, "probe 1": { ...clean, changedPaths: ["src/cli/dev.ts"], checksOnly: ["src/cli/dev.ts"], checksRun: 3, statementsRun: 0, statementsMatched: 0 }, "review r1": clean, "CI 1": green });
-  assert.match(String(p.result["status"]), /^reviewed/);
-  assert.doesNotMatch(String(p.result["status"]), /probe 1 ran no statement/);
 });
 
 // scripts/evidence-owed.ts over a synthetic repo: a base, then one head a case, each a commit off the base.
@@ -1639,7 +1446,7 @@ test("evidence-owed: a shared path is decided by its hunks through the checker; 
   }
 });
 
-test("pr-loop-slim: no design stage, no design review and no probe; the rest of the loop is pr-loop's", async () => {
+test("pr-loop-slim: no design stage, no design review and no probe; the author's note and check at scale take their place", async () => {
   const titles = meta("pr-loop-slim").phases.map((p) => p.title);
   for (const t of ["Design", "Design review", "Probe"]) assert.ok(!titles.includes(t), `meta declares no ${t} phase`);
   const src = source("pr-loop-slim");
@@ -1663,7 +1470,7 @@ test("pr-loop-slim: no design stage, no design review and no probe; the rest of 
     "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "record",
   ]);
   assert.match(String(result["status"]), /^reviewed, no open blocking finding/);
-  assert.deepEqual(shapeOf(result), RESULT_KEYS, "the result is pr-loop's shape, so issue-loop can run either");
+  assert.deepEqual(shapeOf(result), RESULT_KEYS, "one shape at every exit, which every reader of a result reads");
   assert.deepEqual([(result["designRounds"] as unknown[]).length, (result["probeRounds"] as unknown[]).length], [0, 0]);
   assert.deepEqual(Object.keys(result["classes"] as object), ["new-class"], "only this PR's classes, never the base's");
   assert.equal(prompt("file").split(base.input).length - 1, 1, "the base's finding is filed once");
@@ -1680,7 +1487,7 @@ test("pr-loop-slim: no design stage, no design review and no probe; the rest of 
   for (const l of ["review r1", "review r2", "review r3"]) assert.equal(opts(l).effort, "medium", l);
   assert.ok(prompt("review r3").includes(`diff ${sha("f")} ${sha("c")}`), "the CI fix is re-checked narrowly, from the head before it");
 
-  // the class rule, as pr-loop's
+  // the class rule
   const k = (o: Partial<Record<string, string>> = {}) => finding({ classKey: "k", ...o });
   let r = await run("pr-loop-slim", { ...PR }, {
     ...SLIM, "review r1": { findings: [k({ input: "a" }), k({ input: "b" })], judgedCorrect: [] },
@@ -1700,7 +1507,7 @@ test("pr-loop-slim: no design stage, no design review and no probe; the rest of 
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
   r = await run("pr-loop-slim", { ...PR }, many);
   assert.match(String(r.result["status"]), /^still 1 finding\(s\) after 4 rounds/);
-  // a review that ran nothing is no review, as pr-loop's
+  // a review that ran nothing is no review
   r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...clean, statementsRun: 0, statementsMatched: 0 } });
   assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement/);
 });
@@ -1763,7 +1570,6 @@ test("pr-loop-slim: the implementer returns a structured handoff, pasted verbati
   // the author checks at scale before every push, with the review's own text: statements for the engine's paths, in
   // every variant form, and the regression sweep; checks for the others; the differences fixed, the counts reported
   const forms = arrayOf("pr-loop-slim", "VARIANT_FORMS");
-  assert.deepEqual(forms, arrayOf("pr-loop", "VARIANT_FORMS"), "pr-loop's variant forms");
   for (const l of ["implement", "fix r1", "CI fix 1"]) {
     const p = r.prompt(l);
     assert.match(p, /CHECK AT SCALE before you push/, l);
@@ -1798,7 +1604,7 @@ test("pr-loop-slim: a brief given in args skips the Brief stage, and Learn runs 
   assert.ok(!r.phases.includes("Brief"));
   assert.ok(r.prompt("implement").includes("the shared brief") && r.prompt("implement").includes("SELECT shared_shape FROM t"));
   assert.ok(r.prompt("review r1").includes("SELECT shared_shape FROM t"), "the review holds the shared brief's shapes");
-  // learn and its check run, as pr-loop's, and each says its time
+  // learn and its check run, and each says its time
   assert.deepEqual(r.labels.filter((l) => l.startsWith("learn")), ["learn", "learn check"]);
   assert.match(r.prompt("learn"), /date -u \+%FT%TZ` as your first command and as your last/);
   assert.match(r.prompt("learn check"), /date -u \+%FT%TZ` and return its output as endedAt/);
@@ -1822,35 +1628,45 @@ test("pr-loop-slim: a brief given in args skips the Brief stage, and Learn runs 
   assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
 });
 
-test("pr-loop-slim: its review, re-check and CI read are pr-loop's word for word, and its Review record is pr-loop's shape", async () => {
-  const common: Answers = { "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green };
-  const full = await run("pr-loop", { ...PR }, { ...START, ...common });
-  const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, ...common, "fix r1": { ...pushed("b"), handoff: H1 } });
-  for (const l of ["review r1", "review r2", "CI read r1", "CI read r2", "CI 1"]) {
-    const s = slim.prompt(l);
-    if (l.startsWith("review")) assert.equal(s.split(NOT_THE_HANDOFF).length, 2, `"${l}" adds the handoff sentence once`);
-    assert.equal(s.replace(NOT_THE_HANDOFF, ""), full.prompt(l), `"${l}" is pr-loop's prompt`);
-  }
-  const schemaOf = (x: typeof full, l: string) => x.calls.find((c) => c.opts.label === l)!.opts.schema;
-  assert.deepEqual(schemaOf(slim, "review r1"), schemaOf(full, "review r1"), "the review returns pr-loop's FINDINGS");
-  const [a, b] = [parseRecords(full.prompt("record"))[0]!, parseRecords(slim.prompt("record"))[0]!];
-  assert.deepEqual(Object.keys(b).sort(), Object.keys(a).sort(), "the record block has pr-loop's keys");
-  for (const k of ["pr", "reviewRounds", "findings", "deferred", "ciFixes", "status"] as const) assert.deepEqual(b[k], a[k], k);
+test("pr-loop-slim: its review adds the handoff sentence once, returns FINDINGS, and its Review record keeps the block's keys", async () => {
+  const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green });
+  for (const l of ["review r1", "review r2"]) assert.equal(slim.prompt(l).split(NOT_THE_HANDOFF).length, 2, `"${l}" adds the handoff sentence once`);
+  const schema = slim.calls.find((c) => c.opts.label === "review r1")!.opts.schema as { required: string[] };
+  assert.deepEqual(schema.required, ["findings", "judgedCorrect", "statementsRun", "statementsMatched", "checksRun", "changedPaths", "checksOnly"], "the review returns FINDINGS");
+  const b = parseRecords(slim.prompt("record"))[0]!;
+  assert.deepEqual(Object.keys(b).sort(), ["checksRun", "ciFixes", "deferred", "designRounds", "findings", "pr", "probeRounds", "reviewRounds", "statementsMatched", "statementsRun", "status"],
+    "the record block's keys, which scripts/review-stats.ts reads");
+  assert.deepEqual([b.pr, b.reviewRounds, b.ciFixes], [900, 2, 0]);
+  assert.deepEqual(b.findings, [{ round: 1, stage: "review", classKey: "c-a", severity: "wrong-answer" }]);
   assert.deepEqual([b.designRounds, b.probeRounds], [0, 0], "no design round and no probe round");
-  assert.equal(b.statementsRun, 2, "the reviews' statements alone");
+  assert.equal(b.statementsRun, 2, "the reviews' statements alone, summed");
   assert.match(slim.prompt("record"), /pr-loop-slim/, "the record's text names the process it came from");
   assert.equal(stats([b]).firstPass, 0);
-  assert.equal(stats([b]).bySecond, 1, "review-stats reads it as it reads pr-loop's");
+  assert.equal(stats([b]).bySecond, 1, "review-stats reads it");
 });
 
-// ---------------------------------------------------------------- the pr-persistent skill: the race's first process
-// PR 258, review round 1, a CLASS round: a prompt duplicated by hand drifts from its source, and the race measures time
-// and tokens, so any drift between the arms' prompts biases it. The skill therefore restates NOTHING: its render
+// ---------------------------------------------------------------- the pr-persistent skill: the coordinator of one run
+// PR 258, review round 1, a CLASS round: a prompt duplicated by hand drifts from its source, so the skill restates
+// NOTHING (that was measured in the race on issue 176, which this skill won, issue 386): its render
 // command replays pr-loop-slim.js against the answers recorded so far and writes the whole prompt of each next stage.
 // These tests hold every stage's rendered prompt equal to slim's own, whole, for the same inputs, and the skill free of
 // slim's prompt text.
 const SKILL = path.join(ROOT, ".claude", "skills", "pr-persistent", "SKILL.md");
 const skillText = (): string => fs.readFileSync(SKILL, "utf8");
+// Issue 386: the top session's queue, a skill of its own; it starts each run as a coordinator following SKILL.md
+const UP_NEXT = path.join(ROOT, ".claude", "skills", "up-next", "SKILL.md");
+const upNextText = (): string => fs.readFileSync(UP_NEXT, "utf8");
+/** A skill's frontmatter fields, held to what Claude Code reads: a name, and a description that is one plain scalar. */
+function frontmatter(text: string): Record<string, string> {
+  const front = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  assert.ok(front, "the skill opens with frontmatter");
+  const fields = Object.fromEntries([...front[1]!.matchAll(/^([a-z-]+): (.+)$/gm)].map((m) => [m[1]!, m[2]!]));
+  assert.ok((fields["description"] ?? "").length > 40, "a description that says when to use it");
+  assert.doesNotMatch(fields["description"]!, /: /, "the description is one plain YAML scalar");
+  return fields;
+}
+/** What no checked-in skill may hold: a machine's path, a scratch folder, or an agent's id (a run's state). */
+const MACHINE = /\/Users\/|\/home\/|\/private\/tmp|scratchpad|claude-501|\ba[0-9a-f]{16}\b/;
 // Issue 304: the coordinator carried every prompt and result through its own context, a third of the implementer's
 // output tokens, only to forward them. Content now goes between agents by path: the render is a script file pinned
 // into the run folder, its stdout only control lines, each prompt a file, each result a file the agent writes.
@@ -1918,15 +1734,67 @@ function onlyControlLines(r: Rendered, what: string): void {
 test("the pr-persistent skill: valid frontmatter, and it names where its text comes from without restating it", async () => {
   assert.ok(fs.existsSync(SKILL), "the skill exists at .claude/skills/pr-persistent/SKILL.md");
   const text = skillText();
-  const front = /^---\n([\s\S]*?)\n---\n/.exec(text);
-  assert.ok(front, "the skill opens with frontmatter");
-  const fields = Object.fromEntries([...front[1]!.matchAll(/^([a-z-]+): (.+)$/gm)].map((m) => [m[1]!, m[2]!]));
+  const fields = frontmatter(text);
   assert.equal(fields["name"], "pr-persistent");
-  assert.ok((fields["description"] ?? "").length > 40, "a description that says when to use it");
-  assert.doesNotMatch(fields["description"]!, /: /, "the description is one plain YAML scalar");
+  assert.doesNotMatch(fields["description"]!, /\brace\b|\barm\b|issue 176/i, "the race is over (issue 386): the description names none");
   for (const s of [".claude/workflows/pr-loop-slim.js", "EVIDENCE", "VARIANT_FORMS", "SEVERITY_RULE", "FINDINGS", "json mason-review-record", "SendMessage",
-    'process: "pr-persistent"', "THE SAME implementer", "--match-head-commit", "Race log", "Learn", "--json state,mergeable"]) {
+    'process: "pr-persistent"', "THE SAME implementer", "Run log", "Learn"]) {
     assert.ok(text.includes(s), `the skill says ${s}`);
+  }
+  assert.ok(!text.includes("Race log"), "the run log, no longer the race's");
+  assert.doesNotMatch(text, /\braced\b|the other arm|experimental|issue 176/, "no race wording");
+});
+
+test("the pr-persistent skill: its arguments, the coordinator's report at DONE, a split DONE, and no merge of its own (issue 386)", () => {
+  const text = skillText(), prose = text.replace(/\s+/g, " ");
+  // the arguments, said once near the top, as placeholders
+  const args = prose.slice(0, prose.indexOf("## 1. Set up the run"));
+  for (const a of ["`issue`", "context line", "`<runs>`", "`<runs>/issue-<n>`", "`<repo>`", "`<it env>`", "`parent`", "`stackedOn`", "`knownClasses`", "`result.json`"]) {
+    assert.ok(args.includes(a), `the arguments name ${a}`);
+  }
+  // args.json without a brief: the Brief stage runs, and may split
+  assert.ok(prose.includes("NO `brief`") && prose.includes("This issue is not split yet"), "args.json has no brief, and the context sentence");
+  // the coordinator never merges: the top session does
+  assert.doesNotMatch(text, /gh pr merge/, "no merge command: the coordinator never merges");
+  assert.ok(prose.includes("Never merge, nor queue a merge") && prose.includes(".claude/skills/up-next/SKILL.md"), "it says who merges");
+  // a split DONE reports the pieces and stops
+  assert.match(prose, /\*\*A split\*\* \(`DONE: split into <k> pieces: …`\)[^]*?their sub-issues[^]*?and stop/);
+  // the report at DONE
+  for (const s of ["the PR and its head", "the status line the render printed", "the wall time", "the tokens per model, from the run log", "every issue filed during the run", "anything that went wrong"]) {
+    assert.ok(prose.includes(s), `the report gives ${s}`);
+  }
+  // pinning reads git's objects: no pull of the main checkout, no index.lock dance
+  assert.match(text, /^git fetch origin <base>$/m);
+  assert.doesNotMatch(text, /git (?:-C \S+ )?pull|index\.lock/, "the main checkout is never pulled");
+  for (const s of ["## Waits", "## Never", "--test-force-exit"]) assert.ok(text.includes(s), `the skill says ${s}`);
+});
+
+test("the up-next skill: the top session's queue, its rules, how a run starts and how a DONE is merged (issue 386)", () => {
+  assert.ok(fs.existsSync(UP_NEXT), "the skill exists at .claude/skills/up-next/SKILL.md");
+  const text = upNextText(), prose = text.replace(/\s+/g, " ");
+  assert.equal(frontmatter(text)["name"], "up-next");
+  for (const s of ["three at a time", "Needs Tom", "Backlog", "jumps the queue", "Every request made in chat gets an issue and a coordinator run", "never a direct agent",
+    "--match-head-commit", "release-notes/next.md", "Sonnet", ".claude/skills/pr-persistent/SKILL.md", "`<queue file>`", "`<runs>`",
+    "members of a class issue", "Two runs on the same files", "--json state,mergeable", "Start the next run first", "read its diff in full"]) {
+    assert.ok(prose.includes(s), `the skill says ${s}`);
+  }
+  assert.match(prose, /A bug that blocks merges jumps the queue[^.]*flaky oracle statement/, "a merge-blocking flake jumps the queue");
+  // a split DONE: each piece in order, a stacked one with stackedOn and knownClasses from the run below
+  assert.match(prose, /\*\*A split\*\*[^]*?in order[^]*?stacked piece starts only once the one below is pushed, with stackedOn[^]*?knownClasses[^]*?from the run below/);
+  // the queue file's format, never its contents
+  assert.ok(prose.includes("Order: done: <issues> | running: <issue>") && prose.includes("| issue | coordinator agent | started | PR | state |"), "the queue file's format");
+  assert.ok(text.includes("`gh pr merge <n> --auto --merge --match-head-commit <sha>`"), "the merge is queued pinned to the head read");
+  assert.ok(prose.includes("the queue belongs on the board") && prose.includes("is open"), "the queue on the board stays an open question");
+});
+
+test("both skills: no machine path, agent id or run state, and no sentence of a pr-loop-slim prompt (issue 386, PR 258's class)", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green });
+  const split = await run("pr-loop-slim", { ...PR }, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } });
+  const sentences = [...new Set([...r.calls, ...split.calls].flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50))];
+  for (const [name, text] of [["pr-persistent", skillText()], ["up-next", upNextText()]] as const) {
+    assert.doesNotMatch(text, MACHINE, `${name}: a machine path, a scratch folder or an agent id`);
+    assert.deepEqual(sentences.filter((x) => text.includes(x)), [], `${name} restates a prompt of pr-loop-slim.js: render it instead`);
+    for (const cmd of commandsOf(text)) assert.deepEqual(unplain(cmd), [], `${name}: \`${cmd}\` is not plain`);
   }
 });
 
@@ -1940,8 +1808,8 @@ test("the pr-persistent skill: the render is one command, each stage is dispatch
     ".claude/skills/pr-persistent/render.mjs", "never the JSON", "cache writes", "cache reads"]) {
     assert.ok(prose.includes(s), `the skill says ${s}`);
   }
-  // both files are pinned from one commit, as the Workflow tool loads its script once
-  assert.match(text, /^git rev-parse HEAD$/m);
+  // both files are pinned from one commit, as the Workflow tool loads its script once, read from git's objects
+  assert.match(text, /^git rev-parse origin\/<base>$/m);
   assert.match(text, /^git show <sha>:\.claude\/workflows\/pr-loop-slim\.js > <run folder>\/pr-loop-slim\.js$/m);
   assert.match(text, /^git show <sha>:\.claude\/skills\/pr-persistent\/render\.mjs > <run folder>\/render\.mjs$/m);
   assert.doesNotMatch(text, /fenced json block/, "a result travels by file, never in the report");
@@ -1953,8 +1821,8 @@ test("the pr-persistent skill: the render is one command, each stage is dispatch
   assert.doesNotMatch(prose, /every agent you start notifies you/, "no wait relies on a notice");
 });
 
-test("the pr-persistent skill and its render restate no sentence of a prompt pr-loop-slim.js gives its agents (PR 258's class)", async () => {
-  const text = skillText() + "\n" + fs.readFileSync(RENDER, "utf8");
+test("the skills and the render restate no sentence of a prompt pr-loop-slim.js gives its agents (PR 258's class)", async () => {
+  const text = skillText() + "\n" + upNextText() + "\n" + fs.readFileSync(RENDER, "utf8");
   const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green });
   const sentences = new Set(r.calls.flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50));
   assert.ok(sentences.size > 100);
@@ -1965,8 +1833,8 @@ test("the pr-persistent skill and its render restate no sentence of a prompt pr-
   assert.equal(parseRecords(text).length, 0, "no record block of its own: the record stage is rendered");
 });
 
-/** A full run of the persistent arm: its args, and every stage answered explicitly, so the harness adds nothing the
- * render does not see. */
+/** A full run as the skill drives it: its args, and every stage answered explicitly, so the harness adds nothing the
+ * render does not see. (Named for the race on issue 176, whose args these were.) */
 const RACE_ARGS = { ...PR, repo: ROOT, brief: { brief: "the shared brief", shapes: ["SELECT shared_shape FROM t"], tests: ["tests/duck-wire.test.ts --test-name-pattern shared"] }, process: "pr-persistent" };
 const ran = (o: object) => ({ changedPaths: ["src/duck/plan.ts"], statementsRun: 300, statementsMatched: 299, checksRun: 0, checksOnly: [], ...o });
 const RACE_ANSWERS: Answers = {
@@ -2017,7 +1885,7 @@ test("the pr-persistent skill: every stage's prompt and options, rendered by the
   assert.deepEqual(Object.keys(together.files).sort(), ["CI-read-r1.md", "review-r1.md"]);
   assert.deepEqual(together.out.split("\n").filter(Boolean).map((l) => l.replace(/ \(.*$/, "")), ['STAGE "review r1"', 'STAGE "CI read r1"']);
   onlyControlLines(together, "review and CI read");
-  // the record is rendered too: pr-loop's block, for the PR it is posted on, saying which arm wrote it
+  // the record is rendered too: its block, for the PR it is posted on, saying which process wrote it
   const recorded = renderStage(args, Object.fromEntries(slim.labels.slice(0, -1).map((l) => [l, answers[l]])));
   onlyControlLines(recorded, "record");
   const record = recorded.files["record.md"]!;
@@ -2187,8 +2055,134 @@ test("pr-loop-slim: args.process names the arm in the record's text, and an unkn
   assert.match(String(r.result["status"]), /^args\.process is "persistent": it is one of pr-loop-slim, pr-persistent/);
 });
 
+// ---------------------------------------------------------------- the split verdict (issue 386): an issue too big for
+// one PR was seen only if the top session spotted it, or late, as rounds piled up or the round bound stopped a run. The
+// Brief may now return `split`; the run makes a sub-issue per piece, posts the plan and stops before any code.
+// issue-loop.js's TASKS item is the piece's shape and its Setup the split stage's prompt, both moved.
+
+test("pr-loop-slim split: a Brief that splits makes a sub-issue per piece, posts the plan and stops before Implement", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } });
+  assert.deepEqual(r.labels, ["brief", "split"], "no implement, link, review, file or record");
+  assert.deepEqual(r.phases, ["Brief", "Split"]);
+  const titles = meta("pr-loop-slim").phases.map((p) => p.title);
+  for (const t of ["Brief", "Split"]) assert.ok(titles.includes(t), `meta declares ${t}`);
+  assert.deepEqual(shapeOf(r.result), RESULT_KEYS, "the result's one shape: no new key");
+  assert.deepEqual([r.result["pr"], r.result["head"]], [null, null]);
+  const status = String(r.result["status"]);
+  assert.match(status, /^split into 2 pieces: #401, #402 \(stacked on #401\); the plan is on #301: the top session starts each as a run$/);
+
+  // the split stage's prompt: issue-loop's Setup, moved
+  const p = r.prompt("split");
+  for (const s of ['`node <repo>/scripts/board.ts status 301 "In progress"`', '`node <repo>/scripts/board.ts sub 301 "301 · schema" --from "Sonnet 5.5"`',
+    '`node <repo>/scripts/board.ts sub 301 "301 · reader" --from "Sonnet 5.5"`', "scope: the schema", "scope: the reader", "branch: issue-301-reader",
+    "read first: src/duck/sync.ts", "`### From Claude (Sonnet 5.5)`", ".claude/skills/pr-persistent/SKILL.md", "too big: two pieces", "comment once on #301"]) {
+    assert.ok(p.includes(s), `the split prompt says ${s}`);
+  }
+  assert.equal(p.split("[stacked on the one before]").length - 1, 1, "the second piece alone is stacked");
+  assert.ok(p.includes("\n2. 301 · reader [stacked on the one before]\n") && p.includes("\n1. 301 · schema\n"), "on the reader, in order");
+  const { label: _l, phase: _p, schema, ...on } = r.calls.find((c) => c.opts.label === "split")!.opts;
+  assert.deepEqual(on, { model: "sonnet", effort: "low" }, "Sonnet, low effort, no isolation: it writes no code");
+  assert.deepEqual((schema as { required: string[] }).required, ["subIssues"]);
+  for (const cmd of commandsOf(p)) assert.deepEqual(unplain(cmd), [], `\`${cmd}\` is plain`);
+
+  // with repo, the commands are the checkout's own
+  const withRepo = await run("pr-loop-slim", { ...PR, repo: "/srv/checkout" }, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } });
+  assert.ok(withRepo.prompt("split").includes('`node /srv/checkout/scripts/board.ts sub 301 "301 · schema" --from "Sonnet 5.5"`'));
+});
+
+test("pr-loop-slim split: a split answer that is not one sub-issue a piece stops the run as failed; a split of one piece is no split", async () => {
+  for (const answer of [{ subIssues: [401] }, null, { subIssues: [401, 0] }, { subIssues: [401, 402, 403] }]) {
+    const r = await run("pr-loop-slim", { ...PR }, { brief: SPLIT_BRIEF, split: answer });
+    assert.match(String(r.result["status"]), /^split failed: /, JSON.stringify(answer));
+    assert.ok(String(r.result["status"]).includes("#301"), "it says where to look");
+    assert.deepEqual(r.labels, ["brief", "split"], `${JSON.stringify(answer)}: no implement`);
+    assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
+  }
+  // one piece: no split stage, nothing implemented from a brief that may be empty
+  const one = await run("pr-loop-slim", { ...PR }, { brief: { ...SPLIT_BRIEF, split: [PIECES[0]] } });
+  assert.deepEqual(one.labels, ["brief"]);
+  assert.match(String(one.result["status"]), /a split of one piece is no split/);
+  assert.deepEqual(shapeOf(one.result), RESULT_KEYS);
+  assert.deepEqual([one.result["pr"], one.result["head"]], [null, null]);
+});
+
+test("pr-loop-slim split: opt-in, so a Brief with no split, or an empty one, runs exactly as before; a given brief may split", async () => {
+  const rest: Answers = { "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green };
+  const today = await run("pr-loop-slim", { ...PR }, { ...SLIM, ...rest });
+  assert.ok(!("split" in (START["brief"] as object)), "today's brief has no split key");
+  const empty = await run("pr-loop-slim", { ...PR }, { ...SLIM, brief: { ...(START["brief"] as object), split: [] }, ...rest });
+  for (const r of [empty]) {
+    assert.deepEqual(r.labels, today.labels);
+    assert.ok(!r.labels.includes("split"));
+    for (const [i, c] of r.calls.entries()) assert.equal(c.prompt, today.calls[i]!.prompt, `"${c.opts.label}" is the same prompt`);
+    assert.equal(r.result["status"], today.result["status"]);
+  }
+  assert.deepEqual(today.labels.slice(0, 4), ["brief", "implement", "link", "review r1"]);
+  // a brief given in args with a split goes to the split stage, with no Brief stage
+  const given = await run("pr-loop-slim", { ...PR, brief: SPLIT_BRIEF }, { split: { subIssues: [401, 402] } });
+  assert.deepEqual(given.labels, ["split"]);
+  assert.match(String(given.result["status"]), /^split into 2 pieces: #401, #402 \(stacked on #401\)/);
+  // a given split whose piece is not a piece is not a brief
+  const bad = await run("pr-loop-slim", { ...PR, brief: { ...SPLIT_BRIEF, split: [{ title: "x" }, PIECES[1]] } }, {});
+  assert.deepEqual(bad.labels, []);
+  assert.match(String(bad.result["status"]), /^args\.brief is not a brief/);
+});
+
+test("pr-loop-slim split: the Brief's schema is one plain object whose split is optional, and its prompt says when to split", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
+  const schema = r.calls.find((c) => c.opts.label === "brief")!.opts.schema as
+    { type: string; required: string[]; oneOf?: unknown; anyOf?: unknown; properties: Record<string, { type: string; items: { type: string; required: string[] } }> };
+  assert.equal(schema.type, "object");
+  assert.deepEqual(schema.required, ["brief", "shapes", "tests"], "split is optional");
+  assert.ok(!("oneOf" in schema) && !("anyOf" in schema), "render.mjs's problem() and the Workflow tool read a plain object schema");
+  const split = schema.properties["split"]!;
+  assert.equal(split.type, "array");
+  assert.equal(split.items.type, "object");
+  assert.deepEqual(split.items.required, ["title", "branch", "scope", "stacked", "readFirst"], "issue-loop's TASKS item, moved");
+  const p = r.prompt("brief");
+  assert.match(p, /SPLIT only when the issue's "Done looks like" cannot ship as ONE PR small enough for one review, with its own tests/);
+  assert.match(p, /two pieces or more, in order/);
+  assert.match(p, /`shapes` and `tests` may be empty/);
+  // the race is over: Learn's time is the run log's, and the script names no race
+  const learn = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green });
+  assert.doesNotMatch(learn.prompt("learn"), /the race/);
+  assert.match(learn.prompt("learn"), /the run log reads Learn's time apart/);
+  const m = meta("pr-loop-slim") as Meta & { whenToUse?: string };
+  for (const t of [m.description, m.whenToUse ?? ""]) assert.doesNotMatch(t, /\brace\b|raced|issue 176/i, t);
+  assert.match(m.description, /pr-persistent/, "it says it is the skill's source");
+});
+
+test("pr-loop-slim split, through render.mjs: a brief result with a split renders the split stage, and its answer the DONE", () => {
+  const { brief: _brief, ...args } = RACE_ARGS;
+  // the Brief's own answer, recorded as a file, with two pieces
+  const split = renderStage(args, { brief: SPLIT_BRIEF });
+  assert.equal(split.out, `STAGE "split" (Split) ${JSON.stringify({ model: "sonnet", effort: "low" })}: ${path.join(split.dir, "next", "split.md")}\n`);
+  onlyControlLines(split, "split");
+  assert.match(split.files["split.md"]!, /scripts\/board\.ts sub 301 "301 · reader" --from "Sonnet 5\.5"/);
+  // the split stage's answer: the DONE, its status in result.json
+  const done = renderStage(args, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } });
+  assert.equal(done.out, "DONE: split into 2 pieces: #401, #402 (stacked on #401); the plan is on #301: the top session starts each as a run\n");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(done.dir, "result.json"), "utf8")).status, done.out.slice("DONE: ".length).trim());
+  // a piece without `stacked` fails the Brief's schema: a failed agent, and the run stops there
+  const { stacked: _s, ...noStacked } = PIECES[1]!;
+  const bad = renderStage(args, { brief: { ...SPLIT_BRIEF, split: [PIECES[0], noStacked] } });
+  assert.match(bad.out, /^NULL "brief": answer\.split\[1\]\.stacked is missing; read as null/m);
+  assert.match(bad.out, /^DONE: brief failed$/m);
+});
+
+test("the repo records one process: CLAUDE.md names the skills and the one workflow, and who merges what (issue 386)", () => {
+  const claude = fs.readFileSync(path.join(ROOT, "CLAUDE.md"), "utf8");
+  for (const s of ["pr-loop.js", "issue-loop.js", "raced", "experimental process"]) assert.ok(!claude.includes(s), `CLAUDE.md no longer says ${s}`);
+  for (const s of [".claude/skills/pr-persistent/SKILL.md", ".claude/skills/up-next/SKILL.md", ".claude/workflows/pr-loop-slim.js"]) assert.ok(claude.includes(s), `CLAUDE.md names ${s}`);
+  const who = /^- \*\*Who merges what\*\*[\s\S]*?(?=^- \*\*)/m.exec(claude)?.[0] ?? "";
+  assert.ok(who.includes("release-notes/next.md"), "a product change's line in release-notes/next.md");
+  assert.match(who.replace(/\s+/g, " "), /A release and a deploy merge on the owner's word/);
+  assert.doesNotMatch(who.replace(/\s+/g, " "), /a PR that changes `src\/`[^.]*merge on the owner's word/i, "a src/ PR no longer waits on the owner");
+  assert.match(who, /--match-head-commit|merge-head\.ts/, "its detector stays");
+});
+
 // ---------------------------------------------------------------- issue 246: five rough edges in the prompts of the
-// review at scale (PR 245's review), each held here in both workflows, since slim's review is pr-loop's word for word.
+// review at scale (PR 245's review), each held here on pr-loop-slim, whose review is the retired pr-loop's word for word.
 
 /** A statement's text with every parenthesised group emptied, so only its top level is left: `count(*)` reads `count()`. */
 const topLevel = (sql: string): string => {
@@ -2213,8 +2207,7 @@ test("variant forms: every statement fixes its row order, so a DIFFER is never c
     "(SELECT a FROM t ORDER BY a LIMIT 1) UNION ALL (SELECT a FROM t ORDER BY a DESC LIMIT 1) ORDER BY 1"]) assert.ok(orderIsFixed(s), s);
   for (const s of ["VALUES (1), (NULL) EXCEPT SELECT a FROM t", "SELECT a FROM t", "SELECT count(*) FROM t GROUP BY a", "(SELECT a FROM t ORDER BY a) UNION SELECT b FROM t",
     "SELECT x FROM (SELECT a AS x FROM t ORDER BY a) s"]) assert.ok(!orderIsFixed(s), s);
-  const forms = arrayOf("pr-loop", "VARIANT_FORMS");
-  assert.deepEqual(arrayOf("pr-loop-slim", "VARIANT_FORMS"), forms, "one list, the same in both workflows");
+  const forms = arrayOf("pr-loop-slim", "VARIANT_FORMS");
   const sql = forms.flatMap((v) => [...v.matchAll(/`([^`]+)`/g)].map((m) => m[1]!));
   assert.ok(sql.includes("VALUES (1), (NULL) EXCEPT SELECT a FROM t ORDER BY 1"), "the VALUES arm's EXCEPT carries its ORDER BY");
   assert.ok(!sql.includes("VALUES (1), (NULL) EXCEPT SELECT a FROM t"));
@@ -2225,15 +2218,13 @@ test("variant forms: every statement fixes its row order, so a DIFFER is never c
 const PSQL_ON_PATH = /scripts\/duck-repro\.ts needs `psql` on PATH[^\n]*`brew install libpq`[^\n]*`postgresql-client`[^\n]*the postgres:18 container does not supply it/;
 const SLIM_CI_FIX: Answers = { "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green };
 
-test("pr-loop, pr-loop-slim: every prompt that runs statements through duck-repro says `psql` must be on PATH, with or without itEnv (issue 246)", async () => {
+test("pr-loop-slim: every prompt that runs statements through duck-repro says `psql` must be on PATH, with or without itEnv (issue 246)", async () => {
   for (const args of [{ ...PR }, { ...PR, itEnv: "/srv/it.env" }]) {
-    const full = await run("pr-loop", args, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
-    for (const l of ["probe 1", "review r1", "review r2"]) assert.match(full.prompt(l), PSQL_ON_PATH, `pr-loop "${l}" ${JSON.stringify(args)}`);
     const slim = await run("pr-loop-slim", args, { ...SLIM, ...SLIM_CI_FIX });
     for (const l of ["implement", "fix r1", "CI fix 1", "review r1", "review r3"]) assert.match(slim.prompt(l), PSQL_ON_PATH, `pr-loop-slim "${l}" ${JSON.stringify(args)}`);
   }
   // the stop's text is built from the same sentence, and still says all a reader needs to install
-  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...clean, statementsRun: 0, statementsMatched: 0 } });
+  const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...clean, statementsRun: 0, statementsMatched: 0 } });
   const status = String(r.result["status"]);
   assert.match(status, /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts/);
   assert.match(status, PSQL_ON_PATH);
@@ -2261,10 +2252,10 @@ test("duck-repro: a missing psql says so, names PATH and how to install it, neve
   }
 });
 
-test("pr-loop, pr-loop-slim: no `docker inspect` prints the container's environment, and NEVER_PRINT forbids one that would (issue 246)", async () => {
+test("pr-loop-slim: no `docker inspect` prints the container's environment, and NEVER_PRINT forbids one that would (issue 246)", async () => {
   for (const name of PR_LOOPS) {
-    const answers: Answers = name === "pr-loop" ? { ...START, "review r1": clean, "CI 1": green } : { ...SLIM, "review r1": clean, "CI 1": green };
-    const labels = name === "pr-loop" ? ["probe 1", "review r1"] : ["implement", "review r1"];
+    const answers: Answers = { ...SLIM, "review r1": clean, "CI 1": green };
+    const labels = ["implement", "review r1"];
     for (const args of [{ ...PR }, { ...PR, itEnv: "/srv/it.env" }] as Array<Record<string, unknown>>) {
       const r = await run(name, args, answers);
       for (const l of labels) {
@@ -2283,9 +2274,9 @@ test("pr-loop, pr-loop-slim: no `docker inspect` prints the container's environm
   }
 });
 
-test("pr-loop, pr-loop-slim: a narrow re-check's regression sweep covers the fix's own code only; the full review's is unchanged (issue 246)", async () => {
+test("pr-loop-slim: a narrow re-check's regression sweep covers the fix's own code only; the full review's is unchanged (issue 246)", async () => {
   const OWN = /Its REGRESSION SWEEP covers the fix's own code only, the code `git diff (\w+) (\w+)` changed: what earlier rounds judged correct outside that code is not re-checked, and inside it the sweep runs it again/;
-  const full = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  const full = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
   const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, ...SLIM_CI_FIX });
   for (const [x, l, from, to] of [[full, "review r2", "a", "b"], [slim, "review r2", "a", "b"], [slim, "review r3", "f", "c"]] as const) {
     const m = OWN.exec(x.prompt(l));
@@ -2299,10 +2290,10 @@ test("pr-loop, pr-loop-slim: a narrow re-check's regression sweep covers the fix
   }
 });
 
-test("pr-loop, pr-loop-slim: `e` keeps its PRIMARY KEY, since duck-repro syncs only a table with a key (issue 246)", async () => {
+test("pr-loop-slim: `e` keeps its PRIMARY KEY, since duck-repro syncs only a table with a key (issue 246)", async () => {
   const E = /`t \(id int PRIMARY KEY, a int, b text, c numeric\(10,2\), d char\(4\)\)`[^\n]*`e`, an empty table of the same shape, its PRIMARY KEY included \(duck-repro syncs only a table with a key\)/;
-  const full = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
-  for (const l of ["probe 1", "review r1", "review r2"]) assert.match(full.prompt(l), E, `pr-loop "${l}"`);
+  const full = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  for (const l of ["implement", "review r1", "fix r1", "review r2"]) assert.match(full.prompt(l), E, `pr-loop-slim "${l}"`);
   const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
   for (const l of ["implement", "review r1"]) assert.match(slim.prompt(l), E, `pr-loop-slim "${l}"`);
 });
@@ -2311,7 +2302,7 @@ test("pr-loop, pr-loop-slim: `e` keeps its PRIMARY KEY, since duck-repro syncs o
 // PR 202's planner walk that grew 3^depth reached its 14th round before a reviewer happened on it. One variant form is
 // DEEP, and it is timed at the head and at the base as well as compared: a head much slower is a regression, and blocks.
 test("variant forms: a deep form, timed at the head and at the base; a head much slower blocks (issue 264)", async () => {
-  const forms = arrayOf("pr-loop", "VARIANT_FORMS");
+  const forms = arrayOf("pr-loop-slim", "VARIANT_FORMS");
   const deep = forms.filter((v) => /^a DEEP form/.test(v));
   assert.equal(deep.length, 1, "one deep form");
   const sql = [...deep[0]!.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
@@ -2333,9 +2324,9 @@ test("variant forms: a deep form, timed at the head and at the base; a head much
     /a head killed by the bound or dead \(out of memory\) where the base finished is a hang, severity crash/,
     /`duck_repro_<pid>` by the pid it printed first, never by a pattern/];
   const WIDE = "regression (what the base got right is now wrong, refused, or much slower (the deep form's time))";
-  const full = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  const full = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
   const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, ...SLIM_CI_FIX });
-  for (const [r, labels, reviews] of [[full, ["probe 1", "review r1", "probe 2", "review r2"], ["review r1", "review r2"]],
+  for (const [r, labels, reviews] of [[full, ["implement", "review r1", "fix r1", "review r2"], ["review r1", "review r2"]],
     [slim, ["implement", "fix r1", "CI fix 1", "review r1", "review r3"], ["review r1", "review r3"]]] as const) {
     for (const l of labels) {
       const p = r.prompt(l);
@@ -2381,12 +2372,10 @@ function commandsOf(text: string): string[] {
 }
 const unplain = (cmd: string): string[] => UNPLAIN.filter(([re]) => re.test(cmd)).map(([, why]) => why);
 
-test("plain: no command a harness prompt or the pr-persistent skill tells an agent to run is one the worktree guard refuses (issue 322)", async () => {
+test("plain: no command a harness prompt or a skill tells an agent to run is one the worktree guard refuses (issue 322)", async () => {
   const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
   const filed = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }, { classKey: "wording", source: "deferred", issue: 951, action: "filed" }] };
   const review1 = { findings: [finding({ classKey: "c-a", input: "SELECT a FROM t" }), base, later({ input: "SELECT later FROM t" })], judgedCorrect: [] };
-  const FULL: Answers = { ...START, "probe 1": f("p"), "probe fix 1": pushed("p"), "probe 2": clean, "review r1": review1, "fix r1": pushed("b"),
-    "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green, file: filed };
   const SLIM_FULL: Answers = { ...SLIM, "review r1": review1, "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red,
     "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green, file: filed };
   const bad = new Map<string, Set<string>>();
@@ -2404,25 +2393,31 @@ test("plain: no command a harness prompt or the pr-persistent skill tells an age
     for (const repo of [undefined, ROOT]) {
       for (const itEnv of [undefined, "/srv/it.env"]) {
         const args: Record<string, unknown> = { ...PR, ...(repo ? { repo } : {}), ...(itEnv ? { itEnv } : {}) };
-        const r = await run(name, args, name === "pr-loop" ? FULL : SLIM_FULL);
-        for (const c of r.calls) {
-          labels.add(`${name}: ${c.opts.label.replace(/\d+/g, "n")}`);
-          for (const cmd of commandsOf(c.prompt)) note(cmd, `${name} "${c.opts.label}"${repo ? " repo" : ""}${itEnv ? " itEnv" : ""}`);
+        // a full run, and a run that reaches the split stage (issue 386), so the split prompt's commands are read too
+        for (const answers of [SLIM_FULL, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
+          const r = await run(name, args, answers);
+          for (const c of r.calls) {
+            labels.add(`${name}: ${c.opts.label.replace(/\d+/g, "n")}`);
+            for (const cmd of commandsOf(c.prompt)) note(cmd, `${name} "${c.opts.label}"${repo ? " repo" : ""}${itEnv ? " itEnv" : ""}`);
+          }
         }
       }
     }
   }
-  for (const cmd of commandsOf(skillText())) note(cmd, "SKILL.md");
+  for (const cmd of commandsOf(skillText())) note(cmd, "pr-persistent SKILL.md");
+  for (const cmd of commandsOf(upNextText())) note(cmd, "up-next SKILL.md");
   assert.deepEqual([...bad].map(([k, w]) => `${k} in ${[...w].slice(0, 3).join(", ")}${w.size > 3 ? ` and ${w.size - 3} more` : ""}`), [],
     "a command an agent is told to run that Claude Code's worktree guard refuses in an isolated agent: make it one program with literal arguments, its logic in a script under scripts/");
   // every stage was rendered, and the commands the decision names are read, so the check is not vacuous
-  for (const l of ["brief", "design dn", "design review dn", "implement", "link", "probe n", "probe fix n", "review rn", "fix rn", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "file", "record"]) {
-    assert.ok(labels.has(`pr-loop: ${l}`), `pr-loop's ${l} was rendered`);
+  for (const l of ["brief", "split", "implement", "link", "review rn", "fix rn", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "file", "record"]) {
+    assert.ok(labels.has(`pr-loop-slim: ${l}`), `pr-loop-slim's ${l} was rendered`);
   }
   for (const cmd of ["node <repo>/scripts/ci-wait.ts 900 540", "mktemp -d", "git worktree add --detach <that path>/head <sha>", "git worktree remove <that path>/head",
     "node --env-file=<env file> <tree>/scripts/duck-repro.ts <ddl.sql> <statements.sql> > <out> 2>&1", "node <repo>/scripts/review-postgres.ts start",
     "node <repo>/scripts/review-postgres.ts stop <name>", "node --env-file=<env file> <repo>/scripts/duck-repro-bounded.ts 300 <tree> <ddl.sql> <deep.sql> > <out> 2>&1",
-    "mktemp", "gh pr comment 900 --body-file <that path>", "gh issue view 301 --json closedByPullRequestsReferences", "node <run folder>/render.mjs", "node <repo>/scripts/wait-file.ts <path> 1800", "git rev-parse HEAD"]) {
+    "mktemp", "gh pr comment 900 --body-file <that path>", "gh issue view 301 --json closedByPullRequestsReferences", "node <run folder>/render.mjs", "node <repo>/scripts/wait-file.ts <path> 1800", "git rev-parse origin/<base>",
+    'node <repo>/scripts/board.ts status 301 "In progress"', 'node <repo>/scripts/board.ts sub 301 "301 · schema" --from "Sonnet 5.5"',
+    "gh pr merge <n> --auto --merge --match-head-commit <sha>", 'node <repo>/scripts/board.ts status <n> "Implementing"']) {
     assert.ok(seen.has(cmd), `the check reads \`${cmd}\``);
   }
   // and it catches each form the guard refused, as origin/main wrote them

@@ -1570,3 +1570,197 @@ test("a table copies beside the polls: the other table is polled meanwhile, and 
     store.close();
   }
 });
+
+// LARGE VALUES OUT OF LINE UNDER A LOW MEMORY LIMIT (issue 96: a table of ~20,000 rows of ~68 KB of `jsonb` out of
+// line, a heap of a few hundred pages, was read as ONE chunk and ran out of a 7.8 GiB limit, whatever
+// MASON_COPY_PARALLEL; src/duck/sync.ts chunkCeiling, readChunks). Synthetic tables, scaled: measured on DuckDB 2.0.0,
+// `docs` (600 rows of ~512 KB of jsonb and one 16 times that, 5 heap pages) failed in one chunk at 1.5 GB and synced
+// one page a chunk at 768 MB; `blobs` (400 rows of ~1 MB of text stored EXTERNAL, 3 heap pages) failed in one chunk at
+// 384 MB and synced one page a chunk there (docs/DESIGN.md "Large values out of line").
+const BLOBS: AddedTable = { source: "public.blobs", schema: "public", table: "blobs", key: ["id"], bytes: 0, rows: 400, foreignKeys: [],
+  columns: [{ name: "id", type: "bigint", notNull: true, comment: null }, { name: "note", type: "text", notNull: false, comment: null },
+    { name: "payload", type: "text", notNull: false, comment: null }] };
+const DOCS: AddedTable = { source: "public.docs", schema: "public", table: "docs", key: ["id"], bytes: 0, rows: 601, foreignKeys: [],
+  columns: [{ name: "id", type: "bigint", notNull: true, comment: null }, { name: "body", type: "jsonb", notNull: false, comment: null }] };
+test("a table of large out-of-line values syncs under a low MASON_DUCKDB_MEMORY, its chunks a page's values at most, equal to the source", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const db = `${tag}_ool`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  psql(url, "CREATE TABLE blobs (id bigint PRIMARY KEY, note text, payload text); ALTER TABLE blobs ALTER COLUMN payload SET STORAGE EXTERNAL");
+  psql(url, "INSERT INTO blobs SELECT g, 'n' || g, (SELECT string_agg(md5(random()::text || g || s), '') FROM generate_series(1, 32768) s) FROM generate_series(1, 400) g");
+  psql(url, "CREATE TABLE docs (id bigint PRIMARY KEY, body jsonb)");
+  psql(url, "INSERT INTO docs SELECT g, jsonb_build_object('k', g, 'v', (SELECT string_agg(md5(random()::text || g || s), '') FROM generate_series(1, 16384) s)) FROM generate_series(1, 600) g");
+  psql(url, "INSERT INTO docs SELECT 100000, jsonb_build_object('v', (SELECT string_agg(md5(random()::text || s), '') FROM generate_series(1, 262144) s))");
+  psql(url, "VACUUM ANALYZE blobs");
+  psql(url, "VACUUM ANALYZE docs");
+  await rowsOlderThanEverySnapshot(url, "blobs");
+  await rowsOlderThanEverySnapshot(url, "docs");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const shapes: Array<{ table: AddedTable; memoryLimit: string; digest: string }> = [
+    { table: BLOBS, memoryLimit: "384MB", digest: "count(*) || ' ' || sum(length(payload)) || ' ' || md5(string_agg(id::text || ':' || md5(payload), ',' ORDER BY id))" },
+    { table: DOCS, memoryLimit: "768MB", digest: "count(*) || ' ' || md5(string_agg(id::text || ':' || md5(body::text), ',' ORDER BY id))" },
+  ];
+  for (const { table, memoryLimit, digest } of shapes) {
+    const logged: string[] = [];
+    const events: Chunk[] = [];
+    let most = 0;
+    const onChunk = async (e: Chunk): Promise<void> => {
+      events.push(e);
+      if (e.phase !== "read") return;
+      most = Math.max(most, Number(await psqlAsync(url, `SELECT count(*) FROM pg_stat_activity WHERE datname = '${db}' AND application_name = '${syncModule.SOURCE_APPLICATION_NAME}' AND xact_start IS NOT NULL`)));
+    };
+    const file = path.join(dir, `ool-${table.table}.db`);
+    const store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit });
+    const sync: Sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3, onChunk });
+    try {
+      await sync.open();
+      void sync.setTables([table]);
+      await sync.once();
+      const said = logged.join("\n");
+      assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [[table.source, "copied", null]], said);
+      assert.ok(committedOf(events).length > 1, `read in more than one chunk\n${said}`);
+      assert.ok(committedOf(events).every((e) => e.end === null || e.end - e.first === 1), `each chunk a page: ${JSON.stringify(committedOf(events).map((e) => [e.first, e.end]))}\n${said}`);
+      assert.ok(most <= 3, `at most MASON_COPY_PARALLEL backends on the source: ${most}\n${said}`);
+    } finally { await sync.stop(); store.close(); }
+    // compared at the default memory: the comparison reads every value at once
+    const read = await DuckStore.open(file, (l) => logged.push(l));
+    try {
+      const name = table.table;
+      assert.equal(String((await read.writer.runAndReadAll(`SELECT ${digest} FROM public.${name}`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT ${digest} FROM ${name}`), `public.${name} differs from the source\n${logged.join("\n")}`);
+    } finally { read.close(); }
+  }
+});
+
+/** a chunk's read failing as the engine fails out of memory (pgErrorOf: 53200) */
+const OOM = "Out of Memory Error: could not allocate block of size 256.0 KiB (128.0 MiB/128.0 MiB used)";
+
+test("a chunk out of memory reads on smaller on one reader: rolled back, its range read again, none twice, equal to the source", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const { url, db, source } = await parallelDatabase("om");
+  const logged: string[] = [];
+  const events: Chunk[] = [];
+  let failed: number | null = null;
+  const onChunk = (e: Chunk): void => {
+    events.push(e);
+    if (e.phase === "read" && failed === null && events.filter((x) => x.phase === "read").length === 2) { failed = events.length - 1; throw new Error(OOM); }
+  };
+  // the default memory: the out-of-memory is the test's, and the equality check at the end sorts the table
+  const store = await DuckStore.open(path.join(dir, "oom-once.db"), (l) => logged.push(l));
+  const sync = new Sync(store, source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyChunkRows: 10_000, copyParallel: 3, onChunk });
+  try {
+    await sync.open();
+    void sync.setTables([PARALLEL]);
+    await sync.once();
+    const said = logged.join("\n");
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.big", "copied", null]], said);
+    assert.ok(logged.some((l) => /^a chunk of \d+ page\(s\) of public\.big ran out of memory: reading on one chunk at a time, \d+ page\(s\) each$/.test(l)), said);
+    assert.ok(!/failed/.test(said), said);
+    const oom = events[failed!]!;
+    // after it, each other reader finishes at most the chunk it held, and takes none
+    for (const r of [0, 1, 2].filter((r) => r !== oom.reader)) {
+      assert.ok(events.slice(failed! + 1).filter((e) => e.phase === "read" && e.reader === r).length <= 1, `reader ${r} took a chunk after the out-of-memory\n${said}`);
+    }
+    // the range that ran out read again, by smaller chunks
+    const after = committedOf(events.slice(failed! + 1));
+    assert.ok(after.some((e) => e.first === oom.first && (e.end ?? Infinity) - e.first < (oom.end ?? Infinity) - oom.first), `pages ${oom.first}–${oom.end} read again, smaller\n${said}`);
+    assertTiles(committedOf(events), said);
+    await assertEqualToSource(store, url, said);
+  } finally { await sync.stop(); store.close(); }
+});
+
+test("a chunk out of memory at one page read alone fails with the operator's way out, its chunks kept, and resumes", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const { url, db, source } = await parallelDatabase("oa");
+  const logged: string[] = [];
+  const file = path.join(dir, "oom-always.db");
+  {
+    const events: Chunk[] = [];
+    const onChunk = (e: Chunk): void => {
+      events.push(e);
+      if (e.phase === "read" && committedOf(events).length >= 2) throw new Error(OOM);
+    };
+    const store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "256MB" });
+    const sync = new Sync(store, source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyChunkRows: 10_000, copyParallel: 3, onChunk });
+    const reader = await store.instance.connect();
+    try {
+      await sync.open();
+      void sync.setTables([PARALLEL]);
+      await sync.once();
+      const said = logged.join("\n");
+      const [state] = sync.state();
+      assert.equal(state?.phase, "failed", said);
+      const error = state?.error ?? "";
+      assert.match(error, /^the rows of public\.big are too large for the memory the synced data may use: one page of its table \(about \d+ row\(s\)\), read alone, ran out of memory, in [\d.]+ [KMG]iB \(MASON_DUCKDB_MEMORY; half the machine's RAM when unset\)\. Raise MASON_DUCKDB_MEMORY and start mason again, or mason add public\.big --columns … without its widest columns \(tried again after \d\d:\d\d UTC \(failure 1 in a row\)/, said);
+      assert.doesNotMatch(error, /threads|preserve_insertion_order|PRAGMA|SET |DuckDB|duckdb/);
+      assert.ok(logged.some((l) => /ran out of memory: reading on one chunk at a time, 1 page\(s\) each$/.test(l)), `halved down to one page\n${said}`);
+      const kept = Number((await reader.runAndReadAll("SELECT count(*) FROM _mason.copy_chunks")).getRowsJS()[0]![0]);
+      assert.ok(kept >= 2, `the chunks committed are kept: ${kept}\n${said}`);
+    } finally { reader.closeSync(); await sync.stop(); store.close(); }
+  }
+  const store = await DuckStore.open(file, (l) => logged.push(l));
+  const sync = new Sync(store, source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyChunkRows: 10_000, copyParallel: 3 });
+  const from = logged.length;
+  try {
+    await sync.open();
+    void sync.setTables([PARALLEL]);
+    await sync.once();
+    const said = logged.slice(from).join("\n");
+    assert.ok(logged.slice(from).some((l) => /^resuming the sync of public\.big at page \d+ of \d+/.test(l)), said);
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.big", "copied", null]], said);
+    await assertEqualToSource(store, url, said);
+  } finally { await sync.stop(); store.close(); }
+});
+
+test("a chunk past the spill's ceiling is not an out of memory: the sync fails as any failure does, never read smaller", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const { db, source } = await parallelDatabase("os");
+  const logged: string[] = [];
+  let n = 0;
+  const onChunk = (e: Chunk): void => {
+    if (e.phase === "read" && ++n === 2) throw new Error("Out of Memory Error: failed to offload data block of size 256.0 KiB (1.0 GiB/1.0 GiB used). This limit was set by the 'max_temp_directory_size' setting.");
+  };
+  const store = await DuckStore.open(path.join(dir, "oom-spill.db"), (l) => logged.push(l), { memoryLimit: "256MB" });
+  const sync = new Sync(store, source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyChunkRows: 10_000, copyParallel: 3, onChunk });
+  try {
+    await sync.open();
+    void sync.setTables([PARALLEL]);
+    await sync.once();
+    const said = logged.join("\n");
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase]), [["public.big", "failed"]], said);
+    assert.match(sync.state()[0]?.error ?? "", /^Out of Memory Error: failed to offload data block .*max_temp_directory_size/, said);
+    assert.ok(!logged.some((l) => /ran out of memory: reading on one chunk at a time/.test(l)), said);
+  } finally { await sync.stop(); store.close(); }
+});
+
+// MANY MODERATE VALUES OUT OF LINE ARE NEVER REFUSED BY ARITHMETIC (review r1 of PR 380): 140,000 rows of ~2 KB stored
+// EXTERNAL (~1,030 heap pages, ~365 MiB out of line) stream through a 128 MB limit, as the base's one chunk did; a
+// refusal is the engine's to say at the write, never a formula over the source's catalog.
+test("a table of many moderate out-of-line values syncs under a 128 MB limit, never refused before it is read", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set" }, async () => {
+  const db = `${tag}_many`;
+  const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${db}`; return u.toString(); })();
+  psql(adminUrl!, `CREATE DATABASE ${db}`);
+  after(() => psql(adminUrl!, `DROP DATABASE IF EXISTS ${db} WITH (FORCE)`));
+  psql(url, "CREATE TABLE many (id bigint PRIMARY KEY, v text); ALTER TABLE many ALTER COLUMN v SET STORAGE EXTERNAL");
+  psql(url, "INSERT INTO many SELECT g, repeat(md5(g::text), 64) FROM generate_series(1, 140000) g");
+  psql(url, "VACUUM ANALYZE many");
+  await rowsOlderThanEverySnapshot(url, "many");
+  const parsed = parseSource(url);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const MANY: AddedTable = { source: "public.many", schema: "public", table: "many", key: ["id"], bytes: 0, rows: 140_000, foreignKeys: [],
+    columns: [{ name: "id", type: "bigint", notNull: true, comment: null }, { name: "v", type: "text", notNull: false, comment: null }] };
+  const logged: string[] = [];
+  const file = path.join(dir, "many.db");
+  const store = await DuckStore.open(file, (l) => logged.push(l), { memoryLimit: "128MB" });
+  const sync: Sync = new Sync(store, parsed.source, db, (l) => logged.push(l), 3_600_000, "poll", null, { copyParallel: 3 });
+  try {
+    await sync.open();
+    void sync.setTables([MANY]);
+    await sync.once();
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.error]), [["public.many", "copied", null]], logged.join("\n"));
+  } finally { await sync.stop(); store.close(); }
+  // compared at the default memory, after a reopen (its checkpoint and its file read back)
+  const read = await DuckStore.open(file, (l) => logged.push(l));
+  try {
+    const digest = "count(*) || ' ' || md5(string_agg(id::text || ':' || md5(v), ',' ORDER BY id))";
+    assert.equal(String((await read.writer.runAndReadAll(`SELECT ${digest} FROM public.many`)).getRowsJS()[0]![0]), await psqlAsync(url, `SELECT ${digest} FROM many`), `public.many differs from the source\n${logged.join("\n")}`);
+  } finally { read.close(); }
+});

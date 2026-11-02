@@ -9,14 +9,18 @@
  *   node scripts/ci-shards.ts run <kind> <n>       run shard n of unit, rest or oracle, and record what it ran in CI_SHARD_DIR
  *   node scripts/ci-shards.ts files <kind> <n>     print its files
  *   node scripts/ci-shards.ts verify <kind> <dir>  every file ran in exactly one shard, by the records in <dir>
- *   node scripts/ci-shards.ts needs                every job in NEEDS (`toJSON(needs)`) succeeded
+ *   node scripts/ci-shards.ts needs                every job in NEEDS (`toJSON(needs)`) succeeded, or was skipped by a docs-only run
  *   node scripts/ci-shards.ts weights <run-id | folder>   write tests/fixtures/unit-weights.json from a run's unit shards
+ *   node scripts/ci-shards.ts changes              whether the pull request checked out changes nothing but docs: docs=true
+ *                                                  or docs=false into GITHUB_OUTPUT
+ *   node scripts/ci-shards.ts docs                 the docs job: the unit tests that read a doc (DOCS_TESTS)
  *
  * Exit 0 when it holds (`run`: the tests' own exit), 1 when not, 2 on a bad argument.
  *
  * `verify` reads the records the shards wrote, never the partition again: a matrix that lost a shard, or a shard that
  * ran something else, is caught, where recomputing `partition` here would only agree with itself. `needs` takes `success`
- * alone: a job that was skipped or cancelled counts as passing a required check on GitHub, so nothing else may pass.
+ * alone, but for a job the run's mode skips (THE DOCS PATH, below): a job that was skipped or cancelled counts as passing
+ * a required check on GitHub, so nothing else may pass.
  *
  * THE UNIT SHARDS' BALANCE. A unit shard's run gives `node --test` a second reporter beside the spec one
  * (scripts/test-times.ts: each file's wall time, as the runner itself reports it), and its record carries those times,
@@ -269,12 +273,119 @@ export function writeUnitWeights(dir: string, root: string, from: string): { cod
   return { code: 0, out: [`unit shards: wrote ${UNIT_WEIGHTS_FILE}: ${Object.keys(got.weights.files).length} file(s) by their measured time, every other ${got.weights.default} ms; read the diff, then commit it`], err: [] };
 }
 
-/** The jobs of a required check that did not succeed; no job at all is one problem too. */
+/**
+ * THE DOCS PATH (issue 339; ci.yml's `changes` and `docs` jobs). A pull request that changes nothing but docs runs the
+ * unit tests that read a doc (DOCS_TESTS) in place of the build, the unit shards, the oracle legs and the rest shards
+ * (DOCS_SKIPS), and every required check still reports by name. This file is the one place each fact is decided:
+ * what a doc is (`docsPath`), what changed (`changesVerdict`, from git on the commit CI checked out), what a docs-only run
+ * skips, and what passes a required check (`needsProblems`, which reads the mode from NEEDS itself). Whatever cannot be
+ * told is never docs: the full run is the safe answer, and a gate that cannot tell the mode fails.
+ */
+
+/** The folders whose `.md` files are docs; every other folder is code, a new one included, until someone decides
+ *  otherwise. `.claude/`, `.github/`, `src/` (its web page serves a README), `cli/` (the package's README), `tests/` and
+ *  `scripts/` hold `.md` files that a test, a workflow, the package or the page reads. */
+export const DOCS_FOLDERS: readonly string[] = ["docs", "deploy", "release-notes"];
+
+/** A path (as git names it, from the root) is docs iff it ends in `.md`, case and all, it is not a CLAUDE.md at any depth
+ *  (instructions, which the harness and its tests read), and it is a root file or under DOCS_FOLDERS. */
+export function docsPath(p: string): boolean {
+  const parts = p.split("/");
+  if (!p.endsWith(".md") || parts.at(-1) === "CLAUDE.md") return false;
+  return parts.length === 1 || DOCS_FOLDERS.includes(parts[0]!);
+}
+
+/** A change is docs-only iff it names at least one path and every one is docs: an empty list is "couldn't tell". */
+export const docsOnly = (paths: readonly string[]): boolean => paths.length > 0 && paths.every(docsPath);
+
+/** The jobs a docs-only run skips: ci.yml runs each only when `needs.changes.outputs.docs == 'false'`. */
+export const DOCS_SKIPS: readonly string[] = ["build", "unit", "oracle", "rest"];
+
+/**
+ * THE DOCS JOB'S TESTS: every unit test file that reads a doc, so a docs-only change still meets each guard over it (the
+ * links, the paths a doc names, the goldens a doc carries). An entry with a `pattern` runs only the tests whose name
+ * matches it (`--test-name-pattern`), where the rest of the file is the engine's. tests/ci-shards.test.ts holds the list
+ * to the tree: every file exists, every pattern names a test, and every unit test reading a doc is here or exempted there.
+ */
+export const DOCS_TESTS: ReadonlyArray<{ file: string; pattern?: string }> = [
+  // the path guard, the link guard over the README and docs/, the recipes' files, the durations CONTRIBUTING.md states
+  { file: "tests/conventions.test.ts" },
+  // docs/SQL-SUPPORT.md and the README's counts are what the registry renders
+  { file: "tests/duck-gaps.test.ts" },
+  // the README's and docs/MEASUREMENTS.md's numbers are what the bench fixture renders
+  { file: "tests/bench-replica.test.ts" },
+  // docs/POSTGRES-API.md
+  { file: "tests/postgres-api/docs.test.ts" },
+  // the README's install and doctor lines
+  { file: "tests/cli-doctor.test.ts" },
+  // every test command a doc instructs (`git ls-files '*.md'`) is one the hook lets through; the file's others read no doc
+  { file: "tests/hooks.test.ts", pattern: "test-timeout: every test command the docs and the harness instruct" },
+  // release-notes/next.md names the numeric forms; the file's other tests are the engine's
+  { file: "tests/duck-generated.test.ts", pattern: "the guide, the rules file and the release note name the numeric forms" },
+];
+
+/** The `node` invocations of the docs job: the per-test bound before the files (CI never runs `npm test`), the files
+ *  with no pattern in one, and each patterned file in one of its own, since `--test-name-pattern` applies to every file
+ *  of an invocation. */
+export function docsCommands(tests: ReadonlyArray<{ file: string; pattern?: string }> = DOCS_TESTS): string[][] {
+  const whole = tests.filter((t) => t.pattern === undefined).map((t) => t.file);
+  return [
+    ...(whole.length > 0 ? [["--test", ...TEST_BOUND_ARGS, ...whole]] : []),
+    ...tests.filter((t) => t.pattern !== undefined).map((t) => ["--test", ...TEST_BOUND_ARGS, `--test-name-pattern=${t.pattern!}`, t.file]),
+  ];
+}
+
+/** `changes`: whether the commit checked out changes nothing but docs, and the lines that say what was classified and
+ *  why. A `pull_request` run checks out GitHub's merge of the head into the base, so the merge's first parent is the base
+ *  and `HEAD^1..HEAD` is the pull request's net change (`--no-renames`: a rename's both paths; `-z`: a path as is). Any
+ *  other event (a push to main runs everything, and is the backstop), any other HEAD, a git failure, or no path at all is
+ *  "couldn't tell", which is never docs. */
+export function changesVerdict(root: string, event: string | undefined): { docs: boolean; lines: string[] } {
+  const full = (why: string): { docs: false; lines: string[] } => ({ docs: false, lines: [`changes: cannot tell that only docs changed: ${why}`, "changes: docs=false: every job runs"] });
+  if (event !== "pull_request") return full(`the event is ${event ?? "not set (GITHUB_EVENT_NAME)"}, not pull_request: a run on main always runs everything`);
+  const git = (args: string[]): { out: string } | { err: string } => {
+    const r = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    return r.status === 0 ? { out: r.stdout } : { err: `\`git ${args.join(" ")}\` exited ${r.status ?? r.signal}: ${(r.stderr || r.error?.message || "").trim()}` };
+  };
+  const parents = git(["rev-list", "--parents", "-n", "1", "HEAD"]);
+  if ("err" in parents) return full(parents.err);
+  const n = parents.out.trim().split(/\s+/).length - 1;
+  if (n !== 2) return full(`HEAD has ${n} parent(s), not the two of GitHub's merge of the pull request into its base`);
+  const diff = git(["diff", "--name-only", "--no-renames", "-z", "HEAD^1", "HEAD"]);
+  if ("err" in diff) return full(diff.err);
+  const paths = diff.out.split("\0").filter((p) => p !== "");
+  if (paths.length === 0) return full("the merge changes no path");
+  const docs = docsOnly(paths);
+  return { docs, lines: [...paths.map((p) => `changes: ${docsPath(p) ? "docs" : "code"}  ${p}`),
+    docs ? `changes: docs=true: ${paths.length} path(s), every one docs: the docs job runs in place of ${DOCS_SKIPS.join(", ")}` : `changes: docs=false: ${paths.filter((p) => !docsPath(p)).length} of ${paths.length} path(s) are code: every job runs`] };
+}
+
+interface Need { result?: string; outputs?: Record<string, string> }
+
+/**
+ * The jobs of a required check that did not pass, by the mode `changes` decided, read from NEEDS itself (toJSON(needs)
+ * carries each need's outputs). `changes` must be in NEEDS, succeed, and say docs exactly "true" or "false", or the mode
+ * cannot be told and the check fails. A full run (docs=false): every job must succeed, but `docs`, which it skips. A
+ * docs-only run (docs=true): a job in DOCS_SKIPS may be skipped, never failed or cancelled, and every other must succeed.
+ * Only that: a skipped job counts as passing a required check on GitHub. No job at all is one problem too.
+ */
 export function needsProblems(needsJson: string | undefined): string[] {
-  const needs = JSON.parse(needsJson ?? "{}") as Record<string, { result?: string }>;
+  const needs = JSON.parse(needsJson ?? "{}") as Record<string, Need>;
   const jobs = Object.entries(needs);
   if (jobs.length === 0) return ["the check has no job behind it: NEEDS is empty"];
-  return jobs.filter(([, j]) => j.result !== "success").map(([name, j]) => `${name}: ${j.result ?? "no result"}`);
+  const changes = needs.changes;
+  const problems: string[] = [];
+  let mode: string | undefined;
+  if (changes === undefined) problems.push("changes: not in NEEDS, so whether this run is docs-only cannot be told");
+  else if (changes.result !== "success") problems.push(`changes: ${changes.result ?? "no result"}, so whether this run is docs-only cannot be told`);
+  else if (changes.outputs?.docs !== "true" && changes.outputs?.docs !== "false") problems.push(`changes: its output docs is ${JSON.stringify(changes.outputs?.docs) ?? "not set"}, not "true" or "false", so whether this run is docs-only cannot be told`);
+  else mode = changes.outputs.docs;
+  const mayBeSkipped = (name: string): boolean => mode === "true" ? DOCS_SKIPS.includes(name) : name === "docs";
+  for (const [name, j] of jobs) {
+    if (name === "changes" || j.result === "success" || (j.result === "skipped" && mayBeSkipped(name))) continue;
+    problems.push(`${name}: ${j.result ?? "no result"}`);
+  }
+  return problems;
 }
 
 /** the files' times and longest tests the timing reporter wrote, those of the shard's files alone; undefined when it
@@ -292,8 +403,33 @@ function main(argv: string[]): number {
   if (what === "needs") {
     const problems = needsProblems(process.env.NEEDS);
     for (const p of problems) console.error(`this check needs every job behind it to succeed: ${p}`);
-    if (problems.length === 0) console.log(`every job behind this check succeeded: ${Object.keys(JSON.parse(process.env.NEEDS!) as object).join(", ")}`);
+    if (problems.length === 0) {
+      const needs = JSON.parse(process.env.NEEDS!) as Record<string, Need>;
+      const skipped = Object.keys(needs).filter((n) => needs[n]!.result === "skipped");
+      console.log(`every job behind this check succeeded: ${Object.keys(needs).filter((n) => !skipped.includes(n)).join(", ")}` +
+        (skipped.length === 0 ? "" : `; skipped, as a ${needs.changes!.outputs!.docs === "true" ? "docs-only" : "full"} run skips it: ${skipped.join(", ")}`));
+    }
     return problems.length === 0 ? 0 : 1;
+  }
+  if (what === "changes") {
+    if (argv.length > 1) { console.error("usage: scripts/ci-shards.ts changes"); return 2; }
+    const out = process.env.GITHUB_OUTPUT;
+    if (out === undefined || out === "") { console.error("set GITHUB_OUTPUT: the file the docs=true or docs=false verdict is written to (GitHub Actions sets it)"); return 2; }
+    const v = changesVerdict(root, process.env.GITHUB_EVENT_NAME);
+    for (const l of v.lines) console.log(l);
+    fs.appendFileSync(out, `docs=${v.docs}\n`);
+    return 0;
+  }
+  if (what === "docs") {
+    if (argv.length > 1) { console.error("usage: scripts/ci-shards.ts docs"); return 2; }
+    let failed = 0;
+    for (const args of docsCommands()) {
+      console.log(`docs: node ${args.join(" ")}`);
+      const r = spawnSync(process.execPath, args, { stdio: "inherit", cwd: root });
+      // a signal leaves status null: never a pass
+      if (r.status !== 0) { failed++; console.error(`docs: \`node ${args.join(" ")}\` exited ${r.status ?? r.signal}`); }
+    }
+    return failed === 0 ? 0 : 1;
   }
   if (what === "weights") {
     const from = kind;
@@ -307,7 +443,7 @@ function main(argv: string[]): number {
     return r.code;
   }
   if (!isKind(kind) || arg === undefined || !["run", "files", "verify"].includes(what ?? "")) {
-    console.error("usage: scripts/ci-shards.ts run|files <unit|rest|oracle> <shard>, verify <unit|rest|oracle> <dir>, weights <run-id | folder>, or needs");
+    console.error("usage: scripts/ci-shards.ts run|files <unit|rest|oracle> <shard>, verify <unit|rest|oracle> <dir>, weights <run-id | folder>, needs, changes, or docs");
     return 2;
   }
   if (what === "verify") {

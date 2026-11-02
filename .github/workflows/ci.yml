@@ -3,16 +3,25 @@
 #
 # THE FOUR REQUIRED CHECKS ARE `checks`, `image`, `integration (oracle)` and `integration (rest)`: the ruleset on main
 # names them, so those names stay. All but `image` are final jobs that `needs` their shards: each runs `always()`, and
-# passes only when every job behind it answered `success` (`scripts/ci-shards.ts needs`), because a skipped job counts
+# passes only when every job behind it answered `success`, or `skipped` where the run's mode skips it (THE DOCS PATH,
+# below; `scripts/ci-shards.ts needs`), because a skipped job counts
 # as passing a required check on GitHub. `always()`, not `!cancelled()`, for the same reason: a cancelled run must not
 # skip the job that would say so. tests/ci-shards.test.ts holds this file to all of it.
 #
 #   checks                  build (once: typecheck, the CLI, the platform packages, the install, shellcheck), and
 #                           unit (1-3): every tests/**/*.test.ts file in exactly one shard (`scripts/ci-shards.ts verify`)
-#   image                   the image builds and answers
+#                           (a docs-only run: docs, the unit tests that read a doc, in place of both)
+#   image                   the image builds and answers (a docs-only run builds none, and says so)
 #   integration (rest)      rest shard (1-2): every integration file but the oracle, in exactly one shard
 #   integration (oracle)    oracle leg (1-2): each the copy, the rounds of changes and its share of the statements; the
 #                           check holds the legs to the whole (`scripts/oracle-legs.ts`)
+#
+# THE DOCS PATH. `changes` reads what the pull request changed, from git on the merge CI checked out
+# (`scripts/ci-shards.ts changes`). When every path is a doc (a root .md file, or one under docs/, deploy/ or
+# release-notes/; never a CLAUDE.md), build, unit, oracle and rest are skipped and `docs` runs the unit tests that read a
+# doc in their place; the four checks still report, each reading the mode from its own needs, and `image` builds nothing
+# and says so. Whatever `changes` cannot tell (a push to main, a merge it cannot read) is a full run, and a gate that
+# cannot tell the mode (a failed `changes`) fails. No `paths` filter on the workflow: a required check that never reports blocks a pull request for ever.
 #
 # A shard's files are computed from the tree (`scripts/ci-shards.ts`), so a new file lands in one by itself; the unit
 # shards are balanced by each file's time as a CI run measured it (tests/fixtures/unit-weights.json, rewritten by
@@ -36,8 +45,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Whether the pull request changes nothing but docs: docs=true or docs=false, read by every job below from
+  # needs.changes.outputs.docs (THE DOCS PATH, above). The merge's two parents are its base and the head, hence depth 2.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs: ${{ steps.classify.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'          # never 24: the build job says why
+      - name: what the pull request changed
+        id: classify
+        run: node scripts/ci-shards.ts changes
+
   build:
     name: build
+    needs: [changes]
+    if: ${{ needs.changes.outputs.docs == 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -122,6 +152,8 @@ jobs:
   # each file's time, the shard's wall time and its CPU in the shard's ran-unit-<n> artifact.
   unit:
     name: unit (${{ matrix.shard }})
+    needs: [changes]
+    if: ${{ needs.changes.outputs.docs == 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -158,11 +190,32 @@ jobs:
           retention-days: 7
           overwrite: true
 
+  # A docs-only run's tests, in place of build and unit: the unit tests that read a doc (DOCS_TESTS, scripts/ci-shards.ts).
+  docs:
+    name: docs
+    needs: [changes]
+    if: ${{ needs.changes.outputs.docs == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'          # never 24: the build job says why
+          cache: npm
+
+      - run: npm ci
+
+      - name: the unit tests that read a doc
+        run: node scripts/ci-shards.ts docs
+
   # REQUIRED. Fails unless `build` and every unit shard succeeded, and every test file ran in exactly one shard; then
-  # says how far apart the shards ran, and warns past a minute (never failing on it).
+  # says how far apart the shards ran, and warns past a minute (never failing on it). On a docs-only run, fails unless
+  # `docs` succeeded and build and unit were skipped.
   checks:
     name: checks
-    needs: [build, unit]
+    needs: [changes, build, unit, docs]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -176,30 +229,67 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: node scripts/ci-shards.ts needs
       - uses: actions/download-artifact@v4
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.changes.outputs.docs != 'true' }}
         with:
           pattern: ran-unit-*
           merge-multiple: true
           path: ran
       - name: every test file ran in exactly one shard
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.changes.outputs.docs != 'true' }}
         run: node scripts/ci-shards.ts verify unit ran
 
-  # The image (docker/mason-data.Dockerfile), built as images-publish.yml builds it (one platform here): it starts,
-  # and `mason --version` inside it answers.
+  # REQUIRED. The image (docker/mason-data.Dockerfile), built as images-publish.yml builds it (one platform here): it
+  # starts, `mason --version` inside it answers, and on the image's own Node (tests/conventions.test.ts holds its major
+  # to this file's node-version) the three things a run loads answer a statement: the engine's native bindings, PGlite
+  # and libpg-query (issue 67). `mason --version` loads none of them. It runs whatever `changes` answered, short of a
+  # cancel (a job skipped for a failed need reports success on a required check), and builds unless the run is
+  # docs-only: the image copies no doc.
   image:
+    needs: [changes]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - name: a docs-only run builds no image
+        if: ${{ needs.changes.outputs.docs == 'true' }}
+        run: echo "the image is not built, since nothing but docs changed and the image copies no doc"
       - uses: actions/checkout@v4
+        if: ${{ needs.changes.outputs.docs != 'true' }}
       - name: build mason-data
+        if: ${{ needs.changes.outputs.docs != 'true' }}
         run: docker build -f docker/mason-data.Dockerfile -t mason-data:ci .
       - name: the mason command inside it answers
+        if: ${{ needs.changes.outputs.docs != 'true' }}
         run: docker run --rm --entrypoint mason mason-data:ci --version
+      - name: the engine, PGlite and libpg-query load and answer on the image's Node
+        if: ${{ needs.changes.outputs.docs != 'true' }}
+        timeout-minutes: 5
+        run: |
+          docker run --rm -i -w /app --entrypoint node mason-data:ci --input-type=module - <<'JS'
+          const check = (what, ok, got) => { if (!ok) { console.error(`${what}: unexpected answer ${JSON.stringify(got)}`); process.exit(1); } console.log(`${what}: ok`); };
+          console.log(`node ${process.version}`);
+          const { DuckDBInstance } = await import("@duckdb/node-api");
+          const duck = await DuckDBInstance.create(":memory:");
+          const conn = await duck.connect();
+          const rows = (await conn.runAndReadAll("SELECT 42 AS x")).getRows();
+          check("the engine's native bindings answer SELECT 42", rows[0]?.[0] === 42, rows);
+          conn.closeSync(); duck.closeSync();
+          const { PGlite } = await import("@electric-sql/pglite");
+          const pglite = await PGlite.create();
+          const one = (await pglite.query("SELECT 1 AS x")).rows;
+          check("PGlite answers SELECT 1", one[0]?.x === 1, one);
+          await pglite.close();
+          const parser = await import("libpg-query");
+          await parser.loadModule();
+          const tree = parser.parseSync("SELECT 1");
+          check("libpg-query parses SELECT 1", tree.stmts?.length === 1, tree);
+          JS
 
   # THE ORACLE, IN LEGS: each leg runs the whole pipeline over a Postgres of its own, and asks its share of the
   # statements in every phase (scripts/oracle-legs.ts). A leg's job is the rest shards' below, by YAML anchor.
   oracle:
     name: oracle leg ${{ matrix.shard }}
+    needs: [changes]
+    if: ${{ needs.changes.outputs.docs == 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -268,11 +358,11 @@ jobs:
           retention-days: 7
           overwrite: true
 
-  # REQUIRED. Fails unless both legs succeeded, and together they asked every statement in every phase and hold what a
+  # REQUIRED. Fails unless both legs succeeded (on a docs-only run: were skipped), and together they asked every statement in every phase and hold what a
   # whole run asserts at its end: no stale decision, no dead gap, src/duck/verified.ts, the fixture's tallies.
   integration-oracle:
     name: integration (oracle)
-    needs: [oracle]
+    needs: [changes, oracle]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -286,21 +376,23 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: node scripts/ci-shards.ts needs
       - uses: actions/download-artifact@v4
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.changes.outputs.docs != 'true' }}
         with:
           pattern: ran-oracle-*
           merge-multiple: true
           path: ran
       - name: every leg ran
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.changes.outputs.docs != 'true' }}
         run: node scripts/ci-shards.ts verify oracle ran
       - name: the legs are the whole oracle
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.changes.outputs.docs != 'true' }}
         run: node scripts/oracle-legs.ts ran
 
   # Every other integration file, one shard of them a job: a new file lands in one by itself.
   rest:
     name: rest shard ${{ matrix.shard }}
+    needs: [changes]
+    if: ${{ needs.changes.outputs.docs == 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -312,10 +404,11 @@ jobs:
     env: *postgres-env
     steps: *integration-steps
 
-  # REQUIRED. Fails unless both shards succeeded, and every file ran in exactly one.
+  # REQUIRED. Fails unless both shards succeeded, and every file ran in exactly one (on a docs-only run: unless both
+  # were skipped).
   integration-rest:
     name: integration (rest)
-    needs: [rest]
+    needs: [changes, rest]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -329,11 +422,11 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: node scripts/ci-shards.ts needs
       - uses: actions/download-artifact@v4
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.changes.outputs.docs != 'true' }}
         with:
           pattern: ran-rest-*
           merge-multiple: true
           path: ran
       - name: every integration file ran in exactly one shard
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.changes.outputs.docs != 'true' }}
         run: node scripts/ci-shards.ts verify rest ran
