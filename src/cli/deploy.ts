@@ -354,7 +354,7 @@ export async function deploy(argv: string[]): Promise<number> {
   // THE DEPLOY, SENT: 201 and its id, else the service's failure as it worded it
   const sent = await call(service, "POST", where, { token, json: { files: files.map(({ path: p, sha256, content }) => ({ path: p, sha256, content })), client: { version: version() } } });
   if (isFailure(sent)) {
-    return failed("deploy", { ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}no answer came back, so whether the deploy was made is not known`,
+    return failed("deploy", { ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}whether the deploy was made is not known`,
       fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)`, exit: 1 }, { json });
   }
   if (sent.status !== 201) return failed("deploy", { ...(serviceFailure(sent, secrets) ?? unexpected(service, sent, "a deploy was sent")), exit: 1 }, { json });
@@ -367,7 +367,7 @@ export async function deploy(argv: string[]): Promise<number> {
   if (!json) say(`Sent ${files.length} file${files.length === 1 ? "" : "s"} (${bytes(totalBytes)}) to ${replicaText(r)} on ${service.base}: deploy ${id}`);
 
   // THE WAIT: a line when the state changes (and every 30 s while it does not), a spinner beside it on a terminal
-  let state = first, said = "", saidAt = 0, unsure: string | null = null;
+  let state = first, said = "", saidAt = 0, unsure: string | null = null, unsureSaid: string | null = null;
   const show = (line: string): void => {
     if (json) return;
     if (terminal) { if (line !== said) { steps.begin(line); said = line; } return; }
@@ -384,7 +384,8 @@ export async function deploy(argv: string[]): Promise<number> {
     }
     // the step it ended on: the outcome's own line when it has one, else (a timeout, an answer outside the contract) the last
     const line = FINAL.has(state.status) ? stateLine(state) : null;
-    if (terminal) { if (error === null) steps.done(line ?? undefined); else steps.fail(line ?? undefined); }
+    // (on a terminal the step turning is ticked and the outcome is a line of its own; a refusal replaces the step it ended)
+    if (terminal) { if (error === null) { if (line !== null && line !== said) steps.begin(line); steps.done(); } else steps.fail(line ?? undefined); }
     else if (line !== null && line !== said) say(`  ${line}`);
     if (error !== null) return failed("deploy", error, { json: false });
     out(reportText({ headline: `Deployed to ${replicaText(r)}: the replica runs it`,
@@ -412,7 +413,9 @@ export async function deploy(argv: string[]): Promise<number> {
     if (isFailure(a) || a.status === 429 || a.status >= 500) {
       unsure = isFailure(a) ? serviceText(`${a.message}${a.why ? ` (${a.why})` : ""}`, 300, secrets) : `${a.what} answered ${a.status}`;
       if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
-      show(`${stateLine(state)}; the service could not say more just now (${unsure}): asking again`);
+      // on a terminal a note above the turning step, which goes on (the step is not over); elsewhere the step's line again
+      if (terminal) { if (unsure !== unsureSaid) steps.print(s.dim(`  the service could not say more just now (${unsure}): asking again`)); unsureSaid = unsure; }
+      else show(`${stateLine(state)}; the service could not say more just now (${unsure}): asking again`);
       continue;
     }
     if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
@@ -420,7 +423,7 @@ export async function deploy(argv: string[]): Promise<number> {
     if (a.status !== 200) return ended({ ...(serviceFailure(a, secrets) ?? unexpected(service, a, "the deploy's state was asked for")), exit: 1 });
     const now = deployStateOf(a.json, id, secrets);
     if (now === null) return ended({ ...unexpected(service, a, "the deploy's state was asked for"), exit: 1 });
-    state = now; unsure = null;
+    state = now; unsure = null; unsureSaid = null;
     if (!FINAL.has(state.status)) show(stateLine(state));
   }
 }
