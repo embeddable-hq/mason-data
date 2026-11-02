@@ -932,6 +932,18 @@ class Rewriter {
         for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) keys(x);
       };
       keys([b.targetList, b.windowClause, b.sortClause]);
+      // each cast read per group: outside an aggregate's or a window's argument, whose rows are each its own, and outside
+      // a group key (`GROUP BY 1` of the cast itself is grouped as it is written)
+      const keyShapes = new Set(((b.groupClause ?? []) as AstNode[]).filter((g) => kindOf(g) !== "GroupingSet").map((g) => shapeOf(this.groupedExpression(g, b))));
+      const casts = (v: unknown): void => {
+        if (Array.isArray(v)) { for (const x of v) casts(x); return; }
+        if (v === null || typeof v !== "object") return;
+        if (isNode(v) && (kindOf(v) === "SelectStmt" || kindOf(v) === "SubLink" || keyShapes.has(shapeOf(v)))) return;
+        if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || bodyOf(v).agg_within_group === true)) return;
+        if (isNode(v) && kindOf(v) === "TypeCast") this.groupedCasts.set(bodyOf(v), b);
+        for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) casts(x);
+      };
+      casts([b.targetList, b.sortClause, b.havingClause]);
     }
     // a DISTINCT ON's sort holds its ON expressions (distinctOnSorted): before any key is built, so each is built as one
     this.distinctOnSorted(b);
@@ -2730,7 +2742,11 @@ class Rewriter {
           const l = sub(b.lexpr);
           const sides = l === null ? null : this.exactEquality(this.clone(b.lexpr), this.clone(b.rexpr));
           if (l === null || sides === null) return asCell();
-          return numeric({ op: "pick", index: cell(caseWhen([[op("=", sides[0], sides[1]), intConst(1)]], intConst(0))), args: [l.p] });
+          // (its NULL is ONE representation, a NULL index on EVERY row whose value is NULL — equal, or the operand NULL —
+          // so a reader that regroups the carried cells, any_value of each, never meets a row's 0 beside another's
+          // operand: review r1 of PR 506, nullif-pick-null-lost-outside-subquery)
+          const keyL = this.clone(sides[0]);
+          return numeric({ op: "pick", index: cell(caseWhen([[or([op("=", sides[0], sides[1]), isNull(keyL)]), nullConst()]], intConst(0))), args: [l.p] });
         }
         // x ^ y: Postgres's own power, as power(x, y) is (`pgNumeric`)
         if (b.kind === "AEXPR_OP" && name === "^" && type === NUMERIC) { const text = this.pgNumeric(n); return text === null ? asCell() : numeric(cell(text, "text")); }
@@ -2867,7 +2883,7 @@ class Rewriter {
             const operands: AstNode[] = [];
             const probe = this.exactOf(args[0]!, (m) => { operands.push(m); return { op: "cell", key: String(operands.length - 1) }; });
             // a column's own min is DuckDB's exact decimal, padded to its scale
-            if (probe === null || probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell") || (this.duckExact(args[0]!) && !worthComputing(probe.p))) return asCell();
+            if (probe === null || ((probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell")) && this.duckExact(args[0]!)) || (this.duckExact(args[0]!) && !worthComputing(probe.p))) return asCell();
             // picked by its exact value's order key (`exactOrderKey`, issue 252), its operands breaking a tie of scales;
             // an aggregate's argument is read per row, so its key is no group's (null)
             const key = caseWhen([[isNotNull(this.clone(args[0]!)), row([this.exactOrderKey(args[0]!, null) ??this.clone(args[0]!), ...operands.map((m) => this.clone(m))])]], null);
@@ -3153,6 +3169,11 @@ class Rewriter {
         // the engine's sign is a TINYINT (-1, 0, 1), whatever its argument: Postgres's numeric_sign is the same value
         // (issue 242: `sign(x)::int` stays the engine's, and `exp(…) * sign(x)` has a program)
         if (name === "sign" && b.over === undefined && args.length === 1) return true;
+        // percentile_disc and mode() pick one row's value of their ORDER BY, in its own type (review r1 of PR 506)
+        if ((name === "percentile_disc" || name === "mode") && b.agg_within_group === true && t !== null && t.type === NUMERIC) {
+          const by = ((b.agg_order ?? []) as AstNode[])[0];
+          return by !== undefined && exact(bodyOf(by).node);
+        }
         // a value picked or summed, in its own type: an aggregate, a window's row, min / max's picked operand
         if (VALUE_KEEPING.has(name) && args.length >= 1) return exact(args[0]) && ((name !== "lag" && name !== "lead") || args.length < 3 || exact(args[2]));
         return false;
@@ -3292,6 +3313,9 @@ class Rewriter {
 
   /** each window ORDER BY key of a grouped SELECT, by the SELECT (`select`): its exact order key is read per group */
   private readonly groupedWindowKeys = new WeakMap<Body, Body>();
+  /** each cast in a grouped SELECT, by the SELECT: a program's text the CAST reader builds there is read per group
+   *  (`overGroups`), never over cells the group does not decide (review r1 of PR 506: the engine's 42803) */
+  private readonly groupedCasts = new WeakMap<Body, Body>();
 
   /** whether a value is a NUMERIC's text (`x::text`, `(x / 3)::text`, under a COLLATE, a subquery's column carrying
    *  one) or a NULL: what a "text" cell may hold, its program parsing it as a numeric */
@@ -5126,7 +5150,9 @@ class Rewriter {
     // never the double's — its text, its nearest double (numeric_float8 reads numeric_out's text) and its integer
     // rounded half away from zero (numeric_int4), as Postgres computes each
     if (t !== null && from === NUMERIC && [TEXT, VARCHAR, BPCHAR, INT2, INT4, INT8, FLOAT8].includes(t.type) && !this.duckExact(arg)) {
-      const exact = this.exactText(arg);
+      const text = this.exactText(arg);
+      // (in a grouped SELECT, read once per group, as one row's whole text: `overGroups`)
+      const exact = text === null ? null : this.overGroups(text, this.groupedCasts.get(b) ?? null);
       if (exact !== null) {
         if (t.type === FLOAT8) return fn("__mason_numeric_double", [exact]);
         if (INTEGERS.has(t.type)) {
@@ -5137,10 +5163,13 @@ class Rewriter {
         else return t.type === VARCHAR && t.typmod > 4 ? fn("left", [exact, intConst(t.typmod - 4)]) : exact;
       }
       // (issue 242) an integer is never the engine's double's, which rounds half to even (2.5 is 2) where Postgres's
-      // numeric_int4 rounds the exact value half away from zero (3): where no program computes it, refused by name
+      // numeric_int4 rounds the exact value half away from zero (3). Where no program computes it, what the engine holds
+      // decides, by ITS type (review r1 of PR 506: the complement of `duckExact`'s forms is no authority on a double):
+      // a DECIMAL's or a text's exact digits rounded as numeric_int4 rounds them, a double or bytes refused by name
+      // (`__mason_numeric_int_of`, src/duck/functions.ts)
       else if (INTEGERS.has(t.type)) {
-        throw new Unrewritable(`a numeric Mason cannot compute exactly (the engine holds it as a double), cast to ${t.type === INT2 ? "smallint" : t.type === INT4 ? "integer" : "bigint"}, is not supported by Mason (Postgres rounds the exact value half away from zero; the double would round half to even)`,
-          "cast the value to an integer inside the aggregate: percentile_disc(0.5) WITHIN GROUP (ORDER BY (a / b)::int), which picks the same row's integer", "numeric-double-integer");
+        const [bits, name] = t.type === INT2 ? [16, "smallint"] : t.type === INT4 ? [32, "integer"] : [64, "bigint"];
+        return cast(fn("__mason_numeric_int_of", [fn("typeof", [this.clone(arg)]), cast(arg, ["varchar"]), intConst(bits as number)]), [name as string]);
       }
     }
     // to char(n): the text cut and padded to n

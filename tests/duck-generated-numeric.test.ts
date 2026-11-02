@@ -193,18 +193,23 @@ test("issue 242: an integer cast of a numeric the engine holds as a double is st
     assert.deepEqual((await typed(w, "SELECT id, x FROM unioned ORDER BY id, x")).rows.map((x) => text(x[1])), ["1", "1", null, null, "-3", "-2", "3", "4"]);
     assert.deepEqual((await typed(w, "SELECT x, c FROM grouped ORDER BY x NULLS FIRST")).rows.map((x) => x.map(text)), [[null, "1"], ["-2", "1"], ["1", "1"], ["3", "1"]]);
     if (restarted) return;
-    // no program computes it: refused at load, by the gap's words and its way out, never stored from the double
+    // no program computes it and the engine holds it as bytes or a double (review r1 of PR 506: the engine's type decides,
+    // so it is known with the rows): the build fails naming the gap and its way out, never stored from the double
     w.write("pdisc", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount / 1.6))::int AS x FROM ledger"));
     w.write("moded", scheduledH("SELECT (mode() WITHIN GROUP (ORDER BY amount / 1.6))::int AS x FROM ledger"));
     // a NULLIF's numeric, printed, is a division's column still
     w.write("nulled", scheduledH("SELECT id, nullif(amount / 1.6, 0) AS x FROM ledger"));
-    for (const name of ["pdisc", "moded", "nulled"]) await w.until((s) => s.state === "refused", `public.${name}`);
+    // percentile_disc of a DECIMAL column is the column's own value, cast as Postgres casts it
+    w.write("pdiscol", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount))::int AS p, (percentile_disc(0.1) WITHIN GROUP (ORDER BY amount))::int8 AS m FROM ledger"));
+    for (const name of ["pdisc", "moded"]) await w.until((s) => s.state === "failed", `public.${name}`);
+    await w.until((s) => s.state === "refused", "public.nulled");
     for (const name of ["pdisc", "moded"]) {
-      const refusals = w.status(`public.${name}`).refusals;
-      refusedAt(refusals, "sql", /^a numeric Mason cannot compute exactly \(the engine holds it as a double\), cast to integer, is not supported by Mason/);
-      assert.ok(refusals[0]!.options.some((o) => o.includes("ORDER BY (a / b)::int")), JSON.stringify(refusals));
+      const s = w.status(`public.${name}`);
+      assert.match(s.error ?? "", /cast to an integer type is not supported by Mason \(Mason gap numeric-double-integer\).*ORDER BY \(a \/ b\)::int/, JSON.stringify(s));
     }
     refusedAt(w.status("public.nulled").refusals, "sql", /^column x divides a numeric, which the engine computes as a double$/);
+    await w.until(served(w.logged), "public.pdiscol");
+    assert.deepEqual((await typed(w, "SELECT p, m FROM pdiscol")).rows.map((x) => x.map(text)), [["1", "-3"]]);
     // its way out is stored
     w.write("pdiscint", scheduledH("SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (amount / 1.6)::int) AS x FROM ledger"));
     await w.until(served(w.logged), "public.pdiscint");

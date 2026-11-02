@@ -1,19 +1,19 @@
 {
-  "statements": 6879,
+  "statements": 6917,
   "mason": {
-    "exact": 6366,
-    "decided": 49,
-    "refused": 464,
+    "exact": 6404,
+    "decided": 47,
+    "refused": 466,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1818,
-    "name": 1272,
-    "refused": 1533,
-    "value": 886,
-    "rows": 588,
-    "text": 188,
-    "other": 594
+    "exact": 1820,
+    "name": 1275,
+    "refused": 1535,
+    "value": 891,
+    "rows": 590,
+    "text": 203,
+    "other": 603
   },
   "gaps": {
     "copyPhase": {
@@ -45,9 +45,10 @@
         "latest-quotient": { "planted": 1, "natural": 0 },
         "like-any-array": { "planted": 1, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 5 },
+        "numeric-double-integer": { "planted": 1, "natural": 0 },
         "numeric-exact-sum": { "planted": 1, "natural": 0 },
         "numeric-math": { "planted": 1, "natural": 0 },
-        "numeric-quotient-equality": { "planted": 2, "natural": 0 },
+        "numeric-quotient-equality": { "planted": 3, "natural": 0 },
         "numeric-special": { "planted": 0, "natural": 2 },
         "quote-ident": { "planted": 0, "natural": 3 },
         "regexp-flags": { "planted": 1, "natural": 0 },
@@ -82,7 +83,7 @@
         "limit-lateral-argument": { "planted": 0, "natural": 2 },
         "limit-lateral-filter": { "planted": 0, "natural": 2 },
         "min-max-scale-tie": { "planted": 1, "natural": 0 },
-        "mixed-scale-numeric": { "planted": 1, "natural": 2 },
+        "mixed-scale-numeric": { "planted": 1, "natural": 0 },
         "negative-zero": { "planted": 0, "natural": 9 },
         "nested-exact-numeric": { "planted": 1, "natural": 0 },
         "numeric-quotient-compare": { "planted": 1, "natural": 0 },
@@ -93,7 +94,7 @@
       }
     },
     "everyAsk": {
-      "asked": 92645,
+      "asked": 94686,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -123,9 +124,10 @@
         "latest-quotient": { "planted": 3, "natural": 0 },
         "like-any-array": { "planted": 3, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 17 },
-        "numeric-exact-sum": { "planted": 3, "natural": 2 },
+        "numeric-double-integer": { "planted": 3, "natural": 0 },
+        "numeric-exact-sum": { "planted": 3, "natural": 7 },
         "numeric-math": { "planted": 3, "natural": 0 },
-        "numeric-quotient-equality": { "planted": 6, "natural": 24 },
+        "numeric-quotient-equality": { "planted": 9, "natural": 26 },
         "numeric-special": { "planted": 0, "natural": 6 },
         "quote-ident": { "planted": 0, "natural": 9 },
         "regexp-flags": { "planted": 3, "natural": 0 },
@@ -159,8 +161,8 @@
         "limit-errors": { "planted": 15, "natural": 6 },
         "limit-lateral-argument": { "planted": 0, "natural": 6 },
         "limit-lateral-filter": { "planted": 0, "natural": 8 },
-        "min-max-scale-tie": { "planted": 3, "natural": 0 },
-        "mixed-scale-numeric": { "planted": 3, "natural": 6 },
+        "min-max-scale-tie": { "planted": 3, "natural": 1 },
+        "mixed-scale-numeric": { "planted": 3, "natural": 0 },
         "negative-zero": { "planted": 0, "natural": 25 },
         "nested-exact-numeric": { "planted": 3, "natural": 0 },
         "numeric-quotient-compare": { "planted": 3, "natural": 0 },

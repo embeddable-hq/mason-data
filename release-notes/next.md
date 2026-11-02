@@ -237,7 +237,7 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   was `2` and is `3` (half away from zero), in a query and in a generated table, and `nullif(x / y, 0)` shows
   Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. A cast to an integer of a numeric Mason
   cannot compute exactly (`percentile_disc` or `mode()` of a division) is refused by name (`numeric-double-integer`)
-  rather than failing with the engine's error; a generated table with one is refused when it is loaded. Nothing to do
+  rather than failing with the engine's error; a generated table with one fails its build saying so. Nothing to do
   on upgrade.
 - **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
   `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with

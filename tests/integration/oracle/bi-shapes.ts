@@ -337,6 +337,9 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   // issue 242: a NULLIF of a quotient, and a product of sign, cast to an integer: the exact value's, half away from zero
   { name: "exact path: a NULLIF and a sign cast to an integer, half away from zero", sql: "SELECT v.id, nullif(v.a / 1.6, 0)::int, nullif(v.a / 1.6, 2.5)::int8, (exp(ln(2.5)) * sign(v.a))::int, sign(v.a)::int, nullif(v.a, 0)::int FROM (VALUES (1, 1.10::numeric(12,2)), (2, 4.00), (3, -4.00), (4, -2.50), (5, NULL)) AS v(id, a) ORDER BY 1" },
   { name: "exact path: a NULLIF of a quotient over orders cast to an integer, half away from zero", sql: "SELECT o.id, nullif(o.amount / 1.6, 0)::int, (o.amount / 1)::int8, (sum(o.amount) OVER (ORDER BY o.id) / nullif(o.id, 0))::int FROM orders o ORDER BY 1" },
+  // review r1 of PR 506: a NULLIF's NULL regrouped outside its subquery, and what the engine holds as a DECIMAL cast as such
+  { name: "exact path: a NULLIF's NULL regrouped outside its subquery, cast half away from zero", sql: "SELECT x, x::int, x::text, count(*) FROM (SELECT nullif(v.a / 1.6, 2.5) AS x FROM (VALUES (1, 4.00::numeric(12,2)), (2, NULL), (3, 1.10), (4, 4.00), (5, -4.00)) AS v(id, a)) s GROUP BY x ORDER BY 1" },
+  { name: "exact path: percentile_disc of a numeric column and max of a sqrt cast to an integer, half away from zero", sql: "SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount))::int, (percentile_disc(0.9) WITHIN GROUP (ORDER BY o.amount) / 7)::int8, max(sqrt(abs(o.amount)))::int FROM orders o" },
   { name: "exact path: a subquery's column named like a hidden cell",sql: "SELECT s.__mason_cell_0 FROM (SELECT o.amount / 7.0 AS __mason_cell_0, o.id FROM orders o) s ORDER BY 1 LIMIT 2" },
   // Issue 358, round 2 of the exact path: each reader PR 341 did not reach, over numeric(30,20) rows two doubles tie
   // (read through `public.one`, so the engine answers them, never the catalog)

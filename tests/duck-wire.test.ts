@@ -5916,11 +5916,29 @@ test("exact path: issue 242: a numeric the engine holds as a double with no prog
     for (const sql of ["SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y))::int FROM bigdec b",
       "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
       "SELECT CAST(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) AS bigint) FROM bigdec b"]) {
-      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-double-integer/.test(e.detail ?? "")
-        && /cast to (integer|bigint), is not supported by Mason/.test(e.message) && /ORDER BY \(a \/ b\)::int/.test(e.hint ?? ""), sql);
+      // (the engine's type decides, so the rows do: a runtime refusal naming its gap and its way out, review r1 of PR 506)
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000"
+        && /cast to an integer type is not supported by Mason \(Mason gap numeric-double-integer\).*ORDER BY \(a \/ b\)::int/.test(e.message), sql);
     }
-    // its way out answers as Postgres does
-    assert.deepEqual(await unlike(c, [["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"]]), []);
+    assert.deepEqual(await unlike(c, [
+      // its way out answers as Postgres does
+      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"],
+      // review r1 of PR 506, finding 2: what the engine holds as a DECIMAL (percentile_disc / mode of a column, min / max
+      // of Postgres's own power) is cast as Postgres casts it, never refused as a double
+      ["SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount))::int, (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount))::int8 FROM orders o", "ordered"],
+      ["SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) * 2)::int, (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) / 7)::int FROM orders o", "ordered"],
+      ["SELECT o.status, (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount DESC))::int FROM orders o GROUP BY o.status ORDER BY 1", "ordered"],
+      ["SELECT s.x::int FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) AS x FROM orders o) s", "ordered"],
+      ["SELECT max(sqrt(o.amount))::int, min(sqrt(o.amount))::int8 FROM orders o", "ordered"],
+      // review r1 of PR 506, finding 1: a NULLIF's NULL read outside its subquery, regrouped: NULL, never its operand
+      ["SELECT x FROM (SELECT nullif(b.x / b.y, 2.5) AS x FROM bigdec b) s GROUP BY x ORDER BY 1", "ordered"],
+      ["WITH q AS (SELECT b.id, nullif(b.x / b.y, 2.5) AS x FROM bigdec b) SELECT x, count(*) FROM q GROUP BY x HAVING x IS NULL OR x > 1.1 ORDER BY 1", "ordered"],
+      ["SELECT coalesce(x, -1), x::int, x::text, x::float8 FROM (SELECT nullif(b.x / b.y, 2.5) AS x FROM bigdec b) s GROUP BY x ORDER BY 1", "ordered"],
+      ["SELECT DISTINCT x FROM (SELECT nullif(nullif(b.x / b.y, 2.5), 1.25) * 2 AS x FROM bigdec b) s ORDER BY 1", "ordered"],
+      ["SELECT s.x FROM (SELECT b.id, nullif(b.x / b.y, 2.5) AS x FROM bigdec b) s JOIN bigdec c ON c.id = s.id GROUP BY s.x ORDER BY 1", "ordered"],
+      // and a program's cast under an outer GROUP BY reads one row's text per group (the engine's 42803 before)
+      ["WITH q AS (SELECT b.x / b.y AS x FROM bigdec b) SELECT x::float8, x::text, x::int FROM q GROUP BY x ORDER BY 2", "ordered"],
+    ]), []);
   } finally { await c.end(); }
 });
 
