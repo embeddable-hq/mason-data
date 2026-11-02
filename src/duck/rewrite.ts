@@ -576,6 +576,7 @@ class Rewriter {
       if (armOf(k, x) !== null && this.original.has(x as Body)) this.original.add(out[k] as Body);
     }
     if (isNode(v) && this.original.has(bodyOf(v))) this.original.add(bodyOf(out as AstNode));
+    if (isNode(v) && this.elementsUnread.has(bodyOf(v))) this.elementsUnread.add(bodyOf(out as AstNode));
     if (isNode(v) && this.writtenKeys.has(bodyOf(v))) this.writtenKeys.add(bodyOf(out as AstNode));
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
@@ -2115,6 +2116,9 @@ class Rewriter {
    */
   private programNeeded(node: AstNode, p: NumericProgram, cells: ReadonlyArray<{ conv: CellConv }>, typmod: number): boolean {
     if (this.duckExact(node) && !worthComputing(p) && cells.every((c) => c.conv === "exact")) return false;
+    // a value at a fixed scale written as its program's DECIMAL (`fixedScale`): the engine's value is Postgres's, at
+    // Postgres's scale, so its print needs no program (and a grouped query no cells beside its keys)
+    if (this.fixedScale(node) !== null) return false;
     // a constant cast to numeric(p, s) that needs no rounding (its decimals within s, its whole digits within p - s): the
     // engine's DECIMAL(p, s) of it, which writes Postgres's digits at Postgres's scale (issue 358: a VALUES row's
     // `1.00000000000000000001::numeric(30,20)`, which no carry could take out of its list)
@@ -2925,8 +2929,49 @@ class Rewriter {
    * `%`, an avg (DuckDB's doubles), a parameter (written as a double), a column a FROM item computes as a double
    * (`carry`), a function this does not know — whose value then has its program, or is the engine's everywhere.
    */
+  /**
+   * A VALUE POSTGRES TYPES AT A FIXED SCALE, WRITTEN AS THE DECIMAL OF ITS PROGRAM (PR 415's review r3, the class
+   * refused-by-type-not-by-program): a cast to numeric(p, s) (p within the engine's 38 digits, `numericCastWrite`'s
+   * "decimal") or round / trunc(x, n) (a constant n, 0 to 38) of a numeric the engine holds as a double whose program
+   * the plan has (`exactText`: a quotient, an avg). The walk writes it `CAST(<its program's text> AS DECIMAL(p, s))`
+   * (`fixedScaleWritten`), so the engine's value IS Postgres's, and `duckExact` says so: every reader (a USING key, an
+   * array_agg's element, a GROUP BY, DISTINCT, =) then reads it as any exact value. Null where it is not one. Its DECIMAL
+   * holds 38 digits: a round(x, n) of 10^(38 - n) or more is the engine's conversion error, where Postgres answers
+   */
+  private fixedScale(n: AstNode): { precision: number; scale: number } | null {
+    const b = bodyOf(n);
+    if (this.fixedScales.has(b)) return this.fixedScales.get(b)!;
+    let found: { precision: number; scale: number } | null = null;
+    const programmed = (x: unknown): boolean => isNode(x) && this.typeOf(x) === NUMERIC && !this.duckExact(x) && this.exactText(x) !== null;
+    if (kindOf(n) === "TypeCast" && ["numeric", "decimal"].includes(lastName(b.typeName?.names)) && programmed(b.arg)) {
+      const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], this.typeOf(b.arg as AstNode), constString(b.arg));
+      if (w.as === "decimal") found = { precision: w.precision, scale: w.scale };
+    } else if (kindOf(n) === "FuncCall" && ["round", "trunc"].includes(lastName(b.funcname)) && b.over === undefined && b.agg_within_group !== true
+      && this.typeOf(n) === NUMERIC) {
+      const args = (b.args ?? []) as AstNode[];
+      const scale = args.length === 1 ? 0 : args.length === 2 ? constInt(args[1]) : null;
+      if (scale !== null && scale >= 0 && scale <= 38 && programmed(args[0])) found = { precision: 38, scale };
+    }
+    // (only a found one is kept: a value read before its FROM items are known is decided again once they are)
+    if (found !== null) this.fixedScales.set(b, found);
+    return found;
+  }
+  private readonly fixedScales = new WeakMap<Body, { precision: number; scale: number } | null>();
+  /** the array_aggs whose elements no reader sees (an `ELEMENT_BLIND` function's argument): their elements' type is
+   *  never the answer's, so no element is refused for it (PR 415's review r3) */
+  private readonly elementsUnread = new WeakSet<Body>();
+
+  /** a fixed-scale value (`fixedScale`) as the walk writes it: the DECIMAL of its program's text, or null */
+  private fixedScaleWritten(n: AstNode): AstNode | null {
+    const f = this.fixedScale(n);
+    const text = f === null ? null : this.exactText(n);
+    return f === null || text === null ? null : cast(text, ["decimal", String(f.precision), String(f.scale)]);
+  }
+
   private duckExact(n: AstNode): boolean {
     const t = this.typed(n), b = bodyOf(n), k = kindOf(n);
+    // (a value at a fixed scale whose program the plan has is written as that program's DECIMAL: `fixedScale`)
+    if ((k === "TypeCast" || k === "FuncCall") && this.fixedScale(n) !== null) return true;
     if (t !== null && INTEGERS.has(t.type)) return true;
     if (isCellRef(n, this.cellPrefix)) return true;
     const exact = (x: unknown): boolean => isNode(x) && this.duckExact(x);
@@ -4185,6 +4230,12 @@ class Rewriter {
     const t = this.typed({ FuncCall: b });
     const args = (b.args ?? []) as AstNode[];
     const argType = (i: number): number | null => t?.args[i]?.type ?? (args[i] !== undefined ? this.typeOf(args[i]!) : null);
+    // round / trunc(x, n) of a value whose program the plan has: that program's DECIMAL (`fixedScale`, which `duckExact`
+    // reads, so what is called exact is what is sent)
+    if (name === "round" || name === "trunc") { const fixed = this.fixedScaleWritten({ FuncCall: b }); if (fixed !== null) return fixed; }
+    // an array_agg whose elements no reader sees (its length, its bounds): the engine's list has as many, whatever their
+    // type, so no element of it is refused (`elementsUnread`)
+    if (ELEMENT_BLIND.has(name) && args[0] !== undefined && kindOf(args[0]) === "FuncCall" && lastName(bodyOf(args[0]).funcname) === "array_agg") this.elementsUnread.add(bodyOf(args[0]));
     // each argument as the type Postgres resolved it to (a real to a double precision, a char(n) to its text), before
     // any rule reads it; an aggregate's own ORDER BY of the same expression with it (DISTINCT needs them alike)
     if (b.agg_within_group !== true) {
@@ -4201,7 +4252,7 @@ class Rewriter {
     }
     // array_agg of a numeric the engine holds as a double whose program the plan has (issue 343): the engine's list is
     // of doubles (float8[], 15 digits), where Postgres answers numeric[] of exact elements
-    if (name === "array_agg" && args[0] !== undefined && argType(0) === NUMERIC && !this.duckExact(args[0]) && this.exactText(args[0]) !== null) {
+    if (name === "array_agg" && args[0] !== undefined && argType(0) === NUMERIC && !this.elementsUnread.has(b) && !this.duckExact(args[0]) && this.exactText(args[0]) !== null) {
       throw new Unrewritable("array_agg of a numeric quotient or average is not supported by Mason (Postgres answers numeric[] of the exact values, which the engine holds as doubles)", "array_agg of its text: array_agg((x / y)::text), or string_agg((x / y)::text, ',')", "array-subquery-element");
     }
     if ((name === "sum" || name === "avg") && argType(0) === INTERVAL) throw new Unrewritable(`${name}() of an interval is not supported by Mason`, "sum(extract(epoch FROM x)) for the seconds", "interval-aggregates");
@@ -4958,7 +5009,8 @@ class Rewriter {
       const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], from, constString(arg));
       switch (w.as) {
         case "double": return cast(arg, ["double"]);
-        case "decimal": return cast(arg, ["decimal", String(w.precision), String(w.scale)]);
+        // (of a value whose program the plan has: that program's DECIMAL, `fixedScale`)
+        case "decimal": return this.fixedScaleWritten({ TypeCast: b }) ?? cast(arg, ["decimal", String(w.precision), String(w.scale)]);
         case "whole": return cast(arg, ["decimal", "38", "0"]);
         case "literal": return decimalConst(w.text);
         case "same": return arg;
@@ -5620,6 +5672,8 @@ const VALUE_KEEPING = new Set(["sum", "min", "max", "latest", "any_value", "arg_
 /** the numeric functions the walk writes as an exact DECIMAL or integer (`duckExact`): count, extract (`extract`: as
  *  the exact numeric Postgres returns), div of integers */
 const WRITTEN_EXACT = new Set(["count", "extract", "div"]);
+/** the array functions that read an array's shape, never its elements (`elementsUnread`) */
+const ELEMENT_BLIND = new Set(["array_length", "cardinality", "array_ndims", "array_lower", "array_upper"]);
 /** Mason's functions whose text is an exact decimal's, which a DECIMAL cast reads exactly (`summed`'s parts) */
 const EXACT_TEXTS = new Set(["__mason_numeric_exact"]);
 

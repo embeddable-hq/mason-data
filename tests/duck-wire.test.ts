@@ -4065,8 +4065,9 @@ test("every way out a numeric refusal names answers as Postgres does; a numeric 
         `SELECT count(*) FROM (SELECT b.x / 1 AS q, b.id FROM bigdec b) s JOIN ratios r ON r.id = s.id WHERE s.q = ${K}`],
       [`SELECT s FROM (SELECT b.x / 1 AS q FROM bigdec b) s WHERE s.q = ${K}`, /not its whole row/,
         `SELECT s.q FROM (SELECT b.x / 1 AS q FROM bigdec b) s WHERE s.q = ${K}`],
-      ["WITH RECURSIVE r(q, n) AS (SELECT round(b.x / 1, 2), 1 FROM bigdec b UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.q = 1.00", /outside the recursive WITH query/,
-        "WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE round(r.x / 1, 2) = 1.00"],
+      // (round(b.x / 1, 2) there is a value at a fixed scale, exact, and answered: PR 415, below)
+      [`WITH RECURSIVE r(q, n) AS (SELECT b.x / 1, 1 FROM bigdec b UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.q = ${K}`, /outside the recursive WITH query/,
+        `WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.x / 1 = ${K}`],
       ["SELECT count(*) FROM (VALUES ('1e-39'::numeric), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0", /38 digits or fewer/,
         "SELECT count(*) FROM (VALUES ('1e-37'::numeric), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0"],
       ["SELECT count(*) FROM (VALUES (1 / 3.0), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0", /compute the value in the query that compares it/,
@@ -6045,6 +6046,55 @@ function textColumnCases(): Array<[string, "ordered"]> {
   for (const kind of ARM_KINDS) for (const text of TEXT_ARMS.slice(1)) for (let at = 0; at < 3; at++) out.push([three("UNION ALL", kind(NUMERIC_TEXTS[0]!), text, at), "ordered"]);
   return out;
 }
+
+/**
+ * THE CLASS OF PR 415's REVIEW r3, refused-by-type-not-by-program: a refusal decided by the column's type (a numeric
+ * the engine does not hold exactly) where the value that reaches the answer IS exact — a value at a fixed scale (round /
+ * trunc(x, n), a cast to numeric(p, s)) of a quotient or an avg, written as its program's DECIMAL; or an array_agg whose
+ * elements no reader sees (its length, its bounds). Every reader that refused a numeric it did not hold exactly.
+ */
+const FIXED_SCALES = ["round(o.amount / 3, 2)", "round(o.amount / 4, 2)", "trunc(o.amount / 3, 2)", "round(o.amount / 7)", "(o.amount / 3)::numeric(10,2)", "(o.amount / 4)::numeric(10,2)", "CAST(o.amount / 7 AS decimal(12,4))"];
+function fixedScaleCases(): Array<[string, "ordered"]> {
+  const out: Array<[string, "ordered"]> = [];
+  for (const x of FIXED_SCALES) {
+    out.push(
+      [`SELECT count(*) FROM (SELECT ${x} AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)`, "ordered"],
+      [`SELECT q FROM (SELECT ${x} AS q FROM orders o) s JOIN (SELECT ${x} AS q FROM orders o) u USING (q) ORDER BY q`, "ordered"],
+      [`SELECT q, count(*) FROM (SELECT ${x} AS q FROM orders o) s NATURAL JOIN (SELECT ${x} AS q FROM orders o) u GROUP BY q ORDER BY q`, "ordered"],
+      // (an array read by its elements' text: the harness's reference parses a numeric[] where it reads Mason's as its
+      // text; the oracle holds the array itself, tests/integration/oracle/bi-shapes.ts)
+      [`SELECT array_to_string(array_agg(${x} ORDER BY o.id), ',') FROM orders o`, "ordered"],
+      // (a UNION of values of one scale: of two, the listed mixed-scale-numeric, as any exact column's)
+      [`SELECT ${x} FROM orders o UNION SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "ordered"],
+      [`SELECT ${x} FROM orders o INTERSECT SELECT ${x} FROM orders o ORDER BY 1`, "ordered"],
+      [`SELECT ${x} FROM orders o EXCEPT SELECT o.amount FROM orders o ORDER BY 1`, "ordered"],
+      [`SELECT ${x} AS q, count(*) FROM orders o GROUP BY ROLLUP (1) ORDER BY 1`, "ordered"],
+      [`SELECT sum(DISTINCT ${x}), count(DISTINCT ${x}) FROM orders o`, "ordered"],
+      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.67, 6.67, 40.00]) ORDER BY 1`, "ordered"],
+      // (compared outside the recursive WITH query that carries it: PR 207's sixth round refused it as a quotient)
+      [`WITH RECURSIVE r(q, n) AS (SELECT ${x}, 1 FROM orders o UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT q, count(*) FROM r WHERE r.q = 6.67 OR r.q > 10 GROUP BY q ORDER BY q`, "ordered"],
+    );
+  }
+  return out;
+}
+
+test("exact path round 2: a value at a fixed scale, or an array whose elements no reader sees, is answered by every reader, never refused by its type (PR 415, refused-by-type-not-by-program)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ...fixedScaleCases(),
+      ["SELECT count(*) FROM (SELECT round(avg(o.amount), 2) AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)", "ordered"],
+      ["SELECT q FROM (SELECT avg(o.amount)::numeric(12,2) AS q FROM orders o) s JOIN (SELECT avg(o.amount)::numeric(12,2) AS q FROM orders o) u USING (q)", "ordered"],
+      ["SELECT array_length(array_agg(o.amount / 3), 1), cardinality(array_agg(o.amount / 3)), array_upper(array_agg(o.amount / 7), 1) FROM orders o", "ordered"],
+      ["SELECT array_length(array_agg(o.amount / 3), 1) FROM orders o WHERE false", "ordered"],
+      ["SELECT o.status, array_length(array_agg(o.amount / 7 ORDER BY o.id), 1) FROM orders o GROUP BY o.status ORDER BY 1", "ordered"],
+    ]), []);
+    // (what stays refused, where the engine's double would reach the answer: a plain quotient's and an avg's USING key,
+    // an array_agg whose elements are read)
+    assert.deepEqual(await answeredOrRefused(c, "SELECT count(*) FROM (SELECT o.amount / 3 AS q FROM orders o) s JOIN (SELECT o.amount * (1.0 / 3) AS q FROM orders o) u USING (q)", "numeric-quotient-equality"), []);
+    assert.deepEqual(await answeredOrRefused(c, "SELECT array_agg(o.amount / 3 ORDER BY o.id) FROM orders o", "array-subquery-element"), []);
+  } finally { await c.end(); }
+});
 
 test("exact path round 2: a text column of a set operation is never read as a numeric, whatever the arm, the operator, the conversion or the text arm's place (PR 415's class)", async () => {
   const c = await client();
