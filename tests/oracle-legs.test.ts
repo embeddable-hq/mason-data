@@ -63,6 +63,8 @@ test("the heaviest texts go to different legs, and the legs differ by no more th
   assert.notEqual(split.get("SELECT 0"), split.get("SELECT 1"));
   const [a, b] = loads(split, 2, w);
   assert.ok(Math.abs(a! - b!) <= 100, `${a} ${b}`);
+  // greedy, exactly: 100 to leg 1, 90 then 80 to leg 2 (170), and the 37 of weight 1 to leg 1, the lighter (137)
+  assert.deepEqual([split.get("SELECT 0"), split.get("SELECT 1"), split.get("SELECT 2"), a, b], [1, 2, 2, 137, 170]);
 });
 
 test("the stages' cost is leg 1's head start: its statements weigh that much less, and it still has some", () => {
@@ -146,7 +148,7 @@ test("--weights lists each text above the threshold by the key the split reads, 
   const split = partition([...statements, ...apart], 2, got.weights);
   const load = loads(split, 2, got.weights);
   assert.ok(Math.abs(load[0]! - load[1]!) <= 120000, `${load}`);
-  assert.equal(split.get("SELECT 0"), 2, "the heaviest text goes to the leg without the stages");
+  assert.deepEqual([split.get("SELECT 0"), ...load], [2, 50000 + 41 * 200, 120000], "the heaviest text goes to the leg without the stages, every other text to the one with them");
   assert.equal(JSON.parse(weightsText(got.weights)).statements[weightKey("SELECT 0")].ms, 120000);
 });
 

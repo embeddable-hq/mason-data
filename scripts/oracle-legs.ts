@@ -2,7 +2,7 @@
 /**
  * THE ORACLE IN LEGS (.github/workflows/ci.yml; tests/integration/README.md). CI runs tests/integration/duck-oracle.itest.ts
  * as two jobs, `IT_ORACLE_LEG=1/2` and `2/2` (`scripts/ci-shards.ts run oracle <n>`), each with its own Postgres, its own copy and both rounds of changes, each
- * asking the statements `legOf` gives it. A statement that no leg asks is a statement nobody holds to Postgres, and a
+ * asking the statements `partition` gives it. A statement that no leg asks is a statement nobody holds to Postgres, and a
  * green run would never say so; and what a whole run asserts at its end (no stale decision, no dead gap, the allowlist
  * exactly what was verified, the tallies the fixture's) is false of a part. So a leg asserts neither, and writes a
  * report instead (`duck-oracle-leg-<n>.json`, at IT_ORACLE_LEG_REPORT); `integration (oracle)` runs this file over the
