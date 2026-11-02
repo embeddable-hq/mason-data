@@ -1,19 +1,19 @@
 {
-  "statements": 6568,
+  "statements": 6571,
   "mason": {
-    "exact": 6062,
+    "exact": 6063,
     "decided": 51,
-    "refused": 455,
-    "differs": 0
+    "refused": 456,
+    "differs": 1
   },
   "duckdb": {
     "exact": 1785,
-    "name": 1236,
-    "refused": 1394,
+    "name": 1237,
+    "refused": 1395,
     "value": 835,
-    "rows": 551,
+    "rows": 550,
     "text": 182,
-    "other": 585
+    "other": 587
   },
   "gaps": {
     "copyPhase": {
@@ -33,6 +33,7 @@
         "infinite-extract": { "planted": 0, "natural": 18 },
         "infinite-interval": { "planted": 1, "natural": 0 },
         "interval-aggregates": { "planted": 0, "natural": 1 },
+        "interval-style": { "planted": 1, "natural": 0 },
         "json-agg-distinct": { "planted": 1, "natural": 0 },
         "json-of-type": { "planted": 1, "natural": 1 },
         "json-path-type": { "planted": 0, "natural": 16 },
@@ -92,29 +93,30 @@
       }
     },
     "everyAsk": {
-      "asked": 45260,
+      "asked": 87896,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
         "bytea-forms": { "planted": 3, "natural": 0 },
-        "citext-forms": { "planted": 0, "natural": 33 },
+        "citext-forms": { "planted": 0, "natural": 93 },
         "collation-unknown": { "planted": 3, "natural": 0 },
         "div-numeric": { "planted": 3, "natural": 0 },
         "enum-forms": { "planted": 3, "natural": 0 },
         "explain-option": { "planted": 3, "natural": 0 },
         "extract-julian": { "planted": 3, "natural": 0 },
         "format-specifiers": { "planted": 3, "natural": 0 },
-        "held-type-compare": { "planted": 3, "natural": 891 },
+        "held-type-compare": { "planted": 3, "natural": 1017 },
         "inet-order": { "planted": 0, "natural": 60 },
         "infinite-extract": { "planted": 0, "natural": 54 },
         "infinite-interval": { "planted": 3, "natural": 0 },
         "interval-aggregates": { "planted": 0, "natural": 3 },
+        "interval-style": { "planted": 3, "natural": 0 },
         "json-agg-distinct": { "planted": 3, "natural": 0 },
         "json-of-type": { "planted": 3, "natural": 3 },
         "json-path-type": { "planted": 0, "natural": 48 },
         "json-rows-in-select": { "planted": 3, "natural": 0 },
-        "jsonb-compare": { "planted": 3, "natural": 6 },
+        "jsonb-compare": { "planted": 3, "natural": 206 },
         "jsonb-set": { "planted": 0, "natural": 3 },
         "latest-order": { "planted": 6, "natural": 0 },
         "latest-quotient": { "planted": 3, "natural": 0 },
@@ -122,7 +124,7 @@
         "multidim-array": { "planted": 0, "natural": 17 },
         "numeric-exact-sum": { "planted": 3, "natural": 0 },
         "numeric-math": { "planted": 3, "natural": 0 },
-        "numeric-quotient-equality": { "planted": 6, "natural": 0 },
+        "numeric-quotient-equality": { "planted": 6, "natural": 24 },
         "numeric-special": { "planted": 0, "natural": 6 },
         "percentile-text-libc": { "planted": 3, "natural": 0 },
         "quote-ident": { "planted": 0, "natural": 9 },
@@ -136,7 +138,7 @@
         "similar-to-forms": { "planted": 3, "natural": 0 },
         "star-join-twin": { "planted": 3, "natural": 0 },
         "sum-real": { "planted": 0, "natural": 9 },
-        "text-array-order": { "planted": 0, "natural": 27 },
+        "text-array-order": { "planted": 0, "natural": 45 },
         "time-date-trunc": { "planted": 0, "natural": 36 },
         "to-char-patterns": { "planted": 0, "natural": 6 },
         "to-timestamp-format": { "planted": 3, "natural": 0 },

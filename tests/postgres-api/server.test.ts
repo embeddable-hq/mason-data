@@ -645,6 +645,48 @@ describe("session state (GitHub issue 253): the session's settings reach every p
     } finally { await c.end(); }
   });
 
+  test("session state: a clock keyword's precision is the one written, 0 included, on the catalog path (review r1 of PR 333)", async () => {
+    const c = await connect();
+    try {
+      // libpg-query's JSON leaves out a typmod of 0: the precision is read from the text, never from the field's presence
+      assert.deepEqual(await text(c, "SELECT length(current_time(0)::text), length(current_timestamp(0)::text), length(localtime(0)::text), length(localtimestamp(0)::text)"), ["11", "22", "8", "19"]);
+      assert.deepEqual(await text(c, "SELECT current_time(0)::text ~ '^[0-9]{2}:[0-9]{2}:[0-9]{2}[+-]', localtimestamp(1)::text ~ '[.][0-9]$|:[0-9]{2}$', CURRENT_TIMESTAMP ( 0 )::text ~ ':[0-9]{2}[+-]'"), ["true", "true", "true"]);
+    } finally { await c.end(); }
+  });
+
+  test("session state: a relative word cast to a date or time type is the transaction's instant, as now() is, on the catalog path (CI's oracle at 76730cb)", async () => {
+    const c = await connect();
+    try {
+      await c.query("SET TimeZone = 'Asia/Tokyo'");
+      assert.deepEqual(await text(c, "SELECT 'now'::timestamptz = now(), 'today'::date = current_date, 'tomorrow'::date - 'yesterday'::date, 'today'::timestamptz = date_trunc('day', now()), timestamp 'today' = current_date::timestamp, date 'tomorrow' = current_date + 1, 'now'::timestamp = localtimestamp"),
+        ["true", "true", "2", "true", "true", "true", "true"]);
+      // a word that is no cast to a time is text, as written
+      assert.deepEqual(await text(c, "SELECT 'now', 'today'::text"), ["now", "today"]);
+    } finally { await c.end(); }
+  });
+
+  test("session state: DateStyle's validity is Postgres's: two orders or two styles are its 22023, a non-ISO style Mason's 0A000 (review r1 of PR 333)", async () => {
+    const c = await connect();
+    try {
+      for (const v of ["YMD, DMY", "ISO, SQL", "ISO, nonsense"]) {
+        const e = await refused(c.query(`SET DateStyle = '${v}'`));
+        assert.deepEqual([e.code, e.message], ["22023", `invalid value for parameter "DateStyle": "${v}"`], v);
+      }
+      assert.match((await refused(c.query("SET DateStyle = 'YMD, DMY'"))).detail ?? "", /Conflicting "DateStyle" specifications/i);
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, MDY"], "nothing was remembered");
+      assert.equal((await refused(c.query("SET DateStyle = 'SQL, DMY'"))).code, "0A000");
+      await c.query("SET DateStyle = 'ISO, YMD'");
+      await c.query("SET DateStyle = 'ISO'");
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, YMD"], "a part not named is kept, as check_datestyle keeps it");
+      await c.query("SELECT set_config('DateStyle', 'dmy', false)");
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, DMY"]);
+    } finally { await c.end(); }
+    // a startup packet's: read by the catalog after the password, its refusal the startup's
+    const d = await connect({ options: "-c DateStyle=ISO,DMY" });
+    try { assert.deepEqual(await text(d, "SHOW DateStyle"), ["ISO, DMY"]); } finally { await d.end(); }
+    await assert.rejects(connect({ options: "-c DateStyle=YMD,DMY" }), (e: { code?: string }) => e.code === "22023");
+  });
+
   test("session state: every parameter setParameter names is honoured, read back, or refused by name; RESET ALL restores each", async () => {
     // [name, a valid value other than the default, what SHOW then answers (null: the SET is refused, with this SQLSTATE;
     // a spelling of another parameter, whose verdict is that one's: its SHOW name)]

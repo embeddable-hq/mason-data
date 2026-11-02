@@ -539,27 +539,11 @@ const SETTING_KEY: Readonly<Record<string, string>> = { transaction: "transactio
 /** the isolation levels Postgres knows, as SHOW answers them */
 const ISOLATION_LEVELS = ["serializable", "repeatable read", "read committed", "read uncommitted"];
 
-/**
- * DATESTYLE AS POSTGRES'S `check_datestyle` READS IT: a list of the output style and the field order, each part not
- * named kept from `current` (`SET DateStyle = 'ISO'` keeps the order), DEFAULT the boot value `ISO, MDY`. The output
- * style is ISO always: every other one is refused by name (this API writes every date and time in ISO 8601); the order
- * is held and applied to both engines' input of a date (src/api/postgres/catalog.ts sessionSetSql, src/duck/pg-eval.ts).
- */
-function dateStyleOf(value: string, current: string): string {
-  let order = /,\s*(\w+)$/.exec(current)?.[1] ?? "MDY";
-  let other: string | null = null;
-  for (const raw of value.split(/[\s,]+/).filter((t) => t !== "")) {
-    const t = raw.toLowerCase();
-    if (t === "iso") continue;
-    if (t === "ymd") order = "YMD";
-    else if (t === "dmy" || t === "euro" || t === "european") order = "DMY";
-    else if (t === "mdy" || t === "us" || t === "noneuro" || t === "noneuropean") order = "MDY";
-    else if (t === "default") order = "MDY";
-    else if (t === "sql" || t === "postgres" || t === "german") other ??= raw;
-    else throw new PgError({ code: "22023", message: `invalid value for parameter "DateStyle": "${value}"`, detail: `Unrecognized key word: "${raw}".` });
-  }
-  if (other !== null) throw new PgError({ code: "0A000", message: `DateStyle ${value} is not supported: this API writes every date and time in ISO 8601 (DateStyle ISO)` });
-  return `ISO, ${order}`;
+/** the one refusal of a DateStyle that is Mason's own: an output style other than ISO (its value as the catalog
+ *  Postgres canonicalised it, `German, DMY`), which this API never writes */
+function isoDateStyle(canonical: string, value: string): string {
+  if (!/^ISO,/.test(canonical)) throw new PgError({ code: "0A000", message: `DateStyle ${value} is not supported: this API writes every date and time in ISO 8601 (DateStyle ISO)` });
+  return canonical;
 }
 
 /** A placeholder's name as Postgres's `valid_custom_variable_name` reads it: two or more simple identifiers, dotted. */
@@ -764,6 +748,8 @@ class Session {
   vars: Vars = defaultVars();
   /** the session's parameters as its startup left them (its packet's `application_name` and `options`): what RESET restores */
   startupVars: Vars = defaultVars();
+  /** a startup packet's DateStyle, canonicalised by the catalog Postgres once the password is read (`password`) */
+  private startupDateStyle: string | null = null;
   /** each reported parameter's value as the client was last told it (`reportChanges`) */
   readonly reported = new Map<string, string>();
   tx: TxState = "none";
@@ -1090,6 +1076,20 @@ class Session {
     if (this.phase !== "password") return;   // the socket closed while the ledger was read
     this.door.logins?.settled(this);
     if (this.wrongDatabase !== null) { this.fatal("3D000", `database "${this.wrongDatabase}" does not exist`, wrongDatabaseHint(this.server.database)); return; }
+    // a startup packet's DateStyle, read as Postgres reads it (`canonicalElsewhere`): refused as the startup's other
+    // parameters are, before the session begins
+    if (this.startupDateStyle !== null) {
+      try {
+        const canonical = await this.canonicalElsewhere("datestyle", this.startupDateStyle, this.sessionState().dateStyle);
+        this.setParameter("datestyle", isoDateStyle(canonical, this.startupDateStyle));
+        this.startupVars = copyVars(this.vars);
+      } catch (err) {
+        const e = asPgError(err, "");
+        this.fatal(e.fields.code, e.message, e.fields.hint);
+        return;
+      }
+      if (this.phase !== "password") return;   // the socket closed while the catalog was asked
+    }
     this.token = token;
     this.presented = m.password;
     this.verifiedAt = this.server.now();
@@ -1130,7 +1130,11 @@ class Session {
         if (value !== null && !isUtf8(value)) throw new PgError({ code: "22023", message: `invalid value for parameter "client_encoding": "${value}"`, hint: "this API sends UTF8 only" });
         return;
       case "datestyle":
-        this.vars.dateStyle = value === null ? "ISO, MDY" : dateStyleOf(value, this.vars.dateStyle);
+        // the value is the catalog Postgres's canonical one (`canonicalElsewhere`): its validity and the order a part not
+        // named keeps are Postgres's check_datestyle, never derived here. A startup packet's is read after the password
+        // (`startupDateStyle`), where the catalog can be asked
+        if (atStartup) { this.startupDateStyle = value; return; }
+        this.vars.dateStyle = value === null ? "ISO, MDY" : isoDateStyle(value, value);
         return;
       case "extra_float_digits": {
         const n = value === null ? 1 : Number(value);
@@ -1291,6 +1295,24 @@ class Session {
   /** The catalog Postgres validates a parameter this server has no opinion on; its own error is the answer. Inside a
    *  transaction that is ROLLED BACK: the sidecar is one connection every session shares, and a SET that stuck there
    *  was every session's (review of #480). The value itself lives in this session's `vars.other`. */
+  /**
+   * A PARAMETER'S VALUE AS THE CATALOG POSTGRES READS IT, from the session's `current` one: SET LOCAL to `current`, then
+   * to `value`, then SHOW, in a transaction rolled back (as `validateElsewhere`, nothing stays on the shared connection).
+   * Postgres's refusal (22023 and its DETAIL) is relayed as its own; its answer is the canonical value SHOW gives.
+   */
+  private async canonicalElsewhere(name: string, value: string, current: string): Promise<string> {
+    const sql = `BEGIN; SET LOCAL ${quoteIdent(name)} = ${quoteLiteral(current)}; SET LOCAL ${quoteIdent(name)} = ${quoteLiteral(value)}; SHOW ${quoteIdent(name)}; ROLLBACK`;
+    const messages = decodeBackend(Buffer.from(await this.server.catalog.run(Buffer.concat([frame("Q", cstr(sql)), frame("Q", cstr("ROLLBACK"))]))));
+    const err = messages.find((x) => x.type === "ErrorResponse");
+    if (err?.type === "ErrorResponse") {
+      throw new PgError({ code: err.fields.C ?? "22023", message: err.fields.M ?? `invalid value for parameter "${name}"`, ...(err.fields.D !== undefined ? { detail: err.fields.D } : {}), ...(err.fields.H !== undefined ? { hint: err.fields.H } : {}) });
+    }
+    const row = messages.find((x) => x.type === "DataRow");
+    const shown = row?.type === "DataRow" ? row.values[0]?.toString("utf8") : undefined;
+    if (shown === undefined) throw new PgError({ code: "XX000", message: `SHOW ${name} answered no row in the catalog (Mason bug: report it)` }, 500);
+    return shown;
+  }
+
   private async validateElsewhere(name: string, value: string | null): Promise<void> {
     const sql = value === null ? `RESET ${quoteIdent(name)}` : `SET LOCAL ${quoteIdent(name)} = ${quoteLiteral(value)}`;
     // one batch, so no other session's statement lands inside the transaction: the ROLLBACK in the first query is not
@@ -1605,7 +1627,9 @@ class Session {
 
   /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it */
   private spliced(text: string, raw: RawStmt): string {
-    return userSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS);
+    // the transaction's instant (begun here when none is, as catalogAs begins it), which a relative literal is read as
+    const now = this.txNow ??= this.server.now();
+    return userSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS, { now, zone: this.sessionState().timeZone });
   }
 
   /** a plan's reads held to the session's role of THIS moment (a role given or taken since the Parse): refused as the
@@ -1952,8 +1976,11 @@ class Session {
     const placeholder = await this.isPlaceholder(t.name);
     if (placeholder) placeholderName(t.name);
     else if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
+    // DateStyle: Postgres's check_datestyle decides its validity (22023 with its DETAIL) and the order a part not named
+    // keeps, from the session's value (GitHub issue 253 review r1); Mason adds only its refusal of a non-ISO style
+    const value = t.name === "datestyle" && t.value !== null ? await this.canonicalElsewhere("datestyle", t.value, this.sessionState().dateStyle) : t.value;
     const tx = this.settingsAtStart();
-    if (t.value === null) await this.resetParameter(t.name); else this.setParameter(t.name, t.value);
+    if (value === null) await this.resetParameter(t.name); else this.setParameter(t.name, value === t.value ? value : isoDateStyle(value, t.value!));
     // transaction_isolation is the transaction's alone, however it is SET (Postgres resets it as the transaction ends)
     if (!t.local && t.name !== "transaction_isolation") copySetting(t.name, this.vars, tx.commit);
     // once named a placeholder stays defined, '', whichever way the transaction ends: its definition is no value it undoes
@@ -2511,7 +2538,31 @@ const CLOCK_OPS: Readonly<Record<string, { name: string; cast: string; precision
 const INSTANT = `pg_catalog.current_setting(${quoteLiteral(SESSION_NOW)})::timestamptz`;
 
 /** one splice of `userSpliced`: the span the parser placed at a location, and what is written in its place */
-type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: string } | { kind: "clock-call"; name: string } | { kind: "clock-op"; op: string; typmod: number };
+type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: string } | { kind: "clock-call"; name: string } | { kind: "clock-op"; op: string }
+  | { kind: "relative"; word: string };
+
+/** the date and time types whose input reads a relative word (`'now'`, `'today'` …) as the transaction's instant */
+const RELATIVE_TYPES: ReadonlySet<string> = new Set(["date", "timestamp", "timestamptz", "time", "timetz"]);
+const RELATIVE_WORD = /^\s*(now|today|tomorrow|yesterday)\s*$/i;
+
+/**
+ * A RELATIVE WORD AS THE TRANSACTION'S INSTANT, written as a literal the type's own input reads to the value Postgres
+ * gives the word at that instant (`clock`: the session's instant and zone): `now` as the wall time in the zone with
+ * its offset, `today` / `tomorrow` / `yesterday` as that day's midnight with none, so the zone reads it as Postgres
+ * does across a change of offset.
+ */
+function relativeLiteral(word: string, clock: { now: number; zone: string }): string {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: clock.zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3, timeZoneName: "longOffset" })
+    .formatToParts(new Date(clock.now)).map((p) => [p.type, p.value]));
+  const w = word.toLowerCase();
+  if (w === "now") {
+    const offset = /^GMT([+-]\d{2}:\d{2})$/.exec(parts.timeZoneName ?? "")?.[1] ?? "+00:00";
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${parts.fractionalSecond}${offset}`;
+  }
+  const day = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + (w === "tomorrow" ? 1 : w === "yesterday" ? -1 : 0)));
+  return `${day.toISOString().slice(0, 10)} 00:00:00`;
+}
 
 /**
  * WHAT A STATEMENT THE CATALOG ANSWERS READS OF ITS SESSION, spliced in its text at the parse tree's locations:
@@ -2532,9 +2583,11 @@ type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: stri
  *   CURRENT_TIMESTAMP[(p)], LOCALTIME[(p)], LOCALTIMESTAMP[(p)]): each the session's instant from the request's carrier
  *   (catalog.ts SESSION_NOW), read at execution, cast to its type under the session's zone and named as Postgres names
  *   its column — so a block's statements on the two paths see one instant. `clock_timestamp()` stays the real clock.
+ *   A relative word cast to a date or time type (`'now'::timestamptz`, `date 'today'`) is that same instant (`clock`),
+ *   written as a literal: Postgres reads both at the transaction's start, so they never part (CI's oracle at 76730cb).
  * `base`: the statement's offset in the text the parse tree's locations count from.
  */
-function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>): string {
+function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>, clock: { now: number; zone: string } = { now: 0, zone: "UTC" }): string {
   const at = new Map<number, Splice>();
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) { for (const x of n) walk(x); return; }
@@ -2542,7 +2595,18 @@ function userSpliced(text: string, stmt: unknown, base: number, user: string, op
     const f = (n as { SQLValueFunction?: { op?: string; typmod?: number; location?: number } }).SQLValueFunction;
     if (f !== undefined && f.op !== undefined && typeof f.location === "number") {
       if (ops.has(f.op)) at.set(f.location, { kind: "user", keyword: USER_OPS[f.op]! });
-      else if (CLOCK_OPS[f.op] !== undefined) at.set(f.location, { kind: "clock-op", op: f.op, typmod: f.typmod ?? -1 });
+      // its precision, for an `_N` op, is read from the text the parser placed (libpg-query's JSON leaves out a field at
+      // its default, so `CURRENT_TIME(0)` carries no typmod)
+      else if (CLOCK_OPS[f.op] !== undefined) at.set(f.location, { kind: "clock-op", op: f.op });
+    }
+    // a relative word cast to a date or time type (`'now'::timestamptz`, `date 'today'`): Postgres reads it at the
+    // transaction's start, the instant the clock above is, so `'now'::timestamptz = now()` holds on this path too
+    const cast = (n as { TypeCast?: { arg?: { A_Const?: { sval?: { sval?: string }; location?: number } }; typeName?: { names?: Array<{ String?: { sval?: string } }> } } }).TypeCast;
+    const literal = cast?.arg?.A_Const;
+    const type = cast?.typeName?.names?.at(-1)?.String?.sval;
+    const word = literal?.sval?.sval;
+    if (literal !== undefined && typeof literal.location === "number" && type !== undefined && RELATIVE_TYPES.has(type) && word !== undefined && RELATIVE_WORD.test(word)) {
+      at.set(literal.location, { kind: "relative", word: RELATIVE_WORD.exec(word)![1]! });
     }
     const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; args?: unknown[]; agg_star?: boolean; over?: unknown; location?: number } }).FuncCall;
     const name = c?.funcname?.map((x) => x.String?.sval ?? "");
@@ -2579,10 +2643,16 @@ function userSpliced(text: string, stmt: unknown, base: number, user: string, op
       put = `(SELECT ${INSTANT} AS ${splice.name})`;
     } else if (splice.kind === "clock-op") {
       const clock = CLOCK_OPS[splice.op]!;
-      const m = new RegExp(`^${clock.name}(?![A-Za-z0-9_$])${clock.precision ? "\\s*\\(\\s*\\d+\\s*\\)" : ""}`, "i").exec(ahead);
+      const m = new RegExp(`^${clock.name}(?![A-Za-z0-9_$])${clock.precision ? "\\s*\\(\\s*(\\d+)\\s*\\)" : ""}`, "i").exec(ahead);
       if (m === null) continue;
       written = m[0];
-      put = `(SELECT ${INSTANT}::${clock.cast}${clock.precision && splice.typmod >= 0 ? `(${splice.typmod})` : ""} AS ${clock.name})`;
+      // an `_N` op has a precision whatever the JSON says: the one written, as the parser read it
+      put = `(SELECT ${INSTANT}::${clock.cast}${clock.precision ? `(${Number(m[1] ?? 0)})` : ""} AS ${clock.name})`;
+    } else if (splice.kind === "relative") {
+      const m = /^'[^']*'/.exec(ahead);
+      if (m === null || !RELATIVE_WORD.test(m[0].slice(1, -1))) continue;
+      written = m[0];
+      put = quoteLiteral(relativeLiteral(splice.word, clock));
     } else {
       const keyword = splice.keyword;
       if (ahead.slice(0, keyword.length).toLowerCase() !== keyword) continue;

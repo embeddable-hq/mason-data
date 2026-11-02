@@ -949,8 +949,9 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
   const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
   // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request;
-  // planner: a generated table's SQL, planned as no session, and refused where it reads a session's setting)
-  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "showAll", "showStatement", "validateElsewhere"].sort(),
+  // planner: a generated table's SQL, planned as no session, and refused where it reads a session's setting;
+  // canonicalElsewhere: a SET's value read by the catalog's own check, as validateElsewhere's)
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "showAll", "showStatement", "validateElsewhere", "canonicalElsewhere"].sort(),
     "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
@@ -975,7 +976,8 @@ test("a transaction's end is one method, and every SET reaches the settings thro
   const callers = (pattern: RegExp): string[] => [...new Set([...src.matchAll(pattern)].map((m) => enclosing(m.index)))].sort();
   assert.deepEqual(callers(/\bthis\.tx = "failed"/g), ["abortTransaction"], "a block failed beside abortTransaction: its settings stay");
   assert.deepEqual(callers(/\bthis\.vars = /g), ["endTransaction", "resetAll"], "the settings replaced beside a transaction's end");
-  assert.deepEqual(callers(/\bthis\.setParameter\(/g), ["applySetting", "commandLineOptions", "resetParameter", "startup"], "a setting moved beside applySetting: a transaction cannot undo it");
+  assert.deepEqual(callers(/\bthis\.setParameter\(/g), ["applySetting", "commandLineOptions", "password", "resetParameter", "startup"], "a setting moved beside applySetting: a transaction cannot undo it");
+  // (password: a startup packet's DateStyle, read by the catalog once the password is read, before any transaction: a startup value)
   assert.deepEqual(callers(/\bthis\.resetParameter\(/g), ["applySetting"]);
   assert.deepEqual(callers(/\bthis\.resetAll\(/g), ["applySetting", "discard"]);
   assert.deepEqual(callers(/\bthis\.settingsTx\b/g), ["endTransaction", "settingsAtStart"], "what a transaction restores is read for no answer");
