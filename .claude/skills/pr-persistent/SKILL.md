@@ -108,8 +108,9 @@ nothing else: `Your instructions are in <path>: read the whole file, then follow
   to a new agent. Tell it once, in the first such message, that it keeps its worktree and its context between
   rounds. That sentence is the only thing you add.
 - **Every other stage** (`brief`, `split`, `review r<n>`, `CI read r<n>`, `link`, `learn`, `learn check`, `CI <n>`,
-  `file`, `record`): a FRESH agent with the Agent tool, with the printed options. A review is `model: "fable"`,
-  `effort: "medium"`.
+  `merge <k>`, `file`, `record`): a FRESH agent with the Agent tool, with the printed options. A review is
+  `model: "fable"`, `effort: "medium"`. A `merge <k>` is never the implementer's: it is a fresh agent in a worktree of
+  its own (`isolation: "worktree"`), as printed.
 
 Each rendered prompt ends by telling its agent to write its result, ONE JSON value, to `results/<name>.json` in the run
 folder before it ends its turn, and to end its report with that path. That path is the `STAGE` line's, with `next/`
@@ -136,6 +137,12 @@ stop, CI, Learn, filing and the record.
   made a sub-issue per piece and posted the plan on the issue. No PR was opened. Report the pieces, in order, with
   their sub-issues and which is stacked on which, as the status line gives them, and stop: the top session reads the
   plan and starts each piece as a run of its own.
+- **A conflict** (`DONE: conflict: …`): the run is over, its reviews were clean, and the PR still conflicts with its
+  base, in the files the status names (the run merged the base itself where it could, and this is what it could not).
+  Only the top session can go on from here, so do the steps of the next bullet, then send your ONE report AT ONCE,
+  saying first that the PR conflicts and naming the files from the status. Never wait on it, watch it, or leave a
+  background job for it: nothing of the run moves again until the top session merges the base, and a coordinator that
+  waited on a conflict instead of reporting it left a clean PR unmerged for an hour (issue 452).
 - **Any other DONE**: post the run log as ONE comment on the PR, headed `### From Claude (<your model>)` and
   `## Run log`. Give each stage's wall time, Learn's own time on its own row, each agent's tokens, and your own on the
   last row. The Review record is the `record` stage's comment, as rendered, so do not add the log to it. Then tell the
@@ -154,6 +161,10 @@ background job that will wake you: the wait-file job above, one per dispatched s
 agent you dispatch has a bounded wait on its results file, never on a notice, and each CI stage is an agent with a
 bounded wait of its own, so you never wait on CI yourself. A turn that ends with nothing of yours running is never
 woken.
+
+A DONE ends the run: once the render prints it, nothing of the run is waited on. No wait, watch or background job
+follows a DONE; its report is your last word on the run, and whatever is left (a conflict, a merge, a decision) is the
+top session's.
 
 Test commands need BOTH `--test-timeout=<ms>` and `--test-force-exit` before the files (PR 313). If an agent's command
 lacks one, the hook says what to run instead: that is expected, not a failure.
