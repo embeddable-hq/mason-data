@@ -117,7 +117,7 @@ test("mason deploy: the files sent are projectFiles of the project folder, whole
     ".mason/state.yml": "x: 1\n",
     ".editor.yml": "a: 1\n",
     "notes.txt": "a note\n",
-    "README.md": "# readme\n",
+    "settings.json": "{ \"readme\": 1 }\n",
   });
   fs.writeFileSync(path.join(root, ".env"), "DATABASE_URL=postgres://u:hunter2@db.example/prod\n");
   fs.writeFileSync(path.join(root, ".mason", "duck.yml"), "x: 1\n");
@@ -427,7 +427,7 @@ test("mason deploy --timeout: past it, exit 124 naming the deploy's id and that 
   const { root } = project();
   const { a } = await deployWith({ get: () => at("applying") }, root, ["--replica", "acme/shop", "--timeout", "1s"]);
   assert.equal(a.code, 124, a.stderr);
-  assert.match(a.stderr, /^✗ mason deploy: deploy dep_01abc to acme\/shop did not finish within 1s\n {2}why {3}it was last: (Queued|Applying)[^\n]*\n {2}fix {3}nothing was stopped, and it may still finish: the service's web app shows deploy dep_01abc of acme\/shop, as GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc does \(docs\/HOSTED-API\.md\); a longer wait is --timeout 30m\n$/m);
+  assert.match(a.stderr, /^✗ mason deploy: deploy dep_01abc to acme\/shop did not finish within 1s\n {2}why {3}it was last: (Queued|Applying)[^\n]*\n {2}fix {3}nothing was stopped, and it may still finish: the service's web app shows deploy dep_01abc of acme\/shop, as GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc does \(the hosted API\); a longer wait is --timeout 30m\n$/m);
   const j = await deployWith({ get: () => at("applying") }, root, ["--replica", "acme/shop", "--timeout", "1s", "--json"]);
   assert.equal(j.a.code, 124);
   const v = JSON.parse(j.a.stdout) as { deploy: { id: string }; error: { code: string } };

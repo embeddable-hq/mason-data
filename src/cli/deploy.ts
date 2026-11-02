@@ -403,7 +403,7 @@ export async function deploy(argv: string[]): Promise<number> {
     if (left <= 0) {
       return ended({ message: `deploy ${id} to ${replicaText(r)} did not finish within ${timeout.every}`, code: "timeout",
         why: unsure !== null ? `the service could not say how it is going: ${unsure}` : `it was last: ${stateLine(state)}`,
-        fix: `nothing was stopped, and it may still finish: the service's web app shows deploy ${id} of ${replicaText(r)}, as GET ${where}/${id} does (docs/HOSTED-API.md); a longer wait is --timeout 30m`,
+        fix: `nothing was stopped, and it may still finish: the service's web app shows deploy ${id} of ${replicaText(r)}, as GET ${where}/${id} does (the hosted API); a longer wait is --timeout 30m`,
         next: [] });
     }
     await sleep(Math.min(waitMs, left));
