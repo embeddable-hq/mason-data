@@ -46,6 +46,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   // (review r2 of PR 506: any expression over the bytes, refused by name, never the engine's own error over them)
   { gap: "numeric-double-integer", sql: "SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 3) * 2)::int, round(mode() WITHIN GROUP (ORDER BY n2 / 3))::int8 FROM typed" },
   { gap: "numeric-double-integer", sql: "SELECT coalesce(x, 0)::int, nullif(x, 0)::int FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 7) AS x FROM typed) s" },
+  // (review r3 of PR 506: the value Mason sorts by its exact order key, never answered as that key's bytes)
+  { gap: "numeric-ordered-set", sql: "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 3), mode() WITHIN GROUP (ORDER BY nullif(n2 / 7, 0)) FROM typed" },
   { gap: "view-forms", sql: "SELECT happy FROM happy" },
   { gap: "enum-forms", sql: "SELECT id, t::text::mood[] FROM moods WHERE false" },
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },
