@@ -88,20 +88,26 @@ const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compre
  * WebAssembly memory once a statement handed it 1.5 M values, the catalog's ~0.26 GiB). `OUTSIDE_RESERVE_BYTES` is that
  * peak with a margin; `MEMORY_FLOOR_BYTES` the smallest container the whole path (a first sync, a generated table's
  * build, writes on the stream, statements through the listener) ran in under this default. Under the floor, with
- * `MASON_DUCKDB_MEMORY` unset, a start is refused (`memoryProblems`); set, it is the operator's word at any size.
+ * `MASON_DUCKDB_MEMORY` unset, a start goes on and WARNS (`memoryWarning`: the run's start, mason status, mason doctor),
+ * its statements given MIN_SHARE_BYTES, the least room for them and the most for the rest (Tom's decision on PR 382: a
+ * warning, never a refusal); set, the variable is the operator's word at any size.
  */
 export const OUTSIDE_RESERVE_BYTES = 2560 * 2 ** 20;
 export const MEMORY_FLOOR_BYTES = 3072 * 2 ** 20;
+/** the statements' share where the reserve leaves less (under the floor, where a start warns): what let the run last
+ *  longest, measured (docs/DESIGN.md): at 2 GiB the whole path ran with it, as with 256MiB, and at 1.5 GiB it answered
+ *  every statement before the kill where 256MiB was killed in the writes; the same statements answered at both, one
+ *  wide aggregate failing alone (53200), and the old quarter, 512MiB, was killed at 2 GiB */
+export const MIN_SHARE_BYTES = 128 * 2 ** 20;
 /**
  * The default memory limit for `totalBytes` of memory, in whole MiB (mason doctor says it for any machine): half of it,
  * the page cache keeping the other half, or what leaves OUTSIDE_RESERVE_BYTES beside it when that is less (from 5 GiB
- * up it is half). Under the floor, where a start is refused but a store may be opened all the same (a test, a script),
- * a quarter.
+ * up it is half), never under MIN_SHARE_BYTES (from 2.625 GiB down: under the floor, where a start warns), nor past half.
  */
 export function defaultMemoryLimit(totalBytes: number): string {
   const mib = 2 ** 20;
-  if (totalBytes < MEMORY_FLOOR_BYTES) return `${Math.floor(totalBytes / 4 / mib)}MiB`;
-  return `${Math.min(Math.floor(totalBytes / 2 / mib), Math.floor((totalBytes - OUTSIDE_RESERVE_BYTES) / mib))}MiB`;
+  const half = Math.floor(totalBytes / 2 / mib), room = Math.floor((totalBytes - OUTSIDE_RESERVE_BYTES) / mib);
+  return `${Math.min(half, Math.max(MIN_SHARE_BYTES / mib, room))}MiB`;
 }
 
 /** A size as a reader recognises it: GiB to one decimal from 1 GiB up, else MiB. */
@@ -127,26 +133,31 @@ export function memorySettingWrong(text: string): MemoryProblem {
 const DEFAULT_RULE = `half the memory, or what leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} beside it when that is less`;
 
 /**
- * WHAT A START REFUSES OF THE MEMORY, every problem at once (mason serve's one report; mason start, mason doctor take the
- * first): `MASON_DUCKDB_MEMORY` that is not an amount, and, while it is unset (or not an amount), `memory` under
- * MEMORY_FLOOR_BYTES. `memory` is `machineMemory()`, the container's limit where one is set.
+ * WHAT A START REFUSES OF THE MEMORY (mason serve's one report; mason start and mason doctor take the first):
+ * `MASON_DUCKDB_MEMORY` that is not an amount. A size under the floor is never refused: it is `memoryWarning`'s.
  */
-export function memoryProblems(memory: MachineMemory, env: Readonly<Record<string, string | undefined>>): MemoryProblem[] {
-  const totalBytes = memory.bytes;
-  const out: MemoryProblem[] = [];
+export function memoryProblems(env: Readonly<Record<string, string | undefined>>): MemoryProblem[] {
   const set = memorySet(env);
-  if (set !== null && !MEMORY_LIMIT_RE.test(set)) out.push(memorySettingWrong(set));
-  if ((set === null || !MEMORY_LIMIT_RE.test(set)) && totalBytes < MEMORY_FLOOR_BYTES) {
-    out.push({ message: `${memorySize(totalBytes)} of memory is under the ${memorySize(MEMORY_FLOOR_BYTES)} Mason needs`,
-      why: `${memorySize(totalBytes)} is ${memory.from === "container" ? "the container's memory limit" : "the machine's RAM"}; ` +
-        `beside what the synced data's statements may use, Mason itself needs up to ${memorySize(OUTSIDE_RESERVE_BYTES)} (measured, with a margin), ` +
-        "and with less the system stops the whole run, every session with it, when a first sync, a burst of writes or a statement needs the memory",
-      fix: `give it ${memorySize(MEMORY_FLOOR_BYTES)} or more (the container's memory limit), or set MASON_DUCKDB_MEMORY=<n> ` +
-        "to choose the statements' share yourself, the rest left to Mason (mason doctor says what it leaves)" });
-  }
-  return out;
+  return set !== null && !MEMORY_LIMIT_RE.test(set) ? [memorySettingWrong(set)] : [];
 }
-/** a problem as one line of mason serve's settings report, and mason doctor's detail */
+
+/**
+ * THE ONE WARNING OF THE MEMORY: `memory` under MEMORY_FLOOR_BYTES while `MASON_DUCKDB_MEMORY` is unset (or not an
+ * amount, which is refused beside it). The start goes on; the run says it at its start and in what mason status reads
+ * (its warnings), and mason doctor's memory line says it, each from this text alone. `memory` is `machineMemory()`.
+ */
+export function memoryWarning(memory: MachineMemory, env: Readonly<Record<string, string | undefined>>): MemoryProblem | null {
+  const set = memorySet(env);
+  if ((set !== null && MEMORY_LIMIT_RE.test(set)) || memory.bytes >= MEMORY_FLOOR_BYTES) return null;
+  const size = memorySize(memory.bytes);
+  return { message: `${size} of memory is under the ${memorySize(MEMORY_FLOOR_BYTES)} Mason needs`,
+    why: `${size} is ${memory.from === "container" ? "the container's memory limit" : "the machine's RAM"}; ` +
+      `beside what the synced data's statements may use, Mason itself needs up to ${memorySize(OUTSIDE_RESERVE_BYTES)} (measured, with a margin), ` +
+      "and with less the system may stop the whole run, every session with it, when a first sync, a burst of writes or a statement needs the memory",
+    fix: `give it ${memorySize(MEMORY_FLOOR_BYTES)} or more (the container's memory limit), or set MASON_DUCKDB_MEMORY=<n> ` +
+      "to choose the statements' share yourself, the rest left to Mason (mason doctor says what it leaves)" };
+}
+/** a problem or the warning as one line: mason serve's settings report, the run's warning, mason doctor's detail */
 export function memoryProblemText(p: MemoryProblem): string { return `${p.message}: ${p.why} — ${p.fix}`; }
 
 /**

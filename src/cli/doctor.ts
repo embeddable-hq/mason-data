@@ -13,7 +13,7 @@ import { connectSource, maskedUrl, parseSource, readSourceFacts, versionProblem,
 import { theRun, type DevRun } from "./runs.ts";
 import { projectSource, type Project } from "./project.ts";
 import { DEFAULT_PG_PORT } from "../api/postgres/listener.ts";
-import { defaultMemoryLimit, machineMemory, memoryLimitBytes, memoryProblems, memoryProblemText, memorySize, OUTSIDE_RESERVE_BYTES, type MachineMemory } from "../duck/store.ts";
+import { defaultMemoryLimit, machineMemory, memoryLimitBytes, memoryProblems, memoryProblemText, memorySize, memoryWarning, OUTSIDE_RESERVE_BYTES, type MachineMemory } from "../duck/store.ts";
 import { probeExtensions, type ExtensionProbe } from "../duck/extensions.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -38,8 +38,8 @@ export const DOCTOR_USAGE = `usage: mason doctor [--json]
 
     mason doctor
 
-  --json   as data: { ready, verdict, checks: [{ name, ok, detail }], next: [{ command, what }] }; ok is true, false,
-           or null when it could not tell
+  --json   as data: { ready, verdict, checks: [{ name, ok, detail, warn }], next: [{ command, what }] }; ok is true,
+           false, or null when it could not tell; warn (only when true): fine to run, but said loudly
 
   Exit status: 0 everything checked is fine; 1 something is not (said, with the way out).
 `;
@@ -53,7 +53,7 @@ export const DOCTOR: CommandSpec = {
 };
 
 /** One check: what was looked at, whether it is fine (null: could not tell), and the detail — a value, or what to do. */
-export interface Check { name: string; ok: boolean | null; detail: string }
+export interface Check { name: string; ok: boolean | null; detail: string; /** a start goes on, but the line is said loudly (`!`) */ warn?: true }
 
 /** The ports a mason start takes by default, and what listens on each. */
 export const PORTS: ReadonlyArray<[port: number, what: string]> = [[DEFAULT_UI_PORT, "the mason commands"], [DEFAULT_PG_PORT, "the Postgres API"]];
@@ -69,18 +69,23 @@ export function nodeCheck(version: string = process.versions.node): Check {
 
 /**
  * The machine's memory and what the copy's engine may use of it (src/duck/store.ts DEFAULT_MEMORY_LIMIT,
- * MASON_DUCKDB_MEMORY): what a start refuses is said in the start's own words (`memoryProblems`, the one function), and
- * a share the operator set that leaves less than OUTSIDE_RESERVE_BYTES beside it is a warning in the line, never a
- * failure, since the start honours it.
+ * MASON_DUCKDB_MEMORY): what a start refuses is said in the start's own words (`memoryProblems`), and what it warns of
+ * under the floor in the run's own words (`memoryWarning`), a warning, never a failure, since the start goes on; so is
+ * a share the operator set that leaves less than OUTSIDE_RESERVE_BYTES beside it.
  */
 export function memoryCheck(memory: MachineMemory = machineMemory(), env: NodeJS.ProcessEnv = process.env): Check {
-  const problems = memoryProblems(memory, env);
+  const problems = memoryProblems(env);
   if (problems.length) return { name: "memory", ok: false, detail: problems.map(memoryProblemText).join("; ") };
+  const warned = memoryWarning(memory, env);
   const set = env.MASON_DUCKDB_MEMORY || undefined;
   const share = set ?? defaultMemoryLimit(memory.bytes);
   const outside = memory.bytes - memoryLimitBytes(share);
+  if (warned !== null) {
+    return { name: "memory", ok: true, warn: true,
+      detail: `${memoryProblemText(warned)} (the engine uses up to ${share.trim()}, the default, leaving ${memorySize(Math.max(0, outside))} beside it)` };
+  }
   return {
-    name: "memory", ok: true,
+    name: "memory", ok: true, ...(outside < OUTSIDE_RESERVE_BYTES ? { warn: true as const } : {}),
     detail: `${memorySize(memory.bytes)}; the engine uses up to ${share.trim()}${set !== undefined ? " (MASON_DUCKDB_MEMORY)" : " (the default; MASON_DUCKDB_MEMORY sets it)"}, ` +
       `leaving ${memorySize(Math.max(0, outside))} for Mason beside it` +
       (outside < OUTSIDE_RESERVE_BYTES ? `, under the ${memorySize(OUTSIDE_RESERVE_BYTES)} it needs (measured, with a margin): the system may stop it in a first sync, ` +
@@ -203,7 +208,7 @@ export function verdictOf(checks: readonly Check[], run: DevRun | null, project:
 
 /** A check's mark: ok, !! a failure, ? could not tell. */
 function markOf(c: Check, s: Style): string {
-  return c.ok === false ? s.red("!! ") : c.ok === null ? s.yellow("?  ") : s.green("ok ");
+  return c.ok === false ? s.red("!! ") : c.ok === null ? s.yellow("?  ") : c.warn === true ? s.yellow("!  ") : s.green("ok ");
 }
 
 export async function doctor(argv: string[], deps: { which?: (cwd: string) => ReturnType<typeof theRun> } = {}): Promise<number> {

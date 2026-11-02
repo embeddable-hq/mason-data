@@ -17,7 +17,7 @@ import pg from "pg";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
 import { DuckDBInstance } from "@duckdb/node-api";
-import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, MEMORY_FLOOR_BYTES, memoryLimitBytes, OUTSIDE_RESERVE_BYTES, pgErrorOf } from "../src/duck/store.ts";
+import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, MEMORY_FLOOR_BYTES, memoryLimitBytes, MIN_SHARE_BYTES, OUTSIDE_RESERVE_BYTES, pgErrorOf } from "../src/duck/store.ts";
 import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.ts";
 import { StatementError } from "../src/duck/statement.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
@@ -1067,7 +1067,7 @@ test("DuckDB's memory is bounded: half the RAM, or what leaves the reserve, unle
   // when that is less (in whole MiB, DEFAULT_MEMORY_LIMIT; issue 301), as DuckDB prints it: to a tenth of its unit
   const total = machineMemoryBytes();
   assert.equal(DEFAULT_MEMORY_LIMIT, defaultMemoryLimit(total));
-  const rule = total < MEMORY_FLOOR_BYTES ? total / 4 : Math.min(total / 2, total - OUTSIDE_RESERVE_BYTES);
+  const rule = Math.min(total / 2, Math.max(MIN_SHARE_BYTES, total - OUTSIDE_RESERVE_BYTES));
   assert.ok(Math.abs(memoryLimitBytes(DEFAULT_MEMORY_LIMIT) - rule) < 2 ** 20, `${DEFAULT_MEMORY_LIMIT} for ${total} bytes`);
   assert.ok(total < MEMORY_FLOOR_BYTES || total - memoryLimitBytes(DEFAULT_MEMORY_LIMIT) >= OUTSIDE_RESERVE_BYTES, "the reserve is left beside it");
   assert.equal(store.memoryLimitBytes, memoryLimitBytes(DEFAULT_MEMORY_LIMIT));

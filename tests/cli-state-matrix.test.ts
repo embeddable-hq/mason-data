@@ -19,6 +19,7 @@ import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
 import type { CopyState, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
 import type { GeneratedStatus } from "../src/duck/generated.ts";
+import { unassignedPort } from "./test-ports.ts";
 
 // nothing listens on port 1: a database that does not answer, as one that is away
 const SOURCE = "kind: postgres\nurl: postgres://mason:secret@127.0.0.1:1/shop\ntables:\n  orders: {}\n";
@@ -376,35 +377,63 @@ test("MASON_CHANGES refuses mason start as it does mason serve, naming the line,
   assert.doesNotMatch(broken.stdout, /MASON_CHANGES/);
 });
 
-test("memory under the floor with MASON_DUCKDB_MEMORY unset refuses mason start in every state of a project, before it spawns and in the run, --json too; set, it is honoured (issue 301)", async () => {
+test("memory under the floor with MASON_DUCKDB_MEMORY unset never refuses mason start, in any state of a project: it goes on to what it meets next (issue 301, a warning by Tom's decision)", async () => {
   const hooks = fs.mkdtempSync(path.join(os.tmpdir(), "mason-start-memory-"));
   try {
     const small = containerMemoryEnv(hooks, 1024 ** 3);
-    const message = "1.0 GiB of memory is under the 3.0 GiB Mason needs";
     for (const state of ["stopped", "stale", "squatted", "streamed_0_7"] as const) {
       const root = folderIn(state);
-      const was = fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8");
       const start = await runMason(root, ["start", "--json"], matrixEnv(small));
-      assert.equal(start.code, 1, start.stdout + start.stderr);
-      const e = (JSON.parse(start.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
-      assert.deepEqual([e.code, e.message], ["refused", message], state);
-      assert.ok(e.why.startsWith("1.0 GiB is the container's memory limit; "), e.why);
-      assert.ok(e.fix.includes("give it 3.0 GiB or more") && e.fix.includes("MASON_DUCKDB_MEMORY=<n>"), e.fix);
-      assert.equal(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8"), was, state);
-      assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, `${state}: refused before a run was spawned`);
-      // the run, as --attach reaches it
+      assert.doesNotMatch(start.stdout + start.stderr, /Mason needs/, `${state}: not refused for memory`);
       const attached = await runMason(root, ["start", "--attach"], matrixEnv(small));
-      assert.equal(attached.code, 1, attached.stdout + attached.stderr);
-      assert.ok(attached.stderr.includes(`✗ mason start: ${message}\n  why   ${e.why}\n  fix   ${e.fix}\n`), `${state}: --attach says the same: ${attached.stdout}${attached.stderr}`);
-      assert.doesNotMatch(attached.stdout + attached.stderr, /Connecting to|Opening the synced data/, "refused before the database or the synced data is touched");
-      assert.equal(fs.existsSync(path.join(root, ".mason", "duck.db")), false, `${state}: the synced data's file was never opened`);
+      assert.doesNotMatch(attached.stdout + attached.stderr, /✗ mason start: .*Mason needs/, `${state}: the run is not refused for memory`);
+      // it goes on to what that state meets next: the database, or the record a streamed project's file must say
+      assert.match(attached.stdout + attached.stderr, state === "streamed_0_7" ? /this project streams, and mason\/sources\/shop\.yml does not say so/ : /Connecting to/,
+        `${state}: it went on: ${attached.stdout}${attached.stderr}`);
     }
-    // MASON_DUCKDB_MEMORY set is the operator's word: the start goes on to what it meets next (here, no database)
+    // not an amount: refused as on main, before it spawns and in the run
     const root = folderIn("stopped");
-    const set = await runMason(root, ["start", "--attach"], matrixEnv({ ...small, MASON_DUCKDB_MEMORY: "256MiB" }));
-    assert.doesNotMatch(set.stdout + set.stderr, /Mason needs/, "not refused for memory");
-    assert.match(set.stdout + set.stderr, /Connecting to/, "it went on to the database");
+    const bad = await runMason(root, ["start", "--json"], matrixEnv({ ...small, MASON_DUCKDB_MEMORY: "lots" }));
+    assert.equal(bad.code, 1, bad.stdout + bad.stderr);
+    assert.equal((JSON.parse(bad.stdout) as { error: { code: string; message: string } }).error.message, 'MASON_DUCKDB_MEMORY="lots" is not an amount of memory');
+    assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
   } finally { fs.rmSync(hooks, { recursive: true, force: true }); }
+});
+
+test("memory under the floor: mason start STARTS and warns once, in the one text, at its start, in mason status (text and --json) while it runs, and in mason doctor before (issue 301)", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-start-floor-")));
+  const hooks = fs.mkdtempSync(path.join(os.tmpdir(), "mason-start-floor-hook-"));
+  const env = matrixEnv({ ...containerMemoryEnv(hooks, 1024 ** 3), MASON_PG_PORT: String(await unassignedPort()) });
+  const mason = (argv: string[]): Promise<Answer> => runMason(root, argv, env, 120_000);
+  const warning = "1.0 GiB of memory is under the 3.0 GiB Mason needs: 1.0 GiB is the container's memory limit; beside what the synced data's statements may use, " +
+    "Mason itself needs up to 2.5 GiB (measured, with a margin), and with less the system may stop the whole run, every session with it, when a first sync, a burst of writes or a statement needs the memory — " +
+    "give it 3.0 GiB or more (the container's memory limit), or set MASON_DUCKDB_MEMORY=<n> to choose the statements' share yourself, the rest left to Mason (mason doctor says what it leaves)";
+  try {
+    const init = await mason(["init", "demo"]);
+    assert.equal(init.code, 0, init.stdout + init.stderr);
+    // the demo's database on a port the OS never hands out (tests/test-ports.ts), as tests/cli-demo-start.test.ts moves it
+    const dotEnv = path.join(root, ".env");
+    fs.writeFileSync(dotEnv, fs.readFileSync(dotEnv, "utf8").replace(/127\.0\.0\.1:\d+/, `127.0.0.1:${await unassignedPort()}`));
+    // mason doctor before the start: a warning (ok, said loudly), never a failure
+    const doctor = await mason(["doctor", "--json"]);
+    const memory = (JSON.parse(doctor.stdout) as { checks: Array<{ name: string; ok: boolean; warn?: boolean; detail: string }> }).checks.find((c) => c.name === "memory")!;
+    assert.deepEqual([memory.ok, memory.warn], [true, true], doctor.stdout);
+    assert.ok(memory.detail.startsWith(warning), memory.detail);
+    const start = await mason(["start"]);
+    assert.equal(start.code, 0, `it starts: ${start.stdout}${start.stderr}`);
+    assert.equal(start.stdout.split(`  ! ${warning}\n`).length - 1, 1, `the warning once, at its start: ${start.stdout}`);
+    assert.match(start.stdout, /at most 128MiB of memory \(MASON_DUCKDB_MEMORY\)/, "the least share, under the floor");
+    const status = await mason(["status", "--json"]);
+    assert.equal(status.code, 0, status.stdout + status.stderr);
+    assert.deepEqual((JSON.parse(status.stdout) as { warnings: string[] }).warnings.filter((w) => w.includes("Mason needs")), [warning], "mason status --json, while it runs");
+    const text = await mason(["status"]);
+    assert.ok(text.stdout.includes("Mason needs"), `mason status says it: ${text.stdout}`);
+    assert.ok(fs.readFileSync(path.join(root, ".mason", "mason.log"), "utf8").includes(`warning: ${warning}`), "the log has it (mason logs)");
+  } finally {
+    const stop = await mason(["stop"]);
+    if (stop.code !== 0) process.stderr.write(`memory floor test: mason stop failed:\n${stop.stdout}${stop.stderr}\n`);
+    fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(hooks, { recursive: true, force: true });
+  }
 });
 
 test("mason add and mason remove need only the project: Mason stopped, they read the database themselves — the demo's runs inside mason start", async () => {

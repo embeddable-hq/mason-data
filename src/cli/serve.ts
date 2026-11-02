@@ -39,7 +39,7 @@ import { commandPinProblem } from "./pin.ts";
 import { recordRefusal } from "./replication-mode.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
-import { machineMemory, memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES, OUTSIDE_RESERVE_BYTES, type MachineMemory } from "../duck/store.ts";
+import { memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES, MIN_SHARE_BYTES, OUTSIDE_RESERVE_BYTES } from "../duck/store.ts";
 import { runningVersion, version, type RunningVersion } from "./version.ts";
 import { phaseCounts } from "./readiness.ts";
 import { METRICS_CONTENT_TYPE, metricsText, type RunMetrics } from "./metrics.ts";
@@ -81,8 +81,9 @@ export const SERVE: CommandSpec = {
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
     MASON_DUCKDB_MEMORY     the engine's memory, 4GB or 512MiB (default half the container's memory limit, else of the
-                            machine's RAM, or what leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} beside it when that is less; mason doctor says
-                            it); a statement past it fails alone with 53200. Unset, a start under ${memorySize(MEMORY_FLOOR_BYTES)} is refused
+                            machine's RAM, or what leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} beside it when that is less, never under
+                            ${memorySize(MIN_SHARE_BYTES)}; mason doctor says it); a statement past it fails alone with 53200. Unset,
+                            under ${memorySize(MEMORY_FLOOR_BYTES)} Mason starts and warns: the system may stop it
     MASON_SPILL_LIMIT       what statements may spill to disk, 40GB or 512MiB (default half of what is free, followed as
                             the disk fills; never past 90% of it); a statement past it fails alone with 53400
     MASON_STATEMENT_TIMEOUT   each statement's limit, as Postgres's statement_timeout (default 5min; 0 for none)
@@ -125,7 +126,7 @@ function pgPortOf(env: Readonly<Record<string, string | undefined>>): number | n
 }
 
 /** THE SETTINGS, OR EVERY ONE MISSING OR WRONG AT ONCE: a platform's deploy is slow, and one variable a deploy wastes it. */
-export function serveSettings(env: Readonly<Record<string, string | undefined>>, cwd: string, memory: MachineMemory = machineMemory()): ServeSettings | Failure {
+export function serveSettings(env: Readonly<Record<string, string | undefined>>, cwd: string): ServeSettings | Failure {
   const wrong: string[] = [];
   const project = path.resolve(cwd, env.MASON_PROJECT || "mason");
   const data = path.resolve(cwd, env.MASON_DATA || ".");
@@ -148,9 +149,9 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // the history's days: MASON_HISTORY_DAYS, a number of days; the old name refused (src/duck/history.ts)
   const days = historyDaysSetting(env);
   if (typeof days !== "number") wrong.push(historyDaysWrongText(days));
-  // the memory (src/duck/store.ts memoryProblems): MASON_DUCKDB_MEMORY not an amount, or a container under the floor
-  // while it is unset, said here with the rest, before anything is written or connected
-  wrong.push(...memoryProblems(memory, env).map(memoryProblemText));
+  // MASON_DUCKDB_MEMORY not an amount (src/duck/store.ts memoryProblems), said here with the rest, before anything is
+  // written or connected; a container under the floor starts, and the run warns (memoryWarning)
+  wrong.push(...memoryProblems(env).map(memoryProblemText));
   const selfSigned = env.MASON_PG_SELF_SIGNED_TLS || "0";
   if (selfSigned !== "0" && selfSigned !== "1") wrong.push(`MASON_PG_SELF_SIGNED_TLS=${JSON.stringify(selfSigned)}: 1, or 0 (the default)`);
   const portText = env.MASON_HEALTH_PORT || "4140";

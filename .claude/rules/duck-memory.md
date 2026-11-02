@@ -17,9 +17,11 @@ paths:
   container up to 3 GiB (issue 301: up to 2.3 GiB measured outside the limit). On a dedicated box half is
   conservative; on a laptop a large copy and a BI query starve each other. What cannot spill fails ITS statement with
   53200 and a hint naming the variable; the run goes on.
-- **Under `MEMORY_FLOOR_BYTES` (3 GiB) a start is refused while `MASON_DUCKDB_MEMORY` is unset** (`memoryProblems`, the
-  one function: mason serve's settings report, mason start before it spawns and in the run, mason doctor's memory
-  line); set, it is the operator's word at any size, and doctor says the room it leaves. The two constants are a
+- **Under `MEMORY_FLOOR_BYTES` (3 GiB) a start goes on and WARNS while `MASON_DUCKDB_MEMORY` is unset, never refuses**
+  (Tom, PR 382): the default is then `MIN_SHARE_BYTES` (128 MiB), the most room for the rest, and the warning is
+  `memoryWarning`, the one function, said in three places (the run's log, `mason status` and `--json` `warnings` while
+  it runs, mason doctor's memory line as a warning, never a failure). Only a value that is not an amount is refused
+  (`memoryProblems`). Set, the variable is the operator's word at any size, and doctor says the room it leaves. The two constants are a
   measurement (docs/DESIGN.md "Memory: the room outside the engine's limit"): a change that adds memory outside the
   engine's limit (a worker, a WebAssembly instance, a cache) measures them again, never guesses.
 - **What statements spill has a ceiling under the free disk, and it follows the disk** (`spillCeiling`, `keepSpillCeiling`,

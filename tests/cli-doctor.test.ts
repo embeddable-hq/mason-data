@@ -8,7 +8,7 @@ import { DOCTOR_USAGE, memoryCheck, NODE_MIN, nextSteps, nodeCheck, portsCheck, 
 import * as doctorModule from "../src/cli/doctor.ts";
 import * as storeModule from "../src/duck/store.ts";
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
-const { defaultMemoryLimit, machineMemory, machineMemoryBytes, MEMORY_FLOOR_BYTES, memoryLimitBytes, memoryProblems, memoryProblemText, OUTSIDE_RESERVE_BYTES } = storeModule as unknown as typeof import("../src/duck/store.ts");
+const { defaultMemoryLimit, machineMemory, machineMemoryBytes, MEMORY_FLOOR_BYTES, memoryLimitBytes, memoryProblems, memoryProblemText, memoryWarning, MIN_SHARE_BYTES, OUTSIDE_RESERVE_BYTES } = storeModule as unknown as typeof import("../src/duck/store.ts");
 import type { DevRun } from "../src/cli/runs.ts";
 import { newConfig, type Project } from "../src/cli/project.ts";
 
@@ -59,19 +59,25 @@ test("the memory the run may use is the container's limit where one is set, else
   assert.deepEqual(machineMemory(files({ "/sys/fs/cgroup/memory.max": "max\n" }), 32 * gib), { bytes: 32 * gib, from: "machine" });
 });
 
-// issue 301: the default is half, or what leaves OUTSIDE_RESERVE_BYTES beside it, and a start under the floor is refused
+// issue 301: the default is half, or what leaves OUTSIDE_RESERVE_BYTES beside it, never under MIN_SHARE_BYTES; under the
+// floor a start goes on and warns (Tom's decision on PR 382: a warning, never a refusal)
 const GIB = 1024 ** 3, MIB = 1024 ** 2;
 const cgroup = (m: Record<string, string>) => (f: string): string => { if (f in m) return m[f]!; throw new Error(`ENOENT: ${f}`); };
 const container = (bytes: number) => ({ bytes, from: "container" as const });
 
-test("memory: the default limit is half, or what leaves the measured reserve beside it, in whole MiB; a quarter under the floor", () => {
+test("memory: the default limit is half, or what leaves the measured reserve beside it, in whole MiB; never under the least share, nor past half", () => {
   assert.equal(OUTSIDE_RESERVE_BYTES, 2560 * MIB, "the room measured outside the engine's limit, with its margin (docs/DESIGN.md)");
   assert.equal(MEMORY_FLOOR_BYTES, 3 * GIB, "the smallest container the whole path ran in under the default");
+  assert.equal(MIN_SHARE_BYTES, 128 * MIB, "the share that let the run last longest under the floor, measured");
   // cgroup v2 memory.max, each size to its number
   const v2 = (bytes: number): string => defaultMemoryLimit(machineMemoryBytes(cgroup({ "/sys/fs/cgroup/memory.max": `${bytes}\n` }), 32 * GIB));
-  assert.equal(v2(1 * GIB), "256MiB", "under the floor: a quarter (a start is refused there)");
-  assert.equal(v2(1.5 * GIB), "384MiB");
-  assert.equal(v2(2 * GIB), "512MiB");
+  assert.equal(v2(0.25 * GIB), "128MiB", "never past half");
+  assert.equal(v2(1 * GIB), "128MiB", "under the floor: the least share, the most room for the rest");
+  assert.equal(v2(1.5 * GIB), "128MiB");
+  assert.equal(v2(2 * GIB), "128MiB");
+  assert.equal(v2(2.5 * GIB), "128MiB");
+  assert.equal(v2(2.625 * GIB), "128MiB", "the reserve leaves exactly the least share");
+  assert.equal(v2(2.75 * GIB), "256MiB", "the reserve leaves more than it");
   assert.equal(v2(3 * GIB), "512MiB", "3 GiB less the reserve, under half");
   assert.equal(v2(4 * GIB), "1536MiB", "4 GiB less the reserve, under half");
   assert.equal(v2(5 * GIB), "2560MiB", "where the two meet");
@@ -87,48 +93,50 @@ test("memory: the default limit is half, or what leaves the measured reserve bes
   for (const [g, half] of [[16, "8192MiB"], [32, "16384MiB"], [64, "32768MiB"]] as const) assert.equal(defaultMemoryLimit(machineMemoryBytes(cgroup({}), g * GIB)), half, `${g} GiB`);
 });
 
-test("memory: under the floor with MASON_DUCKDB_MEMORY unset a start is refused, saying the size, where it was read, the floor and both ways out", () => {
+test("memory: under the floor with MASON_DUCKDB_MEMORY unset a start is never refused; the one warning says the size, where it was read, what Mason needs and both ways out", () => {
   const at1 = machineMemory(cgroup({ "/sys/fs/cgroup/memory.max": "1073741824\n" }), 32 * GIB);
   assert.deepEqual(at1, container(GIB));
-  assert.deepEqual(memoryProblems(at1, {}), [{
+  assert.deepEqual(memoryProblems({}), [], "nothing refused");
+  assert.deepEqual(memoryWarning(at1, {}), {
     message: "1.0 GiB of memory is under the 3.0 GiB Mason needs",
     why: "1.0 GiB is the container's memory limit; beside what the synced data's statements may use, Mason itself needs up to 2.5 GiB (measured, with a margin), " +
-      "and with less the system stops the whole run, every session with it, when a first sync, a burst of writes or a statement needs the memory",
+      "and with less the system may stop the whole run, every session with it, when a first sync, a burst of writes or a statement needs the memory",
     fix: "give it 3.0 GiB or more (the container's memory limit), or set MASON_DUCKDB_MEMORY=<n> to choose the statements' share yourself, the rest left to Mason (mason doctor says what it leaves)",
-  }]);
-  assert.match(memoryProblems({ bytes: 2 * GIB, from: "machine" }, {})[0]!.why, /^2\.0 GiB is the machine's RAM; /);
-  assert.deepEqual(memoryProblems(container(MEMORY_FLOOR_BYTES), {}), [], "exactly the floor starts");
-  assert.equal(memoryProblems(container(MEMORY_FLOOR_BYTES - MIB), {}).length, 1, "a MiB under it is refused");
-  assert.deepEqual(memoryProblems(container(GIB), { MASON_DUCKDB_MEMORY: "" }).length, 1, "set empty is unset, as the run reads it");
-  // set, it is the operator's word at any size
-  assert.deepEqual(memoryProblems(container(GIB), { MASON_DUCKDB_MEMORY: "256MiB" }), []);
-  assert.deepEqual(memoryProblems(container(2 * GIB), { MASON_DUCKDB_MEMORY: "1900MiB" }), []);
-  // not an amount: refused as before, and beside the floor where both apply
-  const lots = memoryProblems(container(GIB), { MASON_DUCKDB_MEMORY: "lots" });
-  assert.deepEqual(lots.map((p) => p.message), ['MASON_DUCKDB_MEMORY="lots" is not an amount of memory', "1.0 GiB of memory is under the 3.0 GiB Mason needs"]);
-  assert.deepEqual(memoryProblems(container(32 * GIB), { MASON_DUCKDB_MEMORY: "lots" }).map((p) => p.message), ['MASON_DUCKDB_MEMORY="lots" is not an amount of memory']);
+  });
+  assert.match(memoryWarning({ bytes: 2 * GIB, from: "machine" }, {})!.why, /^2\.0 GiB is the machine's RAM; /);
+  assert.equal(memoryWarning(container(MEMORY_FLOOR_BYTES), {}), null, "exactly the floor: no warning");
+  assert.notEqual(memoryWarning(container(MEMORY_FLOOR_BYTES - MIB), {}), null, "a MiB under it warns");
+  assert.notEqual(memoryWarning(container(GIB), { MASON_DUCKDB_MEMORY: "" }), null, "set empty is unset, as the run reads it");
+  // set, it is the operator's word at any size: no warning of the floor
+  assert.equal(memoryWarning(container(GIB), { MASON_DUCKDB_MEMORY: "256MiB" }), null);
+  assert.equal(memoryWarning(container(2 * GIB), { MASON_DUCKDB_MEMORY: "1900MiB" }), null);
+  // not an amount: refused as on main, at any size
+  for (const bytes of [GIB, 32 * GIB]) assert.deepEqual(memoryProblems({ MASON_DUCKDB_MEMORY: "lots" }).map((p) => p.message), ['MASON_DUCKDB_MEMORY="lots" is not an amount of memory'], `${bytes}`);
 });
 
-test("memory: mason doctor says the start's own words under the floor, the room a set share leaves (a warning under the reserve, never a failure), and has no threshold of its own", () => {
+test("memory: mason doctor warns under the floor in the run's own words (never a failure), says the room a set share leaves, and has no threshold of its own", () => {
   const big = memoryCheck({ bytes: 32 * GIB, from: "machine" }, {});
   assert.deepEqual(big, { name: "memory", ok: true, detail: "32.0 GiB; the engine uses up to 16384MiB (the default; MASON_DUCKDB_MEMORY sets it), leaving 16.0 GiB for Mason beside it" });
   assert.equal(memoryCheck(container(4 * GIB), {}).detail, "4.0 GiB; the engine uses up to 1536MiB (the default; MASON_DUCKDB_MEMORY sets it), leaving 2.5 GiB for Mason beside it");
   const set = memoryCheck({ bytes: 32 * GIB, from: "machine" }, { MASON_DUCKDB_MEMORY: "12GiB" });
   assert.deepEqual(set, { name: "memory", ok: true, detail: "32.0 GiB; the engine uses up to 12GiB (MASON_DUCKDB_MEMORY), leaving 20.0 GiB for Mason beside it" });
-  // under the floor: the refusal's words, from the one function
+  // under the floor: a warning, ok, in the one text the run says
   for (const bytes of [GIB, 1.5 * GIB, 2 * GIB, MEMORY_FLOOR_BYTES - MIB]) {
     const c = memoryCheck(container(bytes), {});
-    assert.equal(c.ok, false);
-    assert.equal(c.detail, memoryProblemText(memoryProblems(container(bytes), {})[0]!));
+    assert.equal(c.ok, true, `${bytes}: never a failure`);
+    assert.equal(c.warn, true, `${bytes}: said loudly`);
+    assert.ok(c.detail.startsWith(memoryProblemText(memoryWarning(container(bytes), {})!)), c.detail);
   }
-  assert.equal(memoryCheck(container(MEMORY_FLOOR_BYTES), {}).ok, true);
+  assert.equal(memoryCheck(container(GIB), {}).detail, `${memoryProblemText(memoryWarning(container(GIB), {})!)} (the engine uses up to 128MiB, the default, leaving 896 MiB beside it)`);
+  assert.equal(verdictOf([memoryCheck(container(GIB), {})], null, null).ready, true, "a warning leaves doctor ready");
+  assert.equal(memoryCheck(container(MEMORY_FLOOR_BYTES), {}).warn, undefined);
   // a share the operator set: honoured, the room it leaves said, and a warning under the reserve
   const low = memoryCheck(container(GIB), { MASON_DUCKDB_MEMORY: "256MiB" });
-  assert.equal(low.ok, true);
+  assert.deepEqual([low.ok, low.warn], [true, true]);
   assert.equal(low.detail, "1.0 GiB; the engine uses up to 256MiB (MASON_DUCKDB_MEMORY), leaving 768 MiB for Mason beside it, under the 2.5 GiB it needs (measured, with a margin): " +
     "the system may stop it in a first sync, a generated table's build or a burst of writes (a smaller MASON_DUCKDB_MEMORY, or more memory)");
   const tight = memoryCheck(container(2 * GIB), { MASON_DUCKDB_MEMORY: "1900MiB" });
-  assert.equal(tight.ok, true);
+  assert.deepEqual([tight.ok, tight.warn], [true, true]);
   assert.match(tight.detail, /^2\.0 GiB; the engine uses up to 1900MiB \(MASON_DUCKDB_MEMORY\), leaving 148 MiB for Mason beside it, under the 2\.5 GiB it needs \(measured, with a margin\)/);
   const bad = memoryCheck({ bytes: 32 * GIB, from: "machine" }, { MASON_DUCKDB_MEMORY: "lots" });
   assert.equal(bad.ok, false);

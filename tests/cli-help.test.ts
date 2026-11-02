@@ -261,9 +261,10 @@ test("mason serve --help lists GET /metrics beside /healthz, on MASON_HEALTH_POR
   assert.doesNotMatch(r.stdout, /duckdb(?!_memory)/i, "nothing a user sees names the engine (MASON_DUCKDB_MEMORY is a setting's name)");
 });
 
-test("mason serve --help's MASON_DUCKDB_MEMORY line names the default's rule and the floor a start under is refused at, in sizes a reader recognises (issue 301)", () => {
+test("mason serve --help's MASON_DUCKDB_MEMORY line names the default's rule, its least share and the floor under which Mason warns, in sizes a reader recognises (issue 301)", () => {
   const r = mason("serve", "--help");
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /\n {4}MASON_DUCKDB_MEMORY {5}the engine's memory, 4GB or 512MiB \(default half the container's memory limit, else of the\n {28}machine's RAM, or what leaves 2\.5 GiB beside it when that is less; mason doctor says\n {28}it\); a statement past it fails alone with 53200\. Unset, a start under 3\.0 GiB is refused\n/);
+  assert.match(r.stdout, /\n {4}MASON_DUCKDB_MEMORY {5}the engine's memory, 4GB or 512MiB \(default half the container's memory limit, else of the\n {28}machine's RAM, or what leaves 2\.5 GiB beside it when that is less, never under\n {28}128 MiB; mason doctor says it\); a statement past it fails alone with 53200\. Unset,\n {28}under 3\.0 GiB Mason starts and warns: the system may stop it\n/);
+  assert.doesNotMatch(r.stdout.slice(r.stdout.indexOf("MASON_DUCKDB_MEMORY"), r.stdout.indexOf("MASON_SPILL_LIMIT")), /refused/i, "a start is never refused for memory");
   assert.doesNotMatch(r.stdout, /duckdb(?!_memory)/i);
 });

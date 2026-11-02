@@ -185,9 +185,10 @@ docker compose exec mason mason user add metabase   # users are kept on the serv
 - **Memory**: By default, Mason's queries may use half of the container's memory limit (or half the machine's RAM if
   there is no limit), or what leaves 2.5 GiB beside them when that is less. The rest is for the page cache, Node and
   the catalog. The catalog uses about 820 MB, but only while it is in use. It starts on a tool's first catalog query
-  and stops after 10 minutes without one. The smallest container is 3 GiB: under it, with `MASON_DUCKDB_MEMORY` unset,
-  Mason refuses to start, since Mason itself was measured using up to 2.3 GiB beside the queries and the kernel killed
-  it in less.
+  and stops after 10 minutes without one. The default is never under 128 MiB, which is what a container of 2.5 GiB or
+  less gets. Give it 3 GiB or more: Mason itself was measured using up to 2.3 GiB beside the queries, and in less the kernel
+  killed it. Under 3 GiB, with `MASON_DUCKDB_MEMORY` unset, Mason still starts, and warns in its log, `mason status`
+  and `mason doctor` that the system may stop it.
 
   Give the container enough memory for the page cache to hold the columns your dashboards read. A query on a column
   that is not in the cache runs at disk speed. In the benchmark, the synced data was about a fifth of the tables' size in
