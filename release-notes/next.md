@@ -15,6 +15,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`latest(x ORDER BY …)`, an aggregate Mason adds, in any statement.** It answers the `x` of the row its ORDER BY
+  sorts last, by Postgres's sort rules (NULLs last ascending, first descending, `NULLS FIRST/LAST` as written, a text
+  key's collation): `SELECT customer_id, latest(status ORDER BY updated_at, id) FROM orders GROUP BY customer_id`. End
+  the keys in a unique column, since tied rows have no defined pick. Without an ORDER BY, as a window function, or of a
+  numeric quotient it is refused with the way out (`latest-order`, `latest-quotient` in docs/SQL-SUPPORT.md).
 - **Connect from anywhere, on the web page.** The Overview's Connect card opens what `mason share` opens — a temporary
   public address, TLS required, a password shown once — after asking once, with a role picker where `mason/roles.yml`
   has several roles, and Stop sharing beside it. The share lasts while the page is open: two minutes after it closes or

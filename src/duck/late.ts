@@ -159,7 +159,7 @@
  * holding a volatile function (`Query.volatileOn`). A raising list value in a row that is not its group's first answers
  * here (`limit-errors`).
  */
-import type { TreeNode, TreeValue } from "./pgtree.ts";
+import { FIRST_USER_OID, type TreeNode, type TreeValue } from "./pgtree.ts";
 import { distinctGrouping, fanOutBounded, keyGrouped, projectionOnly } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
 import { constantExpression, evaluated } from "./constant-key.ts";
@@ -724,8 +724,6 @@ interface Walled { kind: "walled"; alias: string; columns: string[] }
 /** a FROM item; null for one that is none of these (a function, a VALUES list) */
 type Relation = Table | Derived | Walled | null;
 const RTE_RELATION = "0", RTE_SUBQUERY = "1", RTE_JOIN = "2", RTE_CTE = "6", RTE_GROUP = "9";
-/** Postgres's first OID for an object not of its own (FirstNormalObjectId): below it, a catalog table, no copy */
-const FIRST_USER_OID = 16384;
 /** ctematerialized: CTEMaterializeAlways */
 const MATERIALIZED = "1";
 

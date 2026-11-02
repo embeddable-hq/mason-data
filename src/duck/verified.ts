@@ -100,6 +100,7 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["aggregate:3972", "the aggregate percentile_disc(double precision,anyelement)"],
   ["aggregate:3974", "the aggregate percentile_cont(double precision,double precision)"],
   ["aggregate:3984", "the aggregate mode(anyelement)"],
+  ["aggregate:ext:latest(anyelement)", "the aggregate latest(anyelement) (an extension's)"],
   ["cast:1007>1022", "a cast from integer[] to double precision[]"],
   ["cast:1007>1043", "a cast from integer[] to character varying"],
   ["cast:1007>1231", "a cast from integer[] to numeric[]"],

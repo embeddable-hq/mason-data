@@ -11,6 +11,9 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "libc-mark-run-form", sql: "SELECT 'a6ß' > E'a\\u03086ß' FROM public.one" },
   { gap: "libc-rare-letter", sql: "SELECT E'\\uA79A' < E'\\u00C4' FROM public.one" },
   { gap: "explain-option", sql: "EXPLAIN (FORMAT XML) SELECT id FROM typed" },
+  { gap: "latest-order", sql: "SELECT latest(b) FROM latest_t" },
+  { gap: "latest-quotient", sql: "SELECT g, latest(n / 3 ORDER BY a, id) FROM latest_t GROUP BY g ORDER BY g" },
+  { gap: "latest-order", sql: "SELECT id, latest(b) OVER (PARTITION BY g ORDER BY id) FROM latest_t ORDER BY id" },
   // is_local: Postgres's change ends with the statement's own transaction, so the session's state is the same after
   { gap: "set-config-forms", sql: "SELECT set_config('application_name', 'gap-case', true) FROM public.one" },
   { gap: "star-join-twin", sql: "SELECT j.* FROM (star_o a FULL JOIN star_b b USING (name)) AS j ORDER BY 1 NULLS FIRST, 2, 8" },

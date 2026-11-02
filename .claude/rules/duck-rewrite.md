@@ -405,3 +405,9 @@ again before each review. Its Learn step adds to this list; each bullet names th
 - A libc collation: en_US over symbols (`㊿`, `€`, `½`), private use and NFD marks (`E'ä6ß'`), a non-glibc en_US,
   the source's glibc upgraded; tr_TR and sv_SE over ASCII pairs: en_US refused, or another locale differing unsaid
   (PR 135).
+- The PR's diff against its own base, read for deletions it did not mean (`git diff --stat <base>...HEAD`, then each
+  `-` under `src/`, `tests/`, `.claude/rules/` and `release-notes/`), and a statement a merged PR just fixed, run at the
+  base and the head (over `t(id int primary key, a int, b text, c numeric(10,2), d char(4))`: `SELECT * FROM t UNION ALL
+  TABLE t ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES`, `SELECT b FROM t UNION ALL SELECT d FROM t ORDER BY 1`, `SELECT
+  DISTINCT a FROM t ORDER BY a FETCH FIRST 2 ROWS WITH TIES`): a commit built from a stale tree, overwriting files
+  whole and undoing a merged PR's code, tests, rules bullets and release notes; `branch-reverts-merged-work` (PR 272).

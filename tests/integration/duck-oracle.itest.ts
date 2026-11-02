@@ -63,6 +63,8 @@ import { GAP_CASES } from "./oracle/gap-cases.ts";
 import { refusedAsNamed, SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
 import { ANY, collationMet, decidedShapes, shapeDecision, shapesDecided, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
+import { LATEST_CASES, LATEST_SCHEMA, LATEST_TABLES } from "./oracle/latest.ts";
+import { LATEST_SQL } from "../../src/api/postgres/catalog.ts";
 import { CHAR_ARMS, emptyShapeCount, NUMERIC_READERS, say as sayShape, SET_OPERATION_ARMS, shapeProblems, VALUES_ARMS, type ShapeCount, type ShapeName, type ShapeTally } from "./oracle/shape-names.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
 import { countGap, emptyTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
@@ -114,7 +116,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog"];
+const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -311,6 +313,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   psql(dbUrl, META);
   psql(dbUrl, TYPED);
   psql(dbUrl, ROWS_SCHEMA);
+  // latest(x ORDER BY …), Mason's aggregate, declared here from the catalog's own definition: like with like
+  psql(dbUrl, `${LATEST_SQL.map((s) => `${s};`).join("\n")}\n${LATEST_SCHEMA}`);
   const collation = psql(dbUrl, "SELECT datcollate || ' (' || datlocprovider::text || ')' FROM pg_database WHERE datname = current_database()");
   console.log(`duck oracle: database ${tag}, collation ${collation}`);
 
@@ -417,6 +421,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     ...BI_SHAPES.map((q) => ({ group: "BI shape", name: q.name, sql: q.sql })),
     ...TYPE_MATRIX.map((q) => ({ group: "type matrix", name: q.name, sql: q.sql, ...(q.zone === undefined ? {} : { zone: q.zone }) })),
     ...GAP_CASES.map((q) => ({ group: "gap case", name: `gap case: ${q.gap}`, sql: q.sql })),
+    ...LATEST_CASES.map((q) => ({ group: "latest", name: q.name, sql: q.sql })),
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },
   ];
   const all = (): ReturnType<typeof every> => every().filter((q) => (ONLY === null || ONLY.test(q.name)) && (LEG === null || legOf(q.sql, LEG.of) === LEG.leg));
