@@ -235,3 +235,8 @@ again before each review. Its Learn step adds to this list; each bullet names th
 - A field `mason status --json` gained: shown on the page in the CLI's words, with a fixture that carries it (PR 135).
 - Enter or Space on a row's `<summary>`, then Tab: the focus kept on that row (issue 70).
 - A cause the page states for a state (a lost slot): one the source can actually tell (issue 74).
+- A table's line rendered for every kind that keeps it (`kept.by` poll, replication and recopy) in each state its
+  `sync.state` names: a recopied table `public.t` copied 2 h ago against a 120 s promise, so `sync.state` "behind", says
+  "behind by 1 h 58 min" and why on the page and on `mason status`'s line alike, painted yellow, never nothing nor the
+  word `null` (the state is derived once; the line reads it from `sync` for every kind, never from a kind-keyed branch
+  such as `keptAge`): class one-word-state-rendered-by-kind-blind-line (PR 324).

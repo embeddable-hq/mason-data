@@ -420,6 +420,10 @@ test("a NAMED publication is read as it is, never altered: a table it lacks is r
     assert.match(c.error!, /^replication: publication app_pub does not carry what Mason's synced table holds\.\n\n {2}missing: public\.c \(read by Mason's sync\)\n/);
     assert.match(c.error!, /\n {2}ALTER PUBLICATION app_pub ADD TABLE\n {4}public\.c \(id, v\);\n\nFound: publication app_pub \(publish = 'insert, update, delete'\)\n {4}public\.a \(id, v, extra\),\n {4}public\.b \(id, v\)\n/);
     assert.match(c.error!, /never altering it/);
+    // in one word, failed, and its line's reason gives the statement and the way that needs no publication (issue 254)
+    const r = await import("../../src/cli/readiness.ts") as unknown as { syncStateOf: (c: unknown) => string };
+    assert.equal(r.syncStateOf(c), "failed");
+    assert.match(String((c.kept as { why: string | null }).why), /^publication app_pub does not carry what Mason's synced table holds\. — the database's owner runs ALTER PUBLICATION app_pub ADD TABLE public\.c \(id, v\); — or give its entry sync: poll <interval>/);
     assert.equal(await rowsOf(store, "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'c'"), "0", "not copied");
     psql(url, "UPDATE a SET v = 'beside the refusal' WHERE id = 4; INSERT INTO b VALUES (12, 'b12'); INSERT INTO c VALUES (2, 'c2')");
     await same("a refused table beside them");
@@ -538,6 +542,19 @@ test("the stream says where it is: a table joins and leaves on a line with its p
     const idleFrom = logged.length;
     await new Promise((r) => setTimeout(r, 1_200));
     assert.deepEqual(logged.slice(idleFrom).filter((l) => /^replication: applied through /.test(l)), [], "silent while idle");
+
+    // AN IDLE HEALTHY STREAM IS NEVER BEHIND (issue 254): the keepalive it asks for every 10 s says it has everything,
+    // so its synced data's age (kept.syncedAt) stays far under what a streamed table promises — sampled over 25 s
+    const r = await import("../../src/cli/readiness.ts") as unknown as { tableSync: (c: unknown, now: number) => { state: string; asOf: string | null; promisedSeconds: number | null } };
+    let oldest = 0;
+    for (let i = 0; i < 25; i++) {
+      const now = Date.now(), a = sync.state().find((x) => x.source === "public.a")!, facts = r.tableSync(a, now);
+      assert.equal(facts.state, "synced", `idle ${i} s: ${JSON.stringify(facts)}`);
+      oldest = Math.max(oldest, (now - Date.parse(facts.asOf!)) / 1000);
+      await new Promise((res) => setTimeout(res, 1_000));
+    }
+    assert.ok(oldest < 15, `an idle stream says it has everything at least every 10 s: the oldest age seen was ${oldest} s`);
+    assert.equal(r.tableSync(sync.state().find((x) => x.source === "public.a")!, Date.now()).promisedSeconds, 120);
 
     // A TABLE ADDED joins after its catch-up; a TRUNCATE is counted
     sync.setTables([A!, B!]);
@@ -1070,6 +1087,13 @@ test("a named publication is never altered by a sync change: a replicated table 
     assert.match(b.error!, /^replication: publication owners_pub does not carry what Mason's synced table holds\.\n/);
     assert.match(b.error!, /\n {2}ALTER PUBLICATION owners_pub ADD TABLE\n {4}public\.b \(id, v\);\n/);
     assert.match(b.error!, /give the table's entry sync: poll <interval> in the sources file/);
+    // left out: failed on its own row, and mason wait is not ready (issue 100)
+    const r = await import("../../src/cli/readiness.ts") as unknown as { tableSync: (c: unknown, now: number) => { state: string };
+      readiness: (s: unknown) => { ready: boolean; failed: string[] } };
+    assert.deepEqual([(b.kept as { state: string }).state, r.tableSync(b, Date.now()).state], ["left-out", "failed"]);
+    const ready = r.readiness({ tables: [{ table: "public.b", added: true, error: b.error, copy: { phase: "done", rowsCopied: 1, updatedAt: "" }, sync: r.tableSync(b, Date.now()) }] });
+    assert.equal(ready.ready, false);
+    assert.match(ready.failed[0]!, /^public\.b: replication: publication owners_pub does not carry/);
     psql(url, "UPDATE a SET v = 'streamed' WHERE id = 1; UPDATE c SET v = 'polled' WHERE id = 1");
     await sync.caughtUp();
     assert.ok(await same("a"), "the carried table streams on");

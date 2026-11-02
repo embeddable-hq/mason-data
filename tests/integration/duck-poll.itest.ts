@@ -1000,6 +1000,12 @@ test("a failed catch-up waits before it is tried again, said with its time; a ch
     assert.match(failed[0]!, /^public\.t: its catch-up poll failed \(the synced data serves as it was; it is caught up by one poll again after \d\d:\d\d UTC \(failure 1 in a row\), or at once when Mason starts again or its columns or key change\): \S/);
     // in mason status: the table's error says it, with the time
     assert.equal(sync.state()[0]?.error, failed[0]!.slice("public.t: ".length));
+    // and in one word, failed, while it waits: mason wait is not ready (issues 254, 82: it said ready, the copy stale)
+    const r = await import("../../src/cli/readiness.ts") as unknown as { syncStateOf: (c: unknown) => string; readiness: (s: unknown) => { ready: boolean; failed: string[] } };
+    const waiting = sync.state()[0]!;
+    assert.equal(r.syncStateOf(waiting), "failed");
+    const ready = r.readiness({ tables: [{ table: "public.t", added: true, error: waiting.error, copy: { phase: "done", rowsCopied: 20, updatedAt: "" }, sync: { state: r.syncStateOf(waiting) } }] });
+    assert.deepEqual([ready.ready, ready.failed.length], [false, 1]);
     // the next pass: not tried again, it waits its turn
     from = logged.length;
     await sync.once();

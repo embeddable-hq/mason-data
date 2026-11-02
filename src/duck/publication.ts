@@ -88,6 +88,20 @@ export function namedPublicationVerdict(described: DescribedPublication, tables:
   return { refused: null, tables: out, noTruncate };
 }
 
+/**
+ * A TABLE'S GAP ON ONE LINE, for its line in `mason status` (src/duck/sync.ts `notStreamedReason`): what is wrong, the
+ * statements its owner runs (this module's own "Expected" block, joined), and the way that needs no publication. A gap
+ * written otherwise (one line) is its own first line.
+ */
+export function gapLine(gap: string): string {
+  const lines = gap.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("Expected ("));
+  if (at < 0) return `${lines[0]!} — or give its entry sync: poll <interval> in the sources file, which needs no publication`;
+  const end = lines.findIndex((l, i) => i > at && l.trim() === "");
+  const sql = lines.slice(at + 1, end < 0 ? undefined : end).map((l) => l.trim()).filter((l) => !l.startsWith("(")).join(" ");
+  return `${lines[0]!} — the database's owner runs ${sql} — or give its entry sync: poll <interval> in the sources file, which needs no publication`;
+}
+
 // ------------------------------------------------------------------ the check
 
 const q = (s: string): string => /^[a-z_][a-z0-9_]*$/.test(s) ? s : `"${s.replace(/"/g, '""')}"`;
