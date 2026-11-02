@@ -1302,7 +1302,7 @@ function* matrix(): Generator<Matrixed> {
   yield q("a set operation's SELECTs: a char(n) beside a text, WITH TIES", "SELECT * FROM (SELECT o.name AS x FROM star_o o UNION ALL SELECT o.ch FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s ORDER BY 1");
   yield q("a set operation's SELECTs: a char(n) beside a text, its text and a GROUP BY", "SELECT s.x, count(*) FROM (SELECT o.name AS x FROM star_o o UNION ALL SELECT o.ch FROM star_o o) s GROUP BY 1 ORDER BY 1 NULLS FIRST");
   yield q("a set operation's SELECTs: a char(n) beside a text, UNION", "SELECT o.name AS x FROM star_o o UNION SELECT o.ch FROM star_o o ORDER BY 1 NULLS FIRST");
-  yield q("a set operation's SELECTs: an integer beside a quotient, WITH TIES", "SELECT * FROM (SELECT o.n::numeric / 3 AS q FROM star_o o UNION ALL SELECT o.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s ORDER BY 1");
+  yield q("a set operation's SELECTs: an integer beside a quotient, WITH TIES", "SELECT * FROM (SELECT o.n::numeric / 3 AS q FROM star_o o UNION ALL SELECT o.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES) s ORDER BY 1, q::text");
   // FETCH … WITH TIES READS ITS LIMITS WHERE NO ROW IS (PR 231): a negative one raises over none
   yield q("WITH TIES over no rows: a negative count", "SELECT o.id FROM star_o o WHERE false ORDER BY o.n FETCH FIRST -1 ROWS WITH TIES");
   yield q("WITH TIES over no rows: a negative offset", "SELECT o.id FROM star_o o WHERE false ORDER BY o.n OFFSET -1 FETCH FIRST 2 ROWS WITH TIES");

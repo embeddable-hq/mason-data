@@ -286,8 +286,9 @@ paths:
   PR 207's class round): a quotient or an avg the engine holds as a double equates values Postgres tells apart past 17
   digits, so DISTINCT, DISTINCT ON, GROUP BY (beside the value), PARTITION BY, count(DISTINCT), `=` and `<>` read the
   program's value without trailing zeros (`__mason_numeric_key`); a form where no key can be placed (a grouping set,
-  another aggregate's DISTINCT, a set operation without ALL) is refused, `numeric-quotient-equality`; IN, IS DISTINCT
-  FROM, NULLIF, CASE x WHEN, < and > are the listed difference `numeric-quotient-compare`. A new context that
+  another aggregate's DISTINCT, a set operation without ALL, a JOIN … USING or NATURAL JOIN on a subquery's quotient,
+  `refuseMergedExact`) is refused, `numeric-quotient-equality`; IN a list keys every item (issue 358); = ANY, IS
+  DISTINCT FROM, NULLIF, CASE x WHEN, < and > are the listed difference `numeric-quotient-compare`. A new context that
   equates values asks `exactKey` as it asks `equalKey` for a jsonb. `tests/duck-wire.test.ts` "class round".
   **Every other READER asks the same two (issue 252, `exact-numeric-leaves-exact-path`)**: an ORDER BY, a window's
   ORDER BY, FETCH … WITH TIES and min / max sort by `exactOrderKey` (`__mason_numeric_order`, numeric_cmp's order); a
@@ -295,7 +296,15 @@ paths:
   program's text (`typeCast`); a `*` beside a program is written out (`starsWrittenForExact`) so its cells ride. Each
   asks `duckExact` first, so a DECIMAL column, an integer or a sum of one keeps its native plan with no `__mason_*`
   call. The hidden cells are named by `cellPrefix`, which no name the statement writes begins with.
-  `tests/duck-wire.test.ts` "exact path: …".
+  `tests/duck-wire.test.ts` "exact path: …". Round 2 (issue 358) adds: a set operation's ORDER BY, LIMIT and WITH TIES
+  key each output by its record (`recordOrderKey`, `setOperationExactKeys`); a VALUES or nested arm is typed by
+  Postgres's analysis and wrapped to the one cell count (`exactArms`, `armWrapped`); a numeric column whose arms write
+  several scales is each arm's own (`armScales`, `scalesDiffer`, read outside the union through `carry`); a scalar
+  subquery is ONE text cell, its program's text built inside it (`subqueryText`); a window's min / max pick by
+  `arg_min` / `arg_max` over the window and first_value, last_value, nth_value, lag and lead pick each cell (lag /
+  lead's default by the row's existence); array_agg of a quotient is refused, `array-subquery-element`, never a
+  float8[]; a grouped query's ORDER BY of an output is keyed by its analysed expression (`sortBy`).
+  `tests/duck-wire.test.ts` "exact path round 2: …"; oracle shapes `numeric-set-ordered`, `numeric-scalar`.
   **"Decided exactly" is a property of the value's PROGRAM, never of its syntax or its type** (PR 207's third round):
   a column of a subquery or WITH query that holds one is that query's program over its cells, which ride as hidden
   columns of the FROM item (`carry`, decided once per item before the walk, `carryAll`), so it is printed and keyed

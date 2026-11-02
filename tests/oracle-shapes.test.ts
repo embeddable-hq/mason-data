@@ -133,10 +133,17 @@ test("the numeric readers: every numeric output by Postgres's name, over a deriv
   assert.deepEqual(by("numeric-aggregate"), [[`WITH mason_shape AS (${S}) SELECT sum(mason_shape."third"), min(mason_shape."third"), max(mason_shape."third"), count(DISTINCT mason_shape."third") FROM mason_shape`, false]]);
   assert.deepEqual(by("numeric-ordered"), [[`SELECT mason_shape."third" FROM (${S}) AS mason_shape ORDER BY mason_shape."third", mason_shape."third"::text COLLATE "C"`, true]]);
   assert.deepEqual(by("numeric-ranked"), [[`SELECT mason_shape."third", rank() OVER (ORDER BY mason_shape."third" DESC) FROM (${S}) AS mason_shape`, false]]);
+  // issue 358: a UNION ALL of two readers ordered by each value and its text, compared in order; each as a scalar subquery
+  const third = `mason_shape."third", mason_shape."third"::text COLLATE "C" AS mason_t1`;
+  assert.deepEqual(by("numeric-set-ordered"), [[`SELECT ${third} FROM (${S}) AS mason_shape UNION ALL SELECT ${third} FROM (${S}) AS mason_shape ORDER BY 1 DESC, 2`, true]]);
+  assert.deepEqual(by("numeric-scalar"), [[`SELECT (SELECT mason_shape."third" FROM (${S}) AS mason_shape ORDER BY 1 DESC NULLS LAST, mason_shape."third"::text COLLATE "C" LIMIT 1)`, false]]);
   const two = "SELECT i.unit_price, i.unit_price / 7 AS q FROM order_items i ORDER BY i.id LIMIT 20";
   const t = await of(two, answer(["unit_price", "q"], [1700, 1700], [["1.00", "0.14"]], [786438, -1]));
   assert.deepEqual(t.by("numeric-distinct"), [[`SELECT DISTINCT mason_shape."unit_price", mason_shape."q" FROM (${two}) AS mason_shape`, false]]);
   assert.deepEqual(t.by("numeric-ordered"), [[`SELECT mason_shape."unit_price", mason_shape."q" FROM (${two}) AS mason_shape ORDER BY mason_shape."unit_price", mason_shape."unit_price"::text COLLATE "C", mason_shape."q", mason_shape."q"::text COLLATE "C"`, true]]);
+  const both = `mason_shape."unit_price", mason_shape."unit_price"::text COLLATE "C" AS mason_t1, mason_shape."q", mason_shape."q"::text COLLATE "C" AS mason_t2`;
+  assert.deepEqual(t.by("numeric-set-ordered"), [[`SELECT ${both} FROM (${two}) AS mason_shape UNION ALL SELECT ${both} FROM (${two}) AS mason_shape ORDER BY 1 DESC, 2, 3 DESC, 4`, true]]);
+  assert.deepEqual(t.by("numeric-scalar"), [[`SELECT (SELECT mason_shape."unit_price" FROM (${two}) AS mason_shape ORDER BY 1 DESC NULLS LAST, mason_shape."unit_price"::text COLLATE "C" LIMIT 1), (SELECT mason_shape."q" FROM (${two}) AS mason_shape ORDER BY 1 DESC NULLS LAST, mason_shape."q"::text COLLATE "C" LIMIT 1)`, false]]);
   const star = "SELECT * FROM order_items ORDER BY id LIMIT 5";
   assert.deepEqual((await of(star, answer(["id", "unit_price"], [20, 1700], [["1", "2.00"]]))).by("numeric-distinct"), [[`SELECT DISTINCT mason_shape."unit_price" FROM (${star}) AS mason_shape`, false]]);
   assert.ok(!(await of("SELECT i.id, (i.unit_price / 3)::text AS third FROM order_items i ORDER BY i.id LIMIT 20", answer(["id", "third"], [20, 25], [["1", "1"]]))).names.has("numeric-distinct"));
@@ -175,14 +182,20 @@ test("the groups a decision names are what shapes() builds: each set operation a
   // must hold every shape built that way (PR 261: a list read from one run missed char-arm). Read from Postgres's parse.
   const star = "SELECT * FROM order_items ORDER BY id LIMIT 5";
   const { r } = await of(star, answer(["id", "sku", "unit_price"], [20, 25, 1700], [["1", "a", "2.50"]]));
-  type Sel = { op?: string; all?: boolean; larg?: { valuesLists?: unknown }; rarg?: { valuesLists?: unknown }; withClause?: unknown; fromClause?: Array<{ RangeSubselect?: unknown }> };
+  type Sel = { op?: string; all?: boolean; larg?: { valuesLists?: unknown; fromClause?: Array<{ RangeSubselect?: unknown }> }; rarg?: { valuesLists?: unknown; fromClause?: Array<{ RangeSubselect?: unknown }> };
+    withClause?: unknown; fromClause?: Array<{ RangeSubselect?: unknown }>; targetList?: Array<{ ResTarget?: { val?: { SubLink?: unknown } } }> };
   const built = new Map<string, Set<string>>();
   for (const s of r.shaped) {
     if (!(s.shape in NEW_SHAPES)) continue;
     const q = ((await parseSql(s.sql)).stmts![0]!.stmt as { SelectStmt?: Sel }).SelectStmt!;
-    const setop = q.op !== undefined && q.op !== "SETOP_NONE";
+    // (a UNION ALL whose every arm reads the base as a derived table is a reader of it, the base an arm of none; so is a
+    // list of scalar subqueries over it)
+    const readsBase = (x: { fromClause?: Array<{ RangeSubselect?: unknown }> } | undefined): boolean => x?.fromClause?.[0]?.RangeSubselect !== undefined;
+    const setop = q.op !== undefined && q.op !== "SETOP_NONE" && !(readsBase(q.larg) && readsBase(q.rarg));
     const forms = new Set<string>();
     if (setop) forms.add("set");
+    if (q.op !== undefined && q.op !== "SETOP_NONE" && !setop) forms.add("reader");
+    if (q.targetList !== undefined && q.targetList.length > 0 && q.targetList.every((t) => t.ResTarget?.val?.SubLink !== undefined)) forms.add("reader");
     if (q.larg?.valuesLists !== undefined || q.rarg?.valuesLists !== undefined) forms.add("values");
     if (q.op === "SETOP_UNION" && q.all !== true) forms.add("union");
     if (!setop && (q.withClause !== undefined || q.fromClause?.[0]?.RangeSubselect !== undefined)) forms.add("reader");

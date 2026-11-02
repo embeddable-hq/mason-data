@@ -3724,8 +3724,11 @@ test("a numeric quotient is compared by its exact value wherever it is equated (
       await postgres(sql);
       await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /numeric-quotient-equality/.test(e.detail ?? ""), sql);
     }
-    // C9: the decided difference numeric-quotient-compare, as listed: IN equates the doubles
-    const listed = "SELECT b.id FROM bigdec b WHERE b.x / 1 IN (1.00000000000000000001) ORDER BY 1";
+    // C9: IN a list of values equates the exact keys, as = does (issue 350); the decided difference
+    // numeric-quotient-compare, as listed: = ANY of an array equates the doubles
+    const keyed = "SELECT b.id FROM bigdec b WHERE b.x / 1 IN (1.00000000000000000001, 7) ORDER BY 1";
+    assert.deepEqual((await answer(c, keyed)).rows, (await postgres(keyed)).rows);
+    const listed = "SELECT b.id FROM bigdec b WHERE b.x / 1 = ANY (ARRAY[1.00000000000000000001]) ORDER BY 1";
     assert.deepEqual((await postgres(listed)).rows, [["1"]]);
     assert.deepEqual((await answer(c, listed)).rows, [["1"], ["2"]]);
   } finally { await c.end(); }
@@ -5749,5 +5752,172 @@ test("exact path: a value the engine holds exactly keeps its native plan, with n
       assert.doesNotMatch(plan, /__mason_numeric_(order|program|int|double|key)/, sql);
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
     }
+  } finally { await c.end(); }
+});
+
+// ISSUE 358, THE CLASS exact-numeric-leaves-exact-path, ROUND 2: the readers PR 341 did not reach, each routed through
+// the same authorities (`duckExact`, `programOf` / `exactText`, `exactOrderKey`, `exactKey`, a set operation's record)
+const SET_ORDERED = "SELECT b.x / 1 FROM bigdec b UNION ALL SELECT b.x / b.y FROM bigdec b";
+/** a statement answered as Postgres answers it, or refused by the named gap (0A000 naming it) */
+async function answeredOrRefused(c: pg.Client, sql: string, gap: string, how: "ordered" | "bag" = "ordered"): Promise<string[]> {
+  const refused = await answer(c, sql).then(() => null, (e: pg.DatabaseError) => e.code === "0A000" && `${e.message} ${e.detail ?? ""} ${e.hint ?? ""}`.includes(gap) ? e : null);
+  return refused !== null ? [] : unlike(c, [[sql, how]]);
+}
+
+test("exact path round 2: a set operation's sort, LIMIT and WITH TIES read the exact order key of its record (#352)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`${SET_ORDERED} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, "ordered"],
+      [`${SET_ORDERED} ORDER BY 1 LIMIT 2`, "ordered"],
+      [`${SET_ORDERED} ORDER BY 1 DESC`, "ordered"],
+      [`${SET_ORDERED} ORDER BY 1 DESC LIMIT 10 OFFSET 6`, "ordered"],
+      ["SELECT b.id, b.x / 1 FROM bigdec b UNION ALL SELECT b.id, b.x / b.y FROM bigdec b ORDER BY 2 DESC, 1", "ordered"],
+      ["SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT b.x / b.y FROM bigdec b ORDER BY q DESC LIMIT 3", "ordered"],
+      ["SELECT b.x / 1 AS q, (b.x / 1)::text AS t FROM bigdec b UNION ALL SELECT b.id, b.id::text FROM bigdec b ORDER BY 1 DESC, 2", "ordered"],
+      ["WITH s AS (SELECT b.x / 1 AS q FROM bigdec b) SELECT q FROM s UNION ALL SELECT q FROM s ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES", "ordered"],
+      ["(SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT b.x / b.y FROM bigdec b ORDER BY 1 LIMIT 3) UNION ALL SELECT b.x / 1 FROM bigdec b ORDER BY 1 DESC", "ordered"],
+      ["SELECT * FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT b.x / b.y FROM bigdec b) s ORDER BY q DESC LIMIT 3", "ordered"],
+      [`SELECT * FROM (${SET_ORDERED} ORDER BY 1 DESC LIMIT 3) s`, "ordered"],
+      [`WITH s AS (${SET_ORDERED} ORDER BY 1 LIMIT 2) SELECT * FROM s`, "ordered"],
+      [`${SET_ORDERED} ORDER BY 1 DESC NULLS FIRST FETCH FIRST 3 ROWS WITH TIES`, "ordered"],
+      ["SELECT b.x / 1 FROM bigdec b WHERE false UNION ALL SELECT b.x / b.y FROM bigdec b WHERE false ORDER BY 1 LIMIT 2", "ordered"],
+    ]), []);
+    assert.deepEqual(await unlikeBound(c, [bound(`${SET_ORDERED} ORDER BY 1 LIMIT $1`, ["2"])]), []);
+    // (a prepared statement executed after a later SET reads the plan made at its Parse)
+    const named = { name: "r2_352", text: `${SET_ORDERED} ORDER BY 1 LIMIT $1`, values: ["2"], rowMode: "array" as const, types: raw };
+    await c.query(named as pg.QueryConfig);
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual((await c.query(named as pg.QueryConfig)).rows, (await postgres(`${SET_ORDERED} ORDER BY 1 LIMIT $1`, ["2"])).rows);
+    await c.query("RESET TimeZone");
+    // ARMS OF ONE SCALE KEEP THEIR NATIVE PLAN: no Mason function
+    for (const sql of ["SELECT o.amount FROM orders o UNION ALL SELECT o.amount FROM orders o ORDER BY 1 LIMIT 2", "SELECT o.amount FROM orders o UNION ALL SELECT o.amount * 1 FROM orders o ORDER BY 1"]) {
+      const plan = (await c.query(`EXPLAIN (VERBOSE) ${sql}`)).rows.map((r: Record<string, string>) => r["QUERY PLAN"]).join("\n");
+      assert.doesNotMatch(plan, /__mason_(numeric|float)_/, sql);
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a VALUES arm and a nested arm are typed by Postgres's analysis, every arm one width (#342)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["VALUES (0.5) UNION ALL SELECT o.amount / 3 FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT o.amount / 3 FROM orders o UNION ALL VALUES (0.5) ORDER BY 1", "ordered"],
+      ["(SELECT o.id, o.status, o.amount / 3 AS third FROM orders o ORDER BY o.id LIMIT 5) UNION ALL VALUES (0, 'v', 14::numeric) ORDER BY 1", "ordered"],
+      ["(WITH t AS (SELECT o.amount / 7 AS v FROM orders o) SELECT * FROM t UNION ALL SELECT v FROM t) UNION ALL (WITH t AS (SELECT o.amount / 7 AS v FROM orders o) SELECT * FROM t UNION ALL SELECT v FROM t) ORDER BY 1", "ordered"],
+      ["((SELECT * FROM (SELECT o.amount / 7 AS v FROM orders o) a UNION ALL SELECT o.amount / 3 FROM orders o) UNION ALL VALUES (1.5)) UNION ALL SELECT o.qty FROM orders o ORDER BY 1, 1::text", "ordered"],
+      ["VALUES (0.5), (NULL) UNION ALL SELECT o.amount / 3 FROM orders o", "bag"],
+      // (a set operation of its own WITH as an arm beside another: its `*` arm reads its own WITH query's cells)
+      ["(WITH t AS (SELECT o.amount / 7 AS v FROM orders o) SELECT * FROM t UNION ALL SELECT v FROM t ORDER BY 1 LIMIT 12) UNION ALL SELECT NULL", "bag"],
+      ["SELECT 1 UNION ALL ((WITH t AS (SELECT o.amount / 7 AS v FROM orders o) SELECT * FROM t UNION ALL SELECT v FROM t) ORDER BY 1 LIMIT 12)", "bag"],
+      // (a VALUES row's constant past the engine's 38 digits beside a table's column: each row its own text)
+      ["SELECT b.x FROM bigdec b UNION ALL VALUES ('0.001250000000000000000000000001'::numeric(65,30)) ORDER BY 1", "ordered"],
+      ["SELECT o.amount FROM orders o UNION ALL VALUES ('0.001250000000000000000000000000'::numeric(65,30))", "bag"],
+      // (a VALUES-first union read outside by its column1)
+      ["SELECT s.column1, s.column1::text FROM (VALUES (0.5) UNION ALL SELECT o.amount / 3 FROM orders o ORDER BY 1 LIMIT 6) AS s ORDER BY 2", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: each arm of a numeric set operation column prints at its own scale (#227)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT o.amount FROM orders o UNION ALL SELECT o.qty FROM orders o ORDER BY 1, 1::text", "ordered"],
+      ["SELECT o.qty FROM orders o UNION ALL SELECT 1.5 ORDER BY 1", "ordered"],
+      ["VALUES (0, 0.5) UNION ALL SELECT o.qty, o.amount FROM orders o ORDER BY 1, 2", "ordered"],
+      ["(SELECT o.id, o.amount FROM orders o ORDER BY o.id) UNION ALL SELECT NULL, 1 ORDER BY 1, 2", "ordered"],
+      ["SELECT o.amount FROM orders o UNION ALL SELECT o.qty FROM orders o", "bag"],
+      ["SELECT o.amount::text FROM orders o UNION ALL SELECT o.qty::text FROM orders o", "bag"],
+      ["SELECT v FROM (SELECT 1 AS v FROM orders o UNION ALL SELECT 1.5 FROM orders o) AS m ORDER BY v, v::text", "ordered"],
+      ["SELECT m.v, m.v::text FROM (SELECT o.qty AS v FROM orders o UNION ALL SELECT o.amount FROM orders o) AS m ORDER BY 2", "ordered"],
+      // (read outside the union by every reader: a scalar subquery, its text as a sort key, an aggregate, a WITH query)
+      ["SELECT (SELECT ms.p FROM (SELECT o.amount AS p FROM orders o UNION ALL SELECT o.qty FROM orders o) AS ms ORDER BY 1 DESC NULLS LAST, ms.p::text COLLATE \"C\" LIMIT 1), (SELECT ms.p FROM (SELECT o.amount AS p FROM orders o UNION ALL SELECT o.qty FROM orders o) AS ms ORDER BY 1 LIMIT 1)", "ordered"],
+      ["WITH ms AS (SELECT o.amount AS p FROM orders o UNION ALL SELECT o.qty FROM orders o) SELECT sum(ms.p), min(ms.p), max(ms.p), count(DISTINCT ms.p) FROM ms", "ordered"],
+      ["SELECT ms.p::text, ms.p * 2 FROM (SELECT o.amount AS p FROM orders o UNION ALL SELECT o.qty FROM orders o) AS ms ORDER BY 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a scalar subquery's column is its program, printed, cast, compared and sorted (#350)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT (SELECT b.x / 1 FROM bigdec b WHERE b.id = 2)", "ordered"],
+      ["SELECT (SELECT s.q FROM (SELECT b.x / 1 AS q FROM bigdec b WHERE b.id = 2) s)", "ordered"],
+      ["SELECT b.id, (SELECT c.x / c.y FROM bigdec c WHERE c.id = b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT (SELECT s.q FROM (SELECT b.x / 1 AS q FROM bigdec b ORDER BY 1 DESC LIMIT 1) s)", "ordered"],
+      ["SELECT (SELECT max(o.amount / 3) FROM orders o)", "ordered"],
+      ["SELECT (SELECT c.x / 1 FROM bigdec c WHERE c.id = 2)::numeric(30,20)", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.x / 1 IN ((SELECT c.x / 1 FROM bigdec c WHERE c.id = 2)::numeric(30,20)) ORDER BY 1", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.x / 1 = (SELECT c.x / 1 FROM bigdec c WHERE c.id = 2 UNION ALL SELECT 0 WHERE false)::numeric(30,20) ORDER BY 1", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.x / 1 = (SELECT c.x / 1 FROM bigdec c WHERE c.id = 2)::text::numeric ORDER BY 1", "ordered"],
+      ["SELECT b.id, (SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id)::text FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, (SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id)::int FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.id < 3 ORDER BY (SELECT b.x / 1) DESC", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.id < 3 ORDER BY (SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id) DESC", "ordered"],
+      ["SELECT b.id, (SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id) * 2 FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT sum((SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id)) FROM bigdec b", "ordered"],
+      ["SELECT b.id, (SELECT b.x / 1) = (SELECT c.x / 1 FROM bigdec c WHERE c.id = 1) FROM bigdec b ORDER BY 1", "ordered"],
+      // (its own ORDER BY or GROUP BY naming the column by number or name sorts the value, never the text in its place)
+      ["SELECT (SELECT b.x / 1 AS q FROM bigdec b ORDER BY q DESC LIMIT 1), (SELECT b.x / b.y FROM bigdec b ORDER BY 1 LIMIT 1), (SELECT o.amount / 3 FROM orders o ORDER BY 1 DESC LIMIT 1)", "ordered"],
+      ["SELECT (SELECT o.amount / 3 FROM orders o GROUP BY 1 ORDER BY 1 DESC LIMIT 1)", "ordered"],
+      ["SELECT (SELECT o.amount / 3 FROM orders o GROUP BY o.amount / 3 ORDER BY 1 LIMIT 1), (SELECT o.amount / 3 FROM orders o GROUP BY o.id ORDER BY o.id LIMIT 1), (SELECT o.amount / 3 FROM orders o GROUP BY o.amount ORDER BY 1 DESC LIMIT 1)", "ordered"],
+    ]), []);
+    assert.deepEqual(await answeredOrRefused(c, "SELECT ARRAY(SELECT b.x / 1 FROM bigdec b ORDER BY 1)", "array-subquery-element"), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a window's min, max, first_value, last_value, nth_value, lag and lead pick the program (#343)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT b.id, max(b.x / 1) OVER (), min(b.x / 1) OVER (ORDER BY b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT o.id, min(o.amount / 3) OVER (PARTITION BY o.status), max(o.amount / 3) OVER () FROM orders o ORDER BY o.id", "ordered"],
+      ["SELECT b.id, first_value(b.x / b.y) OVER (ORDER BY b.id DESC), last_value(b.x / 1) OVER (ORDER BY b.id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), nth_value(b.x / 1, 2) OVER (ORDER BY b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT s.id, lead(s.x, 1, 0) OVER (ORDER BY s.id), lag(s.x) OVER (ORDER BY s.id) FROM (SELECT o.id, o.amount / 3 AS x FROM orders o) s ORDER BY 1", "ordered"],
+      ["SELECT b.id FROM bigdec b ORDER BY max(b.x / 1) OVER (PARTITION BY b.id) DESC, b.id", "ordered"],
+      ["SELECT b.id FROM bigdec b ORDER BY first_value(b.x / 1) OVER (PARTITION BY b.id) DESC, b.id", "ordered"],
+      ["SELECT b.y, max(max(b.x / 1)) OVER (), min(min(b.x / b.y)) OVER () FROM bigdec b GROUP BY b.y ORDER BY 1", "ordered"],
+      ["SELECT b.id, lag(b.x / b.y, 1, b.x / 3) OVER (ORDER BY b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, (max(b.x / 1) OVER ())::text, max(b.x / 1) OVER () * 2 FROM bigdec b ORDER BY 1", "ordered"],
+    ]), []);
+    assert.deepEqual(await answeredOrRefused(c, "SELECT array_agg(q ORDER BY q DESC) FROM (SELECT b.x / 1 AS q FROM bigdec b) s", "array-subquery-element"), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a grouped query's output key is its analysed expression, whatever the GROUP BY's spelling (#353)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b WHERE b.id < 3 GROUP BY b.id, b.x ORDER BY q DESC", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b WHERE b.id < 3 GROUP BY b.id, b.x ORDER BY 2 DESC", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b GROUP BY b.id, b.x HAVING count(*) > 0 ORDER BY q DESC, 1", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b WHERE b.id < 3 GROUP BY b.id, b.x ORDER BY q DESC FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q, rank() OVER (ORDER BY b.x / 1 DESC) FROM bigdec b GROUP BY b.id, b.x ORDER BY 3, 1", "ordered"],
+      ["SELECT b.x / b.y AS q, count(*) FROM bigdec b GROUP BY b.x, b.y ORDER BY q DESC", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b WHERE b.id < 3 GROUP BY b.id, b.x / b.y, b.x ORDER BY q DESC", "ordered"],
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: JOIN … USING and NATURAL JOIN on a carried quotient equate its exact key, or refuse by name (#218)", async () => {
+  const c = await client();
+  try {
+    const s = "(SELECT b.x / 1 AS q FROM bigdec b) s", t = "(SELECT b.x / 1 AS q FROM bigdec b) t";
+    for (const [sql, how] of [
+      [`SELECT count(*) FROM ${s} JOIN ${t} USING (q)`, "ordered"],
+      [`SELECT count(*) FROM ${s} NATURAL JOIN ${t}`, "ordered"],
+      [`SELECT q FROM ${s} JOIN ${t} USING (q) ORDER BY 1`, "ordered"],
+      ["SELECT * FROM (SELECT b.id, b.x / 1 AS q FROM bigdec b) s LEFT JOIN (SELECT b.x / b.y AS q, b.id AS j FROM bigdec b) t USING (q) ORDER BY 2, 3", "ordered"],
+      ["SELECT q FROM (SELECT b.x / 1 AS q FROM bigdec b WHERE b.id < 4) s FULL JOIN (SELECT b.x / b.y AS q FROM bigdec b) t USING (q) ORDER BY 1", "ordered"],
+      // (a quotient over a VALUES list's typed constants, and over a value no program is built for: the engine's double either way)
+      ["SELECT count(*) FROM (SELECT v.x / 1 AS q FROM orders o, (VALUES (1.00000000000000000001::numeric(30,20))) AS v(x)) s JOIN (SELECT v.x / 1 AS q FROM orders o, (VALUES (1.00000000000000000002::numeric(30,20))) AS v(x)) t USING (q)", "ordered"],
+      ["SELECT count(*) FROM (SELECT sqrt(o.amount) AS q FROM orders o) s JOIN (SELECT sqrt(o.amount) AS q FROM orders o) t USING (q)", "ordered"],
+    ] as const) assert.deepEqual(await answeredOrRefused(c, sql, "numeric-quotient-equality", how), [], sql);
+    assert.deepEqual(await unlike(c, [[`SELECT count(*) FROM ${s} JOIN ${t} ON s.q = t.q`, "ordered"]]), []);
   } finally { await c.end(); }
 });

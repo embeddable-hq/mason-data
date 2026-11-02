@@ -204,6 +204,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (`3`, half away from zero). A `*` beside a division (`SELECT *, a / 7 AS q …`, `SELECT s.*, 1 …`) showed 15 digits; it
   shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
+- **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
+  `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with
+  "types cannot be matched", and an integer beside a `numeric(12,2)` showed `1.00` where Postgres shows `1`; each now
+  answers as Postgres does. `(SELECT a / 7 FROM …)`, `min` / `max` / `first_value` / `lag` / `lead` of a division
+  over a window, `x / y IN (…)` and a grouped query's `ORDER BY` of a division by its alias now show, compare and sort
+  Postgres's digits. `array_agg` of a division, and `JOIN … USING` or `NATURAL JOIN` on a subquery's division, are now
+  refused by name with the way out (`array_agg((x / y)::text)`; `JOIN … ON`), where they answered rounded numbers.
+  Nothing to do on upgrade.
 
 - **A session's TimeZone, search_path and DateStyle now apply to every statement**, not only one that reads a synced
   table. A statement of no table (`SELECT '2026-01-02 03:04:05+00'::timestamptz`, `SELECT current_schemas(false)`,
