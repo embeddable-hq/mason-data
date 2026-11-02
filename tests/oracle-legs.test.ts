@@ -152,6 +152,21 @@ test("--weights lists each text above the threshold by the key the split reads, 
   assert.equal(JSON.parse(weightsText(got.weights)).statements[weightKey("SELECT 0")].ms, 120000);
 });
 
+test("--weights counts each leg's times in one machine's milliseconds: a leg whose runner took twice the setup weighs its statements half", () => {
+  // leg 1's runner slow (setup 30 s), leg 2's fast (10 s): the same setup, so leg 1's times are scaled by 20/30, leg 2's by 20/10
+  const [a, b] = timed();
+  const slow = { ...a, times: { ...a.times!, fixed: { setup: 30000 }, statements: Object.fromEntries(Object.entries(a.times!.statements).map(([k, x]) => [k, { ...x, ms: x.ms === 120000 ? 3000 : 300 }])) } };
+  const fast = { ...b, times: { ...b.times!, fixed: { setup: 10000 }, statements: Object.fromEntries(Object.entries(b.times!.statements).map(([k, x]) => [k, { ...x, ms: x.ms === 120000 ? 3000 : 100 }])) } };
+  const got = weightsFromLegs([slow, fast], 2, "7", 1000);
+  assert.ok("weights" in got, JSON.stringify(got));
+  const inLeg1 = a.asked[PHASES[0]]!.includes(statementId(statements[0]!));
+  assert.deepEqual(got.weights, { from: "7", above: 1000, stages: Math.round(50000 * 20 / 30), default: 200,
+    statements: { [weightKey("SELECT 0")]: { ms: inLeg1 ? 2000 : 6000, name: "statement 0" } } });
+  // a report with no setup (or a zero one) is taken as it stands
+  const unscaled = weightsFromLegs([{ ...slow, times: { ...slow.times, fixed: {} } }, fast], 2, "7", 1000);
+  assert.ok("weights" in unscaled && unscaled.weights.stages === 50000 && unscaled.weights.default > 100 && unscaled.weights.default < 300, JSON.stringify(unscaled).slice(0, 300));
+});
+
 test("--weights refuses a report from before the timing, naming the leg and the run, and writes nothing; the report still serves the check and --write", (t) => {
   const [a, b] = timed();
   const { times: _t, ...old } = b;

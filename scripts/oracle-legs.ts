@@ -189,12 +189,18 @@ export function weightsFromLegs(reports: readonly LegReport[], want: number, fro
   if (partitioned.length > 0) return { problems: partitioned };
   const untimed = reports.filter((r) => r.times === undefined).map((r) => r.leg);
   if (untimed.length > 0) return { problems: [`the report of leg(s) ${untimed.join(", ")} of ${from} has no times: the run predates the timing. Use a run of a commit that times its statements`] };
-  const spent = reports.flatMap((r) => Object.entries(r.times!.statements));
+  // ONE MACHINE'S MILLISECONDS: each leg ran on a runner of its own, and runners differ (PR 321's first run: the same
+  // setup took 68 s in one leg and 42 s in the other, and every percentile of the statements differed by that factor).
+  // The setup is the same work in every leg, so each leg's times are scaled by the legs' mean setup over its own
+  const setups = reports.map((r) => r.times!.fixed.setup);
+  const mean = (xs: number[]): number => xs.reduce((n, x) => n + x, 0) / xs.length;
+  const scale = (r: LegReport): number => setups.every((s) => s !== undefined && s > 0) ? mean(setups as number[]) / r.times!.fixed.setup! : 1;
+  const spent = reports.flatMap((r) => Object.entries(r.times!.statements).map(([k, x]): [string, { ms: number; name: string }] => [k, { ms: x.ms * scale(r), name: x.name }]));
   const listed = spent.filter(([, x]) => x.ms >= above).sort(([a, x], [b, y]) => y.ms - x.ms || (a < b ? -1 : 1));
   const rest = spent.filter(([, x]) => x.ms < above);
-  const mean = rest.length === 0 ? above : rest.reduce((n, [, x]) => n + x.ms, 0) / rest.length;
-  const stages = reports.reduce((n, r) => n + Object.values(r.times!.stages).reduce((m, ms) => m + (ms ?? 0), 0), 0);
-  return { weights: { from, above, stages: Math.round(stages), default: Math.max(1, Math.round(mean)), statements: Object.fromEntries(listed.map(([k, x]) => [k, { ms: Math.round(x.ms), name: x.name }])) } };
+  const restMean = rest.length === 0 ? above : mean(rest.map(([, x]) => x.ms));
+  const stages = reports.reduce((n, r) => n + scale(r) * Object.values(r.times!.stages).reduce((m, ms) => m + (ms ?? 0), 0), 0);
+  return { weights: { from, above, stages: Math.round(stages), default: Math.max(1, Math.round(restMean)), statements: Object.fromEntries(listed.map(([k, x]) => [k, { ms: Math.round(x.ms), name: x.name }])) } };
 }
 
 /** the weights file's text: one listed text a line, so its diff can be read */

@@ -1,5 +1,27 @@
 {
-  "stages": 0,
-  "default": 1,
-  "statements": {}
+  "from": "41389723050",
+  "above": 1000,
+  "stages": 20940,
+  "default": 144,
+  "statements": {
+    "6468ef05d6c67812": {"ms":14314,"name":"type matrix: unnest(string_to_array(col, ' ')) LEFT JOIN ON TRUE, whole"},
+    "f2e2699bae9d1d0d": {"ms":6368,"name":"type matrix: unnest(string_to_array(col, ',')) LEFT JOIN ON TRUE, sorted by the table's column, limited"},
+    "1ea93ad2d60bd63a": {"ms":4551,"name":"type matrix: unnest(string_to_array(col, ' ')) LEFT JOIN ON TRUE, sorted by the table's column, limited"},
+    "ae23281429a19ee7": {"ms":4250,"name":"WITH TIES: NULLs first, and the nulls idiom"},
+    "0f837d9c8b15136c": {"ms":2792,"name":"type matrix: date_trunc of a timestamptz, every part, in UTC"},
+    "68201a09b7f1519b": {"ms":2442,"name":"DISTINCT outside: a subquery's quotient under an alias list, a join, no alias"},
+    "8b75e6db98588d21": {"ms":2167,"name":"the table tenants, whole"},
+    "4e60967ddd4a7eb8": {"ms":2123,"name":"type matrix: jsonb_path_query_array / _first / _exists"},
+    "d3183f1fe75736db": {"ms":1998,"name":"type matrix: jsonb_array_elements / _text, jsonb_object_keys, unnest LEFT JOIN ON TRUE, whole"},
+    "75a06b09051503aa": {"ms":1842,"name":"the table customers, whole"},
+    "9d1543793f5ad112": {"ms":1806,"name":"regexp_replace('the word here', '\\yword\\y', 'X', 'g')"},
+    "5dbfabf75e593b25": {"ms":1715,"name":"'a word here' ~ '\\yword\\y'"},
+    "6f0f0662e516791b": {"ms":1713,"name":"type matrix: jsonb_path_query"},
+    "5bd093c29b90cad7": {"ms":1442,"name":"type matrix: date_trunc of a timestamptz grouped (a histogram), in UTC"},
+    "6da5284bc54870ac": {"ms":1429,"name":"type matrix: json_each_text / jsonb_each_text LEFT JOIN LATERAL ON true, whole"},
+    "51abe1fa0c24d369": {"ms":1398,"name":"type matrix: jsonb: every pair compared"},
+    "d12dcd1b63717658": {"ms":1127,"name":"type matrix: jsonb: every pair by <=, >=, <>"},
+    "c9e1ba92d6f1b000": {"ms":1073,"name":"type matrix: json_each_text / jsonb_each_text LEFT JOIN LATERAL ON true, limited and offset"},
+    "c61c15caa314d682": {"ms":1061,"name":"type matrix: json_each_text / jsonb_each_text LEFT JOIN LATERAL ON true, limited"}
+  }
 }
