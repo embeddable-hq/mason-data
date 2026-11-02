@@ -522,6 +522,19 @@ the record counts the round as no review (PR 245's first review found such a rou
 showed none is noted, as a failed probe is. The statements' Postgres is the file the `itEnv` argument names, or a
 throwaway `postgres:18` container of the stage's own, removed when done, whose URL no prompt prints.
 
+A file is the wrong grain for a path two subsystems share (issue 286, 2026-11-02): PR 280 changed one line of
+`src/cli/dev.ts`, a sweep of tunnel files at start, and since three engine rules files list `dev.ts` (so their rules
+load when it is edited), its review ran 332 statements that told it nothing. So a SHARED path, one in `STATEMENT_PATHS`
+and in the `paths:` of `cli.md` or `web-ui.md` (`HOST_PATHS`; today `dev.ts`, `generated-files.ts`, `mason.cjs`,
+`pool-size.cjs`), owes by its hunks. `scripts/evidence-owed.ts <base> <head>` decides them with TypeScript's checker:
+a hunk reaches the engine when a name on a changed line (added lines in the head's tree, removed ones in the base's,
+aliases followed) resolves to a declaration in a path that owes statements, so `store.query` counts though it names no
+import. A shared path with no such hunk owes checks; one that is not `.ts`, added or deleted, or that does not parse,
+owes statements, since "couldn't tell" is never checks. The review reports the shared paths it agrees owe checks
+(`checksOnly`), and overrides the script by leaving one out, when a hunk changes the flow or the arguments into an
+engine call without naming an engine symbol; a waiver of any other path, or one that cannot be read, waives nothing.
+The script is also the one reader of the rules' front matter, which `tests/workflows.test.ts` imports.
+
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
 **Decision.** Every open issue carries the label `bug` or `enhancement`. Every bug is on the Mason work board with its
