@@ -54,6 +54,27 @@ agent wants complete context and a machine-readable form (`--json`, a declared s
 `.claude/rules/cli.md` has the mechanics. **Nothing a user sees is named for DuckDB**: the image is `mason-data`, a
 command's words say "the synced data", never the engine; the engine's name belongs in the code and the docs.
 
+## Security comes first
+
+**Security is the first design principle of everything here** (Tom, 2026-11-02): Mason holds a production database's
+URL and serves its data, so when security pulls against convenience or speed, security wins, and the change says what
+it traded. Every PR's review asks what the change exposes, and to whom; a security hole is blocking ("The loop", step 4).
+In practice:
+- **least privilege**: Mason only reads the source; a user reaches what its role grants.
+- **nothing off loopback** without TLS and a password.
+- **a secret never reaches** a command line, a log, an error, `--json` or the repo. It is read from the environment or
+  a 0600 file, and masked where a failure repeats it.
+- **fail closed**: a check that cannot tell refuses.
+- **all input is untrusted**: everything from a client, a file or the network.
+
+Detector: the review, and the tests that hold each piece (`tests/cli-security.test.ts`, `tests/pg-tls.test.ts`,
+`tests/duck-users.test.ts`, …). Why: docs/DESIGN.md "Security comes first".
+
+**This repository is public** (Tom, 2026-11-02). Only Mason itself lands here, with clients of documented public APIs.
+Code, infrastructure, hostnames, account ids, credentials, customer names and plans of a service Embeddable hosts live
+in a private repository: never in this one's code, docs, issues, PRs or commit messages. A change such a service needs
+is made here as a generic feature, in generic words. Detector: the review; nothing automatic yet.
+
 ## Scope of work
 
 **Only build what was asked for.** Analysis, measurements, and recommendations are always welcome — but do not create
