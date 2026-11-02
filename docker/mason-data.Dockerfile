@@ -8,7 +8,7 @@
 #
 # ONE container per data volume, never two: DuckDB lets one process write a file, so a platform must run one replica
 # and stop the old one before starting the new (a recreate, never a rolling deploy).
-FROM node:24-slim
+FROM node:26-slim
 
 # tini as PID 1: it passes SIGTERM on (Node as PID 1 ignores a signal it has no handler for yet, so a `docker stop`
 # during the start would wait out its timeout) and reaps what it leaves

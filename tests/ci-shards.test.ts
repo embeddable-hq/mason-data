@@ -671,7 +671,7 @@ test("docs ci.yml simulated, a docs-only run: the four required checks run and p
   for (const g of GATES) assert.equal(results[g], "success", g);
   for (const j of shards.DOCS_SKIPS) assert.equal(results[j], "skipped", j);
   assert.equal(results.docs, "success");
-  assert.ok(ran.image!.includes("a docs-only run builds no image") && !ran.image!.includes("build mason-data"), ran.image!.join(", "));
+  assert.deepEqual(ran.image, ["a docs-only run builds no image"], "a docs-only run checks out, builds and runs nothing of the image");
   for (const g of ["checks", "integration-oracle", "integration-rest"]) assert.deepEqual(ran[g]!.filter((s) => /verify|ran|whole|download/.test(s)), [], `${g} reads no shard's records on a docs-only run`);
   // and a docs job that failed fails checks alone
   const failed = simulate("success", "true", { docs: "failure" }).results;

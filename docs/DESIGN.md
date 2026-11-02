@@ -1987,8 +1987,8 @@ be absent. Run with real OpenSSH and sshd on one machine, host and container; a 
 **Decision.** `mason serve` is `mason start --attach`'s run configured by the environment alone (`DATABASE_URL`,
 `MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_PG_*`), every bad setting on one
 report, the log on stdout, SIGTERM its stop (tini PID 1). `GET /healthz` (`MASON_HEALTH_PORT`, 4140) is 503 until the run
-answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with the
-copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
+answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:26-slim, CI's Node ("The Node CI runs on"), with
+the copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
 still copies); one replica, stop-then-start deploys;
 `deploy/mason-data/compose.yml` the quickstart. `version()` is `PostgreSQL 18.6 (mason-data <version>) …`, Postgres first
 since tools parse it. Item 1 of the server's plan was a login that does not expire: `mason user` ("Users").
@@ -2107,9 +2107,23 @@ container under 1 and 2 CPUs on Node 24 and 26, none in 20 runs of a PGlite and 
 `--stress-wasm-code-gc` there. Upstream's reporter: 0 in 191 processes with the two V8 commits on Node 24, 8 in 149
 without, and none on Node 26.10.
 
-**Still true.** The image (`docker/mason-data.Dockerfile`, `node:24-slim`) and a user's own Node 24 still carry the bug,
-and `mason serve` terminates a catalog worker at every idle stop: there it is a rare abort the supervisor restarts.
-Lift the guard when a Node 24 release carries nodejs/node#66376.
+**Still true.** A user's own Node 24 still carries the bug, and a run terminates a catalog worker at every idle stop:
+there it is a rare abort that `mason start`'s supervisor restarts (cli/README.md "Requirements" says so). Lift the
+guard when a Node 24 release carries nodejs/node#66376.
+
+**The image (2026-11-02, issue 67).** The image ran `node:24-slim` after CI had left it, so the crash CI no longer saw
+was still the image's, where `mason serve` stops the catalog's worker at every idle stop and the platform restarts what
+aborts. Tom chose the first of the issue's two options: the image runs CI's Node, `node:26-slim` (Debian 13), never
+`--no-wasm-code-gc` on Node 24, which covers the one known fault only. `tests/conventions.test.ts` ("the image runs the
+Node CI runs") holds the major of every `FROM node:…` in the Dockerfile EQUAL to `ciFacts(ci.yml).nodeMajor`
+(scripts/gate.ts), so the two cannot drift either way, and a tag that names no major is refused; ci.yml's `image` job
+loads the engine's native bindings, PGlite and libpg-query inside the built image and has each answer a statement,
+which `mason --version` never did. **Measured** on an arm64 Mac at load 6 to 11, the same smoke start on each image: a
+throwaway postgres:18 with a synthetic 5,000-row table synced by the stream, four aggregates and an
+`information_schema.columns` read equal to Postgres's, an insert seen after `mason wait`, `docker stop` in 2.4 s (Node
+26.13.0) and 2.6 s (Node 24.22.1), healthy after 81.8 s and 84.0 s (the first start's read of the database's collation),
+no `Check failed` in either log. `Check failed: end > addr`, seen once on Node 24 on an arm64 Mac at load ~114, was not
+met again and is not explained: it is not claimed to be this bug, nor fixed.
 
 ### The turn (2026-10-31, issue 127)
 

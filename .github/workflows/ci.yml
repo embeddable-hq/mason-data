@@ -239,9 +239,11 @@ jobs:
         run: node scripts/ci-shards.ts verify unit ran
 
   # REQUIRED. The image (docker/mason-data.Dockerfile), built as images-publish.yml builds it (one platform here): it
-  # starts, and `mason --version` inside it answers. It runs whatever `changes` answered, short of a cancel (a job
-  # skipped for a failed need reports success on a required check), and builds unless the run is docs-only: the image
-  # copies no doc.
+  # starts, `mason --version` inside it answers, and on the image's own Node (tests/conventions.test.ts holds its major
+  # to this file's node-version) the three things a run loads answer a statement: the engine's native bindings, PGlite
+  # and libpg-query (issue 67). `mason --version` loads none of them. It runs whatever `changes` answered, short of a
+  # cancel (a job skipped for a failed need reports success on a required check), and builds unless the run is
+  # docs-only: the image copies no doc.
   image:
     needs: [changes]
     if: ${{ !cancelled() }}
@@ -258,6 +260,29 @@ jobs:
       - name: the mason command inside it answers
         if: ${{ needs.changes.outputs.docs != 'true' }}
         run: docker run --rm --entrypoint mason mason-data:ci --version
+      - name: the engine, PGlite and libpg-query load and answer on the image's Node
+        if: ${{ needs.changes.outputs.docs != 'true' }}
+        timeout-minutes: 5
+        run: |
+          docker run --rm -i -w /app --entrypoint node mason-data:ci --input-type=module - <<'JS'
+          const check = (what, ok, got) => { if (!ok) { console.error(`${what}: unexpected answer ${JSON.stringify(got)}`); process.exit(1); } console.log(`${what}: ok`); };
+          console.log(`node ${process.version}`);
+          const { DuckDBInstance } = await import("@duckdb/node-api");
+          const duck = await DuckDBInstance.create(":memory:");
+          const conn = await duck.connect();
+          const rows = (await conn.runAndReadAll("SELECT 42 AS x")).getRows();
+          check("the engine's native bindings answer SELECT 42", rows[0]?.[0] === 42, rows);
+          conn.closeSync(); duck.closeSync();
+          const { PGlite } = await import("@electric-sql/pglite");
+          const pglite = await PGlite.create();
+          const one = (await pglite.query("SELECT 1 AS x")).rows;
+          check("PGlite answers SELECT 1", one[0]?.x === 1, one);
+          await pglite.close();
+          const parser = await import("libpg-query");
+          await parser.loadModule();
+          const tree = parser.parseSync("SELECT 1");
+          check("libpg-query parses SELECT 1", tree.stmts?.length === 1, tree);
+          JS
 
   # THE ORACLE, IN LEGS: each leg runs the whole pipeline over a Postgres of its own, and asks its share of the
   # statements in every phase (scripts/oracle-legs.ts). A leg's job is the rest shards' below, by YAML anchor.
