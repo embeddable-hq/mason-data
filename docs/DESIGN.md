@@ -571,6 +571,24 @@ owes statements, since "couldn't tell" is never checks. The review reports the s
 engine call without naming an engine symbol; a waiver of any other path, or one that cannot be read, waives nothing.
 The script is also the one reader of the rules' front matter, which `tests/workflows.test.ts` imports.
 
+One process, not three (Tom, 2026-11-02; issue 386). Experiment 1, on issue 192, ran the `pr-loop.js` harness against
+ONE persistent Opus agent that was sent each review's findings by message. The harness had run 5.5 h, with 2 design,
+7 probe and 4 review rounds, and was still in CI; it used about 2.3 M Opus output tokens. The persistent agent was clean
+and green in 1 h 51 min, and it took about 1.0 M Opus output tokens over all its rounds, the later fix rounds included.
+The difference was continuity: a fix round rebuilt no context. Experiment 2 raced that agent, kept by a coordinator
+(the pr-persistent skill), against `pr-loop-slim.js`, the harness without its design review and probe, whose fixers
+read a `## Handoff` comment. On issue 137 it was a tie: 49 min for the skill (PR 279) and about 48 min for slim (PR 280,
+the coordinator's count), and both were clean at the first review. On issue 176 the skill's PR 272 was clean at its
+second review. At its second review slim's PR 274 had two new wrong answers of its own, and it was stopped. Tom then
+ran the skill with a Sonnet coordinator per issue, and decided: "As far as I'm concerned, this new process has won. The
+others weren't faster, better or cheaper." So `pr-loop.js` and `issue-loop.js` are retired. `pr-loop-slim.js` stays as
+the source the skill renders every prompt from, not as a process of its own. The top session's queue is a skill too
+(`.claude/skills/up-next/SKILL.md`). issue-loop's split moved into the Brief, as a verdict it may return in place of a
+brief: the pieces, each able to ship alone, in order, and which are stacked. The run then makes a sub-issue per piece,
+posts the plan and stops, and the top session starts each piece. Before, an issue too big for one PR was seen only if the top session
+spotted it, or late, as rounds piled up or the four-round bound stopped a run. `issue-loop.js` ran its pieces by
+`workflow('pr-loop')`, and a Workflow script cannot hold an implementer across rounds, since an `agent()` is one-shot.
+
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
 **Decision.** Every open issue carries the label `bug` or `enhancement`. Every bug is on the Mason work board with its
@@ -2472,6 +2490,21 @@ or splitting it is #338's; until then the warning names it.
 
 **Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
 and their spread is worth a third leg or a queue.
+
+### A docs-only path in CI (2026-11-02, issue 339)
+
+**Decision: a pull request that changes nothing but docs runs a `docs` job in place of build, the unit shards, the
+oracle legs and the rest shards**, worth about 34 runner-minutes a day by issue 78's count, and every required check
+still reports by name. A `changes` job decides it from git on the merge CI checked out (`HEAD^1..HEAD`, `--no-renames`),
+never the GitHub API's paged file list nor a third-party filter; a doc is an `.md` file at the root or under `docs/`,
+`deploy/` or `release-notes/`, never a CLAUDE.md, an allowlist so a new folder is code until decided otherwise
+(`docsPath`, `scripts/ci-shards.ts`). A workflow-level `paths-ignore` was rejected: a required check that never
+reports blocks the pull request for ever. Whatever `changes` cannot tell (a push to main, a HEAD that is not a merge, a
+git failure, no path) is a full run, and each gate reads the mode from its own `needs`, so a failed `changes` fails
+every gate rather than passing over skipped shards; `image` runs short of a cancel and builds unless the run is
+docs-only, since a job skipped for a failed need reports success on a required check. The `docs` job runs the unit
+tests that read a doc (`DOCS_TESTS`), and `tests/ci-shards.test.ts` holds that list to every unit test whose code reads
+one, simulates the workflow's jobs and gates in each mode, and runs `changes` over real merges.
 
 ## A libc order, read level by level
 

@@ -7,8 +7,8 @@
  *
  * A guide's name is never a command's (tests/cli-help.test.ts): one word never means two pages.
  */
-import { DEMO_ADDED_TABLES, DEMO_TABLES, DEMO_TABLE_TO_ADD } from "../demo/seed.ts";
 import { DEFAULT_MEMORY_RULE, memorySize, MEMORY_FLOOR_BYTES, OUTSIDE_RESERVE_BYTES } from "../duck/store.ts";
+import { DEMO_ADDED_TABLES, DEMO_GENERATED, DEMO_TABLES, DEMO_TABLE_TO_ADD } from "../demo/seed.ts";
 
 /** The guides, by the name `mason help <guide>` takes. */
 export const GUIDES = {
@@ -115,6 +115,7 @@ async function agentGuide(): Promise<string> {
   // imported here, not at the top: the registry imports this file for the HELP usage
   const { STEPS } = await import("./registry.ts");
   const { FAILURE_CODES } = await import("./command.ts");
+  const { GENERATED_DIR } = await import("./generated-files.ts");
   const w = Math.max(...STEPS.flatMap(([, cs]) => cs.map((c) => c.name.length))) + "mason  --json".length;
   const commands = STEPS.map(([step, cs]) => `  ${step}\n${cs.map((c) => `    ${`mason ${c.name}${Object.hasOwn(c.options, "json") ? " --json" : ""}`.padEnd(w)}  ${c.summary}`).join("\n")}`).join("\n");
   const codes = Object.entries(FAILURE_CODES).map(([code, what]) => `    ${code.padEnd(12)} ${what}`).join("\n");
@@ -201,6 +202,8 @@ ${codes}
   With no database to hand, in a new folder: mason init demo --json && mason start --json — a demo database Mason
   hosts itself (${DEMO_TABLES.join(", ")}), changed every few seconds, polled every 5 s (its sync: poll 5s). Init adds
   ${DEMO_ADDED_TABLES.join(", ")}; ${DEMO_TABLE_TO_ADD} is left to add: mason add ${DEMO_TABLE_TO_ADD} --json && mason wait --json, after mason start.
+  It also writes a generated table, ${DEMO_GENERATED.table} (mason/${GENERATED_DIR}/${DEMO_GENERATED.file}: orders and revenue per
+  day and status, over the synced orders): mason wait ${DEMO_GENERATED.table} --json, after mason start.
 `;
 }
 

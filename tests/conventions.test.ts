@@ -1374,7 +1374,7 @@ test("the duration guard would catch the real thing", () => {
 });
 
 /**
- * A REVIEW PROBE SAYS WHERE IT WAS MET (.claude/workflows/pr-loop.js, its Probe and Learn stages): each bullet of a
+ * A REVIEW PROBE SAYS WHERE IT WAS MET (.claude/workflows/pr-loop-slim.js, its Learn stage): each bullet of a
  * rules file's `## What review probes` section names the PR or issue it came from, so a probe the Learn step writes and
  * one edited by hand stay traceable to the review that found it. The one exception is a section whose only bullet is
  * the placeholder "None recorded yet". Returns each bullet that names neither, or the section's absence.

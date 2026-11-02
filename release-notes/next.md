@@ -79,6 +79,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   0; 1 when its run failed or it or a parent was refused before it was built; 124 on `--timeout`), so a script can read it right after a load. A table
   that serves and holds everything synced is ready though its last run failed: after editing its file, read
   `mason status` for whether the new definition was refused or failed.
+- **`mason init demo` also writes a generated table**, `mason/generated_tables/daily_orders.yml`: orders and revenue per
+  day (UTC) and status, over the synced `orders`, `target_lag: 30s`. `mason wait daily_orders` waits until it is built,
+  and `mason status` shows it re-running as the demo's orders arrive. A file already at that path is kept. `mason init
+  --json` has a new key, `generated`: `[{ table, file, written }]` for the demo, `[]` for any other project.
 - **A column is reported as the source's type, whatever Mason holds.** `information_schema`, `pg_attribute`, `pg_typeof`
   and the wire's type OID now say `timetz` (1266), `point`, `money`, `bit`, `macaddr` and the rest where they said `text`,
   so a BI tool stops sending text functions at them. If a saved question or a script of yours read one of these columns as

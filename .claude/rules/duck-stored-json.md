@@ -107,8 +107,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
-again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
+again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
 - jsonb values Postgres holds equal but whose text differs (`{"k": 1}`, `{"k": 1.0}`, `{"k": 1.00}`; one object's keys
   in two orders) under DISTINCT, DISTINCT ON and GROUP BY, by name, by number and as the expression: equality taken on
