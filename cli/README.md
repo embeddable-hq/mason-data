@@ -269,8 +269,9 @@ seeds it again.
   with `Check failed: jit_page_->allocations_.erase(addr) == 1`, as a process exits or when the catalog's worker stops
   after idling. `mason start` starts a run that died after it was ready again (not under `--attach`), and `mason status`
   shows the restart. To avoid it, use Node 26, or a 22.x release from 22.13.
-- Memory: the engine may use half the container's memory limit by default, else half the machine's RAM
-  (`MASON_DUCKDB_MEMORY=4GB` sets it; `mason doctor` says it). Sizing a server:
+- Memory: by default the engine may use half the container's memory limit, else of the machine's RAM, or what leaves
+  2.5 GiB beside it when that is less, never under 128 MiB (`MASON_DUCKDB_MEMORY=4GB` sets it; `mason doctor` says
+  it). Under 3 GiB, with it unset, Mason starts and warns that the system may stop it. Sizing a server:
   [deploy/mason-data/README.md#memory](https://github.com/embeddable-hq/mason-data/blob/main/deploy/mason-data/README.md#memory).
 - Postgres 13 or later. Each table needs a primary key, or a `key:` in the sources file (polling only).
 

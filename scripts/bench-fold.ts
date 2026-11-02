@@ -10,6 +10,7 @@
  *   scripts/gate-slot.ts node scripts/bench-fold.ts --out <file.json>   # the measurement: 4 GiB, ~20 GiB, <= 110 min
  *     --keep           leave the container, volume and image (debugging only; never the default)
  *     --budget-min N   the hard deadline (default 110)
+ *     --memory G       the container's memory in GiB (default 3 for the smoke, 4 for the run; issue 301 measured the floor with it)
  *
  * THE SETUP: everything that reads or writes the data runs in ONE container of the mason-data image
  * (docker/mason-data.Dockerfile), built from this tree and tagged `mason-bench-fold-<random>`, with --memory = --memory-swap
@@ -814,14 +815,22 @@ const summarise = (byStatement: Record<string, number[]> | undefined, generatedO
   return out;
 };
 
+/** the container's memory: `--memory <GiB>` (0.5 or more, whole MiB), else 3 GiB for the smoke and 4 GiB for the run */
+export function containerMemoryBytes(memory: string | undefined, smoke: boolean): number {
+  if (memory === undefined) return smoke ? 3 * GIB : 4 * GIB;
+  const g = Number(memory);
+  if (!/^\d+(\.\d+)?$/.test(memory) || g < 0.5) throw new Error(`--memory ${JSON.stringify(memory)}: the container's memory in GiB, 0.5 or more (1.5, 2)`);
+  return Math.floor(g * 1024) * 1024 ** 2;
+}
+
 async function host(argv: string[]): Promise<number> {
   const smoke = argv.includes("--smoke"), keep = argv.includes("--keep");
   const arg = (k: string): string | undefined => { const i = argv.indexOf(k); return i < 0 ? undefined : argv[i + 1]; };
   const out = arg("--out") ?? path.join(os.tmpdir(), `bench-fold${smoke ? "-smoke" : ""}.json`);
   const budgetMs = Number(arg("--budget-min") ?? (smoke ? 15 : 110)) * 60_000;
   // the smoke at 3 GiB: Mason with its default memory limit (half the cgroup) was OOM-killed at 1 GiB in the whole re-run,
-  // and at 2 GiB in the writer phase (anon 1.76 GiB beside an engine limit of 1 GiB)
-  const memoryBytes = smoke ? 3 * GIB : 4 * GIB;
+  // and at 2 GiB in the writer phase (anon 1.76 GiB beside an engine limit of 1 GiB); --memory <GiB> sets it (issue 301)
+  const memoryBytes = containerMemoryBytes(arg("--memory"), smoke);
   const target = smoke ? 1.5e9 : targetBytes(memoryBytes);
   const free = fs.statfsSync(os.homedir()); const freeBytes = free.bavail * free.bsize;
   if (freeBytes < HOST_FREE_MIN_BYTES) { process.stderr.write(`bench-fold: ${gib(freeBytes)} free on the host, under the ${gib(HOST_FREE_MIN_BYTES)} the run needs\n`); return 2; }

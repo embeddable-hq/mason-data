@@ -51,7 +51,7 @@ import { USAGE_TABLE, UsageSampler } from "../duck/usage.ts";
 import { withPlaceholders } from "./pg-url.ts";
 import { UI } from "./ui.ts";
 import { cliPinProblem, ensurePin } from "./pin.ts";
-import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION } from "../duck/store.ts";
+import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION, machineMemory, memoryProblems, memoryProblemText, memoryWarning } from "../duck/store.ts";
 import { copyChunkSecondsOf, copyParallelOf, humanBytes, Sync, syncModeOf, type CopyState } from "../duck/sync.ts";
 import { storeJsonPathsOf } from "../duck/kept.ts";
 import { libcOrderNote, readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
@@ -226,6 +226,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // before anything opens (src/duck/history.ts); every history below keeps them
   const keptDays = historyDaysSetting(process.env);
   if (typeof keptDays !== "number") return failed("start", { code: "refused", ...keptDays }, { json: false });
+  // MASON_DUCKDB_MEMORY not an amount (src/duck/store.ts memoryProblems), refused before anything opens (mason serve has
+  // said it already, with its other settings)
+  const memory = memoryProblems(process.env)[0];
+  if (memory !== undefined) return failed("start", { code: "refused", ...memory }, { json: false });
   // THE SOURCE (src/cli/sources.ts): the database and the tables to copy, from the project's sources file; a server's
   // URL from its environment first (mason serve is configured by it alone). Read here, its failure said below where it
   // always was (after the listener's checks): a demo project's port is needed first
@@ -417,6 +421,14 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     else say(`  ! the engine's thread stopped: ${reason}`);
   });
   done(`the synced data in ${path.relative(project.root, duckFile)} (mason destroy deletes it; engine ${DUCKDB_VERSION}), at most ${(memoryLimit ?? DEFAULT_MEMORY_LIMIT).trim()} of memory (MASON_DUCKDB_MEMORY), spilling at most ${humanBytes(store.spillLimitBytes)} to ${path.relative(project.root, duckFile)}.tmp (MASON_SPILL_LIMIT)`);
+  // UNDER THE MEMORY FLOOR the run goes on and warns (src/duck/store.ts memoryWarning, the one text): here at its start,
+  // in its log, and in its warnings, which mason status, --json and the web page read for as long as it runs
+  const memoryWarned = memoryWarning(machineMemory(), process.env);
+  if (memoryWarned !== null) {
+    // the log (mason serve's stdout among its writers), and mason start's own terminal
+    logLine(`[engine] warning: ${memoryProblemText(memoryWarned)}`);
+    if (o.serve === undefined) say(`  ! ${memoryProblemText(memoryWarned)}`);
+  }
   const syncMode = syncModeOf(process.env);
   // THE SYNC'S EVENTS (src/duck/events.ts): its failures and notable events, kept as the request log is, before the sync
   // that records them starts
@@ -569,7 +581,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const setupPort = o.exactPort === true ? o.port : await freePort(o.port, chosen);
   const token = newToken();
   const runCtx: RunContext = {
-    source, facts: () => facts, warnings, textOrder,
+    source, facts: () => facts, warnings: [...warnings, ...(memoryWarned === null ? [] : [memoryProblemText(memoryWarned)])], textOrder,
     // the slot and publication while a table's sync is replication (the run streams), as the sync says it now
     replication: () => sync.streams() ? repl : null, port: setupPort, token, folder: () => folder, root: project.root, home,
     version: o.version, startedAt,

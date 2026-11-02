@@ -15,6 +15,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **On a container under 5 GiB the queries' default share of memory is smaller**: half the container's limit, as
+  before, or what leaves 2.5 GiB beside it when that is less, never under 128 MiB: 128 MiB of a container of 2.5 GiB or
+  less (half of it before: 1 GiB of a 2 GiB one), 512 MiB of 3 GiB (was 1.5 GiB), 1.5 GiB of 4 GiB (was 2 GiB). From 5 GiB up
+  it is half, unchanged. A query that needs more than its share spills to disk or fails
+  on its own (53200) where it used to take the whole run down with it; `MASON_DUCKDB_MEMORY` still sets the share.
+  `mason doctor` says the share and what it leaves, and warns when a share you set leaves under 2.5 GiB.
+- **Under 3 GiB of memory, with `MASON_DUCKDB_MEMORY` unset, Mason starts and warns** that the system may stop it: in
+  the log at its start, in `mason status` (and `warnings` in `--json`) while it runs, and in `mason doctor`. The
+  warning says the size it read, where it read it, what Mason needs beside its queries and the two ways out: give the
+  container 3 GiB or more, or set `MASON_DUCKDB_MEMORY` yourself. Measured, Mason uses up to 2.3 GiB beside its
+  queries' share, and under the old default the kernel killed the whole run at 1, 1.5, 2 and 3 GiB.
 - **The `mason-data` image now runs Node 26, where it ran Node 24**, the Node CI tests on: Node 24's V8 could now and
   then abort the server (nodejs/node#66366), for the platform to restart (compose's `restart: unless-stopped`). Nothing
   to do on upgrade, unless you build your own image FROM it with native modules of your own: rebuild them. A CLI on

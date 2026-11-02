@@ -2073,6 +2073,83 @@ and a 7-day count over 196 M rows, Q2):
 So a copy's writes in flight are bounded (a chunk per reader). It does not yield between chunks: nothing counts the
 statements in flight, and DuckDB 2.0 has no per-connection thread or priority control (`SET SESSION threads` is refused).
 
+### Memory: the room outside the engine's limit (2026-11-02, issue 301)
+
+**Decision.** DuckDB's default limit is half the memory, or what leaves `OUTSIDE_RESERVE_BYTES` (2.5 GiB) beside it
+when that is less, never under `MIN_SHARE_BYTES` (128 MiB) (`src/duck/store.ts` `defaultMemoryLimit`; every text that
+states the default reads `DEFAULT_MEMORY_RULE` or the constants). With `MASON_DUCKDB_MEMORY` unset, a start under
+`MEMORY_FLOOR_BYTES` (3 GiB) goes on and WARNS, never refuses (Tom, on PR 382, 2026-11-02: the branch first refused
+it): `memoryWarning` is the one text, said in the run's log at its start, in `mason status` and its `--json`
+`warnings` while it runs, and in mason doctor's memory line, a warning and never a failure. Only a value that is not an
+amount is refused (`memoryProblems`), as on main. Set, the variable is the operator's word at any size. From 5 GiB up
+the default is half, as before.
+
+**Why.** The limit counts DuckDB's buffers only. Beside them, in one process: V8's heaps, the catalog's PGlite (started
+at the run's start, ~0.26 GiB of WebAssembly memory an instance in this run), the pg-eval PGlite (started by the
+first `__mason_pg_*` call, never stopped, and WebAssembly memory never shrinks), and DuckDB's own memory its buffer
+manager does not count. Under half, the kernel killed the whole run (exit 137, `OOMKilled` true) at every size tried.
+
+**The measurement** (synthetic only; the mason-data image on node:24-slim, Node 24.22.1, built from main at 7367201 and
+from the branch; `docker run --memory=<n> --memory-swap=<n> --cpus 4` beside a postgres:18 with `wal_level=logical` on
+a docker network; a laptop under other sessions' load). The source: `public.events`, 1.5 M rows with a ~1.5 kB jsonb
+of 40 keys (3.0 GB in Postgres), `sync: replication`. The path: the first sync; the issue's two generated tables
+(`requests` grouping by `tenant_id, coalesce(request_key, id)` with `latest(… ORDER BY started_at, id)`, and
+`daily_durations` with `percentile_cont(0.95)` over it) built with 4 idle psql sessions open; 2 minutes of `UPDATE … SET
+status = 'failed', payload = payload || '{"retried": true}'` of 6, 60 and 1000 rows in turn, committed one by one, the
+stream applying them; beside them and after them, through the listener: a tool's `pg_class` introspection, a group by
+tenant, a group by `payload->>'h07'`, the latest 100 rows with the payload, the generated table's days, and `count(DISTINCT
+substr(started_at::text, 1, 10)::date)`, which reaches the pg-eval worker. Every 2 s: the cgroup's `memory.current`,
+`memory.peak` and `memory.stat` anon and file, and each thread's `process.memoryUsage()` (a preload); the engine's own
+count from the usage samples (`duckdb_memory()`, a minute apart).
+
+| container | image | limit | verdict | where | peak anon / process RSS |
+|---|---|---|---|---|---|
+| 1 GiB | main | 512MiB (half) | killed | the start (the first sync) | 934 MiB / 1107 MiB |
+| 1.5 GiB | main | 768MiB | killed | the group by a JSON key, beside the writes | 1469 / 1572 |
+| 2 GiB | main | 1024MiB | killed | the pg-eval statement beside the writes | 1820 / 2020 |
+| 3 GiB, twice | main | 1536MiB | killed, both | the pg-eval statement beside the writes | 3042 / 3095 |
+| 3 GiB | main, `MASON_DUCKDB_MEMORY=256MiB` | 256MiB | the whole path | (one statement 53200 at that limit) | 2294 / 2588 |
+| 2 GiB, 2.5 GiB | the branch's first head | — | refused, exit 1, nothing killed | before anything was written | — |
+| 2 GiB | the warning's head, 3 runs at once | 256MiB | the whole path (one 53200: the group by a JSON key) | | 1737 / 1865 |
+| 2 GiB | the same, `MASON_DUCKDB_MEMORY=512MiB` (the old quarter) | 512MiB | killed | beside the writes | 2022 / 2069 |
+| 2 GiB | the same, `=128MiB`, alone | 128MiB | the whole path (the same one 53200) | | 1603 / 1705 |
+| 1.5 GiB | the same, 3 runs at once | 256MiB | killed | the generated tables' build | 1506 / 1510 |
+| 1.5 GiB | the same, alone | 256MiB | killed | beside the writes | 1500 / 1533 |
+| 1.5 GiB | the same, `=128MiB`, alone | 128MiB | killed, after every statement was answered (the same one 53200) | the statements after the writes | 1509 / 1509 |
+| 3 GiB (the floor) | the merged head on **Node 26.13.0** | 512MiB | the whole path, every statement answered | | 2385 / 2472 |
+| 2 GiB | the same, Node 26 | 128MiB | the whole path (the same one 53200) | | 1773 / 1975 |
+| 2 GiB | the same, Node 26, host load ~60 | 128MiB | not killed; the first sync past its 20 min bound, both generated tables refused when the catalog's start timed out (issue 409) | the first sync | 1749 (peak) |
+| 1.5 GiB | the same, Node 26 | 128MiB | killed | beside the writes | 1434 / 1503 |
+| 3 GiB (the floor) | branch | 512MiB | the whole path, every statement answered | | 1994 / 2131 |
+| 4 GiB | branch | 1536MiB | the whole path, every statement answered | | 3089 / 3279 |
+
+**What lies outside the limit**, by difference: with the limit at 256MiB the process reached 2.59 GiB at the pg-eval
+statement, so 2.3 GiB was outside the limit. At that moment the pg-eval worker's `external` was 509 MB, the catalog's
+259 MB, a third worker's 144 MB, the main thread's heap 157-203 MB and the executor's 71 MB; about 1 GiB is native memory
+nobody counts (DuckDB's allocations outside its buffer manager, the allocator's arenas across the engine's and libuv's
+threads, V8's code). The main thread's heap reached 621 MB during a build, not explained. The catalog cannot be "never
+started" on this path: the run starts it at its start (0 tables) and replaces it as tables appear. `OUTSIDE_RESERVE_BYTES`
+is the 2.3 GiB with ~10 % margin; at the floor and at 4 GiB the room used outside was 1.6-1.7 GiB, under it.
+
+**The share under the floor** is what let the run last longest: at 2 GiB the whole path ran with 128MiB and with
+256MiB, and the old quarter (512MiB) was killed; at 1.5 GiB every share was killed, 128MiB last, after every statement
+was answered, 256MiB in the writes. Both shares answered the same statements (the group by a JSON key failed alone,
+53200, at each). So `MIN_SHARE_BYTES` is 128MiB. Nothing under 128MiB was measured, and nothing under 1.5 GiB ran the
+whole path: under the floor the warning stays true at every share. One run each, on a laptop under load.
+
+**On Node 26** (the image's Node since PR 368; the runs above were Node 24.22.1), the merged head held all three
+constants: at the floor the whole path ran with every statement answered, the room used outside the limit about
+1.96 GiB (2472 MiB RSS less 512MiB), under the reserve; at 2 GiB the 128MiB share ran the whole path; 1.5 GiB was
+killed, under the floor where the warning says it may be. The pg-eval and catalog WebAssembly memory read lower on
+Node 26 (external ~0.25 GB against ~0.72 GB) and native memory higher, so the sum moved less than its parts.
+
+**Not known, and filed:** stopping the pg-eval worker when idle (issue 374), where the ~1 GiB of native memory goes
+(issue 375), a CI job that runs the image under a memory limit (issue 376). Issue 96 (a first sync's 53200 on large
+out-of-line values) is a different failure, not folded in. Detector: the unit tests hold the rule, the floor and the one
+warning (`tests/cli-doctor.test.ts`, `tests/serve.test.ts`, `tests/cli-state-matrix.test.ts`: a start under the floor
+STARTS, and says the warning once in the log, in `mason status` and in mason doctor); nothing in CI runs a
+container under a limit (issue 376), so a change that grows the memory outside the limit measures the constants again.
+
 ### What stands between this and production
 
 1. A self-signed certificate only encrypts; a verifying client needs a CA's (`MASON_PG_TLS_CERT` / `_KEY`).
