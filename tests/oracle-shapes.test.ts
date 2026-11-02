@@ -132,6 +132,7 @@ test("the numeric readers: every numeric output by Postgres's name, over a deriv
   assert.deepEqual(by("numeric-text"), [[`SELECT mason_shape."third"::text FROM (${S}) AS mason_shape`, false]]);
   assert.deepEqual(by("numeric-aggregate"), [[`WITH mason_shape AS (${S}) SELECT sum(mason_shape."third"), min(mason_shape."third"), max(mason_shape."third"), count(DISTINCT mason_shape."third") FROM mason_shape`, false]]);
   assert.deepEqual(by("numeric-ordered"), [[`SELECT mason_shape."third" FROM (${S}) AS mason_shape ORDER BY mason_shape."third", mason_shape."third"::text COLLATE "C"`, true]]);
+  assert.deepEqual(by("numeric-ranked"), [[`SELECT mason_shape."third", rank() OVER (ORDER BY mason_shape."third" DESC) FROM (${S}) AS mason_shape`, false]]);
   const two = "SELECT i.unit_price, i.unit_price / 7 AS q FROM order_items i ORDER BY i.id LIMIT 20";
   const t = await of(two, answer(["unit_price", "q"], [1700, 1700], [["1.00", "0.14"]], [786438, -1]));
   assert.deepEqual(t.by("numeric-distinct"), [[`SELECT DISTINCT mason_shape."unit_price", mason_shape."q" FROM (${two}) AS mason_shape`, false]]);

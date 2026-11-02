@@ -287,8 +287,15 @@ paths:
   digits, so DISTINCT, DISTINCT ON, GROUP BY (beside the value), PARTITION BY, count(DISTINCT), `=` and `<>` read the
   program's value without trailing zeros (`__mason_numeric_key`); a form where no key can be placed (a grouping set,
   another aggregate's DISTINCT, a set operation without ALL) is refused, `numeric-quotient-equality`; IN, IS DISTINCT
-  FROM, NULLIF, CASE x WHEN and every ORDER are the listed difference `numeric-quotient-compare`. A new context that
+  FROM, NULLIF, CASE x WHEN, < and > are the listed difference `numeric-quotient-compare`. A new context that
   equates values asks `exactKey` as it asks `equalKey` for a jsonb. `tests/duck-wire.test.ts` "class round".
+  **Every other READER asks the same two (issue 252, `exact-numeric-leaves-exact-path`)**: an ORDER BY, a window's
+  ORDER BY, FETCH … WITH TIES and min / max sort by `exactOrderKey` (`__mason_numeric_order`, numeric_cmp's order); a
+  sum, avg or window sum adds the program's text (`summed`); a cast to text, varchar, float8 or an integer reads the
+  program's text (`typeCast`); a `*` beside a program is written out (`starsWrittenForExact`) so its cells ride. Each
+  asks `duckExact` first, so a DECIMAL column, an integer or a sum of one keeps its native plan with no `__mason_*`
+  call. The hidden cells are named by `cellPrefix`, which no name the statement writes begins with.
+  `tests/duck-wire.test.ts` "exact path: …".
   **"Decided exactly" is a property of the value's PROGRAM, never of its syntax or its type** (PR 207's third round):
   a column of a subquery or WITH query that holds one is that query's program over its cells, which ride as hidden
   columns of the FROM item (`carry`, decided once per item before the walk, `carryAll`), so it is printed and keyed
@@ -411,3 +418,8 @@ again before each review. Its Learn step adds to this list; each bullet names th
   TABLE t ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES`, `SELECT b FROM t UNION ALL SELECT d FROM t ORDER BY 1`, `SELECT
   DISTINCT a FROM t ORDER BY a FETCH FIRST 2 ROWS WITH TIES`): a commit built from a stale tree, overwriting files
   whole and undoing a merged PR's code, tests, rules bullets and release notes; `branch-reverts-merged-work` (PR 272).
+- An exact numeric key (a quotient over `numeric(30,20)`, `x / 1`, `c / 3`) in a GROUPED query, under each rule that
+  builds one: ORDER BY, FETCH FIRST … WITH TIES, min / max, DISTINCT ON (`SELECT x / 1 AS q, count(*) FROM bigdec GROUP
+  BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES`, also by `GROUP BY x / 1`, `GROUP BY q`, with HAVING, a rank()
+  OVER beside it, two keys, an empty table): the key built without its query's groups, reading the ungrouped column
+  (42803 where Postgres answers); `exact-key-built-outside-its-group` (PR 341).
