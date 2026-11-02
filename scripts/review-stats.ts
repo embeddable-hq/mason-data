@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * HOW OFTEN A PR PASSES ITS REVIEW (.claude/workflows/pr-loop.js). Every exit of pr-loop with a PR posts a
+ * HOW OFTEN A PR PASSES ITS REVIEW (.claude/workflows/pr-loop-slim.js). Every exit of pr-loop-slim with a PR posts a
  * `Review record` comment on that PR, holding one fenced block tagged `json mason-review-record`: the PR, its design,
  * probe and review rounds, each blocking finding of the PR's with its round, stage, class and severity, the ones it
  * deferred as non-blocking (filed, not fixed) under `deferred`, its CI fixes and its status. This
@@ -32,8 +32,9 @@ import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** A finding's severity, as pr-loop's FINDINGS schema names it; .claude/workflows/pr-loop.js holds the same two lists
- * (it cannot import), and tests/workflows.test.ts holds them equal. When unsure, a reviewer gives a blocking one. */
+/** A finding's severity, as pr-loop-slim's FINDINGS schema names it; .claude/workflows/pr-loop-slim.js holds the same
+ * two lists (it cannot import), and tests/workflows.test.ts holds them equal. When unsure, a reviewer gives a blocking
+ * one. */
 export const BLOCKING = ["wrong-answer", "crash", "data-loss", "security", "regression"] as const;
 export const DEFERRED = ["message", "over-refusal", "docs", "quality"] as const;
 export type Severity = (typeof BLOCKING)[number] | (typeof DEFERRED)[number];

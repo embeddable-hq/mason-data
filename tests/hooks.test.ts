@@ -128,7 +128,7 @@ function instructedTestCommands(): { where: string; command: string }[] {
 
 test("test-timeout: every test command the docs and the harness instruct is one the hook lets through", () => {
   const commands = instructedTestCommands();
-  assert.ok(commands.some((c) => c.where.startsWith(".claude/workflows/pr-loop.js")), "the reader finds the harness's commands");
+  assert.ok(commands.some((c) => c.where.startsWith(".claude/workflows/pr-loop-slim.js")), "the reader finds the harness's commands");
   assert.ok(commands.some((c) => c.where.startsWith("CLAUDE.md")), "the reader finds CLAUDE.md's commands");
   const blocked = commands.filter(({ command }) => run("test-timeout", bash(command)).code !== 0);
   assert.deepEqual(blocked, [], "each of these would be blocked by the hook: give it --test-timeout=<ms> --test-force-exit before its files");
