@@ -23,7 +23,8 @@
  *   node scripts/review-stats.ts [--repo <owner/name>] [--json]
  *
  * A record counts for the PR whose comment holds it, and only when it names that PR: a record quoted on another PR is
- * left out. A PR run through pr-loop twice (a resume) posts two records; the last one posted is the PR's. A block
+ * left out. A record in a comment whose author is not one of scripts/gh-text.ts's KEPT is left out too, and counted on
+ * stderr. A PR run through pr-loop twice (a resume) posts two records; the last one posted is the PR's. A block
  * opens with a line that is exactly the fence and its tag, so a quoted one (`> ```json …`) is not a block. A block that
  * does not parse, lacks a field, or never closes is reported on stderr with its comment's URL and left out, never
  * guessed. Exit 0 with the numbers; 1 when gh failed or a block was malformed; 2 on a usage error.
@@ -31,6 +32,13 @@
 import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { keep } from "./gh-text.ts";
+
+/** Who may write a record that counts: gh-text's own list, never a second one. */
+export { KEPT } from "./gh-text.ts";
+type RecordComment = { url: string; issue_url: string; body: string; author_association?: unknown };
+/** The record comments, one a line, with who wrote each (issue comments are PR comments too; --jq runs per page). */
+export const RECORD_JQ = '.[] | select(.body | contains("mason-review-record")) | {url: .html_url, issue_url, body, author_association}';
 
 /** A finding's severity, as pr-loop-slim's FINDINGS schema names it; .claude/workflows/pr-loop-slim.js holds the same
  * two lists (it cannot import), and tests/workflows.test.ts holds them equal. When unsure, a reviewer gives a blocking
@@ -195,9 +203,8 @@ function main(argv: string[]): number {
   }
   let out: string;
   try {
-    // issue comments are PR comments too; --jq runs per page, one object a line
-    out = execFileSync("gh", ["api", "--paginate", `repos/${repo}/issues/comments?per_page=100`, "--jq",
-      '.[] | select(.body | contains("mason-review-record")) | {url: .html_url, issue_url, body}'], { encoding: "utf8", maxBuffer: 1 << 28 });
+    out =execFileSync("gh", ["api", "--paginate", `repos/${repo}/issues/comments?per_page=100`, "--jq",
+      RECORD_JQ], { encoding: "utf8", maxBuffer: 1 << 28 });
   } catch (e) {
     process.stderr.write(`review-stats: gh api failed: ${(e as Error).message}\n`);
     return 1;
@@ -205,8 +212,10 @@ function main(argv: string[]): number {
   const records: ReviewRecord[] = [];
   let malformed = 0;
   let quoted = 0;
-  for (const line of out.split("\n").filter(Boolean)) {
-    const c = JSON.parse(line) as { url: string; issue_url: string; body: string };
+  // a record counts only when its comment is by the repository's people, as scripts/gh-text.ts decides (issue 438)
+  const { kept, left } = keep(out.split("\n").filter(Boolean).map((line) => JSON.parse(line) as RecordComment));
+  if (left) process.stderr.write(`review-stats: ${left} record comment(s) by others left out\n`);
+  for (const c of kept) {
     try {
       const r = recordsOfComment(c);
       records.push(...r.records);
