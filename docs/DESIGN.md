@@ -2276,6 +2276,7 @@ apart:
 | 41393151088 | 55.2 / 68.3 s | 520 / 673 s (152 apart) | 582 / 608 s (26) | 612 / 783 s | unit (2), 1067 s |
 | 41396664763 | 69.2 / 53.9 s | 649 / 496 s (153) | 577 / 566 s (11) | 759 / 594 s | unit (2), 1110 s |
 | 41396965861 | 68.7 / 63.1 s | 711 / 687 s (24) | 682 / 717 s (36) | 825 / 796 s | rest shard 2, 845 s |
+| 41400764545 (this PR) | 68.3 / 53.8 s | 711 / 487 s (225) | 636 / 552 s (84) | 825 / 585 s | unit (2), 1069 s |
 | 41389723050 | 68.3 / 42.3 s | (1000 ms weights) | | | |
 | 41391539636 | | (1000 ms weights) | 116 s apart | leg 1 858 s | oracle leg 1, 19 s over rest shard 2 |
 
@@ -2290,6 +2291,12 @@ It never moves the exit code: balance is a cost, never coverage, and a red requi
 flake. When it cannot tell (a report without times, a setup missing or 0, a leg missing) it says "not measured", never
 a gap of 0. The CPU is never in `measured`, which `--write` holds equal across the legs: two legs on different CPUs
 would refuse to write.
+
+The PR's own run is the first to name its runners: leg 1 on an AMD EPYC 7763, leg 2 on an AMD EPYC 9V74, 4 vCPUs each.
+The setups were 1.27x apart and the statements and stages 1.46x, so the setup under-corrected the faster CPU, and the
+scaled gap (84 s) passed the target: the warning fired, and the weights were rewritten from that run as it says. Whether
+a CPU model speeds the statements more than the setup on every draw is not known yet; the CPU in each leg's report lets
+the next runs say.
 
 **Rejected.** A shared queue, each leg taking the next statement as it frees: two hosted jobs share no state but
 artifacts, read only after a job ends, so it needs a coordinator they do not have; and one job running both halves on a
