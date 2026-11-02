@@ -296,3 +296,84 @@ test("a copy in progress from the Mason of one reader becomes its committed chun
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A CHUNK'S OUT-OF-LINE BYTES BOUNDED BY THE MEMORY (issue 96: a table of large `jsonb` values out of line, a heap of a
+// few pages, was ONE chunk whatever the limit; src/duck/sync.ts chunkCeiling, chunkBudgetBytes, giveBack)
+const bySize = syncModule as unknown as {
+  chunkCeiling?: (pages: number, rows: number | null, outOfLine: number | null, budget: number, target?: number) => number;
+  chunkBudgetBytes?: (limit: number, readers: number) => number;
+  giveBack?: (gaps: Range[], r: Range) => void;
+  tooLargeText?: (source: string, what: string, limit: number) => string;
+  nextChunkPages: (ceiling: number, rate: { pagesPerSecond: number; rowsPerSecond: number; bytesPerSecond: number; chunks: number } | null, seconds: number) => number;
+  copyGaps: (done: readonly Range[]) => Range[];
+  takeChunk: (gaps: Range[], pages: number, size: number) => Range | undefined;
+  COPY_CHUNK_MEMORY_SHARE?: number;
+};
+const MiB = 2 ** 20;
+
+test("a chunk's out-of-line bytes are held to the memory's budget, at least a page; a table with nothing out of line keeps the rows ceiling", () => {
+  const { chunkCeiling, chunkBudgetBytes, nextChunkPages } = bySize;
+  assert.ok(chunkCeiling !== undefined && chunkBudgetBytes !== undefined, "chunkCeiling and chunkBudgetBytes are exported");
+  // nothing out of line (a heap's own bytes): exactly the rows ceiling, whatever the budget
+  for (const budget of [1, 2 ** 20, 2 ** 40]) {
+    assert.equal(chunkCeiling!(10_000, 1_000_000, 0, budget), chunkPages(10_000, 1_000_000));
+    assert.equal(chunkCeiling!(10_000, 1_000_000, null, budget), chunkPages(10_000, 1_000_000), "unknown bytes: the rows ceiling");
+  }
+  // the issue's shape scaled: 400 rows over 50 pages, 400 MiB out of line, 128 MiB of memory, three readers
+  const budget = chunkBudgetBytes!(128 * MiB, 3);
+  const ceiling = chunkCeiling!(50, 400, 400 * MiB, budget);
+  const perPage = (400 * MiB) / 50;
+  assert.ok(ceiling >= 1 && (ceiling === 1 || ceiling * perPage <= budget), `${ceiling} page(s) of ${perPage} bytes against ${budget}`);
+  assert.ok(ceiling < chunkPages(50, 400), "smaller than the rows ceiling, the whole table");
+  // the first chunk and one grown by a fast measured rate stay under it
+  assert.ok(nextChunkPages(ceiling, null, 12) <= ceiling);
+  assert.ok(nextChunkPages(ceiling, { pagesPerSecond: 1e6, rowsPerSecond: 1e6, bytesPerSecond: 1e9, chunks: 9 }, 300) <= ceiling);
+  // a single page past the budget: still one page, never none; unknown rows bounded by the bytes too
+  assert.equal(chunkCeiling!(3, 400, 3 * 1024 * MiB, 1 * MiB), 1);
+  assert.equal(chunkCeiling!(3_000, null, 3_000 * MiB, 30 * MiB), 30, "rows unknown: the bytes still bound it");
+  // the budget reads the limit and the readers: half the limit, half the ceiling; one reader, three readers' budget × 3
+  assert.equal(chunkBudgetBytes!(64 * MiB, 1), chunkBudgetBytes!(128 * MiB, 1) / 2);
+  assert.equal(chunkBudgetBytes!(128 * MiB, 1), chunkBudgetBytes!(128 * MiB, 3) * 3);
+  assert.equal(chunkBudgetBytes!(128 * MiB, 1), 128 * MiB * bySize.COPY_CHUNK_MEMORY_SHARE!);
+  assert.equal(chunkCeiling!(10_000, 100_000, 10_000 * MiB, chunkBudgetBytes!(1024 * MiB, 1)) / 2,
+    chunkCeiling!(10_000, 100_000, 10_000 * MiB, chunkBudgetBytes!(512 * MiB, 1)), "half the memory, half the pages");
+});
+
+test("ranges given back after a chunk ran out of memory still tile the heap: every page read exactly once, none skipped", () => {
+  const { giveBack, copyGaps, takeChunk } = bySize;
+  assert.ok(giveBack !== undefined, "giveBack is exported");
+  const PAGES = 40;
+  // readers take chunks, some run out of memory and are given back (out of order, the open-ended last one among them)
+  for (const fails of [[1], [2, 0], [5, 3, 1], [0, 1, 2, 3, 4, 5, 6, 7]]) {
+    const gaps = copyGaps([]);
+    const committed: Range[] = [];
+    const inFlight: Range[] = [];
+    let n = 0;
+    for (let guard = 0; guard < 1000; guard++) {
+      while (inFlight.length < 3) { const r = takeChunk(gaps, PAGES, 7); if (r === undefined) break; inFlight.push(r); }
+      const r = inFlight.shift();
+      if (r === undefined) break;
+      if (fails.includes(n++)) giveBack!(gaps, r); else committed.push(r);
+    }
+    const sorted = [...committed].sort((a, b) => a.first - b.first);
+    assert.equal(sorted[0]!.first, 0, JSON.stringify(sorted));
+    for (let i = 1; i < sorted.length; i++) assert.equal(sorted[i]!.first, sorted[i - 1]!.end, `every page once: ${JSON.stringify(sorted)}`);
+    assert.equal(sorted.at(-1)!.end, null, "the open-ended last range is read");
+    assert.deepEqual(gaps, [], "nothing left");
+  }
+  // two given back beside each other join; the open-ended one given back stays open-ended
+  const gaps: Range[] = [{ first: 20, end: 30 }];
+  giveBack!(gaps, { first: 30, end: null });
+  giveBack!(gaps, { first: 10, end: 20 });
+  assert.deepEqual(gaps, [{ first: 10, end: null }]);
+});
+
+test("a table too large for the memory is said in the operator's words, never the engine's remedies", () => {
+  const { tooLargeText } = bySize;
+  assert.ok(tooLargeText !== undefined);
+  const m = tooLargeText!("public.big", "one page of its table (about 136 row(s)), read alone, ran out of memory", 128 * MiB);
+  assert.match(m, /MASON_DUCKDB_MEMORY/);
+  assert.match(m, /mason add public\.big --columns/);
+  assert.match(m, /128\.0 MiB/);
+  assert.doesNotMatch(m, /threads|preserve_insertion_order|PRAGMA|SET |DuckDB|duckdb|\bcopy\b/);
+});
