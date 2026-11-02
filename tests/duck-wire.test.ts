@@ -5573,6 +5573,27 @@ test("exact path: the ORDER reader sorts, ranks and ties a program by its exact 
   } finally { await c.end(); }
 });
 
+// PR 341 review r1, the class exact-key-built-outside-its-group: FETCH … WITH TIES built a grouped query's exact order
+// key over the ungrouped column (42803, "must appear in the GROUP BY clause"), where the ORDER BY's rule reads it per
+// group; every rule that keys a value now names the query it keys
+test("exact path: FETCH … WITH TIES keys a grouped query's quotient per group, as its ORDER BY does", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT b.x / 3 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT b.x / 3 AS q, b.y FROM bigdec b GROUP BY 1, 2 ORDER BY 1, 2 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT b.x / 3 AS q, count(*) FROM bigdec b WHERE false GROUP BY 1 ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY b.x / 1 ORDER BY b.x / 1 DESC FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY q ORDER BY q DESC FETCH FIRST 2 ROWS WITH TIES", "bag"],
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 HAVING count(*) > 0 ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT b.x / 1 AS q, rank() OVER (ORDER BY b.x / 1 DESC) FROM bigdec b GROUP BY 1 ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES", "bag"],
+      ["SELECT b.y, max(b.x / b.y) FROM bigdec b GROUP BY 1 ORDER BY 2 DESC FETCH FIRST 1 ROWS WITH TIES", "bag"],
+      ["SELECT sum(b.x) / 3 AS q FROM bigdec b ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES", "bag"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("exact path: the AGGREGATE reader sums and averages a program exactly, through a derived table or a CTE (issue 278)", async () => {
   const c = await client();
   try {

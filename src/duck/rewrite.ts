@@ -1495,8 +1495,9 @@ class Rewriter {
       }
       let column: string;
       // a numeric the engine holds as a double is ranked by its exact value's order key (`exactOrderKey`), a column of
-      // its own (bytes: sorted as they are)
-      const exactOrder = !setOperation && typed?.type === NUMERIC && collated === null ? this.exactOrderKey(value) : null;
+      // its own (bytes: sorted as they are), computed in the query it keys: in a grouped one, per group (`overGroups`),
+      // as the ORDER BY's rule builds it
+      const exactOrder = !setOperation && typed?.type === NUMERIC && collated === null ? this.exactOrderKey(value, b) : null;
       if (exactOrder !== null) {
         hidden.push(exactOrder);
         column = `__mason_ties_k${hidden.length}`;
@@ -2483,8 +2484,9 @@ class Rewriter {
             const probe = this.exactOf(args[0]!, (m) => { operands.push(m); return { op: "cell", key: String(operands.length - 1) }; });
             // a column's own min is DuckDB's exact decimal, padded to its scale
             if (probe === null || probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell") || (this.duckExact(args[0]!) && !worthComputing(probe.p))) return asCell();
-            // picked by its exact value's order key (`exactOrderKey`, issue 252), its operands breaking a tie of scales
-            const key = caseWhen([[isNotNull(this.clone(args[0]!)), row([this.exactOrderKey(args[0]!) ?? this.clone(args[0]!), ...operands.map((m) => this.clone(m))])]], null);
+            // picked by its exact value's order key (`exactOrderKey`, issue 252), its operands breaking a tie of scales;
+            // an aggregate's argument is read per row, so its key is no group's (null)
+            const key = caseWhen([[isNotNull(this.clone(args[0]!)), row([this.exactOrderKey(args[0]!, null) ??this.clone(args[0]!), ...operands.map((m) => this.clone(m))])]], null);
             const picked = (m: AstNode): AstNode => {
               const call = fn(name === "min" ? "arg_min_null" : "arg_max_null", [this.clone(m), this.clone(key)], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter) });
               // an aggregate, as the grouping checks read it (validGrouped, decidedByKey), typed as the operand it picks
@@ -2726,9 +2728,12 @@ class Rewriter {
    * bytes that order as numeric_cmp does (`__mason_numeric_order`, src/lib/pg-numeric.ts `numericOrderKey`), never by
    * its double, which ties two values Postgres orders apart past 17 digits and orders 0.1 + 0.2 after 0.3. null: a
    * value the engine holds exactly (a DECIMAL column, an integer: its native sort, no function), or one with no program
-   * (the engine's value everywhere).
+   * (the engine's value everywhere). `grouped` is the query the key is computed in, never defaulted (the class
+   * exact-key-built-outside-its-group, PR 341 r1): in a grouped one the text is read per group (`overGroups`), so every
+   * rule that keys a value (ORDER BY, a window's ORDER BY, FETCH … WITH TIES) names it, and an aggregate's argument
+   * (min / max) says null.
    */
-  private exactOrderKey(e: AstNode, grouped: Body | null = null): AstNode | null {
+  private exactOrderKey(e: AstNode, grouped: Body | null): AstNode | null {
     if (this.typeOf(e) !== NUMERIC || this.duckExact(e)) return null;
     const exact = this.exactText(e);
     // (in a grouped SELECT, the text is read once per group, whose rows hold one value, and keyed once per group)

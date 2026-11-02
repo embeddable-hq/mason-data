@@ -326,6 +326,7 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "exact path: ORDER BY a derived quotient two doubles tie", sql: "SELECT s.q FROM (SELECT v.x / 1 AS q FROM (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002), (2.5)) AS v(x)) s ORDER BY 1 DESC" },
   { name: "exact path: rank() over a quotient two doubles tie", sql: "SELECT v.x / 1 AS q, rank() OVER (ORDER BY v.x / 1) FROM (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002), (2.5), (2.5)) AS v(x) ORDER BY 2, 1" },
   { name: "exact path: FETCH … WITH TIES over 0.1 + 0.2 and 0.3", sql: "SELECT v.id, v.x / 10 + v.y / 10 AS s FROM (VALUES (1, 1::numeric, 2::numeric), (2, 3, 0), (3, 2.5, 0.5)) AS v(id, x, y) ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES" },
+  { name: "exact path: FETCH … WITH TIES over a grouped quotient, keyed per group", sql: "SELECT o.amount / 7 AS q, count(*) FROM orders o GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES" },
   { name: "exact path: a quotient's text, its length and its concatenation", sql: "SELECT length((v.x / 1)::text), (v.x / 1)::text || '' FROM (VALUES (1.00000000000000000001::numeric(30,20)), (2.5)) AS v(x) ORDER BY 1, 2" },
   { name: "exact path: sum and avg of a quotient", sql: "SELECT sum(o.amount / 7), avg(o.amount / 7) FROM orders o" },
   { name: "exact path: sum, min, max and avg of a CTE's quotient", sql: "WITH q AS (SELECT o.amount / 7 AS x FROM orders o) SELECT sum(x), max(x), min(x), avg(x) FROM q" },
