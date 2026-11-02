@@ -24,10 +24,10 @@ each). The copy is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 6,571 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 6,572 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 6,571 statements | Mason | DuckDB alone |
+| Of 6,572 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 92% | 27% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -122,10 +122,11 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 
 ## Answered differently
 
-19 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
+20 cases are answered, but not as Postgres answers. Each is a decided difference the oracle checks still differs.
 
 | Gap | What | Postgres | Mason | Instead |
 |---|---|---|---|---|
+| `fromless-numeric-text-order` | a SELECT of no table that orders text (`'a' < 'B'`, `… FROM (VALUES …) ORDER BY x`) under a collation other than C and also holds a numeric, a literal such as `1.5` included | the collation's order | the catalog answers it, its numerics exact and its text in byte order (a statement of no table that holds no numeric is answered in the collation's order) | add COLLATE "C" to say so, cast the numeric to text or a float, or select FROM a table |
 | `libc-mark-run-form` | text under a libc collation holding a combining mark written apart, then a digit or punctuation, then a letter that is a compatibility form at the third level (`ß`, `ð`, `æ`): `'a6ß'` against `'a' \|\| U+0308 \|\| '6ß'` | the mark's skipped run moves the third levels one along, and glibc compares a letter's with another's on one scale | reads each letter's third level as its own (a read of one scale asks the source of every letter), so such two values compare the other way round | ORDER BY normalize(x, NFC), which spells the mark in its letter, or COLLATE "C" |
 | `libc-rare-letter` | text under an `en_*` collation holding a rare letter or symbol whose weights no spelling of it says, against the same word's near neighbour: `Ꜳ`, `Ꞛ`, `Ꞝ`, `Ꞟ`, an Arabic presentation-form ligature, a Tamil vowel written in two, a CJK compatibility symbol (`㏩`), a circled number (`㊿`, `⑯`) | the table's own weight | the weights the read could confirm: it sorts in its letter's place, and two such neighbours may turn round. mason status says how many pairs of those the read was held to differ | COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the letter out |
 | `limit-errors` | a value that raises (`'x'::int`, a bad JSON number) in a row a LIMIT leaves out: in the select list or a plain derived read's list (a view, a WITH query, a tool's wrapper), where no index gives the ORDER BY, a subquery of the select list among them (one Postgres finds cheap, it computes below its sort), and a SELECT DISTINCT ON's list, where the row raising is in a group but not its first; or in the argument of a LEFT JOIN of a list's rows ON TRUE (unnest(ARRAY[…, 'x'::int]), jsonb_each of a non-object), under a LIMIT with no ORDER BY | the select list's raises: its plan sorts every row, its select list computed for each (through an index it stops at the limit and answers); the lateral's answers: it stops at the limit | the select list's answers: a sorted, limited select list, a derived list a join reads by row number, a subquery in the list and a DISTINCT ON's list are computed for the rows the limit keeps (src/duck/late.ts), as Postgres's index scan does; the lateral's raises: DuckDB computes its argument for a whole vector of rows (2,048) before the limit stops it | none needed for the select list's answer; filter the bad rows out to have neither raise |

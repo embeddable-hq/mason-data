@@ -324,7 +324,7 @@ export class DuckStore {
         planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
       parameters: duckParameters,
       // a SELECT of no table that orders text under a collation that is not byte order: the synced data's (issue 122)
-      ordersText: (catalog, text, paramOids, under) => ordersText({ catalog, text, paramOids, under, collations: resolver }),
+      ordersText: (catalog, text, paramOids, under, bindable) => ordersText({ catalog, text, paramOids, under, collations: resolver, bindable }),
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
       // a stored JSON path ready or gone (src/duck/kept.ts): the plans kept are made again

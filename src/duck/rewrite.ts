@@ -3305,10 +3305,19 @@ class Rewriter {
     }
     if (collations.some((o, i) => o === 0 && [ls[i], rs[i]].some((x) => x !== undefined && COLLATED_TEXTS.has(this.typeOf(x) ?? -1)))) throw indeterminate();
     const each = collations.map((o) => this.collations.resolve(o));
-    if (each.every((c) => c === null || c.kind === "bytes")) return null;
+    // both sides of a column in ONE shape, the type Postgres compared it as (`inputTypes`), never each side's own: a
+    // literal beside a char(n) is a char(n), compared without its padding (bpcharcmp), a char(n) beside a text its text
+    const types = compared?.inputTypes;
+    if (types === undefined || types.length !== ls.length) {
+      if (textual) throw new Unrewritable(`Mason could not read the types of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
+      return null;
+    }
+    const plain = (i: number): boolean => { const c = each[i]; return c === null || c === undefined || c.kind === "bytes"; };
+    if (types.every((t, i) => t !== BPCHAR && plain(i)) && ![...ls, ...rs].some((x) => this.typeOf(x) === BPCHAR)) return null;
     const keyed = (xs: AstNode[]): AstNode[] => xs.map((x, i) => {
-      const c = each[i];
-      return c === null || c === undefined || c.kind === "bytes" ? x : this.textKey(x, c);
+      const c = each[i], t = types[i]!, v = this.widen(x, t);
+      if (c === null || c === undefined || c.kind === "bytes") return t === BPCHAR ? fn("rtrim", [strip(v)]) : v;
+      return this.textKey(v, c, t === BPCHAR, null);
     });
     return op(name, { RowExpr: { ...bodyOf(l), args: keyed(ls) } }, { RowExpr: { ...bodyOf(r), args: keyed(rs) } });
   }
@@ -3323,12 +3332,17 @@ class Rewriter {
   /** a text value's key under a collation that is not byte order, as ONE text that orders as Postgres does and ends in
    *  the value's own bytes (`icuKey`, `libcKey`). A char(n) is ordered without its padding (bpcharcmp: `'b   '` is `'b'`,
    *  which an ICU key, whose spaces weigh, would put after `'B'`), then its trimmed bytes, then `tie` (what decides
-   *  between two equal char(n) values of another padding), and its value whole, read back from the last bytes */
-  private textKey(a: AstNode, c: Exclude<DuckCollation, { kind: "bytes" }>, tie = ""): AstNode {
+   *  between two equal char(n) values of another padding), and its value whole, read back from the last bytes; `tie`
+   *  null where the key is only compared, never read back (a row comparison), so equal char(n) values have equal keys.
+   *  `padded`: the comparison is of char(n), as the CALLER read it from Postgres's analysis of the comparison, never
+   *  this value's own type (two sides of one comparison keyed in two shapes never compare equal) */
+  private textKey(a: AstNode, c: Exclude<DuckCollation, { kind: "bytes" }>, padded: boolean, tie: string | null): AstNode {
     const v = strip(a);
-    if (this.typeOf(v) !== BPCHAR) return c.kind === "libc" ? libcKey(this.cp, v, c.collate) : icuKey(this.cp, v, c.name);
+    if (!padded) return c.kind === "libc" ? libcKey(this.cp, v, c.collate) : icuKey(this.cp, v, c.name);
     const trimmed = (): AstNode => fn("rtrim", [this.cp(v)]);
     const key = c.kind === "libc" ? fn("__mason_libc_key", [trimmed(), strConst(c.collate)]) : fn("icu_sort_key", [trimmed(), strConst(c.name)]);
+    // (compared, never read back: two char(n) values of another padding are EQUAL, so the key ends at the trimmed bytes)
+    if (tie === null) return concat(key, strConst(" "), fn("hex", [trimmed()]));
     return concat(key, strConst(" "), fn("hex", [trimmed()]), strConst(` ${tie} `), fn("hex", [v]));
   }
 
@@ -3347,7 +3361,7 @@ class Rewriter {
     // (equal char(n) values of another padding: Postgres keeps the first argument, which `tie` makes the least, or
     // the greatest, of the equal keys)
     const args = b.args as AstNode[];
-    const keys = args.map((a, i) => this.textKey(a, c, String(b.op === "IS_LEAST" ? i : args.length - i).padStart(4, "0")));
+    const keys = args.map((a, i) => this.textKey(a, c, t.type === BPCHAR, String(b.op === "IS_LEAST" ? i : args.length - i).padStart(4, "0")));
     const best: AstNode = { MinMaxExpr: { ...b, args: keys } };
     this.done.add(bodyOf(best));
     return fn("decode", [fn("unhex", [fn("regexp_extract", [best, strConst("[^ ]*$")])])]);
@@ -4220,7 +4234,7 @@ class Rewriter {
     // orders as the collation does and ends in the value's own bytes, read back from it (as GREATEST's is)
     if (name === "percentile_disc" && order.length === 1) {
       const sort = bodyOf(order[0]!);
-      const keyed: AstNode = { FuncCall: { ...b, agg_order: [{ SortBy: { ...sort, node: this.textKey(key!, c) } }] } };
+      const keyed: AstNode = { FuncCall: { ...b, agg_order: [{ SortBy: { ...sort, node: this.textKey(key!, c, this.typeOf(key!) === BPCHAR, "") } }] } };
       this.done.add(bodyOf(keyed));
       const value = (k: AstNode): AstNode => fn("decode", [fn("unhex", [fn("regexp_extract", [k, strConst("[^ ]*$")])])]);
       // an array of fractions answers an array of keys

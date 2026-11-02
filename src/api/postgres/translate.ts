@@ -69,7 +69,7 @@ function collect(n: unknown, kind: string, out: Node[] = []): Node[] {
 /**
  * Whether a statement of no table has a construct that can order text, read off the raw tree: a sort (ORDER BY, a
  * window's, an aggregate's or WITHIN GROUP's), <, >, <=, >= (BETWEEN, ANY / ALL and a subquery's among them),
- * GREATEST / LEAST, min / max. One without (`SELECT 1`, `SELECT version()`, `current_setting(…)`, `'a' = 'A'`) is the
+ * GREATEST / LEAST, min / max, and a COLLATE (`'a' = 'A' COLLATE mason_ci`). One without (`SELECT 1`, `SELECT version()`, `current_setting(…)`, `'a' = 'A'`) is the
  * catalog's without asking its analysis, which costs a statement several milliseconds (`ordersText`, issue 122): a
  * statement it says may order is asked, so a false "may" costs time, never an answer.
  */
@@ -80,6 +80,9 @@ export function mayOrderText(n: unknown): boolean {
   for (const [k, v] of Object.entries(n as Any)) {
     if ((k === "sortClause" || k === "orderClause" || k === "agg_order") && Array.isArray(v) && v.length > 0) return true;
     if (k === "MinMaxExpr") return true;
+    // a COLLATE names a collation the source declared, whose rules the catalog's copy of it does not hold: a
+    // nondeterministic one equates otherwise, and the synced data's plan refuses it by name (`ordersText` asks)
+    if (k === "CollateClause") return true;
     if ((k === "A_Expr" || k === "SubLink") && v !== null && typeof v === "object") {
       const b = v as Any;
       if (typeof b.kind === "string" && b.kind.includes("BETWEEN")) return true;

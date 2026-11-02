@@ -114,6 +114,9 @@ export interface Typed {
   inputCollation: number;
   /** a row comparison's (ROWCOMPAREEXPR) collation of each column it compares, in order */
   inputCollations?: number[];
+  /** a row comparison's type of each column it compares, as Postgres coerced both sides to it (the left's: `('b', 3)`
+   *  beside a char(4) is compared as a char(4)) */
+  inputTypes?: number[];
   /** a VAR's query level: 0 this query's own column, 1 the query around it (a correlated subquery's) */
   levelsUp: number | null;
   /** a CONST's value as Postgres parsed it, its bytes (`constvalue`: `8 [ 0 -48 70 … ]`); null when NULL or not a CONST */
@@ -395,6 +398,7 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
   if (constantExpression(v)) typed.constant = true;
   // a row comparison compares each column under its own collation (RowCompareExpr's inputcollids)
   if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.inputcollids)) typed.inputCollations = v.inputcollids.filter((x) => x !== "o").map((x) => typeof x === "string" ? num(x) ?? 0 : 0);
+  if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.largs)) typed.inputTypes = v.largs.filter(isNode).map((a) => exprType(a)?.type ?? 0);
   if (v._node === "AGGREF") typed.keys = keysOf(v.args, v.aggorder, v.aggdistinct, []);
   const text = constText(v);
   if (text !== undefined) typed.text = text;

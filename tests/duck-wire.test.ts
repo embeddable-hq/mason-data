@@ -5881,7 +5881,11 @@ test("collation resolver: a column's own collation, a COLLATE on either side, a 
       // #122 no table under a COLLATE that is not byte order
       "SELECT 'a' < 'B' COLLATE \"und-x-icu\", ' alpha' COLLATE \"und-x-icu\" < '10'",
       "SELECT x FROM (VALUES ('b'), ('A'), (' a'), ('10')) AS v(x) ORDER BY x COLLATE \"und-x-icu\"",
+      // no table, computing a numeric: the catalog's exact digits (the synced data holds a VALUES list's otherwise)
+      "SELECT length((v.x / 1)::text), (v.x / 1)::text || '' FROM (VALUES (1.00000000000000000001::numeric(30,20)), (2.5)) AS v(x) ORDER BY 1, (v.x / 1)::text COLLATE \"und-x-icu\"",
     ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    // no table, as a simple Query, naming a parameter: Postgres's 42P02 from the catalog, never a Bind's protocol error
+    await assert.rejects(c.query("SELECT $1::text < $2::text COLLATE \"und-x-icu\""), (e: pg.DatabaseError) => e.code === "42P02");
     // Postgres's errors, from the analysis: two explicit COLLATEs, two implicit ones
     await assert.rejects(c.query("SELECT id FROM colls WHERE c COLLATE \"C\" > i COLLATE \"und-x-icu\""), (e: pg.DatabaseError) => e.code === "42P21");
     await assert.rejects(c.query("SELECT id FROM colls WHERE c > i"), (e: pg.DatabaseError) => e.code === "42P22");
@@ -5889,6 +5893,21 @@ test("collation resolver: a column's own collation, a COLLATE on either side, a 
     // a bound statement: the resolver is asked at Parse, as at Query
     const bound = { text: "SELECT id FROM colls WHERE i > $1 ORDER BY i, id", values: ["b"] };
     assert.deepEqual((await c.query({ ...bound, rowMode: "array" })).rows, (await truth.query(bound.text, bound.values, { rowMode: "array" })).rows);
+  } finally { await c.end(); await a.close(); }
+});
+
+// (a row comparison is not verified, issue 284, so the listener here refuses nothing: what is held is its keys)
+test("collation resolver: a row comparison keys both sides of a column in the type Postgres compared it as", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    for (const sql of [
+      // a literal beside a char(n) is a char(n), its padding ignored ('b' equals 'b     ')
+      "SELECT id FROM colls WHERE (d::char(6) COLLATE \"und-x-icu\", id) < ('b', 99) ORDER BY id",
+      "SELECT id FROM colls WHERE (d::char(6) COLLATE \"und-x-icu\", id) <= ('b', 1) ORDER BY id",
+      "SELECT id FROM colls WHERE (i, d::char(6)) <= ('b', 'b') ORDER BY id",
+      // a char(n) beside a text is its text, without its padding
+      "SELECT id FROM colls WHERE (i, 1) <= (d::char(6), 0) ORDER BY id",
+    ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
   } finally { await c.end(); await a.close(); }
 });
 
@@ -5900,6 +5919,13 @@ test("collation resolver: refuses what it cannot follow by name, and a collation
     await assert.rejects(c.query("SELECT id FROM colls ORDER BY d COLLATE mason_num, id"), (e: pg.DatabaseError) => e.code === "0A000" && /mason_num/.test(e.message) && !/duckdb/i.test(e.message));
     // a nondeterministic collation anywhere: its equality is not the engine's
     await assert.rejects(c.query("SELECT id FROM colls WHERE d = 'B' COLLATE mason_ci"), (e: pg.DatabaseError) => e.code === "0A000" && /nondeterministic/.test(e.message));
+    // ... a statement of no table's too, though nothing in it orders: the catalog's mason_ci is not the source's
+    for (const sql of ["SELECT 'a' = 'A' COLLATE mason_ci", "SELECT 'a' COLLATE mason_ci IN ('A', 'z')",
+      "SELECT DISTINCT x COLLATE mason_ci FROM (VALUES ('a'), ('A')) AS v(x)",
+      "SELECT count(*) FROM (VALUES ('a'), ('A')) AS v(x) GROUP BY x COLLATE mason_ci",
+      "SELECT x FROM (VALUES ('b'), ('A')) AS v(x) WHERE x = 'a' COLLATE mason_ci"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /nondeterministic/.test(e.message), sql);
+    }
     // PGlite has "unicode", a source that lacks it does not
     await assert.rejects(c.query("SELECT id FROM colls ORDER BY d COLLATE \"unicode\""), (e: pg.DatabaseError) => e.code === "42704" && /"unicode"/.test(e.message));
     // unused for an order, an ICU keyword is no refusal: equality is the C key

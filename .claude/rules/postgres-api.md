@@ -34,7 +34,11 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   whose analysis ORDERS text under a collation that is not byte order (`SELECT 'a' < 'B'` under en_US or ICU, a VALUES
   sorted, a `COLLATE "und-x-icu"`) is the synced data's instead (`ordersText`, src/duck/plan.ts: one analysis, 5 to
   13 ms measured on a loaded laptop, so asked only of a statement of no table whose raw tree has a sort, `<`, `>`,
-  BETWEEN, GREATEST / LEAST or min / max: `mayOrderText`, translate.ts; issue 122); equality and every other one stay the catalog's.
+  BETWEEN, GREATEST / LEAST, min / max or a COLLATE: `mayOrderText`, translate.ts; issue 122); equality and every other
+  one stay the catalog's. A COLLATE naming a collation the resolver refuses (a nondeterministic one) is the synced
+  data's, which refuses it by name, ordered or not. Two stay the catalog's though they order text: one naming a
+  parameter in a simple Query (Postgres's 42P02, the analysis being a Parse's), and one that holds a numeric (a literal
+  such as 1.5 included), which the catalog computes exactly (Mason gap `fromless-numeric-text-order`, its text then in byte order).
   It holds the copied tables' definitions (`schema.ts`, from the copy's own columns and types, each column's own
   collation) and the source's collations (`collationDdl`: a locale PGlite lacks is made under its provider's root, so
   its name and provider are the source's, and Postgres's analysis names it), and no rows. It is ONE connection every session shares, so the

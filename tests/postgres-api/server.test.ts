@@ -877,7 +877,7 @@ test("no table: a statement that orders text under a collation is the synced dat
   const asked: string[] = [], planned: string[] = [];
   const duck: DuckOptions = {
     ...listener,
-    ordersText: async (catalog, text, paramOids, under) => { asked.push(text); return listener.ordersText!(catalog, text, paramOids, under); },
+    ordersText: async (catalog, text, paramOids, under, bindable) => { asked.push(text); return listener.ordersText!(catalog, text, paramOids, under, bindable); },
     plan: (catalog, text, ...rest) => { planned.push(text); return listener.plan(catalog, text, ...rest); },
   };
   const s = await startPostgresApi({

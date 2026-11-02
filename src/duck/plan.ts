@@ -295,16 +295,23 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  * the resolver says whether that collation is byte order. True: the statement is planned for the synced data, made and
  * refused like any other. A statement the analysis refuses stays the catalog's, which raises Postgres's own error.
  */
-export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver }): Promise<boolean> {
+export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<boolean> {
   const analysis = await analyze(o.catalog, o.text, o.paramOids, o.under);
   if ("refused" in analysis) return false;
+  // the analysis as the session runs the statement: a simple Query binds no parameter, so one naming `$1` is Postgres's
+  // 42P02, which the catalog answers (the analysis above is a Parse's, which would infer its type)
+  if (!o.bindable && analysis.params.length > 0) return false;
   const oids = collationOids(analysis.tree);
   if (oids.size === 0) return false;
   let resolved: StatementCollations;
   // (a collation the source lacks, or one Mason cannot follow: the synced data's plan refuses it by name, never the
-  // catalog's byte order)
+  // catalog's byte order; a nondeterministic one wherever it is named, equality and GROUP BY included)
   try { resolved = await o.collations.prepare((sql) => catalogRows(o.catalog, sql), oids); }
   catch (e) { if (e instanceof Unrewritable) return true; throw e; }
+  // a statement of no table that holds a numeric (a literal such as 1.5 included) stays the catalog's, which computes it exactly, its text in byte
+  // order as before (Mason gap fromless-numeric-text-order): the synced data holds a VALUES list's numeric otherwise
+  // than Postgres (issue 342's class), and the catalog answered it right
+  if ([...analysis.types.values()].some((ts) => ts.some((t) => t.type === NUMERIC || t.type === NUMERIC_ARRAY))) return false;
   const ordering = (coll: number): boolean => {
     try { const c = resolved.resolve(coll); return c !== null && c.kind !== "bytes"; }
     catch (e) { if (e instanceof Unrewritable) return true; throw e; }
@@ -319,6 +326,8 @@ export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Ui
     ...(fns.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_proc WHERE oid IN (${fns.join(", ")}) AND proname IN ('min', 'max')`] : [])].join(" UNION ALL "));
   return named.length > 0;
 }
+
+const NUMERIC = 1700, NUMERIC_ARRAY = 1231;
 
 /** a rewrite's refusal as the statement's: a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its
  *  SQLSTATE, and no gap */

@@ -20,7 +20,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE
   "en_US"` on an ICU database, read from the source on its first use, as the database's own is). Before, these sorted
   or compared under the database's collation, or byte order, without saying so. A `SELECT` of no table that sorts or
-  compares text (`SELECT 'a' < 'B'`) now answers under the database's collation rather than byte order, and
+  compares text (`SELECT 'a' < 'B'`) now answers under the database's collation rather than byte order (one that
+  also holds a numeric, such as `1.5`, still answers in byte order, its numbers exact), and
   `percentile_disc` and `mode()` of text answer under every collation. Two kinds are refused by name rather than
   answered differently: a nondeterministic collation, and an ICU collation with a keyword (`und-u-kn`); `rank(…)
   WITHIN GROUP` and the other hypothetical-set aggregates are refused by name rather than with an internal error.

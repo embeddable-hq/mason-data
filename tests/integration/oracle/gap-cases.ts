@@ -11,6 +11,7 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "interval-style", sql: "SET LOCAL IntervalStyle = 'iso_8601'" },
   { gap: "libc-mark-run-form", sql: "SELECT 'a6ß' > E'a\\u03086ß' FROM public.one" },
   { gap: "libc-rare-letter", sql: "SELECT E'\\uA79A' < E'\\u00C4' FROM public.one" },
+  { gap: "fromless-numeric-text-order", sql: "SELECT 1.5 AS n, 'a' < 'B' AS lt" },
   { gap: "explain-option", sql: "EXPLAIN (FORMAT XML) SELECT id FROM typed" },
   { gap: "latest-order", sql: "SELECT latest(b) FROM latest_t" },
   { gap: "latest-quotient", sql: "SELECT g, latest(n / 3 ORDER BY a, id) FROM latest_t GROUP BY g ORDER BY g" },

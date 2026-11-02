@@ -136,6 +136,12 @@ export const COLLATION_CASES: Array<{ name: string; sql: string }> = [
   { name: "collation: no table, a window's ORDER BY", sql: "SELECT x, row_number() OVER (ORDER BY x) FROM (VALUES ('b'), ('A')) AS v(x) ORDER BY 2" },
   { name: "collation: no table, ARRAY of a sorted subquery", sql: "SELECT ARRAY(SELECT x FROM (VALUES ('b'), ('A')) AS v(x) ORDER BY x)" },
   { name: "collation: no table, a scalar subquery's max", sql: "SELECT (SELECT max(x) FROM (VALUES ('b'), ('A')) AS v(x))" },
+  // a statement of no table that names a nondeterministic collation, though nothing in it orders: refused by name,
+  // never the catalog's copy of the collation (#253 B, review r1)
+  { name: "collation: no table, equal under a nondeterministic collation", sql: "SELECT 'a' = 'A' COLLATE mason_ci" },
+  { name: "collation: no table, grouped under a nondeterministic collation", sql: "SELECT count(*) FROM (VALUES ('a'), ('A')) AS v(x) GROUP BY x COLLATE mason_ci" },
+  // a statement of no table that computes a numeric: the catalog's exact digits, its text order the catalog's
+  { name: "collation: no table, a numeric quotient's text sorted", sql: "SELECT length((v.x / 1)::text), (v.x / 1)::text || '' FROM (VALUES (1.00000000000000000001::numeric(30,20)), (2.5)) AS v(x) ORDER BY 1, 2" },
   { name: "collation: no table, percentile_disc", sql: "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY x) FROM (VALUES ('b'), ('A'), (' a')) AS v(x)" },
   // #122 stays the catalog's
   { name: "collation: no table, equality stays the catalog's", sql: "SELECT 'a' = 'A'" },

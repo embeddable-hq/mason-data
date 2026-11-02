@@ -275,8 +275,10 @@ const KNOWN: Decided[] = [
   // Linux, as in CI, or both on macOS: the machines' math libraries decide, so `machineFloat`)
   // (a source of another collation meets none of these, so `collation` decides staleness, and each gap's `heldBy` is this file:
   // Mason gap libc-mark-run-form
-  // Mason gap libc-rare-letter)
+  // Mason gap libc-rare-letter
+  // Mason gap fromless-numeric-text-order)
   { sql: /^SELECT 'a6ß' > E'a\\u03086ß' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-mark-run-form", why: "a mark's skipped run compares ß's third level with a digit's: glibc's one scale, Mason's per letter" },
+  { sql: /^SELECT 1\.5 AS n, 'a' < 'B' AS lt$/, collation: "not-c", kind: "value", gap: "fromless-numeric-text-order", why: "a statement of no table that computes a numeric is the catalog's, whose text order is byte order" },
   { sql: /^SELECT E'\\uA79A' < E'\\u00C4' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-rare-letter", why: "a rare letter's weight no spelling of it says" },
   { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },
