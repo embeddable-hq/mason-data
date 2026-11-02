@@ -30,8 +30,13 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   a deadline per statement — `statementMs`, `MASON_PG_CATALOG_TIMEOUT_MS` — since it runs synchronously on whatever
   thread hosts it): `pg_catalog` and `information_schema` statements, and a statement that reads no table at all
   (`SELECT version()`, `SELECT 1`, `current_setting(…)`), are forwarded, under per-session statement names, and the
-  reply relayed byte for byte, never hand-answered from text matching. It holds the copied tables' definitions
-  (`schema.ts`, from the copy's own columns and types) and no rows. It is ONE connection every session shares, so the
+  reply relayed byte for byte, never hand-answered from text matching. Its database is C, so a statement of no table
+  whose analysis ORDERS text under a collation that is not byte order (`SELECT 'a' < 'B'` under en_US or ICU, a VALUES
+  sorted, a `COLLATE "und-x-icu"`) is the synced data's instead (`ordersText`, src/duck/plan.ts: one analysis, about
+  a millisecond, asked only of a statement of no table; issue 122); equality and every other one stay the catalog's.
+  It holds the copied tables' definitions (`schema.ts`, from the copy's own columns and types, each column's own
+  collation) and the source's collations (`collationDdl`: a locale PGlite lacks is made under its provider's root, so
+  its name and provider are the source's, and Postgres's analysis names it), and no rows. It is ONE connection every session shares, so the
   server keeps its protocol state itself: after an ErrorResponse it sends the Sync Postgres waits for
   (`ignore_till_sync`; without it one refused Parse silenced the catalog for every session), and a `SET` it validates
   runs inside a transaction it rolls back. A view or default of the source the catalog cannot hold is said in one

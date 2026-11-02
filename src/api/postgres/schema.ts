@@ -45,7 +45,13 @@ export interface PgColumn {
   /** a type a database made that the copy holds as its text (a composite, a range, an extension's: src/duck/held-types.ts):
    *  the catalog declares it under its name, with nothing defined over it, so a tool reads the source's type */
   made?: boolean | "row" | undefined;
+  /** the column's own collation where it is not its type's (src/cli/preflight.ts), by schema and name: the catalog
+   *  declares the column `COLLATE` it, so Postgres's analysis orders it as the source does */
+  collation?: { schema: string; name: string } | undefined;
 }
+
+/** A collation of the source (pg_collation), as the catalog declares one it lacks (src/duck/collation.ts SourceCollation) */
+export interface PgCollation { schema: string; name: string; provider: string; collate: string | null; locale: string | null; deterministic: boolean }
 
 /** the input function's name of a type the catalog declares for a `made` column: what the planner tells one by */
 export const HELD_TYPE_INPUT = "mason_held_in";
@@ -122,6 +128,9 @@ export interface PgSchema {
   /** the source's views, created in the catalog after the tables (catalog.ts `catalogViews`) and
    *  answered over the copied tables (src/duck/views.ts) */
   views?: PgView[] | undefined;
+  /** the source's collations, each declared in the catalog where it lacks it, before the tables (catalog.ts
+   *  `catalogDdl`): a statement's COLLATE resolves, or is 42704, as on the source */
+  collations?: PgCollation[] | undefined;
 }
 
 /** A source view: its definition with every name outside pg_catalog qualified (src/cli/preflight.ts VIEWS_SQL) */

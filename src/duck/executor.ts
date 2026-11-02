@@ -389,8 +389,9 @@ export class Executor {
   async connect(): Promise<DuckConnection> { return new RemoteConnection(this, await this.call<number>({ op: "connect" })); }
   writer(): DuckConnection { return new RemoteConnection(this, 0); }
 
-  /** the libc order's two functions (src/duck/functions.ts registerLibcOrder), registered on the worker */
-  async registerLibcOrder(order: LibcOrder): Promise<void> { await this.call({ op: "libc", order }); }
+  /** a libc order's functions (src/duck/functions.ts registerLibcOrder), registered on the worker: the key under
+   *  `collate`, and jsonb's order under the database's (`database`) */
+  async registerLibcOrder(collate: string, order: LibcOrder, database: boolean): Promise<void> { await this.call({ op: "libc", collate, order, database }); }
   /** how many vectors each Mason function was called with so far (src/duck/functions.ts FUNCTION_CALLS: the worker's
    *  count, the functions being its) — what a test or a measurement reads to know whether a statement reached one */
   async functionCalls(): Promise<Map<string, number>> { return new Map(Object.entries(await this.call<Record<string, number>>({ op: "calls" }))); }

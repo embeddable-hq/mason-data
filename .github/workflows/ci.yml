@@ -268,11 +268,57 @@ jobs:
           retention-days: 7
           overwrite: true
 
-  # REQUIRED. Fails unless both legs succeeded, and together they asked every statement in every phase and hold what a
-  # whole run asserts at its end: no stale decision, no dead gap, src/duck/verified.ts, the fixture's tallies.
+  # THE COLLATION RESOLVER UNDER AN ICU AND A C DATABASE (issue 253, decision B): the service's database is glibc's
+  # en_US.utf8, so the legs above ask every statement under libc; this asks the resolver's statements
+  # (tests/integration/oracle/collations.ts) and the collation gaps under the other two providers, in a database made on
+  # the same service (IT_ORACLE_COLLATION). Not a leg: no leg report, and its artifact is outside `ran-oracle-*`, so
+  # the legs' whole (scripts/oracle-legs.ts) is the default database's alone. The whole oracle under each is issue ISSUE_FULL's.
+  collation:
+    name: oracle collation ${{ matrix.collation }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        collation: [icu, c]
+    services: *postgres-service
+    env: *postgres-env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'          # never 24: the build job says why
+          cache: npm
+      - run: npm ci
+      - uses: actions/cache@v4
+        with:
+          path: cli/platforms
+          key: extensions-${{ hashFiles('cli/extensions.json') }}
+      - run: node cli/extensions.ts linux-x64
+      - run: node cli/extensions.ts --node-modules node_modules
+      - name: the collation statements under ${{ matrix.collation }}
+        env:
+          IT_ORACLE_COLLATION: ${{ matrix.collation }}
+          IT_ORACLE_ONLY: '^collation: |^the table colls,|^gap case: (collation-unknown|hypothetical-set)$'
+          TMPDIR: ${{ runner.temp }}/collation
+        run: |
+          mkdir -p "$TMPDIR"
+          node --test --test-timeout=1500000 --test-force-exit tests/integration/duck-oracle.itest.ts
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: collation-${{ matrix.collation }}
+          path: ${{ runner.temp }}/collation/duck-oracle-differences.txt
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+  # REQUIRED. Fails unless both legs and both collations succeeded, and together the legs asked every statement in every
+  # phase and hold what a whole run asserts at its end: no stale decision, no dead gap, src/duck/verified.ts, the
+  # fixture's tallies.
   integration-oracle:
     name: integration (oracle)
-    needs: [oracle]
+    needs: [oracle, collation]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -12,6 +12,7 @@ import * as os from "node:os";
 import { PgConnection, PgError } from "../cdc/pg-wire.ts";
 import { parseDatabaseUrl, type PgConnection as UrlParts } from "../lib/database-url.ts";
 import type { Failure, NextStep } from "./command.ts";
+import type { SourceCollation } from "../duck/collation.ts";
 
 /** What `mason start` was given, completed the way libpq completes a URL: the user defaults to the OS user. */
 export interface Source extends UrlParts { url: string; remote: boolean }
@@ -190,6 +191,9 @@ export interface SourceColumnInfo {
   generated?: true;
   /** the sequence a serial or identity column owns, qualified and quoted as `pg_get_serial_sequence` returns it */
   sequence?: string;
+  /** the column's own collation (pg_attribute.attcollation) where it is not its type's, by schema and name: the catalog
+   *  declares it, so Postgres's analysis orders the column as the source does (src/duck/collation.ts) */
+  collation?: { schema: string; name: string };
 }
 
 export interface SourceFacts {
@@ -206,8 +210,25 @@ export interface SourceFacts {
   /** how the database orders text (pg_database: `provider` c libc, i ICU, b builtin; `locale` ICU's or builtin's):
    *  Mason sorts as it does (src/duck/rewrite.ts DuckCollation) */
   collation?: { provider: string; collate: string; locale: string | null; version?: string | null };
+  /** the database's collations (pg_collation, of its encoding): the catalog declares those it lacks, and what a
+   *  collation a statement names means is the source's row of that name (src/duck/collation.ts) */
+  collations?: SourceCollation[];
   /** the views this user can read (Mason serves them over the copied tables, src/duck/views.ts) */
   views?: SourceView[];
+}
+
+/** pg_collation_actual_version (a libc collation's glibc now) exists from this server_version_num */
+const COLLATION_ACTUAL_NUM = 130000;
+
+/** The database's collations of its encoding, each as src/duck/collation.ts reads it. The locale's column differs by
+ *  version (colllocale from 17, colliculocale 15–16, none before: collcollate holds ICU's), so the row is read whole. */
+export async function readCollations(pg: Pick<PgConnection, "query">, versionNum: number): Promise<SourceCollation[]> {
+  const version = versionNum >= COLLATION_ACTUAL_NUM ? "CASE WHEN c.collprovider = 'c' THEN pg_collation_actual_version(c.oid) END" : "NULL::text";
+  const rows = JSON.parse((await pg.query(`SELECT coalesce(json_agg(to_jsonb(c) || jsonb_build_object('schema', n.nspname, 'actual', ${version}) ORDER BY c.oid), '[]')::text ` +
+    "FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace WHERE c.collencoding IN (-1, pg_char_to_encoding(getdatabaseencoding()))")).rows[0]?.[0] ?? "[]") as Array<Record<string, string | boolean | null>>;
+  return rows.map((r) => ({ schema: String(r.schema), name: String(r.collname), provider: String(r.collprovider ?? "c"), collate: (r.collcollate ?? null) as string | null,
+    locale: (r.colllocale ?? r.colliculocale ?? (r.collprovider === "i" ? r.collcollate : null) ?? null) as string | null, deterministic: r.collisdeterministic !== false,
+    version: (r.actual ?? r.collversion ?? null) as string | null }));
 }
 
 /** A view of the source: its definition with every name outside pg_catalog qualified (VIEWS_SQL), so it means the
@@ -259,6 +280,9 @@ export const TABLES_SQL = `SELECT json_agg(t ORDER BY t.schema, t.table)::text F
         'type_array_oid', (SELECT typarray FROM pg_type WHERE oid = b.oid),
         'type_kind', (SELECT coalesce(e.typtype, t.typtype) FROM pg_type t LEFT JOIN pg_type e ON e.typarray = t.oid WHERE t.oid = b.oid),
         'default', pg_get_expr(d.adbin, d.adrelid), 'identity', a.attidentity, 'generated', a.attgenerated,
+        -- the column's own collation, where it is not its (base) type's: the catalog declares it (src/duck/collation.ts)
+        'collation', (SELECT json_build_object('schema', cn.nspname, 'name', co.collname) FROM pg_collation co JOIN pg_namespace cn ON cn.oid = co.collnamespace
+          WHERE co.oid = a.attcollation AND a.attcollation <> 0 AND a.attcollation <> (SELECT typcollation FROM pg_type WHERE oid = b.oid)),
         -- the sequence a serial or identity column owns: asked only of a column with a default or an identity
         'sequence', CASE WHEN d.adbin IS NOT NULL OR a.attidentity <> '' THEN pg_get_serial_sequence(format('%I.%I', n.nspname, c.relname), a.attname) END) ORDER BY a.attnum), '[]'::json)
       FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
@@ -283,7 +307,7 @@ interface TableRow {
   schema: string; table: string; oid: number; row_type_oid: number | string; replica_identity: string; reltuples: number; unanalysed: boolean; bytes: number; comment: string | null; key: string[];
   unique_keys: Array<{ name: string; constraint: boolean; nulls_not_distinct: boolean; columns: string[] }>;
   columns: Array<{ name: string; type: string; domain: boolean; type_kind: string; not_null: boolean; comment: string | null; type_oid: number | string; type_array_oid: number | string;
-    default: string | null; identity: string; generated: string; sequence: string | null }>;
+    default: string | null; identity: string; generated: string; sequence: string | null; collation: { schema: string; name: string } | null }>;
   foreign_keys: Array<{ column: string; target: string; target_column: string }>;
 }
 
@@ -302,7 +326,8 @@ export async function collationVersion(pg: Pick<PgConnection, "query">, versionN
 }
 
 /** The database's facts: its version, whether it is a standby, and every table this user can read. */
-export async function readSourceFacts(pg: PgConnection, counted: Map<number, number> = COUNTED): Promise<SourceFacts> {
+/** `collations: false` (the run's 10-second refresh) leaves the database's collations unread: they were read at the start */
+export async function readSourceFacts(pg: PgConnection, counted: Map<number, number> = COUNTED, o: { collations?: boolean } = {}): Promise<SourceFacts> {
   const r = (await pg.query("SELECT current_setting('server_version_num'), current_setting('server_version'), pg_is_in_recovery()::text")).rows[0]!;
   const rows = JSON.parse((await pg.query(TABLES_SQL)).rows[0]?.[0] ?? "null") as TableRow[] | null;
   const tables: SourceTable[] = [];
@@ -320,7 +345,8 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
         ...(Number(c.type_oid) >= 16384 ? { typeOid: Number(c.type_oid), ...(Number(c.type_array_oid) > 0 ? { typeArrayOid: Number(c.type_array_oid) } : {}) } : {}),
         // a generated column's pg_attrdef row is its expression, never a default
         ...(c.default !== null && c.generated === "" ? { default: c.default } : {}), ...(c.identity === "a" || c.identity === "d" ? { identity: c.identity } : {}),
-        ...(c.generated === "s" ? { generated: true as const } : {}), ...(c.sequence !== null ? { sequence: c.sequence } : {}) })),
+        ...(c.generated === "s" ? { generated: true as const } : {}), ...(c.sequence !== null ? { sequence: c.sequence } : {}),
+        ...(c.collation !== null && c.collation !== undefined ? { collation: c.collation } : {}) })),
       foreignKeys: t.foreign_keys.map((f) => ({ column: f.column, target: f.target, targetColumn: f.target_column })),
       uniqueKeys: t.unique_keys.map((u) => ({ name: u.name, columns: u.columns, constraint: u.constraint, nullsNotDistinct: u.nulls_not_distinct })),
       ...(Number(t.row_type_oid) > 0 ? { rowTypeOid: Number(t.row_type_oid) } : {}),
@@ -334,7 +360,8 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
   const collation = { provider: db.datlocprovider ?? "c", collate: db.datcollate ?? "C", locale: db.datlocale ?? db.daticulocale ?? null, version: await collationVersion(pg, Number(r[0]), db.datcollversion ?? null) };
   const views = (JSON.parse((await pg.query(VIEWS_SQL)).rows[0]?.[0] ?? "[]") as Array<SourceView & { oid: number }>)
     .map((v) => ({ schema: v.schema, name: v.name, definition: v.definition, comment: v.comment }));
-  return { version: Number(r[0]), versionText: r[1] ?? "", standby: r[2] === "true", tables, systemIdentifier: await systemIdentifier(pg), collation, views };
+  const collations = o.collations === false ? undefined : await readCollations(pg, Number(r[0]));
+  return { version: Number(r[0]), versionText: r[1] ?? "", standby: r[2] === "true", tables, systemIdentifier: await systemIdentifier(pg), collation, ...(collations !== undefined ? { collations } : {}), views };
 }
 
 /** The server's system identifier, or null when this user may not read it (only that refusal: any other error is real). */

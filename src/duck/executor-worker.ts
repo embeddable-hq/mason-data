@@ -124,7 +124,7 @@ async function answer(m: Request): Promise<{ value: unknown; transfer?: Transfer
       catch (e) { log(`closing a connection of the engine failed: ${(e as Error).message}`); }
       return undefined;
     }
-    case "libc": registerLibcOrder(need(conns, 0, "connection"), m.order as Parameters<typeof registerLibcOrder>[1]); return { value: null };
+    case "libc": registerLibcOrder(need(conns, 0, "connection"), String(m.collate), m.order as Parameters<typeof registerLibcOrder>[2], m.database === true); return { value: null };
     case "calls": return { value: Object.fromEntries(FUNCTION_CALLS) };
     case "function rows": return { value: Object.fromEntries(FUNCTION_ROWS) };
     case "runner.open": {

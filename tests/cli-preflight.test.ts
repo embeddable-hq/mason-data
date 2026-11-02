@@ -9,6 +9,8 @@ import { PgError } from "../src/cdc/pg-wire.ts";
 import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, serverlessHost, sourceWarnings, unpickableReason,
   type SourceFacts, type SourceTable } from "../src/cli/preflight.ts";
 import { unassignedPort } from "./test-ports.ts";
+import { PGlite } from "@electric-sql/pglite";
+import { readCollations, TABLES_SQL } from "../src/cli/preflight.ts";
 
 const source = (url: string) => {
   const r = parseSource(url);
@@ -116,4 +118,25 @@ test("a database elsewhere is warned about: the copy, a primary, a serverless co
   assert.ok(neon.some((w) => /Neon suspends an idle compute/.test(w)));
   assert.ok(!sourceWarnings(source("postgres://me@replica.example.com/app"), facts(true)).some((w) => /PRIMARY/.test(w)));
   assert.equal(serverlessHost("db.abc.supabase.co"), null);
+});
+
+// THE SOURCE'S COLLATIONS (issue 253, decision B): a column's own collation, where it is not its type's, and every
+// collation of the database's encoding, read where the tables are; the catalog declares them (src/api/postgres/catalog.ts)
+test("collation: a column's own collation and the source's collations are read with the tables", async () => {
+  const db = new PGlite();
+  try {
+    await db.exec("CREATE COLLATION public.mason_num (provider = icu, locale = 'und-u-kn'); " +
+      "CREATE COLLATION public.mason_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false); " +
+      "CREATE TABLE public.colls (id int PRIMARY KEY, d text, c text COLLATE \"C\", n text COLLATE public.mason_num, a text[] COLLATE \"C\", v varchar(4) COLLATE \"und-x-icu\")");
+    const pg = { query: async (sql: string) => ({ rows: (await db.query<unknown[]>(sql, [], { rowMode: "array" })).rows }) };
+    const tables = JSON.parse(String((await pg.query(TABLES_SQL)).rows[0]![0])) as Array<{ table: string; columns: Array<{ name: string; collation: unknown }> }>;
+    assert.deepEqual(tables.find((t) => t.table === "colls")!.columns.map((c) => [c.name, c.collation]),
+      [["id", null], ["d", null], ["c", { schema: "pg_catalog", name: "C" }], ["n", { schema: "public", name: "mason_num" }], ["a", { schema: "pg_catalog", name: "C" }],
+        ["v", { schema: "pg_catalog", name: "und-x-icu" }]]);
+    const collations = await readCollations(pg as unknown as Parameters<typeof readCollations>[0], 170000);
+    const own = (name: string) => collations.find((c) => c.name === name);
+    assert.deepEqual(own("mason_num"), { schema: "public", name: "mason_num", provider: "i", collate: null, locale: "und-u-kn", deterministic: true, version: own("mason_num")!.version });
+    assert.equal(own("mason_ci")?.deterministic, false);
+    assert.deepEqual([own("C")?.provider, own("C")?.collate, own("und-x-icu")?.provider, own("und-x-icu")?.locale], ["c", "C", "i", "und"]);
+  } finally { await db.close(); }
 });

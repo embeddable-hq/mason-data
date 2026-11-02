@@ -213,6 +213,9 @@ export interface DuckOptions {
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
+  /** whether a statement of no table orders text under a collation that is not byte order (src/duck/plan.ts
+   *  `ordersText`): then it is the synced data's, never the catalog's C database's. Absent: every such one is the catalog's */
+  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState): Promise<boolean>;
   /** moves when what a plan is made from moves outside the schema (a stored JSON path ready or gone, src/duck/kept.ts):
    *  the plans kept are made again */
   generation?(): number;
@@ -1444,12 +1447,24 @@ class Session {
     return duckTranslate(stmt, text);
   }
 
+  /**
+   * A SELECT OF NO TABLE THAT ORDERS TEXT (issue 122): the catalog's database is C, so one whose analysis orders text
+   * under a collation that is not byte order is the synced data's (src/duck/plan.ts `ordersText`, decided by the
+   * analysis, never the text), planned and refused like any other; every other stays the catalog's (SELECT 1, version(),
+   * 'a' = 'A', anything under C).
+   */
+  private async routed(t: AnyTranslation, text: string, paramOids: readonly number[]): Promise<AnyTranslation> {
+    const ask = this.server.options.duck.ordersText;
+    if (t.kind !== "catalog" || t.fromless === undefined || ask === undefined) return t;
+    return await ask((b) => this.server.catalog.run(b), text, paramOids, this.sessionState()) ? { kind: "duckdb", sql: text, names: t.fromless.names } : t;
+  }
+
   /** One statement of a simple query: the whole reply but the ReadyForQuery. */
   private async runSimple(raw: RawStmt, text: string, whole: string): Promise<Buffer[]> {
     if (raw.stmt === undefined) return [emptyQueryResponse()];
     const now = this.txStart(this.statementNow);
     this.heldToFailedBlock(raw.stmt);
-    const t = this.classify(raw.stmt, text);
+    const t = await this.routed(this.classify(raw.stmt, text), text, []);
     switch (t.kind) {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
@@ -1734,14 +1749,16 @@ class Session {
    */
   private async explaining(raw: RawStmt, whole: string, t: ExplainTranslation, paramOids: readonly number[]): Promise<Explaining> {
     const options = explainOptions(t.options);
-    const inner = this.classify(t.query, "");
-    if (inner.kind === "catalog") return { options, plan: null };
-    if (inner.kind !== "duckdb") throw new PgError({ code: "0A000", message: "EXPLAIN of this statement is not supported: a SELECT is explained" });
+    const classified = this.classify(t.query, "");
+    if (classified.kind === "catalog" && classified.fromless === undefined) return { options, plan: null };
+    if (classified.kind !== "duckdb" && classified.kind !== "catalog") throw new PgError({ code: "0A000", message: "EXPLAIN of this statement is not supported: a SELECT is explained" });
     const bytes = Buffer.from(whole, "utf8");
     const base = raw.stmt_location ?? 0;
     const text = bytes.subarray(base, raw.stmt_len ? base + raw.stmt_len : bytes.length).toString("utf8");
     const found = await explainedText(text, t.query);
     if (found === null) throw new PgError({ code: "0A000", message: "Mason cannot find the statement this EXPLAIN explains in its text (a Mason gap: report it, with the statement)" });
+    // a statement of no table is explained as what answers it: the synced data's plan where it orders text (`routed`)
+    if ((await this.routed(classified, found.text, paramOids)).kind === "catalog") return { options, plan: null };
     let plan: DuckPlan;
     try {
       const grants = this.grants();
@@ -2202,7 +2219,7 @@ class Session {
     if (m.name !== "" && this.statements.has(m.name)) throw new PgError({ code: "42P05", message: `prepared statement "${m.name}" already exists` });
     const statement: Statement = { sql: m.sql, raw, paramOids: [...m.paramTypes], shape: null, catalogName: null };
     if (raw?.stmt !== undefined) {
-      statement.shape = this.classify(raw.stmt, statementText(m.sql, raw));
+      statement.shape = await this.routed(this.classify(raw.stmt, statementText(m.sql, raw)), statementText(m.sql, raw), m.paramTypes);
       if (statement.shape.kind === "explain") {
         const e = await this.explaining(raw, m.sql, statement.shape, m.paramTypes);
         if (e.plan === null) statement.explainCatalog = e.options;

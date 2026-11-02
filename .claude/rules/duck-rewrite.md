@@ -276,7 +276,14 @@ paths:
   collation's**: the database's collation is deterministic (equal strings are equal bytes), so =, IN, GROUP BY,
   DISTINCT, PARTITION BY … read `equalKey`, and only ORDER BY, <, >, BETWEEN must read the collation's key of each
   string (ICU's, or the measured libc order's, which refuses a character it does not cover: equality must never
-  refuse what it never had to order). Under C and ICU the order's key equates exactly and never refuses, so
+  refuse what it never had to order). **Which collation orders is Postgres's analysis, what it means the resolver's**
+  (src/duck/collation.ts, issue 253 decision B): every reader asks `collationOf` / `inputCollationOf` /
+  `orderedUnder` for the node's exprCollation or inputcollid, resolved through the catalog's pg_collation row to the
+  source's, never the database's for every text, a COLLATE's name read off the raw tree, or a constant on a synthetic
+  node (which carries the collation of the node it stands for); `tests/conventions.test.ts` "collation resolver".
+  A collation of no determinate kind where text is ordered is Postgres's 42P22; a nondeterministic one anywhere, or an
+  ICU keyword where text is ordered, is refused by name (`collation-unknown`); a libc one other than the database's is
+  keyed by its own collcollate (`__mason_libc_key(s, collate)`), its order read from the source on its first use. Under C and ICU the order's key equates exactly and never refuses, so
   `equalKey` is it (and may be stored); under libc it is the C key, stored as a column of its own (`EQUAL_STEPS`, `.claude/rules/duck-stored-json.md`)
   or computed. A node the rewrite typed as another (`typedLike`) keeps
   that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
@@ -428,3 +435,9 @@ again before each review. Its Learn step adds to this list; each bullet names th
   BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES`, also by `GROUP BY x / 1`, `GROUP BY q`, with HAVING, a rank()
   OVER beside it, two keys, an empty table): the key built without its query's groups, reading the ungrouped column
   (42803 where Postgres answers); `exact-key-built-outside-its-group` (PR 341).
+- A collation that is not the database's, in every reader: a column's own (`b text COLLATE "C"` on an ICU or en_US
+  database) through `*`, by number and in a join's top N; a `COLLATE` on the RIGHT of `<`, BETWEEN's upper bound, one
+  argument of GREATEST, inside min(); a derived table's or a view's `COLLATE` read through `s.n`, `1`, `n` and a
+  grouped one; two libc collations in one statement; a set operation of a C and an ICU column ordered by number (42P22):
+  a sort or comparison under the database's collation, or a byte order where the COLLATE said otherwise;
+  `collation-read-twice` (issue 253, decision B).

@@ -574,11 +574,28 @@ type Path = Array<string | number | null>;
 const stepsOf = (path: Array<string | number>, either: boolean): Step[] => path.map((s) => typeof s === "number" ? { index: s } : either ? { either: s } : { key: s });
 const steps = (json: string, either: boolean): Step[] => stepsOf(JSON.parse(json) as Array<string | number>, either);
 
-/** The libc order's functions (src/duck/libc-order.ts), for the order the source was read with: a text's key (a value
- *  holding a character not covered refuses, by name) and jsonb's order under it (src/duck/jsonb-order.ts). */
-export function registerLibcOrder(conn: DuckDBConnection, order: LibcOrder): void {
-  scalar(conn, "__mason_libc_key", [VARCHAR], VARCHAR, ([s]) => libcKey(order, String(s)));
-  keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.key, [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order })));
+/** the libc orders read, by collcollate (src/duck/collation.ts names one in each `__mason_libc_key` call) */
+const LIBC_ORDERS = new Map<string, LibcOrder>();
+/** the connections the key's function is registered on */
+const LIBC_KEYED = new WeakSet<DuckDBConnection>();
+
+/**
+ * A LIBC ORDER'S FUNCTIONS (src/duck/libc-order.ts), one order per collcollate: a text's key under the order the
+ * call names (`__mason_libc_key(s, collate)`; a value holding a character not covered refuses, by name), and — for the
+ * DATABASE's order alone (`database`) — jsonb's order under it (src/duck/jsonb-order.ts: Postgres compares a jsonb's
+ * strings under the database's collation, whatever the column's).
+ */
+export function registerLibcOrder(conn: DuckDBConnection, collate: string, order: LibcOrder, database: boolean): void {
+  LIBC_ORDERS.set(collate, order);
+  if (!LIBC_KEYED.has(conn)) {
+    LIBC_KEYED.add(conn);
+    scalar(conn, "__mason_libc_key", [VARCHAR, VARCHAR], VARCHAR, ([s, c]) => {
+      const named = LIBC_ORDERS.get(String(c));
+      if (named === undefined) throw new Error(`the libc collation ${String(c)}'s order was not read (Mason bug: report it)`);
+      return libcKey(named, String(s));
+    });
+  }
+  if (database) keyScalar(conn, JSONB_KEY_FUNCTIONS.libc.key, [VARCHAR], BLOB, ([j]) => new DuckDBBlobValue(jsonbKey(String(j), { kind: "libc", order })));
 }
 
 /**

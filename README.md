@@ -466,7 +466,7 @@ instead. None was answered with a wrong value.
 
 [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 1,143 verified pieces (types, functions,
 operators, aggregates, window functions, casts, constructs and their forms). It also lists the 58 refused shapes, the
-20 that are answered differently and the 8 limits, each with what to write instead.
+19 that are answered differently and the 8 limits, each with what to write instead.
 <!-- END GENERATED -->
 
 The tests also replay the queries that BI tools send: psql, pgjdbc, node-postgres, Metabase, Grafana, DBeaver and

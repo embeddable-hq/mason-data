@@ -6,6 +6,7 @@
  * and types a statement answers with are held to what POSTGRES answers for the same SQL (PGlite).
  */
 import { test, after, before } from "node:test";
+import { CollationResolver } from "../src/duck/collation.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -5544,7 +5545,7 @@ test("round 14: a wire statement's plan computes no generated table's outputs, a
     for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
     const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
     const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
-      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null });
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
     // a first plan pays the catalog's and the parser's start: untimed
     await plan("SELECT 1::numeric AS a");
     for (const depth of DEEP_DEPTHS) for (const [shape, sql] of Object.entries(deepChains("1::int8", depth))) {
@@ -5808,4 +5809,110 @@ test("exact path: a value the engine holds exactly keeps its native plan, with n
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
     }
   } finally { await c.end(); }
+});
+
+// THE COLLATION RESOLVER (issue 253, decision B; issues 121, 122, 125, 150, 213): which collation orders a text is
+// Postgres's analysis, what it means src/duck/collation.ts's, and every reader asks it: a column's own collation, a
+// COLLATE on either side of a comparison, a derived table's COLLATE read through the table around it, and a SELECT of no
+// table that orders text, each answered as Postgres answers
+const COLLS_ROWS = "(1, ''), (2, ' alpha'), (3, '10'), (4, 'Beta'), (5, 'alpha'), (6, 'b'), (7, 'A'), (8, 'a'), (9, 'é'), (10, 'e'), (11, '-x'), (12, 'w'), (13, NULL)";
+const collsTable: PgSchema["tables"][number] = { name: "colls", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "d", type: "text" },
+  { name: "c", type: "text", collation: { schema: "pg_catalog", name: "C" } }, { name: "i", type: "text", collation: { schema: "pg_catalog", name: "und-x-icu" } }] };
+const PG_COLLATIONS = [
+  { schema: "pg_catalog", name: "C", provider: "c", collate: "C", locale: null, deterministic: true },
+  { schema: "pg_catalog", name: "POSIX", provider: "c", collate: "POSIX", locale: null, deterministic: true },
+  { schema: "pg_catalog", name: "und-x-icu", provider: "i", collate: null, locale: "und", deterministic: true },
+];
+let collsMade = false;
+async function makeColls(): Promise<void> {
+  if (collsMade) return;
+  collsMade = true;
+  await store.writer.run("CREATE TABLE public.colls (id INTEGER PRIMARY KEY, d VARCHAR, c VARCHAR, i VARCHAR)");
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, x FROM (VALUES ${COLLS_ROWS}) AS s(id, x)`);
+  await truth.exec("CREATE TABLE public.colls (id int PRIMARY KEY, d text, c text COLLATE \"C\", i text COLLATE \"und-x-icu\")");
+  await truth.exec(`INSERT INTO public.colls SELECT id, x, x, x FROM (VALUES ${COLLS_ROWS}) AS s(id, x)`);
+}
+async function collsApi(duck: Parameters<typeof startPostgresApi>[0]["duck"], extra: NonNullable<PgSchema["collations"]> = []): Promise<{ api: PgApiServer; c: pg.Client }> {
+  await makeColls();
+  const withColls: PgSchema = { ...schema, tables: [...schema.tables, collsTable], collations: [...PG_COLLATIONS, ...extra] };
+  const a = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => withColls, record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)), duck,
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: a.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+  await c.connect();
+  return { api: a, c };
+}
+
+test("collation resolver: a column's own collation, a COLLATE on either side, a derived table's and no table's order are Postgres's", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    for (const sql of [
+      // #121 a column's own collation: a star, by number, a top N, compared, min and max, an aggregate's order, a window
+      "SELECT * FROM colls ORDER BY i, id", "SELECT * FROM colls ORDER BY 4 DESC NULLS LAST, 1 LIMIT 5", "SELECT id FROM colls WHERE i > 'b' ORDER BY id",
+      "SELECT min(i), max(i), min(c), max(c) FROM colls", "SELECT id, greatest(i, 'b'), least(i, 'B') FROM colls ORDER BY id",
+      "SELECT string_agg(i, ',' ORDER BY i) FROM colls", "SELECT id, row_number() OVER (ORDER BY i, id) FROM colls ORDER BY id",
+      "SELECT i, count(*) FROM colls GROUP BY i ORDER BY 1", "SELECT DISTINCT ON (i) i, id FROM colls ORDER BY i, id",
+      "SELECT a.i, b.id FROM colls a JOIN colls b ON b.id = a.id ORDER BY a.i, b.id LIMIT 4",
+      "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY i), mode() WITHIN GROUP (ORDER BY i) FROM colls",
+      "SELECT column_name, collation_name FROM information_schema.columns WHERE table_name = 'colls' ORDER BY ordinal_position",
+      // #150 a COLLATE on the right, the left, both, in BETWEEN, a row comparison
+      "SELECT id FROM colls WHERE d > 'b' COLLATE \"und-x-icu\" ORDER BY id", "SELECT id FROM colls WHERE d COLLATE \"und-x-icu\" > 'b' ORDER BY id",
+      "SELECT id FROM colls WHERE i <= 'B' COLLATE \"C\" ORDER BY id", "SELECT id FROM colls WHERE d BETWEEN 'A' AND 'b' COLLATE \"und-x-icu\" ORDER BY id",
+      "SELECT id FROM colls WHERE d NOT BETWEEN (' a' COLLATE \"und-x-icu\") AND 'z' ORDER BY id",
+      "SELECT id, CASE WHEN d > 'b' COLLATE \"und-x-icu\" THEN 1 ELSE 0 END FROM colls ORDER BY id",
+      "SELECT id, greatest(d, 'b' COLLATE \"und-x-icu\") FROM colls ORDER BY id", "SELECT min(d COLLATE \"und-x-icu\") FROM colls",
+      // #213 a derived table's COLLATE, read through the table around it
+      "SELECT * FROM (SELECT a.d COLLATE \"und-x-icu\" AS n FROM colls a ORDER BY 1 LIMIT 8) s ORDER BY s.n",
+      "SELECT * FROM (SELECT d COLLATE \"und-x-icu\" AS n, count(*) AS k FROM colls GROUP BY 1) s ORDER BY s.n",
+      "SELECT * FROM (SELECT d COLLATE \"und-x-icu\" AS n, count(*) AS k FROM colls GROUP BY 1) s ORDER BY 1",
+      "WITH s AS (SELECT d COLLATE \"und-x-icu\" AS n, id FROM colls) SELECT n FROM s ORDER BY n, id",
+      "SELECT n FROM (SELECT i AS n FROM colls UNION ALL SELECT i FROM colls) s ORDER BY n",
+      "SELECT max(n) FROM (SELECT d COLLATE \"und-x-icu\" AS n FROM colls) s",
+      // #122 no table under a COLLATE that is not byte order
+      "SELECT 'a' < 'B' COLLATE \"und-x-icu\", ' alpha' COLLATE \"und-x-icu\" < '10'",
+      "SELECT x FROM (VALUES ('b'), ('A'), (' a'), ('10')) AS v(x) ORDER BY x COLLATE \"und-x-icu\"",
+    ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    // Postgres's errors, from the analysis: two explicit COLLATEs, two implicit ones
+    await assert.rejects(c.query("SELECT id FROM colls WHERE c COLLATE \"C\" > i COLLATE \"und-x-icu\""), (e: pg.DatabaseError) => e.code === "42P21");
+    await assert.rejects(c.query("SELECT id FROM colls WHERE c > i"), (e: pg.DatabaseError) => e.code === "42P22");
+    await assert.rejects(c.query("SELECT c FROM colls UNION ALL SELECT i FROM colls ORDER BY 1"), (e: pg.DatabaseError) => e.code === "42P22");
+    // a bound statement: the resolver is asked at Parse, as at Query
+    const bound = { text: "SELECT id FROM colls WHERE i > $1 ORDER BY i, id", values: ["b"] };
+    assert.deepEqual((await c.query({ ...bound, rowMode: "array" })).rows, (await truth.query(bound.text, bound.values, { rowMode: "array" })).rows);
+  } finally { await c.end(); await a.close(); }
+});
+
+test("collation resolver: refuses what it cannot follow by name, and a collation the source lacks is Postgres's 42704", async () => {
+  const extra = [{ schema: "public", name: "mason_num", provider: "i", collate: null, locale: "und-u-kn", deterministic: true },
+    { schema: "public", name: "mason_ci", provider: "i", collate: null, locale: "und-u-ks-level2", deterministic: false }];
+  const { api: a, c } = await collsApi(await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: [...PG_COLLATIONS, ...extra] }), extra);
+  try {
+    await assert.rejects(c.query("SELECT id FROM colls ORDER BY d COLLATE mason_num, id"), (e: pg.DatabaseError) => e.code === "0A000" && /mason_num/.test(e.message) && !/duckdb/i.test(e.message));
+    // a nondeterministic collation anywhere: its equality is not the engine's
+    await assert.rejects(c.query("SELECT id FROM colls WHERE d = 'B' COLLATE mason_ci"), (e: pg.DatabaseError) => e.code === "0A000" && /nondeterministic/.test(e.message));
+    // PGlite has "unicode", a source that lacks it does not
+    await assert.rejects(c.query("SELECT id FROM colls ORDER BY d COLLATE \"unicode\""), (e: pg.DatabaseError) => e.code === "42704" && /"unicode"/.test(e.message));
+    // unused for an order, an ICU keyword is no refusal: equality is the C key
+    assert.deepEqual(await answer(c, "SELECT id FROM colls WHERE d = 'b' COLLATE mason_num"), { fields: [["id", 23]], rows: [["6"]] });
+  } finally { await c.end(); await a.close(); }
+});
+
+test("collation resolver: two libc collations in one session, each by its own order, the second read once on its first use", async () => {
+  const database = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" ", "-"], { collate: "en_US.utf8" });
+  const reversed = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({}).reverse()], [" ", "-"], { collate: "rv_RV.utf8" });
+  const rev = { schema: "public", name: "mason_rev", provider: "c", collate: "rv_RV.utf8", locale: null, deterministic: true };
+  let reads = 0;
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, database, () => copies, undefined,
+    { collations: [...PG_COLLATIONS, rev], readLibc: async (sc) => { reads++; assert.equal(sc.collate, "rv_RV.utf8"); return reversed; } }), [rev]);
+  try {
+    const sql = "SELECT id, d < 'c', d COLLATE mason_rev < 'c' FROM colls WHERE id IN (5, 6, 10, 12) ORDER BY d COLLATE mason_rev";
+    assert.deepEqual((await answer(c, sql)).rows, [["12", "f", "t"], ["10", "f", "t"], ["6", "t", "f"], ["5", "t", "f"]], sql);
+    const max = "SELECT max(d), max(d COLLATE mason_rev), (SELECT max(x COLLATE mason_rev) FROM (VALUES ('a'), ('z')) v(x)) FROM colls WHERE id IN (5, 6, 10, 12)";
+    assert.deepEqual((await answer(c, max)).rows, [["w", "alpha", "a"]], max);
+    // no table, under the database's libc order: the synced data's, never the catalog's byte order
+    assert.deepEqual((await answer(c, "SELECT 'a' < 'B', 'B' < 'a'")).rows, [["t", "f"]]);
+    assert.equal(reads, 1, "the second collation's order is read once, then held");
+  } finally { await c.end(); await a.close(); }
 });

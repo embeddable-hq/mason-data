@@ -22,12 +22,20 @@ import { beginStatement, cancelStatement, slotName, statementCancelled } from ".
 import type { PgSession } from "../api/postgres/encode.ts";
 import type { DuckAnswer, DuckOptions, DuckRunner, DuckSession, ExplainHow } from "../api/postgres/server.ts";
 import { StatementError } from "./statement.ts";
-import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from "./plan.ts";
+import { duckParameters, missingRelationHint, ordersText, planDuck, quoteDuckKeywords } from "./plan.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
 import { VERIFIED } from "./verified.ts";
 import { registerFunctions, SESSION_VARIABLE, SETTINGS_VARIABLE } from "./functions.ts";
-import { duckCollation, type DuckCollation } from "./rewrite.ts";
+import { CollationResolver, duckCollation, isLibcCollation, type DuckCollation, type SourceCollation } from "./collation.ts";
+
+/** the source's collations as the listener resolves them (src/duck/collation.ts): its pg_collation rows, the libc
+ *  orders read at the start (a synced column's), by collcollate, and how one named first by a statement is read */
+export interface ListenerCollations {
+  collations?: readonly SourceCollation[];
+  libcOrders?: ReadonlyMap<string, LibcOrder>;
+  readLibc?: (c: SourceCollation) => Promise<LibcOrder>;
+}
 import { decodeLibcOrder, encodeLibcOrder, isCurrentLibcOrder, type LibcOrder } from "./libc-order.ts";
 import { dataRow } from "../api/postgres/protocol.ts";
 import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } from "./types.ts";
@@ -283,7 +291,8 @@ export class DuckStore {
    *  order as `libcOrder` read it), refusing what is not `verified` (null: nothing is refused for it, the oracle's
    *  recording run alone). */
   async listener(collation: { provider: string; collate: string; locale: string | null } | undefined,
-    verified: ReadonlyMap<string, string> | null = VERIFIED, libc?: LibcOrder, copies: () => readonly CopyState[] = () => [], kept?: KeptRoutes): Promise<DuckOptions & { collation: DuckCollation }> {
+    verified: ReadonlyMap<string, string> | null = VERIFIED, libc?: LibcOrder, copies: () => readonly CopyState[] = () => [], kept?: KeptRoutes,
+    more: ListenerCollations = {}): Promise<DuckOptions & { collation: DuckCollation; collations: CollationResolver }> {
     const known = new Set((await this.writer.runAndReadAll("SELECT collname FROM pragma_collations()")).getRowsJson().map((r) => String(r[0])));
     quoteDuckKeywords((await this.writer.runAndReadAll("SELECT keyword_name FROM duckdb_keywords() WHERE keyword_category <> 'unreserved'")).getRowsJson().map((r) => String(r[0])));
     const named = collation === undefined ? { kind: "bytes" as const } : duckCollation(collation.provider, collation.collate, collation.locale, known);
@@ -291,16 +300,31 @@ export class DuckStore {
     const c: DuckCollation = named.kind === "libc" && libc?.bytes === true ? { kind: "bytes" } : named;
     if (c.kind === "libc") {
       if (libc === undefined) throw new Error(`the database orders text by the libc collation ${collation!.collate}, and its order was not read (Mason bug: report it)`);
-      await this.executor.registerLibcOrder(libc);
+      await this.executor.registerLibcOrder(c.collate, libc, true);
     }
+    // each other libc collation read at the start (a synced column's): its key's order, by its collcollate
+    for (const [collate, order] of more.libcOrders ?? []) if (!order.bytes) await this.executor.registerLibcOrder(collate, order, false);
+    // a libc collation named first by a statement: read from the source on its first use, kept in the copy, then the
+    // engine told its order before the plan that needs it is made (src/duck/collation.ts)
+    const readLibc = more.readLibc;
+    const resolver = new CollationResolver({ database: c, databaseCollate: collation !== undefined && isLibcCollation(collation.provider, collation.collate) ? collation.collate : null,
+      source: more.collations ?? null, known, libc: more.libcOrders ?? new Map(),
+      readLibc: readLibc === undefined ? null : async (sc) => {
+        const r = await this.libcOrder(sc.collate ?? "C", sc.version ?? null, () => readLibc(sc));
+        if (!r.order.bytes) await this.executor.registerLibcOrder(sc.collate ?? "C", r.order, false);
+        return r.order;
+      } });
     // a jsonb's stored key is this collation's (src/duck/kept.ts `orderBy`)
     await kept?.orderBy(c, c.kind === "libc" ? libc : undefined);
     return {
       collation: c,
+      collations: resolver,
       open: () => this.runner(),
       plan: (catalog, text, stmt, base, paramOids, under, userTypes, wireBound, grants, relations, outputs) =>
-        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
       parameters: duckParameters,
+      // a SELECT of no table that orders text under a collation that is not byte order: the synced data's (issue 122)
+      ordersText: (catalog, text, paramOids, under) => ordersText({ catalog, text, paramOids, under, collations: resolver }),
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
       // a stored JSON path ready or gone (src/duck/kept.ts): the plans kept are made again

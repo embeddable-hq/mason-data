@@ -96,7 +96,7 @@ test("the four required checks are there by name, once each, and no shard can pa
 });
 
 test("each required check runs always, passes only on success, and stands for every job but the image", () => {
-  const gates: Array<[string, string[]]> = [["checks", ["build", "unit"]], ["integration-oracle", ["oracle"]], ["integration-rest", ["rest"]]];
+  const gates: Array<[string, string[]]> = [["checks", ["build", "unit"]], ["integration-oracle", ["oracle", "collation"]], ["integration-rest", ["rest"]]];
   for (const [id, needs] of gates) {
     const gate = workflow.jobs[id]!;
     assert.deepEqual(gate.needs, needs, id);
@@ -111,6 +111,19 @@ test("each required check runs always, passes only on success, and stands for ev
   }
   assert.ok(workflow.jobs["integration-oracle"]!.steps!.some((s) => s.run === "node scripts/oracle-legs.ts ran"), "the oracle's check holds the legs to the whole");
   assert.deepEqual(Object.keys(workflow.jobs).filter((id) => id !== "image" && !gates.some(([gate, needs]) => gate === id || needs.includes(id))), [], "a job no required check stands for gates nothing");
+});
+
+test("the collation job asks the collation resolver's statements under ICU and C, apart from the legs", () => {
+  const job = workflow.jobs.collation!;
+  assert.deepEqual((job.strategy?.matrix as { collation?: string[] } | undefined)?.collation, ["icu", "c"]);
+  assert.equal(job.strategy?.["fail-fast"], false);
+  const run = job.steps!.find((s) => s.run?.includes("tests/integration/duck-oracle.itest.ts"));
+  assert.ok(run, "the job runs the oracle");
+  assert.equal(run.env?.IT_ORACLE_COLLATION, "${{ matrix.collation }}");
+  assert.match(run.env?.IT_ORACLE_ONLY ?? "", /^\^collation: \|/, "it asks the resolver's statements");
+  assert.equal(run.env?.IT_ORACLE_LEG, undefined, "never a leg: the legs' whole is the default database's");
+  const upload = job.steps!.find((s) => s.with?.name !== undefined);
+  assert.ok(upload !== undefined && !upload.with!.name!.startsWith("ran-oracle-"), "its artifact is none of the legs'");
 });
 
 test("the matrices are the shards scripts/ci-shards.ts counts, and no failure stops a sibling", () => {

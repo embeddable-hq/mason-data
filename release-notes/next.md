@@ -15,6 +15,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
+  COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
+  of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE
+  "en_US"` on an ICU database, read from the source on its first use, as the database's own is). Before, these sorted
+  or compared under the database's collation, or byte order, without saying so. A `SELECT` of no table that sorts or
+  compares text (`SELECT 'a' < 'B'`) now answers under the database's collation rather than byte order, and
+  `percentile_disc` and `mode()` of text answer under every collation. Two kinds are refused by name rather than
+  answered differently: a nondeterministic collation, and an ICU collation with a keyword (`und-u-kn`); `rank(…)
+  WITHIN GROUP` and the other hypothetical-set aggregates are refused by name rather than with an internal error.
+
 - **`mason status`, `--json` and the web page now say when a synced table is behind what its `sync:` promises**,
   measured from when it was last synced, with why. A table set to `sync: poll 15m` whose pass of polls takes 13 min is
   polled about every hour, since Mason waits four times a pass between passes to keep the database's load to a fifth;

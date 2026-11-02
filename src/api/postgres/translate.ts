@@ -30,7 +30,9 @@ export class Unsupported extends Error {
 
 /** A statement the session or the catalog Postgres answers (a SELECT over a table is `duckTranslate`'s `duckdb`). */
 export type Translation =
-  | { kind: "catalog" }
+  /** `fromless`: a SELECT of no relation at all (no table, no pg_catalog one): the server asks its analysis whether it
+   *  orders text under a collation that is not byte order, which makes it the synced data's (`names` its columns') */
+  | { kind: "catalog"; fromless?: { names: (string | null)[] | null } }
   /** `local`: for the transaction alone; `tag`: its CommandComplete, `SET x TO DEFAULT` being a SET whose value is null */
   | { kind: "set"; name: string; value: string | null; local: boolean; tag: "SET" | "RESET" }
   | { kind: "show"; name: string }
@@ -127,6 +129,7 @@ export function duckTranslate(stmt: Node, text: string): Translation | { kind: "
   const ctes = (s.withClause?.ctes ?? []).map((n) => bodyOf<CommonTableExpr>(n));
   const names = new Set(ctes.map((c) => String(c.ctename ?? "")));
   const relations = collect(s, "RangeVar").map((n) => bodyOf<RangeVar>(n)).filter((r) => r.schemaname !== undefined || !names.has(String(r.relname ?? "")));
+  if (relations.length === 0) return { kind: "catalog", fromless: { names: pgColumnNames(s) } };
   if (relations.every(isCatalogRelation)) return { kind: "catalog" };
   return { kind: "duckdb", sql: text, names: pgColumnNames(s) };
 }

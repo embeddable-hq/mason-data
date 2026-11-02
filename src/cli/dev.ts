@@ -55,7 +55,8 @@ import { DEFAULT_MEMORY_LIMIT, DuckStore, DUCKDB_VERSION } from "../duck/store.t
 import { copyChunkSecondsOf, copyParallelOf, humanBytes, Sync, syncModeOf, type CopyState } from "../duck/sync.ts";
 import { storeJsonPathsOf } from "../duck/kept.ts";
 import { libcOrderNote, readLibcOrder, type LibcOrder } from "../duck/libc-order.ts";
-import { isLibcCollation } from "../duck/rewrite.ts";
+import { isLibcCollation, type SourceCollation } from "../duck/collation.ts";
+import { pgIdent } from "../cdc/pg-wire.ts";
 import { listenerLogins, LiveUsers, readUsers, USERS_FILE } from "../duck/users.ts";
 import { exampleRole, LiveRoles, missingAttributesText, noRoleWayOut, readRoles, resolveRoles, rolesDefaultLine, rolesFile, usersMissingAttributes, usersWithNoRole, usersWithoutRole } from "./roles.ts";
 import { READY_LINE, readRestarts } from "./supervise.ts";
@@ -150,6 +151,9 @@ async function closeDemo(hosted: Hosted, closed: string | null): Promise<void> {
 
 /** how soon a pass that failed (the database away) is tried again, and replication mode's pass when a table waits */
 const PASS_RETRY_MS = 5000;
+/** how long a libc collation's order may take to read from the source (a few seconds of read-only SELECTs): past it the
+ *  read is given up, and the statements that need it refused by name */
+const LIBC_READ_MS = 120_000;
 
 /** the tables by their sync, as the start line says them: ` (2 polled, every 5s and 30s; 1 replicated; 1 off)` */
 function syncCounts(tables: ReadonlyArray<{ sync?: TableSync }>): string {
@@ -447,6 +451,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     if (r.said !== null) logLine(`[sync] ${r.said}`);
     sources = { file: r.file, tables: r.tables, problem: r.problem };
     sync.setViews(facts.views ?? []);
+    sync.setCollations(facts.collations ?? []);
     return sync.setTables(sources.tables);
   };
 
@@ -474,6 +479,35 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       if (textOrder !== null) (r.order.unread ? say : logLine)(`  ! ${textOrder}`);
     } catch (e) { fail(reading); say(`  ${(e as Error).message}`); await sync.stop(); await events.close(); await store.close(); return 1; }
   }
+  // EVERY OTHER LIBC COLLATION'S ORDER (src/duck/collation.ts), read the same way under its own name: a synced column's
+  // at the start, one a statement names first on its first use (the plan waits for it, under a bound). A column's that
+  // cannot be read is said, and its statements refused by name (libc-locale-unread) until a read succeeds
+  const readNamed = async (sc: SourceCollation): Promise<LibcOrder> => {
+    const c = await connectSource(source);
+    if ("failure" in c) throw new Error(`could not connect to read it: ${c.failure.message}`);
+    const read = readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, sc.collate ?? "C", sc.version ?? null, `${pgIdent(sc.schema)}.${pgIdent(sc.name)}`);
+    // (a read given up at the bound ends when its connection closes: said, as the race has moved on)
+    read.catch((e: unknown) => logLine(`[engine] the read of the collation ${sc.name} ended: ${(e as Error).message}`));
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`the read took longer than ${LIBC_READ_MS / 1000} s`)), LIBC_READ_MS); });
+    try { return await Promise.race([read, bound]); } finally { clearTimeout(timer); c.pg.close(); }
+  };
+  const libcOrders = new Map<string, LibcOrder>();
+  const byName = new Map((facts.collations ?? []).map((c) => [`${c.schema}\u0000${c.name}`, c]));
+  const columnLibc = new Map<string, SourceCollation>();
+  for (const t of sources.tables) for (const col of t.columns) {
+    const sc = col.collation === undefined ? undefined : byName.get(`${col.collation.schema}\u0000${col.collation.name}`);
+    if (sc !== undefined && sc.provider === "c" && sc.collate !== null && isLibcCollation("c", sc.collate) && !(coll !== undefined && isLibcCollation(coll.provider, coll.collate) && sc.collate === coll.collate)) columnLibc.set(sc.collate, sc);
+  }
+  for (const sc of columnLibc.values()) {
+    try {
+      const r = await store.libcOrder(sc.collate!, sc.version ?? null, () => readNamed(sc));
+      libcOrders.set(sc.collate!, r.order);
+      if (r.read) logLine(`[engine] read how ${source.database} orders text under the collation ${sc.name} (${sc.collate}): kept with the synced data`);
+      const note = libcOrderNote(r.order);
+      if (note !== null) logLine(`[engine] ! ${note}`);
+    } catch (e) { say(`  ! the order of the collation ${sc.name} (${sc.collate}) a synced column has could not be read: ${(e as Error).message}; its sorts are refused until it is`); }
+  }
   begin("Starting the Postgres listener");
   // ONE STATEMENT'S LIMIT (server.ts armTimeout): a runaway query must not hold DuckDB for ever; a session's
   // statement_timeout may only shorten it. Postgres's units (5min, 90s, 300000); 0 for none
@@ -495,7 +529,13 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   try { usage = await UsageSampler.open(store, logLine, { days: keptDays }); }
   catch (e) { fail("Starting the Postgres listener"); say(`  the usage samples (${USAGE_TABLE}) could not be opened: ${(e as Error).message}`); await requests.close(); await sync.stop(); await events.close(); await store.close(); return 1; }
   let duckListener;
-  try { duckListener = await store.listener(facts.collation, undefined, libc, () => [...sync.state(), ...sync.generated.copies()], sync.kept.enabled ? sync.kept : undefined); }
+  try {
+    duckListener = await store.listener(facts.collation, undefined, libc, () => [...sync.state(), ...sync.generated.copies()], sync.kept.enabled ? sync.kept : undefined,
+      { ...(facts.collations !== undefined ? { collations: facts.collations } : {}), libcOrders, readLibc: async (sc) => {
+        logLine(`[engine] reading how ${source.database} orders text under the collation ${sc.name} (${sc.collate}), which a statement names first`);
+        return readNamed(sc);
+      } });
+  }
   catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
   logLine(`[engine] text sorts as the source's collation does: ${JSON.stringify(duckListener.collation)}`);
   // THE USERS (src/duck/users.ts): `mason user` edits the file beside this process; the listener re-reads it at every
@@ -612,7 +652,9 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     void (async () => {
       const c = await connectSource(source);
       if ("failure" in c) return;   // the commands keep the last catalog; the sync says loudly if the source is away
-      try { facts = await readSourceFacts(c.pg); } finally { c.pg.close(); }
+      const before = facts.collations;
+      try { facts = await readSourceFacts(c.pg, undefined, { collations: false }); } finally { c.pg.close(); }
+      if (before !== undefined) facts.collations = before;
     })().catch((e: unknown) => logLine(`catalog refresh failed: ${(e as Error).message}`));
   }, 10_000);
   const tablesSet = added();

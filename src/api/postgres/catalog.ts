@@ -119,6 +119,11 @@ export function catalogDdl(schema: PgSchema): string[] {
   for (const name of [...new Set(schema.tables.map((t) => t.schema).filter((x): x is string => x !== undefined && x !== "public"))]) {
     statements.push(`CREATE SCHEMA IF NOT EXISTS ${ident(name)};`);
   }
+  // THE SOURCE'S COLLATIONS (src/duck/collation.ts), before the tables: each the catalog lacks, declared under its name with
+  // the source's provider, locale and determinism (a locale PGlite cannot open declared on its root locale: what it
+  // MEANS is the source's row of its name, read by the resolver, never this one's), so a column's COLLATE and a
+  // statement's resolve as on the source. In pg_catalog, public, a table's schema, or a column's collation's schema
+  statements.push(...collationDdl(schema));
   // a source enum a column has: the type, its labels in their declared order, before the tables —
   // spelled as the source's format_type spells it (`mood`, `other.level`, `"Odd"`), its schema made first
   const enums = new Map<string, readonly string[]>();
@@ -143,7 +148,11 @@ export function catalogDdl(schema: PgSchema): string[] {
   });
   for (const table of schema.tables) {
     const lines: string[] = [];
-    for (const c of table.columns) lines.push(`${ident(c.name)} ${c.made !== undefined ? `${madeTypeName(c.spelled!)}${c.spelled!.endsWith("[]") ? "[]" : ""}` : c.spelled ?? PG_API_TYPE_SPELLING[c.type]}${c.notNull === true ? " NOT NULL" : ""}`);
+    for (const c of table.columns) {
+      // a column's own collation: the source's, so Postgres's analysis orders it as the source does
+      const collate = c.collation !== undefined ? ` COLLATE ${ident(c.collation.schema)}.${ident(c.collation.name)}` : "";
+      lines.push(`${ident(c.name)} ${c.made !== undefined ? `${madeTypeName(c.spelled!)}${c.spelled!.endsWith("[]") ? "[]" : ""}` : c.spelled ?? PG_API_TYPE_SPELLING[c.type]}${collate}${c.notNull === true ? " NOT NULL" : ""}`);
+    }
     if (table.primaryKey.length > 0) lines.push(`PRIMARY KEY (${table.primaryKey.map(ident).join(", ")})`);
     statements.push(`CREATE TABLE ${qualified(table)} (\n  ${lines.join(",\n  ")}\n);`);
     // the source's unique indexes, under its names: before the foreign keys that may reference them
@@ -178,6 +187,35 @@ export function catalogDdl(schema: PgSchema): string[] {
     }
   }
   return [...statements, ...constraints, ...sourceTypeNames(schema)];
+}
+
+/**
+ * THE SOURCE'S COLLATIONS THE CATALOG LACKS, declared (one DO block: ~800 ICU collations in tens of milliseconds): each
+ * under its schema and name, by the source's provider, locale and determinism, else — a locale PGlite's ICU or libc
+ * cannot open — the same name on the root locale (ICU), C (libc) or C (builtin), which its analysis treats alike: the
+ * resolver reads what a collation means from the SOURCE's row of its name (src/duck/collation.ts), never this one. Only
+ * where a name can be met: pg_catalog, public, a table's schema, and a synced column's collation's own schema.
+ */
+export function collationDdl(schema: PgSchema): string[] {
+  const used = schema.tables.flatMap((t) => t.columns.flatMap((c) => c.collation !== undefined ? [c.collation] : []));
+  const schemas = new Set(["pg_catalog", "public", ...schema.tables.map((t) => t.schema ?? "public"), ...used.map((c) => c.schema)]);
+  const declared = (schema.collations ?? []).filter((c) => c.provider !== "d" && schemas.has(c.schema));
+  if (declared.length === 0) return [];
+  const out: string[] = [];
+  for (const s of new Set(declared.map((c) => c.schema))) if (s !== "pg_catalog" && s !== "public") out.push(`CREATE SCHEMA IF NOT EXISTS ${ident(s)};`);
+  const provider = (p: string): string => p === "i" ? "icu" : p === "b" ? "builtin" : "libc";
+  const body = declared.map((c) => {
+    const name = `${ident(c.schema)}.${ident(c.name)}`;
+    const locale = c.provider === "c" ? c.collate ?? "C" : c.locale ?? c.collate ?? "und";
+    const deterministic = c.deterministic ? "" : ", deterministic = false";
+    const fallback = c.provider === "i" ? "und" : "C";
+    // (a name taken already, the catalog's own `C` or `und-x-icu`, is the source's too)
+    return `IF NOT EXISTS (SELECT FROM pg_catalog.pg_collation c JOIN pg_catalog.pg_namespace n ON n.oid = c.collnamespace WHERE n.nspname = ${literal(c.schema)} AND c.collname = ${literal(c.name)} AND c.collencoding IN (-1, 6)) THEN ` +
+      `BEGIN CREATE COLLATION ${name} (provider = ${provider(c.provider)}, locale = ${literal(locale)}${deterministic}); ` +
+      `EXCEPTION WHEN OTHERS THEN CREATE COLLATION ${name} (provider = ${provider(c.provider)}, locale = ${literal(fallback)}${deterministic}); END; END IF;`;
+  });
+  out.push(`DO $mason_collations$ BEGIN\n${body.join("\n")}\nEND $mason_collations$;`);
+  return out;
 }
 
 /**

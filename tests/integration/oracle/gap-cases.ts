@@ -7,7 +7,6 @@
 import type { GapId } from "../../../src/duck/gaps.ts";
 
 export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
-  { gap: "fromless-text-order", sql: "SELECT 'a' < 'B'" },
   // SET LOCAL outside a block: Postgres warns and keeps its style, so the oracle's session is unchanged after it
   { gap: "interval-style", sql: "SET LOCAL IntervalStyle = 'iso_8601'" },
   { gap: "libc-mark-run-form", sql: "SELECT 'a6ß' > E'a\\u03086ß' FROM public.one" },
@@ -20,7 +19,7 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "set-config-forms", sql: "SELECT set_config('application_name', 'gap-case', true) FROM public.one" },
   { gap: "star-join-twin", sql: "SELECT j.* FROM (star_o a FULL JOIN star_b b USING (name)) AS j ORDER BY 1 NULLS FIRST, 2, 8" },
   { gap: "setop-ordinal-star", sql: "SELECT *, t FROM (SELECT id, t FROM typed) s UNION SELECT id, t, t FROM typed ORDER BY 2, 1" },
-  { gap: "collation-unknown", sql: "SELECT id FROM typed ORDER BY t COLLATE \"en_US.utf8\", id" },
+  { gap: "collation-unknown", sql: "SELECT id FROM colls ORDER BY d COLLATE mason_num, id" },
   { gap: "like-any-array", sql: "SELECT id FROM typed WHERE t LIKE ANY (at) ORDER BY id" },
   { gap: "similar-to-forms", sql: "SELECT id FROM typed WHERE t SIMILAR TO vc ORDER BY id" },
   { gap: "array-remove-type", sql: "SELECT id, array_remove(ARRAY[iv], iv) FROM typed ORDER BY id" },
@@ -34,7 +33,7 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "with-ordinality", sql: "SELECT id, e, k FROM typed, jsonb_array_elements(jb) WITH ORDINALITY AS x(e, k) WHERE jsonb_typeof(jb) = 'array' ORDER BY id, k" },
   { gap: "format-specifiers", sql: "SELECT id, format('%I', t) FROM typed ORDER BY id" },
   { gap: "to-timestamp-format", sql: "SELECT id, to_date('2026-01-01', t) FROM typed WHERE false" },
-  { gap: "percentile-text-libc", sql: "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY t) FROM typed" },
+  { gap: "hypothetical-set", sql: "SELECT rank('b') WITHIN GROUP (ORDER BY t) FROM typed" },
   { gap: "div-numeric", sql: "SELECT id, div(n, 3) FROM typed WHERE id < 100 ORDER BY id" },
   { gap: "width-bucket-forms", sql: "SELECT id, width_bucket(i4, ARRAY[0, 10, 100]) FROM typed ORDER BY id" },
   { gap: "relative-time-literal", sql: "SELECT id FROM typed WHERE ts < 'today 12:00' ORDER BY id" },
