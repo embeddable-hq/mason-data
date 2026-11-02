@@ -532,6 +532,63 @@ function* mappedTypes(): Generator<Matrixed> {
     yield q(`mapped timetz in ${zone}: a time as one`, "SELECT id, tm::timetz FROM typed WHERE id < 3 ORDER BY id", zone);
     yield q(`mapped timetz in ${zone}: a timestamptz as one`, "SELECT id, tz::timetz FROM typed WHERE id < 3 ORDER BY id", zone);
     yield q(`mapped tstzrange in ${zone}: rows`, "SELECT id, rz, mz, rz::text, length(mz::text) FROM mapped ORDER BY id", zone);
+    // A TIME BESIDE A TIMETZ, cast implicitly as Postgres casts it (time_timetz: the zone's offset on the transaction's
+    // date, issue 167): every place Postgres coerces it, and where it does not (time beside time). Where New York's
+    // offset decides, both -04 and -05 are named, so the statement is decisive on any day
+    const implicit = (name: string, sql: string): Matrixed => q(`implicit timetz in ${zone}: ${name}`, sql, zone);
+    yield implicit("equal to either offset", "SELECT id FROM typed WHERE tm = '12:30:00.5-04'::timetz OR tm = '12:30:00.5-05'::timetz ORDER BY id");
+    yield implicit("equal, each offset", "SELECT id, tm = '12:30:00.5-04'::timetz, tm = '12:30:00.5-05'::timetz, tm <> '12:30:00.5-05'::timetz, '12:30:00.5-05'::timetz = tm, tm = '12:30:00.5+05:30'::timetz FROM typed ORDER BY id");
+    yield implicit("<", "SELECT id FROM typed WHERE tm < '03:00:00-05'::timetz ORDER BY id");
+    yield implicit("<=, >, >=", "SELECT id, tm <= '03:00:00-05'::timetz, tm > '03:00:00-05'::timetz, tm >= '12:30:00.5-05'::timetz FROM typed ORDER BY id");
+    yield implicit("columns compared", "SELECT t.id, t.tm = m.tz, t.tm < m.tz, m.tz >= t.tm FROM typed t JOIN mapped m USING (id) ORDER BY t.id");
+    yield implicit("IN", "SELECT id FROM typed WHERE tm IN ('12:30:00.5-04'::timetz, '12:30:00.5-05'::timetz, '00:00:00+05:30'::timetz) ORDER BY id");
+    yield implicit("= ANY", "SELECT id FROM typed WHERE tm = ANY (ARRAY['12:30:00.5-04'::timetz, '12:30:00.5-05'::timetz]) ORDER BY id");
+    yield implicit("BETWEEN", "SELECT id FROM typed WHERE tm BETWEEN '00:00:00-05'::timetz AND '12:30:00.5-05'::timetz ORDER BY id");
+    yield implicit("NOT BETWEEN", "SELECT id FROM typed WHERE tm NOT BETWEEN '00:00:00-05'::timetz AND '12:30:00.5-05'::timetz ORDER BY id");
+    yield implicit("IS DISTINCT FROM", "SELECT id, tm IS DISTINCT FROM '12:30:00.5-05'::timetz, tm IS NOT DISTINCT FROM NULL::timetz FROM typed ORDER BY id");
+    yield implicit("NULLIF", "SELECT t.id, NULLIF(m.tz, t.tm) FROM typed t LEFT JOIN mapped m USING (id) ORDER BY t.id");
+    yield implicit("an expression's", "SELECT id FROM typed WHERE tm + interval '1 hour' > '12:00:00-05'::timetz ORDER BY id");
+    yield implicit("AT TIME ZONE", "SELECT id, tm AT TIME ZONE 'UTC', tm AT TIME ZONE 'Asia/Kolkata' FROM typed ORDER BY id");
+    yield implicit("a union's column", "SELECT id, tm FROM typed UNION ALL SELECT id, tm::timetz FROM typed ORDER BY 1, 2");
+    yield implicit("a union of two tables", "SELECT tm FROM typed UNION ALL SELECT tz FROM mapped ORDER BY 1");
+    yield implicit("a union, the timetz arm first", "SELECT tz FROM mapped UNION ALL SELECT tm FROM typed ORDER BY 1");
+    yield implicit("UNION", "SELECT tm FROM typed UNION SELECT tz FROM mapped ORDER BY 1");
+    yield implicit("INTERSECT", "SELECT tm::timetz FROM typed INTERSECT SELECT tm FROM typed ORDER BY 1");
+    yield implicit("EXCEPT", "SELECT tm::timetz FROM typed EXCEPT SELECT tm FROM typed WHERE id < 5 ORDER BY 1");
+    yield implicit("a nested union", "SELECT tm FROM typed UNION ALL SELECT tz FROM mapped UNION ALL SELECT tm FROM typed WHERE id = 2 ORDER BY 1");
+    yield implicit("a union grouped by its ordinal", "SELECT x, count(*) FROM (SELECT tm AS x FROM typed UNION ALL SELECT tz FROM mapped) s GROUP BY 1 ORDER BY 1");
+    yield implicit("a union sorted by its column", "SELECT s.x FROM (SELECT tm AS x FROM typed UNION ALL SELECT tz FROM mapped) s ORDER BY s.x");
+    yield implicit("a union sorted by its bare column", "SELECT x FROM (SELECT tm AS x FROM typed UNION ALL SELECT tz FROM mapped) s ORDER BY x");
+    yield implicit("a union WITH TIES", "SELECT tm FROM typed UNION ALL SELECT tz FROM mapped ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES");
+    yield implicit("a union with VALUES", "SELECT tm FROM typed UNION ALL VALUES ('12:30-04'::timetz) ORDER BY 1");
+    yield implicit("VALUES of a time first", "VALUES ('12:30'::time) UNION ALL SELECT tz FROM mapped ORDER BY 1");
+    yield implicit("CASE", "SELECT id, CASE WHEN id > 3 THEN tm::timetz ELSE tm END FROM typed ORDER BY id");
+    yield implicit("CASE, the time arm first", "SELECT id, CASE WHEN id > 3 THEN tm ELSE tm::timetz END FROM typed ORDER BY id");
+    yield implicit("CASE of a value", "SELECT t.id, CASE t.id WHEN 1 THEN t.tm ELSE m.tz END FROM typed t LEFT JOIN mapped m USING (id) ORDER BY t.id");
+    yield implicit("COALESCE", "SELECT t.id, COALESCE(m.tz, t.tm), COALESCE(t.tm, m.tz) FROM typed t LEFT JOIN mapped m USING (id) ORDER BY t.id");
+    yield implicit("COALESCE of every row", "SELECT id, COALESCE(NULL::timetz, tm) FROM typed ORDER BY id");
+    yield implicit("COALESCE of an expression", "SELECT t.id, COALESCE(m.tz, t.tm + interval '1 hour') FROM typed t LEFT JOIN mapped m USING (id) ORDER BY t.id");
+    yield implicit("a literal of a time", "SELECT id, COALESCE(NULL::timetz, '12:30'::time), COALESCE(NULL::timetz, time '00:00') FROM typed WHERE id < 3 ORDER BY id");
+    yield implicit("GREATEST, LEAST", "SELECT t.id, GREATEST(m.tz, t.tm), LEAST(m.tz, t.tm) FROM typed t JOIN mapped m USING (id) ORDER BY t.id");
+    yield implicit("ARRAY", "SELECT t.id, ARRAY[m.tz, t.tm] FROM typed t JOIN mapped m USING (id) ORDER BY t.id");
+    yield implicit("VALUES rows", "SELECT t.id, v.x FROM typed t CROSS JOIN LATERAL (VALUES (t.tm), ('12:30-05'::timetz)) v(x) ORDER BY 1, 2");
+    yield implicit("GROUP BY the expression", "SELECT COALESCE(m.tz, t.tm) AS c, count(*) FROM typed t LEFT JOIN mapped m USING (id) GROUP BY COALESCE(m.tz, t.tm) ORDER BY 1");
+    yield implicit("GROUP BY its ordinal", "SELECT COALESCE(m.tz, t.tm) AS c, count(*) FROM typed t LEFT JOIN mapped m USING (id) GROUP BY 1 ORDER BY c");
+    yield implicit("ORDER BY the expression", "SELECT COALESCE(m.tz, t.tm) AS c, count(*) FROM typed t LEFT JOIN mapped m USING (id) GROUP BY c ORDER BY COALESCE(m.tz, t.tm)");
+    yield implicit("DISTINCT", "SELECT DISTINCT CASE WHEN id > 3 THEN tm::timetz ELSE tm END AS x FROM typed ORDER BY x");
+    yield implicit("a window's ORDER BY", "SELECT id, row_number() OVER (ORDER BY COALESCE(NULL::timetz, tm), id) FROM typed ORDER BY id");
+    yield implicit("an aggregate's ORDER BY", "SELECT string_agg(COALESCE(NULL::timetz, tm)::text, ',' ORDER BY COALESCE(NULL::timetz, tm), id) FROM typed");
+    yield implicit("max, min", "SELECT max(COALESCE(NULL::timetz, tm)), min(GREATEST(NULL::timetz, tm)) FROM typed");
+    yield implicit("* beside it", "SELECT *, COALESCE(NULL::timetz, tm) AS c FROM typed WHERE id < 3 ORDER BY id");
+    yield implicit("a correlated subquery", "SELECT id, (SELECT count(*) FROM mapped m WHERE m.tz > t.tm) FROM typed t ORDER BY id");
+    yield implicit("EXISTS", "SELECT id FROM typed t WHERE EXISTS (SELECT 1 FROM mapped m WHERE m.tz = t.tm) ORDER BY id");
+    yield implicit("IN a subquery", "SELECT id FROM typed t WHERE t.tm IN (SELECT tz FROM mapped) ORDER BY id");
+    // where nothing is cast: a time beside a time, and the explicit casts once each
+    yield implicit("a time beside a time", "SELECT id, tm FROM typed WHERE tm = '12:30:00.5' ORDER BY id");
+    yield implicit("all time", "SELECT id, tm < '12:00'::time, COALESCE(tm, '00:00'::time) FROM typed ORDER BY id");
+    yield implicit("a union of times", "SELECT tm FROM typed UNION ALL SELECT tm FROM typed ORDER BY 1");
+    yield implicit("the explicit casts", "SELECT id, tm::timetz, timetz(tm), CAST(tm AS time with time zone) FROM typed ORDER BY id");
+    yield implicit("a timetz already", "SELECT id, COALESCE(tm::timetz, m.tz) FROM typed t LEFT JOIN mapped m USING (id) ORDER BY id");
   }
 }
 

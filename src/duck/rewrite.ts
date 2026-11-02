@@ -33,7 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
 import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
-import { analysedQueries, caseTwins, FIRST_USER_OID, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
+import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
@@ -468,26 +468,37 @@ class Rewriter {
     for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) this.indexShapes(x);
   }
 
-  private typedAt(n: AstNode): Typed | null {
+  private typedAt(n: AstNode): Typed | null { return this.ownEntries(n)[0] ?? null; }
+
+  /**
+   * A RAW NODE'S OWN ANALYSED ENTRIES, its own first (`typedAt`): those at its offset of a kind it is analysed into. Most
+   * nodes have one; an expression Postgres copies has one a copy (BETWEEN's operand is in both of its comparisons).
+   */
+  private ownEntries(n: AstNode): readonly Typed[] {
     const k = kindOf(n);
     const b = bodyOf(n);
     const own = this.synthetic.get(b);
-    if (own !== undefined) return own;
+    if (own !== undefined) return [own];
     if (k === "TypeCast") {
       // a cast to the type the value already has leaves no node of its own: the value's
-      return this.at(b, ANALYSED.TypeCast!) ?? (b.arg !== undefined ? this.typedAt(b.arg) : null);
+      const cast = this.allAt(b, ANALYSED.TypeCast!);
+      return cast.length > 0 ? cast : b.arg !== undefined ? this.ownEntries(b.arg) : [];
     }
-    if (k === "CollateClause") return b.arg !== undefined ? this.typedAt(b.arg) : null;
+    if (k === "CollateClause") return b.arg !== undefined ? this.ownEntries(b.arg) : [];
     // a node the rewrite made that reads as another (decidedByKey's any_value, a set operation's sort column)
     const like = this.typedLike.get(b);
-    if (like !== undefined) return this.typed(like);
+    if (like !== undefined) { const t = this.typed(like); return t === null ? [] : [t]; }
     const kinds = ANALYSED[k];
-    return kinds === undefined ? null : this.at(b, kinds);
+    return kinds === undefined ? [] : this.allAt(b, kinds);
   }
 
   private at(b: Body, kinds: readonly string[]): Typed | null {
     if (typeof b.location !== "number" || b.location < 0) return null;
     return this.types.get(b.location - this.base)?.find((t) => kinds.includes(t.node)) ?? null;
+  }
+  private allAt(b: Body, kinds: readonly string[]): readonly Typed[] {
+    if (typeof b.location !== "number" || b.location < 0) return [];
+    return this.types.get(b.location - this.base)?.filter((t) => kinds.includes(t.node)) ?? [];
   }
 
   typeOf(n: AstNode): number | null { return this.widened.get(bodyOf(n)) ?? this.typed(n)?.type ?? null; }
@@ -1590,6 +1601,10 @@ class Rewriter {
    * (`castArms`) is given null.
    */
   private setOperationColumns(b: Body, required = true): Array<Typed | null> | null {
+    return this.setOperationFound(b, required)?.columns ?? null;
+  }
+  /** a set operation's analysis (`setOperationColumns`), with each arm's own output types (`armTypes`) */
+  private setOperationFound(b: Body, required: boolean): ReturnType<typeof setOperationOutputs>[number] | undefined {
     const arms = this.setOperationArms(b);
     const offsets = arms.map((a) => { let first = a; while (isSetOp(first)) first = unwrappedArm(first.larg); return this.offsetsIn(first.targetList ?? first.valuesLists ?? []); });
     const limits = this.offsetsIn([b.limitCount, b.limitOffset]);
@@ -1598,7 +1613,7 @@ class Rewriter {
       (q) => [...q.arms.map((at, i) => ({ parse: offsets[i]!, analysed: at })), { parse: limits, analysed: q.limits }],
       (q) => JSON.stringify(q.columns));
     if (found === undefined && required) throw new Error("a set operation is not in Postgres's analysis, or twice: report it, with the statement");
-    return found?.columns ?? null;
+    return found;
   }
   private setOps: ReturnType<typeof setOperationOutputs> | undefined;
 
@@ -1619,13 +1634,34 @@ class Rewriter {
       // (a set operation inside it that is no SELECT of its own is part of this one)
       const mark = (s: Body): void => { if (isSetOp(s) && s !== b && ["sortClause", "limitCount", "limitOffset", "lockingClause", "withClause"].every((k) => s[k] === undefined)) inner.add(s); if (isSetOp(s)) { mark(unwrappedArm(s.larg)); mark(unwrappedArm(s.rarg)); } };
       mark(b);
-      const resolved = this.setOperationColumns(b, false);
-      if (resolved !== null) for (const arm of this.setOperationArms(b)) {
+      const found = this.setOperationFound(b, false);
+      const resolved = found?.columns ?? null;
+      // a time arm of a timetz column (issue 167): Postgres casts it implicitly (time_timetz), which the arm must say;
+      // where the analysis is not found, or the arm cannot be written, the statement is refused, never answered
+      // with the engine's own unifying of the two
+      if (found === undefined && (this.setOps ?? []).some((q) => q.columns.some((c, i) => c?.type === TIMETZ && q.armTypes.some((a) => a === null || a[i] === TIME)))) refuseTimetz();
+      if (found !== undefined && resolved !== null) for (const [ai, arm] of this.setOperationArms(b).entries()) {
+        const armTypes = found.armTypes[ai] ?? null;
+        const timeArm = (i: number): boolean => resolved[i]?.type === TIMETZ && (armTypes === null || armTypes[i] === TIME);
         const targets = arm.targetList as AstNode[] | undefined;
-        if (isSetOp(arm) || !Array.isArray(targets) || targets.some((t) => hasStar(bodyOf(t).val))) continue;
+        const rows = Array.isArray(arm.valuesLists) ? (arm.valuesLists as AstNode[]).map((r) => (isNode(r) ? bodyOf(r).items : r) as AstNode[]) : null;
+        if (!isSetOp(arm) && !Array.isArray(targets) && rows !== null && rows.every(Array.isArray)) {
+          for (const items of rows) items.forEach((x, i) => { if (timeArm(i)) items[i] = this.asImplicitTimetz(x); });
+          continue;
+        }
+        if (isSetOp(arm) || !Array.isArray(targets) || targets.some((t) => hasStar(bodyOf(t).val))) {
+          if (resolved.some((_, i) => timeArm(i))) refuseTimetz();
+          continue;
+        }
         targets.forEach((t, i) => {
           const tb = bodyOf(t), column = resolved[i] ?? null;
           const own = isNode(tb.val) ? this.typed(tb.val as AstNode) : null;
+          if (timeArm(i) && isNode(tb.val)) {
+            // (the column keeps its name: the cast's would be `timetz`)
+            if (tb.name === undefined) tb.name = figureColname(tb.val as AstNode);
+            tb.val = this.asImplicitTimetz(tb.val as AstNode);
+            return;
+          }
           if (own === null || column === null || own.type !== BPCHAR || (column.type !== TEXT && column.type !== VARCHAR)) return;
           const to: AstNode = { TypeCast: { arg: tb.val, typeName: { names: [S("pg_catalog"), S(column.type === TEXT ? "text" : "varchar")], typemod: -1 }, location: -1 } };
           this.synthetic.set(bodyOf(to), { ...column, node: "FUNCEXPR", format: 2, oid: null, args: [{ type: own.type, typmod: own.typmod }] });
@@ -1637,6 +1673,81 @@ class Rewriter {
       }
     }
     for (const [k, x] of Object.entries(b)) this.castArms(armOf(k, x) ?? x, inner);
+  }
+
+  /**
+   * `x` AS POSTGRES'S IMPLICIT time→timetz CAST (time_timetz, function 2047, COERCE_IMPLICIT_CAST): a cast node typed as
+   * that FUNCEXPR, which the cast's own rule writes (`typeCast` → `timeAsTimetz`), so an implicit coercion and an
+   * explicit `tm::timetz` send the same SQL (issue 167). Its analysed type is TIMETZ, which every rule above it reads.
+   */
+  private asImplicitTimetz(x: AstNode): AstNode {
+    const to: AstNode = { TypeCast: { arg: x, typeName: { names: [S("pg_catalog"), S("timetz")], typemod: -1 }, location: -1 } };
+    this.synthetic.set(bodyOf(to), { node: "FUNCEXPR", type: TIMETZ, typmod: -1, args: [{ type: TIME, typmod: -1 }], oid: 2047, format: 2, collation: 0, inputCollation: 0,
+      levelsUp: null, datum: null, qualifier: null, renamed: null });
+    this.original.add(bodyOf(to));
+    return to;
+  }
+
+  /**
+   * EACH IMPLICIT time→timetz CAST POSTGRES ADDED, WRITTEN WHERE IT IS (the class "a coercion Postgres adds that the raw
+   * tree lacks: the analysed node unread", issue 167). Postgres casts a time beside a timetz (an operator's operand, IN,
+   * BETWEEN, IS DISTINCT FROM, NULLIF, a CASE's or COALESCE's arm, GREATEST, LEAST, an ARRAY's element, a VALUES row, a
+   * function's argument) with time_timetz, which has no offset of its own: its ARGUMENT's analysed entry says so
+   * (`Typed.implicitTimetz`, src/duck/pgtree.ts), and the raw node whose OWN entry it is (the outermost that reads it:
+   * `'12:30'::time` is read by its cast and its literal) is wrapped in the cast (`asImplicitTimetz`), once, before the
+   * walk: DuckDB would compare a TIME with a TIMETZ ignoring the offset, or refuse to mix them. An expression with no
+   * entry of its own repeats a target (an ORDER BY's, a GROUP BY's: findTargetlistEntrySQL99) and is written as its
+   * twin is: by the shape of the node that HOLDS the coercion (a bare `t.tm` is coerced in one place and not in
+   * another). A set operation's arm is castArms's (Postgres leaves it as written). Every cast of the analysis must be
+   * written: one that is not, an operand cast in one copy and not the other (BETWEEN a time and a timetz), or a bare
+   * literal, is refused by name (time-timetz-coerced).
+   */
+  coerceImplicit(root: unknown): void {
+    const expected = implicitTimetzCasts(this.analysisTree);
+    if (expected === 0) return;
+    const listed = new Set<Typed>();
+    for (const list of this.types.values()) for (const t of list) if (t.implicitTimetz === true) listed.add(t);
+    if (listed.size !== expected) refuseTimetz();
+    type Slot = { holder: AstNode; path: ReadonlyArray<string | number>; node: AstNode };
+    const wraps: Slot[] = [], unanalysed: Slot[] = [];
+    const claimed = new Set<Typed>();
+    const byHolder = new Map<string, Set<string>>();
+    const visit = (v: unknown, holder: AstNode | null, path: ReadonlyArray<string | number>): void => {
+      if (Array.isArray(v)) { v.forEach((x, i) => visit(x, holder, [...path, i])); return; }
+      if (v === null || typeof v !== "object") return;
+      if (!isNode(v)) { for (const [k, x] of Object.entries(v as Body)) visit(x, holder, [...path, k]); return; }
+      const own = this.ownEntries(v);
+      const cast = own.filter((t) => t.implicitTimetz === true);
+      // (an entry an outer node of it took: a cast's literal)
+      if (cast.length > 0 && !claimed.has(cast[0]!)) {
+        // a copy of it left a time (BETWEEN a time and a timetz bound): one node cannot be written both ways. (Another
+        // entry at its offset of another type is another node's: a set operation's output, at its first arm's)
+        if (own.some((t) => t.implicitTimetz !== true && t.node === cast[0]!.node && t.type === cast[0]!.type) || holder === null || kindOf(v) === "A_Const") refuseTimetz();
+        for (const t of cast) claimed.add(t);
+        wraps.push({ holder: holder!, path, node: v });
+        const key = shapeOf(holder!);
+        const at = byHolder.get(key) ?? new Set<string>();
+        at.add(JSON.stringify(path));
+        byHolder.set(key, at);
+      } else if (own.length === 0 && holder !== null) unanalysed.push({ holder, path, node: v });
+      for (const [k, x] of Object.entries(bodyOf(v))) { const arm = armOf(k, x); if (arm !== null) visit(arm, null, []); else visit(x, v, [k]); }
+    };
+    visit(root, null, []);
+    for (const t of listed) if (!claimed.has(t)) refuseTimetz();
+    // a twin's (the shapes read before any node is wrapped)
+    const shapes = new Map<AstNode, string>();
+    const shaped = (h: AstNode): string => { let k = shapes.get(h); if (k === undefined) { k = shapeOf(h); shapes.set(h, k); } return k; };
+    const twins = unanalysed.filter((u) => byHolder.get(shaped(u.holder))?.has(JSON.stringify(u.path)) === true);
+    for (const { holder, path, node } of [...wraps, ...twins]) {
+      let at: unknown = bodyOf(holder);
+      for (const step of path.slice(0, -1)) at = (at as Record<string | number, unknown>)[step];
+      const slot = at as Record<string | number, unknown>;
+      const last = path.at(-1)!;
+      if (slot[last] !== node) throw new Error("a time cast to a timetz was not where its analysis was read: report it, with the statement");
+      slot[last] = this.asImplicitTimetz(node);
+    }
+    // the wrapped expressions' shapes, for an ORDER BY or GROUP BY that repeats one (`typed`)
+    if (wraps.length > 0) this.indexShapes(root);
   }
 
   /** whether a FETCH … WITH TIES was written (a generated table refuses one: src/duck/generated-plan.ts) */
@@ -3358,6 +3469,10 @@ class Rewriter {
       throw new Unrewritable(`${b.op === "IS_LEAST" ? "LEAST" : "GREATEST"} of jsonb values is not supported by Mason (Postgres orders jsonb by its own rules)`, "ORDER BY the value … LIMIT 1 in a subquery", "jsonb-compare");
     }
     if (t !== null) b.args = (b.args as AstNode[]).map((a, i) => this.widen(a, t.args[i]?.type));
+    // a timetz by its order (the instant, then the zone), as `<` and max() compare it: DuckDB's own GREATEST of two
+    // timetz compares otherwise (23:59:59-05 below 23:59:59.999999+05:30, which Postgres has the other way round). A
+    // list's greatest skips its NULLs, as GREATEST does
+    if (t !== null && t.type === TIMETZ) return fn(b.op === "IS_LEAST" ? "list_min" : "list_max", [arrayOf(b.args as AstNode[])]);
     if (t === null || !TEXTS.has(t.type)) return null;
     // under the collation the GREATEST compared under (its inputcollid), never the database's whatever the arguments
     const c = this.inputCollationOf(t);
@@ -4475,7 +4590,12 @@ class Rewriter {
     // only Postgres's input function reads a text as one, and it is the session's offset where the text has none
     if (t !== null && t.type === TIMETZ && from !== null && TEXTS.has(from)) throw new Unrewritable("a text read as a timetz is not supported by Mason", "compare the text, or write a literal", "held-type-compare");
     if (t !== null && t.type === TIMETZ && t.typmod >= 0) throw new Unrewritable("a timetz(n) of a value is not supported by Mason", "cast to timetz with no precision", "held-type-compare");
-    if (t !== null && t.type === TIMETZ && from === TIME) return this.timeAsTimetz(arg);
+    if (t !== null && t.type === TIMETZ && from === TIME) {
+      // (typed as the cast it writes, explicit or Postgres's implicit one: `asImplicitTimetz`)
+      const made = this.timeAsTimetz(arg);
+      this.typedLike.set(bodyOf(made), { TypeCast: b });
+      return made;
+    }
     // ARRAY[tm, …]::timetz[]: Postgres casts each element (transformArrayExpr), so each time element by the same rule
     if (t !== null && t.type === TIMETZ_ARRAY && kindOf(arg) === "A_ArrayExpr") {
       const elements = (bodyOf(arg).elements ?? []) as AstNode[];
@@ -5242,6 +5362,10 @@ const hasWindow = (v: unknown): boolean => Array.isArray(v) ? v.some(hasWindow)
 /** one output column: its target, and its place among the outputs (a `*` is one per column) */
 /** an output of a SELECT; `row`: a row value, which the list writes as its text (`rowValues`) */
 type Output = { target: number; at: number; name: string; value: AstNode; star: boolean; twin: boolean; row: boolean };
+/** a time Postgres casts to a timetz where the rewrite cannot write the cast (`coerceImplicit`, `castArms`) */
+function refuseTimetz(): never {
+  throw new Unrewritable("a time beside a timetz here is not supported by Mason (Postgres casts the time to a timetz, which Mason cannot write in this place)", "cast the time: tm::timetz", "time-timetz-coerced");
+}
 const hasStar = (v: unknown): boolean => isNode(v) && kindOf(v) === "ColumnRef" && (bodyOf(v).fields as AstNode[]).some((f) => kindOf(f) === "A_Star");
 
 /** whether a program of a value the engine holds exactly (`duckExact`, asked first) writes what DuckDB would write
@@ -6043,6 +6167,7 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.scopeColumns(own);
   r.refuseExactRows(own);
   r.castArms(own);
+  r.coerceImplicit(own);
   const exact = r.exactThrough(own, analysis.fields);
   r.carryAll(own);
   r.markBounds(own, wireBound);
