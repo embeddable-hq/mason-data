@@ -283,7 +283,6 @@ const KNOWN: Decided[] = [
   { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },
   { sql: /stddev\(DISTINCT (i4|n2)\)|stddev\(n\)/, kind: "text", gap: "numeric-stddev", why: "Postgres's numeric stddev of DISTINCT values, or of an unconstrained numeric, is exact to its scale; DuckDB's a double" },
-  { sql: /greatest\(ch, (t|vc)\)/, kind: "value", gap: "char-n-minmax", why: "least(char(5) '', text ''): Postgres compares without the padding" },
   { sql: /^SELECT min\(a \/ b\), max\(a \/ b\) FROM public\.one, \(VALUES/, kind: "text", gap: "min-max-scale-tie", why: "min of 0 / 7 and 0 / 1000000, equal values at two scales: Postgres keeps the last it reads, Mason the least operands" },
   { sql: /^SELECT var_samp\(x\) FROM \(SELECT 7 \/ 3\.0 AS x/, kind: "text", gap: "nested-exact-numeric", why: "the subquery's quotients are DuckDB's doubles where the outer query takes their variance (a sum, an avg, min / max and an ORDER BY read their programs)" },
   { sql: /^SELECT count\(\*\) FROM public\.one, \(VALUES \(1\.00000000000000000001::numeric\(30,20\)\), \(1\.00000000000000000002\)\) AS v\(x\) WHERE v\.x \/ 1 IN \(1\.00000000000000000001\)$/, kind: "value", gap: "numeric-quotient-compare", why: "IN equates the two quotients' doubles, which Postgres's exact values tell apart" },
