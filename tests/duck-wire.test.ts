@@ -5913,12 +5913,17 @@ test("exact path: the CAST reader reads a program's text, its nearest double and
 test("exact path: issue 242: a numeric the engine holds as a double with no program, cast to an integer, is refused by name", async () => {
   const c = await client();
   try {
-    for (const sql of ["SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y))::int FROM bigdec b",
-      "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
-      "SELECT CAST(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) AS bigint) FROM bigdec b"]) {
-      // (the engine's type decides, so the rows do: a runtime refusal naming its gap and its way out, review r1 of PR 506)
-      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000"
-        && /cast to an integer type is not supported by Mason \(Mason gap numeric-double-integer\).*ORDER BY \(a \/ b\)::int/.test(e.message), sql);
+    // review r2 of PR 506 (runtime-refusal-preempted-by-engine-error): the bytes are the rewrite's own, so a cast of
+    // them, or of any expression over them, is refused by name before the engine runs, never the engine's 42883 / 42804
+    const over = "percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)";
+    for (const sql of [`SELECT (${over})::int FROM bigdec b`, "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
+      `SELECT CAST(${over} AS bigint) FROM bigdec b`, `SELECT (${over} * 2)::int FROM bigdec b`, `SELECT (${over} + 0)::int FROM bigdec b`,
+      `SELECT round(${over})::int, trunc(${over})::int FROM bigdec b`, `SELECT abs(${over})::int FROM bigdec b`, `SELECT coalesce(${over}, 0)::int FROM bigdec b`,
+      `SELECT nullif(${over}, 0)::int FROM bigdec b`, `SELECT greatest(${over}, 0)::int FROM bigdec b`, `SELECT (x * 2)::int FROM (SELECT ${over} AS x FROM bigdec b) s`,
+      "WITH q AS (SELECT mode() WITHIN GROUP (ORDER BY b.x / b.y) AS x FROM bigdec b) SELECT (x / 2)::int8 FROM q",
+      `SELECT b.id % 2, (${over} * 2)::int FROM bigdec b GROUP BY 1`, `SELECT (${over} * 2)::int FROM bigdec b UNION ALL SELECT 1`]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-double-integer/.test(e.detail ?? "")
+        && /cast to (integer|bigint), is not supported by Mason/.test(e.message) && /ORDER BY \(a \/ b\)::int/.test(e.hint ?? ""), sql);
     }
     assert.deepEqual(await unlike(c, [
       // its way out answers as Postgres does

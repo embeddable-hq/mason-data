@@ -43,6 +43,9 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   // (`n2 ^ 2` is Postgres's power since issue 242, so ln of it is answered: an unconstrained numeric's stddev has no program)
   { gap: "numeric-math", sql: "SELECT ln(stddev(n)) FROM typed" },
   { gap: "numeric-double-integer", sql: "SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 3))::int FROM typed" },
+  // (review r2 of PR 506: any expression over the bytes, refused by name, never the engine's own error over them)
+  { gap: "numeric-double-integer", sql: "SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 3) * 2)::int, round(mode() WITHIN GROUP (ORDER BY n2 / 3))::int8 FROM typed" },
+  { gap: "numeric-double-integer", sql: "SELECT coalesce(x, 0)::int, nullif(x, 0)::int FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 7) AS x FROM typed) s" },
   { gap: "view-forms", sql: "SELECT happy FROM happy" },
   { gap: "enum-forms", sql: "SELECT id, t::text::mood[] FROM moods WHERE false" },
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },
