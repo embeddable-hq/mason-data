@@ -1365,6 +1365,70 @@ test("a time as a timetz takes the offset of the transaction's date at the value
   }
 });
 
+// A TIME BESIDE A TIMETZ is cast as Postgres casts it implicitly (time_timetz, function 2047, COERCE_IMPLICIT_CAST),
+// which the raw tree does not show: an operator's operand, a COALESCE's, a CASE's arm, a set operation's column. Its
+// value is the explicit cast's (issue 162's rule), sent as the SAME SQL, one path: before issue 167 a comparison ignored
+// the offset (12:30:00.5 equal to both 12:30:00.5-04 and -05), a union's column answered as a time (1083), and a CASE
+// or a `<` failed with the engine's error on mixing the two.
+test("a time beside a timetz is cast as Postgres casts it, by the explicit cast's own rule (issue 167)", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  const sentOf = async (sql: string): Promise<string> => { const from = logged.length; await c.query(sql); return sent(from); };
+  // the offset timeAsTimetz writes (src/duck/rewrite.ts), once a cast
+  const casts = (duck: string): number => duck.split("%s%02d:%02d:%02d").length - 1;
+  const cases: Array<[string, string, string[]]> = [
+    ["2026-11-01T04:31:00Z", "America/New_York", ["00:00:00-04", "01:30:00-05", "02:30:00-05", "12:30:00.5-05", "23:59:00-05", "24:00:00-05"]],
+    ["2026-03-08T06:00:00Z", "America/New_York", ["00:00:00-05", "01:30:00-05", "02:30:00-05", "12:30:00.5-04", "23:59:00-04", "24:00:00-04"]],
+    ["2026-11-01T04:31:00Z", "Asia/Kolkata", ["00:00:00+05:30", "01:30:00+05:30", "02:30:00+05:30", "12:30:00.5+05:30", "23:59:00+05:30", "24:00:00+05:30"]],
+  ];
+  try {
+    for (const [now, zone, times] of cases) {
+      fixedNow = Date.parse(now) * 1000;
+      await c.query(`SET TimeZone = '${zone}'`);
+      const what = `at ${now} in ${zone}`;
+      const rows = times.map((t, i) => [String(i + 1), t]);
+      // a COALESCE's argument, row for row the explicit cast's, 24:00 kept
+      assert.deepEqual(await answer(c, "SELECT id, COALESCE(NULL::timetz, tm) FROM clock_times ORDER BY id"), { fields: [["id", 23], ["coalesce", 1266]], rows }, what);
+      assert.deepEqual(await answer(c, "SELECT id, CASE WHEN id > 3 THEN tm::timetz ELSE tm END AS x FROM clock_times ORDER BY id"), { fields: [["id", 23], ["x", 1266]], rows }, `a CASE ${what}`);
+      // an operator's operand: the offset compared, one of -04 and -05 equal on each day, never both
+      for (const offset of ["-05", "-04", "+05:30"]) {
+        const sql = `SELECT id FROM clock_times WHERE tm = '12:30:00.5${offset}'::timetz ORDER BY id`;
+        assert.deepEqual((await answer(c, sql)).rows, times[3]!.endsWith(offset) ? [["4"]] : [], `${sql} ${what}`);
+      }
+      // (a timetz is ordered by its instant: its time less its offset, 03:00:00-05 at 08:00 UTC)
+      const utc = (t: string): number => { const [, h, m, s, sign, oh, om] = /^(\d+):(\d+):([\d.]+)([+-])(\d+)(?::(\d+))?$/.exec(t)!; return Number(h) * 3600 + Number(m) * 60 + Number(s) - (sign === "+" ? 1 : -1) * (Number(oh) * 3600 + Number(om ?? 0) * 60); };
+      assert.deepEqual((await answer(c, "SELECT id FROM clock_times WHERE tm < '03:00:00-05'::timetz ORDER BY id")).rows,
+        times.flatMap((t, i) => utc(t) < 8 * 3600 ? [[String(i + 1)]] : []), `< ${what}`);
+      // a set operation's column: a timetz (1266), each time arm cast, whichever comes first
+      assert.deepEqual(await answer(c, "SELECT tm FROM clock_times WHERE id IN (1, 4) UNION ALL SELECT NULL::timetz ORDER BY 1"),
+        { fields: [["tm", 1266]], rows: [[times[0]], [times[3]], [null]] }, `a union ${what}`);
+      assert.deepEqual((await answer(c, "SELECT NULL::timetz AS x UNION ALL SELECT tm FROM clock_times WHERE id = 6 ORDER BY 1")).rows, [[times[5]], [null]], `a union, the timetz arm first ${what}`);
+      // the value of a CASE whose every WHEN is a timetz
+      assert.deepEqual((await answer(c, "SELECT id, CASE tm WHEN '12:30:00.5-05'::timetz THEN 'a' WHEN '12:30:00.5-04'::timetz THEN 'b' END FROM clock_times WHERE id = 4")).rows,
+        [["4", times[3]!.endsWith("-05") ? "a" : times[3]!.endsWith("-04") ? "b" : null]], `CASE tm WHEN ${what}`);
+    }
+    // GREATEST and LEAST of a timetz by its instant, as `<` orders it (the engine's own put 23:59:59-05, at 04:59:59 UTC
+    // the next day, below 23:59:59.999999+05:30), a NULL skipped
+    assert.deepEqual((await answer(c, "SELECT GREATEST('23:59:59-05'::timetz, NULL, '23:59:59.999999+05:30'::timetz), LEAST(tm, '23:59:59-05'::timetz) FROM clock_times WHERE id = 6")).rows,
+      [["23:59:59-05", "24:00:00+05:30"]]);
+    // ONE PATH: the implicit cast sends the SQL the explicit one sends
+    assert.equal(await sentOf("SELECT id FROM clock_times WHERE tm = '12:30:00.5-05'::timetz ORDER BY id"), await sentOf("SELECT id FROM clock_times WHERE tm::timetz = '12:30:00.5-05'::timetz ORDER BY id"));
+    assert.equal(await sentOf("SELECT id, COALESCE(NULL::timetz, tm) FROM clock_times ORDER BY id"), await sentOf("SELECT id, COALESCE(NULL::timetz, tm::timetz) FROM clock_times ORDER BY id"));
+    // an explicit cast once each, never twice, and nothing where no time meets a timetz
+    assert.equal(casts(await sentOf("SELECT id, tm::timetz, timetz(tm), CAST(tm AS time with time zone) FROM clock_times ORDER BY id")), 3);
+    assert.equal(casts(await sentOf("SELECT id, COALESCE(tm::timetz, NULL::timetz) FROM clock_times ORDER BY id")), 1);
+    assert.equal(casts(await sentOf("SELECT id, tm < '12:00'::time, COALESCE(tm, '00:00'::time) FROM clock_times WHERE tm = '12:30:00.5' ORDER BY id")), 0);
+    assert.deepEqual((await answer(c, "SELECT tm FROM clock_times UNION ALL SELECT tm FROM clock_times ORDER BY 1 LIMIT 1")).fields, [["tm", 1083]]);
+    // an arm Mason cannot write (a `*`) is refused by name, never the engine's own unifying of the two
+    await assert.rejects(c.query("SELECT * FROM (SELECT tm FROM clock_times) s UNION ALL SELECT NULL::timetz"),
+      (e: Error & { code?: string; detail?: string }) => e.code === "0A000" && /Mason gap time-timetz-coerced/.test(`${e.message} ${e.detail ?? ""}`));
+  } finally {
+    fixedNow = undefined;
+    await c.query("SET TimeZone = 'UTC'");
+    await c.end();
+  }
+});
+
 // DATE_TRUNC OF A TIMESTAMPTZ IS THE INSTANT'S OWN ARITHMETIC where that is Postgres's answer (src/duck/rewrite.ts
 // truncInstant): DuckDB's date_trunc of a TIMESTAMPTZ is ICU's calendar, ~45 ns a row a thread even in UTC (a BI tool's
 // monthly histogram over 197 M rows took 7.9 s on the test server), and its sub-day parts in another zone re-read the

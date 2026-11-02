@@ -67,6 +67,33 @@ const envUrl = (): string => /^DATABASE_URL=(.*)$/m.exec(fs.readFileSync(path.jo
 let demoPort = 0;
 let demoUrl = "";
 
+/**
+ * ISSUE 387: THE DEMO'S GENERATED TABLE IS NEVER REFUSED AT A START. Its base, orders, is synced: a check planned before
+ * the catalog held it waits for it (src/duck/generated.ts `check`), so nothing is said of it at `mason start`, in the log,
+ * or by `mason status`, and `mason wait daily_orders` waits instead of exiting 1.
+ */
+const REFUSED_LINE = /daily_orders\.yml: (sql: relation "orders" does not exist|no longer refused)/;
+function neverRefused(s: Answer): void {
+  assert.doesNotMatch(s.stdout, /! mason\/generated_tables\//, said(s));
+  assert.doesNotMatch(s.stdout, REFUSED_LINE, said(s));
+  const log = fs.readFileSync(path.join(home, "mason.log"), "utf8").split("\n").filter((l) => REFUSED_LINE.test(l));
+  assert.deepEqual(log, [], "the log says no refusal of daily_orders");
+}
+/** every `mason status --json` from the start until daily_orders serves: waiting, building, current or behind, never refused */
+async function sampledUntilServed(): Promise<void> {
+  type G = { state: string; serving: boolean; refusals: unknown[] };
+  for (const end = Date.now() + 60_000; ;) {
+    const j = await mason(["status", "--json"]);
+    assert.equal(j.code, 0, said(j));
+    const g = (JSON.parse(j.stdout) as { generatedTables: G[] }).generatedTables[0];
+    assert.ok(g !== undefined, said(j));
+    assert.match(g.state, /^(waiting|building|current|behind)$/, JSON.stringify(g));
+    assert.deepEqual(g.refusals, [], JSON.stringify(g));
+    if (g.serving) return;
+    assert.ok(Date.now() < end, `daily_orders never served: ${JSON.stringify(g)}`);
+  }
+}
+
 /** `body` (a start and what it checks), then `mason stop` whatever happened in it, so a step that fails leaves no run
  *  up for the next: the stop's own failure is the step's when the body passed, else said beside the body's. */
 async function thenStop(body: () => Promise<void>): Promise<void> {
@@ -166,6 +193,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 300_0
     // what to run next, the web page first: a first-time user's most useful next step
     assert.match(s.stdout.slice(s.stdout.lastIndexOf("Next:")), /^Next:\n {2}mason ui +the status, tables, users and statements, in your browser\n {2}mason tables +the database's tables, and what you can add\n {2}mason add <table> +sync a table into Mason\n {2}mason user add <name> +a user for a BI tool or your app: its password and URL, printed once\n {2}mason status +what Mason is doing\n {2}mason logs +its log: every sync, poll and statement\n {2}mason stop +stop Mason; the next mason start resumes where it stopped\n?$/, said(s));
     assert.ok(fs.existsSync(demoDir), ".mason/demo/ is made");
+    await sampledUntilServed();
+    neverRefused(s);
     const again = await mason(["start", "--json"]);
     assert.equal(again.code, 0, said(again));
     const v = JSON.parse(again.stdout) as { running: boolean; pid: number };
@@ -194,15 +223,8 @@ describe("mason init demo, then the run as a person drives it", { timeout: 300_0
   });
 
   test("the demo's generated table, before mason add order_items: built from the synced orders, in mason status, read over the Postgres API, equal to Postgres's answer, and kept current", async () => {
-    // built from the three tables init adds: mason wait names it, as a person and as data. Issue 387: for a few seconds
-    // after a start the table is refused with `relation "orders" does not exist` though orders is synced, and mason wait
-    // exits 1 on it; that refusal alone is waited out (bounded), any other failure is this test's
-    const deadline = Date.now() + 30_000;
-    let w = await mason(["wait", "daily_orders", "--timeout", "60"]);
-    while (w.code === 1 && /refused: relation "orders" does not exist/.test(w.stderr) && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 1_000));
-      w = await mason(["wait", "daily_orders", "--timeout", "60"]);
-    }
+    // built from the three tables init adds: mason wait names it, as a person and as data, the first time (issue 387)
+    const w = await mason(["wait", "daily_orders", "--timeout", "60"]);
     assert.equal(w.code, 0, said(w));
     const wj = await mason(["wait", "daily_orders", "--timeout", "60", "--json"]);
     assert.equal(wj.code, 0, said(wj));
@@ -325,6 +347,9 @@ describe("mason init demo, then the run as a person drives it", { timeout: 300_0
       const s = await mason(["start"]);
       assert.equal(s.code, 0, said(s));
       assert.ok(s.stdout.includes(`✓ Demo database on 127.0.0.1:${demoPort} (Postgres, hosted by this process in .mason/demo; kept from the last run)`), said(s));
+      const w = await mason(["wait", "daily_orders", "--timeout", "60"]);
+      assert.equal(w.code, 0, said(w));
+      neverRefused(s);
     });
     await thenStop(async () => {
       // the answer an agent reads (its help: { running, pid, postgres: { url, host, port, database, sslmode }, next })
@@ -392,6 +417,10 @@ describe("mason init demo, then the run as a person drives it", { timeout: 300_0
       const s = await mason(["start"]);
       assert.equal(s.code, 0, said(s));
       assert.ok(s.stdout.includes(`✓ Demo database on 127.0.0.1:${demoPort} (Postgres, hosted by this process in .mason/demo; seeded with the shop schema)`), said(s));
+      await sampledUntilServed();
+      const w = await mason(["wait", "daily_orders", "--timeout", "60"]);
+      assert.equal(w.code, 0, said(w));
+      neverRefused(s);
     });
   });
 });

@@ -57,6 +57,10 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   // is the Parse's offset (Postgres folds it there); a value written in the session's zone is the run's
   s("a timetz parsed in one zone and run in another", "SET TimeZone = 'Asia/Kolkata'", { prepare: "p", sql: "SELECT id, tz, tz::text FROM public.mapped WHERE tz <> '12:30:00' ORDER BY tz, id" },
     "SET TimeZone = 'America/New_York'", { run: "p" }, "SET TimeZone = 'UTC'", { run: "p" }),
+  // a time cast implicitly to a timetz takes the EXECUTION's zone and date, as the explicit cast does (issue 167)
+  s("a time cast implicitly to a timetz, parsed in one zone and run in another", "SET TimeZone = 'Asia/Kolkata'",
+    { prepare: "p", sql: "SELECT id, COALESCE(NULL::timetz, tm), tm = '12:30:00.5+05:30'::timetz FROM public.typed WHERE id IN (2, 101) ORDER BY id" },
+    { run: "p" }, "SET TimeZone = 'America/New_York'", { run: "p" }),
   s("a tstzrange parsed in one zone and run in another", { prepare: "p", sql: "SELECT id, rz, mz::text FROM public.mapped ORDER BY id" }, "SET TimeZone = 'Asia/Kolkata'", { run: "p" }),
   s("a held type parsed and run after a SET", { prepare: "p", sql: "SELECT id, mc, substring(cd::text, 1, 3) FROM public.mapped WHERE mc = '08:00:2b:01:02:03' ORDER BY id" }, "SET application_name = 'a'", { run: "p" }),
   // SET LOCAL outside a block: the warning, its value gone by the next request, nothing reported
