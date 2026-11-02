@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_SERVICE_URL, deviceName, serviceOf, serviceText, urlProblem } from "../src/cli/hosted.ts";
+import { codeOfStatus, DEFAULT_SERVICE_URL, deviceName, serviceOf, serviceText, urlProblem } from "../src/cli/hosted.ts";
 import { credentialsPath, environmentToken, parseLogins } from "../src/cli/credentials.ts";
 
 test("serviceOf: the default when MASON_CLOUD_URL is unset; its origin when it is an address alone; else refused", () => {
@@ -55,4 +55,9 @@ test("deviceName: the hostname as printable ASCII, at most 64 characters, never 
   assert.equal(deviceName(""), "unknown");
   assert.equal(deviceName("\u0000\u0007"), "--");
   assert.match(deviceName(), /^[\x20-\x7e]{1,64}$/, "this machine's");
+});
+
+test("codeOfStatus: the CLI's own code for a service's failure, by its HTTP status, never usage or timeout", () => {
+  assert.deepEqual([400, 401, 403, 404, 408, 409, 413, 415, 422, 429, 499, 500, 502, 503, 504].map(codeOfStatus),
+    ["refused", "refused", "refused", "not_found", "refused", "refused", "refused", "refused", "refused", "refused", "refused", "failed", "failed", "failed", "failed"]);
 });

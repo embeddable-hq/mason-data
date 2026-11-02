@@ -13,11 +13,17 @@
  *
  * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, every string the CLI prints is made
  * printable and bounded (`serviceText`: no control or bidi character reaches a terminal), and the token — the one this
- * request carries, and anything shaped as a documented token — is masked in it. A `/v1/` failure is the CLI's own
- * failure shape and is said as the service worded it (`serviceFailure`), never re-worded.
+ * request carries, and anything shaped as a documented token — is masked in it. A `/v1/` failure's words are said as the
+ * service worded them (`serviceFailure`), never re-worded.
+ *
+ * NOTHING THE SERVICE SENDS DECIDES WHAT THE CLI DOES: its text is shown, never obeyed. A failure's CODE, and so its
+ * exit code, is the CLI's own, from the HTTP status (`codeOfStatus`, one place), the service's own code kept as
+ * information in `why`; a next step is kept only when it is a `mason` command this CLI has, its words plain; the page a
+ * person is sent to, and that a browser opens, is on the service's own origin (`pageUrl`); every number that times the
+ * poll is bounded here.
  */
 import * as os from "node:os";
-import type { Failure, NextStep } from "./command.ts";
+import type { Failure, FailureCode, NextStep } from "./command.ts";
 import { version } from "./version.ts";
 
 /** The hosted service a login goes to when `MASON_CLOUD_URL` is unset: the one place it is named. */
@@ -165,11 +171,33 @@ export function unexpected(service: Service, a: Answer, step: string): Failure {
 }
 
 /**
- * A `/v1/` FAILURE, AS THE SERVICE WORDED IT: `{ error: { code, message, why?, fix? }, next: [{ command, what? }] }`,
- * the CLI's own failure shape, said as any Failure is (never re-worded), each string made printable and masked. Null
- * when the answer is not that shape.
+ * THE CLI'S CODE FOR A SERVICE'S FAILURE, by its HTTP status alone (the one place it is decided): the service refused
+ * what was asked (401, 403, any other 4xx) is `refused`, a thing it does not have (404) `not_found`, anything else
+ * (5xx) `failed`. Never `usage` or `timeout`, whose exit codes (2, 124) say something of THIS command line or wait:
+ * the service's own word for it is information (`serviceFailure` keeps it in `why`), never the CLI's contract.
  */
-export function serviceFailure(a: Answer, secrets: readonly string[]): Failure | null {
+export function codeOfStatus(status: number): FailureCode {
+  if (status === 404) return "not_found";
+  if (status >= 400 && status < 500) return "refused";
+  return "failed";
+}
+
+/** A next step the service names, when it is one this CLI can take: `mason <one of commands>`, each word plain (no
+ *  shell syntax), at most 300 characters; null for anything else. */
+function nextCommand(v: unknown, commands: readonly string[]): string | null {
+  if (!str(v, 300)) return null;
+  const words = v.trim().split(/ +/);
+  if (words[0] !== "mason" || !commands.includes(words[1] ?? "")) return null;
+  return words.every((w) => /^[\w@%+=:,./-]+$/.test(w)) ? words.join(" ") : null;
+}
+
+/**
+ * A `/v1/` FAILURE: `{ error: { code, message, why?, fix? }, next: [{ command, what? }] }`, its message, why and fix
+ * said as the service worded them (made printable, masked); its CODE the CLI's own (`codeOfStatus`), the service's kept
+ * in `why`; its next steps those that are a `mason` command of `commands`, and `mason login` for a 401 (the service no
+ * longer takes this login). Null when the answer is not that shape.
+ */
+export function serviceFailure(a: Answer, secrets: readonly string[], commands: readonly string[]): Failure | null {
   if (a.status < 400 || !obj(a.json) || !obj(a.json.error)) return null;
   const e = a.json.error;
   if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || !str(e.message, 2000)) return null;
@@ -177,21 +205,34 @@ export function serviceFailure(a: Answer, secrets: readonly string[]): Failure |
   const next: NextStep[] = [];
   if (Array.isArray(a.json.next)) {
     for (const n of a.json.next.slice(0, 10)) {
-      if (!obj(n) || !str(n.command, 300)) return null;
+      if (!obj(n)) return null;
+      const command = nextCommand(n.command, commands);
+      if (command === null || next.some(([c]) => c === command) || next.length >= 5) continue;
       const what = text(n.what, 300);
-      next.push(what ? [serviceText(n.command, 300, secrets), what] : [serviceText(n.command, 300, secrets)]);
+      next.push(what ? [command, what] : [command]);
     }
   }
-  return { message: serviceText(e.message, 2000, secrets), code: e.code, why: text(e.why, 2000), fix: text(e.fix, 2000), next };
+  if (a.status === 401 && !next.some(([c]) => c === "mason login")) next.unshift(["mason login", "sign in again"]);
+  const why = text(e.why, 2000);
+  const said = `the service said ${e.code}, HTTP ${a.status}`;
+  return { message: serviceText(e.message, 2000, secrets), code: codeOfStatus(a.status), why: why ? `${why} (${said})` : said, fix: text(e.fix, 2000), next };
 }
 
 /** The device code the service gave: the code a person approves, where, and for how long. */
 export interface DeviceCode { deviceCode: string; userCode: string; verificationUri: string; verificationUriComplete: string | null; expiresIn: number; interval: number }
 
-/** A URL the service names for a person to open: https (or http to this machine), as the URL parser writes it. */
-function pageUrl(v: unknown): string | null {
+/**
+ * A PAGE THE SERVICE SENDS A PERSON TO, which is printed and, on a terminal, opened: on the service's OWN origin (the
+ * address MASON_CLOUD_URL named, or the default), as the URL parser writes it, with no user or password. A page
+ * elsewhere would send the person, and their code, to an address nobody chose: `elsewhere` names it. Null when it is
+ * not a URL.
+ */
+function pageUrl(service: Service, v: unknown): { href: string } | { elsewhere: string } | null {
   if (!str(v, 2048)) return null;
-  try { const u = new URL(v); return urlProblem(u) === null && !u.username && !u.password ? u.href : null; } catch { return null; }
+  let u: URL;
+  try { u = new URL(v); } catch { return null; }
+  if (u.origin !== service.base) return { elsewhere: u.protocol === "https:" || u.protocol === "http:" ? u.origin : `${u.protocol}//` };
+  return u.username || u.password ? null : { href: u.href };
 }
 
 /** `POST /oauth/device/code`: a device code, or a Failure. */
@@ -207,8 +248,17 @@ export async function startDevice(service: Service): Promise<DeviceCode | Failur
   const j = a.json;
   if (!obj(j)) return unexpected(service, a, "a device code was expected");
   const userCode = typeof j.user_code === "string" ? /^([A-Za-z]{4})-?([A-Za-z]{4})$/.exec(j.user_code) : null;
-  const verificationUri = pageUrl(j.verification_uri);
-  const complete = j.verification_uri_complete === undefined ? null : pageUrl(j.verification_uri_complete);
+  const page = pageUrl(service, j.verification_uri);
+  const completePage = j.verification_uri_complete === undefined ? null : pageUrl(service, j.verification_uri_complete);
+  for (const p of [page, completePage]) {
+    if (p && "elsewhere" in p) {
+      return { message: `${service.base} named a sign-in page on another address: ${serviceText(p.elsewhere, 300)}`, code: "refused",
+        why: `a sign-in page is printed and opened only on the service's own address, ${service.base}: anything else would send you, and the code, to an address nobody chose`,
+        fix: "check MASON_CLOUD_URL names the service you mean; if it does, the service is answering outside its documented API" };
+    }
+  }
+  const verificationUri = page && "href" in page ? page.href : null;
+  const complete = completePage && "href" in completePage ? completePage.href : null;
   const expiresIn = j.expires_in, interval = j.interval ?? 5;
   if (!str(j.device_code, 2048) || !/^[\x21-\x7e]+$/.test(j.device_code) || !userCode || !verificationUri
     || (j.verification_uri_complete !== undefined && complete === null)
@@ -267,7 +317,11 @@ export interface Me { email: string; name: string; orgs: Array<{ slug: string; n
 export async function whoAmI(service: Service, token: string): Promise<Me | Failure> {
   const a = await call(service, "GET", "/v1/me", { token });
   if (isFailure(a)) return a;
-  if (a.status !== 200) return serviceFailure(a, [token]) ?? unexpected(service, a, "the account signed in was asked for");
+  if (a.status !== 200) {
+    // the commands a failure's next step may name: this CLI's own (read when needed: the registry imports this module)
+    const { COMMANDS } = await import("./registry.ts");
+    return serviceFailure(a, [token], COMMANDS.map((c) => c.name)) ?? unexpected(service, a, "the account signed in was asked for");
+  }
   const j = a.json;
   const orgs = obj(j) && Array.isArray(j.orgs) ? j.orgs : null;
   if (!obj(j) || !str(j.email, 320) || typeof j.name !== "string" || j.name.length > 300 || orgs === null || orgs.length > 1000

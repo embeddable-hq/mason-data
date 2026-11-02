@@ -37,12 +37,13 @@ character replaced by `-`), at most 64 characters, and `unknown` when that leave
 |---|---|
 | `device_code` | opaque, printable ASCII, at most 2048 characters; never shown |
 | `user_code` | 8 letters, shown as `XXXX-XXXX` (sent with or without the hyphen) |
-| `verification_uri` | the page where the code is entered: `https://` (or `http://` to this machine) |
-| `verification_uri_complete` | optional: the same page with the code filled in, which the CLI shows and opens |
+| `verification_uri` | the page where the code is entered, on the service's own origin (the base URL's scheme, host and port) |
+| `verification_uri_complete` | optional: the same page with the code filled in, which the CLI shows and opens; on the service's own origin too |
 | `expires_in` | seconds the code lasts, 1 to 3600 |
 | `interval` | seconds between polls, 1 to 300 (5 when absent) |
 
-On a terminal the CLI opens the page in a browser when it can. It opens only an address of letters, digits and
+A page on any other origin is refused, naming both origins, before it is printed, opened or polled: it would send the
+person, and the code, to an address nobody chose. On a terminal the CLI opens the page in a browser when it can. It opens only an address of letters, digits and
 `. : [ ] - _ ~ / ? = +`, so a shell never reads one. Otherwise, and always for a coding agent, it prints the page and
 the code on stderr at once, then waits.
 
@@ -94,7 +95,7 @@ retries one by itself.
 |---|---|---|
 | `POST /oauth/device/code` | `400 { "error": "invalid_request" }`: a `device_name` empty, over 64 characters or with a control character | stops: code `failed`, naming `invalid_request` and its `error_description` |
 | `POST /oauth/device/code` | `429 { "error": "slow_down" }`: too many sign-ins from one address | stops: code `failed`, "try again in a few minutes"; it is not polled again |
-| `GET /v1/me` | `403` with the failure shape, code `refused`, next `mason login`: a CI token (`masondata_ci_…`) cannot say who a person is | says it as the service worded it |
+| `GET /v1/me` | `403` with the failure shape, code `refused`, next `mason login`: a CI token (`masondata_ci_…`) cannot say who a person is | says its words as the service wrote them, code `refused` (below) |
 | any, `/oauth/revoke` included | `400`, `413` or `415`: a body the service cannot read | stops with the status; `mason logout` still removes the login, and says it was NOT revoked |
 | any | another status, or a body that is not JSON | a failure naming the request and the status, never the body |
 
@@ -106,8 +107,19 @@ Every `/v1/` endpoint fails with an HTTP 4xx or 5xx and the CLI's own failure sh
 { "error": { "code": "unauthenticated", "message": "…", "why": "…", "fix": "…" }, "next": [{ "command": "mason login", "what": "…" }] }
 ```
 
-`why`, `fix` and `what` are optional. `code` is lowercase letters, digits and `_`. The CLI says it as it says any
-failure, never re-worded (a token in it is masked). A `401` has the code `unauthenticated` and `next` `mason login`.
+`why`, `fix` and `what` are optional. `code` is lowercase letters, digits and `_`. A `401` has the code
+`unauthenticated` and `next` `mason login`.
+
+Nothing in it decides what the CLI does; its words are shown, never obeyed:
+
+- `message`, `why` and `fix` are said as the service wrote them, never re-worded (made printable, a token masked).
+- The CLI's code, and so its exit code, is its own, from the HTTP status: `404` is `not_found`, any other 4xx
+  `refused`, anything else `failed`, each exit 1. It is never `usage` (exit 2) or `timeout` (exit 124), whatever the
+  service says. The service's `code` is kept as information at the end of `why`: `(the service said unauthenticated,
+  HTTP 401)`. So `--json`'s `error.code` is always one of the CLI's own codes (`mason help agent` lists them).
+- A `next` step is kept only when it is a `mason` command this CLI has, each word plain (letters, digits and
+  `_ @ % + = : , . / -`); anything else is dropped, so a coding agent that runs the next step never runs the service's
+  shell. At most 5 are kept. A `401` always has `mason login` among them.
 
 ## Tokens
 
