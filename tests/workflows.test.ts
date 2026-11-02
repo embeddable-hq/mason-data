@@ -1697,7 +1697,7 @@ function renderStage(args: Record<string, unknown>, answers: Answers, slimSrc = 
 }
 /** What the render appends to slim's prompt of `label`, up to its schema: where the agent writes its result. */
 const RESULT_TRAILER = (dir: string, label: string) =>
-  `\n\nWrite your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(dir, label)}, and end your report with that path. The schema: `;
+  `\n\nBefore you end your turn, write your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(dir, label)}, and end your report with that path. The schema: `;
 /** The coordinator reads stdout, so it holds control lines only, and no sentence of any prompt it rendered. */
 function onlyControlLines(r: Rendered, what: string): void {
   for (const line of r.out.split("\n").filter(Boolean)) assert.match(line, /^(STAGE |DONE: |NULL )/, `${what}: a stdout line that is not a control line: ${line}`);
@@ -1737,6 +1737,12 @@ test("the pr-persistent skill: the render is one command, each stage is dispatch
   assert.match(text, /show "\$SHA:\.claude\/workflows\/pr-loop-slim\.js" > "\$RUN\/pr-loop-slim\.js"/);
   assert.match(text, /show "\$SHA:\.claude\/skills\/pr-persistent\/render\.mjs" > "\$RUN\/render\.mjs"/);
   assert.doesNotMatch(text, /fenced json block/, "a result travels by file, never in the report");
+  // issue 304, PR 313: a resumed implementer's completion notice can go to the top-level session, never to the
+  // coordinator, so the coordinator's wait on an agent watches its results file (or the PR's head), never a notice
+  for (const s of ["before it ends its turn", "never the agent's completion notice", "[ -s <path> ]", "git ls-remote", "never on a notice"]) {
+    assert.ok(prose.includes(s), `the skill says ${s}`);
+  }
+  assert.doesNotMatch(prose, /every agent you start notifies you/, "no wait relies on a notice");
 });
 
 test("the pr-persistent skill and its render restate no sentence of a prompt pr-loop-slim.js gives its agents (PR 258's class)", async () => {

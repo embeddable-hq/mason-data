@@ -125,7 +125,7 @@ async function main() {
     for (const { prompt, opts } of next) {
       const { label, phase, schema, ...on } = opts;
       const file = path.join(RUN, "next", `${name(label)}.md`);
-      fs.writeFileSync(file, `${prompt}\n\nWrite your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(label)}, and end your report with that path. The schema: ${JSON.stringify(schema)}`);
+      fs.writeFileSync(file, `${prompt}\n\nBefore you end your turn, write your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(label)}, and end your report with that path. The schema: ${JSON.stringify(schema)}`);
       console.log(`STAGE ${JSON.stringify(label)} (${phase}) ${JSON.stringify(on)}: ${file}`);
     }
   }

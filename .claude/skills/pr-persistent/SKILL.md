@@ -84,17 +84,24 @@ nothing else: `Your instructions are in <path>: read the whole file, then follow
   a FRESH agent with the Agent tool, with the printed options. A review is `model: "fable"`, `effort: "medium"`.
 
 Each rendered prompt ends by telling its agent to write its result, ONE JSON value, to `results/<name>.json` in the run
-folder, and to end its report with that path. When an agent reports, record under the stage's label in `answers.json`,
-exactly as printed, the results path its report ends with, or `null` when the agent failed or named no path. Then
-render again. Record a path, never the JSON: the render refuses any value but that label's own results path or
-`null`, since another stage's file would be read as this stage's answer. Never judge whether a result is valid by eye:
+folder before it ends its turn, and to end its report with that path. That path is the `STAGE` line's, with `next/`
+made `results/` and `.md` made `.json`. **The file is the result, never the agent's completion notice**: when you
+resume the implementer by SendMessage, the notice of its end can go to the top-level session instead of you, so a
+fix round's result would be lost while you wait on it (issue 304, PR 313). So for each stage you dispatch, leave a
+bounded background job that exits when its results file exists or 30 minutes pass
+(`for i in $(seq 120); do [ -s <path> ] && break; sleep 15; done`); it wakes you whether or not a notice reaches you. When its bound passes with no
+file, look before leaving another: a fix that pushed has moved the PR's head (`git ls-remote origin <branch>`), and an
+agent that ended without writing its file failed. Then record under the stage's label in `answers.json`, exactly as
+printed, its results path once the file exists, or `null` when the agent failed without writing it. Then render
+again. Record a path, never the JSON: the render refuses any value but that label's own results path or `null`, since
+another stage's file would be read as this stage's answer. Never judge whether a result is valid by eye:
 the render checks each against the schema its stage carries. A review's result is its `FINDINGS`; the implementer's
 and a fixer's carry the handoff, which the next fix prompt pastes verbatim. Never edit a result. The script itself
 decides what happens next from those results: a class round, a deferral, the 4-round bound, the `unreviewed` stop,
 CI, Learn, filing and the record.
 
-Nothing waits unwatched: every agent you start notifies you when it reports, and each CI stage is an agent with its
-own bounded wait.
+Nothing waits unwatched: every agent you dispatch has a bounded wait on its results file, never on a notice, and each
+CI stage is an agent with its own bounded wait.
 
 ## 3. When the render says DONE
 
