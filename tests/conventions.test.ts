@@ -950,8 +950,9 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
   // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request;
   // planner: a generated table's SQL, planned as no session, and refused where it reads a session's setting;
-  // canonicalElsewhere: a SET's value read by the catalog's own check, as validateElsewhere's)
-  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "showAll", "showStatement", "validateElsewhere", "canonicalElsewhere"].sort(),
+  // canonicalElsewhere: a SET's value read by the catalog's own check, as validateElsewhere's;
+  // relativeLiterals: a catalog statement's analysis under the session's state, its types only, which runs nothing)
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "showAll", "showStatement", "validateElsewhere", "canonicalElsewhere", "relativeLiterals"].sort(),
     "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
