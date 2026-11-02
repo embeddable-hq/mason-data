@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_SERVICE_URL, serviceOf, serviceText, urlProblem } from "../src/cli/hosted.ts";
+import { DEFAULT_SERVICE_URL, deviceName, serviceOf, serviceText, urlProblem } from "../src/cli/hosted.ts";
 import { credentialsPath, environmentToken, parseLogins } from "../src/cli/credentials.ts";
 
 test("serviceOf: the default when MASON_CLOUD_URL is unset; its origin when it is an address alone; else refused", () => {
@@ -46,4 +46,13 @@ test("credentialsPath: XDG_CONFIG_HOME when absolute, else ~/.config; MASON_TOKE
   assert.equal(environmentToken({ MASON_TOKEN: "t" }), "t");
   assert.equal(environmentToken({ MASON_TOKEN: "" }), null);
   assert.equal(environmentToken({}), null);
+});
+
+test("deviceName: the hostname as printable ASCII, at most 64 characters, never empty", () => {
+  assert.equal(deviceName("ada-laptop.local"), "ada-laptop.local");
+  assert.equal(deviceName("café\u001b[2J\nx"), "caf--[2J-x");
+  assert.equal(deviceName("a".repeat(100)).length, 64);
+  assert.equal(deviceName(""), "unknown");
+  assert.equal(deviceName("\u0000\u0007"), "--");
+  assert.match(deviceName(), /^[\x20-\x7e]{1,64}$/, "this machine's");
 });

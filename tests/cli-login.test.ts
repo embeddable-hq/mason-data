@@ -27,7 +27,7 @@ const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
 interface Req { at: number; method: string; path: string; headers: http.IncomingHttpHeaders; form: Record<string, string> }
-type Reply = { status: number; body?: unknown; headers?: Record<string, string> } | "drop";
+type Reply = { status: number; body?: unknown; raw?: string; headers?: Record<string, string> } | "drop";
 interface Script {
   device?: Reply;
   /** the n-th poll's answer (0-based) */
@@ -58,8 +58,8 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
         : p === "/oauth/revoke" ? script.revoke ?? { status: 200, body: {} }
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
-      res.writeHead(reply.status, { "content-type": "application/json", ...reply.headers });
-      res.end(reply.body === undefined ? "" : JSON.stringify(reply.body));
+      res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
+      res.end(reply.raw ?? (reply.body === undefined ? "" : JSON.stringify(reply.body)));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -141,7 +141,7 @@ test("mason login: the page and the code on stderr at once, before it is approve
     assert.equal(first!.path, "/oauth/device/code");
     assert.equal(first!.headers["content-type"], "application/x-www-form-urlencoded");
     assert.equal(first!.form.client_id, "mason-cli");
-    assert.ok(first!.form.device_name && first!.form.device_name.length <= 64, JSON.stringify(first!.form));
+    assert.match(first!.form.device_name ?? "", /^[\x20-\x7e]{1,64}$/, "the hostname as printable ASCII, at most 64 characters");
     const polls = rest.filter((r) => r.path === "/oauth/token");
     assert.ok(polls.length >= 2, `${polls.length} polls`);
     for (const p of polls) assert.deepEqual(p.form, { grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: "dev-code-1", client_id: "mason-cli" });
@@ -213,8 +213,18 @@ test("mason login: access_denied is refused, expired_token and a code past expir
   }
 });
 
-test("mason login: an answer outside the contract is a failure said by its status, never followed (a redirect) nor repeated (its body)", async () => {
+test("mason login: an answer outside the contract is a failure said by its status, never followed (a redirect) nor repeated (its body), never retried", async () => {
+  const echoed = newToken(); SECRETS.push(echoed);
   const cases: Array<[Script, RegExp]> = [
+    // the service's limit of sign-ins from one address: try again later, and no loop of retries
+    [{ device: { status: 429, body: { error: "slow_down" } } }, /^http:\/\/127\.0\.0\.1:\d+ is limiting sign-ins from this address \(429\)$/],
+    // a device_name the service refuses, and a body it cannot read
+    [{ device: { status: 400, body: { error: "invalid_request", error_description: "device_name is not printable" } } }, /refused this sign-in \(invalid_request\) when a sign-in was asked for$/],
+    [{ device: { status: 413, body: { error: "invalid_request" } } }, /refused this sign-in \(invalid_request\)/],
+    [{ device: { status: 415, raw: "<html>unsupported media type</html>" } }, /answered POST \/oauth\/device\/code with 415, not JSON, where a sign-in was asked for$/],
+    // a body that is not JSON, a token in it: named by its status, never shown
+    [{ device: { status: 502, raw: `<html>bad gateway ${echoed}</html>` } }, /answered POST \/oauth\/device\/code with 502, not JSON, where a sign-in was asked for$/],
+    [{ device: { status: 200, raw: "<html>a login page</html>" } }, /answered POST \/oauth\/device\/code with 200, not JSON, where a device code was expected$/],
     [{ device: { status: 302, headers: { location: "https://elsewhere.example/oauth/device/code" } } }, /answered POST \/oauth\/device\/code with a redirect \(302\)/],
     [{ device: { status: 200, body: { ...DEVICE, user_code: "\u001b[2Jx" } } }, /answered POST \/oauth\/device\/code with 200, where a device code was expected/],
     [{ device: { status: 200, body: { ...DEVICE, verification_uri: "http://elsewhere.example/device" } } }, /with 200, where a device code was expected/],
@@ -228,7 +238,8 @@ test("mason login: an answer outside the contract is a failure said by its statu
       const a = await mason(h, ["login", "--json"], envFor(h, fake.url));
       assert.equal(a.code, 1, a.stdout + a.stderr);
       assert.match((JSON.parse(a.stdout) as { error: { message: string } }).error.message, message);
-      assert.doesNotMatch(a.stdout + a.stderr, /\u001b/, "no control character from the service reaches the output");
+      assert.doesNotMatch(a.stdout + a.stderr, /\u001b|<html>/, "no control character, and nothing of a body outside the contract, reaches the output");
+      assert.equal(fake.requests.filter((r) => r.path === "/oauth/device/code").length, 1, "asked once: a refusal is never retried");
       assert.equal(fake.requests.filter((r) => r.path === "/v1/me").length, 0);
       assert.equal(fs.existsSync(credentials(h)), false);
     } finally { await fake.close(); }
@@ -398,7 +409,7 @@ test("mason logout with the service down, or refusing: the login is still remove
   assert.match(t.stdout, new RegExp(`^Signed out of ${url} on this machine, but the login was NOT revoked\\n[\\s\\S]*\\n {2}revoked {8}no\\n`));
   assert.match(t.stdout, new RegExp(`\\nTip: The login was NOT revoked \\(could not reach .*\\), so it still works on the service until it expires: sign in to ${url} in a browser and revoke this machine's login there\\.\\n`));
   // a service that answers the revoke with 500, or drops it
-  for (const revoke of [{ status: 500, body: {} }, "drop"] as Reply[]) {
+  for (const revoke of [{ status: 500, body: {} }, { status: 400, body: { error: "invalid_request" } }, { status: 413, raw: "too large" }, { status: 415, raw: "unsupported" }, "drop"] as Reply[]) {
     const fake = await fakeService({ revoke });
     try {
       const h2 = home();
@@ -406,6 +417,7 @@ test("mason logout with the service down, or refusing: the login is still remove
       const r = await mason(h2, ["logout", "--json"], envFor(h2, fake.url));
       const o = JSON.parse(r.stdout) as Record<string, unknown>;
       assert.deepEqual([r.code, o.signedOut, o.revoked], [0, true, false], r.stdout);
+      if (revoke !== "drop") assert.equal(o.revokeError, `${fake.url} answered POST /oauth/revoke with ${revoke.status}`);
       assert.deepEqual(saved(h2).logins, {});
     } finally { await fake.close(); }
   }
@@ -430,7 +442,9 @@ test("mason login: a /v1/ failure is said as the service worded it, a token in i
   const token = newToken(); SECRETS.push(token);
   const failure = { error: { code: "unauthenticated", message: "this login is not valid", why: "the token was revoked", fix: "sign in again" }, next: [{ command: "mason login", what: "sign in again" }] };
   const echo = { error: { code: "failed", message: `the token ${token} is unknown`, fix: `do not share masondata_ci_${"A".repeat(43)}` }, next: [] };
-  for (const [me, expect] of [[{ status: 401, body: failure }, failure], [{ status: 500, body: echo }, null]] as const) {
+  // a CI token is refused on /v1/me: 403, said as the service words it
+  const ci = { error: { code: "refused", message: "a CI token cannot sign in a person", fix: "sign in as yourself" }, next: [{ command: "mason login", what: "sign in" }] };
+  for (const [me, expect] of [[{ status: 401, body: failure }, failure], [{ status: 403, body: ci }, ci], [{ status: 500, body: echo }, null]] as const) {
     const fake = await fakeService({ token: () => granted(token), me });
     try {
       const h = home();

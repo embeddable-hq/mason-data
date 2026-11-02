@@ -28,7 +28,8 @@ the contract: a change to it is a change to both sides.
 
 ### `POST /oauth/device/code`
 
-Form body: `client_id=mason-cli`, `device_name=<the machine's hostname, printable, at most 64 characters>`.
+Form body: `client_id=mason-cli`, `device_name=<the machine's hostname>`. The CLI sends it as printable ASCII (any other
+character replaced by `-`), at most 64 characters, and `unknown` when that leaves nothing.
 
 `200`, JSON:
 
@@ -83,6 +84,19 @@ service does not know.
 `mason logout` revokes, then removes the saved login whatever the answer. When the revoke did not reach the service,
 it exits 0 and says the token was NOT revoked: sign in to the service's web app and revoke it there. `mason login`
 again revokes the login it replaces.
+
+## Answers a client must expect
+
+Beside the answers above, a service may answer these. The CLI says each as a failure, in the failure shape, and never
+retries one by itself.
+
+| Request | Answer | What the CLI does |
+|---|---|---|
+| `POST /oauth/device/code` | `400 { "error": "invalid_request" }`: a `device_name` empty, over 64 characters or with a control character | stops: code `failed`, naming `invalid_request` and its `error_description` |
+| `POST /oauth/device/code` | `429 { "error": "slow_down" }`: too many sign-ins from one address | stops: code `failed`, "try again in a few minutes"; it is not polled again |
+| `GET /v1/me` | `403` with the failure shape, code `refused`, next `mason login`: a CI token (`masondata_ci_…`) cannot say who a person is | says it as the service worded it |
+| any, `/oauth/revoke` included | `400`, `413` or `415`: a body the service cannot read | stops with the status; `mason logout` still removes the login, and says it was NOT revoked |
+| any | another status, or a body that is not JSON | a failure naming the request and the status, never the body |
 
 ## Failures of `/v1/`
 

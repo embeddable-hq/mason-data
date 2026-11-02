@@ -83,9 +83,10 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
 }
 
-/** This machine's name, as the service lists the login: printable, at most 64 characters. */
-export function deviceName(): string {
-  const name = [...serviceText(os.hostname(), 64).replace(/\n|…$/g, "")].slice(0, 64).join("").trim();
+/** This machine's name, as the service lists the login: printable ASCII, at most 64 characters, never empty (the
+ *  service refuses any other `device_name` with 400 invalid_request). */
+export function deviceName(hostname: string = os.hostname()): string {
+  const name = hostname.replace(/[^\x20-\x7e]/g, "-").trim().slice(0, 64).trim();
   return name || "unknown";
 }
 
@@ -197,6 +198,11 @@ function pageUrl(v: unknown): string | null {
 export async function startDevice(service: Service): Promise<DeviceCode | Failure> {
   const a = await call(service, "POST", "/oauth/device/code", { form: { client_id: CLIENT_ID, device_name: deviceName() } });
   if (isFailure(a)) return a;
+  if (a.status === 429) {
+    // the service's limit of sign-ins from this address: waiting is the way out, never a loop of retries
+    return { message: `${service.base} is limiting sign-ins from this address (429)`, code: "failed", why: "too many sign-ins were asked for from here in a short time",
+      fix: "try again in a few minutes", next: [["mason login", "in a few minutes"]] };
+  }
   if (a.status !== 200) return oauthFailure(service, a, "a sign-in was asked for", []);
   const j = a.json;
   if (!obj(j)) return unexpected(service, a, "a device code was expected");
