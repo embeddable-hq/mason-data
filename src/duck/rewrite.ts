@@ -3322,13 +3322,14 @@ class Rewriter {
 
   /** a text value's key under a collation that is not byte order, as ONE text that orders as Postgres does and ends in
    *  the value's own bytes (`icuKey`, `libcKey`). A char(n) is ordered without its padding (bpcharcmp: `'b   '` is `'b'`,
-   *  which an ICU key, whose spaces weigh, would put after `'B'`), its value read back whole from the bytes */
-  private textKey(a: AstNode, c: Exclude<DuckCollation, { kind: "bytes" }>): AstNode {
+   *  which an ICU key, whose spaces weigh, would put after `'B'`), then its trimmed bytes, then `tie` (what decides
+   *  between two equal char(n) values of another padding), and its value whole, read back from the last bytes */
+  private textKey(a: AstNode, c: Exclude<DuckCollation, { kind: "bytes" }>, tie = ""): AstNode {
     const v = strip(a);
     if (this.typeOf(v) !== BPCHAR) return c.kind === "libc" ? libcKey(this.cp, v, c.collate) : icuKey(this.cp, v, c.name);
-    const trimmed = fn("rtrim", [this.cp(v)]);
-    const key = c.kind === "libc" ? fn("__mason_libc_key", [trimmed, strConst(c.collate)]) : fn("icu_sort_key", [trimmed, strConst(c.name)]);
-    return concat(key, strConst(" "), fn("hex", [v]));
+    const trimmed = (): AstNode => fn("rtrim", [this.cp(v)]);
+    const key = c.kind === "libc" ? fn("__mason_libc_key", [trimmed(), strConst(c.collate)]) : fn("icu_sort_key", [trimmed(), strConst(c.name)]);
+    return concat(key, strConst(" "), fn("hex", [trimmed()]), strConst(` ${tie} `), fn("hex", [v]));
   }
 
   private minMax(b: Body): AstNode | null {
@@ -3343,7 +3344,10 @@ class Rewriter {
     const c = this.inputCollationOf(t);
     if (c === null || c.kind === "bytes") return null;
     // the greatest (least) of the values' keys, which end in the value's own bytes: the value is read back from them
-    const keys = (b.args as AstNode[]).map((a) => this.textKey(a, c));
+    // (equal char(n) values of another padding: Postgres keeps the first argument, which `tie` makes the least, or
+    // the greatest, of the equal keys)
+    const args = b.args as AstNode[];
+    const keys = args.map((a, i) => this.textKey(a, c, String(b.op === "IS_LEAST" ? i : args.length - i).padStart(4, "0")));
     const best: AstNode = { MinMaxExpr: { ...b, args: keys } };
     this.done.add(bodyOf(best));
     return fn("decode", [fn("unhex", [fn("regexp_extract", [best, strConst("[^ ]*$")])])]);
