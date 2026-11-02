@@ -203,18 +203,19 @@ export function collationDdl(schema: PgSchema): string[] {
   if (declared.length === 0) return [];
   const out: string[] = [];
   for (const s of new Set(declared.map((c) => c.schema))) if (s !== "pg_catalog" && s !== "public") out.push(`CREATE SCHEMA IF NOT EXISTS ${ident(s)};`);
-  const provider = (p: string): string => p === "i" ? "icu" : p === "b" ? "builtin" : "libc";
-  const body = declared.map((c) => {
-    const name = `${ident(c.schema)}.${ident(c.name)}`;
-    const locale = c.provider === "c" ? c.collate ?? "C" : c.locale ?? c.collate ?? "und";
-    const deterministic = c.deterministic ? "" : ", deterministic = false";
-    const fallback = c.provider === "i" ? "und" : "C";
-    // (a name taken already, the catalog's own `C` or `und-x-icu`, is the source's too)
-    return `IF NOT EXISTS (SELECT FROM pg_catalog.pg_collation c JOIN pg_catalog.pg_namespace n ON n.oid = c.collnamespace WHERE n.nspname = ${literal(c.schema)} AND c.collname = ${literal(c.name)} AND c.collencoding IN (-1, 6)) THEN ` +
-      `BEGIN CREATE COLLATION ${name} (provider = ${provider(c.provider)}, locale = ${literal(locale)}${deterministic}); ` +
-      `EXCEPTION WHEN OTHERS THEN CREATE COLLATION ${name} (provider = ${provider(c.provider)}, locale = ${literal(fallback)}${deterministic}); END; END IF;`;
-  });
-  out.push(`DO $mason_collations$ BEGIN\n${body.join("\n")}\nEND $mason_collations$;`);
+  // ONE INSERT of the rows, never a CREATE COLLATION each: a source lists about 1,600 (every ICU locale and every libc
+  // one the OS has), and a CREATE each took the catalog's start past its deadline (about 18 ms each, measured; the
+  // INSERT, 260 ms for 1,600). The catalog only ANALYSES under them: what a statement orders by is the synced data's, so
+  // a locale PGlite has no data for is never opened. A name the catalog has already (`C`, `und-x-icu`) is the source's
+  // too; the OIDs are past any the catalog makes, so none collides
+  const rows = declared.map((c) => ({ schema: c.schema, name: c.name, provider: c.provider, collate: c.collate, locale: c.locale, deterministic: c.deterministic }));
+  out.push(`INSERT INTO pg_catalog.pg_collation (oid, collname, collnamespace, collowner, collprovider, collisdeterministic, collencoding, collcollate, collctype, colllocale)
+SELECT (greatest((SELECT max(oid)::bigint FROM pg_catalog.pg_collation), 3000000000) + row_number() OVER ())::oid, c.name, n.oid, 10, c.provider, c.deterministic,
+  CASE WHEN c.provider = 'c' THEN 6 ELSE -1 END, CASE WHEN c.provider = 'c' THEN c."collate" END, CASE WHEN c.provider = 'c' THEN c."collate" END,
+  CASE WHEN c.provider <> 'c' THEN coalesce(c.locale, c."collate") END
+FROM json_to_recordset(${literal(JSON.stringify(rows))}) AS c(schema text, name text, provider "char", "collate" text, locale text, deterministic boolean)
+JOIN pg_catalog.pg_namespace n ON n.nspname = c.schema
+WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_collation x WHERE x.collnamespace = n.oid AND x.collname = c.name AND x.collencoding IN (-1, 6));`);
   return out;
 }
 

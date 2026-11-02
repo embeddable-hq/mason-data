@@ -761,6 +761,10 @@ test("collation: the catalog declares the source's collations, and each column's
   assert.match(ddl, /"i" text COLLATE "pg_catalog"\."und-x-icu"/);
   assert.match(ddl, /"r" text COLLATE "extra"\."mason_rev"/);
   assert.doesNotMatch(ddl, /unused/);
+  // a source's 1,600 collations are one statement, never one each: a CREATE COLLATION each took the catalog's start past
+  // its deadline (about 18 ms each)
+  const many = Array.from({ length: 1600 }, (_, i) => ({ schema: "pg_catalog", name: `l${i}-x-icu`, provider: "i", collate: null, locale: `l${i}`, deterministic: true }));
+  assert.equal(catalogModule.collationDdl({ ...collated, collations: [...collated.collations!, ...many] }).length, 2, "a schema's CREATE, then one INSERT");
   const own = new PgCatalog(collated, { log: () => undefined });
   try {
     assert.deepEqual(rowsOf(await own.run(simpleQuery(
