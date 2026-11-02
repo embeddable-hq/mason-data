@@ -44,6 +44,7 @@ export const NEW_SHAPES = {
   "numeric-text": { life: "answer", may: [] },
   "numeric-aggregate": { life: "answer", may: [] },
   "numeric-ordered": { life: "answer", may: [] },
+  "numeric-ranked": { life: "answer", may: [] },
 } as const satisfies Record<string, { life: "answer" | "refusal"; may: readonly string[] }>;
 
 export type NewShapeName = keyof typeof NEW_SHAPES;
@@ -64,7 +65,7 @@ export const VALUES_ARMS = ["values-arm", "values-arm-first"] as const satisfies
 /** of those, a UNION (distinct) beside a character(n) or text literal */
 export const CHAR_ARMS = ["char-arm", "char-arm-first"] as const satisfies readonly NewShapeName[];
 /** a derived table or a CTE over the base, reading its numeric outputs */
-export const NUMERIC_READERS = ["numeric-distinct", "numeric-text", "numeric-aggregate", "numeric-ordered"] as const satisfies readonly NewShapeName[];
+export const NUMERIC_READERS = ["numeric-distinct", "numeric-text", "numeric-aggregate", "numeric-ordered", "numeric-ranked"] as const satisfies readonly NewShapeName[];
 
 /** what one shape met over a run: every ask, how both sides answered it, and the statements it could not be spelt for */
 export interface ShapeCount {

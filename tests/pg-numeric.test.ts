@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import {
   add, aggregateType, ceil, div, divScale, evaluate, evaluateText, floor, mod, mul, numericBinary, numericText, parseNumeric, round, stddev, sub, trunc, withTypmod,
-  wholeNumberOf, NumericError, type NumericProgram, type PgNumeric,
+  wholeNumberOf, NumericError, numericOrderKey, numericToInteger, type NumericProgram, type PgNumeric,
 } from "../src/lib/pg-numeric.ts";
 
 const db = new PGlite();
@@ -214,4 +214,27 @@ test("pick: a CASE computes only the arm the row took; past the arms (no ELSE), 
   assert.equal(evaluateText(p, { i: null, a: "2" }), null);
   // the arm not taken is never computed: a division by zero there raises nothing
   assert.equal(evaluateText({ op: "pick", index: { op: "cell", key: "i" }, args: [{ op: "literal", text: "1" }, { op: "div", args: [{ op: "literal", text: "1" }, { op: "literal", text: "0" }] }] }, { i: "0" }), "1");
+});
+
+test("order key: a numeric's key sorts as numeric_cmp, equal values one key (issue 252)", async () => {
+  const values = [...VALUES, ...VALUES.filter((v) => !v.startsWith("-")).map((v) => `-${v}`), "1.00000000000000000001", "1.00000000000000000002", "0.99999999999999999999",
+    "-1.00000000000000000001", "-0.99999999999999999999", "1e-30", "-1e-30", "1e30", "-1e30", "NaN", "Infinity", "-Infinity", "2.50", "2.5"];
+  const texts = (await pg(values.map((v) => `'${v}'::numeric`))) as string[];
+  const r = await db.query<{ i: number }>(`SELECT i FROM (VALUES ${values.map((v, i) => `(${i}, '${v}'::numeric)`).join(", ")}) AS t(i, v) ORDER BY v, i`);
+  const want = r.rows.map((x) => x.i);
+  const got = values.map((_v, i) => i).sort((a, b) => { const ka = numericOrderKey(texts[a]!), kb = numericOrderKey(texts[b]!); return ka < kb ? -1 : ka > kb ? 1 : a - b; });
+  assert.deepEqual(got, want);
+});
+
+test("integer cast: a numeric's text to int2, int4 and int8 rounds half away from zero, 22003 past the range (issue 252)", async () => {
+  const values = ["2.5", "-2.5", "0.5", "-0.5", "1.49999999999999999999", "32767.4", "32767.5", "-32768.5", "2147483647.49", "2147483647.5", "-2147483648.5",
+    "9223372036854775807.4", "9223372036854775807.5", "-9223372036854775808.5", "0", "-0.4"];
+  for (const [bits, type] of [[16, "int2"], [32, "int4"], [64, "int8"]] as const) {
+    for (const v of values) {
+      const want = await db.query<{ v: string }>(`SELECT ('${v}'::numeric)::${type}::text AS v`).then((x) => x.rows[0]!.v, (e: { code: string }) => `error ${e.code}`);
+      let got: string;
+      try { got = numericToInteger(v, bits); } catch (e) { got = e instanceof NumericError ? `error ${e.sqlstate}` : String(e); }
+      assert.equal(got, want, `${v}::${type}`);
+    }
+  }
 });

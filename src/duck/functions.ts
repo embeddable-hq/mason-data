@@ -20,7 +20,7 @@ import { floatAsNumeric } from "./types.ts";
 import { intervalText } from "./types.ts";
 import { jsonbText, parseJson, writeJson, quoteJson, type Json } from "./jsonb.ts";
 import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
-import { compare, div, evaluateText, NumericError, numericText, parseNumeric, type NumericProgram } from "../lib/pg-numeric.ts";
+import { compare, div, evaluateText, NumericError, numericOrderKey, numericText, numericToInteger, parseNumeric, type NumericProgram } from "../lib/pg-numeric.ts";
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
 import { gapMark } from "./gaps.ts";
@@ -815,6 +815,19 @@ export function registerFunctions(conn: DuckDBConnection): void {
     try { return evaluateText(JSON.parse(String(program)) as NumericProgram, values); }
     catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
   }, { nulls: "pass", varargs: true });
+  // a numeric's ORDER KEY (src/duck/rewrite.ts exactOrderKey, issue 252): bytes that sort as numeric_cmp, so a program's
+  // value is ordered, ranked and tied by its exact value, never by its double (1.00000000000000000001 and …02 are two)
+  scalar(conn, "__mason_numeric_order", [VARCHAR], BLOB, ([t]) => {
+    try { return new DuckDBBlobValue(Buffer.from(numericOrderKey(String(t)), "latin1")); }
+    catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
+  });
+  // a numeric's exact text cast to an integer of `bits` (numeric_int4 …): rounded half away from zero, 22003 past its range
+  scalar(conn, "__mason_numeric_int", [VARCHAR, INTEGER], VARCHAR, ([t, bits]) => {
+    try { return numericToInteger(String(t), Number(bits) as 16 | 32 | 64); }
+    catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
+  });
+  // a numeric's exact text cast to float8 (numeric_float8: strtod of numeric_out's text): the double nearest it
+  scalar(conn, "__mason_numeric_double", [VARCHAR], DOUBLE, ([t]) => { const s = String(t).trim(); return /^-inf/i.test(s) ? -Infinity : /inf/i.test(s) ? Infinity : Number(s); });
   // the decimals of numeric_out's text: the value's display scale (`2.450` has 3)
   scalar(conn, "__mason_numeric_scale", [VARCHAR], INTEGER, ([t]) => { const at = String(t).indexOf("."); return at < 0 ? 0 : String(t).length - at - 1; });
   scalar(conn, "__mason_float_numeric_text", [DOUBLE, BOOLEAN], VARCHAR, ([x, four]) => floatNumericText(Number(x), four === true));

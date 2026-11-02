@@ -195,6 +195,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   ROW(a, b) AS r … ORDER BY r`, `SELECT t … ORDER BY 1`) sorted by the row's text (`(0,100)` before `(0,50)`): it is
   now refused by name (`row-value`), with the way out, as `ORDER BY ROW(a, b)` already was. Sort by the row's columns
   instead. Nothing to do on upgrade.
+- **A numeric division or average now keeps Postgres's exact value in more places.** It sorted, ranked and tied by a
+  rounded number: `ORDER BY x / y`, `rank() OVER (ORDER BY x / y)`, `FETCH FIRST 1 ROWS WITH TIES` and `min` / `max` put
+  two values that differ only past the 17th digit in either order, and `0.1 + 0.2` after `0.3`; they now sort as
+  Postgres does. `sum`, `avg` and a running `sum(…) OVER` of a division, or of a subquery's or `WITH` query's division,
+  showed 15 digits (`34.6428571428571`); they now show Postgres's (`34.6428571428571429`). A division cast to text,
+  `varchar`, `double precision` or an integer was the rounded number's (`(5 / 2.0)::int` was `2`); it is Postgres's now
+  (`3`, half away from zero). A `*` beside a division (`SELECT *, a / 7 AS q …`, `SELECT s.*, 1 …`) showed 15 digits; it
+  shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
+  like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
 
 ## Known
 

@@ -2182,7 +2182,7 @@
       "sql": "SELECT floor(extract(epoch FROM o.created_at) / 2.6784e+06) * 2.6784e+06 AS time, count(*) FROM orders o GROUP BY 1 ORDER BY 1",
       "plan": [
         "ORDER_BY",
-        "  PROJECTION",
+        "  PROJECTION calls __mason_numeric_order, __mason_numeric_program, __mason_turn",
         "    HASH_GROUP_BY",
         "      PROJECTION calls __mason_numeric_key, __mason_numeric_program, __mason_turn",
         "        PROJECTION",
@@ -2191,6 +2191,7 @@
       "calls": [
         "__mason_numeric_div",
         "__mason_numeric_key",
+        "__mason_numeric_order",
         "__mason_numeric_program"
       ],
       "sends": [
