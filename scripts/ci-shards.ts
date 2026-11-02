@@ -173,8 +173,9 @@ const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
  *  its CPU) and one of the gap between the slowest and the fastest, and past UNIT_APART_MS a GitHub warning naming what
  *  closes it: the command that rebalances (`runId`: GITHUB_RUN_ID, in CI this run), or, when the slowest shard's longest
  *  file alone is past the target from the fastest shard, that file (no split runs a shard faster than its longest file;
- *  PR 346's runs: tests/duck-generated.test.ts, 744 s and 853 s). A cost, never coverage: nothing here moves the exit
- *  code; a shard with no wall time is "not measured", never a gap of 0. */
+ *  PR 346's runs: tests/duck-generated.test.ts, 744 s and 853 s, until #338 split it into tests/duck-generated*.test.ts,
+ *  no piece past the slowest APART file). A cost, never coverage: nothing here moves the exit code; a shard with no wall
+ *  time is "not measured", never a gap of 0. */
 export function balanceLines(records: readonly ShardRecord[], runId: string | undefined): string[] {
   const shards = [...records].sort((a, b) => a.shard - b.shard);
   if (shards.length < 2) return [`unit shards: balance: not measured: ${shards.length} shard record(s), where a gap needs two`];
