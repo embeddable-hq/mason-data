@@ -231,6 +231,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   values). `SET IntervalStyle` to anything but `postgres` is now refused by name (`interval-style`), where it was
   accepted and ignored: every interval is written in Postgres's default style. Nothing to do on upgrade, unless a
   tool sets IntervalStyle: remove the setting, or set it to `postgres`.
+- **`now()` and the clock keywords now carry microseconds, as Postgres's do**: a prepared statement's `'now'` and its
+  run's `now()` no longer compare equal when both fall in one millisecond, and `current_time` and `localtimestamp(6)`
+  print Postgres's six fraction digits (they printed three).
+
+- **A table of large values (big `jsonb` or `text` documents, a few rows to a page of the table) now syncs within the
+  memory set by `MASON_DUCKDB_MEMORY`**, where its first sync read it whole at once and failed with `Out of Memory
+  Error` and the engine's advice (threads, settings) however the readers were set. Its first sync reads as many pages
+  at a time as the memory holds, and goes on with one reader and smaller chunks when one runs out. A table whose rows
+  do not fit even one page at a time now fails with the limit as set and the way out: raise `MASON_DUCKDB_MEMORY` and
+  start mason again, or `mason add <table> --columns …` without its widest columns.
 
 ## Known
 

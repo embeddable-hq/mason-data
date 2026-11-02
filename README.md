@@ -397,6 +397,42 @@ Most of Mason's speed comes from memory. These are the things that help most, in
 - **Add cores for more users.** One query already uses every core. More cores help when many dashboards query at
   once: the benchmark's 4-core machine answered 12 queries a second with 8 clients and with 32, and the extra clients
   waited in a queue.
+- **Store an answer that many queries repeat.** When dashboards keep aggregating the same large table the same way,
+  declare that query as a [generated table](#generated-tables) and point the dashboards at it.
+
+### Generated tables
+
+A generated table is a table you declare in SQL, which Mason keeps current from the synced tables. A query reads it by
+name, like any other table, so a dashboard that repeats an expensive aggregate on every load can read the stored
+answer instead.
+
+Each generated table is one file in `mason/generated_tables/`, committed beside the sources file. The file's name is
+the table's: `daily_orders.yml` is `public.daily_orders`, and `reports.daily.yml` is `reports.daily`.
+
+```yaml
+# mason/generated_tables/daily_orders.yml
+kind: scheduled
+target_lag: 5m
+sql: |
+  SELECT tenant_id, date_trunc('day', created_at, 'UTC') AS day, count(*) AS orders
+  FROM orders
+  GROUP BY 1, 2
+order_by: day, tenant_id
+```
+
+- **How it stays current.** A `scheduled` table runs its whole `sql` again after a table it reads has changed, early
+  enough to finish within `target_lag` of that change, and swaps the new answer in at once; the old one serves until
+  then. Nothing runs while its tables are idle. A run happens inside Mason and reads nothing from your database.
+- **Chains.** A generated table may read another. Mason builds parents first, and a change re-runs the whole chain
+  above it over one snapshot and swaps it in at once, so a child agrees with its parent unless the child's run failed.
+- **What you see.** `mason status` shows each table's state, how far behind it is, and why a run failed. A run that
+  fails leaves the table serving what it held. `mason wait <table>` waits until a table holds everything synced when
+  the wait began.
+- **What is refused.** A file with a mistake, or SQL Mason cannot store exactly, is refused by file, key and reason,
+  with the way out. A table has no session, so SQL that reads a time zone or a setting is refused: name the zone, as
+  `date_trunc('day', created_at, 'UTC')` does above.
+
+`mason help generated` has every key and rule. Only `scheduled` is available; `live` is not yet.
 
 ## Postgres compatibility
 

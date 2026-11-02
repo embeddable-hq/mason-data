@@ -84,8 +84,12 @@ const NULLISH = "INSERT INTO public.nullish VALUES (1, '2026-01-02 03:04:05', 'b
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-wire-"));
 let store: DuckStore;
 let api: PgApiServer;
-/** the listener's clock when a test fixes it (`clock` of startPostgresApi): the transaction's start every plan reads */
+/** the listener's clock when a test fixes it (`clock` of startPostgresApi): the transaction's start every plan reads,
+ *  in microseconds since the epoch (src/lib/instant.ts) */
 let fixedNow: number | undefined;
+/** a microsecond wall clock of the test's own, beside the listener's (src/lib/instant.ts is not imported, so the file
+ *  loads with src/ as it was before it: scripts/fails-without.ts) */
+const microsNow = (): number => Math.floor((performance.timeOrigin + performance.now()) * 1000);
 const truth = new PGlite({ extensions: { citext } });
 
 // one table in public, one in a schema of its own, as the copy lands them (<schema>.<table>, the key as the source's)
@@ -336,7 +340,7 @@ before(async () => {
     schema: () => schema,
     record: (r) => { recorded.push(r); }, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: await store.listener(undefined, undefined, undefined, () => copies),
-    clock: () => fixedNow ?? Date.now(),
+    clock: () => fixedNow ?? microsNow(),
   });
 });
 after(async () => {
@@ -632,6 +636,60 @@ test("the corpus rerun: a relative time literal is the transaction's start at th
     assert.equal(b[0], a[0], "the literal is the Parse's");
     assert.notEqual(b[1], a[1], "now() is each execution's");
   } finally { await c.end(); }
+});
+
+// GitHub issues 372 and 363: the transaction's instant is microseconds, as Postgres's. A millisecond made a prepared
+// statement's 'now' and its run's now() equal whenever both fell in one millisecond (the flaky oracle), and printed
+// three fraction digits where Postgres prints six.
+test("the transaction's instant is microseconds on both paths: a prepared 'now' and its run's now() inside one millisecond are two instants", async () => {
+  const c = await client();
+  const AT = Date.UTC(2026, 0, 2, 20, 0, 0) * 1000;
+  const rows = async (q: pg.QueryConfig | string): Promise<unknown[][]> =>
+    (await c.query(typeof q === "string" ? { text: q, rowMode: "array", types: raw } as pg.QueryConfig : q)).rows as unknown[][];
+  try {
+    for (const [name, sql] of [["p372", "SELECT $1::int AS n, now() = 'now' AS same"], ["p372duck", "SELECT $1::int AS n, now() = 'now' AS same FROM orders WHERE id = 1"]] as const) {
+      const prepared = { name, text: sql, values: ["1"], rowMode: "array", types: raw } as pg.QueryConfig;
+      // Parse, Bind, Execute and Sync in one batch: one implicit transaction, one instant
+      fixedNow = AT + 123_456;
+      assert.deepEqual(await rows(prepared), [["1", "t"]], `${name} parsed and run in one batch`);
+      assert.deepEqual(await rows({ text: sql, values: ["1"], rowMode: "array", types: raw } as pg.QueryConfig), [["1", "t"]], `${name} unnamed, in one batch`);
+      // its run in a batch of its own, the same millisecond, a later microsecond: the Parse's 'now' is not the run's now()
+      fixedNow = AT + 123_789;
+      assert.deepEqual(await rows(prepared), [["1", "f"]], `${name} run later in the same millisecond`);
+    }
+    // the literal is the Parse's microsecond, now() the run's
+    fixedNow = AT + 123_456;
+    const frozen = { name: "frozen372", text: "SELECT 'now'::timestamptz::text AS lit, now()::text AS fn FROM orders WHERE id = 1", rowMode: "array", types: raw } as pg.QueryConfig;
+    assert.deepEqual(await rows(frozen), [["2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123456+00"]]);
+    fixedNow = AT + 123_789;
+    assert.deepEqual(await rows(frozen), [["2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123789+00"]]);
+    // issue 363: the instant prints six digits on the DuckDB path as on the catalog's; the keywords it has not verified
+    // stay refused, as before
+    fixedNow = AT + 123_456;
+    const six = ["2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123456"];
+    assert.deepEqual(await rows("SELECT now()::text, current_timestamp::text, now()::timestamp::text FROM orders WHERE id = 1"), [six]);
+    assert.deepEqual(await rows("SELECT now()::text, current_timestamp::text, now()::timestamp::text"), [six]);
+    for (const sql of ["SELECT current_time::text FROM orders WHERE id = 1", "SELECT localtime::text FROM orders WHERE id = 1", "SELECT localtimestamp::text FROM orders WHERE id = 1", "SELECT localtimestamp(6)::text FROM orders WHERE id = 1"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000", sql);
+    }
+    // the instant's every edge reaches both paths as one microsecond, inside one block, the clock moved on by 3 µs
+    for (const [tail, text] of [[0, "20:00:00"], [1, "20:00:00.000001"], [123_456, "20:00:00.123456"], [499_999, "20:00:00.499999"], [500_000, "20:00:00.5"], [999_999, "20:00:00.999999"]] as const) {
+      fixedNow = AT + tail;
+      await c.query("BEGIN");
+      const catalog = await rows("SELECT now()::text");
+      fixedNow = AT + tail + 3;
+      const duck = await rows("SELECT now()::text FROM orders WHERE id = 1");
+      const again = await rows("SELECT now()::text");
+      await c.query("COMMIT");
+      const want = [[`2026-01-02 ${text}+00`]];
+      assert.deepEqual([catalog, duck, again], [want, want, want], `.${String(tail).padStart(6, "0")}`);
+    }
+    // outside a block, two Queries 3 µs apart are two instants
+    fixedNow = AT + 7;
+    const first = await rows("SELECT now()::text FROM orders WHERE id = 1");
+    fixedNow = AT + 10;
+    assert.deepEqual([first, await rows("SELECT now()::text FROM orders WHERE id = 1")], [[["2026-01-02 20:00:00.000007+00"]], [["2026-01-02 20:00:00.00001+00"]]]);
+  } finally { fixedNow = undefined; await c.end(); }
 });
 
 // review round 9 of PR 202: a WITH query's exact programs are derived once and given to every reader. The first UNION
@@ -1153,6 +1211,10 @@ test("past what may spill is 53400 and a full disk 53100, each with the way out,
     assert.doesNotMatch(JSON.stringify(e.fields), /duckdb|duck\.db|max_temp|\/data|the engine/i);
   }
   assert.equal(pgErrorOf(new Error("Out of Memory Error: could not allocate block of size 256 KiB"), "SELECT 1").fields.code, "53200", "memory stays memory");
+  // a commit that could not pin a block is the limit too (issue 96, measured on DuckDB 2.0.0); another commit failure is not
+  assert.equal(pgErrorOf(new Error("TransactionContext Error: Failed to commit: failed to pin block of size 1.0 MiB (365.7 MiB/366.2 MiB used)"), "COMMIT").fields.code, "53200");
+  assert.equal(pgErrorOf(new Error("TransactionContext Error: Failed to commit: PRIMARY KEY or UNIQUE constraint violation"), "COMMIT").fields.code, "XX000");
+  assert.equal(pgErrorOf(new Error("TransactionContext Error: Current transaction is aborted (please ROLLBACK)"), "COMMIT").fields.code, "XX000");
   // a statement's literal holding the engine's words is that statement's error
   assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'max_temp_directory_size' to INT32"), "SELECT 1").fields.code, "22P02");
   assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'This limit was set by the 'max_temp_directory_size' setting' to INT32"), "SELECT 1").fields.code, "22P02");
@@ -1267,7 +1329,7 @@ test("a time as a timetz takes the offset of the transaction's date at the value
   ];
   try {
     for (const [now, zone, times] of cases) {
-      fixedNow = Date.parse(now);
+      fixedNow = Date.parse(now) * 1000;
       await c.query(`SET TimeZone = '${zone}'`);
       const what = `at ${now} in ${zone}`;
       assert.deepEqual(await answer(c, "SELECT id, tm::timetz FROM clock_times ORDER BY id"),
@@ -1280,7 +1342,7 @@ test("a time as a timetz takes the offset of the transaction's date at the value
     }
     // 24:00 is its own time, never the next midnight's 00:00: in New York on 2026-11-01 beside 00:00, and in Kolkata (one
     // offset all day) not equal to it
-    fixedNow = Date.parse("2026-11-01T04:31:00Z");
+    fixedNow = Date.parse("2026-11-01T04:31:00Z") * 1000;
     await c.query("SET TimeZone = 'America/New_York'");
     assert.deepEqual((await answer(c, "SELECT tm::timetz FROM clock_times WHERE id IN (1, 6) ORDER BY id")).rows, [["00:00:00-04"], ["24:00:00-05"]]);
     await c.query("SET TimeZone = 'Asia/Kolkata'");
@@ -1292,7 +1354,7 @@ test("a time as a timetz takes the offset of the transaction's date at the value
     // planned once (at its Parse, in Kolkata) and executed under a later SET TimeZone and clock: the execution's date and zone
     const prepared = { name: "tm_timetz", text: "SELECT tm::timetz FROM clock_times WHERE id = $1", values: [4], rowMode: "array", types: raw } as pg.QueryConfig;
     assert.deepEqual((await c.query(prepared)).rows, [["12:30:00.5+05:30"]]);
-    fixedNow = Date.parse("2026-03-08T06:00:00Z");
+    fixedNow = Date.parse("2026-03-08T06:00:00Z") * 1000;
     await c.query("SET TimeZone = 'America/New_York'");
     assert.deepEqual((await c.query(prepared)).rows, [["12:30:00.5-04"]], "a prepared statement executed after a SET TimeZone");
   } finally {
