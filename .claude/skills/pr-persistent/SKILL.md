@@ -42,15 +42,16 @@ spent a third of the implementer's output tokens doing it.
 
 Make the run folder, `<runs>/issue-<n>`. In it, write `args.json`, pr-loop-slim's args:
 
-- `issue`: n; `parent`: the same n, or for a piece the split issue; `title`: the issue's title
-  (`gh issue view <n> --json title`);
+- `issue`: n; `parent`: the same n, or for a piece the split issue; `title`: the issue's title, the first line
+  `node <repo>/scripts/gh-text.ts issue <n>` prints (when it says the title and body are by someone else, start
+  nothing: tell the top session, whose up-next skill moves the card to Needs Tom);
 - `base`: `"main"`, or for a stacked piece the branch of the piece below; `branch`: `"upnext-<n>"`, or for a piece the
   branch its plan names; `stackedOn`: `null`, or for a stacked piece the PR below, as a string;
 - `repo`: `<repo>`; `itEnv`: `<it env>` when given, else leave it out;
 - `process: "pr-persistent"`, so the Review record says which process wrote it;
 - `knownClasses`: `{}`, or for a piece the run below's `classes`;
 - `context`: the context line, then: "This issue is not split yet: its one PR closes it (`Closes #<n>`), unless the
-  brief finds it too big for one PR. Read the issue and all its comments first (`gh issue view <n> --comments`). Build
+  brief finds it too big for one PR. Read the issue and all its comments first (`node <repo>/scripts/gh-text.ts issue <n>`). Build
   only what its 'Done looks like' asks; anything else found goes to a new issue, as CLAUDE.md 'What a session finds'
   says. A real database's data never appears: synthetic only. No user-visible text names the engine." For a piece, its
   first sentence is instead: "This is a piece of #<parent>'s split, whose plan is on #<parent>: its one PR closes

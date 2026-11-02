@@ -350,7 +350,7 @@ test("pr-loop-slim: every fix carries the note and every earlier round, labelled
     "review r4": clean, "CI 1": green,
   });
   const fix3 = r.prompt("fix r3");
-  for (const s of ["### review r1", "SELECT r1_found FROM t", "r1-judged", "### review r2", "SELECT r2_found FROM t", "r2-judged", "SELECT r3_found FROM t", "`## Design` (`gh pr view 900 --json body`)"]) {
+  for (const s of ["### review r1", "SELECT r1_found FROM t", "r1-judged", "### review r2", "SELECT r2_found FROM t", "r2-judged", "SELECT r3_found FROM t", "`## Design` (`node <repo>/scripts/gh-text.ts body 900`)"]) {
     assert.ok(fix3.includes(s), `fix r3 carries ${s}`);
   }
   assert.ok(fix3.indexOf("### review r1") < fix3.indexOf("### review r2"), "oldest first");
@@ -1564,7 +1564,7 @@ test("pr-loop-slim: the implementer returns a structured handoff, pasted verbati
   }
   // an implementer that returned no handoff: the fixer reads the comment, and no prompt says undefined
   const none = await run("pr-loop-slim", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
-  assert.ok(none.prompt("fix r1").includes("gh pr view 900 --comments") && !none.prompt("fix r1").includes("```json"));
+  assert.ok(none.prompt("fix r1").includes("node <repo>/scripts/gh-text.ts pr 900") && !none.prompt("fix r1").includes("```json"));
   assert.match(String(none.result["status"]), /the implementer returned no whole handoff/);
 
   // the author checks at scale before every push, with the review's own text: statements for the engine's paths, in
@@ -1785,6 +1785,12 @@ test("the up-next skill: the top session's queue, its rules, how a run starts an
   assert.ok(prose.includes("Order: done: <issues> | running: <issue>") && prose.includes("| issue | coordinator agent | started | PR | state |"), "the queue file's format");
   assert.ok(text.includes("`gh pr merge <n> --auto --merge --match-head-commit <sha>`"), "the merge is queued pinned to the head read");
   assert.ok(prose.includes("the queue belongs on the board") && prose.includes("is open"), "the queue on the board stays an open question");
+  // a run starts only on an issue whose author is the repository's own (issue 438); any other goes to Needs Tom
+  const gate = text.indexOf("`node <repo>/scripts/gh-text.ts author <n>`");
+  const implementing = text.indexOf('`node <repo>/scripts/board.ts status <n> "Implementing"`');
+  assert.ok(gate >= 0 && implementing > gate, "the author is checked before the card moves to Implementing");
+  assert.match(text.slice(gate, implementing), /Exit 3[^]*Needs Tom[^]*`node <repo>\/scripts\/board\.ts status <n> "Needs Tom"`/, "exit 3 goes to Needs Tom");
+  assert.match(text.slice(gate, implementing), /Exit 1 is "couldn't tell"[^.]*never start/, "a gh that failed starts nothing");
 });
 
 test("both skills: no machine path, agent id or run state, and no sentence of a pr-loop-slim prompt (issue 386, PR 258's class)", async () => {
@@ -2417,7 +2423,9 @@ test("plain: no command a harness prompt or a skill tells an agent to run is one
     "node <repo>/scripts/review-postgres.ts stop <name>", "node --env-file=<env file> <repo>/scripts/duck-repro-bounded.ts 300 <tree> <ddl.sql> <deep.sql> > <out> 2>&1",
     "mktemp", "gh pr comment 900 --body-file <that path>", "gh issue view 301 --json closedByPullRequestsReferences", "node <run folder>/render.mjs", "node <repo>/scripts/wait-file.ts <path> 1800", "git rev-parse origin/<base>",
     'node <repo>/scripts/board.ts status 301 "In progress"', 'node <repo>/scripts/board.ts sub 301 "301 · schema" --from "Sonnet 5.5"',
-    "gh pr merge <n> --auto --merge --match-head-commit <sha>", 'node <repo>/scripts/board.ts status <n> "Implementing"']) {
+    "gh pr merge <n> --auto --merge --match-head-commit <sha>", 'node <repo>/scripts/board.ts status <n> "Implementing"',
+    "node <repo>/scripts/gh-text.ts issue 300", "node <repo>/scripts/gh-text.ts body 900", 'node <repo>/scripts/gh-text.ts comment-id 900 "## Handoff"',
+    'node <repo>/scripts/gh-text.ts search "<words>"', "node <repo>/scripts/gh-text.ts author <n>", "node <repo>/scripts/gh-text.ts issue <n>"]) {
     assert.ok(seen.has(cmd), `the check reads \`${cmd}\``);
   }
   // and it catches each form the guard refused, as origin/main wrote them
@@ -2581,4 +2589,250 @@ test("plain: wait-file exits 0 once its file is there and not empty, 8 at its bo
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------- issue 438: the agents read an issue's or a PR's
+// people-written text (titles, bodies, comments, reviews, inline review comments, search results) only through
+// scripts/gh-text.ts, which keeps OWNER, MEMBER and COLLABORATOR and names what it left out. Nothing here imports it
+// statically, so at a commit without it each test fails by name instead of the file not loading.
+
+const GH_TEXT = path.join(ROOT, "scripts", "gh-text.ts");
+const REVIEW_STATS = path.join(ROOT, "scripts", "review-stats.ts");
+/** The `--json` fields a prompt may ask `gh issue view` / `gh pr view` for: GitHub's own values, never people's words. */
+const NOT_TEXT_FIELDS = new Set(["mergeable", "mergeStateStatus", "state", "headRefOid", "closedByPullRequestsReferences", "number", "url", "isDraft", "baseRefName", "headRefName", "statusCheckRollup"]);
+/** Each `gh` command in a text (up to a backtick or a line's end) that reads an issue's or a PR's people-written text
+ * other than through gh-text: a view with --comments, with a --json field that is not GitHub's own value, or of a number
+ * with no --json at all (it prints the title and body); any list or search; a `gh api` GET of an issue, a PR, their
+ * comments or reviews, or search. A write (`gh api -X PATCH …`), a diff, the checks and a run's log are let through. */
+function textReads(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/\bgh\s+(issue|pr|api|search)\b[^`\n]*/g)) {
+    const cmd = m[0];
+    if (m[1] === "search") { out.push(cmd); continue; }
+    if (m[1] === "api") {
+      if (/\s(?:-X|--method)\s+(?:POST|PATCH|PUT|DELETE)\b/.test(cmd)) continue;
+      if (/(?:^|\s)\/?(?:repos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\b|search\/)/.test(cmd)) out.push(cmd);
+      continue;
+    }
+    const verb = /^gh\s+\w+\s+(\w+)/.exec(cmd)?.[1];
+    if (verb === "list") { out.push(cmd); continue; }
+    if (verb !== "view") continue;
+    if (/--comments\b/.test(cmd)) { out.push(cmd); continue; }
+    const json = /--json[\s=]+(\S+)/.exec(cmd);
+    if (json) { if (json[1]!.split(",").some((f) => !NOT_TEXT_FIELDS.has(f))) out.push(cmd); continue; }
+    // a bare `gh pr view` names the command in prose; one given a number and no --json prints the title and body
+    if (/^gh\s+\w+\s+view\s+(?:\d|<|\$\{)/.test(cmd)) out.push(cmd);
+  }
+  return out;
+}
+
+test("github text: no prompt or skill reads an issue's or a PR's text except through gh-text", async () => {
+  // the matcher catches each form origin/main wrote, and lets GitHub's own values, the diff, the checks and the write through
+  for (const main of ["gh issue view 300 --comments", "gh issue view <n> --json title", "gh pr view 900 --comments", "gh pr view 900 --json body",
+    'gh issue list --state open --search "<words>"', "gh api repos/embeddable-hq/mason-data/issues/900/comments --jq '.[] | select(.body | contains(\"## Handoff\")) | .id'",
+    "gh pr view 900", "gh issue view 7 --json title,closedByPullRequestsReferences", "gh search issues collaborators", "gh pr list --search x",
+    "gh api repos/embeddable-hq/mason-data/pulls/900/reviews", "gh api --paginate repos/embeddable-hq/mason-data/pulls/900/comments", "gh api search/issues -f q=x"]) {
+    assert.deepEqual(textReads(`\`${main}\``), [main], `the matcher catches \`${main}\``);
+  }
+  for (const ok of ["gh pr view 900 --json mergeable,mergeStateStatus", "gh pr view <n> --json state,mergeable", "gh issue view 301 --json closedByPullRequestsReferences",
+    "gh pr diff <n>", "gh pr checks 900", "gh api -X PATCH repos/embeddable-hq/mason-data/issues/comments/<id> -F body=@<file>", "gh run view <run> --json jobs",
+    "gh api repos/embeddable-hq/mason-data/actions/jobs/<id>/logs", "gh pr view <n> --json headRefOid --jq .headRefOid", "gh pr edit 900 --body-file <file>"]) {
+    assert.deepEqual(textReads(`\`${ok}\``), [], `the matcher lets \`${ok}\` through`);
+  }
+  assert.deepEqual(textReads("the `gh pr view` line the chunk printed"), [], "a bare name in prose is no read");
+
+  const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
+  const filed = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }, { classKey: "wording", source: "deferred", issue: 951, action: "filed" }] };
+  const review1 = { findings: [finding({ classKey: "c-a", input: "SELECT a FROM t" }), base, later({ input: "SELECT later FROM t" })], judgedCorrect: [] };
+  const FULL: Answers = { ...SLIM, "review r1": review1, "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red,
+    "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green, file: filed };
+  const NO_HANDOFF: Answers = { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green };
+  const reads: string[] = [];
+  const prompts = new Map<string, string[]>();
+  for (const repo of [undefined, ROOT]) {
+    for (const itEnv of [undefined, "/srv/it.env"]) {
+      for (const stackedOn of ["", "899"]) {
+        const args: Record<string, unknown> = { ...PR, stackedOn, ...(repo ? { repo } : {}), ...(itEnv ? { itEnv } : {}) };
+        for (const answers of [FULL, NO_HANDOFF, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
+          const r = await run("pr-loop-slim", args, answers);
+          for (const c of r.calls) {
+            const key = `${c.opts.label}${repo ? " repo" : ""}${stackedOn ? " stacked" : ""}${answers === NO_HANDOFF ? " no-handoff" : ""}`;
+            prompts.set(key, [...(prompts.get(key) ?? []), c.prompt]);
+            for (const x of textReads(c.prompt)) reads.push(`${key}: ${x}`);
+          }
+        }
+      }
+    }
+  }
+  for (const [name, text] of [["pr-persistent SKILL.md", skillText()], ["up-next SKILL.md", upNextText()]] as const) for (const x of textReads(text)) reads.push(`${name}: ${x}`);
+  assert.deepEqual([...new Set(reads)], [], "an issue's or a PR's text is read only through scripts/gh-text.ts");
+
+  // not vacuous: each stage that reads GitHub text is rendered and names gh-text, with the path the run gives
+  const has = (key: string, s: string) => assert.ok((prompts.get(key) ?? []).some((p) => p.includes(s)), `"${key}" says ${s}`);
+  has("brief", "node <repo>/scripts/gh-text.ts issue 300");
+  has("brief repo", `node ${ROOT}/scripts/gh-text.ts issue 300`);
+  has("fix r1 no-handoff", "node <repo>/scripts/gh-text.ts pr 900");
+  has("fix r1 repo no-handoff", `node ${ROOT}/scripts/gh-text.ts pr 900`);
+  for (const l of ["fix r1", "CI fix 1"]) has(l, "gh-text.ts body 900");
+  for (const l of ["fix r1", "CI fix 1"]) {
+    has(l, 'node <repo>/scripts/gh-text.ts comment-id 900 "## Handoff"');
+    has(l, "gh api -X PATCH repos/embeddable-hq/mason-data/issues/comments/<id> -F body=@<file>");
+  }
+  for (const l of ["link", "link stacked", "learn"]) has(l, "node <repo>/scripts/gh-text.ts body 900");
+  has("file", 'node <repo>/scripts/gh-text.ts search "<words>"');
+  has("file", "node <repo>/scripts/gh-text.ts issue <n>");
+  // every prompt carries the rule, so an agent that would read more of GitHub reads it the same way
+  for (const [key, ps] of prompts) for (const p of ps) assert.ok(p.includes("scripts/gh-text.ts` (issue, pr, body, comment-id, search, author)"), `"${key}" carries the rule`);
+  for (const [name, text] of [["pr-persistent", skillText()], ["up-next", upNextText()]] as const) {
+    assert.ok(text.includes("node <repo>/scripts/gh-text.ts issue <n>"), `${name} reads an issue through gh-text`);
+  }
+});
+
+type GhAnswer = { json?: unknown; pages?: unknown[][]; rc?: number; err?: string };
+/** Runs a script with a stub `gh` first on PATH that answers `gh api <path>` from `routes` (keyed by the path without its
+ * query; "*" answers any other), as gh does: a list read with --paginate gets every page, without it the first; `--jq
+ * '.[]'` or `'.items[]'` prints one item a line, and review-stats' record filter is applied as its jq would. */
+function runGh(script: string, args: string[], routes: Record<string, GhAnswer>): { rc: number | null; out: string; err: string; calls: string[][] } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gh-text-"));
+  try {
+    fs.writeFileSync(path.join(dir, "routes.json"), JSON.stringify(routes));
+    fs.writeFileSync(path.join(dir, "calls.log"), "");
+    fs.writeFileSync(path.join(dir, "gh"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const dir = ${JSON.stringify(dir)};
+const a = process.argv.slice(2);
+fs.appendFileSync(dir + "/calls.log", JSON.stringify(a) + "\\n");
+const routes = JSON.parse(fs.readFileSync(dir + "/routes.json", "utf8"));
+const VALUE = new Set(["--jq", "-f", "-F", "-X", "--method", "-H"]);
+let p = "";
+for (let i = 1; i < a.length; i++) { if (VALUE.has(a[i])) { i++; continue; } if (!a[i].startsWith("-")) { p = a[i]; break; } }
+const r = routes[p.split("?")[0]] || routes["*"];
+if (a[0] !== "api" || !r) { process.stderr.write("gh: Not Found (HTTP 404)\\n"); process.exit(1); }
+if (r.rc) { process.stderr.write((r.err || "gh: failed") + "\\n"); process.exit(r.rc); }
+const v = r.pages ? (a.includes("--paginate") ? r.pages.flat() : r.pages[0]) : r.json;
+const jq = a.includes("--jq") ? a[a.indexOf("--jq") + 1] : null;
+let items = null;
+if (jq === ".[]") items = v;
+else if (jq === ".items[]") items = v.items;
+else if (jq && jq.includes("mason-review-record")) items = v.filter((c) => c.body.includes("mason-review-record")).map((c) => ({ url: c.html_url, issue_url: c.issue_url, body: c.body, author_association: c.author_association }));
+else if (jq) { process.stderr.write("stub gh: unknown jq " + jq + "\\n"); process.exit(2); }
+process.stdout.write(items ? items.map((x) => JSON.stringify(x)).join("\\n") + "\\n" : JSON.stringify(v));
+`, { mode: 0o755 });
+    const r = spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 60_000, env: { ...process.env, PATH: `${dir}:${process.env["PATH"]}` } });
+    assert.equal(r.error, undefined, String(r.error));
+    const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]);
+    return { rc: r.status, out: r.stdout, err: r.stderr, calls };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+const API = "repos/embeddable-hq/mason-data";
+/** An item of GitHub's REST answers: `assoc` undefined leaves author_association out; its login carries its body's word. */
+const item = (id: number, assoc: string | undefined, body: string, extra: Record<string, unknown> = {}) => ({
+  id, body, user: { login: `${body}-login` }, created_at: "2026-11-02T00:00:00Z", ...(assoc === undefined ? {} : { author_association: assoc }), ...extra,
+});
+const DROPPED = [item(3, "NONE", "drop-none"), item(4, "CONTRIBUTOR", "drop-contrib"), item(5, "FIRST_TIME_CONTRIBUTOR", "drop-ftc"), item(6, "FIRST_TIMER", "drop-ft"),
+  item(7, "MANNEQUIN", "drop-mannequin"), item(8, undefined, "drop-missing"), item(9, "SOMETHING_NEW", "drop-new")];
+const ISSUE_ROUTES: Record<string, GhAnswer> = {
+  [`${API}/issues/7`]: { json: { number: 7, title: "kept-title", ...item(70, "OWNER", "kept-body") } },
+  [`${API}/issues/7/comments`]: { pages: [[item(1, "MEMBER", "kept-member"), item(2, "COLLABORATOR", "kept-collab"), ...DROPPED]] },
+  [`${API}/issues/8`]: { json: { number: 8, title: "drop-title", ...item(80, "NONE", "drop-body") } },
+  [`${API}/issues/8/comments`]: { pages: [[item(1, "OWNER", "kept-owner")]] },
+  [`${API}/issues/9`]: { json: { number: 9, title: "kept-nine", ...item(90, "MEMBER", "kept-nine-body") } },
+  [`${API}/issues/9/comments`]: { pages: [Array.from({ length: 30 }, (_, i) => item(100 + i, "MEMBER", `kept-c${i + 1}-end`)), [item(130, "MEMBER", "kept-c31-end")]] },
+};
+
+test("github text: gh-text keeps OWNER, MEMBER and COLLABORATOR and names what it left out", async () => {
+  const { KEPT, keep, isKept } = await import("../scripts/gh-text.ts") as { KEPT: readonly string[]; keep: (i: unknown[]) => { kept: unknown[]; left: number }; isKept: (i: object) => boolean };
+  assert.deepEqual([...KEPT], ["OWNER", "MEMBER", "COLLABORATOR"]);
+  assert.equal(keep(ISSUE_ROUTES[`${API}/issues/7/comments`]!.pages![0]!).left, 7, "the pure filter, called directly");
+  assert.equal(isKept({}), false, "a missing association is not kept");
+
+  const r = runGh(GH_TEXT, ["issue", "7"], ISSUE_ROUTES);
+  assert.equal(r.rc, 0, r.err);
+  for (const s of ["kept-title", "kept-body", "kept-member", "kept-collab", "MEMBER", "COLLABORATOR"]) assert.ok(r.out.includes(s), `prints ${s}`);
+  assert.ok(!r.out.includes("drop-") && !r.err.includes("drop-"), "not one byte of a left-out comment, its author's login included");
+  assert.match(r.out, /left out: 7 comments by others not read/);
+  const comments = r.calls.find((c) => c.some((a) => a.startsWith(`${API}/issues/7/comments`)))!;
+  assert.ok(comments.includes("--paginate") && comments.some((a) => a.includes("per_page=100")), `the list is read whole: ${comments.join(" ")}`);
+
+  // a 31st comment, on a second page, is read
+  const nine = runGh(GH_TEXT, ["issue", "9"], ISSUE_ROUTES);
+  assert.equal(nine.rc, 0, nine.err);
+  for (let i = 1; i <= 31; i++) assert.ok(nine.out.includes(`kept-c${i}-end`), `comment ${i} of 31`);
+  assert.match(nine.out, /left out: nothing/);
+});
+
+test("github text: an issue by someone else is not read, and a gh that failed is never read as kept", () => {
+  const r = runGh(GH_TEXT, ["issue", "8"], ISSUE_ROUTES);
+  assert.equal(r.rc, 0, r.err);
+  assert.ok(r.out.includes("kept-owner"), "a kept comment is still printed");
+  assert.ok(!r.out.includes("drop-") && !r.err.includes("drop-"), "neither the title nor the body");
+  assert.match(r.out, /the issue's title and body are by someone else \(NONE\): not read/);
+  const author = runGh(GH_TEXT, ["author", "8"], ISSUE_ROUTES);
+  assert.equal(author.rc, 3);
+  assert.match(author.out, /NONE/);
+  assert.equal(runGh(GH_TEXT, ["author", "7"], ISSUE_ROUTES).rc, 0);
+  const body = runGh(GH_TEXT, ["body", "8"], ISSUE_ROUTES);
+  assert.equal(body.rc, 3);
+  assert.equal(body.out, "", "a stranger's body never reaches a stage that writes it back");
+  assert.ok(!body.err.includes("drop-"));
+  assert.equal(runGh(GH_TEXT, ["body", "7"], ISSUE_ROUTES).out, "kept-body", "a kept body, raw");
+
+  const failing = { "*": { rc: 1, err: "HTTP 401: Bad credentials" } };
+  assert.equal(runGh(GH_TEXT, ["author", "7"], failing).rc, 1, "couldn't tell is never kept");
+  const issue = runGh(GH_TEXT, ["issue", "7"], { [`${API}/issues/7`]: ISSUE_ROUTES[`${API}/issues/7`]!, "*": failing["*"] });
+  assert.equal(issue.rc, 1);
+  assert.equal(issue.out, "", "nothing printed as kept when a read failed");
+  assert.match(issue.err, /gh auth status/, "it says the way out");
+  for (const args of [[], ["issue"], ["issue", "x"], ["comment-id", "7"], ["search"], ["lunch", "1"]]) assert.equal(runGh(GH_TEXT, args, ISSUE_ROUTES).rc, 2, args.join(" "));
+});
+
+test("github text: a PR's reviews and inline comments are kept as its comments are; comment-id and search read only kept authors", () => {
+  const handoff = item(11, "OWNER", "### From Claude (Opus 5.5)\n## Handoff\nkept-handoff");
+  const routes: Record<string, GhAnswer> = {
+    [`${API}/issues/900`]: { json: { number: 900, title: "kept-pr-title", ...item(9000, "OWNER", "## Design\nkept-design") } },
+    [`${API}/issues/900/comments`]: { pages: [[handoff, item(12, "NONE", "## Handoff\ndrop-handoff")]] },
+    [`${API}/pulls/900/reviews`]: { pages: [[item(21, "MEMBER", "kept-review", { submitted_at: "2026-11-02T00:00:00Z" }), item(22, "NONE", "drop-review"), item(23, "NONE", "")]] },
+    [`${API}/pulls/900/comments`]: { pages: [[item(31, "COLLABORATOR", "kept-inline", { path: "src/duck/plan.ts", line: 3 }), item(32, "CONTRIBUTOR", "drop-inline")]] },
+    "search/issues": { json: { items: [{ number: 950, title: "a refusal names its entry", author_association: "MEMBER" }, { number: 951, title: "drop-search", author_association: "NONE" }] } },
+  };
+  const r = runGh(GH_TEXT, ["pr", "900"], routes);
+  assert.equal(r.rc, 0, r.err);
+  for (const s of ["kept-pr-title", "kept-design", "kept-handoff", "kept-review", "kept-inline", "src/duck/plan.ts:3"]) assert.ok(r.out.includes(s), `prints ${s}`);
+  assert.ok(!r.out.includes("drop-") && !r.err.includes("drop-"));
+  assert.match(r.out, /left out: 1 comment, 1 review and 1 review comment by others not read/);
+  for (const p of ["/pulls/900/reviews", "/pulls/900/comments", "/issues/900/comments"]) assert.ok(r.calls.find((c) => c.some((a) => a.includes(p)))!.includes("--paginate"), `${p} is paginated`);
+
+  const id = runGh(GH_TEXT, ["comment-id", "900", "## Handoff"], routes);
+  assert.deepEqual([id.rc, id.out], [0, "11\n"], "the kept Handoff, never the later one by someone else");
+  const none = runGh(GH_TEXT, ["comment-id", "900", "## Handoff"], { ...routes, [`${API}/issues/900/comments`]: { pages: [[item(12, "NONE", "## Handoff\ndrop-handoff")]] } });
+  assert.equal(none.rc, 3);
+  assert.equal(none.out, "");
+
+  const s = runGh(GH_TEXT, ["search", "wording", "refusal"], routes);
+  assert.equal(s.rc, 0, s.err);
+  assert.match(s.out, /^#950 a refusal names its entry$/m);
+  assert.ok(!s.out.includes("drop-") && !s.out.includes("#951"));
+  assert.match(s.out, /left out: 1 issue by others not listed/);
+  const q = s.calls[0]!.join(" ");
+  assert.ok(q.includes("--paginate") && q.includes("is:open") && q.includes("wording refusal") && q.includes("repo:embeddable-hq/mason-data"), q);
+});
+
+test("github text: review-stats counts only the records the repository's people wrote, with gh-text's own list", async () => {
+  const gt = await import("../scripts/gh-text.ts") as { KEPT: unknown };
+  const rs = await import("../scripts/review-stats.ts") as { KEPT?: unknown };
+  assert.equal(rs.KEPT, gt.KEPT, "review-stats reads gh-text's list itself, never a copy");
+  const block = (r: unknown) => "```json mason-review-record\n" + JSON.stringify(r) + "\n```";
+  const rec = (o: object) => ({ pr: 900, designRounds: 0, probeRounds: 0, reviewRounds: 1, findings: [], ciFixes: 0, status: "reviewed", ...o });
+  const comment = (id: number, assoc: string, r: object) => ({ id, html_url: `https://github.com/x/y/pull/900#issuecomment-${id}`, issue_url: `https://api.github.com/${API}/issues/900`, author_association: assoc, body: `## Review record\n\n${block(r)}` });
+  const routes: Record<string, GhAnswer> = {
+    // the one by someone else is posted later, so it would be the PR's own record if it counted
+    "repos/{owner}/{repo}/issues/comments": { pages: [[comment(1, "OWNER", rec({})), comment(2, "NONE", rec({ findings: [{ round: 1, stage: "review", classKey: "k", severity: "wrong-answer" }] }))]] },
+  };
+  const r = runGh(REVIEW_STATS, ["--json"], routes);
+  assert.equal(r.rc, 0, r.err);
+  const s = JSON.parse(r.out) as { prs: number; firstPass: number };
+  assert.deepEqual([s.prs, s.firstPass], [1, 1], "only the OWNER's record counts");
+  assert.match(r.err, /1 record comment\(s\) by others left out/);
 });
