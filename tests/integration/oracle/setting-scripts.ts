@@ -247,6 +247,14 @@ export const SETTING_SCRIPTS: SettingScript[] = [
     "SELECT 'now'::text::timestamptz = now(), 'now'::varchar::timestamptz = now(), 'now'::unknown::timestamptz = now(), now() = 'now', 'now' = now()",
     { prepare: "p", sql: "SELECT $1::int AS n, now() = 'now' AS same" }, { run: "p", values: ["1"] },
     "BEGIN", "SELECT 'now'::timestamptz = now()", "SELECT now() = (SELECT now() FROM public.one)", "COMMIT"),
+  // GitHub issues 372 and 363: the instant is microseconds, so a prepared statement's 'now' (its Parse's transaction)
+  // and its run's now() (a later one) differ as Postgres's do, even inside one millisecond; and the real clock after
+  // the transaction's start never reads earlier than it. The resolution itself is held by the unit tests, whose clock
+  // is pinned: a live Postgres's microseconds end in 000 now and then, so no statement here can hold six digits
+  s("session state: a prepared relative literal and its run's now() on the DuckDB path", "SET TimeZone = 'Asia/Tokyo'",
+    { prepare: "p", sql: "SELECT $1::int AS n, now() = 'now' AS same FROM public.one" }, { run: "p", values: ["1"] },
+    "BEGIN", "SELECT statement_timestamp() >= now(), clock_timestamp() >= now(), clock_timestamp() >= statement_timestamp()",
+    "SELECT now() = (SELECT now() FROM public.one)", "COMMIT"),
   s("session state: every reader of the transaction's start on the catalog path, however the word reaches it (review r3 of PR 333)", "SET TimeZone = 'Asia/Tokyo'",
     "/* app */ SELECT 'now'::timestamptz = now(), E'now'::timestamptz = now(), now() = 'now', date 'today' = current_date",
     "-- a comment line\nSELECT E'now'::timestamptz = now(), 'now'::text::timestamptz = now()",

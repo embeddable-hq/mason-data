@@ -8,13 +8,14 @@
  * Messages in: `{ id, op: "init", statements, optional? }` (start PGlite and run the DDL; the reply names the refused
  * statement, or the optional ones refused),
  * `{ id, op: "raw", bytes, at? }` (frontend protocol bytes in, backend bytes out; `at`: the instant the FIRST message
- * runs at, `pinnedClock`), `{ id, op: "query", sql }` (rows as
+ * runs at, in microseconds since the epoch, `pinnedClock`), `{ id, op: "query", sql }` (rows as
  * objects, for the server's own lookups and the tests), `{ id, op: "close" }`. Every reply carries the id:
  * `{ id, ok: true, bytes | rows }` or `{ id, ok: false, message }`.
  */
 import { parentPort } from "node:worker_threads";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
+import { instantWallMs, nowMicros } from "../../lib/instant.ts";
 
 type Request =
   | { id: number; op: "init"; statements: string[]; optional?: string[] }
@@ -37,23 +38,40 @@ let db: PGlite | null = null;
  * transaction instant IS the session's and no statement is rewritten for it. `statement_timestamp()` and
  * `clock_timestamp()` read the real clock, as on Postgres. PGlite's wall clock is `Date.now()`
  * (emscripten's `clock_time_get(CLOCK_REALTIME)`), on this thread alone; the requests are one at a time.
+ * The instant is MICROSECONDS, as Postgres's (src/lib/instant.ts, GitHub issues 372, 363): `at` is handed to PGlite
+ * as the value it reads back as exactly that microsecond (`instantWallMs`), and the real clock after it is this
+ * thread's microsecond clock (`nowMicros`), floored at `at`: the two threads' clocks may disagree inside a
+ * millisecond, and `statement_timestamp()` must never read earlier than the transaction's start, as on Postgres.
  */
 async function pinnedClock(instance: PGlite, bytes: Uint8Array, at: number): Promise<Uint8Array> {
   // a frame: its type byte, then its length (its own four bytes included)
   const first = 1 + new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1);
   const wall = Date.now;
-  let head: Uint8Array;
-  Date.now = () => at;
+  const pinned = instantWallMs(at);
+  let head: Uint8Array, tail: Uint8Array;
   try {
+    Date.now = () => pinned;
     head = new Uint8Array(await instance.execProtocolRaw(bytes.subarray(0, first)));   // a copy: PGlite may reuse its buffer
+    Date.now = () => instantWallMs(Math.max(at, nowMicros(wall)));
+    tail = await instance.execProtocolRaw(bytes.subarray(first));
   } finally {
     Date.now = wall;
   }
-  const tail = await instance.execProtocolRaw(bytes.subarray(first));
   const out = new Uint8Array(head.length + tail.length);
   out.set(head, 0);
   out.set(tail, head.length);
   return out;
+}
+
+/** a request run at no instant of a session's (the DDL, a parameter's input function): the real clock, in microseconds */
+async function microsClock(instance: PGlite, bytes: Uint8Array): Promise<Uint8Array> {
+  const wall = Date.now;
+  try {
+    Date.now = () => instantWallMs(nowMicros(wall));
+    return await instance.execProtocolRaw(bytes);
+  } finally {
+    Date.now = wall;
+  }
 }
 
 port.on("message", (m: Request) => {
@@ -94,7 +112,7 @@ port.on("message", (m: Request) => {
         }
         case "raw": {
           if (db === null) throw new Error("the catalog is not started");
-          const bytes = m.at === undefined ? await db.execProtocolRaw(m.bytes) : await pinnedClock(db, m.bytes, m.at);
+          const bytes = m.at === undefined ? await microsClock(db, m.bytes) : await pinnedClock(db, m.bytes, m.at);
           const copy = new Uint8Array(bytes);   // PGlite may reuse its buffer: a copy of our own is transferred
           port.postMessage({ id: m.id, ok: true, bytes: copy }, [copy.buffer]);
           return;

@@ -652,14 +652,15 @@ test("session state: the catalog answers under the session's search_path, TimeZo
     // the request's transaction begins at the instant it is run at (PgCatalog.run's `at`, catalog-worker.ts
     // pinnedClock): every reader of the transaction's start reads it — now(), the keywords, a relative word however it
     // reaches a date or time — and the real clock goes on (statement_timestamp, clock_timestamp)
-    const at = Date.UTC(2026, 0, 2, 20, 0, 0);
+    // (`at` is microseconds since the epoch, as Postgres's transaction start: src/lib/instant.ts)
+    const at = Date.UTC(2026, 0, 2, 20, 0, 0) * 1000;
     assert.deepEqual(await ask("SELECT now()::text, current_date::text, localtimestamp(0)::text, 'now'::timestamptz = now(), lower('NOW')::timestamptz = now(), 'today'::char(5)::date = current_date, statement_timestamp() > now() + interval '1 month', clock_timestamp() > now() + interval '1 month'",
       { ...BASE_STATE, timeZone: "Asia/Tokyo" }, new Map(), at), ["2026-01-03 05:00:00+09|2026-01-03|2026-01-03 05:00:00|t|t|t|t|t"]);
     // a prepared statement's Execute in a request of its own reads that request's instant
     const parsed = await c.run(m.asSession(message("P", concat(cstring("p_now"), cstring("SELECT now()::text, $1::timestamptz = now()"), int16(0))), BASE_STATE, new Map()), at);
     assert.ok(!decode(parsed).some((x) => x.type === "E"));
     const bound = concat(message("B", concat(cstring(""), cstring("p_now"), int16(0), int16(1), int32(3), enc.encode("now"), int16(0))), message("E", concat(cstring(""), int32(0))));
-    assert.deepEqual(rowsOf(await c.run(m.asSession(bound, BASE_STATE, new Map()), at + 1000)).map((r) => r.join("|")), ["2026-01-02 20:00:01+00|t"]);
+    assert.deepEqual(rowsOf(await c.run(m.asSession(bound, BASE_STATE, new Map()), at + 1_000_000)).map((r) => r.join("|")), ["2026-01-02 20:00:01+00|t"]);
     // the overrides, reached by name (the splice writes `public.`), answer the session's with public off the path
     const own = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "v"]]);
     assert.deepEqual(await ask("SELECT public.current_setting('TimeZone') || ' ' || public.current_setting('MYAPP.X', true) || ' ' || public.current_setting('block_size') || ' ' || (public.current_setting('no_such', true) IS NULL)::text", { ...BASE_STATE, searchPath: "nowhere" }, own),
@@ -674,6 +675,27 @@ test("session state: the catalog answers under the session's search_path, TimeZo
     assert.deepEqual([err?.error?.C, err?.error?.M], ["42704", 'unrecognized configuration parameter "myapp.x"']);
     // the carrier is no tool's name: `mason.session` is Postgres's 42704
     assert.deepEqual(await ask("SELECT public.current_setting('mason.session')", BASE_STATE, own), '42704 unrecognized configuration parameter "mason.session"');
+  } finally { await c.stop(); }
+});
+
+test("session state: the catalog's transaction starts at exactly the microsecond it is run at, and its real clock after it never reads earlier (issues 372, 363)", { timeout: 120_000 }, async () => {
+  const m = catalogModule as unknown as SessionApi;
+  const c = new PgCatalog(schema, { log: () => undefined, setup: [...m.currentSettingSql(), "SET search_path = public, pg_catalog"] } as never);
+  const ask = async (sql: string, at: number): Promise<string[]> => rowsOf(await c.run(m.asSession(simpleQuery(sql), BASE_STATE, new Map()), at)).map((r) => r.join("|"));
+  try {
+    // the microsecond PGlite reads back is the one handed to it, at every edge of emscripten's rounding and musl's truncation
+    const at = Date.UTC(2026, 0, 2, 20, 0, 0) * 1000;
+    for (const [tail, text] of [[0, "20:00:00"], [1, "20:00:00.000001"], [123_456, "20:00:00.123456"], [499_999, "20:00:00.499999"], [500_000, "20:00:00.5"], [999_999, "20:00:00.999999"]] as const) {
+      assert.deepEqual(await ask("SELECT now()::text, transaction_timestamp() = now()", at + tail), [`2026-01-02 ${text}+00|t`], `.${String(tail).padStart(6, "0")}`);
+    }
+    // a precision rounds Postgres's way: half up, from the microseconds
+    assert.deepEqual(await ask("SELECT current_timestamp(3)::text, localtime(3)::text, 'now'::timestamptz(3) = now(), 'now'::timestamptz(6) = now(), current_time::text, localtimestamp(6)::text", at + 123_500),
+      ["2026-01-02 20:00:00.124+00|20:00:00.124|f|t|20:00:00.1235+00|2026-01-02 20:00:00.1235"]);
+    // the real clock after the request's first message (statement_timestamp, clock_timestamp) is floored at the
+    // instant: an instant from the session's thread a little ahead of this thread's clock is never later than them
+    for (const ahead of [0, 400, 900]) {
+      assert.deepEqual(await ask("SELECT statement_timestamp() >= now(), clock_timestamp() >= now(), clock_timestamp() >= statement_timestamp()", Math.floor((performance.timeOrigin + performance.now()) * 1000) + ahead), ["t|t|t"], `ahead ${ahead} µs`);
+    }
   } finally { await c.stop(); }
 });
 
