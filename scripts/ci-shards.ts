@@ -126,10 +126,14 @@ export const timesName = (shard: number): string => `test-times-unit-${shard}.js
  *  file would run every test in the tree, so an empty shard is an error, not a pass. A unit shard carries the per-test
  *  bound before its files (TEST_BOUND_ARGS, scripts/gate.ts): CI never runs `npm test`, so this is where CI holds it. It
  *  reports twice: spec on stdout, as before (ci.yml's `slowest tests` reads those lines), and each file's time into `out`. */
+/** How many files a unit shard runs side by side, said before its files: Node's default is os.availableParallelism() - 1,
+ *  3 on the 4 vCPUs of ubuntu-latest. Issue 338 measured 4 against that default over the PR's own runs (docs/DESIGN.md
+ *  "Measured: one file is the floor"). */
+export const UNIT_CONCURRENCY = 4;
 export function shardCommand(kind: Kind, shard: number, files: readonly string[], out: string): { args: string[]; env: Record<string, string> } {
   if (files.length === 0) throw new Error(`${kind} shard ${shard} has no file: \`node --test\` would run every test in the tree`);
   const reporters = ["--test-reporter=spec", "--test-reporter-destination=stdout", `--test-reporter=${TIMES_REPORTER}`, `--test-reporter-destination=${path.join(out, timesName(shard))}`];
-  return { args: ["--test", ...(kind === "unit" ? [...TEST_BOUND_ARGS, ...reporters] : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}`, IT_ORACLE_LEG_REPORT: path.join(out, reportName(shard)) } : {} };
+  return { args: ["--test", ...(kind === "unit" ? [...TEST_BOUND_ARGS, `--test-concurrency=${UNIT_CONCURRENCY}`, ...reporters] : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}`, IT_ORACLE_LEG_REPORT: path.join(out, reportName(shard)) } : {} };
 }
 
 /** What a shard wrote of itself. A unit shard's carries its files' times, its wall time and its runner's CPU; a record

@@ -61,8 +61,9 @@ test("a shard with no file is an error: `node --test` alone would run every test
   assert.throws(() => shardCommand("unit", 1, [], "o"), /has no file/);
   // CI never runs `npm test`: a unit shard carries the per-test pair itself, before its files (issue 139)
   assert.deepEqual(gate.TEST_BOUND_ARGS, ["--test-timeout=300000", "--test-force-exit"]);
-  // and reports twice: spec on stdout as before, each file's time into the shard's folder
-  assert.deepEqual(shardCommand("unit", 1, ["a"], "o"), { args: ["--test", ...gate.TEST_BOUND_ARGS, "--test-reporter=spec", "--test-reporter-destination=stdout",
+  // and runs four files side by side, said before its files (issue 338: Node's default is 3 on CI's 4 vCPUs), and reports
+  // twice: spec on stdout as before, each file's time into the shard's folder
+  assert.deepEqual(shardCommand("unit", 1, ["a"], "o"), { args: ["--test", ...gate.TEST_BOUND_ARGS, "--test-concurrency=4", "--test-reporter=spec", "--test-reporter-destination=stdout",
     `--test-reporter=${path.join(ROOT, "scripts", "test-times.ts")}`, `--test-reporter-destination=${path.join("o", "test-times-unit-1.json")}`, "a"], env: {} });
   assert.deepEqual(shardCommand("rest", 2, ["a"], "o"), { args: ["--test", "--test-concurrency=1", "a"], env: {} });
   assert.deepEqual(shardCommand("oracle", 2, ["a"], "o").env, { IT_ORACLE_LEG: "2/2", IT_ORACLE_LEG_REPORT: path.join("o", "duck-oracle-leg-2.json") });
