@@ -6112,66 +6112,92 @@ function textColumnCases(): Array<[string, "ordered"]> {
 }
 
 /**
- * THE CLASS OF PR 415's REVIEW r3, refused-by-type-not-by-program: a refusal decided by the column's type (a numeric
- * the engine does not hold exactly) where the value that reaches the answer IS exact — a value at a fixed scale (round /
- * trunc(x, n), a cast to numeric(p, s)) of a quotient or an avg, written as its program's DECIMAL; or an array_agg whose
- * elements no reader sees (its length, its bounds). Every reader that refused a numeric it did not hold exactly.
+ * THE CLASS OF PR 415's REVIEW r3, refused-by-type-not-by-program, as narrowed after review r5: a value at a fixed scale
+ * (round / trunc(x, n), a cast to numeric(p, s)) of a quotient or an avg is computed as main computes it, the engine's
+ * double with its program, and the refusals this PR added for a quotient's double do not refuse it: a JOIN … USING or a
+ * NATURAL JOIN on it, and an array_agg of a cast of one (the engine's DECIMAL(p, s), as main's). Where main refuses
+ * (a set operation without ALL, a grouping set, sum(DISTINCT), a WITH query's or a subquery's column compared outside
+ * it, an array_agg of a round, whose doubles print 40.0 for 40.00), it is refused, never answered otherwise. An array_agg
+ * whose elements no reader sees (its length, its bounds) is answered whatever its elements.
  */
 const FIXED_SCALES = ["round(o.amount / 3, 2)", "round(o.amount / 4, 2)", "trunc(o.amount / 3, 2)", "round(o.amount / 7)", "(o.amount / 3)::numeric(10,2)", "(o.amount / 4)::numeric(10,2)", "CAST(o.amount / 7 AS decimal(12,4))",
   // (a negative scale is Postgres's 0; a value at a fixed scale of another)
   "round(o.amount / 3, -1)", "trunc(o.amount / 7, -1)", "round((o.amount / 3)::numeric(10,4), 2)", "round(round(o.amount / 7, 4), 2)"];
-function fixedScaleCases(): Array<[string, "ordered"]> {
-  const out: Array<[string, "ordered"]> = [];
+type FixedScaleCase = readonly [string, "answered" | "numeric-quotient-equality" | "array-subquery-element" | "numeric-exact-sum" | "row-value"];
+function fixedScaleCases(): FixedScaleCase[] {
+  const out: FixedScaleCase[] = [];
   for (const x of FIXED_SCALES) {
+    // (a cast, and a round of one, are the engine's DECIMAL at Postgres's scale, as main writes them)
+    const decimal = /^\(|^CAST|^round\(\(/.test(x);
     out.push(
-      [`SELECT count(*) FROM (SELECT ${x} AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)`, "ordered"],
-      [`SELECT q FROM (SELECT ${x} AS q FROM orders o) s JOIN (SELECT ${x} AS q FROM orders o) u USING (q) ORDER BY q`, "ordered"],
-      [`SELECT q, count(*) FROM (SELECT ${x} AS q FROM orders o) s NATURAL JOIN (SELECT ${x} AS q FROM orders o) u GROUP BY q ORDER BY q`, "ordered"],
-      // (an array read by its elements' text: the harness's reference parses a numeric[] where it reads Mason's as its
-      // text; the oracle holds the array itself, tests/integration/oracle/bi-shapes.ts)
-      [`SELECT array_to_string(array_agg(${x} ORDER BY o.id), ',') FROM orders o`, "ordered"],
-      // (a set operation of values of one scale: of two, the listed mixed-scale-numeric, as any exact column's)
-      [`SELECT ${x} FROM orders o UNION SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "ordered"],
-      [`SELECT ${x} FROM orders o INTERSECT SELECT ${x} FROM orders o ORDER BY 1`, "ordered"],
-      [`SELECT ${x} FROM orders o EXCEPT SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "ordered"],
-      [`SELECT ${x} AS q, count(*) FROM orders o GROUP BY ROLLUP (1) ORDER BY 1`, "ordered"],
-      [`SELECT sum(DISTINCT ${x}), count(DISTINCT ${x}) FROM orders o`, "ordered"],
-      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.67, 6.67, 40.00]) ORDER BY 1`, "ordered"],
-      // (a list's or a subquery's comparison of more decimals than the value's: the engine unifies the two by cutting
-      // a scale where their width passes 38)
-      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.667, 6.6667, 40.001, 2.5]) ORDER BY 1`, "ordered"],
-      [`SELECT o.id FROM orders o WHERE ${x} IN (SELECT (u.amount / 3)::numeric(10,4) FROM orders u) ORDER BY 1`, "ordered"],
-      // (compared outside the recursive WITH query that carries it: PR 207's sixth round refused it as a quotient)
-      [`WITH RECURSIVE r(q, n) AS (SELECT ${x}, 1 FROM orders o UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT q, count(*) FROM r WHERE r.q = 6.67 OR r.q > 10 GROUP BY q ORDER BY q`, "ordered"],
+      // (this PR's USING refusal of a quotient's double: never of a value at a fixed scale, answered as main answers it)
+      [`SELECT count(*) FROM (SELECT ${x} AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)`, "answered"],
+      [`SELECT q FROM (SELECT ${x} AS q FROM orders o) s JOIN (SELECT ${x} AS q FROM orders o) u USING (q) ORDER BY q`, "answered"],
+      [`SELECT count(*) FROM (SELECT ${x} AS q FROM orders o) s NATURAL JOIN (SELECT ${x} AS q FROM orders o) u`, "answered"],
+      // (main's refusals: the merged column grouped outside the subquery, a set operation without ALL, a grouping set,
+      // sum(DISTINCT), a WITH query's column compared outside it)
+      [`SELECT q, count(*) FROM (SELECT ${x} AS q FROM orders o) s NATURAL JOIN (SELECT ${x} AS q FROM orders o) u GROUP BY q ORDER BY q`, "numeric-quotient-equality"],
+      [`SELECT ${x} FROM orders o UNION SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "numeric-quotient-equality"],
+      [`SELECT ${x} FROM orders o INTERSECT SELECT ${x} FROM orders o ORDER BY 1`, "numeric-quotient-equality"],
+      [`SELECT ${x} FROM orders o EXCEPT SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "numeric-quotient-equality"],
+      [`SELECT ${x} AS q, count(*) FROM orders o GROUP BY ROLLUP (1) ORDER BY 1`, "numeric-quotient-equality"],
+      [`SELECT sum(DISTINCT ${x}), count(DISTINCT ${x}) FROM orders o`, "numeric-quotient-equality"],
+      [`WITH RECURSIVE r(q, n) AS (SELECT ${x}, 1 FROM orders o UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT q, count(*) FROM r WHERE r.q = 6.67 OR r.q > 10 GROUP BY q ORDER BY q`, "numeric-quotient-equality"],
+      // (an array_agg of a cast is the engine's DECIMAL(p, s), main's; of a round, this PR's refusal of a double's list)
+      [`SELECT array_to_string(array_agg(${x} ORDER BY o.id), ',') FROM orders o`, decimal ? "answered" : "array-subquery-element"],
+      // (read by a list or a subquery, beside more decimals or not: main's path, the engine never cuts a scale)
+      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.67, 6.67, 40.00]) ORDER BY 1`, "answered"],
+      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.667, 6.6667, 40.001, 2.5]) ORDER BY 1`, "answered"],
+      [`SELECT o.id FROM orders o WHERE ${x} IN (SELECT (u.amount / 3)::numeric(10,4) FROM orders u) ORDER BY 1`, "answered"],
     );
   }
   return out;
 }
 
 /**
- * PR 415's review r4, the class fixed-scale-whole-digits-cap: one bound of whole digits applied to every value at a fixed
- * scale, wherever it is read, raised 22003 where main answered. A value past 10^20 (amount × 10^20 / 3) through every
- * reader: printed, filtered, grouped, made DISTINCT, summed, an avg's, a USING key.
+ * PR 415's reviews r4 and r5 (fixed-scale-whole-digits-cap, widening-reader-off-the-list): a value at a fixed scale past
+ * 10^20 (amount × 10^20 / 3), or beside a numeric of more decimals, in every reader the engine widens two numerics in —
+ * a row comparison, a comparison with a wider literal or a scalar subquery, BETWEEN, arithmetic, abs / sign / mod, an
+ * ORDER BY of a difference, a single-row VALUES, a list, a set operation, COALESCE / CASE / GREATEST — and printed with
+ * more whole digits than a DECIMAL holds beside its scale: answered as main answers it (the engine's double with its
+ * program), never a 22003 nor a cut scale, or refused where main refuses.
  */
-function bigFixedScaleCases(): Array<[string, "ordered"]> {
+function bigFixedScaleCases(): FixedScaleCase[] {
   const big = "o.amount * 100000000000000000000";
   return [
-    [`SELECT o.id, round(${big} / 3, 2), trunc(${big} / 7, 1), round(${big} / 3), (${big} / 3)::numeric(38,2) FROM orders o ORDER BY o.id`, "ordered"],
-    [`SELECT o.id, round(${big} / 3, 2) FROM orders o WHERE o.id = 2`, "ordered"],
-    [`SELECT o.id FROM orders o WHERE round(${big} / 3, 2) > 1000000000000000000000 ORDER BY 1`, "ordered"],
-    [`SELECT round(${big} / 3, 2) AS q, count(*) FROM orders o GROUP BY 1 ORDER BY 1`, "ordered"],
-    [`SELECT DISTINCT round(${big} / 3, 2) FROM orders o ORDER BY 1`, "ordered"],
-    [`SELECT sum(round(${big} / 3, 2)), max(round(${big} / 3, 2)) FROM orders o`, "ordered"],
-    [`SELECT round(avg(${big}), 2), round(avg(${big}) / 7, 3) FROM orders o`, "ordered"],
-    [`SELECT count(*) FROM (SELECT round(avg(${big}), 2) AS q FROM orders o) s JOIN (SELECT ${big} AS q FROM orders o) u USING (q)`, "ordered"],
-    [`SELECT array_to_string(array_agg(round(${big} / 3, 2) ORDER BY o.id), ',') FROM orders o`, "ordered"],
+    [`SELECT o.id, round(${big} / 3, 2), trunc(${big} / 7, 1), round(${big} / 3), (${big} / 3)::numeric(38,2) FROM orders o ORDER BY o.id`, "answered"],
+    [`SELECT o.id, round(${big} / 3, 2) FROM orders o WHERE o.id = 2`, "answered"],
+    [`SELECT o.id FROM orders o WHERE round(${big} / 3, 2) > 1000000000000000000000 ORDER BY 1`, "answered"],
+    [`SELECT round(${big} / 3, 2) AS q, count(*) FROM orders o GROUP BY 1 ORDER BY 1`, "answered"],
+    [`SELECT DISTINCT round(${big} / 3, 2) FROM orders o ORDER BY 1`, "answered"],
+    [`SELECT round(avg(${big}), 2), round(avg(${big}), 18), round(avg(${big}) / 7, 3), round(sum(${big}) / 7, 2) FROM orders o`, "answered"],
+    [`SELECT count(*) FROM (SELECT round(avg(${big}), 2) AS q FROM orders o) s JOIN (SELECT ${big} AS q FROM orders o) u USING (q)`, "answered"],
+    [`SELECT o.id, round(${big} / 3, 2) + o.amount / 7, round(${big} / 3, 2) - 0.333333333333333333, abs(round(${big} / 3, 2) - 2.5), sign(round(${big} / 3, 2) - 2.5) FROM orders o ORDER BY 1`, "answered"],
+    [`SELECT o.id FROM orders o WHERE round(${big} / 3, 2) = 2.33::numeric(38,18) OR round(${big} / 3, 2) > (SELECT max(u.amount) FROM orders u) ORDER BY 1`, "answered"],
+    [`SELECT o.id FROM orders o WHERE round(${big} / 3, 2) BETWEEN 0.333333333333333333 AND 10000000000000000000000 ORDER BY 1`, "answered"],
+    [`SELECT o.id FROM orders o ORDER BY round(${big} / 3, 2) - 0.333333333333333333 DESC, o.id`, "answered"],
+    [`SELECT o.id, v.x FROM orders o JOIN (VALUES (0.333333333333333333)) v(x) ON round(${big} / 3, 2) = v.x ORDER BY 1`, "answered"],
+    // (main's: a sum past 20 whole digits; an array_agg of a round, this PR's)
+    [`SELECT sum(round(${big} / 3, 2)), max(round(${big} / 3, 2)) FROM orders o`, "numeric-exact-sum"],
+    [`SELECT array_to_string(array_agg(round(${big} / 3, 2) ORDER BY o.id), ',') FROM orders o`, "array-subquery-element"],
   ];
 }
 
+/** a row comparison of a value at a fixed scale beside one of more decimals (review r5's wrong answers): main's */
+function rowFixedScaleCases(): FixedScaleCase[] {
+  const out: FixedScaleCase[] = [];
+  for (const x of ["round(o.amount / 3, 2)", "round(o.amount / 3, 4)", "(o.amount / 3)::numeric(10,2)"]) {
+    out.push(
+      [`SELECT o.id FROM orders o WHERE (${x}, o.id) = ((o.amount / 3)::numeric(10,4), o.id) ORDER BY 1`, "row-value"],
+      [`SELECT o.id, row(${x}, o.id) = row(26.8333, o.id), (${x}, o.id) < (o.amount, o.id), (${x}, o.id) <> (26.8333, o.id) FROM orders o ORDER BY 1`, "row-value"],
+    );
+  }
+  return out;
+}
+
 /**
- * Where the engine unifies a value at a fixed scale with another type — a list, a subquery's comparison, a VALUES list,
- * a set operation's arms, COALESCE / CASE / GREATEST — and the other has more decimals: DuckDB's one type of 38 digits
- * cuts them (`markUnifying`), so these read the value as main read it
+ * Where the engine unifies a value at a fixed scale with another type — a list, a subquery's comparison, a set
+ * operation's arms, COALESCE / CASE / GREATEST — and the other has more decimals: main's path, so no scale is cut
  */
 function widenedFixedScaleCases(): Array<[string, "ordered"]> {
   const out: Array<[string, "ordered"]> = [];
@@ -6182,36 +6208,43 @@ function widenedFixedScaleCases(): Array<[string, "ordered"]> {
       [`SELECT o.id FROM orders o WHERE (o.amount / 3)::numeric(10,4) IN (SELECT ${y} FROM orders u) ORDER BY 1`, "ordered"],
       [`SELECT o.id, ${x} = ANY (SELECT (u.amount / 3)::numeric(10,4) FROM orders u) FROM orders o ORDER BY 1`, "ordered"],
       [`SELECT sum(s.x), count(DISTINCT s.x) FROM (SELECT ${x} AS x FROM orders o UNION ALL SELECT (o.amount / 3)::numeric(10,4) FROM orders o) s`, "ordered"],
-      // (each value compared, not printed: a CASE's mixed scales print as the listed mixed-scale-numeric, as main's; a
-      // cut scale would read 26.8333 as 26.83. A VALUES list's, compared outside it, is main's refusal: below)
+      // (each value compared, not printed: a CASE's mixed scales print as the listed mixed-scale-numeric, as main's)
       [`SELECT o.id, coalesce(CASE WHEN o.id = 1 THEN NULL ELSE ${x} END, 0.3333) = 0.3333, greatest(${x}, 26.8333) = 26.8333, (CASE WHEN o.id = 2 THEN 0.3333 ELSE ${x} END) = 0.3333 FROM orders o ORDER BY 1`, "ordered"],
     );
   }
   return out;
 }
 
-test("exact path round 2: a value at a fixed scale, or an array whose elements no reader sees, is answered by every reader, never refused by its type (PR 415, refused-by-type-not-by-program)", async () => {
+test("exact path round 2: a value at a fixed scale is answered as main answers it, never refused by its type, and an array whose elements no reader sees is answered (PR 415, refused-by-type-not-by-program)", async () => {
   const c = await client();
   try {
+    const cases = [...fixedScaleCases(), ...bigFixedScaleCases(), ...rowFixedScaleCases()];
     assert.deepEqual(await unlike(c, [
-      ...fixedScaleCases(),
+      ...cases.filter(([, e]) => e === "answered").map(([s]) => [s, "ordered"] as const),
       ["SELECT count(*) FROM (SELECT round(avg(o.amount), 2) AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)", "ordered"],
       ["SELECT q FROM (SELECT avg(o.amount)::numeric(12,2) AS q FROM orders o) s JOIN (SELECT avg(o.amount)::numeric(12,2) AS q FROM orders o) u USING (q)", "ordered"],
+      ["SELECT array_to_string(array_agg((o.amount / 4)::numeric(10,2) ORDER BY o.id), ',') FROM orders o", "ordered"],
       ["SELECT array_length(array_agg(o.amount / 3), 1), cardinality(array_agg(o.amount / 3)), array_upper(array_agg(o.amount / 7), 1) FROM orders o", "ordered"],
       ["SELECT array_length(array_agg(o.amount / 3), 1) FROM orders o WHERE false", "ordered"],
       ["SELECT o.status, array_length(array_agg(o.amount / 7 ORDER BY o.id), 1) FROM orders o GROUP BY o.status ORDER BY 1", "ordered"],
+      ["SELECT array_length(array_agg(round(o.amount / 3, 2)), 1) FROM orders o", "ordered"],
+      // (an array_agg of a FROM item's column cast to numeric(p, s), and of a round of a cast, grouped: main's DECIMALs)
+      ["SELECT array_to_string(array_agg(s.q ORDER BY s.q), ',') FROM (SELECT o.status, avg(o.amount)::numeric(12,2) AS q FROM orders o GROUP BY o.status) s", "ordered"],
+      ["SELECT o.status, array_to_string(array_agg(round((o.amount / 3)::numeric(10,4), 2) ORDER BY o.id), ',') FROM orders o GROUP BY o.status ORDER BY 1", "ordered"],
       // (a text read as numeric, rounded: its program parses a text, so it keeps the path it had, computed after the
       // engine's answer — a generated table's TEXT reason reads it there, tests/duck-generated-round5.test.ts)
       ["SELECT o.id, round((o.meta ->> 'k')::numeric, 2), trunc((o.meta ->> 'k')::numeric / 3, 2) FROM orders o ORDER BY o.id", "ordered"],
-      ...bigFixedScaleCases(), ...widenedFixedScaleCases(),
+      ...widenedFixedScaleCases(),
     ]), []);
+    const failures: string[] = [];
+    for (const [s, gap] of cases) if (gap !== "answered") failures.push(...await answeredOrRefused(c, s, gap));
+    assert.deepEqual(failures, []);
     // (what stays refused, where the engine's double would reach the answer: a plain quotient's and an avg's USING key,
-    // an array_agg whose elements are read)
+    // a JSON number's text rounded, an array_agg whose elements are read)
     assert.deepEqual(await answeredOrRefused(c, "SELECT count(*) FROM (SELECT o.amount / 3 AS q FROM orders o) s JOIN (SELECT o.amount * (1.0 / 3) AS q FROM orders o) u USING (q)", "numeric-quotient-equality"), []);
     assert.deepEqual(await answeredOrRefused(c, "SELECT array_agg(o.amount / 3 ORDER BY o.id) FROM orders o", "array-subquery-element"), []);
     assert.deepEqual(await answeredOrRefused(c, "SELECT count(*) FROM (SELECT round((o.meta ->> 'k')::numeric, 2) AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)", "numeric-quotient-equality"), []);
-    // (a set operation without ALL of a value at a fixed scale beside one of more decimals: the arms widen, so main's
-    // refusal, never the engine's cut scale merging 26.83 with 26.8333)
+    // (a set operation without ALL of a value at a fixed scale beside one of more decimals: main's refusal)
     for (const op of ["UNION", "INTERSECT", "EXCEPT"]) {
       assert.deepEqual(await answeredOrRefused(c, `SELECT round(o.amount / 3, 2) FROM orders o ${op} SELECT (o.amount / 3)::numeric(10,4) FROM orders o ORDER BY 1`, "numeric-quotient-equality"), []);
     }
