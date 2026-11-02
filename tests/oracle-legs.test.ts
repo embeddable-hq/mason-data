@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
 import { emptyShapeCount, NEW_SHAPES, shapeProblems, sumShapeTallies, type ShapeTally } from "./integration/oracle/shape-names.ts";
-import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legOf, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, type Decision, type LegReport, type Measured, type Tallies } from "../scripts/oracle-legs.ts";
+import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, Clock, FIRST_LEG_RUNS_STAGES, partition, readWeights, timesLine, weightKey, weightsFromLegs, weightsText, writeWeights, WEIGHTS_FILE, type Decision, type LegReport, type Measured, type Tallies, type Weights } from "../scripts/oracle-legs.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import type { GapTally } from "./integration/oracle/gap-tally.ts";
@@ -28,22 +28,150 @@ const everyGap = () => ({ refused: {}, decided: Object.fromEntries((Object.keys(
 const decisions = (over: Partial<Decision> = {}): Decision[] => [{ sql: "/x/", why: "why", differed: true, decided: true, ...over }];
 
 const measured: Measured = { what: "w", machine: "linux x64", postgres: "PostgreSQL 18 on x86_64-pc-linux-gnu", collation: "en_US.utf8 (c)", shapes: true };
-function report(leg: number, of = 2): LegReport {
-  const mine = statements.filter((q) => legOf(q.sql, of) === leg).map(statementId);
-  const mineApart = apart.filter((q) => legOf(q.sql, of) === leg).map(statementId);
+/** no text listed: every text the default weight, the stages none */
+const NONE: Weights = { stages: 0, default: 1, statements: {} };
+/** weights by text, keyed as the leg measures them (`weightKey`) */
+const weighted = (byText: Record<string, number>, rest = 1, stages = 0): Weights =>
+  ({ stages, default: rest, statements: Object.fromEntries(Object.entries(byText).map(([sql, ms]) => [weightKey(sql), { ms, name: sql }])) });
+/** each leg's load under a split: its texts' weights, leg FIRST_LEG_RUNS_STAGES's stages too */
+const loads = (split: Map<string, number>, of: number, w: Weights, withStages = true): number[] => Array.from({ length: of }, (_, i) =>
+  [...split].filter(([, l]) => l === i + 1).reduce((n, [sql]) => n + (w.statements[weightKey(sql)]?.ms ?? w.default), withStages && i + 1 === FIRST_LEG_RUNS_STAGES ? w.stages : 0));
+
+function report(leg: number, of = 2, split = partition([...statements, ...apart], of, NONE)): LegReport {
+  const mine = statements.filter((q) => split.get(q.sql) === leg).map(statementId);
+  const mineApart = apart.filter((q) => split.get(q.sql) === leg).map(statementId);
   return { leg, of, whole, asked: Object.fromEntries(PHASES.map((p) => [p, [...mine, ...mineApart]])), stages: leg === 1 ? Object.fromEntries(STAGES.map((s) => [s, 5])) : {}, shaped: 3,
     tallies: { statements: mine.length, mason: { exact: mine.length }, duckdb: { exact: mine.length } }, copyPhase: { refused: {}, decided: {} }, everyAsk: leg === 1 ? everyGap() : { refused: {}, decided: {} },
     decisions: decisions({ differed: leg === 1 }), verified: [`k${leg}`], names: { [`k${leg}`]: leg === 1 ? "one" : "two" }, asks: 3 * (mine.length + mineApart.length) + 3, measured, differences: 0 };
 }
 const legs = (): [LegReport, LegReport] => [report(1), report(2)];
 
-test("every statement falls in exactly one leg of any number, by its text alone", () => {
+test("every statement falls in exactly one leg of any number, and with no weight listed the legs differ by at most one text", () => {
   for (const n of [1, 2, 3]) {
-    const counts = Array.from({ length: n }, (_, i) => statements.filter((q) => legOf(q.sql, n) === i + 1).length);
-    assert.equal(counts.reduce((a, b) => a + b), statements.length);
-    assert.ok(n === 1 || counts.every((n) => n > 0), `${counts}`);
+    const split = partition(statements, n, NONE);
+    assert.deepEqual([...split.keys()].sort(), statements.map((q) => q.sql).sort());
+    assert.ok([...split.values()].every((l) => l >= 1 && l <= n));
+    const load = loads(split, n, NONE);
+    assert.ok(load.every((x) => x > 0), `${load}`);
+    assert.ok(Math.max(...load) - Math.min(...load) <= NONE.default, `${load}`);
   }
-  assert.equal(legOf("SELECT 1", 2), legOf("SELECT 1", 2));
+});
+
+test("the heaviest texts go to different legs, and the legs differ by no more than the heaviest text", () => {
+  const w = weighted({ "SELECT 0": 100, "SELECT 1": 90, "SELECT 2": 80 });
+  const split = partition(statements, 2, w);
+  assert.notEqual(split.get("SELECT 0"), split.get("SELECT 1"));
+  const [a, b] = loads(split, 2, w);
+  assert.ok(Math.abs(a! - b!) <= 100, `${a} ${b}`);
+});
+
+test("the stages' cost is leg 1's head start: its statements weigh that much less, and it still has some", () => {
+  const w: Weights = { ...weighted(Object.fromEntries(statements.map((q) => [q.sql, 10]))), stages: 300 };
+  const split = partition(statements, 2, w);
+  const [one, two] = loads(split, 2, w, false);
+  assert.ok(Math.abs(two! - one! - 300) <= 10, `${one} ${two}`);
+  const [a, b] = loads(split, 2, w);
+  assert.ok(Math.abs(a! - b!) <= 10, `${a} ${b}`);
+  assert.ok(one! > 0);
+});
+
+test("a text asked under two names is one leg's", () => {
+  for (const n of [2, 3]) {
+    const twice = [{ group: "g", name: "a", sql: "SELECT 7" }, ...statements, { group: "h", name: "b", sql: "SELECT 7" }];
+    const split = partition(twice, n, NONE);
+    assert.equal(split.size, statements.length, "one entry a text");
+    const leg = split.get("SELECT 7")!;
+    assert.deepEqual(twice.filter((q) => q.sql === "SELECT 7").map((q) => split.get(q.sql)), [leg, leg, leg]);
+  }
+});
+
+test("the split depends on the set of texts and the weights alone, never their order", () => {
+  for (const w of [NONE, weighted({ "SELECT 0": 100, "SELECT 1": 90, "SELECT 2": 80 })]) {
+    const want = [...partition(statements, 2, w)].sort();
+    assert.deepEqual([...partition([...statements].reverse(), 2, w)].sort(), want);
+    const swapped = [...statements];
+    [swapped[5], swapped[30]] = [swapped[30]!, swapped[5]!];
+    assert.deepEqual([...partition(swapped, 2, w)].sort(), want);
+  }
+});
+
+test("a weight for a text no statement has moves nothing; a text no weight lists is asked once at the default weight", () => {
+  const w = weighted({ "SELECT 0": 100, "SELECT 1": 90 });
+  const split = partition([...statements, ...apart], 2, w);
+  assert.deepEqual([...partition([...statements, ...apart], 2, { ...w, statements: { ...w.statements, ...weighted({ "SELECT 999": 500 }).statements } })], [...split]);
+  assert.deepEqual(partitionProblems([report(1, 2, split), report(2, 2, split)], 2), []);
+  const more = [...statements, { group: "g", name: "statement 40", sql: "SELECT 40" }];
+  const grown = partition([...more, ...apart], 2, w);
+  assert.ok([1, 2].includes(grown.get("SELECT 40")!));
+  const wholeOf = [...more.map((q) => ({ id: statementId(q), name: q.name })), ...apart.map((q) => ({ id: statementId(q), name: q.name, apart: true as const }))];
+  const leg = (n: number): LegReport => {
+    const mine = [...more, ...apart].filter((q) => grown.get(q.sql) === n).map(statementId);
+    return { ...report(n, 2, grown), whole: wholeOf, asked: Object.fromEntries(PHASES.map((p) => [p, mine])), tallies: { statements: more.filter((q) => grown.get(q.sql) === n).length, mason: {}, duckdb: {} } };
+  };
+  assert.deepEqual(partitionProblems([leg(1), leg(2)], 2), []);
+});
+
+test("the unordered limits are split by the same function as the rest", () => {
+  const split = partition([...statements, ...apart], 2, NONE);
+  const [a, b] = legs();
+  for (const q of apart) assert.ok([a, b][split.get(q.sql)! - 1]!.asked[PHASES[0]]!.includes(statementId(q)), q.name);
+});
+
+test("the committed weights are the file the legs read, and a leg's clock gives each key the time to its next lap", () => {
+  const w = readWeights(ROOT);
+  assert.ok(w.default > 0 && w.stages >= 0, JSON.stringify(w).slice(0, 200));
+  assert.equal(fs.readFileSync(path.join(ROOT, WEIGHTS_FILE), "utf8"), weightsText(w), `${WEIGHTS_FILE} is as \`--weights\` writes it`);
+  let now = 0;
+  const clock = new Clock(() => now);
+  clock.lap("a", "first a"); now = 5;
+  clock.lap("b", "b"); now = 7;
+  clock.lap("a", "second a"); now = 10;
+  clock.stop(); now = 50;
+  clock.stop();
+  assert.deepEqual([...clock.spent], [["a", { ms: 8, name: "first a" }], ["b", { ms: 2, name: "b" }]]);
+  assert.match(timesLine({ fixed: { setup: 1500 }, stages: { roles: 2000 }, statements: Object.fromEntries(clock.spent) }), /^fixed: setup 1\.5 s; stages: roles 2\.0 s; statements: 0\.0 s over 2 texts; slowest: "first a" 0\.0 s, "b" 0\.0 s$/);
+});
+
+/** the legs, each timed as a leg times itself: `SELECT 0` 120 s, every other text 200 ms, the stages in leg 1 */
+const timed = (): [LegReport, LegReport] => legs().map((r): LegReport => ({ ...r, times: {
+  fixed: { setup: 20000, "first sync": 5000 },
+  stages: r.leg === 1 ? { roles: 30000, "row filters": 15000, settings: 1000, "setting scripts": 4000 } : {},
+  statements: Object.fromEntries([...statements, ...apart].filter((q) => r.asked[PHASES[0]]!.includes(statementId(q))).map((q) => [weightKey(q.sql), { ms: q.sql === "SELECT 0" ? 120000 : 200, name: q.name }])),
+} })) as LegReport[] as [LegReport, LegReport];
+
+test("--weights lists each text above the threshold by the key the split reads, the stages' total, and the mean of the rest", () => {
+  const got = weightsFromLegs(timed(), 2, "123", 1000);
+  assert.ok("weights" in got, JSON.stringify(got));
+  assert.deepEqual(got.weights, { from: "123", above: 1000, stages: 50000, default: 200, statements: { [weightKey("SELECT 0")]: { ms: 120000, name: "statement 0" } } });
+  const split = partition([...statements, ...apart], 2, got.weights);
+  const load = loads(split, 2, got.weights);
+  assert.ok(Math.abs(load[0]! - load[1]!) <= 120000, `${load}`);
+  assert.equal(split.get("SELECT 0"), 2, "the heaviest text goes to the leg without the stages");
+  assert.equal(JSON.parse(weightsText(got.weights)).statements[weightKey("SELECT 0")].ms, 120000);
+});
+
+test("--weights refuses a report from before the timing, naming the leg and the run, and writes nothing; the report still serves the check and --write", (t) => {
+  const [a, b] = timed();
+  const { times: _t, ...old } = b;
+  assert.deepEqual(weightsFromLegs([a, old], 2, "4242", 1000), { problems: ["the report of leg(s) 2 of 4242 has no times: the run predates the timing. Use a run of a commit that times its statements"] });
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-weights-"));
+  t.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+  const root = path.join(tmp, "repo"), dir = path.join(tmp, "download");
+  fs.mkdirSync(path.dirname(path.join(root, WEIGHTS_FILE)), { recursive: true });
+  fs.writeFileSync(path.join(root, WEIGHTS_FILE), "was\n");
+  for (const r of [a, old]) { fs.mkdirSync(path.join(dir, `ran-oracle-${r.leg}`), { recursive: true }); fs.writeFileSync(path.join(dir, `ran-oracle-${r.leg}`, reportName(r.leg)), JSON.stringify(r)); }
+  const refused = writeWeights(dir, root, "4242", 1000);
+  assert.equal(refused.code, 1);
+  assert.match(refused.err.join("\n"), /leg\(s\) 2 of 4242 has no times[\s\S]*nothing written/);
+  assert.equal(fs.readFileSync(path.join(root, WEIGHTS_FILE), "utf8"), "was\n");
+  assert.deepEqual(partitionProblems([a, old], 2), []);
+  assert.deepEqual(foldProblems([a, old], 2, fixture, listed), []);
+  const [c, d] = legsOfTheRepo();
+  assert.ok(!("problems" in filesFromLegs([c, d], 2, fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8"))), "legs with no times still write verified.ts and the fixture");
+  fs.writeFileSync(path.join(dir, "ran-oracle-2", reportName(2)), JSON.stringify(b));
+  const done = writeWeights(dir, root, "4242", 1000);
+  assert.equal(done.code, 0, done.err.join("\n"));
+  assert.equal(fs.readFileSync(path.join(root, WEIGHTS_FILE), "utf8"), weightsText({ from: "4242", above: 1000, stages: 50000, default: 200, statements: { [weightKey("SELECT 0")]: { ms: 120000, name: "statement 0" } } }));
 });
 
 test("the legs of a whole run hold: nothing is said", () => {
@@ -196,7 +324,7 @@ test("a failure of the allowlist or the fixture names the command that writes th
 });
 
 /** Two legs whose sums are the committed fixture and the committed allowlist, every count split between them (the
- *  fixture's 3669 statements as the whole, partitioned by `legOf` as CI's are) */
+ *  fixture's 3669 statements as the whole, partitioned by `partition` as CI's are) */
 function legsOfTheRepo(): [LegReport, LegReport] {
   type Fixture = Tallies & { gaps: { copyPhase: GapTally; everyAsk: GapTally & { asked: number } }; measured: Measured };
   const was = JSON.parse(fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8")) as Fixture;
@@ -209,8 +337,9 @@ function legsOfTheRepo(): [LegReport, LegReport] {
     .flatMap(([id, c]) => Object.keys(counts).indexOf(id) % 2 === 1 ? (leg === 1 ? [[id, c!]] : []) : [[id, halves(c!, leg)]]));
   const tally = (t: GapTally, leg: number): GapTally => ({ refused: split(t.refused, leg), decided: split(t.decided, leg) });
   const keys = [...VERIFIED.keys()];
+  const legOfText = partition(many, 2, NONE);
   const leg = (n: 1 | 2): LegReport => {
-    const mine = many.filter((q) => legOf(q.sql, 2) === n).map(statementId);
+    const mine = many.filter((q) => legOfText.get(q.sql) === n).map(statementId);
     const verified = keys.filter((_, i) => i % 3 === 0 || i % 2 === n - 1).reverse();   // some in both legs, in no order
     return { leg: n, of: 2, whole: all, asked: Object.fromEntries(PHASES.map((p) => [p, mine])), stages: n === 1 ? Object.fromEntries(STAGES.map((s) => [s, 1])) : {}, shaped: 0,
       tallies: { statements: mine.length, mason: halves(was.mason, n), duckdb: halves(was.duckdb, n) }, copyPhase: tally(was.gaps.copyPhase, n), everyAsk: tally(was.gaps.everyAsk, n),
