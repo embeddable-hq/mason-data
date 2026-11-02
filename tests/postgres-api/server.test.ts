@@ -17,7 +17,6 @@ import { ApiError } from "../../src/api/error.ts";
 import { startPostgresApi, type DuckOptions, type DuckRunner, type PgApiServer, type PgToken } from "../../src/api/postgres/server.ts";
 import type { PgSchema } from "../../src/api/postgres/schema.ts";
 import { DuckStore } from "../../src/duck/store.ts";
-import { nowMicros } from "../../src/lib/instant.ts";
 import * as wire from "./wire.ts";
 
 const SCHEMA: PgSchema = {
@@ -55,6 +54,9 @@ let listener: DuckOptions;
 let server: PgApiServer;
 /** the listener's clock when a test pins it (`clock` of startPostgresApi): microseconds since the epoch */
 let fixedNow: number | undefined;
+/** a microsecond wall clock of the test's own, beside the listener's (src/lib/instant.ts is not imported, so the file
+ *  loads with src/ as it was before it: scripts/fails-without.ts) */
+const microsNow = (): number => Math.floor((performance.timeOrigin + performance.now()) * 1000);
 
 const tokenFor = async (password: string): Promise<PgToken> => {
   if (password === "good-token") return {};
@@ -75,7 +77,7 @@ before(async () => {
     record: () => undefined,
     log: () => undefined,
     duck: listener,
-    clock: () => fixedNow ?? nowMicros(),
+    clock: () => fixedNow ?? microsNow(),
   });
 });
 after(async () => {
@@ -747,7 +749,7 @@ describe("session state (GitHub issue 253): the session's settings reach every p
       // the instant pinned at the real clock's microsecond, and a little ahead of it (the session's thread and the
       // catalog's read two clocks, which may disagree inside a millisecond)
       for (const ahead of [0, 900]) {
-        fixedNow = nowMicros() + ahead;
+        fixedNow = microsNow() + ahead;
         assert.deepEqual(await text(c, ordered), ["true", "true", "true"], `alone, ahead ${ahead}`);
         await c.query("BEGIN");
         assert.deepEqual(await text(c, ordered), ["true", "true", "true"], `in a block, ahead ${ahead}`);

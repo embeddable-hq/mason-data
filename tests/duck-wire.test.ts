@@ -19,7 +19,6 @@ import { citext } from "@electric-sql/pglite/contrib/citext";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes, pgErrorOf } from "../src/duck/store.ts";
 import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.ts";
-import { nowMicros } from "../src/lib/instant.ts";
 import { StatementError } from "../src/duck/statement.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
 // (as a namespace: a tree before latest has no LATEST_SQL, and this file still loads there, for scripts/fails-without.ts)
@@ -88,6 +87,9 @@ let api: PgApiServer;
 /** the listener's clock when a test fixes it (`clock` of startPostgresApi): the transaction's start every plan reads,
  *  in microseconds since the epoch (src/lib/instant.ts) */
 let fixedNow: number | undefined;
+/** a microsecond wall clock of the test's own, beside the listener's (src/lib/instant.ts is not imported, so the file
+ *  loads with src/ as it was before it: scripts/fails-without.ts) */
+const microsNow = (): number => Math.floor((performance.timeOrigin + performance.now()) * 1000);
 const truth = new PGlite({ extensions: { citext } });
 
 // one table in public, one in a schema of its own, as the copy lands them (<schema>.<table>, the key as the source's)
@@ -338,7 +340,7 @@ before(async () => {
     schema: () => schema,
     record: (r) => { recorded.push(r); }, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: await store.listener(undefined, undefined, undefined, () => copies),
-    clock: () => fixedNow ?? nowMicros(),
+    clock: () => fixedNow ?? microsNow(),
   });
 });
 after(async () => {

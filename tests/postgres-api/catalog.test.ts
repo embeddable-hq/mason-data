@@ -8,7 +8,6 @@ import { test, after } from "node:test";
 import * as assert from "node:assert/strict";
 import { catalogDdl, catalogDefaults, databaseNameSql, PgCatalog } from "../../src/api/postgres/catalog.ts";
 import * as catalogModule from "../../src/api/postgres/catalog.ts";
-import { nowMicros } from "../../src/lib/instant.ts";
 import type { PgSchema, PgTable } from "../../src/api/postgres/schema.ts";
 import { SHOP_SCHEMA } from "./corpus/shop.ts";
 
@@ -695,7 +694,7 @@ test("session state: the catalog's transaction starts at exactly the microsecond
     // the real clock after the request's first message (statement_timestamp, clock_timestamp) is floored at the
     // instant: an instant from the session's thread a little ahead of this thread's clock is never later than them
     for (const ahead of [0, 400, 900]) {
-      assert.deepEqual(await ask("SELECT statement_timestamp() >= now(), clock_timestamp() >= now(), clock_timestamp() >= statement_timestamp()", nowMicros() + ahead), ["t|t|t"], `ahead ${ahead} µs`);
+      assert.deepEqual(await ask("SELECT statement_timestamp() >= now(), clock_timestamp() >= now(), clock_timestamp() >= statement_timestamp()", Math.floor((performance.timeOrigin + performance.now()) * 1000) + ahead), ["t|t|t"], `ahead ${ahead} µs`);
     }
   } finally { await c.stop(); }
 });
