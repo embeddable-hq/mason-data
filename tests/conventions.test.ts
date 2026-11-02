@@ -887,6 +887,9 @@ const BARE_REFUSALS_WHEN_GUARDED = [
   "standard_conforming_strings off is not supported: a string literal is read as Postgres reads it by default",
   "EXPLAIN of this statement is not supported: a SELECT is explained",
   "Mason cannot find the statement this EXPLAIN explains in its text (a Mason gap: report it, with the statement)",
+  // Postgres's own refusal, word for word (plancache.c), of a prepared statement whose result the search_path moved:
+  // no gap of Mason's, Postgres answers it the same (GitHub issue 63)
+  "cached plan must not change result type",
 ];
 
 test("a statement refused 0A000 by the listener names its gap (src/duck/gaps.ts): no new bare refusal", () => {
@@ -1072,8 +1075,8 @@ test("every caller of duck.plan passes the session's grants: a statement planned
   // nothing; `planner` plans a generated table's SQL, which no user runs, and a user reads that table through a role.
   // Named whole, so any other call without them, a second of either kind included, fails here
   assert.deepEqual(planned.flatMap((f) => planCallsWithoutGrants(f.src).map((c) => `${f.name}: ${c}`)),
-    ['src/api/postgres/server.ts: duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null, relations, true)',
-      'src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined)']);
+    ['src/api/postgres/server.ts: duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], GENERATED_SESSION, this.userTypes(), false, null, relations, true)',
+      'src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], GENERATED_SESSION, this.userTypes(), false, undefined)']);
 });
 
 test("the duck.plan guard would catch the real thing", () => {

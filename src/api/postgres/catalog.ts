@@ -204,7 +204,12 @@ export function sourceTypeNames(schema: PgSchema): string[] {
     }
   }
   // with no type the source made, every OID the wire sends is Postgres's: the wire's name is format_type's
-  if (names.size === 0) return [`CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;`];
+  // (format_type is declared all the same: a catalog statement's every unqualified call of it is spliced to this one,
+  // server.ts userSpliced, since the session's search_path puts pg_catalog first)
+  if (names.size === 0) {
+    return [`CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;`,
+      `CREATE OR REPLACE FUNCTION public.format_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;`];
+  }
   const values = [...names].map(([oid, spelled]) => `(${oid}::oid, ${literal(spelled)})`).join(", ");
   return [`CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$
   SELECT coalesce((SELECT pg_catalog.format_type(pg_catalog.to_regtype(v.spelled), $2) FROM (VALUES ${values}) AS v(source, spelled) WHERE v.source = $1),

@@ -8,6 +8,8 @@ import type { GapId } from "../../../src/duck/gaps.ts";
 
 export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "fromless-text-order", sql: "SELECT 'a' < 'B'" },
+  // SET LOCAL outside a block: Postgres warns and keeps its style, so the oracle's session is unchanged after it
+  { gap: "interval-style", sql: "SET LOCAL IntervalStyle = 'iso_8601'" },
   { gap: "libc-mark-run-form", sql: "SELECT 'a6ß' > E'a\\u03086ß' FROM public.one" },
   { gap: "libc-rare-letter", sql: "SELECT E'\\uA79A' < E'\\u00C4' FROM public.one" },
   { gap: "explain-option", sql: "EXPLAIN (FORMAT XML) SELECT id FROM typed" },

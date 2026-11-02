@@ -110,7 +110,9 @@ test("a statement an Execute's row count stopped is a row of _mason.requests whe
   const before = (await ledger.recent({ limit: 1000 })).length;
   const { PgConnection } = await import("../src/cdc/pg-wire.ts");
   const c = await PgConnection.connect({ host: "127.0.0.1", port: api.port, user: "mason", password: mintToken(API_KEY, 600).token, database: "app",
-    sslmode: "disable", connectTimeoutMs: 5_000, applicationName: "jdbc-maxrows" });
+    sslmode: "disable", connectTimeoutMs: 5_000, applicationName: "jdbc-maxrows",
+    // the sync's own text forms but IntervalStyle iso_8601, which the listener refuses by name (gap interval-style)
+    textForms: [["DateStyle", "ISO, YMD"], ["TimeZone", "UTC"], ["extra_float_digits", "3"]] });
   try {
     // JDBC's setMaxRows, mason mcp's max_rows: one Execute at a row count, then Sync drops the portal unread
     const cut = await c.extended("SELECT id FROM orders ORDER BY id", 2);
