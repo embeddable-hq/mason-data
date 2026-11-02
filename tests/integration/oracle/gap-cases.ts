@@ -47,6 +47,8 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "jsonb-compare", sql: "SELECT id, greatest(jb, '1') FROM typed ORDER BY id" },
   { gap: "held-type-compare", sql: "SELECT id FROM mapped ORDER BY mc, id" },
   { gap: "time-timetz-coerced", sql: "SELECT * FROM (SELECT tm FROM typed) s UNION ALL SELECT tz FROM mapped ORDER BY 1" },
+  { gap: "time-timetz-coerced", sql: "SELECT id FROM typed WHERE tm BETWEEN '00:00'::time AND '12:30:00.5-05'::timetz ORDER BY id" },
+  { gap: "time-timetz-coerced", sql: "SELECT id, CASE tm WHEN '00:00'::time THEN 'a' WHEN '12:30:00.5-05'::timetz THEN 'b' END FROM typed ORDER BY id" },
   // the decided differences (KNOWN in duck-oracle.itest.ts)
   { gap: "domain-column", sql: "SELECT pg_typeof(di)::text FROM mapped LIMIT 1" },
   { gap: "limit-errors", sql: "SELECT l.id, (l.j ->> 'n')::int, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.k DESC LIMIT 3" },

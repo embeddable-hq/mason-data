@@ -263,8 +263,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   matched 12:30 whatever its offset, a `UNION` of a time and a timetz column answered a `time` column, and `<`, a `CASE`
   or a `COALESCE` of the two failed with an internal error. `GREATEST` and `LEAST` of `timetz` values now order them
   by their instant, as `<` does (`23:59:59-05` is later than `23:59:59.999999+05:30`). A `UNION` arm written as `*`
-  over a time column beside a timetz one, and a time `BETWEEN` a time bound and a timetz one, are refused by name
-  (`time-timetz-coerced`): cast the time, `tm::timetz`.
+  over a time column beside a timetz one, a time `BETWEEN` a time bound and a timetz one, and a `CASE tm WHEN` a time
+  and `WHEN` a timetz are refused by name (`time-timetz-coerced`): cast the time, `tm::timetz`.
 
 ## Known
 

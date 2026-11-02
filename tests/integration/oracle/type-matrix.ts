@@ -565,6 +565,8 @@ function* mappedTypes(): Generator<Matrixed> {
     yield implicit("CASE", "SELECT id, CASE WHEN id > 3 THEN tm::timetz ELSE tm END FROM typed ORDER BY id");
     yield implicit("CASE, the time arm first", "SELECT id, CASE WHEN id > 3 THEN tm ELSE tm::timetz END FROM typed ORDER BY id");
     yield implicit("CASE of a value", "SELECT t.id, CASE t.id WHEN 1 THEN t.tm ELSE m.tz END FROM typed t LEFT JOIN mapped m USING (id) ORDER BY t.id");
+    yield implicit("CASE of the time WHEN a timetz", "SELECT id, CASE tm WHEN '12:30:00.5-05'::timetz THEN 'a' WHEN '12:30:00.5-04'::timetz THEN 'b' WHEN '00:00:00+05:30'::timetz THEN 'c' ELSE 'd' END FROM typed ORDER BY id");
+    yield implicit("CASE of the time WHEN a column", "SELECT t.id, CASE t.tm WHEN m.tz THEN 'same' ELSE 'other' END FROM typed t JOIN mapped m USING (id) ORDER BY t.id");
     yield implicit("COALESCE", "SELECT t.id, COALESCE(m.tz, t.tm), COALESCE(t.tm, m.tz) FROM typed t LEFT JOIN mapped m USING (id) ORDER BY t.id");
     yield implicit("COALESCE of every row", "SELECT id, COALESCE(NULL::timetz, tm) FROM typed ORDER BY id");
     yield implicit("COALESCE of an expression", "SELECT t.id, COALESCE(m.tz, t.tm + interval '1 hour') FROM typed t LEFT JOIN mapped m USING (id) ORDER BY t.id");

@@ -1403,6 +1403,9 @@ test("a time beside a timetz is cast as Postgres casts it, by the explicit cast'
       assert.deepEqual(await answer(c, "SELECT tm FROM clock_times WHERE id IN (1, 4) UNION ALL SELECT NULL::timetz ORDER BY 1"),
         { fields: [["tm", 1266]], rows: [[times[0]], [times[3]], [null]] }, `a union ${what}`);
       assert.deepEqual((await answer(c, "SELECT NULL::timetz AS x UNION ALL SELECT tm FROM clock_times WHERE id = 6 ORDER BY 1")).rows, [[times[5]], [null]], `a union, the timetz arm first ${what}`);
+      // the value of a CASE whose every WHEN is a timetz
+      assert.deepEqual((await answer(c, "SELECT id, CASE tm WHEN '12:30:00.5-05'::timetz THEN 'a' WHEN '12:30:00.5-04'::timetz THEN 'b' END FROM clock_times WHERE id = 4")).rows,
+        [["4", times[3]!.endsWith("-05") ? "a" : times[3]!.endsWith("-04") ? "b" : null]], `CASE tm WHEN ${what}`);
     }
     // GREATEST and LEAST of a timetz by its instant, as `<` orders it (the engine's own put 23:59:59-05, at 04:59:59 UTC
     // the next day, below 23:59:59.999999+05:30), a NULL skipped
