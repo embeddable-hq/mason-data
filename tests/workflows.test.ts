@@ -564,7 +564,7 @@ test("pr-loop: GitHub itself must say the PR closes its sub-issue, or the run st
   let r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
   assert.deepEqual(r.labels.slice(3, 6), ["implement", "link", "probe 1"]);
   const q = r.prompt("link");
-  assert.ok(q.includes("gh api graphql -f query='query{repository(") && q.includes("issue(number:301)") && q.includes("closedByPullRequestsReferences(first:10,includeClosedPrs:true)"), "the link is read from GitHub");
+  assert.ok(q.includes("`gh issue view 301 --json closedByPullRequestsReferences`"), "the link is read from GitHub");
   assert.ok(q.includes("Closes #301") && q.includes("gh pr edit 900"), "an unlinked body is fixed, then asked again");
   // not linked after the fix: the run stops there, before any review
   r = await run("pr-loop", { ...PR }, { ...START, link: { linked: false, bodyFixed: true, detail: "listed none" } });
@@ -2370,6 +2370,8 @@ const UNPLAIN: Array<[RegExp, string]> = [
   [/(?:^|[;&|(]\s*)(?:\.|source)\s+\S/, "a sourced file"],
   [/\$\{?[A-Za-z_]/, "a shell variable"],
   [/\bgit\s+-C\b/, "git -C"],
+  // `gh api graphql -f query='query{…}'` was refused in issue 322's isolated implementer; gh issue view --json reads the same field
+  [/\bgh\s+api\s+graphql\b/, "a GraphQL query"],
 ];
 /** The shell commands a text tells its reader to run: each backticked span that is one, and each line of a ```sh block. */
 function commandsOf(text: string): string[] {
@@ -2420,7 +2422,7 @@ test("plain: no command a harness prompt or the pr-persistent skill tells an age
   for (const cmd of ["node <repo>/scripts/ci-wait.ts 900 540", "mktemp -d", "git worktree add --detach <that path>/head <sha>", "git worktree remove <that path>/head",
     "node --env-file=<env file> <tree>/scripts/duck-repro.ts <ddl.sql> <statements.sql> > <out> 2>&1", "node <repo>/scripts/review-postgres.ts start",
     "node <repo>/scripts/review-postgres.ts stop <name>", "node --env-file=<env file> <repo>/scripts/duck-repro-bounded.ts 300 <tree> <ddl.sql> <deep.sql> > <out> 2>&1",
-    "mktemp", "gh pr comment 900 --body-file <that path>", "node <run folder>/render.mjs", "node <repo>/scripts/wait-file.ts <path> 1800", "git rev-parse HEAD"]) {
+    "mktemp", "gh pr comment 900 --body-file <that path>", "gh issue view 301 --json closedByPullRequestsReferences", "node <run folder>/render.mjs", "node <repo>/scripts/wait-file.ts <path> 1800", "git rev-parse HEAD"]) {
     assert.ok(seen.has(cmd), `the check reads \`${cmd}\``);
   }
   // and it catches each form the guard refused, as origin/main wrote them
@@ -2432,6 +2434,7 @@ test("plain: no command a harness prompt or the pr-persistent skill tells an age
     ["f=$(mktemp)", "a command substitution, $(…) or $((…))"],
     ["node \"$RUN/render.mjs\"", "a shell variable"],
     ["mg=$(gh pr view 900) ; grep -q x <<<\"$mg\"", "a heredoc or a here-string"],
+    ["gh api graphql -f query='query{repository(owner:\"o\",name:\"r\"){issue(number:1){id}}}'", "a GraphQL query"],
   ]) {
     assert.equal(commandsOf(`\`${cmd}\``).length, 1, `${cmd} is read as a command`);
     assert.ok(unplain(cmd!).includes(why!), `${cmd}: ${why}`);

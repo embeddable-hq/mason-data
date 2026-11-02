@@ -640,12 +640,13 @@ log(`PR ${last.pr} pushed at ${last.head.slice(0, 7)}`)
 // artifact). GitHub links a closing keyword only on a PR into the default branch, so a stacked PR, whose base is
 // another PR's branch, is checked for the keyword in its body and linked once it is retargeted.
 phase('Link')
-// one plain command, the issue written into the query: a `$n` is a shell variable to the worktree guard (issue 322)
-const LINK_QUERY = `gh api graphql -f query='query{repository(owner:"embeddable-hq",name:"mason-data"){issue(number:${A.issue}){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number}}}}}'`
+// one plain command: gh's own field, never a `gh api graphql` query, whose text the worktree guard refuses in an
+// isolated agent (tried in issue 322's implementer), nor a `$n` variable
+const LINK_QUERY = `gh issue view ${A.issue} --json closedByPullRequestsReferences`
 const link = await agent(
   `${WHERE}Check that GitHub links PR ${last.pr} to issue #${A.issue}. ${A.stackedOn
     ? `The PR is stacked (its base is ${A.base}, not the default branch), and GitHub links a closing keyword only on a PR into the default branch: read its body (\`gh pr view ${last.pr} --json body\`) and set linked true when it says \`Closes #${A.issue}\`. If it does not, add that line to the body (\`gh pr edit ${last.pr} --body-file <file>\`, the body read first and kept), set bodyFixed, and read it again.`
-    : `Ask GitHub itself:\n\`${LINK_QUERY}\`\nlinked is true only when its nodes list ${last.pr}. If they do not, read the PR body (\`gh pr view ${last.pr} --json body\`), make it say \`Closes #${A.issue}\` (replacing a "Part of #${A.issue}" or the like; the rest kept), write it with \`gh pr edit ${last.pr} --body-file <file>\`, set bodyFixed, and run the query again; linked is what that second query says.`} Change nothing else. Move no card on the board. Report the numbers each query listed.`,
+    : `Ask GitHub itself:\n\`${LINK_QUERY}\`\nlinked is true only when the PRs it lists include ${last.pr}. If they do not, read the PR body (\`gh pr view ${last.pr} --json body\`), make it say \`Closes #${A.issue}\` (replacing a "Part of #${A.issue}" or the like; the rest kept), write it with \`gh pr edit ${last.pr} --body-file <file>\`, set bodyFixed, and run the query again; linked is what that second query says.`} Change nothing else. Move no card on the board. Report the numbers each query listed.`,
   { label: 'link', phase: 'Link', ...ON.link, schema: LINKED })
 if (!link) return await finish(`the link check returned nothing: whether PR ${last.pr} closes #${A.issue} is not known`)
 if (!link.linked) return await finish(`PR ${last.pr} is not linked to #${A.issue}${link.bodyFixed ? ' after its body was fixed' : ''}: ${link.detail}`)
