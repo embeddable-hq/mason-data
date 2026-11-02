@@ -16,7 +16,7 @@ import { ORACLE } from "../scripts/gate.ts";
 // a namespace, not a named import: a tree whose gate.ts lacks the constant still loads, and the test fails by name
 import * as gate from "../scripts/gate.ts";
 import { reportName } from "../scripts/ci-layout.ts";
-import { PHASES, STAGES, statementId, type LegReport } from "../scripts/oracle-legs.ts";
+import { PHASES, STAGES, statementId, WEIGHTS_FILE, type LegReport } from "../scripts/oracle-legs.ts";
 import { GAPS } from "../src/duck/gaps.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 
@@ -165,6 +165,13 @@ test("scripts/oracle-legs.ts run as CI runs it: exit 0 on legs that are the whol
   const nothing = program("oracle-legs.ts", ["--write", dir]);
   assert.equal(nothing.status, 1, nothing.out);
   assert.match(nothing.out, /the reports are of leg\(s\) none[\s\S]*nothing written/);
+  // --weights: the same, and the tree's weights untouched
+  const weights = fs.readFileSync(path.join(ROOT, WEIGHTS_FILE), "utf8");
+  for (const args of [["--weights"], ["--weights", dir, "--above"], ["--weights", dir, "--above", "x"], ["--weights", dir, "--below", "5"], ["--weights", dir, "--above", "5", "extra"]]) assert.equal(program("oracle-legs.ts", args).status, 2, args.join(" "));
+  const unweighed = program("oracle-legs.ts", ["--weights", dir, "--above", "500"]);
+  assert.equal(unweighed.status, 1, unweighed.out);
+  assert.match(unweighed.out, /the reports are of leg\(s\) none[\s\S]*nothing written/);
+  assert.equal(fs.readFileSync(path.join(ROOT, WEIGHTS_FILE), "utf8"), weights);
 });
 
 test("scripts/ci-shards.ts run as CI runs it: files, needs and verify each end with their exit code", (t) => {
