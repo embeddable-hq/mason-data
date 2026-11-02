@@ -527,6 +527,15 @@ test("behind: a polled table older than its sync promises is behind, by how much
     ...promiseOf({ mode: "recopy", intervalSeconds: 3600, lastPollMs: null, lastPassMs: 5 * 60_000 }) } });
   assert.deepEqual([recopy.sync.state, recopy.sync.promisedSeconds], ["behind", 4200]);
   assert.match(String(recopy.sync.behindWhy), /took 5 min/);
+  // its line says it too, whatever kind keeps it (review r1: a recopied table's line said nothing, painted green)
+  assert.match(recopy.line, /1,000 rows · synced · behind by 60 min: the last pass, which reads every table again whole, took 5 min, and Mason waits four times a pass between passes to keep the database's load to a fifth$/);
+  assert.equal(recopy.colour, "Y");
+  assert.doesNotMatch(recopy.line, /null/);
+  // a why its words already say (a rebuild pending) is not said twice
+  const pendingWhy = "its columns changed: it is read again whole, then caught up by one poll";
+  const queued = await row254({ kept: { ...polledKept(7200, { pending: pendingWhy }), pending: pendingWhy } });
+  assert.equal(queued.sync.state, "behind");
+  assert.match(queued.line, /NOT kept current \(last synced 2 h ago\): its columns changed: it is read again whole, then caught up by one poll — behind by 1 h 44 min$/);
 });
 
 test("a streamed table is behind only past what the stream promises: an idle healthy stream never; a stream down past it, with why (issue 254)", async () => {

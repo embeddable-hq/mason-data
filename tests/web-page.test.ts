@@ -326,6 +326,9 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
       kept: { by: "poll", sync: every15, syncedAt: ago(7200), nextAt: null, pending, promisedSeconds: 960, lateWhy: pending } } as CopyState]],
     ["a stream down past its bound", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "replication", slot: "s", state: "streamed", why: null, position: "0/1", lastCommit: null,
       notRunning: "it has not started yet: it starts at the next pass", syncedAt: ago(300), promisedSeconds: 120, lateWhy: "the stream is not running: it has not started yet: it starts at the next pass" } } as CopyState]],
+    // a recopied table behind (review r1: the page said `null`, the CLI nothing): behind, from sync, for every kind
+    ["behind, recopied", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "recopy", copiedAt: ago(7200), syncedAt: ago(7200), promisedSeconds: 120,
+      lateWhy: "the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth" } } as CopyState]],
     ["off", [{ ...copied("public.events", 30_000_000, ago(7200)), kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(3 * 86_400), nextAt: null, promisedSeconds: null, lateWhy: null } } as CopyState]],
     ["synced", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(14 * 60), nextAt: null, promisedSeconds: 960, lateWhy: pass } } as CopyState]],
   ];
@@ -343,7 +346,10 @@ test("behind, left out, a failed catch-up, a stream down, off: each table's line
     words[name] = `${/class="indicator (\w+)"/.exec(row)![1]} ${/<\/span>(Behind|Failed|Synced|Syncing|Waiting)</.exec(row)![1]} ${ours.state}`;
   }
   assert.deepEqual(words, { "behind, the pass": "warn Behind unsynced", "behind, its own poll": "warn Behind unsynced", "left out": "bad Failed failed", "a failed catch-up": "bad Failed failed",
-    "a stream down past its bound": "warn Behind unsynced", off: "ok Synced done", synced: "ok Synced done" });
+    "a stream down past its bound": "warn Behind unsynced", "behind, recopied": "warn Behind unsynced", off: "ok Synced done", synced: "ok Synced done" });
+  const recopied = stateOf(states.find(([n]) => n === "behind, recopied")![1], { now: NOW });
+  const line = tableLine(recopied.tables.find((x) => x.table === "public.customers")!, NOW).what;
+  assert.equal(line, "1,200 rows · synced · behind by 1 h 58 min: the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth");
 });
 
 test("a copy the poll does not keep current is the page's warning, as mason status paints it: its line's words equal, its state unsynced", () => {

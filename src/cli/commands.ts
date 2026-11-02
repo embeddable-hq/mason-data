@@ -207,7 +207,7 @@ export { copyingText, copyProgress, duration, msText, readiness, readinessWord, 
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work
  *  (a table whose sync is off is copied as it asked: green). */
 export function paintBar(line: string, s: Style): string {
-  const colour = / its first sync failed: | NOT kept current, its sync failed /.test(line) ? s.red : / NOT kept current | — behind by /.test(line) ? s.yellow
+  const colour = / its first sync failed: | NOT kept current, its sync failed /.test(line) ? s.red : / NOT kept current | (—|·) behind by /.test(line) ? s.yellow
     : / 100%  [\d,]+ rows · synced( · |$)/.test(line) ? s.green : s.cyan;
   return line.replace(/(█+)(░*)|(░+)/, (_m, full: string | undefined, empty: string | undefined, none: string | undefined) =>
     full !== undefined ? `${colour(full)}${s.dim(empty ?? "")}` : s.dim(none ?? ""));
@@ -234,7 +234,7 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
     let fraction: number, what: string;
     if (r === 0) {
       fraction = 1;
-      const age = keptAge(t, now);
+      const age = keptWords(t, now);
       what = `${n(t.copy?.rowsCopied ?? 0)} rows · synced${t.copy?.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
     }
     else if (r === 1) { fraction = 1; what = t.copy?.phase === "done" ? copiedFailedText(t, now) : `its first sync failed: ${firstLine(t.error!)}`; }
@@ -260,20 +260,32 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
  */
 export function keptAge(t: Pick<TableState, "table" | "kept" | "sync">, now: number = Date.now()): string | null {
   const k = t.kept;
-  // behind what its sync promises (`tables[].sync`, src/cli/readiness.ts behindOf, measured when the run answered):
-  // by how much and why, once, on its line
-  const behind = t.sync?.state === "behind" && t.sync.behindBySeconds != null ? ` — behind by ${duration(t.sync.behindBySeconds)}: ${t.sync.behindWhy ?? "its next sync is late"}` : "";
   if (k?.by === "replication") {
     if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : agoText(k.syncedAt, now)}`;
-    return behind ? `${at}${behind}` : k.notRunning === null ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+    // behind: `keptWords` says it, with the stream not running as its why
+    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
   }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`;
   if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
   // the line to write as well as the command: a project an older Mason polled is off after the upgrade
   if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${tableArg(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
-  return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)}`}${behind}`;
+  return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)}`}`;
+}
+
+/**
+ * WHAT A SERVED TABLE'S LINE SAYS AFTER `synced`: how it is kept and how old it is (`keptAge`, by the kind of its
+ * keeping), then — for EVERY kind, from the one word (`tables[].sync.state`, src/cli/readiness.ts behindOf), never a
+ * second reading of `kept` — behind by how much and why. A kind keptAge has no words for (recopy) still says behind;
+ * a why its words already say is not said twice. Null: nothing to say.
+ */
+export function keptWords(t: Pick<TableState, "table" | "kept" | "sync">, now: number = Date.now()): string | null {
+  const age = keptAge(t, now), s = t.sync;
+  if (s?.state !== "behind" || s.behindBySeconds == null) return age;
+  const why = s.behindWhy ?? "its next sync is late";
+  const by = `behind by ${duration(s.behindBySeconds)}${age !== null && age.includes(why) ? "" : `: ${why}`}`;
+  return age === null ? by : `${age} — ${by}`;
 }
 
 /**
