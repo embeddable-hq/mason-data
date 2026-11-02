@@ -20,20 +20,20 @@ each). The copy is read-only.
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 254 functions, 387 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
-| Anything else: 58 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
+| Anything else: 59 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 6,714 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 6,879 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 6,714 statements | Mason | DuckDB alone |
+| Of 6,879 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 92% | 27% |
+| answered exactly as Postgres: the rows, their text, the column names | 93% | 26% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 7% | — |
-| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 19% |
-| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 21% |
+| the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 18% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 22% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 13% |
 | wrong rows, or the rows in another order | — | 9% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 3% |
@@ -55,7 +55,7 @@ Postgres did, after a copy and after two rounds of changes. A statement using an
 What is known **beyond** that list is below. A refusal names its gap in the error's detail (`Mason gap <id>`) and
 says what to write instead in its hint.
 
-## Refused (58)
+## Refused (59)
 
 A statement using one of these is refused with SQLSTATE 0A000, where Postgres would answer it.
 
@@ -91,6 +91,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `libc-locale-unread` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) under a database whose libc collation Mason's read does not follow: a locale that tailors ASCII or Latin (tr_TR, sv_SE, cs_CZ) or another C library's. An `en_*` locale never is; the read says which at the start and mason status repeats it | answers, in the collation's order | refused whenever text is ordered; everything else is answered, equality, GROUP BY and DISTINCT of text included | add COLLATE "C" or an ICU collation (COLLATE "und-x-icu") to the comparison or the sort |
 | `hypothetical-set` | a hypothetical-set aggregate: rank, dense_rank, percent_rank or cume_dist(…) WITHIN GROUP (ORDER BY …) | the rank the value would have among the rows | refused | count the rows below the value in a subquery |
 | `infinite-extract` | extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |
+| `time-timetz-coerced` | a time Postgres casts to a timetz where Mason cannot write the cast: an arm of a UNION, INTERSECT or EXCEPT written as a * or as a set operation of its own with an ORDER BY or a LIMIT; a time BETWEEN a time bound and a timetz one; a CASE of a time WHEN a time and WHEN a timetz | casts the time to a timetz at the session zone's offset on the transaction's date | refused (a time beside a timetz in a comparison, IN, BETWEEN, CASE, COALESCE, GREATEST, LEAST, NULLIF, an ARRAY, a VALUES list, a function's argument and a set operation's named columns is answered) | cast the time: tm::timetz |
 | `time-date-trunc` | date_trunc of a time (Postgres truncates it as an interval) | an interval | refused | date_trunc of a timestamp, or extract the parts |
 | `quote-ident` | quote_ident() | quotes an identifier when it must be | refused (it needs Postgres's keyword list) | quote it in the statement, or format('%s', …) |
 | `div-numeric` | div() of a value that is not an integer | the integer quotient of two numerics | refused | trunc(a / b) |
