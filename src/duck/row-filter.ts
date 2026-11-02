@@ -22,6 +22,7 @@ import type { Node } from "libpg-query";
 import { gapRefusal, StatementError } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, type PgAnalysis } from "./analyze.ts";
+import { sessionSetSql, type SessionState } from "../api/postgres/catalog.ts";
 import type { TreeValue } from "./pgtree.ts";
 import { treeDifference } from "./rewrite.ts";
 
@@ -172,7 +173,7 @@ export async function filterTypes(run: Catalog, f: RowFilter, shapes: ReadonlyMa
     const message = (r.M ?? "Postgres refused it").replace(/\$(\d+)/g, (m, k: string) => names[Number(k) - 1] !== undefined ? `:${names[Number(k) - 1]}` : m);
     return { problem: `${f.at}.where: ${message}${at} — the predicate is checked by Postgres as SELECT 1 FROM ${f.table} WHERE ${f.where!.text}` };
   };
-  const first = await analyze(run, sql, names.map(() => 0), "public");
+  const first = await analyze(run, sql, names.map(() => 0));
   if ("refused" in first) return said(first.refused);
   if (hasSubquery(first.tree)) return { problem: `${f.at}.where: reads another table (a subquery) — a where: reads its own table's columns; through: <table> makes a row visible through another table's` };
   const oids = first.params;
@@ -196,7 +197,7 @@ export async function filterTypes(run: Catalog, f: RowFilter, shapes: ReadonlyMa
   }
   if (mismatch !== null) {
     // Postgres's own refusal, the parameter declared of the shape the file says
-    const again = await analyze(run, sql, declared, "public");
+    const again = await analyze(run, sql, declared);
     if ("refused" in again) return { problem: `${said(again.refused).problem} (${mismatch})` };
     return { problem: `${f.at}.where: ${mismatch}` };
   }
@@ -266,7 +267,7 @@ export function bindFilter(f: RowFilter, types: ReadonlyMap<string, string>, val
 export async function attributeRefused(run: Catalog, rows: ReadonlyMap<string, BoundFilter>, tables: readonly string[]): Promise<{ name: string; type: string; at: string; where: string; problem: string } | null> {
   for (const table of tables) {
     for (const a of rows.get(table)?.attributes ?? []) {
-      const r = await analyze(run, `SELECT ${a.sql}`, [], "public");
+      const r = await analyze(run, `SELECT ${a.sql}`, []);
       if ("refused" in r) return { name: a.name, type: a.type, at: a.at, where: a.where, problem: r.refused.M ?? "Postgres refused it" };
     }
   }
@@ -503,7 +504,7 @@ async function carryKeyDependency(catalog: Catalog, tree: Body, reads: ReadonlyA
  * security: a filtered table's whole row (a subquery's is a record), a name both a WITH query and a filtered table, a
  * TABLESAMPLE of one, a column qualified by its schema beside another item of the table's name.
  */
-export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: PgAnalysis, searchPathSql: string, filters: ReadonlyMap<string, BoundFilter>): Promise<{ text: string; stmt: Node; walls: Walls; tables: string[] } | null> {
+export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: PgAnalysis, under: SessionState, filters: ReadonlyMap<string, BoundFilter>): Promise<{ text: string; stmt: Node; walls: Walls; tables: string[] } | null> {
   const read = relationsRead(analysis.tree);
   if (read.size === 0 || filters.size === 0) return null;
   const names = await catalogRows(catalog, `SELECT c.oid::text, n.nspname || '.' || c.relname, c.reltype::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid IN (${[...read].join(", ")})`);
@@ -520,7 +521,7 @@ export async function expandRowFilters(catalog: Catalog, stmt: Node, analysis: P
   const ctes = new Set(all.filter((n) => n.kind === "CommonTableExpr").map((n) => n.body.ctename as string));
   const spelled = ranges.map((r) => [r.body.catalogname, r.body.schemaname, r.body.relname].filter((x): x is string => typeof x === "string").map(quoteIdent).join("."));
   const resolved = spelled.length === 0 ? [] : await catalogRows(catalog,
-    `SET LOCAL search_path = ${searchPathSql}, pg_catalog; SELECT v.i::text, c.oid::text FROM (VALUES ${spelled.map((s, i) => `(${i}, ${literal(s)})`).join(", ")}) AS v(i, name) ` +
+    `${sessionSetSql(under, true)}; SELECT v.i::text, c.oid::text FROM (VALUES ${spelled.map((s, i) => `(${i}, ${literal(s)})`).join(", ")}) AS v(i, name) ` +
     `JOIN pg_class c ON c.oid = to_regclass(v.name) WHERE c.relkind = 'r'`);
   const asFiltered = new Map<number, string>();
   for (const [i, oid] of resolved) {

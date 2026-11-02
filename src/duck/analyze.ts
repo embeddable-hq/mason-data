@@ -7,7 +7,9 @@
  *  - the result's column NAMES, type OIDs and typmods are Postgres's RowDescription, and the parameters' types its
  *    ParameterDescription;
  *  - the analysed tree (`debug_print_parse`, src/duck/pgtree.ts) gives the rewrite every expression's resolved type.
- * The statement is analysed under the SESSION's search_path (an unqualified table is the one the session would read).
+ * The statement is analysed under the SESSION's state (src/api/postgres/catalog.ts sessionSetSql, the catalog's one
+ * applier): its search_path as written (an unqualified table is the one the session would read), its TimeZone and its
+ * DateStyle (a literal is folded under both: `'01/02/2026'::date` is the session's order).
  *
  * ONE BATCH, SERIALISED (the catalog's queue): the logging is switched on, the statement is parsed, described and
  * closed under a name of its own, and everything is set back, before the next session's call runs. Nothing of it is
@@ -15,6 +17,7 @@
  * catalog statement's portal, beside another session's").
  */
 import { HELD } from "./held-types.ts";
+import { CATALOG_BASE_SQL, sessionSetSql, type SessionState } from "../api/postgres/catalog.ts";
 import { cstr, decodeBackend, frame, int16, int32 } from "../api/postgres/protocol.ts";
 import { outputsByLocation, parseTree, typesByLocation, type QueryOutputs, type Typed, type TreeValue } from "./pgtree.ts";
 
@@ -34,24 +37,23 @@ export interface PgAnalysis {
 export type PgRefusal = { refused: Record<string, string> };
 
 const NAME = "__mason_analysis";
-/** the catalog's TimeZone, set back after a statement set the session's (src/api/postgres/catalog.ts sets it at start) */
-const CATALOG_ZONE = "SET TimeZone = 'UTC'";
+/** what a statement of no session is analysed under (a row filter's read, a unit test): UTC, under `public`, ISO with month-day-year */
+const NO_SESSION: SessionState = { timeZone: "UTC", searchPath: "public", dateStyle: "ISO, MDY" };
 const query = (sql: string): Buffer => frame("Q", cstr(sql));
 
 /** Asks the catalog Postgres to analyse `sql` (with these declared parameter OIDs, 0 = infer). */
-export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, sql: string, paramOids: readonly number[], searchPath = "public", timeZone = "UTC"): Promise<PgAnalysis | PgRefusal> {
+export async function analyze(run: (bytes: Uint8Array) => Promise<Uint8Array>, sql: string, paramOids: readonly number[], under: SessionState = NO_SESSION): Promise<PgAnalysis | PgRefusal> {
   const bytes = Buffer.concat([
-    // the session's search_path, pg_catalog after it as the catalog's own setup has it (catalog.ts)
-    // …and its TimeZone: Postgres parses a literal under it ('2026-01-01 12:00'::timestamptz is that zone's noon), and
-    // the rewrite writes the value it parsed (src/duck/rewrite.ts `aConst`)
-    query(`SET search_path = ${searchPath}, pg_catalog; SET TimeZone = '${timeZone.replace(/'/g, "''")}'; SET client_min_messages = log; SET debug_print_parse = on; SET debug_pretty_print = off`),
+    // the session's state: Postgres parses a literal under its zone and order ('2026-01-01 12:00'::timestamptz is that
+    // zone's noon), and the rewrite writes the value it parsed (src/duck/rewrite.ts `aConst`)
+    query(`${sessionSetSql(under)}; SET client_min_messages = log; SET debug_print_parse = on; SET debug_pretty_print = off`),
     frame("P", cstr(NAME), cstr(sql), int16(paramOids.length), ...paramOids.map(int32)),
     frame("D", Buffer.from("S"), cstr(NAME)),
     frame("C", Buffer.from("S"), cstr(NAME)),
     frame("S"),
-    // the catalog's own TimeZone back (catalog.ts sets UTC at its start): RESET would be the server's boot default, the
-    // machine's zone, under which the catalog then answered what reads no table
-    query(`RESET debug_print_parse; RESET debug_pretty_print; RESET client_min_messages; ${CATALOG_ZONE}; SET search_path = public, pg_catalog`),
+    // the catalog's own state back (catalog.ts CATALOG_BASE): RESET would be the server's boot default, the machine's
+    // zone, under which the catalog then answered what reads no table
+    query(`RESET debug_print_parse; RESET debug_pretty_print; RESET client_min_messages; ${CATALOG_BASE_SQL}`),
   ]);
   const messages = decodeBackend(Buffer.from(await run(bytes)));
   // the replies to the first Query end at its ReadyForQuery; the statement's run to the next one
@@ -88,13 +90,13 @@ const PARAM_TYPES: Record<number, string> = {
 
 /**
  * A statement's parameters as Postgres reads them: each value through its type's input function (the type Postgres
- * inferred, or the one declared), under the session's TimeZone — so `'1.5'` for a smallint is Postgres's 22P02, and
- * `'01/02/2026'` for a date is 2026-01-02. A value comes back as text DuckDB reads to the same value: a number, a
+ * inferred, or the one declared), under the session's state (its TimeZone and DateStyle) — so `'1.5'` for a smallint
+ * is Postgres's 22P02, and `'01/02/2026'` for a date is 2026-01-02 (2026-02-01 under `ISO, DMY`). A value comes back as text DuckDB reads to the same value: a number, a
  * boolean or a uuid canonical; a date as days and a timestamp as microseconds since 2000-01-01 (src/duck/rewrite.ts
  * `datumText` writes them), an interval as its months, days and microseconds; `infinity` as itself.
  */
 export async function readParameters(run: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[],
-  timeZone: string): Promise<{ values: Array<{ oid: number; text: string } | null> } | PgRefusal | TextArrayRefusal> {
+  under: SessionState): Promise<{ values: Array<{ oid: number; text: string } | null> } | PgRefusal | TextArrayRefusal> {
   const quote = (s: string): string => `'${s.replace(/'/g, "''")}'`;
   const items = values.map((v, i) => {
     const oid = oids[i] ?? 0, type = PARAM_TYPES[oid];
@@ -110,12 +112,12 @@ export async function readParameters(run: (bytes: Uint8Array) => Promise<Uint8Ar
     return `${x}::text`;
   });
   if (items.every((x) => x === null)) return { values: values.map(() => null) };
-  const sql = `SET TimeZone = ${quote(timeZone)}; SELECT ${items.map((x) => x ?? "NULL").join(", ")}; ${CATALOG_ZONE}`;
+  const sql = `${sessionSetSql(under)}; SELECT ${items.map((x) => x ?? "NULL").join(", ")}; ${CATALOG_BASE_SQL}`;
   const messages = decodeBackend(Buffer.from(await run(query(sql))));
   const refused = messages.find((m) => m.type === "ErrorResponse");
   if (refused?.type === "ErrorResponse") {
-    // the value's own error (22P02, 22003, 22008 …) — and the zone set back, which the failed statement skipped
-    await run(query(CATALOG_ZONE));
+    // the value's own error (22P02, 22003, 22008 …) — and the catalog's state set back, which the failed statement skipped
+    await run(query(CATALOG_BASE_SQL));
     return { refused: refused.fields };
   }
   const row = messages.find((m) => m.type === "DataRow");

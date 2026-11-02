@@ -13,6 +13,7 @@ import { outputExpressions, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
+import type { SessionState } from "../api/postgres/catalog.ts";
 import { argumentTypes, describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
@@ -83,9 +84,6 @@ export function quoteDuckKeywords(words: Iterable<string>): void {
   };
 }
 
-/** a search_path as SET writes it: each schema quoted (`"$user"` kept) */
-const pathSql = (searchPath: string): string => searchPath.split(",").map((s) => s.trim()).filter((s) => s !== "")
-  .map((s) => s.startsWith('"') ? s : `"${s.replaceAll('"', '""')}"`).join(", ") || "public";
 
 declare const PLANNED: unique symbol;
 /**
@@ -122,8 +120,8 @@ export interface PlannedSql {
  * its error (`'1.5'` for a smallint: 22P02).
  */
 export async function duckParameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[],
-  timeZone: string): Promise<(string | null)[]> {
-  const read = await readParameters(catalog, oids, values, timeZone);
+  under: SessionState): Promise<(string | null)[]> {
+  const read = await readParameters(catalog, oids, values, under);
   if ("refused" in read) {
     const f = read.refused;
     throw new StatementError({ code: f.C ?? "22P02", message: f.M ?? "invalid parameter value", ...(f.D ? { detail: f.D } : {}), ...(f.H ? { hint: f.H } : {}) }, "");
@@ -258,6 +256,8 @@ export interface PlanOptions {
   paramOids: readonly number[];
   searchPath: string;
   timeZone: string;
+  /** the session's DateStyle (src/api/postgres/catalog.ts SessionState): Postgres folds a literal date in its order */
+  dateStyle?: string;
   collation: DuckCollation;
   verified: ReadonlyMap<string, string> | null;
   userTypes?: ReadonlyMap<string, number>;
@@ -307,10 +307,11 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all.
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
-  const { catalog, text, stmt, base, paramOids, searchPath, timeZone, collation, verified, userTypes = new Map<string, number>(), copies = () => [],
+  const { catalog, text, stmt, base, paramOids, searchPath, timeZone, dateStyle = "ISO, MDY", collation, verified, userTypes = new Map<string, number>(), copies = () => [],
     depth = 0, kept = null, wireBound = false, grants, walls = null, relations, outputs = false } = options;
   const started = performance.now();
-  const analysis = await analyze(catalog, text, paramOids, pathSql(searchPath), timeZone);
+  const under: SessionState = { searchPath, timeZone, dateStyle };
+  const analysis = await analyze(catalog, text, paramOids, under);
   if ("refused" in analysis) {
     const f = analysis.refused;
     // a table the catalog does not hold: where its copy is, or the `mason add` away
@@ -327,7 +328,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // A VIEW is answered as Postgres answers it, by its definition in its place (src/duck/views.ts): the statement so
   // written is planned from the start, its parameters typed as this one's were. Its errors are the expanded text's, so
   // they carry no position into this one
-  const expanded = await expandViews(catalog, stmt, analysis, pathSql(searchPath));
+  const expanded = await expandViews(catalog, stmt, analysis, under);
   if (expanded !== null) {
     if (depth >= MAX_VIEW_DEPTH) throw viewRefused(`Mason cannot yet answer views read through more than ${MAX_VIEW_DEPTH} other views`, "read the tables the views read");
     try { return await planDuck({ ...options, text: expanded.text, stmt: expanded.stmt, base: 0, paramOids: analysis.params, depth: depth + 1 }); }
@@ -349,7 +350,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // to nothing more (the grants were held above, on the statement as written: a filter may read a column the role
   // may not, as a policy may on Postgres). Its errors are the expanded text's, so they carry no position into this one
   if (grants?.rows !== undefined && grants.rows.size > 0) {
-    const filtered = await expandRowFilters(catalog, stmt, analysis, pathSql(searchPath), grants.rows);
+    const filtered = await expandRowFilters(catalog, stmt, analysis, under, grants.rows);
     if (filtered !== null) {
       let inner: DuckPlan;
       try { inner = await planDuck({ ...options, text: filtered.text, stmt: filtered.stmt, base: 0, paramOids: analysis.params, depth: depth + 1, grants: undefined, walls: filtered.walls }); }
@@ -422,7 +423,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, userTypes: catalogTypes, rowTypes: sourceRows, timeZone, enums, kept: l, wireBound, keyCounts });
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, userTypes: catalogTypes, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

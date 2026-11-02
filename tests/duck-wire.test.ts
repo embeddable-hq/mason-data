@@ -84,8 +84,12 @@ const NULLISH = "INSERT INTO public.nullish VALUES (1, '2026-01-02 03:04:05', 'b
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-wire-"));
 let store: DuckStore;
 let api: PgApiServer;
-/** the listener's clock when a test fixes it (`clock` of startPostgresApi): the transaction's start every plan reads */
+/** the listener's clock when a test fixes it (`clock` of startPostgresApi): the transaction's start every plan reads,
+ *  in microseconds since the epoch (src/lib/instant.ts) */
 let fixedNow: number | undefined;
+/** a microsecond wall clock of the test's own, beside the listener's (src/lib/instant.ts is not imported, so the file
+ *  loads with src/ as it was before it: scripts/fails-without.ts) */
+const microsNow = (): number => Math.floor((performance.timeOrigin + performance.now()) * 1000);
 const truth = new PGlite({ extensions: { citext } });
 
 // one table in public, one in a schema of its own, as the copy lands them (<schema>.<table>, the key as the source's)
@@ -159,6 +163,11 @@ const DDL = [
   CLOCK_TIMES,
   "CREATE TABLE public.nullish (id INTEGER PRIMARY KEY, ts TIMESTAMP, t VARCHAR, n INTEGER)",
   NULLISH,
+  // session state (GitHub issue 63), last: no OID of the others moves
+  "CREATE TABLE public.invoices (id INTEGER PRIMARY KEY, total DECIMAL(10,3))",
+  "INSERT INTO public.invoices VALUES (7, 70.5)",
+  "CREATE TABLE sales.accounts (id INTEGER PRIMARY KEY, owner VARCHAR)",
+  "INSERT INTO sales.accounts VALUES (1, 'x')",
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -230,6 +239,11 @@ const PG_DDL = [
   "CREATE VIEW public.late_read AS SELECT id, name, 1 AS one, id * 2 AS twice FROM public.late_c WHERE id < 30",
   "CREATE VIEW public.late_read_again AS SELECT one, twice, id, name FROM public.late_read WHERE id > 2",
   "CREATE VIEW public.late_counts AS SELECT c, count(*) AS n FROM public.late GROUP BY c",
+  // session state (GitHub issue 63), last: no OID of the others moves
+  "CREATE TABLE public.invoices (id INTEGER PRIMARY KEY, total DECIMAL(10,3))",
+  "INSERT INTO public.invoices VALUES (7, 70.5)",
+  "CREATE TABLE sales.accounts (id INTEGER PRIMARY KEY, owner VARCHAR)",
+  "INSERT INTO sales.accounts VALUES (1, 'x')",
 ];
 const schema: PgSchema = {
   database: "app",
@@ -280,6 +294,9 @@ const schema: PgSchema = {
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
     { name: "clock_times", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "tm", type: "timestamptz", spelled: "time" }] },
     { name: "nullish", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp" }, { name: "t", type: "text" }, { name: "n", type: "int4" }] },
+    // session state (GitHub issue 63), last: a name in two schemas, of one shape (invoices) and of two (accounts)
+    { name: "invoices", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "total", type: "numeric", spelled: "numeric(10,3)" }] },
+    { name: "accounts", schema: "sales", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "owner", type: "text" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -323,7 +340,7 @@ before(async () => {
     schema: () => schema,
     record: (r) => { recorded.push(r); }, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: await store.listener(undefined, undefined, undefined, () => copies),
-    clock: () => fixedNow ?? Date.now(),
+    clock: () => fixedNow ?? microsNow(),
   });
 });
 after(async () => {
@@ -448,8 +465,8 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "invoices"]]);
-    const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoices' ORDER BY ordinal_position");
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
 });
@@ -619,6 +636,60 @@ test("the corpus rerun: a relative time literal is the transaction's start at th
     assert.equal(b[0], a[0], "the literal is the Parse's");
     assert.notEqual(b[1], a[1], "now() is each execution's");
   } finally { await c.end(); }
+});
+
+// GitHub issues 372 and 363: the transaction's instant is microseconds, as Postgres's. A millisecond made a prepared
+// statement's 'now' and its run's now() equal whenever both fell in one millisecond (the flaky oracle), and printed
+// three fraction digits where Postgres prints six.
+test("the transaction's instant is microseconds on both paths: a prepared 'now' and its run's now() inside one millisecond are two instants", async () => {
+  const c = await client();
+  const AT = Date.UTC(2026, 0, 2, 20, 0, 0) * 1000;
+  const rows = async (q: pg.QueryConfig | string): Promise<unknown[][]> =>
+    (await c.query(typeof q === "string" ? { text: q, rowMode: "array", types: raw } as pg.QueryConfig : q)).rows as unknown[][];
+  try {
+    for (const [name, sql] of [["p372", "SELECT $1::int AS n, now() = 'now' AS same"], ["p372duck", "SELECT $1::int AS n, now() = 'now' AS same FROM orders WHERE id = 1"]] as const) {
+      const prepared = { name, text: sql, values: ["1"], rowMode: "array", types: raw } as pg.QueryConfig;
+      // Parse, Bind, Execute and Sync in one batch: one implicit transaction, one instant
+      fixedNow = AT + 123_456;
+      assert.deepEqual(await rows(prepared), [["1", "t"]], `${name} parsed and run in one batch`);
+      assert.deepEqual(await rows({ text: sql, values: ["1"], rowMode: "array", types: raw } as pg.QueryConfig), [["1", "t"]], `${name} unnamed, in one batch`);
+      // its run in a batch of its own, the same millisecond, a later microsecond: the Parse's 'now' is not the run's now()
+      fixedNow = AT + 123_789;
+      assert.deepEqual(await rows(prepared), [["1", "f"]], `${name} run later in the same millisecond`);
+    }
+    // the literal is the Parse's microsecond, now() the run's
+    fixedNow = AT + 123_456;
+    const frozen = { name: "frozen372", text: "SELECT 'now'::timestamptz::text AS lit, now()::text AS fn FROM orders WHERE id = 1", rowMode: "array", types: raw } as pg.QueryConfig;
+    assert.deepEqual(await rows(frozen), [["2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123456+00"]]);
+    fixedNow = AT + 123_789;
+    assert.deepEqual(await rows(frozen), [["2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123789+00"]]);
+    // issue 363: the instant prints six digits on the DuckDB path as on the catalog's; the keywords it has not verified
+    // stay refused, as before
+    fixedNow = AT + 123_456;
+    const six = ["2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123456"];
+    assert.deepEqual(await rows("SELECT now()::text, current_timestamp::text, now()::timestamp::text FROM orders WHERE id = 1"), [six]);
+    assert.deepEqual(await rows("SELECT now()::text, current_timestamp::text, now()::timestamp::text"), [six]);
+    for (const sql of ["SELECT current_time::text FROM orders WHERE id = 1", "SELECT localtime::text FROM orders WHERE id = 1", "SELECT localtimestamp::text FROM orders WHERE id = 1", "SELECT localtimestamp(6)::text FROM orders WHERE id = 1"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000", sql);
+    }
+    // the instant's every edge reaches both paths as one microsecond, inside one block, the clock moved on by 3 µs
+    for (const [tail, text] of [[0, "20:00:00"], [1, "20:00:00.000001"], [123_456, "20:00:00.123456"], [499_999, "20:00:00.499999"], [500_000, "20:00:00.5"], [999_999, "20:00:00.999999"]] as const) {
+      fixedNow = AT + tail;
+      await c.query("BEGIN");
+      const catalog = await rows("SELECT now()::text");
+      fixedNow = AT + tail + 3;
+      const duck = await rows("SELECT now()::text FROM orders WHERE id = 1");
+      const again = await rows("SELECT now()::text");
+      await c.query("COMMIT");
+      const want = [[`2026-01-02 ${text}+00`]];
+      assert.deepEqual([catalog, duck, again], [want, want, want], `.${String(tail).padStart(6, "0")}`);
+    }
+    // outside a block, two Queries 3 µs apart are two instants
+    fixedNow = AT + 7;
+    const first = await rows("SELECT now()::text FROM orders WHERE id = 1");
+    fixedNow = AT + 10;
+    assert.deepEqual([first, await rows("SELECT now()::text FROM orders WHERE id = 1")], [[["2026-01-02 20:00:00.000007+00"]], [["2026-01-02 20:00:00.00001+00"]]]);
+  } finally { fixedNow = undefined; await c.end(); }
 });
 
 // review round 9 of PR 202: a WITH query's exact programs are derived once and given to every reader. The first UNION
@@ -1251,7 +1322,7 @@ test("a time as a timetz takes the offset of the transaction's date at the value
   ];
   try {
     for (const [now, zone, times] of cases) {
-      fixedNow = Date.parse(now);
+      fixedNow = Date.parse(now) * 1000;
       await c.query(`SET TimeZone = '${zone}'`);
       const what = `at ${now} in ${zone}`;
       assert.deepEqual(await answer(c, "SELECT id, tm::timetz FROM clock_times ORDER BY id"),
@@ -1264,7 +1335,7 @@ test("a time as a timetz takes the offset of the transaction's date at the value
     }
     // 24:00 is its own time, never the next midnight's 00:00: in New York on 2026-11-01 beside 00:00, and in Kolkata (one
     // offset all day) not equal to it
-    fixedNow = Date.parse("2026-11-01T04:31:00Z");
+    fixedNow = Date.parse("2026-11-01T04:31:00Z") * 1000;
     await c.query("SET TimeZone = 'America/New_York'");
     assert.deepEqual((await answer(c, "SELECT tm::timetz FROM clock_times WHERE id IN (1, 6) ORDER BY id")).rows, [["00:00:00-04"], ["24:00:00-05"]]);
     await c.query("SET TimeZone = 'Asia/Kolkata'");
@@ -1276,7 +1347,7 @@ test("a time as a timetz takes the offset of the transaction's date at the value
     // planned once (at its Parse, in Kolkata) and executed under a later SET TimeZone and clock: the execution's date and zone
     const prepared = { name: "tm_timetz", text: "SELECT tm::timetz FROM clock_times WHERE id = $1", values: [4], rowMode: "array", types: raw } as pg.QueryConfig;
     assert.deepEqual((await c.query(prepared)).rows, [["12:30:00.5+05:30"]]);
-    fixedNow = Date.parse("2026-03-08T06:00:00Z");
+    fixedNow = Date.parse("2026-03-08T06:00:00Z") * 1000;
     await c.query("SET TimeZone = 'America/New_York'");
     assert.deepEqual((await c.query(prepared)).rows, [["12:30:00.5-04"]], "a prepared statement executed after a SET TimeZone");
   } finally {
@@ -1573,12 +1644,12 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
     schema: () => current,
     record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)),
     duck: { ...duck, open: () => { opened++; return duck.open(); }, plan: async (...a: Parameters<typeof duck.plan>) => {
-      planned.push({ text: a[1], wire: a[8] === true });
-      if (a[8] === true) { under.push(`${a[5]} | ${a[6]}`); await gate; }
-      if (a[8] === true && failWire) throw new StatementError({ code: "0A000", message: "refused for the test" }, a[1]);
+      planned.push({ text: a[1], wire: a[7] === true });
+      if (a[7] === true) { under.push(`${a[5].searchPath} | ${a[5].timeZone}`); await gate; }
+      if (a[7] === true && failWire) throw new StatementError({ code: "0A000", message: "refused for the test" }, a[1]);
       const p = await duck.plan(...a);
       // a schema moved between the Parse and the Execute: the plan made again answers another column
-      return skew && a[8] === true ? { ...p, fields: p.fields!.map((f, i) => i === 0 ? { ...f, name: "moved" } : f) } : p;
+      return skew && a[7] === true ? { ...p, fields: p.fields!.map((f, i) => i === 0 ? { ...f, name: "moved" } : f) } : p;
     } },
   });
   // a portal's statement is logged once its result is released, a moment after its last rows
@@ -1737,14 +1808,15 @@ test("an Execute's row count over a LEFT lateral streams Postgres's first rows: 
     assert.match(plain.join("\n"), /Sent to the engine: .* LEFT JOIN LATERAL [\s\S]*__duckdb_delim_/, plain.join("\n"));
     assert.doesNotMatch(plain.join("\n"), /CROSS JOIN LATERAL/, plain.join("\n"));
 
-    // planned again under the search_path and TimeZone of its Parse, never a later SET's
+    // a search_path moved since the Parse: planned again under the session's state now, and the bounded plan under that
+    // same state, never a third (GitHub issue 63)
     const zoned = `${lateral} WHERE t.id > 0`;
     s.socket.write(Buffer.concat([wire.parse("zoned", zoned), wire.sync()]));
     await s.untilReady();
     s.socket.write(wire.query("SET TimeZone = 'Europe/Berlin'; SET search_path = sales, public"));
     await s.untilReady();
     assert.deepEqual((await paged("zoned", "z", 3)).pages.flat(), all);
-    assert.equal(under.at(-1), '"$user", public | UTC');
+    assert.equal(under.at(-1), 'sales, public | Europe/Berlin');
     s.socket.write(wire.query("SET TimeZone = 'UTC'; SET search_path = DEFAULT"));
     await s.untilReady();
 
@@ -5527,6 +5599,43 @@ test("latest(x ORDER BY …) answers the x of the row its ORDER BY sorts last: a
     for (const sql of ["SELECT arg_max_null(id, k) FROM late", "SELECT last(id ORDER BY k) FROM late"]) {
       await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "42883", sql);
     }
+  } finally { await c.end(); }
+});
+
+test("session state: a prepared statement whose search_path moved since its Parse is planned again, as Postgres's plancache; a result that moved is 0A000; a zone alone plans nothing again", async () => {
+  const c = await client();
+  try {
+    const ids = async (q: { name: string; text: string }): Promise<number[]> => (await c.query(q)).rows.map((r: { id: number }) => r.id);
+    const p = { name: "p63", text: "SELECT id, total FROM invoices ORDER BY id" };
+    assert.deepEqual(await ids(p), [7]);
+    await c.query("SET search_path = sales, public");
+    assert.deepEqual(await ids(p), [1, 2], "the path moved: the statement reads sales.invoices");
+    await c.query("RESET search_path");
+    assert.deepEqual(await ids(p), [7]);
+    // a zone alone: the same plan, the same rows
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual(await ids(p), [7]);
+    await c.query("RESET TimeZone");
+    // the path names no schema holding it: Postgres's 42P01, then the statement answers again once the path is back
+    const n = { name: "n63", text: "SELECT count(*)::int AS id FROM invoices" };
+    assert.deepEqual(await ids(n), [1]);
+    await c.query("SET search_path = nowhere");
+    assert.equal(((await c.query(n).catch((e: unknown) => e)) as { code?: string }).code, "42P01");
+    await c.query("RESET search_path");
+    assert.deepEqual(await ids(n), [1]);
+    // another shape under the new path: Postgres's 0A000
+    const a = { name: "a63", text: "SELECT * FROM accounts ORDER BY id" };
+    assert.ok((await c.query(a)).rows.length > 0);
+    await c.query("SET search_path = sales, public");
+    const e = (await c.query(a).catch((x: unknown) => x)) as { code?: string; message?: string };
+    assert.deepEqual([e.code, e.message], ["0A000", "cached plan must not change result type"]);
+    // an unqualified name beside a qualified one
+    await c.query("RESET search_path");
+    const j = { name: "j63", text: "SELECT i.id FROM invoices i JOIN public.invoices o USING (id) ORDER BY 1" };
+    assert.deepEqual(await ids(j), [7]);
+    await c.query("SET search_path = sales, public");
+    assert.deepEqual(await ids(j), [], "sales.invoices beside public.invoices share no id");
+    await c.query("RESET search_path");
   } finally { await c.end(); }
 });
 

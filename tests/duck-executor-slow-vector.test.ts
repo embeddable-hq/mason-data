@@ -16,7 +16,7 @@ useScratch();
 const slowVector = (k: number, order: "before its first fetch" | "during its first fetch", trials: number): string => `
   await store.writer.run("CREATE TABLE public.calls AS SELECT range::INTEGER AS id, '{\\"n\\": ' || range || '}' AS j FROM range(400000)");
   const runner = await store.runner();
-  const S = { timeZone: "UTC", searchPath: "public", settings: {} };
+  const S = { timeZone: "UTC", searchPath: "public", dateStyle: "ISO, MDY", settings: {} };
   // the CASE gives the call's argument native work per row, with no call and no check of an interrupt until it calls
   const call = "__mason_json_get(getvariable('__mason_session'), CASE WHEN md5(repeat(j, ${k})) = '' THEN '{}' ELSE j END, '[\\"n\\"]', false, true, false)";
   const planned = { text: "SELECT id FROM calls WHERE " + call + " IS NOT NULL", functions: ["__mason_json_get"] };

@@ -10,11 +10,12 @@
 import { workerData, type MessagePort } from "node:worker_threads";
 import { PGlite } from "@electric-sql/pglite";
 
-interface Request { sql: string; params: unknown[]; timeZone: string }
+interface Request { sql: string; params: unknown[]; timeZone: string; dateStyle: string }
 const { port, signal } = workerData as { port: MessagePort; signal: Int32Array };
 
 const db = new PGlite();
 let zone: string | null = null;
+let order: string | null = null;
 
 const reply = (m: unknown): void => { port.postMessage(m); Atomics.store(signal, 0, 1); Atomics.notify(signal, 0); };
 
@@ -25,6 +26,11 @@ port.on("message", (m: Request) => {
       if (zone !== m.timeZone) {
         await db.exec(`SET TimeZone = '${m.timeZone.replace(/'/g, "''")}'`);
         zone = m.timeZone;
+      }
+      // the session's DateStyle: a text read as a date in its field order (`'01/02/2026'` under `ISO, DMY`)
+      if (order !== m.dateStyle) {
+        await db.exec(`SET DateStyle = '${m.dateStyle.replace(/'/g, "''")}'`);
+        order = m.dateStyle;
       }
       const result = await db.query<unknown[]>(m.sql, m.params, { rowMode: "array" });
       // an array as the JSON of its elements' text (the `list` kind, src/duck/functions.ts)

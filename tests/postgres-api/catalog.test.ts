@@ -162,12 +162,14 @@ test("catalogDdl: tables, primary keys, comments, then the foreign keys", () => 
     `ALTER TABLE public."orders" ADD CONSTRAINT "orders_customer_id_fkey" FOREIGN KEY ("customer_id") REFERENCES public."customers" ("id");`,
     `ALTER TABLE public."orders" ADD CONSTRAINT "orders_referrer_id_fkey" FOREIGN KEY ("referrer_id") REFERENCES public."customers" ("id");`,
     `ALTER TABLE public."orders" ADD CONSTRAINT "orders_region_code_fkey" FOREIGN KEY ("region_code") REFERENCES public."regions" ("code");`,
-    WIRE_TYPE,
+    WIRE_TYPE, FORMAT_TYPE,
   ]);
 });
 
 /** the name of an OID the wire sent, with no type the source made: Postgres's (catalog.ts sourceTypeNames) */
 const WIRE_TYPE = "CREATE OR REPLACE FUNCTION public.mason_wire_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;";
+// declared with no type the source made too: every unqualified call of a catalog statement is spliced to it (issue 253)
+const FORMAT_TYPE = "CREATE OR REPLACE FUNCTION public.format_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS $$ SELECT pg_catalog.format_type($1, $2) $$;";
 
 test("catalogDdl: a join that cannot be a foreign key is a comment, never a refused constraint", () => {
   // a target column that is not the target's whole primary key; a target outside the schema; a column the table
@@ -190,7 +192,7 @@ test("catalogDdl: a join that cannot be a foreign key is a comment, never a refu
 
 test("catalogDdl: identifiers are double-quoted with an inner quote doubled; no primary key for a view", () => {
   const t: PgTable = { name: `we"ird`, primaryKey: [], columns: [{ name: `a"b`, type: "uuid" }], joins: [] };
-  assert.deepEqual(catalogDdl({ database: "x", tables: [t] }), [`CREATE TABLE public."we""ird" (\n  "a""b" uuid\n);`, WIRE_TYPE]);
+  assert.deepEqual(catalogDdl({ database: "x", tables: [t] }), [`CREATE TABLE public."we""ird" (\n  "a""b" uuid\n);`, WIRE_TYPE, FORMAT_TYPE]);
 });
 
 // --- the instance -----------------------------------------------------------------------------------------------
@@ -593,45 +595,107 @@ test("asRole wraps a request in SET ROLE … RESET ROLE, with a Sync where the r
   assert.deepEqual(m.unwrapRole([]).frames, []);
 });
 
-test("asSession wraps a request in SET search_path and SET <carrier> … RESET, its settings as JSON and a Sync where it has none; unwrapSession strips them, and says one out of step", () => {
-  const m = catalogModule as unknown as { asSession: (b: Uint8Array, s: ReadonlyMap<string, string>) => Uint8Array; unwrapSession: (f: Array<{ type: string; frame: Buffer }>) => Array<{ type: string }>; SESSION_SETTINGS: string };
-  // the carrier is no name a tool writes: named anew by the process
+type SessionApi = {
+  asSession: (b: Uint8Array, state: { timeZone: string; searchPath: string; dateStyle: string }, s: ReadonlyMap<string, string>) => Uint8Array;
+  unwrapSession: (f: Array<{ type: string; frame: Buffer }>) => Array<{ type: string; frame: Buffer }>;
+  SESSION_SETTINGS: string; searchPathSql: (path: string) => string; currentSettingSql: () => string[];
+};
+const BASE_STATE = { timeZone: "UTC", searchPath: '"$user", public', dateStyle: "ISO, MDY" };
+
+test("session state: asSession begins a transaction and applies the session's search_path, TimeZone, DateStyle and settings before a request, rolls back and sets the catalog's base after, a Sync where it has none; unwrapSession strips exactly its own replies, and says one out of step", () => {
+  const m = catalogModule as unknown as SessionApi;
+  // the carriers are no name a tool writes: named anew by the process
   assert.match(m.SESSION_SETTINGS, /^mason_[0-9a-f]{16}\.session$/);
   const carrier = m.SESSION_SETTINGS.replace(".", "\\.");
   const framesOf = (b: Uint8Array): string[] => decode(b).map((f) => f.type);
   const settings = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "it's"]]);
+  const state = { timeZone: "Europe/Berlin", searchPath: 'other, "$user", PUBLIC', dateStyle: "ISO, DMY" };
   // a simple Query ends in itself: no Sync added; a value's quote doubled inside the literal
-  const q = m.asSession(simpleQuery("SELECT 1"), settings);
+  const q = m.asSession(simpleQuery("SELECT 1"), state, settings);
   assert.deepEqual(framesOf(q), ["Q", "Q", "Q"]);
-  assert.match(dec.decode(q), new RegExp(`SET search_path = public, pg_catalog; SET ${carrier} = '\\{"timezone":"Europe/Berlin","myapp\\.x":"it''s"\\}'\0.*SELECT 1\0.*RESET ${carrier}\0`, "s"));
-  // an extended batch with no Sync gets one, before the RESET (ignore_till_sync); one with a Sync none
+  assert.match(dec.decode(q), new RegExp(`^Q.{4}BEGIN; SET search_path = "other", "\\$user", "public"; SET TimeZone = 'Europe/Berlin'; SET DateStyle = 'ISO, DMY'; SET ${carrier} = '\\{"timezone":"Europe/Berlin","myapp\\.x":"it''s"\\}'\0.*SELECT 1\0.*ROLLBACK; RESET ${carrier}; SET search_path = "public", "pg_catalog"; SET TimeZone = 'UTC'; SET DateStyle = 'ISO, MDY'\0`, "s"));
+  // an extended batch with no Sync gets one, before the restore (ignore_till_sync); one with a Sync none
   const parse = message("P", concat(cstring(""), cstring("SELECT 1"), int16(0)));
-  assert.deepEqual(framesOf(m.asSession(parse, settings)), ["Q", "P", "S", "Q"]);
-  assert.deepEqual(framesOf(m.asSession(concat(parse, message("S", new Uint8Array(0))), settings)), ["Q", "P", "S", "Q"]);
+  assert.deepEqual(framesOf(m.asSession(parse, state, settings)), ["Q", "P", "S", "Q"]);
+  assert.deepEqual(framesOf(m.asSession(concat(parse, message("S", new Uint8Array(0))), state, settings)), ["Q", "P", "S", "Q"]);
   const f = (type: string): { type: string; frame: Buffer } => ({ type, frame: Buffer.from(type) });
-  assert.deepEqual(m.unwrapSession([f("C"), f("C"), f("Z"), f("T"), f("D"), f("C"), f("Z"), f("C"), f("Z")]).map((x) => x.type), ["T", "D", "C", "Z"]);
+  const five = ["C", "C", "C", "C", "C", "Z"].map(f);
+  assert.deepEqual(m.unwrapSession([...five, f("T"), f("D"), f("C"), f("Z"), ...five]).map((x) => x.type), ["T", "D", "C", "Z"]);
+  // a request that failed: its error and ReadyForQuery are the request's, the restore still stripped
+  assert.deepEqual(m.unwrapSession([...five, f("E"), f("Z"), ...five]).map((x) => x.type), ["E", "Z"]);
   assert.throws(() => m.unwrapSession([f("E"), f("Z"), f("C"), f("Z")]), /did not take the session's settings/);
-  assert.throws(() => m.unwrapSession([f("C"), f("Z"), f("T"), f("C"), f("Z"), f("C"), f("Z")]), /did not take the session's settings/);
+  assert.throws(() => m.unwrapSession([f("C"), f("C"), f("Z"), f("T"), f("C"), f("Z"), f("C"), f("Z")]), /did not take the session's settings/);
+  // a search_path as Postgres reads the parameter's text: quoted names kept, unquoted folded, the empty list ''
+  assert.equal(m.searchPathSql(' "My Schema" , Other,"a""b"'), '"My Schema", "other", "a""b"');
+  assert.equal(m.searchPathSql(""), "''");
+  assert.equal(m.searchPathSql("x'; DROP TABLE y; --"), `"x'; drop table y; --"`);
 });
 
-test("the catalog's current_setting is the session's under the carrier, Postgres's own (its 42704) otherwise, any case; nothing stays after the RESET", async () => {
-  const m = catalogModule as unknown as { asSession: (b: Uint8Array, s: ReadonlyMap<string, string>) => Uint8Array; unwrapSession: (f: Array<{ type: string; frame: Buffer }>) => Array<{ type: string; frame: Buffer }> };
-  const c = new PgCatalog(schema, { log: () => undefined, setup: [...(catalogModule as unknown as { currentSettingSql: () => string[] }).currentSettingSql(), "SET search_path = public, pg_catalog"] } as never);
+test("session state: the catalog answers under the session's search_path, TimeZone, DateStyle, settings and instant, and is left in its base after, a failed request too", { timeout: 120_000 }, async () => {
+  const m = catalogModule as unknown as SessionApi;
+  const c = new PgCatalog(schema, { log: () => undefined, setup: [...m.currentSettingSql(), "SET search_path = public, pg_catalog"] } as never);
+  const ask = async (sql: string, state = BASE_STATE, own: ReadonlyMap<string, string> = new Map(), now?: number) => {
+    const bytes = await c.run(m.asSession(simpleQuery(sql), state, own), now);
+    const frames = decode(bytes);
+    const err = frames.find((x) => x.type === "E");
+    return err !== undefined ? `${err.error?.C} ${err.error?.M}` : rowsOf(bytes).map((r) => r.join("|"));
+  };
   try {
-    const sql = "SELECT current_setting('TimeZone') || ' ' || current_setting('MYAPP.X', true) || ' ' || current_setting('block_size') || ' ' || (current_setting('no_such', true) IS NULL)::text";
+    // the default path: pg_catalog first, as Postgres's
+    assert.deepEqual(await ask("SELECT current_schemas(false)::text, current_schemas(true)::text, current_schema()"), ["{public}|{pg_catalog,public}|public"]);
+    assert.deepEqual(await ask("SELECT current_schemas(false)::text", { ...BASE_STATE, searchPath: "pg_catalog, public" }), ["{pg_catalog,public}"]);
+    assert.deepEqual(await ask("SELECT 'orders'::regclass::text", { ...BASE_STATE, searchPath: "nowhere" }), '42P01 relation "orders" does not exist');
+    assert.deepEqual(await ask("SELECT 'orders'::regclass::text"), ["orders"]);
+    // the zone and the order: a literal read under them
+    assert.deepEqual(await ask("SELECT '2026-01-02 03:04:05+00'::timestamptz::text, '01/02/2026'::date::text, current_setting('DateStyle')", { timeZone: "Asia/Tokyo", searchPath: "public", dateStyle: "ISO, DMY" }),
+      ["2026-01-02 12:04:05+09|2026-02-01|ISO, DMY"]);
+    // the request's transaction begins at the instant it is run at (PgCatalog.run's `at`, catalog-worker.ts
+    // pinnedClock): every reader of the transaction's start reads it — now(), the keywords, a relative word however it
+    // reaches a date or time — and the real clock goes on (statement_timestamp, clock_timestamp)
+    // (`at` is microseconds since the epoch, as Postgres's transaction start: src/lib/instant.ts)
+    const at = Date.UTC(2026, 0, 2, 20, 0, 0) * 1000;
+    assert.deepEqual(await ask("SELECT now()::text, current_date::text, localtimestamp(0)::text, 'now'::timestamptz = now(), lower('NOW')::timestamptz = now(), 'today'::char(5)::date = current_date, statement_timestamp() > now() + interval '1 month', clock_timestamp() > now() + interval '1 month'",
+      { ...BASE_STATE, timeZone: "Asia/Tokyo" }, new Map(), at), ["2026-01-03 05:00:00+09|2026-01-03|2026-01-03 05:00:00|t|t|t|t|t"]);
+    // a prepared statement's Execute in a request of its own reads that request's instant
+    const parsed = await c.run(m.asSession(message("P", concat(cstring("p_now"), cstring("SELECT now()::text, $1::timestamptz = now()"), int16(0))), BASE_STATE, new Map()), at);
+    assert.ok(!decode(parsed).some((x) => x.type === "E"));
+    const bound = concat(message("B", concat(cstring(""), cstring("p_now"), int16(0), int16(1), int32(3), enc.encode("now"), int16(0))), message("E", concat(cstring(""), int32(0))));
+    assert.deepEqual(rowsOf(await c.run(m.asSession(bound, BASE_STATE, new Map()), at + 1_000_000)).map((r) => r.join("|")), ["2026-01-02 20:00:01+00|t"]);
+    // the overrides, reached by name (the splice writes `public.`), answer the session's with public off the path
     const own = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "v"]]);
-    assert.deepEqual(rowsOf(await c.run(m.asSession(simpleQuery(sql), own))).map((r) => r[0]), ["Europe/Berlin v 8192 true"]);
+    assert.deepEqual(await ask("SELECT public.current_setting('TimeZone') || ' ' || public.current_setting('MYAPP.X', true) || ' ' || public.current_setting('block_size') || ' ' || (public.current_setting('no_such', true) IS NULL)::text", { ...BASE_STATE, searchPath: "nowhere" }, own),
+      ["Europe/Berlin v 8192 true"]);
+    // a failed request: the catalog is left in its base all the same
+    assert.match(String(await ask("SELECT 1/0", { timeZone: "Asia/Tokyo", searchPath: "nowhere", dateStyle: "ISO, YMD" })), /^22012/);
+    assert.deepEqual(rowsOf(await c.run(simpleQuery("SELECT current_setting('TimeZone'), current_setting('DateStyle'), current_setting('search_path')"))).map((r) => r.join("|")),
+      ["UTC|ISO, MDY|public, pg_catalog"]);
     // the next request, of a session holding nothing: the catalog's own, and its error for a name nobody knows
-    assert.deepEqual(rowsOf(await c.run(m.asSession(simpleQuery("SELECT current_setting('myapp.x', true) IS NULL"), new Map()))).map((r) => r[0]), ["t"]);
-    const err = decode(await c.run(simpleQuery("SELECT current_setting('myapp.x')"))).find((f) => f.type === "E");
+    assert.deepEqual(await ask("SELECT public.current_setting('myapp.x', true) IS NULL"), ["t"]);
+    const err = decode(await c.run(simpleQuery("SELECT current_setting('myapp.x')"))).find((x) => x.type === "E");
     assert.deepEqual([err?.error?.C, err?.error?.M], ["42704", 'unrecognized configuration parameter "myapp.x"']);
-    // a catalog whose search_path was moved off public (a forwarded set_config did it): the request pins it, so the
-    // override still answers the session's
-    await c.run(simpleQuery("SELECT pg_catalog.set_config('search_path', 'pg_catalog', false)"));
-    assert.deepEqual(rowsOf(await c.run(m.asSession(simpleQuery("SELECT current_setting('TimeZone')"), own))).map((r) => r[0]), ["Europe/Berlin"]);
     // the carrier is no tool's name: `mason.session` is Postgres's 42704
-    const carrier = decode(await c.run(m.asSession(simpleQuery("SELECT current_setting('mason.session')"), own))).find((f) => f.type === "E");
-    assert.deepEqual([carrier?.error?.C, carrier?.error?.M], ["42704", 'unrecognized configuration parameter "mason.session"']);
+    assert.deepEqual(await ask("SELECT public.current_setting('mason.session')", BASE_STATE, own), '42704 unrecognized configuration parameter "mason.session"');
+  } finally { await c.stop(); }
+});
+
+test("session state: the catalog's transaction starts at exactly the microsecond it is run at, and its real clock after it never reads earlier (issues 372, 363)", { timeout: 120_000 }, async () => {
+  const m = catalogModule as unknown as SessionApi;
+  const c = new PgCatalog(schema, { log: () => undefined, setup: [...m.currentSettingSql(), "SET search_path = public, pg_catalog"] } as never);
+  const ask = async (sql: string, at: number): Promise<string[]> => rowsOf(await c.run(m.asSession(simpleQuery(sql), BASE_STATE, new Map()), at)).map((r) => r.join("|"));
+  try {
+    // the microsecond PGlite reads back is the one handed to it, at every edge of emscripten's rounding and musl's truncation
+    const at = Date.UTC(2026, 0, 2, 20, 0, 0) * 1000;
+    for (const [tail, text] of [[0, "20:00:00"], [1, "20:00:00.000001"], [123_456, "20:00:00.123456"], [499_999, "20:00:00.499999"], [500_000, "20:00:00.5"], [999_999, "20:00:00.999999"]] as const) {
+      assert.deepEqual(await ask("SELECT now()::text, transaction_timestamp() = now()", at + tail), [`2026-01-02 ${text}+00|t`], `.${String(tail).padStart(6, "0")}`);
+    }
+    // a precision rounds Postgres's way: half up, from the microseconds
+    assert.deepEqual(await ask("SELECT current_timestamp(3)::text, localtime(3)::text, 'now'::timestamptz(3) = now(), 'now'::timestamptz(6) = now(), current_time::text, localtimestamp(6)::text", at + 123_500),
+      ["2026-01-02 20:00:00.124+00|20:00:00.124|f|t|20:00:00.1235+00|2026-01-02 20:00:00.1235"]);
+    // the real clock after the request's first message (statement_timestamp, clock_timestamp) is floored at the
+    // instant: an instant from the session's thread a little ahead of this thread's clock is never later than them
+    for (const ahead of [0, 400, 900]) {
+      assert.deepEqual(await ask("SELECT statement_timestamp() >= now(), clock_timestamp() >= now(), clock_timestamp() >= statement_timestamp()", Math.floor((performance.timeOrigin + performance.now()) * 1000) + ahead), ["t|t|t"], `ahead ${ahead} µs`);
+    }
   } finally { await c.stop(); }
 });
 
