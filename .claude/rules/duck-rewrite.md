@@ -437,3 +437,13 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES`, also by `GROUP BY x / 1`, `GROUP BY q`, with HAVING, a rank()
   OVER beside it, two keys, an empty table): the key built without its query's groups, reading the ungrouped column
   (42803 where Postgres answers); `exact-key-built-outside-its-group` (PR 341).
+- A set operation whose one arm reads a numeric's text (`(c / 3)::text`, `avg(c)::text`, `c::text`) beside an arm of
+  arbitrary text (`SELECT b FROM t`, the char(4) `d`, a literal `'abc'`), over `t(id int primary key, a int, b text, c
+  numeric(10,2), d char(4))`: `SELECT (c / 3)::text FROM t UNION ALL SELECT b FROM t ORDER BY 1`, the arms swapped, no
+  ORDER BY, through a derived table: a cell of conv "text" (by contract a NUMERIC's text) given to an arm's plain text and
+  parsed as numeric, 22P02 where the base answered; `text-cell-parsed-as-numeric` (PR 415).
+- A VALUES arm beside a column recorded as a numeric's text (`SELECT (c / 3)::text FROM t UNION ALL VALUES
+  (NULL::text) ORDER BY 1`, `VALUES (NULL)`, `VALUES ((1.5 / 7)::text)`, either arm first, with a quotient column beside
+  it: `SELECT (c / 3)::text, c / 7 FROM t UNION ALL VALUES (NULL::text, 1.5) ORDER BY 2, 1`, through `SELECT * FROM (…)
+  s`): the wrapper's column count and the VALUES rows' appended items derived in two places that disagree, 42804 "has 1
+  columns available but 2 columns specified"; `texts-column-beside-values-arm-width` (PR 415).
