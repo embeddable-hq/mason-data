@@ -2605,7 +2605,9 @@ function userSpliced(text: string, stmt: unknown, base: number, user: string, op
     const literal = cast?.arg?.A_Const;
     const type = cast?.typeName?.names?.at(-1)?.String?.sval;
     const word = literal?.sval?.sval;
-    if (literal !== undefined && typeof literal.location === "number" && type !== undefined && RELATIVE_TYPES.has(type) && word !== undefined && RELATIVE_WORD.test(word)) {
+    if (literal !== undefined && typeof literal.location === "number" && type !== undefined && RELATIVE_TYPES.has(type) && word !== undefined && RELATIVE_WORD.test(word)
+      // a time reads `now` alone: `'today'::time` is Postgres's 22007, left to the catalog to say
+      && (RELATIVE_WORD.exec(word)![1]!.toLowerCase() === "now" || !type.startsWith("time") || type.startsWith("timestamp"))) {
       at.set(literal.location, { kind: "relative", word: RELATIVE_WORD.exec(word)![1]! });
     }
     const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; args?: unknown[]; agg_star?: boolean; over?: unknown; location?: number } }).FuncCall;

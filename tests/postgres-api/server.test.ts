@@ -660,6 +660,9 @@ describe("session state (GitHub issue 253): the session's settings reach every p
       await c.query("SET TimeZone = 'Asia/Tokyo'");
       assert.deepEqual(await text(c, "SELECT 'now'::timestamptz = now(), 'today'::date = current_date, 'tomorrow'::date - 'yesterday'::date, 'today'::timestamptz = date_trunc('day', now()), timestamp 'today' = current_date::timestamp, date 'tomorrow' = current_date + 1, 'now'::timestamp = localtimestamp"),
         ["true", "true", "2", "true", "true", "true", "true"]);
+      // a time reads 'now' alone: 'today'::time is Postgres's own 22007
+      assert.equal((await refused(c.query("SELECT 'today'::time"))).code, "22007");
+      assert.deepEqual(await text(c, "SELECT 'now'::time = localtime, 'now'::timetz = current_time"), ["true", "true"]);
       // a word that is no cast to a time is text, as written
       assert.deepEqual(await text(c, "SELECT 'now', 'today'::text"), ["now", "today"]);
     } finally { await c.end(); }
