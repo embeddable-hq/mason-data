@@ -6148,6 +6148,32 @@ test("exact path: issue 242: a numeric the engine holds as a double with no prog
   } finally { await c.end(); }
 });
 
+test("exact path: percentile_disc or mode() ordered by a numeric Mason computes exactly is refused by name, never the order key's bytes (review r3 of PR 506)", async () => {
+  const c = await client();
+  try {
+    // (class order-key-bytes-as-result: the engine answers what it sorts by, and the rules sort such a value by its exact
+    // order key; PR 506 made c ^ 2, exp(…) * sign(c) and a NULLIF programs, so they reached it too)
+    for (const key of ["b.x / b.y", "b.x ^ 2", "exp(ln(2.5)) * sign(b.x)", "nullif(b.x / b.y, 0)", "coalesce(b.x / b.y, 0)"]) {
+      for (const sql of [`SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) FROM bigdec b`,
+        `SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}))::text FROM bigdec b`,
+        `SELECT b.id % 2, mode() WITHIN GROUP (ORDER BY ${key}) FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY ${key}) FROM bigdec b`,
+        `SELECT x FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) AS x FROM bigdec b) s`,
+        `SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) * 2 FROM bigdec b`]) {
+        await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? "")
+          && /WITHIN GROUP \(ORDER BY a numeric Mason computes exactly/.test(e.message) && /ORDER BY \(a \/ b\)::float8/.test(e.hint ?? ""), sql);
+      }
+    }
+    assert.deepEqual(await unlike(c, [
+      // its ways out answer as Postgres does, and a column, an integer or a float8 key stays the engine's own
+      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::float8), mode() WITHIN GROUP (ORDER BY (b.x / b.y)::float8) FROM bigdec b", "ordered"],
+      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int), mode() WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"],
+      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount), mode() WITHIN GROUP (ORDER BY o.amount), percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount * 2) FROM orders o", "ordered"],
+      ["SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("exact path: the PRINT reader prints a program beside a *, through s.* and a.* … JOIN (issue 218)", async () => {
   const c = await client();
   try {

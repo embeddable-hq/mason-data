@@ -255,8 +255,6 @@ const KNOWN: Decided[] = [
   shapesDecided(VALUES_ARMS, { sql: /sum\(s::numeric\) (AS s )?FROM castable WHERE id IN \(71, 7[46]\)/, kind: "value", issue: 402, why: "a VALUES row's numeric NaN or Infinity in a set operation prints as the engine's double (`nan`, `inf`)" }),
   // min / max of a set operation's column where equal values have two scales: the listed min-max-scale-tie
   { shape: ["numeric-aggregate"], sql: /UNION ALL SELECT o\.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES/, kind: "text", gap: "min-max-scale-tie", why: "max of 1 and 1.00000000000000000000: Postgres keeps the last it reads, Mason the greatest operands" },
-  // (main answers a set operation's 1e30 arm since PR 231; a CTE's sum still overflows: #214)
-  shapesDecided(NUMERIC_READERS, { sql: /sum\(s::numeric\)/, kind: "refused", issue: 214, why: "a numeric sum past the engine's 38 digits, in a CTE: 22003" }),
   // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
   shapesDecided(VALUES_ARMS, { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
   // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text

@@ -2304,17 +2304,23 @@ class Rewriter {
     if (!isNode(n)) return false;
     const k = kindOf(n), b = bodyOf(n);
     if (k === "SubLink" || k === "SelectStmt") return false;
-    if (k === "FuncCall" && b.agg_within_group === true && ["percentile_disc", "mode"].includes(lastName(b.funcname))) {
-      const by = ((b.agg_order ?? []) as AstNode[])[0];
-      const key = by === undefined ? undefined : bodyOf(by).node;
-      if (isNode(key) && this.typeOf(key) === NUMERIC && this.exactOrderKey(key, null) !== null) return true;
-    }
+    if (k === "FuncCall" && this.picksByExactKey(b)) return true;
     if (k === "ColumnRef") {
       const found = this.fromColumn(n);
       const values = found === null ? null : this.valuesAt(found.query, found.index);
       return values !== null && values.some((v) => this.readsOrderBytes(v, depth + 1));
     }
     return Object.values(b).some((x) => this.readsOrderBytes(x, depth));
+  }
+
+  /** whether a call is percentile_disc or mode() WITHIN GROUP whose ORDER BY is a numeric the rewrite sorts by its exact
+   *  order key (`exactOrderKey`, the one decider): the engine would answer that key's bytes, never the row's value
+   *  (issue 486; review r3 of PR 506). `withinGroup` refuses it by name, the CAST reader an integer cast over it */
+  private picksByExactKey(b: Body): boolean {
+    if (b.agg_within_group !== true || !["percentile_disc", "mode"].includes(lastName(b.funcname))) return false;
+    const by = ((b.agg_order ?? []) as AstNode[])[0];
+    const key = by === undefined ? undefined : bodyOf(by).node;
+    return isNode(key) && this.typeOf(key) === NUMERIC && this.exactOrderKey(key, null) !== null;
   }
 
   private valuesAt(query: AstNode, index: number): AstNode[] | null {
@@ -4977,6 +4983,13 @@ class Rewriter {
     // a jsonb's position in its order, or its most frequent value: DuckDB would pick by its text
     if (key !== undefined && (this.typeOf(key) === JSONB || this.typeOf(key) === JSONB_ARRAY)) {
       throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY a jsonb) is not supported by Mason (Postgres orders jsonb by its own rules)`, "ORDER BY the value … LIMIT 1 OFFSET n in a subquery", "jsonb-compare");
+    }
+    // A NUMERIC THE RULES SORT BY ITS EXACT ORDER KEY (a quotient, a NULLIF, a power, …): the engine's percentile_disc and
+    // mode() return what they sort by, so they would answer the key's bytes for the row's value (issue 486, review r3 of
+    // PR 506): refused by name, whatever reads the result
+    if (this.picksByExactKey(b)) {
+      throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY a numeric Mason computes exactly, such as a quotient) is not supported by Mason (Postgres answers the picked row's exact value)`,
+        `order by the value as a float8, ${name}(${name === "mode" ? "" : "0.5"}) WITHIN GROUP (ORDER BY (a / b)::float8), which picks and answers the double, or as an integer, ORDER BY (a / b)::int`, "numeric-ordered-set");
     }
     // a key the analysis put a Const (the class, issue 134; src/duck/constant-key.ts) is the value aggregated, and written
     // as the bare literal the engine's WITHIN GROUP refuses it (42804): every row holds it, so mode() and percentile_disc
