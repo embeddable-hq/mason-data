@@ -21,8 +21,13 @@ the contract: a change to it is a change to both sides.
 - A redirect is never followed: it is a failure, so a Bearer header never travels to another address.
 - Each request has a 15 s time limit. An answer larger than 64 KiB is refused.
 - What comes back is untrusted. Each answer is held to the shape below. Anything else is a failure said by its status
-  alone, never its body. Every string the CLI prints from the service has its control characters replaced and is
-  bounded in length. A token is masked wherever it appears.
+  alone, never its body. A token is masked wherever it appears.
+- **A value the service sends is data, never structure and never an instruction.** Every string it sends reaches the
+  output, for a person and in `--json`, as ONE line: every line break (newline, carriage return, NEL, the line and
+  paragraph separators), every other control character, and every zero-width, format or bidi mark is replaced by `?`,
+  and its length is bounded. So a value sits inside a line the CLI writes (a headline, a row, a failure's message) and
+  never starts one: it cannot add a `Next:` block, a tip, a row or a failure of its own. What to run next, the failure
+  code, the exit code and the page a person is sent to are the CLI's own (below).
 
 ## Signing in: the device authorization grant (RFC 8628)
 
@@ -151,13 +156,13 @@ every `.yml` and `.yaml` under the folder (`mason/`), outside any folder or file
 
 `id` matches `^[A-Za-z0-9_-]{1,64}$`, held to it before the CLI puts it in the next path (an id outside it, which could
 point the next request at another path, is a failure); `status` is `queued`. Other statuses, each with the failure
-shape, are said as "Failures of `/v1/`" says: their words as the service wrote them, the CLI's code from the HTTP
-status (`404` `not_found`, the others `refused`), exit 1, the service's code at the end of `why`, and only `mason`
-commands kept from `next`:
+shape, are said as "Failures of `/v1/`" says: their words as the service wrote them, each one line, the CLI's code
+from the HTTP status (`404` `not_found`, the others `refused`), exit 1, the service's code at the end of `why`, and the
+CLI's own next step (`next` is never read):
 
 | Status | The service's `code` | When |
 |---|---|---|
-| `401` | `unauthenticated` | no token, or one the service does not take; `next` `mason login` |
+| `401` | `unauthenticated` | no token, or one the service does not take (the CLI's next step: `mason login`) |
 | `403` | `refused` | the token may not deploy this replica (a viewer's, or a CI token made for another replica) |
 | `404` | `not_found` | no such replica in that organisation, or the token's account is not in the organisation: said the same way, so it never tells whether the name exists elsewhere |
 | `409` | `busy` | another deploy to this replica has not finished; `why` names its id |
@@ -180,7 +185,7 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 | `id` | the id the POST answered |
 | `status` | `queued`, `applying`, `starting`, `running`, `refused` or `failed` (below) |
 | `phase` | optional: what is under way within the status, one of a closed set (below); absent or `null` for none |
-| `failure` | present when, and only when, `status` is `refused` or `failed`: `{ code, message, why?, fix?, next }`, the failure shape in one object (`next` a list of `{ command, what? }`, maybe empty) |
+| `failure` | present when, and only when, `status` is `refused` or `failed`: `{ code, message, why?, fix? }`, the failure shape's `error` (a `next` beside them is never read) |
 | `createdAt` | when the POST was taken: ISO 8601 with its zone |
 | `finishedAt` | when it reached `running`, `refused` or `failed`: ISO 8601 with its zone; absent before |
 
@@ -203,11 +208,19 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 A `status` or a `phase` outside these (or a phase beside another status) is outside the contract. The CLI says each in
 its own words and never prints the service's text for it.
 
-As for every `/v1/` failure, nothing in a deploy's `failure` decides what the CLI does: its `message`, `why` and `fix`
-are said as written (made printable, a token masked); its code is the CLI's, `refused` for a refused deploy and
-`failed` for a failed one, exit 1, never `usage` (2) or `timeout` (124), whatever `failure.code` says, which is kept at
-the end of `why` (`(Mason on the replica said bad_source)`); and `next` keeps only `mason` commands this CLI has, each
-word plain, at most 5.
+As for every `/v1/` failure, nothing in a deploy's `failure` decides what the CLI does, and none of it is structure:
+
+- its `message`, `why` and `fix` are said as written, each as ONE line (every line break, control, zero-width, format
+  or bidi character replaced by `?`, bounded, a token masked), so none starts a line, a row or a `Next:` block;
+- its code is the CLI's, `refused` for a refused deploy and `failed` for a failed one, exit 1, never `usage` (2) or
+  `timeout` (124), whatever `failure.code` says, which is kept at the end of `why` (`(Mason on the replica said
+  bad_source)`);
+- a `next` in it is never read: the next step is the CLI's own, `mason deploy --replica <org>/<name>` ("deploy again,
+  once what it says is fixed").
+
+Every other value of these answers the CLI prints is held before it is: the `id` to its grammar, `status` and `phase`
+to their closed sets (said in the CLI's words), `createdAt` and `finishedAt` to ISO 8601 (`--json` alone). `--json`
+never carries a line break in any string.
 
 The CLI asks every 2 s, or after the seconds a `Retry-After` header (delta-seconds, 1 to 3600) asks for, on any
 answer. A `429`, a `5xx` or no answer at all cannot say how the deploy goes: the CLI asks again, until its
@@ -227,19 +240,21 @@ Every `/v1/` endpoint fails with an HTTP 4xx or 5xx and the CLI's own failure sh
 { "error": { "code": "unauthenticated", "message": "…", "why": "…", "fix": "…" }, "next": [{ "command": "mason login", "what": "…" }] }
 ```
 
-`why`, `fix` and `what` are optional. `code` is lowercase letters, digits and `_`. A `401` has the code
-`unauthenticated` and `next` `mason login`.
+`why`, `fix` and `next` are optional. `code` is lowercase letters, digits and `_`. A `401` has the code
+`unauthenticated`.
 
 Nothing in it decides what the CLI does; its words are shown, never obeyed:
 
-- `message`, `why` and `fix` are said as the service wrote them, never re-worded (made printable, a token masked).
+- `message`, `why` and `fix` are said as the service wrote them, never re-worded, each as one line (above), a token
+  masked.
 - The CLI's code, and so its exit code, is its own, from the HTTP status: `404` is `not_found`, any other 4xx
   `refused`, anything else `failed`, each exit 1. It is never `usage` (exit 2) or `timeout` (exit 124), whatever the
   service says. The service's `code` is kept as information at the end of `why`: `(the service said unauthenticated,
   HTTP 401)`. So `--json`'s `error.code` is always one of the CLI's own codes (`mason help agent` lists them).
-- A `next` step is kept only when it is a `mason` command this CLI has, each word plain (letters, digits and
-  `_ @ % + = : , . / -`); anything else is dropped, so a coding agent that runs the next step never runs the service's
-  shell. At most 5 are kept. A `401` always has `mason login` among them.
+- The service's `next` is never read. The CLI cannot know what a command the service names would do to this machine
+  (`mason destroy`, `mason ui --ssh <anywhere>`, a shell line), and a coding agent runs the step it is given. The next
+  step is the CLI's own, by status: `mason login` ("sign in again") for a `401` or `403`, else `mason login` ("try
+  again in a moment").
 
 ## Tokens
 

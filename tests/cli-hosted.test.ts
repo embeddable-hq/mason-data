@@ -21,8 +21,10 @@ test("serviceOf: the default when MASON_CLOUD_URL is unset; its origin when it i
   assert.equal(urlProblem(new URL("https://a.example")), null);
 });
 
-test("serviceText: control and bidi characters replaced, bounded, secrets and documented token shapes masked", () => {
-  assert.equal(serviceText("a\u001b[2Jb‮c\u0007d\ne", 100), "a?[2Jb?c?d\ne");
+test("serviceText: one line, every line break, control, format and bidi character replaced, bounded, secrets and documented token shapes masked", () => {
+  assert.equal(serviceText("a\u001b[2Jb\u202ec\u0007d\ne", 100), "a?[2Jb?c?d?e");
+  // one line: no break of any kind survives, nor a zero-width or directional mark
+  assert.equal(serviceText("1\n2\r3\u000b4\u000c5\u00856\u20287\u20298\t9\u200b0\u200e1\u061c2\u20663\ufeff4", 100), "1?2?3?4?5?6?7?8?9?0?1?2?3?4");
   assert.equal(serviceText("abcdef", 3), "abc…");
   const t = `masondata_pat_${"x".repeat(43)}`;
   assert.equal(serviceText(`token ${t}!`, 200), "token masondata_pat_****!");

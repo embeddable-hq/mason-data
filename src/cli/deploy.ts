@@ -29,11 +29,23 @@
  *    replica runs this deploy; 1 when Mason there refused it (its failure's words printed as they came) or the deploy
  *    failed; 124 at the timeout, which stops nothing: the deploy's id says where to look.
  *
- * NOTHING THE SERVICE SAYS STEERS THE CLI (#481's rule, src/cli/hosted.ts): a failure's code and exit code are the
- * CLI's own (`codeOfStatus` for an HTTP failure; `refused` or `failed` by the deploy's status), the service's code kept
- * in `why`; its next steps are this CLI's commands alone; a status and a phase are each one of a closed set (`STATUSES`,
- * `PHASES`), anything else a failure; the deploy's id is held to `DEPLOY_ID` before it goes into a path, and every
- * later answer must name the same id.
+ * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (#481's decision, src/cli/hosted.ts). Every place a
+ * value the service sent reaches what this command prints:
+ *
+ *   value                                   where it is printed                     what holds it
+ *   an HTTP failure's message, why, fix     stderr's failure, --json error          `serviceFailure`: one line each (`serviceText`)
+ *   an HTTP failure's code                  inside why: "(the service said …)"      `^[a-z][a-z0-9_]*$`, 64 chars; the code is `codeOfStatus`'s
+ *   an HTTP failure's next                  nowhere: never read                     the step is `serviceNext`'s, by the status
+ *   a deploy's failure message, why, fix    stderr's failure, --json error          `failureShape`: one line each (`serviceText`)
+ *   a deploy's failure code                 inside why: "(Mason on the replica …)"  the same grammar; the code is `refused` / `failed`
+ *   a deploy's failure next                 nowhere: never read                     the step is `again`'s, the CLI's
+ *   the deploy's id                         stderr's lines, the report, --json      `DEPLOY_ID`, checked before it is in a path or printed
+ *   status, phase                           stderr's lines (the CLI's words), --json  closed sets (`STATUSES`, `PHASES_OF`)
+ *   createdAt, finishedAt                   --json deploy                           `isTime`: digits, `-`, `T`, `:`, `.`, a zone
+ *   an HTTP status, Retry-After             a failure's or a wait's line            a number (Retry-After bounded, never printed)
+ *   why a request got no answer             the wait's line, a failure's why        `call`'s own words, through `serviceText`
+ *
+ * So no value of the service's starts a line, adds a row or a `Next:` step, or puts a line break in --json.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -106,8 +118,9 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   --timeout <interval>     how long to wait for the outcome (default ${DEFAULT_TIMEOUT}; 1s to 24h); the deploy goes on after it
   --json                   as data, once it ends: { dryRun, replica (null when none is named on a dry run),
                            service, files: [{ path, size, sha256 }], totalBytes, warnings (the generated tables
-                           refused, as mason start says them), deploy ({ id, status (queued, applying, starting, running, refused, failed),
-                           phase (null, checking, writing, restarting, syncing), createdAt, finishedAt };
+                           refused, as mason start says them, each one line), deploy ({ id, status (queued,
+                           applying, starting, running, refused, failed), phase (null, checking, writing,
+                           restarting, syncing), createdAt, finishedAt };
                            null on a dry run), error (when the replica refused it, it failed or the wait timed out:
                            { code, message, why, fix }), next }
 
@@ -278,10 +291,11 @@ const isTime = (v: unknown): v is string => typeof v === "string" && v.length <=
 /**
  * `{ deploy: { … } }` held to its shape, the id this command asked for (or, for the POST's answer, one in `DEPLOY_ID`'s
  * grammar, since it goes into the next request's path); null when it is not that shape. Nothing in it steers the CLI:
- * the status and the phase are each one of a closed set, and a refusal's or a failure's code is the CLI's own (`refused`,
- * `failed`, by the status), the service's kept in `why`, its next steps this CLI's own commands alone (`commands`).
+ * the status and the phase are each one of a closed set, and a refusal's or a failure's words are one line each, its code
+ * the CLI's own (`refused`, `failed`, by the status), the service's kept in `why`, and its next step `again`, the CLI's:
+ * the service's `next` is never read.
  */
-export function deployStateOf(json: unknown, id: string | null, secrets: readonly string[], commands: readonly string[]): DeployState | null {
+export function deployStateOf(json: unknown, id: string | null, secrets: readonly string[], again: NextStep[]): DeployState | null {
   if (!obj(json) || !obj(json.deploy)) return null;
   const d = json.deploy;
   if (typeof d.id !== "string" || !DEPLOY_ID.test(d.id) || (id !== null && d.id !== id)) return null;
@@ -297,8 +311,9 @@ export function deployStateOf(json: unknown, id: string | null, secrets: readonl
   let failure: Failure | null = null;
   if (status === "refused" || status === "failed") {
     if (!obj(d.failure)) return null;
-    failure = failureShape(d.failure, d.failure.next, secrets, commands,
-      status === "refused" ? { code: "refused", said: (c) => `Mason on the replica said ${c}` } : { code: "failed", said: (c) => `the service said ${c}` });
+    failure = failureShape(d.failure, secrets, status === "refused"
+      ? { code: "refused", said: (c) => `Mason on the replica said ${c}`, next: again }
+      : { code: "failed", said: (c) => `the service said ${c}`, next: again });
     if (failure === null) return null;
   } else if (d.failure !== undefined && d.failure !== null) return null;
   return { id: d.id, status, phase, createdAt: d.createdAt, finishedAt: typeof d.finishedAt === "string" ? d.finishedAt : null, failure };
@@ -356,7 +371,9 @@ export async function deploy(argv: string[]): Promise<number> {
   if (isFailure(files)) return failed("deploy", files, { json });
   const totalBytes = files.reduce((n, x) => n + x.size, 0);
   const listed = files.map(({ path: p, size, sha256 }) => ({ path: p, size, sha256 }));
-  const base = { replica: replica === null ? null : replicaText(replica), service: service.base, files: listed, totalBytes, warnings: checked.warnings };
+  // --json carries each warning as one line (a string with no line break); a person reads its lines on stderr
+  const base = { replica: replica === null ? null : replicaText(replica), service: service.base, files: listed, totalBytes,
+    warnings: checked.warnings.map((w) => w.split("\n").map((l) => l.trim()).filter(Boolean).join(" ")) };
   if (!json) for (const w of checked.warnings) process.stderr.write(textEntry("  ! ", w));
 
   if (dryRun) {
@@ -385,11 +402,10 @@ export async function deploy(argv: string[]): Promise<number> {
     return failed("deploy", { ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}whether the deploy was made is not known`,
       fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)` }, { json });
   }
-  // the commands a failure's next step may name: this CLI's own (read when needed: the registry imports this module)
-  const { COMMANDS } = await import("./registry.ts");
-  const commands = COMMANDS.map((c) => c.name);
-  if (sent.status !== 201) return failed("deploy", serviceFailure(sent, secrets, commands) ?? unexpected(service, sent, "a deploy was sent"), { json });
-  const first = deployStateOf(sent.json, null, secrets, commands);
+  if (sent.status !== 201) return failed("deploy", serviceFailure(sent, secrets) ?? unexpected(service, sent, "a deploy was sent"), { json });
+  // what to run after a refused or failed deploy: the CLI's own step, never one the service names
+  const again: NextStep[] = [[`mason deploy --replica ${replicaText(r)}`, "deploy again, once what it says is fixed"]];
+  const first = deployStateOf(sent.json, null, secrets, again);
   if (first === null || first.status !== "queued") return failed("deploy", unexpected(service, sent, "a deploy was sent"), { json });
   const id = first.id;
   const s = styleErr();
@@ -451,8 +467,8 @@ export async function deploy(argv: string[]): Promise<number> {
     }
     if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
     // a refusal of the question (the token revoked meanwhile, the replica gone) is the service's, as it worded it
-    if (a.status !== 200) return ended(serviceFailure(a, secrets, commands) ?? unexpected(service, a, "the deploy's state was asked for"));
-    const now = deployStateOf(a.json, id, secrets, commands);
+    if (a.status !== 200) return ended(serviceFailure(a, secrets) ?? unexpected(service, a, "the deploy's state was asked for"));
+    const now = deployStateOf(a.json, id, secrets, again);
     if (now === null) return ended(unexpected(service, a, "the deploy's state was asked for"));
     state = now; unsure = null; unsureSaid = null;
     if (!FINAL.has(state.status)) show(stateLine(state));
