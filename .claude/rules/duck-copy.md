@@ -134,3 +134,9 @@ again before each review. Its Learn step adds to this list; each bullet names th
   under a low `MASON_DUCKDB_MEMORY` at `MASON_COPY_PARALLEL` 3: it syncs in chunks of a page's values, or fails with
   the operator's way out and never the engine's advice (issue 96); and many moderate ones (~2 KB, 140,000 rows) under
   128 MB, never refused before they are read (PR 380). A checkpoint that invalidates the database is issue 371's.
+- `sizing-guard-from-derived-estimate`: a refusal decided up front by arithmetic on the source's catalog (out-of-line
+  bytes a row group times a share, against the memory limit), measured on one shape and applied to all. Sync
+  `CREATE TABLE t (id bigint PRIMARY KEY, v text)`, `v` `STORAGE EXTERNAL`, 140,000 rows of `repeat(md5(id::text), 64)`
+  (~365 MiB out of line) under `memoryLimit '128MB'`, `copyParallel` 3: it syncs and equals the source, as the base
+  does. The authority for "cannot be written" is the engine's own failure at the write (53200 at the commit or the
+  checkpoint), said as the chunk out-of-memory path says it, never a formula the base's behaviour contradicts (PR 380).
