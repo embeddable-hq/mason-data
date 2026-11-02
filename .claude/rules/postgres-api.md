@@ -51,9 +51,13 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   database to it (`databaseNameSql`, which moves another database holding the name, PGlite's `template0` / `template1`, aside), so `current_database()` and
   `pg_database` agree. The project's name names the slot alone. DETECTOR: `tests/conventions.test.ts`,
   `tests/database-name.test.ts`.
-- **What a tool sets is honoured or refused, never silently ignored**: `TimeZone` moves every timestamptz the session
-  sends; `extra_float_digits` below 1, a `client_encoding` other than UTF8 and a `DateStyle` other than ISO are
-  refused; a parameter Mason has no opinion on is given to the catalog Postgres to validate (an unknown name is
+- **What a tool sets is honoured, read back or refused by name, never silently ignored** (issues 64, 253): `TimeZone`
+  moves every timestamptz the session sends; `DateStyle`'s field order (`ISO, DMY` / `YMD` / `MDY`, a part not named
+  kept as `check_datestyle` keeps it) is held and read by both engines' input of a date; `extra_float_digits` 1..3 and
+  the isolation levels (`SET TRANSACTION`, transaction-local; `SET SESSION CHARACTERISTICS`) are remembered, so `SHOW`
+  and `current_setting` read back what was set; `extra_float_digits` below 1, a `client_encoding` other than UTF8, a
+  `DateStyle` other than ISO and an `IntervalStyle` other than `postgres` (gap `interval-style`) are refused; a
+  parameter Mason has no opinion on is given to the catalog Postgres to validate (an unknown name is
   `42704`, as on Postgres) and kept by the session, so `SHOW` answers it. **What a session says about TLS is the
   session's** (`tlsParameters`): `SHOW ssl` / `current_setting('ssl')` and the `ssl_*` the listener knows
   are one table read before the catalog Postgres, which serves no TLS and said `off` on every TLS session.
@@ -66,7 +70,24 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   `set_config` is a SET, or under `is_local` a SET LOCAL, so the listener's (translate.ts `setConfig`: alone in a
   SELECT, else `set-config-forms`): forwarded, it ran on the one shared catalog connection and stayed for every session.
   The changed parameters are
-  told once per request, before its ReadyForQuery (`ready`). The
+  told once per request, before its ReadyForQuery (`ready`).
+- **A session's state for an answer is ONE value, applied by ONE applier per engine** (issue 253): its TimeZone,
+  search_path and DateStyle are `Session.sessionState()` (server.ts), built from `sessionSetting` alone; the plan, its
+  cache key, the analysis, a Bind's values, a run and every catalog request take that value. The catalog Postgres is
+  given it by `sessionSetSql` (catalog.ts: `asSession` around every request, which sets the catalog's base back after,
+  `analyze` / `readParameters`, the lookups of views.ts and row-filter.ts); DuckDB by store.ts `SessionSetup.settle`,
+  pg-eval told the zone and DateStyle from it. The catalog runs a request under the session's search_path as Postgres
+  does (pg_catalog first unless listed), so the overrides (`version()`, `current_setting`, `format_type`) are reached
+  by the splice of every call of them from the parse tree (`userSpliced`), never by the path's order. The clock is
+  never spliced: each catalog request is a transaction of its own (`asSession`: BEGIN … ROLLBACK) whose first message
+  runs with PGlite's wall clock held at the session's instant (`PgCatalog.run`'s `at`, catalog-worker.ts
+  `pinnedClock`), so the catalog's transaction start IS the session's and every reader of it (now(), the keywords, a
+  relative word however it is spelt, computed or bound) agrees with the DuckDB path; a block's two paths see one
+  instant. A prepared statement whose search_path moved since its Parse is planned again
+  (Postgres's plancache), and a result that moved is 0A000 `cached plan must not change result type`; a zone alone
+  plans nothing again. DETECTOR: `tests/conventions.test.ts` "session state" (no SET of the four in src/ outside the
+  appliers; `this.vars.timeZone` / `.searchPath` / `.dateStyle` read only where they are set), and the parameters'
+  class test in `tests/postgres-api/server.test.ts` (every name `setParameter` knows has its verdict). The
   catalog's `current_setting` was a fourth reader answering its own values after a SET (issues 40, 41). DETECTOR:
   `tests/conventions.test.ts` (one reader; every catalog request carries the settings or is named), `tests/duck-wire.test.ts`
   and the oracle's setting cases.
@@ -204,3 +225,20 @@ again before each review. Its Learn step adds to this list; each bullet names th
   session (PR 146; issue 63).
 - A statement of no table under `SET TimeZone = 'America/St_Johns'` (`SELECT '12:30'::time::timetz`): the catalog's UTC
   answer (PR 166; issue 168).
+- A parse-tree field at its default value, which libpg-query's JSON omits (`SELECT length(current_time(0)::text),
+  length(localtimestamp(0)::text)`, a precision of 0 against 1 and 2; any node whose `_N` kind or flag says a value is
+  written while the value is 0, false or empty): the absent field read as "not written" where the node's kind says it
+  is; `parse-tree-default-field-read-as-absent` (PR 333).
+- A parameter value Postgres rejects that Mason's own parsing of it accepts (`SET DateStyle = 'YMD, DMY'`, `'ISO,
+  SQL'`, two orders or two styles in one value): accepted and remembered where the catalog Postgres answers 22023 with
+  its DETAIL; a parameter's validity is the catalog Postgres's, never re-derived; `parameter-validity-rederived`
+  (PR 333).
+- Every spelling the parser reads as one value, where a rule keys on a literal's text (`E'now'`, `$$now$$`,
+  `U&'now'`, `'now'::text::timestamptz`, `'now'::char(4)::timestamptz`, `'now'::varchar(2)::timestamptz`, the bare
+  `now() = 'now'`, `lower('now')::timestamptz`, `coalesce('now','x')::timestamptz`, `(SELECT 'now')::timestamptz`, a
+  CASE, a bound `$1 = 'now'`), each `= now()` on a statement of no table: one spelling spliced and the rest read
+  another clock, or a written typmod truncating the spliced text; `splice-confirmed-by-one-spelling` (PR 333).
+- A statement whose first token is not at byte 0 (`/* app */ SELECT 'now'::timestamptz = now()`, `-- a line\nSELECT
+  …`, `SELECT 1; SELECT E'now'::timestamptz = now()`, the same under EXPLAIN, a CTE or a sub-SELECT): a position read
+  in the whole text's frame and used in the statement's, or the reverse, so a rewrite lands beside its token instead
+  of on it; `offset-mixed-between-two-frames` (PR 333).

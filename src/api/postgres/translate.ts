@@ -263,7 +263,12 @@ function setStatement(s: VariableSetStmt): Translation {
   if (s.kind === "VAR_SET_DEFAULT") return { kind: "set", name, value: null, local: s.is_local === true, tag: "SET" };
   if (s.kind === "VAR_RESET_ALL") return { kind: "set", name: "all", value: null, local: false, tag: "RESET" };
   // SET TRANSACTION is for the transaction alone, whichever way it is spelt; SET SESSION CHARACTERISTICS is the session's
-  if (s.kind === "VAR_SET_MULTI") return { kind: "set", name, value: "", local: name === "transaction", tag: "SET" };
+  // its value is the isolation level it names, '' for none (`READ ONLY` alone): the listener remembers the level
+  if (s.kind === "VAR_SET_MULTI") {
+    const level = (s.args ?? []).map((a) => (a as { DefElem?: { defname?: string; arg?: Node } }).DefElem).find((d) => d?.defname === "transaction_isolation");
+    const value = level?.arg !== undefined && kindOf(level.arg) === "A_Const" ? constText(bodyOf<A_Const>(level.arg)) : "";
+    return { kind: "set", name, value, local: name === "transaction", tag: "SET" };
+  }
   if (s.kind !== "VAR_SET_VALUE") throw new Unsupported(`SET ${name}: ${String(s.kind)} is not supported`, s.location ?? null);
   const parts = (s.args ?? []).map((a) => {
     if (kindOf(a) === "A_Const") return constText(bodyOf<A_Const>(a));

@@ -41,11 +41,11 @@ function start(): { worker: Worker; port: MessagePort; signal: Int32Array } {
 }
 
 /** Runs one statement on the worker's Postgres and returns its rows as text; Postgres's error is a PgEvalError. */
-export function pgEvalSync(sql: string, params: unknown[], timeZone: string): Array<Array<string | null>> {
+export function pgEvalSync(sql: string, params: unknown[], timeZone: string, dateStyle = "ISO, MDY"): Array<Array<string | null>> {
   current ??= start();
   const w = current;
   Atomics.store(w.signal, 0, 0);
-  w.port.postMessage({ sql, params, timeZone });
+  w.port.postMessage({ sql, params, timeZone, dateStyle });
   const waited = Atomics.wait(w.signal, 0, 0, TIMEOUT_MS);
   const got = receiveMessageOnPort(w.port);
   if (waited === "timed-out" || got === undefined) {

@@ -67,7 +67,7 @@ import type { GapId } from "../../duck/gaps.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "../../duck/statement.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
-import { asRole, asSession, catalogPolicies, currentSettingSql, databaseNameSql, LATEST_SQL, PgCatalog, unwrapRole, unwrapSession } from "./catalog.ts";
+import { asRole, asSession, CATALOG_BASE_SQL, catalogPolicies, currentSettingSql, databaseNameSql, LATEST_SQL, PgCatalog, unwrapRole, unwrapSession, type SessionState } from "./catalog.ts";
 import { wrongDatabaseHint } from "../../lib/database-name.ts";
 import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
@@ -155,9 +155,10 @@ export interface DuckAnswer {
    *  has let go of the main thread (src/duck/store.ts scalarCallsSettled); DuckDB's connection is free again then */
   close(): void;
 }
-/** what a DuckDB statement of a session runs under (`Session.duckSession`): its TimeZone and search_path, and every
- *  setting `current_setting(name)` reads beside a copied table (src/duck/rewrite.ts, src/duck/store.ts settle) */
-export interface DuckSession { timeZone: string; searchPath: string; settings: Readonly<Record<string, string>> }
+/** what a DuckDB statement of a session runs under (`Session.duckSession`): the session's state (its TimeZone,
+ *  search_path and DateStyle, `Session.sessionState`), and every setting `current_setting(name)` reads beside a copied
+ *  table (src/duck/rewrite.ts, src/duck/store.ts settle) */
+export interface DuckSession extends SessionState { settings: Readonly<Record<string, string>> }
 export interface DuckRunner {
   /** `sql`: a plan's (src/duck/plan.ts PlannedSql), never a statement's text; `fields`: Postgres's columns for the
    *  result (the plan's), which DuckDB's values are written as */
@@ -204,11 +205,11 @@ export interface DuckOptions {
   /** `grants`: the session's role, held after Postgres's analysis (src/duck/grants.ts): a 42501 StatementError where
    *  it reads what the role may not; null for a session with no role beside roles; undefined where no roles exist.
    *  `outputs`: the generated planner's alone (src/duck/plan.ts `PlanOptions.outputs`), never a wire statement's */
-  plan(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: NonNullable<RawStmt["stmt"]>, base: number, paramOids: readonly number[], searchPath: string,
-    timeZone: string, userTypes: ReadonlyMap<string, number>, wireBound?: boolean, grants?: RoleGrants | null, relations?: ReadonlyMap<string, string>, outputs?: boolean): Promise<DuckPlan>;
+  plan(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, stmt: NonNullable<RawStmt["stmt"]>, base: number, paramOids: readonly number[], under: SessionState,
+    userTypes: ReadonlyMap<string, number>, wireBound?: boolean, grants?: RoleGrants | null, relations?: ReadonlyMap<string, string>, outputs?: boolean): Promise<DuckPlan>;
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
-  parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], timeZone: string): Promise<(string | null)[]>;
+  parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
   /** moves when what a plan is made from moves outside the schema (a stored JSON path ready or gone, src/duck/kept.ts):
    *  the plans kept are made again */
   generation?(): number;
@@ -504,24 +505,45 @@ const spell = (name: string): string => SPELLING[name] ?? name;
 
 interface Vars {
   timeZone: string;
+  /** DateStyle as SHOW answers it: always ISO, with the order a SET named (`dateStyleOf`) */
+  dateStyle: string;
   applicationName: string;
   searchPath: string;
   /** every other parameter the session set, validated by the catalog Postgres; SHOW answers from here */
   other: Map<string, string>;
 }
 
-const defaultVars = (): Vars => ({ timeZone: "UTC", applicationName: "", searchPath: '"$user", public', other: new Map() });
+const defaultVars = (): Vars => ({ timeZone: "UTC", dateStyle: "ISO, MDY", applicationName: "", searchPath: '"$user", public', other: new Map() });
 const copyVars = (v: Vars): Vars => ({ ...v, other: new Map(v.other) });
+
+/** a generated table's plan is made under no session: UTC, under `public`, ISO with month-day-year */
+const GENERATED_SESSION: SessionState = { timeZone: "UTC", searchPath: "public", dateStyle: "ISO, MDY" };
 
 /** One parameter's value carried from one set of values to another, from where `setParameter` keeps it. */
 function copySetting(name: string, from: Vars, to: Vars): void {
   switch (name) {
     case "timezone": case "time zone": to.timeZone = from.timeZone; return;
+    case "datestyle": to.dateStyle = from.dateStyle; return;
     case "application_name": to.applicationName = from.applicationName; return;
     case "search_path": to.searchPath = from.searchPath; return;
   }
-  const value = from.other.get(name);
-  if (value === undefined) to.other.delete(name); else to.other.set(name, value);
+  const key = SETTING_KEY[name] ?? name;
+  const value = from.other.get(key);
+  if (value === undefined) to.other.delete(key); else to.other.set(key, value);
+}
+
+/** the parameter a SET of another name moves: SET TRANSACTION and SET SESSION CHARACTERISTICS are Postgres's spellings of
+ *  transaction_isolation and default_transaction_isolation (translate.ts setStatement) */
+const SETTING_KEY: Readonly<Record<string, string>> = { transaction: "transaction_isolation", "session characteristics": "default_transaction_isolation" };
+
+/** the isolation levels Postgres knows, as SHOW answers them */
+const ISOLATION_LEVELS = ["serializable", "repeatable read", "read committed", "read uncommitted"];
+
+/** the one refusal of a DateStyle that is Mason's own: an output style other than ISO (its value as the catalog
+ *  Postgres canonicalised it, `German, DMY`), which this API never writes */
+function isoDateStyle(canonical: string, value: string): string {
+  if (!/^ISO,/.test(canonical)) throw new PgError({ code: "0A000", message: `DateStyle ${value} is not supported: this API writes every date and time in ISO 8601 (DateStyle ISO)` });
+  return canonical;
 }
 
 /** A placeholder's name as Postgres's `valid_custom_variable_name` reads it: two or more simple identifiers, dotted. */
@@ -534,14 +556,18 @@ function placeholderName(name: string): void {
 const FIXED = new Map<string, (vars: Vars, user: string) => string>([
   ["server_version", () => SERVER_VERSION], ["server_version_num", () => SERVER_VERSION_NUM],
   ["server_encoding", () => "UTF8"], ["client_encoding", () => "UTF8"],
-  ["datestyle", () => "ISO, MDY"], ["intervalstyle", () => "postgres"],
+  ["datestyle", (v) => v.dateStyle], ["intervalstyle", () => "postgres"],
   ["timezone", (v) => v.timeZone], ["application_name", (v) => v.applicationName], ["search_path", (v) => v.searchPath],
   ...["integer_datetimes", "standard_conforming_strings", "default_transaction_read_only", "transaction_read_only", "in_hot_standby"].map((n): [string, () => string] => [n, () => "on"]),
   ["is_superuser", () => "off"],
   // the session's user, and no role SET over it (SET ROLE is its own name or NONE, setStatement): Postgres's `none`
   ["session_authorization", (_v, user) => user], ["role", () => "none"],
-  ["transaction_isolation", () => "read committed"], ["default_transaction_isolation", () => "read committed"],
-  ["extra_float_digits", () => "1"], ["max_identifier_length", () => "63"],
+  // what SET TRANSACTION and SET SESSION CHARACTERISTICS said, remembered (`setParameter`): nothing is ever written, so
+  // every level answers the same rows
+  ["transaction_isolation", (v) => v.other.get("transaction_isolation") ?? v.other.get("default_transaction_isolation") ?? "read committed"],
+  ["default_transaction_isolation", (v) => v.other.get("default_transaction_isolation") ?? "read committed"],
+  // remembered: every float is sent as the shortest text that reads back exactly, Postgres's output at 1 and above
+  ["extra_float_digits", (v) => v.other.get("extra_float_digits") ?? "1"], ["max_identifier_length", () => "63"],
 ]);
 function fixedParameter(name: string, vars: Vars, user: string): string | null {
   return FIXED.get(name)?.(vars, user) ?? null;
@@ -578,9 +604,9 @@ interface Statement {
   catalogName: string | null;
   /** a DuckDB statement's plan, made at Parse */
   duck?: DuckPlan;
-  /** the session's search_path and TimeZone it was planned under at its Parse: a plan made again for it is made
-   *  under them, never a later SET's */
-  plannedUnder?: { searchPath: string; timeZone: string };
+  /** the session's state it was planned under at its Parse (or when planned again, `executeDuck`): a plan made again
+   *  for a row count is made under it, never a third; a search_path moved since plans it again, as Postgres's plancache */
+  plannedUnder?: SessionState;
   /** its plan for an Execute with a row count, made at the first such Execute when its plan has a LEFT lateral only
    *  a bound streams (PlannedSql.unboundedLateral, `boundOnWire`) */
   duckOnWire?: DuckPlan;
@@ -722,6 +748,8 @@ class Session {
   vars: Vars = defaultVars();
   /** the session's parameters as its startup left them (its packet's `application_name` and `options`): what RESET restores */
   startupVars: Vars = defaultVars();
+  /** a startup packet's DateStyle, canonicalised by the catalog Postgres once the password is read (`password`) */
+  private startupDateStyle: string | null = null;
   /** each reported parameter's value as the client was last told it (`reportChanges`) */
   readonly reported = new Map<string, string>();
   tx: TxState = "none";
@@ -1048,6 +1076,20 @@ class Session {
     if (this.phase !== "password") return;   // the socket closed while the ledger was read
     this.door.logins?.settled(this);
     if (this.wrongDatabase !== null) { this.fatal("3D000", `database "${this.wrongDatabase}" does not exist`, wrongDatabaseHint(this.server.database)); return; }
+    // a startup packet's DateStyle, read as Postgres reads it (`canonicalElsewhere`): refused as the startup's other
+    // parameters are, before the session begins
+    if (this.startupDateStyle !== null) {
+      try {
+        const canonical = await this.canonicalElsewhere("datestyle", this.startupDateStyle, this.sessionState().dateStyle);
+        this.setParameter("datestyle", isoDateStyle(canonical, this.startupDateStyle));
+        this.startupVars = copyVars(this.vars);
+      } catch (err) {
+        const e = asPgError(err, "");
+        this.fatal(e.fields.code, e.message, e.fields.hint);
+        return;
+      }
+      if (this.phase !== "password") return;   // the socket closed while the catalog was asked
+    }
     this.token = token;
     this.presented = m.password;
     this.verifiedAt = this.server.now();
@@ -1088,23 +1130,41 @@ class Session {
         if (value !== null && !isUtf8(value)) throw new PgError({ code: "22023", message: `invalid value for parameter "client_encoding": "${value}"`, hint: "this API sends UTF8 only" });
         return;
       case "datestyle":
-        if (value !== null && !/^\s*iso\b/i.test(value) && !/,\s*iso\s*$/i.test(value) && value.trim() !== "") {
-          throw new PgError({ code: "0A000", message: `DateStyle ${value} is not supported: this API writes every date and time in ISO 8601 (DateStyle ISO)` });
-        }
+        // the value is the catalog Postgres's canonical one (`canonicalElsewhere`): its validity and the order a part not
+        // named keeps are Postgres's check_datestyle, never derived here. A startup packet's is read after the password
+        // (`startupDateStyle`), where the catalog can be asked
+        if (atStartup) { this.startupDateStyle = value; return; }
+        this.vars.dateStyle = value === null ? "ISO, MDY" : isoDateStyle(value, value);
         return;
       case "extra_float_digits": {
         const n = value === null ? 1 : Number(value);
         if (!Number.isInteger(n) || n < -15 || n > 3) throw new PgError({ code: "22023", message: `${n} is outside the valid range for parameter "extra_float_digits" (-15 .. 3)` });
         if (n < 1) throw new PgError({ code: "0A000", message: `extra_float_digits ${n} is not supported: this API sends every float as the shortest text that reads back exactly (Postgres's extra_float_digits >= 1, the default since Postgres 12); fewer digits would be a different number` });
+        if (value === null) this.vars.other.delete(name); else this.vars.other.set(name, String(n));
         return;
       }
       case "standard_conforming_strings":
         if (value !== null && !/^(on|true|yes|1)$/i.test(value)) throw new PgError({ code: "0A000", message: "standard_conforming_strings off is not supported: a string literal is read as Postgres reads it by default" });
         return;
-      case "intervalstyle": return;
-      case "transaction_isolation": case "default_transaction_isolation": case "transaction": case "session characteristics":
-        // read committed on a store that is never written: every level answers the same rows
+      case "intervalstyle": {
+        const style = value?.trim().toLowerCase() ?? "postgres";
+        if (style === "postgres") return;
+        if (["postgres_verbose", "sql_standard", "iso_8601"].includes(style)) {
+          throw gapRefusal("interval-style", `IntervalStyle ${value} is not supported: every interval is written in Postgres's default style`, "SET IntervalStyle = postgres");
+        }
+        throw new PgError({ code: "22023", message: `invalid value for parameter "IntervalStyle": "${value}"`, hint: "Available values: postgres, postgres_verbose, sql_standard, iso_8601." });
+      }
+      case "transaction_isolation": case "default_transaction_isolation": case "transaction": case "session characteristics": {
+        // remembered, so SHOW and current_setting read back what was set; a store that is never written answers the same
+        // rows at every level. SET TRANSACTION … READ ONLY and the like name no level: nothing to remember
+        const key = SETTING_KEY[name] ?? name;
+        if (value === null) { this.vars.other.delete(key); return; }
+        const level = value.trim().toLowerCase().replace(/\s+/g, " ");
+        if (level === "" && (name === "transaction" || name === "session characteristics")) return;
+        if (!ISOLATION_LEVELS.includes(level)) throw new PgError({ code: "22023", message: `invalid value for parameter "${key}": "${value}"`, hint: `Available values: ${ISOLATION_LEVELS.join(", ")}.` });
+        this.vars.other.set(key, level);
         return;
+      }
       case "default_transaction_read_only": case "transaction_read_only":
         if (value !== null && /^(off|false|no|0)$/i.test(value)) throw new PgError({ code: "25006", message: "cannot set transaction read-write mode: this API is read-only" });
         return;
@@ -1135,6 +1195,7 @@ class Session {
     const start = this.startupVars;
     switch (name) {
       case "timezone": case "time zone": this.vars.timeZone = start.timeZone; return;
+      case "datestyle": this.vars.dateStyle = start.dateStyle; return;
       case "application_name": this.vars.applicationName = start.applicationName; return;
       case "search_path": this.vars.searchPath = start.searchPath; return;
     }
@@ -1234,6 +1295,24 @@ class Session {
   /** The catalog Postgres validates a parameter this server has no opinion on; its own error is the answer. Inside a
    *  transaction that is ROLLED BACK: the sidecar is one connection every session shares, and a SET that stuck there
    *  was every session's (review of #480). The value itself lives in this session's `vars.other`. */
+  /**
+   * A PARAMETER'S VALUE AS THE CATALOG POSTGRES READS IT, from the session's `current` one: SET LOCAL to `current`, then
+   * to `value`, then SHOW, in a transaction rolled back (as `validateElsewhere`, nothing stays on the shared connection).
+   * Postgres's refusal (22023 and its DETAIL) is relayed as its own; its answer is the canonical value SHOW gives.
+   */
+  private async canonicalElsewhere(name: string, value: string, current: string): Promise<string> {
+    const sql = `BEGIN; SET LOCAL ${quoteIdent(name)} = ${quoteLiteral(current)}; SET LOCAL ${quoteIdent(name)} = ${quoteLiteral(value)}; SHOW ${quoteIdent(name)}; ROLLBACK`;
+    const messages = decodeBackend(Buffer.from(await this.server.catalog.run(Buffer.concat([frame("Q", cstr(sql)), frame("Q", cstr("ROLLBACK"))]))));
+    const err = messages.find((x) => x.type === "ErrorResponse");
+    if (err?.type === "ErrorResponse") {
+      throw new PgError({ code: err.fields.C ?? "22023", message: err.fields.M ?? `invalid value for parameter "${name}"`, ...(err.fields.D !== undefined ? { detail: err.fields.D } : {}), ...(err.fields.H !== undefined ? { hint: err.fields.H } : {}) });
+    }
+    const row = messages.find((x) => x.type === "DataRow");
+    const shown = row?.type === "DataRow" ? row.values[0]?.toString("utf8") : undefined;
+    if (shown === undefined) throw new PgError({ code: "XX000", message: `SHOW ${name} answered no row in the catalog (Mason bug: report it)` }, 500);
+    return shown;
+  }
+
   private async validateElsewhere(name: string, value: string | null): Promise<void> {
     const sql = value === null ? `RESET ${quoteIdent(name)}` : `SET LOCAL ${quoteIdent(name)} = ${quoteLiteral(value)}`;
     // one batch, so no other session's statement lands inside the transaction: the ROLLBACK in the first query is not
@@ -1408,20 +1487,19 @@ class Session {
   /** A DuckDB statement's plan (Postgres's analysis and the DuckDB SQL), kept per text, search_path, TimeZone,
    *  declared parameter types and the session's role until the schema or the roles change. Every statement DuckDB
    *  runs has one: never its text as written. */
-  private async duckPlan(raw: RawStmt, whole: string, paramOids: readonly number[], under: { searchPath: string; timeZone: string } = this.vars, wireBound = false): Promise<DuckPlan> {
+  private async duckPlan(raw: RawStmt, whole: string, paramOids: readonly number[], under: SessionState = this.sessionState(), wireBound = false): Promise<DuckPlan> {
     const stmt = raw.stmt!;
     const bytes = Buffer.from(whole, "utf8");
     const base = raw.stmt_location ?? 0;
     const text = bytes.subarray(base, raw.stmt_len ? base + raw.stmt_len : bytes.length).toString("utf8");
-    const { searchPath, timeZone } = under;
     const grants = this.grants();
     // the plan cache's key is the role the plan is held to: the effective one (a default's plans are that role's), and
     // a user with no role under a file with no default its own key, never a token's ("") — and, where the role filters
     // rows, the filters bound to the user's values (a plan holds them as literals)
     const rowsKey = rowsKeyOf(grants);
     const key = `${grants?.noRole !== undefined ? "\u0000no role" : this.roleName() ?? ""}${rowsKey === "" ? "" : `\u0000${rowsKey}`}`;
-    return this.server.duckPlan(text, paramOids, searchPath, timeZone, wireBound, key, async () => {
-      const plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, searchPath, timeZone, this.server.userTypes(), wireBound, grants);
+    return this.server.duckPlan(text, paramOids, under, wireBound, key, async () => {
+      const plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), text, stmt, base, paramOids, under, this.server.userTypes(), wireBound, grants);
       return rowsKey === "" ? plan : { ...plan, rowsKey };
     });
   }
@@ -1547,7 +1625,8 @@ class Session {
     return live.file !== null && live.problem === null && live.default === null;
   }
 
-  /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it */
+  /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it, and
+   *  every call of an override (`userSpliced`) */
   private spliced(text: string, raw: RawStmt): string {
     return userSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS);
   }
@@ -1588,7 +1667,12 @@ class Session {
     // fail closed first (a role the file lacks, a file that cannot be read), then the catalog's role of the session
     // (`catalogRole`; both read the roles once, with no await between)
     const role = this.catalogRole();
-    const reply = unwrapSession(splitFrames(await this.server.catalog.run(asSession(role === undefined ? message : asRole(message, role), this.sessionSettings()))));
+    // the transaction's instant, which a block's statements on either path read (`txNow`): begun here when none is
+    // (reset at the end of a statement outside a block, as executeDuck's)
+    const now = this.txNow ??= this.server.now();
+    // the request's transaction begins at that instant (asSession, catalog-worker.ts pinnedClock): the catalog's own
+    // transaction start is the session's, whatever reads it
+    const reply = unwrapSession(splitFrames(await this.server.catalog.run(asSession(role === undefined ? message : asRole(message, role), this.sessionState(), this.sessionSettings()), now)));
     if (role === undefined) return reply;
     const { frames, setRoleRefused } = unwrapRole(reply);
     if (setRoleRefused !== null) {
@@ -1618,7 +1702,7 @@ class Session {
     if (statement.duckOnWire === undefined) {
       this.running = controller;
       let bounded: DuckPlan;
-      try { bounded = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.vars, true); }
+      try { bounded = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.sessionState(), true); }
       catch (e) {
         if (!(e instanceof StatementError) || e.fields.code === "57014") throw e;
         this.server.log(`session ${this.id}: a statement planned again for an Execute's row count was refused (${e.fields.code}: ${e.fields.message}): its Parse's plan runs`);
@@ -1655,7 +1739,7 @@ class Session {
     try {
       const grants = this.grants();
       plan = await this.server.options.duck.plan((b) => this.server.catalog.run(b), found.text, t.query, base + Buffer.byteLength(text.slice(0, found.offset)), paramOids,
-        this.vars.searchPath, this.vars.timeZone, this.server.userTypes(), false, grants);
+        this.sessionState(), this.server.userTypes(), false, grants);
       // the row filters it was made under, as every plan of a session carries them (Session.duckPlan)
       const rowsKey = rowsKeyOf(grants);
       if (rowsKey !== "") plan = { ...plan, rowsKey };
@@ -1696,7 +1780,7 @@ class Session {
    *  transaction's start where the plan reads it (its positions follow the statement's own parameters) */
   private async duckValues(plan: DuckPlan, params: readonly (string | null)[], clock: { parse: number; exec: number }): Promise<(string | null)[]> {
     const own = params.length === 0 ? params
-      : await this.server.options.duck.parameters((b) => this.server.catalog.run(b), plan.params, params, this.vars.timeZone);
+      : await this.server.options.duck.parameters((b) => this.server.catalog.run(b), plan.params, params, this.sessionState());
     const values = [...own];
     for (const [which, at] of Object.entries(plan.clock ?? {}) as Array<["parse" | "exec", number]>) values[at - 1] = new Date(clock[which]).toISOString();
     return values;
@@ -1715,7 +1799,18 @@ class Session {
    */
   private async duckSession(): Promise<DuckSession> {
     const settings = new Map([...await this.server.catalogSettings(), ...this.sessionSettings()]);
-    return { timeZone: settings.get("timezone") ?? "UTC", searchPath: settings.get("search_path") ?? "", settings: Object.fromEntries(settings) };
+    return { ...this.sessionState(), settings: Object.fromEntries(settings) };
+  }
+
+  /**
+   * THE SESSION'S STATE FOR AN ANSWER, AS ONE VALUE (GitHub issue 253): its TimeZone, search_path and DateStyle, each
+   * `sessionSetting`'s — the one reader SHOW answers from — so a statement planned, analysed, run on DuckDB or answered by
+   * the catalog Postgres is made under the same values (src/api/postgres/catalog.ts SessionState). Nothing else reads
+   * the session's zone, path or order.
+   */
+  private sessionState(): SessionState {
+    const read = (name: string, otherwise: string): string => this.sessionSetting(name) ?? otherwise;
+    return { timeZone: read("timezone", "UTC"), searchPath: read("search_path", '"$user", public'), dateStyle: read("datestyle", "ISO, MDY") };
   }
 
   /** A DuckDB statement run: its columns (Postgres's, where it has a plan), and its rows to read, encoded in the
@@ -1762,7 +1857,7 @@ class Session {
     const mine = this.running === null;
     if (mine) this.running = c.controller;
     try {
-      const rows = await c.answer.fetch(c.formats, { timeZone: this.vars.timeZone });
+      const rows = await c.answer.fetch(c.formats, { timeZone: this.sessionState().timeZone });
       if (rows === null) c.done = true;
       else for (const r of rows) c.pending.push(r);
     } catch (e) { c.done = true; throw e; }
@@ -1882,9 +1977,13 @@ class Session {
     const placeholder = await this.isPlaceholder(t.name);
     if (placeholder) placeholderName(t.name);
     else if (!this.decidesHere(t.name)) await this.validateElsewhere(t.name, t.value);
+    // DateStyle: Postgres's check_datestyle decides its validity (22023 with its DETAIL) and the order a part not named
+    // keeps, from the session's value (GitHub issue 253 review r1); Mason adds only its refusal of a non-ISO style
+    const value = t.name === "datestyle" && t.value !== null ? await this.canonicalElsewhere("datestyle", t.value, this.sessionState().dateStyle) : t.value;
     const tx = this.settingsAtStart();
-    if (t.value === null) await this.resetParameter(t.name); else this.setParameter(t.name, t.value);
-    if (!t.local) copySetting(t.name, this.vars, tx.commit);
+    if (value === null) await this.resetParameter(t.name); else this.setParameter(t.name, value === t.value ? value : isoDateStyle(value, t.value!));
+    // transaction_isolation is the transaction's alone, however it is SET (Postgres resets it as the transaction ends)
+    if (!t.local && t.name !== "transaction_isolation") copySetting(t.name, this.vars, tx.commit);
     // once named a placeholder stays defined, '', whichever way the transaction ends: its definition is no value it undoes
     if (placeholder) for (const v of [tx.rollback, tx.commit]) if (!v.other.has(t.name)) v.other.set(t.name, "");
     return [commandComplete(t.tag)];
@@ -2104,8 +2203,9 @@ class Session {
       }
       // Postgres's analysis says the result's columns and the parameters' types, and DuckDB's SQL is made from it
       if (statement.shape.kind === "duckdb") {
-        statement.duck = await this.duckPlan(raw, m.sql, m.paramTypes);
-        statement.plannedUnder = { searchPath: this.vars.searchPath, timeZone: this.vars.timeZone };
+        const under = this.sessionState();
+        statement.duck = await this.duckPlan(raw, m.sql, m.paramTypes, under);
+        statement.plannedUnder = under;
         // the implicit transaction begins with the Parse, as Postgres's does (start_xact_command): its literals read it
         statement.parsedNow = this.txNow ??= this.server.now();
       }
@@ -2151,6 +2251,7 @@ class Session {
         catalog: { description, rows: statement.explainCatalog === undefined ? rows : catalogExplained(rows, statement.explainCatalog), sent: 0, done } });
       return [bound];
     }
+    await this.plannedAgainIfMoved(statement);
     const planned = statement.duck ?? statement.explain?.plan;
     const expected = planned !== undefined ? planned.params.length : 0;
     if (m.params.length !== expected) throw new PgError({ code: "08P01", message: `bind message supplies ${m.params.length} parameters, but prepared statement "${m.statement}" requires ${expected}` });
@@ -2282,6 +2383,24 @@ class Session {
     if (this.asked !== null && plan.jsonReads !== undefined) this.asked.jsonReads = plan.jsonReads;
   }
 
+  /**
+   * THE SEARCH_PATH MOVED SINCE A STATEMENT WAS PLANNED: at its Bind it is planned again under the session's state now,
+   * as Postgres's plancache plans a cached statement again (`GetCachedPlan` in exec_bind_message; GitHub issue 63) —
+   * never run against tables named under another path. Its parameters keep the types the Parse fixed; a result that
+   * moved (names, types, count) is Postgres's 0A000, and a refusal of the new plan (42P01) is the Bind's, as Postgres's.
+   * The portal keeps the plan it was bound with. The zone alone plans nothing again: the plan reads it at execution.
+   */
+  private async plannedAgainIfMoved(statement: Statement): Promise<void> {
+    const now = this.sessionState();
+    if (statement.raw === null || statement.duck === undefined || statement.plannedUnder === undefined || statement.plannedUnder.searchPath === now.searchPath) return;
+    const again = await this.duckPlan(statement.raw, statement.sql, statement.duck.params, now);
+    const result = (p: DuckPlan): string => JSON.stringify(p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null);
+    if (result(again) !== result(statement.duck)) throw new PgError({ code: "0A000", message: "cached plan must not change result type" });
+    statement.duck = again;
+    statement.plannedUnder = now;
+    delete statement.duckOnWire;
+  }
+
   /** an Execute of a DuckDB statement's portal: its cursor begun at the first, then paged or streamed */
   private async executeDuck(m: Extract<FrontendMessage, { type: "Execute" }>, portal: Portal, statement: Statement, controller: AbortController): Promise<Buffer[]> {
     // each Execute of a paged portal is a message of its own: the last one's row in the request log carries the reads
@@ -2291,7 +2410,7 @@ class Session {
       // A ROLE'S ROW FILTERS MOVED SINCE THE PARSE (the roles file edited): planned again under them, as Postgres plans a
       // prepared statement again after its policies change — where its columns and parameters are what the Parse said
       if (statement.raw !== null && (statement.duck.rowsKey ?? "") !== rowsKeyOf(this.grants())) {
-        const again = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.vars);
+        const again = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.sessionState());
         const shape = (p: DuckPlan): string => JSON.stringify([p.params, p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null]);
         if (shape(again) === shape(statement.duck)) { statement.duck = again; delete statement.duckOnWire; }
       }
@@ -2402,8 +2521,12 @@ const USER_OPS: Readonly<Record<string, string>> = { SVFOP_SESSION_USER: "sessio
 const SESSION_OPS: ReadonlySet<string> = new Set(["SVFOP_SESSION_USER"]);
 /** a user the roles file holds to nothing: its catalog role is `NO_ROLE_CATALOG`, never a name it should answer */
 const HELD_TO_NOTHING_OPS: ReadonlySet<string> = new Set(Object.keys(USER_OPS));
-/** `userSpliced`'s mark for the `pg_catalog.` of a qualified `current_setting`, never a keyword's text */
-const SETTING = "\u0000setting";
+/** the functions Mason overrides in the catalog's `public` (src/api/postgres/catalog.ts currentSettingSql,
+ *  sourceTypeNames; `version()` in `Server`'s setup), each with what a call of it may be written with: `pg_catalog.` too,
+ *  or unqualified only (`pg_catalog.format_type`, written out, is Postgres's own) */
+const OVERRIDES: Readonly<Record<string, { qualified: boolean }>> = { version: { qualified: true }, current_setting: { qualified: true }, format_type: { qualified: false } };
+/** one splice of `userSpliced`: the span the parser placed at a location, and what is written in its place */
+type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: string };
 
 /**
  * WHAT A STATEMENT THE CATALOG ANSWERS READS OF ITS SESSION, spliced in its text at the parse tree's locations:
@@ -2415,22 +2538,29 @@ const SETTING = "\u0000setting";
  *   src/api/postgres/catalog.ts asRole), spliced only for a user the roles file holds to nothing
  *   (`HELD_TO_NOTHING_OPS`), whose catalog role is `NO_ROLE_CATALOG`: Postgres answers its own name for all three to a
  *   login with no grant.
- * - `pg_catalog.current_setting(…)`, so written, is the session's override (`public.current_setting`, catalog.ts
- *   currentSettingSql): Postgres's own is called by its OID's C function whatever its catalog row says, so it cannot be
- *   replaced, and so qualified it answered the catalog's values after a SET (GitHub issue 40).
+ * - EVERY CALL OF AN OVERRIDE (`OVERRIDES`: `version()`, `current_setting(…)`, `format_type(…)`), however written, is
+ *   the override's (`public.<name>`): the catalog runs a request under the session's search_path, which puts pg_catalog
+ *   first as Postgres's does (GitHub issue 253), so the override is reached by name, never by the path's order — and
+ *   Postgres's own `pg_catalog.current_setting` is called by its OID's C function whatever its catalog row says, so it
+ *   cannot be replaced (GitHub issue 40). The call is read from the parse tree's FuncCall, never from the text.
+ * The clock is never spliced: the catalog's transaction begins at the session's instant (catalog.ts asSession), so
+ * every reader of it is the session's as written (review r3 of PR 333).
  * `base`: the statement's offset in the text the parse tree's locations count from.
  */
 function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>): string {
-  // a user keyword by its location, or `setting`: the `pg_catalog.` of a qualified current_setting
-  const at = new Map<number, string>();
+  const at = new Map<number, Splice>();
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) { for (const x of n) walk(x); return; }
     if (typeof n !== "object" || n === null) return;
     const f = (n as { SQLValueFunction?: { op?: string; location?: number } }).SQLValueFunction;
-    if (f !== undefined && f.op !== undefined && ops.has(f.op) && typeof f.location === "number") at.set(f.location, USER_OPS[f.op]!);
-    const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; location?: number } }).FuncCall;
+    if (f !== undefined && f.op !== undefined && typeof f.location === "number" && ops.has(f.op)) at.set(f.location, { kind: "user", keyword: USER_OPS[f.op]! });
+    const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; over?: unknown; location?: number } }).FuncCall;
     const name = c?.funcname?.map((x) => x.String?.sval ?? "");
-    if (c !== undefined && typeof c.location === "number" && name?.length === 2 && name[0] === "pg_catalog" && name[1] === "current_setting") at.set(c.location, SETTING);
+    if (c !== undefined && name !== undefined && typeof c.location === "number" && c.over === undefined && (name.length === 1 || (name.length === 2 && name[0] === "pg_catalog"))) {
+      const fn = name.at(-1)!;
+      const override = OVERRIDES[fn];
+      if (override !== undefined && (name.length === 1 || override.qualified)) at.set(c.location, { kind: "override", name: fn });
+    }
     for (const v of Object.values(n)) walk(v);
   };
   walk(stmt);
@@ -2438,29 +2568,37 @@ function userSpliced(text: string, stmt: unknown, base: number, user: string, op
   const bytes = Buffer.from(text, "utf8");
   const parts: Buffer[] = [];
   let end = bytes.length;
-  for (const loc of [...at.keys()].sort((a, b) => b - a)) {
-    const keyword = at.get(loc)!;
+  const qualified = (name: string): RegExp => new RegExp(`^(?:(?:pg_catalog|"pg_catalog")\\s*\\.\\s*)?(?:${name}|"${name}")(?![A-Za-z0-9_$])`, "i");
+  for (const loc of [...at.keys()].sort((x, y) => y - x)) {
+    const splice = at.get(loc)!;
     const from = loc - base;
-    if (from < 0) continue;
-    let written: string;
-    if (keyword === SETTING) {
-      // the qualifier as written (`pg_catalog.`, `"pg_catalog" .`): what is spliced is its span, never a guess at it
-      const q = /^(?:pg_catalog|"pg_catalog")\s*\.\s*/i.exec(bytes.subarray(from, from + 64).toString("utf8"));
-      if (q === null) continue;
-      written = q[0];
+    if (from < 0 || from >= end) continue;
+    const ahead = bytes.subarray(from, Math.min(end, from + 128)).toString("utf8");
+    let written: string, put: string;
+    if (splice.kind === "override") {
+      // the name as written (`version`, `pg_catalog.current_setting`, `"pg_catalog" . "version"`): its span, never a guess
+      const m = qualified(splice.name).exec(ahead);
+      if (m === null) continue;
+      written = m[0];
+      put = `public.${splice.name}`;
     } else {
-      if (bytes.subarray(from, from + keyword.length).toString("utf8").toLowerCase() !== keyword) continue;
+      const keyword = splice.keyword;
+      if (ahead.slice(0, keyword.length).toLowerCase() !== keyword) continue;
       // the keyword must end there (`user` is the start of `user_name`): the parser placed it, so a word character after is not it
-      if (/^[A-Za-z0-9_$]/.test(bytes.subarray(from + keyword.length, from + keyword.length + 1).toString("utf8"))) continue;
+      if (/^[A-Za-z0-9_$]/.test(ahead.slice(keyword.length, keyword.length + 1))) continue;
       written = keyword;
+      put = `(SELECT ${quoteLiteral(user)}::name AS ${keyword})`;
     }
     parts.unshift(bytes.subarray(from + Buffer.byteLength(written), end));
-    parts.unshift(Buffer.from(keyword === SETTING ? "public." : `(SELECT ${quoteLiteral(user)}::name AS ${keyword})`, "utf8"));
+    parts.unshift(Buffer.from(put, "utf8"));
     end = from;
   }
   parts.unshift(bytes.subarray(0, end));
   return Buffer.concat(parts).toString("utf8");
 }
+
+/** the splice of a statement the catalog answers, exported for its unit tests (tests/postgres-api/server.test.ts) */
+export const userSplicedForTest = userSpliced;
 
 /** the text of one statement of a simple query, from the parser's byte offsets */
 function statementText(sql: string, raw: RawStmt): string {
@@ -2645,7 +2783,7 @@ class Server {
    * analysis starts the instance with the new DDL. A plan whose schema or generation moved while it was made is
    * returned to its caller and not kept.
    */
-  async duckPlan(text: string, paramOids: readonly number[], searchPath: string, timeZone: string, wireBound: boolean, role: string, make: () => Promise<DuckPlan>): Promise<DuckPlan> {
+  async duckPlan(text: string, paramOids: readonly number[], under: SessionState, wireBound: boolean, role: string, make: () => Promise<DuckPlan>): Promise<DuckPlan> {
     const schema = this.schema();
     const roles = this.rolesNow();
     const generation = this.options.duck?.generation?.() ?? 0;
@@ -2653,7 +2791,8 @@ class Server {
     // the zone too: a plan holds the values Postgres parsed its literals to, under the session's zone
     // and the bound: an Execute's row count plans a LEFT lateral of a list otherwise (Session.boundOnWire), kept beside
     // and the role: a plan is held to it as it is made (src/duck/grants.ts), so a role's plans are its own
-    const key = `${searchPath}\u0000${timeZone}\u0000${paramOids.join(",")}\u0000${wireBound ? "wire" : ""}\u0000${role}\u0000${text}`;
+    // and the DateStyle: Postgres reads a literal date in its order (`'01/02/2026'::date`), at analysis
+    const key = `${under.searchPath}\u0000${under.timeZone}\u0000${under.dateStyle}\u0000${paramOids.join(",")}\u0000${wireBound ? "wire" : ""}\u0000${role}\u0000${text}`;
     const hit = this.duckPlans.get(key);
     if (hit !== undefined) return hit;
     const plan = await make();
@@ -2686,7 +2825,8 @@ class Server {
         ...currentSettingSql(),
         // latest(x ORDER BY …), Mason's aggregate, analysed as Postgres's own (catalog.ts LATEST_SQL)
         ...LATEST_SQL,
-        "SET search_path = public, pg_catalog",
+        // the catalog's base state, which every request of a session leaves it in (catalog.ts CATALOG_BASE)
+        CATALOG_BASE_SQL,
         ...databaseNameSql(options.database),
       ],
       ...(options.catalogStatementMs !== undefined ? { statementMs: options.catalogStatementMs } : {}),
@@ -2733,7 +2873,7 @@ class Server {
     if (duck === undefined) throw new Error("a generated table needs the listener's engine (Mason bug: report it)");
     const catalog = (b: Uint8Array): Promise<Uint8Array> => this.catalog.run(b);
     return {
-      plan: (text, stmt, relations) => { this.schema(); return duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null, relations, true); },
+      plan: (text, stmt, relations) => { this.schema(); return duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], GENERATED_SESSION, this.userTypes(), false, null, relations, true); },
       rows: (sql) => { this.schema(); return catalogRows(catalog, sql); },
     };
   }
@@ -2776,7 +2916,7 @@ class Server {
             const probe = filterProbe(f, r.types, g.attributes ?? new Map());
             const stmt = (await parseSql(probe)).stmts?.[0]?.stmt;
             if (stmt === undefined) throw new Error(`a filter's read does not parse: ${probe}`);
-            try { await this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined); }
+            try { await this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], GENERATED_SESSION, this.userTypes(), false, undefined); }
             catch (e) {
               if (!(e instanceof StatementError)) throw e;
               problems.push(`${f.at}.where: ${e.fields.message}${e.fields.hint !== undefined ? ` (${e.fields.hint})` : ""} — the predicate is read as SELECT 1 FROM ${f.table} WHERE ${f.where.text}`);

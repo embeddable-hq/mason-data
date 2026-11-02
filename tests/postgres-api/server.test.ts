@@ -180,7 +180,8 @@ describe("session parameters", () => {
   test("Metabase's and Grafana's session statements are accepted", async () => {
     const c = await connect();
     await c.query("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ UNCOMMITTED");
-    assert.equal((await c.query("SHOW TRANSACTION ISOLATION LEVEL")).rows[0]!.transaction_isolation, "read committed");
+    // remembered, as Postgres answers it (GitHub issue 64): nothing is ever written, so every level answers the same rows
+    assert.equal((await c.query("SHOW TRANSACTION ISOLATION LEVEL")).rows[0]!.transaction_isolation, "read uncommitted");
     await c.query("SET statement_timeout = 30000");
     await c.query("SET application_name = 'grafana'");
     assert.equal((await c.query("SHOW application_name")).rows[0]!.application_name, "grafana");
@@ -519,4 +520,265 @@ describe("a refused or failed statement is a line of the log, trace or not (a BI
     // refuse() builds the frame first: its bytes are counted in the statement's row of the request log, then it is sent
     assert.deepEqual(sends.map((l) => l.trim()), ["const response = errorResponse(e.fields);"], "the one non-FATAL sender is refuse()");
   });
+});
+
+describe("session state (GitHub issue 253): the session's settings reach every path that answers", () => {
+  const one = async (c: pg.Client, sql: string): Promise<unknown[]> => (await c.query({ text: sql, rowMode: "array" }) as unknown as { rows: unknown[][] }).rows[0]!;
+  const text = async (c: pg.Client, sql: string): Promise<string[]> => (await one(c, sql)).map((v) => v instanceof Date ? v.toISOString() : String(v));
+
+  test("session state: TimeZone and SET LOCAL TimeZone reach a statement the catalog answers, and the one beside a copied table", async () => {
+    const c = await connect();
+    try {
+      await c.query("SET TimeZone = 'Asia/Tokyo'");
+      assert.deepEqual(await text(c, "SELECT '2026-01-02 03:04:05+00'::timestamptz::text, to_char('2026-01-02 03:04:05+00'::timestamptz, 'HH24:MI TZ')"), ["2026-01-02 12:04:05+09", "12:04 JST"]);
+      await c.query("SET TimeZone = 'America/New_York'");
+      assert.deepEqual(await text(c, "SELECT '12:30'::time::timetz::text, extract(timezone_hour FROM current_time(0))::text IN ('-5', '-4')"), ["12:30:00-05", "true"]);
+      await c.query("RESET TimeZone");
+      await c.query("BEGIN");
+      await c.query("SET LOCAL TimeZone = 'Asia/Tokyo'");
+      assert.deepEqual(await text(c, "SELECT '2026-01-02 03:04:05+00'::timestamptz::text"), ["2026-01-02 12:04:05+09"]);
+      assert.deepEqual(await text(c, "SELECT '2026-01-02 03:04:05+00'::timestamptz::text FROM orders LIMIT 1"), ["2026-01-02 12:04:05+09"]);
+      await c.query("COMMIT");
+      assert.deepEqual(await text(c, "SELECT '2026-01-02 03:04:05+00'::timestamptz::text"), ["2026-01-02 03:04:05+00"]);
+    } finally { await c.end(); }
+  });
+
+  test("session state: search_path reaches the catalog as Postgres's, pg_catalog first; the overrides answer with public off the path", async () => {
+    const c = await connect();
+    try {
+      assert.deepEqual(await text(c, "SELECT current_schemas(false)::text, current_schemas(true)::text, current_schema()"), ["{public}", "{pg_catalog,public}", "public"]);
+      await c.query("SET search_path = pg_catalog, public");
+      assert.deepEqual(await text(c, "SELECT current_schemas(false)::text"), ["{pg_catalog,public}"]);
+      await c.query("SET search_path = nowhere");
+      await c.query("SET application_name = 'probe'");
+      const e = await refused(c.query("SELECT 'orders'::regclass"));
+      assert.deepEqual([e.code, e.message], ["42P01", 'relation "orders" does not exist']);
+      assert.deepEqual(await text(c, "SELECT current_setting('search_path'), pg_catalog.current_setting('TimeZone'), current_setting('application_name'), version() LIKE 'PostgreSQL 18%'"),
+        ["nowhere", "UTC", "probe", "true"]);
+      assert.deepEqual(await text(c, "SELECT count(*) FROM pg_class WHERE relname = 'orders' AND pg_table_is_visible(oid)"), ["0"]);
+      await c.query("RESET search_path");
+      assert.deepEqual(await text(c, "SELECT count(*) FROM pg_class WHERE relname = 'orders' AND pg_table_is_visible(oid)"), ["1"]);
+      // a catalog statement prepared under one path, run under another: Postgres plans it again
+      const q = { name: "vis", text: "SELECT count(*)::int AS n FROM pg_class WHERE relname = 'orders' AND pg_table_is_visible(oid)" };
+      assert.equal((await c.query(q)).rows[0].n, 1);
+      await c.query("SET search_path = nowhere");
+      assert.equal((await c.query(q)).rows[0].n, 0);
+    } finally { await c.end(); }
+  });
+
+  test("session state: DateStyle's order is held and applied on both paths; a non-ISO style stays refused", async () => {
+    const c = await connect();
+    try {
+      await c.query("SET DateStyle = 'ISO, DMY'");
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, DMY"]);
+      assert.deepEqual(await text(c, "SELECT '01/02/2026'::date::text"), ["2026-02-01"]);
+      assert.deepEqual(await text(c, "SELECT '01/02/2026'::date::text AS d FROM orders LIMIT 1"), ["2026-02-01"]);
+      assert.deepEqual((await c.query({ text: "SELECT $1::date::text AS d FROM orders LIMIT 1", values: ["01/02/2026"] })).rows[0].d, "2026-02-01");
+      await c.query("SET DateStyle = 'ISO, YMD'");
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, YMD"]);
+      await c.query("RESET DateStyle");
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, MDY"]);
+      await c.query("BEGIN");
+      await c.query("SET LOCAL DateStyle = 'ISO, DMY'");
+      assert.deepEqual(await text(c, "SELECT '01/02/2026'::date::text"), ["2026-02-01"]);
+      await c.query("ROLLBACK");
+      assert.deepEqual(await text(c, "SELECT '01/02/2026'::date::text"), ["2026-01-02"]);
+      assert.equal((await refused(c.query("SET DateStyle = 'German'"))).code, "0A000");
+      assert.equal((await refused(c.query("SET DateStyle = 'nonsense'"))).code, "22023");
+    } finally { await c.end(); }
+  });
+
+  test("session state: IntervalStyle other than postgres is refused by name; an invalid one is Postgres's 22023", async () => {
+    const c = await connect();
+    try {
+      await c.query("SET IntervalStyle = 'postgres'");
+      assert.deepEqual(await text(c, "SHOW IntervalStyle"), ["postgres"]);
+      const e = await refused(c.query("SET IntervalStyle = 'iso_8601'"));
+      assert.equal(e.code, "0A000");
+      assert.match(e.detail ?? "", /interval-style/);
+      const bad = await refused(c.query("SET IntervalStyle = 'nonsense'"));
+      assert.deepEqual([bad.code, bad.message, bad.hint], ["22023", 'invalid value for parameter "IntervalStyle": "nonsense"', "Available values: postgres, postgres_verbose, sql_standard, iso_8601."]);
+      await c.query("BEGIN");
+      assert.equal((await refused(c.query("SET LOCAL IntervalStyle = 'sql_standard'"))).code, "0A000");
+      assert.equal((await refused(c.query("SELECT 1"))).code, "25P02");
+      await c.query("ROLLBACK");
+    } finally { await c.end(); }
+  });
+
+  test("session state: extra_float_digits and the isolation levels are remembered, read back by SHOW and current_setting on both paths", async () => {
+    const c = await connect({ options: "-c extra_float_digits=2" });
+    try {
+      assert.deepEqual(await text(c, "SHOW extra_float_digits"), ["2"]);
+      await c.query("SET extra_float_digits = 3");
+      assert.deepEqual(await text(c, "SHOW extra_float_digits"), ["3"]);
+      assert.deepEqual(await text(c, "SELECT current_setting('extra_float_digits') FROM orders LIMIT 1"), ["3"]);
+      await c.query("BEGIN");
+      await c.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+      assert.deepEqual(await text(c, "SHOW transaction_isolation"), ["repeatable read"]);
+      assert.deepEqual(await text(c, "SELECT current_setting('transaction_isolation') FROM orders LIMIT 1"), ["repeatable read"]);
+      await c.query("COMMIT");
+      assert.deepEqual(await text(c, "SHOW transaction_isolation"), ["read committed"]);
+      await c.query("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+      assert.deepEqual(await text(c, "SHOW default_transaction_isolation"), ["serializable"]);
+      await c.query("BEGIN");
+      assert.deepEqual(await text(c, "SHOW transaction_isolation"), ["serializable"]);
+      await c.query("COMMIT");
+    } finally { await c.end(); }
+  });
+
+  test("session state: the clock functions of a catalog statement are the transaction's instant, named and typed as Postgres's; clock_timestamp stays the real clock", async () => {
+    const c = await connect();
+    try {
+      const r = await c.query("SELECT now(), CURRENT_DATE, LOCALTIME(0), CURRENT_TIMESTAMP(0), transaction_timestamp(), clock_timestamp() >= now() AS later");
+      assert.deepEqual(r.fields.map((f) => [f.name, f.dataTypeID]), [["now", 1184], ["current_date", 1082], ["localtime", 1083], ["current_timestamp", 1184], ["transaction_timestamp", 1184], ["later", 16]]);
+      assert.equal(r.rows[0].later, true);
+      await c.query("BEGIN");
+      const [a] = await one(c, "SELECT now()") as [Date];
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const [b] = await one(c, "SELECT now() FROM orders LIMIT 1") as [Date];
+      const [d] = await one(c, "SELECT transaction_timestamp()") as [Date];
+      await c.query("COMMIT");
+      assert.equal(b.getTime(), a.getTime(), "one instant on both paths in a block");
+      assert.equal(d.getTime(), a.getTime());
+      // a string that says now() is no call
+      assert.deepEqual(await text(c, "SELECT 'now()' AS t"), ["now()"]);
+    } finally { await c.end(); }
+  });
+
+  test("session state: a clock keyword's precision is the one written, 0 included, on the catalog path (review r1 of PR 333)", async () => {
+    const c = await connect();
+    try {
+      // libpg-query's JSON leaves out a typmod of 0: the precision is read from the text, never from the field's presence
+      assert.deepEqual(await text(c, "SELECT length(current_time(0)::text), length(current_timestamp(0)::text), length(localtime(0)::text), length(localtimestamp(0)::text)"), ["11", "22", "8", "19"]);
+      assert.deepEqual(await text(c, "SELECT current_time(0)::text ~ '^[0-9]{2}:[0-9]{2}:[0-9]{2}[+-]', localtimestamp(1)::text ~ '[.][0-9]$|:[0-9]{2}$', CURRENT_TIMESTAMP ( 0 )::text ~ ':[0-9]{2}[+-]'"), ["true", "true", "true"]);
+    } finally { await c.end(); }
+  });
+
+  test("session state: a relative word cast to a date or time type is the transaction's instant, as now() is, on the catalog path (CI's oracle at 76730cb)", async () => {
+    const c = await connect();
+    try {
+      await c.query("SET TimeZone = 'Asia/Tokyo'");
+      assert.deepEqual(await text(c, "SELECT 'now'::timestamptz = now(), 'today'::date = current_date, 'tomorrow'::date - 'yesterday'::date, 'today'::timestamptz = date_trunc('day', now()), timestamp 'today' = current_date::timestamp, date 'tomorrow' = current_date + 1, 'now'::timestamp = localtimestamp"),
+        ["true", "true", "2", "true", "true", "true", "true"]);
+      // a time reads 'now' alone: 'today'::time is Postgres's own 22007
+      assert.equal((await refused(c.query("SELECT 'today'::time"))).code, "22007");
+      assert.deepEqual(await text(c, "SELECT 'now'::time = localtime, 'now'::timetz = current_time"), ["true", "true"]);
+      // every spelling the parser reads as the word, and every way it reaches the type, from Postgres's analysis
+      // (review r2 of PR 333): E'', $$ $$, U&'', a chain of casts through text, varchar or unknown, the comparison's coercion
+      assert.deepEqual(await text(c, "SELECT E'now'::timestamptz = now(), E'today'::date = current_date, $$now$$::timestamptz = now(), U&'now'::timestamptz = now(), U&'n!006Fw' UESCAPE '!'::timestamptz = now()"),
+        ["true", "true", "true", "true", "true"]);
+      assert.deepEqual(await text(c, "SELECT 'now'::text::timestamptz = now(), 'now'::varchar::timestamptz = now(), 'now'::unknown::timestamptz = now(), now() = 'now', 'now' = now(), 'é' || 'x' = 'éx' AND E'now'::timestamptz = now()"),
+        ["true", "true", "true", "true", "true", "true"]);
+      assert.equal((await refused(c.query("SELECT 'today'::text::time"))).code, "22007");
+      // prepared, with a parameter beside it
+      assert.equal((await c.query({ text: "SELECT $1::int AS n, now() = 'now' AS same", values: ["1"] })).rows[0].same, true);
+      // review r3 of PR 333, the class every reader of the transaction's start (the catalog's transaction begins at the
+      // session's instant, catalog.ts asSession): a statement not at byte 0 (a comment before it, a second statement)
+      assert.deepEqual(await text(c, "/* app */ SELECT 'now'::timestamptz = now(), E'now'::timestamptz = now(), now() = 'now', date 'today' = current_date"), ["true", "true", "true", "true"]);
+      assert.deepEqual(await text(c, "-- a comment line\nSELECT E'now'::timestamptz = now(), 'now'::text::timestamptz = now()"), ["true", "true"]);
+      const two = await c.query("SELECT 1; SELECT E'now'::timestamptz = now() AS same") as unknown as Array<{ rows: Array<Record<string, unknown>> }>;
+      assert.equal(two[1]!.rows[0]!.same, true);
+      // a cast whose type modifier cuts the word first: Postgres reads what is left ('now ', 'no')
+      assert.deepEqual(await text(c, "SELECT 'now'::char(4)::timestamptz = now(), 'now'::varchar(3)::timestamptz = now(), 'today'::char(5)::date = current_date"), ["true", "true", "true"]);
+      assert.equal((await refused(c.query("SELECT 'now'::varchar(2)::timestamptz"))).code, "22007");
+      // the word computed at run time: a function's result, COALESCE, a concatenation, a sub-SELECT, CASE
+      assert.deepEqual(await text(c, "SELECT lower('now')::timestamptz = now(), upper('NOW')::timestamptz = now(), coalesce('now', 'x')::timestamptz = now(), ('now' || '')::timestamptz = now(), (SELECT 'now')::timestamptz = now(), CASE WHEN true THEN 'now' END::timestamptz = now()"),
+        ["true", "true", "true", "true", "true", "true"]);
+      // the word bound as a parameter
+      assert.equal((await c.query({ text: "SELECT $1::timestamptz = now() AS same", values: ["now"] })).rows[0].same, true);
+      // a block: every statement reads the block's start, the real clock goes on
+      await c.query("BEGIN");
+      const first = (await c.query("SELECT now()::text AS n")).rows[0].n as string;
+      await new Promise((r) => setTimeout(r, 30));
+      assert.deepEqual(Object.values((await c.query("SELECT 'now'::timestamptz::text AS a, now()::text AS b, lower('now')::timestamptz::text AS c, statement_timestamp() > now() AS d, clock_timestamp() > now() AS e")).rows[0]),
+        [first, first, first, true, true]);
+      await c.query("COMMIT");
+      // a word that is no cast to a time is text, as written
+      assert.deepEqual(await text(c, "SELECT 'now', 'today'::text"), ["now", "today"]);
+    } finally { await c.end(); }
+  });
+
+  test("session state: DateStyle's validity is Postgres's: two orders or two styles are its 22023, a non-ISO style Mason's 0A000 (review r1 of PR 333)", async () => {
+    const c = await connect();
+    try {
+      for (const v of ["YMD, DMY", "ISO, SQL", "ISO, nonsense"]) {
+        const e = await refused(c.query(`SET DateStyle = '${v}'`));
+        assert.deepEqual([e.code, e.message], ["22023", `invalid value for parameter "DateStyle": "${v}"`], v);
+      }
+      assert.match((await refused(c.query("SET DateStyle = 'YMD, DMY'"))).detail ?? "", /Conflicting "DateStyle" specifications/i);
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, MDY"], "nothing was remembered");
+      assert.equal((await refused(c.query("SET DateStyle = 'SQL, DMY'"))).code, "0A000");
+      await c.query("SET DateStyle = 'ISO, YMD'");
+      await c.query("SET DateStyle = 'ISO'");
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, YMD"], "a part not named is kept, as check_datestyle keeps it");
+      await c.query("SELECT set_config('DateStyle', 'dmy', false)");
+      assert.deepEqual(await text(c, "SHOW DateStyle"), ["ISO, DMY"]);
+    } finally { await c.end(); }
+    // a startup packet's: read by the catalog after the password, its refusal the startup's
+    const d = await connect({ options: "-c DateStyle=ISO,DMY" });
+    try { assert.deepEqual(await text(d, "SHOW DateStyle"), ["ISO, DMY"]); } finally { await d.end(); }
+    await assert.rejects(connect({ options: "-c DateStyle=YMD,DMY" }), (e: { code?: string }) => e.code === "22023");
+  });
+
+  test("session state: every parameter setParameter names is honoured, read back, or refused by name; RESET ALL restores each", async () => {
+    // [name, a valid value other than the default, what SHOW then answers (null: the SET is refused, with this SQLSTATE;
+    // a spelling of another parameter, whose verdict is that one's: its SHOW name)]
+    const CASES: ReadonlyArray<{ name: string; value: string; shows: string | null; code?: string; spelling?: string }> = [
+      { name: "timezone", value: "Asia/Tokyo", shows: "Asia/Tokyo" }, { name: "time zone", value: "Asia/Tokyo", shows: "Asia/Tokyo", spelling: "timezone" },
+      { name: "application_name", value: "probe", shows: "probe" }, { name: "search_path", value: "other, public", shows: "other, public" },
+      { name: "client_encoding", value: "UTF8", shows: "UTF8" }, { name: "names", value: "UTF8", shows: "UTF8", spelling: "client_encoding" },
+      { name: "datestyle", value: "ISO, DMY", shows: "ISO, DMY" }, { name: "extra_float_digits", value: "3", shows: "3" },
+      { name: "standard_conforming_strings", value: "on", shows: "on" }, { name: "intervalstyle", value: "sql_standard", shows: null, code: "0A000" },
+      { name: "transaction_isolation", value: "repeatable read", shows: "read committed" /* the transaction's alone: outside a block it ends with the SET */ }, { name: "default_transaction_isolation", value: "serializable", shows: "serializable" },
+      { name: "transaction", value: "", shows: null, spelling: "transaction_isolation" }, { name: "session characteristics", value: "", shows: null, spelling: "default_transaction_isolation" },
+      { name: "default_transaction_read_only", value: "on", shows: "on" }, { name: "transaction_read_only", value: "on", shows: "on" },
+      { name: "statement_timeout", value: "5s", shows: "5s" }, { name: "lock_timeout", value: "5s", shows: "5s" },
+      { name: "idle_in_transaction_session_timeout", value: "5s", shows: "5s" }, { name: "idle_session_timeout", value: "5s", shows: "5s" },
+      { name: "transaction_timeout", value: "5s", shows: "5s" }, { name: "client_min_messages", value: "warning", shows: "warning" },
+      { name: "log_min_messages", value: "error", shows: "error" }, { name: "bytea_output", value: "escape", shows: "escape" },
+      { name: "default_transaction_deferrable", value: "on", shows: "on" }, { name: "xmloption", value: "document", shows: "document" },
+      { name: "backslash_quote", value: "on", shows: "on" }, { name: "escape_string_warning", value: "off", shows: "off" },
+      { name: "synchronize_seqscans", value: "off", shows: "off" }, { name: "work_mem", value: "8MB", shows: "8MB" },
+      { name: "max_parallel_workers_per_gather", value: "0", shows: "0" }, { name: "jit", value: "off", shows: "off" }, { name: "row_security", value: "off", shows: "off" },
+      { name: "lc_messages", value: "C", shows: "C" }, { name: "lc_monetary", value: "C", shows: "C" }, { name: "lc_numeric", value: "C", shows: "C" },
+      { name: "lc_time", value: "C", shows: "C" }, { name: "check_function_bodies", value: "off", shows: "off" },
+    ];
+    // every case setParameter names, read from its source: a new case cannot skip this test
+    const source = fs.readFileSync(new URL("../../src/api/postgres/server.ts", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("  private setParameter("), source.indexOf("  private async resetParameter("));
+    const named = [...new Set([...body.matchAll(/case "([^"]+)":/g)].map((m) => m[1]!))];
+    assert.deepEqual(named.sort(), CASES.map((x) => x.name).sort(), "every parameter setParameter names has its verdict here");
+    const c = await connect();
+    try {
+      for (const { name, value, shows, code, spelling } of CASES) {
+        if (spelling !== undefined) continue; // the parameter it spells is held under its own name
+        const before = (await text(c, `SHOW ${name}`))[0];
+        if (shows === null) {
+          assert.equal((await refused(c.query(`SET ${name} = '${value}'`))).code, code, name);
+          continue;
+        }
+        await c.query(`SET ${name} = '${value}'`);
+        assert.deepEqual(await text(c, `SHOW ${name}`), [shows], name);
+        assert.deepEqual(await text(c, `SELECT current_setting('${name}')`), [shows], `${name}: current_setting on the catalog`);
+        assert.deepEqual(await text(c, `SELECT current_setting('${name}') FROM orders LIMIT 1`), [shows], `${name}: current_setting beside a copied table`);
+        await c.query("RESET ALL");
+        assert.deepEqual(await text(c, `SHOW ${name}`), [before], `${name}: RESET ALL`);
+      }
+    } finally { await c.end(); }
+  });
+});
+
+test("session state: the splice of a catalog statement reaches every call of an override, read from the parse tree, and leaves the clock as written", async () => {
+  const { userSplicedForTest } = await import("../../src/api/postgres/server.ts");
+  const { parse } = await import("libpg-query");
+  const splice = async (sql: string): Promise<string> => userSplicedForTest(sql, (await parse(sql)).stmts![0]!.stmt, 0, "agent", new Set(["SVFOP_SESSION_USER"]));
+  assert.equal(await splice("SELECT version(), pg_catalog.version(), \"pg_catalog\" . \"version\" ( )"), "SELECT public.version(), public.version(), public.version ( )");
+  assert.equal(await splice("SELECT current_setting('a'), pg_catalog.current_setting('b', true), CURRENT_SETTING('c')"),
+    "SELECT public.current_setting('a'), public.current_setting('b', true), public.current_setting('c')");
+  assert.equal(await splice("SELECT format_type(23, NULL), pg_catalog.format_type(23, NULL)"), "SELECT public.format_type(23, NULL), pg_catalog.format_type(23, NULL)");
+  // the clock is the catalog transaction's own, begun at the session's instant (catalog.ts asSession): never spliced
+  const clock = "SELECT now(), CURRENT_DATE, current_timestamp(3), LOCALTIME, transaction_timestamp(), clock_timestamp(), 'now'::timestamptz, x.now FROM (SELECT 1 AS now) x";
+  assert.equal(await splice(clock), clock);
+  // a schema of the user's own: never an override
+  assert.equal(await splice("SELECT myapp.version(), myapp.now()"), "SELECT myapp.version(), myapp.now()");
 });
