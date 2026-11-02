@@ -26,7 +26,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   warning says the size it read, where it read it, what Mason needs beside its queries and the two ways out: give the
   container 3 GiB or more, or set `MASON_DUCKDB_MEMORY` yourself. Measured, Mason uses up to 2.3 GiB beside its
   queries' share, and under the old default the kernel killed the whole run at 1, 1.5, 2 and 3 GiB.
-
+- **The `mason-data` image now runs Node 26, where it ran Node 24**, the Node CI tests on: Node 24's V8 could now and
+  then abort the server (nodejs/node#66366), for the platform to restart (compose's `restart: unless-stopped`). Nothing
+  to do on upgrade, unless you build your own image FROM it with native modules of your own: rebuild them. A CLI on
+  Node 24 has the same aborts, which `mason start` restarts; Node 26, or a 22.x release from 22.13, avoids them.
 - **`mason status`, `--json` and the web page now say when a synced table is behind what its `sync:` promises**,
   measured from when it was last synced, with why. A table set to `sync: poll 15m` whose pass of polls takes 13 min is
   polled about every hour, since Mason waits four times a pass between passes to keep the database's load to a fifth;

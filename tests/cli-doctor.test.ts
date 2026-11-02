@@ -11,6 +11,7 @@ import * as storeModule from "../src/duck/store.ts";
 const { defaultMemoryLimit, machineMemory, machineMemoryBytes, MEMORY_FLOOR_BYTES, memoryLimitBytes, memoryProblems, memoryProblemText, memoryWarning, MIN_SHARE_BYTES, OUTSIDE_RESERVE_BYTES } = storeModule as unknown as typeof import("../src/duck/store.ts");
 import type { DevRun } from "../src/cli/runs.ts";
 import { newConfig, type Project } from "../src/cli/project.ts";
+import { ciNodeMajor, docNodeProblems, NODE_WITHOUT_THE_FIX } from "./node-versions.ts";
 
 const project: Project = { root: "/app", dir: "/app/.mason", folder: "/app/mason", config: newConfig("app", "mason", false) };
 const run: DevRun = { name: "app", root: "/app", home: "/app/.mason", folder: "/app/mason", pid: 1, apiKey: "k",
@@ -32,18 +33,33 @@ test("the package's engines and every Node the READMEs name for the package are 
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "cli", "package.json"), "utf8")) as { engines: { node: string } };
   assert.equal(pkg.engines.node, `>=${NODE_MIN}`);
-  // cli/README.md is the package's page: every Node it names is the floor
-  const cli = fs.readFileSync(path.join(root, "cli", "README.md"), "utf8");
-  const named = [...cli.matchAll(/\bNode (\d+(?:\.\d+)*)/g)].map((m) => m[1]);
-  assert.ok(named.length >= 3, "cli/README.md says the floor where it lists what mason needs");
-  assert.deepEqual([...new Set(named)], [NODE_MIN]);
+  // cli/README.md is the package's page: it says the floor where it lists what mason needs, and every other Node it
+  // names is held to an authority (tests/node-versions.ts): CI's major, or one without V8's fix (issue 67)
+  const ci = ciNodeMajor(root);
+  const cli = docNodeProblems("cli/README.md", fs.readFileSync(path.join(root, "cli", "README.md"), "utf8"), NODE_MIN, ci);
+  assert.ok(cli.floorMentions >= 3, "cli/README.md says the floor where it lists what mason needs");
+  assert.deepEqual(cli.problems, []);
   // the repo's README: the package's install line says the floor; its `Node ≥ 23.6` is the checkout's, not the package's
-  const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
-  const install = readme.split("\n").find((l) => l.startsWith("npm i -g @mason-data/cli"));
+  const src = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  const install = src.split("\n").find((l) => l.startsWith("npm i -g @mason-data/cli"));
   assert.match(install ?? "", new RegExp(`needs Node ${NODE_MIN.replace(".", "\\.")}\\+ `));
-  assert.deepEqual([...readme.matchAll(/\bNode (\d+(?:\.\d+)*)\+/g)].map((m) => m[1]), [NODE_MIN], "every `Node <n>+` in the README");
+  assert.deepEqual([...src.matchAll(/\bNode (\d+(?:\.\d+)*)\+/g)].map((m) => m[1]), [NODE_MIN], "every `Node <n>+` in the README");
+  assert.deepEqual(docNodeProblems("README.md", src, NODE_MIN, ci).problems, []);
   // and what mason prints says it too
   assert.match(DOCTOR_USAGE, new RegExp(`Node ${NODE_MIN.replace(".", "\\.")} or later`));
+});
+
+test("the READMEs' Node guard catches the real thing: each Node a doc names is the floor, CI's, or one without the fix", () => {
+  const of = (src: string) => docNodeProblems("R", src, "22.13", "26").problems;
+  assert.deepEqual(of("It needs Node 22.13 or later, Node 22.13+ too. CI runs Node 26. On Node 24 it can abort."), []);
+  assert.deepEqual(of("On Node 23 it can abort."), ["R:1 \"Node 23\": names a Node no authority holds (the floor 22.13, CI's 26, or one without the fix: 24)"]);
+  assert.deepEqual(of("\nOn Node 25 it can abort."), ["R:2 \"Node 25\": names a Node no authority holds (the floor 22.13, CI's 26, or one without the fix: 24)"]);
+  assert.deepEqual(of("It needs Node 26+."), ["R:1 \"Node 26+\": a floor is NODE_MIN (22.13, src/cli/doctor.ts)"], "CI's major is no floor");
+  assert.deepEqual(of("It needs Node 24 or later."), ["R:1 \"Node 24 or later\": a floor is NODE_MIN (22.13, src/cli/doctor.ts)"]);
+  assert.deepEqual(of("It needs Node 22 and up."), ["R:1 \"Node 22\": names a Node no authority holds (the floor 22.13, CI's 26, or one without the fix: 24)"], "a major alone is not the floor");
+  assert.equal(docNodeProblems("R", "Node 22.13 or later; Node 22.13+; Node 22.13.", "22.13", "26").floorMentions, 3);
+  // the majors without the fix are the one list, so a sentence naming Node 24 passes only through it
+  assert.ok(NODE_WITHOUT_THE_FIX.has(24));
 });
 
 test("the memory the run may use is the container's limit where one is set, else the machine's RAM", () => {
