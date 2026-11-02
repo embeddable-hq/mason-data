@@ -575,7 +575,13 @@ class Rewriter {
     if (Array.isArray(v)) return v.map((x) => this.clone(x) as unknown) as T;
     if (v === null || typeof v !== "object") return v;
     const out: Body = {};
-    for (const [k, x] of Object.entries(v as Body)) out[k] = this.clone(x);
+    for (const [k, x] of Object.entries(v as Body)) {
+      out[k] = this.clone(x);
+      // (a set operation's arm is a bare body, the statement's own as `adopt` marks it, so its copy is too: else a copy's
+      // arm ran no SELECT rule — its WITH TIES printed as a LIMIT, refused at the read-back; PR 415's CI, a scalar
+      // subquery's copy, `subqueryText`)
+      if (armOf(k, x) !== null && this.original.has(x as Body)) this.original.add(out[k] as Body);
+    }
     if (isNode(v) && this.original.has(bodyOf(v))) this.original.add(bodyOf(out as AstNode));
     if (isNode(v) && this.writtenKeys.has(bodyOf(v))) this.writtenKeys.add(bodyOf(out as AstNode));
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
@@ -2274,7 +2280,18 @@ class Rewriter {
     // and coerces no arm's digits, so a row prints at its own arm's scale (an integer whole, a numeric(p, s) at s, a
     // literal as written, each VALUES row its own), where the engine unifies the arms to one DECIMAL scale. A column whose
     // arms' scales differ is computed from each arm's own cell; one whose arms agree keeps the engine's plan
-    const scaled = new Set(fields.flatMap((f, i) => f.oid === NUMERIC && new Set(arms.flatMap((a) => this.armScales(a, i))).size > 1 ? [i] : []));
+    // (only where every arm's value there is one it can carry as its own cell: the engine's exact value, or a VALUES row's
+    // text. A column of scales alone is the record's to improve, never to give up: one whose arm the engine holds as a
+    // double (`sign(n)` beside an integer) stays the engine's union, and the union's other columns are still the record's
+    // — PR 415's CI: a scaled `sign(n)` gave up `abs(n)` beside it, which main answered)
+    const ownCell = (a: AstNode, k: number, i: number): boolean => {
+      if (Array.isArray(bodyOf(a).valuesLists)) return true;
+      if (isSetOp(bodyOf(a)) || trial[k]!.listed.some((t) => hasStar(bodyOf(t).val))) return this.outputExact(a, i);
+      const v = trial[k]!.listed[i] === undefined ? undefined : bodyOf(trial[k]!.listed[i]!).val;
+      return isNode(v) && this.duckExact(v);
+    };
+    const scaled = new Set(fields.flatMap((f, i) => f.oid === NUMERIC && new Set(arms.flatMap((a) => this.armScales(a, i))).size > 1
+      && (trial.some((t) => t.made.some((e) => e.column === i)) || arms.every((a, k) => ownCell(a, k, i))) ? [i] : []));
     // A VALUES ROW'S NUMERIC THE ENGINE HOLDS AS A DOUBLE (a constant past its 38 digits, `'…'::numeric(65,30)`): the
     // column is each arm's own too, the row's text Postgres's (`valuesText`), so the engine's double is never printed
     const inexact = new Set(fields.flatMap((f, i) => f.oid === NUMERIC && arms.some((a) => Array.isArray(bodyOf(a).valuesLists)
@@ -2284,7 +2301,12 @@ class Rewriter {
     // the columns some arm computes, or whose arms' scales differ; every other arm's value there must be DuckDB's exact one
     // A NUMERIC'S TEXT some arm computes (`(x / 3)::text`) is a column of the record too: an arm that computes none
     // there is its own text, as the engine writes it (a cell read as text)
-    const texts = new Set(fields.flatMap((_f, i) => trial.some((t) => t.made.some((e) => e.column === i && e.text)) ? [i] : []));
+    // A "text" cell is by contract a NUMERIC's text, which the program parses: so a column is one only where EVERY arm's
+    // value there is a numeric's text or a NULL (`numericTextValue`); a column some arm writes as any other text (a
+    // text column, a char(n), a literal) is left out of the record, the engine's union as before (PR 415's review:
+    // `(c / 3)::text … UNION ALL SELECT b` raised 22P02 parsing 'x' as a numeric)
+    const texts = new Set(fields.flatMap((_f, i) => trial.some((t) => t.made.some((e) => e.column === i && e.text))
+      && arms.every((a) => (this.valuesAt(a, i) ?? [null]).every((v) => v !== null && this.numericTextValue(v))) ? [i] : []));
     const columns = fields.map((f, i) => texts.has(i) || (f.oid === NUMERIC && (scaled.has(i) || inexact.has(i) || trial.some((t) => t.made.some((e) => e.column === i)))) ? i : -1).filter((i) => i >= 0);
     if (columns.length === 0) return [];
     // AN ARM WHOSE OWN LIST CANNOT TAKE THE UNION'S CELLS (issue 342: a VALUES list, a set operation of its own clauses, a
@@ -3086,6 +3108,17 @@ class Rewriter {
 
   /** each window ORDER BY key of a grouped SELECT, by the SELECT (`select`): its exact order key is read per group */
   private readonly groupedWindowKeys = new WeakMap<Body, Body>();
+
+  /** whether a value is a NUMERIC's text (`x::text`, `(x / 3)::text`, under a COLLATE, a subquery's column carrying
+   *  one) or a NULL: what a "text" cell may hold, its program parsing it as a numeric */
+  private numericTextValue(v: AstNode): boolean {
+    const bare = kindOf(v) === "CollateClause" && isNode(bodyOf(v).arg) ? bodyOf(v).arg as AstNode : v;
+    if (isNullValue(bare)) return true;
+    const type = this.typeOf(bare);
+    if (type === null || !TEXTS.has(type)) return false;
+    if (kindOf(bare) === "TypeCast" && isNode(bodyOf(bare).arg)) return this.typeOf(bodyOf(bare).arg as AstNode) === NUMERIC;
+    return kindOf(bare) === "ColumnRef" && (this.carry(bare) as { text?: boolean } | null)?.text === true;
+  }
 
   /** a numeric's text decided exactly (`(x / 3)::text`, a subquery's column holding one) as the program's text, or null */
   private exactNumericText(e: AstNode): AstNode | null {

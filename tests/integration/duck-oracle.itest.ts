@@ -68,7 +68,7 @@ import { ANY, collationMet, decidedShapes, shapeDecision, shapesDecided, staleDe
 import { shapes as shapesOf } from "./oracle/shapes.ts";
 import { LATEST_CASES, LATEST_SCHEMA, LATEST_TABLES } from "./oracle/latest.ts";
 import { LATEST_SQL } from "../../src/api/postgres/catalog.ts";
-import { CHAR_ARMS, emptyShapeCount, NUMERIC_READERS, say as sayShape, shapeProblems, VALUES_ARMS, type ShapeCount, type ShapeName, type ShapeTally } from "./oracle/shape-names.ts";
+import { CHAR_ARMS, emptyShapeCount, NUMERIC_READERS, say as sayShape, SET_OPERATION_ARMS, shapeProblems, VALUES_ARMS, type ShapeCount, type ShapeName, type ShapeTally } from "./oracle/shape-names.ts";
 import { BARRIER_SHAPES, HIDDEN_SHAPES, referenceSql, ROW_SHAPES, ROWS_ROLES, ROWS_SCHEMA, ROWS_USERS, TIER_SHAPES } from "./oracle/row-filters.ts";
 import { countGap, emptyTally, fixtureText, gapSummary, type Met } from "./oracle/gap-tally.ts";
 import { VERIFIED } from "../../src/duck/verified.ts";
@@ -231,6 +231,18 @@ const KNOWN: Decided[] = [
   // exact-numeric-leaves-exact-path, #252's): a set operation WITHOUT ALL keeps the engine's one DECIMAL scale (the
   // char-arm shapes' UNION, over every base with a numeric column of several scales), #402
   shapesDecided(CHAR_ARMS, { sql: ANY, kind: "text", issue: 402, why: "a numeric column of a UNION without ALL prints at the engine's one scale, where Postgres keeps each value's" }),
+  // and what main already differed on, each class by the statements it meets (#402; main decided them all as #252's,
+  // over every arm and reader shape): an integer arm beside a value the record cannot carry (an ordered-set aggregate,
+  // an array's element, an arm of a column it gives up) prints at that arm's scale
+  shapesDecided(["integer-arm", "integer-arm-first"], { sql: /percentile_disc|mode\(\) WITHIN GROUP|array_agg\(1\.5::numeric|n::numeric\(30, 1\)/, kind: "text", issue: 402, why: "an integer arm beside a numeric the record cannot carry prints at that numeric's scale" }),
+  // a numeric(65,30) or an unconstrained numeric past the engine's DECIMAL, in an arm or under a reader: its text is the
+  // engine's digits
+  shapesDecided([...SET_OPERATION_ARMS, ...NUMERIC_READERS], { sql: /o\.big\b|o\.amount_raw\b/, kind: "text", issue: 402, why: "a numeric(65,30) or unconstrained numeric in a set operation or under a reader prints the engine's digits" }),
+  // a value whose scale its row decides (greatest / least / coalesce of an integer and a numeric, a CASE … ELSE 0.0, a
+  // sqrt or a text read as a numeric through a CTE), under an aggregate or a scalar subquery: the engine's one scale
+  shapesDecided(NUMERIC_READERS, { sql: /greatest\(|least\(2\.5, 1\)|ELSE 0\.0 END|coalesce\(latest\(|sqrt\(abs\(n2\)\)|s::numeric FROM castable/, kind: "text", issue: 402, why: "a value whose scale its row decides, read by an aggregate or a scalar subquery, has the engine's one scale" }),
+  // a VALUES row's NaN or Infinity beside a SELECT arm's numeric sum of one: the engine's double's text
+  shapesDecided(VALUES_ARMS, { sql: /sum\(s::numeric\) (AS s )?FROM castable WHERE id IN \(71, 7[46]\)/, kind: "value", issue: 402, why: "a VALUES row's numeric NaN or Infinity in a set operation prints as the engine's double (`nan`, `inf`)" }),
   // min / max of a set operation's column where equal values have two scales: the listed min-max-scale-tie
   { shape: ["numeric-aggregate"], sql: /UNION ALL SELECT o\.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES/, kind: "text", gap: "min-max-scale-tie", why: "max of 1 and 1.00000000000000000000: Postgres keeps the last it reads, Mason the greatest operands" },
   // (main answers a set operation's 1e30 arm since PR 231; a CTE's sum still overflows: #214)

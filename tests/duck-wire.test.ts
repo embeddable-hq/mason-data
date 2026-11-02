@@ -5932,6 +5932,32 @@ test("exact path round 2: a scalar subquery's column is its program, printed, ca
   } finally { await c.end(); }
 });
 
+test("exact path round 2: a text column of a set operation is a numeric's text only where every arm's is, never a text, a char(n) or a literal parsed as one (PR 415)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT o.status FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT o.status FROM orders o", "bag"],
+      ["SELECT o.status FROM orders o UNION ALL SELECT (o.amount / 3)::text FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT 'abc' ORDER BY 1", "ordered"],
+      ["SELECT 'abc' UNION ALL SELECT (o.amount / 3)::text FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT o.status::char(4) FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT avg(o.amount)::text FROM orders o UNION ALL SELECT o.status FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT o.amount::text FROM orders o UNION ALL SELECT o.status FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT x FROM (SELECT (o.amount / 3)::text AS x FROM orders o UNION ALL SELECT o.status FROM orders o) s ORDER BY 1", "ordered"],
+      ["SELECT x FROM (SELECT (o.amount / 3)::text AS x FROM orders o UNION ALL SELECT 'abc') s ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text, o.id FROM orders o UNION ALL SELECT o.status, o.id FROM orders o ORDER BY 2, 1", "ordered"],
+      // (every arm a numeric's text or a NULL: still the record's, each arm's quotient at Postgres's digits)
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT (o.amount / 7)::text FROM orders o UNION ALL SELECT NULL ORDER BY 1", "ordered"],
+      ["SELECT (b.x / b.y)::text FROM bigdec b UNION ALL SELECT (b.x / 3)::text FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT (SELECT s.q FROM (SELECT * FROM ((SELECT o.id, o.amount / 7 AS q FROM orders o ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES) UNION ALL SELECT 0, 1) s ORDER BY 1) AS s ORDER BY 1 DESC NULLS LAST, s.q::text COLLATE \"C\" LIMIT 1)", "ordered"],
+      ["(SELECT o.id, abs(o.amount), sign(o.amount), -o.amount, +o.amount FROM orders o ORDER BY o.id) UNION ALL SELECT NULL, 1, 1, 1, 1", "ordered"],
+      ["SELECT NULL, 1, 1, 1, 1 UNION ALL (SELECT o.id, abs(o.amount), sign(o.amount), -o.amount, +o.amount FROM orders o ORDER BY o.id)", "ordered"],
+      ["(SELECT b.id, abs(b.x), sign(b.x), -b.x, +b.x FROM bigdec b ORDER BY b.id) UNION ALL SELECT NULL, 1, 1, 1, 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("exact path round 2: a window's min, max, first_value, last_value, nth_value, lag and lead pick the program (#343)", async () => {
   const c = await client();
   try {
