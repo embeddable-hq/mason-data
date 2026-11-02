@@ -1108,7 +1108,7 @@ export class Sync {
       },
       enqueue: (name) => this.enqueue(name, { kind: "generated" }),
       interruptible: (f) => this.interruptible(generatedLane(), f),
-      added: (name) => this.tables.has(name) ? (this.states.get(name)?.phase === "copied" ? "copied" : "adding") : this.views.some((v) => `${v.schema ?? "public"}.${v.name}` === name) ? "view" : null,
+      added: (name) => this.addedAs(name),
       syncedAt: (base) => this.synced.get(base)?.at ?? null,
       rebuildCatalog: () => this.rebuildSchema(),
       schema: () => this.currentSchema,
@@ -1117,6 +1117,21 @@ export class Sync {
       log: (line) => this.log(line),
       event: (e) => this.event(e),
     }, options.generated ?? {});
+  }
+
+  /**
+   * A BASE IS THERE WHEN THE CATALOG HOLDS IT (issue 387), the generated tables' `added` (src/duck/generated.ts
+   * `GeneratedHost.added`): `copied` only when the copy is recorded copied AND the catalog's schema (`currentSchema`, what
+   * the listener's catalog is replaced from and every definition is planned over) holds the table; a table the sources
+   * file adds that the catalog does not hold yet is `adding`, whatever its copy's phase. The copy records `copied` before
+   * its rebuild of the catalog (which reads that record), and the rebuild waits behind any other: said `copied` from the
+   * phase alone, a definition planned in between met 42P01 for a synced table and was refused, and a run could be planned
+   * over a catalog without its base. The one place this is decided: the check and `ready` read it.
+   */
+  private addedAs(name: string): "copied" | "adding" | "view" | null {
+    const t = this.tables.get(name);
+    if (t !== undefined) return this.states.get(name)?.phase === "copied" && this.currentSchema.tables.some((x) => x.schema === t.schema && x.name === t.table) ? "copied" : "adding";
+    return this.views.some((v) => `${v.schema ?? "public"}.${v.name}` === name) ? "view" : null;
   }
 
   /** the rebuilds' connection: open from `open` until `stop` */

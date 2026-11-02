@@ -174,7 +174,9 @@ export interface GeneratedHost {
   enqueue(name: string): void;
   /** `f` as `Sync.interruptible` runs a long statement on the run's connection: `stop` ends it, thrown as Stopping */
   interruptible<T>(f: () => Promise<T>): Promise<T>;
-  /** `schema.table` is a table the sources file adds, or a view of the source's */
+  /** `schema.table` is a table the sources file adds, or a view of the source's: `copied` when it is IN THE CATALOG
+   *  (`schema()` holds it, its copy recorded copied), `adding` when the sources file adds it and the catalog does not hold
+   *  it yet, whatever its copy's phase (issue 387: the copy is recorded before the catalog is rebuilt over it) */
   added(name: string): "copied" | "adding" | "view" | null;
   /** when `base` was last brought current (ISO), null when not known */
   syncedAt(base: string): string | null;
@@ -566,10 +568,17 @@ export class GeneratedTables {
       }
       e.checked = null;
       const missing = x.fields.code === "42P01" ? /^relation "([^"]+)" does not exist$/.exec(x.fields.message)?.[1] : undefined;
-      const adding = missing === undefined ? null : this.host.added(missing.includes(".") ? missing : `public.${missing}`);
+      const base = missing === undefined ? undefined : missing.includes(".") ? missing : `public.${missing}`;
+      const adding = base === undefined ? null : this.host.added(base);
+      // A 42P01 IS THE CATALOG'S IT WAS PLANNED ON (issue 387): a table the sources file adds is waited for until the
+      // catalog holds it (`adding`), and also when the catalog moved while this was planned, since the host's answer is
+      // the new catalog's, which may hold a table the plan's did not (the demo's start: orders synced and in the catalog
+      // while the check's plan, begun before, waited for the catalog Postgres to start without it). `seen` keeps the
+      // schema the plan was made on, so the next review checks it again over the one that holds it
+      const moved = this.host.schema() !== schema;
       // a parent not built yet: waited for by name; why it is refused or its build failed is read when it is said
       const parent = x.gap === "generated-not-built" ? /the generated table (\S+) is not built yet/.exec(x.fields.message)?.[1] : undefined;
-      if (adding === "adding") { e.waitingFor = missing!; e.refusals = []; }
+      if (adding === "adding" || (adding === "copied" && moved)) { e.waitingFor = base!; e.refusals = []; }
       else if (parent !== undefined) { e.waitingFor = parent; e.refusals = []; }
       else { e.waitingFor = null; e.refusals = [refusalOf(x)]; }
     }

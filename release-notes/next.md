@@ -258,6 +258,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   at a time as the memory holds, and goes on with one reader and smaller chunks when one runs out. A table whose rows
   do not fit even one page at a time now fails with the limit as set and the way out: raise `MASON_DUCKDB_MEMORY` and
   start mason again, or `mason add <table> --columns …` without its widest columns.
+- **A generated table over a synced table is no longer refused for a few seconds at `mason start`** with `relation
+  "orders" does not exist` though `orders` is synced: it waits for the table (`waiting for public.orders` in `mason
+  status`) until the synced data can be read, then builds. `mason wait <table>` right after `mason start` now waits for
+  it, where it exited 1 on that refusal.
 - **A `time` compared with or combined with a `timetz` now answers as Postgres does.** Postgres casts the time to a
   `timetz` at the session zone's offset (as `tm::timetz` does); Mason ignored the offset, so `tm = '12:30-04'::timetz`
   matched 12:30 whatever its offset, a `UNION` of a time and a timetz column answered a `time` column, and `<`, a `CASE`
