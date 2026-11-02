@@ -15,6 +15,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **The `mason-data` image now runs Node 26, where it ran Node 24**, the Node CI tests on: Node 24's V8 could now and
+  then abort the server (nodejs/node#66366), which the platform then restarted. Nothing to do on upgrade, unless you
+  build your own image FROM it with native modules of your own: rebuild them. A CLI on Node 24 has the same aborts, which
+  `mason start` restarts; Node 26, or a 22.x release from 22.13, avoids them.
 - **`mason status`, `--json` and the web page now say when a synced table is behind what its `sync:` promises**,
   measured from when it was last synced, with why. A table set to `sync: poll 15m` whose pass of polls takes 13 min is
   polled about every hour, since Mason waits four times a pass between passes to keep the database's load to a fifth;
