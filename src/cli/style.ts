@@ -27,6 +27,8 @@ export interface Style {
   yellow: (s: string) => string;
   /** the terminal's width to wrap at; null: never wrap (not a terminal) */
   width: number | null;
+  /** the output holds a hosted service's text: src/cli/command.ts `serviceStyle` breaks every line itself */
+  untrusted?: true;
 }
 
 const sgr = (on: number, off: number) => (s: string): string => s === "" ? s : `\x1b[${on}m${s}\x1b[${off}m`;

@@ -20,9 +20,12 @@
  *
  *   - EVERY STRING THE SERVICE SENDS LEAVES THIS MODULE AS ONE LINE, through `serviceText` alone, which it applies at
  *     the boundary (`whoAmI`, `serviceFailure`, `oauthFailure`, `call`, `revoke`): no line break of any kind, no
- *     control, format or bidi character, bounded, masked. A value can sit INSIDE a line the CLI writes — a headline,
- *     a row's value, a failure's message — and never start one, so it can never be a block of next steps, a tip,
- *     a row or a failure of its own, for a person or in `--json`.
+ *     control, format or bidi character, no run of spaces, bounded, masked. A value can sit INSIDE a line the CLI
+ *     writes — a headline, a row's value, a failure's message — and never start one, so it can never be a block of
+ *     next steps, a tip, a row or a failure of its own, for a person or in `--json`. On a terminal that holds for
+ *     the VISUAL line too: a command whose output holds a service's text renders it in `serviceStyle`
+ *     (src/cli/command.ts), under which the CLI breaks every line itself, never the terminal, and every
+ *     continuation starts at column 4 or deeper, where nothing of the CLI's starts.
  *   - WHAT TO RUN NEXT, WHAT THE CODE AND THE EXIT ARE, AND WHERE A PERSON IS SENT ARE THE CLI'S OWN: a failure's
  *     code by the HTTP status (`codeOfStatus`), the service's own code kept in `why` as information; its next step
  *     the CLI's (`serviceNext`), the service's `next` never read, since a CLI cannot know what a command the service
@@ -84,8 +87,9 @@ export function serviceOf(env: NodeJS.ProcessEnv = process.env): Service | Failu
 /**
  * TEXT FROM THE SERVICE, AS IT MAY BE PRINTED: ONE LINE (above: data, never structure) — every control character, the
  * newline and the carriage return included, and every line or paragraph separator, format or bidi mark replaced by
- * `?`, so none can end a line, move a cursor, clear a screen or reorder what a person reads; at most `max` characters;
- * and every secret masked — the ones named, and anything shaped as a documented token.
+ * `?`, so none can end a line, move a cursor, clear a screen or reorder what a person reads; every run of white space
+ * one space, none at either end; at most `max` characters; and every secret masked — the ones named, and anything
+ * shaped as a documented token. On a terminal the line it sits in is broken by the CLI (`serviceStyle`).
  */
 export function serviceText(s: string, max: number, secrets: readonly string[] = []): string {
   let t = s;
@@ -94,6 +98,9 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
   // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
   t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
+  // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
+  // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
+  t = t.replace(/\s+/g, " ").trim();
   const chars = [...t];
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
 }

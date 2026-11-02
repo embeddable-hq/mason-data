@@ -18,13 +18,18 @@
  * and `mason logout` says it cannot remove an environment variable.
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import { failed, jsonText, parseCommand, reportText, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { endText, failed, jsonText, parseCommand, reportText, serviceStyle, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { environmentToken, readLogins, TOKEN_ENV, writeLogins, type Logins } from "./credentials.ts";
 import { DEFAULT_SERVICE_URL, expired, isFailure, pollToken, revoke, serviceOf, serviceText, startDevice, whoAmI, type DeviceCode, type Me, type Service } from "./hosted.ts";
-import { err as styleErr, out as styleOut, stepRenderer } from "./style.ts";
+import { err as styleErr, out as styleOut, stepRenderer, type Style } from "./style.ts";
 import { openBrowser } from "./ui.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
+/** Everything these commands print can hold the service's text, so it is drawn in serviceStyle (src/cli/command.ts):
+ *  on a terminal the CLI breaks every line itself, and a person never sees a line begin with what the service sent. */
+const outStyle = (): Style => serviceStyle(styleOut());
+const errStyle = (): Style => serviceStyle(styleErr());
+const fail = (cmd: "login" | "logout", f: Failure, o: { json: boolean }): number => failed(cmd, f, { json: o.json, style: errStyle() });
 const say = (m: string): void => { process.stderr.write(`${m}\n`); };
 
 export const LOGIN: CommandSpec = {
@@ -89,34 +94,34 @@ export async function login(argv: string[]): Promise<number> {
   const f = parseCommand(LOGIN, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
-  if (f.positionals.length) return failed("login", { message: "it takes no argument", code: "usage", why: "the service is MASON_CLOUD_URL's, else the default", usage: LOGIN.usage }, { json });
+  if (f.positionals.length) return fail("login", { message: "it takes no argument", code: "usage", why: "the service is MASON_CLOUD_URL's, else the default", usage: LOGIN.usage }, { json });
   const service = serviceOf();
-  if (isFailure(service)) return failed("login", service, { json });
+  if (isFailure(service)) return fail("login", service, { json });
   if (environmentToken() !== null) {
-    return failed("login", { message: `${TOKEN_ENV} is set in this environment, so a login would not be used`, code: "refused",
+    return fail("login", { message: `${TOKEN_ENV} is set in this environment, so a login would not be used`, code: "refused",
       why: `every command sends ${TOKEN_ENV} before a saved login: a new login to ${service.base} would be shadowed by it`,
       fix: `to sign in anyway, run it without the variable: env -u ${TOKEN_ENV} mason login (the login is used once ${TOKEN_ENV} is unset)`,
       next: [[`env -u ${TOKEN_ENV} mason login`, "sign in, for when MASON_TOKEN is unset"]] }, { json });
   }
   // the file is checked BEFORE the person spends a minute approving a code: a folder others can read is said now
   const before = readLogins();
-  if (isFailure(before)) return failed("login", before, { json });
+  if (isFailure(before)) return fail("login", before, { json });
 
   const code = await startDevice(service);
-  if (isFailure(code)) return failed("login", code, { json });
+  if (isFailure(code)) return fail("login", code, { json });
   const token = await approved(service, code, json);
-  if (isFailure(token)) return failed("login", token, { json });
+  if (isFailure(token)) return fail("login", token, { json });
 
   // who signed in, before anything is saved: a token the service will not say who it is is never kept
   const me = await whoAmI(service, token);
-  if (isFailure(me)) { await revoke(service, token); return failed("login", me, { json }); }
+  if (isFailure(me)) { await revoke(service, token); return fail("login", me, { json }); }
   // read again just before the write, so a login another command saved meanwhile is kept
   const now = readLogins();
-  if (isFailure(now)) { await revoke(service, token); return failed("login", now, { json }); }
+  if (isFailure(now)) { await revoke(service, token); return fail("login", now, { json }); }
   const was = now.logins.logins[service.base] ?? null;
   const logins: Logins = { version: 1, logins: { ...now.logins.logins, [service.base]: { token, email: me.email, savedAt: new Date().toISOString() } } };
   const saved = writeLogins(logins);
-  if (isFailure(saved)) { await revoke(service, token); return failed("login", saved, { json }); }
+  if (isFailure(saved)) { await revoke(service, token); return fail("login", saved, { json }); }
   // the login it replaced is revoked, so this machine never leaves a token it no longer holds alive on the service
   const replaced = was === null || was.token === token ? null : { email: serviceText(was.email, 320, [token, was.token]), revokeError: await revoke(service, was.token) };
 
@@ -141,7 +146,7 @@ export async function login(argv: string[]): Promise<number> {
       ? [`This replaces the login of ${replaced.email}, which is revoked.`]
       : [`This replaces the login of ${replaced.email}, which was NOT revoked (${replaced.revokeError}): sign in to ${service.base} in a browser and revoke it there.`],
     next,
-  }));
+  }, outStyle()));
   return 0;
 }
 
@@ -152,13 +157,13 @@ export async function login(argv: string[]): Promise<number> {
  */
 async function approved(service: Service, code: DeviceCode, json: boolean): Promise<string | Failure> {
   const page = code.verificationUriComplete ?? code.verificationUri;
-  const s = styleErr();
+  const s = errStyle();
   say(reportText({ headline: `To sign in to ${service.base}, open this page and approve the code:`,
     details: [["page", page], ["code", code.verificationUriComplete ? `${code.userCode} (the page shows it: check they match)` : `${code.userCode} (enter it on the page)`]] }, s));
   const terminal = !json && process.stderr.isTTY === true;
   if (terminal) {
     const couldNot = OPENABLE.test(page) ? await openBrowser(page) : "the page's address is not one Mason opens by itself";
-    if (couldNot !== null) say(s.dim(`Could not open a browser (${couldNot}): open the page yourself.`));
+    if (couldNot !== null) say(endText({ tips: [`Could not open a browser (${couldNot}): open the page yourself.`] }, s).replace(/^\n/, ""));
   }
   const minutes = Math.max(1, Math.round(code.expiresIn / 60));
   const waiting = `Waiting for the code to be approved (it expires in ${minutes} min; Ctrl-C stops)`;
@@ -182,18 +187,18 @@ export async function logout(argv: string[]): Promise<number> {
   const f = parseCommand(LOGOUT, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
-  if (f.positionals.length) return failed("logout", { message: "it takes no argument", code: "usage", why: "the service is MASON_CLOUD_URL's, else the default", usage: LOGOUT.usage }, { json });
+  if (f.positionals.length) return fail("logout", { message: "it takes no argument", code: "usage", why: "the service is MASON_CLOUD_URL's, else the default", usage: LOGOUT.usage }, { json });
   const service = serviceOf();
-  if (isFailure(service)) return failed("logout", service, { json });
+  if (isFailure(service)) return fail("logout", service, { json });
   const fromEnv = environmentToken() !== null;
   const envTip = fromEnv ? [`${TOKEN_ENV} is set in this environment, and every command still uses it: logout cannot remove an environment variable. Unset it (unset ${TOKEN_ENV}), and revoke it in the service's web app if it was shared.`] : [];
   const read = readLogins();
-  if (isFailure(read)) return failed("logout", read, { json });
+  if (isFailure(read)) return fail("logout", read, { json });
   const entry = read.logins.logins[service.base];
   if (entry === undefined) {
     const next: NextStep[] = [["mason login", `sign this machine in to ${service.base}`]];
     if (json) { out(jsonText(LOGOUT, { service: service.base, signedOut: false, email: null, revoked: null, revokeError: null, environmentToken: fromEnv, file: read.file }, next)); return 0; }
-    out(reportText({ headline: `This machine is not signed in to ${service.base}`, details: [["file", read.file]], tips: envTip, next }));
+    out(reportText({ headline: `This machine is not signed in to ${service.base}`, details: [["file", read.file]], tips: envTip, next }, outStyle()));
     return 0;
   }
   const revokeError = await revoke(service, entry.token);
@@ -201,7 +206,7 @@ export async function logout(argv: string[]): Promise<number> {
   const rest = { ...read.logins.logins };
   delete rest[service.base];
   const written = writeLogins({ version: 1, logins: rest });
-  if (isFailure(written)) return failed("logout", written, { json });
+  if (isFailure(written)) return fail("logout", written, { json });
   const email = serviceText(entry.email, 320, [entry.token]);
   const next: NextStep[] = [["mason login", `sign in to ${service.base} again`]];
   if (json) {
@@ -215,6 +220,6 @@ export async function logout(argv: string[]): Promise<number> {
     details: [["account", email], ["revoked", revokeError === null ? "yes: the service takes this login no more" : "no"], ["removed from", written.file]],
     tips: [...(notRevoked ? [notRevoked] : []), ...envTip],
     next,
-  }, styleOut()));
+  }, outStyle()));
   return 0;
 }

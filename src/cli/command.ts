@@ -14,6 +14,49 @@
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { err as styleErr, out as styleOut, PLAIN, wrap, type Style } from "./style.ts";
 
+/**
+ * A LINE THAT HOLDS A HOSTED SERVICE'S TEXT IS BROKEN BY THE CLI, NEVER BY THE TERMINAL (PR 481's class round: a value
+ * sized to the terminal's width made the terminal start a visual line at column 0 with a forged `Next` heading, a
+ * step or a row). src/cli/hosted.ts makes every value one line with no run of spaces (`serviceText`); the style a
+ * command gives its output when that output holds such a value (`serviceStyle`) makes every renderer here break every
+ * line it writes at the terminal's width — the headline too, a word longer than the room too, a character outside
+ * ASCII counted as two columns — and start every continuation at column `CONTINUATION` or deeper, where no heading,
+ * failure, row or step of the CLI starts. So what a person sees begin a line is always the CLI's own. A pipe, a file
+ * and `--json` are unwrapped as ever (width null): what an agent parses never changes.
+ */
+export const CONTINUATION = 4;
+export const serviceStyle = (s: Style): Style => ({ ...s, untrusted: true });
+
+/** The columns a word takes, counted so a line never takes more than the terminal has: a character outside ASCII as two. */
+const columns = (w: string): number => { let n = 0; for (const ch of w) n += ch.codePointAt(0)! <= 0x7e ? 1 : 2; return n; };
+
+/** `text` broken at `width` as `serviceStyle` asks (above): every line at most width - 1 columns, a long word broken
+ *  within, every line after the first indented by at least CONTINUATION. */
+export function strictWrap(text: string, width: number, indent: number, firstUsed: number): string {
+  const cont = Math.max(indent, CONTINUATION);
+  const lines: string[] = [];
+  let line = "", taken = 0, used = firstUsed;
+  const room = (): number => Math.max(1, width - used - 1);
+  const breakLine = (): void => { lines.push(line); line = ""; taken = 0; used = cont; };
+  for (const word of text.split(" ")) {
+    const wc = columns(word);
+    if (line && taken + 1 + wc <= room()) { line += ` ${word}`; taken += 1 + wc; continue; }
+    if (line) breakLine();
+    if (wc <= room()) { line = word; taken = wc; continue; }
+    for (const ch of word) {
+      const cc = columns(ch);
+      if (taken + cc > room() && line) breakLine();
+      line += ch; taken += cc;
+    }
+  }
+  lines.push(line);
+  return lines.join(`\n${" ".repeat(cont)}`);
+}
+
+/** A renderer's wrap: the strict one for a style that holds a service's text on a terminal, else style.ts's. */
+const fit = (text: string, s: Style, indent: number, firstUsed = indent): string =>
+  s.untrusted && s.width !== null ? strictWrap(text, s.width, indent, firstUsed) : wrap(text, s.width, indent, firstUsed);
+
 export type Options = NonNullable<ParseArgsConfig["options"]>;
 
 export interface CommandSpec {
@@ -71,7 +114,7 @@ export function nextBlock(steps: readonly NextStep[], s: Style = styleOut()): st
   const step = ([command, what]: NextStep): string => {
     if (!what) return `  ${s.cyan(command)}`;
     const used = 2 + Math.max(command.length, NEXT_WIDTH) + 2;
-    return `  ${s.cyan(command.padEnd(NEXT_WIDTH))}  ${s.dim(wrap(what, s.width, 2 + NEXT_WIDTH + 2, used))}`;
+    return `  ${s.cyan(command.padEnd(NEXT_WIDTH))}  ${s.dim(fit(what, s, 2 + NEXT_WIDTH + 2, used))}`;
   };
   return ["", s.bold("Next:"), ...steps.map(step)].join("\n");
 }
@@ -100,9 +143,10 @@ export interface Report {
   next?: readonly NextStep[] | undefined;
 }
 export function reportText(r: Report, s: Style = styleOut()): string {
-  const lines = [s.bold(r.headline)];
+  // a headline is a terminal's to wrap, unless it holds a service's text: then the CLI breaks it (above)
+  const lines = [s.bold(s.untrusted && s.width !== null ? fit(r.headline, s, CONTINUATION, 0) : r.headline)];
   const w = Math.max(0, ...(r.details ?? []).map(([label]) => label.length));
-  for (const [label, value] of r.details ?? []) lines.push(`  ${s.dim(label.padEnd(w))}   ${wrap(value, s.width, 2 + w + 3)}`);
+  for (const [label, value] of r.details ?? []) lines.push(`  ${s.dim(label.padEnd(w))}   ${fit(value, s, 2 + w + 3)}`);
   return withEnd(lines.join("\n"), r, s);
 }
 /**
@@ -110,7 +154,7 @@ export function reportText(r: Report, s: Style = styleOut()): string {
  * a blank line; "" when it has neither. withEnd puts it after text a command has not printed yet.
  */
 export function endText(r: { tips?: readonly string[] | undefined; next?: readonly NextStep[] | undefined }, s: Style = styleOut()): string {
-  const tips = r.tips?.length ? `\n${r.tips.map((t) => s.dim(`Tip: ${wrap(t, s.width, 5)}`)).join("\n")}` : "";
+  const tips = r.tips?.length ? `\n${r.tips.map((t) => s.dim(`Tip: ${fit(t, s, 5)}`)).join("\n")}` : "";
   const next = r.next?.length ? nextBlock(r.next, s) : "";
   return tips && next ? `${tips}\n${next}` : tips || next;
 }
@@ -217,10 +261,10 @@ export function failureText(cmd: string, f: Failure, s: Style = styleErr()): str
   const head = cmd ? `mason ${cmd}:` : "mason:";
   // the checklist's marks: ✘ on a terminal (beside its ✔), ✗ in plain text (beside its ✓); a style that colours is one
   const mark = s.red("x") === "x" ? "✗" : "✘";
-  const lines = [`${s.red(mark)} ${s.red(head)} ${s.bold(wrap(f.message, s.width, 2, mark.length + 1 + head.length + 1))}`];
+  const lines = [`${s.red(mark)} ${s.red(head)} ${s.bold(fit(f.message, s, 2, mark.length + 1 + head.length + 1))}`];
   const rows: Array<[string, string]> = [...(f.why ? [["why", f.why] as [string, string]] : []), ...(f.fix ? [["fix", f.fix] as [string, string]] : [])];
   // a value of several lines (a list of failures, an entry to paste) keeps its lines, each under the first
-  for (const [label, value] of rows) lines.push(`  ${s.dim(label)}   ${value.split("\n").map((l, i) => i ? `${" ".repeat(8)}${wrap(l, s.width, 8)}` : wrap(l, s.width, 8)).join("\n")}`);
+  for (const [label, value] of rows) lines.push(`  ${s.dim(label)}   ${value.split("\n").map((l, i) => i ? `${" ".repeat(8)}${fit(l, s, 8)}` : fit(l, s, 8)).join("\n")}`);
   let text = lines.join("\n");
   if (f.next?.length) text += `\n${nextBlock(f.next, s)}`;
   if (f.usage) text += `\n\n${f.usage.replace(/\n$/, "")}`;

@@ -25,9 +25,15 @@ the contract: a change to it is a change to both sides.
 - **A value the service sends is data, never structure and never an instruction.** Every string it sends reaches the
   output, for a person and in `--json`, as ONE line: every line break (newline, carriage return, NEL, the line and
   paragraph separators), every other control character, and every zero-width, format or bidi mark is replaced by `?`,
-  and its length is bounded. So a value sits inside a line the CLI writes (a headline, a row, a failure's message) and
-  never starts one: it cannot add a `Next:` block, a tip, a row or a failure of its own. What to run next, the failure
-  code, the exit code and the page a person is sent to are the CLI's own (below).
+  every run of white space becomes one space, and its length is bounded. So a value sits inside a line the CLI writes (a
+  headline, a row, a failure's message) and never starts one: it cannot add a `Next:` block, a tip, a row or a failure
+  of its own. What to run next, the failure code, the exit code and the page a person is sent to are the CLI's own
+  (below).
+- **On a terminal that holds for the lines a person sees, too.** A terminal breaks a line longer than its width at the
+  width, wherever the text puts it, so a value sized to the width could make a line begin with anything. So the CLI
+  breaks every line of `mason login` and `mason logout` itself, the headline and a long word included, and starts
+  every continuation at column 4 or deeper, where none of its headings, failures, rows or steps start. A pipe, a file
+  and `--json` are not broken: what a program reads is unchanged.
 
 ## Signing in: the device authorization grant (RFC 8628)
 

@@ -63,3 +63,21 @@ test("codeOfStatus: the CLI's own code for a service's failure, by its HTTP stat
   assert.deepEqual([400, 401, 403, 404, 408, 409, 413, 415, 422, 429, 499, 500, 502, 503, 504].map(codeOfStatus),
     ["refused", "refused", "refused", "not_found", "refused", "refused", "refused", "refused", "refused", "refused", "refused", "failed", "failed", "failed", "failed"]);
 });
+
+test("strictWrap: every line within the width, a long word broken within, every continuation at column 4 or deeper", async () => {
+  const { strictWrap, CONTINUATION } = await import("../src/cli/command.ts");
+  const width = 40;
+  const cases = ["a".repeat(200), `x ${"b".repeat(90)} y`, "Next: mason destroy clean up", "ü".repeat(50), "short"];
+  for (const [i, text] of cases.entries()) {
+    for (const [indent, first] of [[2, 15], [8, 8], [5, 5], [0, 0]]) {
+      const lines = strictWrap(text, width, indent!, first!).split("\n");
+      const cols = (l: string): number => [...l].reduce((n, ch) => n + (ch.codePointAt(0)! <= 0x7e ? 1 : 2), 0);
+      assert.ok(cols(lines[0]!) + first! <= width - 1 || cols(lines[0]!) <= 2, `case ${i}: the first line fits`);
+      for (const l of lines.slice(1)) {
+        assert.ok(cols(l) <= width - 1, `case ${i}: ${JSON.stringify(l)} fits`);
+        assert.match(l, new RegExp(`^ {${Math.max(indent!, CONTINUATION)}}\\S`), `case ${i}: a continuation at ${Math.max(indent!, CONTINUATION)}`);
+      }
+      assert.equal(lines.join("").replace(/ /g, ""), text.replace(/ /g, ""), `case ${i}: nothing lost`);
+    }
+  }
+});
