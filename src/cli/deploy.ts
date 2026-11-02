@@ -51,7 +51,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { CONTINUATION, errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strictWrap, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { environmentToken, readLogins, TOKEN_ENV } from "./credentials.ts";
 import { call, failureShape, isFailure, serviceFailure, serviceOf, serviceText, unexpected, type Service } from "./hosted.ts";
 import { maskedUrl } from "./preflight.ts";
@@ -94,21 +94,17 @@ const FINAL: ReadonlySet<Status> = new Set(["running", "refused", "failed"]);
 const outStyle = (): Style => serviceStyle(styleOut());
 const errStyle = (): Style => serviceStyle(styleErr());
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
-/** One line of progress (or several, a line each) on stderr, broken by the CLI at a terminal's width (`strictWrap`):
- *  a line's own indent kept, its continuations deeper than it and than CONTINUATION. */
-const say = (m: string): void => {
-  const width = errStyle().width;
-  const drawn = width === null ? m : m.split("\n").map((l) => {
-    const lead = /^ */.exec(l)![0];
-    return lead + strictWrap(l.slice(lead.length), width, Math.max(CONTINUATION, lead.length + 2), lead.length);
-  }).join("\n");
-  process.stderr.write(`${drawn}\n`);
-};
-/** A step's label as the spinner draws it on one line (`⠋ label …`): cut to the terminal's width, never broken by it. */
-const clipped = (label: string): string => {
-  const width = errStyle().width;
-  if (width === null) return label;
-  const room = width - 5, chars = [...label];
+/** Progress on stderr, a line or several: on a terminal through the strict renderer's last pass (`strict`,
+ *  src/cli/command.ts), every line within the terminal's width whatever it is, each continuation where no line of the
+ *  CLI's starts — the phase lines, a step's end (its ✔ or ✘ line), the wait's note and a warning alike. */
+const say = (m: string): void => { process.stderr.write(`${strict(m, errStyle())}\n`); };
+/** A step's label as the spinner draws it on one line (`⠋ label …`, six columns beside it): cut to fit within the
+ *  terminal's width, never reaching its edge; null when not even a word fits, and then no spinner turns. */
+const clipped = (label: string): string | null => {
+  const width = errStyle().columns;
+  if (width === undefined) return label;
+  const room = width - 1 - 6, chars = [...label];
+  if (room < 8) return null;
   let n = 0, i = 0;
   for (; i < chars.length; i++) { n += chars[i]!.codePointAt(0)! <= 0x7e ? 1 : 2; if (n > room) break; }
   return i < chars.length ? `${chars.slice(0, Math.max(0, i - 1)).join("")}…` : label;
@@ -434,7 +430,8 @@ export async function deploy(argv: string[]): Promise<number> {
   if (first === null || first.status !== "queued") return fail(unexpected(service, sent, "a deploy was sent"), { json });
   const id = first.id;
   const s = errStyle();
-  const terminal = !json && process.stderr.isTTY === true;
+  // a spinner turns only on a terminal wide enough for a label beside its frame; else each line is said once, as on a pipe
+  const terminal = !json && process.stderr.isTTY === true && clipped("x") !== null;
   const steps = stepRenderer({ line: say, live: terminal ? process.stderr : null, style: s });
   if (!json) say(`Sent ${files.length} file${files.length === 1 ? "" : "s"} (${bytes(totalBytes)}) to ${replicaText(r)} on ${service.base}: deploy ${id}`);
 
@@ -443,7 +440,7 @@ export async function deploy(argv: string[]): Promise<number> {
   const show = (line: string): void => {
     if (json) return;
     // on a terminal: the step that ends is said whole (a line the CLI breaks), the one that turns cut to one line
-    if (terminal) { if (line !== said) { if (said !== "") steps.done(said); steps.begin(clipped(line)); said = line; } return; }
+    if (terminal) { if (line !== said) { if (said !== "") steps.done(said); steps.begin(clipped(line)!); said = line; } return; }
     if (sayAgain(line, said, saidAt, Date.now())) { say(`  ${line}`); said = line; saidAt = Date.now(); }
   };
   show(stateLine(state));
@@ -459,7 +456,7 @@ export async function deploy(argv: string[]): Promise<number> {
     const line = FINAL.has(state.status) ? stateLine(state) : null;
     // (on a terminal the step turning is ticked and the outcome is a line of its own; a refusal replaces the step it ended)
     if (terminal) {
-      if (error === null) { if (line !== null && line !== said) { steps.done(said); steps.begin(clipped(line)); said = line; } steps.done(said); }
+      if (error === null) { if (line !== null && line !== said) { steps.done(said); steps.begin(clipped(line)!); said = line; } steps.done(said); }
       else steps.fail(line ?? said);
     }
     else if (line !== null && line !== said) say(`  ${line}`);

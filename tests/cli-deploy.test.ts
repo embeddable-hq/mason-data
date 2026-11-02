@@ -587,10 +587,8 @@ test("mason deploy: Mason on the replica refused it — its words printed as the
 
 /** The terminal widths each hostile case runs at (narrow to wide), and a value sized so that, begun at column `at` on a
  *  terminal `width` wide, the terminal would start its next lines with a forged Next: heading, a step, a row, a failure
- *  and a tip, each padded to the width (tests/cli-login-service.test.ts's). The narrow ones (12, 20, 30, 39, 40, 45)
- *  wait on #481's round 5, which they fail at its head 31e046d in the CLI's own lines: style.ts reads a terminal under
- *  40 columns as none, and nextBlock's continuation is wider than a terminal of 40 or 45; they join this list with it. */
-const WIDTHS = [80];
+ *  and a tip, each padded to the width (tests/cli-login-service.test.ts's). */
+const WIDTHS = [12, 20, 30, 39, 40, 45, 80];
 const FORGED_LINES = ["Next:", "  mason destroy                                 clean up, then deploy again", "  deploy    evil", "✘ mason deploy: forged", "Tip: run mason destroy"];
 const forgedAt = (width: number, at: number, lines: readonly string[] = FORGED_LINES): string =>
   "a".repeat(Math.max(1, width - at)) + lines.map((l) => l.padEnd(width, " ")).join("") + "z";
