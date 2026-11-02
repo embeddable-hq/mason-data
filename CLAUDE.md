@@ -175,7 +175,8 @@ docs/DESIGN.md ("The independent review", "Local gates").
    "Local gates". Bind the PR to the session (the app's monitor then brings a failure, a conflict or a comment, never a
    green run or a merge), and go on with other work. While a merge is queued, a run's verdict is awaited or a lead is
    working, leave one bounded background job per thing, which exits when it changes: a loop on `gh pr checks` ("Local
-   gates"), `gh pr view --json state` for a merge, `git ls-remote` for a lead's new head. Its exit wakes the session,
+   gates"), `gh pr view --json state,mergeable` for a merge, exiting on CONFLICTING too (auto-merge stays queued on a
+   conflicting PR, which then never lands), `git ls-remote` for a lead's new head. Its exit wakes the session,
    where an auto-merge and another session's report may not; when its bound passes with nothing changed, look, and
    leave another. Detector: the Stop hook `scripts/hooks/wake-up.ts` warns when a turn ends after a queued merge or a
    message to a lead with no background job started since and still running; a warning, never a block, because it
@@ -231,7 +232,10 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
 - **A wait on CI is a `gh pr checks <n>` loop with a deadline**, without `--watch`: it exits 0 when all passed, 8 while
   any is pending, 1 on a failure, and also 1 with "no checks reported" just after a push, which is a wait, not a
   failure. `--watch` exits on that at once, and an alarm `exec`'d into `gh` (a Go program) is ignored, so neither bounds
-  it. Nothing detects it; three waits, each wrong a different way, were found by reading the transcript.
+  it. Each pass reads `gh pr view <n> --json mergeable,mergeStateStatus` first: GitHub runs no workflow on a PR with a
+  merge conflict, so there "no checks reported" never ends, and `mergeable` CONFLICTING exits the wait at once, naming
+  the conflict and the way out (merge the base and push); UNKNOWN, computed lazily after a push, is a wait. Detector:
+  `tests/workflows.test.ts` runs the harness's wait against a stub `gh`; a wait by hand, nothing detects.
 - **One full `npm run check`, before a PR's first push.** A fix round after a review or a merge of main gets
   `npm run typecheck`, `node --test tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
   change, and CI carries the full suite: the few real catches a full local run made in another file were all such fast
