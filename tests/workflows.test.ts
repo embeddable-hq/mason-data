@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1254,7 +1254,7 @@ test("pr-loop: Postgres for the statements is the itEnv file when given, else a 
   const src = source("pr-loop");
   assert.match(src, /^\/\/ args: \{[^}\n]*\bitEnv\?/m, "the args line names itEnv");
   assert.match(src, /^\/\/ {3}itEnv: [^\n]*IT_POSTGRES_URL/m, "and the header says what it is");
-  const ownPg = [/postgres:18/, /wal_level=logical/, /-e POSTGRES_PASSWORD /, /openssl rand -hex/, /127\.0\.0\.1:0:5432/, /docker rm -f -v "\$n"/, /docker inspect "\$n"` must fail/];
+  const ownPg = [/postgres:18/, /wal_level=logical/, /-e POSTGRES_PASSWORD /, /openssl rand -hex/, /127\.0\.0\.1:0:5432/, /docker rm -f -v "\$n"/, /docker inspect --format '\{\{\.State\.Status\}\}' "\$n"` must fail/];
   const without = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
   for (const l of ["probe 1", "review r1"]) {
     const p = without.prompt(l);
@@ -1703,4 +1703,124 @@ test("pr-loop-slim: args.process names the arm in the record's text, and an unkn
   r = await run("pr-loop-slim", { ...PR, process: "persistent" }, {});
   assert.deepEqual(r.labels, []);
   assert.match(String(r.result["status"]), /^args\.process is "persistent": it is one of pr-loop-slim, pr-persistent/);
+});
+
+// ---------------------------------------------------------------- issue 246: five rough edges in the prompts of the
+// review at scale (PR 245's review), each held here in both workflows, since slim's review is pr-loop's word for word.
+
+/** A statement's text with every parenthesised group emptied, so only its top level is left: `count(*)` reads `count()`. */
+const topLevel = (sql: string): string => {
+  let s = sql;
+  for (let prev = ""; prev !== s;) { prev = s; s = s.replace(/\([^()]*\)/g, "()"); }
+  return s;
+};
+const AGGREGATES = /^(count|sum|max|min|avg|bool_and|bool_or|every)\(\)$/i;
+/** True when Postgres fixes the statement's row order: a top-level ORDER BY, or a single row (aggregates, no GROUP BY). */
+function orderIsFixed(sql: string): boolean {
+  const top = topLevel(sql);
+  if (/\bORDER BY\b/i.test(top)) return true;
+  if (/\b(GROUP BY|UNION|EXCEPT|INTERSECT)\b/i.test(top)) return false;
+  const lists = [...top.matchAll(/\bSELECT\s+(.*?)\s+FROM\b/gi)];
+  const list = lists.at(-1)?.[1];
+  return list !== undefined && list.split(",").every((x) => AGGREGATES.test(x.trim()));
+}
+
+test("variant forms: every statement fixes its row order, so a DIFFER is never chance (issue 246)", () => {
+  // the rule's own cases, so a reading that passes everything fails here
+  for (const s of ["SELECT count(*), sum(c), max(b) FROM t WHERE false", "WITH q AS (SELECT c / 7 AS x FROM t) SELECT sum(x), max(x) FROM q", "TABLE t ORDER BY 1 LIMIT 2",
+    "(SELECT a FROM t ORDER BY a LIMIT 1) UNION ALL (SELECT a FROM t ORDER BY a DESC LIMIT 1) ORDER BY 1"]) assert.ok(orderIsFixed(s), s);
+  for (const s of ["VALUES (1), (NULL) EXCEPT SELECT a FROM t", "SELECT a FROM t", "SELECT count(*) FROM t GROUP BY a", "(SELECT a FROM t ORDER BY a) UNION SELECT b FROM t",
+    "SELECT x FROM (SELECT a AS x FROM t ORDER BY a) s"]) assert.ok(!orderIsFixed(s), s);
+  const forms = arrayOf("pr-loop", "VARIANT_FORMS");
+  assert.deepEqual(arrayOf("pr-loop-slim", "VARIANT_FORMS"), forms, "one list, the same in both workflows");
+  const sql = forms.flatMap((v) => [...v.matchAll(/`([^`]+)`/g)].map((m) => m[1]!));
+  assert.ok(sql.includes("VALUES (1), (NULL) EXCEPT SELECT a FROM t ORDER BY 1"), "the VALUES arm's EXCEPT carries its ORDER BY");
+  assert.ok(!sql.includes("VALUES (1), (NULL) EXCEPT SELECT a FROM t"));
+  for (const s of sql) assert.ok(orderIsFixed(s), `"${s}" leaves its row order to chance: give it a top-level ORDER BY`);
+});
+
+// what every prompt that runs duck-repro is told of `psql`, with or without itEnv
+const PSQL_ON_PATH = /scripts\/duck-repro\.ts needs `psql` on PATH[^\n]*`brew install libpq`[^\n]*`postgresql-client`[^\n]*the postgres:18 container does not supply it/;
+const SLIM_CI_FIX: Answers = { "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green };
+
+test("pr-loop, pr-loop-slim: every prompt that runs statements through duck-repro says `psql` must be on PATH, with or without itEnv (issue 246)", async () => {
+  for (const args of [{ ...PR }, { ...PR, itEnv: "/srv/it.env" }]) {
+    const full = await run("pr-loop", args, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+    for (const l of ["probe 1", "review r1", "review r2"]) assert.match(full.prompt(l), PSQL_ON_PATH, `pr-loop "${l}" ${JSON.stringify(args)}`);
+    const slim = await run("pr-loop-slim", args, { ...SLIM, ...SLIM_CI_FIX });
+    for (const l of ["implement", "fix r1", "CI fix 1", "review r1", "review r3"]) assert.match(slim.prompt(l), PSQL_ON_PATH, `pr-loop-slim "${l}" ${JSON.stringify(args)}`);
+  }
+  // the stop's text is built from the same sentence, and still says all a reader needs to install
+  const r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...clean, statementsRun: 0, statementsMatched: 0 } });
+  const status = String(r.result["status"]);
+  assert.match(status, /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts/);
+  assert.match(status, PSQL_ON_PATH);
+  for (const s of ["`psql` on PATH", "brew install libpq", "postgresql-client", "Docker running", "itEnv"]) assert.ok(status.includes(s), s);
+  for (const name of PR_LOOPS) assert.equal(source(name).match(/brew install libpq/g)?.length, 1, `${name}: the fact lives in one place`);
+});
+
+test("duck-repro: a missing psql says so, names PATH and how to install it, never `psql: ` and nothing (issue 246)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-repro-nopsql-"));
+  try {
+    const bin = path.join(dir, "empty-bin");
+    fs.mkdirSync(bin);
+    for (const f of ["ddl.sql", "stmts.sql"]) fs.writeFileSync(path.join(dir, f), "SELECT 1\n");
+    const r = spawnSync(process.execPath, [path.join(ROOT, "scripts", "duck-repro.ts"), path.join(dir, "ddl.sql"), path.join(dir, "stmts.sql")], {
+      cwd: ROOT, encoding: "utf8", timeout: 120_000, env: { PATH: bin, IT_POSTGRES_URL: "postgres://x:y@127.0.0.1:1/x" },
+    });
+    assert.equal(r.error, undefined, `the script ran within its bound: ${String(r.error)}`);
+    assert.notEqual(r.status, 0, "it fails");
+    assert.doesNotMatch(r.stderr, /psql: *(\n|$)/, "never `psql: ` with nothing after it");
+    assert.match(r.stderr, /`psql`/, "it names psql");
+    assert.match(r.stderr, /\bPATH\b/, "and PATH");
+    assert.match(r.stderr, /brew install libpq[^\n]*postgresql-client/, "and how to install it");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pr-loop, pr-loop-slim: no `docker inspect` prints the container's environment, and NEVER_PRINT forbids one that would (issue 246)", async () => {
+  for (const name of PR_LOOPS) {
+    const answers: Answers = name === "pr-loop" ? { ...START, "review r1": clean, "CI 1": green } : { ...SLIM, "review r1": clean, "CI 1": green };
+    const labels = name === "pr-loop" ? ["probe 1", "review r1"] : ["implement", "review r1"];
+    for (const args of [{ ...PR }, { ...PR, itEnv: "/srv/it.env" }] as Array<Record<string, unknown>>) {
+      const r = await run(name, args, answers);
+      for (const l of labels) {
+        const p = r.prompt(l);
+        const what = `${name} "${l}" ${JSON.stringify(args)}`;
+        assert.match(p, /Never print, echo or log the URL or its password/, what);
+        assert.match(p, /never a `docker inspect` without a `--format` naming one field[^\n]*Config\.Env[^\n]*POSTGRES_PASSWORD/, `${what}: NEVER_PRINT forbids it`);
+        if (args.itEnv) continue;
+        // every docker inspect the prompt has an agent run (a backticked command with a target) prints one field
+        const uses = [...p.matchAll(/`(docker inspect [^`]+)`/g)].map((m) => m[1]!);
+        assert.ok(uses.length > 0, `${what}: the removal check is there`);
+        for (const u of uses) assert.match(u, /^docker inspect --format '\{\{\.[A-Za-z.]+\}\}' "\$n"$/, `${what}: "${u}" prints one field, never Config.Env`);
+        assert.match(p, /`docker rm -f -v "\$n"`, then `docker inspect --format '\{\{\.State\.Status\}\}' "\$n"` must fail, and delete the env file/, what);
+      }
+    }
+  }
+});
+
+test("pr-loop, pr-loop-slim: a narrow re-check's regression sweep covers the fix's own code only; the full review's is unchanged (issue 246)", async () => {
+  const OWN = /Its REGRESSION SWEEP covers the fix's own code only, the code `git diff (\w+) (\w+)` changed: what earlier rounds judged correct outside that code is not re-checked, and inside it the sweep runs it again/;
+  const full = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, ...SLIM_CI_FIX });
+  for (const [x, l, from, to] of [[full, "review r2", "a", "b"], [slim, "review r2", "a", "b"], [slim, "review r3", "f", "c"]] as const) {
+    const m = OWN.exec(x.prompt(l));
+    assert.ok(m, `"${l}" says its sweep covers the fix's own code only`);
+    assert.deepEqual([m[1], m[2]], [sha(from), sha(to)], `"${l}": the code since the previous head`);
+    assert.match(x.prompt(l), /Already judged correct, so do NOT re-check/, l);
+  }
+  for (const x of [full, slim]) {
+    assert.doesNotMatch(x.prompt("review r1"), /covers the fix's own code only/, "the full review is not narrowed");
+    assert.match(x.prompt("review r1"), /hundreds of statements/);
+  }
+});
+
+test("pr-loop, pr-loop-slim: `e` keeps its PRIMARY KEY, since duck-repro syncs only a table with a key (issue 246)", async () => {
+  const E = /`t \(id int PRIMARY KEY, a int, b text, c numeric\(10,2\), d char\(4\)\)`[^\n]*`e`, an empty table of the same shape, its PRIMARY KEY included \(duck-repro syncs only a table with a key\)/;
+  const full = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  for (const l of ["probe 1", "review r1", "review r2"]) assert.match(full.prompt(l), E, `pr-loop "${l}"`);
+  const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
+  for (const l of ["implement", "review r1"]) assert.match(slim.prompt(l), E, `pr-loop-slim "${l}"`);
 });

@@ -105,13 +105,14 @@ const PROBE_SHAPES = "wrap the expression (`* 2`, coalesce, round), nest it, cha
 // about the tokens of a reading review (172k to 250k each, against 197k), because the statements were batched through
 // scripts/duck-repro.ts and only the differences read; they took two to three times the wall time.
 // The synthetic tables every variant form runs over; duck-repro syncs only a table with a key.
-const REPRO_TABLES = "`t (id int PRIMARY KEY, a int, b text, c numeric(10,2), d char(4))`, holding NULLs, duplicate values and ties in every column but id, and `e`, an empty table of the same shape"
+const REPRO_TABLES = "`t (id int PRIMARY KEY, a int, b text, c numeric(10,2), d char(4))`, holding NULLs, duplicate values and ties in every column but id, and `e`, an empty table of the same shape, its PRIMARY KEY included (duck-repro syncs only a table with a key)"
 // The forms nobody wrote that found issue 192's wrong answers, generalised: each a concrete statement over REPRO_TABLES.
 // Run every form that reaches the code the diff touches, with the feature under test and, for the regression sweep,
-// without it. One list, for the probe and every review.
+// without it. One list, for the probe and every review. Each statement fixes its row order (a top-level ORDER BY, or a
+// single row), so a DIFFER is never chance (issue 246; tests/workflows.test.ts holds every one to it).
 const VARIANT_FORMS = [
   "TABLE t in place of SELECT * FROM t, alone and as a set operation's arm: `TABLE t ORDER BY 1 LIMIT 2`; `SELECT * FROM t UNION ALL TABLE t ORDER BY 1 LIMIT 2`",
-  "a VALUES arm first in a set operation: `VALUES (0, 0, 'v', 0.5, 'v') UNION ALL SELECT * FROM t ORDER BY 1 LIMIT 3`; `VALUES (1), (NULL) EXCEPT SELECT a FROM t`",
+  "a VALUES arm first in a set operation: `VALUES (0, 0, 'v', 0.5, 'v') UNION ALL SELECT * FROM t ORDER BY 1 LIMIT 3`; `VALUES (1), (NULL) EXCEPT SELECT a FROM t ORDER BY 1`",
   "an empty input under each bound and aggregate: `SELECT a FROM t WHERE false ORDER BY a LIMIT 2`; `SELECT * FROM e ORDER BY 1 OFFSET 1`; `SELECT count(*), sum(c), max(b) FROM t WHERE false`",
   "a char(4) arm (d) beside a text arm (b): `SELECT d FROM t UNION SELECT b FROM t ORDER BY 1`; `SELECT b FROM t UNION ALL SELECT d FROM t ORDER BY 1 LIMIT 3`",
   "each count and offset zero, negative, NULL and an expression: `SELECT a FROM t ORDER BY a LIMIT NULL`; `SELECT a FROM t ORDER BY a LIMIT -1`; `SELECT a FROM t ORDER BY a OFFSET -1`; `SELECT a FROM t ORDER BY a LIMIT 0`; `SELECT a FROM t ORDER BY a LIMIT 1 + 1 OFFSET NULL`",
@@ -120,14 +121,18 @@ const VARIANT_FORMS = [
   "NULLs and ties at the bound: `SELECT a FROM t ORDER BY a NULLS FIRST LIMIT 2`; `SELECT a FROM t ORDER BY a DESC LIMIT 3`",
   "a set operation's arm with a bound of its own, parenthesised: `(SELECT a FROM t ORDER BY a LIMIT 1) UNION ALL (SELECT a FROM t ORDER BY a DESC LIMIT 1) ORDER BY 1`",
 ]
+// What duck-repro needs of the host, told to every stage that runs it (BATCH) and said in the stop of one that ran no
+// statement (NEEDS), from this one place: without psql, spawnSync fails with an empty stderr (issue 246).
+const PSQL = 'scripts/duck-repro.ts needs `psql` on PATH, which it runs for the DDL (the Postgres client: `brew install libpq` and its bin on PATH, or the `postgresql-client` package; the postgres:18 container does not supply it)'
 // Where duck-repro's Postgres comes from: the itEnv file, or a container of the stage's own that it removes. The
 // password is passed by the environment, never argv (`ps` shows argv), and the container ends itself after two hours
 // should the agent die first (as scripts/gate.ts's does); a shell's variables do not outlive a tool call, so the URL
-// is kept in a file only its owner reads (umask 077).
-const NEVER_PRINT = 'Never print, echo or log the URL or its password: no `cat` of the env file, no `env`, no `set -x`. If no Postgres can be had, report statementsRun 0 and say why first in judgedCorrect; never reason out an answer in place of running it.'
+// is kept in a file only its owner reads (umask 077). `docker inspect` prints the container's Config.Env, which holds
+// the password, so it is only ever run with a --format naming one field (issue 246).
+const NEVER_PRINT = 'Never print, echo or log the URL or its password: no `cat` of the env file, no `env`, no `set -x`, and never a `docker inspect` without a `--format` naming one field, since its Config.Env holds POSTGRES_PASSWORD. If no Postgres can be had, report statementsRun 0 and say why first in judgedCorrect; never reason out an answer in place of running it.'
 const PG_ACCESS = A.itEnv
   ? `Postgres: \`${A.itEnv}\` exports IT_POSTGRES_URL; source it in the same shell call as duck-repro (\`. ${A.itEnv}\`). ${NEVER_PRINT}`
-  : `Postgres: start a throwaway one of your own, and remove it when done. \`umask 077; n=mason-review-$(openssl rand -hex 4); pw=$(openssl rand -hex 16); POSTGRES_PASSWORD=$pw docker run -d --rm --name "$n" -e POSTGRES_PASSWORD -p 127.0.0.1:0:5432 --entrypoint timeout postgres:18 --kill-after=30 7200 docker-entrypoint.sh postgres -c wal_level=logical\`; its port is \`docker port "$n" 5432/tcp\`; in that same call, write \`export IT_POSTGRES_URL=postgres://postgres:$pw@127.0.0.1:<port>/postgres\` to an env file under the system temp dir, and source it (\`. <env file>\`) in each call that runs duck-repro. It is ready when \`docker exec "$n" pg_isready -h 127.0.0.1 -U postgres\` says so, within 60 seconds. When done: \`docker rm -f -v "$n"\`, then \`docker inspect "$n"\` must fail, and delete the env file. ${NEVER_PRINT}`
+  : `Postgres: start a throwaway one of your own, and remove it when done. \`umask 077; n=mason-review-$(openssl rand -hex 4); pw=$(openssl rand -hex 16); POSTGRES_PASSWORD=$pw docker run -d --rm --name "$n" -e POSTGRES_PASSWORD -p 127.0.0.1:0:5432 --entrypoint timeout postgres:18 --kill-after=30 7200 docker-entrypoint.sh postgres -c wal_level=logical\`; its port is \`docker port "$n" 5432/tcp\`; in that same call, write \`export IT_POSTGRES_URL=postgres://postgres:$pw@127.0.0.1:<port>/postgres\` to an env file under the system temp dir, and source it (\`. <env file>\`) in each call that runs duck-repro. It is ready when \`docker exec "$n" pg_isready -h 127.0.0.1 -U postgres\` says so, within 60 seconds. When done: \`docker rm -f -v "$n"\`, then \`docker inspect --format '{{.State.Status}}' "$n"\` must fail, and delete the env file. ${NEVER_PRINT}`
 // Which evidence a review owes is decided by the diff's paths (PR 245, round 2: every review was made to run SQL, and a
 // PR that changes only the CLI, the web page, a script, a workflow or docs has no statement that reaches its code).
 // A path the engine or the listener answers through owes STATEMENTS against Postgres: the `paths:` of every
@@ -144,7 +149,7 @@ const STATEMENT_RES = STATEMENT_PATHS.map(globRe)
 const owesStatements = (path) => STATEMENT_RES.some((re) => re.test(path))
 // How the statements are run: in files, dozens a call, at the head and at the base, the output to a file, and only the
 // counts and the differences read. `scale` says how many.
-const BATCH = (scale) => `RUN statements; never judge by reading alone. ${PG_ACCESS}
+const BATCH = (scale) => `RUN statements; never judge by reading alone. ${PSQL}. ${PG_ACCESS}
 Give each tree its dependencies: link \`${REPO}/node_modules\` into it when its package-lock.json is the same as the main checkout's (\`cmp\`), else \`npm ci\` there. Write a DDL file over the synthetic tables ${REPRO_TABLES} (never a real database's names or rows), and statement files under the system temp dir, statements separated by lines holding only \`--\`, as scripts/duck-repro.ts reads them. Run each file at the head and at the base, dozens of statements a call: \`(. <env file> && cd <tree> && node scripts/duck-repro.ts <ddl.sql> <statements.sql>) > <out> 2>&1\`, the Bash tool's timeout set to 600000. Then read only the counts and the differences: \`grep -c '^SAME' <out>\`, \`grep -c '^DIFFER' <out>\`, \`grep -A2 '^DIFFER' <out> | head -150\`, and \`grep -m5 'NOT COPIED\\|Error' <out>\` (a table not synced: fix the DDL, and count none of its statements); never the whole file. Read a statement that differs at the head beside its line at the base. A statement whose order Postgres leaves open (ties under a LIMIT, no ORDER BY) can differ by chance: order by every column before calling it a difference.
 Run every one of these VARIANT FORMS that reaches the code the diff touches, each spelt over the shapes under test:
 ${VARIANT_FORMS.map((v) => `- ${v}`).join('\n')}
@@ -361,7 +366,7 @@ const countsOf = (a) => ({
   ...(isCount(a.checksRun) ? { checksRun: a.checksRun } : {}),
 })
 // what the statements need, said wherever a stage that ran none of them is reported
-const NEEDS = 'scripts/duck-repro.ts needs `psql` on PATH (the Postgres client: `brew install libpq` and its bin on PATH, or the `postgresql-client` package) and a Postgres: Docker running, for a throwaway postgres:18, or itEnv naming a file that exports IT_POSTGRES_URL'
+const NEEDS = `${PSQL}, and a Postgres: Docker running, for a throwaway postgres:18, or itEnv naming a file that exports IT_POSTGRES_URL`
 const RUN_CHECKS = 'run what the diff changed at the head and the base: the `mason` command in a project of its own, the script, the change\'s test files'
 // what the round failed to show, or null when it showed all it owed
 function missingEvidence(a) {
@@ -536,7 +541,7 @@ async function reviewAndFix(start) {
   ? "hundreds of statements (300 or more): the brief's shapes, each in every variant form, and the regression sweep of every path the diff touches"
   : "a narrower set: the fix's statements in the variant forms that reach the code it changed, and the regression sweep of that code; dozens, not a full review's count")}
 Do not edit or push.
-${kind === 'full' ? `The shapes the brief named:\n${brief.shapes.map((s) => '- ' + s).join('\n')}\nLook beyond them too. About 80 tool calls, never more than 120 tool calls.` : `${what}${probeFixed ? `\nThe commits since ${probedFrom.slice(0, 7)} fix what a probe found; check them the same way.` : ''}\nLook for what the fix broke, in the code it changed only. Already judged correct, so do NOT re-check: ${judged.join('; ') || '(nothing yet)'}. About 30 tool calls, never more than 45 tool calls.`}
+${kind === 'full' ? `The shapes the brief named:\n${brief.shapes.map((s) => '- ' + s).join('\n')}\nLook beyond them too. About 80 tool calls, never more than 120 tool calls.` : `${what}${probeFixed ? `\nThe commits since ${probedFrom.slice(0, 7)} fix what a probe found; check them the same way.` : ''}\nLook for what the fix broke, in the code it changed only. Its REGRESSION SWEEP covers the fix's own code only, the code \`git diff ${base} ${last.head}\` changed: what earlier rounds judged correct outside that code is not re-checked, and inside it the sweep runs it again. Already judged correct, so do NOT re-check: ${judged.join('; ') || '(nothing yet)'}. About 30 tool calls, never more than 45 tool calls.`}
 For each confirmed finding give the failing input, Postgres's answer, Mason's answer at the head, and Mason's answer at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible (CLAUDE.md "Fix the class, not the symptom"). origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
   ${knownList()}
 Give no fix and no patch. Also list what you judged correct.`,

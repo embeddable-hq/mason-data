@@ -32,7 +32,13 @@ const tag = `duck_repro_${process.pid}`;
 const dbUrl = (() => { const u = new URL(adminUrl); u.pathname = `/${tag}`; return u.toString(); })();
 const psql = (url: string, sql: string): void => {
   const r = spawnSync("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", url], { input: sql, encoding: "utf8" });
-  if (r.status !== 0) throw new Error(`psql: ${r.stderr.trim()}`);
+  // spawnSync sets `error` (with no status and no stderr) when psql could not be run at all, most often because it is
+  // not on PATH: say so, and how to get it, rather than `psql: ` and nothing (issue 246)
+  if (r.error !== undefined) {
+    throw new Error(`could not run \`psql\` (${r.error.message}): this script runs the Postgres client \`psql\` for the DDL, so it must be on PATH: \`brew install libpq\` and add its bin to PATH, or install the \`postgresql-client\` package`);
+  }
+  const stderr = r.stderr.trim();
+  if (r.status !== 0) throw new Error(stderr ? `psql: ${stderr}` : `psql exited with ${r.status === null ? `signal ${r.signal}` : `status ${r.status}`} and printed nothing`);
 };
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "duck-repro-"));
 psql(adminUrl, `CREATE DATABASE ${tag}`);
