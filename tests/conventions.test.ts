@@ -207,7 +207,8 @@ export function packagesReached(entries: readonly string[], read: (file: string)
 
 test("what CI's final jobs run needs no npm ci: scripts/ci-shards.ts and scripts/oracle-legs.ts reach only Node's builtins", () => {
   const read = (f: string): string => fs.readFileSync(path.join(ROOT, f), "utf8");
-  assert.deepEqual(packagesReached(["scripts/ci-shards.ts", "scripts/oracle-legs.ts"], read), [], "the final jobs of ci.yml have no node_modules: move this import behind what they run, or add npm ci to them");
+  // the unit shards' timing reporter is loaded by its path (`--test-reporter=`), never imported, so it is named here
+  assert.deepEqual(packagesReached(["scripts/ci-shards.ts", "scripts/oracle-legs.ts", "scripts/ci-layout.ts", "scripts/test-times.ts"], read), [], "the final jobs of ci.yml have no node_modules: move this import behind what they run, or add npm ci to them");
   const workflow = read(".github/workflows/ci.yml");
   for (const gate of ["checks", "integration-oracle", "integration-rest"]) {
     const job = new RegExp(`\\n  ${gate}:\\n[\\s\\S]*?(?=\\n  [\\w-]+:\\n|$)`).exec(workflow)?.[0];
@@ -661,13 +662,17 @@ test("the models guard catches the real thing", () => {
 const PATH_SCANNED = ["src", "tests", "scripts", "docs", ".claude", "README.md", "CLAUDE.md", "cli", "deploy"];
 /** Paths named on purpose that are not files here, each with its reason. None today. */
 const PATH_EXCEPTIONS: ReadonlyMap<string, string> = new Map();
+/** Tracked files whose paths are data, not a pointer for a reader, each with its reason */
+const PATH_UNSCANNED: ReadonlyMap<string, string> = new Map([
+  ["tests/fixtures/unit-weights.json", "each unit file's time as a CI run measured it (scripts/ci-shards.ts weights): an entry for a file gone costs balance, never coverage, until the next run rewrites it"],
+]);
 export function namedPaths(text: string): Array<{ line: number; path: string }> {
   const re = /(?<![\w./-])(?:src|tests|scripts|docs|examples)\/[A-Za-z0-9_./-]+\.(?:ts|mjs|js|md|yml|json|html|sh|sql)\b/g;
   return text.split("\n").flatMap((l, i) => [...l.matchAll(re)].map((m) => ({ line: i + 1, path: m[0] })));
 }
 
 test("a path a comment or a doc names exists in this tree", () => {
-  const files = execFileSync("git", ["ls-files", "-z", ...PATH_SCANNED], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean);
+  const files = execFileSync("git", ["ls-files", "-z", ...PATH_SCANNED], { cwd: ROOT, encoding: "utf8" }).split("\0").filter((f) => f !== "" && !PATH_UNSCANNED.has(f));
   assert.ok(files.length >= 100, `expected at least 100 tracked files, got ${files.length}`);
   const missing = files.flatMap((f) => namedPaths(fs.readFileSync(path.join(ROOT, f), "utf8"))
     .filter((p) => !PATH_EXCEPTIONS.has(p.path) && !fs.existsSync(path.join(ROOT, p.path)))
