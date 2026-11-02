@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, test } from "node:test";
 import pg from "pg";
-import { SESSION_VARIABLE } from "../src/duck/functions.ts";
+import { SESSION_VARIABLE, TURN_FUNCTION } from "../src/duck/functions.ts";
 import {
   Batches, CLEANUP_MS, Fold, iso, buildGenerated, containerArgs, foldByKey, openWorld, planPhases, renderReport, statementSet, targetBytes, verdictOf, volumeTooBig, withCleanup,
   type Change, type ContainerSpec, type DockerResult, type EventRow, type FoldOptions, type Names, type Result, type World,
@@ -144,12 +144,14 @@ describe("the fold over the real engine", () => {
     for (const op of ["delete"]) assert.ok(changes.some((c) => c.op === op), `the mix has a ${op}`);
     await apply(changes);
   });
-  test("fold: the base write alone, today's writer", async () => {
-    const gen = new Batches(fold.conn, 9);
+  test("fold: the base write alone, today's writer, touches only rows outside the definition", async () => {
+    const gen = new Batches(fold.conn, 9, { outside: true });
     await gen.refill();
     const changes = gen.next(60);
+    assert.ok(changes.every((c) => c.op === "delete" || c.row.kind !== "query"));
     const t = await fold.batch(changes, { fold: false });
     assert.ok(t.base > 0 && t.s1 === undefined);
+    assert.deepEqual((await fold.gate()).failures, [], "the baseline's batches left the stored tables stale");
     const [[n, distinct]] = await q("SELECT count(*), count(DISTINCT id) FROM public.events") as [[bigint, bigint]];
     assert.equal(n, distinct);
   });
@@ -168,26 +170,21 @@ describe("the fold over the real engine", () => {
     } finally { await c.end(); }
   });
 
-  test("session: the fold's connection is set up by SessionSetup, and a hand-made one stores wrong rows", async () => {
+  test("session: the fold's connection is set up by SessionSetup; a hand-made one is not", async () => {
     const [[v]] = await q(`SELECT getvariable('${SESSION_VARIABLE}')`) as [[string | null]];
     assert.equal(v, "bench_fold");
-    // the same recompute on a connection nobody set up: Mason's functions answer NULL there, which the gate catches
-    // set up by hand: the zone, the path and the null order, but not the session variable only SessionSetup sets
+    // the planned recompute calls a Mason function, whose first argument is the session (src/duck/functions.ts)
+    assert.match(fold.plans.requestsWhole.plan.sql.text, new RegExp(`${TURN_FUNCTION}\\(getvariable\\('${SESSION_VARIABLE}'\\)`));
+    const turn = `SELECT ${TURN_FUNCTION}(getvariable('${SESSION_VARIABLE}'), 1)`;
+    assert.notEqual((await q(turn))[0]![0], null, "the Mason function answered NULL on the fold's connection");
+    // set up by hand: the zone, the path and the null order, but not the session only SessionSetup sets: the function
+    // answers NULL there. (For THIS definition the recompute's rows still match: the value it computes does not go
+    // through the NULL, so the gate alone would not catch a hand-made connection; the variable is what is held.)
     const hand = await w.store.instance.connect();
-    for (const sql of ["SET TimeZone = 'UTC'", "SET search_path = 'public'", "SET default_null_order = 'nulls_last_on_asc_first_on_desc'"]) await hand.run(sql);
-    const [[none]] = (await hand.runAndReadAll(`SELECT getvariable('${SESSION_VARIABLE}')`)).getRowsJS() as [[string | null]];
-    assert.equal(none, null);
-    assert.match(fold.plans.requestsWhole.plan.sql.text, /mason_/, "the planned recompute calls a Mason function");
-    await hand.run("DELETE FROM public.requests");
-    let failed: unknown = null;
-    try { await hand.run(`INSERT INTO public.requests SELECT * FROM (${fold.plans.requestsWhole.plan.sql.text})`); }
-    catch (e) { failed = e; }   // an error here is as good as wrong rows: either way not the definition's, which the gate says
-    const gate = await fold.gate();
-    assert.equal(gate.ok, false, `a hand-made connection's recompute passed the gate (its insert ${failed === null ? "ran" : "failed"})`);
-    // put the table back as the definition has it, on the set-up connection
-    await fold.conn.run("DELETE FROM public.requests");
-    await fold.conn.run(`INSERT INTO public.requests SELECT * FROM (${fold.plans.requestsWhole.plan.sql.text})`);
-    hand.closeSync();
+    try {
+      for (const sql of ["SET TimeZone = 'UTC'", "SET search_path = 'public'", "SET default_null_order = 'nulls_last_on_asc_first_on_desc'"]) await hand.run(sql);
+      assert.equal((await hand.runAndReadAll(turn)).getRowsJS()[0]![0], null);
+    } finally { hand.closeSync(); }
   });
 });
 

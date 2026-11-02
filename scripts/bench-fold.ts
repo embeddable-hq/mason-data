@@ -6,7 +6,7 @@
  * over synthetic data five times the container's memory, with dashboard statements running beside it through the real
  * listener, and says whether the numbers argue against stages 6-11. No product code changes: it calls src/ as it is.
  *
- *   node scripts/bench-fold.ts --smoke --out <file.json>     # 1 GiB container, ~1.5 GB of data, phases of ~1 min, <= 15 min
+ *   node scripts/bench-fold.ts --smoke --out <file.json>     # 3 GiB container, ~1.5 GB of data, phases of ~1 min, <= 15 min
  *   scripts/gate-slot.ts node scripts/bench-fold.ts --out <file.json>   # the measurement: 4 GiB, ~20 GiB, <= 110 min
  *     --keep           leave the container, volume and image (debugging only; never the default)
  *     --budget-min N   the hard deadline (default 110)
@@ -300,7 +300,7 @@ const lit = (v: string | number | null): string => v === null ? "NULL" : typeof 
 export const EVENT_COLUMNS = [["id", "bigint", true], ["tenant_id", "integer", true], ["request_key", "bigint", false], ["kind", "text", true], ["status", "text", false], ["code", "integer", false],
   ["started_at", "timestamp with time zone", true], ["finished_at", "timestamp with time zone", false], ["payload", "jsonb", false]] as const;
 const COLS = EVENT_COLUMNS.map(([n]) => n);
-export const EVENTS: AddedTable = { source: "public.events", schema: "public", table: "events", key: ["id"], foreignKeys: [], bytes: 0, rows: 0,
+export const EVENTS: AddedTable = { source: "public.events", schema: "public", table: "events", key: ["id"], foreignKeys: [], bytes: 0, rows: 0, sync: { mode: "off" },
   columns: EVENT_COLUMNS.map(([name, type, notNull]) => ({ name, type, notNull, comment: null })) };
 export const EVENTS_DDL = "CREATE TABLE public.events (id BIGINT, tenant_id INTEGER NOT NULL, request_key BIGINT, kind VARCHAR NOT NULL, status VARCHAR, code INTEGER, started_at TIMESTAMPTZ NOT NULL, finished_at TIMESTAMPTZ, payload JSON)";
 export const END_DAY = "2026-03-31";
@@ -419,29 +419,33 @@ export const MIX = [["new", 0.60], ["finish", 0.25], ["retry", 0.08], ["group", 
 const SELECT_ROW = "SELECT id, tenant_id, request_key, kind, status, code, epoch_ms(started_at), epoch_ms(finished_at), payload::VARCHAR FROM public.events";
 const toRow = (r: unknown[]): EventRow => ({ id: Number(r[0]), tenant_id: Number(r[1]), request_key: r[2] === null ? null : Number(r[2]), kind: String(r[3]), status: r[4] as string | null, code: r[5] === null ? null : Number(r[5]),
   started_at: iso(Number(r[6])), finished_at: r[7] === null ? null : iso(Number(r[7])), payload: r[8] as string | null });
-/** batches of the issue's mix, seeded, drawn from pools read from the base before each phase (outside every timing) */
+/** batches of the issue's mix, seeded, drawn from pools read from the base before each phase (outside every timing).
+ *  `outside`: every row a batch touches is outside the definition's WHERE (kind <> 'query'), before and after: the base
+ *  write alone (today's writer, the baseline) has the same shape and cost, and leaves the stored tables equal to their
+ *  definitions, so the correctness gate still holds after it */
 export class Batches {
   private readonly rnd: () => number;
   private clock = 0; private nextId = 0; private nextKey = 0;
   private unfinished: EventRow[] = []; private recent: EventRow[] = []; private older: EventRow[] = [];
-  private readonly c: DuckConnection; private readonly keys: number;
-  constructor(c: DuckConnection, seed = SEED, keys = PAYLOAD_KEYS) { this.c = c; this.keys = keys; this.rnd = mulberry32(seed); }
+  private readonly c: DuckConnection; private readonly keys: number; private readonly outside: boolean;
+  constructor(c: DuckConnection, seed = SEED, o: { keys?: number; outside?: boolean } = {}) { this.c = c; this.keys = o.keys ?? PAYLOAD_KEYS; this.outside = o.outside === true; this.rnd = mulberry32(seed); }
   async refill(): Promise<void> {
     const one = async (sql: string): Promise<unknown[]> => (await this.c.runAndReadAll(sql)).getRowsJS()[0]!;
     const [newest, maxId, maxKey] = await one("SELECT epoch_ms(max(started_at)), max(id), max(request_key) FROM public.events");
     this.clock = Math.max(this.clock, Number(newest)); this.nextId = Math.max(this.nextId, Number(maxId) + 1); this.nextKey = Math.max(this.nextKey, Number(maxKey ?? 0) + 1);
     const rows = async (where: string, limit: number): Promise<EventRow[]> => (await this.c.runAndReadAll(`${SELECT_ROW} WHERE ${where} ORDER BY id DESC LIMIT ${limit}`)).getRowsJS().map(toRow);
     const t = (days: number): string => `TIMESTAMPTZ '${iso(this.clock - days * 86_400_000)}'`;
-    this.unfinished = await rows(`finished_at IS NULL AND started_at >= ${t(10)}`, 5000);
-    this.recent = await rows(`kind = 'query' AND started_at >= ${t(1)}`, 20000);
-    this.older = await rows(`kind = 'query' AND request_key IS NOT NULL AND started_at >= ${t(15)} AND started_at < ${t(5)}`, 5000);
+    const kind = this.outside ? "kind <> 'query'" : "kind = 'query'";
+    this.unfinished = await rows(`finished_at IS NULL AND ${kind} AND started_at >= ${t(10)}`, 5000);
+    this.recent = await rows(`${kind} AND started_at >= ${t(1)}`, 20000);
+    this.older = await rows(`${kind} AND request_key IS NOT NULL AND started_at >= ${t(15)} AND started_at < ${t(5)}`, 5000);
   }
   private pick(pool: EventRow[]): EventRow | undefined { if (pool.length === 0) return undefined; const i = Math.floor(this.rnd() * pool.length); const [r] = pool.splice(i, 1); return r; }
   private fresh(over: Partial<EventRow> = {}): EventRow {
     this.clock += 1 + Math.floor(this.rnd() * 50);
     const u = this.rnd(), v = this.rnd() * 100;
     const row: EventRow = { id: this.nextId++, tenant_id: 1 + Math.min(499, Math.floor(500 * Math.pow(u, 2.46))), request_key: this.rnd() < 0.2 ? null : 1_000_000_000 + this.nextKey++,
-      kind: v < 80 ? "query" : v < 95 ? "load" : "other", status: null, code: null, started_at: iso(this.clock), finished_at: null, payload: makePayload(this.rnd, this.keys), ...over };
+      kind: this.outside ? "other" : v < 80 ? "query" : v < 95 ? "load" : "other", status: null, code: null, started_at: iso(this.clock), finished_at: null, payload: makePayload(this.rnd, this.keys), ...over };
     if (this.rnd() > 0.3 && over.finished_at === undefined) { row.finished_at = iso(this.clock + 10 + Math.floor(this.rnd() * 29990)); row.status = "ok"; row.code = 200; }
     this.recent.push(row); if (row.finished_at === null) this.unfinished.push(row);
     return row;
@@ -455,11 +459,11 @@ export class Batches {
       if (op === "new" || base === undefined) { out.push({ op: "upsert", row: this.fresh() }); continue; }
       switch (op) {
         case "finish": out.push({ op: "upsert", row: { ...base, finished_at: iso(Date.parse(base.started_at.replace(" ", "T").replace("+00", "Z")) + 10 + Math.floor(this.rnd() * 29990)), status: "ok", code: 200 } }); break;
-        case "retry": out.push({ op: "upsert", row: this.fresh({ tenant_id: base.tenant_id, request_key: base.request_key ?? base.id, kind: "query" }) }); this.recent.push(base); break;
+        case "retry": out.push({ op: "upsert", row: this.fresh({ tenant_id: base.tenant_id, request_key: base.request_key ?? base.id, kind: this.outside ? "other" : "query" }) }); this.recent.push(base); break;
         case "group": out.push({ op: "upsert", row: { ...base, request_key: 1_000_000_000 + this.nextKey++ } }); break;
-        case "leave": out.push({ op: "upsert", row: { ...base, kind: "load" } }); break;
+        case "leave": out.push({ op: "upsert", row: { ...base, kind: this.outside ? (base.kind === "load" ? "other" : "load") : "load" } }); break;
         case "delete": out.push({ op: "delete", id: base.id }); break;
-        case "late": out.push({ op: "upsert", row: { ...this.fresh({ tenant_id: base.tenant_id, request_key: base.request_key, kind: "query" }), started_at: iso(Date.parse(base.started_at.replace(" ", "T").replace("+00", "Z")) - 60_000), finished_at: base.started_at } }); this.clock -= 1; break;
+        case "late": out.push({ op: "upsert", row: { ...this.fresh({ tenant_id: base.tenant_id, request_key: base.request_key, kind: this.outside ? "other" : "query" }), started_at: iso(Date.parse(base.started_at.replace(" ", "T").replace("+00", "Z")) - 60_000), finished_at: base.started_at } }); this.clock -= 1; break;
       }
     }
     return out;
@@ -500,9 +504,10 @@ export class Fold {
     // the columns each definition reads, as Postgres's analysis says (DuckPlan.reads), never a list written here
     const readsOf = (d: DefinitionPlan, table: string): string[] => { const r = (d.plan.reads ?? []).find((x) => x.table === table); if (r === undefined) throw new Error(`the plan reads no ${table}`); return r.columns; };
     const reads = { events: readsOf(requestsWhole, "public.events"), requests: readsOf(dailyWhole, "public.requests") };
-    // the swapped relations: real tables in the base's schema, since swapRelations keeps the schema (a TEMP table is not in `public`)
-    await c.run(`CREATE OR REPLACE TABLE public.${SCOPE_EVENTS} AS SELECT ${reads.events.map(ident).join(", ")} FROM public.events LIMIT 0`);
-    await c.run(`CREATE OR REPLACE TABLE public.${SCOPE_REQUESTS} AS SELECT ${reads.requests.map(ident).join(", ")} FROM public.requests LIMIT 0`);
+    // the swapped relations: TEMP tables of this connection, made once and refilled each batch (no DDL a batch). The planned
+    // SQL names them bare, and DuckDB looks in the temp catalog before the search path
+    await c.run(`CREATE OR REPLACE TEMP TABLE ${SCOPE_EVENTS} AS SELECT ${reads.events.map(ident).join(", ")} FROM public.events LIMIT 0`);
+    await c.run(`CREATE OR REPLACE TEMP TABLE ${SCOPE_REQUESTS} AS SELECT ${reads.requests.map(ident).join(", ")} FROM public.requests LIMIT 0`);
     const requests = await plan(planner, REQUESTS_SQL, new Map([["public.events", SCOPE_EVENTS]]));
     const daily = await plan(planner, DAILY_SQL, new Map([["public.requests", SCOPE_REQUESTS]]));
     return new Fold(c, w.sync.kept, { requests, daily, requestsWhole, dailyWhole }, reads);
@@ -563,14 +568,14 @@ export class Fold {
         t.s4 = lap();
         // step 5: the recompute: the PLANNER's SQL over a relation of the touched groups' base rows, the columns it reads, from the bound
         const req = output(this.plans.requests);
-        const scope = (where: string): string => `CREATE OR REPLACE TABLE public.${SCOPE_EVENTS} AS SELECT ${this.reads.events.map((x) => `e.${ident(x)}`).join(", ")} FROM public.events e SEMI JOIN __fold_ledger l ON e.tenant_id = l.tenant_id AND coalesce(e.request_key, e.id) = l.key${where}`;
+        const scope = async (where: string): Promise<void> => { await c.run(`DELETE FROM ${SCOPE_EVENTS}`); await c.run(`INSERT INTO ${SCOPE_EVENTS} SELECT ${this.reads.events.map((x) => `e.${ident(x)}`).join(", ")} FROM public.events e SEMI JOIN __fold_ledger l ON e.tenant_id = l.tenant_id AND coalesce(e.request_key, e.id) = l.key${where}`); };
         if (o.compareUnbounded === true) {
           const u0 = performance.now();
-          await c.run(scope(""));
+          await scope("");
           await c.run(`CREATE OR REPLACE TEMP TABLE __fold_req_unbounded AS ${req.select(this.plans.requests.plan.sql.text)}`);
           unboundedMs = performance.now() - u0; t.unbounded = unboundedMs; at += unboundedMs;
         }
-        await c.run(scope(bound === null ? " WHERE false" : ` WHERE e.started_at >= ${lit(bound)}::TIMESTAMPTZ`));
+        await scope(bound === null ? " WHERE false" : ` WHERE e.started_at >= ${lit(bound)}::TIMESTAMPTZ`);
         await c.run(`CREATE OR REPLACE TEMP TABLE __fold_req_new AS ${req.select(this.plans.requests.plan.sql.text)}`);
         await c.run(`INSERT INTO public.requests (${req.cols}) SELECT * FROM __fold_req_new`);
         t.s5 = lap();
@@ -588,7 +593,8 @@ export class Fold {
           const day = (x: string): string => `date_trunc('day', timezone('UTC', ${x}))`;
           await c.run(`CREATE OR REPLACE TEMP TABLE __fold_days AS SELECT DISTINCT tenant_id, ${day("first_at")} AS day FROM (SELECT tenant_id, first_at FROM __fold_req_old UNION ALL SELECT tenant_id, first_at FROM __fold_req_new)`);
           await c.run("DELETE FROM public.daily_durations AS d USING __fold_days AS x WHERE d.tenant_id = x.tenant_id AND d.day = x.day");
-          await c.run(`CREATE OR REPLACE TABLE public.${SCOPE_REQUESTS} AS SELECT ${this.reads.requests.map((x) => `r.${ident(x)}`).join(", ")} FROM public.requests r SEMI JOIN __fold_days x ON r.tenant_id = x.tenant_id AND ${day("r.first_at")} = x.day`);
+          await c.run(`DELETE FROM ${SCOPE_REQUESTS}`);
+          await c.run(`INSERT INTO ${SCOPE_REQUESTS} SELECT ${this.reads.requests.map((x) => `r.${ident(x)}`).join(", ")} FROM public.requests r SEMI JOIN __fold_days x ON r.tenant_id = x.tenant_id AND ${day("r.first_at")} = x.day`);
           const daily = output(this.plans.daily);
           await c.run(`INSERT INTO public.daily_durations (${daily.cols}) ${daily.select(this.plans.daily.plan.sql.text)}`);
         }
@@ -688,14 +694,17 @@ async function coldRead(file: string, bytes: number): Promise<{ readBytes: numbe
   return { readBytes: read, diskBytes: before === null || after === null ? null : after - before, seconds: (performance.now() - t0) / 1000 };
 }
 async function blocksOf(c: DuckConnection, table: string, columns?: readonly string[]): Promise<number> {
+  // a column's blocks: each segment's own and its overflow blocks (a long string's), counted once; an upper bound, since a
+  // small segment shares its block with others
   const where = columns === undefined ? "" : ` WHERE column_name IN (${columns.map(lit).join(", ")})`;
-  return Number((await c.runAndReadAll(`SELECT count(DISTINCT block_id) * 262144 FROM pragma_storage_info(${lit(table)})${where}`)).getRowsJS()[0]![0]);
+  const info = `pragma_storage_info(${lit(table)})`;
+  return Number((await c.runAndReadAll(`SELECT count(DISTINCT b) * 262144 FROM (SELECT block_id AS b FROM ${info}${where} UNION ALL SELECT unnest(additional_block_ids) FROM ${info}${where}) WHERE b IS NOT NULL`)).getRowsJS()[0]![0]);
 }
 
 interface InsideConfig { targetBytes: number; smoke: boolean; batchesPerSize: number; spillLimit: string }
 async function inside(cfg: InsideConfig): Promise<void> {
   const dir = "/data", log = (l: string): void => { process.stdout.write(`${new Date().toISOString()} ${l}\n`); };
-  let world: World | null = null, fold: Fold | null = null, gen: Batches | null = null;
+  let world: World | null = null, fold: Fold | null = null, gen: Batches | null = null, outside: Batches | null = null;
   const run = async (req: Record<string, unknown>): Promise<unknown> => {
     switch (req.phase) {
       case "generate": return phase(dir, async () => {
@@ -711,7 +720,7 @@ async function inside(cfg: InsideConfig): Promise<void> {
       case "token": return { token: world!.token(4 * 3600) };
       case "rerun": return phase(dir, async () => {
         const built = await buildGenerated(world!, 60 * 60_000);
-        fold = await Fold.open(world!); gen = new Batches(fold.conn);
+        fold = await Fold.open(world!); gen = new Batches(fold.conn); outside = new Batches(fold.conn, SEED + 1, { outside: true });
         const w = world!.store.writer;
         const n = async (t: string): Promise<number> => Number((await w.runAndReadAll(`SELECT count(*) FROM ${t}`)).getRowsJS()[0]![0]);
         return { rerunSeconds: built.seconds, requestsRows: await n("public.requests"), dailyRows: await n("public.daily_durations"),
@@ -720,8 +729,9 @@ async function inside(cfg: InsideConfig): Promise<void> {
       case "writer": return phase(dir, async () => {
         const out: Record<string, unknown> = {}, count = cfg.batchesPerSize;
         for (const fold_ of [false, true]) for (const size of [6, 60, 1000]) {
-          await gen!.refill();
-          const r = await runBatches(fold!, gen!, { size, intervalMs: 0, count, fold: fold_ });
+          const g = fold_ ? gen! : outside!;
+          await g.refill();
+          const r = await runBatches(fold!, g, { size, intervalMs: 0, count, fold: fold_ });
           out[`${fold_ ? "fold" : "base"}${size}Stats`] = timingStats(r.timings);
         }
         await gen!.refill();
@@ -733,8 +743,9 @@ async function inside(cfg: InsideConfig): Promise<void> {
         return out;
       });
       case "together": return phase(dir, async () => {
-        await gen!.refill();
-        const r = await runBatches(fold!, gen!, { size: Number(req.size), intervalMs: Number(req.intervalMs), durationMs: Number(req.durationMs), fold: req.fold === true });
+        const g = req.fold === true ? gen! : outside!;
+        await g.refill();
+        const r = await runBatches(fold!, g, { size: Number(req.size), intervalMs: Number(req.intervalMs), durationMs: Number(req.durationMs), fold: req.fold === true });
         return { batchStats: timingStats(r.timings), batches: r.timings.length, late: r.late, maxLagMs: r.maxLagMs, lastLagMs: r.lastLagMs };
       });
       case "gate": return phase(dir, async () => ({ gate: await fold!.gate() }));
@@ -752,6 +763,12 @@ async function inside(cfg: InsideConfig): Promise<void> {
   });
   server.requestTimeout = 0; server.headersTimeout = 0; server.timeout = 0;
   server.listen(CONTROL_PORT, "0.0.0.0");
+  // the memory a kill would follow, every 2 s: what the host's death report quotes (its last line)
+  setInterval(() => {
+    const m = cgroup("memory.stat"), f = (k: string): string => { const x = m === null ? null : new RegExp(`^${k} (\\d+)$`, "m").exec(m); return x === null ? "?" : `${Math.round(Number(x[1]) / 1024 ** 2)}M`; };
+    const duck = world === null ? "" : ` duckdb_limit=${Math.round(world.store.memoryLimitBytes / 1024 ** 2)}M`;
+    log(`mem anon=${f("anon")} file=${f("file")} dirty=${f("file_dirty")} writeback=${f("file_writeback")} kernel=${f("kernel")} rss=${Math.round(process.memoryUsage().rss / 1024 ** 2)}M heap=${Math.round(process.memoryUsage().heapUsed / 1024 ** 2)}M${duck}`);
+  }, 2000).unref();
   log(`bench-fold inside: control on ${CONTROL_PORT}`);
 }
 
@@ -802,7 +819,9 @@ async function host(argv: string[]): Promise<number> {
   const arg = (k: string): string | undefined => { const i = argv.indexOf(k); return i < 0 ? undefined : argv[i + 1]; };
   const out = arg("--out") ?? path.join(os.tmpdir(), `bench-fold${smoke ? "-smoke" : ""}.json`);
   const budgetMs = Number(arg("--budget-min") ?? (smoke ? 15 : 110)) * 60_000;
-  const memoryBytes = smoke ? GIB : 4 * GIB;
+  // the smoke at 3 GiB: Mason with its default memory limit (half the cgroup) was OOM-killed at 1 GiB in the whole re-run,
+  // and at 2 GiB in the writer phase (anon 1.76 GiB beside an engine limit of 1 GiB)
+  const memoryBytes = smoke ? 3 * GIB : 4 * GIB;
   const target = smoke ? 1.5e9 : targetBytes(memoryBytes);
   const free = fs.statfsSync(os.homedir()); const freeBytes = free.bavail * free.bsize;
   if (freeBytes < HOST_FREE_MIN_BYTES) { process.stderr.write(`bench-fold: ${gib(freeBytes)} free on the host, under the ${gib(HOST_FREE_MIN_BYTES)} the run needs\n`); return 2; }
@@ -822,20 +841,30 @@ async function host(argv: string[]): Promise<number> {
     await must(realDocker, ["build", "-q", "-f", path.join(root, "docker/mason-data.Dockerfile"), "-t", names.image, root]);
     await must(realDocker, ["volume", "create", names.volume]);
     // the volume's block device, read inside a throwaway container from /data's mount and sysfs (a partition's parent disk)
-    const probe = "const fs=require('fs');const l=fs.readFileSync('/proc/self/mountinfo','utf8').split('\\n').find(x=>x.split(' ')[4]==='/data');const mm=l&&l.split(' ')[2];let d=null;" +
-      "try{let p='/sys/dev/block/'+mm;if(fs.existsSync(p+'/partition'))p=fs.realpathSync(p)+'/..';const u=fs.readFileSync(p+'/uevent','utf8');const m=/DEVNAME=(.*)/.exec(u);if(m)d='/dev/'+m[1];}catch(e){}console.log(JSON.stringify({mm,d}))";
-    const found = JSON.parse(await must(realDocker, ["run", "--rm", "--user", "0", "-v", `${names.volume}:/data`, "--entrypoint", "node", names.image, "-e", probe])) as { mm: string | null; d: string | null };
+    // a volume on a filesystem with no device of its own (btrfs: major 0) is read from its mount's source
+    const probe = "const fs=require('fs');const l=fs.readFileSync('/proc/self/mountinfo','utf8').split('\\n').find(x=>x.split(' ')[4]==='/data');const mm=l&&l.split(' ')[2];const src=l&&l.split(' - ')[1].split(' ')[1];let d=null;" +
+      "const disk=(sys)=>{let p=sys;if(fs.existsSync(p+'/partition'))p=fs.realpathSync(p)+'/..';const m=/DEVNAME=(.*)/.exec(fs.readFileSync(p+'/uevent','utf8'));return m?'/dev/'+m[1]:null};" +
+      "try{if(mm&&!mm.startsWith('0:'))d=disk('/sys/dev/block/'+mm);else if(src&&src.startsWith('/dev/'))d=disk('/sys/class/block/'+src.slice(5));}catch(e){d=null}console.log(JSON.stringify({mm,src,d}))";
+    const found = JSON.parse(await must(realDocker, ["run", "--rm", "--user", "0", "-v", `${names.volume}:/data`, "--entrypoint", "node", names.image, "-e", probe])) as { mm: string | null; src: string | null; d: string | null };
     const spec = (device: string | null): ContainerSpec => ({ container: names.container, image: names.image, volume: names.volume, memoryBytes, cpus: 4, device, script: fileURLToPath(import.meta.url),
       env: { MASON_SPILL_LIMIT: "6GB", BENCH_FOLD_CONFIG: JSON.stringify({ targetBytes: target, smoke, batchesPerSize: smoke ? 6 : 40, spillLimit: "6GB" } satisfies InsideConfig) }, args: [] });
-    let run = found.d === null ? { code: 1, stdout: "", stderr: `no block device for /data (${found.mm ?? "no mount"})` } : await realDocker(containerArgs(spec(found.d)));
+    let run = found.d === null ? { code: 1, stdout: "", stderr: `no block device for /data (${found.mm ?? "no mount"} on ${found.src ?? "?"})` } : await realDocker(containerArgs(spec(found.d)));
     result.environment.throttle = run.code === 0 ? `${found.d} throttled to 125 MB/s and 3000 IOPS each way (an EBS gp3)` : `NOT throttled (${run.stderr.trim().split("\n")[0]}): the numbers are a laptop disk's`;
     if (run.code !== 0) { await realDocker(["rm", "-f", names.container]); run = await realDocker(containerArgs(spec(null))); }
     if (run.code !== 0) throw new Error(`the container did not start: ${run.stderr.trim()}`);
+    /** why the container stopped answering: its state (OOMKilled) and its log's last lines, read before cleanup removes it */
+    const died = async (): Promise<string> => {
+      const st = await realDocker(["inspect", "-f", "running={{.State.Running}} oomkilled={{.State.OOMKilled}} exit={{.State.ExitCode}}", names.container]);
+      const logs = await realDocker(["logs", "--tail", "400", names.container]);
+      const lines = (logs.stdout + logs.stderr).trim().split("\n");
+      const mem = lines.filter((l) => / mem anon=/.test(l)).slice(-3);
+      return `${st.stdout.trim()}; memory before: ${mem.join(" / ")}; last lines: ${lines.filter((l) => !/ mem anon=/.test(l)).slice(-3).map((l) => l.slice(0, 200)).join(" / ")}`;
+    };
     const portOf = async (p: number): Promise<number> => Number((await must(realDocker, ["port", names.container, String(p)])).split("\n")[0]!.split(":").pop());
     const cport = await portOf(CONTROL_PORT), pgport = await portOf(PG_PORT);
     for (let k = 0; ; k++) { try { await control(cport, {}); break; } catch (e) { if (k > 120) throw e; await new Promise((r) => setTimeout(r, 500)); } }
     const step = async (name: string, body: Record<string, unknown>): Promise<PhaseRecord> => {
-      const r = await control(cport, body) as PhaseRecord;
+      const r = await control(cport, body).catch(async (e: unknown) => { throw new Error(`${name}: ${e instanceof Error ? e.message : String(e)} (${await died()})`); }) as PhaseRecord;
       r.hostLoad = os.loadavg();
       result.phases[name] = r; save();
       if (volumeTooBig(r.volumeBytes)) throw new Error(`the volume holds ${gib(r.volumeBytes)}, past the ${gib(VOLUME_STOP_BYTES)} stop`);
@@ -864,7 +893,7 @@ async function host(argv: string[]): Promise<number> {
       const rec: Record<string, unknown> = {};
       for (const p of parts) {
         c.label(p.label);
-        if (p.body !== undefined) rec[p.label] = await control(cport, p.body); else await new Promise((r) => setTimeout(r, p.ms));
+        if (p.body !== undefined) rec[p.label] = await control(cport, p.body).catch(async (e: unknown) => { throw new Error(`${name} ${p.label}: ${e instanceof Error ? e.message : String(e)} (${await died()})`); }); else await new Promise((r) => setTimeout(r, p.ms));
       }
       const got = await c.stop();
       const record = { ...(Object.values(rec)[0] as PhaseRecord | undefined ?? { io: { readBytes: null, writeBytes: null }, memory: { fileBytes: null, anonBytes: null, peakBytes: null }, cpu: { throttledUsec: null, nrThrottled: null }, volumeBytes: 0, spillBytes: 0 }), seconds: (performance.now() - t0) / 1000, hostLoad: os.loadavg(), clientErrors: got.errors } as PhaseRecord;
