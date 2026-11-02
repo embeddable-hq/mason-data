@@ -216,6 +216,13 @@ test("what CI's final jobs run needs no npm ci: scripts/ci-shards.ts and scripts
   }
 });
 
+test("the scripts a harness prompt has an agent run from the main checkout reach only Node's builtins (issue 322)", () => {
+  // an agent runs them as `node <repo>/scripts/<name>.ts …`, from a checkout whose node_modules it cannot assume
+  const read = (f: string): string => fs.readFileSync(path.join(ROOT, f), "utf8");
+  const scripts = ["scripts/ci-wait.ts", "scripts/wait-file.ts", "scripts/review-postgres.ts", "scripts/duck-repro-bounded.ts"];
+  assert.deepEqual(packagesReached(scripts, read), [], "a script a prompt runs by path imports a package: keep it to node: builtins");
+});
+
 test("the npm ci guard catches the real thing", () => {
   const tree: Record<string, string> = {
     "a.ts": 'import { x } from "./b.ts";\nimport type { T } from "./t.ts";\nimport * as fs from "node:fs";\nconst y = await import("./c.ts");\n',

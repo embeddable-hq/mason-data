@@ -39,13 +39,16 @@ Make a run folder in your scratchpad. In it, write `args.json` with pr-loop-slim
 
 Then write `answers.json` holding `{}`, make `results/` (each agent writes its result there), and PIN the script and
 its render: copy `.claude/workflows/pr-loop-slim.js` and `.claude/skills/pr-persistent/render.mjs` into the run folder,
-both from the commit the other arm starts from, and note that commit in the race log:
+both from the commit the other arm starts from, and note that commit in the race log. Each line is one plain
+command, run from the checkout the other arm's Workflow runs in: `<sha>` is what the first printed and `<run folder>`
+the folder's absolute path, both written out (issue 322: a command substitution, a shell variable or git's -C is what
+Claude Code's worktree guard refuses in an isolated agent):
 
 ```sh
-SHA=$(git -C <repo> rev-parse HEAD)
-git -C <repo> show "$SHA:.claude/workflows/pr-loop-slim.js" > "$RUN/pr-loop-slim.js"
-git -C <repo> show "$SHA:.claude/skills/pr-persistent/render.mjs" > "$RUN/render.mjs"
-mkdir -p "$RUN/results"
+git rev-parse HEAD
+git show <sha>:.claude/workflows/pr-loop-slim.js > <run folder>/pr-loop-slim.js
+git show <sha>:.claude/skills/pr-persistent/render.mjs > <run folder>/render.mjs
+mkdir -p <run folder>/results
 ```
 
 The render reads only those copies, as the Workflow tool loads its script once, so a main that moves during the race
@@ -61,8 +64,8 @@ session's usage reports them at the end. A coordinator that carried every prompt
 
 ```sh
 # render-stage: replays the pinned pr-loop-slim.js against answers.json, both beside it in the run folder, and writes
-# each next stage's prompt to next/. It prints only STAGE, NULL and DONE lines.
-node "$RUN/render.mjs"
+# each next stage's prompt to next/. It prints only STAGE, NULL and DONE lines. <run folder> is written out.
+node <run folder>/render.mjs
 ```
 
 It prints `DONE: <status>` when the run is over, or one `STAGE` line for each stage the script starts next. Before
@@ -88,8 +91,9 @@ folder before it ends its turn, and to end its report with that path. That path 
 made `results/` and `.md` made `.json`. **The file is the result, never the agent's completion notice**: when you
 resume the implementer by SendMessage, the notice of its end can go to the top-level session instead of you, so a
 fix round's result would be lost while you wait on it (issue 304, PR 313). So for each stage you dispatch, leave a
-bounded background job that exits when its results file exists or 30 minutes pass
-(`for i in $(seq 120); do [ -s <path> ] && break; sleep 15; done`); it wakes you whether or not a notice reaches you. When its bound passes with no
+bounded background job that exits when its results file exists (and is not empty) or 30 minutes pass, one plain
+command with run_in_background, `node <repo>/scripts/wait-file.ts <path> 1800` (exit 0: the file is there; 8: the
+bound passed); it wakes you whether or not a notice reaches you. When its bound passes with no
 file, look before leaving another: a fix that pushed has moved the PR's head (`git ls-remote origin <branch>`), and an
 agent that ended without writing its file failed. Then record under the stage's label in `answers.json`, exactly as
 printed, its results path once the file exists, or `null` when the agent failed without writing it. Then render

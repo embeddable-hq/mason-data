@@ -11,7 +11,7 @@ export const meta = {
 
 // args: { issue, base = 'main', prLoop?, tasks?, knownClasses?, from?, prev?, repo?, itEnv? }
 //   repo: the main checkout's path, passed on to pr-loop. Without it each agent finds the repository itself (WHERE).
-//   itEnv: a path to a shell file that exports IT_POSTGRES_URL, passed on to pr-loop for the statements its probes and
+//   itEnv: a path to a file that holds IT_POSTGRES_URL (`export IT_POSTGRES_URL=…` or `IT_POSTGRES_URL=…`, both read by Node's --env-file), passed on to pr-loop for the statements its probes and
 //   reviews run; without it, each starts a throwaway Postgres of its own (pr-loop's header).
 //   prLoop: a path to a pr-loop script to run instead of the named workflow `pr-loop` (.claude/workflows/pr-loop.js).
 //   Without `tasks`: plan only, and return the tasks. The coordinator reads them (and may edit them) before a run: a

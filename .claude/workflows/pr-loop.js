@@ -24,7 +24,7 @@ export const meta = {
 //   knownClasses: { slug: { count, why } } carried from the PRs this one is stacked on (or the issue's earlier PRs), so
 //   a class met on PR 170 counts on PR 207 too. The run returns its classes in the same shape, for the next run: only
 //   the classes of blocking findings a PR made, never the base's nor a non-blocking one, which are filed instead.
-//   itEnv: a path to a shell file that exports IT_POSTGRES_URL, the Postgres the probe and the review run their
+//   itEnv: a path to a file that holds IT_POSTGRES_URL (`export IT_POSTGRES_URL=…` or `IT_POSTGRES_URL=…`, both read by Node's --env-file), the Postgres the probe and the review run their
 //   statements against through scripts/duck-repro.ts (a database of its own is made there and dropped). Without it, each
 //   probe and review starts a throwaway postgres:18 container of its own (wal_level=logical, a random password, a free
 //   loopback port) and removes it when done. No prompt prints the URL.
@@ -32,9 +32,15 @@ export const meta = {
 //   { status, pr, head, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds }.
 const A = args
 const REPO = A.repo || '<repo>'
+// Every command a prompt tells an agent to run is PLAIN: one program with literal arguments, at most its output
+// redirected to a file; no $(…), $((…)), << or <<<, loop, ( … ) subshell, . or source, $VAR, nor git -C <repo>. Claude
+// Code's worktree guard refuses those in an agent that runs isolated in a worktree, including one that inherits a lead's,
+// and the refused agent improvises its own (issue 322); what needs logic is a script under scripts/.
+// tests/workflows.test.ts holds every rendered prompt to it.
+const GIT_HERE = ' Run each git command from your own working directory (a checkout of this repository or a worktree of it, which share one object store), never redirected to the main checkout with -C: Claude Code\'s worktree guard refuses that in an isolated agent.'
 const WHERE = A.repo
-  ? `The repository's main checkout is ${A.repo}.\n`
-  : "<repo> below is the repository's main checkout: the one your working directory is in (`git rev-parse --show-toplevel`), or for a worktree agent, its main checkout via `git rev-parse --path-format=absolute --git-common-dir` and its parent. Find it first and use its absolute path for <repo>.\n"
+  ? `The repository's main checkout is ${A.repo}.${GIT_HERE}\n`
+  : "<repo> below is the repository's main checkout: the one your working directory is in (`git rev-parse --show-toplevel`), or for a worktree agent, its main checkout via `git rev-parse --path-format=absolute --git-common-dir` and its parent. Find it first and use its absolute path for <repo>." + GIT_HERE + '\n'
 // the board is moved from the main checkout's file, never through `node <(git show …)`, which exits 0 having run nothing
 const BOARD = (status) => `node ${REPO}/scripts/board.ts status ${A.issue} "${status}"`
 // one bound per PR, on the one counter (`round`) the stop's status and rounds[] read: the review rounds of a CI fix's
@@ -70,26 +76,25 @@ const ON = {
 const signed = (on) => `### From Claude (${SIGNS[on.model]})`
 const coAuthor = (on) => `Co-Authored-By: Claude ${SIGNS[on.model]} <noreply@anthropic.com>`
 
-// One chunk of the CI wait (CLAUDE.md "Local gates": a `gh pr checks` loop with a deadline, never --watch, which exits
-// at once on "no checks reported"). Each pass first reads `gh pr view --json mergeable,mergeStateStatus`, before the
-// checks' verdict: GitHub runs no pull_request workflow on a PR with a merge conflict, so on a conflicting PR "no checks
-// reported" never ends (PRs 231 and 233 waited to their deadline, issue 255). mergeable CONFLICTING is its own verdict,
-// conflict, at once, even over a finished run at the head (a green PR that cannot merge is not ready); UNKNOWN (GitHub
-// computes it lazily, just after a push) or a read that fails is "couldn't tell", a wait; only MERGEABLE lets the checks
-// decide. mergeStateStatus is printed for the record and is never a verdict (DRAFT, BLOCKED and BEHIND all get CI).
-// gh pr checks exits 0 when all passed, 8 while any is pending, 1 on a failure, and
-// also 1 with "no checks reported" just after a push, which is a wait, not a failure; a failure while others are still
-// pending is a failure (gh says 1). Any other exit is "couldn't tell", waited on like a pending one, and the last exit
-// code is printed. Nine minutes: the agent's tool call is given a timeout of 600000 ms (CI_TOOL_MS), past the chunk, as
-// the default of two minutes would kill it before it printed. The $SECONDS deadline bounds the loop, since an alarm
-// exec'd into gh (a Go program) is ignored.
+// The CI wait (CLAUDE.md "Local gates": a `gh pr checks` loop with a deadline, never --watch, which exits at once on
+// "no checks reported") is scripts/ci-wait.ts, run by the agent as ONE plain command from the main checkout, as BOARD
+// runs board.ts. It was a $SECONDS loop written out here, which Claude Code's worktree guard refuses in an isolated
+// agent (a CI stage started by a lead that runs in a worktree inherits it), so each agent improvised its own (issue
+// 322). Its rules are issue 255's, kept in the script: each pass reads `gh pr view --json mergeable,mergeStateStatus`
+// first, parsed; CONFLICTING is the verdict conflict, at once and final, even over a finished run at the head (GitHub
+// runs no pull_request workflow on a conflicting PR, so its "no checks reported" never ends); UNKNOWN or a read that
+// fails is "couldn't tell", a wait; only MERGEABLE lets the checks decide; mergeStateStatus is printed, never a verdict;
+// gh pr checks exits 0 when all passed, 8 while any is pending, 1 on a failure and also 1 with "no checks reported"
+// (a wait), and any other exit is a wait. The script's exit codes are the verdicts: 0 green, 3 failed, 4 conflict,
+// 8 pending; any other is "couldn't tell". Nine minutes: the agent's tool call is given a timeout of 600000 ms
+// (CI_TOOL_MS), past the chunk, as the default of two minutes would kill it before it printed; the script kills each gh
+// call at its deadline (an alarm exec'd into gh, a Go program, is ignored) and caps a chunk to fit the tool's bound.
 const CI_CHUNK_S = 540
 const CI_TOOL_MS = 600000
-const CI_WAIT = (pr) => `p=${pr}; end=$((SECONDS + ${CI_CHUNK_S})); st=pending; while [ $SECONDS -lt $end ]; do mg=$(gh pr view "$p" --json mergeable,mergeStateStatus 2>&1); mrc=$?; out=$(gh pr checks "$p" 2>&1); rc=$?; if [ $mrc -eq 0 ] && grep -q '"mergeable": *"CONFLICTING"' <<<"$mg"; then st=conflict; break; elif [ $mrc -ne 0 ] || ! grep -q '"mergeable": *"MERGEABLE"' <<<"$mg"; then :; elif [ $rc -eq 0 ]; then st=green; break; elif [ $rc -eq 1 ] && ! grep -q "no checks reported" <<<"$out"; then st=failed; break; fi; sleep 10; done; echo "PR $p: $st (last exit $rc)"; echo "mergeable (exit $mrc): $mg"; printf '%s\\n' "$out"`
+const CI_WAIT = (pr) => `node ${REPO}/scripts/ci-wait.ts ${pr} ${CI_CHUNK_S}`
 // The CI wait's prompt: the final CI stage moves the card, the read beside a review moves none (the review does).
-const CI_PROMPT = (board) => `${WHERE}${board ? `First run \`${BOARD('CI / queued')}\`.` : 'Move no card on the board.'} Wait for PR ${last.pr}'s CI at head ${last.head.slice(0, 7)} and report it. The wait is CLAUDE.md "Local gates"' loop on \`gh pr checks\` with a deadline, never \`--watch\`. Run this chunk of it in the foreground, as it is, with the Bash tool's timeout set to ${CI_TOOL_MS} (the chunk runs up to ${CI_CHUNK_S / 60} minutes, and the default timeout of two minutes would kill it before it prints), up to 8 times, until its first line says green, failed or conflict; still pending after the 8th is a timeout:
+const CI_PROMPT = (board) => `${WHERE}${board ? `First run \`${BOARD('CI / queued')}\`.` : 'Move no card on the board.'} Wait for PR ${last.pr}'s CI at head ${last.head.slice(0, 7)} and report it. The wait is CLAUDE.md "Local gates"' loop on \`gh pr checks\` with a deadline, never \`--watch\`. Run this chunk of it, one plain command, in the foreground, as it is, from any directory, with the Bash tool's timeout set to ${CI_TOOL_MS} (the chunk runs up to ${CI_CHUNK_S / 60} minutes, and the default timeout of two minutes would kill it before it prints), up to 8 times, until it exits 0 (green), 3 (failed) or 4 (conflict), its first line saying green, failed or conflict; exit 8 is pending, and still pending after the 8th is a timeout. Any other exit (2 is a usage error, 1 the script's own failure) is "couldn't tell": run it again, and say what it printed:
 \`${CI_WAIT(last.pr)}\`
-If the tool refuses the loop (a foreground \`sleep\`), run the same chunk with run_in_background and read its output when it exits; never drop its deadline or use \`--watch\` instead.
 Each pass reads \`gh pr view <n> --json mergeable,mergeStateStatus\` first, and its \`mergeable\` decides before the checks do. CONFLICTING is the verdict conflict, at once and final, even when the head's checks finished green or red: GitHub starts no CI run on a PR with a merge conflict, so its "no checks reported" never ends, and a PR that cannot merge is not ready. Report conflict with the base it conflicts with and the \`gh pr view\` line the chunk printed; read no job's log for it. UNKNOWN (GitHub computes it lazily, just after a push) or a \`gh pr view\` that fails is "couldn't tell": a wait, never a verdict. Only MERGEABLE lets the checks decide; mergeStateStatus (DRAFT, BLOCKED, BEHIND, ...) is printed for the record and is never a verdict. \`gh pr checks\` exits 0 when all passed, 8 while any is pending, 1 on a failure, and also 1 with "no checks reported" just after a push, which is a wait, not a failure; a failure while others are still pending is a failure. Any other exit code is "couldn't tell": a wait, never green and never failed. On a failure, read each failing job's log: \`gh run view <run> --json jobs\`, then \`gh api repos/embeddable-hq/mason-data/actions/jobs/<id>/logs\` and the lines after "failing tests:" (for the oracle, the "differs:" lines and the first difference). Report each failing test's name and assertion text. Never re-run a job.`
 
 // Every agent that writes code runs with isolation 'worktree': a worktree made for it, which it may edit. A worktree
@@ -100,8 +105,10 @@ Each pass reads \`gh pr view <n> --json mergeable,mergeStateStatus\` first, and 
 const WORKTREE = (from) => `You run in a git worktree made for you; work only there, never in another worktree. Start with \`git fetch origin ${A.branch} ${A.base} && git checkout --detach ${from}\`, and push with \`git push origin HEAD:${A.branch}\`. Never \`git checkout ${A.branch}\` (a branch can be checked out in one worktree only).`
 // the gates of a fix round (CLAUDE.md "Local gates"): the change's tests, typecheck and the two fast convention files
 const FIX_GATES = 'Before the push, run the `## What review probes` of each .claude/rules/ file whose `paths:` the change falls under. Bound every test run. Run the tests of the change by --test-name-pattern, `npm run typecheck`, and `node --test --test-timeout=120000 --test-force-exit tests/conventions.test.ts tests/cli-state-matrix.test.ts`; fails-without once on the final tree.'
-// a probe and a review run their statements in throwaway worktrees, never under a home path, and leave nothing behind
-const PROBE_TREES = `in two worktrees of your own under the system temp dir (\`git -C ${REPO} worktree add "$(mktemp -d)/head" <sha>\`), never under a home path, one at the head and one at origin/${A.base}, both removed afterwards (\`git -C ${REPO} worktree remove\`)`
+// a probe and a review run their statements in throwaway worktrees, never under a home path, and leave nothing behind;
+// each step a plain command run from the agent's own working directory: Claude Code's worktree guard refuses, in an
+// isolated agent, `git -C <main checkout>` and a `$(mktemp -d)` inside a git command (issue 322)
+const PROBE_TREES = `in two worktrees of your own under the system temp dir, never under a home path, one at the head and one at origin/${A.base}: run \`mktemp -d\` alone, then \`git worktree add --detach <that path>/head <sha>\` from your own working directory (a checkout of this repository or a worktree of it, which share one object store), never redirected to another checkout with -C; the same, in a second \`mktemp -d\`, for the base; both removed afterwards (\`git worktree remove <that path>/head\`)`
 // the probes every review ran that PR 202's author never did; each rules file's "## What review probes" adds its own
 const PROBE_SHAPES = "wrap the expression (`* 2`, coalesce, round), nest it, change the input type, put the table on an outer join's nullable side, pass it as a parameter, prepare before a SET, and run the real run (`mason start` and the listener over a synced table), not only the unit world"
 
@@ -138,11 +145,13 @@ const PSQL = 'scripts/duck-repro.ts needs `psql` on PATH, which it runs for the 
 // password is passed by the environment, never argv (`ps` shows argv), and the container ends itself after two hours
 // should the agent die first (as scripts/gate.ts's does); a shell's variables do not outlive a tool call, so the URL
 // is kept in a file only its owner reads (umask 077). `docker inspect` prints the container's Config.Env, which holds
-// the password, so it is only ever run with a --format naming one field (issue 246).
+// the password, so it is only ever run with a --format naming one field (issue 246). Each is one plain command, the
+// container's start and stop scripts/review-postgres.ts and the URL loaded by Node's --env-file, as a shell line with
+// `$(…)`, `$pw` or a sourced file is refused by Claude Code's worktree guard in an isolated agent (issue 322).
 const NEVER_PRINT = 'Never print, echo or log the URL or its password: no `cat` of the env file, no `env`, no `set -x`, and never a `docker inspect` without a `--format` naming one field, since its Config.Env holds POSTGRES_PASSWORD. If no Postgres can be had, report statementsRun 0 and say why first in judgedCorrect; never reason out an answer in place of running it.'
 const PG_ACCESS = A.itEnv
-  ? `Postgres: \`${A.itEnv}\` exports IT_POSTGRES_URL; source it in the same shell call as duck-repro (\`. ${A.itEnv}\`). ${NEVER_PRINT}`
-  : `Postgres: start a throwaway one of your own, and remove it when done. \`umask 077; n=mason-review-$(openssl rand -hex 4); pw=$(openssl rand -hex 16); POSTGRES_PASSWORD=$pw docker run -d --rm --name "$n" -e POSTGRES_PASSWORD -p 127.0.0.1:0:5432 --entrypoint timeout postgres:18 --kill-after=30 7200 docker-entrypoint.sh postgres -c wal_level=logical\`; its port is \`docker port "$n" 5432/tcp\`; in that same call, write \`export IT_POSTGRES_URL=postgres://postgres:$pw@127.0.0.1:<port>/postgres\` to an env file under the system temp dir, and source it (\`. <env file>\`) in each call that runs duck-repro. It is ready when \`docker exec "$n" pg_isready -h 127.0.0.1 -U postgres\` says so, within 60 seconds. When done: \`docker rm -f -v "$n"\`, then \`docker inspect --format '{{.State.Status}}' "$n"\` must fail, and delete the env file. ${NEVER_PRINT}`
+  ? `Postgres: \`${A.itEnv}\` holds IT_POSTGRES_URL; each command that runs duck-repro loads it with Node's own \`--env-file=${A.itEnv}\`, never a shell's \`.\` or \`source\`, which Claude Code's worktree guard refuses in an isolated agent. ${NEVER_PRINT}`
+  : `Postgres: start a throwaway one of your own, and remove it when done. \`node ${REPO}/scripts/review-postgres.ts start\` starts a postgres:18 with wal_level=logical on a free 127.0.0.1 port, its password passed by the environment and never printed, ending itself after two hours, and prints the container's name and its env file's path (readable by you alone); each command that runs duck-repro loads that file with Node's own \`--env-file=<env file>\`. Without Docker it says so. When done: \`node ${REPO}/scripts/review-postgres.ts stop <name>\`, which removes it, checks that \`docker inspect --format '{{.State.Status}}' <name>\` then fails, and deletes the env file. ${NEVER_PRINT}`
 // Which evidence a review owes is decided by the diff's paths (PR 245, round 2: every review was made to run SQL, and a
 // PR that changes only the CLI, the web page, a script, a workflow or docs has no statement that reaches its code).
 // A path the engine or the listener answers through owes STATEMENTS against Postgres: the `paths:` of every
@@ -171,10 +180,10 @@ const isShared = (path) => owesStatements(path) && HOST_RES.some((re) => re.test
 // How the statements are run: in files, dozens a call, at the head and at the base, the output to a file, and only the
 // counts and the differences read. `scale` says how many.
 const BATCH = (scale) => `RUN statements; never judge by reading alone. ${PSQL}. ${PG_ACCESS}
-Give each tree its dependencies: link \`${REPO}/node_modules\` into it when its package-lock.json is the same as the main checkout's (\`cmp\`), else \`npm ci\` there. Write a DDL file over the synthetic tables ${REPRO_TABLES} (never a real database's names or rows), and statement files under the system temp dir, statements separated by lines holding only \`--\`, as scripts/duck-repro.ts reads them. Run each file at the head and at the base, dozens of statements a call: \`(. <env file> && cd <tree> && node scripts/duck-repro.ts <ddl.sql> <statements.sql>) > <out> 2>&1\`, the Bash tool's timeout set to 600000. Then read only the counts and the differences: \`grep -c '^SAME' <out>\`, \`grep -c '^DIFFER' <out>\`, \`grep -A2 '^DIFFER' <out> | head -150\`, and \`grep -m5 'NOT COPIED\\|Error' <out>\` (a table not synced: fix the DDL, and count none of its statements); never the whole file. Read a statement that differs at the head beside its line at the base. A statement whose order Postgres leaves open (ties under a LIMIT, no ORDER BY) can differ by chance: order by every column before calling it a difference.
+Give each tree its dependencies: link \`${REPO}/node_modules\` into it when its package-lock.json is the same as the main checkout's (\`cmp\`), else \`npm ci\` there. Write a DDL file over the synthetic tables ${REPRO_TABLES} (never a real database's names or rows), and statement files under the system temp dir, statements separated by lines holding only \`--\`, as scripts/duck-repro.ts reads them. Run each file at the head and at the base, dozens of statements a call: \`node --env-file=<env file> <tree>/scripts/duck-repro.ts <ddl.sql> <statements.sql> > <out> 2>&1\`, one plain command from any directory, the Bash tool's timeout set to 600000. Then read only the counts and the differences: \`grep -c '^SAME' <out>\`, \`grep -c '^DIFFER' <out>\`, \`grep -A2 '^DIFFER' <out> | head -150\`, and \`grep -m5 'NOT COPIED\\|Error' <out>\` (a table not synced: fix the DDL, and count none of its statements); never the whole file. Read a statement that differs at the head beside its line at the base. A statement whose order Postgres leaves open (ties under a LIMIT, no ORDER BY) can differ by chance: order by every column before calling it a difference.
 Run every one of these VARIANT FORMS that reaches the code the diff touches, each spelt over the shapes under test:
 ${VARIANT_FORMS.map((v) => `- ${v}`).join('\n')}
-And a REGRESSION SWEEP: for each code path the diff touches (each function, branch or rewrite it changes), the statements that reach that path in their PLAIN form, WITHOUT the new feature, in the variant forms above, at the head and at the base. Issue 192's regression was \`SELECT * FROM t UNION ALL TABLE t ORDER BY 1 LIMIT 2\`, which has no new syntax at all. A statement SAME at the base and DIFFER at the head is blocking: severity regression, origin this-pr. TIME the DEEP form too: its statements in a statements file of their own, run once at the head and once at the base, each run bounded and timed by the shell, \`(. <env file> && cd <tree> && /usr/bin/time -p perl -e 'print STDERR "pid $$\\n"; alarm shift; exec @ARGV' 300 node scripts/duck-repro.ts <ddl.sql> <deep.sql>) > <out> 2>&1\` (macOS has no \`timeout\`; perl's alarm kills node, which keeps perl's pid), and the head's \`real\` more than twice the base's AND more than 30 s longer is blocking, severity regression, origin this-pr, while a head killed by the bound or dead (out of memory) where the base finished is a hang, severity crash; a run that did not finish leaves its database behind, so drop that one, \`duck_repro_<pid>\` by the pid it printed first, never by a pattern.
+And a REGRESSION SWEEP: for each code path the diff touches (each function, branch or rewrite it changes), the statements that reach that path in their PLAIN form, WITHOUT the new feature, in the variant forms above, at the head and at the base. Issue 192's regression was \`SELECT * FROM t UNION ALL TABLE t ORDER BY 1 LIMIT 2\`, which has no new syntax at all. A statement SAME at the base and DIFFER at the head is blocking: severity regression, origin this-pr. TIME the DEEP form too: its statements in a statements file of their own, run once at the head and once at the base, each run bounded and timed by the shell, \`node --env-file=<env file> ${REPO}/scripts/duck-repro-bounded.ts 300 <tree> <ddl.sql> <deep.sql> > <out> 2>&1\` (it runs that tree's duck-repro, prints the run's pid first and its \`real\` time last, and past the 300 s bound kills the run and exits 124), and the head's \`real\` more than twice the base's AND more than 30 s longer is blocking, severity regression, origin this-pr, while a head killed by the bound or dead (out of memory) where the base finished is a hang, severity crash; a run that did not finish leaves its database behind, which the script drops itself, \`duck_repro_<pid>\` by the pid it printed first, never by a pattern; when it says it could not, drop that one by that name.
 Aim for ${scale}. Report statementsRun (the statements you ran at the head, each once) and statementsMatched (of those, the ones SAME at the head).`
 // what a non-engine path owes: what the diff changed, run at the head and the base
 const CHECKS = `RUN what it changed, at the head and at the base, and compare; never judge by reading alone: for src/cli/ or cli/, the \`mason\` command it changed in a project of its own under the system temp dir (\`node <tree>/src/cli/main.ts <command>\`, with and without --json, in each state it can meet); for src/web/, the page's JSON from the run's command server; for scripts/ or .claude/, the script or workflow with the inputs it reads, or the test that loads it (tests/workflows.test.ts for a workflow); for docs, each claim checked against the code it names, and tests/conventions.test.ts; and the change's own test files, bounded (\`node --test --test-timeout=120000 --test-force-exit <file>\`). A check whose result the base gave right and the head does not is blocking: severity regression. Report checksRun: the checks you ran at the head, each once (a command, a script, a test file).`
@@ -493,7 +502,7 @@ ${byClass(deferred.map((f) => ({ ...f, classWhy: `${f.classWhy} (met in ${f.labe
   if (last) {
     phase('Record')
     const posted = await agent(
-      `${WHERE}Post this comment on PR ${last.pr} of embeddable-hq/mason-data, exactly as written between the BEGIN and END lines (not those lines): write it to a file under the system temp dir (\`f=$(mktemp)\`) and run \`gh pr comment ${last.pr} --body-file "$f"\`. Change nothing in it. Return the comment's URL.
+      `${WHERE}Post this comment on PR ${last.pr} of embeddable-hq/mason-data, exactly as written between the BEGIN and END lines (not those lines): write it to a file under the system temp dir (run \`mktemp\` alone, and write to the path it prints), then run \`gh pr comment ${last.pr} --body-file <that path>\`. Change nothing in it. Return the comment's URL.
 BEGIN
 ${recordBody(status)}
 END`,
@@ -515,7 +524,7 @@ async function probeAndFix(base) {
     const p = probeRounds.length + 1
     phase('Probe')
     const probe = await agent(
-      `${WHERE}Probe PR ${last.pr} of embeddable-hq/mason-data at head ${last.head} for wrong answers, before its review, as its reviewer will: you have no stake in this code. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff --name-only ${base} ${last.head}\`. For each .claude/rules/*.md file whose \`paths:\` covers a changed path, read its \`## What review probes\` section at the head (\`git -C ${REPO} show ${last.head}:.claude/rules/<file>\`): each bullet is a probe shape, the class it catches, and where it was met. Run EVERY probe that applies to this change, and these, which reviews ran and authors did not: ${PROBE_SHAPES}. Run the design note's shapes too:
+      `${WHERE}Probe PR ${last.pr} of embeddable-hq/mason-data at head ${last.head} for wrong answers, before its review, as its reviewer will: you have no stake in this code. Run \`git fetch origin ${A.branch} ${A.base}\` and \`git diff --name-only ${base} ${last.head}\`. For each .claude/rules/*.md file whose \`paths:\` covers a changed path, read its \`## What review probes\` section at the head (\`git show ${last.head}:.claude/rules/<file>\`): each bullet is a probe shape, the class it catches, and where it was met. Run EVERY probe that applies to this change, and these, which reviews ran and authors did not: ${PROBE_SHAPES}. Run the design note's shapes too:
 ${design ? design.shapes.map((s) => `- ${s.input} (${s.where})`).join('\n') : '(no note)'}
 Run what you check ${PROBE_TREES}. ${EVIDENCE("a hundred statements or more: the rules' probes, the note's shapes and these, each in the variant forms, and the regression sweep")}
 Do not edit or push. For each wrong answer give the failing input, Postgres's answer, Mason's at the head, and Mason's at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible. origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
@@ -566,7 +575,7 @@ async function reviewAndFix(start) {
     const judged = history.flatMap((x) => x.judgedCorrect)
     const [review, ciNow] = await parallel([
       () => agent(
-        `${WHERE}First run \`${BOARD('In review')}\`. ${kind === 'full' ? 'Review' : 'Narrowly re-check the latest fix of'} PR ${last.pr} of embeddable-hq/mason-data at head ${last.head}, for wrong answers. Run \`git -C ${REPO} fetch origin ${A.branch} ${A.base}\` and \`git -C ${REPO} diff ${base} ${last.head}\`, and read the whole touched files at that head with \`git show\`. Read the .claude/rules/ file of the subsystem. Never take the author's report as evidence. Run what you check ${PROBE_TREES}.${EVIDENCE(kind === 'full'
+        `${WHERE}First run \`${BOARD('In review')}\`. ${kind === 'full' ? 'Review' : 'Narrowly re-check the latest fix of'} PR ${last.pr} of embeddable-hq/mason-data at head ${last.head}, for wrong answers. Run \`git fetch origin ${A.branch} ${A.base}\` and \`git diff ${base} ${last.head}\`, and read the whole touched files at that head with \`git show\`. Read the .claude/rules/ file of the subsystem. Never take the author's report as evidence. Run what you check ${PROBE_TREES}.${EVIDENCE(kind === 'full'
   ? "hundreds of statements (300 or more): the brief's shapes, each in every variant form, and the regression sweep of every path the diff touches"
   : "a narrower set: the fix's statements in the variant forms that reach the code it changed, and the regression sweep of that code; dozens, not a full review's count")}
 Do not edit or push.
@@ -616,7 +625,7 @@ Give no fix and no patch. Also list what you judged correct.`,
 phase('Brief')
 const brief = await agent(
   `${WHERE}Write the brief for ONE PR of the Mason repo (${REPO}): sub-issue #${A.issue} of #${A.parent}, "${A.title}".
-Read issue #${A.parent} and its comments (\`gh issue view ${A.parent} --comments\`) for this task's part, and the code it builds on: branch \`${A.base}\` (\`git -C ${REPO} fetch origin ${A.base}\`; read with \`git -C ${REPO} show origin/${A.base}:<path>\`)${A.readFirst ? `, especially ${A.readFirst}` : ''}. Read the .claude/rules/ file of the subsystem it touches.
+Read issue #${A.parent} and its comments (\`gh issue view ${A.parent} --comments\`) for this task's part, and the code it builds on: branch \`${A.base}\` (\`git fetch origin ${A.base}\`; read with \`git show origin/${A.base}:<path>\`)${A.readFirst ? `, especially ${A.readFirst}` : ''}. Read the .claude/rules/ file of the subsystem it touches.
 ${A.context || ''}
 The brief follows CLAUDE.md "The loop" step 1: name what the tests must hold, not only what to build. List EVERY shape the tests (and for the engine, the oracle) must answer equal to Postgres, as concrete SQL over the tests' own tables, including the shapes .claude/rules/duck-rewrite.md requires of a rewrite and the fallback shapes that must stay as written. Name the test files and the --test-name-pattern / IT_ORACLE_ONLY the runs use. Do not write code.`,
   { label: 'brief', phase: 'Brief', ...ON.brief, schema: BRIEF })
@@ -627,7 +636,7 @@ for (let d = 1; d <= MAX_DESIGN_ROUNDS; d++) {
   phase('Design')
   const prev = designRounds[designRounds.length - 1]
   const note = await agent(
-    `${WHERE}Design ONE PR of the Mason repo before any code is written: sub-issue #${A.issue} of #${A.parent}, "${A.title}". Read the brief below, the code it builds on at origin/${A.base} (\`git -C ${REPO} fetch origin ${A.base}\`; \`git -C ${REPO} show origin/${A.base}:<path>\`) and the .claude/rules/ file of each subsystem it touches. Write no code. Return the design note:
+    `${WHERE}Design ONE PR of the Mason repo before any code is written: sub-issue #${A.issue} of #${A.parent}, "${A.title}". Read the brief below, the code it builds on at origin/${A.base} (\`git fetch origin ${A.base}\`; \`git show origin/${A.base}:<path>\`) and the .claude/rules/ file of each subsystem it touches. Write no code. Return the design note:
 - decision: the decision the change makes.
 - authorities: for EACH fact the change needs (a type, an error, a name, a value's kind), the existing module that is its AUTHORITY, and why not another: Postgres's analysis (src/duck/pgtree.ts reads every node's result type), store.ts's pgErrorOf for an error, the engine's prepared types, …. A fact derived again where a module already holds it is CLAUDE.md's "a fact derived in several places"; a type guessed from syntax (a list of function names over the raw parse tree) where Postgres's analysis holds it breaks "Postgres decides, DuckDB computes".
 - principles: which of CLAUDE.md's principles and named classes apply ("Postgres decides", the classes under "Fix the class, not the symptom", "A refusal on the wire is Postgres's", "An APPROXIMATE value cannot be compared for equality", …), and how the design honours each.
@@ -642,7 +651,7 @@ ${prev ? `This is design round ${d}: the design review found these problems in y
   design = note
   phase('Design review')
   const verdict = await agent(
-    `${WHERE}Review the design note below for ONE PR of the Mason repo, sub-issue #${A.issue} of #${A.parent} ("${A.title}"), before any code is written. Read ONLY the note and the code it names, at origin/${A.base} (\`git -C ${REPO} fetch origin ${A.base}\`; \`git -C ${REPO} show origin/${A.base}:<path>\`). Check every type, error and fact the note uses against the module it names as its authority: that the module holds it, where the change needs it, and that no module already holding it is passed over. Nothing may derive again what an existing module already knows (CLAUDE.md "a fact derived in several places"), nor guess from syntax what Postgres's analysis decides ("Postgres decides, DuckDB computes"). Check each principle it names applies as it says, and that none it leaves out applies; check the shapes table covers every form, wrapper and type, in the real run as well as the unit world. Verdict 'sound' when nothing needs changing, else 'revise' with each problem, its class (a kebab-case slug) and the principle it breaks. Give no patch. Do not edit. About 20 tool calls.
+    `${WHERE}Review the design note below for ONE PR of the Mason repo, sub-issue #${A.issue} of #${A.parent} ("${A.title}"), before any code is written. Read ONLY the note and the code it names, at origin/${A.base} (\`git fetch origin ${A.base}\`; \`git show origin/${A.base}:<path>\`). Check every type, error and fact the note uses against the module it names as its authority: that the module holds it, where the change needs it, and that no module already holding it is passed over. Nothing may derive again what an existing module already knows (CLAUDE.md "a fact derived in several places"), nor guess from syntax what Postgres's analysis decides ("Postgres decides, DuckDB computes"). Check each principle it names applies as it says, and that none it leaves out applies; check the shapes table covers every form, wrapper and type, in the real run as well as the unit world. Verdict 'sound' when nothing needs changing, else 'revise' with each problem, its class (a kebab-case slug) and the principle it breaks. Give no patch. Do not edit. About 20 tool calls.
 The note:
 ${noteText()}`,
     { label: `design review d${d}`, phase: 'Design review', ...ON.designReview, schema: DESIGN_VERDICT })
@@ -680,7 +689,8 @@ log(`PR ${last.pr} pushed at ${last.head.slice(0, 7)}`)
 // artifact). GitHub links a closing keyword only on a PR into the default branch, so a stacked PR, whose base is
 // another PR's branch, is checked for the keyword in its body and linked once it is retargeted.
 phase('Link')
-const LINK_QUERY = `gh api graphql -F n=${A.issue} -f query='query($n:Int!){repository(owner:"embeddable-hq",name:"mason-data"){issue(number:$n){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number}}}}}'`
+// one plain command, the issue written into the query: a `$n` is a shell variable to the worktree guard (issue 322)
+const LINK_QUERY = `gh api graphql -f query='query{repository(owner:"embeddable-hq",name:"mason-data"){issue(number:${A.issue}){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number}}}}}'`
 const link = await agent(
   `${WHERE}Check that GitHub links PR ${last.pr} to issue #${A.issue}. ${A.stackedOn
     ? `The PR is stacked (its base is ${A.base}, not the default branch), and GitHub links a closing keyword only on a PR into the default branch: read its body (\`gh pr view ${last.pr} --json body\`) and set linked true when it says \`Closes #${A.issue}\`. If it does not, add that line to the body (\`gh pr edit ${last.pr} --body-file <file>\`, the body read first and kept), set bodyFixed, and read it again.`
@@ -718,7 +728,7 @@ ${learnable.map((h) => `### ${h.label}\n${asFailures(h.findings)}`).join('\n\n')
     const prev = last.head
     last = learned
     const check = await agent(
-      `${WHERE}Run \`git -C ${REPO} fetch origin ${A.branch}\` and \`git -C ${REPO} diff --no-renames --name-only ${prev} ${learned.head}\`, and return every path it prints, exactly; if either command fails, return nothing rather than an empty list. Change nothing. Move no card on the board.`,
+      `${WHERE}Run \`git fetch origin ${A.branch}\` and \`git diff --no-renames --name-only ${prev} ${learned.head}\`, and return every path it prints, exactly; if either command fails, return nothing rather than an empty list. Change nothing. Move no card on the board.`,
       { label: 'learn check', phase: 'Learn', ...ON.learnCheck, schema: CHANGED })
     if (!check || check.files.length === 0) return await finish(`learn's commit ${learned.head.slice(0, 7)} could not be read: whether it touched only .claude/rules/ is not known, and that head is neither probed nor reviewed: the coordinator decides`)
     const outside = check.files.filter((f) => !f.startsWith('.claude/rules/'))

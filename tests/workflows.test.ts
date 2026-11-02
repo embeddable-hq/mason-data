@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -564,7 +564,7 @@ test("pr-loop: GitHub itself must say the PR closes its sub-issue, or the run st
   let r = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
   assert.deepEqual(r.labels.slice(3, 6), ["implement", "link", "probe 1"]);
   const q = r.prompt("link");
-  assert.ok(q.includes("gh api graphql -F n=301") && q.includes("closedByPullRequestsReferences(first:10,includeClosedPrs:true)"), "the link is read from GitHub");
+  assert.ok(q.includes("gh api graphql -f query='query{repository(") && q.includes("issue(number:301)") && q.includes("closedByPullRequestsReferences(first:10,includeClosedPrs:true)"), "the link is read from GitHub");
   assert.ok(q.includes("Closes #301") && q.includes("gh pr edit 900"), "an unlinked body is fixed, then asked again");
   // not linked after the fix: the run stops there, before any review
   r = await run("pr-loop", { ...PR }, { ...START, link: { linked: false, bodyFixed: true, detail: "listed none" } });
@@ -675,7 +675,7 @@ test("pr-loop: Learn's commit is read from git, and a head that changed anything
 test("pr-loop: the Learn check's own git command prints both ends of a rename", async () => {
   // the command the prompt gives, run on a real repository where a file moved from src/ into .claude/rules/
   const r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
-  const m = /`git -C \S+ (diff [^`]*) \S+ \S+`/.exec(r.prompt("learn check"));
+  const m = /`git (diff [^`]*) \S+ \S+`/.exec(r.prompt("learn check"));
   assert.ok(m, "the learn check names a git diff over the commit range");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-check-"));
   try {
@@ -710,41 +710,51 @@ test("pr-loop: a red CI beside a clean review goes to the CI stage, which reads 
 // pull_request workflow on a PR with a merge conflict, so "no checks reported" never ends there, and PRs 231 and 233
 // waited to their deadline. The wait reads `mergeable` first, and a conflict is its own verdict.
 
-/** The CI wait's chunk, as the CI stage's prompt gives it: the line that is one backticked command. */
+/** The CI wait's chunk, as the CI stage's prompt gives it: the line that is one backticked command, scripts/ci-wait.ts
+ * (issue 322: it was a shell loop the worktree guard refused in an isolated agent). */
 function ciWaitOf(prompt: string): string {
-  const m = /^`(p=\d+; [^\n]*)`$/m.exec(prompt);
+  const m = /^`(node \S+\/scripts\/ci-wait\.ts \d+ \d+)`$/m.exec(prompt);
   assert.ok(m, "the CI prompt carries the wait's chunk on a line of its own");
   return m[1]!;
 }
+const CI_WAIT_SCRIPT = path.join(ROOT, "scripts", "ci-wait.ts");
 
 type Step = { out: string; rc: number };
 const NO_CHECKS: Step = { out: "no checks reported on the 'issue-300-a-piece' branch", rc: 1 };
 const FAILING: Step = { out: "checks\tfail\t3m\thttps://github.com/embeddable-hq/mason-data/actions/runs/1/job/2", rc: 1 };
 const view = (mergeable: string, mergeStateStatus: string): Step => ({ out: JSON.stringify({ mergeable, mergeStateStatus }), rc: 0 });
 
-/** Runs the chunk in bash with a stub `gh` (each subcommand answering its scripted steps in turn, the last repeated) and
- * an instant `sleep` first on PATH; returns its output and the stub's call log. */
-function runWait(cmd: string, scenario: { view: Step[]; checks: Step[] }): { out: string; first: string; views: string[]; checks: string[] } {
+/** Runs the command in bash with a stub `gh` first on PATH (each subcommand answering its scripted steps in turn, the
+ * last repeated; a step with `hang` never returns) and no pause between passes; returns its output, exit code, time and
+ * the stub's call log, each call with the time it started. */
+type Waited = { out: string; err: string; status: number | null; ms: number; first: string; views: string[]; checks: string[]; starts: number[]; t0: number };
+function runWait(cmd: string, scenario: { view: Array<Step & { hang?: boolean }>; checks: Array<Step & { hang?: boolean }> }, bash = true): Waited {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-wait-"));
   try {
     fs.writeFileSync(path.join(dir, "scenario.json"), JSON.stringify(scenario));
+    fs.writeFileSync(path.join(dir, "calls.log"), "");
     fs.writeFileSync(path.join(dir, "gh"), `#!/usr/bin/env node
 const fs = require("node:fs");
 const dir = ${JSON.stringify(dir)};
 const a = process.argv.slice(2);
 const kind = a[0] === "pr" && a[1] === "view" ? "view" : a[0] === "pr" && a[1] === "checks" ? "checks" : "other";
-fs.appendFileSync(dir + "/calls.log", kind + " " + a.join(" ") + "\\n");
+fs.appendFileSync(dir + "/calls.log", kind + " " + Date.now() + " " + a.join(" ") + "\\n");
 const steps = JSON.parse(fs.readFileSync(dir + "/scenario.json", "utf8"))[kind];
 if (!steps) { process.stderr.write("stub gh: unexpected call " + a.join(" ")); process.exit(2); }
 const n = fs.readFileSync(dir + "/calls.log", "utf8").split("\\n").filter((l) => l.startsWith(kind + " ")).length;
 const s = steps[Math.min(n, steps.length) - 1];
-process.stdout.write(s.out + "\\n");
-process.exit(s.rc);
+if (s.hang) setInterval(() => {}, 1000);
+else { process.stdout.write(s.out + "\\n"); process.exit(s.rc); }
 `, { mode: 0o755 });
-    fs.writeFileSync(path.join(dir, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    const out = execFileSync("bash", ["-c", cmd], { encoding: "utf8", timeout: 60_000, env: { ...process.env, PATH: `${dir}:${process.env["PATH"]}` } });
-    const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8").split("\n").filter(Boolean);
-    return { out, first: out.split("\n")[0]!, views: calls.filter((c) => c.startsWith("view ")), checks: calls.filter((c) => c.startsWith("checks ")) };
+    const env = { ...process.env, PATH: `${dir}:${process.env["PATH"]}`, CI_WAIT_INTERVAL_MS: "0" };
+    const t0 = Date.now();
+    const r = bash ? spawnSync("bash", ["-c", cmd], { encoding: "utf8", timeout: 60_000, env }) : spawnSync(process.execPath, [CI_WAIT_SCRIPT, ...cmd.split(" ").filter(Boolean)], { encoding: "utf8", timeout: 60_000, env });
+    const ms = Date.now() - t0;
+    assert.equal(r.error, undefined, `the wait ended within the test's bound: ${String(r.error)}`);
+    const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8").split("\n").filter(Boolean).map((c) => c.split(" "));
+    const line = (c: string[]) => [c[0], ...c.slice(2)].join(" ");
+    return { out: r.stdout, err: r.stderr, status: r.status, ms, first: r.stdout.split("\n")[0]!, t0, starts: calls.map((c) => Number(c[1])),
+      views: calls.filter((c) => c[0] === "view").map(line), checks: calls.filter((c) => c[0] === "checks").map(line) };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -752,29 +762,40 @@ process.exit(s.rc);
 
 test("pr-loop: the CI wait reads mergeable beside gh pr checks, and a conflicting PR is its own verdict at once", async () => {
   for (const name of PR_LOOPS) {
-    const r = await run(name, { ...PR }, { ...(name === "pr-loop" ? START : SLIM), "review r1": clean, "CI 1": green });
+    // without repo the prompt names <repo>, as BOARD does; with it, the command is the checkout's own script, run as is
+    const bare = await run(name, { ...PR }, { ...(name === "pr-loop" ? START : SLIM), "review r1": clean, "CI 1": green });
+    assert.equal(ciWaitOf(bare.prompt("CI 1")), "node <repo>/scripts/ci-wait.ts 900 540", `${name}: one plain command`);
+    const r = await run(name, { ...PR, repo: ROOT }, { ...(name === "pr-loop" ? START : SLIM), "review r1": clean, "CI 1": green });
     const p = r.prompt("CI 1");
     const cmd = ciWaitOf(p);
-    for (const s of ["gh pr view", "--json mergeable,mergeStateStatus", "CONFLICTING", "gh pr checks", "timeout set to 600000"]) assert.ok(p.includes(s), `${name}: the CI prompt says ${s}`);
+    assert.equal(cmd, `node ${ROOT}/scripts/ci-wait.ts 900 540`, name);
+    for (const s of ["gh pr view", "--json mergeable,mergeStateStatus", "CONFLICTING", "gh pr checks", "timeout set to 600000",
+      "exits 0 (green), 3 (failed) or 4 (conflict)", "exit 8 is pending", "Any other exit (2 is a usage error, 1 the script's own failure) is \"couldn't tell\""]) assert.ok(p.includes(s), `${name}: the CI prompt says ${s}`);
     assert.match(p, /green, failed or conflict/, `${name}: conflict is a verdict the chunk ends on`);
-    assert.ok(!cmd.includes("--watch"), `${name}: the chunk never uses --watch`);
+    assert.ok(!cmd.includes("--watch") && !fs.readFileSync(CI_WAIT_SCRIPT, "utf8").includes('"--watch"'), `${name}: the chunk never uses --watch`);
+    assert.doesNotMatch(p, /run_in_background|a foreground `sleep`/, `${name}: no fallback for a shell sleep the script does not have`);
     const schema = r.calls.find((c) => c.opts.label === "CI 1")!.opts.schema as { properties: { state: { enum: string[] } } };
     assert.deepEqual(schema.properties.state.enum, ["green", "failed", "timeout", "conflict"], `${name}: the CI schema's states`);
+    if (name === "pr-loop-slim") assert.equal(p, (await run("pr-loop", { ...PR, repo: ROOT }, { ...START, "review r1": clean, "CI 1": green })).prompt("CI 1"), "slim's CI prompt is pr-loop's");
 
-    // no checks reported on a conflicting PR: conflict at once, in one pass
+    // the prompt's own command, run verbatim by bash: no checks reported on a conflicting PR: conflict at once, in one pass
     let w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [NO_CHECKS] });
     assert.match(w.first, /^PR 900: conflict\b/, `${name}: ${w.out}`);
+    assert.equal(w.status, 4, `${name}: conflict exits 4`);
     assert.deepEqual([w.views.length, w.checks.length], [1, 1], `${name}: one pass`);
     assert.ok(w.views[0]!.includes("pr view 900 --json mergeable,mergeStateStatus"), w.views[0]);
     assert.match(w.out, /CONFLICTING/, "the mergeable read is printed for the record");
     // a finished run at the head, green or red, of a PR that conflicts: conflict, read before the checks' verdict
     w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [{ out: "all passed", rc: 0 }] });
     assert.match(w.first, /^PR 900: conflict\b/, `${name}: a stale green is not ready: ${w.out}`);
+    assert.equal(w.status, 4);
     w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [FAILING] });
     assert.match(w.first, /^PR 900: conflict\b/, `${name}: a stale red is no CI failure: ${w.out}`);
+    assert.equal(w.status, 4, "never failed");
     // MERGEABLE leaves the checks' logic as it was: no checks yet is a wait (BLOCKED is no verdict), then green
     w = runWait(cmd, { view: [view("MERGEABLE", "BLOCKED")], checks: [NO_CHECKS, NO_CHECKS, { out: "all passed", rc: 0 }] });
     assert.match(w.first, /^PR 900: green\b/, `${name}: ${w.out}`);
+    assert.equal(w.status, 0, "green exits 0");
     assert.equal(w.checks.length, 3, `${name}: it waited two passes first`);
     // UNKNOWN is "couldn't tell": a wait, then the conflict at the next pass
     w = runWait(cmd, { view: [view("UNKNOWN", "UNKNOWN"), view("CONFLICTING", "DIRTY")], checks: [NO_CHECKS] });
@@ -786,6 +807,7 @@ test("pr-loop: the CI wait reads mergeable beside gh pr checks, and a conflictin
     assert.equal(w.views.length, 2, `${name}: the failed read waited one pass`);
     w = runWait(cmd, { view: [{ out: "HTTP 401", rc: 1 }, view("MERGEABLE", "CLEAN")], checks: [{ out: "all passed", rc: 0 }] });
     assert.equal(w.views.length, 2, `${name}: a green beside a failed read is not yet green`);
+    assert.equal(w.status, 0);
     // DRAFT is no verdict: a draft gets CI
     w = runWait(cmd, { view: [view("MERGEABLE", "DRAFT")], checks: [{ out: "pending", rc: 8 }, { out: "all passed", rc: 0 }] });
     assert.match(w.first, /^PR 900: green\b/, `${name}: ${w.out}`);
@@ -793,7 +815,45 @@ test("pr-loop: the CI wait reads mergeable beside gh pr checks, and a conflictin
     // and a real failure on a mergeable PR is failed, as before
     w = runWait(cmd, { view: [view("MERGEABLE", "CLEAN")], checks: [FAILING] });
     assert.match(w.first, /^PR 900: failed \(last exit 1\)/, `${name}: ${w.out}`);
+    assert.equal(w.status, 3, "failed exits 3");
+    // an exit gh pr checks does not list is "couldn't tell": a wait, never green and never failed
+    w = runWait(cmd, { view: [view("MERGEABLE", "CLEAN")], checks: [{ out: "usage", rc: 2 }, { out: "?", rc: 4 }, { out: "gh: not found", rc: 127 }, { out: "all passed", rc: 0 }] });
+    assert.match(w.first, /^PR 900: green \(last exit 0\)/, `${name}: ${w.out}`);
+    assert.equal(w.checks.length, 4, `${name}: exits 2, 4 and 127 were each a wait`);
+    // mergeable is parsed, never grepped: another key order and spacing is the same field
+    w = runWait(cmd, { view: [{ out: '{"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}', rc: 0 }], checks: [NO_CHECKS] });
+    assert.equal(w.status, 4, `${name}: ${w.out}`);
   }
+});
+
+test("ci-wait: bounded, a deadline no pass starts after, a gh that never returns killed, and its verdict exits never 1", () => {
+  // pending for ever: exit 8 at the deadline, no pass started after it, three parts printed
+  let w = runWait("900 2", { view: [view("MERGEABLE", "CLEAN")], checks: [{ out: "pending", rc: 8 }] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.match(w.first, /^PR 900: pending \(last exit 8\)$/);
+  assert.match(w.out, /\nmergeable \(exit 0\): \{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"\}\npending\n$/, "its three parts");
+  assert.ok(w.ms < 2000 + 3000, `within the bound and a call's kill: ${w.ms} ms`);
+  for (const t of w.starts) assert.ok(t - w.t0 < 2000 + 1000, `a call started ${t - w.t0} ms in, past the 2 s deadline`);
+  // a gh pr checks that never returns is killed at the deadline (gh, a Go program, ignores an alarm)
+  w = runWait("900 3", { view: [view("MERGEABLE", "CLEAN")], checks: [{ out: "", rc: 0, hang: true }] }, false);
+  assert.equal(w.status, 8, w.out + w.err);
+  assert.ok(w.ms >= 2900 && w.ms < 3000 + 4000, `killed near its deadline: ${w.ms} ms`);
+  assert.match(w.first, /^PR 900: pending \(last exit 137\)$/);
+  assert.match(w.out, /\nmergeable \(exit 0\): [^\n]*MERGEABLE[^\n]*\n[^\n]*killed after \d+ s, past its bound/, "its three parts, the kill said");
+  // usage: exit 2, one line naming the cap, gh never called
+  for (const args of ["", "abc 10", "900 0", "900 -5", "900 x", "900 571", "900 10 extra"]) {
+    w = runWait(args, { view: [view("MERGEABLE", "CLEAN")], checks: [{ out: "all passed", rc: 0 }] }, false);
+    assert.equal(w.status, 2, `"${args}": ${w.err}`);
+    assert.match(w.err, /^usage: node scripts\/ci-wait\.ts <pr> <seconds>: [^\n]*from 1 to 570[^\n]*\n$/, `"${args}": one usage line naming the cap`);
+    assert.equal(w.views.length + w.checks.length, 0, `"${args}": gh is never called`);
+  }
+  // its verdicts' exit codes are its own, never Node's 1 (an uncaught error), and the cap fits the Bash tool's bound
+  const src = fs.readFileSync(CI_WAIT_SCRIPT, "utf8");
+  const verdicts = /const VERDICT = (\{[^}]*\})/.exec(src)?.[1];
+  assert.ok(verdicts, "VERDICT is one object");
+  assert.deepEqual(new Function(`return (${verdicts})`)(), { green: 0, failed: 3, conflict: 4, pending: 8 });
+  assert.match(src, /^export const MAX_SECONDS = 570;$/m);
+  assert.ok(570 + 2 * 1 + 10 < 600, "a chunk at the cap, its last call's grace and Node's start end inside 600000 ms");
 });
 
 test("pr-loop and pr-loop-slim: a conflict exits the CI stage with the base and the way out, sends nothing to a fix, and issue-loop stops there", async () => {
@@ -1214,7 +1274,7 @@ test("pr-loop: the probe and every review run their statements batched through d
   const r = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
   for (const l of ["probe 1", "review r1", "review r2"]) {
     const p = r.prompt(l);
-    assert.match(p, /node scripts\/duck-repro\.ts <ddl\.sql> <statements\.sql>/, `${l}: statements go through duck-repro`);
+    assert.match(p, /`node --env-file=<env file> <tree>\/scripts\/duck-repro\.ts <ddl\.sql> <statements\.sql> > <out> 2>&1`, one plain command/, `${l}: statements go through duck-repro, one plain command`);
     assert.match(p, /lines holding only `--`/, `${l}: in files, as duck-repro reads them`);
     assert.match(p, /> <out> 2>&1/, `${l}: the output goes to a file`);
     assert.match(p, /grep -c '\^SAME'/, `${l}: and only the counts and the differences are read`);
@@ -1405,7 +1465,9 @@ test("pr-loop: Postgres for the statements is the itEnv file when given, else a 
   const src = source("pr-loop");
   assert.match(src, /^\/\/ args: \{[^}\n]*\bitEnv\?/m, "the args line names itEnv");
   assert.match(src, /^\/\/ {3}itEnv: [^\n]*IT_POSTGRES_URL/m, "and the header says what it is");
-  const ownPg = [/postgres:18/, /wal_level=logical/, /-e POSTGRES_PASSWORD /, /openssl rand -hex/, /127\.0\.0\.1:0:5432/, /docker rm -f -v "\$n"/, /docker inspect --format '\{\{\.State\.Status\}\}' "\$n"` must fail/];
+  // the container's start and stop are scripts/review-postgres.ts (issue 322), whose own test holds its rules
+  const ownPg = [/`node <repo>\/scripts\/review-postgres\.ts start`/, /postgres:18/, /wal_level=logical/, /password passed by the environment and never printed/, /`--env-file=<env file>`/,
+    /`node <repo>\/scripts\/review-postgres\.ts stop <name>`, which removes it, checks that `docker inspect --format '\{\{\.State\.Status\}\}' <name>` then fails, and deletes the env file/];
   const without = await run("pr-loop", { ...PR }, { ...START, "review r1": clean, "CI 1": green });
   for (const l of ["probe 1", "review r1"]) {
     const p = without.prompt(l);
@@ -1415,8 +1477,8 @@ test("pr-loop: Postgres for the statements is the itEnv file when given, else a 
   const given = await run("pr-loop", { ...PR, itEnv: "/srv/it.env" }, { ...START, "review r1": clean, "CI 1": green });
   for (const l of ["probe 1", "review r1"]) {
     const p = given.prompt(l);
-    assert.match(p, /`\. \/srv\/it\.env`/, `${l}: the file is sourced`);
-    assert.doesNotMatch(p, /docker run/, `${l}: and no container is started`);
+    assert.match(p, /`--env-file=\/srv\/it\.env`, never a shell's `\.` or `source`/, `${l}: the file is loaded by Node, never sourced`);
+    assert.doesNotMatch(p, /docker run|review-postgres/, `${l}: and no container is started`);
     assert.match(p, /Never print, echo or log the URL or its password/, l);
   }
   // issue-loop passes it on to each pr-loop, as it does repo
@@ -1705,7 +1767,7 @@ test("pr-loop-slim: the implementer returns a structured handoff, pasted verbati
   for (const l of ["implement", "fix r1", "CI fix 1"]) {
     const p = r.prompt(l);
     assert.match(p, /CHECK AT SCALE before you push/, l);
-    assert.match(p, /node scripts\/duck-repro\.ts <ddl\.sql> <statements\.sql>/, `${l}: in batches, through duck-repro`);
+    assert.match(p, /node --env-file=<env file> <tree>\/scripts\/duck-repro\.ts <ddl\.sql> <statements\.sql>/, `${l}: in batches, through duck-repro`);
     assert.match(p, /at the head and at the base/, l);
     assert.match(p, /REGRESSION SWEEP[^\n]*WITHOUT the new feature/, `${l}: the regression sweep`);
     assert.match(p, /For every other changed path, CHECKS: RUN what it changed/, `${l}: the EVIDENCE split`);
@@ -1870,21 +1932,22 @@ test("the pr-persistent skill: valid frontmatter, and it names where its text co
 
 test("the pr-persistent skill: the render is one command, each stage is dispatched by path, and the run is pinned and measured", () => {
   const cmd = renderCommand();
-  assert.ok(cmd.includes('node "$RUN/render.mjs"'), "the render is the pinned script, run by path");
+  assert.ok(cmd.includes("node <run folder>/render.mjs"), "the render is the pinned script, run by its literal path");
   assert.doesNotMatch(cmd, /<</, "no heredoc: the coordinator never re-emits the render's source");
-  assert.deepEqual(cmd.split("\n").filter((l) => !l.startsWith("#")), ['node "$RUN/render.mjs"'], "the block is that one command");
+  assert.deepEqual(cmd.split("\n").filter((l) => !l.startsWith("#")), ["node <run folder>/render.mjs"], "the block is that one command");
   const text = skillText(), prose = text.replace(/\s+/g, " ");
   for (const s of ["Your instructions are in", "read the whole file, then follow it", "results/", "PIN the script and its render",
     ".claude/skills/pr-persistent/render.mjs", "never the JSON", "cache writes", "cache reads"]) {
     assert.ok(prose.includes(s), `the skill says ${s}`);
   }
   // both files are pinned from one commit, as the Workflow tool loads its script once
-  assert.match(text, /show "\$SHA:\.claude\/workflows\/pr-loop-slim\.js" > "\$RUN\/pr-loop-slim\.js"/);
-  assert.match(text, /show "\$SHA:\.claude\/skills\/pr-persistent\/render\.mjs" > "\$RUN\/render\.mjs"/);
+  assert.match(text, /^git rev-parse HEAD$/m);
+  assert.match(text, /^git show <sha>:\.claude\/workflows\/pr-loop-slim\.js > <run folder>\/pr-loop-slim\.js$/m);
+  assert.match(text, /^git show <sha>:\.claude\/skills\/pr-persistent\/render\.mjs > <run folder>\/render\.mjs$/m);
   assert.doesNotMatch(text, /fenced json block/, "a result travels by file, never in the report");
   // issue 304, PR 313: a resumed implementer's completion notice can go to the top-level session, never to the
   // coordinator, so the coordinator's wait on an agent watches its results file (or the PR's head), never a notice
-  for (const s of ["before it ends its turn", "never the agent's completion notice", "[ -s <path> ]", "git ls-remote", "never on a notice"]) {
+  for (const s of ["before it ends its turn", "never the agent's completion notice", "`node <repo>/scripts/wait-file.ts <path> 1800`", "run_in_background", "git ls-remote", "never on a notice"]) {
     assert.ok(prose.includes(s), `the skill says ${s}`);
   }
   assert.doesNotMatch(prose, /every agent you start notifies you/, "no wait relies on a notice");
@@ -2213,8 +2276,8 @@ test("pr-loop, pr-loop-slim: no `docker inspect` prints the container's environm
         // every docker inspect the prompt has an agent run (a backticked command with a target) prints one field
         const uses = [...p.matchAll(/`(docker inspect [^`]+)`/g)].map((m) => m[1]!);
         assert.ok(uses.length > 0, `${what}: the removal check is there`);
-        for (const u of uses) assert.match(u, /^docker inspect --format '\{\{\.[A-Za-z.]+\}\}' "\$n"$/, `${what}: "${u}" prints one field, never Config.Env`);
-        assert.match(p, /`docker rm -f -v "\$n"`, then `docker inspect --format '\{\{\.State\.Status\}\}' "\$n"` must fail, and delete the env file/, what);
+        for (const u of uses) assert.match(u, /^docker inspect --format '\{\{\.[A-Za-z.]+\}\}' <name>$/, `${what}: "${u}" prints one field, never Config.Env`);
+        assert.match(p, /`node \S+\/scripts\/review-postgres\.ts stop <name>`, which removes it, checks that `docker inspect --format '\{\{\.State\.Status\}\}' <name>` then fails, and deletes the env file/, what);
       }
     }
   }
@@ -2265,7 +2328,7 @@ test("variant forms: a deep form, timed at the head and at the base; a head much
   for (const s of sql) assert.equal(s.split("LIMIT 100").length - 1, top, s);
 
   const TIMING = [/TIME the DEEP form too[^\n]*run once at the head and once at the base/,
-    /\/usr\/bin\/time -p perl -e 'print STDERR "pid \$\$\\n"; alarm shift; exec @ARGV' 300 node scripts\/duck-repro\.ts <ddl\.sql> <deep\.sql>/,
+    /`node --env-file=<env file> \S+\/scripts\/duck-repro-bounded\.ts 300 <tree> <ddl\.sql> <deep\.sql> > <out> 2>&1` \(it runs that tree's duck-repro, prints the run's pid first and its `real` time last, and past the 300 s bound kills the run and exits 124\)/,
     /more than twice the base's AND more than 30 s longer is blocking, severity regression, origin this-pr/,
     /a head killed by the bound or dead \(out of memory\) where the base finished is a hang, severity crash/,
     /`duck_repro_<pid>` by the pid it printed first, never by a pattern/];
@@ -2287,4 +2350,237 @@ test("variant forms: a deep form, timed at the head and at the base; a head much
   }
   // the doc says what the harness does
   assert.ok(fs.readFileSync(path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..", "CLAUDE.md"), "utf8").includes(`a ${WIDE}`), "CLAUDE.md 'The loop' step 4");
+});
+
+// ---------------------------------------------------------------- issue 322: a command the harness writes out for an
+// agent is refused by Claude Code's worktree guard, in an agent that runs isolated in a worktree (or inherits a lead's),
+// so each agent improvised its own: the CI wait's $SECONDS loop, a sourced env file, the throwaway Postgres's shell
+// line, `git -C <repo> worktree add "$(mktemp -d)/head"`, the Record stage's `f=$(mktemp)`, the skill's `node
+// "$RUN/render.mjs"`. Every command an agent is told to run is PLAIN: one program with literal arguments, at most its
+// output redirected to a file; what needs logic is a script under scripts/.
+
+/** A backticked span that is a shell command (a program or a shell construct first), not a name, a flag or SQL. */
+const SHELL_START = /^(?:\((?!\s*(?:SELECT|VALUES|WITH|TABLE)\b)|\.\s|source\s|\$|[A-Za-z_]\w*=|\/usr\/bin\/time\b|(?:for|while|until|if|git|gh|node|npm|npx|docker|psql|grep|cd|mktemp|umask|perl|mkdir|cp|mv|cat|sleep|rm|date|openssl|bash|sh|seq)\b)/;
+/** What the guard refuses in an isolated agent, each with its name. */
+const UNPLAIN: Array<[RegExp, string]> = [
+  [/\$\(/, "a command substitution, $(…) or $((…))"],
+  [/<</, "a heredoc or a here-string"],
+  [/\b(?:while|until)\b|\bfor\s+\w+\s+in\b|;\s*do\b|;\s*done\b/, "a loop"],
+  [/^\(|[;&|]\s*\(/, "a ( … ) subshell"],
+  [/(?:^|[;&|(]\s*)(?:\.|source)\s+\S/, "a sourced file"],
+  [/\$\{?[A-Za-z_]/, "a shell variable"],
+  [/\bgit\s+-C\b/, "git -C"],
+];
+/** The shell commands a text tells its reader to run: each backticked span that is one, and each line of a ```sh block. */
+function commandsOf(text: string): string[] {
+  const blocks = [...text.matchAll(/```sh\n([\s\S]*?)\n```/g)].flatMap((m) => m[1]!.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")));
+  const spans = [...text.replace(/```sh\n[\s\S]*?\n```/g, "").matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!.trim()).filter((s) => SHELL_START.test(s));
+  return [...blocks, ...spans];
+}
+const unplain = (cmd: string): string[] => UNPLAIN.filter(([re]) => re.test(cmd)).map(([, why]) => why);
+
+test("plain: no command a harness prompt or the pr-persistent skill tells an agent to run is one the worktree guard refuses (issue 322)", async () => {
+  const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
+  const filed = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }, { classKey: "wording", source: "deferred", issue: 951, action: "filed" }] };
+  const review1 = { findings: [finding({ classKey: "c-a", input: "SELECT a FROM t" }), base, later({ input: "SELECT later FROM t" })], judgedCorrect: [] };
+  const FULL: Answers = { ...START, "probe 1": f("p"), "probe fix 1": pushed("p"), "probe 2": clean, "review r1": review1, "fix r1": pushed("b"),
+    "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green, file: filed };
+  const SLIM_FULL: Answers = { ...SLIM, "review r1": review1, "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red,
+    "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green, file: filed };
+  const bad = new Map<string, Set<string>>();
+  const seen = new Set<string>();
+  const labels = new Set<string>();
+  const note = (cmd: string, where: string): void => {
+    seen.add(cmd);
+    for (const why of unplain(cmd)) {
+      const k = `${cmd.slice(0, 160)} [${why}]`;
+      if (!bad.has(k)) bad.set(k, new Set());
+      bad.get(k)!.add(where);
+    }
+  };
+  for (const name of PR_LOOPS) {
+    for (const repo of [undefined, ROOT]) {
+      for (const itEnv of [undefined, "/srv/it.env"]) {
+        const args: Record<string, unknown> = { ...PR, ...(repo ? { repo } : {}), ...(itEnv ? { itEnv } : {}) };
+        const r = await run(name, args, name === "pr-loop" ? FULL : SLIM_FULL);
+        for (const c of r.calls) {
+          labels.add(`${name}: ${c.opts.label.replace(/\d+/g, "n")}`);
+          for (const cmd of commandsOf(c.prompt)) note(cmd, `${name} "${c.opts.label}"${repo ? " repo" : ""}${itEnv ? " itEnv" : ""}`);
+        }
+      }
+    }
+  }
+  for (const cmd of commandsOf(skillText())) note(cmd, "SKILL.md");
+  assert.deepEqual([...bad].map(([k, w]) => `${k} in ${[...w].slice(0, 3).join(", ")}${w.size > 3 ? ` and ${w.size - 3} more` : ""}`), [],
+    "a command an agent is told to run that Claude Code's worktree guard refuses in an isolated agent: make it one program with literal arguments, its logic in a script under scripts/");
+  // every stage was rendered, and the commands the decision names are read, so the check is not vacuous
+  for (const l of ["brief", "design dn", "design review dn", "implement", "link", "probe n", "probe fix n", "review rn", "fix rn", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "file", "record"]) {
+    assert.ok(labels.has(`pr-loop: ${l}`), `pr-loop's ${l} was rendered`);
+  }
+  for (const cmd of ["node <repo>/scripts/ci-wait.ts 900 540", "mktemp -d", "git worktree add --detach <that path>/head <sha>", "git worktree remove <that path>/head",
+    "node --env-file=<env file> <tree>/scripts/duck-repro.ts <ddl.sql> <statements.sql> > <out> 2>&1", "node <repo>/scripts/review-postgres.ts start",
+    "node <repo>/scripts/review-postgres.ts stop <name>", "node --env-file=<env file> <repo>/scripts/duck-repro-bounded.ts 300 <tree> <ddl.sql> <deep.sql> > <out> 2>&1",
+    "mktemp", "gh pr comment 900 --body-file <that path>", "node <run folder>/render.mjs", "node <repo>/scripts/wait-file.ts <path> 1800", "git rev-parse HEAD"]) {
+    assert.ok(seen.has(cmd), `the check reads \`${cmd}\``);
+  }
+  // and it catches each form the guard refused, as origin/main wrote them
+  for (const [cmd, why] of [
+    ["p=900; end=$((SECONDS + 540)); while [ $SECONDS -lt $end ]; do sleep 10; done", "a loop"],
+    ["(. /srv/it.env && cd <tree> && node scripts/duck-repro.ts <ddl.sql> <statements.sql>) > <out> 2>&1", "a sourced file"],
+    ["umask 077; n=mason-review-$(openssl rand -hex 4)", "a command substitution, $(…) or $((…))"],
+    ["git -C /repo worktree add \"$(mktemp -d)/head\" <sha>", "git -C"],
+    ["f=$(mktemp)", "a command substitution, $(…) or $((…))"],
+    ["node \"$RUN/render.mjs\"", "a shell variable"],
+    ["mg=$(gh pr view 900) ; grep -q x <<<\"$mg\"", "a heredoc or a here-string"],
+  ]) {
+    assert.equal(commandsOf(`\`${cmd}\``).length, 1, `${cmd} is read as a command`);
+    assert.ok(unplain(cmd!).includes(why!), `${cmd}: ${why}`);
+  }
+  for (const sql of ["(SELECT a FROM t ORDER BY a LIMIT 1) UNION ALL (SELECT a FROM t ORDER BY a DESC LIMIT 1) ORDER BY 1", "SELECT a FROM t"]) assert.deepEqual(commandsOf(`\`${sql}\``), [], "SQL is no command");
+});
+
+test("plain: Node's --env-file reads an env file written either way, `export IT_POSTGRES_URL=…` and `IT_POSTGRES_URL=…`", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "env-file-"));
+  try {
+    const url = "postgres://u:p@127.0.0.1:5/postgres";
+    for (const [file, text] of [["export.env", `export IT_POSTGRES_URL=${url}\n`], ["bare.env", `IT_POSTGRES_URL=${url}\n`]] as const) {
+      fs.writeFileSync(path.join(dir, file), text);
+      const r = spawnSync(process.execPath, [`--env-file=${path.join(dir, file)}`, "-e", "process.stdout.write(process.env.IT_POSTGRES_URL ?? 'unset')"], { encoding: "utf8", env: { PATH: process.env["PATH"] } });
+      assert.equal(r.stdout, url, `${file}: ${r.stderr}`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A stub program in `dir`, a Node script logging its argv and the environment the tests look at, then `body`. */
+function stubBin(dir: string, name: string, body: string): void {
+  fs.writeFileSync(path.join(dir, name), `#!/usr/bin/env node
+const fs = require("node:fs");
+const dir = ${JSON.stringify(dir)};
+const a = process.argv.slice(2);
+fs.appendFileSync(dir + "/${name}.log", JSON.stringify({ argv: a, env: { POSTGRES_PASSWORD: process.env.POSTGRES_PASSWORD, PGPASSWORD: process.env.PGPASSWORD, PGHOST: process.env.PGHOST, PGPORT: process.env.PGPORT, PGUSER: process.env.PGUSER, PGDATABASE: process.env.PGDATABASE } }) + "\\n");
+${body}
+`, { mode: 0o755 });
+}
+const logOf = (dir: string, name: string): Array<{ argv: string[]; env: Record<string, string | undefined> }> =>
+  fs.existsSync(path.join(dir, `${name}.log`)) ? fs.readFileSync(path.join(dir, `${name}.log`), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+
+test("plain: review-postgres starts a throwaway postgres:18 and stops it, its password never in argv, stdout or a file others read", () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "review-pg-")));
+  const tmp = path.join(dir, "tmp");
+  fs.mkdirSync(tmp);
+  const SCRIPT = path.join(ROOT, "scripts", "review-postgres.ts");
+  try {
+    stubBin(dir, "docker", `const state = dir + "/state";
+if (a[0] === "run") { fs.writeFileSync(state, "running"); process.stdout.write("c0ffee\\n"); process.exit(0); }
+if (a[0] === "port") { process.stdout.write("127.0.0.1:54321\\n"); process.exit(0); }
+if (a[0] === "exec") { const n = (fs.existsSync(dir + "/ready") ? 1 : 0); fs.writeFileSync(dir + "/ready", "1"); process.exit(n ? 0 : 2); }
+if (a[0] === "rm") { fs.writeFileSync(state, "gone"); process.exit(0); }
+if (a[0] === "inspect") { if (fs.readFileSync(state, "utf8") === "running") { process.stdout.write("running\\n"); process.exit(0); } process.stderr.write("Error: No such object\\n"); process.exit(1); }
+process.exit(9);`);
+    const env = { PATH: `${dir}:${process.env["PATH"]}`, TMPDIR: tmp, REVIEW_POSTGRES_POLL_MS: "0" };
+    const start = spawnSync(process.execPath, [SCRIPT, "start"], { encoding: "utf8", env, timeout: 60_000 });
+    assert.equal(start.status, 0, start.stderr);
+    const name = /^container (mason-review-[0-9a-f]{8})$/m.exec(start.stdout)?.[1];
+    assert.ok(name, start.stdout);
+    const envFile = /^env file (\S+)$/m.exec(start.stdout)?.[1];
+    assert.equal(envFile, path.join(tmp, `${name}.env`));
+    assert.equal(fs.statSync(envFile!).mode & 0o077, 0, "the env file is its owner's alone");
+    const text = fs.readFileSync(envFile!, "utf8");
+    const pw = /^export IT_POSTGRES_URL=postgres:\/\/postgres:([0-9a-f]{32})@127\.0\.0\.1:54321\/postgres\n$/.exec(text)?.[1];
+    assert.ok(pw, "the env file holds the URL, on the free port docker gave");
+    const runCall = logOf(dir, "docker").find((c) => c.argv[0] === "run")!;
+    assert.equal(runCall.env["POSTGRES_PASSWORD"], pw, "the password is passed by the environment");
+    for (const c of logOf(dir, "docker")) assert.ok(!c.argv.join(" ").includes(pw!), `never in argv: docker ${c.argv.join(" ")}`);
+    assert.ok(!start.stdout.includes(pw!) && !start.stderr.includes(pw!) && !start.stdout.includes("postgres://"), "the URL is never printed");
+    const argv = runCall.argv.join(" ");
+    for (const s of ["-d --rm --name " + name, "-e POSTGRES_PASSWORD -p 127.0.0.1:0:5432", "--entrypoint timeout postgres:18 --kill-after=30 7200 docker-entrypoint.sh postgres -c wal_level=logical"]) assert.ok(argv.includes(s), `docker run … ${s}`);
+    assert.equal(logOf(dir, "docker").filter((c) => c.argv[0] === "exec").length, 2, "it waited for pg_isready");
+    const stop = spawnSync(process.execPath, [SCRIPT, "stop", name!], { encoding: "utf8", env, timeout: 60_000 });
+    assert.equal(stop.status, 0, stop.stderr);
+    assert.ok(!fs.existsSync(envFile!), "the env file is deleted");
+    const calls = logOf(dir, "docker").map((c) => c.argv.join(" "));
+    assert.ok(calls.includes(`rm -f -v ${name}`), "removed");
+    for (const c of calls.filter((x) => x.startsWith("inspect"))) assert.equal(c, `inspect --format {{.State.Status}} ${name}`, "inspect prints one field, never Config.Env");
+    // still there after rm: stop says so, non-zero
+    stubBin(dir, "docker", `if (a[0] === "inspect") { process.stdout.write("running\\n"); process.exit(0); } process.exit(0);`);
+    const stuck = spawnSync(process.execPath, [SCRIPT, "stop", name!], { encoding: "utf8", env, timeout: 60_000 });
+    assert.equal(stuck.status, 3, stuck.stderr);
+    assert.match(stuck.stderr, /is not gone/);
+    // without Docker it says so, and how to go on
+    const none = spawnSync(process.execPath, [SCRIPT, "start"], { encoding: "utf8", env: { ...env, PATH: tmp }, timeout: 60_000 });
+    assert.equal(none.status, 3, none.stderr);
+    assert.match(none.stderr, /could not run docker[^\n]*itEnv/);
+    for (const bad of [["stop"], ["stop", "postgres"], ["go"]]) assert.equal(spawnSync(process.execPath, [SCRIPT, ...bad], { encoding: "utf8", env }).status, 2, bad.join(" "));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plain: duck-repro-bounded prints the run's pid first and its real time last; past the bound it kills the run and drops that run's database", () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "repro-bounded-")));
+  const SCRIPT = path.join(ROOT, "scripts", "duck-repro-bounded.ts");
+  try {
+    // a tree whose duck-repro says its own pid, then answers or never returns, as its statements file says
+    fs.mkdirSync(path.join(dir, "tree", "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "tree", "scripts", "duck-repro.ts"), `import * as fs from "node:fs";
+process.stdout.write("mypid " + process.pid + "\\n");
+if (fs.readFileSync(process.argv[3]!, "utf8").includes("hang")) setInterval(() => {}, 1000);
+else process.stdout.write("SAME 1\\n");
+`);
+    fs.writeFileSync(path.join(dir, "ddl.sql"), "CREATE TABLE t (id int PRIMARY KEY)\n");
+    fs.writeFileSync(path.join(dir, "ok.sql"), "SELECT 1\n");
+    fs.writeFileSync(path.join(dir, "hang.sql"), "-- hang\n");
+    fs.writeFileSync(path.join(dir, "it.env"), "export IT_POSTGRES_URL=postgres://u:s3cret@127.0.0.1:5/postgres\n");
+    stubBin(dir, "psql", "process.exit(0);");
+    const env = { PATH: `${dir}:${process.env["PATH"]}` };
+    const go = (stmts: string, secs = "1") => spawnSync(process.execPath, [`--env-file=${path.join(dir, "it.env")}`, SCRIPT, secs, path.join(dir, "tree"), path.join(dir, "ddl.sql"), path.join(dir, stmts)], { encoding: "utf8", env, timeout: 60_000 });
+    const ok = go("ok.sql", "30");
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /SAME 1/);
+    assert.match(ok.stderr, /^pid (\d+)\n(?:[^\n]*\n)*real \d+\.\d\d\n$/, ok.stderr);
+    assert.equal(/^pid (\d+)/.exec(ok.stderr)![1], /mypid (\d+)/.exec(ok.stdout)![1], "the pid printed is the run's own");
+    assert.equal(logOf(dir, "psql").length, 0, "a run that finished leaves nothing to drop");
+    const hung = go("hang.sql");
+    assert.equal(hung.status, 124, hung.stderr);
+    const pid = /^pid (\d+)/.exec(hung.stderr)?.[1];
+    assert.equal(pid, /mypid (\d+)/.exec(hung.stdout)?.[1], "the pid printed first is the run's own");
+    assert.match(hung.stderr, /killed: past the bound of 1 s\n/);
+    assert.match(hung.stderr, new RegExp(`dropped duck_repro_${pid}\\n`));
+    assert.match(hung.stderr, /\nreal 1\.\d\d\n$/, "the real time, last");
+    const drop = logOf(dir, "psql");
+    assert.equal(drop.length, 1);
+    assert.ok(drop[0]!.argv.includes(`DROP DATABASE IF EXISTS duck_repro_${pid} WITH (FORCE)`), drop[0]!.argv.join(" "));
+    assert.ok(!drop[0]!.argv.join(" ").includes("s3cret"), "the password never in psql's argv");
+    assert.deepEqual([drop[0]!.env["PGPASSWORD"], drop[0]!.env["PGHOST"], drop[0]!.env["PGPORT"], drop[0]!.env["PGUSER"], drop[0]!.env["PGDATABASE"]], ["s3cret", "127.0.0.1", "5", "u", "postgres"]);
+    assert.ok(!hung.stderr.includes("s3cret") && !hung.stdout.includes("s3cret"), "nor printed");
+    // usage: without the URL, a bound out of range, or a tree with no duck-repro
+    for (const [withEnv, args] of [[false, ["1", path.join(dir, "tree"), "a", "b"]], [true, ["0", path.join(dir, "tree"), "a", "b"]], [true, ["1", dir, "a", "b"]]] as const) {
+      const r = spawnSync(process.execPath, [...(withEnv ? [`--env-file=${path.join(dir, "it.env")}`] : []), SCRIPT, ...args], { encoding: "utf8", env });
+      assert.equal(r.status, 2, `${args.join(" ")}: ${r.stderr}`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plain: wait-file exits 0 once its file is there and not empty, 8 at its bound", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wait-file-"));
+  const SCRIPT = path.join(ROOT, "scripts", "wait-file.ts");
+  try {
+    const target = path.join(dir, "result.json");
+    fs.writeFileSync(target, "");
+    const t0 = Date.now();
+    const child = spawn(process.execPath, [SCRIPT, target, "20"], { env: { ...process.env, WAIT_FILE_INTERVAL_MS: "50" } });
+    setTimeout(() => fs.writeFileSync(target, "{}"), 400);
+    const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
+    assert.equal(code, 0);
+    assert.ok(Date.now() - t0 >= 350, "an empty file is not there yet");
+    const late = spawnSync(process.execPath, [SCRIPT, path.join(dir, "never.json"), "1"], { encoding: "utf8", env: { ...process.env, WAIT_FILE_INTERVAL_MS: "50" }, timeout: 30_000 });
+    assert.equal(late.status, 8, late.stderr);
+    for (const args of [[], [target], [target, "0"], [target, "x"], [target, "7201"]]) assert.equal(spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" }).status, 2, args.join(" "));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
