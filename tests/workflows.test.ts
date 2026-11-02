@@ -788,7 +788,7 @@ test("pr-loop-slim: a merge that leaves the conflict open stops the run with a s
     assert.equal(r.result["head"], sha("z"));
     // stacked: the base below, never main
     const s = await run(name, { ...PR, base: "issue-300-below", stackedOn: "899" }, { ...SLIM, "review r1": clean, "CI 1": { state: "conflict", detail: "conflicts with issue-300-below" },
-      "merge 1": { state: "conflict", head: sha("a"), files: ["src/x.ts"], detail: "conflict: src/x.ts" } });
+      "merge 1": { state: "conflict", head: sha("a"), files: ["app/x.ts"], detail: "conflict: app/x.ts" } });
     assert.ok(s.prompt("merge 1").includes('`node scripts/merge-base.ts origin/issue-300-below "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"`'), "a stacked PR merges the branch below");
     assert.doesNotMatch(s.prompt("merge 1"), /origin\/main\b/, "never main");
     const ss = String(s.result["status"]);
@@ -906,7 +906,7 @@ function settled(r: MergeRepo, what: string): void {
 }
 
 test("merge-base: a merge with no conflict is committed with two parents and the trailer last; nothing to merge is exit 5", () => {
-  let r = mergeRepo({ "src/base.ts": "base\n" }, { "src/a.ts": "a\n" }, { "src/b.ts": "b\n" });
+  let r = mergeRepo({ "app/base.ts": "base\n" }, { "app/a.ts": "a\n" }, { "app/b.ts": "b\n" });
   try {
     const before = r.git(r.work, "rev-parse", "HEAD").trim();
     const m = mergeBaseRun(r, "origin/main", "Co-Authored-By: X");
@@ -918,7 +918,7 @@ test("merge-base: a merge with no conflict is committed with two parents and the
     const msg = r.git(r.work, "log", "-1", "--format=%B").trim();
     assert.match(msg, /^Merge origin\/main into the branch\n/);
     assert.ok(msg.endsWith("\nCo-Authored-By: X"), msg);
-    assert.equal(fs.readFileSync(path.join(r.work, "src/a.ts"), "utf8") + fs.readFileSync(path.join(r.work, "src/b.ts"), "utf8"), "a\nb\n");
+    assert.equal(fs.readFileSync(path.join(r.work, "app/a.ts"), "utf8") + fs.readFileSync(path.join(r.work, "app/b.ts"), "utf8"), "a\nb\n");
     settled(r, "clean merge");
     // the branch now holds origin/main: up to date, exit 5, no commit
     const again = mergeBaseRun(r, "origin/main", "Co-Authored-By: X");
@@ -930,7 +930,7 @@ test("merge-base: a merge with no conflict is committed with two parents and the
     fs.rmSync(r.dir, { recursive: true, force: true });
   }
   // usage: no argument, or a ref that does not resolve: never 0, nothing committed, the tree clean
-  r = mergeRepo({ "src/base.ts": "base\n" }, { "src/a.ts": "a\n" }, { "src/b.ts": "b\n" });
+  r = mergeRepo({ "app/base.ts": "base\n" }, { "app/a.ts": "a\n" }, { "app/b.ts": "b\n" });
   try {
     const before = r.git(r.work, "rev-parse", "HEAD").trim();
     for (const args of [[], ["origin/nope"], ["origin/main", "trailer", "extra"]]) {
@@ -986,15 +986,15 @@ test("merge-base: release-notes/next.md alone, insertions on both sides, keeps b
 });
 
 test("merge-base: another file conflicting aborts the merge, next.md not resolved on its own; the paths are read from git's index", () => {
-  const r = mergeRepo({ "release-notes/next.md": NOTES_BASE, "src/x.ts": "one\ntwo\n" },
-    { "release-notes/next.md": after("- base note", "- main note\n"), "src/x.ts": "ONE (main)\ntwo\n" },
-    { "release-notes/next.md": after("- base note", "- branch note\n"), "src/x.ts": "ONE (branch)\ntwo\n" });
+  const r = mergeRepo({ "release-notes/next.md": NOTES_BASE, "app/x.ts": "one\ntwo\n" },
+    { "release-notes/next.md": after("- base note", "- main note\n"), "app/x.ts": "ONE (main)\ntwo\n" },
+    { "release-notes/next.md": after("- base note", "- branch note\n"), "app/x.ts": "ONE (branch)\ntwo\n" });
   try {
     const before = r.git(r.work, "rev-parse", "HEAD").trim();
     const m = mergeBaseRun(r, "origin/main", "Co-Authored-By: X");
     assert.equal(m.status, 4, m.out + m.err);
     assert.match(m.first, /^conflict: /);
-    assert.deepEqual(m.first.slice("conflict: ".length).split(" ").sort(), ["release-notes/next.md", "src/x.ts"]);
+    assert.deepEqual(m.first.slice("conflict: ".length).split(" ").sort(), ["app/x.ts", "release-notes/next.md"]);
     assert.equal(r.git(r.work, "rev-parse", "HEAD").trim(), before, "HEAD unchanged");
     assert.equal(fs.readFileSync(path.join(r.work, "release-notes/next.md"), "utf8"), after("- base note", "- branch note\n"), "next.md as the branch had it");
     settled(r, "another file");
