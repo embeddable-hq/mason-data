@@ -5855,20 +5855,22 @@ test("issue 484: a numeric's program shared by its references is executed at dep
     }
     const bound = Math.max(2 * PLAN_TIME_BOUND_MS, 2 * integerMs);
     const arm = "SELECT a, d FROM deep_t";
-    const shallow: Record<keyof ReturnType<typeof shapes>, string> = {
+    const shallow = (depth: number): Record<keyof ReturnType<typeof shapes>, string> => ({
       "c + c - c": "SELECT c FROM deep_t ORDER BY 1",
       "q + q - q": "SELECT c / 3 AS q FROM deep_t ORDER BY 1",
       "344": "SELECT c / 3 AS a, b FROM deep_t ORDER BY a, b LIMIT 100",
       "mixed-scale union, nested": `SELECT a, b FROM (SELECT c / 3 AS a, b FROM deep_t UNION ALL ${arm}) s ORDER BY a, b LIMIT 100`,
-      "mixed-scale union, a chain": `SELECT a, b FROM (SELECT c / 3 AS a, b FROM deep_t${` UNION ALL ${arm}`.repeat(32)}) s ORDER BY a, b LIMIT 100`,
-    };
-    for (const [shape, sql] of Object.entries(shapes(32)) as Array<[keyof typeof shallow, string]>) {
+      "mixed-scale union, a chain": `SELECT a, b FROM (SELECT c / 3 AS a, b FROM deep_t${` UNION ALL ${arm}`.repeat(depth)}) s ORDER BY a, b LIMIT 100`,
+    });
+    // climbing, so a walk that grows with the expansion fails the bound by name at 12 (main: seconds, or a statement it
+    // cannot write) instead of running out of memory at 32
+    for (const depth of [12, 32]) for (const [shape, sql] of Object.entries(shapes(depth)) as Array<[keyof ReturnType<typeof shapes>, string]>) {
       const started = performance.now();
       const got = await answer(c, over(sql));
       const ms = performance.now() - started;
-      t.diagnostic(`${shape} at depth 32: ${ms.toFixed(0)} ms (bound ${bound.toFixed(0)} ms, the integer forms ${integerMs.toFixed(0)} ms)`);
-      assert.ok(ms < bound, `${shape}: answered in ${ms.toFixed(0)} ms at depth 32, past the bound of ${bound.toFixed(0)} ms (the integer forms ${integerMs.toFixed(0)} ms)`);
-      assert.deepEqual(got, await postgres(shallow[shape]), `${shape} at depth 32`);
+      t.diagnostic(`${shape} at depth ${depth}: ${ms.toFixed(0)} ms (bound ${bound.toFixed(0)} ms, the integer forms ${integerMs.toFixed(0)} ms)`);
+      assert.ok(ms < bound, `${shape}: answered in ${ms.toFixed(0)} ms at depth ${depth}, past the bound of ${bound.toFixed(0)} ms (the integer forms ${integerMs.toFixed(0)} ms)`);
+      assert.deepEqual(got, await postgres(shallow(depth)[shape]), `${shape} at depth ${depth}`);
     }
     // depth 4: Postgres answers each itself
     assert.deepEqual(await unlike(c, Object.values(shapes(4)).map((sql) => [over(sql), "ordered"] as const)), []);
