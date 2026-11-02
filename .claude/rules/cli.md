@@ -309,9 +309,13 @@ CLI lacks).
   starts one — no forged `Next:`, tip, row or failure, for a person or in `--json`; and what to run next, the code and
   the exit, and the page a person is sent to are the CLI's own: the code by HTTP status (`codeOfStatus`, never `usage`
   or `timeout`, the service's code kept in `why`), the next step by status (`serviceNext`, the service's `next` never
-  read), the page on the service's own origin (`pageUrl`, refused naming both). tests/cli-login.test.ts holds every
-  run to it (`mason`: no line begins with a hostile value, one `Next:` of the CLI's own steps, no `--json` string with a
-  line break). **The login is the person's, never a project's**
+  read), the page on the service's own origin (`pageUrl`, refused naming both). **On a terminal the visual lines too**:
+  `serviceText` collapses white space, and a command whose output holds a service's text draws it in `serviceStyle`
+  (src/cli/command.ts), under which the CLI breaks every line itself (`strictWrap`: the headline and a long word too,
+  a character outside ASCII as two columns) and starts every continuation at `CONTINUATION` (4) or deeper, never the
+  terminal. tests/hosted-fake.ts `mason` holds every run of tests/cli-login.test.ts and
+  tests/cli-login-service.test.ts to it: every line a person sees, logical on a pipe and visual on a terminal 80 wide (a
+  preload, `terminal`), is one the CLI begins (`seenProblems`), and no `--json` string has a line break. **The login is the person's, never a project's**
   (src/cli/credentials.ts: `$XDG_CONFIG_HOME/mason/credentials.json`, else `~/.config/mason/`, 0600 in 0700, renamed
   over, keyed by the base URL): a file or folder others can read is refused with the chmod, one that cannot be parsed
   with its path, both checked before the device code is asked for. **A token never reaches a command line, the output
