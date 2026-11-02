@@ -144,7 +144,8 @@ own bounded wait.
 - **Merge** under CLAUDE.md "Who merges what". Read the diff in full. A PR that changes `src/` waits for the owner's
   word (`Needs Tom` on the board). When the PR may merge, queue it pinned,
   `gh pr merge <n> --auto --merge --match-head-commit <sha>`, and leave a bounded background job on
-  `gh pr view <n> --json state`. Confirm that it merged, then move the card with
+  `gh pr view <n> --json state,mergeable`, which exits on CONFLICTING too, since a queued auto-merge on a conflicting PR
+  never lands. Confirm that it merged, then move the card with
   `node <repo>/scripts/board.ts status <sub-issue> "Done"`.
 - **End the implementer** once the PR is merged or stopped: tell it it is done, and check that nothing in its worktree
   is unpushed.
