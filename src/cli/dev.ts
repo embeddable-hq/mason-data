@@ -35,7 +35,7 @@ import { readGenerated } from "./generated-files.ts";
 import { addedTables, effectiveSync, entryName, replicatedEntries, rereadSources, shownPath, syncWritten, type RunSources, type SourceFile } from "./sources.ts";
 import { newToken } from "./security.ts";
 import { alive, liveRun } from "./runs.ts";
-import { DEMO_DIR, DUCK_FILE, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, projectReadOnlySetting, projectSource, startSettingRefusal, theProject, writeConfig, type PostgresListener, type ProjectConfig } from "./project.ts";
 import { closedWithin, closingOnce, DEMO_STILL_CLOSING, demoChanges, demoChangesRefusal, demoPort, demoSettings, openDemo } from "./demo.ts";
 import { postgresApiUrl, readPgTls, type PgListenerSettings } from "../api/postgres/listener.ts";
 import { connectDatabase } from "../lib/database-name.ts";
@@ -226,6 +226,12 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // a setting a start refuses (the parent of a background start has asked the same list: src/cli/project.ts)
   const setting = startSettingRefusal(project, process.env, { serve: o.serve !== undefined });
   if (setting !== null) return failed("start", setting, { json: false });
+  // THE PROJECT'S FILES DEPLOYED READ-ONLY (MASON_PROJECT_READONLY=1): recorded in the config at every start, and removed
+  // at a start without, so a command beside the run — up or down, whatever its own environment — is refused as the run
+  // is (src/cli/project.ts projectWriteRefusal reads the record and the environment; a value not 0 or 1 is refused above)
+  if (projectReadOnlySetting(process.env) === true) {
+    if (cfg.projectReadOnly !== true) { cfg.projectReadOnly = true; writeConfig(home, cfg); }
+  } else if (cfg.projectReadOnly !== undefined) { delete cfg.projectReadOnly; writeConfig(home, cfg); }
   // the history's days (MASON_HISTORY_DAYS, a number of days; the old MASON_REQUEST_LOG_DAYS refused, named), read
   // before anything opens (src/duck/history.ts); every history below keeps them
   const keptDays = historyDaysSetting(process.env);
@@ -260,7 +266,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if ("problem" in pgTls) return failed("start", pgTls, { json: false });
   const chosen = new Set([pg.port, ...demoPorts]);
   // a server's project folder is the team's, committed, and may be mounted read-only: mason serve writes nothing there
-  const wrotePin = o.serve ? null : ensurePin(folder, o.version);
+  const wrotePin = o.serve ? null : ensurePin(folder, o.version, project.root);
   if (wrotePin) say(`  wrote ${path.relative(project.root, wrotePin)}: version ${o.version}, the Mason this project is written for — commit it`);
   if ("message" in src) return failed("start", src, { json: false });
   // a demo project's file naming sync: replication (its database has no change log), refused before anything opens

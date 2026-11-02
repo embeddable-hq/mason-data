@@ -15,6 +15,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
+  ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
+  beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
+  them", and the page's Tables list says why in place of the buttons (`sourcesReadOnly` in `mason status --json`). Before,
+  such an edit ran a config nobody committed, and the next deploy undid it without a word. A value other than `0` or `1`
+  refuses the start. Unset, nothing changes.
 - **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
   COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
   of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE

@@ -40,6 +40,7 @@ import type { RunState } from "./commands.ts";
 import { postgresFacts, postgresLink } from "./pg-url.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 import { catalogTable, parseSourceText, shownPath, type CatalogColumn, type ProjectSource, type SourceFile } from "./sources.ts";
+import { projectWriteRefusal } from "./project.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type PollMeasure, type RemoveResult } from "./source-edit.ts";
 import { PollRefused, type CopyState, type DiskStatus, type PolledTable, type StreamedAnswer, type StreamStatus } from "../duck/sync.ts";
 import { DEFAULT_SYNC, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
@@ -192,8 +193,8 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
     ui: ctx.page,
     // mason serve's run: the page's words for a tunnel that closed, and for the Postgres URL's host, follow from it
     served: ctx.served === true,
-    // why the page offers no Add or Remove, or null: a server's project folder may be mounted read-only, and a control
-    // that can only fail is not offered
+    // why the page offers no Add or Remove, or null: the project's files deployed read-only (MASON_PROJECT_READONLY), or
+    // a server's project folder mounted read-only — a control that can only fail is not offered
     sourcesReadOnly: sourcesReadOnly(ctx, sources.file?.file ?? null),
     source: { url: maskedUrl(ctx.source.url), host: ctx.source.host, database: ctx.source.database, remote: ctx.source.remote, demo: ctx.demo === true,
       // `replication` while a table's sync is replication (the run streams), else `poll`: each table's own is its kept
@@ -237,8 +238,15 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
   };
 }
 
-/** Why the run could not write its sources file now, or null: `mason start`'s is the developer's, and always offered. */
+/**
+ * Why the run could not write its sources file now, or null — ONE fact for the page and `mason status --json`, computed
+ * here: first the project's own word (src/cli/project.ts `projectWriteRefusal`, the authority every edit asks, so the page
+ * offers no Add or Remove exactly when `/api/pick` and `/api/remove` would refuse them); then, on a server, a file it
+ * cannot write (a folder mounted read-only). `mason start`'s file is the developer's, and never asked of the disk.
+ */
 function sourcesReadOnly(ctx: RunContext, file: string | null): string | null {
+  const readOnly = projectWriteRefusal(ctx.root, process.env);
+  if (readOnly !== null) return `${readOnly.message}; ${readOnly.fix}`;
   if (ctx.served !== true || file === null) return null;
   try { fs.accessSync(file, fs.constants.W_OK); return null; }
   catch (e) { return `the sources file cannot be written on this server (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}): commit a change to it, and deploy`; }

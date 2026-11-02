@@ -64,6 +64,8 @@ COPY mason/ /mason/project/
 
 with `[build]` naming the `dockerfile` instead of `image`. `mason serve` writes nothing in a project folder that has a
 sources file, so the folder may be read-only; a table added or removed in it is copied or dropped at the next deploy.
+Set `MASON_PROJECT_READONLY=1` too: `mason add` and `mason remove` beside the server, and the web page's Add and Remove,
+are then refused with "edit the files and deploy them", where they would edit a folder the next deploy replaces.
 
 ## Memory and size
 
