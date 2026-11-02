@@ -2235,6 +2235,16 @@ push), and the alarm, `exec`'d into `gh`, is caught and ignored by Go's runtime,
 alarm still running at 67 s). The waits became a loop of `gh pr checks` with a deadline, reading its exit code (0
 passed, 8 pending, 1 failed or no checks yet), and a PR sent back has its merge withdrawn.
 
+"No checks yet" was a wait that could not end. On 2026-11-01 PRs 231 and 233 went into conflict with main after PRs
+202, 245 and 250 merged, and their CI waits sat to the deadline, then reported a timeout that did not name the cause:
+GitHub runs no `pull_request` workflow on a PR with a merge conflict, so its new head never gets a check (issue 255).
+Each pass of a wait now reads `gh pr view --json mergeable,mergeStateStatus` before the checks, and CONFLICTING is its
+own verdict, even over a finished run (233 kept its old head's run), while UNKNOWN, which GitHub computes lazily, is a
+wait. Two other doubts were checked against GitHub's docs: a draft PR gets CI (`opened` has no exception for drafts,
+and ci.yml has no draft condition), and a workflow skipped by a `paths:` or `branches:` filter would leave its required
+checks pending, but ci.yml has neither. Auto-merge lists no conflict among what switches it off, so a merge wait reads
+`mergeable` too.
+
 A brief names the shapes its tests must hold because on each of the three PRs of 2026-10-28 the first fix round was for
 a shape its brief had left out, and the tests its runs use because one issue's agents spent 36 min proving a whole slow
 file twice.

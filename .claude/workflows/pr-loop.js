@@ -12,7 +12,7 @@ export const meta = {
     { title: 'Review', detail: 'Fable, fresh context, findings with their class, their severity and whether the base has them', model: 'fable' },
     { title: 'Fix', detail: "this PR's blocking failures and classes and CI's, every earlier round, never the edit; a repeated class makes a class round", model: 'opus' },
     { title: 'Learn', detail: "each class met becomes a review probe in its rules file, one docs-only commit", model: 'opus' },
-    { title: 'CI', detail: 'bounded wait on gh pr checks, beside each review and after the last; a CI fix gets a narrow re-check', model: 'sonnet' },
+    { title: 'CI', detail: 'bounded wait on gh pr checks, with mergeable read first on every pass (GitHub runs no CI on a conflicting PR, so a conflict is its own verdict), beside each review and after the last; a CI fix gets a narrow re-check', model: 'sonnet' },
     { title: 'File', detail: "the base's findings and this PR's non-blocking ones, one issue per class, at every exit", model: 'sonnet' },
     { title: 'Record', detail: 'the Review record comment, with its machine-readable block, at every exit with a PR', model: 'sonnet' },
   ],
@@ -71,7 +71,13 @@ const signed = (on) => `### From Claude (${SIGNS[on.model]})`
 const coAuthor = (on) => `Co-Authored-By: Claude ${SIGNS[on.model]} <noreply@anthropic.com>`
 
 // One chunk of the CI wait (CLAUDE.md "Local gates": a `gh pr checks` loop with a deadline, never --watch, which exits
-// at once on "no checks reported"). gh pr checks exits 0 when all passed, 8 while any is pending, 1 on a failure, and
+// at once on "no checks reported"). Each pass first reads `gh pr view --json mergeable,mergeStateStatus`, before the
+// checks' verdict: GitHub runs no pull_request workflow on a PR with a merge conflict, so on a conflicting PR "no checks
+// reported" never ends (PRs 231 and 233 waited to their deadline, issue 255). mergeable CONFLICTING is its own verdict,
+// conflict, at once, even over a finished run at the head (a green PR that cannot merge is not ready); UNKNOWN (GitHub
+// computes it lazily, just after a push) or a read that fails is "couldn't tell", a wait; only MERGEABLE lets the checks
+// decide. mergeStateStatus is printed for the record and is never a verdict (DRAFT, BLOCKED and BEHIND all get CI).
+// gh pr checks exits 0 when all passed, 8 while any is pending, 1 on a failure, and
 // also 1 with "no checks reported" just after a push, which is a wait, not a failure; a failure while others are still
 // pending is a failure (gh says 1). Any other exit is "couldn't tell", waited on like a pending one, and the last exit
 // code is printed. Nine minutes: the agent's tool call is given a timeout of 600000 ms (CI_TOOL_MS), past the chunk, as
@@ -79,12 +85,12 @@ const coAuthor = (on) => `Co-Authored-By: Claude ${SIGNS[on.model]} <noreply@ant
 // exec'd into gh (a Go program) is ignored.
 const CI_CHUNK_S = 540
 const CI_TOOL_MS = 600000
-const CI_WAIT = (pr) => `p=${pr}; end=$((SECONDS + ${CI_CHUNK_S})); st=pending; while [ $SECONDS -lt $end ]; do out=$(gh pr checks "$p" 2>&1); rc=$?; if [ $rc -eq 0 ]; then st=green; break; elif [ $rc -eq 1 ] && ! grep -q "no checks reported" <<<"$out"; then st=failed; break; fi; sleep 10; done; echo "PR $p: $st (last exit $rc)"; printf '%s\\n' "$out"`
+const CI_WAIT = (pr) => `p=${pr}; end=$((SECONDS + ${CI_CHUNK_S})); st=pending; while [ $SECONDS -lt $end ]; do mg=$(gh pr view "$p" --json mergeable,mergeStateStatus 2>&1); mrc=$?; out=$(gh pr checks "$p" 2>&1); rc=$?; if [ $mrc -eq 0 ] && grep -q '"mergeable": *"CONFLICTING"' <<<"$mg"; then st=conflict; break; elif [ $mrc -ne 0 ] || ! grep -q '"mergeable": *"MERGEABLE"' <<<"$mg"; then :; elif [ $rc -eq 0 ]; then st=green; break; elif [ $rc -eq 1 ] && ! grep -q "no checks reported" <<<"$out"; then st=failed; break; fi; sleep 10; done; echo "PR $p: $st (last exit $rc)"; echo "mergeable (exit $mrc): $mg"; printf '%s\\n' "$out"`
 // The CI wait's prompt: the final CI stage moves the card, the read beside a review moves none (the review does).
-const CI_PROMPT = (board) => `${WHERE}${board ? `First run \`${BOARD('CI / queued')}\`.` : 'Move no card on the board.'} Wait for PR ${last.pr}'s CI at head ${last.head.slice(0, 7)} and report it. The wait is CLAUDE.md "Local gates"' loop on \`gh pr checks\` with a deadline, never \`--watch\`. Run this chunk of it in the foreground, as it is, with the Bash tool's timeout set to ${CI_TOOL_MS} (the chunk runs up to ${CI_CHUNK_S / 60} minutes, and the default timeout of two minutes would kill it before it prints), up to 8 times, until its first line says green or failed; still pending after the 8th is a timeout:
+const CI_PROMPT = (board) => `${WHERE}${board ? `First run \`${BOARD('CI / queued')}\`.` : 'Move no card on the board.'} Wait for PR ${last.pr}'s CI at head ${last.head.slice(0, 7)} and report it. The wait is CLAUDE.md "Local gates"' loop on \`gh pr checks\` with a deadline, never \`--watch\`. Run this chunk of it in the foreground, as it is, with the Bash tool's timeout set to ${CI_TOOL_MS} (the chunk runs up to ${CI_CHUNK_S / 60} minutes, and the default timeout of two minutes would kill it before it prints), up to 8 times, until its first line says green, failed or conflict; still pending after the 8th is a timeout:
 \`${CI_WAIT(last.pr)}\`
 If the tool refuses the loop (a foreground \`sleep\`), run the same chunk with run_in_background and read its output when it exits; never drop its deadline or use \`--watch\` instead.
-\`gh pr checks\` exits 0 when all passed, 8 while any is pending, 1 on a failure, and also 1 with "no checks reported" just after a push, which is a wait, not a failure; a failure while others are still pending is a failure. Any other exit code is "couldn't tell": a wait, never green and never failed. On a failure, read each failing job's log: \`gh run view <run> --json jobs\`, then \`gh api repos/embeddable-hq/mason-data/actions/jobs/<id>/logs\` and the lines after "failing tests:" (for the oracle, the "differs:" lines and the first difference). Report each failing test's name and assertion text. Never re-run a job.`
+Each pass reads \`gh pr view <n> --json mergeable,mergeStateStatus\` first, and its \`mergeable\` decides before the checks do. CONFLICTING is the verdict conflict, at once and final, even when the head's checks finished green or red: GitHub starts no CI run on a PR with a merge conflict, so its "no checks reported" never ends, and a PR that cannot merge is not ready. Report conflict with the base it conflicts with and the \`gh pr view\` line the chunk printed; read no job's log for it. UNKNOWN (GitHub computes it lazily, just after a push) or a \`gh pr view\` that fails is "couldn't tell": a wait, never a verdict. Only MERGEABLE lets the checks decide; mergeStateStatus (DRAFT, BLOCKED, BEHIND, ...) is printed for the record and is never a verdict. \`gh pr checks\` exits 0 when all passed, 8 while any is pending, 1 on a failure, and also 1 with "no checks reported" just after a push, which is a wait, not a failure; a failure while others are still pending is a failure. Any other exit code is "couldn't tell": a wait, never green and never failed. On a failure, read each failing job's log: \`gh run view <run> --json jobs\`, then \`gh api repos/embeddable-hq/mason-data/actions/jobs/<id>/logs\` and the lines after "failing tests:" (for the oracle, the "differs:" lines and the first difference). Report each failing test's name and assertion text. Never re-run a job.`
 
 // Every agent that writes code runs with isolation 'worktree': a worktree made for it, which it may edit. A worktree
 // another agent made is another session's to the edit guard, so a fix agent sent to the implementer's worktree was
@@ -213,6 +219,9 @@ const LINKED = { type: 'object', required: ['linked', 'bodyFixed', 'detail'], pr
 const BLOCKING = ['wrong-answer', 'crash', 'data-loss', 'security', 'regression']
 const DEFERRED = ['message', 'over-refusal', 'docs', 'quality']
 const blocks = (f) => !DEFERRED.includes(f.severity)
+// Only the exact 'base' makes a finding the base's: an origin this script does not know, or none, is read as this PR's,
+// as a severity is (issue 235), so no finding falls between fromBase, the fix and deferred.
+const ofThisPr = (f) => f.origin !== 'base'
 // the line, as the review and the probe are told it
 const SEVERITY_RULE = "Give each finding its SEVERITY. Blocking, and sent back for a fix: wrong-answer (where Mason answers, it answers differently from Postgres: rows, text, types or OIDs, order, or SQLSTATE), crash (a crash, a hang, or a stuck state such as a table left `building`), data-loss (synced data lost or corrupted), security, regression (what the base got right is now wrong or refused). Not blocking, filed as an issue while the PR goes on: message (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is right), over-refusal (Mason refuses where Postgres answers, and the base refused it too: safe, and a gap), docs, quality (code quality, or a missing test of a shape already answered right). When you are unsure, the finding is blocking: give the blocking severity it would be."
 const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'statementsRun', 'statementsMatched', 'checksRun', 'changedPaths'], properties: {
@@ -241,8 +250,8 @@ const FILED = { type: 'object', required: ['issues'], properties: {
   } } },
 } }
 const CI = { type: 'object', required: ['state', 'detail'], properties: {
-  state: { type: 'string', enum: ['green', 'failed', 'timeout'] },
-  detail: { type: 'string', description: 'for failed: each failing job, its failing test name and assertion text' },
+  state: { type: 'string', enum: ['green', 'failed', 'timeout', 'conflict'] },
+  detail: { type: 'string', description: 'for failed: each failing job, its failing test name and assertion text; for conflict: the base the PR conflicts with, and the gh pr view line the wait printed (mergeable, mergeStateStatus)' },
 } }
 const CHANGED = { type: 'object', required: ['files'], properties: {
   files: { type: 'array', items: { type: 'string' }, description: 'every path git diff --no-renames --name-only printed, exactly' },
@@ -304,13 +313,13 @@ const historyText = (hs) => hs.length
   : '(none: this is the first)'
 
 // A finding the base has joins fromBase (one input is one finding, whatever slug a later round gives it); this PR's
-// that do not block join deferred, the same way; this PR's blocking ones are `mine`, and only they drive a fix and
-// count toward the class rule. A class seen before (on this PR, or carried from the stack), or twice in these
-// findings, makes the fix a class round.
+// (ofThisPr: every other origin, or none) that do not block join deferred, the same way; this PR's blocking ones are
+// `mine`, and only they drive a fix and count toward the class rule. So each finding is in exactly one of the three. A
+// class seen before (on this PR, or carried from the stack), or twice in these findings, makes the fix a class round.
 function tally(findings, at) {
-  const mine = findings.filter((f) => f.origin === 'this-pr' && blocks(f))
+  const mine = findings.filter((f) => ofThisPr(f) && blocks(f))
   for (const f of findings) if (f.origin === 'base' && !fromBase.some((g) => g.input === f.input)) fromBase.push(f)
-  const later = findings.filter((f) => f.origin === 'this-pr' && !blocks(f))
+  const later = findings.filter((f) => ofThisPr(f) && !blocks(f))
   for (const f of later) if (!deferred.some((g) => g.input === f.input) && !mine.some((g) => g.input === f.input)) deferred.push({ ...f, ...at })
   // an input deferred once and found blocking later is this PR's to fix, never filed as well
   for (const f of mine) {
@@ -544,6 +553,8 @@ Give no fix and no patch. Also list what you judged correct.`,
     // "couldn't tell" is never a failure sent back: the CI loop after the reviews reads it again
     const ciFailure = ciNow && ciNow.state === 'failed' ? ciNow.detail : null
     if (!ciNow || ciNow.state === 'timeout') log(`CI beside review r${round}: ${ciNow ? 'not finished' : 'no answer'}; the CI stage reads it`)
+    // a conflict is never a CI failure: GitHub runs no CI on the PR until the base is merged, which the CI stage reports
+    else if (ciNow.state === 'conflict') log(`CI beside review r${round}: the PR conflicts with ${A.base}; the CI stage reports it`)
     const { mine, later, repeated } = tally(review.findings, { round, stage: 'review', label: `review r${round}` })
     const classRound = repeated.length > 0
     const entry = { round, label: `review r${round}`, head: last.head, findings: mine, deferred: later.length, base: review.findings.length - mine.length - later.length, judgedCorrect: review.judgedCorrect, classRound, unrun: false, ...countsOf(review) }
@@ -694,6 +705,9 @@ for (let attempt = 1; attempt <= MAX_CI_FIXES + 1; attempt++) {
   phase('CI')
   const ci = await agent(CI_PROMPT(true), { label: `CI ${attempt}`, phase: 'CI', ...ON.ci, schema: CI })
   if (!ci) return await finish(`CI wait ${attempt} returned nothing: the coordinator looks`)
+  // GitHub starts no CI run on a conflicting PR, so a conflict is never sent to a CI fix: the run stops naming the base
+  // and the way out, never 'reviewed', so issue-loop stops there too
+  if (ci.state === 'conflict') return await finish(`conflict: PR ${last.pr} conflicts with ${A.base}, and GitHub runs no CI on a conflicting PR: merge origin/${A.base} into ${A.branch} and push, then CI runs again (${ci.detail.slice(0, 300)})`)
   if (ci.state === 'timeout') return await finish('CI not finished within the bound')
   if (ci.state === 'green') return await finish('reviewed, no open blocking finding of this PR, CI green: ready for the merge decision')
   log(`CI failed: ${ci.detail.slice(0, 200)}`)

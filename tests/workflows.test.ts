@@ -704,6 +704,147 @@ test("pr-loop: a red CI beside a clean review goes to the CI stage, which reads 
   assert.match(String(r.result["status"]), /^reviewed/);
 });
 
+// ---------------------------------------------------------------- a conflicting PR (issue 255): GitHub runs no
+// pull_request workflow on a PR with a merge conflict, so "no checks reported" never ends there, and PRs 231 and 233
+// waited to their deadline. The wait reads `mergeable` first, and a conflict is its own verdict.
+
+/** The CI wait's chunk, as the CI stage's prompt gives it: the line that is one backticked command. */
+function ciWaitOf(prompt: string): string {
+  const m = /^`(p=\d+; [^\n]*)`$/m.exec(prompt);
+  assert.ok(m, "the CI prompt carries the wait's chunk on a line of its own");
+  return m[1]!;
+}
+
+type Step = { out: string; rc: number };
+const NO_CHECKS: Step = { out: "no checks reported on the 'issue-300-a-piece' branch", rc: 1 };
+const FAILING: Step = { out: "checks\tfail\t3m\thttps://github.com/embeddable-hq/mason-data/actions/runs/1/job/2", rc: 1 };
+const view = (mergeable: string, mergeStateStatus: string): Step => ({ out: JSON.stringify({ mergeable, mergeStateStatus }), rc: 0 });
+
+/** Runs the chunk in bash with a stub `gh` (each subcommand answering its scripted steps in turn, the last repeated) and
+ * an instant `sleep` first on PATH; returns its output and the stub's call log. */
+function runWait(cmd: string, scenario: { view: Step[]; checks: Step[] }): { out: string; first: string; views: string[]; checks: string[] } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-wait-"));
+  try {
+    fs.writeFileSync(path.join(dir, "scenario.json"), JSON.stringify(scenario));
+    fs.writeFileSync(path.join(dir, "gh"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const dir = ${JSON.stringify(dir)};
+const a = process.argv.slice(2);
+const kind = a[0] === "pr" && a[1] === "view" ? "view" : a[0] === "pr" && a[1] === "checks" ? "checks" : "other";
+fs.appendFileSync(dir + "/calls.log", kind + " " + a.join(" ") + "\\n");
+const steps = JSON.parse(fs.readFileSync(dir + "/scenario.json", "utf8"))[kind];
+if (!steps) { process.stderr.write("stub gh: unexpected call " + a.join(" ")); process.exit(2); }
+const n = fs.readFileSync(dir + "/calls.log", "utf8").split("\\n").filter((l) => l.startsWith(kind + " ")).length;
+const s = steps[Math.min(n, steps.length) - 1];
+process.stdout.write(s.out + "\\n");
+process.exit(s.rc);
+`, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, "sleep"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const out = execFileSync("bash", ["-c", cmd], { encoding: "utf8", timeout: 60_000, env: { ...process.env, PATH: `${dir}:${process.env["PATH"]}` } });
+    const calls = fs.readFileSync(path.join(dir, "calls.log"), "utf8").split("\n").filter(Boolean);
+    return { out, first: out.split("\n")[0]!, views: calls.filter((c) => c.startsWith("view ")), checks: calls.filter((c) => c.startsWith("checks ")) };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("pr-loop: the CI wait reads mergeable beside gh pr checks, and a conflicting PR is its own verdict at once", async () => {
+  for (const name of PR_LOOPS) {
+    const r = await run(name, { ...PR }, { ...(name === "pr-loop" ? START : SLIM), "review r1": clean, "CI 1": green });
+    const p = r.prompt("CI 1");
+    const cmd = ciWaitOf(p);
+    for (const s of ["gh pr view", "--json mergeable,mergeStateStatus", "CONFLICTING", "gh pr checks", "timeout set to 600000"]) assert.ok(p.includes(s), `${name}: the CI prompt says ${s}`);
+    assert.match(p, /green, failed or conflict/, `${name}: conflict is a verdict the chunk ends on`);
+    assert.ok(!cmd.includes("--watch"), `${name}: the chunk never uses --watch`);
+    const schema = r.calls.find((c) => c.opts.label === "CI 1")!.opts.schema as { properties: { state: { enum: string[] } } };
+    assert.deepEqual(schema.properties.state.enum, ["green", "failed", "timeout", "conflict"], `${name}: the CI schema's states`);
+
+    // no checks reported on a conflicting PR: conflict at once, in one pass
+    let w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [NO_CHECKS] });
+    assert.match(w.first, /^PR 900: conflict\b/, `${name}: ${w.out}`);
+    assert.deepEqual([w.views.length, w.checks.length], [1, 1], `${name}: one pass`);
+    assert.ok(w.views[0]!.includes("pr view 900 --json mergeable,mergeStateStatus"), w.views[0]);
+    assert.match(w.out, /CONFLICTING/, "the mergeable read is printed for the record");
+    // a finished run at the head, green or red, of a PR that conflicts: conflict, read before the checks' verdict
+    w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [{ out: "all passed", rc: 0 }] });
+    assert.match(w.first, /^PR 900: conflict\b/, `${name}: a stale green is not ready: ${w.out}`);
+    w = runWait(cmd, { view: [view("CONFLICTING", "DIRTY")], checks: [FAILING] });
+    assert.match(w.first, /^PR 900: conflict\b/, `${name}: a stale red is no CI failure: ${w.out}`);
+    // MERGEABLE leaves the checks' logic as it was: no checks yet is a wait (BLOCKED is no verdict), then green
+    w = runWait(cmd, { view: [view("MERGEABLE", "BLOCKED")], checks: [NO_CHECKS, NO_CHECKS, { out: "all passed", rc: 0 }] });
+    assert.match(w.first, /^PR 900: green\b/, `${name}: ${w.out}`);
+    assert.equal(w.checks.length, 3, `${name}: it waited two passes first`);
+    // UNKNOWN is "couldn't tell": a wait, then the conflict at the next pass
+    w = runWait(cmd, { view: [view("UNKNOWN", "UNKNOWN"), view("CONFLICTING", "DIRTY")], checks: [NO_CHECKS] });
+    assert.match(w.first, /^PR 900: conflict\b/, `${name}: ${w.out}`);
+    assert.equal(w.views.length, 2, `${name}: UNKNOWN waited one pass`);
+    // a gh pr view that fails is "couldn't tell", never a verdict, whatever the checks say
+    w = runWait(cmd, { view: [{ out: "error connecting to api.github.com", rc: 1 }, view("MERGEABLE", "CLEAN")], checks: [{ out: "pending", rc: 8 }, { out: "all passed", rc: 0 }] });
+    assert.match(w.first, /^PR 900: green\b/, `${name}: ${w.out}`);
+    assert.equal(w.views.length, 2, `${name}: the failed read waited one pass`);
+    w = runWait(cmd, { view: [{ out: "HTTP 401", rc: 1 }, view("MERGEABLE", "CLEAN")], checks: [{ out: "all passed", rc: 0 }] });
+    assert.equal(w.views.length, 2, `${name}: a green beside a failed read is not yet green`);
+    // DRAFT is no verdict: a draft gets CI
+    w = runWait(cmd, { view: [view("MERGEABLE", "DRAFT")], checks: [{ out: "pending", rc: 8 }, { out: "all passed", rc: 0 }] });
+    assert.match(w.first, /^PR 900: green\b/, `${name}: ${w.out}`);
+    assert.equal(w.checks.length, 2, `${name}: DRAFT waited on pending`);
+    // and a real failure on a mergeable PR is failed, as before
+    w = runWait(cmd, { view: [view("MERGEABLE", "CLEAN")], checks: [FAILING] });
+    assert.match(w.first, /^PR 900: failed \(last exit 1\)/, `${name}: ${w.out}`);
+  }
+});
+
+test("pr-loop and pr-loop-slim: a conflict exits the CI stage with the base and the way out, sends nothing to a fix, and issue-loop stops there", async () => {
+  const conflict = { state: "conflict", detail: "PR 900 conflicts with main" };
+  const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
+  const common: Answers = {
+    "review r1": { findings: [base], judgedCorrect: [] }, "CI 1": conflict,
+    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
+  };
+  const statuses: string[] = [];
+  for (const name of PR_LOOPS) {
+    const r = await run(name, { ...PR }, { ...(name === "pr-loop" ? START : SLIM), ...common });
+    const status = String(r.result["status"]);
+    statuses.push(status);
+    assert.match(status, /^conflict/, `${name}: ${status}`);
+    assert.ok(status.includes("PR 900 conflicts with main") && status.includes("merge origin/main into issue-300-a-piece"), `${name}: the base and the way out: ${status}`);
+    assert.ok(!r.labels.some((l) => /^CI fix/.test(l)), `${name}: a conflict is never sent to a CI fix`);
+    assert.ok(r.labels.includes("file") && r.labels.includes("record"), `${name}: file and record still run`);
+    assert.equal(parseRecords(r.prompt("record"))[0]!.status, status, `${name}: the record carries the status`);
+    assert.equal(parseRecords(r.prompt("record"))[0]!.ciFixes, 0);
+
+    // stacked: the base below, never main
+    const s = await run(name, { ...PR, base: "issue-300-below", stackedOn: "899" }, { ...(name === "pr-loop" ? START : SLIM), "review r1": clean, "CI 1": { state: "conflict", detail: "conflicts with issue-300-below" } });
+    assert.ok(String(s.result["status"]).includes("merge origin/issue-300-below into issue-300-a-piece"), String(s.result["status"]));
+    assert.ok(!String(s.result["status"]).includes("origin/main"), "a stacked PR merges the branch below");
+
+    // a conflict read beside a review is never a CI failure in that round's fix
+    const f1 = await run(name, { ...PR }, {
+      ...(name === "pr-loop" ? START : SLIM), "review r1": f("a"), "CI read r1": { state: "conflict", detail: "conflicts with main" },
+      "fix r1": name === "pr-loop" ? pushed("b") : { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green,
+    });
+    assert.doesNotMatch(f1.prompt("fix r1"), /CI failed|conflicts with main/, `${name}: the fix is told no CI failure`);
+    assert.match(String(f1.result["status"]), /^reviewed/);
+  }
+  assert.equal(statuses[0], statuses[1], "pr-loop-slim exits as pr-loop does");
+
+  // issue-loop: a conflict is not 'reviewed', so it stops at that task, resumable from it
+  const stop = await run("issue-loop", { issue: 300, tasks: TASKS }, SETUP, [
+    () => ({ status: statuses[0], pr: 401, classes: {} }),
+  ]);
+  assert.equal(stop.flowCalls.length, 1, "task 2 never runs");
+  assert.match(String(stop.result["status"]), /^stopped at task 1: conflict/);
+  assert.equal((stop.result["resume"] as Record<string, unknown>)["from"], 0);
+
+  // the rules a person's wait follows say the same
+  const claude = fs.readFileSync(path.join(ROOT, "CLAUDE.md"), "utf8");
+  const ciBullet = /^- \*\*A wait on CI is[\s\S]*?(?=^- \*\*)/m.exec(claude)?.[0] ?? "";
+  assert.ok(ciBullet.includes("mergeable") && ciBullet.includes("CONFLICTING"), "CLAUDE.md's CI wait reads mergeable");
+  const step5 = /^5\. \*\*Merge\.\*\*[\s\S]*?(?=^The coordinator runs)/m.exec(claude)?.[0] ?? "";
+  assert.ok(step5.includes("--json state,mergeable"), "CLAUDE.md's merge wait reads mergeable");
+  assert.ok(skillText().includes("--json state,mergeable"), "the pr-persistent skill's merge wait reads mergeable");
+});
+
 test("pr-loop: the author is told to run the rules' review probes before every push", async () => {
   const r = await run("pr-loop", { ...PR }, {
     ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r3": clean, "CI 2": green,
@@ -831,6 +972,79 @@ test("pr-loop: a finding with no severity, or one the script does not know, bloc
   assert.ok(file.indexOf(mine.input) > ofPr, "the PR's own is filed as deferred");
   assert.deepEqual((r.result["fromBase"] as Array<{ input: string }>).map((g) => g.input), [base.input]);
   assert.deepEqual((r.result["deferred"] as Array<{ input: string }>).map((g) => g.input), [mine.input]);
+});
+
+test("pr-loop, pr-loop-slim: a finding with no origin, or one the script does not know, is the PR's: fixed when it blocks, filed as deferred when not, never dropped", async () => {
+  // issue 235: only the exact 'base' makes a finding the base's; any other origin, or none, is read as this PR's, as an
+  // unknown severity is read as blocking, so no finding falls between fromBase, the fix and deferred
+  const withOrigin = (f: ReturnType<typeof finding>, origin: unknown) => {
+    const { origin: _, ...bare } = f;
+    return origin === "missing" ? bare : { ...bare, origin };
+  };
+  const inputsOf = (r: Result, key: string) => (r[key] as Array<{ input: string }>).map((g) => g.input);
+  const odd: Array<[unknown, string]> = [
+    ["missing", "SELECT no_origin FROM t"], [null, "SELECT null_origin FROM t"], ["", "SELECT empty_origin FROM t"],
+    ["Base", "SELECT cased_origin FROM t"], ["this_pr", "SELECT misspelt_origin FROM t"], ["upstream", "SELECT unknown_origin FROM t"],
+  ];
+  for (const name of PR_LOOPS) {
+    const start = name === "pr-loop" ? START : SLIM;
+    // a blocking finding of an origin not known, or none, is fixed and counted toward its class
+    for (const [origin, input] of odd) {
+      const at = `${name}, origin ${JSON.stringify(origin)}`;
+      const r = await run(name, { ...PR }, {
+        ...start, "review r1": { findings: [withOrigin(finding({ input }), origin)], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+      });
+      assert.ok(r.labels.includes("fix r1") && r.prompt("fix r1").includes(input), `${at}: the fix is handed it`);
+      assert.deepEqual(r.result["fromBase"], [], `${at}: never the base's`);
+      assert.equal((r.result["classes"] as Record<string, { count: number }>)["some-class"]?.count, 1, `${at}: its class is counted`);
+      assert.deepEqual(parseRecords(r.prompt("record"))[0]!.findings, [{ round: 1, stage: "review", classKey: "some-class", severity: "wrong-answer" }], `${at}: in the record`);
+      assert.ok(!r.labels.includes("file"), `${at}: nothing to file`);
+    }
+
+    // a non-blocking finding of an origin not known is deferred, and filed as the PR's, never as the base's
+    const w = finding({ input: "SELECT unknown_wording FROM t", origin: "upstream", severity: "message", classKey: "wording" });
+    const c = await run(name, { ...PR }, { ...start, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": green, file: { issues: [] } });
+    assert.ok(!c.labels.some((l) => /^fix r/.test(l)), `${name}: no fix round for a non-blocking finding`);
+    assert.deepEqual(inputsOf(c.result, "deferred"), [w.input], `${name}: deferred`);
+    assert.deepEqual(c.result["fromBase"], [], `${name}: never the base's`);
+    assert.deepEqual(c.result["classes"], {}, `${name}: a non-blocking class is not counted`);
+    const file = c.prompt("file");
+    const [onBase, ofPr] = [file.indexOf("## source 'base'"), file.indexOf("## source 'deferred'")];
+    assert.equal(file.split(w.input).length - 1, 1, `${name}: filed once`);
+    assert.ok(ofPr >= 0 && file.indexOf(w.input) > ofPr, `${name}: filed under the deferred source`);
+    assert.ok(onBase < ofPr || file.indexOf(w.input) < onBase, `${name}: never under the base's source`);
+    assert.deepEqual(parseRecords(c.prompt("record"))[0]!.deferred, [{ round: 1, stage: "review", classKey: "wording", severity: "message" }], `${name}: the record lists it deferred`);
+
+    // the control: the exact 'base' is the one origin that leaves the PR
+    const onBaseF = finding({ origin: "base", input: "SELECT on_base FROM t", classKey: "on-base" });
+    const e = await run(name, { ...PR }, {
+      ...start, "review r1": { findings: [onBaseF, finding({ input: "SELECT mine FROM t" })], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+      file: { issues: [] },
+    });
+    assert.deepEqual(inputsOf(e.result, "fromBase"), ["SELECT on_base FROM t"], `${name}: the base's finding is the base's`);
+    assert.ok(e.prompt("fix r1").includes("SELECT mine FROM t") && !e.prompt("fix r1").includes("SELECT on_base FROM t"), `${name}: the fix is handed only the PR's`);
+    assert.ok(!("on-base" in (e.result["classes"] as object)), `${name}: the base's class is never counted`);
+
+    // every finding of a round lands in exactly one of fromBase, the fix and deferred, whatever its origin
+    const all = (["base", "this-pr", "missing", "upstream"] as const).flatMap((origin, i) => [
+      withOrigin(finding({ input: `SELECT block_${i} FROM t`, classKey: `block-${i}` }), origin),
+      withOrigin(finding({ input: `SELECT later_${i} FROM t`, classKey: `later-${i}`, severity: i % 2 ? "message" : "over-refusal" }), origin),
+    ]);
+    const f = await run(name, { ...PR }, {
+      ...start, "review r1": { findings: all, judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green, file: { issues: [] },
+    });
+    const [fromBase, deferred, fix] = [inputsOf(f.result, "fromBase"), inputsOf(f.result, "deferred"), f.prompt("fix r1")];
+    for (const { input } of all) {
+      const places = [fromBase.includes(input), fix.includes(input), deferred.includes(input)].filter(Boolean).length;
+      assert.equal(places, 1, `${name}: ${input} is in exactly one of fromBase, the fix and deferred (in ${places})`);
+    }
+  }
+
+  // the probe reads origin the same way: pr-loop only, since the slim loop has no probe
+  const p = withOrigin(finding({ input: "SELECT probe_no_origin FROM t" }), "missing");
+  const r = await run("pr-loop", { ...PR }, { ...START, "probe 1": { findings: [p], judgedCorrect: [] }, "probe fix 1": pushed("b"), "review r1": clean, "CI 1": green });
+  assert.ok(r.labels.includes("probe fix 1") && r.prompt("probe fix 1").includes(p.input), "the probe's finding with no origin is fixed");
+  assert.deepEqual(parseRecords(r.prompt("record"))[0]!.findings, [{ round: 1, stage: "probe", classKey: "some-class", severity: "wrong-answer" }]);
 });
 
 test("pr-loop: an input deferred once and found blocking later is fixed, never filed; a failed filing never says filed", async () => {
