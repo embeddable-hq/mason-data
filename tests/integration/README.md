@@ -33,11 +33,13 @@ too; the stages of one session (the roles, the row filters, the settings) stay w
 cost, so the two legs take about as long: every distinct text, heaviest first, goes to the leg with the least so far,
 leg 1 starting from what its stages cost, by the weights in `tests/fixtures/oracle-weights.json`. Every run times each
 statement text, each stage and its fixed costs (a `duck oracle: time:` line), and a leg's report carries the times, so
-when the legs drift apart `node scripts/oracle-legs.ts --weights <run-id> [--above <ms>]` rewrites the weights from a
+when the gap persists past the target across runs whose legs ran on matching CPUs (one run is never enough: the setup
+can under-read a newer CPU) `node scripts/oracle-legs.ts --weights <run-id> [--above <ms>]` rewrites the weights from a
 finished CI run of the commit checked out (each text that took `--above` ms or more listed, every other the mean of the
 rest); read the diff and commit it. A stale weight costs balance, never coverage. The balance is held in one machine's
 seconds (each leg's statements and stages scaled by the legs' mean setup over its own, since runners differ by up to
-1.6x): `integration (oracle)` prints each leg's and the gap, and warns, never fails, past `LEGS_APART_MS` (60 s). What only all the statements can say (a stale decision, a dead gap, `src/duck/verified.ts`,
+1.6x): `integration (oracle)` prints each leg's and the gap, and warns, never fails, past `LEGS_APART_MS` (60 s), naming
+each leg's CPU, and `--weights` only when they match and only for when earlier runs on matching CPUs were past it too. What only all the statements can say (a stale decision, a dead gap, `src/duck/verified.ts`,
 the fixture's tallies) is asserted by no leg: each writes a report, and `integration (oracle)` runs `scripts/oracle-legs.ts`
 over the two, which fails when the legs' counts do not sum to the whole or any statement was left out or asked twice. A
 leg refuses `IT_ORACLE_ONLY`, `UPDATE_VERIFIED=1` and `UPDATE_FIXTURE=1`. Each leg's report also carries its part of

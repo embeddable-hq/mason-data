@@ -12,8 +12,11 @@
  *
  * and then says how far apart the legs ran (`balanceLines`): each leg's statements and stages as run and in ONE MACHINE'S
  * seconds (`legScales`: hosted runners differ by up to 1.6x, and the setup, alike in every leg, measures by how much),
- * and a GitHub warning naming `--weights` when the scaled gap passes LEGS_APART_MS. Balance is a cost, never coverage: it
- * never moves the exit code, and when it cannot be told (a report without times or a setup) it says "not measured".
+ * and a GitHub warning when the scaled gap passes LEGS_APART_MS. One run past it is never an order to rebalance (issue
+ * 347): on legs whose CPUs differ or are not reported the warning names each CPU and no command, since the setup can
+ * under-read a newer CPU; on matching CPUs it names `--weights` only for when earlier runs on matching CPUs were past
+ * the target too. Balance is a cost, never coverage: it never moves the exit code, and when it cannot be told (a report
+ * without times or a setup) it says "not measured".
  *
  * WHAT A WHOLE RUN REGENERATES COMES FROM THE LEGS TOO, since no session runs the whole oracle locally (CLAUDE.md "Local
  * gates"): each leg reports its part of src/duck/verified.ts (the keys and what each names) and of the fixture's
@@ -128,7 +131,7 @@ export const WEIGHTS_FILE = "tests/fixtures/oracle-weights.json";
  *  across PR 321's two runs, each judged by the other's weights */
 export const WEIGHTS_ABOVE_MS = 500;
 /** THE LEGS' BALANCE TARGET: how far apart the legs' statements and stages may be, in ONE MACHINE'S ms (each leg's
- *  scaled by `legScales`), before the folder check warns to rebalance. Not in seconds as run: hosted runners differ by up
+ *  scaled by `legScales`), before the folder check warns (never an order to rebalance from one run: `balanceLines`). Not in seconds as run: hosted runners differ by up
  *  to 1.6x in speed (run 41389723050: setup 68.3 s in one leg, 42.3 s in the other), so the same split ran 152 s apart
  *  as run and 26 s apart scaled (run 41393151088), 153 s and 11 s (41396664763), 24 s and 36 s (41396965861), where 1000 ms
  *  weights left 116 s scaled (41391539636). Nor does the gap set CI's wall time: in five runs of six a unit shard or a rest
@@ -224,11 +227,12 @@ const stagesMs = (t: Times): number => Object.values(t.stages).reduce((m, ms) =>
 const legLoad = (t: Times): number => Object.values(t.statements).reduce((n, x) => n + x.ms, 0) + stagesMs(t);
 
 /** The legs' balance: each leg's setup, load as run and scaled (`legScales`), its runner; the gap between the heaviest and
- *  the lightest, as run and scaled. NOT MEASURED, with why, when it cannot be told: the legs not each present once, a
+ *  the lightest, as run and scaled; and `alikeRunners`, THE ONE answer to whether the legs ran on matching CPUs: every
+ *  leg's `times.cpu` reported and the same string (model and count), so a CPU not reported is never alike. NOT MEASURED, with why, when it cannot be told: the legs not each present once, a
  *  report with no times, a setup missing or 0. Never a gap of 0 in place of "couldn't tell". */
 export type Balance =
   | { measured: false; why: string }
-  | { measured: true; legs: Array<{ leg: number; setup: number; asRun: number; scaled: number; cpu?: string }>; apartAsRun: number; apart: number };
+  | { measured: true; legs: Array<{ leg: number; setup: number; asRun: number; scaled: number; cpu?: string }>; apartAsRun: number; apart: number; alikeRunners: boolean };
 export function legsBalance(reports: readonly LegReport[]): Balance {
   const legs = reports.map((r) => r.leg).sort((a, b) => a - b);
   if (reports.length === 0 || legs.some((l, i) => l !== i + 1) || reports.some((r) => r.of !== reports.length)) return { measured: false, why: `the reports are of leg(s) ${legs.join(", ") || "none"}, not each leg of ${reports[0]?.of ?? "the oracle"} once` };
@@ -238,11 +242,17 @@ export function legsBalance(reports: readonly LegReport[]): Balance {
   if (scales === null) return { measured: false, why: `the report of leg(s) ${reports.filter((r) => !((r.times!.fixed.setup ?? 0) > 0)).map((r) => r.leg).join(", ")} has no setup time to scale by` };
   const each = reports.map((r, i) => ({ leg: r.leg, setup: r.times!.fixed.setup!, asRun: legLoad(r.times!), scaled: legLoad(r.times!) * scales[i]!, ...(r.times!.cpu === undefined ? {} : { cpu: r.times!.cpu }) })).sort((a, b) => a.leg - b.leg);
   const apart = (xs: number[]): number => Math.max(...xs) - Math.min(...xs);
-  return { measured: true, legs: each, apartAsRun: apart(each.map((l) => l.asRun)), apart: apart(each.map((l) => l.scaled)) };
+  const alikeRunners = each.every((l) => l.cpu !== undefined && l.cpu === each[0]!.cpu);
+  return { measured: true, legs: each, apartAsRun: apart(each.map((l) => l.asRun)), apart: apart(each.map((l) => l.scaled)), alikeRunners };
 }
 
 /** The folder check's balance lines, after its coverage verdict: one a leg and one of the gap, and, when the scaled gap
- *  passes LEGS_APART_MS, a GitHub warning naming the command that rebalances (`runId`: GITHUB_RUN_ID, in CI this run).
+ *  passes LEGS_APART_MS, ONE GitHub warning, never an order to rebalance from this one run (issue 347: PR 332's two runs
+ *  passed the target with the legs on different CPU generations, and the weights rewritten from the first chased the
+ *  draw). Which warning is `alikeRunners`'s: on runners not alike (CPUs that differ, or any not reported) it names each
+ *  leg's CPU and no command, since the setup can under-read a newer CPU and the gap may be the draw, not the split; on
+ *  matching CPUs it names the command that rebalances (`runId`: GITHUB_RUN_ID, in CI this run) for when earlier runs on
+ *  matching CPUs were past the target too. Whether they were is the reader's judgement: the check reads one run.
  *  A cost, never coverage: nothing here moves the exit code, so runner noise never turns a required check red. */
 export function balanceLines(reports: readonly LegReport[], runId: string | undefined): string[] {
   const b = legsBalance(reports);
@@ -250,7 +260,11 @@ export function balanceLines(reports: readonly LegReport[], runId: string | unde
   const s = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
   const lines = b.legs.map((l) => `oracle leg ${l.leg}: balance: setup ${s(l.setup)}; statements and stages ${s(l.asRun)} as run, ${s(l.scaled)} in one machine's seconds; runner: ${l.cpu ?? "not reported"}`);
   lines.push(`oracle legs: balance: ${s(b.apartAsRun)} apart as run, ${s(b.apart)} in one machine's seconds (the target: ${s(LEGS_APART_MS)} or less)`);
-  if (b.apart > LEGS_APART_MS) lines.push(`::warning title=oracle legs::the legs are ${s(b.apart)} apart in one machine's seconds, past the target of ${s(LEGS_APART_MS)}: rebalance with \`node scripts/oracle-legs.ts --weights ${runId ?? "<run-id>"}\` (from this run's oracle legs), read the diff of ${WEIGHTS_FILE}, and commit it`);
+  if (b.apart <= LEGS_APART_MS) return lines;
+  const past = `::warning title=oracle legs::the legs are ${s(b.apart)} apart in one machine's seconds, past the target of ${s(LEGS_APART_MS)}`;
+  lines.push(b.alikeRunners
+    ? `${past}, on matching CPUs (${b.legs[0]!.cpu}): one run is not enough to rebalance on; when earlier runs whose legs ran on matching CPUs were also past the target, rebalance: \`node scripts/oracle-legs.ts --weights ${runId ?? "<run-id>"}\`, read the diff of ${WEIGHTS_FILE}, and commit it`
+    : `${past}, on runners whose CPUs are not known to match (${b.legs.map((l) => `leg ${l.leg}: ${l.cpu ?? "not reported"}`).join("; ")}): the setup can under-read a newer CPU, so the gap may be the draw of runners rather than the split; read it beside those CPUs, and rebalance only when the gap persists across runs whose legs ran on matching CPUs`);
   return lines;
 }
 
