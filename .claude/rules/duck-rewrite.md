@@ -411,3 +411,7 @@ again before each review. Its Learn step adds to this list; each bullet names th
   TABLE t ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES`, `SELECT b FROM t UNION ALL SELECT d FROM t ORDER BY 1`, `SELECT
   DISTINCT a FROM t ORDER BY a FETCH FIRST 2 ROWS WITH TIES`): a commit built from a stale tree, overwriting files
   whole and undoing a merged PR's code, tests, rules bullets and release notes; `branch-reverts-merged-work` (PR 272).
+- A change to `src/duck/verified.ts` or `tests/fixtures/oracle-duckdb-alone.json` (a hand edit, or `node
+  scripts/oracle-legs.ts --write <run-id>`), then `node --test --test-timeout=120000 tests/duck-gaps.test.ts`: README.md's
+  block and docs/SQL-SUPPORT.md left as the old registry rendered them, so `checks` is red; a source rewritten without
+  `UPDATE_FIXTURE=1 npm run check` and its diff read; `generated-fixture-not-regenerated` (PR 333).

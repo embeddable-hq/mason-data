@@ -225,3 +225,20 @@ again before each review. Its Learn step adds to this list; each bullet names th
   session (PR 146; issue 63).
 - A statement of no table under `SET TimeZone = 'America/St_Johns'` (`SELECT '12:30'::time::timetz`): the catalog's UTC
   answer (PR 166; issue 168).
+- A parse-tree field at its default value, which libpg-query's JSON omits (`SELECT length(current_time(0)::text),
+  length(localtimestamp(0)::text)`, a precision of 0 against 1 and 2; any node whose `_N` kind or flag says a value is
+  written while the value is 0, false or empty): the absent field read as "not written" where the node's kind says it
+  is; `parse-tree-default-field-read-as-absent` (PR 333).
+- A parameter value Postgres rejects that Mason's own parsing of it accepts (`SET DateStyle = 'YMD, DMY'`, `'ISO,
+  SQL'`, two orders or two styles in one value): accepted and remembered where the catalog Postgres answers 22023 with
+  its DETAIL; a parameter's validity is the catalog Postgres's, never re-derived; `parameter-validity-rederived`
+  (PR 333).
+- Every spelling the parser reads as one value, where a rule keys on a literal's text (`E'now'`, `$$now$$`,
+  `U&'now'`, `'now'::text::timestamptz`, `'now'::char(4)::timestamptz`, `'now'::varchar(2)::timestamptz`, the bare
+  `now() = 'now'`, `lower('now')::timestamptz`, `coalesce('now','x')::timestamptz`, `(SELECT 'now')::timestamptz`, a
+  CASE, a bound `$1 = 'now'`), each `= now()` on a statement of no table: one spelling spliced and the rest read
+  another clock, or a written typmod truncating the spliced text; `splice-confirmed-by-one-spelling` (PR 333).
+- A statement whose first token is not at byte 0 (`/* app */ SELECT 'now'::timestamptz = now()`, `-- a line\nSELECT
+  …`, `SELECT 1; SELECT E'now'::timestamptz = now()`, the same under EXPLAIN, a CTE or a sub-SELECT): a position read
+  in the whole text's frame and used in the statement's, or the reverse, so a rewrite lands beside its token instead
+  of on it; `offset-mixed-between-two-frames` (PR 333).
