@@ -81,8 +81,8 @@ The demo shop has four tables: `customers`, `products`, `orders` and `order_item
 yours: over the Postgres protocol.
 
 Mason's CI and the `mason-data` image run Node 26. On Node 24 Mason runs, but a bug in Node 24's V8
-(nodejs/node#66366) can now and then abort it; `mason start` starts it again, and `mason status` shows the restart.
-Node 26, or a 22.x release from 22.13, avoids it ([Requirements](cli/README.md#requirements)).
+(nodejs/node#66366) can now and then abort it; `mason start` starts it again (not under `--attach`), and `mason status`
+shows the restart. Node 26, or a 22.x release from 22.13, avoids it ([Requirements](cli/README.md#requirements)).
 
 ### Try with your data
 
