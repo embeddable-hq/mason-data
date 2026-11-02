@@ -2933,7 +2933,8 @@ class Rewriter {
    * A VALUE POSTGRES TYPES AT A FIXED SCALE, WRITTEN AS THE DECIMAL OF ITS PROGRAM (PR 415's review r3, the class
    * refused-by-type-not-by-program): a cast to numeric(p, s) (p within the engine's 38 digits, `numericCastWrite`'s
    * "decimal") or round / trunc(x, n) (a constant n up to 38; a negative one is scale 0, as Postgres's) of a numeric the
-   * engine holds as a double whose program the plan has (`exactText`: a quotient, an avg), or of another such value.
+   * engine holds as a double whose program the plan has over values the engine holds exactly (`programOf`'s cells: a
+   * quotient, an avg — never a JSON number's `->>` cast to numeric, nor a double's text), or of another such value.
    * The walk writes it `CAST(<its program's text> AS DECIMAL(p, s))` (`fixedScaleWritten`), so the engine's value IS
    * Postgres's, and `duckExact` says so: every reader (a USING key, an array_agg's element, a GROUP BY, DISTINCT, =)
    * then reads it as any exact value. Null where it is not one. A round's DECIMAL holds 20 whole digits
@@ -2943,9 +2944,18 @@ class Rewriter {
     const b = bodyOf(n);
     if (this.fixedScales.has(b)) return this.fixedScales.get(b)!;
     let found: { precision: number; scale: number } | null = null;
-    // (of a double whose program the plan has, or of a value at a fixed scale itself: round((x / 3)::numeric(10,4), 2))
-    const programmed = (x: unknown): boolean => isNode(x) && this.typeOf(x) === NUMERIC && (!this.duckExact(x) || this.fixedScale(x) !== null)
-      && this.exactText(x) !== null;
+    // (of a double whose program the plan has, or of a value at a fixed scale itself: round((x / 3)::numeric(10,4), 2);
+    // a program over values the engine holds exactly — `programOf`'s cells, every one "exact". Any other cell keeps the
+    // path it had, computed after the engine's answer (`DuckPlan.exact`), where a generated table holds it to what it
+    // can store (src/duck/generated-plan.ts storedNumeric): a text parsed as numeric (a JSON number's `->>`, whose
+    // digits no DECIMAL caps), a double's text (the engine's double, which may differ from Postgres's in its last
+    // bit), a sum of texts' NaN pick)
+    const programmed = (x: unknown): boolean => {
+      if (!isNode(x) || this.typeOf(x) !== NUMERIC || (this.duckExact(x) && this.fixedScale(x) === null)) return false;
+      const convs: CellConv[] = [];
+      const built = this.programOf(x, (_m, conv = "exact") => { convs.push(conv); return { op: "cell", key: String(convs.length - 1) }; });
+      return built !== null && convs.every((c) => c === "exact");
+    };
     if (kindOf(n) === "TypeCast" && ["numeric", "decimal"].includes(lastName(b.typeName?.names)) && programmed(b.arg)) {
       const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], this.typeOf(b.arg as AstNode), constString(b.arg));
       if (w.as === "decimal") found = { precision: w.precision, scale: w.scale };

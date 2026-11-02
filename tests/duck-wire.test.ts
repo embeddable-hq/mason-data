@@ -6094,11 +6094,15 @@ test("exact path round 2: a value at a fixed scale, or an array whose elements n
       ["SELECT array_length(array_agg(o.amount / 3), 1), cardinality(array_agg(o.amount / 3)), array_upper(array_agg(o.amount / 7), 1) FROM orders o", "ordered"],
       ["SELECT array_length(array_agg(o.amount / 3), 1) FROM orders o WHERE false", "ordered"],
       ["SELECT o.status, array_length(array_agg(o.amount / 7 ORDER BY o.id), 1) FROM orders o GROUP BY o.status ORDER BY 1", "ordered"],
+      // (a text read as numeric, rounded: its program parses a text, so it keeps the path it had, computed after the
+      // engine's answer — a generated table's TEXT reason reads it there, tests/duck-generated-round5.test.ts)
+      ["SELECT o.id, round((o.meta ->> 'k')::numeric, 2), trunc((o.meta ->> 'k')::numeric / 3, 2) FROM orders o ORDER BY o.id", "ordered"],
     ]), []);
     // (what stays refused, where the engine's double would reach the answer: a plain quotient's and an avg's USING key,
     // an array_agg whose elements are read)
     assert.deepEqual(await answeredOrRefused(c, "SELECT count(*) FROM (SELECT o.amount / 3 AS q FROM orders o) s JOIN (SELECT o.amount * (1.0 / 3) AS q FROM orders o) u USING (q)", "numeric-quotient-equality"), []);
     assert.deepEqual(await answeredOrRefused(c, "SELECT array_agg(o.amount / 3 ORDER BY o.id) FROM orders o", "array-subquery-element"), []);
+    assert.deepEqual(await answeredOrRefused(c, "SELECT count(*) FROM (SELECT round((o.meta ->> 'k')::numeric, 2) AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)", "numeric-quotient-equality"), []);
   } finally { await c.end(); }
 });
 
