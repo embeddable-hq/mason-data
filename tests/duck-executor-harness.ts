@@ -32,23 +32,39 @@ let controlPort = 0;
 const TOKEN = "t0ken-of-this-run";
 
 /**
- * THE STATEMENT THAT CALLS A MASON FUNCTION ON EVERY ROW. Its shape is chosen to stay a function call whatever the
- * rewrite answers natively (a string-valued `->>` is read in DuckDB's own SQL): `->` keeps the json value's text,
- * which only `__mason_json_get` computes as Postgres does, and the value read is a NUMBER, which no string read covers.
+ * THE READ ONLY A MASON FUNCTION ANSWERS, the one shape every test that must EXERCISE the function reads (a cancel, a
+ * timeout, a close, the watch): `->` of an OBJECT, whose text (`{"n": 7}`, spaced as jsonb_out spaces it) only
+ * `__mason_json_get` writes as Postgres does. A string's or an integer's `->`, a `->>` of a string and a read's
+ * nullness are DuckDB's own (src/duck/rewrite.ts jsonGet, jsonValueRead, jsonNullTest) and call nothing; `useServer`
+ * holds this one to a call. `j` the document's name in the statement (`a.j`).
+ */
+export const CALLED = (j = "j"): string => `(${j} -> 'o')::text`;
+/**
+ * THE STATEMENT THAT CALLS A MASON FUNCTION ON EVERY ROW (CALLED, of a document's object member).
  * 6 M rows of jsonb (written canonically per row): several seconds of calls on the test machine, the executor's
  * threads all calling at once — long enough that, where the calls run on the listener's thread (before the executor
  * worker), a leaving client's close lands while the statement still runs.
  */
 export const ROWS = 6_000_000;
-export const CALLING = "SELECT count(*) FROM gen WHERE (j -> 'n') IS NOT NULL";
+export const CALLING = `SELECT count(*) FROM gen WHERE ${CALLED()} IS NOT NULL`;
 export const schema: PgSchema = {
   database: "app",
   tables: [
     { name: "gen", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }] },
     { name: "small", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }] },
     { name: "wide", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "n", type: "int4" }, { name: "ts", type: "timestamptz" }, { name: "j", type: "jsonb" }] },
+    { name: "jwide", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "j", type: "jsonb" }] },
   ],
 };
+/**
+ * `jwide`'s rows (issue 130): 20 kB jsonb documents, `{"a": <id % 50>, "b": "v<id % 7>", "pad": "x…"}`, a BI tool's
+ * filter over a wide JSON column. A Mason function's vector of them is ~200 ms of the executor's loop, and a loop turn
+ * runs one vector per calling thread: 3 row groups held a small statement of another session ~4 s on main. Built in
+ * `useServer({ jwide: true })` (DuckDB keeps the pad in a dictionary: a few MB on disk); its build time is
+ * `jwideBuild.ms`.
+ */
+export const JWIDE_ROWS = 300_000;
+export const jwideBuild = { ms: 0 };
 /** the rows of `wide`, which a statement of each per-row function reads in tests/duck-executor-starve.test.ts: more than
  *  2,000 vectors, so a statement is over 1,000 calls of each function (src/duck/functions.ts `registerTurn`) */
 export const WIDE_ROWS = 5_000_000;
@@ -59,15 +75,21 @@ export function useScratch(): void {
 }
 
 /** the store, the listener and the command server, for every test of the file that calls it */
-export function useServer(o: { warm?: boolean; wide?: boolean } = {}): void {
+export function useServer(o: { warm?: boolean; wide?: boolean; jwide?: boolean } = {}): void {
   before(async () => {
     store = await DuckStore.open(path.join(dir, "duck.db"), (l) => { logged.push(l); });
-    await store.writer.run(`CREATE TABLE public.gen AS SELECT range::INTEGER AS id, '{"n": ' || range || ', "pad": "' || repeat('x', 40) || '"}' AS j FROM range(${ROWS})`);
+    await store.writer.run(`CREATE TABLE public.gen AS SELECT range::INTEGER AS id, '{"n": ' || range || ', "o": {"n": ' || range || '}, "pad": "' || repeat('x', 40) || '"}' AS j FROM range(${ROWS})`);
     await store.writer.run("CREATE TABLE public.small AS SELECT range::INTEGER AS id FROM range(10)");
     if (o.wide === true) {
       await store.writer.run(`CREATE TABLE public.wide AS SELECT range::INTEGER AS id, (range % 1000)::INTEGER AS n,
         TIMESTAMPTZ '2024-01-01 00:00:00+00' + INTERVAL (range * 13 % 63072000) SECOND AS ts,
         '{"a": ' || (range % 50) || ', "b": "v' || (range % 7) || '", "pad": "' || repeat('x', 40) || '"}' AS j FROM range(${WIDE_ROWS})`);
+    }
+    if (o.jwide === true) {
+      const t0 = performance.now();
+      await store.writer.run(`CREATE TABLE public.jwide AS SELECT range::INTEGER AS id,
+        '{"a": ' || (range % 50) || ', "b": "v' || (range % 7) || '", "pad": "' || repeat('x', 20000) || '"}' AS j FROM range(${JWIDE_ROWS})`);
+      jwideBuild.ms = performance.now() - t0;
     }
     api = await startPostgresApi({
       port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data",
@@ -75,6 +97,14 @@ export function useServer(o: { warm?: boolean; wide?: boolean } = {}): void {
       schema: () => schema, record: () => undefined, log: (l) => { logged.push(l); },
       duck: await store.listener(undefined),
     });
+    // CALLED reaches the function: a test that must exercise it is voided where the rewrite answers it natively
+    {
+      const calls = async (): Promise<number> => (await store.functionCalls()).get("__mason_json_get") ?? 0;
+      const before = await calls();
+      const c = await client();
+      try { await c.query(`SELECT count(*) FROM gen WHERE id < 3000 AND ${CALLED()} IS NOT NULL`); } finally { await c.end(); }
+      assert.ok(await calls() > before, `${CALLED()} reached no function: make it a read only the function answers`);
+    }
     // the run's command server, as src/cli/dev.ts starts it: /api/ping is what `mason status` and the supervisor ask
     const parsed = parseSource("postgres://me@localhost:5432/app");
     assert.ok("source" in parsed);
@@ -167,8 +197,8 @@ export async function inProcess(name: string, body: string, ms = 90_000): Promis
     const logged = [];
     const KEY = ${JSON.stringify(API_KEY)};
     const store = await DuckStore.open(${JSON.stringify(path.join(dir, `${name}.db`))}, (l) => logged.push(l));
-    // the repo's own rows (DuckDB's range()): a JSON document per row, a string and a number in it
-    await store.writer.run("CREATE TABLE public.docs AS SELECT range::INTEGER AS id, ('{\\"s\\": \\"x' || (range % 7) || '\\", \\"n\\": ' || range || '}')::JSON AS j FROM range(" + (process.env.ROWS ?? "200000") + ")");
+    // the repo's own rows (DuckDB's range()): a JSON document per row, a string, a number and an object in it (CALLED)
+    await store.writer.run("CREATE TABLE public.docs AS SELECT range::INTEGER AS id, ('{\\"s\\": \\"x' || (range % 7) || '\\", \\"n\\": ' || range || ', \\"o\\": {\\"n\\": ' || range || '}}')::JSON AS j FROM range(" + (process.env.ROWS ?? "200000") + ")");
     let turn = Promise.resolve();
     const host = { onWriter(f) { const t = turn.then(f); turn = t.then(() => undefined, () => undefined); return t; },
       served: () => new Map([["public.docs", [{ name: "id", type: "integer" }, { name: "j", type: "jsonb" }]]]), rebuilding: () => false, log: (l) => logged.push(l) };

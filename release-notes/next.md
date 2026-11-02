@@ -262,6 +262,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   "orders" does not exist` though `orders` is synced: it waits for the table (`waiting for public.orders` in `mason
   status`) until the synced data can be read, then builds. `mason wait <table>` right after `mason start` now waits for
   it, where it exited 1 on that refusal.
+- **A BI tool's JSON filter (`meta @> '{"status": "paid"}'`), its "is not empty" (`(meta -> 'status') IS NOT NULL`) and
+  a `->` read of a string, a whole number, a boolean or a JSON null no longer hold other sessions' statements**, and run
+  several times faster over wide documents: each was answered row by row on the thread every statement waits on, so
+  beside one over large JSON documents a `SELECT` of a small table on another session waited 10 s and more. They are
+  answered by the synced data's own SQL now; a template holding an array, a template known only from a parameter, and
+  a `->` of an object, an array or a decimal number are answered as before. Nothing to do on upgrade.
 
 ## Known
 

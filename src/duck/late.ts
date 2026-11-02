@@ -305,6 +305,9 @@ function overLate(n: unknown, columns: Map<string, string>): unknown {
   if (Array.isArray(n)) return n.map((x) => overLate(x, columns));
   if (!isObject(n)) return n;
   if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
+    // a lambda's parameter (the rewrite's own name) is no column of the table
+    const names = fieldNames(n.ColumnRef);
+    if (names.length === 1 && typeof names[0] === "string" && ownName(names[0])) return n;
     const key = JSON.stringify(n.ColumnRef.fields);
     let name = columns.get(key);
     if (name === undefined) { name = `__mason_c${columns.size + 1}`; columns.set(key, name); }
@@ -1012,6 +1015,8 @@ function writtenOut(targets: AstNode[], tables: readonly Listed[], tablesAlone =
       if (names.length === 1) {
         // a bare name: of a table it does not say, unless it is a table's own name, a whole row
         const name = names[0];
+        // (a lambda's parameter, the rewrite's own name, reads no table)
+        if (typeof name === "string" && ownName(name)) return true;
         if (name === null || name === undefined || aliases.has(name)) return false;
         const owners = tablesAlone ? [] : tables.filter((t) => t.columns.includes(name));
         for (const t of owners.length > 0 ? owners : tables) read.add(t.alias);
@@ -1277,6 +1282,8 @@ function overCarried(n: unknown, carried: readonly Listed[], columns: Map<string
   if (kindOf(n) === "ColumnRef" && isObject(n.ColumnRef)) {
     const names = fieldNames(n.ColumnRef);
     const column = names.at(-1);
+    // a lambda's parameter (the rewrite's own name) is no column of any item
+    if (names.length === 1 && typeof column === "string" && ownName(column)) return n;
     const owner = names.length === 1 ? carried.find((c) => c.columns.includes(String(column))) : carried.find((c) => c.alias === names.at(-2));
     if (owner === undefined || typeof column !== "string") return n;
     const key = `${owner.alias}.${column}`;

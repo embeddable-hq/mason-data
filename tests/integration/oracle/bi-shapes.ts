@@ -90,6 +90,10 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "cast ::json of an expression", sql: "SELECT o.id, ('{\"n\": ' || o.amount || '}')::json ->> 'n' AS n FROM orders o ORDER BY o.id LIMIT 20" },
   { name: "json ->> / -> on a jsonb column (stored as JSON)", sql: "SELECT o.id, o.meta ->> 'status' AS s, o.meta -> 'tags' ->> 0 AS t0, (o.meta -> 'n')::text AS n FROM orders o ORDER BY o.id LIMIT 20" },
   { name: "jsonb @>", sql: "SELECT o.id, o.meta @> '{\"status\": \"paid\"}' AS paid FROM orders o ORDER BY o.id LIMIT 20" },
+  // a BI tool's filter of a JSON column and its "is not empty", and a -> of its members (issue 130, Metabase)
+  { name: "jsonb @> filter, counted", sql: "SELECT count(*) FROM orders o WHERE o.meta @> '{\"status\": \"paid\"}'" },
+  { name: "jsonb -> is not empty, counted", sql: "SELECT count(*) FROM orders o WHERE (o.meta -> 'status') IS NOT NULL" },
+  { name: "jsonb -> of a string and a number", sql: "SELECT o.id, o.meta -> 'status', o.meta -> 'n' FROM orders o ORDER BY o.id LIMIT 20" },
   { name: "jsonb #>> / #>", sql: "SELECT o.id, o.meta #>> '{tags,0}' AS first_tag FROM orders o ORDER BY o.id LIMIT 20" },
   { name: "jsonb #>> array[…] grouped", sql: "SELECT o.meta #>> array['status'] AS s, count(*) AS n FROM orders o GROUP BY o.meta #>> array['status'] ORDER BY s" },
   { name: "jsonb ? key", sql: "SELECT o.id, o.meta ? 'status' AS has FROM orders o ORDER BY o.id LIMIT 20" },

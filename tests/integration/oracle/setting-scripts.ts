@@ -196,6 +196,12 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   ...PATH_PARAMETERS.map(([name, sql]) => s(`a json path as a parameter, ${name}`, { prepare: "p", sql }, ...PATH_VALUES.flatMap((v, i): Step[] => [{ run: "p", values: [v] }, `SET TimeZone = '${i % 2 === 0 ? "Asia/Tokyo" : "UTC"}'`, { run: "p", values: [v] }]))),
   ...TEXT_ARRAY_PARAMETERS.map(([name, sql]) => s(`a text[] parameter of two dimensions or other bounds, ${name}`, { prepare: "p", sql }, ...TEXT_ARRAY_STEPS)),
   s("a json path element as a parameter", { prepare: "p", sql: "SELECT id, jb #>> ARRAY[$1], j #>> ARRAY[$1, 'b'], jsonb_extract_path_text(jb, $1, 'b') FROM public.jpath ORDER BY id" }, { run: "p", values: ["o"] }, "SET TimeZone = 'Asia/Tokyo'", { run: "p", values: ["k"] }, { run: "p", values: [null] }, { run: "p", values: ["0"] }),
+  // native json (issue 130): an @> template known only at the Bind stays the function's; a native read prepared, run
+  // again after a SET
+  s("native json: @> a parameter template", { prepare: "p", sql: "SELECT id FROM public.jcontain WHERE jb @> $1::jsonb ORDER BY id" }, { run: "p", values: ['{"a": 1}'] }, { run: "p", values: ['{"a": 1.0}'] },
+    "SET TimeZone = 'Asia/Tokyo'", { run: "p", values: ["[1]"] }, { run: "p", values: [null] }, { run: "p", values: ['{"a": 1}'] }),
+  s("native json: a prepared native statement run after a SET", { prepare: "p", sql: "SELECT id, jb -> 'a', jb @> '{\"a\": 1}', (jb -> 'b') IS NULL FROM public.jcontain WHERE id > $1 ORDER BY id" },
+    { run: "p", values: ["0"] }, "SET TimeZone = 'Asia/Kolkata'", { run: "p", values: ["10"] }),
   s("a statement parsed before, run through SET LOCAL and after", { prepare: "z", sql: ZONED }, { run: "z" }, "BEGIN", "SET LOCAL TimeZone = 'Asia/Tokyo'", "SET LOCAL application_name = 'loc'", { run: "z" }, "COMMIT", { run: "z" }),
   s("a statement parsed before, run through a rolled-back SET and after", { prepare: "z", sql: ZONED }, "BEGIN", "SET TimeZone = 'Asia/Tokyo'", { run: "z" }, "ROLLBACK", { run: "z" }),
   s("a statement parsed under a SET LOCAL, run after", "BEGIN", "SET LOCAL TimeZone = 'Asia/Tokyo'", { prepare: "z", sql: ZONED }, { run: "z" }, "COMMIT", { run: "z" }),

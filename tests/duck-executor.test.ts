@@ -21,7 +21,7 @@ import pg from "pg";
 import { DuckStore } from "../src/duck/store.ts";
 import { startPostgresApi } from "../src/api/postgres/server.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
-import { API_KEY, CALLING, client, dir, inProcess, logged, nodeProcess, released, schema, store, timed, useServer } from "./duck-executor-harness.ts";
+import { API_KEY, CALLED, CALLING, client, dir, inProcess, logged, nodeProcess, released, schema, store, timed, useServer } from "./duck-executor-harness.ts";
 
 // THE ENGINE WARM, as these tests have always found it: in one file they ran after the starvation test, now
 // tests/duck-executor-starve.test.ts, whose statement this runs first. On CI's runner a client leaving is released in
@@ -207,8 +207,8 @@ test("stopping while a statement is drained ends the process cleanly, and a stat
   let n = 0;
   for (const [what, env] of [
     ["a SELECT * cross join over a copy with a stored path", { SQL: "SELECT * FROM docs a, docs b", ROWS: "4000" }],
-    ["a function-calling count over a cross join", { SQL: "SELECT count(*) FROM docs a, docs b WHERE (a.j->'n')::text || (b.j->'n')::text <> ''", ROWS: "4000" }],
-    ["a scalar subquery's call, then a call-free cross join, without stored paths", { SQL: "SELECT a.id, b.id, (SELECT (j -> 'n')::text FROM docs WHERE id = 1) AS n FROM docs a, docs b", ROWS: "4000", NO_KEEPER: "1" }],
+    ["a function-calling count over a cross join", { SQL: `SELECT count(*) FROM docs a, docs b WHERE ${CALLED("a.j")} || ${CALLED("b.j")} <> ''`, ROWS: "4000" }],
+    ["a scalar subquery's call, then a call-free cross join, without stored paths", { SQL: `SELECT a.id, b.id, (SELECT ${CALLED()} FROM docs WHERE id = 1) AS n FROM docs a, docs b`, ROWS: "4000", NO_KEEPER: "1" }],
   ] as const) {
     Object.assign(process.env, env);
     try {
@@ -225,8 +225,8 @@ test("stopping while a statement is drained ends the process cleanly, and a stat
     const r = await inProcess("stop-first", `
       const c = await client();
       // its path stored first (eager, the oracle's way: the plan itself stores it), so the stop meets the statement running
-      await c.query("SELECT (j -> 'n')::text FROM docs LIMIT 1");
-      const q = outcome(c.query("SELECT count(*) FROM docs a, docs b WHERE (a.j->'n')::text || (b.j->'n')::text <> ''"));
+      await c.query("SELECT ${CALLED()} FROM docs LIMIT 1");
+      const q = outcome(c.query("SELECT count(*) FROM docs a, docs b WHERE ${CALLED("a.j")} || ${CALLED("b.j")} <> ''"));
       await sleep(1000);
       await keeper.stop();
       await store.close();
@@ -250,7 +250,7 @@ test("stopping while a statement is drained ends the process cleanly, and a stat
 // it no longer runs that rest to its end: DuckDB reads an interrupt at its next chunk (microseconds for this join), and
 // the fetch that reads it ends the query (src/duck/store.ts cleanUp), so the answer comes within a second of the
 // timeout — that, not the statement's length, is the bound.
-const CALLS_THEN_COUNTS = "SELECT a.id FROM gen a, small b, small d, small e WHERE a.id + b.id + d.id + e.id < (SELECT ((j -> 'n')::text)::int - 100 FROM gen WHERE id = 1)";
+const CALLS_THEN_COUNTS = `SELECT a.id FROM gen a, small b, small d, small e WHERE a.id + b.id + d.id + e.id < (SELECT length(${CALLED()}) - 1000 FROM gen WHERE id = 1)`;
 test("a timeout that lands after a statement's last function call is 57014, never ok: the session's statement_timeout and MASON_STATEMENT_TIMEOUT", { timeout: 120_000 }, async (t) => {
   const capped = await startPostgresApi({
     port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test", product: "mason-data", statementTimeoutMs: 300,
@@ -454,7 +454,7 @@ test("the watch: a real Mason function beats on every row, so a statement's call
   const c = await client();
   try {
     const before = beats(table);
-    assert.equal(String((await c.query("SELECT count(*) AS n FROM gen WHERE id < 5000 AND (j -> 'n') IS NOT NULL")).rows[0].n), "5000");
+    assert.equal(String((await c.query(`SELECT count(*) AS n FROM gen WHERE id < 5000 AND ${CALLED()} IS NOT NULL`)).rows[0].n), "5000");
     assert.ok(beats(table) - before >= 5000, `the beat moved ${beats(table) - before} over 5,000 rows`);
   } finally { await c.end(); }
 });

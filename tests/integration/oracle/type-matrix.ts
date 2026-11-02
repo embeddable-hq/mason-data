@@ -104,6 +104,21 @@ export const JORDER: Array<string | null> = [
  * white space around a `json` value, a scalar and an array as the whole document, a key's text a collation orders
  * otherwise than its bytes. One document as a jsonb and as a json.
  */
+/**
+ * DOCUMENTS A NATIVE `->` AND `@>` MEET (issue 130, src/duck/rewrite.ts jsonValueRead, jsonNullTest, nativeContains),
+ * the same text as a jsonb and as a json: every root kind; numbers DuckDB reads as integers and as DOUBLE (a point, an
+ * exponent, `-0`, past int64 and uint64, a decimal a double cannot tell from 1); every scalar kind; nested objects and
+ * arrays; a key twice (jsonb keeps the last, json both); strings DuckDB writes as Postgres does and two it does not
+ * (`\u001f`, NFD beside NFC); keys a path must escape or quote.
+ */
+export const JCONTAIN: Array<string | null> = [
+  null, "{}", "[]", '"s"', "5", "true", "null", '[{"a": 1}]', '{"a": 1}', '{"a": 1.0}', '{"a": 1.00}', '{"a": 1.50}', '{"a": 1e2}', '{"a": -0}', '{"a": 0.1}',
+  '{"a": 100000000000000000000}', '{"a": 1.0000000000000000001}', '{"a": 9223372036854775807}', '{"a": -9223372036854775809}', '{"a": 18446744073709551616}',
+  '{"a": "1"}', '{"a": ""}', '{"a": null}', '{"a": true}', '{"a": false}', '{"a": [1]}', '{"a": []}', '{"a": {}}', '{"a": {"b": 1}}', '{"a": {"b": {"c": "x"}, "d": 2}}',
+  '{"a": [1, "x", {"b": 1}]}', '{"b": 1}', '{"A": 1}', '{"a": 1, "b": 1}', '{"a": 1, "a": 2}', '{"a": "é"}', String.raw`{"a": "é"}`, '{"a": "😀"}',
+  String.raw`{"a": "x\ny"}`, String.raw`{"a": "tab\there"}`, String.raw`{"a": "\u0001"}`, String.raw`{"a": "\u001f"}`, String.raw`{"a": "q\"uote"}`, String.raw`{"a": "back\\slash"}`,
+  '{"a": "a/b"}', '{"é": 1}', String.raw`{"a\"b": 1}`, '{"a/b": 1}', '{"a~b": 1}', '{"": 1}', '{"1": 1}', '{"*": 1}', '{"a.b": 1}', '["1", 2]',
+];
 export const JPATH: Array<string | null> = [
   String.raw`{"k": "alpha", "n": 7.00, "t": true, "f": false, "z": null, "o": {"b": "deep", "0": "key0"}, "a": ["x", "y", {"0": "in"}], "0": "zero", "1": "one", "a.b": "dot", "q\"r": "quote", "o.b": "flat", "e": "esc\"aped\n"}`,
   String.raw`{"k": "Beta", "k": "dup", "o": {"b": 1, "b": 2}, "a": [1, 2.50, null, "s", [1,  2], {"x":  1}]}`,
@@ -248,6 +263,9 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   `(4, '["x", "y", "z"]', '["x", "y", "z"]'), (5, NULL, NULL), (6, '{"a": "p", "o": {"a": "q", "b": ["r", "s"]}}', '{"o": {"a": "q", "a": "q2"}}');` +
   // a json read's path (issue 130), and read through a view grouped by it
   `CREATE TABLE public.jpath (id int PRIMARY KEY, jb jsonb, j json); INSERT INTO public.jpath VALUES ${JPATH.map((d, i) => `(${i + 1}, ${d === null ? "NULL, NULL" : `'${d.replace(/'/g, "''")}', '${d.replace(/'/g, "''")}'`})`).join(", ")};` +
+  // a native -> and @> (issue 130)
+  `CREATE TABLE public.jcontain (id int PRIMARY KEY, jb jsonb, j json); INSERT INTO public.jcontain VALUES ${JCONTAIN.map((d, i) => `(${i + 1}, ${d === null ? "NULL, NULL" : `'${d.replace(/'/g, "''")}', '${d.replace(/'/g, "''")}'`})`).join(", ")};` +
+  "CREATE VIEW public.jcontain_v AS SELECT id, jb FROM public.jcontain; " +
   "CREATE VIEW public.jpath_by_array AS SELECT jb #>> ARRAY['k'] AS v, count(*) AS n FROM public.jpath GROUP BY 1; " +
   "CREATE VIEW public.jpath_by_literal AS SELECT j #>> '{o,b}'::text[] AS v, count(*) AS n FROM public.jpath GROUP BY 1;" +
   // TEXT IN THE DATABASE'S ORDER (the BI-tools test of #517): what a glibc locale orders otherwise than ICU
@@ -376,6 +394,71 @@ const LITERALS: Partial<Record<Col, string[]>> = {
  * one read, so each is held over every path on both types; then what must NOT read as a constant (a cast that changes the
  * value, an element a row holds), the NULLs, the functions, and the shapes a tool groups and sorts by.
  */
+function* nativeJsonCases(): Generator<Matrixed> {
+  const n = (name: string, sql: string): Matrixed => q(`native json: ${name}`, sql);
+  const each = (name: string, reads: string[]): Matrixed => n(name, `SELECT id, ${reads.join(", ")} FROM jcontain ORDER BY id`);
+  yield each("-> text, jb", ["jb -> 'a'", "(jb -> 'a')::text", "jb -> 'b'", "jb -> 'A'", "jb -> 'missing'", "jb -> 'é'", `jb -> 'a"b'`, "jb -> 'a/b'", "jb -> 'a~b'", "jb -> ''", "jb -> '1'", "jb -> '*'", "jb -> 'a.b'"]);
+  yield each("-> text, j", ["j -> 'a'", "(j -> 'a')::text", "j -> 'missing'", "j -> '1'", "j -> ''"]);
+  yield each("-> key spellings", ["jb -> 'a'::text", "jb -> 'a'::varchar", "jb -> lower('A')", "jb -> CASE WHEN id % 2 = 0 THEN 'a' ELSE 'b' END"]);
+  yield each("-> chains and #>", ["jb -> 'a' -> 'b'", "jb -> 'a' -> 'b' -> 'c'", "jb #> '{a,b}'", "jb #> ARRAY['a', 'b']", "jb #> '{a,d}'", "jsonb_extract_path(jb, 'a', 'b')", "jb -> 'a' -> 0", "jb #> '{a,0}'", "jb -> 'a' ->> 'b'"]);
+  yield each("-> nullness", ["(jb -> 'a') IS NULL", "(jb -> 'a') IS NOT NULL", "(jb -> 'missing') IS NULL", "(jb -> '1') IS NOT NULL", "(jb #> '{a,b}') IS NOT NULL", "(jb -> 'a' -> 'b') IS NULL", "(j -> 'a') IS NOT NULL", "(j -> 'a' -> 'b') IS NULL"]);
+  yield n("-> nullness filtered", "SELECT count(*) FROM jcontain WHERE (jb -> 'a') IS NOT NULL");
+  yield n("-> nullness under NOT", "SELECT count(*) FROM jcontain WHERE NOT ((jb -> 'a') IS NULL)");
+  yield n("-> counted", "SELECT count(jb -> 'a'), count(jb -> 'missing'), count(j -> 'a') FROM jcontain");
+  yield n("-> grouped by nullness, by number", "SELECT (jb -> 'a') IS NULL AS m, count(*) FROM jcontain GROUP BY 1 ORDER BY 1");
+  yield n("-> grouped by nullness, by name", "SELECT (jb -> 'a') IS NULL AS m, count(*) FROM jcontain GROUP BY m ORDER BY m");
+  yield n("-> grouped by nullness, by expression", "SELECT (jb -> 'a') IS NULL, count(*) FROM jcontain GROUP BY (jb -> 'a') IS NULL ORDER BY (jb -> 'a') IS NULL");
+  yield n("-> grouped by value", "SELECT jb -> 'a' AS v, count(*) FROM jcontain GROUP BY 1 ORDER BY 1");
+  yield n("-> ordered by value", "SELECT id FROM jcontain c ORDER BY c.jb -> 'a', id");
+  yield n("-> ordered by nullness then value", "SELECT id FROM jcontain ORDER BY (jb -> 'a') IS NULL, jb -> 'a', id");
+  yield n("-> nulls idiom with a shadowing alias", "SELECT id, jb -> 'b' AS jb FROM jcontain c ORDER BY (c.jb -> 'a') IS NULL, id");
+  yield n("-> compared to a number", "SELECT id FROM jcontain WHERE jb -> 'a' = '1'::jsonb ORDER BY id");
+  yield n("-> compared to null", "SELECT id FROM jcontain WHERE jb -> 'a' = 'null'::jsonb ORDER BY id");
+  // (`(jb -> 'a')::numeric` is the base's double, `1.50` read `1.5`: an issue of its own, not this read's)
+  yield n("-> cast", "SELECT id, (jb -> 'a')::text, (jb -> 'a')::text::numeric FROM jcontain WHERE jsonb_typeof(jb -> 'a') = 'number' ORDER BY id");
+  yield n("-> typeof", "SELECT id, jsonb_typeof(jb -> 'a') FROM jcontain ORDER BY id");
+  yield n("-> beside a star", "SELECT *, jb -> 'a' AS v, (jb -> 'a') IS NULL AS m FROM jcontain ORDER BY id");
+  yield n("-> through a derived table", "SELECT s.id, s.d -> 'a' FROM (SELECT id, jb AS d FROM jcontain) s ORDER BY s.id");
+  yield n("-> through a view", "SELECT id, jb -> 'a', (jb -> 'a') IS NULL, jb @> '{\"a\": 1}' FROM jcontain_v ORDER BY id");
+  yield n("-> through a WITH", "WITH w AS (SELECT id, jb FROM jcontain) SELECT id, jb -> 'a' FROM w ORDER BY id");
+  yield n("-> in a join's top N", "SELECT c.id, c.jb -> 'a', d.jb -> 'b' FROM jcontain c JOIN jcontain d ON d.id = c.id ORDER BY c.id DESC LIMIT 5");
+  yield n("-> on a LEFT JOIN's NULL side", "SELECT a.id, (b.jb -> 'a') IS NULL FROM jcontain a LEFT JOIN jcontain b ON b.id = a.id + 1000 ORDER BY a.id");
+  yield n("-> in a page with no ORDER BY", "SELECT jb -> 'a', (jb -> 'a') IS NULL FROM jcontain LIMIT 100");
+  yield each("@> scalar leaves", ['{"a": 1}', '{"a": 1.0}', '{"a": 1.00}', '{"a": 1.5}', '{"a": 1.50}', '{"a": 1e2}', '{"a": 100}', '{"a": 0}', '{"a": -0}', '{"a": 0.1}', '{"a": 100000000000000000000}',
+    '{"a": 1.0000000000000000001}', '{"a": 9223372036854775807}', '{"a": -9223372036854775809}', '{"a": 18446744073709551616}'].map((t) => `jb @> '${t}'`));
+  yield each("@> kinds", ['{"a": "1"}', '{"a": ""}', '{"a": null}', '{"a": true}', '{"a": false}', "{}", '{"b": 1}', '{"A": 1}', '{"a": 1, "b": 1}', '{"missing": null}', '{"a": 1, "a": 2}', '{"a": 2, "a": 1}'].map((t) => `jb @> '${t}'`));
+  yield each("@> nested and containers", ['{"a": {}}', '{"a": {"b": 1}}', '{"a": {"b": 1.0}}', '{"a": {"b": {"c": "x"}}}', '{"a": {"b": {}}, "a": {"d": 2}}', '{"a": {"d": 2, "b": {"c": "x"}}}', '{"a": []}', '{"a": [1]}',
+    '{"a": [{"b": 1}]}', '{"a": ["x", 1]}', '{"a": [[1]]}'].map((t) => `jb @> '${t}'`));
+  yield each("@> keys and strings", ['{"é": 1}', String.raw`{"é": 1}`, String.raw`{"a\"b": 1}`, '{"a/b": 1}', '{"a~b": 1}', '{"": 1}', '{"1": 1}', '{"*": 1}', '{"a.b": 1}', '{"a": "é"}', String.raw`{"a": "é"}`,
+    String.raw`{"a": "é"}`, '{"a": "😀"}', String.raw`{"a": "x\ny"}`, String.raw`{"a": "tab\there"}`, String.raw`{"a": "\u0001"}`, String.raw`{"a": "\u001f"}`, String.raw`{"a": "q\"uote"}`,
+    String.raw`{"a": "back\\slash"}`, '{"a": "a/b"}'].map((t) => `jb @> '${t}'`));
+  yield each("@> non-object templates", ["[]", "[1]", '["1"]', "1", "5", '"s"', "true", "null", '[{"a": 1}]'].map((t) => `jb @> '${t}'`));
+  yield each("<@", [`'{"a": 1}' <@ jb`, "'{}' <@ jb", `'{"a": {"b": 1}}' <@ jb`, `jb <@ '{"a": 1, "b": 1}'`, "jb <@ '{}'"]);
+  yield each("@> NULLs, strict", ["jb @> NULL", "jb @> NULL::jsonb", `NULL::jsonb @> '{"a": 1}'`, `(jb @> '{"a": 1}') IS NULL`]);
+  yield n("@> filtered", `SELECT count(*) FROM jcontain WHERE jb @> '{"a": 1}'`);
+  yield n("@> filtered under NOT", `SELECT count(*) FROM jcontain WHERE NOT (jb @> '{"a": 1}')`);
+  yield n("@> filtered under OR", `SELECT count(*) FROM jcontain WHERE jb @> '{"a": 1}' OR jb @> '{"b": 1}'`);
+  yield n("@> as aggregate filters", `SELECT count(*) FILTER (WHERE jb @> '{"a": null}'), count(*) FILTER (WHERE jb @> '{}') FROM jcontain`);
+  yield n("@> grouped, by number", `SELECT jb @> '{"a": 1}' AS c, count(*) FROM jcontain GROUP BY 1 ORDER BY 1`);
+  yield n("@> grouped, by name", `SELECT jb @> '{"a": 1}' AS c, count(*) FROM jcontain GROUP BY c ORDER BY c`);
+  yield n("@> grouped, by expression", `SELECT jb @> '{"a": 1}', count(*) FROM jcontain GROUP BY jb @> '{"a": 1}' ORDER BY jb @> '{"a": 1}'`);
+  yield n("@> ordered", `SELECT id FROM jcontain c ORDER BY c.jb @> '{"a": 1}', id`);
+  yield each("@> template spellings", [`jb @> '{"a": 1}'::jsonb`, `jb @> CAST('{"a": 1}' AS jsonb)`, `jb @> jsonb '{"a": 1}'`, `jb @> '{"a": 1}'::json::jsonb`, `jb @> ' { "a" : 1 } '`]);
+  yield each("@> non-constant or non-column sides", ["jb @> jb", "jb @> jsonb_build_object('a', id % 2)", "jb @> (SELECT jb FROM jcontain WHERE id = 9)", `(jb -> 'a') @> '{"b": 1}'`, `jb::text::jsonb @> '{"a": 1}'`,
+    `jsonb_build_object('a', 1, 'a', 2) @> '{"a": 2}'`, `jb @> ANY (ARRAY['{"a": 1}'::jsonb, '{"b": 1}'])`]);
+  // (an array cast whole is refused by name: `jsonb-compare`, the base's)
+  yield each("@> ANY of an array cast whole", [`jb @> ANY (ARRAY['{"a": 1}', '{"b": 1}']::jsonb[])`]);
+  yield n("@> on json", `SELECT j @> '{"a": 1}' FROM jcontain`);
+  yield n("@> beside a star", `SELECT *, jb @> '{"a": 1}' AS c FROM jcontain ORDER BY id`);
+  yield n("@> through a derived table", `SELECT count(*) FROM (SELECT jb AS d FROM jcontain) s WHERE d @> '{"a": 1}'`);
+  yield n("@> through a WITH", `WITH w AS (SELECT id, jb FROM jcontain) SELECT id FROM w WHERE jb @> '{"a": {"b": 1}}' ORDER BY id`);
+  yield n("@> in a join's top N", `SELECT c.id, c.jb @> '{"a": 1}' FROM jcontain c JOIN jcontain d ON d.id = c.id ORDER BY c.id DESC LIMIT 5`);
+  yield n("@> on a LEFT JOIN's NULL side", `SELECT a.id, b.jb @> '{"a": 1}' FROM jcontain a LEFT JOIN jcontain b ON b.id = a.id + 1000 ORDER BY a.id`);
+  yield n("inside a scalar subquery and EXISTS", `SELECT id, (SELECT count(*) FROM jcontain i WHERE i.jb @> '{"a": 1}' AND i.id <= o.id), EXISTS (SELECT 1 FROM jcontain i WHERE (i.jb -> 'a') IS NOT NULL AND i.id = o.id) FROM jcontain o ORDER BY id`);
+  yield n("inside IN", `SELECT id FROM jcontain WHERE id IN (SELECT id FROM jcontain WHERE jb @> '{"a": true}') ORDER BY id`);
+  yield n("in a set operation's arm", `SELECT id, jb -> 'a' FROM jcontain WHERE jb @> '{"a": 1}' UNION ALL SELECT id, jb -> 'b' FROM jcontain WHERE (jb -> 'b') IS NOT NULL ORDER BY 1, 2`);
+}
+
 function* jsonPathCases(): Generator<Matrixed> {
   const paths: string[][] = [["k"], ["n"], ["t"], ["f"], ["z"], ["o"], ["a"], ["missing"], ["o", "b"], ["o", "0"], ["o", "missing"], ["k", "b"], ["0"], ["1"], ["-1"], ["2"],
     ["a", "0"], ["a", "1"], ["a", "2", "0"], ["a", "-1"], ["a", "-7"], ["a", "4", "1"], ["a", "5", "x"], ["2", "1"], ["2", "2", "1"], ["a.b"], ['q"r'], ["o.b"], ["e"], ["k", "0"], ["+1"], [" 1"], ["1 "], ["01"], [""]];
@@ -690,6 +773,7 @@ function* matrix(): Generator<Matrixed> {
   yield q("#> path elements read as an array index", "SELECT id, " + ["{+1}", "{\" 1\"}", "{\"1 \"}", "{01}", "{-1}", "{\" -1\"}", "{+-1}", "{1.0}", "{99999999999}"]
     .flatMap((e) => [`"JB" #>> '${e}'`, `"J" #>> '${e}'`]).join(", ") + ", jsonb_extract_path_text(\"JB\", '+1'), json_extract_path_text(\"J\", ' 1'), \"JB\" #>> '{o,b,+1}' FROM jcased ORDER BY id");
   yield* jsonPathCases();
+  yield* nativeJsonCases();
   yield q("jsonb operators", "SELECT id, jb @> '{\"a\": 1}', jb <@ '{\"a\": 1, \"b\": 2}', jb ? 'a', jb ?| ARRAY['a', 'z'], jb ?& ARRAY['a', 'b'], jb || '{\"z\": 0}', jb - 'a' FROM typed ORDER BY id");
   yield q("jsonb sorted", "SELECT id, jb FROM typed ORDER BY jb, id");
   // ---- jsonb's order and equality (src/duck/jsonb-order.ts), over JORDER: every pair compared, sorted every way ----

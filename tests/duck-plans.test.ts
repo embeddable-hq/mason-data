@@ -344,6 +344,11 @@ const KEY_COUNTS: Shape[] = [
   // it may hold one value twice for a moment the source never showed
   { name: "count distinct key: a UNIQUE column that is not the key, counted (not rewritten)", sql: "SELECT c.tenant_id, count(DISTINCT c.email) AS n FROM customers c GROUP BY 1 ORDER BY 1" },
   { name: "count distinct key: a join on a UNIQUE column that is not the key (not rewritten)", sql: "SELECT c.tenant_id, count(DISTINCT o.id) AS n FROM orders o JOIN customers c ON c.email = o.status GROUP BY 1 ORDER BY 1" },
+  // a BI tool's JSON filter and read, DuckDB's own SQL (issue 130: nativeContains, jsonNullTest, jsonValueRead): no row
+  // handed to a Mason function (the invariant below), one extraction of the document each
+  { name: "native json: an @> filter of a string", sql: "SELECT count(*) FROM orders WHERE meta @> '{\"status\": \"paid\"}'" },
+  { name: "native json: a -> read's nullness", sql: "SELECT count(*) FROM orders WHERE (meta -> 'status') IS NOT NULL" },
+  { name: "native json: a -> read of a string or a JSON null", sql: "SELECT meta -> 'status' FROM orders LIMIT 100" },
 ];
 
 const SHAPES: Shape[] = [...REWRITTEN, ...KEY_COUNTS, ...HELD_BI.map((name) => {
@@ -408,7 +413,8 @@ function delimiterJoin(cte: JsonNode): boolean {
 /** the functions a truncation of a time is spelled with in the SQL Mason sends (`sends`) */
 const TIME_CALLS = ["date_trunc", "make_timestamptz", "make_timestamp", "epoch_us", "timezone", "current_setting"];
 /** what a sort, a group or a comparison reads beyond a value in the SQL Mason sends (`keys`); `list_transform` is
- *  also the list a LEFT lateral's unnest of an expression computes once (leftLateral) */
+ *  also the list a LEFT lateral's unnest of an expression computes once (leftLateral), and the one extraction of a
+ *  document a native json read or `@>` names as often as it likes (src/duck/rewrite.ts `bound`) */
 const KEY_SENDS: Array<[string, RegExp]> = [["icu_sort_key", /\bicu_sort_key\(/], ["list_transform", /\blist_transform\(/], ["a stored column", /\b__mason_json_[0-9a-f]{12}\b/]];
 /** a stored column's name is a hash of its read, a jsonb key's of its collation, its encoding and DuckDB's version
  *  (src/duck/kept.ts `orderId`): one name for all, so an upgrade that keeps the plan keeps the fixture */
@@ -789,6 +795,17 @@ async function rowsOf(sql: string, on?: Where): Promise<Map<string, number>> {
   const after = await store.functionRows();
   return new Map([...after].map(([k, n]) => [k, n - (before.get(k) ?? 0)]));
 }
+
+// issue 130: a BI tool's `@>` filter of scalars, a `->` read's nullness and a `->` of a string or a JSON null are DuckDB's
+// own SQL: over the million orders, no row reaches any Mason function (each vector would be a hop to the executor's loop
+// that every other session's statement waits behind)
+test("a native json filter or read hands no row to any Mason function", async (t) => {
+  for (const name of ["native json: an @> filter of a string", "native json: a -> read's nullness", "native json: a -> read of a string or a JSON null"]) {
+    const rows = [...(await rowsOf(sqlOf(name))).values()].reduce((a, b) => a + b, 0);
+    t.diagnostic(`${name}: ${rows} rows handed to Mason functions`);
+    assert.equal(rows, 0, `${name}: ${rows} rows handed to Mason functions`);
+  }
+});
 
 // limitBounds: where no LIMIT keeps the first rows, the streamed lateral handed the list's function every ROW of the
 // base (the count over 22 M rows went from 79 s to over 200 s); DuckDB's own delimiter join hands it each DISTINCT

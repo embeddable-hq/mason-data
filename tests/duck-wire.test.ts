@@ -63,6 +63,22 @@ const JQ: Array<[number, string | null]> = [[1, '{"k": 1}'], [2, '{"k": "a"}'], 
   [6, '{"k": "a"}'], [7, '{"k": {"a": 1}}'], [8, '{"k": {}}'], [9, '{"k": true}'], [10, '{"k": "A"}'], [11, '{"k": 2}'], [12, null],
   [13, '{"k": 1.00}'], [14, '{"k": "b"}']];
 const jqInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jq VALUES ${JQ.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${asHeld(v)}'`})`).join(", ")}`;
+/** documents a native `->` and `@>` meet (src/duck/rewrite.ts jsonValueRead, nativeContains), each held as a jsonb (the
+ *  copy's canonical text) and as a json: every root kind, numbers DuckDB types as integers and as DOUBLE (a point, an
+ *  exponent, past uint64, past a double's range), every scalar kind, nested objects, a key twice (json keeps both),
+ *  strings DuckDB writes as Postgres does and one it does not (`\u001f`), and keys a path must escape */
+const JNAT: Array<[number, string | null]> = [
+  [1, null], [2, "{}"], [3, "[]"], [4, '"s"'], [5, "5"], [6, "true"], [7, "null"], [8, '[{"a": 1}]'],
+  [9, '{"a": 1}'], [10, '{"a": 1.0}'], [11, '{"a": 1.50}'], [12, '{"a": 1e2}'], [13, '{"a": 100000000000000000000}'], [14, '{"a": 1.0000000000000000001}'],
+  [15, '{"a": 9223372036854775807}'], [16, '{"a": -9223372036854775809}'], [17, '{"a": 18446744073709551616}'], [18, '{"a": "1"}'], [19, '{"a": ""}'],
+  [20, '{"a": null}'], [21, '{"a": true}'], [22, '{"a": false}'], [23, '{"a": [1]}'], [24, '{"a": {}}'], [25, '{"a": {"b": 1}}'], [26, '{"a": {"b": {"c": "x"}, "d": 2}}'],
+  [27, '{"a": 1, "b": 1}'], [28, '{"a": 1, "a": 2}'], [29, '{"a": "é"}'], [30, String.raw`{"a": "x\ny"}`], [31, String.raw`{"a": "\u0001"}`], [32, String.raw`{"a": "\u001f"}`],
+  [33, String.raw`{"a": "q\"uote"}`], [34, String.raw`{"a": "back\\slash"}`], [35, String.raw`{"a": "a/b", "s": "\b\f\r\t` + "\u007f" + String.raw`😀"}`],
+  [36, String.raw`{"é": 1, "a\"b": 2, "a/b": 3, "a~b": 4, "": 5, "1": 6, "*": 7, "a.b": 8}`],
+  [37, String.raw`{"i": 7, "a": -5, "n": 2.50, "o": {"b": "deep"}, "arr": [1], "s": "x", "z": null, "t": true, "c": "\u0001"}`],
+  [38, String.raw`{"a": "\\u00e9"}`], [39, `{"a": 1${"0".repeat(400)}}`], [40, '{"a": -0, "b": 0.1}'],
+];
+const jnatInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jnat VALUES ${JNAT.map(([id, d]) => `(${id}, ${d === null ? "NULL, NULL" : `'${asHeld(d)}', '${d}'`})`).join(", ")}`;
 const jdocsInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jdocs VALUES ${JDOCS.map(([id, b, j]) => `(${id}, ${b === null ? "NULL" : `'${asHeld(b)}'`}, ${j === null ? "NULL" : `'${j}'`})`).join(", ")}`;
 /** instants a truncation meets at its edges: each side of a daylight-saving change (Europe/Berlin's 2026-03-29 02:00
  *  and 2026-10-25 03:00, America/New_York's), a repeated hour's two halves, before 1970, a zone's local mean time
@@ -155,6 +171,8 @@ const DDL = [
   jqInsert(jsonbText),
   "CREATE TABLE public.jdocs (id INTEGER PRIMARY KEY, b JSON, j JSON)",
   jdocsInsert(jsonbText),
+  "CREATE TABLE public.jnat (id INTEGER PRIMARY KEY, b JSON, j JSON)",
+  jnatInsert(jsonbText),
   // a jsonb column whose name is jdocs.b's in another case: a bare "B" beside b is ambiguous to DuckDB
   "CREATE TABLE public.jcase (id INTEGER PRIMARY KEY, \"B\" JSON)",
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
@@ -222,6 +240,8 @@ const PG_DDL = [
   jqInsert((doc) => doc),
   "CREATE TABLE public.jdocs (id integer PRIMARY KEY, b jsonb, j json)",
   jdocsInsert((doc) => doc),
+  "CREATE TABLE public.jnat (id integer PRIMARY KEY, b jsonb, j json)",
+  jnatInsert((doc) => doc),
   "CREATE TABLE public.jcase (id integer PRIMARY KEY, \"B\" jsonb)",
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
   "CREATE TABLE public.instants (id integer PRIMARY KEY, at timestamptz)",
@@ -292,6 +312,7 @@ const schema: PgSchema = {
     { name: "rowid_cased", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "RowId", type: "int4" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
+    { name: "jnat", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
     { name: "clock_times", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "tm", type: "timestamptz", spelled: "time" }] },
     { name: "nullish", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp" }, { name: "t", type: "text" }, { name: "n", type: "int4" }] },
@@ -466,7 +487,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -4511,6 +4532,53 @@ test("a ->> of a column is DuckDB's own read where it is Postgres's answer, the 
     for (const read of ["b ->> 's'", "b ->> 'missing'", "b ->> 'z'", "b -> 'o' ->> 'b'", "b #>> '{o,b}'", "b ->> ''", "b ->> '*'", "b ->> 'a.b'", "jsonb_extract_path_text(b, 'o', 'b')"]) assert.equal(await hops(read), 0, `${read} reached the function`);
     for (const read of ["j ->> 'a'", "j -> 'o' ->> 'k'", "j ->> 'missing'", "json_extract_path_text(j, 'o', 'k')"]) assert.equal(await hops(read, "WHERE id <> 1"), 0, `${read} reached the function`);
     for (const read of ["b ->> 'n'", "j ->> 'a'", "j -> 'o' ->> 'k'", "b -> 'arr' ->> 0", "b #>> '{arr,0}'", "b -> 'o'", "'{\"a\": \"x\"}'::jsonb ->> 'a'"]) assert.ok(await hops(read) > 0, `${read} never reached the function`);
+  } finally { await c.end(); }
+});
+
+// A `->` AND AN `@>` OF A COPIED JSONB ARE DUCKDB'S OWN (issue 130: a BI tool's `j @> '{"a": 1}'` and `(j -> 'a') IS
+// NOT NULL` over 20 kB documents held every other session's statement 10 s and more, each vector a hop to the executor's
+// loop). Where DuckDB's read is Postgres's answer (an integer, a boolean, a JSON null, a string DuckDB writes alike; a
+// read's nullness; a template of scalars) no row reaches a function; the rest goes on to it (the CASE's ELSE). Postgres's
+// answers are PGlite's own; the hops are every function's, the turn's included.
+test("a -> and an @> of a copied jsonb are DuckDB's own read where that is Postgres's answer, the function's for the rest", async () => {
+  const c = await client();
+  try {
+    const reads = ["b -> 'a'", "(b -> 'a')::text", "b -> 'b'", "b -> 'missing'", "b -> 'é'", `b -> 'a"b'`, "b -> 'a/b'", "b -> 'a~b'", "b -> ''", "b -> '1'", "b -> '*'", "b -> 'a.b'",
+      "b -> 's'", "b -> 'i'", "b -> 'n'", "b -> 'o'", "b -> 'arr'", "b -> 'z'", "b -> 't'", "b -> 'c'", "b -> 'a' -> 'b'", "b -> 'a' -> 'b' -> 'c'", "b #> '{a,b}'", "b #> '{a,d}'", "b #> '{o,b}'",
+      "jsonb_typeof(b -> 'a')", "b -> 'a' ->> 'b'", "j -> 'a'", "(j -> 'a')::text", "j -> '1'",
+      "(b -> 'a') IS NULL", "(b -> 'a') IS NOT NULL", "(b -> 'missing') IS NULL", "(b -> '1') IS NOT NULL", "(b #> '{a,b}') IS NOT NULL", "(b -> 'a' -> 'b') IS NULL", "(j -> 'a') IS NOT NULL", "(j -> 'a' -> 'b') IS NULL",
+      `b @> '{"a": 1}'`, `b @> '{"a": 1.0}'`, `b @> '{"a": 1.5}'`, `b @> '{"a": 1e2}'`, `b @> '{"a": 100}'`, `b @> '{"a": 0}'`, `b @> '{"a": -0}'`, `b @> '{"a": -5}'`, `b @> '{"b": 0.1}'`,
+      `b @> '{"a": 100000000000000000000}'`, `b @> '{"a": 1.0000000000000000001}'`, `b @> '{"a": 9223372036854775807}'`, `b @> '{"a": -9223372036854775809}'`, `b @> '{"a": 18446744073709551616}'`,
+      `b @> '{"a": "1"}'`, `b @> '{"a": ""}'`, `b @> '{"a": null}'`, `b @> '{"a": true}'`, `b @> '{"a": false}'`, `b @> '{}'`, `b @> '{"a": 1, "b": 1}'`, `b @> '{"a": 1, "a": 2}'`, `b @> '{"missing": null}'`,
+      `b @> '{"a": {}}'`, `b @> '{"a": {"b": 1}}'`, `b @> '{"a": {"b": 1.0}}'`, `b @> '{"a": {"b": {"c": "x"}}}'`, `b @> '{"a": {"d": 2, "b": {"c": "x"}}}'`, `b @> '{"a": [1]}'`, `b @> '{"a": []}'`,
+      `b @> '{"é": 1}'`, String.raw`b @> '{"a\"b": 2}'`, `b @> '{"a/b": 3}'`, `b @> '{"a~b": 4}'`, `b @> '{"": 5}'`, `b @> '{"1": 6}'`, `b @> '{"*": 7}'`, `b @> '{"a.b": 8}'`,
+      `b @> '{"a": "é"}'`, String.raw`b @> '{"a": "é"}'`, String.raw`b @> '{"a": "x\ny"}'`, String.raw`b @> '{"a": "\u0001"}'`, String.raw`b @> '{"a": "\u001f"}'`, String.raw`b @> '{"a": "q\"uote"}'`,
+      String.raw`b @> '{"a": "back\\slash"}'`, `b @> '{"a": "a/b"}'`, String.raw`b @> '{"a": "\\u00e9"}'`, `b @> '[1]'`, `b @> '1'`, `b @> 'null'`, `b @> NULL`, `NULL::jsonb @> '{"a": 1}'`,
+      `'{"a": 1}' <@ b`, `'{}' <@ b`, `b <@ '{"a": 1, "b": 1}'`, `b @> '{"a": 1}'::jsonb`, `b @> jsonb '{"a": 1}'`, `b @> CAST('{"a": 1}' AS jsonb)`, `b @> ' { "a" : 1 } '`, `b @> '{"a": 1}'::json::jsonb`,
+      `b @> jsonb_build_object('a', 1)`, `(b -> 'a') @> '{"b": 1}'`, `b::text::jsonb @> '{"a": 1}'`];
+    const sql = `SELECT id, ${reads.join(", ")} FROM jnat ORDER BY id`;
+    const [got, want] = [await answer(c, sql), await postgres(sql)];
+    for (const [i, row] of want.rows.entries()) for (const [k, v] of row.entries()) assert.equal(got.rows[i]![k], v, `row ${row[0]}: ${k === 0 ? "id" : reads[k - 1]}`);
+    assert.deepEqual(got.fields, want.fields);
+    // filtered, counted and grouped as a BI tool asks, and inside a subquery
+    for (const statement of [`SELECT count(*) FROM jnat WHERE b @> '{"a": 1}'`, `SELECT count(*) FROM jnat WHERE NOT (b @> '{"a": 1}')`, "SELECT count(*) FROM jnat WHERE (b -> 'a') IS NOT NULL",
+      "SELECT (b -> 'a') IS NULL AS m, count(*) FROM jnat GROUP BY 1 ORDER BY 1", `SELECT b @> '{"a": 1}' AS c, count(*) FROM jnat GROUP BY c ORDER BY c`,
+      "SELECT id, b -> 'b' AS b FROM jnat c ORDER BY (c.b -> 'a') IS NULL, id", `SELECT id FROM jnat c ORDER BY c.b @> '{"a": 1}', id`,
+      `SELECT id, (SELECT count(*) FROM jnat i WHERE i.b @> '{"a": 1}' AND i.id <= o.id), EXISTS (SELECT 1 FROM jnat i WHERE (i.b -> 'a') IS NOT NULL AND i.id = o.id) FROM jnat o ORDER BY id`,
+      `SELECT *, b -> 'a' AS v, b @> '{"a": 1}' AS c FROM jnat ORDER BY id`, `SELECT a.id, b.b @> '{"a": 1}', (b.b -> 'a') IS NULL FROM jnat a LEFT JOIN jnat b ON b.id = a.id + 1000 ORDER BY a.id`]) {
+      assert.deepEqual((await answer(c, statement)).rows, (await postgres(statement)).rows, statement);
+    }
+    const calls = async (): Promise<number> => [...(await store.functionCalls()).values()].reduce((a, b) => a + b, 0);
+    const hops = async (read: string): Promise<number> => {
+      const before = await calls();
+      await answer(c, `SELECT ${read} FROM jnat`);
+      return (await calls()) - before;
+    };
+    for (const read of ["b -> 's'", "b -> 'missing'", "b -> 'z'", "b -> 't'", "b -> 'i'", "(b -> 'o') IS NOT NULL", "(b -> 'arr') IS NULL", "b #> '{o,b}'", "(j -> 'a') IS NOT NULL", "(b -> 'a') IS NOT NULL",
+      `b @> '{"s": "x"}'`, `b @> '{"i": 7}'`, `b @> '{"n": 7}'`, `b @> '{"o": {"b": "deep"}}'`, `b @> '{}'`, `'{"z": null}' <@ b`]) assert.equal(await hops(read), 0, `${read} reached a function`);
+    for (const read of ["b -> 'o'", "b -> 'arr'", "b -> 'n'", "b -> 'c'", "b -> 'a'", `b @> '{"arr": [1]}'`, `b @> '[1]'`, `b @> jsonb_build_object('a', 1)`, "j -> 'a'", `'{"a": "x"}'::jsonb -> 'a'`]) {
+      assert.ok(await hops(read) > 0, `${read} never reached a function`);
+    }
   } finally { await c.end(); }
 });
 
