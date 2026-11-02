@@ -589,6 +589,25 @@ posts the plan and stops, and the top session starts each piece. Before, an issu
 spotted it, or late, as rounds piled up or the four-round bound stopped a run. `issue-loop.js` ran its pieces by
 `workflow('pr-loop')`, and a Workflow script cannot hold an implementer across rounds, since an `agent()` is one-shot.
 
+### Who may give an agent words (Tom, 2026-11-02)
+
+**Decision.** The agents that work this repository (the up-next session, its coordinators, and the Opus and Fable
+agents they start) read an issue's or a PR's people-written text, its title, body, comments, reviews, inline review
+comments and search results, only through one script, `scripts/gh-text.ts` (issue 438). It reads GitHub's REST
+`author_association` on each item and keeps OWNER, MEMBER and COLLABORATOR, an allowlist, so every other value, a
+missing one, and one GitHub adds later are left out; what it left out it names by count and kind ("2 comments by others
+not read"), never by text or login, so the reader knows something was dropped. Every list is read with `--paginate`.
+The up-next session checks an issue's author before it starts a run (`gh-text.ts author <n>`), and sends an issue by
+anyone else to Needs Tom. `scripts/review-stats.ts` imports the same list, so a Review record counts only when the
+repository's people posted it. **Why.** The repository is public, and the agents treated whatever an issue, a PR or
+their comments said as their task, whoever wrote it; until then nothing read who wrote it. One script, one list: a
+second list in a second reader is CLAUDE.md's "a fact derived in several places". Left as they were: `gh pr diff`
+(code only those with write access push), GitHub's own values (`mergeable`, `state`, `headRefOid`,
+`closedByPullRequestsReferences`), the checks and CI's logs. Open: who can move a card onto Up next (the board's base
+role cannot be read through the API); the author check covers an issue by anyone else wherever its card is.
+**Detector:** `tests/workflows.test.ts` ("github text") renders every stage of `pr-loop-slim.js` and both skills and
+finds no other read of an issue's or a PR's text, and runs the script against a stub `gh`.
+
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
 **Decision.** Every open issue carries the label `bug` or `enhancement`. Every bug is on the Mason work board with its

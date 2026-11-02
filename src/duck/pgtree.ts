@@ -156,6 +156,12 @@ export interface Typed {
   functionColumn?: { alias: string; column: string };
   /** an AGGREF's arguments as its ORDER BY binds to them (`Keys`: `sorted` its ORDER BY, `distinct` its DISTINCT) */
   keys?: Keys;
+  /** Postgres wrapped THIS expression in its implicit time→timetz cast (a FUNCEXPR of time_timetz, function 2047, its
+   *  funcformat COERCE_IMPLICIT_CAST), which has no offset of its own and is listed nowhere: a time coerced beside a
+   *  timetz (an operator's operand, a CASE or COALESCE arm, a function's argument, the value of a `CASE tm WHEN
+   *  <timetz>` whose every WHEN casts it …), the ONE fact src/duck/rewrite.ts `coerceImplicit` reads (issue 167). Absent
+   *  on everything else */
+  implicitTimetz?: true;
 }
 
 /**
@@ -351,6 +357,8 @@ const argsOf = (n: TreeNode): TreeValue[] => {
  */
 export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
   const out = new Map<number, Typed[]>();
+  // the arguments Postgres wrapped in its implicit time→timetz cast (`Typed.implicitTimetz`)
+  const asTimetz = new WeakSet<TreeNode>();
   // the range tables of the queries around the node being visited, innermost last
   const rtables: TreeNode[][] = [];
   const visit = (v: TreeValue): void => {
@@ -370,8 +378,11 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
     };
     const loc = first !== null ? placed(first) : num(v.location);
     const t = exprType(v);
+    const wrapped = implicitTimetzArg(v);
+    if (wrapped !== null) asTimetz.add(wrapped);
     if (loc !== null && loc >= 0 && t !== null) {
       const typed = typedOf(v, t, rtables);
+      if (asTimetz.has(v)) typed.implicitTimetz = true;
       const list = out.get(loc);
       if (list) list.push(typed); else out.set(loc, [typed]);
     }
@@ -379,6 +390,44 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
   };
   visit(tree);
   return out;
+}
+
+/** the argument of Postgres's IMPLICIT time→timetz cast (FUNCEXPR of time_timetz, function 2047, COERCE_IMPLICIT_CAST),
+ *  or null for any other node: the one test of it (`typesByLocation`, `implicitTimetzCasts`) */
+function implicitTimetzArg(v: TreeNode): TreeNode | null {
+  // `CASE tm WHEN '12:30-05'::timetz …`: each WHEN compares a placeholder of the CASE's value (CaseTestExpr), which
+  // Postgres casts in each: the CASE's own value is the one cast, where every WHEN casts it (`caseCasts`)
+  if (v._node === "CASEEXPR" && isNode(v.arg ?? null)) { const c = caseCasts(v); return c.cast > 0 && c.cast === c.whens ? v.arg as TreeNode : null; }
+  const a = timetzCastOf(v);
+  return a !== null && a._node !== "CASETESTEXPR" ? a : null;
+}
+const timetzCastOf = (v: TreeValue | undefined): TreeNode | null => {
+  if (v === undefined || !isNode(v) || v._node !== "FUNCEXPR" || num(v.funcid ?? null) !== 2047 || num(v.funcformat ?? null) !== 2) return null;
+  const a = argsOf(v)[0];
+  return a !== undefined && isNode(a) ? a : null;
+};
+/** a `CASE x WHEN …`'s WHENs, and how many of them cast its placeholder (x) to a timetz */
+function caseCasts(v: TreeNode): { whens: number; cast: number } {
+  const whens = (Array.isArray(v.args) ? v.args : []).filter(isNode);
+  const cast = whens.filter((w) => { const e = w.expr ?? null; const first = isNode(e) ? argsOf(e)[0] : undefined; return timetzCastOf(first)?._node === "CASETESTEXPR"; }).length;
+  return { whens: whens.length, cast };
+}
+
+/** how many implicit time→timetz casts Postgres's analysis holds, a CASE's WHENs that cast its value counted once:
+ *  each must be written where its argument is (src/duck/rewrite.ts `coerceImplicit` counts what it wrote against this,
+ *  and refuses the statement when one was not: a CASE whose WHENs cast its value in some and not others among them) */
+export function implicitTimetzCasts(tree: TreeValue): number {
+  let n = 0;
+  const visit = (v: TreeValue): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (!isNode(v)) return;
+    const a = timetzCastOf(v);
+    if (a !== null && a._node !== "CASETESTEXPR") n++;
+    if (v._node === "CASEEXPR" && isNode(v.arg ?? null) && caseCasts(v).cast > 0) n++;
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return n;
 }
 
 /** one expression of a query whose range tables are `rtables`, innermost last, as `Typed` says it */
@@ -588,8 +637,8 @@ function limitOffsets(q: TreeNode): number[] {
  * its outputs hold none), and the offsets its own LIMIT and OFFSET hold. Each column is typed as no table's column:
  * what is known of it is the set operation's alone.
  */
-export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null> }> {
-  const found: Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null> }> = [];
+export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null>; armTypes: Array<number[] | null> }> {
+  const found: Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null>; armTypes: Array<number[] | null> }> = [];
   const held = (x: TreeValue | undefined): number[] => {
     if (Array.isArray(x)) return x.flatMap(held);
     // (a subquery in an output is a query of its own)
@@ -603,12 +652,15 @@ export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; 
     if (v._node === "QUERY" && isNode(v.setOperations ?? null) && Array.isArray(v.targetList)) {
       const rtable = Array.isArray(v.rtable) ? v.rtable : [];
       const arms: number[][] = [];
+      // each arm's own output types, before the set operation coerced them to its columns' (null: not known)
+      const armTypes: Array<number[] | null> = [];
       const leaves = (s: TreeValue | undefined): void => {
         if (s === undefined || !isNode(s)) return;
         if (s._node === "SETOPERATIONSTMT") { leaves(s.larg); leaves(s.rarg); return; }
         const rte = s._node === "RANGETBLREF" ? rtable[(num(s.rtindex ?? null) ?? 0) - 1] : undefined;
         const q = isNode(rte ?? null) ? (rte as TreeNode).subquery ?? null : null;
-        if (!isNode(q)) { arms.push([]); return; }
+        if (!isNode(q)) { arms.push([]); armTypes.push(null); return; }
+        armTypes.push(Array.isArray(q.targetList) ? q.targetList.filter((t) => isNode(t) && t.resjunk !== "true").map((t) => { const e = (t as TreeNode).expr ?? null; return isNode(e) ? exprType(e)?.type ?? 0 : 0; }) : null);
         const own = Array.isArray(q.targetList) ? held(q.targetList.filter((t) => isNode(t) && t.resjunk !== "true").map((t) => (t as TreeNode).expr ?? null)) : [];
         // (a VALUES's outputs read its rows at no offset of their own: it is known by its rows')
         const rows = own.length > 0 || !Array.isArray(q.rtable) ? [] : q.rtable.filter(isNode).flatMap((r) => held(r.values_lists));
@@ -622,7 +674,7 @@ export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; 
         const { relation: _r, column: _c, functionColumn: _f, ...own } = typedOf(e, type, [rtable.filter(isNode)]);
         return { ...own, qualifier: null, renamed: null };
       });
-      found.push({ arms, limits: limitOffsets(v), columns });
+      found.push({ arms, limits: limitOffsets(v), columns, armTypes });
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };

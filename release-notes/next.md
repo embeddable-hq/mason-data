@@ -262,6 +262,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   "orders" does not exist` though `orders` is synced: it waits for the table (`waiting for public.orders` in `mason
   status`) until the synced data can be read, then builds. `mason wait <table>` right after `mason start` now waits for
   it, where it exited 1 on that refusal.
+- **A `time` compared with or combined with a `timetz` now answers as Postgres does.** Postgres casts the time to a
+  `timetz` at the session zone's offset (as `tm::timetz` does); Mason ignored the offset, so `tm = '12:30-04'::timetz`
+  matched 12:30 whatever its offset, a `UNION` of a time and a timetz column answered a `time` column, and `<`, a `CASE`
+  or a `COALESCE` of the two failed with an internal error. `GREATEST` and `LEAST` of `timetz` values now order them
+  by their instant, as `<` does (`23:59:59-05` is later than `23:59:59.999999+05:30`). A `UNION` arm written as `*`
+  over a time column beside a timetz one, a time `BETWEEN` a time bound and a timetz one, and a `CASE tm WHEN` a time
+  and `WHEN` a timetz are refused by name (`time-timetz-coerced`): cast the time, `tm::timetz`.
 - **A BI tool's JSON filter (`meta @> '{"status": "paid"}'`), its "is not empty" (`(meta -> 'status') IS NOT NULL`) and
   a `->` read of a string, a whole number, a boolean or a JSON null no longer hold other sessions' statements**, and run
   several times faster over wide documents: each was answered row by row on the thread every statement waits on, so

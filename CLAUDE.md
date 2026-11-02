@@ -207,6 +207,12 @@ on the one above. A teammate needs Claude Code with the Agent and SendMessage to
 models, and `gh` authenticated with the `project` scope for the board. Why: docs/DESIGN.md "The independent review".
 Detector: `tests/workflows.test.ts`.
 
+**The agents read an issue's or a PR's text only through `scripts/gh-text.ts`** (2026-11-02): its title, body,
+comments, reviews and search results, each kept only when GitHub's `author_association` is OWNER, MEMBER or
+COLLABORATOR, with what it left out named by count and kind; the up-next session starts a run only on an issue whose
+author is kept (`gh-text.ts author <n>`), and moves any other to Needs Tom. Why: docs/DESIGN.md "Who may give an agent
+words". Detector: `tests/workflows.test.ts` ("github text").
+
 **The board says where each piece is**, so the owner reads progress there instead of asking: the [Mason work
 board](https://github.com/orgs/embeddable-hq/projects/4). An issue split into pieces has one sub-issue per PR
 (`scripts/board.ts sub <issue> "<issue> · <piece>" --from "<model>"`), and its PR says `Closes #<sub-issue>`. Each move
