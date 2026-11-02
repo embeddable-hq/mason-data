@@ -137,7 +137,7 @@ async function firstShapes(sql: string, inOrder: boolean): Promise<Shaped[]> {
 }
 
 /*
- * THE SHAPES THAT VARY THE STATEMENT ITSELF (.claude/workflows/pr-loop.js VARIANT_FORMS, held on every push), each
+ * THE SHAPES THAT VARY THE STATEMENT ITSELF (.claude/workflows/pr-loop-slim.js VARIANT_FORMS, held on every push), each
  * built from Postgres's answers and never guessed from the text: the statement's STRUCTURE is its parse (parseSql); its
  * OUTPUT COLUMNS are the source's RowDescription (names, type OIDs, typmods) and its first row; a type's spelling is the
  * source's `format_type` (`typeOf`). A text is asked only once its parse holds the tree it was built to be (src/duck/

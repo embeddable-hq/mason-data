@@ -571,6 +571,24 @@ owes statements, since "couldn't tell" is never checks. The review reports the s
 engine call without naming an engine symbol; a waiver of any other path, or one that cannot be read, waives nothing.
 The script is also the one reader of the rules' front matter, which `tests/workflows.test.ts` imports.
 
+One process, not three (Tom, 2026-11-02; issue 386). Experiment 1, on issue 192, ran the `pr-loop.js` harness against
+ONE persistent Opus agent that was sent each review's findings by message. The harness had run 5.5 h, with 2 design,
+7 probe and 4 review rounds, and was still in CI; it used about 2.3 M Opus output tokens. The persistent agent was clean
+and green in 1 h 51 min, and it took about 1.0 M Opus output tokens over all its rounds, the later fix rounds included.
+The difference was continuity: a fix round rebuilt no context. Experiment 2 raced that agent, kept by a coordinator
+(the pr-persistent skill), against `pr-loop-slim.js`, the harness without its design review and probe, whose fixers
+read a `## Handoff` comment. On issue 137 it was a tie: 49 min for the skill (PR 279) and about 48 min for slim (PR 280,
+the coordinator's count), and both were clean at the first review. On issue 176 the skill's PR 272 was clean at its
+second review. At its second review slim's PR 274 had two new wrong answers of its own, and it was stopped. Tom then
+ran the skill with a Sonnet coordinator per issue, and decided: "As far as I'm concerned, this new process has won. The
+others weren't faster, better or cheaper." So `pr-loop.js` and `issue-loop.js` are retired. `pr-loop-slim.js` stays as
+the source the skill renders every prompt from, not as a process of its own. The top session's queue is a skill too
+(`.claude/skills/up-next/SKILL.md`). issue-loop's split moved into the Brief, as a verdict it may return in place of a
+brief: the pieces, each able to ship alone, in order, and which are stacked. The run then makes a sub-issue per piece,
+posts the plan and stops, and the top session starts each piece. Before, an issue too big for one PR was seen only if the top session
+spotted it, or late, as rounds piled up or the four-round bound stopped a run. `issue-loop.js` ran its pieces by
+`workflow('pr-loop')`, and a Workflow script cannot hold an implementer across rounds, since an `agent()` is one-shot.
+
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
 **Decision.** Every open issue carries the label `bug` or `enhancement`. Every bug is on the Mason work board with its
