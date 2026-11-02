@@ -2023,11 +2023,26 @@ class Rewriter {
    *  (`displayScale`, as `exactArms` decides it); a NULL writes none */
   private scalesDiffer(query: AstNode, index: number): boolean {
     const b = this.armWrapped.get(bodyOf(query)) ?? bodyOf(query);
-    if (b.op !== "SETOP_UNION" || b.all !== true || this.setOperationColumns(b, false)?.[index]?.type !== NUMERIC) return false;
-    const values = this.valuesAt(query, index);
-    if (values === null) return false;
-    return new Set(values.filter((v) => !isNullValue(v)).map((v) => this.displayScale(v))).size > 1;
+    if (b.op !== "SETOP_UNION" || b.all !== true) return false;
+    // DECIDED ONCE per column (issue 244's class: a column read at every level of a deep chain, each level asking the
+    // level below, would otherwise be decided again per reference, exponentially in the depth)
+    const known = this.scalesDecided.get(b)?.get(index);
+    if (known !== undefined) return known;
+    const decide = (): boolean => {
+      if (this.setOperationColumns(b, false)?.[index]?.type !== NUMERIC) return false;
+      const values = this.valuesAt(query, index);
+      // (a recursive WITH query's own column read in its recursive arm writes the scale its rows compute, which no type
+      // decides: the engine's, as before)
+      const recursive = (v: unknown): boolean => Array.isArray(v) ? v.some(recursive) : isNode(v) ? (kindOf(v) === "ColumnRef" && this.fromColumn(v)?.recursive === true) || Object.values(bodyOf(v)).some(recursive) : false;
+      return values !== null && !values.some(recursive) && new Set(values.filter((v) => !isNullValue(v)).map((v) => this.displayScale(v))).size > 1;
+    };
+    const differs = decide();
+    const own = this.scalesDecided.get(b) ?? new Map<number, boolean>();
+    own.set(index, differs);
+    this.scalesDecided.set(b, own);
+    return differs;
   }
+  private readonly scalesDecided = new WeakMap<Body, Map<number, boolean>>();
 
   /** whether a FROM item's column is a value the engine computes exactly (`duckExact` of each value it can be); a
    *  column none of whose values is found is not (unknown is not exact) */
@@ -2240,6 +2255,11 @@ class Rewriter {
     // real pass run on a copy, and what it finds is what the real pass will. (A column an arm's copy CARRIES out of a
     // WITH query is resolved by where it is written, `carry`'s `scopes`: the real WITH query, derived once there, and
     // the real pass is given that one derivation, `exactThrough`'s `derived`)
+    // THE FROM ITEMS THE ARMS CARRY OUT OF ARE DERIVED FIRST, ONCE, on the real tree (as `carryAll` derives them before
+    // the walk), so each copy below is made with their records (`clone` copies `derived`) and its carry reads them, never
+    // derives them again: a chain of unions each read through a subquery derived its lower levels once in the trial's
+    // copy and again in the real pass, 2^depth (the class of issue 244; tests/duck-generated.test.ts "round 14")
+    if (!this.walking) for (const a of arms) this.carryAll(a);
     const real = this.cteScope.splice(0);
     this.cteScope.push(...real.map((list) => this.clone(list)));
     let trial: Array<{ made: ExactColumn[]; listed: AstNode[]; exposed: number }>;
