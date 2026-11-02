@@ -33,7 +33,19 @@ const SEED = [
   `INSERT INTO ${MASON_SCHEMA}.poll_state (source, snapshot, polled_at, sync) VALUES ('public.events', '100:100:', now(), 'off')`,
 ];
 
-export const COUNTS = "kind: scheduled\ntarget_lag: 1s\nsql: |\n  SELECT tenant_id, count(*) AS requests, max(started_at) AS last_at FROM events GROUP BY 1\norder_by: tenant_id\n";
+/**
+ * THE BOUND ON "THE REVIEW RUN UNTIL A TABLE IS BUILT / SERVED" (issue 482), read by `until` and by every build or serve
+ * loop of tests/duck-generated*.test.ts, never written again as a number. Twice the slowest seen on CI, as CLAUDE.md
+ * "Local gates" sizes a test's own timeout. Measured from 17 CI runs' unit-shard logs (2026-11-02, the spec reporter's
+ * "(N ms)"): the WHOLE test "the catalog holds it" took 12.6-27.7 s in 13 passing runs, and failed four times at 22.3 s
+ * and 27.4 s when its 20 s build loop ran out; "the catalog the check planned on holds it" 8.4-17.8 s; "built but not yet
+ * in the catalog (issue 474)" 32.5 s. A build loop is a part of its test, so the slowest passing loop is at most 27.7 s
+ * and a failing one was cut at 20 s: 60 s. The three late_* tests print, by t.diagnostic, the loop's time and each run's
+ * phases, so CI's log re-derives this; a loop above half of it on CI raises it to twice that.
+ */
+export const BUILD_BOUND_MS = 60_000;
+
+export const COUNTS ="kind: scheduled\ntarget_lag: 1s\nsql: |\n  SELECT tenant_id, count(*) AS requests, max(started_at) AS last_at FROM events GROUP BY 1\norder_by: tenant_id\n";
 
 export interface World {
   dir: string; root: string; folder: string; store: DuckStore; sync: Sync; api: PgApiServer; logged: string[]; events: SyncEventInput[];
@@ -43,7 +55,7 @@ export interface World {
   remove(name: string): void;
   status(name?: string): GeneratedStatus;
   client(): Promise<pg.Client>;
-  /** the review run until `done` holds of the table, or a failure naming what it is */
+  /** the review run until `done` holds of the table, or a failure naming what it is, at BUILD_BOUND_MS */
   until(done: (s: GeneratedStatus) => boolean, name?: string): Promise<GeneratedStatus>;
   rows(sql: string): Promise<unknown[][]>;
 }
@@ -86,7 +98,7 @@ export async function withWorld(files: Record<string, string>, use: (w: World) =
       status,
       client: async () => { const c = new pg.Client({ host: "127.0.0.1", port: theApi.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token }); await c.connect(); return c; },
       until: async (done, name = "public.counts") => {
-        const end = Date.now() + 20_000;
+        const end = Date.now() + BUILD_BOUND_MS;
         for (;;) {
           await live.generated.review();
           const s = status(name);
