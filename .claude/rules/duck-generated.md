@@ -43,7 +43,9 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   a double's, so an integer is cast to DECIMAL(38,0) first. **Every path a numeric reaches storage by is held to its
   engine type** (`storedColumns`): a program's cells, and a numeric the engine answers itself (no program, a passthrough
   among them: a DECIMAL stored, an integer as HUGEINT, a double refused, never stored as a double under a numeric's
-  name). **Before its engine type, its FORM: the analysis is the one authority on what is stored.** A column whose
+  name). An integer column converted from a numeric holds the value the plan's SQL computes, which the rewrite's CAST
+  reader makes exact (`__mason_numeric_int`, half away from zero) or refuses (`numeric-double-integer`), so it needs no
+  form walk (issue 242). **Before its engine type, its FORM: the analysis is the one authority on what is stored.** A column whose
   analysed form the engine computes as a double (a variance, sqrt and its kin, avg or `/`, a cast from a double:
   `ENGINE_DOUBLES`) is refused by that form, whether or not the rewrite made a program for it; whether a program exists
   (src/duck/rewrite.ts `programNeeded`) is the wire's rule, and its silence stored `stddev(x)::numeric(p,s)` from the

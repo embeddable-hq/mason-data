@@ -40,7 +40,9 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "relative-time-literal", sql: "SELECT id FROM typed WHERE ts < 'today 12:00' ORDER BY id" },
   { gap: "bytea-forms", sql: "SELECT id, convert_to(t, 'LATIN1') FROM typed WHERE id < 3 ORDER BY id" },
   { gap: "infinite-interval", sql: "SELECT id, s::interval FROM castable WHERE id = 32" },
-  { gap: "numeric-math", sql: "SELECT id, ln(n2 ^ 2) FROM typed WHERE n2 > 0 ORDER BY id" },
+  // (`n2 ^ 2` is Postgres's power since issue 242, so ln of it is answered: an unconstrained numeric's stddev has no program)
+  { gap: "numeric-math", sql: "SELECT ln(stddev(n)) FROM typed" },
+  { gap: "numeric-double-integer", sql: "SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 3))::int FROM typed" },
   { gap: "view-forms", sql: "SELECT happy FROM happy" },
   { gap: "enum-forms", sql: "SELECT id, t::text::mood[] FROM moods WHERE false" },
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },

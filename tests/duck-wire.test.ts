@@ -5887,7 +5887,40 @@ test("exact path: the CAST reader reads a program's text, its nearest double and
       ["SELECT o.id, power(o.amount, 2)::double precision FROM orders o ORDER BY 1", "ordered"],
       ["SELECT b.id, (b.x / 1)::int, (b.x / b.y)::int8, (-b.x / 1)::int FROM bigdec b ORDER BY 1", "ordered"],
       ["SELECT b.id, (b.x / b.y)::double precision FROM bigdec b ORDER BY 1", "ordered"],
+      // issue 242: a NULLIF over a quotient is its operand's program, NULL where it equals the other by the exact keys
+      ["SELECT b.id, nullif(b.x / b.y, 0)::int, nullif(b.x / b.y, 0)::int8, nullif(b.x / b.y, 2.5)::int FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, nullif(b.x / b.y, 0), nullif(b.x / b.y, 2.5), nullif(b.x / 1, 1.00000000000000000001) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, (exp(ln(2.5)) * sign(b.x))::int, (exp(ln(2.5)) * sign(-b.x))::int8 FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, (SELECT nullif(c.x / c.y, 0)::int FROM bigdec c WHERE c.id = b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT *, nullif(b.x / b.y, 0)::int AS r FROM bigdec b ORDER BY b.id", "ordered"],
+      ["SELECT sum(nullif(b.x / b.y, 0)), max(nullif(b.x / b.y, 0))::int FROM bigdec b", "ordered"],
+      // what the base answered stays answered: sign's TINYINT, a DECIMAL's own cast, round and trunc, a float8's half to even
+      ["SELECT b.id, sign(b.x)::int, sign(b.x / b.y)::int, nullif(b.x, 0)::int, (b.x * 2)::int FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, trunc(b.x / b.y)::int, round(b.x / b.y)::int, ((b.x / b.y)::float8)::int, (b.x::float8 / b.y)::int8 FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT (sum(o.amount) / nullif(count(*), 0))::int, round(100.0 * sum(o.amount) / nullif(sum(o.qty), 0))::int FROM orders o", "ordered"],
+      ["SELECT b.id, ((b.x / b.y)::int)::text, ((b.x / b.y)::int)::numeric(10,2) FROM bigdec b ORDER BY 1", "ordered"],
     ]), []);
+    // a parameter in the NULLIF's quotient, prepared and then executed again after a later SET
+    const bound = "SELECT b.id, nullif(b.x / $1, 0)::int AS r FROM bigdec b ORDER BY b.id";
+    assert.deepEqual(await unlikeBound(c, [[bound, ["2"]]]), []);
+    const want = (await postgres(bound, ["2"])).rows;
+    assert.deepEqual((await c.query({ name: "nullif_bound", text: bound, values: ["2"], rowMode: "array" })).rows.map((r) => r.map(String)), want.map((r) => r.map(String)));
+    await c.query("SET TimeZone = 'Europe/Paris'");
+    assert.deepEqual((await c.query({ name: "nullif_bound", text: bound, values: ["2"], rowMode: "array" })).rows.map((r) => r.map(String)), want.map((r) => r.map(String)), "after a SET");
+  } finally { await c.end(); }
+});
+
+test("exact path: issue 242: a numeric the engine holds as a double with no program, cast to an integer, is refused by name", async () => {
+  const c = await client();
+  try {
+    for (const sql of ["SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y))::int FROM bigdec b",
+      "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
+      "SELECT CAST(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) AS bigint) FROM bigdec b"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-double-integer/.test(e.detail ?? "")
+        && /cast to (integer|bigint), is not supported by Mason/.test(e.message) && /ORDER BY \(a \/ b\)::int/.test(e.hint ?? ""), sql);
+    }
+    // its way out answers as Postgres does
+    assert.deepEqual(await unlike(c, [["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"]]), []);
   } finally { await c.end(); }
 });
 

@@ -2724,6 +2724,16 @@ class Rewriter {
       }
       case "A_Expr": {
         const name = lastName(b.name);
+        // NULLIF(a, b) of a numeric the engine holds as a double (issue 242): a's program where the row's a is not equal
+        // to b by the one comparison of a quotient (`exactEquality`: both exact keys), else NULL (the index past the arm)
+        if (b.kind === "AEXPR_NULLIF" && type === NUMERIC && isNode(b.lexpr) && isNode(b.rexpr) && !this.duckExact(b.lexpr)) {
+          const l = sub(b.lexpr);
+          const sides = l === null ? null : this.exactEquality(this.clone(b.lexpr), this.clone(b.rexpr));
+          if (l === null || sides === null) return asCell();
+          return numeric({ op: "pick", index: cell(caseWhen([[op("=", sides[0], sides[1]), intConst(1)]], intConst(0))), args: [l.p] });
+        }
+        // x ^ y: Postgres's own power, as power(x, y) is (`pgNumeric`)
+        if (b.kind === "AEXPR_OP" && name === "^" && type === NUMERIC) { const text = this.pgNumeric(n); return text === null ? asCell() : numeric(cell(text, "text")); }
         if (b.kind !== "AEXPR_OP" || !["+", "-", "*", "/", "%"].includes(name)) return asCell();
         if (type !== NUMERIC) return asCell();
         if (b.lexpr === undefined) { const r = sub(b.rexpr); return r === null ? null : name === "-" ? numeric({ op: "neg", arg: r.p }) : r; }
@@ -3006,8 +3016,10 @@ class Rewriter {
       const from = this.typeOf(b.arg);
       return from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(b.arg) === null ? pgCall("text", "a1::numeric", [this.clone(b.arg)]) : null;
     }
-    const name = kindOf(n) === "FuncCall" ? lastName(b.funcname) : "";
-    const args = (b.args ?? []) as AstNode[];
+    // (`x ^ y` of numerics is Postgres's numeric_power, power(x, y)'s function: issue 242)
+    const raised = kindOf(n) === "A_Expr" && b.kind === "AEXPR_OP" && lastName(b.name) === "^" && isNode(b.lexpr) && isNode(b.rexpr);
+    const name = kindOf(n) === "FuncCall" ? lastName(b.funcname) : raised ? "power" : "";
+    const args = (raised ? [b.lexpr, b.rexpr] : b.args ?? []) as AstNode[];
     if (!["ln", "log", "log10", "exp", "sqrt", "power", "pow"].includes(name) || this.typeOf(n) !== NUMERIC || b.over !== undefined || args.length < 1 || args.length > 2) return null;
     // an argument computed here (a quotient): its exact value, the program DuckDB evaluates row by row
     const read = args.map((a): [string, AstNode] | null => {
@@ -3021,6 +3033,9 @@ class Rewriter {
       return exact === null ? null : ["numeric", exact];
     });
     if (read.some((x) => x === null)) {
+      // (an operator's operand with no program stays the engine's double, as before issue 242: refused only where
+      // something needs it exact, the CAST reader's integer)
+      if (raised) return null;
       throw new Unrewritable(`${name}() of a numeric Mason cannot compute exactly is not supported by Mason`, `cast the argument to numeric(p, s): ${name}(x::numeric(20, 4))`, "numeric-math");
     }
     return pgCall("text", `${name}(${read.map((x, i) => `a${i + 1}::${x![0]}`).join(", ")})`, read.map((x) => x![1]));
@@ -3135,6 +3150,9 @@ class Rewriter {
         const name = lastName(b.funcname);
         // a count (an avg's, made from the avg's node, carries the avg's type), and what the walk writes as a DECIMAL
         if (WRITTEN_EXACT.has(name)) return true;
+        // the engine's sign is a TINYINT (-1, 0, 1), whatever its argument: Postgres's numeric_sign is the same value
+        // (issue 242: `sign(x)::int` stays the engine's, and `exp(…) * sign(x)` has a program)
+        if (name === "sign" && b.over === undefined && args.length === 1) return true;
         // a value picked or summed, in its own type: an aggregate, a window's row, min / max's picked operand
         if (VALUE_KEEPING.has(name) && args.length >= 1) return exact(args[0]) && ((name !== "lag" && name !== "lead") || args.length < 3 || exact(args[2]));
         return false;
@@ -3296,6 +3314,20 @@ class Rewriter {
     const c = this.carry(e);
     if (c === "uncarried") return this.refuseUncarried(e);
     return c === null || !c.text ? null : this.exactText(e);
+  }
+
+  /**
+   * TWO NUMERICS COMPARED FOR EQUALITY, each by its exact key (`exactKey`; a value the engine holds exactly by its own
+   * text's key), or null where neither is decided exactly: the one comparison of a quotient, `=` and `<>`'s and
+   * NULLIF's (issue 242). A parameter alone is keyed only beside a value decided exactly (its bound text; DuckDB
+   * compares a column with it natively elsewhere)
+   */
+  private exactEquality(l: AstNode, r: AstNode): [AstNode, AstNode] | null {
+    const kl = this.exactKey(l), kr = this.exactKey(r);
+    const side = (x: AstNode, k: AstNode | null): AstNode | null => k ?? (this.duckExact(x) ? fn("__mason_numeric_key", [cast(x, ["varchar"])]) : null);
+    const decided = (x: AstNode, k: AstNode | null): boolean => k !== null && kindOf(stripCasts(x)) !== "ParamRef";
+    const sl = !decided(l, kl) && !decided(r, kr) ? null : side(l, kl), sr = sl === null ? null : side(r, kr);
+    return sl !== null && sr !== null ? [sl, sr] : null;
   }
 
   /** null where a value is no numeric decided exactly; a refusal where it is one whose program cannot be read here (a
@@ -3953,13 +3985,8 @@ class Rewriter {
     const comparing = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name);
     // a numeric decided exactly, compared for equality: by its exact key, the other side by its own (exactKey)
     if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 === NUMERIC && a1 === NUMERIC && l !== undefined && r !== undefined) {
-      const kl = this.exactKey(l), kr = this.exactKey(r);
-      const side = (x: AstNode, k: AstNode | null): AstNode | null => k ?? (this.duckExact(x) ? fn("__mason_numeric_key", [cast(x, ["varchar"])]) : null);
-      // a parameter alone is keyed only beside a value decided exactly (its bound text; DuckDB compares a column with it
-      // natively elsewhere)
-      const decided = (x: AstNode, k: AstNode | null): boolean => k !== null && kindOf(stripCasts(x)) !== "ParamRef";
-      const sl = !decided(l, kl) && !decided(r, kr) ? null : side(l, kl), sr = sl === null ? null : side(r, kr);
-      if (sl !== null && sr !== null) { b.lexpr = sl; b.rexpr = sr; return null; }
+      const sides = this.exactEquality(l, r);
+      if (sides !== null) { [b.lexpr, b.rexpr] = sides; return null; }
     }
     // and IN a list of values (issue 350: each item an equality, Postgres's `=` of each): every side by its exact key
     if (b.kind === "AEXPR_IN" && l !== undefined && r !== undefined && kindOf(r) === "List" && this.typeOf(l) === NUMERIC) {
@@ -5108,6 +5135,12 @@ class Rewriter {
         }
         if (t.type === BPCHAR) { if (t.typmod > 4) return fn("rpad", [fn("left", [exact, intConst(t.typmod - 4)]), intConst(t.typmod - 4), strConst(" ")]); }
         else return t.type === VARCHAR && t.typmod > 4 ? fn("left", [exact, intConst(t.typmod - 4)]) : exact;
+      }
+      // (issue 242) an integer is never the engine's double's, which rounds half to even (2.5 is 2) where Postgres's
+      // numeric_int4 rounds the exact value half away from zero (3): where no program computes it, refused by name
+      else if (INTEGERS.has(t.type)) {
+        throw new Unrewritable(`a numeric Mason cannot compute exactly (the engine holds it as a double), cast to ${t.type === INT2 ? "smallint" : t.type === INT4 ? "integer" : "bigint"}, is not supported by Mason (Postgres rounds the exact value half away from zero; the double would round half to even)`,
+          "cast the value to an integer inside the aggregate: percentile_disc(0.5) WITHIN GROUP (ORDER BY (a / b)::int), which picks the same row's integer", "numeric-double-integer");
       }
     }
     // to char(n): the text cut and padded to n

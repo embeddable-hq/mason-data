@@ -233,6 +233,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (`3`, half away from zero). A `*` beside a division (`SELECT *, a / 7 AS q …`, `SELECT s.*, 1 …`) showed 15 digits; it
   shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
+- **A `NULLIF` of a numeric division cast to an integer rounds as Postgres does**: `nullif(x / 1.6, 0)::int` of 4.00
+  was `2` and is `3` (half away from zero), in a query and in a generated table, and `nullif(x / y, 0)` shows
+  Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. A cast to an integer of a numeric Mason
+  cannot compute exactly (`percentile_disc` or `mode()` of a division) is refused by name (`numeric-double-integer`)
+  rather than failing with the engine's error; a generated table with one is refused when it is loaded. Nothing to do
+  on upgrade.
 - **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
   `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with
   "types cannot be matched", and an integer beside a `numeric(12,2)` showed `1.00` where Postgres shows `1`; each now
