@@ -13,13 +13,14 @@ import type pg from "pg";
 import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { stopParser } from "../src/api/postgres/parser.ts";
 import { GENERATED_DIR, GENERATED_KEYS, parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
-import type { AddedTable } from "../src/duck/sync.ts";
+import type { AddedTable, CopyState } from "../src/duck/sync.ts";
 import { REVIEW_MS, withoutValues, type GeneratedStatus } from "../src/duck/generated.ts";
-import { definitionStatement, refusalText, type GeneratedRefusal } from "../src/duck/generated-plan.ts";
+import { definitionStatement, refusalText, type GeneratedRefusal, type Planner } from "../src/duck/generated-plan.ts";
+import { generatedReadiness } from "../src/cli/readiness.ts";
 import { parseLag, parseSync } from "../src/lib/table-sync.ts";
 import { generatedLines } from "../src/cli/commands.ts";
 import { guideText } from "../src/cli/guides.ts";
-import { built, COUNTS, plain, refusedAt, served, withWorld } from "./duck-generated-world.ts";
+import { built, COUNTS, plain, refusedAt, served, withWorld, type World } from "./duck-generated-world.ts";
 
 after(() => stopParser());
 
@@ -527,4 +528,118 @@ test("a function stable only for its arguments' text is built over types whose t
 test("target_lag's floor is said at the key: Mason looks every REVIEW_MS", () => {
   assert.equal(REVIEW_MS, 5_000);
   assert.match(GENERATED_KEYS.target_lag, /every 5s/);
+});
+
+// ISSUE 387: A BASE IS THERE WHEN THE CATALOG HOLDS IT. The copy records a table `copied` before the catalog is rebuilt
+// over it (the rebuild reads that record, and waits behind any other), and a check's plan can be made over a catalog
+// older than the host's answer read after it (the demo's start: the check began before orders was synced, its plan
+// waited for the catalog Postgres to start without it, and came back with 42P01 once orders was synced and in the
+// catalog). Either way the definition was refused, `mason wait` exited 1, and the refusal was said at `mason start`.
+const LATE_COLUMNS = [["id", "integer"], ["total", "numeric(10,2)"], ["created_at", "timestamp with time zone"], ["status", "text"]].map(([name, type]) => ({ name: name!, type: type!, notNull: false, comment: null }));
+const late: AddedTable = { source: "public.late", schema: "public", table: "late", key: ["id"], columns: LATE_COLUMNS, foreignKeys: [], bytes: 0, rows: 5 };
+const LATE_ROWS = "(1, 10.50, '2026-01-01 10:00:00+00', 'paid'), (2, 5.25, '2026-01-01 23:30:00+00', 'paid'), (3, 7.00, '2026-01-01 12:00:00+00', NULL), (4, 1.00, '2026-01-02 00:30:00+00', 'paid'), (5, NULL, NULL, 'refunded')";
+const LATE_DDL = "CREATE TABLE public.late (id INTEGER, total DECIMAL(10,2), created_at TIMESTAMPTZ, status VARCHAR)";
+const LATE_DAILY = "kind: scheduled\ntarget_lag: 30s\nsql: SELECT (created_at AT TIME ZONE 'UTC')::date AS day, status, count(*) AS orders, sum(total) AS revenue FROM late GROUP BY 1, 2\norder_by: day, status\n";
+/** the groups Postgres gives LATE_DAILY over LATE_ROWS: (01-01, paid), (01-01, NULL), (01-02, paid), (NULL, refunded) */
+const LATE_GROUPS = 4;
+
+type SyncInside = { tables: Map<string, AddedTable>; schemaBuild: Promise<void>; record(s: CopyState, columns: unknown[]): Promise<void>; rebuildSchema(): Promise<void> };
+/**
+ * A table's copy landing as the copy's success path lands it (src/duck/sync.ts, after the swap): its rows in the engine,
+ * the table added, its record `copied`, then the catalog rebuilt — behind a rebuild held until the function returned is
+ * called when `hold`, as one chained behind another is. Resolves to: let the rebuild go, and wait for it.
+ */
+async function lands(w: World, t: AddedTable, ddl: string, rows: string, hold: boolean): Promise<() => Promise<void>> {
+  const sync = w.sync as unknown as SyncInside;
+  let release = (): void => undefined;
+  if (hold) { const held = new Promise<void>((r) => { release = r; }); sync.schemaBuild = sync.schemaBuild.then(() => held); }
+  await w.store.writer.run(`CREATE SCHEMA IF NOT EXISTS ${t.schema}`);
+  await w.store.writer.run(ddl);
+  await w.store.writer.run(`INSERT INTO ${t.source} VALUES ${rows}`);
+  sync.tables.set(t.source, t);
+  await sync.record({ source: t.source, phase: "copied", rows: t.rows, bytes: 0, seconds: 0.1, copiedAt: new Date().toISOString(), error: null }, t.columns);
+  const rebuilt = sync.rebuildSchema();
+  return async () => { release(); await rebuilt; };
+}
+
+test("a definition over a synced table the catalog does not hold yet waits for it, never refused, then builds (the catalog holds it)", async () => {
+  const since = Date.now();
+  await withWorld({}, async (w) => {
+    // THE COPY'S WINDOW: public.late recorded copied, the catalog's rebuild over it held
+    const release = await lands(w, late, LATE_DDL, LATE_ROWS, true);
+    const said = (l: string): boolean => /late_(daily|q|join|parent|child)\.yml: (sql: relation "late" does not exist|no longer refused)/.test(l);
+    const waiting = ["public.late_daily", "public.late_q", "public.late_join", "public.late_parent"];
+    try {
+      assert.ok(!w.sync.schema().tables.some((t) => t.name === "late"), "the catalog does not hold public.late yet");
+      w.write("late_daily", LATE_DAILY);
+      w.write("late_q", "kind: scheduled\ntarget_lag: 30s\nsql: SELECT status, count(*) AS n FROM public.late GROUP BY 1\n");
+      w.write("late_join", "kind: scheduled\ntarget_lag: 30s\nsql: SELECT e.tenant_id, count(*) AS n FROM events e JOIN late l ON l.id = e.id GROUP BY 1\n");
+      w.write("late_parent", "kind: scheduled\ntarget_lag: 30s\nsql: SELECT status, count(*) AS n FROM late GROUP BY 1\n");
+      w.write("late_child", "kind: scheduled\ntarget_lag: 30s\nsql: SELECT sum(n) AS total FROM late_parent\n");
+      // kept as a refusal: a relation the sources file does not add is Postgres's refusal, whatever the catalog is doing
+      w.write("unknown_base", "kind: scheduled\ntarget_lag: 30s\nsql: SELECT count(*) FROM nosuch\n");
+      for (let i = 0; i < 3; i++) {
+        await w.sync.generated.review();
+        for (const name of waiting) {
+          const s = w.status(name);
+          assert.deepEqual([s.state, s.waitingFor, s.refusals, s.serving], ["waiting", "public.late", [], false], `${name}: ${JSON.stringify(s)}\n${w.logged.join("\n")}`);
+          const r = generatedReadiness(s, since);
+          assert.deepEqual([r.ready, r.failed, r.waiting], [false, [], [`${name}: waiting for public.late`]]);
+        }
+        const child = w.status("public.late_child");
+        assert.deepEqual([child.state, child.waitingFor, child.refusals], ["waiting", "public.late_parent", []], JSON.stringify(child));
+        refusedAt(w.status("public.unknown_base").refusals, "sql", /relation "nosuch" does not exist/);
+      }
+      // a run is never planned over a base the catalog lacks: none began, none failed
+      assert.deepEqual(w.reached, [], "no run began");
+      assert.deepEqual(w.events.filter((e) => e.kind === "generated_failed"), []);
+      assert.ok(!w.logged.some(said), w.logged.join("\n"));
+    } finally {
+      // the catalog holds it (and the sync's stop waits for the catalog's last rebuild, so a failure above lets it go too)
+      await release();
+    }
+    // each built, with no refusal at any review on the way
+    const all = [...waiting, "public.late_child"];
+    for (const end = Date.now() + 20_000; !all.every((n) => built(w.status(n)));) {
+      assert.ok(Date.now() < end, `never built: ${JSON.stringify(all.map((n) => w.status(n)))}\n${w.logged.join("\n")}`);
+      await w.sync.generated.review();
+      for (const n of all) assert.notEqual(w.status(n).state, "refused", JSON.stringify(w.status(n)));
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(w.status("public.late_daily").lastRun?.rows, LATE_GROUPS);
+    assert.deepEqual(await w.rows("SELECT strftime(day, '%Y-%m-%d'), status, orders, revenue::VARCHAR FROM public.late_daily ORDER BY day NULLS LAST, status NULLS LAST"),
+      [["2026-01-01", "paid", 2n, "15.75"], ["2026-01-01", null, 1n, "7.00"], ["2026-01-02", "paid", 1n, "1.00"], [null, "refunded", 1n, null]]);
+    assert.equal(w.status("public.late_child").lastRun?.rows, 1);
+    assert.ok(!w.logged.some(said), w.logged.join("\n"));
+    assert.equal(w.status("public.unknown_base").state, "refused");
+  });
+});
+
+test("a definition whose check was planned before its base reached the catalog waits for it, never refused (the catalog the check planned on holds it)", async () => {
+  await withWorld({}, async (w) => {
+    // THE CHECK'S WINDOW, the demo's: the plan is made over a catalog without public.late, and the copy lands, the
+    // catalog rebuilt over it, before the check reads what the 42P01 means
+    const g = w.sync.generated as unknown as { planner: Planner };
+    const planner = g.planner;
+    let landed = false;
+    g.planner = { ...planner, plan: async (text, stmt, relations) => {
+      try { return await planner.plan(text, stmt, relations); }
+      finally { if (!landed && /\blate\b/.test(text)) { landed = true; await (await lands(w, late, LATE_DDL, LATE_ROWS, false))(); } }
+    } };
+    w.write("late_daily", LATE_DAILY);
+    await w.sync.generated.review();
+    assert.ok(landed, "the copy landed while the check planned");
+    const s = w.status("public.late_daily");
+    assert.deepEqual([s.state, s.waitingFor, s.refusals], ["waiting", "public.late", []], `${JSON.stringify(s)}\n${w.logged.join("\n")}`);
+    assert.equal((await w.until(built, "public.late_daily")).lastRun?.rows, LATE_GROUPS);
+    assert.ok(!w.logged.some((l) => /late_daily\.yml: (sql: relation "late" does not exist|no longer refused)/.test(l)), w.logged.join("\n"));
+    // kept as a refusal: an unqualified name whose only synced table is in another schema (Postgres's search_path is
+    // public), the catalog moving or not
+    const invoices: AddedTable = { source: "billing.invoices", schema: "billing", table: "invoices", key: ["id"], columns: [{ name: "id", type: "integer", notNull: false, comment: null }], foreignKeys: [], bytes: 0, rows: 1 };
+    await (await lands(w, invoices, "CREATE TABLE billing.invoices (id INTEGER)", "(1)", false))();
+    w.write("bills", "kind: scheduled\ntarget_lag: 30s\nsql: SELECT count(*) AS n FROM invoices\n");
+    refusedAt((await w.until((x) => x.state === "refused", "public.bills")).refusals, "sql", /relation "invoices" does not exist/);
+    w.write("bills_q", "kind: scheduled\ntarget_lag: 30s\nsql: SELECT count(*) AS n FROM billing.invoices\n");
+    await w.until(built, "public.bills_q");
+  });
 });

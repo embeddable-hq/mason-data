@@ -151,6 +151,13 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
 - **A file's name is its table.** A name a synced table holds is refused, and the synced table wins the catalog
   (`served`, `names`) and the table: what was deployed under that name is let go with its ledger row (`release`), and
   nothing is built or swapped over it (`buildable`).
+- **A base is there when the catalog holds it, never when the copy's phase says copied** (issue 387). The host's `added`
+  (src/duck/sync.ts `addedAs`, the one place) says `copied` only when the catalog's schema holds the table; the copy
+  records `copied` before its rebuild of the catalog, so the phase alone refused a definition at every `mason start`.
+  A check's 42P01 for a table the sources file adds is a wait, also when the catalog moved while it planned (the
+  host's answer is then the new catalog's, not the one the plan was made on), and `ready` reads the same answer.
+  Detector: tests/duck-generated.test.ts "the catalog holds it" and "the catalog the check planned on holds it", and
+  tests/cli-demo-start.test.ts's starts (no refusal said, `mason wait daily_orders` exits 0 the first time).
 
 ## What review probes
 
