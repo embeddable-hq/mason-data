@@ -47,7 +47,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   analysed form the engine computes as a double (a variance, sqrt and its kin, avg or `/`, a cast from a double:
   `ENGINE_DOUBLES`) is refused by that form, whether or not the rewrite made a program for it; whether a program exists
   (src/duck/rewrite.ts `programNeeded`) is the wire's rule, and its silence stored `stddev(x)::numeric(p,s)` from the
-  double over an input with a typmod (PR 202 round 11). Detector: tests/duck-generated-round11-14.test.ts "round 11", every such
+  double over an input with a typmod (PR 202 round 11). Detector: tests/duck-generated-round11-13-14.test.ts "round 11", every such
   node bare, under `::numeric` and under a typmod, over inputs with a typmod and without. A scale is a number or what decides it per row ("value", "rows", "picks"), never unknown: a null that meant both
   let 30 decimals through. What is not stored says ITS OWN reason (`verdict`, `notStoredRefusal`: a division; the
   variance family in ONE wording; sqrt, exp, ln, log or power picking decimals per value (a round over one says what
@@ -64,7 +64,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   value's form survives every conversion** (PR 202 round 12): a text read as a numeric keeps the form of what the text
   was made from (`textFrom` walks every text and JSON node down to it: a cast, `||`, a jsonb build and `->>`, a WITH
   column), so a typmod over a variance's text is refused by the variance, never stored from the engine's double; only a
-  stored column's or a JSON number's text is "a text". Detector: tests/duck-generated-round11-14.test.ts "round 12". **The
+  stored column's or a JSON number's text is "a text". Detector: tests/duck-generated-round12.test.ts "round 12". **The
   walk follows the value wherever the analysis says it comes from**: a scalar sublink's subselect, a CTE's query, each
   arm of a set operation (the reason any arm's, the way out in every arm of that form) and a subquery in FROM, under any
   node (`outputExpressions` hangs what a VAR reads on it as `followed`). **The walk is the generated planner's alone,
@@ -73,7 +73,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   reference (pgtree.ts `Follow`), and `seen`, `textFrom` and `oidsOf` memoise by node (`Walk`), so each analysed node is
   visited once. A copy per VAR grew 3^depth for levels each reading the level below three times (880 ms at depth 12, on
   the wire's thread for every statement); a form's sites are capped (`MAX_SITES`), past which the way out is the
-  column cast whole. Detector: tests/duck-wire.test.ts and tests/duck-generated-round11-14.test.ts "round 14", each shape at depth
+  column cast whole. Detector: tests/duck-wire.test.ts and tests/duck-generated-round11-13-14.test.ts "round 14", each shape at depth
   16 within 500 ms. The way out is the user's own SQL, deparsed,
   with only the cast moved (`sum(sqrt(abs(x))::double precision)`, `round(log(x), 2)::double precision`, a numeric cast
   from a double taken away, a text's cast given `numeric(20,4)`), every aggregate and wrapper kept, for EVERY form and
@@ -83,10 +83,10 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   precision` was). Where the engine computes a value, its engine type says only that it is not stored; why is the
   form's, and a variance, sqrt and its kin, or a double outranks a scale the program saw around it. Never a reason from
   an engine type, a node's own kind over a double, the outermost node or a constant: a raw-tree walk guessing types
-  from names gave a false reason in six rounds. Detector: tests/duck-generated-round5-6.test.ts "round 5: every
-  reason against every wrapper" and "round 6: a numeric's reason is the type each node computes", and
-  tests/duck-generated-round7-8.test.ts "round 7: the walk follows a sublink, a CTE, a set operation's arms and a
-  subquery", each reason with its way out held exactly, built and stored.
+  from names gave a false reason in six rounds. Detector: tests/duck-generated-round5.test.ts "round 5: every
+  reason against every wrapper", tests/duck-generated-round6.test.ts "round 6: a numeric's reason is the type each
+  node computes", and tests/duck-generated-round7-8.test.ts "round 7: the walk follows a sublink, a CTE, a set
+  operation's arms and a subquery", each reason with its way out held exactly, built and stored.
 - **The run's connection is a session's, set up by the ONE set-up** (src/duck/store.ts `SessionSetup`: the session
   variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`
   reads), never by hand: a connection without `__mason_session` answers NULL from every Mason function (DuckDB's NULL in,
@@ -94,7 +94,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   at the plan ("it reads a session"). Detector: tests/duck-generated-numeric-reasons.test.ts, the run's session variables. **The review's
   check has a connection of its own** (`GeneratedHost.checkConnection`, set up by the same set-up), never the run's: a
   run holds its connection in a transaction across awaits, and a check on it landed inside that transaction, between the
-  build's statements (PR 202 round 13, #224's class). Detector: tests/duck-generated-round11-14.test.ts "round 13".
+  build's statements (PR 202 round 13, #224's class). Detector: tests/duck-generated-round11-13-14.test.ts "round 13".
 - **A run's failure is Postgres's error, by the ONE mapping a statement on the wire gets** (src/duck/store.ts
   `pgErrorOf`; `failureWords` reads it and matches no engine spelling): its message and SQLSTATE, Postgres's DETAIL
   where it has one, the way out its SQLSTATE has, no value of a row and no `__mason_` name. An engine error said in
@@ -103,8 +103,9 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   refusal at the write is the table's refusal with its options; a failure is run again on the back-off. A numeric field
   overflow is worded in ONE place (src/lib/pg-numeric.ts `fieldOverflow`: Postgres's message and DETAIL), which the
   engine's DECIMAL cast, the exact numeric's typmod and a Mason function's `mason[22003]` (its DETAIL on a line of its
-  own, src/duck/functions.ts) all reach. Detector: tests/duck-generated-round5-6.test.ts "round 5: a run's failure is
-  Postgres's error" and "round 6: a numeric field overflow says Postgres's DETAIL on every path".
+  own, src/duck/functions.ts) all reach. Detector: tests/duck-generated-round5.test.ts "round 5: a run's failure is
+  Postgres's error" and tests/duck-generated-round6.test.ts "round 6: a numeric field overflow says Postgres's DETAIL
+  on every path".
 - **A made type is judged by the catalog's type of its NAME**, never the field's OID, which is the source's (and an oid
   is a string in Postgres's JSON: a number from the entrance, `readSourceFacts`). `dropLast` is refused. A domain and a
   composite stay refused by name. Detector: tests/duck-generated-numeric.test.ts and

@@ -2,7 +2,7 @@
  * Statements whose every level reads the column below three times (PR 202 round 14): `a + a + a` (or `a || a || a`)
  * over the level below, `depth` levels deep, as nested subqueries, a WITH chain and a UNION ALL chain. Copying a followed
  * expression into each column reference grew 3^depth (depth 12 took 880 ms, 16 about 70 s), so planning one is held to
- * a bound linear in the statement (tests/duck-wire.test.ts, tests/duck-generated-round11-14.test.ts "round 14").
+ * a bound linear in the statement (tests/duck-wire.test.ts, tests/duck-generated-round11-13-14.test.ts "round 14").
  */
 export const DEEP_DEPTH = 16;
 /** the depths a test climbs to `DEEP_DEPTH`: a walk that grows with the expansion fails the bound at the first depth past

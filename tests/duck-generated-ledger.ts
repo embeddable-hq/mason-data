@@ -1,6 +1,6 @@
 /**
  * WHAT THE PIECES OF tests/duck-generated*.test.ts SHARE beyond the world (tests/duck-generated-world.ts): the chains'
- * `scheduled`, stage 3's `ledger` and `overLedger`, and the reasons PR 202's review rounds hold a refusal to. Moved here
+ * `scheduled`, stage 3's `ledger` and `overLedger`, and the reasons PR 202's review rounds hold a refusal to, and round 11's nodes, which round 12 reads too. Moved here
  * from tests/duck-generated.test.ts when issue 338 split it into files the unit shards can spread; each value is as it was.
  */
 import assert from "node:assert/strict";
@@ -56,3 +56,18 @@ export const PICKS = /^column x is whichever value a GREATEST, LEAST, COALESCE o
 export const DOUBLE = /^column x is a numeric cast from a double precision value/;
 
 export const TEXT_JSON = /^column x is a numeric read from text \(a JSON number's ->> cast to numeric\), which keeps the decimals each value's text has$/;
+
+export type R11Node = { fn: string; agg: boolean; sql: (x: string) => string; reason: (column: string, fixed: boolean) => RegExp };
+export const R11_VARIANCE = (fn: string): R11Node => ({ fn, agg: true, sql: (x) => `${fn}(${x})`,
+  reason: (c) => new RegExp(`^column ${c} is a ${fn}, which Postgres computes as an exact numeric at decimals it picks`) });
+export const R11_DIVIDES = (fn: string, agg: boolean, sql: (x: string) => string): R11Node => ({ fn, agg, sql,
+  reason: (c) => new RegExp(`^column ${c} divides a numeric, which the engine computes as a double$`) });
+export const R11_PER_VALUE = (fn: string, sql: (x: string) => string): R11Node => ({ fn, agg: false, sql,
+  reason: (c, fixed) => fixed ? new RegExp(`^column ${c} rounds or casts a numeric Postgres computes for each row at decimals it picks \\(${fn}\\)`)
+    : new RegExp(`^column ${c} is a numeric whose decimals Postgres picks by the size of each value \\(${fn}\\)`) });
+export const R11_NODES: R11Node[] = [
+  ...["stddev", "stddev_samp", "stddev_pop", "variance", "var_samp", "var_pop"].map(R11_VARIANCE),
+  R11_DIVIDES("avg", true, (x) => `avg(${x})`), R11_DIVIDES("quotient", false, (x) => `${x} / 3`),
+  R11_PER_VALUE("sqrt", (x) => `sqrt(abs(${x}))`), R11_PER_VALUE("exp", (x) => `exp(${x})`), R11_PER_VALUE("ln", (x) => `ln(abs(${x}))`),
+  R11_PER_VALUE("log", (x) => `log(abs(${x}))`), R11_PER_VALUE("power", (x) => `power(${x}, 2)`),
+];
