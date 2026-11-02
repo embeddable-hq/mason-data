@@ -15,6 +15,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason status`, `--json` and the web page now say when a synced table is behind what its `sync:` promises**,
+  measured from when it was last synced, with why. A table set to `sync: poll 15m` whose pass of polls takes 13 min is
+  polled about every hour, since Mason waits four times a pass between passes to keep the database's load to a fifth;
+  its line now says `— behind by 36 min:` and that reason, painted yellow, and `tables[].sync.state` is `behind`
+  (`asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy` beside it). A polled table is behind past its interval
+  plus the larger of a minute and twice its own last poll; a streamed one past two minutes. `sync: off` is never behind.
+  Behind is not a failure: `mason wait` still exits 0.
+- **A synced table whose keeping fails is now a failure on its own row, and `mason wait` exits 1 for it**, where it said
+  ready before: a named publication that does not carry it (its line gives the `ALTER PUBLICATION … ADD TABLE …` for
+  the database's owner, or `sync: poll <interval>` on its entry), a catch-up that failed, a poll or the stream that
+  failed. Its line says it is served as of its age and NOT kept current, in red, never that its first sync failed. A
+  stream error left from an earlier run on a table the stream keeps current is now cleared as soon as the stream has
+  everything the database wrote, not only by the next change.
+
 - **`latest(x ORDER BY …)`, an aggregate Mason adds, in any statement.** It answers the `x` of the row its ORDER BY
   sorts last, by Postgres's sort rules (NULLs last ascending, first descending, `NULLS FIRST/LAST` as written, a text
   key's collation): `SELECT customer_id, latest(status ORDER BY updated_at, id) FROM orders GROUP BY customer_id`. End
@@ -181,6 +195,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   ROW(a, b) AS r … ORDER BY r`, `SELECT t … ORDER BY 1`) sorted by the row's text (`(0,100)` before `(0,50)`): it is
   now refused by name (`row-value`), with the way out, as `ORDER BY ROW(a, b)` already was. Sort by the row's columns
   instead. Nothing to do on upgrade.
+- **A numeric division or average now keeps Postgres's exact value in more places.** It sorted, ranked and tied by a
+  rounded number: `ORDER BY x / y`, `rank() OVER (ORDER BY x / y)`, `FETCH FIRST 1 ROWS WITH TIES` and `min` / `max` put
+  two values that differ only past the 17th digit in either order, and `0.1 + 0.2` after `0.3`; they now sort as
+  Postgres does. `sum`, `avg` and a running `sum(…) OVER` of a division, or of a subquery's or `WITH` query's division,
+  showed 15 digits (`34.6428571428571`); they now show Postgres's (`34.6428571428571429`). A division cast to text,
+  `varchar`, `double precision` or an integer was the rounded number's (`(5 / 2.0)::int` was `2`); it is Postgres's now
+  (`3`, half away from zero). A `*` beside a division (`SELECT *, a / 7 AS q …`, `SELECT s.*, 1 …`) showed 15 digits; it
+  shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
+  like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
 
 - **A session's TimeZone, search_path and DateStyle now apply to every statement**, not only one that reads a synced
   table. A statement of no table (`SELECT '2026-01-02 03:04:05+00'::timestamptz`, `SELECT current_schemas(false)`,

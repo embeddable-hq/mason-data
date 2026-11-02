@@ -172,7 +172,9 @@ export function runState(ctx: RunContext, copies: readonly CopyState[], stream: 
         // copyProgressNow), so mason wait and status move between two commits
         ...(c.phase === "copying" && c.progress !== undefined ? { progress: c.progress } : {}),
         ...(c.phase === "copied" && c.retired !== undefined ? { retired: c.retired } : {}) } : null,
-      error: c?.phase === "failed" ? c.error : null,
+      // its sync's error, whatever its phase: a copied table whose poll, catch-up, stream or publication check failed
+      // carries it on its own row, as its sync's state says failed (issue 100)
+      error: c?.error ?? null,
       // how the run keeps the copy current NOW, as the sync derives it once (src/duck/sync.ts KeptCurrent, `keptOf`): its
       // sync and when it was last synced, what mason status and the stream's tables say, and EXPLAIN says over the wire
       ...(c?.kept ? { kept: c.kept } : {}),

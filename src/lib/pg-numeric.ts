@@ -110,6 +110,51 @@ export function numericText(n: PgNumeric): string {
   return n.unscaled < 0n ? `-${text}` : text;
 }
 
+/**
+ * A numeric's ORDER KEY (issue 252): bytes whose order is numeric_cmp's, for numeric_out's text (or `NaN`, `Infinity`,
+ * `-Infinity`): -Infinity < the negatives < 0 < the positives < Infinity < NaN, as Postgres sorts them; equal values
+ * (`2.5`, `2.50`) are one key. A finite value is its sign, its decimal exponent and its significant digits; a negative
+ * one's exponent and digits are complemented, ended by a byte above every digit, so a longer one sorts first.
+ */
+export function numericOrderKey(text: string): string {
+  const t = text.trim();
+  if (/^nan$/i.test(t)) return "5";
+  if (/^\+?inf(inity)?$/i.test(t)) return "4";
+  if (/^-inf(inity)?$/i.test(t)) return "0";
+  const n = parseNumeric(t);
+  if (n.unscaled === 0n) return "2";
+  const digits = abs(n.unscaled).toString().replace(/0+$/, "");
+  // the value is 0.<digits> × 10^exponent
+  const exponent = abs(n.unscaled).toString().length - n.scale;
+  // (numeric's exponent lies within ±200000: a fixed width of six digits after an offset keeps it in order)
+  const e = String(exponent + 500000).padStart(7, "0");
+  if (n.unscaled > 0n) return `3${e}${digits}`;
+  const complement = (s: string): string => s.replace(/\d/g, (d) => String(9 - Number(d)));
+  return `1${complement(e)}${complement(digits)}~`;
+}
+
+/** A numeric cast to an integer (`numeric_int4`, `numeric_int8`, `numeric_int2`): rounded half away from zero, or
+ *  22003 past the type's range, in Postgres's words; NaN and Infinity raise 0A000 as Postgres does */
+export function numericToInteger(text: string, bits: 16 | 32 | 64): string {
+  const t = text.trim();
+  const name = bits === 16 ? "smallint" : bits === 32 ? "integer" : "bigint";
+  // (Postgres's words, which name the type and never the value)
+  if (/^nan$/i.test(t)) {
+    if (bits === 16) throw new NumericError("cannot convert NaN to smallint", "0A000");
+    if (bits === 32) throw new NumericError("cannot convert NaN to integer", "0A000");
+    throw new NumericError("cannot convert NaN to bigint", "0A000");
+  }
+  if (/inf/i.test(t)) {
+    if (bits === 16) throw new NumericError("cannot convert infinity to smallint", "0A000");
+    if (bits === 32) throw new NumericError("cannot convert infinity to integer", "0A000");
+    throw new NumericError("cannot convert infinity to bigint", "0A000");
+  }
+  const r = round(parseNumeric(t), 0).unscaled;
+  const limit = 1n << BigInt(bits - 1);
+  if (r < -limit || r >= limit) throw new NumericError(`${name} out of range`, "22003");
+  return r.toString();
+}
+
 /** The value at a larger scale (more trailing zeros), unchanged. */
 const atScale = (n: PgNumeric, scale: number): bigint => n.unscaled * pow10(scale - n.scale);
 

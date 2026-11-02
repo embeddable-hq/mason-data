@@ -240,8 +240,11 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
   failure. `--watch` exits on that at once, and an alarm `exec`'d into `gh` (a Go program) is ignored, so neither bounds
   it. Each pass reads `gh pr view <n> --json mergeable,mergeStateStatus` first: GitHub runs no workflow on a PR with a
   merge conflict, so there "no checks reported" never ends, and `mergeable` CONFLICTING exits the wait at once, naming
-  the conflict and the way out (merge the base and push); UNKNOWN, computed lazily after a push, is a wait. Detector:
-  `tests/workflows.test.ts` runs the harness's wait against a stub `gh`; a wait by hand, nothing detects.
+  the conflict and the way out (merge the base and push); UNKNOWN, computed lazily after a push, is a wait. That loop
+  is `scripts/ci-wait.ts <pr> <seconds>` (exit 0 green, 3 failed, 4 conflict, 8 still pending; at most 570 s a call,
+  inside the Bash tool's bound), which the harness's CI stage runs and a wait by hand runs too: a shell loop of one's
+  own is what the worktree guard refuses in an isolated agent (issue 322). Detector: `tests/workflows.test.ts` runs the
+  CI prompt's own command against a stub `gh`; a wait by hand that does not use the script, nothing detects.
 - **One full `npm run check`, before a PR's first push.** A fix round after a review or a merge of main gets
   `npm run typecheck`, `node --test --test-timeout=300000 --test-force-exit tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
   change, and CI carries the full suite: the few real catches a full local run made in another file were all such fast

@@ -320,7 +320,13 @@ test("mason status and wait --json say how each table is kept current (kept, src
   // why the copy is not kept current, phase included
   assert.match(decl, /syncedAt \(its last whole read or poll\), nextAt \(when its next poll is due; null: off/);
   assert.match(decl, /pending \(only when it applies: why it is not kept current now, its phase included/);
-  assert.match(decl, /by: recopy, copiedAt, pending \(only when it applies/);
+  assert.match(decl, /by: recopy, copiedAt, syncedAt, pending \(only when it applies/);
+  // what a table's sync promises, and whether it is behind it (issue 254): each key declared, and the new state
+  assert.match(decl, /each with promisedSeconds \(.*\) and lateWhy \(/);
+  const status = STATUS.usage.replace(/\s+/g, " ");
+  assert.match(status, /sync: \{ state \(synced, syncing, behind: [^)]*, failed, waiting\)/);
+  for (const key of ["asOf", "promisedSeconds", "behindBySeconds", "behindWhy"]) assert.match(status, new RegExp(`\\b${key} \\(`), key);
+  assert.match(WAIT.usage.replace(/\s+/g, " "), /synced, syncing, behind, failed, waiting — asOf, promisedSeconds, behindBySeconds, behindWhy/);
   assert.match(WAIT.usage.replace(/\s+/g, " "), /pending, when it applies, says why it is not kept current now, its phase included/);
 });
 

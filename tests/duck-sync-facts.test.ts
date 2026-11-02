@@ -386,6 +386,50 @@ test("a stream's failure is over when the stream next applies a batch WITH A POS
   });
 });
 
+/** a copy's state as the run's /api/state row reads it (src/cli/run-server.ts runState's own derivations), and what mason
+ *  wait and mason status make of it (src/cli/readiness.ts) */
+async function asRead(st: () => Record<string, unknown>): Promise<{ sync: Record<string, unknown>; error: unknown; readiness: { ready: boolean; failed: string[] }; word: string }> {
+  const r = await import("../src/cli/readiness.ts") as unknown as { tableSync: (c: unknown, now: number) => Record<string, unknown>;
+    readiness: (s: unknown) => { ready: boolean; failed: string[] }; readinessWord: (r: unknown) => string };
+  const c = st();
+  const row = { table: c.source, added: true, rows: c.rows, error: c.error ?? null, kept: c.kept, sync: r.tableSync(c, Date.now()),
+    copy: c.phase === "copied" ? { phase: "done", rowsCopied: c.rows, updatedAt: "" } : c.phase === "failed" ? { phase: "failed", rowsCopied: 0, updatedAt: "" } : null };
+  const readiness = r.readiness({ tables: [row] });
+  return { sync: row.sync, error: row.error, readiness, word: r.readinessWord(readiness) };
+}
+
+test("a copied table's failed catch-up is its failure until it is caught up: said on its row, and mason wait fails (issue 82's shape)", async () => {
+  await aRun(async ({ sync, st }) => {
+    const s = sync as unknown as { behind: Map<string, { why: string }>; retries: Map<string, { failures: number; at: number }>; states: Map<string, Record<string, unknown>> };
+    const m = "its catch-up poll failed (the synced data serves as it was; …): Parser Error: VALUES lists must all be the same length";
+    s.behind.set("public.t", { why: "after its whole read" });
+    s.retries.set("public.t", { failures: 1, at: Date.now() + 5 * 60_000 });
+    s.states.set("public.t", { ...s.states.get("public.t")!, phase: "copied", error: m });
+    assert.equal(st().phase, "copied");
+    assert.match(String((st().kept as { why: string }).why), /its last catch-up failed, tried again after \d\d:\d\d UTC$/);
+    const read = await asRead(st);
+    assert.deepEqual([read.sync.state, read.error, read.readiness.ready, read.word], ["failed", m, false, "Failed"]);
+    // queued after a copy that went well (no error): syncing, and ready
+    s.states.set("public.t", { ...s.states.get("public.t")!, error: null });
+    const queued = await asRead(st);
+    assert.deepEqual([queued.sync.state, queued.readiness.ready], ["syncing", true]);
+  });
+});
+
+test("an idle stream that has everything the database wrote clears a copied table's stream error, as a batch with a position does", async () => {
+  await aRun(async ({ sync, st, events }) => {
+    const s = sync as unknown as { streamCurrent: () => void; onWriter: <T>(f: () => Promise<T>) => Promise<T>; joinedNow: Set<string> };
+    s.joinedNow = new Set(["public.t"]);
+    assert.equal(st().error, "replication: the slot is in use", "a stream error from the run before, on a copied table");
+    assert.equal((await asRead(st)).readiness.ready, false);
+    s.streamCurrent();
+    await s.onWriter(async () => undefined);
+    assert.equal(st().error, null, "the keepalive says the stream has everything: the error is over");
+    assert.ok(events.some((e) => e.kind === "recovered" && e.table === "public.t"), "and said, as recovered");
+    assert.equal((await asRead(st)).readiness.ready, true);
+  });
+});
+
 test("a named publication's gap is its own error and its own recovery: set by the pass that finds it, cleared by the pass that finds the table carried again", async () => {
   await aRun(async ({ sync, events, st }) => {
     const s = sync as unknown as { settlePrepared: (t: readonly AddedTable[]) => Promise<void>; unpublished: Map<string, string>; wholeFailure: { prepare: string | null };
@@ -397,9 +441,18 @@ test("a named publication's gap is its own error and its own recovery: set by th
     await s.settlePrepared([T]);
     assert.equal(st().error, "replication: publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t");
     assert.deepEqual(events.map((e) => e.kind), ["stream_failed"]);
+    // issue 100: read as mason status and mason wait read it — left out, failed on its own row, and not ready
+    assert.equal((st().kept as { state: string }).state, "left-out");
+    const left = await asRead(st);
+    assert.deepEqual([left.sync.state, left.error, left.readiness.ready, left.word], ["failed", st().error, false, "Failed"]);
+    assert.deepEqual(left.readiness.failed, ["public.t: replication: publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t"]);
+    assert.match(String((st().kept as { why: string }).why), /ADD TABLE public\.t — or give its entry sync: poll <interval> in the sources file/);
     s.unpublished.clear();
     await s.settlePrepared([T]);
     assert.equal(st().error, null, "carried again: its gap's error cleared by the pass that found it");
+    const back = await asRead(st);
+    assert.ok(["synced", "behind"].includes(String(back.sync.state)), String(back.sync.state));
+    assert.equal(back.readiness.ready, true, "ready again");
     assert.deepEqual(events.map((e) => `${e.kind} ${e.table}`), ["stream_failed public.t", "recovered public.t"]);
     // a failure to prepare: a table never copied has it cleared by the pass that prepares (its copy is next); a copied
     // one keeps it until the stream applies a batch with a position

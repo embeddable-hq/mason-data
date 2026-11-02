@@ -154,7 +154,7 @@ async function firstShapes(sql: string, inOrder: boolean): Promise<Shaped[]> {
  *  - the bounds of the OUTERMOST query: `count-zero`, `count-negative`, `count-null`, `offset-negative`,
  *    `bound-expression`, `offset-zero` (none changes which rows a bound keeps: ties at a new boundary are undefined);
  *  - the numeric readers of every numeric output: `numeric-distinct`, `numeric-text`, `numeric-aggregate`,
- *    `numeric-ordered`.
+ *    `numeric-ordered`, `numeric-ranked`.
  */
 const CHAR = new Set([25, 1043, 1042]), INTEGER = new Set([21, 20, 700, 701, 1700]), NUMERIC = 1700, BPCHAR = 1042;
 
@@ -328,6 +328,9 @@ export async function shapes(sql: string, inOrder: boolean, group: string, answe
     const query = Array.isArray(ctes) && ctes.length === 1 ? (ctes[0] as Ast).CommonTableExpr?.ctequery : undefined;
     put("numeric-aggregate", query !== undefined && same(query, stmt) ? cte : null, false);
     await derived("numeric-ordered", `SELECT ${numeric.join(", ")} FROM (${sql}) AS mason_shape ORDER BY ${numeric.map((c) => `${c}, ${c}::text COLLATE "C"`).join(", ")}`, true);
+    // each value ranked by its own order, DESC (issue 252): two values a double ties, ordered apart only by the exact
+    // value (numeric-ordered's text tie-break orders them by accident)
+    await derived("numeric-ranked", `SELECT ${numeric.map((c) => `${c}, rank() OVER (ORDER BY ${c} DESC)`).join(", ")} FROM (${sql}) AS mason_shape`, false);
   }
   return { shaped, unspellable };
 }

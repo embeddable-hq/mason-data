@@ -139,6 +139,14 @@ paths:
   read it, never the poll's ledger (a project switched to replication keeps its last poll there: EXPLAIN said "kept
   current by polling" of a streamed table). `tests/duck-sync-added.test.ts` and `tests/duck-wire.test.ts` hold it.
   ("EXPLAIN")
+- **What a table's `sync:` promises is derived ONCE, by the sync** (`keptPromise`, carried on `kept` as
+  `promisedSeconds` and `lateWhy`): a polled table its interval plus max(60 s, twice its own last poll), a recopied one
+  the run's interval plus max(60 s, twice the last pass), a streamed one `REPLICATION_BEHIND_SECONDS`, an `off` one
+  nothing. It reads what the schedule reads (`lastPollMs`, `lastPassMs`) and changes neither load rule: it SAYS them —
+  `poll 15m` behind a 13-minute pass is polled about hourly, and said nowhere before (issue 106). Whether a table is
+  behind is compared ONCE, at the moment asked, from the ledger's time (`kept.syncedAt`), never a schedule, a phase or
+  `CopyState.synced.at` (src/cli/readiness.ts `behindOf`: `tables[].sync.state` `behind`). DETECTOR:
+  `tests/duck-sync-schedule.test.ts`, `tests/cli-run-server.test.ts`.
 
 ## What the sync records
 
@@ -154,7 +162,9 @@ paths:
   sync says so (`recovered` of no table: the stream applied a batch WITH A POSITION, the publication and slot were made
   ready, the database attached — `wholeFailure`); never a failure whose end nothing says. **A copy's replication error
   is over only when the stream applies a batch with a position** (`applyChanges`: every table it keeps current is current
-  as of it), never at a pass's publication check (`settlePrepared`, which runs while the stream waits out its back-off)
+  as of it), **or says it has everything the database wrote** (`streamCurrent`: a keepalive with nothing pending, the
+  same proof — an idle database sends no batch, and a run-old stream error stayed on a healthy table, which `mason wait`
+  read as failed once readiness read the state, issue 254), never at a pass's publication check (`settlePrepared`, which runs while the stream waits out its back-off)
   nor at a piece of a large transaction; the check clears only what it owns — a named publication's gap once the table is
   carried again, and its own failure on a table never copied.
   The supervisor's restarts stay in `.mason/restarts.json` (a process of its own cannot open the file) and are merged

@@ -276,7 +276,7 @@ const KNOWN: Decided[] = [
   { sql: /stddev\(DISTINCT (i4|n2)\)|stddev\(n\)/, kind: "text", gap: "numeric-stddev", why: "Postgres's numeric stddev of DISTINCT values, or of an unconstrained numeric, is exact to its scale; DuckDB's a double" },
   { sql: /greatest\(ch, (t|vc)\)/, kind: "value", gap: "char-n-minmax", why: "least(char(5) '', text ''): Postgres compares without the padding" },
   { sql: /^SELECT min\(a \/ b\), max\(a \/ b\) FROM public\.one, \(VALUES/, kind: "text", gap: "min-max-scale-tie", why: "min of 0 / 7 and 0 / 1000000, equal values at two scales: Postgres keeps the last it reads, Mason the least operands" },
-  { sql: /^SELECT sum\(x\) FROM \(SELECT 7 \/ 3\.0 AS x/, kind: "text", gap: "nested-exact-numeric", why: "the subquery's 7 / 3.0 is DuckDB's double where the outer query sums it (an outer x * 2 now reads its program)" },
+  { sql: /^SELECT var_samp\(x\) FROM \(SELECT 7 \/ 3\.0 AS x/, kind: "text", gap: "nested-exact-numeric", why: "the subquery's quotients are DuckDB's doubles where the outer query takes their variance (a sum, an avg, min / max and an ORDER BY read their programs)" },
   { sql: /^SELECT count\(\*\) FROM public\.one, \(VALUES \(1\.00000000000000000001::numeric\(30,20\)\), \(1\.00000000000000000002\)\) AS v\(x\) WHERE v\.x \/ 1 IN \(1\.00000000000000000001\)$/, kind: "value", gap: "numeric-quotient-compare", why: "IN equates the two quotients' doubles, which Postgres's exact values tell apart" },
   { sql: /^SELECT DISTINCT ON \(l\.c\) l\.c, l\.id, \(l\.j ->> 'n'\)::int AS n FROM late l ORDER BY l\.c, l\.id LIMIT 3$/, kind: "answered", gap: "limit-errors", why: "row 2000's 'x' is in c = 0's group but not its first row: Postgres computes the list below its Unique for every row, Mason chooses the kept rows by row number and computes the list for them" },
   { sql: /^SELECT upper\('\u{10D70}'\)/u, kind: "value", gap: "unicode-16-case", why: "a Garay letter (Unicode 16): DuckDB's ICU predates it" },
@@ -607,6 +607,8 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     fixed: Object.fromEntries([...fixedClock.spent].map(([k, v]) => [k, ms(v.ms)])),
     stages: Object.fromEntries([...stageClock.spent].map(([k, v]) => [k, ms(v.ms)])),
     statements: Object.fromEntries([...clock.spent].map(([k, v]) => [k, { ms: ms(v.ms), name: v.name }])),
+    // the runner, to read beside the setup that scales this leg's times (scripts/oracle-legs.ts legScales); never in `measured`
+    cpu: `${os.cpus()[0]?.model.trim() ?? "unknown"} × ${os.cpus().length}`,
   };
   const asked = all().length * 3 + shaped;
   // the DuckDB-alone tallies, held to the fixture docs/SQL-SUPPORT.md renders (a percentage point of the statements of

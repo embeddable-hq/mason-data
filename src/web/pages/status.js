@@ -63,18 +63,29 @@ export function copyingText(copied, rowsEstimate, p) {
  * current and how old its copy is (`keptAge`).
  */
 export function tableLine(t, now = Date.now()) {
-  if (t.error) return { state: "failed", fraction: 1, what: `its first sync failed: ${firstLine(t.error)}` };
+  if (t.error) return { state: "failed", fraction: 1, what: t.copy?.phase === "done" ? copiedFailedText(t, now) : `its first sync failed: ${firstLine(t.error)}` };
   if (t.copy?.phase === "copying") {
     const c = copyingText(t.copy.rowsCopied, t.rows, t.copy.progress);
     return { state: "copying", fraction: c.fraction ?? 0, what: /^\d/.test(c.text) ? `syncing ${c.text}` : c.text };
   }
   if (!t.copy) return { state: "waiting", fraction: 0, what: "waiting for its first sync to start" };
-  const age = keptAge(t, now);
+  const age = keptWords(t, now);
+  const what = `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
   // a copy the poll does not keep current (it waits for its catch-up) is a warning, as mason status paints it (paintBar)
-  if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && (t.kept.state !== "streamed" || t.kept.notRunning !== null))) {
-    return { state: "unsynced", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""} · ${age}` };
+  // and so is one behind what its sync promises (`tables[].sync.state`, src/cli/readiness.ts behindOf), of any kind
+  if ((t.kept?.by === "poll" && t.kept.pending !== undefined) || (t.kept?.by === "replication" && (t.kept.state !== "streamed" || t.kept.notRunning !== null)) || t.sync?.state === "behind") {
+    return { state: "unsynced", fraction: 1, what };
   }
-  return { state: "done", fraction: 1, what: `${n(t.copy.rowsCopied ?? 0)} rows · synced${t.copy.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}` };
+  return { state: "done", fraction: 1, what };
+}
+
+/** What a served table's line says after `synced`, for every kind: its keeping and age, then behind (src/cli/commands.ts `keptWords`). */
+export function keptWords(t, now = Date.now()) {
+  const age = keptAge(t, now), s = t.sync;
+  if (s?.state !== "behind" || s.behindBySeconds == null) return age;
+  const why = s.behindWhy ?? "its next sync is late";
+  const by = `behind by ${duration(s.behindBySeconds)}${age !== null && age.includes(why) ? "" : `: ${why}`}`;
+  return age === null ? by : `${age} — ${by}`;
 }
 
 /** How long ago a table was synced, as `mason status` says it on its line (src/lib/table-sync.ts `agoText`, which
@@ -94,13 +105,22 @@ export function keptAge(t, now = Date.now()) {
   if (k?.by === "replication") {
     if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : syncedAgo(k.syncedAt, now)}`;
-    return k.notRunning === null ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
   }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${syncedAgo(k.syncedAt, now)}`;
   if (k.pending !== undefined) return `NOT kept current (${synced}): ${k.pending}`;
   if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${entryName(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
   return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${syncedAgo(k.syncedAt, now)}`}`;
+}
+
+/** A served table whose sync failed, as mason status says it (src/cli/commands.ts `copiedFailedText`). */
+function copiedFailedText(t, now) {
+  const k = t.kept;
+  const reason = k?.by === "replication" ? (k.state !== "streamed" ? k.why : k.notRunning === null ? null : `the stream is not running: ${k.notRunning}`)
+    : k?.by === "poll" || k?.by === "recopy" ? k.pending ?? null : null;
+  const asOf = t.sync?.asOf ?? (k && k.by !== "generated" && k.by !== "recopy" ? k.syncedAt : null) ?? t.sync?.syncedAt ?? null;
+  return `${n(t.copy?.rowsCopied ?? 0)} rows · synced · NOT kept current, its sync failed (${asOf === null ? "never synced" : `last synced ${syncedAgo(asOf, now)}`}): ${reason ?? firstLine(t.error)}`;
 }
 
 /**

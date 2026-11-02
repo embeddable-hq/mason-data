@@ -310,6 +310,48 @@ test("copying: the bar's share, the rows, the chunks, the rate and the time left
   assert.ok(!/public\.customers/.test(text), "a copy that is done is not a bar");
 });
 
+test("behind, left out, a failed catch-up, a stream down, off: each table's line is mason status's word for word; the Tables page says Behind and Failed (issue 254)", () => {
+  const ago = (s: number): string => new Date(NOW - s * 1000).toISOString();
+  const pass = "every polled table's polls took 13 min in the last pass, and Mason waits four times that between passes to keep the database's load to a fifth";
+  const gap = "publication app_pub does not carry public.orders: ALTER PUBLICATION app_pub ADD TABLE public.orders — or give its entry sync: poll <interval> in the sources file, which needs no publication";
+  const pending = "it is caught up by one poll after its whole read first — after a failure, tried again after 09:10 UTC";
+  const every15 = { mode: "poll", every: "15m", seconds: 900 };
+  const states: Array<[string, CopyState[]]> = [
+    ["behind, the pass", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(52 * 60), nextAt: null, promisedSeconds: 960, lateWhy: pass } } as CopyState]],
+    ["behind, its own poll", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(31 * 60), nextAt: null, promisedSeconds: 1620,
+      lateWhy: "its own poll took 6 min, and Mason waits four times a table's poll before its next to keep the database's load to a fifth" } } as CopyState]],
+    ["left out", [{ ...copied("public.orders", 2_000_000, ago(7200)), error: `replication: ${gap}`, kept: { by: "replication", slot: "s", state: "left-out", why: gap, position: "0/1",
+      lastCommit: null, notRunning: null, syncedAt: ago(7200), promisedSeconds: 120, lateWhy: gap } } as CopyState]],
+    ["a failed catch-up", [{ ...copied("public.orders", 2_000_000, ago(7200)), error: "its catch-up poll failed (…): Parser Error: VALUES lists must all be the same length", behind: "after its whole read",
+      kept: { by: "poll", sync: every15, syncedAt: ago(7200), nextAt: null, pending, promisedSeconds: 960, lateWhy: pending } } as CopyState]],
+    ["a stream down past its bound", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "replication", slot: "s", state: "streamed", why: null, position: "0/1", lastCommit: null,
+      notRunning: "it has not started yet: it starts at the next pass", syncedAt: ago(300), promisedSeconds: 120, lateWhy: "the stream is not running: it has not started yet: it starts at the next pass" } } as CopyState]],
+    // a recopied table behind (review r1: the page said `null`, the CLI nothing): behind, from sync, for every kind
+    ["behind, recopied", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "recopy", copiedAt: ago(7200), syncedAt: ago(7200), promisedSeconds: 120,
+      lateWhy: "the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth" } } as CopyState]],
+    ["off", [{ ...copied("public.events", 30_000_000, ago(7200)), kept: { by: "poll", sync: { mode: "off" }, syncedAt: ago(3 * 86_400), nextAt: null, promisedSeconds: null, lateWhy: null } } as CopyState]],
+    ["synced", [{ ...copied("public.customers", 1200, ago(7200)), kept: { by: "poll", sync: every15, syncedAt: ago(14 * 60), nextAt: null, promisedSeconds: 960, lateWhy: pass } } as CopyState]],
+  ];
+  const tableLine = fn<[unknown, number], { state: string; fraction: number; what: string }>("tableLine");
+  const renderTables = fn<[unknown, Record<string, unknown>?], string>("renderTables");
+  const words: Record<string, string> = {};
+  for (const [name, copies] of states) {
+    const s = stateOf(copies, { now: NOW });
+    const t = s.tables.find((x) => x.table === copies[0]!.source)!;
+    const cli = commands.tableLines(s, NOW).find((l) => l.startsWith(t.table))!;
+    const ours = tableLine(t, NOW);
+    assert.ok(cli.endsWith(`  ${ours.what}`), `${name}:\n${cli}\n${ours.what}`);
+    assert.doesNotMatch(ours.what, /first sync failed/, `${name}: a synced table's sync is never its first`);
+    const row = renderTables(s).split("<tr").find((r) => r.includes(`<code class="name" title="${t.table}">`))!;
+    words[name] = `${/class="indicator (\w+)"/.exec(row)![1]} ${/<\/span>(Behind|Failed|Synced|Syncing|Waiting)</.exec(row)![1]} ${ours.state}`;
+  }
+  assert.deepEqual(words, { "behind, the pass": "warn Behind unsynced", "behind, its own poll": "warn Behind unsynced", "left out": "bad Failed failed", "a failed catch-up": "bad Failed failed",
+    "a stream down past its bound": "warn Behind unsynced", "behind, recopied": "warn Behind unsynced", off: "ok Synced done", synced: "ok Synced done" });
+  const recopied = stateOf(states.find(([n]) => n === "behind, recopied")![1], { now: NOW });
+  const line = tableLine(recopied.tables.find((x) => x.table === "public.customers")!, NOW).what;
+  assert.equal(line, "1,200 rows · synced · behind by 1 h 58 min: the last pass, which reads every table again whole, took 1 s, and Mason waits four times a pass between passes to keep the database's load to a fifth");
+});
+
 test("a copy the poll does not keep current is the page's warning, as mason status paints it: its line's words equal, its state unsynced", () => {
   const BEHIND = stateOf([{ ...copied("public.orders", 2_000_000, "2026-10-27T09:00:09.000Z"),
     kept: { by: "poll", sync: { mode: "poll", every: "30s", seconds: 30 }, syncedAt: "2026-10-27T09:00:09.000Z", nextAt: null, pending: "caught up by one poll first (after its whole read)" } }]);

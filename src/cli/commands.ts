@@ -207,7 +207,8 @@ export { copyingText, copyProgress, duration, msText, readiness, readinessWord, 
 /** A table line's bar in its state's colour (on a terminal): green copied, red failed, yellow served but not kept current, cyan at work
  *  (a table whose sync is off is copied as it asked: green). */
 export function paintBar(line: string, s: Style): string {
-  const colour = / its first sync failed: /.test(line) ? s.red : / NOT kept current /.test(line) ? s.yellow : / 100%  [\d,]+ rows · synced( · |$)/.test(line) ? s.green : s.cyan;
+  const colour = / its first sync failed: | NOT kept current, its sync failed /.test(line) ? s.red : / NOT kept current | (—|·) behind by /.test(line) ? s.yellow
+    : / 100%  [\d,]+ rows · synced( · |$)/.test(line) ? s.green : s.cyan;
   return line.replace(/(█+)(░*)|(░+)/, (_m, full: string | undefined, empty: string | undefined, none: string | undefined) =>
     full !== undefined ? `${colour(full)}${s.dim(empty ?? "")}` : s.dim(none ?? ""));
 }
@@ -233,10 +234,10 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
     let fraction: number, what: string;
     if (r === 0) {
       fraction = 1;
-      const age = keptAge(t, now);
+      const age = keptWords(t, now);
       what = `${n(t.copy?.rowsCopied ?? 0)} rows · synced${t.copy?.retired ? ` · ${t.copy.retired}` : ""}${age ? ` · ${age}` : ""}`;
     }
-    else if (r === 1) { fraction = 1; what = `its first sync failed: ${firstLine(t.error!)}`; }
+    else if (r === 1) { fraction = 1; what = t.copy?.phase === "done" ? copiedFailedText(t, now) : `its first sync failed: ${firstLine(t.error!)}`; }
     else if (r === 2) {
       const c = copyingText(t.copy!.rowsCopied, t.rows, t.copy!.progress);
       fraction = c.fraction ?? 0;
@@ -257,12 +258,13 @@ export function tableLines(s: RunState, now: number = Date.now()): string[] {
  * everything the database wrote); a table being caught up, copied again or not streamed says why it is NOT kept current.
  * The Stream section says the rest of the stream.
  */
-export function keptAge(t: Pick<TableState, "table" | "kept">, now: number = Date.now()): string | null {
+export function keptAge(t: Pick<TableState, "table" | "kept" | "sync">, now: number = Date.now()): string | null {
   const k = t.kept;
   if (k?.by === "replication") {
     if (k.state !== "streamed") return `NOT kept current (${k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`}): ${k.why ?? "it is not streamed yet"}`;
     const at = `replicated, at ${k.position}, ${k.syncedAt === null ? "not synced yet" : agoText(k.syncedAt, now)}`;
-    return k.notRunning === null ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
+    // behind: `keptWords` says it, with the stream not running as its why
+    return k.notRunning === null || t.sync?.state === "behind" ? at : `${at} — NOT kept current now, the stream is not running: ${k.notRunning}`;
   }
   if (k?.by !== "poll") return null;
   const synced = k.syncedAt === null ? "never synced" : `last synced ${agoText(k.syncedAt, now)}`;
@@ -270,6 +272,34 @@ export function keptAge(t: Pick<TableState, "table" | "kept">, now: number = Dat
   // the line to write as well as the command: a project an older Mason polled is off after the upgrade
   if (k.sync.mode === "off") return `sync: off, ${synced} — mason sync ${tableArg(t.table)} syncs it now; sync: poll 5m on its entry polls it`;
   return `polled every ${k.sync.every}, ${k.syncedAt === null ? "not polled yet" : `last ${agoText(k.syncedAt, now)}`}`;
+}
+
+/**
+ * WHAT A SERVED TABLE'S LINE SAYS AFTER `synced`: how it is kept and how old it is (`keptAge`, by the kind of its
+ * keeping), then — for EVERY kind, from the one word (`tables[].sync.state`, src/cli/readiness.ts behindOf), never a
+ * second reading of `kept` — behind by how much and why. A kind keptAge has no words for (recopy) still says behind;
+ * a why its words already say is not said twice. Null: nothing to say.
+ */
+export function keptWords(t: Pick<TableState, "table" | "kept" | "sync">, now: number = Date.now()): string | null {
+  const age = keptAge(t, now), s = t.sync;
+  if (s?.state !== "behind" || s.behindBySeconds == null) return age;
+  const why = s.behindWhy ?? "its next sync is late";
+  const by = `behind by ${duration(s.behindBySeconds)}${age !== null && age.includes(why) ? "" : `: ${why}`}`;
+  return age === null ? by : `${age} — ${by}`;
+}
+
+/**
+ * A SERVED TABLE WHOSE SYNC FAILED (its first sync succeeded; its poll, catch-up, stream or publication check did not:
+ * issues 100, 82): served as of its age, NOT kept current, why — how it is kept, when it says it is not kept current
+ * now (`keptAge`: a catch-up waiting out its back-off, a table the publication does not carry, with the way out), else
+ * its error's first line — never "its first sync failed".
+ */
+function copiedFailedText(t: TableState, now: number): string {
+  const k = t.kept;
+  const reason = k?.by === "replication" ? (k.state !== "streamed" ? k.why : k.notRunning === null ? null : `the stream is not running: ${k.notRunning}`)
+    : k?.by === "poll" || k?.by === "recopy" ? k.pending ?? null : null;
+  const asOf = t.sync?.asOf ?? (t.kept && t.kept.by !== "generated" && t.kept.by !== "recopy" ? t.kept.syncedAt : null) ?? t.sync?.syncedAt ?? null;
+  return `${n(t.copy?.rowsCopied ?? 0)} rows · synced · NOT kept current, its sync failed (${asOf === null ? "never synced" : `last synced ${agoText(asOf, now)}`}): ${reason ?? firstLine(t.error!)}`;
 }
 
 /** A span of seconds as the stream's lines say it: `0.3 s` under ten seconds, then as a wait reads (`duration`). */
@@ -351,9 +381,13 @@ const STATUS_USAGE = `usage: mason status [--json]
            source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
            replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
            says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
-           bytes, key, added, addedColumns, copy, error, kept, sync: { state (synced, syncing, failed, waiting), syncedAt (when
+           bytes, key, added, addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
+           publication check keeping a synced table current; null otherwise), kept, sync: { state (synced, syncing,
+           behind: served and kept but older than its sync: promises, failed, waiting), syncedAt (when
            it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
-           ageSeconds (how long ago that was) }, … }], totals: { added, copied, failed, rows (the synced tables' rows),
+           ageSeconds (how long ago that was), asOf (the time the synced data holds the database as of: kept's syncedAt),
+           promisedSeconds (the age its sync: promises not to pass; null: sync: off promises nothing), behindBySeconds
+           (how far past it, 0 when not; null when nothing is promised), behindWhy (why, while behind; else null) }, … }], totals: { added, copied, failed, rows (the synced tables' rows),
            syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
            uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
            or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file),
@@ -379,9 +413,12 @@ const STATUS_USAGE = `usage: mason status [--json]
            else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
            now), pending (only when it applies: why it is not kept current now, its phase included: it waits for
            its first sync, it is being read whole, its first sync failed, it is read again whole, caught up first) }
-           or { by: recopy, copiedAt, pending (only when it applies, as the poll's) }
+           or { by: recopy, copiedAt, syncedAt, pending (only when it applies, as the poll's) }
            or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
-           notRunning (why the stream is not running, null when it is) }; with Mason stopped: { running: false, project, source: { name,
+           notRunning (why the stream is not running, null when it is) }; each with promisedSeconds (the age of
+           its synced data past which it is behind: poll, its interval plus the larger of 60 s and twice its last poll;
+           replication, 120 s; off, null) and lateWhy (what would make it late now: the pass's or its own poll's
+           time, which Mason waits four times, the stream not running); with Mason stopped: { running: false, project, source: { name,
            file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
            { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
            exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the
@@ -1301,7 +1338,7 @@ export function removedReport(removed: readonly string[], file: string, o: { run
 /** An added table as mason wait --json says it: its copy, its error, and how it is kept current, as the run's state has
  *  them (mason status --json's own fields, never derived again here) */
 export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "error" | "kept"> {
-  return { table: t.table, copy: t.copy, error: t.error, ...(t.kept ? { kept: t.kept } : {}) };
+  return { table: t.table, copy: t.copy, error: t.error, ...(t.kept ? { kept: t.kept } : {}), ...(t.sync ? { sync: t.sync } : {}) };
 }
 
 const WAIT_USAGE = `usage: mason wait [<generated table>] [--timeout <seconds>] [--json]
@@ -1321,14 +1358,17 @@ const WAIT_USAGE = `usage: mason wait [<generated table>] [--timeout <seconds>] 
                         rate, the seconds left, while its chunks are read }; kept as mason status --json says it —
                         { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its last whole read
                         or poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why
-                        it is not kept current now, its phase included),
+                        it is not kept current now, its phase included; sync as mason status --json says it: its state —
+                        synced, syncing, behind, failed, waiting — asOf, promisedSeconds, behindBySeconds, behindWhy),
                         stream (replication mode: where the stream is, as mason status --json says it), error (on a
                         failure or a timeout: { code, message, next }), next }
                         Named, a generated table: the same ready, failed, waiting, timedOut, error and next, tables
                         empty, and generatedTable (as mason status --json's generatedTables says it: its state,
                         behindSeconds, behindSince — when the oldest change not in it was committed, null: none)
 
-  Exit status: 0 ready; 1 a first sync failed, or the generated table's run failed, or it or a parent was refused
+  Exit status: 0 ready (a table behind what its sync: promises is said on its line, and ready); 1 a first sync failed,
+  or the sync keeping a synced table current failed (its poll, its catch-up, the stream, or a named publication that
+  does not carry it), or the generated table's run failed, or it or a parent was refused
   before it was built (printed, with what to do; Mason tries a failed one again by itself); 124 timed out.
   A generated table that serves and holds everything synced is ready (0) though its last run failed: after editing its
   file, read mason status for whether the new definition was refused or failed.

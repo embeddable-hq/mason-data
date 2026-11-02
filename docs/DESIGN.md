@@ -2262,6 +2262,90 @@ A brief names the shapes its tests must hold because on each of the three PRs of
 a shape its brief had left out, and the tests its runs use because one issue's agents spent 36 min proving a whole slow
 file twice.
 
+### The oracle's legs and their runners (2026-11-02, issue 326)
+
+**Decision: accept the runners' spread, and hold the legs' balance in one machine's seconds.** PR 321 split the oracle's
+statements by measured cost, and its legs still finished minutes apart. The gap is the runners, not the split: hosted
+runners drew for one run differ by up to 1.6x in speed, and the setup, the same work in every leg, measures by how much.
+Each leg's statements and stages, scaled by the legs' mean setup over its own (`legScales` in `scripts/oracle-legs.ts`,
+the one scale `--weights` reads too), were within 36 s of each other in three runs, where as run they were up to 171 s
+apart:
+
+| run | setup, leg 1 / 2 | statements + stages as run | scaled | job wall, leg 1 / 2 | slowest job |
+|---|---|---|---|---|---|
+| 41393151088 | 55.2 / 68.3 s | 520 / 673 s (152 apart) | 582 / 608 s (26) | 612 / 783 s | unit (2), 1067 s |
+| 41396664763 | 69.2 / 53.9 s | 649 / 496 s (153) | 577 / 566 s (11) | 759 / 594 s | unit (2), 1110 s |
+| 41396965861 | 68.7 / 63.1 s | 711 / 687 s (24) | 682 / 717 s (36) | 825 / 796 s | rest shard 2, 845 s |
+| 41400764545 (this PR) | 68.3 / 53.8 s | 711 / 487 s (225) | 636 / 552 s (84) | 825 / 585 s | unit (2), 1069 s |
+| 41402798966 (this PR, new weights) | 68.3 / 42.5 s | 731 / 403 s (328) | 593 / 526 s (67) | 850 / 484 s | unit (2), 1090 s |
+| 41389723050 | 68.3 / 42.3 s | (1000 ms weights) | | | |
+| 41391539636 | | (1000 ms weights) | 116 s apart | leg 1 858 s | oracle leg 1, 19 s over rest shard 2 |
+
+Nor does the gap set CI's wall time: in five runs of six (with 41393819569, unit (2) 1090 s, and 41393681888, unit (2)
+1032 s) another job was slower than both legs, so a perfect balance would have saved 0 s in five and 19 s in one.
+
+**The detector and its response.** The folder check `node scripts/oracle-legs.ts <folder>`, the `integration (oracle)`
+job's last step, prints after its coverage verdict one line a leg (its setup, its statements and stages as run and
+scaled, its runner's CPU, which a leg's report now carries in `times.cpu`) and one line of the gap, as run and scaled.
+Past `LEGS_APART_MS` (60 s, scaled) it prints a GitHub warning naming `node scripts/oracle-legs.ts --weights <run-id>`.
+It never moves the exit code: balance is a cost, never coverage, and a red required check on runner noise would be a
+flake. When it cannot tell (a report without times, a setup missing or 0, a leg missing) it says "not measured", never
+a gap of 0. The CPU is never in `measured`, which `--write` holds equal across the legs: two legs on different CPUs
+would refuse to write.
+
+The PR's own run is the first to name its runners: leg 1 on an AMD EPYC 7763, leg 2 on an AMD EPYC 9V74, 4 vCPUs each.
+The setups were 1.27x apart and the statements and stages 1.46x, so the setup under-corrected the faster CPU, and the
+scaled gap (84 s) passed the target: the warning fired, and the weights were rewritten from that run as it says. The
+next run, on those weights, drew an EPYC 7763 and an EPYC 9V45: setups 1.61x apart, statements and stages 1.81x, scaled
+67 s apart, warned again. In both, the leg on the newer CPU ran its statements faster than its setup says, so the scaled
+gap is at least partly that leg looking light, not the split: the setup is a weaker proxy for the statements' speed across
+CPU generations than across draws of one. Rewriting the weights again from each such run would chase the draw. Not known:
+how often the legs draw different generations, and a better proxy (a fixed piece of the statements' own work, timed in
+each leg); the CPU in each leg's report lets the next runs say. Until then the warning is read beside the two CPUs.
+
+**Rejected.** A shared queue, each leg taking the next statement as it frees: two hosted jobs share no state but
+artifacts, read only after a job ends, so it needs a coordinator they do not have; and one job running both halves on a
+4-vCPU runner is one runner doing both legs' work. A third leg: each leg pays about 35 s of job overhead and 78 s of
+setup, first sync and changes, so three legs are about 560 s on a mean runner and 700 s on a slow one, under rest shard
+2 and unit (2) either way: no wall-time gain while those are the critical path, for one more runner. Larger runners cost
+money, and are the owner's call.
+
+### The unit shards split by measured time (2026-11-02, issue 337)
+
+**Decision: the unit shards are weighed by each file's time as a CI run measured it, through the oracle legs'
+mechanism.** A unit shard's `node --test` reports twice: spec on stdout, as before, and `scripts/test-times.ts`, which
+keeps the runner's own event for each FILE (one `test:complete` at nesting 0, line 1, column 1, named for the file: its
+whole wall time, load and top-level awaits included, sent too for a file that fails to load), never a sum of its tests.
+The shard's record (`ran-unit-<n>.json`) carries those times, its wall time and its CPU;
+`node scripts/ci-shards.ts weights <run-id>` writes `tests/fixtures/unit-weights.json` from a finished run of the
+commit checked out, every file by path and any other at the median. `partition` and `APART` are unchanged; the hand
+table had gone stale (every unlisted file weighed 3 s, `tests/duck-generated.test.ts` among them). The rest shards keep
+their hand table (#345).
+
+**The detector and its response.** `verify unit`, the `checks` job's last step, prints after its coverage verdict each
+shard's wall time and CPU and the gap, and past `UNIT_APART_MS` (60 s, as run: nothing is alike across unit shards to
+scale by) a GitHub warning. It names `weights <run-id>` when a split can close the gap, and the file when it cannot:
+when the slowest shard's longest file alone took more than the target past the fastest shard, since no shard runs
+faster than its longest file. Never the exit code.
+
+**Measured: one file is the floor.** PR 346's runs, the first on the hand table in ms (the base's split), the second on
+weights from the first:
+
+| run | unit (1) / (2) / (3), job | the shard holding duck-generated | that file | oracle legs 1 / 2 | rest 1 / 2 |
+|---|---|---|---|---|---|
+| 41409999918 (hand weights) | 229 / 808 / 197 s | (2): 791 s, 36 files, EPYC 9V74 | 744 s | 849 / 873 s | 418 / 693 s |
+| 41411857532 (measured) | 369 / 392 / 874 s | (3): 860 s, 23 files, EPYC 9V74 | 853 s | 756 / 860 s | 409 / 838 s |
+
+The measured split took every other weight off the shard holding `tests/duck-generated.test.ts` (936 s of file time
+there, against 1357 s before) and brought the other two within 25 s of each other (352 and 376 s, on Xeon 8573C and
+8370C runners), but that file alone is more than a shard's mean of file time (about 826 s), so its shard is as slow as
+it is: 744 s on one draw of a runner and 853 s on another of the same CPU model. The unit jobs are not within a minute
+of each other, and the slowest is at the slower oracle leg (874 s against 860 s), not below it. Making that file faster
+or splitting it is #338's; until then the warning names it.
+
+**Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
+and their spread is worth a third leg or a queue.
+
 ## A libc order, read level by level
 
 Issue 128: under en_US.utf8 one value holding U+FE0F (`❤️`) or a Thai vowel refused a whole column's sort, group and
