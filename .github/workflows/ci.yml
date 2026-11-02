@@ -14,7 +14,9 @@
 #   integration (oracle)    oracle leg (1-2): each the copy, the rounds of changes and its share of the statements; the
 #                           check holds the legs to the whole (`scripts/oracle-legs.ts`)
 #
-# A shard's files are computed from the tree (`scripts/ci-shards.ts`), so a new file lands in one by itself. Only
+# A shard's files are computed from the tree (`scripts/ci-shards.ts`), so a new file lands in one by itself; the unit
+# shards are balanced by each file's time as a CI run measured it (tests/fixtures/unit-weights.json, rewritten by
+# `node scripts/ci-shards.ts weights <run-id>` when `checks` warns the shards ran more than a minute apart). Only
 # `build` and `unit` run on the runner alone: no Docker, no Postgres, no .env. The integration jobs run the real thing
 # against a Postgres service container: the copy and the poll, the stream (logical replication), `mason serve`'s whole
 # life, to_char, and the oracle — every statement answered by Mason held equal to what the Postgres it copies from
@@ -116,7 +118,8 @@ jobs:
           files=$(grep -rl '^#!/usr/bin/env bash' scripts/ || true)
           if [ -n "$files" ]; then shellcheck $files; else echo "no bash script under scripts/"; fi
 
-  # The unit tests, one shard of them a job: scripts/ci-shards.ts computes each shard's files from the tree.
+  # The unit tests, one shard of them a job: scripts/ci-shards.ts computes each shard's files from the tree, and records
+  # each file's time, the shard's wall time and its CPU in the shard's ran-unit-<n> artifact.
   unit:
     name: unit (${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -155,7 +158,8 @@ jobs:
           retention-days: 7
           overwrite: true
 
-  # REQUIRED. Fails unless `build` and every unit shard succeeded, and every test file ran in exactly one shard.
+  # REQUIRED. Fails unless `build` and every unit shard succeeded, and every test file ran in exactly one shard; then
+  # says how far apart the shards ran, and warns past a minute (never failing on it).
   checks:
     name: checks
     needs: [build, unit]

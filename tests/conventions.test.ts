@@ -208,7 +208,8 @@ export function packagesReached(entries: readonly string[], read: (file: string)
 
 test("what CI's final jobs run needs no npm ci: scripts/ci-shards.ts and scripts/oracle-legs.ts reach only Node's builtins", () => {
   const read = (f: string): string => fs.readFileSync(path.join(ROOT, f), "utf8");
-  assert.deepEqual(packagesReached(["scripts/ci-shards.ts", "scripts/oracle-legs.ts"], read), [], "the final jobs of ci.yml have no node_modules: move this import behind what they run, or add npm ci to them");
+  // the unit shards' timing reporter is loaded by its path (`--test-reporter=`), never imported, so it is named here
+  assert.deepEqual(packagesReached(["scripts/ci-shards.ts", "scripts/oracle-legs.ts", "scripts/ci-layout.ts", "scripts/test-times.ts"], read), [], "the final jobs of ci.yml have no node_modules: move this import behind what they run, or add npm ci to them");
   const workflow = read(".github/workflows/ci.yml");
   for (const gate of ["checks", "integration-oracle", "integration-rest"]) {
     const job = new RegExp(`\\n  ${gate}:\\n[\\s\\S]*?(?=\\n  [\\w-]+:\\n|$)`).exec(workflow)?.[0];
@@ -662,13 +663,17 @@ test("the models guard catches the real thing", () => {
 const PATH_SCANNED = ["src", "tests", "scripts", "docs", ".claude", "README.md", "CLAUDE.md", "cli", "deploy"];
 /** Paths named on purpose that are not files here, each with its reason. None today. */
 const PATH_EXCEPTIONS: ReadonlyMap<string, string> = new Map();
+/** Tracked files whose paths are data, not a pointer for a reader, each with its reason */
+const PATH_UNSCANNED: ReadonlyMap<string, string> = new Map([
+  ["tests/fixtures/unit-weights.json", "each unit file's time as a CI run measured it (scripts/ci-shards.ts weights): an entry for a file gone costs balance, never coverage, until the next run rewrites it"],
+]);
 export function namedPaths(text: string): Array<{ line: number; path: string }> {
   const re = /(?<![\w./-])(?:src|tests|scripts|docs|examples)\/[A-Za-z0-9_./-]+\.(?:ts|mjs|js|md|yml|json|html|sh|sql)\b/g;
   return text.split("\n").flatMap((l, i) => [...l.matchAll(re)].map((m) => ({ line: i + 1, path: m[0] })));
 }
 
 test("a path a comment or a doc names exists in this tree", () => {
-  const files = execFileSync("git", ["ls-files", "-z", ...PATH_SCANNED], { cwd: ROOT, encoding: "utf8" }).split("\0").filter(Boolean);
+  const files = execFileSync("git", ["ls-files", "-z", ...PATH_SCANNED], { cwd: ROOT, encoding: "utf8" }).split("\0").filter((f) => f !== "" && !PATH_UNSCANNED.has(f));
   assert.ok(files.length >= 100, `expected at least 100 tracked files, got ${files.length}`);
   const missing = files.flatMap((f) => namedPaths(fs.readFileSync(path.join(ROOT, f), "utf8"))
     .filter((p) => !PATH_EXCEPTIONS.has(p.path) && !fs.existsSync(path.join(ROOT, p.path)))
@@ -895,6 +900,9 @@ const BARE_REFUSALS_WHEN_GUARDED = [
   "standard_conforming_strings off is not supported: a string literal is read as Postgres reads it by default",
   "EXPLAIN of this statement is not supported: a SELECT is explained",
   "Mason cannot find the statement this EXPLAIN explains in its text (a Mason gap: report it, with the statement)",
+  // Postgres's own refusal, word for word (plancache.c), of a prepared statement whose result the search_path moved:
+  // no gap of Mason's, Postgres answers it the same (GitHub issue 63)
+  "cached plan must not change result type",
 ];
 
 test("a statement refused 0A000 by the listener names its gap (src/duck/gaps.ts): no new bare refusal", () => {
@@ -954,8 +962,9 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   const enclosing = (at: number): string => [...src.slice(0, at).matchAll(/\n {2}(?:private |readonly |static )*(?:async )?(\w+)\(/g)].at(-1)?.[1] ?? "?";
   const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
   // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request;
-  // planner: a generated table's SQL, planned as no session, and refused where it reads a session's setting)
-  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "showAll", "showStatement", "validateElsewhere"].sort(),
+  // planner: a generated table's SQL, planned as no session, and refused where it reads a session's setting;
+  // canonicalElsewhere: a SET's value read by the catalog's own check, as validateElsewhere's)
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "showAll", "showStatement", "validateElsewhere", "canonicalElsewhere"].sort(),
     "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
@@ -980,7 +989,8 @@ test("a transaction's end is one method, and every SET reaches the settings thro
   const callers = (pattern: RegExp): string[] => [...new Set([...src.matchAll(pattern)].map((m) => enclosing(m.index)))].sort();
   assert.deepEqual(callers(/\bthis\.tx = "failed"/g), ["abortTransaction"], "a block failed beside abortTransaction: its settings stay");
   assert.deepEqual(callers(/\bthis\.vars = /g), ["endTransaction", "resetAll"], "the settings replaced beside a transaction's end");
-  assert.deepEqual(callers(/\bthis\.setParameter\(/g), ["applySetting", "commandLineOptions", "resetParameter", "startup"], "a setting moved beside applySetting: a transaction cannot undo it");
+  assert.deepEqual(callers(/\bthis\.setParameter\(/g), ["applySetting", "commandLineOptions", "password", "resetParameter", "startup"], "a setting moved beside applySetting: a transaction cannot undo it");
+  // (password: a startup packet's DateStyle, read by the catalog once the password is read, before any transaction: a startup value)
   assert.deepEqual(callers(/\bthis\.resetParameter\(/g), ["applySetting"]);
   assert.deepEqual(callers(/\bthis\.resetAll\(/g), ["applySetting", "discard"]);
   assert.deepEqual(callers(/\bthis\.settingsTx\b/g), ["endTransaction", "settingsAtStart"], "what a transaction restores is read for no answer");
@@ -1106,8 +1116,8 @@ test("every caller of duck.plan passes the session's grants: a statement planned
   // nothing; `planner` plans a generated table's SQL, which no user runs, and a user reads that table through a role.
   // Named whole, so any other call without them, a second of either kind included, fails here
   assert.deepEqual(planned.flatMap((f) => planCallsWithoutGrants(f.src).map((c) => `${f.name}: ${c}`)),
-    ['src/api/postgres/server.ts: duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], "public", "UTC", this.userTypes(), false, null, relations, true)',
-      'src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], "public", "UTC", this.userTypes(), false, undefined)']);
+    ['src/api/postgres/server.ts: duck.plan(catalog, text, stmt as NonNullable<RawStmt["stmt"]>, 0, [], GENERATED_SESSION, this.userTypes(), false, null, relations, true)',
+      'src/api/postgres/server.ts: this.options.duck.plan((b) => this.catalog.run(b), probe, stmt, 0, [], GENERATED_SESSION, this.userTypes(), false, undefined)']);
 });
 
 test("the duck.plan guard would catch the real thing", () => {
@@ -1457,4 +1467,34 @@ test("a refusal raised at a row quotes no value of the row (issue 128)", () => {
   assert.deepEqual(rowInRefusals('throw new PgEvalError("0A000", `words (${gapMark("x")})`); throw new PgEvalError("22P02", `Postgres quotes ${s}`);'), []);
   assert.deepEqual(rowInRefusals('function other() { return { code: "0A000", message: `a statement ${x}` }; }'), []);
   assert.deepEqual(rowInRefusals('function markedError() { return { code: "0A000", message: "a jsonb holds " + `the string ${s}` + " (Mason gap x)" }; }'), ["s"]);
+});
+
+// SESSION STATE (GitHub issue 253): a session's TimeZone, search_path and DateStyle are ONE value built in ONE place
+// (server.ts Session.sessionState, from sessionSetting) and applied by ONE applier per engine: the catalog Postgres's
+// (src/api/postgres/catalog.ts sessionSetSql) and DuckDB's (src/duck/store.ts SessionSetup.settle), pg-eval told both
+// from it (src/duck/pg-eval-worker.ts). A SET of one of them written anywhere else is a second derivation.
+const SESSION_SET_RE = /\bSET\s+(?:LOCAL\s+)?(?:TimeZone|search_path|DateStyle|IntervalStyle)\s*=\s*(?!\s)(?!pg_catalog\b|postgres\b)/gi;
+// gaps.ts: the registry's words, a way out a person reads, never SQL run
+const SESSION_APPLIERS = new Set(["src/duck/store.ts", "src/duck/pg-eval-worker.ts", "src/duck/gaps.ts"]);
+test("session state: no SET of TimeZone, search_path, DateStyle or IntervalStyle in src/ outside the appliers (Mason's own `SET LOCAL search_path = pg_catalog` lookups aside)", () => {
+  const offending: string[] = [];
+  for (const { name, src } of scannedFiles(["src"])) {
+    if (SESSION_APPLIERS.has(name)) continue;
+    const code = withoutComments(src);
+    for (const m of code.matchAll(SESSION_SET_RE)) offending.push(`${name}:${code.slice(0, m.index).split("\n").length}: ${m[0]}`);
+  }
+  assert.deepEqual(offending, [], "apply the session's state through catalog.ts sessionSetSql (the catalog) or store.ts SessionSetup.settle (DuckDB)");
+});
+
+test("session state: the session's zone, path and order are read from Vars only where setParameter and resetParameter keep them; every other reader asks sessionState", () => {
+  const src = fs.readFileSync(path.join(ROOT, "src/api/postgres/server.ts"), "utf8");
+  const ranges = ["  private setParameter(", "  private async resetParameter("].map((start) => {
+    const at = src.indexOf(start);
+    assert.ok(at >= 0, `server.ts has no ${start}`);
+    return [at, src.indexOf("\n  }\n", at)] as const;
+  });
+  const reads = [...src.matchAll(/\bthis\.vars\.(?:timeZone|searchPath|dateStyle)\b/g)].map((m) => m.index);
+  assert.ok(reads.length > 0, "the detector finds the setters' own writes");
+  const outside = reads.filter((i) => !ranges.some(([from, to]) => i > from && i < to)).map((i) => src.slice(0, i).split("\n").length);
+  assert.deepEqual(outside, [], "read the session's state by sessionState() (one reader, sessionSetting's)");
 });

@@ -567,8 +567,6 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["function:941", "the function mod(integer,integer)"],
   ["function:946", "the function text(\"char\")"],
   ["function:947", "the function mod(bigint,bigint)"],
-  ["function:ext:current_setting(text)", "the function current_setting(text) (an extension's)"],
-  ["function:ext:current_setting(text,boolean)", "the function current_setting(text,boolean) (an extension's)"],
   ["node:AGGREF", "an aggregate"],
   ["node:ALIAS", "an alias"],
   ["node:ARRAYCOERCEEXPR", "a cast of an array's elements"],

@@ -19,6 +19,7 @@ import type { Node } from "libpg-query";
 import { gapRefusal, type StatementError } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { catalogRows, type PgAnalysis } from "./analyze.ts";
+import { sessionSetSql, type SessionState } from "../api/postgres/catalog.ts";
 import type { TreeValue } from "./pgtree.ts";
 import { treeDifference } from "./rewrite.ts";
 
@@ -69,7 +70,7 @@ function nodes(root: unknown): Array<{ holder: Body | unknown[]; key: string | n
  * The statement with every view it reads replaced by its definition, printed; null when it reads no view. Throws a
  * StatementError (gap view-forms) where the replacement could read otherwise than Postgres does.
  */
-export async function expandViews(catalog: Catalog, stmt: Node, analysis: PgAnalysis, searchPathSql: string): Promise<{ text: string; stmt: Node } | null> {
+export async function expandViews(catalog: Catalog, stmt: Node, analysis: PgAnalysis, under: SessionState): Promise<{ text: string; stmt: Node } | null> {
   const read = viewsRead(analysis.tree);
   if (read.size === 0) return null;
   const tree = structuredClone(stmt) as unknown as Body;
@@ -79,7 +80,7 @@ export async function expandViews(catalog: Catalog, stmt: Node, analysis: PgAnal
   // each name the statement writes, resolved as Postgres resolves it under the session's search_path
   const spelled = ranges.map((r) => [r.body.catalogname, r.body.schemaname, r.body.relname].filter((x): x is string => typeof x === "string").map(quote).join("."));
   const resolved = spelled.length === 0 ? [] : await catalogRows(catalog,
-    `SET LOCAL search_path = ${searchPathSql}, pg_catalog; SELECT v.i::text, c.oid::text, n.nspname, c.reltype::text FROM (VALUES ${spelled.map((s, i) => `(${i}, ${literal(s)})`).join(", ")}) AS v(i, name) ` +
+    `${sessionSetSql(under, true)}; SELECT v.i::text, c.oid::text, n.nspname, c.reltype::text FROM (VALUES ${spelled.map((s, i) => `(${i}, ${literal(s)})`).join(", ")}) AS v(i, name) ` +
     `JOIN pg_class c ON c.oid = to_regclass(v.name) JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'v'`);
   const asView = new Map(resolved.map(([i, oid, schema, rowType]) => [Number(i), { oid: Number(oid), schema: schema!, rowType: Number(rowType) }]));
   // the names that are views must be the views Postgres read: a WITH query of a view's name is one or the other

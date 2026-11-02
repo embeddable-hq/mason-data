@@ -48,17 +48,18 @@
  * builtins (tests/conventions.test.ts).
  */
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SHARDS, reportName } from "./ci-layout.ts";
+import { SHARDS, entriesText, reportName, runArtifacts, runProblems } from "./ci-layout.ts";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import { decisionKey, staleDecisions } from "../tests/integration/oracle/known.ts";
 import { fixtureTally, fixtureText, type GapCounts, type GapTally } from "../tests/integration/oracle/gap-tally.ts";
 import { shapeProblems, sumShapeTallies, type ShapeTally } from "../tests/integration/oracle/shape-names.ts";
+
+// the run check lives in ci-layout.ts, which scripts/ci-shards.ts shares; said from here too, for what imports it from here
+export { runProblems };
 
 /** the three times every statement is asked; the shapes and the DuckDB-alone pass belong to the first */
 export const PHASES = ["after the copy", "after changes round 1", "after changes round 2"] as const;
@@ -273,9 +274,7 @@ export function weightsFromLegs(reports: readonly LegReport[], want: number, fro
 
 /** the weights file's text: one listed text a line, so its diff can be read */
 export function weightsText(w: Weights): string {
-  const head = Object.entries({ from: w.from, above: w.above, stages: w.stages, default: w.default }).filter(([, v]) => v !== undefined).map(([k, v]) => `  ${JSON.stringify(k)}: ${JSON.stringify(v)},\n`).join("");
-  const listed = Object.entries(w.statements).map(([k, x]) => `    ${JSON.stringify(k)}: ${JSON.stringify(x)}`);
-  return `{\n${head}  "statements": {${listed.length === 0 ? "" : `\n${listed.join(",\n")}\n  `}}\n}\n`;
+  return entriesText({ from: w.from, above: w.above, stages: w.stages, default: w.default }, "statements", w.statements);
 }
 
 /** `--weights`: tests/fixtures/oracle-weights.json under `root` from the reports in `dir`, and what to say; nothing is
@@ -455,15 +454,6 @@ export function readReports(dir: string): LegReport[] {
 
 export const VERIFIED_FILE = "src/duck/verified.ts", FIXTURE_FILE = "tests/fixtures/oracle-duckdb-alone.json";
 
-/** Why a run's legs are not this tree's, from `gh run view <id> --json headSha,status,conclusion`: a run of another
- *  commit (an earlier push, another branch) measured another tree, and a run still going may have no legs yet */
-export function runProblems(view: { headSha?: string; status?: string; conclusion?: string | null }, headSha: string): string[] {
-  const problems: string[] = [];
-  if (view.headSha !== headSha) problems.push(`the run is of commit ${view.headSha ?? "unknown"}, where this checkout is at ${headSha}: use the run of this commit's push (gh run list --commit ${headSha}), or check out ${view.headSha ?? "its commit"}`);
-  if (view.status !== "completed") problems.push(`the run has not finished (${view.status ?? "unknown"}): wait for it, then run this again`);
-  return problems;
-}
-
 /** `--write`: the files under `root` from the reports in `dir`, in a whole run's order, and what to say. Nothing is
  *  written when the legs are not the whole. The fixture is written first, as a whole run writes it before its other
  *  assertions; then a stale decision or a dead gap writes no src/duck/verified.ts, as a whole run fails on them before
@@ -492,15 +482,10 @@ if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLTo
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   /** the folder of a run's `ran-oracle-*` artifacts, downloaded once the run is of this commit and finished; a folder as given */
   const legsOf = (from: string): string => {
-    if (!/^\d+$/.test(from) || fs.existsSync(from)) { console.log(`oracle legs: ${from} is a folder, not a run: nothing checks that its legs ran on this checkout's commit`); return from; }
-    const view = JSON.parse(execFileSync("gh", ["run", "view", from, "--json", "headSha,status,conclusion"], { cwd: root, encoding: "utf8" })) as Parameters<typeof runProblems>[0];
-    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-    const wrong = runProblems(view, head);
-    if (wrong.length > 0) { for (const p of wrong) console.error(`oracle legs: run ${from}: ${p}`); console.error("oracle legs: nothing written"); process.exit(1); }
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-legs-"));
-    console.log(`oracle legs: downloading the ran-oracle-* artifacts of run ${from} into ${dir}`);
-    execFileSync("gh", ["run", "download", from, "--pattern", "ran-oracle-*", "--dir", dir], { cwd: root, stdio: "inherit" });
-    return dir;
+    const got = runArtifacts(from, "ran-oracle-*", root, "oracle legs", "legs");
+    if ("err" in got) { for (const l of got.err) console.error(l); process.exit(1); }
+    for (const l of got.out) console.log(l);
+    return got.dir;
   };
   const say = (r: { code: 0 | 1; out: string[]; err: string[] }): never => {
     for (const l of r.out) console.log(l);
