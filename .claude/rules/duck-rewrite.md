@@ -418,3 +418,8 @@ again before each review. Its Learn step adds to this list; each bullet names th
   TABLE t ORDER BY 2 FETCH FIRST 2 ROWS WITH TIES`, `SELECT b FROM t UNION ALL SELECT d FROM t ORDER BY 1`, `SELECT
   DISTINCT a FROM t ORDER BY a FETCH FIRST 2 ROWS WITH TIES`): a commit built from a stale tree, overwriting files
   whole and undoing a merged PR's code, tests, rules bullets and release notes; `branch-reverts-merged-work` (PR 272).
+- An exact numeric key (a quotient over `numeric(30,20)`, `x / 1`, `c / 3`) in a GROUPED query, under each rule that
+  builds one: ORDER BY, FETCH FIRST … WITH TIES, min / max, DISTINCT ON (`SELECT x / 1 AS q, count(*) FROM bigdec GROUP
+  BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES`, also by `GROUP BY x / 1`, `GROUP BY q`, with HAVING, a rank()
+  OVER beside it, two keys, an empty table): the key built without its query's groups, reading the ungrouped column
+  (42803 where Postgres answers); `exact-key-built-outside-its-group` (PR 341).
