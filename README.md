@@ -80,6 +80,10 @@ The demo shop has four tables: `customers`, `products`, `orders` and `order_item
 (`sync: poll 5s`), so `mason status` shows Mason keeping up. Mason reads the demo database the same way it reads
 yours: over the Postgres protocol.
 
+The demo also has a [generated table](#generated-tables), `daily_orders`: orders and revenue per day and status,
+declared in `mason/generated_tables/daily_orders.yml` and kept current from the synced `orders`. `mason wait
+daily_orders` waits until it is built, and `mason status` shows it re-running as new orders arrive.
+
 ### Try with your data
 
 **1. Add your tables and start Mason.**
