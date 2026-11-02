@@ -53,7 +53,7 @@
  * Read-only on the source (CLAUDE.md): only SELECTs, through a READ_ONLY attachment.
  */
 import type { DuckStore } from "./store.ts";
-import { freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, SessionSetup } from "./store.ts";
+import { freeBytesAt, MASON_SCHEMA, NO_ROLE_SESSION, pgErrorOf, SessionSetup } from "./store.ts";
 
 /** the session the generated tables' run passes the Mason functions: no slot of the cancel table (src/duck/cancel.ts
  *  `slotOf`), so never cancelled through it; a stop interrupts the run's connection instead */
@@ -456,6 +456,75 @@ const COPY_CHUNK_MAX_PAGES = 131_072;
 export function chunkPages(pages: number, rows: number | null, targetRows: number = COPY_CHUNK_ROWS): number {
   if (pages <= 0 || rows === null || rows <= 0) return COPY_CHUNK_MAX_PAGES;
   return Math.min(COPY_CHUNK_MAX_PAGES, Math.max(1, Math.round(targetRows / (rows / pages))));
+}
+
+/**
+ * A CHUNK'S OUT-OF-LINE BYTES ARE BOUNDED BY THE MEMORY (issue 96: a table of ~20,000 rows of ~68 KB of `jsonb` out of
+ * line has a heap of a few hundred pages, so its rows ceiling was the whole table, read as ONE chunk, which ran out of
+ * a 7.8 GiB limit). A heap page holds a TOAST pointer of ~20 bytes where the row holds its value, so the rows ceiling
+ * (`chunkPages`, measured on heap rows) cannot see what a chunk reads; the source's catalog can: its TOAST table's bytes
+ * (`pg_table_size` of `reltoastrelid`), a heap page's share of them, read each attempt (`Sync.outOfLineBytes`). The
+ * ceiling is then at most `budget / out-of-line bytes a page` pages, at least one: the budget is the memory limit
+ * (`store.memoryLimitBytes`) times `COPY_CHUNK_MEMORY_SHARE`, shared by the readers that may read at once
+ * (`MASON_COPY_PARALLEL`). A table with nothing out of line gets exactly the rows ceiling.
+ *
+ * MEASURED (DuckDB 2.0.0, `duckdb_memory()` sampled every 50 ms; docs/DESIGN.md "Large values out of line"): a chunk
+ * of `jsonb` held ~5.5 times its bytes on the source while it read (366 MiB for one 67 MB page), one of uncompressed
+ * text 1 to 2 times; so a chunk is given an eighth of the limit, the rest left to the readers beside it, the stream,
+ * the polls and the queries, and a chunk that still runs out goes on smaller (`readChunks`).
+ */
+export const COPY_CHUNK_MEMORY_SHARE = 1 / 8;
+/** the bytes one reader's chunk may read out of line: the memory limit's share (`COPY_CHUNK_MEMORY_SHARE`), split
+ *  between the readers that may read at once */
+export function chunkBudgetBytes(memoryLimitBytes: number, readers: number): number {
+  return (memoryLimitBytes * COPY_CHUNK_MEMORY_SHARE) / Math.max(1, readers);
+}
+/** THE CEILING of a chunk of a table of `pages` heap pages, about `rows` rows and `outOfLine` bytes out of line
+ *  (its TOAST table's; null: unknown): the rows ceiling (`chunkPages`), held to `budget` bytes out of line, at least
+ *  one page */
+export function chunkCeiling(pages: number, rows: number | null, outOfLine: number | null, budget: number, targetRows: number = COPY_CHUNK_ROWS): number {
+  const byRows = chunkPages(pages, rows, targetRows);
+  if (outOfLine === null || outOfLine <= 0 || pages <= 0) return byRows;
+  return Math.min(byRows, Math.max(1, Math.floor(budget / (outOfLine / pages))));
+}
+
+/**
+ * A SYNCED TABLE'S ROW GROUP MUST FIT IN MEMORY WHEN IT IS WRITTEN (measured on DuckDB 2.0.0): chunks of a few large
+ * rows each commit a small row group, and a checkpoint merges a table's small row groups into one of up to
+ * `ROW_GROUP_ROWS` rows, holding their values at once. When that does not fit, the checkpoint fails and DuckDB
+ * INVALIDATES the database (every table, until a restart; issue 371): 30 one-page chunks of 100 KB values (400 MiB)
+ * merged under 366 MiB of limit, and failed under 244 MiB (400 MiB) and 122 MiB (182 MiB committed). So a table whose
+ * out-of-line bytes in one row group are more than the limit over `COPY_CHECKPOINT_SHARE` is not synced, said with the
+ * way out (`tooLargeText`), before a page is read: at the base such a table failed loudly in its one chunk. The
+ * source's bytes are the stored ones, so a compressed value (a `jsonb`) is under-counted here.
+ */
+export const ROW_GROUP_ROWS = 122_880;
+export const COPY_CHECKPOINT_SHARE = 0.75;
+/** the out-of-line bytes one row group of the synced table would hold (null: rows or bytes unknown) */
+export function rowGroupOutOfLine(rows: number | null, outOfLine: number | null): number | null {
+  if (rows === null || rows <= 0 || outOfLine === null) return null;
+  return outOfLine * Math.min(1, ROW_GROUP_ROWS / rows);
+}
+
+/** WHY A TABLE IS NOT SYNCED IN THIS MEMORY (`readChunks`): its rows, the limit as set, and the ways out — in the
+ *  operator's words, never the engine's own remedies (its threads, its settings) */
+export function tooLargeText(source: string, what: string, memoryLimitBytes: number): string {
+  return `the rows of ${source} are too large for the memory the synced data may use: ${what}, in ${humanBytes(memoryLimitBytes)} ` +
+    `(MASON_DUCKDB_MEMORY; half the machine's RAM when unset). Raise MASON_DUCKDB_MEMORY and start mason again, or ` +
+    `mason add ${source} --columns … without its widest columns`;
+}
+
+/** A CHUNK'S RANGE GIVEN BACK to what is left to read (`readChunks`: its chunk ran out of memory and rolled back):
+ *  put among `gaps` in page order and joined to the gaps it meets, so the gaps still tile what no chunk committed —
+ *  no page twice, none skipped */
+export function giveBack(gaps: PageRange[], r: PageRange): void {
+  gaps.push({ ...r });
+  gaps.sort((a, b) => a.first - b.first);
+  for (let i = 0; i + 1 < gaps.length;) {
+    const a = gaps[i]!, b = gaps[i + 1]!;
+    if (a.end !== null && a.end === b.first) { gaps.splice(i, 2, { first: a.first, end: b.end }); continue; }
+    i++;
+  }
 }
 
 /**
@@ -3199,13 +3268,24 @@ export class Sync {
     const named = t.columns.map((c) => ident(c.name)).join(", ");
     const started = Date.now();
     const lanes: Lane[] = [this.rebuilder];
+    // ITS VALUES OUT OF LINE, from the source's catalog (`chunkCeiling`): read once an attempt, before any transaction
+    // of the copy (a begun copy's first read fixes its snapshot); sizing only, so a resumed copy reads it again
+    const outOfLine = await this.interruptible(this.rebuilder, () => this.outOfLineBytes(pgFrom));
+    const limit = this.store.memoryLimitBytes;
+    const ceilingOf = (pages: number): number => chunkCeiling(pages, t.rows, outOfLine, chunkBudgetBytes(limit, this.copyParallel), this.copyChunkRows);
+    // A ROW GROUP THE ENGINE COULD NOT WRITE (`COPY_CHECKPOINT_SHARE`): refused before a page is read, as the base's
+    // one chunk would have failed, rather than chunks committed into a checkpoint that invalidates the synced data
+    const grouped = recopy ? null : rowGroupOutOfLine(t.rows, outOfLine);
+    if (grouped !== null && grouped * COPY_CHECKPOINT_SHARE > limit) {
+      throw new Error(tooLargeText(t.source, `about ${humanBytes(grouped)} of its values out of line would be written together (one row group of up to ${ROW_GROUP_ROWS.toLocaleString("en-US")} rows)`, limit));
+    }
     if (recopy) await w.run("BEGIN TRANSACTION");
     try {
       let begun = from;
       if (begun === null) {
         if (!recopy) await w.run("BEGIN TRANSACTION");
         try {
-          begun = await this.interruptible(this.rebuilder, () => this.beginCopy(t, side, pgFrom));
+          begun = await this.interruptible(this.rebuilder, () => this.beginCopy(t, side, pgFrom, ceilingOf, outOfLine));
           if (!recopy) {
             await this.writeBegun(t, begun);
             await w.run("COMMIT");
@@ -3223,7 +3303,7 @@ export class Sync {
       // first chunks are a tenth of it, to measure, and every later one is what a reader reads in copyChunkSeconds at
       // the rate measured since — cut from what no committed chunk covers (`copyGaps`, `takeChunk`), so a copy resumed
       // reads exactly the ranges it did not commit, whatever size its chunks were
-      const ceiling = chunkPages(p.pages, t.rows, this.copyChunkRows);
+      const ceiling = ceilingOf(p.pages);
       const gaps = copyGaps(p.done);
       let rate: ChunkRate | null = null;
       // the source's page size, for the bytes a second its readers read (pg_relation_size is in bytes; pages are its unit)
@@ -3254,20 +3334,27 @@ export class Sync {
         failure ??= { error: e };
         for (const l of lanes) if (l.inFlight) l.conn.interrupt();
       };
+      // OUT OF MEMORY IN A CHUNK (53200, `pgErrorOf`; never 53400, the spill's ceiling, which is disk): its range is given
+      // back (`giveBack`) and the copy reads on with ONE reader (`sole`), each chunk at most half the one that ran out
+      // (`memoryPages`, which only shrinks in an attempt); a one-page chunk read alone that runs out fails the copy
+      let sole: number | null = null, memoryPages = Infinity;
       // the chunks since the last minute's line, and how long they took
       let lineAt = Date.now(), chunks = 0, chunkMs = 0;
       const reader = async (lane: Lane, k: number): Promise<void> => {
         const c = lane.conn;
         for (;;) {
           if (failure !== null) return;
+          if (sole !== null && sole !== k) return;
           const sizedBy = rate;
-          const range = takeChunk(gaps, p.pages, nextChunkPages(ceiling, sizedBy, this.copyChunkSeconds));
+          const range = takeChunk(gaps, p.pages, Math.min(memoryPages, nextChunkPages(ceiling, sizedBy, this.copyChunkSeconds)));
           if (range === undefined) return;
           const { first, end } = range;
           // its pages as counted when the copy began (an open-ended last chunk reads what the table grew by too)
           const chunkSize = Math.max(1, (end ?? p.pages) - first);
           const slot = { since: Date.now(), pages: chunkSize };
           live.reading.push(slot);
+          // read with no other chunk in flight, by the one reader the copy reads with
+          const alone = live.reading.length === 1 && (sole === k || readers === 1);
           live.untaken = gapPages(gaps, p.pages);
           live.chunkPages = nextChunkPages(ceiling, rate, this.copyChunkSeconds);
           const told = { source: t.source, first, end, reader: k, pages: chunkSize, ceiling, sizedBy };
@@ -3316,9 +3403,38 @@ export class Sync {
           } catch (e) {
             const at = live.reading.indexOf(slot);
             if (at >= 0) live.reading.splice(at, 1);
-            if (inTx) {
-              try { await c.run("ROLLBACK"); }
-              catch (r) { this.log(`a chunk of ${t.source}'s sync could not be rolled back after it failed (its connection is closed with the sync): ${r instanceof Error ? r.message : String(r)}`); }
+            // rolled back, so its connection reads on: a ROLLBACK out of memory itself (measured, with other readers'
+            // chunks in flight) is tried again while the others' memory is given back, for about two seconds
+            let rolledBack = !inTx;
+            for (let attempt = 0; inTx && !rolledBack; attempt++) {
+              try { await c.run("ROLLBACK"); rolledBack = true; }
+              catch (r) {
+                const said = r instanceof Error ? r.message : String(r);
+                // the engine ended the transaction itself (measured: "cannot rollback - no transaction is active" after a
+                // COMMIT, or a read, out of memory): nothing of the chunk is left to roll back
+                if (/no transaction is active/.test(said)) { rolledBack = true; break; }
+                if (attempt < 20 && pgErrorOf(r, "").fields.code === "53200") { await new Promise((ok) => setTimeout(ok, 100)); continue; }
+                this.log(`a chunk of ${t.source}'s sync could not be rolled back after it failed (its connection is closed with the sync): ${said}`);
+                break;
+              }
+            }
+            if (failure === null && !recopy && rolledBack && pgErrorOf(e, "").fields.code === "53200") {
+              giveBack(gaps, range);
+              live.untaken = gapPages(gaps, p.pages);
+              if (chunkSize <= 1 && alone) {
+                const rpp = live.rowsPerPage;
+                fail(new Error(tooLargeText(t.source, `one page of its table${rpp === null ? "" : ` (about ${Math.max(1, Math.round(rpp)).toLocaleString("en-US")} row(s))`}, read alone, ran out of memory`, limit)));
+                return;
+              }
+              const was = { sole, memoryPages };
+              sole ??= k;
+              memoryPages = Math.max(1, Math.min(memoryPages, Math.floor(chunkSize / 2)));
+              live.readers = 1;
+              live.chunkPages = Math.min(memoryPages, live.chunkPages);
+              if (was.sole === null || was.memoryPages !== memoryPages) {
+                this.log(`a chunk of ${chunkSize} page(s) of ${t.source} ran out of memory: reading on one chunk at a time, ${memoryPages} page(s) each`);
+              }
+              continue;
             }
             fail(e);
             return;
@@ -3338,9 +3454,13 @@ export class Sync {
       };
       // an interrupt sent before a reader's statement began is lost: sent again until every reader has stopped
       const again = setInterval(() => { if (failure !== null) for (const l of lanes) if (l.inFlight) l.conn.interrupt(); }, 50);
-      try { await Promise.all(lanes.map((lane, k) => reader(lane, k))); }
-      finally { clearInterval(again); }
+      try {
+        await Promise.all(lanes.map((lane, k) => reader(lane, k)));
+        // a range given back once the other readers had finished: the one reader left reads it
+        while (failure === null && sole !== null && gaps.length > 0) await reader(lanes[sole]!, sole);
+      } finally { clearInterval(again); }
       if (failure !== null) throw (failure as { error: unknown }).error;
+      if (gaps.length > 0) throw new Error(`the sync of ${t.source} ended with pages ${JSON.stringify(gaps)} unread (Mason bug: report it, with mason logs)`);
       if (recopy) await w.run("COMMIT");
       return { rows: p.rows, seconds: (Date.now() - started) / 1000, progress: p };
     } catch (e) {
@@ -3357,7 +3477,7 @@ export class Sync {
    *  extension's REPEATABLE READ snapshot; its xmin is the copy's watermark, as the change reader records one before its
    *  copy), the exact numerics' widths, the side table (NO KEY: no PRIMARY KEY or UNIQUE, so no index), and the heap's
    *  pages now (`pg_relation_size`, exact where `relpages` is an estimate) */
-  private async beginCopy(t: AddedTable, side: string, pgFrom: string): Promise<CopyProgress> {
+  private async beginCopy(t: AddedTable, side: string, pgFrom: string, ceilingOf: (pages: number) => number, outOfLine: number | null): Promise<CopyProgress> {
     const w = this.rebuilder.conn;
     const snapshot = this.mode !== "recopy" ? ((await w.runAndReadAll(`SELECT * FROM ${pq(SNAPSHOT_SQL)}`)).getRowsJS()[0] as [string, string])[0] : null;
     const described = await w.runAndReadAll(`DESCRIBE SELECT ${t.columns.map((c) => ident(c.name)).join(", ")} FROM ${SRC}.${ident(t.schema)}.${ident(t.table)}`);
@@ -3374,13 +3494,22 @@ export class Sync {
     await w.run(`CREATE SCHEMA IF NOT EXISTS ${ident(t.schema)}`);
     await w.run(`CREATE OR REPLACE TABLE ${side} (${defs.join(", ")})`);
     const pages = Number((await w.runAndReadAll(`SELECT * FROM ${pq(`SELECT (pg_relation_size(${pgLiteral(pgFrom)}::regclass) / current_setting('block_size')::int)::bigint`)}`)).getRowsJS()[0]![0]);
-    const ceiling = chunkPages(pages, t.rows, this.copyChunkRows);
+    const ceiling = ceilingOf(pages);
+    const byBytes = ceiling < chunkPages(pages, t.rows, this.copyChunkRows) && outOfLine !== null
+      ? ` for its ${humanBytes(outOfLine)} of values out of line in ${humanBytes(this.store.memoryLimitBytes)} of memory` : "";
     const firstSize = nextChunkPages(ceiling, null, this.copyChunkSeconds);
     const readers = this.mode === "recopy" ? 1 : Math.min(this.copyParallel, Math.max(1, Math.ceil(pages / firstSize)));
     this.log(`syncing ${t.source}${snapshot === null ? "" : ` as of the source's snapshot ${snapshot}: what commits after it is caught up by one poll once read`}; ` +
-      `${pages} page(s) in chunks sized to ~${this.copyChunkSeconds} s of reading each at the rate measured here (MASON_COPY_CHUNK_SECONDS; at most ${ceiling} page(s)), ` +
+      `${pages} page(s) in chunks sized to ~${this.copyChunkSeconds} s of reading each at the rate measured here (MASON_COPY_CHUNK_SECONDS; at most ${ceiling} page(s)${byBytes}), ` +
       `the first of ${firstSize} page(s) to measure it, ${readers === 1 ? "one at a time" : `${readers} at a time (MASON_COPY_PARALLEL), each a backend on the database`}`);
     return { snapshot, columns: columnsKey(t.columns), exact, filenode: null, pages, done: [], rows: 0 };
+  }
+
+  /** THE SOURCE TABLE'S VALUES OUT OF LINE, in bytes: its TOAST table's (`pg_table_size`, no index), 0 with none; the
+   *  one reading of it (`chunkCeiling`, `rowGroupOutOfLine`) */
+  private async outOfLineBytes(pgFrom: string): Promise<number> {
+    const r = await this.rebuilder.conn.runAndReadAll(`SELECT * FROM ${pq(`SELECT COALESCE((SELECT pg_table_size(reltoastrelid) FROM pg_class WHERE oid = ${pgLiteral(pgFrom)}::regclass AND reltoastrelid <> 0), 0)::bigint`)}`);
+    return Number(r.getRowsJS()[0]![0]);
   }
 
   /** what a copy was begun with, in its beginning's transaction (`CopyProgress`) */

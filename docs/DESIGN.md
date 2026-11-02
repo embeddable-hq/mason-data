@@ -130,6 +130,40 @@ four or five chunks of 1.3 – 2.7 s against a 0.5 s target to adapt. The estima
 rows sent the bar back to 0 % past it. **Where.** `src/duck/sync.ts` (`takeChunk`, `CopyLive`), `src/cli/commands.ts`;
 `tests/duck-copy-order.test.ts`.
 
+### Large values out of line (2026-11-02, issue 96)
+
+**Decision.** A chunk's ceiling is also held to what its pages hold OUT OF LINE: the source table's TOAST bytes
+(`pg_table_size(reltoastrelid)`, read from the catalog each attempt) a heap page's share of them, against an eighth of
+`store.memoryLimitBytes` split between `MASON_COPY_PARALLEL` readers, at least one page (`chunkCeiling`,
+`COPY_CHUNK_MEMORY_SHARE`); a table with nothing out of line keeps the rows ceiling exactly. A chunk that still runs out
+of memory (53200, `pgErrorOf`, a commit that cannot pin a block included; never 53400) rolls back, its range is given
+back (`giveBack`), and the copy reads on with one reader, each chunk at most half the one that ran out; a one-page
+chunk read alone that runs out fails the copy with the way out in the operator's words (`tooLargeText`), its chunks
+kept. A table whose out-of-line bytes in one row group times 0.75 are more than the limit is refused before a page is
+read (`rowGroupOutOfLine`, `COPY_CHECKPOINT_SHARE`).
+
+**Why.** A deployment's table of ~20,000 rows of ~68 KB of compressed `jsonb` (up to ~20 MB) had a heap of a few
+hundred pages, so its rows ceiling (131,072 pages at most) was the whole table: ONE chunk, which ran out of a 7.8 GiB
+limit at one reader and synced at 12 GB. Measured on DuckDB 2.0.0 (a laptop, `duckdb_memory()` sampled every 50 ms,
+synthetic tables, one reader unless said):
+
+| table on the source | one chunk (the base) | one page a chunk |
+|---|---|---|
+| `blobs`: 400 rows of ~1 MB of text, `STORAGE EXTERNAL`, 3 heap pages, 416 MiB of TOAST | fails at 128, 256, 384 MB; syncs at 448 MB (peak 427 MiB), 512 MB, 1 GB (peak 915 MiB, 803 of it overflow strings) | fails at 128 MB (a page is 136 MB); syncs at 384 MB (peak 367 MiB), and at 384 MB with 3 readers after one out of memory |
+| `docs`: 600 rows of ~512 KB of `jsonb` and one of ~8 MB, 5 heap pages, 320 MiB of TOAST | fails at 256, 384, 768 MB and 1.5 GB (1.3 GiB in the allocator) | fails at 384 MB; syncs at 768 MB (peak 505 MiB; one page read 366 MiB in the allocator, ~5.5 times its 67 MB on the source), and with 3 readers after one out of memory |
+| 4,000 rows of ~100 KB of text, 30 heap pages, 400 MiB of TOAST | syncs at 384 MB | at 128 MB: 14 chunks committed, then a checkpoint FATAL that invalidated the database; syncs with the checkpoint's vacuum off (peak 72 MiB) |
+
+So a chunk's memory follows its values, not its heap pages: uncompressed text held 1 to 2 times its bytes, `jsonb`
+about 5.5 times while it read (an eighth of the limit leaves that room, and the readers beside it, the stream, the
+polls and the queries their share). The third row is a limit chunks cannot lift: a checkpoint merges a table's small
+row groups (one a chunk of a few rows) into one of up to 122,880 rows, holding their values at once, and when that does
+not fit DuckDB invalidates the database (issue 371; 400 MiB merged under 366 MiB of limit, failed under 244 and 122 MiB).
+The base never met it for such a table, whose one chunk failed first, loudly; so a table whose row group the merge
+could not hold is refused before it is read, at 0.75 of its bytes (between the 0.67 that failed and the 0.92 that
+passed). The source's bytes are stored ones, so a compressed value is under-counted there (issue 371 keeps that open).
+**Where.** `src/duck/sync.ts` (`chunkCeiling`, `readChunks`, `outOfLineBytes`), `src/duck/store.ts` (`pgErrorOf`:
+a commit out of memory is 53200); `tests/duck-copy-order.test.ts`, `tests/integration/duck-poll.itest.ts`.
+
 ### A copy beside the stream
 
 **Decision.** A rebuild runs on a DuckDB connection of its own, one at a time, writing only its table, side table and
