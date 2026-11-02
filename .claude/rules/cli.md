@@ -303,8 +303,11 @@ CLI lacks).
   (docs/HOSTED-API.md; src/cli/login.ts, src/cli/hosted.ts): no project needed. The service is `MASON_CLOUD_URL`, else
   `DEFAULT_SERVICE_URL`, its one constant, read by ONE function (`serviceOf`): https, or http to this machine, the
   address alone, refused before any byte is sent. Every answer is untrusted: held to its documented shape, a redirect
-  never followed, every string printed made printable and bounded and every token masked (`serviceText`); a `/v1/`
-  failure is said as the service worded it (`serviceFailure`). **The login is the person's, never a project's**
+  never followed, every string printed made printable and bounded and every token masked (`serviceText`).
+  **What the service sends is shown, never obeyed**: a `/v1/` failure's words are the service's, but its code and exit
+  are the CLI's own by HTTP status (`codeOfStatus`, never `usage` or `timeout`; the service's code kept in `why`), its
+  next steps only `mason` commands of the registry (`serviceFailure`), and the page a person is sent to and a browser
+  opens is on the service's own origin (`pageUrl`, refused naming both). **The login is the person's, never a project's**
   (src/cli/credentials.ts: `$XDG_CONFIG_HOME/mason/credentials.json`, else `~/.config/mason/`, 0600 in 0700, renamed
   over, keyed by the base URL): a file or folder others can read is refused with the chmod, one that cannot be parsed
   with its path, both checked before the device code is asked for. **A token never reaches a command line, the output
@@ -319,8 +322,10 @@ CLI lacks).
   to no database, and refuses what a start would refuse, sending nothing. The files are `projectFiles` alone, held to
   the contract's bounds (`deployFiles`), and every file the check read is among them. A literal `url:` with its password
   is refused: the service keeps the files. The wait is bounded by `--timeout` (`parseDuration`, the interval grammar);
-  an answer that cannot say is a wait, never an outcome; exit 0 only on `running`, a refusal is the replica's failure
-  as it came, exit 1 whatever its code, a timeout 124 with the deploy's id (tests/cli-deploy.test.ts, against a fake
+  an answer that cannot say is a wait, never an outcome; exit 0 only on `running`, a refusal is the replica's failure's
+  words as they came, its code the CLI's (`failureShape`: `refused` / `failed`, the service's in `why`, its next steps
+  this CLI's commands alone), exit 1, a status or phase outside the closed sets a failure, the deploy's id held to its
+  grammar before it is in a path, a timeout 124 with the deploy's id (tests/cli-deploy.test.ts, against a fake
   service on 127.0.0.1; every run's output held to carrying no token).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
   README's "Going to production", `mason help production` offline). Only the project folder

