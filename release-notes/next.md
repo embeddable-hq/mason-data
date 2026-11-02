@@ -290,6 +290,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   by their instant, as `<` does (`23:59:59-05` is later than `23:59:59.999999+05:30`). A `UNION` arm written as `*`
   over a time column beside a timetz one, a time `BETWEEN` a time bound and a timetz one, and a `CASE tm WHEN` a time
   and `WHEN` a timetz are refused by name (`time-timetz-coerced`): cast the time, `tm::timetz`.
+- **A BI tool's JSON filter (`meta @> '{"status": "paid"}'`), its "is not empty" (`(meta -> 'status') IS NOT NULL`) and
+  a `->` read of a string, a whole number, a boolean or a JSON null no longer hold other sessions' statements**, and run
+  several times faster over wide documents: each was answered row by row on the thread every statement waits on, so
+  beside one over large JSON documents a `SELECT` of a small table on another session waited 10 s and more. They are
+  answered by the synced data's own SQL now; a template holding an array, a template known only from a parameter, and
+  a `->` of an object, an array or a decimal number are answered as before. Nothing to do on upgrade.
+- **A statement that reads a numeric through many levels of subqueries or WITH queries plans in milliseconds.** Each
+  level that read the level below more than once (`a + a + a` over a derived table, a chain of WITH queries) multiplied
+  the work: eight levels took about a second to plan and twelve took over a minute, during which every other session's
+  statements waited. A numeric read through a UNION ALL at every level is not yet covered.
 
 ## Known
 

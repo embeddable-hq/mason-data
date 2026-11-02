@@ -37,6 +37,7 @@ import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsU
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
+import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
 import type { DuckCollation, StatementCollations } from "./collation.ts";
 
@@ -396,9 +397,73 @@ class Rewriter {
    * value, so its read checks every object on the way as a json column's does (a review finding).
    */
   private jsonRead(base: AstNode, steps: AstNode, either: boolean, canonical: boolean, asText: boolean): AstNode {
-    const t = kindOf(base) === "ColumnRef" ? this.typed(base) : null;
-    const copied = t !== null && t.node === "VAR" && t.relation !== undefined;
-    return this.keptRead(base, steps, either, canonical, asText) ?? jsonGet(this.cp, base, steps, either, canonical, asText, canonical && copied);
+    return this.keptRead(base, steps, either, canonical, asText) ?? jsonGet(this.cp, base, steps, either, canonical, asText, canonical && this.copiedColumn(base));
+  }
+
+  /** `l <name> r`, a json read (`->`, `->>`, `#>`, `#>>`, `a0` json or jsonb), as the document it reads and its steps:
+   *  `(c -> 'a') ->> 'b'` is one read at the steps a, b (jsonChain). The one reading of a read's operands, for the
+   *  operator (aExpr) and its nullness (jsonNullTest) alike */
+  private jsonReadOf(name: string, l: AstNode, r: AstNode, a0: number, a1: number | null): { base: AstNode; steps: AstNode; either: boolean; canonical: boolean } {
+    const either = name.startsWith("#");
+    let steps = either ? this.jsonPath(r) : this.jsonKey(r, a1), base = l;
+    const chain = this.jsonChain(l, either), literal = constString(steps);
+    if (chain !== null && literal !== null) { base = chain.base; steps = strConst(JSON.stringify([...chain.steps, ...JSON.parse(literal) as unknown[]])); }
+    return { base, steps, either, canonical: a0 === JSONB };
+  }
+
+  /** a copied table's column (Typed.relation): its jsonb text is the copy's, Postgres's canonical text, each key once */
+  private copiedColumn(n: AstNode): boolean {
+    const t = kindOf(n) === "ColumnRef" ? this.typed(n) : null;
+    return t !== null && t.node === "VAR" && t.relation !== undefined;
+  }
+
+  /**
+   * `(<a ->/#> read>) IS [NOT] NULL` (issue 130: a BI tool's "is not empty" filter, `(j -> 'a') IS NOT NULL`): the read's
+   * NULLNESS alone, which needs no text of the value — SQL NULL only for a missing path or a NULL document, a JSON null
+   * being a value — so `json_extract(doc, path) IS [NOT] NULL`, one parse and no row through the function, whatever
+   * the value's kind. A stored path's column first (keptRead), as for the read itself. Native off a COLUMN, by keys only
+   * (duckJsonPath), and where DuckDB finds the key Postgres does: a copied jsonb (each key once), or a json column read
+   * by one key (a key held twice is present whichever occurrence is read; deeper, the first and the last may differ).
+   * Null for anything else: the read is rewritten as itself and tested.
+   */
+  private jsonNullTest(b: Body): AstNode | null {
+    const arg = b.arg as AstNode | undefined;
+    if (arg === undefined || kindOf(arg) !== "A_Expr") return null;
+    const e = bodyOf(arg), name = lastName(e.name);
+    if (e.kind !== "AEXPR_OP" || (name !== "->" && name !== "#>") || e.lexpr === undefined || e.rexpr === undefined) return null;
+    const t = this.typed(arg);
+    const a0 = t?.args[0]?.type ?? null, a1 = t?.args[1]?.type ?? null;
+    if (a0 === null || !JSONS.has(a0)) return null;
+    const { base, steps, either, canonical } = this.jsonReadOf(name, e.lexpr as AstNode, e.rexpr as AstNode, a0, a1);
+    // (a path the Parse cannot see is the read's own: nothing made here is placed)
+    const keys = stepKeys(steps, either);
+    const path = keys === null || keys.length === 0 || kindOf(base) !== "ColumnRef" ? null : duckJsonPath(keys);
+    if (path === null) return null;
+    const kept = this.keptRead(base, steps, either, canonical, false);
+    if (kept !== null) return { NullTest: { ...b, arg: kept } };
+    if (!(canonical && this.copiedColumn(base)) && keys!.length !== 1) return null;
+    return { NullTest: { ...b, arg: fn("json_extract", [this.cp(base), strConst(path)]) } };
+  }
+
+  /**
+   * `doc @> template` (`template <@ doc`) in DuckDB's own SQL where that is Postgres's answer (nativeContains): `doc` a
+   * copied table's jsonb column, `template` a constant Postgres read as a jsonb — its canonical text as jsonb_in and
+   * jsonb_out make it (a key written twice keeps its last value), from the analysis and Postgres itself, never the
+   * statement's text read again. Null for anything else (a parameter, an expression, a column on the right, a json
+   * template that is not an object or holds an array): the caller keeps the function.
+   */
+  private containsRead(doc: AstNode, template: AstNode): AstNode | null {
+    if (!this.copiedColumn(doc) || this.typeOf(doc) !== JSONB) return null;
+    const c = this.constRead(template);
+    const written = constString(kindOf(template) === "TypeCast" ? bodyOf(template).arg as AstNode : template);
+    if (c === null || c.node !== "CONST" || c.type !== JSONB || written === null) return null;
+    // (the text Postgres validated at the Parse, as jsonb writes it: jsonbText, the model the function's own parse of a
+    // template is; never pgEvalSync, whose first call starts its Postgres on the listener's thread, ~1 s that every
+    // session waits)
+    const canonical = jsonbText(written);
+    // the rows the native read cannot decide go to the function with the template as jsonb holds it (its last value of
+    // a key written twice)
+    return nativeContains(this.cp, doc, parseJson(canonical), fn("__mason_jsonb_contains", [jsonArg(doc), strConst(canonical)]));
   }
 
   private isCitext(oid: number | null): boolean { return oid !== null && this.userTypes.get(oid) === "citext"; }
@@ -602,6 +667,9 @@ class Rewriter {
     // derived it selected its cells, and the copy, derived again, recorded none; a union beside it was two widths)
     const record = this.derived.get(v as object);
     if (record !== undefined) this.derived.set(out, record.map((e) => ({ ...e })));
+    // and its columns' decisions (`decided`), so a copy reads the decision its original took, never takes it again
+    const decisions = this.decisions.get(v as object);
+    if (decisions !== undefined) this.decisions.set(out, new Map(decisions));
     // and an arm `exactArms` wrapped is still the arm it reads
     if (this.armWrapped.has(v as object)) {
       const subquery = ((out.fromClause as AstNode[] | undefined)?.[0] !== undefined ? bodyOf((out.fromClause as AstNode[])[0]!).subquery : undefined) as AstNode | undefined;
@@ -675,6 +743,7 @@ class Rewriter {
       case "CollateClause": return this.collateClause(b);
       case "MinMaxExpr": return this.minMax(b);
       case "SQLValueFunction": return this.sqlValueFunction(b);
+      case "NullTest": return this.jsonNullTest(b);
       // CASE x WHEN v …: each WHEN is x = v, jsonb's equality for a jsonb (its keys compared)
       case "CaseExpr": {
         if (!isNode(b.arg) || (this.typeOf(b.arg) !== JSONB && this.typeOf(b.arg) !== JSONB_ARRAY)) return null;
@@ -1166,6 +1235,7 @@ class Rewriter {
       if (own.some((o) => o.twin)) throw this.twinRefused();
       return own.length === 0 ? [t] : own.map((o) => ({ ResTarget: { name: o.name, val: o.value } }));
     });
+    this.forgetDecisions();
   }
 
   /**
@@ -1913,6 +1983,7 @@ class Rewriter {
       return outputs.filter((o) => o.target === i).map((o): AstNode => ({ ResTarget: { name: o.name, val: o.value } }));
     });
     b.targetList = written;
+    this.forgetDecisions();
     return written;
   }
   /** the query levels a column reference the rewrite wrote is read in (a `*` written out), as `scopes` holds a written one's */
@@ -2053,7 +2124,8 @@ class Rewriter {
     // by (`exactArms`): a column the walk meets first (an ORDER BY 1 of a `*`, written out at the walk) whose query
     // selects no cells yet is the engine's value, never given cells late (issue 252: a UNION ALL's arm grew wider than
     // the arm beside it, 42804)
-    if (this.walking && !this.derived.has(bodyOf(found.query))) return null;
+    // (an answer of the walk's time alone: no decision that read it is recorded, `decided`)
+    if (this.walking && !this.derived.has(bodyOf(found.query))) { this.provisionalBelow = -1; return null; }
     const exact = this.innerExact(found.query).find((e) => e.column === found.index);
     if (exact === undefined) return this.uncarried(found, this.unwritable(found.query));
     // decided from what the item exposes, as it is written: its query (through a `*`, a WITH query's) holds the cells
@@ -2138,7 +2210,7 @@ class Rewriter {
   /** whether a query's i-th output is a numeric (or a numeric's text) the engine holds as a double where the plan has
    *  its program: in any arm of a set operation, through a `*` pass-through */
   private approximateAt(query: AstNode, index: number): boolean | null {
-    const own = this.over(query, false, (values) => values.some((v) => this.approximateValue(v)), index);
+    const own = this.decided(query, index, "approximate", () => this.over(query, false, (values) => values.some((v) => this.approximateValue(v)), index));
     // (a UNION ALL's numeric column whose arms write it at several scales is its arms' programs, `exactArms`, issue 227:
     // read outside it, it is carried as a quotient is, so each row keeps its own arm's scale)
     return own === false && this.scalesDiffer(query, index) ? true : own;
@@ -2149,30 +2221,60 @@ class Rewriter {
   private scalesDiffer(query: AstNode, index: number): boolean {
     const b = this.armWrapped.get(bodyOf(query)) ?? bodyOf(query);
     if (b.op !== "SETOP_UNION" || b.all !== true) return false;
-    // DECIDED ONCE per column (issue 244's class: a column read at every level of a deep chain, each level asking the
-    // level below, would otherwise be decided again per reference, exponentially in the depth)
-    const known = this.scalesDecided.get(b)?.get(index);
-    if (known !== undefined) return known;
-    const decide = (): boolean => {
+    // (decided once per column, `decided`: read from the record inside a recursive WITH's cycle too, as main read its own)
+    return this.decided(query, index, "scales", (): boolean => {
       if (this.setOperationColumns(b, false)?.[index]?.type !== NUMERIC) return false;
       const values = this.valuesAt(query, index);
       // (a recursive WITH query's own column read in its recursive arm writes the scale its rows compute, which no type
       // decides: the engine's, as before)
       const recursive = (v: unknown): boolean => Array.isArray(v) ? v.some(recursive) : isNode(v) ? (kindOf(v) === "ColumnRef" && this.fromColumn(v)?.recursive === true) || Object.values(bodyOf(v)).some(recursive) : false;
       return values !== null && !values.some(recursive) && new Set(values.filter((v) => !isNullValue(v)).map((v) => this.displayScale(v))).size > 1;
-    };
-    const differs = decide();
-    const own = this.scalesDecided.get(b) ?? new Map<number, boolean>();
-    own.set(index, differs);
-    this.scalesDecided.set(b, own);
-    return differs;
+    }, true);
   }
-  private readonly scalesDecided = new WeakMap<Body, Map<number, boolean>>();
+
+  /**
+   * A FROM ITEM'S COLUMN IS DECIDED ONCE (issue 244, the class "a fact derived again at every reference"): whether the
+   * engine holds it exactly (`outputExact`), whether its text needs its program (`approximateAt`) and whether a UNION
+   * ALL writes it at several scales (`scalesDiffer`) are each taken once per (query, output index) and read by every
+   * reference, so `a + a + a` over the level below asks that level once, never three times a level (3^depth). The
+   * record is keyed by the query's BODY as `valuesAt` reads it (an arm `exactArms` wrapped: the arm), stores the
+   * deciders' answers and derives nothing of its own, and is copied by `clone` as `derived` is, so a trial copy and the
+   * real pass read one decision. NEVER RECORDED: a decision that read an answer which holds only where it was asked —
+   * `over`'s provisional `met` for a recursive WITH query whose cycle was open before the decision began, or `carry`'s
+   * walk-time guard (issue 252) — so every answer read from the record is the one a fresh decision gives then. A query
+   * whose own cycle is open is never read from the record (it answers `met`, as `over` does; `always` for scalesDiffer,
+   * which no cycle answers). An in-place rewrite of a list a decision read (a `*` written out) drops the record whole
+   * (`forgetDecisions`).
+   */
+  private decided<T extends boolean | null>(query: AstNode, index: number, which: "exact" | "approximate" | "scales", decide: () => T, always = false): T {
+    if (!always && this.deciding.has(bodyOf(query))) return decide();
+    const key = this.armWrapped.get(bodyOf(query)) ?? bodyOf(query);
+    const at = `${which}:${index}`;
+    const record = this.decisions.get(key);
+    if (record?.has(at) === true) return record.get(at) as T;
+    const outer = this.provisionalBelow, depth = this.deciding.size;
+    this.provisionalBelow = Infinity;
+    try {
+      const answer = decide();
+      if (this.provisionalBelow >= depth) {
+        const own = this.decisions.get(key) ?? new Map<string, boolean | null>();
+        own.set(at, answer);
+        this.decisions.set(key, own);
+      }
+      return answer;
+    } finally { this.provisionalBelow = Math.min(outer, this.provisionalBelow); }
+  }
+  private decisions = new WeakMap<Body, Map<string, boolean | null>>();
+  /** the lowest `deciding` place a provisional answer was given at since the innermost decision began (-1: `carry`'s
+   *  walk-time guard, below every place); a decision is recorded only where none was below its own start */
+  private provisionalBelow = Infinity;
+  /** a list a decision read was rewritten in place: every decision is taken again, as it would be fresh */
+  private forgetDecisions(): void { this.decisions = new WeakMap(); }
 
   /** whether a FROM item's column is a value the engine computes exactly (`duckExact` of each value it can be); a
    *  column none of whose values is found is not (unknown is not exact) */
   private outputExact(query: AstNode, index: number): boolean {
-    return this.over(query, true, (values) => values.every((v) => this.duckExact(v)), index) ?? false;
+    return this.decided(query, index, "exact", () => this.over(query, true, (values) => values.every((v) => this.duckExact(v)), index) ?? false);
   }
 
   /** a decision over a query's i-th output's values (`valuesAt`), or `met` where it is met again inside itself: a
@@ -2181,11 +2283,14 @@ class Rewriter {
    *  called a column exact that nothing had decided) */
   private over(query: AstNode, met: boolean, decide: (values: AstNode[]) => boolean, index: number): boolean | null {
     const b = bodyOf(query);
-    if (this.deciding.has(b)) return met;
-    this.deciding.add(b);
+    const open = this.deciding.get(b);
+    // (a provisional answer: no decision begun outside this cycle records what read it, `decided`)
+    if (open !== undefined) { this.provisionalBelow = Math.min(this.provisionalBelow, open); return met; }
+    this.deciding.set(b, this.deciding.size);
     try { const values = this.valuesAt(query, index); return values === null ? null : decide(values); } finally { this.deciding.delete(b); }
   }
-  private readonly deciding = new WeakSet<Body>();
+  /** the bodies being decided (`over`), each at its place: the number open when it began */
+  private readonly deciding = new Map<Body, number>();
 
   /** the values a query's i-th output can be: each arm's of a set operation, each row's of a VALUES list, through a
    *  `*` pass-through; a `*` beside other columns by the output Postgres's analysis puts there. Null where the output
@@ -4285,17 +4390,16 @@ class Rewriter {
       }
       case "#>": case "#>>": case "->": case "->>": {
         if (a0 === null || !JSONS.has(a0)) return null;
-        const either = name.startsWith("#"), canonical = a0 === JSONB, asText = name.endsWith(">>");
-        let steps = either ? this.jsonPath(r!) : this.jsonKey(r!, a1), base = l!;
-        // `(c -> 'a') ->> 'b'` is one read at the steps a, b (jsonChain)
-        const chain = this.jsonChain(l!, either), literal = constString(steps);
-        if (chain !== null && literal !== null) { base = chain.base; steps = strConst(JSON.stringify([...chain.steps, ...JSON.parse(literal) as unknown[]])); }
+        const { base, steps, either, canonical } = this.jsonReadOf(name, l!, r!, a0, a1);
         // a stored column of the path where every row holds it (keptRead), else DuckDB's own read where it is
         // Postgres's, else the function (jsonGet)
-        return this.jsonRead(base, steps, either, canonical, asText);
+        return this.jsonRead(base, steps, either, canonical, name.endsWith(">>"));
       }
       case "@>": case "<@":
-        if (a0 !== null && JSONS.has(a0)) return name === "@>" ? fn("__mason_jsonb_contains", [jsonArg(l!), jsonArg(r!)]) : fn("__mason_jsonb_contains", [jsonArg(r!), jsonArg(l!)]);
+        if (a0 !== null && JSONS.has(a0)) {
+          const [doc, template] = name === "@>" ? [l!, r!] : [r!, l!];
+          return this.containsRead(doc, template) ?? fn("__mason_jsonb_contains", [jsonArg(doc), jsonArg(template)]);
+        }
         if (a0 === null || ARRAY_DUCK[a0] === undefined && NUMBER_ELEMENT[a0] === undefined || l === undefined || r === undefined) return null;
         {
           // an array's NULL element is contained in nothing in Postgres ('{NULL,3}' <@ '{1,2,3}' is false); DuckDB
@@ -6197,28 +6301,20 @@ function overlaps(copy: Copy, a1: AstNode, b1: AstNode, a2: AstNode, b2: AstNode
  *    escaped), which takes every key — except an all-digit key, which a pointer reads as an index on an array where
  *    Postgres reads NULL: a path with one is JSONPath's quoted keys, which cannot say `*` (a wildcard even quoted)
  *    or an empty key, so those stay the function's.
- * `->` (the json itself) stays the function's: a string's quoting and escapes are rewritten by DuckDB's writer.
+ * `->` (the json itself) is DuckDB's own only off a copied jsonb, where each key is held once, and only for a value whose
+ * text DuckDB writes as Postgres does (jsonValueRead); a json column's `->` is the document as written, the function's.
  * tests/duck-wire.test.ts "a ->> of a column is DuckDB's own read" holds the answers and counts the hops.
  */
 function jsonGet(copy: Copy, j: AstNode, steps: AstNode, either: boolean, canonical: boolean, asText: boolean, keysOnce: boolean): AstNode {
   const call = fn("__mason_json_get", [jsonArg(copy(j)), steps, boolConst(either), boolConst(canonical), boolConst(asText)]);
-  if (!asText || kindOf(j) !== "ColumnRef") return call;
-  const literal = constString(steps);
-  if (literal === null) return call;
-  const keys: string[] = [];
-  for (const s of JSON.parse(literal) as unknown[]) {
-    // a `->` step that is an integer is an index; a `#>` element that reads as one is an index on an array, as the
-    // function reads it (pathIndex: `+1` and ` 1` are, `1 ` is a key)
-    if (typeof s !== "string" || (either && pathIndex(s) !== null) || /[\u0000-\u001f]/.test(s)) return call;
-    keys.push(s);
-  }
-  if (keys.length === 0) return call;
-  const pointer = (ks: string[]): string => ks.map((k) => "/" + k.replaceAll("~", "~0").replaceAll("/", "~1")).join("");
-  let path: string;
-  if (keys.some((k) => /^\d+$/.test(k))) {
-    if (keys.some((k) => k === "" || k === "*")) return call;
-    path = "$" + keys.map((k) => `."${k.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`).join("");
-  } else path = pointer(keys);
+  if (kindOf(j) !== "ColumnRef") return call;
+  const keys = stepKeys(steps, either);
+  if (keys === null || keys.length === 0) return call;
+  const path = duckJsonPath(keys);
+  if (path === null) return call;
+  // `->` (the value's own text): only where the text holds each key once (a copied jsonb), read by ONE extraction
+  if (!asText) return keysOnce ? jsonValueRead(copy, j, path, call) : call;
+  const pointer = jsonPointer;
   const type = (): AstNode => fn("json_type", [copy(j), strConst(path)]);
   // each object on the way holds every key once (json_keys of an array or a scalar is empty, of a missing path NULL:
   // the read there is NULL on both sides, so both pass)
@@ -6235,6 +6331,158 @@ function jsonGet(copy: Copy, j: AstNode, steps: AstNode, either: boolean, canoni
     // a missing path is SQL NULL from json_type, a JSON null its name
     [when(or([isNull(type()), op("=", type(), strConst("NULL"))])), nullConst()],
   ], call);
+}
+
+/** a json read's constant steps as keys: null where they are not a constant, or a step is an index — a `->` step that
+ *  is an integer, a `#>` element that reads as one on an array, as the function reads it (pathIndex: `+1` and ` 1` are,
+ *  `1 ` is a key) */
+function stepKeys(steps: AstNode, either: boolean): string[] | null {
+  const literal = constString(steps);
+  if (literal === null) return null;
+  const keys: string[] = [];
+  for (const s of JSON.parse(literal) as unknown[]) {
+    if (typeof s !== "string" || (either && pathIndex(s) !== null)) return null;
+    keys.push(s);
+  }
+  return keys;
+}
+
+/** a JSON pointer of keys (`/a/b`, `~` and `/` escaped), which reads every key — but an all-digit one as an index of an
+ *  array */
+const jsonPointer = (keys: readonly string[]): string => keys.map((k) => "/" + k.replaceAll("~", "~0").replaceAll("/", "~1")).join("");
+
+/**
+ * THE ONE WRITER OF A KEY PATH AS DUCKDB'S JSON FUNCTIONS READ IT (`->>`'s and `->`'s native read, a `->` read's
+ * nullness, `@>`'s template leaves): null where no path of DuckDB's reads exactly these keys, and the caller keeps the
+ * function. The root (no key) is `$`. A key holding a control character stays the function's. The path is a JSON
+ * pointer, which takes every key — except an all-digit key, which a pointer reads as an index on an array where
+ * Postgres reads NULL: a path with one is JSONPath's quoted keys, which cannot say `*` (a wildcard even quoted) or an
+ * empty key, so those stay the function's.
+ */
+function duckJsonPath(keys: readonly string[]): string | null {
+  if (keys.length === 0) return "$";
+  if (keys.some((k) => /[\u0000-\u001f]/.test(k))) return null;
+  if (!keys.some((k) => /^\d+$/.test(k))) return jsonPointer(keys);
+  if (keys.some((k) => k === "" || k === "*")) return null;
+  return "$" + keys.map((k) => `."${k.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`).join("");
+}
+
+/** the json types of DuckDB's reader whose text is Postgres's jsonb text of the value: an integer's digits (int64 and
+ *  uint64; a number past them, or with a point or an exponent, is a DOUBLE whose text DuckDB writes again), `true` /
+ *  `false`, and `null` (a JSON null, never SQL NULL) */
+const NATIVE_VALUE_TYPES = ["BIGINT", "UBIGINT", "BOOLEAN", "NULL"];
+
+/** one value through a lambda that names it as often as it likes, `list_transform(list_value(x), <name> -> <body>)[1]`:
+ *  `x` computed ONCE (every json_* call parses the whole document again: 6.8 s for a json_type and a json_extract of one
+ *  path over 100 k 20 kB documents, 3.8 s for the json_extract alone) */
+function bound(x: AstNode, name: string, body: (v: () => AstNode) => AstNode): AstNode {
+  const v = (): AstNode => ({ ColumnRef: { fields: [S(name)] } });
+  return { A_Indirection: { arg: fn("list_transform", [fn("list_value", [x]), op("->", v(), body(v))]), indirection: [{ A_Indices: { uidx: intConst(1) } }] } };
+}
+
+/**
+ * A COPIED JSONB'S `->` VALUE, DUCKDB'S OWN WHERE ITS TEXT IS POSTGRES'S (issue 130): the value extracted once, and its
+ * text where DuckDB writes what jsonb_out does — an integer, a boolean, a JSON null (NATIVE_VALUE_TYPES), or a string
+ * whose written text holds no `\u00` escape (DuckDB writes `\u001F` where Postgres's escape_json writes `\u001f`; `"`,
+ * `\`, `/`, `\b` `\f` `\n` `\r` `\t`, DEL and every other character are written alike; a string holding the
+ * characters `\u00` themselves is written `\\u00` and goes to the function, which is only slower). A missing key or a
+ * NULL document is SQL NULL. The rest — a number DuckDB types DOUBLE (`1.50` reads `1.5`), an object or an array
+ * (DuckDB writes them without spaces) — is the function's, the CASE's ELSE, which DuckDB runs on those rows alone.
+ */
+function jsonValueRead(copy: Copy, j: AstNode, path: string, call: AstNode): AstNode {
+  return bound(fn("json_extract", [copy(j), strConst(path)]), "__mason_v", (v) => {
+    const type = (): AstNode => fn("json_type", [v()]);
+    const text = (): AstNode => cast(v(), ["varchar"]);
+    return caseWhen([
+      [isNull(v()), nullConst()],
+      [or([...NATIVE_VALUE_TYPES.map((t) => op("=", type(), strConst(t))),
+        and([op("=", type(), strConst("VARCHAR")), not(fn("contains", [text(), strConst("\\u00")]))])]), text()],
+    ], call);
+  });
+}
+
+/** a leaf of an `@>` template: the keys to it and the value it must be (a string, a boolean, a JSON null, a number, or
+ *  an EMPTY object, which only says the value there is an object) */
+interface TemplateLeaf { keys: string[]; want: Json }
+
+/** a constant `@>` template's leaves (an object at its root, its members as jsonb holds them: storedPairs), or null
+ *  where it holds an array anywhere — the function's, whose rules for an array's elements DuckDB has no reader of */
+function templateLeaves(t: Json, keys: string[] = []): TemplateLeaf[] | null {
+  if (t.t === "arr") return null;
+  if (t.t !== "obj" || t.v.length === 0) return [{ keys, want: t }];
+  const out: TemplateLeaf[] = [];
+  for (const [k, x] of storedPairs(t.v)) {
+    const leaves = templateLeaves(x, [...keys, k]);
+    if (leaves === null) return null;
+    out.push(...leaves);
+  }
+  return out;
+}
+
+/**
+ * `doc @> template`, A COPIED JSONB COLUMN AND A CONSTANT OBJECT, IN DUCKDB'S OWN SQL (issue 130): Postgres's
+ * JsonbDeepContains of an object template whose every leaf is a scalar (or an empty object) is the AND over its leaves
+ * of "the document holds the leaf's key path with a value of the same kind equal to it" — each key of the template held
+ * once (jsonb's canonical text) and of the document too (the copy's canonical text), so DuckDB's read of a key is
+ * Postgres's. Every leaf is read in ONE extraction (`json_extract(doc, [p1, p2, …])`, one parse of the document), and
+ * each leaf is decided on its own small value:
+ *  - a string: a JSON string whose decoded text is the template's, byte for byte (`=` on DuckDB's VARCHAR, no collation);
+ *  - a boolean, a JSON null: that kind (and value);
+ *  - an empty object: an object (a nested object with members is decided by its leaves, a key read off an array or a
+ *    scalar being NULL);
+ *  - a number: an integer DuckDB reads (int64 or uint64) is equal exactly when its digits are the template's integer
+ *    value's (a template that is not integral equals no integer); a DOUBLE (a point, an exponent, past uint64) is
+ *    UNEQUAL where its double differs from the template's — equal numbers round to one double, both reads being
+ *    correctly rounded (DuckDB's reader, JavaScript's Number) — and undecided where they are the same double: the
+ *    function's (`1.0000000000000000001` beside `1`).
+ * A missing leaf, any other kind: unequal. A row with every leaf equal is true, one with a leaf unequal false, one with
+ * an undecided leaf (and none unequal) the function's, the CASE's ELSE. A NULL document is NULL (the operator is strict).
+ * Null where the template is not such an object: the caller keeps the function.
+ */
+function nativeContains(copy: Copy, doc: AstNode, template: Json, call: AstNode): AstNode | null {
+  if (template.t !== "obj") return null;
+  const leaves = templateLeaves(template);
+  if (leaves === null) return null;
+  const paths = leaves.map((l) => duckJsonPath(l.keys));
+  if (paths.some((p) => p === null)) return null;
+  return bound(fn("json_extract", [copy(doc), arrayOf(paths.map((p) => strConst(p!)))]), "__mason_x", (x) => {
+    const at = (i: number) => (): AstNode => ({ A_Indirection: { arg: x(), indirection: [{ A_Indices: { uidx: intConst(i + 1) } }] } });
+    const decided = leaves.map((l, i) => leafTest(at(i), l.want));
+    const known = (t: AstNode): AstNode => ({ CoalesceExpr: { args: [t, boolConst(false)] } });
+    // (a BoolExpr of one argument is printed as the argument alone, and would not read back as itself)
+    const all = (xs: AstNode[]): AstNode => xs.length === 1 ? xs[0]! : and(xs), any = (xs: AstNode[]): AstNode => xs.length === 1 ? xs[0]! : or(xs);
+    return caseWhen([
+      [isNull(x()), nullConst()],
+      [all(decided.map((d) => known(d.equal()))), boolConst(true)],
+      [any(decided.map((d) => not(known(d.undecided === null ? d.equal() : or([d.equal(), d.undecided()]))))), boolConst(false)],
+    ], call);
+  });
+}
+
+/** one template leaf against the document's value there (`v`, NULL where the path is missing): when it is equal, and,
+ *  for a number, when DuckDB's read cannot tell (a DOUBLE equal to the template's double) */
+function leafTest(v: () => AstNode, want: Json): { equal: () => AstNode; undecided: (() => AstNode) | null } {
+  const type = (): AstNode => fn("json_type", [v()]);
+  const is = (t: string): AstNode => op("=", type(), strConst(t));
+  const text = (): AstNode => cast(v(), ["varchar"]);
+  switch (want.t) {
+    case "obj": return { equal: () => is("OBJECT"), undecided: null };
+    case "null": return { equal: () => is("NULL"), undecided: null };
+    case "bool": return { equal: () => and([is("BOOLEAN"), op("=", text(), strConst(want.v ? "true" : "false"))]), undecided: null };
+    case "str": return { equal: () => and([is("VARCHAR"), op("=", fn("json_extract_string", [v(), strConst("$")]), strConst(want.v))]), undecided: null };
+    case "num": {
+      // (jsonb_out's text of a numeric: no exponent, a point only with digits after it)
+      const whole = /^(-?)(\d+)(?:\.0*)?$/.exec(want.text);
+      const digits = whole === null ? null : BigInt(whole[2]!) === 0n ? "0" : `${whole[1]}${BigInt(whole[2]!)}`;
+      const d = Number(want.text);
+      return {
+        equal: () => digits === null ? boolConst(false) : and([or([is("BIGINT"), is("UBIGINT")]), op("=", text(), strConst(digits))]),
+        // (a CASE: DuckDB evaluates both sides of an AND on every row, and a string's cast to double raises)
+        undecided: () => Number.isFinite(d) ? caseWhen([[is("DOUBLE"), op("=", cast(v(), ["double"]), cast(strConst(String(d)), ["double"]))]], boolConst(false)) : is("DOUBLE"),
+      };
+    }
+    case "arr": throw new Error("an array leaf is the function's (templateLeaves)");
+  }
 }
 
 /**

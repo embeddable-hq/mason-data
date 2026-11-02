@@ -90,6 +90,10 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "cast ::json of an expression", sql: "SELECT o.id, ('{\"n\": ' || o.amount || '}')::json ->> 'n' AS n FROM orders o ORDER BY o.id LIMIT 20" },
   { name: "json ->> / -> on a jsonb column (stored as JSON)", sql: "SELECT o.id, o.meta ->> 'status' AS s, o.meta -> 'tags' ->> 0 AS t0, (o.meta -> 'n')::text AS n FROM orders o ORDER BY o.id LIMIT 20" },
   { name: "jsonb @>", sql: "SELECT o.id, o.meta @> '{\"status\": \"paid\"}' AS paid FROM orders o ORDER BY o.id LIMIT 20" },
+  // a BI tool's filter of a JSON column and its "is not empty", and a -> of its members (issue 130, Metabase)
+  { name: "jsonb @> filter, counted", sql: "SELECT count(*) FROM orders o WHERE o.meta @> '{\"status\": \"paid\"}'" },
+  { name: "jsonb -> is not empty, counted", sql: "SELECT count(*) FROM orders o WHERE (o.meta -> 'status') IS NOT NULL" },
+  { name: "jsonb -> of a string and a number", sql: "SELECT o.id, o.meta -> 'status', o.meta -> 'n' FROM orders o ORDER BY o.id LIMIT 20" },
   { name: "jsonb #>> / #>", sql: "SELECT o.id, o.meta #>> '{tags,0}' AS first_tag FROM orders o ORDER BY o.id LIMIT 20" },
   { name: "jsonb #>> array[…] grouped", sql: "SELECT o.meta #>> array['status'] AS s, count(*) AS n FROM orders o GROUP BY o.meta #>> array['status'] ORDER BY s" },
   { name: "jsonb ? key", sql: "SELECT o.id, o.meta ? 'status' AS has FROM orders o ORDER BY o.id LIMIT 20" },
@@ -379,5 +383,10 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "exact path: a rounded quotient past 10^20 joined on a single-row VALUES of more decimals", sql: "SELECT o.id, v.x FROM orders o JOIN (VALUES (0.333333333333333333)) v(x) ON round(o.amount * 100000000000000000000 / 3, 2) = v.x ORDER BY 1" },
   { name: "exact path: an integer arm beside abs, sign and the negation of a numeric", sql: "(SELECT o.id, abs(o.amount), sign(o.amount), -o.amount FROM orders o ORDER BY o.id LIMIT 3) UNION ALL SELECT NULL, 1, 1, 1 FROM public.one ORDER BY 1, 2" },
   { name: "exact path: a scalar subquery over a union whose arm is WITH TIES", sql: "SELECT (SELECT s.q FROM ((SELECT o.id, o.amount / 7 AS q FROM orders o ORDER BY 2, 1 FETCH FIRST 1 ROWS WITH TIES) UNION ALL SELECT 0, 1 FROM public.one) AS s ORDER BY 1 DESC LIMIT 1) FROM public.one" },
+  { name: "exact path: deep a + a + a over a quotient, nested", sql: "SELECT a + a + a AS a FROM (SELECT a + a + a AS a FROM (SELECT a + a + a AS a FROM (SELECT a + a + a AS a FROM (SELECT o.amount / 7 AS a FROM orders o) s1) s2) s3) s4 ORDER BY 1 LIMIT 5" },
+  { name: "exact path: deep a + a + a, a WITH chain", sql: "WITH t0 AS (SELECT o.amount AS a FROM orders o), t1 AS (SELECT a + a + a AS a FROM t0), t2 AS (SELECT a + a + a AS a FROM t1), t3 AS (SELECT a + a + a AS a FROM t2), t4 AS (SELECT a + a + a AS a FROM t3) SELECT a, a::text FROM t4 ORDER BY 1 LIMIT 5" },
+  { name: "exact path: deep c + 1 and c passed through", sql: "SELECT s5.a, s5.a::text, s5.c FROM (SELECT a + 1 AS a, c FROM (SELECT a + 1 AS a, c FROM (SELECT a + 1 AS a, c FROM (SELECT a + 1 AS a, c FROM (SELECT o.amount AS a, o.amount AS c FROM orders o) s1) s2) s3) s4) s5 ORDER BY 1, 3 LIMIT 5" },
+  { name: "exact path: deep quotient passed through and q + 1, keyed", sql: "SELECT DISTINCT s5.q, s5.r FROM (SELECT q, r + 1 AS r FROM (SELECT q, r + 1 AS r FROM (SELECT q, r + 1 AS r FROM (SELECT q, r + 1 AS r FROM (SELECT o.amount / 7 AS q, o.amount / 3 AS r FROM orders o) s1) s2) s3) s4) s5 ORDER BY 1, 2 LIMIT 8" },
+  { name: "exact path: deep every column with a quotient, through a * at each level", sql: "SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT o.id, o.status, o.amount / 7 AS q, o.amount FROM orders o) s1) s2) s3) s4 ORDER BY 3, 1 LIMIT 5" },
   { name: "exact path: an IN list of a quotient two doubles tie", sql: "SELECT v.id FROM (SELECT b.* FROM public.one CROSS JOIN (VALUES (1, 1.00000000000000000001::numeric(30,20), 1::numeric(30,20)), (2, 1.00000000000000000002::numeric(30,20), 1::numeric(30,20)), (3, 2.5::numeric(30,20), 2::numeric(30,20)), (4, 5::numeric(30,20), 2::numeric(30,20)), (5, 2.5::numeric(30,20), 1::numeric(30,20))) AS b(id, x, y)) AS v WHERE v.x / 1 IN (1.00000000000000000001, 2.5) ORDER BY 1" },
 ];
