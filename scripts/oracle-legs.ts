@@ -112,8 +112,10 @@ export interface Weights {
   statements: Record<string, { ms: number; name: string }>;
 }
 export const WEIGHTS_FILE = "tests/fixtures/oracle-weights.json";
-/** what a text must have cost to be listed by name, when `--weights` is given no `--above` */
-export const WEIGHTS_ABOVE_MS = 1000;
+/** what a text must have cost to be listed by name, when `--weights` is given no `--above`. 1000 ms listed 19 texts and left a
+ *  gap of about 2 min between the legs (PR 321's second run): the unlisted mass is not alike, and 500 ms, about 450 texts, closed it to under 25 s
+ *  across PR 321's two runs, each judged by the other's weights */
+export const WEIGHTS_ABOVE_MS = 500;
 
 const sha = (text: string): Buffer => createHash("sha256").update(text).digest();
 
