@@ -187,13 +187,20 @@ test("scripts/oracle-legs.ts run as CI runs it says the legs' balance after the 
   assert.equal(untimed.status, 0, untimed.out);
   assert.match(untimed.out, /oracle legs: balance: not measured: the report of leg\(s\) 1, 2 has no times/);
   assert.doesNotMatch(untimed.out, /::warning/);
-  // 120 s apart on alike runners: warned, naming this run's --weights, and still 0
+  // 120 s apart on matching runners: warned, naming this run's --weights only behind earlier runs past the target too, and still 0
   const timed = reports.map((r, i) => ({ ...r, times: { fixed: { setup: 68000 }, stages: {}, statements: { [`k${i}`]: { ms: i === 0 ? 750000 : 630000, name: `statement ${i + 1}` } }, cpu: "c × 4" } }));
   write(dir, timed);
   const apart = program("oracle-legs.ts", [dir], { GITHUB_RUN_ID: "123" });
   assert.equal(apart.status, 0, apart.out);
   assert.match(apart.out, /oracle legs: 1 \+ 1 = 2 statements[\s\S]*oracle leg 1: balance: setup 68\.0 s; statements and stages 750\.0 s as run, 750\.0 s in one machine's seconds; runner: c × 4\n[\s\S]*oracle legs: balance: 120\.0 s apart as run, 120\.0 s in one machine's seconds/);
-  assert.match(apart.out, /^::warning title=oracle legs::the legs are 120\.0 s apart in one machine's seconds, past the target of 60\.0 s: rebalance with `node scripts\/oracle-legs\.ts --weights 123`/m);
+  assert.match(apart.out, /^::warning title=oracle legs::the legs are 120\.0 s apart in one machine's seconds, past the target of 60\.0 s.*earlier runs whose legs ran on matching CPUs were also past the target.*`node scripts\/oracle-legs\.ts --weights 123`/m);
+  // the same gap on different CPUs (issue 347): warned without any --weights, and still 0
+  const drawn = timed.map((r, i) => ({ ...r, times: { ...r.times, cpu: i === 0 ? "c × 4" : "d × 4" } }));
+  write(dir, drawn);
+  const draw = program("oracle-legs.ts", [dir], { GITHUB_RUN_ID: "123" });
+  assert.equal(draw.status, 0, draw.out);
+  assert.match(draw.out, /^::warning title=oracle legs::the legs are 120\.0 s apart.*leg 1: c × 4.*leg 2: d × 4.*persists across runs whose legs ran on matching CPUs/m);
+  assert.doesNotMatch(draw.out, /--weights|rebalance with/);
   // the imbalance and a statement left out: 1, by the coverage line, and the warning beside it
   timed[1]!.asked[PHASES[2]] = [];
   write(dir, timed);

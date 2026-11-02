@@ -36,7 +36,8 @@
  * assert; `integration (oracle)` holds the reports to the whole. Without it a run is the whole, as ever. Which leg asks
  * a statement is `partition`'s, by measured cost: every run times each statement text, each stage and its fixed costs,
  * prints them on one `duck oracle: time:` line, and a leg's report carries them (`times`), from which
- * `node scripts/oracle-legs.ts --weights <run-id>` rewrites tests/fixtures/oracle-weights.json once the legs drift apart.
+ * `node scripts/oracle-legs.ts --weights <run-id>` rewrites tests/fixtures/oracle-weights.json once the legs' gap
+ * persists past the target across runs whose legs ran on matching CPUs (never from one run: issue 347).
  *
  * Needs IT_POSTGRES_URL (any wal_level; a database of its own is created and dropped), psql on PATH, and the copy's
  * extensions installed from this platform's package (`node cli/extensions.ts --node-modules node_modules`, once): the

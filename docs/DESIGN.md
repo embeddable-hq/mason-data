@@ -2355,8 +2355,10 @@ Nor does the gap set CI's wall time: in five runs of six (with 41393819569, unit
 **The detector and its response.** The folder check `node scripts/oracle-legs.ts <folder>`, the `integration (oracle)`
 job's last step, prints after its coverage verdict one line a leg (its setup, its statements and stages as run and
 scaled, its runner's CPU, which a leg's report now carries in `times.cpu`) and one line of the gap, as run and scaled.
-Past `LEGS_APART_MS` (60 s, scaled) it prints a GitHub warning naming `node scripts/oracle-legs.ts --weights <run-id>`.
-It never moves the exit code: balance is a cost, never coverage, and a red required check on runner noise would be a
+Past `LEGS_APART_MS` (60 s, scaled) it prints one GitHub warning, never an order to rebalance from that run (below,
+issue 347): on legs whose CPUs differ or are not reported (`alikeRunners` false: unknown is never alike) it names each
+leg's CPU and no command; on matching CPUs it names `node scripts/oracle-legs.ts --weights <run-id>` for when earlier
+runs on matching CPUs were past the target too. It never moves the exit code: balance is a cost, never coverage, and a red required check on runner noise would be a
 flake. When it cannot tell (a report without times, a setup missing or 0, a leg missing) it says "not measured", never
 a gap of 0. The CPU is never in `measured`, which `--write` holds equal across the legs: two legs on different CPUs
 would refuse to write.
@@ -2369,7 +2371,18 @@ next run, on those weights, drew an EPYC 7763 and an EPYC 9V45: setups 1.61x apa
 gap is at least partly that leg looking light, not the split: the setup is a weaker proxy for the statements' speed across
 CPU generations than across draws of one. Rewriting the weights again from each such run would chase the draw. Not known:
 how often the legs draw different generations, and a better proxy (a fixed piece of the statements' own work, timed in
-each leg); the CPU in each leg's report lets the next runs say. Until then the warning is read beside the two CPUs.
+each leg); the CPU in each leg's report lets the next runs say.
+
+**The warning reads the CPUs itself (2026-11-02, issue 347).** Until then the warning was to be read beside the two
+CPUs, and still told the reader to rebalance from the run it read: acting on it rewrote the weights from noise. So it
+branches on one fact, `alikeRunners` of the measured balance (every leg's `times.cpu` reported and the same string).
+Not alike: it names each leg's CPU, says the setup can under-read a newer CPU so the gap may be the draw rather than the
+split, and to rebalance only when the gap persists across runs whose legs ran on matching CPUs; it names no command.
+Alike: one run is still not enough, and it names `--weights` only for when earlier runs on matching CPUs were past the
+target too. The target, the scale and the exit code are unchanged (no better proxy and no wider target, the owner's
+decision in the issue); the script reads one run, so whether a gap persisted is the reader's judgement across warnings,
+not a history the check keeps. `scripts/ci-shards.ts`'s unit-shard warning still names `weights <run-id>` from one run,
+and was not decided here.
 
 **Rejected.** A shared queue, each leg taking the next statement as it frees: two hosted jobs share no state but
 artifacts, read only after a job ends, so it needs a coordinator they do not have; and one job running both halves on a
