@@ -213,6 +213,9 @@ const LINKED = { type: 'object', required: ['linked', 'bodyFixed', 'detail'], pr
 const BLOCKING = ['wrong-answer', 'crash', 'data-loss', 'security', 'regression']
 const DEFERRED = ['message', 'over-refusal', 'docs', 'quality']
 const blocks = (f) => !DEFERRED.includes(f.severity)
+// Only the exact 'base' makes a finding the base's: an origin this script does not know, or none, is read as this PR's,
+// as a severity is (issue 235), so no finding falls between fromBase, the fix and deferred.
+const ofThisPr = (f) => f.origin !== 'base'
 // the line, as the review and the probe are told it
 const SEVERITY_RULE = "Give each finding its SEVERITY. Blocking, and sent back for a fix: wrong-answer (where Mason answers, it answers differently from Postgres: rows, text, types or OIDs, order, or SQLSTATE), crash (a crash, a hang, or a stuck state such as a table left `building`), data-loss (synced data lost or corrupted), security, regression (what the base got right is now wrong or refused). Not blocking, filed as an issue while the PR goes on: message (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is right), over-refusal (Mason refuses where Postgres answers, and the base refused it too: safe, and a gap), docs, quality (code quality, or a missing test of a shape already answered right). When you are unsure, the finding is blocking: give the blocking severity it would be."
 const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'statementsRun', 'statementsMatched', 'checksRun', 'changedPaths'], properties: {
@@ -304,13 +307,13 @@ const historyText = (hs) => hs.length
   : '(none: this is the first)'
 
 // A finding the base has joins fromBase (one input is one finding, whatever slug a later round gives it); this PR's
-// that do not block join deferred, the same way; this PR's blocking ones are `mine`, and only they drive a fix and
-// count toward the class rule. A class seen before (on this PR, or carried from the stack), or twice in these
-// findings, makes the fix a class round.
+// (ofThisPr: every other origin, or none) that do not block join deferred, the same way; this PR's blocking ones are
+// `mine`, and only they drive a fix and count toward the class rule. So each finding is in exactly one of the three. A
+// class seen before (on this PR, or carried from the stack), or twice in these findings, makes the fix a class round.
 function tally(findings, at) {
-  const mine = findings.filter((f) => f.origin === 'this-pr' && blocks(f))
+  const mine = findings.filter((f) => ofThisPr(f) && blocks(f))
   for (const f of findings) if (f.origin === 'base' && !fromBase.some((g) => g.input === f.input)) fromBase.push(f)
-  const later = findings.filter((f) => f.origin === 'this-pr' && !blocks(f))
+  const later = findings.filter((f) => ofThisPr(f) && !blocks(f))
   for (const f of later) if (!deferred.some((g) => g.input === f.input) && !mine.some((g) => g.input === f.input)) deferred.push({ ...f, ...at })
   // an input deferred once and found blocking later is this PR's to fix, never filed as well
   for (const f of mine) {

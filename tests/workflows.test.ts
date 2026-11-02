@@ -833,6 +833,79 @@ test("pr-loop: a finding with no severity, or one the script does not know, bloc
   assert.deepEqual((r.result["deferred"] as Array<{ input: string }>).map((g) => g.input), [mine.input]);
 });
 
+test("pr-loop, pr-loop-slim: a finding with no origin, or one the script does not know, is the PR's: fixed when it blocks, filed as deferred when not, never dropped", async () => {
+  // issue 235: only the exact 'base' makes a finding the base's; any other origin, or none, is read as this PR's, as an
+  // unknown severity is read as blocking, so no finding falls between fromBase, the fix and deferred
+  const withOrigin = (f: ReturnType<typeof finding>, origin: unknown) => {
+    const { origin: _, ...bare } = f;
+    return origin === "missing" ? bare : { ...bare, origin };
+  };
+  const inputsOf = (r: Result, key: string) => (r[key] as Array<{ input: string }>).map((g) => g.input);
+  const odd: Array<[unknown, string]> = [
+    ["missing", "SELECT no_origin FROM t"], [null, "SELECT null_origin FROM t"], ["", "SELECT empty_origin FROM t"],
+    ["Base", "SELECT cased_origin FROM t"], ["this_pr", "SELECT misspelt_origin FROM t"], ["upstream", "SELECT unknown_origin FROM t"],
+  ];
+  for (const name of PR_LOOPS) {
+    const start = name === "pr-loop" ? START : SLIM;
+    // a blocking finding of an origin not known, or none, is fixed and counted toward its class
+    for (const [origin, input] of odd) {
+      const at = `${name}, origin ${JSON.stringify(origin)}`;
+      const r = await run(name, { ...PR }, {
+        ...start, "review r1": { findings: [withOrigin(finding({ input }), origin)], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+      });
+      assert.ok(r.labels.includes("fix r1") && r.prompt("fix r1").includes(input), `${at}: the fix is handed it`);
+      assert.deepEqual(r.result["fromBase"], [], `${at}: never the base's`);
+      assert.equal((r.result["classes"] as Record<string, { count: number }>)["some-class"]?.count, 1, `${at}: its class is counted`);
+      assert.deepEqual(parseRecords(r.prompt("record"))[0]!.findings, [{ round: 1, stage: "review", classKey: "some-class", severity: "wrong-answer" }], `${at}: in the record`);
+      assert.ok(!r.labels.includes("file"), `${at}: nothing to file`);
+    }
+
+    // a non-blocking finding of an origin not known is deferred, and filed as the PR's, never as the base's
+    const w = finding({ input: "SELECT unknown_wording FROM t", origin: "upstream", severity: "message", classKey: "wording" });
+    const c = await run(name, { ...PR }, { ...start, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": green, file: { issues: [] } });
+    assert.ok(!c.labels.some((l) => /^fix r/.test(l)), `${name}: no fix round for a non-blocking finding`);
+    assert.deepEqual(inputsOf(c.result, "deferred"), [w.input], `${name}: deferred`);
+    assert.deepEqual(c.result["fromBase"], [], `${name}: never the base's`);
+    assert.deepEqual(c.result["classes"], {}, `${name}: a non-blocking class is not counted`);
+    const file = c.prompt("file");
+    const [onBase, ofPr] = [file.indexOf("## source 'base'"), file.indexOf("## source 'deferred'")];
+    assert.equal(file.split(w.input).length - 1, 1, `${name}: filed once`);
+    assert.ok(ofPr >= 0 && file.indexOf(w.input) > ofPr, `${name}: filed under the deferred source`);
+    assert.ok(onBase < ofPr || file.indexOf(w.input) < onBase, `${name}: never under the base's source`);
+    assert.deepEqual(parseRecords(c.prompt("record"))[0]!.deferred, [{ round: 1, stage: "review", classKey: "wording", severity: "message" }], `${name}: the record lists it deferred`);
+
+    // the control: the exact 'base' is the one origin that leaves the PR
+    const onBaseF = finding({ origin: "base", input: "SELECT on_base FROM t", classKey: "on-base" });
+    const e = await run(name, { ...PR }, {
+      ...start, "review r1": { findings: [onBaseF, finding({ input: "SELECT mine FROM t" })], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green,
+      file: { issues: [] },
+    });
+    assert.deepEqual(inputsOf(e.result, "fromBase"), ["SELECT on_base FROM t"], `${name}: the base's finding is the base's`);
+    assert.ok(e.prompt("fix r1").includes("SELECT mine FROM t") && !e.prompt("fix r1").includes("SELECT on_base FROM t"), `${name}: the fix is handed only the PR's`);
+    assert.ok(!("on-base" in (e.result["classes"] as object)), `${name}: the base's class is never counted`);
+
+    // every finding of a round lands in exactly one of fromBase, the fix and deferred, whatever its origin
+    const all = (["base", "this-pr", "missing", "upstream"] as const).flatMap((origin, i) => [
+      withOrigin(finding({ input: `SELECT block_${i} FROM t`, classKey: `block-${i}` }), origin),
+      withOrigin(finding({ input: `SELECT later_${i} FROM t`, classKey: `later-${i}`, severity: i % 2 ? "message" : "over-refusal" }), origin),
+    ]);
+    const f = await run(name, { ...PR }, {
+      ...start, "review r1": { findings: all, judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": clean, "CI 1": green, file: { issues: [] },
+    });
+    const [fromBase, deferred, fix] = [inputsOf(f.result, "fromBase"), inputsOf(f.result, "deferred"), f.prompt("fix r1")];
+    for (const { input } of all) {
+      const places = [fromBase.includes(input), fix.includes(input), deferred.includes(input)].filter(Boolean).length;
+      assert.equal(places, 1, `${name}: ${input} is in exactly one of fromBase, the fix and deferred (in ${places})`);
+    }
+  }
+
+  // the probe reads origin the same way: pr-loop only, since the slim loop has no probe
+  const p = withOrigin(finding({ input: "SELECT probe_no_origin FROM t" }), "missing");
+  const r = await run("pr-loop", { ...PR }, { ...START, "probe 1": { findings: [p], judgedCorrect: [] }, "probe fix 1": pushed("b"), "review r1": clean, "CI 1": green });
+  assert.ok(r.labels.includes("probe fix 1") && r.prompt("probe fix 1").includes(p.input), "the probe's finding with no origin is fixed");
+  assert.deepEqual(parseRecords(r.prompt("record"))[0]!.findings, [{ round: 1, stage: "probe", classKey: "some-class", severity: "wrong-answer" }]);
+});
+
 test("pr-loop: an input deferred once and found blocking later is fixed, never filed; a failed filing never says filed", async () => {
   const w = later({ input: "SELECT later_blocking FROM t" });
   const r = await run("pr-loop", { ...PR }, {
