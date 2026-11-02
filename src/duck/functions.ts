@@ -553,7 +553,8 @@ function viaPostgres(conn: DuckDBConnection, kind: PgKind): void {
           const cols = Array.from({ length: n }, (_, i) => `a${i + 1}`);
           const sql = `SELECT ${k.sql("mason_x")} FROM unnest(${cols.map((_, i) => `$${i + 1}::text[]`).join(", ")}) WITH ORDINALITY AS mason_u(${cols.join(", ")}, mason_n) ` +
             `CROSS JOIN LATERAL (SELECT ${g.template} AS mason_x) AS mason_s ORDER BY mason_n`;
-          const got = pgEvalSync(sql, cols.map((_, i) => tuples.map((t) => t[i])), g.zone);
+          const [zone, dateStyle] = g.zone.split(PG_SESSION_SEPARATOR) as [string, string | undefined];
+          const got = pgEvalSync(sql, cols.map((_, i) => tuples.map((t) => t[i])), zone, dateStyle);
           got.forEach(([v], i) => answers.set(`${key}\u0000${JSON.stringify(tuples[i])}`, v ?? null));
         }
         rows.forEach(([zone = null, template = null, ...args], r) => {
@@ -620,6 +621,8 @@ export const TURN_FUNCTION = "__mason_turn";
  *  `duckSession`): set on a session's connection before each statement that finds them changed (src/duck/store.ts
  *  `settle`), read by the rewrite's `settingRead` (src/duck/rewrite.ts) */
 export const SETTINGS_VARIABLE = "__mason_settings";
+/** what parts a `__mason_pg_*` call's first argument, the session's zone then its DateStyle (src/duck/rewrite.ts pgCall) */
+export const PG_SESSION_SEPARATOR = "\u0001";
 /** a Mason function's error as DuckDB carries it: Postgres's SQLSTATE, message and DETAIL where the function says them
  *  (src/duck/store.ts postgresWording reads the prefix and the DETAIL's line), else its message */
 const raised = (e: unknown): string => e instanceof PgEvalError

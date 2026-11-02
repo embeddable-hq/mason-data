@@ -371,11 +371,68 @@ export function unwrapRole(frames: ReadonlyArray<{ type: string; frame: Buffer }
   return { frames: inner.slice(0, end), setRoleRefused: null };
 }
 
-/** the placeholder parameter a session's settings ride in, for one request of its (`asSession`): named anew by each
- *  process, so no name a tool writes is it — `current_setting('mason.session')` answered the carrier's JSON where
- *  Postgres (and `SHOW`, and the same beside a copied table) answers 42704 (a review finding of #46). A placeholder
- *  stays defined once SET, so the name, not a RESET, is what keeps it out of reach. */
-export const SESSION_SETTINGS = `mason_${randomBytes(8).toString("hex")}.session`;
+/** the prefix of the placeholders a session's request rides in (`asSession`): named anew by each process, so no name a
+ *  tool writes is one of them — `current_setting('mason.session')` answered the carrier's JSON where Postgres (and
+ *  `SHOW`, and the same beside a copied table) answers 42704 (a review finding of #46). A placeholder stays defined once
+ *  SET, so the name, not a RESET, is what keeps it out of reach. */
+const CARRIER = `mason_${randomBytes(8).toString("hex")}`;
+/** the placeholder a session's settings ride in, for one request of its (`asSession`) */
+export const SESSION_SETTINGS = `${CARRIER}.session`;
+/** the placeholder the session's transaction instant rides in (`asSession`), which the clock functions of a statement the
+ *  catalog answers are spliced to read (server.ts userSpliced): `now()` is the transaction's on both paths */
+export const SESSION_NOW = `${CARRIER}.now`;
+
+/**
+ * WHAT A SESSION'S ANSWER IS MADE UNDER, AS ONE VALUE (the listener's `Session.sessionState`, built from its
+ * `sessionSetting` alone, GitHub issue 253): its TimeZone, its search_path as the session SET it and its DateStyle.
+ * The catalog Postgres is given it by ONE applier, `sessionSetSql` (every catalog request of a session through
+ * `asSession`, the analysis and the parameters' read in src/duck/analyze.ts, the lookups of src/duck/views.ts and
+ * src/duck/row-filter.ts); DuckDB by src/duck/store.ts `SessionSetup.settle`.
+ */
+export interface SessionState { timeZone: string; searchPath: string; dateStyle: string }
+
+/** the catalog's own state, which its start sets and every request of a session leaves it in: UTC, `public` first (Mason's
+ *  own reads that name no schema find its overrides), ISO with month-day-year */
+export const CATALOG_BASE: SessionState = { timeZone: "UTC", searchPath: "public, pg_catalog", dateStyle: "ISO, MDY" };
+
+/**
+ * A search_path as SET writes it, read as Postgres's `SplitIdentifierString` reads the parameter's text: a list split at
+ * the commas outside double quotes, an unquoted name folded to lower case, a quoted one as written (`"$user"` kept); an
+ * empty list is `''`. Every name is written quoted, so no text of a session's reaches the SQL but as an identifier.
+ */
+export function searchPathSql(path: string): string {
+  const names: string[] = [];
+  let i = 0;
+  while (i < path.length) {
+    while (i < path.length && /[\s,]/.test(path[i]!)) i++;
+    if (i >= path.length) break;
+    let name = "";
+    if (path[i] === '"') {
+      i++;
+      while (i < path.length) {
+        if (path[i] === '"') { if (path[i + 1] === '"') { name += '"'; i += 2; continue; } i++; break; }
+        name += path[i++];
+      }
+    } else {
+      while (i < path.length && path[i] !== ",") name += path[i++];
+      name = name.trim().toLowerCase();
+    }
+    while (i < path.length && path[i] !== ",") i++;
+    names.push(name);
+  }
+  return names.length === 0 ? "''" : names.map((n) => `"${n.replaceAll('"', '""')}"`).join(", ");
+}
+
+/** THE CATALOG'S ONE APPLIER of a session's state: its SETs, three statements (`local`: for the transaction they run
+ *  in, as a lookup of Mason's sets them inside one batch) */
+export function sessionSetSql(state: SessionState, local = false): string {
+  const set = local ? "SET LOCAL" : "SET";
+  return `${set} search_path = ${searchPathSql(state.searchPath)}; ${set} TimeZone = ${quoteLiteral(state.timeZone)}; ${set} DateStyle = ${quoteLiteral(state.dateStyle)}`;
+}
+/** the catalog's base set back (`CATALOG_BASE`), after a request that applied a session's state */
+export const CATALOG_BASE_SQL = sessionSetSql(CATALOG_BASE);
+/** how many CommandCompletes `sessionSetSql` answers: one a SET */
+const SESSION_SETS = 3;
 
 /**
  * LATEST(x ORDER BY k…), THE AGGREGATE MASON ADDS: the x of the row its ORDER BY sorts last, by Postgres's sort rules.
@@ -408,31 +465,37 @@ export function currentSettingSql(): string[] {
 }
 
 /**
- * A SESSION'S CATALOG REQUEST WITH ITS SETTINGS: `SET <SESSION_SETTINGS> = '<its settings as JSON>'` before the request's
- * frames and `RESET` after, in ONE message, as `asRole` wraps a role (around it, when the session has one) — the catalog
- * runs one request at a time and a message whole, so no other session's request reads these settings, and none of this
- * session's runs without them. A Sync is added before the RESET where the request has none (ignore_till_sync: a
- * setting left set would be every session's). `settings` are the listener's `sessionSetting`, never read here. The
- * catalog's search_path is pinned in the same SET (`public, pg_catalog`): the overrides of `current_setting` and
- * `version()` win only while public comes first, and the request must never depend on what the catalog was left with.
+ * A SESSION'S CATALOG REQUEST UNDER ITS STATE AND WITH ITS SETTINGS: the session's TimeZone, search_path and DateStyle
+ * (`sessionSetSql`), `SET <SESSION_SETTINGS> = '<its settings as JSON>'` and its transaction's instant
+ * (`SESSION_NOW`) before the request's frames, and the catalog's base (`CATALOG_BASE`) set back after, in ONE message,
+ * as `asRole` wraps a role (around it, when the session has one) — the catalog runs one request at a time and a message
+ * whole, so no other session's request reads these, and none of this session's runs without them. A Sync is added
+ * before the restore where the request has none (ignore_till_sync: a setting left set would be every session's).
+ * `state` and `settings` are the listener's (`sessionState`, `sessionSetting`), never read here. The search_path is the
+ * session's as written, pg_catalog first unless it lists it, as on Postgres: the overrides of `version()`,
+ * `current_setting` and `format_type` are reached by the splice of every call of them (server.ts userSpliced), never by
+ * the order of the path.
  */
-export function asSession(message: Uint8Array, settings: ReadonlyMap<string, string>): Uint8Array {
+export function asSession(message: Uint8Array, state: SessionState, settings: ReadonlyMap<string, string>, now: number): Uint8Array {
   const own = Buffer.from(message.buffer, message.byteOffset, message.byteLength);
   const frames = splitFrames(own);
   const synced = frames.some((f) => f.type === "S") || frames.at(-1)?.type === "Q";
   const json = JSON.stringify(Object.fromEntries(settings));
-  return Buffer.concat([frame("Q", cstr(`SET search_path = public, pg_catalog; SET ${SESSION_SETTINGS} = ${quoteLiteral(json)}`)), own, ...(synced ? [] : [frame("S")]), frame("Q", cstr(`RESET ${SESSION_SETTINGS}`))]);
+  const before = `${sessionSetSql(state)}; SET ${SESSION_SETTINGS} = ${quoteLiteral(json)}; SET ${SESSION_NOW} = ${quoteLiteral(new Date(now).toISOString())}`;
+  const after = `RESET ${SESSION_SETTINGS}; RESET ${SESSION_NOW}; ${CATALOG_BASE_SQL}`;
+  return Buffer.concat([frame("Q", cstr(before)), own, ...(synced ? [] : [frame("S")]), frame("Q", cstr(after))]);
 }
 
-/** The reply to an `asSession` message, less the SETs' and the RESET's own replies (two CommandCompletes and a
- *  ReadyForQuery first, a CommandComplete and a ReadyForQuery last). A SET the catalog refused is a Mason bug, said. */
+/** The reply to an `asSession` message, less the applier's and the restore's own replies (a CommandComplete a SET and a
+ *  ReadyForQuery, first and last). A SET the catalog refused is a Mason bug, said. */
 export function unwrapSession(frames: ReadonlyArray<{ type: string; frame: Buffer }>): Array<{ type: string; frame: Buffer }> {
-  const ok = frames[0]?.type === "C" && frames[1]?.type === "C" && frames[2]?.type === "Z";
+  const sets = SESSION_SETS + 2;
+  const run = (from: number): boolean => frames.slice(from, from + sets).every((f) => f.type === "C") && frames[from + sets]?.type === "Z";
   const n = frames.length;
-  if (!ok || n < 5 || frames[n - 1]!.type !== "Z" || frames[n - 2]!.type !== "C") {
+  if (n < 2 * (sets + 1) || !run(0) || !run(n - sets - 1)) {
     throw new Error(`the catalog Postgres did not take the session's settings around a request (${frames.map((f) => f.type).join(", ")}): report it`);
   }
-  return frames.slice(3, n - 2);
+  return frames.slice(sets + 1, n - sets - 1);
 }
 
 export interface PgCatalogOptions {
@@ -645,7 +708,7 @@ export class PgCatalog {
     const t0 = Date.now();
     const db = new CatalogWorker();
     try {
-      const started = await this.#ask(db, { op: "init", statements: ["SET TimeZone = 'UTC'", ...catalogDdl(schema), ...catalogRoles(schema, roles), ...this.#setup],
+      const started = await this.#ask(db, { op: "init", statements: [CATALOG_BASE_SQL, ...catalogDdl(schema), ...catalogRoles(schema, roles), ...this.#setup],
         optional: [...catalogDefaults(schema), ...catalogViews(schema, roles), ...this.#policies] }, "its start");
       // each left-out default or view: one line, once per schema (the instance starts again after every idle stop)
       for (const r of started.refused ?? []) {

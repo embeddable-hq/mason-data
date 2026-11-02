@@ -21,7 +21,7 @@ test("cancelling a function-calling statement again and again never deadlocks th
   const r = await inProcess("cancels", `
     await store.writer.run("CREATE TABLE public.calls AS SELECT range::INTEGER AS id, '{\\"n\\": ' || range || '}' AS j FROM range(2000000)");
     const runner = await store.runner();
-    const S = { timeZone: "UTC", searchPath: "public", settings: {} };
+    const S = { timeZone: "UTC", searchPath: "public", dateStyle: "ISO, MDY", settings: {} };
     // a planned statement (src/duck/plan.ts PlannedSql) calling json's -> on every row, as the rewrite writes it
     const calling = { text: "SELECT count(*) FROM calls WHERE __mason_json_get(getvariable('__mason_session'), j, '[\\"n\\"]', false, true, false) IS NOT NULL", functions: ["__mason_json_get"] };
     const told = {};

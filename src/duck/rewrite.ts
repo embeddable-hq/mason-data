@@ -31,7 +31,7 @@ import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
-import { pathIndex, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
+import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
 import { numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
 import { analysedQueries, caseTwins, FIRST_USER_OID, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
@@ -300,14 +300,16 @@ class Rewriter {
   private readonly rowTypes: ReadonlyMap<number, readonly RowColumn[]>;
   /** the session's TimeZone the statement was analysed under (a relative literal's day is its) */
   private readonly timeZone: string;
+  /** the session's DateStyle the statement was analysed under: Postgres's input of a date constant reads its order */
+  private readonly dateStyle: string;
   /** the stored JSON paths (src/duck/kept-route.ts): null where none is consulted (the feature off, a test) */
   private readonly kept: KeptLookup | null;
   /** every read of a copied table's JSON column by literal steps the statement makes, stored or not: the request log's
    *  `json_reads`, which the keeper's policy reads (src/duck/kept.ts `review`) */
   readonly jsonReads = new Map<string, JsonRead>();
-  constructor(analysis: PgAnalysis, base: number, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC",
+  constructor(analysis: PgAnalysis, base: number, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY",
     enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set()) {
-    this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone;
+    this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
     this.enums = enums; this.kept = kept;
     for (const at of keyCounts) this.keyCounts.add(at + base);
     this.caseMode = collation.kind === "icu" ? "icu" : collation.kind === "bytes" && collation.ascii === true ? "ascii" : "libc";
@@ -3815,7 +3817,7 @@ class Rewriter {
         const type = argType(0);
         if (type === null) return null;
         const made = this.userTypes.get(type);
-        return strConst(made !== undefined ? made.replace(/^rowtype:(public\.)?/, "") : pgEvalSync("SELECT $1::oid::regtype::text", [String(type)], this.timeZone)[0]?.[0] ?? String(type));
+        return strConst(made !== undefined ? made.replace(/^rowtype:(public\.)?/, "") : pgEvalSync("SELECT $1::oid::regtype::text", [String(type)], this.timeZone, this.dateStyle)[0]?.[0] ?? String(type));
       }
       case "regexp_matches": case "regexp_match": case "regexp_split_to_table": case "regexp_split_to_array": case "regexp_count": case "regexp_instr": case "regexp_substr": case "regexp_like":
         throw new Unrewritable(`${name}() is not supported by Mason`, "test a match with ~ (or ~*), take a part with substring(text from pattern), or replace with regexp_replace", "regexp-functions");
@@ -4203,7 +4205,7 @@ class Rewriter {
     // a literal of a type the copy holds as its text, or of a timetz(n): the text Postgres writes it as
     if (t !== null && constString(arg) !== null && (heldType(t.type) !== undefined || t.type === TIMETZ)) {
       if (t.typmod >= 0) {
-        const written = pgEvalSync(`SELECT $1::timetz(${t.typmod})::text`, [constString(arg)], this.timeZone)[0]?.[0];
+        const written = pgEvalSync(`SELECT $1::timetz(${t.typmod})::text`, [constString(arg)], this.timeZone, this.dateStyle)[0]?.[0];
         if (written != null) return cast(strConst(written), ["timetz"]);
       }
       this.constLike.set(bodyOf(arg), t);
@@ -4212,7 +4214,7 @@ class Rewriter {
     // a bit string read as its type: its text, for what the copy holds
     const bits = bodyOf(arg).bsval as { bsval?: string } | undefined;
     if (t !== null && kindOf(arg) === "A_Const" && bits?.bsval !== undefined && heldType(t.type) !== undefined) {
-      return strConst(pgEvalSync("SELECT $1::varbit::text", [bits.bsval], this.timeZone)[0]?.[0] ?? "");
+      return strConst(pgEvalSync("SELECT $1::varbit::text", [bits.bsval], this.timeZone, this.dateStyle)[0]?.[0] ?? "");
     }
     // a parameter Postgres read as the type: its text already (src/duck/analyze.ts readParameters)
     if (t !== null && from === t.type && heldType(t.type) !== undefined) return arg;
@@ -4313,7 +4315,7 @@ class Rewriter {
       if (t !== null && (t.type === TIMETZ || heldType(t.type) !== undefined) && t.type !== 26) {
         const type = t.type === TIMETZ ? "timetz" : HELD_TYPE_NAMES.get(t.type);
         if (type !== undefined) {
-          const written = pgEvalSync(`SELECT $1::${type}::text`, [String(b.sval.sval ?? "")], this.timeZone)[0]?.[0];
+          const written = pgEvalSync(`SELECT $1::${type}::text`, [String(b.sval.sval ?? "")], this.timeZone, this.dateStyle)[0]?.[0];
           if (written != null) return t.type === TIMETZ ? cast(strConst(written), ["timetz"]) : strConst(written);
         }
       }
@@ -5480,9 +5482,12 @@ function numericCastWrite(typmods: readonly AstNode[], from: number | null, text
 const JSONPATH_ARGS = ["jsonb", "jsonpath", "jsonb", "boolean"];
 
 /** Postgres's own answer for each row (src/duck/pg-eval.ts): `template` over a1…an, each argument's text, under the
- *  zone DuckDB's session has */
+ *  zone DuckDB's session has and the session's DateStyle (its settings, src/duck/store.ts settle), as one argument
+ *  (`PG_SESSION_SEPARATOR`) */
 function pgCall(kind: PgKind, template: string, args: AstNode[]): AstNode {
-  return fn(`__mason_pg_${kind}`, [fn("current_setting", [strConst("TimeZone")]), strConst(template), ...args.map((a) => cast(a, ["varchar"]))]);
+  const dateStyle = fn("ifnull", [fn("map_extract_value", [fn("getvariable", [strConst(SETTINGS_VARIABLE)]), strConst("datestyle")]), strConst("ISO, MDY")]);
+  const session = concat(fn("current_setting", [strConst("TimeZone")]), strConst(PG_SESSION_SEPARATOR), dateStyle);
+  return fn(`__mason_pg_${kind}`, [session, strConst(template), ...args.map((a) => cast(a, ["varchar"]))]);
 }
 
 /** a json argument: a text literal is read as JSON (DuckDB's json functions over a VARCHAR literal parse it anyway) */
@@ -5740,16 +5745,18 @@ export interface RewriteOptions {
   userTypes?: ReadonlyMap<number, string>;
   rowTypes?: ReadonlyMap<number, readonly RowColumn[]>;
   timeZone?: string;
+  /** the session's DateStyle (src/api/postgres/catalog.ts SessionState) */
+  dateStyle?: string;
   enums?: EnumTypes;
   kept?: KeptLookup | null;
   wireBound?: boolean;
   keyCounts?: ReadonlySet<number>;
 }
 
-export function rewrite({ stmt, base, analysis, collation, userTypes = new Map(), rowTypes = new Map(), timeZone = "UTC", enums = { labels: new Map(), arrays: new Map() }, kept = null,
+export function rewrite({ stmt, base, analysis, collation, userTypes = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
   wireBound = false, keyCounts = new Set() }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
-  const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, enums, kept, keyCounts);
+  const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }

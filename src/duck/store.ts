@@ -298,8 +298,8 @@ export class DuckStore {
     return {
       collation: c,
       open: () => this.runner(),
-      plan: (catalog, text, stmt, base, paramOids, searchPath, timeZone, userTypes, wireBound, grants, relations, outputs) =>
-        planDuck({ catalog, text, stmt, base, paramOids, searchPath, timeZone, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
+      plan: (catalog, text, stmt, base, paramOids, under, userTypes, wireBound, grants, relations, outputs) =>
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
       parameters: duckParameters,
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
@@ -503,7 +503,7 @@ export class SessionSetup {
 
 /** a session with no role, as a generated table is planned and run (src/duck/generated-plan.ts): UTC, under `public`, no
  *  settings (what reads one is refused there: `current_setting` is "it reads a session") */
-export const NO_ROLE_SESSION: DuckSession = { timeZone: "UTC", searchPath: "public", settings: {} };
+export const NO_ROLE_SESSION: DuckSession = { timeZone: "UTC", searchPath: "public", dateStyle: "ISO, MDY", settings: {} };
 
 /** when the wait for a statement to end is said in the log */
 const ENDING_SLOW_MS = 5_000;

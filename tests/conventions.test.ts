@@ -1424,3 +1424,33 @@ test("a refusal raised at a row quotes no value of the row (issue 128)", () => {
   assert.deepEqual(rowInRefusals('function other() { return { code: "0A000", message: `a statement ${x}` }; }'), []);
   assert.deepEqual(rowInRefusals('function markedError() { return { code: "0A000", message: "a jsonb holds " + `the string ${s}` + " (Mason gap x)" }; }'), ["s"]);
 });
+
+// SESSION STATE (GitHub issue 253): a session's TimeZone, search_path and DateStyle are ONE value built in ONE place
+// (server.ts Session.sessionState, from sessionSetting) and applied by ONE applier per engine: the catalog Postgres's
+// (src/api/postgres/catalog.ts sessionSetSql) and DuckDB's (src/duck/store.ts SessionSetup.settle), pg-eval told both
+// from it (src/duck/pg-eval-worker.ts). A SET of one of them written anywhere else is a second derivation.
+const SESSION_SET_RE = /\bSET\s+(?:LOCAL\s+)?(?:TimeZone|search_path|DateStyle|IntervalStyle)\s*=\s*(?!\s)(?!pg_catalog\b|postgres\b)/gi;
+// gaps.ts: the registry's words, a way out a person reads, never SQL run
+const SESSION_APPLIERS = new Set(["src/duck/store.ts", "src/duck/pg-eval-worker.ts", "src/duck/gaps.ts"]);
+test("session state: no SET of TimeZone, search_path, DateStyle or IntervalStyle in src/ outside the appliers (Mason's own `SET LOCAL search_path = pg_catalog` lookups aside)", () => {
+  const offending: string[] = [];
+  for (const { name, src } of scannedFiles(["src"])) {
+    if (SESSION_APPLIERS.has(name)) continue;
+    const code = withoutComments(src);
+    for (const m of code.matchAll(SESSION_SET_RE)) offending.push(`${name}:${code.slice(0, m.index).split("\n").length}: ${m[0]}`);
+  }
+  assert.deepEqual(offending, [], "apply the session's state through catalog.ts sessionSetSql (the catalog) or store.ts SessionSetup.settle (DuckDB)");
+});
+
+test("session state: the session's zone, path and order are read from Vars only where setParameter and resetParameter keep them; every other reader asks sessionState", () => {
+  const src = fs.readFileSync(path.join(ROOT, "src/api/postgres/server.ts"), "utf8");
+  const ranges = ["  private setParameter(", "  private async resetParameter("].map((start) => {
+    const at = src.indexOf(start);
+    assert.ok(at >= 0, `server.ts has no ${start}`);
+    return [at, src.indexOf("\n  }\n", at)] as const;
+  });
+  const reads = [...src.matchAll(/\bthis\.vars\.(?:timeZone|searchPath|dateStyle)\b/g)].map((m) => m.index);
+  assert.ok(reads.length > 0, "the detector finds the setters' own writes");
+  const outside = reads.filter((i) => !ranges.some(([from, to]) => i > from && i < to)).map((i) => src.slice(0, i).split("\n").length);
+  assert.deepEqual(outside, [], "read the session's state by sessionState() (one reader, sessionSetting's)");
+});

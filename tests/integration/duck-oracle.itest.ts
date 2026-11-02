@@ -119,10 +119,15 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
+const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
+/** session state (GitHub issue 63): a name in two schemas, of one shape (dup) and of another (dup2) — the setting
+ *  scripts' "session state: a prepared statement …" (oracle/setting-scripts.ts) */
+const SESSION_STATE_DDL = "CREATE SCHEMA IF NOT EXISTS other; CREATE TABLE public.dup (id int PRIMARY KEY, v int); INSERT INTO public.dup VALUES (1, 10), (2, 20); " +
+  "CREATE TABLE other.dup (id int PRIMARY KEY, v int); INSERT INTO other.dup VALUES (1, 100); CREATE TABLE public.dup2 (id int PRIMARY KEY, v int); INSERT INTO public.dup2 VALUES (1, 10); " +
+  "CREATE TABLE other.dup2 (id int PRIMARY KEY, v text, w int); INSERT INTO other.dup2 VALUES (1, 'x', 2);";
 /** a relation of literal rows, read through `one`: `(…) AS t` becomes `(SELECT t.* FROM public.one CROSS JOIN (…) AS t) AS t` */
 const viaOne = (rel: string): string => {
   const alias = /\) AS (\w+)$/.exec(rel)?.[1];
@@ -317,6 +322,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   psql(dbUrl, s.sql);
   psql(dbUrl, STAMPING);
   psql(dbUrl, ONE);
+  psql(dbUrl, SESSION_STATE_DDL);
   psql(dbUrl, META);
   psql(dbUrl, TYPED);
   psql(dbUrl, ROWS_SCHEMA);
@@ -337,12 +343,14 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   assert.equal(added.length, COPIED.length, `the oracle's tables in the catalog: ${facts.tables.map((t) => t.source).join(", ")}`);
   // the row filters' own shop (oracle/row-filters.ts), copied beside the rest and read by `rowFilterCases` alone
   const shop = facts.tables.filter((t) => t.schema === "shop");
+  // session state (GitHub issue 63): other.dup and other.dup2, the names public's hold too (SESSION_STATE_DDL)
+  const other = facts.tables.filter((t) => t.schema === "other");
   assert.deepEqual(shop.map((t) => t.source).sort(), ["shop.accounts", "shop.customers", "shop.invoice_lines", "shop.invoices", "shop.order_items", "shop.orders"]);
   const log: string[] = [];
   store = await DuckStore.open(path.join(dir, "duck.db"), (l) => log.push(l));
   sync = new Sync(store, parsed.source, tag, (l) => log.push(l), 3_600_000, "poll", null, EAGER_JSON ? { json: { eager: true } } : {});
   await sync.open();
-  sync.setTables([...added, ...shop]);
+  sync.setTables([...added, ...shop, ...other]);
   sync.setViews(facts.views ?? []);
   await fixedClock.time("first sync", () => sync!.once());
   assert.deepEqual(sync.state().filter((x) => x.phase !== "copied").map((x) => `${x.source} ${x.phase} ${x.error}`), [], "every table copied");
