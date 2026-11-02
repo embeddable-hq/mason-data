@@ -31,12 +31,13 @@ import { version } from "./version.ts";
 import { parseVersion, PIN_FILE } from "../lib/project-version.ts";
 import { appDatabaseUrl, appEnvValue, appendEnvLine, ENV_FILE } from "../lib/dotenv.ts";
 import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateDir, nameFromFolder, newConfig, writeConfig } from "./project.ts";
-import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_PORT, DEMO_SYNC, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
+import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_GENERATED, DEMO_PORT, DEMO_SYNC, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
+import { GENERATED_DIR, generatedDir } from "./generated-files.ts";
 import { freePort } from "./ports.ts";
 import { databaseNameProblem, DEFAULT_DATABASE } from "../lib/database-name.ts";
 import { DEFAULT_SYNC, syncText } from "../lib/table-sync.ts";
 import { newRolesText, rolesFile } from "./roles.ts";
-import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourcesDir } from "./sources.ts";
+import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourceOf, sourcesDir } from "./sources.ts";
 
 
 export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <name>] [--database <name>] [--folder <dir>] [--remote] [--skip-check] [--json]
@@ -58,6 +59,9 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   mason init demo, in a new folder, makes a project on a demo database Mason hosts itself (a shop: customers, products,
   orders, order_items): mason start makes it in .mason/demo/ and changes it every few seconds. Three of its tables are
   added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its first sync begin.
+  It also writes mason/${GENERATED_DIR}/${DEMO_GENERATED.file}, a generated table over the synced orders (orders and
+  revenue per day and status, kept current: mason wait ${DEMO_GENERATED.table} once Mason is up; mason help generated); one
+  already there is kept.
 
     mason init                                          MASON_DATABASE_URL, else DATABASE_URL (.env or the shell)
     mason init postgres://me:secret@localhost:5432/shop
@@ -74,7 +78,8 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   --json            as data: { name, root, folder, config, demo (true for the demo database's project, else false),
                     source: { name (the source's: its file's), file, url (as the file writes it), database (the name
                     a tool connects with, or null when the file has a mistake), env (the .env line written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
-                    database: { url (password masked), from, version, tables }, warnings, next }
+                    generated: [{ table, file, written (false: one was here, and kept) }] (the demo's generated table; [] for
+                    any other project), database: { url (password masked), from, version, tables }, warnings, next }
 `;
 
 export const INIT: CommandSpec = {
@@ -82,7 +87,7 @@ export const INIT: CommandSpec = {
   summary: "make this folder a Mason project on your Postgres: mason init (its URL from .env), mason init postgres://… or demo",
   usage: INIT_USAGE,
   options: { name: { type: "string" }, database: { type: "string" }, folder: { type: "string" }, remote: { type: "boolean" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
-  json: ["name", "root", "folder", "config", "demo", "source", "roles", "database", "warnings", "next"],
+  json: ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "next"],
 };
 
 /** Why `name` cannot be this project's, or null: not a name its replication slot takes. */
@@ -276,6 +281,9 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const sourceFile = kept !== null ? path.join(sourcesDir(folder), kept) : path.join(sourcesDir(folder), `${sourceNameFor(parsed.source.database)}.yml`);
   const rolesPath = rolesFile(folder);
   const rolesKept = fs.existsSync(rolesPath);
+  // THE DEMO'S GENERATED TABLE (src/demo/seed.ts DEMO_GENERATED): written beside the sources file, kept when one is here
+  const generatedPath = demo ? path.join(generatedDir(folder), DEMO_GENERATED.file) : null;
+  const generatedKept = generatedPath !== null && fs.existsSync(generatedPath);
   // the folder an older Mason listed the tables in: read by nothing (no backwards compatibility before v1.0), said
   const oldTables = path.join(folder, OLD_TABLES_DIR);
   if (fs.existsSync(oldTables)) notes.push(`${rel(oldTables)}/ is an older Mason's, which this one does not read: mason add each table again, then remove it`);
@@ -327,6 +335,16 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
         `(${demo ? "every table polled every 5 s" : "each table read once, then again only by mason sync <table>"}) and the tables to sync, ` +
         `${demo ? `the demo's ${DEMO_ADDED_TABLES.length} added — mason add ${DEMO_TABLE_TO_ADD} adds the fourth` : "none yet (mason add)"} — commit it`);
     }
+    if (generatedPath !== null) {
+      const g = rel(generatedPath);
+      if (generatedKept) await steps.step(`Keeping ${g}`, () => undefined, () => `Kept ${g}: the demo's generated table, as it is`);
+      else {
+        await steps.step(`Writing ${g}`, () => {
+          fs.mkdirSync(path.dirname(generatedPath), { recursive: true });
+          fs.writeFileSync(generatedPath, DEMO_GENERATED.text);
+        }, () => `Wrote ${g}: a generated table, orders and revenue per day, kept current from the synced orders (mason help generated) — commit it`);
+      }
+    }
     // THE ROLES FILE (src/cli/roles.ts newRolesText): today's access said in a committed file — every user reads every
     // copied table, as the default role everything — kept when one is here (a clone of the project)
     if (rolesKept) await steps.step(`Keeping ${rel(rolesPath)}`, () => undefined, () => `Kept ${rel(rolesPath)}: the roles and the default for a user added without --role`);
@@ -373,6 +391,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const next: NextStep[] = demo ? [
     ["mason start", "the demo database and Mason, in the background: its tables synced, then kept current"],
     [`mason add ${DEMO_TABLE_TO_ADD}`, "the demo's fourth table, once Mason is up: watch its first sync begin"],
+    [`mason wait ${DEMO_GENERATED.table}`, "the demo's generated table, once Mason is up: orders and revenue per day, kept current"],
     ["mason status", "the synced data keeping up with the demo's changes"],
     ["mason user add <name>", "a user for psql or a BI tool: its password and URL, printed once"],
   ] : [
@@ -386,11 +405,12 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
         database: keptFile === null ? connectName ?? DEFAULT_DATABASE : "problems" in keptFile ? null : keptFile.database ?? DEFAULT_DATABASE,
         env: where.line === null ? null : maskedLine(where.line) },
       roles: { file: rolesPath, written: !rolesKept },
+      generated: generatedPath === null ? [] : [{ table: sourceOf(DEMO_GENERATED.table), file: generatedPath, written: !generatedKept }],
       database, warnings: notes }, next));
     return 0;
   }
   for (const n of notes) say(`  ! ${n}`);
-  say(endText({ tips: [demo ? `The demo database runs inside mason start, read by polling: a new order every few seconds; ${DEMO_TABLE_TO_ADD} is left for you to add; mason destroy removes it with the synced data`
+  say(endText({ tips: [demo ? `The demo database runs inside mason start, read by polling: a new order every few seconds; ${DEMO_TABLE_TO_ADD} is left for you to add; ${DEMO_GENERATED.table} is a generated table over the synced orders; mason destroy removes the demo database with the synced data`
     : "Mason only reads your database: no setting, slot or publication is needed or made"], next }, st));
   return 0;
 }

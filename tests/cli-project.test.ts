@@ -31,6 +31,10 @@ const ROLES_WROTE = "✓ Wrote mason/roles.yml: every user reads every synced ta
 /** the demo's sync, as mason init demo writes it at the file's top (src/demo/seed.ts DEMO_SYNC) */
 const DEMO_SYNC = { mode: "poll", every: "5s", seconds: 5 };
 import type { Io } from "../src/cli/command.ts";
+// as a namespace: at a commit without DEMO_GENERATED the file still loads, and the tests that read it fail by name
+import * as seed from "../src/demo/seed.ts";
+import { parseGeneratedText, readGenerated } from "../src/cli/generated-files.ts";
+import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { appDatabaseUrl } from "../src/lib/dotenv.ts";
 import { answers, endRun, liveRun, runOf, runState } from "../src/cli/runs.ts";
 
@@ -603,12 +607,20 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     // the checklist: no connection, the database made by mason start; then what to run next
     assert.match(r.out, new RegExp(`^Making try-mason a Mason project in .*\\n✓ The demo database will be postgres://demo@127\\.0\\.0\\.1:${port}/demo: mason start makes it in \\.mason/demo/ and seeds it \\(nothing to connect to yet\\)\\n` +
       "✓ Wrote \\.mason/config\\.json: Mason's key \\(this machine's\\)\\n✓ Wrote mason/sources/demo\\.yml: the database \\(url: \\$\\{DATABASE_URL\\}\\), sync: poll 5s \\(every table polled every 5 s\\) and the tables to sync, the demo's 3 added — mason add order_items adds the fourth — commit it\\n" +
+      "✓ Wrote mason/generated_tables/daily_orders\\.yml: a generated table, orders and revenue per day, kept current from the synced orders \\(mason help generated\\) — commit it\\n" +
       `${ROLES_WROTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n` +
       `✓ Wrote DATABASE_URL=postgres://demo@127\\.0\\.0\\.1:${port}/demo to \\.env: the URL the source file names, kept out of git\\n✓ Made \\.gitignore, ignoring \\.mason/ and \\.env\\n\\n` +
-      "Tip: The demo database runs inside mason start, read by polling: a new order every few seconds; order_items is left for you to add; mason destroy removes it with the synced data\\n\\n" +
+      "Tip: The demo database runs inside mason start, read by polling: a new order every few seconds; order_items is left for you to add; daily_orders is a generated table over the synced orders; mason destroy removes the demo database with the synced data\\n\\n" +
       "Next:\\n {2}mason start +the demo database and Mason, in the background: its tables synced, then kept current\\n" +
-      " {2}mason add order_items +the demo's fourth table, once Mason is up: watch its first sync begin\\n {2}mason status +the synced data keeping up with the demo's changes\\n {2}mason user add <name> +a user for psql or a BI tool"));
+      " {2}mason add order_items +the demo's fourth table, once Mason is up: watch its first sync begin\\n" +
+      " {2}mason wait daily_orders +the demo's generated table, once Mason is up: orders and revenue per day, kept current\\n {2}mason status +the synced data keeping up with the demo's changes\\n {2}mason user add <name> +a user for psql or a BI tool"));
     assert.doesNotMatch(r.out, /Connecting|PGlite|DuckDB/i);
+    // the demo's generated table, the seed's text byte for byte, read by the one reader as a definition
+    const demoGenerated = seed.DEMO_GENERATED;
+    assert.ok(demoGenerated !== undefined, "src/demo/seed.ts exports DEMO_GENERATED");
+    assert.equal(fs.readFileSync(path.join(app, "mason", "generated_tables", "daily_orders.yml"), "utf8"), demoGenerated.text);
+    const read = readGenerated(path.join(app, "mason"), app);
+    assert.deepEqual([read.definitions.map((d) => d.name), read.refused], [["public.daily_orders"], []]);
     // again in the folder: refused as any second init is
     const again = await quiet((io) => init(["demo"], app, { io }));
     assert.equal(again.value, 1);
@@ -619,17 +631,39 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     const j = await quiet((io) => init(["demo", "--json"], asData, { io }));
     assert.equal(j.value, 0, j.err);
     const answer = JSON.parse(j.out) as Record<string, unknown> & { source: { url: string; env: string }; database: { url: string; from: unknown; version: unknown; tables: unknown }; next: Array<{ command: string }> };
-    assert.deepEqual(Object.keys(answer), ["name", "root", "folder", "config", "demo", "source", "roles", "database", "warnings", "next"]);
+    assert.deepEqual(Object.keys(answer), ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "next"]);
+    assert.deepEqual(answer.generated, [{ table: "public.daily_orders", file: path.join(asData, "mason", "generated_tables", "daily_orders.yml"), written: true }]);
     assert.deepEqual(answer.roles, { file: path.join(asData, "mason", "roles.yml"), written: true }, "the roles file, with the files init writes");
     assert.equal(answer.demo, true);
     assert.equal(answer.source.url, "${DATABASE_URL}");
     assert.match(answer.source.env, /^DATABASE_URL=postgres:\/\/demo@127\.0\.0\.1:\d+\/demo$/);
     assert.deepEqual([answer.database.from, answer.database.version, answer.database.tables], [null, null, null], "nothing was connected to");
-    assert.deepEqual(answer.next.map((n) => n.command), ["mason start", "mason add order_items", "mason status", "mason user add <name>"]);
+    assert.deepEqual(answer.next.map((n) => n.command), ["mason start", "mason add order_items", "mason wait daily_orders", "mason status", "mason user add <name>"]);
     const own = path.join(root, "own");
     fs.mkdirSync(own);
     const ownJson = await quiet((io) => init(["postgres://u@localhost/x", "--skip-check", "--json"], own, { io }));
     assert.equal(JSON.parse(ownJson.out).demo, false);
+    // a project on a database of its own gets no generated table: none is written, and --json says []
+    assert.deepEqual(JSON.parse(ownJson.out).generated, []);
+    assert.equal(fs.existsSync(path.join(own, "mason", "generated_tables")), false, "no generated_tables/ folder");
+    // a generated table already at the demo's path (no sources file) is kept byte for byte, said so, written: false
+    const keeps = path.join(root, "keeps");
+    const keptGenerated = path.join(keeps, "mason", "generated_tables", "daily_orders.yml");
+    fs.mkdirSync(path.dirname(keptGenerated), { recursive: true });
+    const mine = "kind: scheduled\ntarget_lag: 1h\nsql: SELECT count(*) AS n FROM orders\n";
+    fs.writeFileSync(keptGenerated, mine);
+    const kept = await quiet((io) => init(["demo"], keeps, { io }));
+    assert.equal(kept.value, 0, kept.err);
+    assert.match(kept.out, /^✓ Kept mason\/generated_tables\/daily_orders\.yml: the demo's generated table, as it is$/m);
+    assert.doesNotMatch(kept.out, /Wrote mason\/generated_tables/);
+    assert.equal(fs.readFileSync(keptGenerated, "utf8"), mine);
+    const keepsJson = path.join(root, "keeps-json");
+    fs.mkdirSync(path.join(keepsJson, "mason", "generated_tables"), { recursive: true });
+    fs.writeFileSync(path.join(keepsJson, "mason", "generated_tables", "daily_orders.yml"), mine);
+    const keptJ = await quiet((io) => init(["demo", "--json"], keepsJson, { io }));
+    assert.equal(keptJ.value, 0, keptJ.err);
+    assert.deepEqual(JSON.parse(keptJ.out).generated, [{ table: "public.daily_orders", file: path.join(keepsJson, "mason", "generated_tables", "daily_orders.yml"), written: false }]);
+    assert.equal(fs.readFileSync(path.join(keepsJson, "mason", "generated_tables", "daily_orders.yml"), "utf8"), mine);
     // --remote and --skip-check mean nothing for it: a wrong command line
     const flags = path.join(root, "flags");
     fs.mkdirSync(flags);
@@ -654,5 +688,28 @@ test("mason init demo: the same project on a demo database Mason hosts — its U
     const nowhere = theProject(flags) as { fix: string };
     assert.match(nowhere.fix, /mason init demo: a demo database, nothing to install/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("mason init demo's generated table: a definition the one reader takes, over the tables init adds alone (never the one left to add)", async () => {
+  const g = seed.DEMO_GENERATED;
+  assert.ok(g !== undefined, "src/demo/seed.ts exports DEMO_GENERATED");
+  assert.deepEqual([g.file, g.table], ["daily_orders.yml", "daily_orders"]);
+  const d = parseGeneratedText(g.text, { schema: "public", table: g.table }, g.file);
+  assert.ok(!("refusals" in d), JSON.stringify(d));
+  assert.deepEqual([d.name, d.targetLag, d.orderBy], ["public.daily_orders", { every: "30s", seconds: 30 }, "day, status"]);
+  // what it reads, as Postgres's parser names each relation: every one a table init adds, none the one left to add
+  const names: string[] = [];
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) { for (const x of n) walk(x); return; }
+    if (typeof n !== "object" || n === null) return;
+    for (const [k, v] of Object.entries(n)) {
+      if (k === "RangeVar") names.push((v as { relname: string }).relname);
+      walk(v);
+    }
+  };
+  try { walk(await parseSql(d.sql)); } finally { await stopParser(); }
+  assert.deepEqual(names, ["orders"]);
+  for (const t of names) assert.ok(seed.DEMO_ADDED_TABLES.includes(t), `${t} is a table mason init demo adds`);
+  assert.ok(!names.includes(seed.DEMO_TABLE_TO_ADD), "never the table left for the person's first mason add");
 });
 
