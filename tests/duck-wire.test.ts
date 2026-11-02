@@ -5932,6 +5932,64 @@ test("exact path round 2: a scalar subquery's column is its program, printed, ca
   } finally { await c.end(); }
 });
 
+/**
+ * THE CLASS OF PR 415's REVIEWS r1 AND r2: a set operation's column Postgres resolved as text, read by an arm as a
+ * numeric. Every case the change reaches: each arm kind holding a numeric's text, each set operation, each way a
+ * numeric becomes text, the plain text arm (a column, a VALUES row, a literal) first, in the middle and last.
+ */
+const NUMERIC_TEXTS = ["(o.amount / 3)::text", "(o.amount / 3)::varchar", "(o.amount / 3) || ''", "format('%s', o.amount / 3)", "concat(o.amount / 3)", "to_char(o.amount / 3, 'FM9999990.0000000000')"];
+const SET_OPERATORS = ["UNION ALL", "UNION", "INTERSECT", "EXCEPT"];
+const ARM_KINDS: ReadonlyArray<(x: string) => string> = [
+  (x) => `SELECT ${x} FROM orders o`,
+  () => "VALUES ((1.5 / 7)::text), (NULL)",
+  (x) => `(WITH w AS (SELECT ${x} AS v FROM orders o) SELECT w.v FROM w)`,
+  (x) => `(WITH w AS (SELECT ${x} AS v FROM orders o UNION ALL SELECT o.status FROM orders o) SELECT w.v FROM w)`,
+  (x) => `SELECT s.v FROM (SELECT ${x} AS v FROM orders o) AS s`,
+  (x) => `(SELECT ${x} FROM orders o UNION ALL SELECT (o.amount / 7)::text FROM orders o)`,
+];
+const TEXT_ARMS = ["SELECT o.status FROM orders o", "VALUES ('abc'), (NULL)", "VALUES (NULL::text)", "SELECT o.status::char(4) FROM orders o"];
+function textColumnCases(): Array<[string, "ordered"]> {
+  const out: Array<[string, "ordered"]> = [];
+  const three = (op: string, arm: string, text: string, at: number): string => {
+    const arms = [arm, "SELECT (o.amount / 7)::text FROM orders o"];
+    arms.splice(at, 0, text);
+    return `${arms.join(` ${op} `)} ORDER BY 1`;
+  };
+  for (const x of NUMERIC_TEXTS) for (const op of SET_OPERATORS) for (let at = 0; at < 3; at++) out.push([three(op, `SELECT ${x} FROM orders o`, TEXT_ARMS[0]!, at), "ordered"]);
+  for (const kind of ARM_KINDS) for (const op of SET_OPERATORS) for (let at = 0; at < 3; at++) out.push([three(op, kind(NUMERIC_TEXTS[0]!), TEXT_ARMS[at % 2]!, at), "ordered"]);
+  for (const kind of ARM_KINDS) for (const text of TEXT_ARMS.slice(1)) for (let at = 0; at < 3; at++) out.push([three("UNION ALL", kind(NUMERIC_TEXTS[0]!), text, at), "ordered"]);
+  return out;
+}
+
+test("exact path round 2: a text column of a set operation is never read as a numeric, whatever the arm, the operator, the conversion or the text arm's place (PR 415's class)", async () => {
+  const c = await client();
+  try {
+    // (main's own, never this PR's to fix: UNION, INTERSECT and EXCEPT without ALL of a numeric's text are refused by
+    // name, #298; a numeric made text by concat, format or || is the engine's double's text, #421 — answered, never an
+    // error)
+    const cases = textColumnCases();
+    const distinct = cases.filter(([s]) => / (UNION|INTERSECT|EXCEPT) (?!ALL)/.test(s));
+    const viaFunction = cases.filter(([s]) => !distinct.some(([d]) => d === s) && /concat\(|format\(|\|\| ''/.test(s));
+    const failures: string[] = [];
+    for (const [s] of distinct) failures.push(...await answeredOrRefused(c, s, "numeric-quotient-equality"));
+    for (const [s] of viaFunction) await answer(c, s).catch((e: Error) => failures.push(`${s}\n    mason: ${e.message}`));
+    assert.deepEqual(failures, []);
+    assert.deepEqual(await unlike(c, [
+      ...cases.filter(([s]) => !distinct.some(([d]) => d === s) && !viaFunction.some(([v]) => v === s)),
+      // (review r2: a VALUES arm beside a numeric's text column, the wrapper's width)
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL VALUES (NULL::text) ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL VALUES (NULL) ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL VALUES ((1.5 / 7)::text) ORDER BY 1", "ordered"],
+      ["VALUES ((1.5 / 7)::text) UNION ALL SELECT (o.amount / 3)::text FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text, o.id FROM orders o UNION ALL VALUES ((2.5 / 7)::text, 0), (NULL, 1) ORDER BY 2, 1", "ordered"],
+      ["SELECT (o.amount / 3)::text, o.amount / 7 FROM orders o UNION ALL VALUES (NULL::text, 1.5) ORDER BY 2, 1", "ordered"],
+      ["SELECT o.amount / 7, (o.amount / 3)::text FROM orders o UNION ALL VALUES (1.5, NULL::text) ORDER BY 1, 2", "ordered"],
+      ["VALUES (1.5, NULL::text) UNION ALL SELECT o.amount / 7, (o.amount / 3)::text FROM orders o ORDER BY 1, 2", "ordered"],
+      ["SELECT * FROM (SELECT (o.amount / 3)::text AS x, o.amount / 7 AS y FROM orders o) s UNION ALL VALUES (NULL::text, 1.5) ORDER BY 2, 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("exact path round 2: a text column of a set operation is a numeric's text only where every arm's is, never a text, a char(n) or a literal parsed as one (PR 415)", async () => {
   const c = await client();
   try {

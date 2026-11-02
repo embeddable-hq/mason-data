@@ -2305,8 +2305,12 @@ class Rewriter {
     // value there is a numeric's text or a NULL (`numericTextValue`); a column some arm writes as any other text (a
     // text column, a char(n), a literal) is left out of the record, the engine's union as before (PR 415's review:
     // `(c / 3)::text … UNION ALL SELECT b` raised 22P02 parsing 'x' as a numeric)
-    const texts = new Set(fields.flatMap((_f, i) => trial.some((t) => t.made.some((e) => e.column === i && e.text))
-      && arms.every((a) => (this.valuesAt(a, i) ?? [null]).every((v) => v !== null && this.numericTextValue(v))) ? [i] : []));
+    // (the column's type is Postgres's resolved one, `fields`, never an arm's: a numeric column is never a text cell; an
+    // arm's value is a numeric's text where its own program says so, or where it is one by its analysed type)
+    const armText = (k: number, i: number): boolean => trial[k]!.made.some((e) => e.column === i && e.text)
+      || (this.valuesAt(arms[k]!, i) ?? [null]).every((v) => v !== null && this.numericTextValue(v));
+    const texts = new Set(fields.flatMap((f, i) => f.oid !== NUMERIC && trial.some((t) => t.made.some((e) => e.column === i && e.text))
+      && arms.every((_a, k) => armText(k, i)) ? [i] : []));
     const columns = fields.map((f, i) => texts.has(i) || (f.oid === NUMERIC && (scaled.has(i) || inexact.has(i) || trial.some((t) => t.made.some((e) => e.column === i)))) ? i : -1).filter((i) => i >= 0);
     if (columns.length === 0) return [];
     // AN ARM WHOSE OWN LIST CANNOT TAKE THE UNION'S CELLS (issue 342: a VALUES list, a set operation of its own clauses, a
@@ -2315,10 +2319,14 @@ class Rewriter {
     // here, for the whole set operation: the engine never meets arms of different widths (its 42804). Decided over the
     // trial's copy, before any arm is written, so a set operation given up on writes none
     const wrapped = arms.map((a, k) => Array.isArray(bodyOf(a).valuesLists) || isSetOp(bodyOf(a)) || trial[k]!.listed.some((t) => hasStar(bodyOf(t).val)));
-    // a VALUES arm's rows each write their own text (`valuesText`): the cells a row adds, one a column computed here
+    // a VALUES arm's rows each write their own text (`valuesText`): the cells a row adds, one a column computed here.
+    // WHAT A VALUES ARM APPENDS is ONE list (`appended`), read by its rows' items, its wrapper's column names and its
+    // cells alike: a column with no program of the arm's own and not a numeric's text (a text column is read as its own
+    // column, `c<i>`, which no row appends). PR 415's review r2: the width counted a text cell the rows never appended (42804)
+    const appended = arms.map((_a, k) => columns.filter((i) => !texts.has(i) && !trial[k]!.made.some((e) => e.column === i)));
     const rowTexts = arms.map((a, k) => {
       if (!Array.isArray(bodyOf(a).valuesLists)) return null;
-      return (bodyOf(a).valuesLists as AstNode[]).map((row) => columns.filter((i) => !texts.has(i) && !trial[k]!.made.some((e) => e.column === i)).map((i) => {
+      return (bodyOf(a).valuesLists as AstNode[]).map((row) => appended[k]!.map((i) => {
         const item = ((bodyOf(row).items ?? []) as unknown[])[i];
         return isNode(item) ? this.valuesText(item) : null;
       }));
@@ -2355,8 +2363,8 @@ class Rewriter {
           continue;
         }
         if (rowTexts[k] !== null) {
-          // (a VALUES row's text, after the arm's own cells in the wrapper's columns)
-          cells.push({ node: read(`${this.cellPrefix}i${cells.length}`), conv: "text" });
+          // (a VALUES row's text, after the arm's own cells in the wrapper's columns, at its place in `appended`)
+          cells.push({ node: read(`${this.cellPrefix}i${ownCells.length + appended[k]!.indexOf(i)}`), conv: "text" });
           programs.set(i, { op: "cell", key: String(cells.length - 1) });
           continue;
         }
@@ -2368,7 +2376,7 @@ class Rewriter {
         const shared = scales === null || scales.size !== 1 ? null : [...scales][0]!;
         programs.set(i, v !== null ? this.padded(v, at) : shared !== null && shared > 0 ? { op: "pad", arg: at, scale: shared } : at);
       }
-      return { targets: targets.slice(0, fields.length), cells, programs, alias, width: wrapped[k] ? (rowTexts[k] !== null ? cells.length : ownCells.length) : 0 };
+      return { targets: targets.slice(0, fields.length), cells, programs, alias, width: wrapped[k] ? ownCells.length + (rowTexts[k] !== null ? appended[k]!.length : 0) : 0 };
     });
     const total = own.reduce((n, o) => n + o.cells.length, 0);
     const offsets = own.map((_o, k) => own.slice(0, k).reduce((n, o) => n + o.cells.length, 0));
