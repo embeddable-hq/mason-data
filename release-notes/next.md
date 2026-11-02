@@ -187,8 +187,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `SELECT 'orders'::regclass`) answered in UTC and under `public` whatever the session set; it now answers in the
   session's zone, under its search_path (pg_catalog first, as on Postgres: `current_schemas(false)` is `{public}`), and
   reads a date in its DateStyle's order (`SET DateStyle = 'ISO, DMY'`: `'01/02/2026'::date` is 2026-02-01, on every
-  path, a bound parameter too). `now()`, `CURRENT_DATE` and the like are the transaction's instant on both paths, so
-  two statements of one block agree. A prepared statement whose search_path moved since it was prepared is planned
+  path, a bound parameter too). `now()`, `CURRENT_DATE` and the like, and `'now'` or `'today'` read as a
+  date or time however the statement writes or computes it, are the transaction's instant on both paths, so two
+  statements of one block agree. A prepared statement whose search_path moved since it was prepared is planned
   again, as Postgres does: it reads the table the path now names (it read the old one), and answers Postgres's
   `cached plan must not change result type` (0A000) when its columns moved. `SHOW extra_float_digits`,
   `SHOW transaction_isolation` and `SHOW default_transaction_isolation` read back what was set (they answered fixed

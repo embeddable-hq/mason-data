@@ -383,9 +383,6 @@ export function unwrapRole(frames: ReadonlyArray<{ type: string; frame: Buffer }
 const CARRIER = `mason_${randomBytes(8).toString("hex")}`;
 /** the placeholder a session's settings ride in, for one request of its (`asSession`) */
 export const SESSION_SETTINGS = `${CARRIER}.session`;
-/** the placeholder the session's transaction instant rides in (`asSession`), which the clock functions of a statement the
- *  catalog answers are spliced to read (server.ts userSpliced): `now()` is the transaction's on both paths */
-export const SESSION_NOW = `${CARRIER}.now`;
 
 /**
  * WHAT A SESSION'S ANSWER IS MADE UNDER, AS ONE VALUE (the listener's `Session.sessionState`, built from its
@@ -470,24 +467,28 @@ export function currentSettingSql(): string[] {
 }
 
 /**
- * A SESSION'S CATALOG REQUEST UNDER ITS STATE AND WITH ITS SETTINGS: the session's TimeZone, search_path and DateStyle
- * (`sessionSetSql`), `SET <SESSION_SETTINGS> = '<its settings as JSON>'` and its transaction's instant
- * (`SESSION_NOW`) before the request's frames, and the catalog's base (`CATALOG_BASE`) set back after, in ONE message,
- * as `asRole` wraps a role (around it, when the session has one) — the catalog runs one request at a time and a message
- * whole, so no other session's request reads these, and none of this session's runs without them. A Sync is added
- * before the restore where the request has none (ignore_till_sync: a setting left set would be every session's).
+ * A SESSION'S CATALOG REQUEST UNDER ITS STATE AND WITH ITS SETTINGS, IN A TRANSACTION OF ITS OWN: `BEGIN`, the session's
+ * TimeZone, search_path and DateStyle (`sessionSetSql`) and `SET <SESSION_SETTINGS> = '<its settings as JSON>'` before
+ * the request's frames; `ROLLBACK` and the catalog's base (`CATALOG_BASE`) set back after, in ONE message, as `asRole`
+ * wraps a role (around it, when the session has one) — the catalog runs one request at a time and a message whole, so
+ * no other session's request reads these, and none of this session's runs without them. A Sync is added before the
+ * restore where the request has none (ignore_till_sync: a setting left set would be every session's). The `BEGIN`'s
+ * message is run at the session's transaction instant (`PgCatalog.run`'s `at`, catalog-worker.ts `pinnedClock`), so
+ * the transaction it begins starts at that instant and every reader of the transaction's start in the request —
+ * now(), the clock keywords, a relative word however it reaches a date or time — reads the session's (GitHub issue
+ * 253, review r3 of PR 333). The ROLLBACK undoes anything the request set, whether it succeeded or failed.
  * `state` and `settings` are the listener's (`sessionState`, `sessionSetting`), never read here. The search_path is the
  * session's as written, pg_catalog first unless it lists it, as on Postgres: the overrides of `version()`,
  * `current_setting` and `format_type` are reached by the splice of every call of them (server.ts userSpliced), never by
  * the order of the path.
  */
-export function asSession(message: Uint8Array, state: SessionState, settings: ReadonlyMap<string, string>, now: number): Uint8Array {
+export function asSession(message: Uint8Array, state: SessionState, settings: ReadonlyMap<string, string>): Uint8Array {
   const own = Buffer.from(message.buffer, message.byteOffset, message.byteLength);
   const frames = splitFrames(own);
   const synced = frames.some((f) => f.type === "S") || frames.at(-1)?.type === "Q";
   const json = JSON.stringify(Object.fromEntries(settings));
-  const before = `${sessionSetSql(state)}; SET ${SESSION_SETTINGS} = ${quoteLiteral(json)}; SET ${SESSION_NOW} = ${quoteLiteral(new Date(now).toISOString())}`;
-  const after = `RESET ${SESSION_SETTINGS}; RESET ${SESSION_NOW}; ${CATALOG_BASE_SQL}`;
+  const before = `BEGIN; ${sessionSetSql(state)}; SET ${SESSION_SETTINGS} = ${quoteLiteral(json)}`;
+  const after = `ROLLBACK; RESET ${SESSION_SETTINGS}; ${CATALOG_BASE_SQL}`;
   return Buffer.concat([frame("Q", cstr(before)), own, ...(synced ? [] : [frame("S")]), frame("Q", cstr(after))]);
 }
 
@@ -630,12 +631,13 @@ export class PgCatalog {
   }
 
   /** Runs raw frontend protocol bytes — one message or several (Parse, Bind, Describe, Execute, Sync in one buffer
-   *  works) — and returns the backend's raw reply, starting the instance when needed. */
-  run(message: Uint8Array): Promise<Uint8Array> {
+   *  works) — and returns the backend's raw reply, starting the instance when needed. `at`: the instant the first
+   *  message runs at, the start of the transaction it begins (`asSession`; catalog-worker.ts `pinnedClock`). */
+  run(message: Uint8Array, at?: number): Promise<Uint8Array> {
     return this.#enqueue(async () => {
       const db = await this.#ensureStarted();
       const copy = new Uint8Array(message);
-      const reply = await this.#ask(db, { op: "raw", bytes: copy }, "a statement", [copy.buffer]);
+      const reply = await this.#ask(db, { op: "raw", bytes: copy, ...(at !== undefined ? { at } : {}) }, "a statement", [copy.buffer]);
       this.#touch();
       return reply.bytes ?? new Uint8Array(0);
     });

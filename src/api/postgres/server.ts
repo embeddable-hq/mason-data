@@ -59,9 +59,7 @@ import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
-import { analyze, catalogRows } from "../../duck/analyze.ts";
-import type { TreeValue } from "../../duck/pgtree.ts";
-import { scan } from "libpg-query";
+import { catalogRows } from "../../duck/analyze.ts";
 import type { Planner } from "../../duck/generated-plan.ts";
 import { ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
@@ -69,7 +67,7 @@ import type { GapId } from "../../duck/gaps.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "../../duck/statement.ts";
 import { canonicalZone } from "../../lib/timezone.ts";
 import { catalogRolesOf, exampleRole, grantRefusal, NO_ROLE_CATALOG, NO_ROLES, type RoleGrants, type RolesLive } from "../../duck/grants.ts";
-import { asRole, asSession, CATALOG_BASE_SQL, catalogPolicies, currentSettingSql, databaseNameSql, LATEST_SQL, PgCatalog, SESSION_NOW, unwrapRole, unwrapSession, type SessionState } from "./catalog.ts";
+import { asRole, asSession, CATALOG_BASE_SQL, catalogPolicies, currentSettingSql, databaseNameSql, LATEST_SQL, PgCatalog, unwrapRole, unwrapSession, type SessionState } from "./catalog.ts";
 import { wrongDatabaseHint } from "../../lib/database-name.ts";
 import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
@@ -1449,7 +1447,7 @@ class Session {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
         const e = await this.explaining(raw, whole, t, []);
-        if (e.plan === null) return catalogExplained(await this.forwardSimple(await this.spliced(text, raw)), e.options);
+        if (e.plan === null) return catalogExplained(await this.forwardSimple(this.spliced(text, raw)), e.options);
         const controller = new AbortController();
         const disarm = this.armTimeout(controller);
         try {
@@ -1459,7 +1457,7 @@ class Session {
           return out;
         } finally { disarm(); }
       }
-      case "catalog": return this.forwardSimple(await this.spliced(text, raw));
+      case "catalog": return this.forwardSimple(this.spliced(text, raw));
       case "set": return this.setStatement(t);
       // its RowDescription first, as Postgres's: a value it refuses is refused after it
       case "set_config": this.send(this.setConfigDescription(t, 0)); return this.setConfigStatement(t);
@@ -1627,50 +1625,10 @@ class Session {
     return live.file !== null && live.problem === null && live.default === null;
   }
 
-  /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it, the
-   *  overrides and the clock (`userSpliced`) */
-  private async spliced(text: string, raw: RawStmt, paramOids: readonly number[] = []): Promise<string> {
-    // the transaction's instant (begun here when none is, as catalogAs begins it), which a relative literal is read as
-    const now = this.txNow ??= this.server.now();
-    const base = raw.stmt_location ?? 0;
-    const relative = await this.relativeLiterals(text, raw, base, paramOids);
-    return userSpliced(text, raw.stmt, base, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS, { now, zone: this.sessionState().timeZone }, relative);
-  }
-
-  /**
-   * THE RELATIVE WORDS OF A CATALOG STATEMENT THAT POSTGRES READS AS A DATE OR TIME (GitHub issue 253, review r2 of
-   * PR 333): a literal `now`, `today`, `tomorrow` or `yesterday` however it is spelt (`'now'`, `E'now'`, `$$now$$`,
-   * `U&'now'`: the parser's A_Const holds the word), and however it reaches the type — a cast, a chain of casts through
-   * text, the comparison's own coercion (`now() = 'now'`). Which literals reach a date or time type is Postgres's
-   * analysis (`relativeTargets`), never the text; a statement with no such word asks nothing. Each is then spliced to
-   * the transaction's instant (`userSpliced`), the one now() reads, since the catalog's own transaction began at another.
-   * Its span is the scanner's token (`spans`). A statement the analysis refuses is left as written: the catalog says why.
-   */
-  private async relativeLiterals(text: string, raw: RawStmt, base: number, paramOids: readonly number[]): Promise<RelativeLiterals> {
-    const words = relativeWords(raw.stmt);
-    if (words.size === 0) return { at: new Map(), spans: new Map() };
-    const statement = Buffer.from(text, "utf8").subarray(0, raw.stmt_len ? raw.stmt_len : undefined).toString("utf8");
-    const analysis = await analyze((b) => this.server.catalog.run(b), statement, paramOids, this.sessionState());
-    if ("refused" in analysis) return { at: new Map(), spans: new Map() };
-    const targets = relativeTargets(analysis.tree, new Set([...words.keys()].map((l) => l - base)));
-    const at = new Map<number, { word: string; type: number }>();
-    for (const [loc, type] of targets) {
-      const word = words.get(loc + base)!;
-      // a time reads `now` alone: `'today'::text::time` is Postgres's 22007 at run time, left to the catalog to say
-      if (word.toLowerCase() !== "now" && (type === 1083 || type === 1266)) continue;
-      at.set(loc + base, { word, type });
-    }
-    // each literal's span, as the scanner reads its token (a U&'…' UESCAPE '…' is the three tokens)
-    const spans = new Map<number, number>();
-    if (at.size > 0) {
-      const tokens = (await scan(text)).tokens;
-      tokens.forEach((t, i) => {
-        if (!at.has(t.start + base)) return;
-        const next = tokens[i + 1];
-        spans.set(t.start + base, next !== undefined && next.text.toUpperCase() === "UESCAPE" && tokens[i + 2] !== undefined ? tokens[i + 2]!.end : t.end);
-      });
-    }
-    return { at, spans };
+  /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it, and
+   *  every call of an override (`userSpliced`) */
+  private spliced(text: string, raw: RawStmt): string {
+    return userSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS);
   }
 
   /** a plan's reads held to the session's role of THIS moment (a role given or taken since the Parse): refused as the
@@ -1712,7 +1670,9 @@ class Session {
     // the transaction's instant, which a block's statements on either path read (`txNow`): begun here when none is
     // (reset at the end of a statement outside a block, as executeDuck's)
     const now = this.txNow ??= this.server.now();
-    const reply = unwrapSession(splitFrames(await this.server.catalog.run(asSession(role === undefined ? message : asRole(message, role), this.sessionState(), this.sessionSettings(), now))));
+    // the request's transaction begins at that instant (asSession, catalog-worker.ts pinnedClock): the catalog's own
+    // transaction start is the session's, whatever reads it
+    const reply = unwrapSession(splitFrames(await this.server.catalog.run(asSession(role === undefined ? message : asRole(message, role), this.sessionState(), this.sessionSettings()), now)));
     if (role === undefined) return reply;
     const { frames, setRoleRefused } = unwrapRole(reply);
     if (setRoleRefused !== null) {
@@ -2254,7 +2214,7 @@ class Session {
         const own = this.statements.get(m.name);
         // the unnamed statement is replaced by a Parse; the sidecar's must be closed first
         const close = own?.catalogName !== null && own !== undefined ? [frame("C", Buffer.from("S"), cstr(own.catalogName))] : m.name === "" ? [frame("C", Buffer.from("S"), cstr(statement.catalogName))] : [];
-        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(await this.spliced(m.sql, raw, m.paramTypes)),
+        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(this.spliced(m.sql, raw)),
           int16(m.paramTypes.length), ...m.paramTypes.map(int32)));
         this.statements.set(m.name, statement);
         // the CloseComplete of the close this server added is not the client's
@@ -2565,93 +2525,8 @@ const HELD_TO_NOTHING_OPS: ReadonlySet<string> = new Set(Object.keys(USER_OPS));
  *  sourceTypeNames; `version()` in `Server`'s setup), each with what a call of it may be written with: `pg_catalog.` too,
  *  or unqualified only (`pg_catalog.format_type`, written out, is Postgres's own) */
 const OVERRIDES: Readonly<Record<string, { qualified: boolean }>> = { version: { qualified: true }, current_setting: { qualified: true }, format_type: { qualified: false } };
-/** the clock functions that are the transaction's instant: their column's name is the function's */
-const CLOCK_CALLS: ReadonlySet<string> = new Set(["now", "transaction_timestamp"]);
-/** the clock keywords (SQLValueFunction): each one's name, as its column is named, and the type the instant is cast to */
-const CLOCK_OPS: Readonly<Record<string, { name: string; cast: string; precision: boolean }>> = {
-  SVFOP_CURRENT_DATE: { name: "current_date", cast: "date", precision: false },
-  SVFOP_CURRENT_TIME: { name: "current_time", cast: "timetz", precision: false }, SVFOP_CURRENT_TIME_N: { name: "current_time", cast: "timetz", precision: true },
-  SVFOP_CURRENT_TIMESTAMP: { name: "current_timestamp", cast: "timestamptz", precision: false }, SVFOP_CURRENT_TIMESTAMP_N: { name: "current_timestamp", cast: "timestamptz", precision: true },
-  SVFOP_LOCALTIME: { name: "localtime", cast: "time", precision: false }, SVFOP_LOCALTIME_N: { name: "localtime", cast: "time", precision: true },
-  SVFOP_LOCALTIMESTAMP: { name: "localtimestamp", cast: "timestamp", precision: false }, SVFOP_LOCALTIMESTAMP_N: { name: "localtimestamp", cast: "timestamp", precision: true },
-};
-/** the transaction's instant as the catalog reads it, from the request's carrier (catalog.ts asSession) */
-const INSTANT = `pg_catalog.current_setting(${quoteLiteral(SESSION_NOW)})::timestamptz`;
-
 /** one splice of `userSpliced`: the span the parser placed at a location, and what is written in its place */
-type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: string } | { kind: "clock-call"; name: string } | { kind: "clock-op"; op: string }
-  | { kind: "relative"; word: string };
-
-/** the date and time types (date, timestamp, timestamptz, time, timetz) whose input reads a relative word as the
- *  transaction's instant */
-const TIME_TYPES: ReadonlySet<number> = new Set([1082, 1114, 1184, 1083, 1266]);
-const RELATIVE_WORD = /^\s*(now|today|tomorrow|yesterday)\s*$/i;
-
-/** a statement's relative literals to splice, by their location in the whole text, each with its word and the type
- *  Postgres reads it as, and the end of each one's token (`Session.relativeLiterals`) */
-interface RelativeLiterals { at: ReadonlyMap<number, { word: string; type: number }>; spans: ReadonlyMap<number, number> }
-
-/** every string literal of a raw tree whose value is a relative word, however it is spelt: its location and word */
-function relativeWords(stmt: unknown): Map<number, string> {
-  const out = new Map<number, string>();
-  const walk = (n: unknown): void => {
-    if (Array.isArray(n)) { for (const x of n) walk(x); return; }
-    if (typeof n !== "object" || n === null) return;
-    const c = (n as { A_Const?: { sval?: { sval?: string }; location?: number } }).A_Const;
-    const word = c?.sval?.sval;
-    if (c !== undefined && typeof c.location === "number" && word !== undefined && RELATIVE_WORD.test(word)) out.set(c.location, RELATIVE_WORD.exec(word)![1]!);
-    for (const v of Object.values(n)) walk(v);
-  };
-  walk(stmt);
-  return out;
-}
-
-/**
- * WHICH OF `wanted` (literals' locations in the analysed text) POSTGRES READS AS A DATE OR TIME, from its analysis: a
- * Const of such a type at that location (an unknown literal coerced, explicitly or by a comparison, keeps the literal's
- * location), or a Const under a chain of casts (COERCEVIAIO, RELABELTYPE, a cast FUNCEXPR) that ends in such a type
- * (`'now'::text::timestamptz`). Each with the type it reaches.
- */
-function relativeTargets(tree: TreeValue, wanted: ReadonlySet<number>): Map<number, number> {
-  const out = new Map<number, number>();
-  const isNode = (v: TreeValue): v is Exclude<TreeValue, string | null | TreeValue[]> => v !== null && typeof v === "object" && !Array.isArray(v);
-  const visit = (v: TreeValue, into: number | null): void => {
-    if (Array.isArray(v)) { for (const x of v) visit(x, into); return; }
-    if (!isNode(v)) return;
-    if (v._node === "CONST") {
-      const type = Number(v.consttype), loc = Number(v.location);
-      const target = TIME_TYPES.has(type) ? type : into;
-      if (target !== null && wanted.has(loc)) out.set(loc, target);
-      return;
-    }
-    // a cast passes the type it reaches down its argument; any other node reaches none
-    const cast = v._node === "COERCEVIAIO" || v._node === "RELABELTYPE" ? Number(v.resulttype)
-      : v._node === "FUNCEXPR" && (Number(v.funcformat) === 1 || Number(v.funcformat) === 2) ? Number(v.funcresulttype) : null;
-    const pass = cast === null ? null : TIME_TYPES.has(cast) ? cast : into;
-    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x, pass);
-  };
-  visit(tree, null);
-  return out;
-}
-
-/**
- * A RELATIVE WORD AS THE TRANSACTION'S INSTANT, written as a literal the type's own input reads to the value Postgres
- * gives the word at that instant (`clock`: the session's instant and zone): `now` as the wall time in the zone with
- * its offset, `today` / `tomorrow` / `yesterday` as that day's midnight with none, so the zone reads it as Postgres
- * does across a change of offset.
- */
-function relativeLiteral(word: string, clock: { now: number; zone: string }): string {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: clock.zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3, timeZoneName: "longOffset" })
-    .formatToParts(new Date(clock.now)).map((p) => [p.type, p.value]));
-  const w = word.toLowerCase();
-  if (w === "now") {
-    const offset = /^GMT([+-]\d{2}:\d{2})$/.exec(parts.timeZoneName ?? "")?.[1] ?? "+00:00";
-    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${parts.fractionalSecond}${offset}`;
-  }
-  const day = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + (w === "tomorrow" ? 1 : w === "yesterday" ? -1 : 0)));
-  return `${day.toISOString().slice(0, 10)} 00:00:00`;
-}
+type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: string };
 
 /**
  * WHAT A STATEMENT THE CATALOG ANSWERS READS OF ITS SESSION, spliced in its text at the parse tree's locations:
@@ -2668,40 +2543,23 @@ function relativeLiteral(word: string, clock: { now: number; zone: string }): st
  *   first as Postgres's does (GitHub issue 253), so the override is reached by name, never by the path's order — and
  *   Postgres's own `pg_catalog.current_setting` is called by its OID's C function whatever its catalog row says, so it
  *   cannot be replaced (GitHub issue 40). The call is read from the parse tree's FuncCall, never from the text.
- * - THE CLOCK IS THE TRANSACTION'S (`now()`, `transaction_timestamp()`, CURRENT_DATE, CURRENT_TIME[(p)],
- *   CURRENT_TIMESTAMP[(p)], LOCALTIME[(p)], LOCALTIMESTAMP[(p)]): each the session's instant from the request's carrier
- *   (catalog.ts SESSION_NOW), read at execution, cast to its type under the session's zone and named as Postgres names
- *   its column — so a block's statements on the two paths see one instant. `clock_timestamp()` stays the real clock.
- *   A relative word cast to a date or time type (`'now'::timestamptz`, `date 'today'`) is that same instant (`clock`),
- *   written as a literal: Postgres reads both at the transaction's start, so they never part (CI's oracle at 76730cb).
+ * The clock is never spliced: the catalog's transaction begins at the session's instant (catalog.ts asSession), so
+ * every reader of it is the session's as written (review r3 of PR 333).
  * `base`: the statement's offset in the text the parse tree's locations count from.
  */
-function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>, clock: { now: number; zone: string } = { now: 0, zone: "UTC" },
-  relative: RelativeLiterals = { at: new Map(), spans: new Map() }): string {
+function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>): string {
   const at = new Map<number, Splice>();
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) { for (const x of n) walk(x); return; }
     if (typeof n !== "object" || n === null) return;
-    const f = (n as { SQLValueFunction?: { op?: string; typmod?: number; location?: number } }).SQLValueFunction;
-    if (f !== undefined && f.op !== undefined && typeof f.location === "number") {
-      if (ops.has(f.op)) at.set(f.location, { kind: "user", keyword: USER_OPS[f.op]! });
-      // its precision, for an `_N` op, is read from the text the parser placed (libpg-query's JSON leaves out a field at
-      // its default, so `CURRENT_TIME(0)` carries no typmod)
-      else if (CLOCK_OPS[f.op] !== undefined) at.set(f.location, { kind: "clock-op", op: f.op });
-    }
-    // a relative word Postgres reads as a date or time (`relativeLiterals`, from its analysis): the transaction's
-    // instant, the one the clock above is, so `'now'::timestamptz = now()` holds on this path too
-    const literal = (n as { A_Const?: { location?: number } }).A_Const;
-    if (literal !== undefined && typeof literal.location === "number" && relative.at.has(literal.location)) {
-      at.set(literal.location, { kind: "relative", word: relative.at.get(literal.location)!.word });
-    }
-    const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; args?: unknown[]; agg_star?: boolean; over?: unknown; location?: number } }).FuncCall;
+    const f = (n as { SQLValueFunction?: { op?: string; location?: number } }).SQLValueFunction;
+    if (f !== undefined && f.op !== undefined && typeof f.location === "number" && ops.has(f.op)) at.set(f.location, { kind: "user", keyword: USER_OPS[f.op]! });
+    const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; over?: unknown; location?: number } }).FuncCall;
     const name = c?.funcname?.map((x) => x.String?.sval ?? "");
     if (c !== undefined && name !== undefined && typeof c.location === "number" && c.over === undefined && (name.length === 1 || (name.length === 2 && name[0] === "pg_catalog"))) {
       const fn = name.at(-1)!;
       const override = OVERRIDES[fn];
       if (override !== undefined && (name.length === 1 || override.qualified)) at.set(c.location, { kind: "override", name: fn });
-      else if (CLOCK_CALLS.has(fn) && (c.args ?? []).length === 0 && c.agg_star !== true) at.set(c.location, { kind: "clock-call", name: fn });
     }
     for (const v of Object.values(n)) walk(v);
   };
@@ -2723,24 +2581,6 @@ function userSpliced(text: string, stmt: unknown, base: number, user: string, op
       if (m === null) continue;
       written = m[0];
       put = `public.${splice.name}`;
-    } else if (splice.kind === "clock-call") {
-      const m = new RegExp(`${qualified(splice.name).source.slice(0, -"(?![A-Za-z0-9_$])".length)}\\s*\\(\\s*\\)`, "i").exec(ahead);
-      if (m === null) continue;
-      written = m[0];
-      put = `(SELECT ${INSTANT} AS ${splice.name})`;
-    } else if (splice.kind === "clock-op") {
-      const clock = CLOCK_OPS[splice.op]!;
-      const m = new RegExp(`^${clock.name}(?![A-Za-z0-9_$])${clock.precision ? "\\s*\\(\\s*(\\d+)\\s*\\)" : ""}`, "i").exec(ahead);
-      if (m === null) continue;
-      written = m[0];
-      // an `_N` op has a precision whatever the JSON says: the one written, as the parser read it
-      put = `(SELECT ${INSTANT}::${clock.cast}${clock.precision ? `(${Number(m[1] ?? 0)})` : ""} AS ${clock.name})`;
-    } else if (splice.kind === "relative") {
-      // the token's span, as the scanner read it: any spelling of the literal
-      const to = relative.spans.get(loc);
-      if (to === undefined) continue;
-      written = bytes.subarray(from, to - base).toString("utf8");
-      put = quoteLiteral(relativeLiteral(splice.word, clock));
     } else {
       const keyword = splice.keyword;
       if (ahead.slice(0, keyword.length).toLowerCase() !== keyword) continue;

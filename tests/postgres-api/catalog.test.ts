@@ -596,29 +596,28 @@ test("asRole wraps a request in SET ROLE … RESET ROLE, with a Sync where the r
 });
 
 type SessionApi = {
-  asSession: (b: Uint8Array, state: { timeZone: string; searchPath: string; dateStyle: string }, s: ReadonlyMap<string, string>, now: number) => Uint8Array;
+  asSession: (b: Uint8Array, state: { timeZone: string; searchPath: string; dateStyle: string }, s: ReadonlyMap<string, string>) => Uint8Array;
   unwrapSession: (f: Array<{ type: string; frame: Buffer }>) => Array<{ type: string; frame: Buffer }>;
-  SESSION_SETTINGS: string; SESSION_NOW: string; searchPathSql: (path: string) => string; currentSettingSql: () => string[];
+  SESSION_SETTINGS: string; searchPathSql: (path: string) => string; currentSettingSql: () => string[];
 };
 const BASE_STATE = { timeZone: "UTC", searchPath: '"$user", public', dateStyle: "ISO, MDY" };
 
-test("session state: asSession applies the session's search_path, TimeZone, DateStyle, settings and instant before a request and the catalog's base after, a Sync where it has none; unwrapSession strips exactly its own replies, and says one out of step", () => {
+test("session state: asSession begins a transaction and applies the session's search_path, TimeZone, DateStyle and settings before a request, rolls back and sets the catalog's base after, a Sync where it has none; unwrapSession strips exactly its own replies, and says one out of step", () => {
   const m = catalogModule as unknown as SessionApi;
   // the carriers are no name a tool writes: named anew by the process
   assert.match(m.SESSION_SETTINGS, /^mason_[0-9a-f]{16}\.session$/);
-  assert.match(m.SESSION_NOW, /^mason_[0-9a-f]{16}\.now$/);
   const carrier = m.SESSION_SETTINGS.replace(".", "\\.");
   const framesOf = (b: Uint8Array): string[] => decode(b).map((f) => f.type);
   const settings = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "it's"]]);
   const state = { timeZone: "Europe/Berlin", searchPath: 'other, "$user", PUBLIC', dateStyle: "ISO, DMY" };
   // a simple Query ends in itself: no Sync added; a value's quote doubled inside the literal
-  const q = m.asSession(simpleQuery("SELECT 1"), state, settings, Date.UTC(2026, 0, 2, 3, 4, 5));
+  const q = m.asSession(simpleQuery("SELECT 1"), state, settings);
   assert.deepEqual(framesOf(q), ["Q", "Q", "Q"]);
-  assert.match(dec.decode(q), new RegExp(`SET search_path = "other", "\\$user", "public"; SET TimeZone = 'Europe/Berlin'; SET DateStyle = 'ISO, DMY'; SET ${carrier} = '\\{"timezone":"Europe/Berlin","myapp\\.x":"it''s"\\}'; SET mason_[0-9a-f]{16}\\.now = '2026-01-02T03:04:05\\.000Z'\0.*SELECT 1\0.*RESET ${carrier}; RESET mason_[0-9a-f]{16}\\.now; SET search_path = "public", "pg_catalog"; SET TimeZone = 'UTC'; SET DateStyle = 'ISO, MDY'\0`, "s"));
+  assert.match(dec.decode(q), new RegExp(`^Q.{4}BEGIN; SET search_path = "other", "\\$user", "public"; SET TimeZone = 'Europe/Berlin'; SET DateStyle = 'ISO, DMY'; SET ${carrier} = '\\{"timezone":"Europe/Berlin","myapp\\.x":"it''s"\\}'\0.*SELECT 1\0.*ROLLBACK; RESET ${carrier}; SET search_path = "public", "pg_catalog"; SET TimeZone = 'UTC'; SET DateStyle = 'ISO, MDY'\0`, "s"));
   // an extended batch with no Sync gets one, before the restore (ignore_till_sync); one with a Sync none
   const parse = message("P", concat(cstring(""), cstring("SELECT 1"), int16(0)));
-  assert.deepEqual(framesOf(m.asSession(parse, state, settings, 0)), ["Q", "P", "S", "Q"]);
-  assert.deepEqual(framesOf(m.asSession(concat(parse, message("S", new Uint8Array(0))), state, settings, 0)), ["Q", "P", "S", "Q"]);
+  assert.deepEqual(framesOf(m.asSession(parse, state, settings)), ["Q", "P", "S", "Q"]);
+  assert.deepEqual(framesOf(m.asSession(concat(parse, message("S", new Uint8Array(0))), state, settings)), ["Q", "P", "S", "Q"]);
   const f = (type: string): { type: string; frame: Buffer } => ({ type, frame: Buffer.from(type) });
   const five = ["C", "C", "C", "C", "C", "Z"].map(f);
   assert.deepEqual(m.unwrapSession([...five, f("T"), f("D"), f("C"), f("Z"), ...five]).map((x) => x.type), ["T", "D", "C", "Z"]);
@@ -632,11 +631,11 @@ test("session state: asSession applies the session's search_path, TimeZone, Date
   assert.equal(m.searchPathSql("x'; DROP TABLE y; --"), `"x'; drop table y; --"`);
 });
 
-test("session state: the catalog answers under the session's search_path, TimeZone, DateStyle, settings and instant, and is left in its base after, a failed request too", async () => {
+test("session state: the catalog answers under the session's search_path, TimeZone, DateStyle, settings and instant, and is left in its base after, a failed request too", { timeout: 120_000 }, async () => {
   const m = catalogModule as unknown as SessionApi;
   const c = new PgCatalog(schema, { log: () => undefined, setup: [...m.currentSettingSql(), "SET search_path = public, pg_catalog"] } as never);
-  const ask = async (sql: string, state = BASE_STATE, own: ReadonlyMap<string, string> = new Map(), now = 0) => {
-    const bytes = await c.run(m.asSession(simpleQuery(sql), state, own, now));
+  const ask = async (sql: string, state = BASE_STATE, own: ReadonlyMap<string, string> = new Map(), now?: number) => {
+    const bytes = await c.run(m.asSession(simpleQuery(sql), state, own), now);
     const frames = decode(bytes);
     const err = frames.find((x) => x.type === "E");
     return err !== undefined ? `${err.error?.C} ${err.error?.M}` : rowsOf(bytes).map((r) => r.join("|"));
@@ -650,8 +649,17 @@ test("session state: the catalog answers under the session's search_path, TimeZo
     // the zone and the order: a literal read under them
     assert.deepEqual(await ask("SELECT '2026-01-02 03:04:05+00'::timestamptz::text, '01/02/2026'::date::text, current_setting('DateStyle')", { timeZone: "Asia/Tokyo", searchPath: "public", dateStyle: "ISO, DMY" }),
       ["2026-01-02 12:04:05+09|2026-02-01|ISO, DMY"]);
-    // the instant a spliced clock reads (server.ts userSpliced): the request's, cast under the session's zone
-    assert.deepEqual(await ask(`SELECT (pg_catalog.current_setting('${m.SESSION_NOW}')::timestamptz)::text`, { ...BASE_STATE, timeZone: "Asia/Tokyo" }, new Map(), Date.UTC(2026, 0, 2, 20, 0, 0)), ["2026-01-03 05:00:00+09"]);
+    // the request's transaction begins at the instant it is run at (PgCatalog.run's `at`, catalog-worker.ts
+    // pinnedClock): every reader of the transaction's start reads it — now(), the keywords, a relative word however it
+    // reaches a date or time — and the real clock goes on (statement_timestamp, clock_timestamp)
+    const at = Date.UTC(2026, 0, 2, 20, 0, 0);
+    assert.deepEqual(await ask("SELECT now()::text, current_date::text, localtimestamp(0)::text, 'now'::timestamptz = now(), lower('NOW')::timestamptz = now(), 'today'::char(5)::date = current_date, statement_timestamp() > now() + interval '1 month', clock_timestamp() > now() + interval '1 month'",
+      { ...BASE_STATE, timeZone: "Asia/Tokyo" }, new Map(), at), ["2026-01-03 05:00:00+09|2026-01-03|2026-01-03 05:00:00|t|t|t|t|t"]);
+    // a prepared statement's Execute in a request of its own reads that request's instant
+    const parsed = await c.run(m.asSession(message("P", concat(cstring("p_now"), cstring("SELECT now()::text, $1::timestamptz = now()"), int16(0))), BASE_STATE, new Map()), at);
+    assert.ok(!decode(parsed).some((x) => x.type === "E"));
+    const bound = concat(message("B", concat(cstring(""), cstring("p_now"), int16(0), int16(1), int32(3), enc.encode("now"), int16(0))), message("E", concat(cstring(""), int32(0))));
+    assert.deepEqual(rowsOf(await c.run(m.asSession(bound, BASE_STATE, new Map()), at + 1000)).map((r) => r.join("|")), ["2026-01-02 20:00:01+00|t"]);
     // the overrides, reached by name (the splice writes `public.`), answer the session's with public off the path
     const own = new Map([["timezone", "Europe/Berlin"], ["myapp.x", "v"]]);
     assert.deepEqual(await ask("SELECT public.current_setting('TimeZone') || ' ' || public.current_setting('MYAPP.X', true) || ' ' || public.current_setting('block_size') || ' ' || (public.current_setting('no_such', true) IS NULL)::text", { ...BASE_STATE, searchPath: "nowhere" }, own),

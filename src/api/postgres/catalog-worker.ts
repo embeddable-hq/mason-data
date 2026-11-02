@@ -7,7 +7,8 @@
  *
  * Messages in: `{ id, op: "init", statements, optional? }` (start PGlite and run the DDL; the reply names the refused
  * statement, or the optional ones refused),
- * `{ id, op: "raw", bytes }` (frontend protocol bytes in, backend bytes out), `{ id, op: "query", sql }` (rows as
+ * `{ id, op: "raw", bytes, at? }` (frontend protocol bytes in, backend bytes out; `at`: the instant the FIRST message
+ * runs at, `pinnedClock`), `{ id, op: "query", sql }` (rows as
  * objects, for the server's own lookups and the tests), `{ id, op: "close" }`. Every reply carries the id:
  * `{ id, ok: true, bytes | rows }` or `{ id, ok: false, message }`.
  */
@@ -17,7 +18,7 @@ import { citext } from "@electric-sql/pglite/contrib/citext";
 
 type Request =
   | { id: number; op: "init"; statements: string[]; optional?: string[] }
-  | { id: number; op: "raw"; bytes: Uint8Array }
+  | { id: number; op: "raw"; bytes: Uint8Array; at?: number }
   | { id: number; op: "query"; sql: string }
   | { id: number; op: "close" };
 
@@ -26,6 +27,34 @@ if (port === null) throw new Error("catalog-worker.ts runs on a worker thread on
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 let db: PGlite | null = null;
+
+/**
+ * THE CATALOG'S CLOCK IS THE SESSION'S TRANSACTION'S (GitHub issue 253, review r3 of PR 333): `bytes`' first message
+ * (`asSession`'s, which begins the request's transaction) runs with the wall clock PGlite reads held at `at`, the
+ * session's instant, and the rest with the real one. Postgres's transaction start is the instant its first message
+ * arrived (`xactStartTimestamp`), and every reader of it — now(), CURRENT_TIMESTAMP and the other keywords, a
+ * relative word (`'now'`, `'today'`) however it is spelt, computed or bound — reads that one value, so the catalog's
+ * transaction instant IS the session's and no statement is rewritten for it. `statement_timestamp()` and
+ * `clock_timestamp()` read the real clock, as on Postgres. PGlite's wall clock is `Date.now()`
+ * (emscripten's `clock_time_get(CLOCK_REALTIME)`), on this thread alone; the requests are one at a time.
+ */
+async function pinnedClock(instance: PGlite, bytes: Uint8Array, at: number): Promise<Uint8Array> {
+  // a frame: its type byte, then its length (its own four bytes included)
+  const first = 1 + new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1);
+  const wall = Date.now;
+  let head: Uint8Array;
+  Date.now = () => at;
+  try {
+    head = new Uint8Array(await instance.execProtocolRaw(bytes.subarray(0, first)));   // a copy: PGlite may reuse its buffer
+  } finally {
+    Date.now = wall;
+  }
+  const tail = await instance.execProtocolRaw(bytes.subarray(first));
+  const out = new Uint8Array(head.length + tail.length);
+  out.set(head, 0);
+  out.set(tail, head.length);
+  return out;
+}
 
 port.on("message", (m: Request) => {
   void (async () => {
@@ -65,7 +94,7 @@ port.on("message", (m: Request) => {
         }
         case "raw": {
           if (db === null) throw new Error("the catalog is not started");
-          const bytes = await db.execProtocolRaw(m.bytes);
+          const bytes = m.at === undefined ? await db.execProtocolRaw(m.bytes) : await pinnedClock(db, m.bytes, m.at);
           const copy = new Uint8Array(bytes);   // PGlite may reuse its buffer: a copy of our own is transferred
           port.postMessage({ id: m.id, ok: true, bytes: copy }, [copy.buffer]);
           return;

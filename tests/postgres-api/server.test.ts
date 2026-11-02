@@ -672,6 +672,27 @@ describe("session state (GitHub issue 253): the session's settings reach every p
       assert.equal((await refused(c.query("SELECT 'today'::text::time"))).code, "22007");
       // prepared, with a parameter beside it
       assert.equal((await c.query({ text: "SELECT $1::int AS n, now() = 'now' AS same", values: ["1"] })).rows[0].same, true);
+      // review r3 of PR 333, the class every reader of the transaction's start (the catalog's transaction begins at the
+      // session's instant, catalog.ts asSession): a statement not at byte 0 (a comment before it, a second statement)
+      assert.deepEqual(await text(c, "/* app */ SELECT 'now'::timestamptz = now(), E'now'::timestamptz = now(), now() = 'now', date 'today' = current_date"), ["true", "true", "true", "true"]);
+      assert.deepEqual(await text(c, "-- a comment line\nSELECT E'now'::timestamptz = now(), 'now'::text::timestamptz = now()"), ["true", "true"]);
+      const two = await c.query("SELECT 1; SELECT E'now'::timestamptz = now() AS same") as unknown as Array<{ rows: Array<Record<string, unknown>> }>;
+      assert.equal(two[1]!.rows[0]!.same, true);
+      // a cast whose type modifier cuts the word first: Postgres reads what is left ('now ', 'no')
+      assert.deepEqual(await text(c, "SELECT 'now'::char(4)::timestamptz = now(), 'now'::varchar(3)::timestamptz = now(), 'today'::char(5)::date = current_date"), ["true", "true", "true"]);
+      assert.equal((await refused(c.query("SELECT 'now'::varchar(2)::timestamptz"))).code, "22007");
+      // the word computed at run time: a function's result, COALESCE, a concatenation, a sub-SELECT, CASE
+      assert.deepEqual(await text(c, "SELECT lower('now')::timestamptz = now(), upper('NOW')::timestamptz = now(), coalesce('now', 'x')::timestamptz = now(), ('now' || '')::timestamptz = now(), (SELECT 'now')::timestamptz = now(), CASE WHEN true THEN 'now' END::timestamptz = now()"),
+        ["true", "true", "true", "true", "true", "true"]);
+      // the word bound as a parameter
+      assert.equal((await c.query({ text: "SELECT $1::timestamptz = now() AS same", values: ["now"] })).rows[0].same, true);
+      // a block: every statement reads the block's start, the real clock goes on
+      await c.query("BEGIN");
+      const first = (await c.query("SELECT now()::text AS n")).rows[0].n as string;
+      await new Promise((r) => setTimeout(r, 30));
+      assert.deepEqual(Object.values((await c.query("SELECT 'now'::timestamptz::text AS a, now()::text AS b, lower('now')::timestamptz::text AS c, statement_timestamp() > now() AS d, clock_timestamp() > now() AS e")).rows[0]),
+        [first, first, first, true, true]);
+      await c.query("COMMIT");
       // a word that is no cast to a time is text, as written
       assert.deepEqual(await text(c, "SELECT 'now', 'today'::text"), ["now", "today"]);
     } finally { await c.end(); }
@@ -747,7 +768,7 @@ describe("session state (GitHub issue 253): the session's settings reach every p
   });
 });
 
-test("session state: the splice of a catalog statement reaches every call of an override and every clock function, read from the parse tree", async () => {
+test("session state: the splice of a catalog statement reaches every call of an override, read from the parse tree, and leaves the clock as written", async () => {
   const { userSplicedForTest } = await import("../../src/api/postgres/server.ts");
   const { parse } = await import("libpg-query");
   const splice = async (sql: string): Promise<string> => userSplicedForTest(sql, (await parse(sql)).stmts![0]!.stmt, 0, "agent", new Set(["SVFOP_SESSION_USER"]));
@@ -755,8 +776,9 @@ test("session state: the splice of a catalog statement reaches every call of an 
   assert.equal(await splice("SELECT current_setting('a'), pg_catalog.current_setting('b', true), CURRENT_SETTING('c')"),
     "SELECT public.current_setting('a'), public.current_setting('b', true), public.current_setting('c')");
   assert.equal(await splice("SELECT format_type(23, NULL), pg_catalog.format_type(23, NULL)"), "SELECT public.format_type(23, NULL), pg_catalog.format_type(23, NULL)");
-  const spliced = await splice("SELECT now(), CURRENT_DATE, current_timestamp(3), LOCALTIME, transaction_timestamp(), clock_timestamp(), 'now()', x.now FROM (SELECT 1 AS now) x");
-  assert.match(spliced, /^SELECT \(SELECT pg_catalog\.current_setting\('mason_[0-9a-f]{16}\.now'\)::timestamptz AS now\), \(SELECT .*::date AS current_date\), \(SELECT .*::timestamptz\(3\) AS current_timestamp\), \(SELECT .*::time AS localtime\), \(SELECT .*::timestamptz AS transaction_timestamp\), clock_timestamp\(\), 'now\(\)', x\.now FROM \(SELECT 1 AS now\) x$/);
+  // the clock is the catalog transaction's own, begun at the session's instant (catalog.ts asSession): never spliced
+  const clock = "SELECT now(), CURRENT_DATE, current_timestamp(3), LOCALTIME, transaction_timestamp(), clock_timestamp(), 'now'::timestamptz, x.now FROM (SELECT 1 AS now) x";
+  assert.equal(await splice(clock), clock);
   // a schema of the user's own: never an override
   assert.equal(await splice("SELECT myapp.version(), myapp.now()"), "SELECT myapp.version(), myapp.now()");
 });
