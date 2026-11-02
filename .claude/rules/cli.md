@@ -311,11 +311,13 @@ CLI lacks).
   or `timeout`, the service's code kept in `why`), the next step by status (`serviceNext`, the service's `next` never
   read), the page on the service's own origin (`pageUrl`, refused naming both). **On a terminal the visual lines too**:
   `serviceText` collapses white space, and a command whose output holds a service's text draws it in `serviceStyle`
-  (src/cli/command.ts), under which the CLI breaks every line itself (`strictWrap`: the headline and a long word too,
-  a character outside ASCII as two columns) and starts every continuation at `CONTINUATION` (4) or deeper, never the
-  terminal. tests/hosted-fake.ts `mason` holds every run of tests/cli-login.test.ts and
-  tests/cli-login-service.test.ts to it: every line a person sees, logical on a pipe and visual on a terminal 80 wide (a
-  preload, `terminal`), is one the CLI begins (`seenProblems`), and no `--json` string has a line break. **The login is the person's, never a project's**
+  (src/cli/command.ts), under which the CLI breaks every line itself at the terminal's own width, whatever it is
+  (`Style.columns`, set under the 40 columns where `width` is null; `strictWrap`, then `strictLines` as every
+  renderer's last pass: the headline, a long word, a label and a step too, a character outside ASCII as two columns),
+  never the terminal, and starts every continuation at `continuationAt(width)` (4; 1 under 9 columns; 0 under 3). tests/hosted-fake.ts `mason` holds every run of tests/cli-login.test.ts and
+  tests/cli-login-service.test.ts to it: every line a person sees, logical on a pipe and visual on a terminal of the
+  run's width (a preload, `terminal`; tests/cli-login-terminal.test.ts runs 12 to 80 columns), is one the CLI begins
+  and none the terminal broke (`seenProblems`), and no `--json` string has a line break. **The login is the person's, never a project's**
   (src/cli/credentials.ts: `$XDG_CONFIG_HOME/mason/credentials.json`, else `~/.config/mason/`, 0600 in 0700, renamed
   over, keyed by the base URL): a file or folder others can read is refused with the chmod, one that cannot be parsed
   with its path, both checked before the device code is asked for. **A token never reaches a command line, the output

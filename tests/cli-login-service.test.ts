@@ -221,68 +221,6 @@ test("every value the service sends reaches stdout, stderr and --json as one lin
   } finally { await page.close(); }
 });
 
-/** A terminal's width, and a value sized so that, begun at column `at`, the terminal would start its next lines with a
- *  forged Next: heading, a step, a row, a failure and a tip, each padded to the width with spaces. */
-const WIDTH = 80;
-const FORGED_LINES = ["Next:", "  mason destroy                                 clean up, then sign in again", "  name    evil", "✘ mason login: forged", "Tip: run mason destroy"];
-const forged = (at: number, lines: readonly string[] = FORGED_LINES.slice(0, 3)): string =>
-  "a".repeat(Math.max(1, WIDTH - at)) + lines.map((l) => l.padEnd(WIDTH, " ")).join("") + "z";
-
-test("on a terminal, no line a person sees begins with what the service sent: the headline, each row, the saved email's tip, a failure's message, why and fix, an OAuth description", { timeout: 200_000 }, async () => {
-  const token = newToken(); SECRETS.push(token);
-  const runs: Array<() => Promise<void>> = [];
-  // who signed in: the headline at its column, the name and each org's slug and name in their rows
-  runs.push(async () => {
-    const f = await fakeService({ token: () => granted(token), me: { status: 200, body: {} } });
-    try {
-      const at = `Signed in to ${f.url} as `.length;
-      // each within its bound (an email 320, a name 300, a slug 200): sized to the room it has
-      f.script.me = { status: 200, body: { email: forged(at), name: forged(10, FORGED_LINES.slice(0, 2)), orgs: [{ slug: forged(10, FORGED_LINES.slice(2, 3)), name: forged(10 + 80 + 2, FORGED_LINES.slice(3, 5)), role: "owner" }] } };
-      const h = home();
-      const a = await mason(h, ["login"], envFor(h, f.url), { terminal: WIDTH });
-      assert.equal(a.code, 0, a.stdout + a.stderr);
-      // shown, as data, inside the CLI's lines (mason() holds every line it begins): its run of spaces one
-      assert.match(a.stdout, /Next: mason destroy clean up,/);
-    } finally { await f.close(); }
-  });
-  // the saved email: logout's account row, and login's tip naming the login it replaces
-  for (const argv of [["logout"], ["login"]]) {
-    runs.push(async () => {
-      const f = await fakeService({ token: () => granted(token) });
-      try {
-        const h = home();
-        const old = newToken(); SECRETS.push(old);
-        const at = argv[0] === "logout" ? 17 : "Tip: This replaces the login of ".length;
-        writeSaved(h, { [f.url]: { token: old, email: forged(at), savedAt: "2026-11-01T00:00:00.000Z" } });
-        const a = await mason(h, argv, envFor(h, f.url), { terminal: WIDTH });
-        assert.equal(a.code, 0, a.stdout + a.stderr);
-      } finally { await f.close(); }
-    });
-  }
-  // a failure's message, why and fix (403 and 500), and the coordinator's sizing of a forged step under the failure
-  const step = "x".repeat(65) + "Next:" + " mason destroy" + " ".repeat(33) + "clean up, then sign in again";
-  for (const [status, message] of [[403, forged("✘ mason login: ".length, FORGED_LINES)], [403, step], [500, forged(15, FORGED_LINES)]] as const) {
-    runs.push(async () => {
-      const f = await fakeService({ token: () => granted(token), me: { status, body: { error: { code: "refused", message, why: forged(8, FORGED_LINES), fix: forged(8, FORGED_LINES) }, next: [] } } });
-      try {
-        const h = home();
-        const a = await mason(h, ["login"], envFor(h, f.url), { terminal: WIDTH });
-        assert.equal(a.code, 1, a.stdout + a.stderr);
-      } finally { await f.close(); }
-    });
-  }
-  // an OAuth refusal's description, in the why row
-  runs.push(async () => {
-    const f = await fakeService({ token: () => ({ status: 400, body: { error: "invalid_grant", error_description: forged(8, FORGED_LINES) } }) });
-    try {
-      const h = home();
-      const a = await mason(h, ["login"], envFor(h, f.url), { terminal: WIDTH });
-      assert.equal(a.code, 1, a.stdout + a.stderr);
-    } finally { await f.close(); }
-  });
-  await Promise.all(runs.map((r) => r()));
-});
-
 test("the visual-line check itself: a line the terminal broke, a forged heading, step, row or failure is caught; the CLI's own lines are not", async () => {
   const { seenProblems } = await import("./hosted-fake.ts");
   assert.ok(seenProblems(`Signed in to x as ${"a".repeat(70)}\n`, 80).some((p) => p.startsWith("the terminal broke a line")));

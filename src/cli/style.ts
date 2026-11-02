@@ -29,6 +29,9 @@ export interface Style {
   width: number | null;
   /** the output holds a hosted service's text: src/cli/command.ts `serviceStyle` breaks every line itself */
   untrusted?: true;
+  /** a terminal's own width, whatever it is: `width` is null under 40 columns (a terminal that narrow is left to wrap
+   *  what the CLI writes), but a line that holds a service's text is broken by the CLI at every width (`serviceStyle`) */
+  columns?: number;
 }
 
 const sgr = (on: number, off: number) => (s: string): string => s === "" ? s : `\x1b[${on}m${s}\x1b[${off}m`;
@@ -54,7 +57,8 @@ export function colourOn(stream: Stream, env: NodeJS.ProcessEnv = process.env): 
 /** The style for a stream: colour when colourOn, and its width when it is a terminal that says one. */
 export function styleFor(stream: Stream, env: NodeJS.ProcessEnv = process.env): Style {
   const width = stream.isTTY === true && stream.columns !== undefined && stream.columns >= 40 ? stream.columns : null;
-  return colourOn(stream, env) ? { ...COLOUR, width } : { ...PLAIN, width };
+  const columns = stream.isTTY === true && stream.columns !== undefined && stream.columns >= 1 ? { columns: stream.columns } : {};
+  return colourOn(stream, env) ? { ...COLOUR, width, ...columns } : { ...PLAIN, width, ...columns };
 }
 
 /** stdout's style (what a command prints) and stderr's (its progress), read when first asked. */
