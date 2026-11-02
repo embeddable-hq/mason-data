@@ -577,6 +577,7 @@ class Rewriter {
     }
     if (isNode(v) && this.original.has(bodyOf(v))) this.original.add(bodyOf(out as AstNode));
     if (isNode(v) && this.elementsUnread.has(bodyOf(v))) this.elementsUnread.add(bodyOf(out as AstNode));
+    if (isNode(v) && this.unifying.has(bodyOf(v))) this.unifying.add(bodyOf(out as AstNode));
     if (isNode(v) && this.writtenKeys.has(bodyOf(v))) this.writtenKeys.add(bodyOf(out as AstNode));
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
@@ -1697,6 +1698,79 @@ class Rewriter {
     }
     for (const [k, x] of Object.entries(b)) this.castArms(armOf(k, x) ?? x, inner);
   }
+
+  /**
+   * THE READERS WHERE THE ENGINE UNIFIES TWO NUMERIC TYPES INTO ONE (PR 415's review r4, the class
+   * fixed-scale-whole-digits-cap): a list (`ARRAY[…]`, `x = ANY / ALL (…)`), a subquery's comparison (`IN (SELECT …)`,
+   * `= ANY / ALL (SELECT …)`), a VALUES list's rows, a set operation's arms, COALESCE, CASE, GREATEST and LEAST. There
+   * DuckDB widens two DECIMALs to one and, past its 38 digits, cuts a scale (`DECIMAL(38,2)` beside `DECIMAL(10,4)` is
+   * `DECIMAL(38,2)`: 0.3333 read as 0.33). A value at a fixed scale (`fixedScale`) is written as `DECIMAL(38, n)` to
+   * hold every value Postgres's does, so in these readers it is read as main read it, the engine's double with its
+   * program: every round / trunc / cast inside an operand of one is marked here, before anything asks `duckExact`.
+   * A set operation's column whose every arm is a value at one fixed scale widens nothing (one scale, 38 digits) and
+   * keeps its exact value. Over-marking only keeps main's path.
+   */
+  markUnifying(v: unknown): void {
+    const all = (x: unknown): void => {
+      if (Array.isArray(x)) { x.forEach(all); return; }
+      if (x === null || typeof x !== "object") return;
+      if (isNode(x) && (kindOf(x) === "FuncCall" || kindOf(x) === "TypeCast")) this.unifying.add(bodyOf(x));
+      for (const [k, y] of Object.entries(isNode(x) ? bodyOf(x) : x as Body)) all(armOf(k, y) ?? y);
+    };
+    // a SELECT's outputs, every arm's where it is a set operation (`setOperationArms`), every row's where it is VALUES
+    const outputs = (s: Body): void => {
+      for (const arm of isSetOp(s) ? this.setOperationArms(s) : [s]) {
+        if (isSetOp(arm)) { outputs(arm); continue; }
+        if (Array.isArray(arm.valuesLists)) all(arm.valuesLists);
+        for (const t of (arm.targetList ?? []) as AstNode[]) all(bodyOf(t).val);
+      }
+    };
+    const visit = (x: unknown): void => {
+      if (Array.isArray(x)) { x.forEach(visit); return; }
+      if (x === null || typeof x !== "object") return;
+      const b = isNode(x) ? bodyOf(x) : x as Body, k = isNode(x) ? kindOf(x) : "";
+      if (k === "A_Expr" && (b.kind === "AEXPR_OP_ANY" || b.kind === "AEXPR_OP_ALL")) { all(b.lexpr); all(b.rexpr); }
+      if (k === "A_ArrayExpr" || k === "CoalesceExpr" || k === "MinMaxExpr") all(k === "A_ArrayExpr" ? b.elements : b.args);
+      if (k === "CaseExpr") { for (const w of (b.args ?? []) as AstNode[]) all(bodyOf(w).result); all(b.defresult); }
+      if (k === "SubLink" && ["ANY_SUBLINK", "ALL_SUBLINK", "ROWCOMPARE_SUBLINK"].includes(String(b.subLinkType))) {
+        all(b.testexpr);
+        if (isNode(b.subselect) && kindOf(b.subselect) === "SelectStmt") outputs(bodyOf(b.subselect));
+      }
+      if (k === "SelectStmt" && Array.isArray(b.valuesLists) && b.valuesLists.length > 1) all(b.valuesLists);
+      if (k === "SelectStmt" && isSetOp(b)) setOps.push(b);
+      // (a recursive WITH query: its recursive arm's read of its own column is that column, of the same type)
+      if (k === "CommonTableExpr" && isNode(b.ctequery) && kindOf(b.ctequery) === "SelectStmt") recursive.set(bodyOf(b.ctequery), b);
+      for (const [key, y] of Object.entries(b)) visit(armOf(key, y) ?? y);
+    };
+    const setOps: Body[] = [];
+    const recursive = new Map<Body, Body>();
+    visit(v);
+    // (after every other reader's marks: a column is decided by its arms' fixed scales, which a mark takes away)
+    for (const b of setOps) {
+      const lists = this.setOperationArms(b).map((a) => isSetOp(a) || !Array.isArray(a.targetList) ? null : (a.targetList as AstNode[]).map((t) => bodyOf(t).val));
+      if (lists.some((l) => l === null || l.length !== lists[0]!.length)) { outputs(b); continue; }
+      const cte = recursive.get(b), names = ((cte?.aliascolnames ?? []) as AstNode[]).map((n) => String(bodyOf(n).sval));
+      const first = (this.setOperationArms(b)[0]?.targetList ?? []) as AstNode[];
+      // the WITH query's own column i, read by name (`r.q`, `q`) in its recursive arm: its column list's name, else the
+      // first arm's
+      const own = (y: unknown, i: number): boolean => {
+        if (cte === undefined || !isNode(y) || kindOf(y) !== "ColumnRef") return false;
+        const fields = (bodyOf(y).fields ?? []) as AstNode[];
+        const given = first[i] === undefined ? undefined : bodyOf(first[i]!).name;
+        const name = names[i] ?? (typeof given === "string" ? given : null);
+        return name !== null && fields.every((f) => kindOf(f) === "String") && String(bodyOf(fields.at(-1)!).sval) === name
+          && (fields.length === 1 || (fields.length === 2 && String(bodyOf(fields[0]!).sval) === String(cte.ctename)));
+      };
+      lists[0]!.forEach((_, i) => {
+        const values = lists.map((l) => l![i]);
+        const scales = values.filter((y) => !own(y, i))
+          .map((y) => isNode(y) && (kindOf(y) === "FuncCall" || kindOf(y) === "TypeCast") ? this.fixedScale(y)?.scale ?? null : null);
+        if (scales.some((s) => s === null || s !== scales[0])) all(values);
+      });
+    }
+  }
+  /** the round / trunc / casts inside an operand the engine unifies with another (`markUnifying`): never at a fixed scale */
+  private readonly unifying = new WeakSet<Body>();
 
   /** whether a FETCH … WITH TIES was written (a generated table refuses one: src/duck/generated-plan.ts) */
   wroteTies = false;
@@ -2937,11 +3011,13 @@ class Rewriter {
    * quotient, an avg — never a JSON number's `->>` cast to numeric, nor a double's text), or of another such value.
    * The walk writes it `CAST(<its program's text> AS DECIMAL(p, s))` (`fixedScaleWritten`), so the engine's value IS
    * Postgres's, and `duckExact` says so: every reader (a USING key, an array_agg's element, a GROUP BY, DISTINCT, =)
-   * then reads it as any exact value. Null where it is not one. A round's DECIMAL holds 20 whole digits
-   * (`FIXED_SCALE_WHOLE_DIGITS`): one of 10^20 or more is the engine's conversion error, where Postgres answers
+   * then reads it as any exact value. Null where it is not one, and in an operand the engine unifies with another type
+   * (`markUnifying`), where it is read as main read it. A round's DECIMAL holds 38 digits, the engine's every one
    */
   private fixedScale(n: AstNode): { precision: number; scale: number } | null {
     const b = bodyOf(n);
+    // (an operand the engine unifies with another type is read as main read it: `markUnifying`)
+    if (this.unifying.has(b)) return null;
     if (this.fixedScales.has(b)) return this.fixedScales.get(b)!;
     let found: { precision: number; scale: number } | null = null;
     // (of a double whose program the plan has, or of a value at a fixed scale itself: round((x / 3)::numeric(10,4), 2);
@@ -2962,13 +3038,11 @@ class Rewriter {
     } else if (kindOf(n) === "FuncCall" && ["round", "trunc"].includes(lastName(b.funcname)) && b.over === undefined && b.agg_within_group !== true
       && this.typeOf(n) === NUMERIC) {
       const args = (b.args ?? []) as AstNode[];
-      // (Postgres's scale is n's, and 0 for a negative n: round(x, -1) is 120. Its 20 whole digits are the exact
-      // sum's, DECIMAL(38,18)'s (`summed`): the engine unifies two DECIMALs in a list's or a subquery's comparison
-      // (= ANY, IN (SELECT …)) by cutting the scale where their width passes 38, so 38 whole digits would cut the other
-      // side's decimals past n, and 20 leave it 18)
+      // (Postgres's scale is n's, and 0 for a negative n: round(x, -1) is 120. Every one of the engine's 38 digits:
+      // where the engine would widen it beside another type, `markUnifying` keeps main's path instead)
       const n = args.length === 1 ? 0 : args.length === 2 ? constInt(args[1]) : null;
       const scale = n === null ? null : Math.max(n, 0);
-      if (scale !== null && scale <= 38 && programmed(args[0])) found = { precision: Math.min(38, scale + FIXED_SCALE_WHOLE_DIGITS), scale };
+      if (scale !== null && scale <= 38 && programmed(args[0])) found = { precision: 38, scale };
     }
     // (only a found one is kept: a value read before its FROM items are known is decided again once they are)
     if (found !== null) this.fixedScales.set(b, found);
@@ -5692,9 +5766,6 @@ const VALUE_KEEPING = new Set(["sum", "min", "max", "latest", "any_value", "arg_
 const WRITTEN_EXACT = new Set(["count", "extract", "div"]);
 /** the array functions that read an array's shape, never its elements (`elementsUnread`) */
 const ELEMENT_BLIND = new Set(["array_length", "cardinality", "array_ndims", "array_lower", "array_upper"]);
-/** the whole digits a round / trunc at a fixed scale is written with (`Rewriter.fixedScale`): the exact sum's 20
- *  (DECIMAL(38,18)), so the engine's list and subquery comparisons keep 18 decimals of the other side */
-const FIXED_SCALE_WHOLE_DIGITS = 20;
 /** Mason's functions whose text is an exact decimal's, which a DECIMAL cast reads exactly (`summed`'s parts) */
 const EXACT_TEXTS = new Set(["__mason_numeric_exact"]);
 
@@ -6535,6 +6606,7 @@ export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(
   r.scopeColumns(own);
   r.refuseExactRows(own);
   r.castArms(own);
+  r.markUnifying(own);
   const exact = r.exactThrough(own, analysis.fields);
   r.carryAll(own);
   r.markBounds(own, wireBound);
