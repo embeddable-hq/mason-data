@@ -59,7 +59,9 @@ import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
-import { catalogRows } from "../../duck/analyze.ts";
+import { analyze, catalogRows } from "../../duck/analyze.ts";
+import type { TreeValue } from "../../duck/pgtree.ts";
+import { scan } from "libpg-query";
 import type { Planner } from "../../duck/generated-plan.ts";
 import { ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
@@ -1447,7 +1449,7 @@ class Session {
       case "empty": return [emptyQueryResponse()];
       case "explain": {
         const e = await this.explaining(raw, whole, t, []);
-        if (e.plan === null) return catalogExplained(await this.forwardSimple(this.spliced(text, raw)), e.options);
+        if (e.plan === null) return catalogExplained(await this.forwardSimple(await this.spliced(text, raw)), e.options);
         const controller = new AbortController();
         const disarm = this.armTimeout(controller);
         try {
@@ -1457,7 +1459,7 @@ class Session {
           return out;
         } finally { disarm(); }
       }
-      case "catalog": return this.forwardSimple(this.spliced(text, raw));
+      case "catalog": return this.forwardSimple(await this.spliced(text, raw));
       case "set": return this.setStatement(t);
       // its RowDescription first, as Postgres's: a value it refuses is refused after it
       case "set_config": this.send(this.setConfigDescription(t, 0)); return this.setConfigStatement(t);
@@ -1625,11 +1627,50 @@ class Session {
     return live.file !== null && live.problem === null && live.default === null;
   }
 
-  /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it */
-  private spliced(text: string, raw: RawStmt): string {
+  /** the statement as the catalog runs it for this session: the user's name spliced for the keywords that name it, the
+   *  overrides and the clock (`userSpliced`) */
+  private async spliced(text: string, raw: RawStmt, paramOids: readonly number[] = []): Promise<string> {
     // the transaction's instant (begun here when none is, as catalogAs begins it), which a relative literal is read as
     const now = this.txNow ??= this.server.now();
-    return userSpliced(text, raw.stmt, raw.stmt_location ?? 0, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS, { now, zone: this.sessionState().timeZone });
+    const base = raw.stmt_location ?? 0;
+    const relative = await this.relativeLiterals(text, raw, base, paramOids);
+    return userSpliced(text, raw.stmt, base, this.user, this.heldToNothing() ? HELD_TO_NOTHING_OPS : SESSION_OPS, { now, zone: this.sessionState().timeZone }, relative);
+  }
+
+  /**
+   * THE RELATIVE WORDS OF A CATALOG STATEMENT THAT POSTGRES READS AS A DATE OR TIME (GitHub issue 253, review r2 of
+   * PR 333): a literal `now`, `today`, `tomorrow` or `yesterday` however it is spelt (`'now'`, `E'now'`, `$$now$$`,
+   * `U&'now'`: the parser's A_Const holds the word), and however it reaches the type — a cast, a chain of casts through
+   * text, the comparison's own coercion (`now() = 'now'`). Which literals reach a date or time type is Postgres's
+   * analysis (`relativeTargets`), never the text; a statement with no such word asks nothing. Each is then spliced to
+   * the transaction's instant (`userSpliced`), the one now() reads, since the catalog's own transaction began at another.
+   * Its span is the scanner's token (`spans`). A statement the analysis refuses is left as written: the catalog says why.
+   */
+  private async relativeLiterals(text: string, raw: RawStmt, base: number, paramOids: readonly number[]): Promise<RelativeLiterals> {
+    const words = relativeWords(raw.stmt);
+    if (words.size === 0) return { at: new Map(), spans: new Map() };
+    const statement = Buffer.from(text, "utf8").subarray(0, raw.stmt_len ? raw.stmt_len : undefined).toString("utf8");
+    const analysis = await analyze((b) => this.server.catalog.run(b), statement, paramOids, this.sessionState());
+    if ("refused" in analysis) return { at: new Map(), spans: new Map() };
+    const targets = relativeTargets(analysis.tree, new Set([...words.keys()].map((l) => l - base)));
+    const at = new Map<number, { word: string; type: number }>();
+    for (const [loc, type] of targets) {
+      const word = words.get(loc + base)!;
+      // a time reads `now` alone: `'today'::text::time` is Postgres's 22007 at run time, left to the catalog to say
+      if (word.toLowerCase() !== "now" && (type === 1083 || type === 1266)) continue;
+      at.set(loc + base, { word, type });
+    }
+    // each literal's span, as the scanner reads its token (a U&'…' UESCAPE '…' is the three tokens)
+    const spans = new Map<number, number>();
+    if (at.size > 0) {
+      const tokens = (await scan(text)).tokens;
+      tokens.forEach((t, i) => {
+        if (!at.has(t.start + base)) return;
+        const next = tokens[i + 1];
+        spans.set(t.start + base, next !== undefined && next.text.toUpperCase() === "UESCAPE" && tokens[i + 2] !== undefined ? tokens[i + 2]!.end : t.end);
+      });
+    }
+    return { at, spans };
   }
 
   /** a plan's reads held to the session's role of THIS moment (a role given or taken since the Parse): refused as the
@@ -2213,7 +2254,7 @@ class Session {
         const own = this.statements.get(m.name);
         // the unnamed statement is replaced by a Parse; the sidecar's must be closed first
         const close = own?.catalogName !== null && own !== undefined ? [frame("C", Buffer.from("S"), cstr(own.catalogName))] : m.name === "" ? [frame("C", Buffer.from("S"), cstr(statement.catalogName))] : [];
-        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(this.spliced(m.sql, raw)),
+        const reply = await this.catalogRun(...close, frame("P", cstr(statement.catalogName), cstr(await this.spliced(m.sql, raw, m.paramTypes)),
           int16(m.paramTypes.length), ...m.paramTypes.map(int32)));
         this.statements.set(m.name, statement);
         // the CloseComplete of the close this server added is not the client's
@@ -2541,9 +2582,57 @@ const INSTANT = `pg_catalog.current_setting(${quoteLiteral(SESSION_NOW)})::times
 type Splice = { kind: "user"; keyword: string } | { kind: "override"; name: string } | { kind: "clock-call"; name: string } | { kind: "clock-op"; op: string }
   | { kind: "relative"; word: string };
 
-/** the date and time types whose input reads a relative word (`'now'`, `'today'` …) as the transaction's instant */
-const RELATIVE_TYPES: ReadonlySet<string> = new Set(["date", "timestamp", "timestamptz", "time", "timetz"]);
+/** the date and time types (date, timestamp, timestamptz, time, timetz) whose input reads a relative word as the
+ *  transaction's instant */
+const TIME_TYPES: ReadonlySet<number> = new Set([1082, 1114, 1184, 1083, 1266]);
 const RELATIVE_WORD = /^\s*(now|today|tomorrow|yesterday)\s*$/i;
+
+/** a statement's relative literals to splice, by their location in the whole text, each with its word and the type
+ *  Postgres reads it as, and the end of each one's token (`Session.relativeLiterals`) */
+interface RelativeLiterals { at: ReadonlyMap<number, { word: string; type: number }>; spans: ReadonlyMap<number, number> }
+
+/** every string literal of a raw tree whose value is a relative word, however it is spelt: its location and word */
+function relativeWords(stmt: unknown): Map<number, string> {
+  const out = new Map<number, string>();
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) { for (const x of n) walk(x); return; }
+    if (typeof n !== "object" || n === null) return;
+    const c = (n as { A_Const?: { sval?: { sval?: string }; location?: number } }).A_Const;
+    const word = c?.sval?.sval;
+    if (c !== undefined && typeof c.location === "number" && word !== undefined && RELATIVE_WORD.test(word)) out.set(c.location, RELATIVE_WORD.exec(word)![1]!);
+    for (const v of Object.values(n)) walk(v);
+  };
+  walk(stmt);
+  return out;
+}
+
+/**
+ * WHICH OF `wanted` (literals' locations in the analysed text) POSTGRES READS AS A DATE OR TIME, from its analysis: a
+ * Const of such a type at that location (an unknown literal coerced, explicitly or by a comparison, keeps the literal's
+ * location), or a Const under a chain of casts (COERCEVIAIO, RELABELTYPE, a cast FUNCEXPR) that ends in such a type
+ * (`'now'::text::timestamptz`). Each with the type it reaches.
+ */
+function relativeTargets(tree: TreeValue, wanted: ReadonlySet<number>): Map<number, number> {
+  const out = new Map<number, number>();
+  const isNode = (v: TreeValue): v is Exclude<TreeValue, string | null | TreeValue[]> => v !== null && typeof v === "object" && !Array.isArray(v);
+  const visit = (v: TreeValue, into: number | null): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x, into); return; }
+    if (!isNode(v)) return;
+    if (v._node === "CONST") {
+      const type = Number(v.consttype), loc = Number(v.location);
+      const target = TIME_TYPES.has(type) ? type : into;
+      if (target !== null && wanted.has(loc)) out.set(loc, target);
+      return;
+    }
+    // a cast passes the type it reaches down its argument; any other node reaches none
+    const cast = v._node === "COERCEVIAIO" || v._node === "RELABELTYPE" ? Number(v.resulttype)
+      : v._node === "FUNCEXPR" && (Number(v.funcformat) === 1 || Number(v.funcformat) === 2) ? Number(v.funcresulttype) : null;
+    const pass = cast === null ? null : TIME_TYPES.has(cast) ? cast : into;
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x, pass);
+  };
+  visit(tree, null);
+  return out;
+}
 
 /**
  * A RELATIVE WORD AS THE TRANSACTION'S INSTANT, written as a literal the type's own input reads to the value Postgres
@@ -2587,7 +2676,8 @@ function relativeLiteral(word: string, clock: { now: number; zone: string }): st
  *   written as a literal: Postgres reads both at the transaction's start, so they never part (CI's oracle at 76730cb).
  * `base`: the statement's offset in the text the parse tree's locations count from.
  */
-function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>, clock: { now: number; zone: string } = { now: 0, zone: "UTC" }): string {
+function userSpliced(text: string, stmt: unknown, base: number, user: string, ops: ReadonlySet<string>, clock: { now: number; zone: string } = { now: 0, zone: "UTC" },
+  relative: RelativeLiterals = { at: new Map(), spans: new Map() }): string {
   const at = new Map<number, Splice>();
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) { for (const x of n) walk(x); return; }
@@ -2599,16 +2689,11 @@ function userSpliced(text: string, stmt: unknown, base: number, user: string, op
       // its default, so `CURRENT_TIME(0)` carries no typmod)
       else if (CLOCK_OPS[f.op] !== undefined) at.set(f.location, { kind: "clock-op", op: f.op });
     }
-    // a relative word cast to a date or time type (`'now'::timestamptz`, `date 'today'`): Postgres reads it at the
-    // transaction's start, the instant the clock above is, so `'now'::timestamptz = now()` holds on this path too
-    const cast = (n as { TypeCast?: { arg?: { A_Const?: { sval?: { sval?: string }; location?: number } }; typeName?: { names?: Array<{ String?: { sval?: string } }> } } }).TypeCast;
-    const literal = cast?.arg?.A_Const;
-    const type = cast?.typeName?.names?.at(-1)?.String?.sval;
-    const word = literal?.sval?.sval;
-    if (literal !== undefined && typeof literal.location === "number" && type !== undefined && RELATIVE_TYPES.has(type) && word !== undefined && RELATIVE_WORD.test(word)
-      // a time reads `now` alone: `'today'::time` is Postgres's 22007, left to the catalog to say
-      && (RELATIVE_WORD.exec(word)![1]!.toLowerCase() === "now" || !type.startsWith("time") || type.startsWith("timestamp"))) {
-      at.set(literal.location, { kind: "relative", word: RELATIVE_WORD.exec(word)![1]! });
+    // a relative word Postgres reads as a date or time (`relativeLiterals`, from its analysis): the transaction's
+    // instant, the one the clock above is, so `'now'::timestamptz = now()` holds on this path too
+    const literal = (n as { A_Const?: { location?: number } }).A_Const;
+    if (literal !== undefined && typeof literal.location === "number" && relative.at.has(literal.location)) {
+      at.set(literal.location, { kind: "relative", word: relative.at.get(literal.location)!.word });
     }
     const c = (n as { FuncCall?: { funcname?: Array<{ String?: { sval?: string } }>; args?: unknown[]; agg_star?: boolean; over?: unknown; location?: number } }).FuncCall;
     const name = c?.funcname?.map((x) => x.String?.sval ?? "");
@@ -2651,9 +2736,10 @@ function userSpliced(text: string, stmt: unknown, base: number, user: string, op
       // an `_N` op has a precision whatever the JSON says: the one written, as the parser read it
       put = `(SELECT ${INSTANT}::${clock.cast}${clock.precision ? `(${Number(m[1] ?? 0)})` : ""} AS ${clock.name})`;
     } else if (splice.kind === "relative") {
-      const m = /^'[^']*'/.exec(ahead);
-      if (m === null || !RELATIVE_WORD.test(m[0].slice(1, -1))) continue;
-      written = m[0];
+      // the token's span, as the scanner read it: any spelling of the literal
+      const to = relative.spans.get(loc);
+      if (to === undefined) continue;
+      written = bytes.subarray(from, to - base).toString("utf8");
       put = quoteLiteral(relativeLiteral(splice.word, clock));
     } else {
       const keyword = splice.keyword;

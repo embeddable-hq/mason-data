@@ -18,16 +18,16 @@ each). The copy is read-only.
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 87 forms of them verified |
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 256 functions, 387 operators, 96 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 254 functions, 387 operators, 96 aggregates, 58 window functions and 125 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 58 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 6,568 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 6,571 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 6,568 statements | Mason | DuckDB alone |
+| Of 6,571 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 92% | 27% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
@@ -162,7 +162,7 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (1145)
+## What is verified (1143)
 
 ### Types (93)
 
@@ -260,7 +260,7 @@ Not about one statement: what the prototype cannot do yet.
 - a value of type xid8
 - a value of type xml
 
-### Functions (256)
+### Functions (254)
 
 - the function "bit"(bit,integer,boolean)
 - the function "extract"(text,date)
@@ -328,9 +328,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function concat("any")
 - the function concat_ws(text,"any")
 - the function current_setting(text)
-- the function current_setting(text) (an extension's)
 - the function current_setting(text,boolean)
-- the function current_setting(text,boolean) (an extension's)
 - the function date(timestamp with time zone)
 - the function date(timestamp without time zone)
 - the function date_bin(interval,timestamp without time zone,timestamp without time zone)

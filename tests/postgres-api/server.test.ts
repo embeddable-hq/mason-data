@@ -663,6 +663,15 @@ describe("session state (GitHub issue 253): the session's settings reach every p
       // a time reads 'now' alone: 'today'::time is Postgres's own 22007
       assert.equal((await refused(c.query("SELECT 'today'::time"))).code, "22007");
       assert.deepEqual(await text(c, "SELECT 'now'::time = localtime, 'now'::timetz = current_time"), ["true", "true"]);
+      // every spelling the parser reads as the word, and every way it reaches the type, from Postgres's analysis
+      // (review r2 of PR 333): E'', $$ $$, U&'', a chain of casts through text, varchar or unknown, the comparison's coercion
+      assert.deepEqual(await text(c, "SELECT E'now'::timestamptz = now(), E'today'::date = current_date, $$now$$::timestamptz = now(), U&'now'::timestamptz = now(), U&'n!006Fw' UESCAPE '!'::timestamptz = now()"),
+        ["true", "true", "true", "true", "true"]);
+      assert.deepEqual(await text(c, "SELECT 'now'::text::timestamptz = now(), 'now'::varchar::timestamptz = now(), 'now'::unknown::timestamptz = now(), now() = 'now', 'now' = now(), 'é' || 'x' = 'éx' AND E'now'::timestamptz = now()"),
+        ["true", "true", "true", "true", "true", "true"]);
+      assert.equal((await refused(c.query("SELECT 'today'::text::time"))).code, "22007");
+      // prepared, with a parameter beside it
+      assert.equal((await c.query({ text: "SELECT $1::int AS n, now() = 'now' AS same", values: ["1"] })).rows[0].same, true);
       // a word that is no cast to a time is text, as written
       assert.deepEqual(await text(c, "SELECT 'now', 'today'::text"), ["now", "today"]);
     } finally { await c.end(); }
