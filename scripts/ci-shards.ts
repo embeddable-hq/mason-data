@@ -24,7 +24,8 @@
  * `scripts/oracle-legs.ts --weights` writes the oracle's (the run check, the download and the fixture's text are
  * ci-layout.ts's, shared). `verify unit` then says how far apart the shards ran and warns past UNIT_APART_MS, naming
  * that command, or the one file no split can help (`balanceLines`): balance is a cost, never coverage, so it never moves
- * the exit code. This file never imports
+ * the exit code. A file whose test runs near the per-test bound runs by itself after the shard's others (`ALONE`), and
+ * `verify unit` warns of one not listed (`nearBoundLines`). This file never imports
  * scripts/oracle-legs.ts, which reaches the engine's gaps and the oracle's decisions.
  */
 import { spawnSync } from "node:child_process";
@@ -32,8 +33,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ORACLE, TEST_BOUND_ARGS } from "./gate.ts";
+import { ORACLE, TEST_BOUND_ARGS, TEST_TIMEOUT_MS } from "./gate.ts";
 import { SHARDS, entriesText, reportName, runArtifacts } from "./ci-layout.ts";
+import type { FileTimes } from "./test-times.ts";
 
 export { SHARDS };
 export type Kind = keyof typeof SHARDS;
@@ -55,6 +57,21 @@ const REST_WEIGHTS: Readonly<Record<string, number>> = {
 const REST_UNLISTED = 3;
 /** The executor's stress tests fill every core they get: one to a shard, before anything else is placed. */
 export const APART: readonly string[] = ["tests/duck-executor-slow-vector.test.ts", "tests/duck-executor-starve.test.ts", "tests/duck-executor-cancel-stress.test.ts"];
+/**
+ * A TEST NEAR ITS BOUND RUNS BY ITSELF (issue 338). A unit shard runs its files SIDE_BY_SIDE at once on 4 vCPUs, so a
+ * CPU-bound test's time is its neighbours' as much as its own: the generated tables' round 12 took 79-125 s in the one
+ * file of the base, beside light files, and 151-300 s in a file of its own beside other generated-world files, where 300 s
+ * is the per-test bound (TEST_TIMEOUT_MS) that cancelled it (run 41440605532). A file whose longest top-level test has
+ * run past NEAR_BOUND_MS on CI is listed here (round 12; round 6, 157 s; round 7, 158 s): its shard runs it
+ * after its other files, one ALONE file at a time (`aloneCommand`), so nothing runs beside it, and `partition` counts it
+ * SIDE_BY_SIDE times over, the shard's wall it takes. `verify unit` warns of a file not listed whose longest test ran
+ * past NEAR_BOUND_MS (`nearBoundLines`); the bound itself is never loosened.
+ */
+export const ALONE: readonly string[] = ["tests/duck-generated-round12.test.ts", "tests/duck-generated-round6.test.ts", "tests/duck-generated-round7-8.test.ts"];
+/** Half the per-test bound: a test past it on one runner's draw is one draw from the bound on a slower one */
+export const NEAR_BOUND_MS = TEST_TIMEOUT_MS / 2;
+/** The files a unit shard runs at once: Node's default, os.availableParallelism() - 1, on CI's 4-vCPU runners */
+export const SIDE_BY_SIDE = 3;
 
 /** tests/fixtures/unit-weights.json: each unit file's wall time in ms, as a CI run's unit shards measured it */
 export interface UnitWeights {
@@ -95,19 +112,24 @@ export function testFiles(kind: Kind, root: string): string[] {
 }
 
 /**
- * The files in `n` shards of about equal weight: `apart` one to a shard, then the heaviest first, each into the
- * lightest shard so far. It is a function of the list alone, ties going to the lower shard, so every shard's job
- * computes the same partition.
+ * The files in `n` shards of about equal weight: `apart` one to a shard, then each `alone` file, heaviest first, into
+ * the lightest shard so far, counted SIDE_BY_SIDE times over (it runs with nothing beside it, so it takes that much of
+ * its shard's wall), then the rest the same way, heaviest first. It is a function of the list alone, ties going to the
+ * lower shard, so every shard's job computes the same partition.
  */
-export function partition(files: readonly string[], n: number, weight: (file: string) => number, apart: readonly string[] = []): string[][] {
+export function partition(files: readonly string[], n: number, weight: (file: string) => number, apart: readonly string[] = [], alone: readonly string[] = []): string[][] {
   const shards = Array.from({ length: n }, () => ({ files: [] as string[], total: 0 }));
   const seeded = apart.filter((f) => files.includes(f));
   seeded.forEach((file, i) => { const s = shards[i % n]!; s.files.push(file); s.total += weight(file); });
-  for (const file of files.filter((f) => !seeded.includes(f)).sort((a, b) => weight(b) - weight(a) || (a < b ? -1 : 1))) {
+  const heaviest = (a: string, b: string): number => weight(b) - weight(a) || (a < b ? -1 : 1);
+  const place = (file: string, cost: number): void => {
     const lightest = shards.reduce((best, s) => s.total < best.total ? s : best);
     lightest.files.push(file);
-    lightest.total += weight(file);
-  }
+    lightest.total += cost;
+  };
+  const by = alone.filter((f) => files.includes(f) && !seeded.includes(f)).sort(heaviest);
+  for (const file of by) place(file, weight(file) * SIDE_BY_SIDE);
+  for (const file of files.filter((f) => !seeded.includes(f) && !by.includes(f)).sort(heaviest)) place(file, weight(file));
   return shards.map((s) => s.files.sort());
 }
 
@@ -115,12 +137,20 @@ export function partition(files: readonly string[], n: number, weight: (file: st
 export function shardFiles(kind: Kind, shard: number, root: string): string[] {
   if (!Number.isInteger(shard) || shard < 1 || shard > SHARDS[kind]) throw new RangeError(`${kind} has shards 1 to ${SHARDS[kind]}, not ${shard}`);
   if (kind === "oracle") return [ORACLE];
-  return partition(testFiles(kind, root), SHARDS[kind], weightOf(kind, root), APART)[shard - 1]!;
+  return partition(testFiles(kind, root), SHARDS[kind], weightOf(kind, root), APART, kind === "unit" ? ALONE : [])[shard - 1]!;
 }
 
-/** The reporter that times each file of a unit shard, and where its shard has it write */
+/** The reporter that times each file of a unit shard, and where its shard has it write (`alone`: its ALONE files' run) */
 export const TIMES_REPORTER = fileURLToPath(new URL("./test-times.ts", import.meta.url));
-export const timesName = (shard: number): string => `test-times-unit-${shard}.json`;
+export const timesName = (shard: number, alone = false): string => `test-times-unit-${shard}${alone ? "-alone" : ""}.json`;
+const unitReporters = (dest: string): string[] => ["--test-reporter=spec", "--test-reporter-destination=stdout", `--test-reporter=${TIMES_REPORTER}`, `--test-reporter-destination=${dest}`];
+
+/** The `node` arguments of a unit shard's ALONE files, run after its others: one file at a time, so nothing runs beside
+ *  it, under the same per-test bound and the same two reporters, its times written apart */
+export function aloneCommand(shard: number, files: readonly string[], out: string): { args: string[]; env: Record<string, string> } {
+  if (files.length === 0) throw new Error(`unit shard ${shard} has no ALONE file: \`node --test\` would run every test in the tree`);
+  return { args: ["--test", ...TEST_BOUND_ARGS, "--test-concurrency=1", ...unitReporters(path.join(out, timesName(shard, true))), ...files], env: {} };
+}
 
 /** The `node` arguments of a shard. Integration files run one at a time (tests/integration/README.md); `--test` with no
  *  file would run every test in the tree, so an empty shard is an error, not a pass. A unit shard carries the per-test
@@ -128,13 +158,13 @@ export const timesName = (shard: number): string => `test-times-unit-${shard}.js
  *  reports twice: spec on stdout, as before (ci.yml's `slowest tests` reads those lines), and each file's time into `out`. */
 export function shardCommand(kind: Kind, shard: number, files: readonly string[], out: string): { args: string[]; env: Record<string, string> } {
   if (files.length === 0) throw new Error(`${kind} shard ${shard} has no file: \`node --test\` would run every test in the tree`);
-  const reporters = ["--test-reporter=spec", "--test-reporter-destination=stdout", `--test-reporter=${TIMES_REPORTER}`, `--test-reporter-destination=${path.join(out, timesName(shard))}`];
-  return { args: ["--test", ...(kind === "unit" ? [...TEST_BOUND_ARGS, ...reporters] : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}`, IT_ORACLE_LEG_REPORT: path.join(out, reportName(shard)) } : {} };
+  return { args: ["--test", ...(kind === "unit" ? [...TEST_BOUND_ARGS, ...unitReporters(path.join(out, timesName(shard)))] : ["--test-concurrency=1"]), ...files], env: kind === "oracle" ? { IT_ORACLE_LEG: `${shard}/${SHARDS.oracle}`, IT_ORACLE_LEG_REPORT: path.join(out, reportName(shard)) } : {} };
 }
 
-/** What a shard wrote of itself. A unit shard's carries its files' times, its wall time and its runner's CPU; a record
+/** What a shard wrote of itself. A unit shard's carries its files' times, each file's longest top-level test, its wall
+ *  time (its ALONE files' run included) and its runner's CPU; a record
  *  from before the timing has none of them, and `verify` still decides its coverage */
-export interface ShardRecord { kind: Kind; shard: number; files: string[]; exit: number; times?: Record<string, number>; wallMs?: number; cpu?: string }
+export interface ShardRecord { kind: Kind; shard: number; files: string[]; exit: number; times?: Record<string, number>; longest?: Record<string, number>; wallMs?: number; cpu?: string }
 export const recordName = (kind: Kind, shard: number): string => `ran-${kind}-${shard}.json`;
 
 /** The records of a kind in a folder, or in its folders one deep (`gh run download` puts each artifact in one of its own) */
@@ -198,6 +228,16 @@ export function balanceLines(records: readonly ShardRecord[], runId: string | un
   return lines;
 }
 
+/** `verify unit`'s warnings of a test near its bound (ALONE): a file whose longest top-level test ran past NEAR_BOUND_MS,
+ *  not listed in ALONE, is named with the way out (list it, so it runs with nothing beside it), and one listed that ran
+ *  past it even alone is named too (make that test faster: nothing is left to take from beside it). A warning, never the
+ *  exit code; the test that crossed the bound itself failed its shard already. */
+export function nearBoundLines(records: readonly ShardRecord[]): string[] {
+  return [...records].sort((a, b) => a.shard - b.shard).flatMap((r) => Object.entries(r.longest ?? {}).filter(([, ms]) => ms > NEAR_BOUND_MS).sort((a, b) => b[1] - a[1]).map(([file, ms]) => ALONE.includes(file)
+    ? `::warning title=unit shards::${file}'s longest test took ${seconds(ms)} in unit shard ${r.shard}, run alone, past half its bound of ${seconds(TEST_TIMEOUT_MS)}: nothing ran beside it, so make that test faster`
+    : `::warning title=unit shards::${file}'s longest test took ${seconds(ms)} in unit shard ${r.shard}, past half its bound of ${seconds(TEST_TIMEOUT_MS)}, beside the shard's other files: add it to ALONE (scripts/ci-shards.ts), so it runs with nothing beside it`));
+}
+
 /** `weights`: the unit weights from the shards' records, or why they cannot give them: a shard missing or recorded twice,
  *  a shard that failed (a failed file's time is cut short), a record with no times, a file with no time. `from` names the
  *  run or folder. */
@@ -236,11 +276,13 @@ export function needsProblems(needsJson: string | undefined): string[] {
   return jobs.filter(([, j]) => j.result !== "success").map(([name, j]) => `${name}: ${j.result ?? "no result"}`);
 }
 
-/** the files' times the timing reporter wrote, those of the shard's files alone; undefined when it wrote none */
-function readTimes(file: string, files: readonly string[]): Record<string, number> | undefined {
+/** the files' times and longest tests the timing reporter wrote, those of the shard's files alone; undefined when it
+ *  wrote none */
+function readTimes(file: string, files: readonly string[]): FileTimes | undefined {
   if (!fs.existsSync(file)) return undefined;
-  const all = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, number>;
-  return Object.fromEntries(files.filter((f) => all[f] !== undefined).map((f) => [f, all[f]!]));
+  const all = JSON.parse(fs.readFileSync(file, "utf8")) as FileTimes;
+  const own = (m: Record<string, number>): Record<string, number> => Object.fromEntries(files.filter((f) => m[f] !== undefined).map((f) => [f, m[f]!]));
+  return { files: own(all.files), longest: own(all.longest) };
 }
 
 function main(argv: string[]): number {
@@ -274,7 +316,7 @@ function main(argv: string[]): number {
     for (const p of problems) console.error(p);
     if (problems.length === 0) console.log(`${kind}: ${files.length} file(s), each in exactly one of ${records.length} shards`);
     // the balance, after the verdict and whatever it was: a cost, said and warned of, never the exit code
-    if (kind === "unit") for (const l of balanceLines(records, process.env.GITHUB_RUN_ID)) console.log(l);
+    if (kind === "unit") for (const l of [...balanceLines(records, process.env.GITHUB_RUN_ID), ...nearBoundLines(records)]) console.log(l);
     return problems.length === 0 ? 0 : 1;
   }
   const shard = Number(arg);
@@ -284,21 +326,26 @@ function main(argv: string[]): number {
   const out = process.env.CI_SHARD_DIR;
   if (out === undefined) { console.error("set CI_SHARD_DIR: the folder of the shard's record"); return 2; }
   fs.mkdirSync(out, { recursive: true });
-  const { args, env } = shardCommand(kind, shard, files, out);
+  // a unit shard's ALONE files run after its others, one at a time; every phase runs, whatever the one before it did
+  const alone = kind === "unit" ? files.filter((f) => ALONE.includes(f)) : [];
+  const together = files.filter((f) => !alone.includes(f));
+  const phases = [...(together.length > 0 || alone.length === 0 ? [{ ...shardCommand(kind, shard, together, out), timesFile: path.join(out, timesName(shard)) }] : []),
+    ...(alone.length > 0 ? [{ ...aloneCommand(shard, alone, out), timesFile: path.join(out, timesName(shard, true)) }] : [])];
   const weight = kind === "oracle" ? null : weightOf(kind, root);
-  console.log(`${kind} shard ${shard} of ${SHARDS[kind]}: ${files.length} file(s)${weight === null ? "" : `, about ${seconds(files.reduce((n, f) => n + weight(f), 0))} of test time`}`);
+  console.log(`${kind} shard ${shard} of ${SHARDS[kind]}: ${files.length} file(s)${weight === null ? "" : `, about ${seconds(files.reduce((n, f) => n + weight(f), 0))} of test time`}${alone.length === 0 ? "" : `, ${alone.length} of them run alone after the others: ${alone.join(", ")}`}`);
   const started = performance.now();
-  const r = spawnSync(process.execPath, args, { stdio: "inherit", cwd: root, env: { ...process.env, ...env } });
-  const wallMs = Math.round(performance.now() - started);
   // a signal leaves status null: never a pass
-  const exit = r.status ?? 1;
+  const statuses = phases.map(({ args, env }) => spawnSync(process.execPath, args, { stdio: "inherit", cwd: root, env: { ...process.env, ...env } }).status ?? 1);
+  const wallMs = Math.round(performance.now() - started);
+  const exit = statuses.find((s) => s !== 0) ?? 0;
   const record: ShardRecord = { kind, shard, files, exit };
   if (kind === "unit") {
-    const timesFile = path.join(out, timesName(shard));
-    const times = readTimes(timesFile, files);
-    fs.rmSync(timesFile, { force: true });
-    if (times === undefined) console.error(`unit shard ${shard}: the timing reporter wrote no times, so this shard's record has none and \`weights\` will refuse this run`);
-    Object.assign(record, { ...(times === undefined ? {} : { times }), wallMs, cpu: `${os.cpus()[0]?.model.trim() ?? "unknown"} × ${os.cpus().length}` });
+    const read = phases.map((p) => readTimes(p.timesFile, files));
+    for (const p of phases) fs.rmSync(p.timesFile, { force: true });
+    const complete = read.every((t) => t !== undefined);
+    if (!complete) console.error(`unit shard ${shard}: the timing reporter wrote no times, so this shard's record has none and \`weights\` will refuse this run`);
+    const merged = complete ? { times: Object.assign({}, ...read.map((t) => t!.files)) as Record<string, number>, longest: Object.assign({}, ...read.map((t) => t!.longest)) as Record<string, number> } : {};
+    Object.assign(record, { ...merged, wallMs, cpu: `${os.cpus()[0]?.model.trim() ?? "unknown"} × ${os.cpus().length}` });
   }
   fs.writeFileSync(path.join(out, recordName(kind, shard)), JSON.stringify(record));
   return exit;

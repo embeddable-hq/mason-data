@@ -2367,6 +2367,20 @@ slowest shard ran 90 s slower as run, its files' summed time about half as much 
 unit shard, so Node's default (`os.availableParallelism() - 1`, 3 on 4 vCPUs) stays. The gap between the shards
 (81 s in 41429359348) is the runners' (an EPYC 9V45 beside two 9V74s), not a file's: no one-file warning fires.
 
+**A test near its bound runs by itself (#338, the review's CI round).** With main merged in, run 41440605532 cancelled
+round 12 at the per-test bound (`test timed out after 300000ms`, unit (3), an EPYC 7763). Round 12 is CPU-bound: it took
+79-125 s in the base's one file, beside light files, and 151 to 300 s over this PR's runs in a file of its own beside
+other generated-world files (round 7-8, the core piece, round 6), slower still on a 7763. The split had moved the test
+next to its heaviest neighbours; `partition` balances summed file time, which says nothing of what runs at once. The
+class is a test pushed toward its bound by what its shard runs beside it, and the decision is that a file whose longest
+test has run past half the bound (`NEAR_BOUND_MS`, 150 s) is `ALONE`: its shard runs it after its other files with
+`--test-concurrency=1`, so nothing runs beside it, and `partition` counts it `SIDE_BY_SIDE` (3) times over, the wall it
+takes, placing it before the rest. Round 12, round 6 (157 s in 41431771794) and round 7-8 (round 7 158 s in
+41440605532) are listed; nothing else of the twenty slowest has crossed 150 s (`every command, in every state` 143 s
+and the slow vector's 145 s are the nearest). The timing reporter now records each file's longest top-level test, and
+`verify unit` warns of a file past `NEAR_BOUND_MS` not listed, or of one listed that crossed it even alone: the
+detector, a warning in every run's `checks`. The bound is never loosened, and no test is edited.
+
 
 **Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
 and their spread is worth a third leg or a queue.
