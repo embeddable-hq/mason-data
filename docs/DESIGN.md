@@ -2399,7 +2399,7 @@ and their spread is worth a third leg or a queue.
 ### A docs-only path in CI (2026-11-02, issue 339)
 
 **Decision: a pull request that changes nothing but docs runs a `docs` job in place of build, the unit shards, the
-oracle legs and the rest shards**, worth about 34 runner-minutes a day by issue 78's count, and every required check
+oracle legs and the rest shards**, worth some 34 runner-minutes a day by issue 78's count, and every required check
 still reports by name. A `changes` job decides it from git on the merge CI checked out (`HEAD^1..HEAD`, `--no-renames`),
 never the GitHub API's paged file list nor a third-party filter; a doc is an `.md` file at the root or under `docs/`,
 `deploy/` or `release-notes/`, never a CLAUDE.md, an allowlist so a new folder is code until decided otherwise
