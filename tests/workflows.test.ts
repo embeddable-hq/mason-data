@@ -2775,7 +2775,7 @@ if (a[0] === "run") { fs.writeFileSync(state, "running"); process.stdout.write("
 if (a[0] === "port") { process.stdout.write("127.0.0.1:54321\\n"); process.exit(0); }
 if (a[0] === "exec") { const n = (fs.existsSync(dir + "/ready") ? 1 : 0); fs.writeFileSync(dir + "/ready", "1"); process.exit(n ? 0 : 2); }
 if (a[0] === "rm") { fs.writeFileSync(state, "gone"); process.exit(0); }
-if (a[0] === "inspect") { if (fs.readFileSync(state, "utf8") === "running") { process.stdout.write("running\\n"); process.exit(0); } process.stderr.write("Error: No such object\\n"); process.exit(1); }
+if (a[0] === "inspect") { if (fs.readFileSync(state, "utf8") === "running") { process.stdout.write("running\\n"); process.exit(0); } process.stderr.write("Error: No such object: " + a.at(-1) + "\\n"); process.exit(1); }
 process.exit(9);`);
     const env = { PATH: `${dir}:${process.env["PATH"]}`, TMPDIR: tmp, REVIEW_POSTGRES_POLL_MS: "0" };
     const start = spawnSync(process.execPath, [SCRIPT, "start"], { encoding: "utf8", env, timeout: 60_000 });
@@ -2805,12 +2805,98 @@ process.exit(9);`);
     stubBin(dir, "docker", `if (a[0] === "inspect") { process.stdout.write("running\\n"); process.exit(0); } process.exit(0);`);
     const stuck = spawnSync(process.execPath, [SCRIPT, "stop", name!], { encoding: "utf8", env, timeout: 60_000 });
     assert.equal(stuck.status, 3, stuck.stderr);
-    assert.match(stuck.stderr, /is not gone/);
+    assert.match(stuck.stderr, /could not confirm .* is gone/);
     // without Docker it says so, and how to go on
     const none = spawnSync(process.execPath, [SCRIPT, "start"], { encoding: "utf8", env: { ...env, PATH: tmp }, timeout: 60_000 });
     assert.equal(none.status, 3, none.stderr);
     assert.match(none.stderr, /could not run docker[^\n]*itEnv/);
     for (const bad of [["stop"], ["stop", "postgres"], ["go"]]) assert.equal(spawnSync(process.execPath, [SCRIPT, ...bad], { encoding: "utf8", env }).status, 2, bad.join(" "));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plain: review-postgres stop leaves everything alone when inspect cannot tell whether the container exists", () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "review-pg-unknown-")));
+  const tmp = path.join(dir, "tmp");
+  fs.mkdirSync(tmp);
+  const name = "mason-review-0123abcd";
+  const envFile = path.join(tmp, `${name}.env`);
+  const text = "IT_POSTGRES_URL=keep-this-file\n";
+  const env = { PATH: `${dir}:${process.env["PATH"]}`, TMPDIR: tmp };
+  try {
+    for (const why of ["Cannot connect to the Docker daemon", "permission denied on the Docker socket", "context unavailable", "",
+      "Error: No such object: mason-review-deadbeef", `Error: No such object: ${name}\nCannot connect to the Docker daemon`]) {
+      fs.writeFileSync(envFile, text);
+      fs.rmSync(path.join(dir, "docker.log"), { force: true });
+      stubBin(dir, "docker", `if (a[0] === "inspect") { process.stderr.write(${JSON.stringify(why)}); process.exit(1); } process.exit(0);`);
+      const r = spawnSync(process.execPath, [path.join(ROOT, "scripts", "review-postgres.ts"), "stop", name], { encoding: "utf8", env, timeout: 60_000 });
+      assert.equal(r.status, 3, `${why}: ${r.stdout} ${r.stderr}`);
+      assert.match(r.stderr, /could not (?:tell|run docker inspect)/);
+      assert.doesNotMatch(r.stdout, /removed/);
+      assert.equal(fs.readFileSync(envFile, "utf8"), text, "unknown keeps the env file intact");
+      assert.deepEqual(logOf(dir, "docker").map((c) => c.argv), [["inspect", "--format", "{{.State.Status}}", name]], "unknown never requests a removal");
+    }
+    const missing = spawnSync(process.execPath, [path.join(ROOT, "scripts", "review-postgres.ts"), "stop", name], { encoding: "utf8", env: { ...env, PATH: tmp }, timeout: 60_000 });
+    assert.equal(missing.status, 3, missing.stderr);
+    assert.match(missing.stderr, /could not run docker inspect/);
+    assert.equal(fs.readFileSync(envFile, "utf8"), text);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plain: review-postgres stop says already gone only for Docker's explicit missing-object verdict", () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "review-pg-absent-")));
+  const tmp = path.join(dir, "tmp");
+  fs.mkdirSync(tmp);
+  const name = "mason-review-0123abcd";
+  const envFile = path.join(tmp, `${name}.env`);
+  try {
+    for (const why of [`Error: No such object: ${name}`, `error: no such object: ${name}`, `Error response from daemon: No such container: ${name}`]) {
+      fs.writeFileSync(envFile, "IT_POSTGRES_URL=stale\n");
+      fs.rmSync(path.join(dir, "docker.log"), { force: true });
+      stubBin(dir, "docker", `if (a[0] === "inspect") { process.stderr.write(${JSON.stringify(why)} + "\\n"); process.exit(1); } process.exit(9);`);
+      const r = spawnSync(process.execPath, [path.join(ROOT, "scripts", "review-postgres.ts"), "stop", name], { encoding: "utf8", env: { PATH: `${dir}:${process.env["PATH"]}`, TMPDIR: tmp }, timeout: 60_000 });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /already gone/);
+      assert.doesNotMatch(r.stdout, /removed/);
+      assert.ok(!fs.existsSync(envFile), "confirmed absence allows stale env cleanup");
+      assert.deepEqual(logOf(dir, "docker").map((c) => c.argv), [["inspect", "--format", "{{.State.Status}}", name]], "already gone needs no rm");
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plain: review-postgres stop keeps the env file when removal or its confirming inspect fails", () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "review-pg-remove-")));
+  const tmp = path.join(dir, "tmp");
+  fs.mkdirSync(tmp);
+  const name = "mason-review-0123abcd";
+  const envFile = path.join(tmp, `${name}.env`);
+  const text = "IT_POSTGRES_URL=keep-until-confirmed\n";
+  try {
+    for (const failure of ["rm", "inspect", "still-present"]) {
+      fs.writeFileSync(envFile, text);
+      fs.rmSync(path.join(dir, "removed"), { force: true });
+      fs.rmSync(path.join(dir, "docker.log"), { force: true });
+      stubBin(dir, "docker", `const failure = ${JSON.stringify(failure)};
+if (a[0] === "rm") { fs.writeFileSync(dir + "/removed", "1"); if (failure === "rm") { process.stderr.write("removal denied\\n"); process.exit(1); } process.exit(0); }
+if (a[0] === "inspect") {
+  if (fs.existsSync(dir + "/removed") && failure === "inspect") { process.stderr.write("Cannot connect to the Docker daemon\\n"); process.exit(1); }
+  process.stdout.write("running\\n"); process.exit(0);
+}
+process.exit(9);`);
+      const r = spawnSync(process.execPath, [path.join(ROOT, "scripts", "review-postgres.ts"), "stop", name], { encoding: "utf8", env: { PATH: `${dir}:${process.env["PATH"]}`, TMPDIR: tmp }, timeout: 60_000 });
+      assert.equal(r.status, 3, `${failure}: ${r.stdout} ${r.stderr}`);
+      assert.doesNotMatch(r.stdout, /removed/);
+      assert.equal(fs.readFileSync(envFile, "utf8"), text, `${failure}: preserve the env until absence is confirmed`);
+      const calls = logOf(dir, "docker").map((c) => c.argv);
+      assert.deepEqual(calls[0], ["inspect", "--format", "{{.State.Status}}", name]);
+      assert.deepEqual(calls[1], ["rm", "-f", "-v", name]);
+      assert.match(r.stderr, /docker rm|could not tell|still finds it/);
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
