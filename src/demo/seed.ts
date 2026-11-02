@@ -52,6 +52,32 @@ export const DEMO_ADDED_TABLES: readonly string[] = DEMO_TABLES.filter((t) => t 
 /** how the demo's tables are kept current (the sources file's top `sync:`, src/lib/table-sync.ts): polled every 5 s,
  *  so the demo shows a copy keeping up with its writer — where a project `mason init` makes is `off` */
 export const DEMO_SYNC = { mode: "poll", every: "5s", seconds: 5 } as const;
+/**
+ * THE GENERATED TABLE `mason init demo` WRITES (`mason/generated_tables/<file>`, src/cli/generated-files.ts reads it), so a
+ * person trying Mason meets a generated table without reading the docs: orders and revenue per day and status, kept
+ * current from the synced `orders`.
+ *   - It reads `orders` ALONE, a table init adds (`DEMO_ADDED_TABLES`), never `DEMO_TABLE_TO_ADD`: it is built at the
+ *     first start, and the person's first lesson (`mason add order_items`) stays the only one.
+ *   - It NAMES ITS ZONE (`AT TIME ZONE 'UTC'`): a generated table has no session, so a form reading the zone is refused.
+ *     The day is a `date`, the same in every client's TimeZone.
+ *   - `revenue` is the sum of a `numeric(12,2)`: its scale is fixed by the type, so it is stored exactly.
+ *   - `target_lag: 30s`: the writer adds an order every few seconds and the poll is 5 s, so it is seen re-running.
+ * Its name is the README's example's (`daily_orders.yml`), so the two read as one.
+ */
+export const DEMO_GENERATED = {
+  file: "daily_orders.yml",
+  table: "daily_orders",
+  text: `# A generated table: a SELECT over the synced tables, kept current by Mason. Yours to commit; mason help generated.
+kind: scheduled
+target_lag: 30s   # how far behind the synced orders it may be
+sql: |
+  SELECT (created_at AT TIME ZONE 'UTC')::date AS day, status, count(*) AS orders, sum(total) AS revenue
+  FROM orders
+  GROUP BY 1, 2
+order_by: day, status
+comment: Orders and revenue per day (UTC) and status, kept current from the synced orders.
+`,
+} as const;
 /** an order's status moves along this path (`changeSql`); `cancelled` is a side exit */
 export const ORDER_STATUSES = ["pending", "paid", "shipped", "delivered"] as const;
 const ROWS_PER_INSERT = 1_000;

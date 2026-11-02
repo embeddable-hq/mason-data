@@ -20,6 +20,7 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { execFileSync } from "node:child_process";
 import ts from "typescript";
+import { ciNodeMajor, imageNodeProblems, NODE_WITHOUT_THE_FIX } from "./node-versions.ts";
 
 const ROOT = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..");
 
@@ -1030,16 +1031,7 @@ test("the metrics label guard would catch the real thing", () => {
   assert.deepEqual(metricLabels(`interface Sample { labels?: Readonly<Partial<Record<MetricLabel, string>>> }`), [], "the type's declaration is no label written");
 });
 
-/**
- * THE NODE CI RUNS ON (docs/DESIGN.md "The Node CI runs on", 2026-10-30): never Node 24. Its V8 (13.6) shares
- * WebAssembly import wrappers across every isolate of a process and can free one twice when an instance dies on one
- * thread while another thread's wasm calls out (`# Check failed: jit_page_->allocations_.erase(addr) == 1`,
- * nodejs/node#66366, fixed in V8 by 9b8ca54d5a and not released in any Node 24). The catalog, the parser and the
- * function worker each hold WebAssembly on a thread of their own, so a test file's process died of it at exit after
- * every test passed (five CI runs in two days). Node 26 carries the fix; a `node-version` of 24 in any workflow brings
- * the crash back for every process CI starts. Lift this when a Node 24 release carries nodejs/node#66376.
- */
-const NODE_WITHOUT_THE_FIX = new Set([24]);
+/** THE NODE CI RUNS ON: never a major in NODE_WITHOUT_THE_FIX (tests/node-versions.ts says why, and holds the list). */
 
 /** Every `node-version:` a workflow sets, as `file: value` with the value unquoted. */
 function workflowNodeVersions(files: Array<{ name: string; src: string }>): Array<{ where: string; version: string }> {
@@ -1069,6 +1061,41 @@ test("the Node guard catches the real thing", () => {
   assert.deepEqual(one("node-version: lts/*\n"), ["w.yml:1 node-version lts/*"], "a moving alias names no major: refused");
   assert.deepEqual(one("node-version: '26'\nnode-version: 26.13.0\nnode-version: '22'\n"), [], "26 carries the fix; 22's V8 never shared the wrappers");
   assert.deepEqual(one("# node-version: '24' in a comment\n"), [], "a comment is no setting");
+});
+
+/**
+ * THE IMAGE RUNS CI'S NODE (issue 67): the `mason-data` image ran Node 24 after CI had left it, so the crash CI no longer
+ * saw was still the image's. Its major is EQUAL to CI's (`ciFacts(ci.yml).nodeMajor`, scripts/gate.ts), never merely
+ * "not 24": the two cannot drift either way, and lifting the Node 24 guard above never loosens the image.
+ */
+const DOCKERFILE = "docker/mason-data.Dockerfile";
+
+test("the image runs the Node CI runs, read from ci.yml's node-version", () => {
+  const { nodeFroms, problems } = imageNodeProblems(DOCKERFILE, fs.readFileSync(path.join(ROOT, DOCKERFILE), "utf8"), ciNodeMajor(ROOT));
+  assert.ok(nodeFroms >= 1, `the guard reads ${DOCKERFILE}'s FROM of a Node image: has the file or its base moved?`);
+  assert.deepEqual(problems, []);
+});
+
+test("the image guard catches the real thing", () => {
+  const ci = "26";
+  const of = (src: string) => imageNodeProblems("D", src, ci).problems;
+  const way = "set it to FROM node:26-slim, or change .github/workflows/ci.yml's node-version and the image together (docs/DESIGN.md \"The Node CI runs on\")";
+  assert.deepEqual(of("# THE IMAGE\nFROM node:24-slim\nRUN true\n"), [`D:2 FROM node:24-slim: the image runs Node 24 and CI runs Node 26; ${way}`], "the image before issue 67");
+  assert.deepEqual(of("FROM node:27-slim\n"), [`D:1 FROM node:27-slim: the image runs Node 27 and CI runs Node 26; ${way}`], "equality, not merely 'not 24'");
+  for (const ok of ["FROM node:26-slim", "FROM node:26.13.0-slim", "FROM node:26", `FROM node:26-slim@sha256:${"a".repeat(64)}`,
+    "FROM --platform=$BUILDPLATFORM node:26-slim AS build", "FROM docker.io/library/node:26-bookworm-slim"]) {
+    assert.deepEqual(imageNodeProblems("D", `${ok}\n`, ci), { nodeFroms: 1, problems: [] }, ok);
+  }
+  assert.deepEqual(of("from node:24-slim\n"), [`D:1 FROM node:24-slim: the image runs Node 24 and CI runs Node 26; ${way}`], "an instruction is case-insensitive");
+  for (const unknown of ["FROM node:slim", "FROM node:lts-slim", "FROM node:current-slim", "FROM node", "ARG NODE=26\nFROM node:${NODE}-slim", "ARG BASE=node:26-slim\nFROM ${BASE}"]) {
+    const found = of(`${unknown}\n`);
+    assert.equal(found.length, 1, unknown);
+    assert.match(found[0] ?? "", /cannot be told/, `${unknown}: cannot tell is not a pass`);
+  }
+  assert.deepEqual(of("FROM node:26-slim AS build\nRUN true\nFROM node:24-slim\n"), [`D:3 FROM node:24-slim: the image runs Node 24 and CI runs Node 26; ${way}`], "every stage, the second too");
+  assert.deepEqual(imageNodeProblems("D", "FROM debian:bookworm-slim\nFROM node:26-slim AS n\nFROM n\n", ci), { nodeFroms: 1, problems: [] }, "another image, and a stage by name, are no Node");
+  assert.deepEqual(imageNodeProblems("D", "# FROM node:24-slim\nRUN true\n", ci), { nodeFroms: 0, problems: [] }, "a comment is no instruction");
+  assert.deepEqual(of("FROM \\\n  node:24-slim\n"), [`D:1 FROM node:24-slim: the image runs Node 24 and CI runs Node 26; ${way}`], "a continued line is one instruction");
 });
 
 /** the calls of a statement's plan (`duck.plan(…)`) that do not pass the session's `grants`, by their first line */
@@ -1348,7 +1375,7 @@ test("the duration guard would catch the real thing", () => {
 });
 
 /**
- * A REVIEW PROBE SAYS WHERE IT WAS MET (.claude/workflows/pr-loop.js, its Probe and Learn stages): each bullet of a
+ * A REVIEW PROBE SAYS WHERE IT WAS MET (.claude/workflows/pr-loop-slim.js, its Learn stage): each bullet of a
  * rules file's `## What review probes` section names the PR or issue it came from, so a probe the Learn step writes and
  * one edited by hand stay traceable to the review that found it. The one exception is a section whose only bullet is
  * the placeholder "None recorded yet". Returns each bullet that names neither, or the section's absence.

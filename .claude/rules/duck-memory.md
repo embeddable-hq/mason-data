@@ -22,7 +22,8 @@ paths:
   no path and no engine in the answer, gap `spill-limit` on its request-log row. A sizing decision reads
   `store.spillLimitBytes`. ("A top N over joined tables")
 - **A sizing decision reads `store.memoryLimitBytes`**, never `os.totalmem()` or a constant: the operator may have set
-  the limit. (The copy needs none since it has no sort, "The copy"; its chunks are sized in pages, by time.)
+  the limit. The copy reads it: a chunk's values out of line are held to an eighth of it over the readers
+  (`chunkCeiling`, `COPY_CHUNK_MEMORY_SHARE`; docs/DESIGN.md "Large values out of line").
 - **A copy shares that limit with the stream, the polls and the BI queries** (it runs beside them):
   what does not fit beside fails its own statement, is said, and is tried again.
 - **What a copy costs the queries beside it is PAGE-CACHE EVICTION, not CPU** (measured on the test server: buffered
@@ -50,8 +51,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
-again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
+again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
 - Many heavy statements at once (64 with the pool) under one `MASON_DUCKDB_MEMORY`: out-of-memory failures or spills
   where a queue used to make them wait (PR 148).

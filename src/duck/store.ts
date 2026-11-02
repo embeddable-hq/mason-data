@@ -413,6 +413,9 @@ export function pgErrorOf(err: unknown, sql: string): StatementError {
     : kind === "Out of Range" ? "22003"
     : kind === "Interrupt" || /INTERRUPT/i.test(full) ? "57014"
     : kind === "Out of Memory" ? "53200"
+    // a commit that could not pin or allocate a block is the same limit reached, under the transaction's own kind
+    // (measured on DuckDB 2.0.0: "Failed to commit: failed to pin block of size 1.0 MiB (365.7 MiB/366.2 MiB used)")
+    : kind === "TransactionContext" && /^Failed to commit: failed to (?:pin block|allocate data) of size .* used\)/.test(message) ? "53200"
     : kind === "Not implemented" ? "0A000"
     : kind === "Invalid Input" ? "22023"
     : "XX000";

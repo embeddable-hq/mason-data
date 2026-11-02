@@ -1209,6 +1209,10 @@ test("past what may spill is 53400 and a full disk 53100, each with the way out,
     assert.doesNotMatch(JSON.stringify(e.fields), /duckdb|duck\.db|max_temp|\/data|the engine/i);
   }
   assert.equal(pgErrorOf(new Error("Out of Memory Error: could not allocate block of size 256 KiB"), "SELECT 1").fields.code, "53200", "memory stays memory");
+  // a commit that could not pin a block is the limit too (issue 96, measured on DuckDB 2.0.0); another commit failure is not
+  assert.equal(pgErrorOf(new Error("TransactionContext Error: Failed to commit: failed to pin block of size 1.0 MiB (365.7 MiB/366.2 MiB used)"), "COMMIT").fields.code, "53200");
+  assert.equal(pgErrorOf(new Error("TransactionContext Error: Failed to commit: PRIMARY KEY or UNIQUE constraint violation"), "COMMIT").fields.code, "XX000");
+  assert.equal(pgErrorOf(new Error("TransactionContext Error: Current transaction is aborted (please ROLLBACK)"), "COMMIT").fields.code, "XX000");
   // a statement's literal holding the engine's words is that statement's error
   assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'max_temp_directory_size' to INT32"), "SELECT 1").fields.code, "22P02");
   assert.equal(pgErrorOf(new Error("Conversion Error: Could not convert string 'This limit was set by the 'max_temp_directory_size' setting' to INT32"), "SELECT 1").fields.code, "22P02");

@@ -218,8 +218,8 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
-again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
+again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
 - A binary Bind of a `text[]` or `varchar[]` parameter holding invalid UTF-8, a NUL byte, flags 2, the other element
   OID, a dimension past 268435455, a lower bound of 2147483647: Postgres's SQLSTATE and message, not 08P01 (PR 149;
