@@ -62,7 +62,8 @@ export const APART: readonly string[] = ["tests/duck-executor-slow-vector.test.t
  * CPU-bound test's time is its neighbours' as much as its own: the generated tables' round 12 took 79-125 s in the one
  * file of the base, beside light files, and 151-300 s in a file of its own beside other generated-world files, where 300 s
  * is the per-test bound (TEST_TIMEOUT_MS) that cancelled it (run 41440605532). A file whose longest top-level test has
- * run past NEAR_BOUND_MS on CI is listed here (round 12; round 6, 157 s; round 7, 158 s): its shard runs it
+ * run past NEAR_BOUND_MS on CI is listed here (round 12; round 6, 157 s in 41431771794; round 7, 158 s in 41440605532;
+ * run alone in 41444899410 and 41447115368: round 12 90-143 s, round 6 100-102 s, round 7 95-96 s): its shard runs it
  * after its other files, one ALONE file at a time (`aloneCommand`), so nothing runs beside it, and `partition` counts it
  * SIDE_BY_SIDE times over, the shard's wall it takes. `verify unit` warns of a file not listed whose longest test ran
  * past NEAR_BOUND_MS (`nearBoundLines`); the bound itself is never loosened.

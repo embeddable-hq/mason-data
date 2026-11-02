@@ -2381,6 +2381,23 @@ and the slow vector's 145 s are the nearest). The timing reporter now records ea
 `verify unit` warns of a file past `NEAR_BOUND_MS` not listed, or of one listed that crossed it even alone: the
 detector, a warning in every run's `checks`. The bound is never loosened, and no test is edited.
 
+The result, by each run's `unit tests` step (start to end), unit (1) / (2) / (3), and round 12's test, run alone:
+
+| run (commit) | weights | unit tests steps | round 12, alone | runners |
+|---|---|---|---|---|
+| 41417362676 (main, 7367201, the base) | 41409999918's | 374 / 284 / 921 s | (in the one file: 125 s) | |
+| 41440605532 (a7359c3, no ALONE) | 41431771794's | | cancelled at 300 s | unit (3) an EPYC 7763 |
+| 41444899410 (33bff1b, ALONE) | 41431771794's | 498 / 654 / 364 s | 143.0 s | three EPYC 7763s |
+| 41447115368 (5c8f53c) | 41444899410's | 562 / 472 / 296 s | 89.8 s | 7763, 7763, 9V45 |
+
+Round 12 now runs at half its bound or less on the slowest runner drawn (143 s of 300 s on a 7763, 90 s on a 9V45),
+round 6 at 100-102 s and round 7 at 95-96 s, each alone. That costs wall: an ALONE file's minutes are its shard's, so
+the slowest unit step is 562-654 s in these two runs, against 423-436 s before ALONE (41434452511, 41431771794) and
+921 s on main; the gain over main is kept, part of the split's is given up for a test that no longer meets its bound.
+The detector's first warning came in 41447115368: `every command, in every state` (tests/cli-state-matrix.test.ts),
+81.6 s in PR 346's run, took 151.5 s on a 7763, past `NEAR_BOUND_MS`; listing it is the next change, made from a run
+that measures it.
+
 
 **Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
 and their spread is worth a third leg or a queue.
