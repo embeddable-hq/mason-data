@@ -340,7 +340,7 @@ export function statusKind(word) {
   const w = String(word ?? "").toLowerCase();
   if (/^(ready|synced|done|copied|completed|ok|streamed|running|live|added)\b/.test(w)) return "ok";
   if (/^(failed|error|refused|lost|not running|stopped)\b/.test(w)) return "bad";
-  if (/^(under way|syncing|copying|waiting|catching up|not streamed|not kept current|unsynced|cancelled|warning|left out|pending)\b/.test(w)) return "warn";
+  if (/^(under way|syncing|behind|copying|waiting|catching up|not streamed|not kept current|unsynced|cancelled|warning|left out|pending)\b/.test(w)) return "warn";
   return "unknown";
 }
 

@@ -125,7 +125,10 @@ CLI lacks).
 - **`mason wait` shows every added table and is exact** (after `mason add a b c` where `a` and `c` were quick, it showed
   only `b`): a line each (`tableLines`), its bar, percent and state — the finished first, in the order
   they finished, the ones still syncing at the bottom — redrawn in place on a terminal, printed when it changes
-  elsewhere; ready only when every added table is synced and served (`readiness`, src/cli/readiness.ts); a first sync that
+  elsewhere; ready only when every added table is synced and served (`readiness`, src/cli/readiness.ts, which reads each
+  table's state in one word, `tables[].sync.state`, never its error or phase a second way: a synced table whose poll,
+  catch-up, stream or publication check failed is failed there and here, issue 100; `behind` is said on its line and
+  never fails it); a first sync that
   failed is said with its error and that Mason tries it again; each synced table says its sync and when it was last synced on
   its line (`keptAge`: `sync: off, last synced 3 h ago — mason sync <table>`, `polled every 30s, last 4 s ago`), and a
   table in the old layout that it is being read again whole.

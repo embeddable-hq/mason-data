@@ -74,10 +74,10 @@ import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../c
 import { holdOf } from "./held-types.ts";
 import { addCounts, countsText, duckValue, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
-import { namedPublicationVerdict, readNamedPublication } from "./publication.ts";
+import { gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
-import { BIG_TABLE_ROWS, intervalOf, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
+import { BIG_TABLE_ROWS, intervalOf, msText, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
 
 /** how a run keeps its copies current: each table as its `sync:` says (`poll`; a table with none — a test's — polled at
  *  the run's interval), each as its `sync:` says with a table with none streamed (`replication`: a test's run of the
@@ -119,6 +119,52 @@ export function nextPollAt(endedMs: number, intervalSeconds: number, pollMs: num
  */
 export function passDelayMs(earliestDueMs: number, nowMs: number, lastPassMs: number): number {
   return Math.min(2 ** 31 - 1, Math.max(0, earliestDueMs - nowMs, 4 * lastPassMs));
+}
+
+/** The least grace a polled or recopied table is given past its interval before it is behind (`keptPromise`): a pass
+ *  attaches the source and queues on the writer, so a poll due now lands a little later. */
+export const POLL_GRACE_FLOOR_SECONDS = 60;
+/** How old a STREAMED table's synced data may be before it is behind (`keptPromise`): an idle healthy stream says it has
+ *  everything the database wrote on the keepalive it asks for every 10 s (src/duck/stream.ts `sendStatus(…, true)`),
+ *  so 120 s is twelve of them, and past `wal_sender_timeout`'s default 60 s: one reconnect never crosses it. */
+export const REPLICATION_BEHIND_SECONDS = 120;
+
+/** What a table's sync promises (`KeptCurrent.promisedSeconds`) and what would make it late now (`lateWhy`). */
+export interface KeptPromise { promisedSeconds: number | null; lateWhy: string | null }
+
+/**
+ * WHAT A TABLE'S `sync:` PROMISES: the age of its synced data past which it is BEHIND, and the facts that would make it
+ * so now — the one derivation (`Sync.keptOf` calls it; src/cli/readiness.ts `behindOf` compares it with the age at the
+ * moment asked). It reads what the schedule reads (`nextPollAt`'s table poll, `passDelayMs`'s last pass), never a second
+ * measure, and changes neither load rule: it says them.
+ *  - `poll`: its interval plus max(60 s, twice its own last poll this run; 60 s when not measured, as after a start);
+ *  - `recopy`: the run's interval plus max(60 s, twice the last pass);
+ *  - `replication`: `REPLICATION_BEHIND_SECONDS`;
+ *  - `off`: nothing (null): it is as of its last `mason sync`, and never behind.
+ */
+export function keptPromise(o: { mode: "poll" | "recopy" | "replication" | "off"; intervalSeconds: number; lastPollMs: number | null; lastPassMs: number;
+  pending: string | null; notRunning: string | null; passFailed: boolean; dueMs: number | null; now: number }): KeptPromise {
+  if (o.mode === "off") return { promisedSeconds: null, lateWhy: null };
+  if (o.mode === "replication") {
+    return { promisedSeconds: REPLICATION_BEHIND_SECONDS, lateWhy: o.pending !== null ? o.pending : o.notRunning !== null ? `the stream is not running: ${o.notRunning}`
+      : "the stream has not had everything the database wrote since then (the Stream section says its lag)" };
+  }
+  const own = o.mode === "recopy" ? o.lastPassMs : o.lastPollMs;
+  const promisedSeconds = o.intervalSeconds + Math.max(POLL_GRACE_FLOOR_SECONDS, own === null ? 0 : (2 * own) / 1000);
+  const interval = o.intervalSeconds * 1000;
+  const fifth = "to keep the database's load to a fifth";
+  let lateWhy: string;
+  if (o.pending !== null) lateWhy = o.pending;
+  else if (o.passFailed) lateWhy = `the sync's last pass failed (mason logs --events says why): it is tried again every ${msText(interval)}`;
+  else if (o.mode === "recopy") lateWhy = o.lastPassMs === 0 ? "it is read again whole at the next pass"
+    : `the last pass, which reads every table again whole, took ${msText(o.lastPassMs)}, and Mason waits four times a pass between passes ${fifth}`;
+  else if (4 * o.lastPassMs > interval && 4 * o.lastPassMs >= 4 * (o.lastPollMs ?? 0)) {
+    lateWhy = `every polled table's polls took ${msText(o.lastPassMs)} in the last pass, and Mason waits four times that between passes ${fifth}`;
+  } else if (o.lastPollMs !== null && 4 * o.lastPollMs > interval) {
+    lateWhy = `its own poll took ${msText(o.lastPollMs)}, and Mason waits four times a table's poll before its next ${fifth}`;
+  } else if (o.lastPollMs === null) lateWhy = "it has not been polled since Mason started: it is polled at the next pass";
+  else lateWhy = o.dueMs !== null && o.dueMs > o.now ? `its next poll is due ${clock(o.dueMs)} UTC` : "its poll is due, after the polls of the pass before it";
+  return { promisedSeconds, lateWhy };
 }
 
 /** what one table's poll found (`Sync.pollNow`): the rows it wrote, the keys it deleted, the source's count after */
@@ -202,12 +248,15 @@ export interface Synced { at: string; seconds: number | null; by: "copy" | "poll
  *   status's), the commit time of the newest change applied this run, why the stream is not running (null: it is), and
  *   `syncedAt`: the copy is current as of then — the last moment the stream had everything the database wrote (a
  *   keepalive with nothing pending, a batch applied) while the table was streamed, else its last copy or poll.
+ * Each but `generated` carries what its sync promises (`keptPromise`): `promisedSeconds`, the age of the synced data
+ * past which it is behind (null: nothing promised, `off`), and `lateWhy`, the facts that would make it late now —
+ * absent from a run before they were said.
  */
 export type KeptCurrent =
-  | { by: "poll"; sync: PolledSync; syncedAt: string | null; nextAt: string | null; pending?: string }
-  | { by: "recopy"; copiedAt: string | null; pending?: string }
-  | { by: "replication"; slot: string; state: StreamTableStatus["state"]; why: string | null; position: string; lastCommit: string | null;
-    notRunning: string | null; syncedAt: string | null }
+  | ({ by: "poll"; sync: PolledSync; syncedAt: string | null; nextAt: string | null; pending?: string } & Partial<KeptPromise>)
+  | ({ by: "recopy"; copiedAt: string | null; syncedAt?: string | null; pending?: string } & Partial<KeptPromise>)
+  | ({ by: "replication"; slot: string; state: StreamTableStatus["state"]; why: string | null; position: string; lastCommit: string | null;
+    notRunning: string | null; syncedAt: string | null } & Partial<KeptPromise>)
   | { by: "generated"; text: string };
 
 /**
@@ -1321,19 +1370,29 @@ export class Sync {
       // says nothing is pending, `mason sync` of it runs
       const pending = this.pollable(t) ? null : this.notStreamedWhy(t.source);
       const next = pending === null ? this.dueAt(t) : null;
-      return { by: "poll", sync, syncedAt: polledAt, nextAt: next === null ? null : new Date(Math.max(next, now)).toISOString(), ...(pending !== null ? { pending } : {}) };
+      const promise = keptPromise({ mode: sync.mode === "off" ? "off" : "poll", intervalSeconds: sync.mode === "poll" ? sync.seconds : 0, lastPollMs: this.lastPollMs.get(t.source) ?? null,
+        lastPassMs: this.lastPassMs, pending, notRunning: null, passFailed: this.passFailed, dueMs: next, now });
+      return { by: "poll", sync, syncedAt: polledAt, nextAt: next === null ? null : new Date(Math.max(next, now)).toISOString(), ...(pending !== null ? { pending } : {}), ...promise };
     }
     // copied again whole every pass, whatever its watermark: only a table not copied now (waiting, being copied, its copy
-    // failed) is not kept current
-    if (this.mode === "recopy") return { by: "recopy", copiedAt: st?.copiedAt ?? null, ...(st?.phase !== "copied" ? { pending: this.notStreamedWhy(t.source) } : {}) };
+    // failed) is not kept current; its synced data is as of its copy's watermark (`polled_at`, taken before the swap)
+    if (this.mode === "recopy") {
+      const pending = st?.phase !== "copied" ? this.notStreamedWhy(t.source) : null;
+      const promise = keptPromise({ mode: "recopy", intervalSeconds: this.intervalMs / 1000, lastPollMs: null, lastPassMs: this.lastPassMs, pending, notRunning: null,
+        passFailed: this.passFailed, dueMs: null, now });
+      return { by: "recopy", copiedAt: st?.copiedAt ?? null, syncedAt: this.polledAt.get(t.source) ?? null, ...(pending !== null ? { pending } : {}), ...promise };
+    }
     const s = this.stream;
     const part = this.streamTable(t, now, s);
     // current as of its last copy or poll, or — streamed — the last moment the stream had all the database wrote
     const polled = this.polledAt.get(t.source) ?? null;
     const streamed = part.state === "streamed" && this.streamCurrentAt !== null ? new Date(this.streamCurrentAt).toISOString() : null;
     const syncedAt = streamed !== null && (polled === null || streamed > polled) ? streamed : polled;
+    const notRunning = this.streamDownWhy(s, st);
+    const promise = keptPromise({ mode: "replication", intervalSeconds: 0, lastPollMs: null, lastPassMs: this.lastPassMs, pending: part.state === "streamed" ? null : part.why,
+      notRunning, passFailed: false, dueMs: null, now });
     return { by: "replication", slot: this.replication?.slot ?? "", state: part.state, why: part.why, position: formatLsn(s?.position() ?? this.appliedLsn),
-      lastCommit: this.lastBatch === null ? null : new Date(this.lastBatch.committedAt).toISOString(), notRunning: this.streamDownWhy(s, st), syncedAt };
+      lastCommit: this.lastBatch === null ? null : new Date(this.lastBatch.committedAt).toISOString(), notRunning, syncedAt, ...promise };
   }
 
   /** why the stream is not running, in the reader's words (null: it runs): its last failure and when it starts again; the
@@ -1830,6 +1889,30 @@ export class Sync {
   }
 
   /**
+   * THE STREAM HAS EVERYTHING THE DATABASE WROTE (a keepalive with nothing pending, or a batch flushed): every streamed
+   * table is current as of now (`keptOf`'s syncedAt), and a copied one's replication error (the stream's failure, the
+   * preparation's, from this run or one before) is over — the same proof a batch applied with a position gives
+   * (`applyChanges`), which an idle database never sends: a healthy table kept a run-old stream error for ever, and
+   * `mason wait` read it as failed. Cleared on the writer's turn, one turn at a time.
+   */
+  private streamCurrent(): void {
+    this.streamCurrentAt = Date.now();
+    if (this.clearingStreamErrors) return;
+    const stale = (source: string): boolean => {
+      const st = this.states.get(source);
+      return st !== undefined && st.phase === "copied" && st.error?.startsWith("replication: ") === true && !this.unpublished.has(source) && !this.held.has(source);
+    };
+    if (![...this.joinedNow].some(stale)) return;
+    this.clearingStreamErrors = true;
+    void this.onWriter(async () => {
+      for (const source of this.joinedNow) if (stale(source)) await this.record({ ...this.states.get(source)!, error: null });
+      this.recovered("stream", "the stream has everything the database wrote again");
+    }).catch((e: unknown) => this.log(`replication: a table's stream error could not be cleared (it is cleared at the next batch): ${e instanceof Error ? e.message : String(e)}`))
+      .finally(() => { this.clearingStreamErrors = false; });
+  }
+  private clearingStreamErrors = false;
+
+  /**
    * The stream started from the slot's acknowledged position, once the slot is known (a pass's `prepareReplication`),
    * and never stopped by a pass: a copy runs beside it. What it applies is `streamed`, read at each change, so a table
    * joins once caught up and leaves when copied again without a restart.
@@ -1841,7 +1924,7 @@ export class Sync {
     const s = new ReplicationStream({
       connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l),
       target: { tables: () => this.streamed, apply: (batch, lsn, committedAt) => this.applyStreamed(batch, lsn, committedAt), applied: () => this.appliedLsn,
-        refuse: (source, missing) => this.refuseStreamed(source, missing), current: () => { if (this.stream === s) this.streamCurrentAt = Date.now(); } },
+        refuse: (source, missing) => this.refuseStreamed(source, missing), current: () => { if (this.stream === s) this.streamCurrent(); } },
     });
     this.stream = s;
     this.streamFailure = null;
@@ -1987,7 +2070,7 @@ export class Sync {
     const t = this.tables.get(source);
     if (t === undefined) return "it is no longer added (its synced data is dropped)";
     const gap = this.unpublished.get(source);
-    if (gap !== undefined) return gap.split("\n")[0]!;
+    if (gap !== undefined) return gapLine(gap);
     const st = this.states.get(source);
     if (this.copiedAs.has(source) && this.copiedAs.get(source) !== columnsKey(t.columns)) return "its columns changed: it is read again whole, then caught up by one poll";
     if (st?.phase === "copied" && !this.snapshots.has(source)) return "a numeric value outgrew its synced DECIMAL column: it is read again whole, wider, then caught up by one poll";

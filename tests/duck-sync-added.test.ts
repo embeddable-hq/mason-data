@@ -152,6 +152,8 @@ type Kept = { by: string; state?: string; why?: string | null; position?: string
 type KeptState = { source: string; phase: string; kept?: Kept };
 /** a kept without its next poll's time (when it is due: now, for a table whose interval has passed) */
 const withoutNext = (k: Kept | undefined): Kept | undefined => { if (k === undefined) return k; const { nextAt: _n, ...rest } = k; return rest; };
+/** kept without what its sync promises (`promisedSeconds`, `lateWhy`: tests/duck-sync-schedule.test.ts holds them) */
+const bare = <K extends object | undefined>(k: K): K => { if (k === undefined) return k; const { promisedSeconds: _p, lateWhy: _w, ...rest } = k as Record<string, unknown>; return rest as K; };
 const replicationX = { slot: "mason_x", publication: "mason_x", owned: true };
 /** each table's state, and what mason status's stream section says of each (replication mode) */
 const keptStates = (t: Started) => withSync(t, async (sync) => ({ states: sync.state() as KeptState[], stream: await sync.streamStatus() }));
@@ -178,7 +180,10 @@ test("a project switched to replication is said streamed by EXPLAIN and status a
   }
   // stopped (as this sync is, before its first pass could start the stream): the reason, never "the slot is not made"
   for (const name of ["a", "big"]) {
-    assert.deepEqual(at(states, name).kept, { by: "replication", slot: "mason_x", state: "streamed", why: null, position: "0/16B3F28", syncedAt: "2026-10-27T19:58:39.000Z", lastCommit: null, notRunning: "Mason is stopping" });
+    assert.deepEqual(bare(at(states, name).kept), { by: "replication", slot: "mason_x", state: "streamed", why: null, position: "0/16B3F28", syncedAt: "2026-10-27T19:58:39.000Z", lastCommit: null, notRunning: "Mason is stopping" });
+    // what a streamed table's sync promises, and why it would be late now: the stream not running, said by the sync
+    const k = at(states, name).kept as { promisedSeconds?: number; lateWhy?: string };
+    assert.deepEqual([k.promisedSeconds, k.lateWhy], [120, "the stream is not running: Mason is stopping"]);
     assert.equal(keptText(at(states, name), Date.parse("2026-10-29T19:58:39.000Z")),
       "streamed by logical replication (slot mason_x), replicated, at 0/16B3F28, last synced 2 days ago (2026-10-27 19:58:39 UTC), no change applied this run; NOT kept current now, the stream is not running: Mason is stopping");
   }
@@ -213,12 +218,17 @@ test("a polled copy says its interval and last poll, an `off` one its age and th
   });
   const asOf = "2026-10-27T19:58:39.000Z";
   const now = Date.parse("2026-10-30T20:58:39.000Z");
-  assert.deepEqual(withoutNext(at(states, "a").kept), { by: "poll", sync: every("30s", 30), syncedAt: asOf });
+  assert.deepEqual(withoutNext(bare(at(states, "a").kept)), { by: "poll", sync: every("30s", 30), syncedAt: asOf });
+  // its promise: its interval plus the 60 s floor (no poll of it measured this run), and why it is late: not polled yet
+  const promised = (k: unknown): unknown[] => { const p = k as { promisedSeconds?: number | null; lateWhy?: string | null }; return [p.promisedSeconds, p.lateWhy]; };
+  assert.deepEqual(promised(at(states, "a").kept), [90, "it has not been polled since Mason started: it is polled at the next pass"]);
+  // off promises nothing
+  assert.deepEqual(promised(at(states, "big").kept), [null, null]);
   // its interval long past its last poll: due now (never a time before now)
   assert.ok(Date.parse(at(states, "a").kept!.nextAt!) >= Date.parse(asOf) + 30_000, "its next poll is due");
   assert.equal(keptText(at(states, "a"), now), "polled every 30s, last 3 days ago (2026-10-27 19:58:39 UTC)");
   // sync: off: copied, served, its age and the way to sync it said; no next poll, and no verdict of the run's own
-  assert.deepEqual(at(states, "big").kept, { by: "poll", sync: OFF, syncedAt: asOf, nextAt: null });
+  assert.deepEqual(bare(at(states, "big").kept), { by: "poll", sync: OFF, syncedAt: asOf, nextAt: null });
   assert.equal("unsynced" in at(states, "big"), false);
   assert.equal(keptText(at(states, "big"), now), "off: last synced 3 days ago (2026-10-27 19:58:39 UTC); mason sync public.big syncs it now");
   const pending: Array<[string, string]> = [
@@ -238,7 +248,7 @@ test("a recopied copy's last copy is the instant the ledger holds, said in UTC w
   const { states } = await keptStates({ mode: "recopy", tables: [table("a")], seed: async (run) => {
     await run(`INSERT INTO ${MASON_SCHEMA}.copy_state VALUES ('public.a', 'copied', 10, 0, 1.0, '2026-10-27 19:00:00+00', NULL, '${JSON.stringify([column("id")])}')`);
   } });
-  assert.deepEqual(at(states, "a").kept, { by: "recopy", copiedAt: "2026-10-27T19:00:00.000Z" });
+  assert.deepEqual(bare(at(states, "a").kept), { by: "recopy", copiedAt: "2026-10-27T19:00:00.000Z", syncedAt: null });
   assert.equal(keptText(at(states, "a")), "kept current by reading it again whole, last synced 2026-10-27 19:00:00 UTC");
 });
 
@@ -285,11 +295,12 @@ test("mason status --json says how each table is kept current as the sync derive
   sameAsTheSync(poll.states, poll.json);
   const asOf = "2026-10-27T19:58:39.000Z";
   const by = (name: string) => poll.json.tables.find((t) => t.table === `public.${name}`)!;
-  assert.deepEqual(withoutNext(by("a").kept), { by: "poll", sync: every("30s", 30), syncedAt: asOf });
-  assert.deepEqual(by("big").kept, { by: "poll", sync: OFF, syncedAt: asOf, nextAt: null });
+  assert.deepEqual(withoutNext(bare(by("a").kept)), { by: "poll", sync: every("30s", 30), syncedAt: asOf });
+  assert.deepEqual(bare(by("big").kept), { by: "poll", sync: OFF, syncedAt: asOf, nextAt: null });
   const lines = tableLines(poll.json, Date.parse("2026-10-30T20:58:39.000Z"));
   assert.match(lines.find((l) => l.startsWith("public.big"))!, /synced · sync: off, last synced 3 days ago — mason sync big syncs it now; sync: poll 5m on its entry polls it$/);
-  assert.match(lines.find((l) => l.startsWith("public.a "))!, /synced · polled every 30s, last 3 days ago$/);
+  // three days past its last poll at the moment the run answered: behind, by how much and why (src/cli/readiness.ts behindOf)
+  assert.match(lines.find((l) => l.startsWith("public.a "))!, /synced · polled every 30s, last 3 days ago — behind by [^:]+: it has not been polled since Mason started: it is polled at the next pass$/);
 
   // REPLICATION MODE: streamed, and caught up by one poll first — the stream section's state and why are kept's
   const replTables = [table("a"), table("caught")];
@@ -307,7 +318,7 @@ test("mason status --json says how each table is kept current as the sync derive
     const said: StreamStatus["tables"][number] = stream.tables.find((s) => s.table === t.table)!;
     assert.deepEqual([said.state, said.why], k.by === "replication" ? [k.state, k.why] : [], `${t.table}: the stream section says what kept says`);
   }
-  assert.deepEqual(repl.json.tables.find((t) => t.table === "public.caught")!.kept,
+  assert.deepEqual(bare(repl.json.tables.find((t) => t.table === "public.caught")!.kept),
     { by: "replication", slot: "mason_x", state: "catching-up", why: "caught up by one poll after its whole read", position: "0/16B3F28", syncedAt: "2026-10-27T19:58:39.000Z", lastCommit: null, notRunning: "Mason is stopping" });
   assert.match(streamLines(stream).find((l) => l.startsWith("public.caught"))!, /catching up by one poll/);
 });
@@ -331,7 +342,7 @@ test("a table not copied now says so in kept itself — waiting for its copy, it
   };
   const poll = await keptBy({ mode: "poll", tables, seed: seed() }, "poll");
   const five = every("5s", 5);
-  assert.deepEqual(Object.fromEntries(Object.entries(poll).map(([k, v]) => [k, withoutNext(v as Kept)])), {
+  assert.deepEqual(Object.fromEntries(Object.entries(poll).map(([k, v]) => [k, withoutNext(bare(v as Kept))])), {
     a: { by: "poll", sync: five, syncedAt: "2026-10-27T19:58:39.000Z" },
     waiting: { by: "poll", sync: five, syncedAt: null, pending: "it waits for its first sync: it joins once synced and caught up by one poll" },
     failed: { by: "poll", sync: five, syncedAt: null, pending: "its first sync failed (the source closed the connection): it joins once synced and caught up by one poll" },
@@ -339,9 +350,9 @@ test("a table not copied now says so in kept itself — waiting for its copy, it
   // a table not kept current now has no next poll
   assert.deepEqual([(poll.waiting as Kept).nextAt, (poll.failed as Kept).nextAt], [null, null]);
   const recopy = await keptBy({ mode: "recopy", tables, seed: seed() }, "poll");
-  assert.deepEqual([recopy.waiting, recopy.failed], [
-    { by: "recopy", copiedAt: null, pending: "it waits for its first sync: it is kept current once synced" },
-    { by: "recopy", copiedAt: (recopy.failed as { copiedAt: string | null }).copiedAt, pending: "its first sync failed (the source closed the connection): it is kept current once synced" },
+  assert.deepEqual([bare(recopy.waiting as object), bare(recopy.failed as object)], [
+    { by: "recopy", copiedAt: null, syncedAt: null, pending: "it waits for its first sync: it is kept current once synced" },
+    { by: "recopy", copiedAt: (recopy.failed as { copiedAt: string | null }).copiedAt, syncedAt: null, pending: "its first sync failed (the source closed the connection): it is kept current once synced" },
   ]);
   assert.equal("pending" in (recopy.a as object), false, "a copied table copied again whole is kept current");
   const repl = await keptBy({ mode: "replication", replication: replicationX, tables, seed: seed(slotAt) }, "replication");

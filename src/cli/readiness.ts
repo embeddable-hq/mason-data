@@ -5,7 +5,7 @@
  * re-exports it).
  */
 import type { RunState } from "./commands.ts";
-import type { CopyProgressView, CopyState, Synced } from "../duck/sync.ts";
+import type { CopyProgressView, CopyState, KeptCurrent, Synced } from "../duck/sync.ts";
 import type { GeneratedStatus } from "../duck/generated.ts";
 
 const n = (x: number): string => x.toLocaleString("en-US");
@@ -81,24 +81,46 @@ export function copyProgress(source: string, copied: number, rowsEstimate: numbe
  *  - `failed`: its copy failed, or the poll, catch-up or stream keeping it current did (its `error` says why; a table
  *    copied before still serves that copy);
  *  - `syncing`: being copied, copied again, or caught up by its one poll before it is kept current;
- *  - `synced`: its copy is served and kept current — or, for a table over the poll's row limit, served as copied and
- *    NOT kept current (its `unsynced` says so, and `syncedAt` how old the copy is).
+ *  - `behind`: served and being kept current, but its synced data is older than its `sync:` promises (`behindOf`:
+ *    measured from the ledger's time, at the moment asked — issue 106);
+ *  - `synced`: its copy is served and kept current as its sync promises — or, `sync: off`, served as of its last sync
+ *    (never behind: it promises nothing past it).
  */
-export type TableSyncState = "synced" | "syncing" | "failed" | "waiting";
-export function syncStateOf(c: CopyState | undefined): TableSyncState {
+export type TableSyncState = "synced" | "syncing" | "failed" | "waiting" | "behind";
+export function syncStateOf(c: CopyState | undefined, now: number = Date.now()): TableSyncState {
   if (c === undefined || c.phase === "waiting") return "waiting";
   if (c.phase === "failed" || c.error !== null) return "failed";
   if (c.phase === "copying" || c.rebuilding !== undefined || c.behind !== undefined) return "syncing";
-  return "synced";
+  return (behindOf(c.kept, now).behindBySeconds ?? 0) > 0 ? "behind" : "synced";
+}
+
+/**
+ * IS A SERVED TABLE BEHIND WHAT ITS `sync:` PROMISES, NOW — the one comparison (`syncStateOf`, `tableSync`): the age of
+ * its synced data as the ledger has it (`kept.syncedAt`, src/duck/sync.ts `keptOf`: a poll's start, the stream's last
+ * moment with everything; a recopy's watermark, else its copy) against the age its sync promises
+ * (`kept.promisedSeconds`, `keptPromise`), never a schedule or a phase. `asOf` null: nothing measured;
+ * `promisedSeconds` null: nothing promised (`off`, or a run before it was said), and `behindBySeconds` null with it;
+ * `behindWhy` the sync's reason (`kept.lateWhy`) while behind, else null.
+ */
+export interface Behind { asOf: string | null; promisedSeconds: number | null; behindBySeconds: number | null; behindWhy: string | null }
+export function behindOf(k: KeptCurrent | undefined, now: number): Behind {
+  if (k === undefined || k.by === "generated") return { asOf: null, promisedSeconds: null, behindBySeconds: null, behindWhy: null };
+  const asOf = k.by === "recopy" ? k.syncedAt ?? k.copiedAt : k.syncedAt;
+  const promisedSeconds = k.promisedSeconds ?? null;
+  if (promisedSeconds === null || asOf === null) return { asOf, promisedSeconds, behindBySeconds: null, behindWhy: null };
+  const over = (now - Date.parse(asOf)) / 1000 - promisedSeconds;
+  return over > 0 ? { asOf, promisedSeconds, behindBySeconds: Math.round(over * 10) / 10, behindWhy: k.lateWhy ?? "its next sync is late" }
+    : { asOf, promisedSeconds, behindBySeconds: 0, behindWhy: null };
 }
 
 /** A table's sync as `/api/state` says it (`tables[].sync`): its state, when it was last brought current and how
- *  (src/duck/sync.ts `Synced`), and how old that is NOW — the one value here relative to the moment it is asked. */
-export interface SyncFacts { state: TableSyncState; syncedAt: string | null; syncSeconds: number | null; syncedBy: Synced["by"] | null; ageSeconds: number | null }
+ *  (src/duck/sync.ts `Synced`), and how old that is NOW — the one value here relative to the moment it is asked — and
+ *  whether it is behind what its sync promises (`behindOf`). */
+export interface SyncFacts extends Partial<Behind> { state: TableSyncState; syncedAt: string | null; syncSeconds: number | null; syncedBy: Synced["by"] | null; ageSeconds: number | null }
 export function tableSync(c: CopyState | undefined, now: number): SyncFacts {
   const s = c?.synced;
-  return { state: syncStateOf(c), syncedAt: s?.at ?? null, syncSeconds: s?.seconds ?? null, syncedBy: s?.by ?? null,
-    ageSeconds: s === undefined ? null : Math.max(0, Math.round((now - Date.parse(s.at)) / 100) / 10) };
+  return { state: syncStateOf(c, now), syncedAt: s?.at ?? null, syncSeconds: s?.seconds ?? null, syncedBy: s?.by ?? null,
+    ageSeconds: s === undefined ? null : Math.max(0, Math.round((now - Date.parse(s.at)) / 100) / 10), ...behindOf(c?.kept, now) };
 }
 
 /** The run's copies in all (`/api/state` `totals`): the tables added, those copied (served), those whose sync failed,
@@ -133,7 +155,11 @@ export function readinessWord(r: Readiness): "Ready" | "Failed" | "Under way" {
 export function readiness(s: Pick<RunState, "tables">): Readiness {
   const failed: string[] = [], waiting: string[] = [];
   for (const t of s.tables.filter((t) => t.added)) {
-    if (t.error) { failed.push(`${t.table}: ${firstLine(t.error)}`); continue; }
+    // the table's state in one word (`syncStateOf`), never a second reading of its error or phase: a copied table whose
+    // poll, catch-up, stream or publication check failed is failed here as it is there (issues 100, 82). Behind is said
+    // on its line, never a failure: it is served and being kept. A run from before `sync` was said: its error and phase.
+    const state = t.sync?.state ?? (t.error ? "failed" : t.copy?.phase === "copying" ? "syncing" : !t.copy ? "waiting" : "synced");
+    if (state === "failed") { failed.push(`${t.table}: ${firstLine(t.error ?? "its sync failed (mason status says why)")}`); continue; }
     if (t.copy?.phase === "copying") { waiting.push(copyProgress(t.table, t.copy.rowsCopied, t.rows, t.copy.progress)); continue; }
     if (!t.copy) waiting.push(`${t.table}: waiting for its first sync to start`);
   }

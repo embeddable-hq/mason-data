@@ -446,16 +446,150 @@ test("each table's sync: its state in one word, when it was last brought current
   ] as unknown as CopyState[];
   const s = runServer.runState(ctx, states, null, now) as { tables: Array<{ table: string; sync?: unknown }>; totals?: unknown };
   const sync = new Map(s.tables.map((t) => [t.table, t.sync]));
-  assert.deepEqual(sync.get("public.customers"), { state: "synced", syncedAt: at, syncSeconds: 0.04, syncedBy: "poll", ageSeconds: 90.5 }, "its poll's own time, and its age at the moment asked");
-  assert.deepEqual(sync.get("public.orders"), { state: "syncing", syncedAt: "2026-10-24T09:00:00.000Z", syncSeconds: 12.5, syncedBy: "copy", ageSeconds: 3690.5 }, "copied, caught up by one poll now: syncing");
-  assert.deepEqual(sync.get("public.logs"), { state: "failed", syncedAt: "2026-10-24T09:30:00.000Z", syncSeconds: null, syncedBy: "poll", ageSeconds: 1890.5 }, "copied, its poll failed: failed, the copy as old as its last poll");
-  assert.deepEqual(sync.get("public.Shouty"), { state: "waiting", syncedAt: null, syncSeconds: null, syncedBy: null, ageSeconds: null }, "not reached yet");
+  // no kept on these states: nothing measured, nothing promised (src/cli/readiness.ts behindOf)
+  const unmeasured = { asOf: null, promisedSeconds: null, behindBySeconds: null, behindWhy: null };
+  assert.deepEqual(sync.get("public.customers"), { state: "synced", syncedAt: at, syncSeconds: 0.04, syncedBy: "poll", ageSeconds: 90.5, ...unmeasured }, "its poll's own time, and its age at the moment asked");
+  assert.deepEqual(sync.get("public.orders"), { state: "syncing", syncedAt: "2026-10-24T09:00:00.000Z", syncSeconds: 12.5, syncedBy: "copy", ageSeconds: 3690.5, ...unmeasured }, "copied, caught up by one poll now: syncing");
+  assert.deepEqual(sync.get("public.logs"), { state: "failed", syncedAt: "2026-10-24T09:30:00.000Z", syncSeconds: null, syncedBy: "poll", ageSeconds: 1890.5, ...unmeasured }, "copied, its poll failed: failed, the copy as old as its last poll");
+  assert.deepEqual(sync.get("public.Shouty"), { state: "waiting", syncedAt: null, syncSeconds: null, syncedBy: null, ageSeconds: null, ...unmeasured }, "not reached yet");
   assert.equal(sync.get("public.events"), undefined, "a table neither added nor copied has no sync");
   // copied: the three copies served; failed: their syncs that failed; rows: the copies' rows; the latest sync of any
   assert.deepEqual(s.totals, { added: 0, copied: 3, failed: 1, rows: 1_023, syncedAt: at });
   const { syncStateOf } = await import("../src/cli/readiness.ts") as unknown as { syncStateOf: (c: unknown) => string };
   assert.deepEqual([{ phase: "copying", error: null }, { phase: "failed", error: "x" }, { phase: "copied", error: null, rebuilding: "copy" }, { phase: "copied", error: null }].map(syncStateOf),
     ["syncing", "failed", "syncing", "synced"], "copying, a failed copy, a copy made again (the old one serves), served and kept current");
+});
+
+// BEHIND, LEFT OUT, A FAILED CATCH-UP (issues 254, 106, 100, 82): what each row says through runState, at an injected now —
+// the state in one word, the measured facts, the row's error, readiness and the line, from ONE comparison
+// (src/cli/readiness.ts behindOf) over what the sync promises (src/duck/sync.ts keptPromise), as the sync would carry it
+const NOW_254 = Date.parse("2026-11-02T12:00:00.000Z");
+const ago = (s: number): string => new Date(NOW_254 - s * 1000).toISOString();
+type Promise254 = { promisedSeconds: number | null; lateWhy: string | null };
+const promiseOf = (o: Record<string, unknown>): Promise254 => {
+  const f = (syncModule as unknown as { keptPromise?: (o: Record<string, unknown>) => Promise254 }).keptPromise;
+  return f === undefined ? assert.fail("src/duck/sync.ts exports keptPromise") : f({ mode: "poll", intervalSeconds: 900, lastPollMs: 2_000, lastPassMs: 2_000, pending: null,
+    notRunning: null, passFailed: false, dueMs: null, now: NOW_254, ...o });
+};
+const every15 = { mode: "poll", every: "15m", seconds: 900 };
+const polledKept = (age: number, o: Record<string, unknown> = {}, sync: Record<string, unknown> = every15) =>
+  ({ by: "poll", sync, syncedAt: ago(age), nextAt: null, ...promiseOf({ ...(sync.mode === "off" ? { mode: "off" } : {}), ...o }) });
+/** one copied table's row as mason status --json says it, added (as the sources file would say), and the commands over it */
+async function row254(st: Record<string, unknown>, now = NOW_254) {
+  const runServer = await import("../src/cli/run-server.ts");
+  const commands = await import("../src/cli/commands.ts");
+  const copy = { source: "public.customers", phase: "copied", rows: 1_000, bytes: 1, seconds: 1, copiedAt: ago(7200), error: null, synced: { at: ago(7200), seconds: 1, by: "copy" }, ...st } as unknown as CopyState;
+  const s = runServer.runState(ctx, [copy], null, now) as RunStateLike;
+  for (const t of s.tables) t.added = t.table === "public.customers";
+  const t = s.tables.find((x) => x.table === "public.customers")!;
+  const line = commands.tableLines(s as never, now).find((l) => l.startsWith("public.customers"))!;
+  return { t, sync: t.sync as Record<string, unknown>, line, readiness: commands.readiness(s as never), word: commands.readinessWord(commands.readiness(s as never)),
+    colour: commands.paintBar(line, { red: (x: string) => `R${x}`, yellow: (x: string) => `Y${x}`, green: (x: string) => `G${x}`, cyan: (x: string) => `C${x}`, dim: (x: string) => x } as never).match(/([RYGC])█/)?.[1],
+    totals: (runServer.runState(ctx, [copy], null, now) as { totals: { failed: number } }).totals };
+}
+type RunStateLike = { tables: Array<{ table: string; added: boolean; error: string | null; sync?: unknown; copy: unknown }> };
+
+test("behind: a polled table older than its sync promises is behind, by how much and why, measured from the ledger's time; ready all the same (issue 106)", async () => {
+  // a pass of 13 min: Mason waits four times it, so poll 15m is polled about every hour
+  const pass = await row254({ kept: polledKept(52 * 60, { lastPassMs: 13 * 60_000 }) });
+  assert.equal(pass.sync.state, "behind");
+  assert.deepEqual([pass.sync.asOf, pass.sync.promisedSeconds, pass.sync.behindBySeconds], [ago(52 * 60), 960, 2160]);
+  assert.match(String(pass.sync.behindWhy), /polls took 13 min in the last pass, and Mason waits four times that/);
+  assert.match(pass.line, /1,000 rows · synced · polled every 15m, last 52 min ago — behind by 36 min: every polled table's polls took 13 min in the last pass, and Mason waits four times that between passes to keep the database's load to a fifth$/);
+  assert.equal(pass.colour, "Y", "behind is painted yellow");
+  assert.deepEqual([pass.readiness.ready, pass.word, pass.totals.failed], [true, "Ready", 0], "behind is said on its line, never a failure");
+  // its own poll of 6 min: due every 24 min; at 31 min it is behind its promise of 900 + 720 s
+  const big = await row254({ kept: polledKept(31 * 60, { lastPollMs: 6 * 60_000, lastPassMs: 0 }) });
+  assert.deepEqual([big.sync.state, big.sync.promisedSeconds, big.sync.behindBySeconds], ["behind", 1620, 240]);
+  assert.match(big.line, /— behind by 4 min: its own poll took 6 min, and Mason waits four times a table's poll before its next/);
+  // the negative control: 14 min old, quick polls: synced, its line as it was
+  const fresh = await row254({ kept: polledKept(14 * 60) });
+  assert.deepEqual([fresh.sync.state, fresh.sync.behindBySeconds, fresh.sync.behindWhy], ["synced", 0, null]);
+  assert.match(fresh.line, /synced · polled every 15m, last 14 min ago$/);
+  assert.equal(fresh.colour, "G");
+  // the boundary: at its promise, synced; a second past it, behind
+  assert.equal((await row254({ kept: polledKept(960) })).sync.state, "synced");
+  assert.equal((await row254({ kept: polledKept(961) })).sync.state, "behind");
+  // the 60 s floor of a poll 1s table
+  const one = { mode: "poll", every: "1s", seconds: 1 };
+  assert.equal((await row254({ kept: polledKept(30, { intervalSeconds: 1, lastPollMs: 200 }, one) })).sync.state, "synced");
+  assert.equal((await row254({ kept: polledKept(120, { intervalSeconds: 1, lastPollMs: 200 }, one) })).sync.state, "behind");
+  // a restart: nothing measured this run, the ledger's last poll 2 h ago: behind at once, measured from the ledger
+  const restart = await row254({ kept: polledKept(7200, { lastPollMs: null, lastPassMs: 0 }) });
+  assert.deepEqual([restart.sync.state, restart.sync.promisedSeconds], ["behind", 960]);
+  // sync: off promises nothing: never behind, its line as it was — and so is a table switched from poll 15m to off
+  const off = await row254({ kept: polledKept(3 * 86_400, {}, { mode: "off" }) });
+  assert.deepEqual([off.sync.state, off.sync.promisedSeconds, off.sync.behindBySeconds], ["synced", null, null]);
+  assert.match(off.line, /synced · sync: off, last synced 3 days ago — mason sync customers syncs it now; sync: poll 5m on its entry polls it$/);
+  assert.equal((await row254({ kept: polledKept(7200, { lastPollMs: 6 * 60_000 }, { mode: "off" }) })).sync.state, "synced", "switched to off: never behind");
+  // recopy: an hour's interval, copied 2 h 10 min ago, a pass of 5 min
+  const recopy = await row254({ kept: { by: "recopy", copiedAt: ago(130 * 60), syncedAt: ago(130 * 60),
+    ...promiseOf({ mode: "recopy", intervalSeconds: 3600, lastPollMs: null, lastPassMs: 5 * 60_000 }) } });
+  assert.deepEqual([recopy.sync.state, recopy.sync.promisedSeconds], ["behind", 4200]);
+  assert.match(String(recopy.sync.behindWhy), /took 5 min/);
+});
+
+test("a streamed table is behind only past what the stream promises: an idle healthy stream never; a stream down past it, with why (issue 254)", async () => {
+  const streamed = (age: number, notRunning: string | null) => ({ by: "replication", slot: "s", state: "streamed", why: null, position: "0/1", lastCommit: null, notRunning,
+    syncedAt: ago(age), ...promiseOf({ mode: "replication", notRunning }) });
+  assert.equal((await row254({ kept: streamed(5, null) })).sync.state, "synced");
+  // a keepalive every 10 s for two minutes: never older than ten seconds when asked
+  for (let s = 0; s <= 120; s += 10) assert.equal((await row254({ kept: streamed(10, null) }, NOW_254 + s * 1000 - s * 1000)).sync.state, "synced");
+  const down = await row254({ kept: streamed(300, "it has not started yet: it starts at the next pass") });
+  assert.deepEqual([down.sync.state, down.sync.promisedSeconds, down.sync.behindBySeconds], ["behind", 120, 180]);
+  assert.match(down.line, /replicated, at 0\/1, 5 min ago — behind by 3 min: the stream is not running: it has not started yet: it starts at the next pass$/);
+  assert.equal(down.readiness.ready, true);
+  // a short restart: within the bound, said as not running, never behind
+  const short = await row254({ kept: streamed(30, "it has not started yet: it starts at the next pass") });
+  assert.equal(short.sync.state, "synced");
+  assert.match(short.line, /NOT kept current now, the stream is not running/);
+  // a stream failure recorded on the copy: failed, on its row, and readiness fails
+  const failed = await row254({ error: "replication: the connection was reset", kept: streamed(30, null) });
+  assert.deepEqual([failed.sync.state, failed.t.error, failed.readiness.ready, failed.word], ["failed", "replication: the connection was reset", false, "Failed"]);
+  assert.match(failed.line, /1,000 rows · synced · NOT kept current, its sync failed \(last synced 30 s ago\): replication: the connection was reset$/);
+});
+
+test("left out of a named publication, or its catch-up failed: a synced table whose keeping fails is failed on its own row, and mason wait fails (issues 100, 82)", async () => {
+  // #100: the publication does not carry it — its copy serves, NOT kept current; the row carries its error
+  const gap = "replication: publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t";
+  const why = "publication app_pub does not carry public.t: ALTER PUBLICATION app_pub ADD TABLE public.t — or give its entry sync: poll <interval> in the sources file, which needs no publication";
+  const left = await row254({ error: gap, kept: { by: "replication", slot: "s", state: "left-out", why, position: "0/1", lastCommit: null, notRunning: null, syncedAt: ago(7200),
+    ...promiseOf({ mode: "replication", pending: why }) } });
+  assert.deepEqual([left.t.error, left.sync.state], [gap, "failed"]);
+  assert.deepEqual(left.readiness, { ready: false, failed: [`public.customers: ${gap}`], waiting: [] });
+  assert.equal(left.word, "Failed");
+  assert.equal(left.totals.failed, 1, "the count of failed is matched by a row");
+  assert.equal(left.line.replace(/\s+/g, " "), `public.customers ████████████████████ 100% 1,000 rows · synced · NOT kept current, its sync failed (last synced 2 h ago): ${why}`);
+  assert.doesNotMatch(left.line, /first sync failed/);
+  assert.equal(left.colour, "R", "a synced table whose sync failed is red");
+  // #82's shape: its catch-up failed and waits out its back-off (the copy's error, its behind mark)
+  const pending = "it is caught up by one poll after its whole read first — after a failure, tried again after 12:05 UTC";
+  const caught = await row254({ error: "its catch-up poll failed (the synced data serves as it was; it is caught up by one poll again after 12:05 UTC (failure 1 in a row), or at once when Mason starts again or its columns or key change): Parser Error: VALUES lists must all be the same length",
+    behind: "after its whole read", kept: polledKept(7200, { pending }, every15) && { ...polledKept(7200, { pending }), pending } });
+  assert.deepEqual([caught.sync.state, caught.readiness.ready, caught.word], ["failed", false, "Failed"]);
+  assert.match(caught.readiness.failed[0]!, /^public\.customers: its catch-up poll failed/);
+  assert.match(caught.line, /NOT kept current, its sync failed \(last synced 2 h ago\): it is caught up by one poll after its whole read first — after a failure, tried again after 12:05 UTC$/);
+  // a catch-up queued after a copy that went well: syncing, ready, never failed or behind
+  const queued = await row254({ behind: "after its whole read", kept: { ...polledKept(7200, { pending: "it is caught up by one poll after its whole read first" }), pending: "it is caught up by one poll after its whole read first" } });
+  assert.deepEqual([queued.sync.state, queued.readiness.ready], ["syncing", true]);
+  // #96 guard: a first sync that failed (out of memory) is said as it was
+  const oom = await row254({ phase: "failed", rows: null, copiedAt: null, synced: undefined, error: "Out of Memory Error: could not allocate block of size 256.0 KiB" });
+  assert.deepEqual([oom.sync.state, (oom.t.copy as { phase: string }).phase, oom.readiness.ready], ["failed", "failed", false]);
+  assert.match(oom.line, /100% {2}its first sync failed: Out of Memory Error: could not allocate block/);
+  // recovered: the error gone, synced again
+  assert.deepEqual([(await row254({ kept: polledKept(60) })).readiness.ready], [true]);
+});
+
+test("an older run's state (sync and kept without what the sync promises) is read as before: no behind, no crash", async () => {
+  const commands = await import("../src/cli/commands.ts");
+  const t = { table: "public.customers", rows: 1, bytes: 1, key: ["id"], comment: null, columns: [], reason: null, added: true, addedColumns: null, copyKey: null,
+    copy: { phase: "done", rowsCopied: 10, updatedAt: ago(7200) }, error: null,
+    kept: { by: "poll", sync: every15, syncedAt: ago(7200), nextAt: null }, sync: { state: "synced", syncedAt: ago(7200), syncSeconds: 1, syncedBy: "poll", ageSeconds: 7200 } };
+  const s = { tables: [t] } as never;
+  assert.match(commands.tableLines(s, NOW_254)[0]!, /10 rows · synced · polled every 15m, last 2 h ago$/);
+  assert.deepEqual(commands.readiness(s), { ready: true, failed: [], waiting: [] });
+  // and one from before `sync` was said at all: its error and phase, as before
+  assert.deepEqual(commands.readiness({ tables: [{ ...t, sync: undefined, copy: null, error: "boom" }] } as never), { ready: false, failed: ["public.customers: boom"], waiting: [] });
 });
 
 test("usage over time: /api/usage passes since, until and step to the samples, an hour by default, with the synced tables' sizes; a bad time or step refused by name", async () => {

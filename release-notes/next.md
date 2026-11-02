@@ -15,6 +15,20 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason status`, `--json` and the web page now say when a synced table is behind what its `sync:` promises**,
+  measured from when it was last synced, with why. A table set to `sync: poll 15m` whose pass of polls takes 13 min is
+  polled about every hour, since Mason waits four times a pass between passes to keep the database's load to a fifth;
+  its line now says `— behind by 36 min:` and that reason, painted yellow, and `tables[].sync.state` is `behind`
+  (`asOf`, `promisedSeconds`, `behindBySeconds`, `behindWhy` beside it). A polled table is behind past its interval
+  plus the larger of a minute and twice its own last poll; a streamed one past two minutes. `sync: off` is never behind.
+  Behind is not a failure: `mason wait` still exits 0.
+- **A synced table whose keeping fails is now a failure on its own row, and `mason wait` exits 1 for it**, where it said
+  ready before: a named publication that does not carry it (its line gives the `ALTER PUBLICATION … ADD TABLE …` for
+  the database's owner, or `sync: poll <interval>` on its entry), a catch-up that failed, a poll or the stream that
+  failed. Its line says it is served as of its age and NOT kept current, in red, never that its first sync failed. A
+  stream error left from an earlier run on a table the stream keeps current is now cleared as soon as the stream has
+  everything the database wrote, not only by the next change.
+
 - **`latest(x ORDER BY …)`, an aggregate Mason adds, in any statement.** It answers the `x` of the row its ORDER BY
   sorts last, by Postgres's sort rules (NULLs last ascending, first descending, `NULLS FIRST/LAST` as written, a text
   key's collation): `SELECT customer_id, latest(status ORDER BY updated_at, id) FROM orders GROUP BY customer_id`. End
