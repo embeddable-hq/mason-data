@@ -12,6 +12,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { APART, SHARDS, UNIT_WEIGHTS_FILE, coverageProblems, needsProblems, partition, shardCommand, shardFiles, testFiles, weightOf, type ShardRecord } from "../scripts/ci-shards.ts";
+// a namespace for the docs path's names (issue 339): a tree without them still loads, and their tests fail by name
+import * as shards from "../scripts/ci-shards.ts";
 import { ORACLE } from "../scripts/gate.ts";
 import { fileOf } from "../scripts/test-times.ts";
 // a namespace, not a named import: a tree whose gate.ts lacks the constant still loads, and the test fails by name
@@ -80,7 +82,7 @@ test("verify fails on a file in no shard, in two, on one not in the tree, and on
 });
 
 test("only success passes: a failed, skipped or cancelled job, or none, fails the check", () => {
-  const ok = { build: { result: "success" }, unit: { result: "success" } };
+  const ok = { changes: { result: "success", outputs: { docs: "false" } }, build: { result: "success" }, unit: { result: "success" } };
   assert.deepEqual(needsProblems(JSON.stringify(ok)), []);
   for (const result of ["failure", "skipped", "cancelled"]) assert.deepEqual(needsProblems(JSON.stringify({ ...ok, unit: { result } })), [`unit: ${result}`]);
   assert.deepEqual(needsProblems("{}"), ["the check has no job behind it: NEEDS is empty"]);
@@ -96,7 +98,7 @@ test("the four required checks are there by name, once each, and no shard can pa
 });
 
 test("each required check runs always, passes only on success, and stands for every job but the image", () => {
-  const gates: Array<[string, string[]]> = [["checks", ["build", "unit"]], ["integration-oracle", ["oracle", "collation"]], ["integration-rest", ["rest"]]];
+  const gates: Array<[string, string[]]> = [["checks", ["changes", "build", "unit", "docs"]], ["integration-oracle", ["changes", "oracle", "collation"]], ["integration-rest", ["changes", "rest"]]];
   for (const [id, needs] of gates) {
     const gate = workflow.jobs[id]!;
     assert.deepEqual(gate.needs, needs, id);
@@ -220,8 +222,9 @@ test("scripts/ci-shards.ts run as CI runs it: files, needs and verify each end w
   const files = program("ci-shards.ts", ["files", "unit", "1"]);
   assert.equal(files.status, 0, files.out);
   assert.ok(files.out.split("\n").includes(shardFiles("unit", 1, ROOT)[0]!), files.out);
-  assert.equal(program("ci-shards.ts", ["needs"], { NEEDS: JSON.stringify({ a: { result: "success" } }) }).status, 0);
-  assert.equal(program("ci-shards.ts", ["needs"], { NEEDS: JSON.stringify({ a: { result: "skipped" } }) }).status, 1);
+  const full = { changes: { result: "success", outputs: { docs: "false" } } };
+  assert.equal(program("ci-shards.ts", ["needs"], { NEEDS: JSON.stringify({ ...full, a: { result: "success" } }) }).status, 0);
+  assert.equal(program("ci-shards.ts", ["needs"], { NEEDS: JSON.stringify({ ...full, a: { result: "skipped" } }) }).status, 1);
   assert.equal(program("ci-shards.ts", ["verify", "rest", dir]).status, 1, "no records");
   for (let shard = 1; shard <= SHARDS.rest; shard++) fs.writeFileSync(path.join(dir, `ran-rest-${shard}.json`), JSON.stringify({ kind: "rest", shard, files: shardFiles("rest", shard, ROOT), exit: 0 }));
   const verified = program("ci-shards.ts", ["verify", "rest", dir]);
@@ -472,4 +475,336 @@ test("ci-shards.ts reaches neither scripts/oracle-legs.ts nor the engine: the un
   };
   walk("scripts/ci-shards.ts");
   assert.deepEqual([...reached].sort(), ["scripts/ci-layout.ts", "scripts/ci-shards.ts", "scripts/gate.ts"]);
+});
+
+// ── the docs path (issue 339) ────────────────────────────────────────────────────────────────────────────────────────
+// A pull request that changes nothing but docs runs the docs job in place of build, unit, oracle and rest, and the four
+// required checks still report. The danger is two-sided: a required check that never reports blocks every docs PR for
+// ever, and a gate that passes over shards skipped for any other reason lets a broken PR merge. Every path below that
+// is not in the tree is built, never written whole (the path guard).
+const P = (...parts: string[]): string => parts.join("/");
+const FULL = { result: "success", outputs: { docs: "false" } }, DOCS = { result: "success", outputs: { docs: "true" } };
+
+test("docs paths: a root .md file, or one under docs/, deploy/ or release-notes/, is docs", () => {
+  assert.equal(shards.docsOnly(["README.md"]), true);
+  assert.equal(shards.docsOnly(["docs/DESIGN.md", "docs/SQL-SUPPORT.md"]), true);
+  assert.equal(shards.docsOnly([P("release-notes", "next.md")]), true);
+  assert.equal(shards.docsOnly([P("release-notes", "v0.9.0.md")]), true);
+  assert.equal(shards.docsOnly([P("deploy", "fly", "README.md"), "CONTRIBUTING.md", "SECURITY.md", P("docs", "sub", "notes.md"), P("docs", "a b.md")]), true);
+});
+
+test("docs paths: CLAUDE.md, .claude/, .github/, src/, cli/, tests/, scripts/, any other file or folder, and an empty list are not docs", () => {
+  for (const p of ["CLAUDE.md", P("docs", "CLAUDE.md"), P(".claude", "rules", "cli.md"), P(".claude", "skills", "pr-persistent", "SKILL.md"), P(".claude", "workflows", "pr-loop.js"),
+    "src/web/vendor/README.md", P("cli", "README.md"), "tests/integration/README.md", P(".github", "pull_request_template.md"), P("scripts", "x.md"),
+    P("docs", "diagram.png"), P("docs", "DESIGN.mdx"), "README.md.orig", P("Docs", "README.md"), "README.MD", P("examples", "README.md")]) {
+    assert.equal(shards.docsPath(p), false, p);
+    assert.equal(shards.docsOnly([p]), false, p);
+  }
+  assert.equal(shards.docsOnly(["docs/DESIGN.md", "src/duck/plan.ts"]), false, "one code path makes the whole set code");
+  assert.equal(shards.docsOnly([P("src", "x.ts"), P("docs", "x.md")]), false, "a rename src -> docs, listed with --no-renames as both paths");
+  assert.equal(shards.docsOnly([]), false, "an empty diff is couldn't tell, never docs");
+});
+
+// ── `changes` against a real git merge, as CI's checkout of refs/pull/<n>/merge has it ──
+const GIT = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
+/** A repository of its own: a base commit holding the shard scripts and `base`, a branch `pr` (never `head`, which a
+ *  case-insensitive disk takes for HEAD) that changes `head`
+ *  (a path to null removes it), and HEAD the two-parent merge of the head into the base, or the head itself (1). */
+function mergeRepo(t: { after(f: () => void): void }, head: Record<string, string | null>, parents: 1 | 2, base: Record<string, string> = {}): string {
+  const root = tree(t, {}, null);
+  const git = (...args: string[]): void => { const r = spawnSync("git", [...GIT, ...args], { cwd: root, encoding: "utf8" }); assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`); };
+  const put = (files: Record<string, string | null>): void => {
+    for (const [f, text] of Object.entries(files)) {
+      if (text === null) { fs.rmSync(path.join(root, f)); continue; }
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+  };
+  put(base);
+  git("init", "-q"); git("add", "-A"); git("commit", "-qm", "base"); git("checkout", "-qb", "pr");
+  put(head);
+  git("add", "-A"); git("commit", "-qm", "head");
+  if (parents === 2) { git("checkout", "-q", "main"); git("merge", "-q", "--no-ff", "-m", "merge", "pr"); }
+  return root;
+}
+/** `node scripts/ci-shards.ts changes` in `root`, with exactly the event and output given (CI's own are dropped) */
+function changes(root: string, event: string | undefined, withOutput = true): { status: number | null; out: string; output: string | null } {
+  const { GITHUB_OUTPUT: _o, GITHUB_EVENT_NAME: _e, ...env } = outsideTests;
+  const file = path.join(root, "github-output");
+  const r = spawnSync(process.execPath, ["scripts/ci-shards.ts", "changes"], { encoding: "utf8", cwd: root,
+    env: { ...env, GIT_CEILING_DIRECTORIES: path.dirname(root), ...(event === undefined ? {} : { GITHUB_EVENT_NAME: event }), ...(withOutput ? { GITHUB_OUTPUT: file } : {}) } });
+  return { status: r.status, out: r.stdout + r.stderr, output: fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null };
+}
+
+test("docs changes: a pull request's merge adding only docs says docs=true and names what it classified", (t) => {
+  const got = changes(mergeRepo(t, { [P("docs", "x.md")]: "x", [P("docs", "a b.md")]: "y" }, 2), "pull_request");
+  assert.equal(got.status, 0, got.out);
+  assert.equal(got.output, "docs=true\n");
+  assert.match(got.out, /docs {2}docs\/x\.md\n/);
+  assert.match(got.out, /docs {2}docs\/a b\.md\n/, "a space read through -z");
+  assert.match(got.out, /docs=true/);
+});
+
+test("docs changes: one code path, a rename out of src/, a one-parent HEAD, a push, a non-repository and no GITHUB_OUTPUT are never docs", (t) => {
+  const mixed = changes(mergeRepo(t, { [P("docs", "x.md")]: "x", [P("src", "y.ts")]: "y" }, 2), "pull_request");
+  assert.equal(mixed.status, 0, mixed.out);
+  assert.equal(mixed.output, "docs=false\n");
+  assert.match(mixed.out, /code {2}src\/y\.ts\n/);
+  const renamed = changes(mergeRepo(t, { [P("src", "x.ts")]: null, [P("docs", "x.md")]: "same text" }, 2, { [P("src", "x.ts")]: "same text" }), "pull_request");
+  assert.equal(renamed.output, "docs=false\n", renamed.out);
+  assert.match(renamed.out, /code {2}src\/x\.ts\n/, "--no-renames lists the rename's old path");
+  const single = changes(mergeRepo(t, { [P("docs", "x.md")]: "x" }, 1), "pull_request");
+  assert.equal(single.status, 0, single.out);
+  assert.equal(single.output, "docs=false\n");
+  assert.match(single.out, /cannot tell that only docs changed: HEAD has 1 parent\(s\)/);
+  const push = changes(mergeRepo(t, { [P("docs", "x.md")]: "x" }, 2), "push");
+  assert.equal(push.output, "docs=false\n", push.out);
+  assert.match(push.out, /the event is push, not pull_request/);
+  assert.equal(changes(mergeRepo(t, { [P("docs", "x.md")]: "x" }, 2), undefined).output, "docs=false\n", "no event is no pull request");
+  const notRepo = changes(tree(t, {}, null), "pull_request");
+  assert.equal(notRepo.status, 0, notRepo.out);
+  assert.equal(notRepo.output, "docs=false\n");
+  assert.match(notRepo.out, /cannot tell that only docs changed: `git rev-list --parents -n 1 HEAD` exited/);
+  const noOutput = changes(mergeRepo(t, { [P("docs", "x.md")]: "x" }, 2), "pull_request", false);
+  assert.equal(noOutput.status, 2, noOutput.out);
+  assert.match(noOutput.out, /GITHUB_OUTPUT/);
+  assert.equal(noOutput.output, null, "nothing guessed");
+});
+
+// ── the gates, by the mode in their own NEEDS ──
+test("docs needs: a docs-only run passes each gate over the jobs it skips, and only those, and only when docs succeeded", () => {
+  const n = (o: object): string[] => needsProblems(JSON.stringify(o));
+  assert.deepEqual(n({ changes: DOCS, build: { result: "skipped" }, unit: { result: "skipped" }, docs: { result: "success" } }), [], "checks on a docs-only run");
+  assert.deepEqual(n({ changes: DOCS, oracle: { result: "skipped" } }), [], "integration (oracle) on a docs-only run");
+  assert.deepEqual(n({ changes: DOCS, rest: { result: "skipped" } }), [], "integration (rest) on a docs-only run");
+  assert.deepEqual(n({ changes: DOCS, build: { result: "skipped" }, unit: { result: "skipped" }, docs: { result: "failure" } }), ["docs: failure"]);
+  assert.deepEqual(n({ changes: DOCS, build: { result: "skipped" }, unit: { result: "skipped" }, docs: { result: "skipped" } }), ["docs: skipped"], "the docs job never runs by skipping");
+  for (const result of ["failure", "cancelled"]) assert.deepEqual(n({ changes: DOCS, build: { result: "skipped" }, unit: { result }, docs: { result: "success" } }), [`unit: ${result}`], `a job docs-only skips, ${result}`);
+});
+
+test("docs needs: a full run passes only when every job but docs succeeded", () => {
+  const n = (o: object): string[] => needsProblems(JSON.stringify(o));
+  assert.deepEqual(n({ changes: FULL, build: { result: "success" }, unit: { result: "success" }, docs: { result: "skipped" } }), [], "checks on a full run");
+  assert.deepEqual(n({ changes: FULL, build: { result: "success" }, unit: { result: "skipped" }, docs: { result: "skipped" } }), ["unit: skipped"]);
+  assert.deepEqual(n({ changes: FULL, oracle: { result: "skipped" } }), ["oracle: skipped"]);
+  assert.deepEqual(n({ changes: FULL, rest: { result: "cancelled" } }), ["rest: cancelled"]);
+});
+
+test("docs needs: a mode that cannot be told fails the check: changes failed, skipped, cancelled, absent, or an output not exactly true or false", () => {
+  const n = (o: object): string[] => needsProblems(JSON.stringify(o));
+  for (const result of ["failure", "skipped", "cancelled"]) {
+    const p = n({ changes: { result, outputs: {} }, build: { result: "skipped" }, unit: { result: "skipped" }, docs: { result: "skipped" } });
+    assert.ok(p.some((x) => x.startsWith(`changes: ${result}`)), `${result}: ${p.join("; ")}`);
+  }
+  for (const outputs of [{}, { docs: "maybe" }, { docs: "TRUE" }, { docs: "" }]) {
+    const p = n({ changes: { result: "success", outputs }, oracle: { result: "skipped" } });
+    assert.ok(p.some((x) => /^changes: its output docs is .*cannot be told/.test(x)), `${JSON.stringify(outputs)}: ${p.join("; ")}`);
+  }
+  assert.ok(n({ build: { result: "skipped" }, unit: { result: "skipped" } }).includes("changes: not in NEEDS, so whether this run is docs-only cannot be told"), "a gate with no changes behind it never passes by docs mode");
+  assert.deepEqual(n({ build: { result: "success" }, unit: { result: "success" } }), ["changes: not in NEEDS, so whether this run is docs-only cannot be told"]);
+  assert.deepEqual(needsProblems("{}"), ["the check has no job behind it: NEEDS is empty"]);
+  assert.deepEqual(needsProblems(undefined), ["the check has no job behind it: NEEDS is empty"]);
+});
+
+test("docs needs run as CI runs it: exit 0 on a docs-only run's skipped oracle, 1 on a full run's", () => {
+  const ok = program("ci-shards.ts", ["needs"], { NEEDS: JSON.stringify({ changes: DOCS, oracle: { result: "skipped" } }) });
+  assert.equal(ok.status, 0, ok.out);
+  assert.match(ok.out, /skipped, as a docs-only run skips it: oracle/);
+  assert.equal(program("ci-shards.ts", ["needs"], { NEEDS: JSON.stringify({ changes: FULL, oracle: { result: "skipped" } }) }).status, 1);
+  assert.equal(program("ci-shards.ts", ["changes", "extra"]).status, 2);
+  assert.equal(program("ci-shards.ts", ["docs", "extra"]).status, 2);
+});
+
+// ── ci.yml, simulated: every job's `if` and every step a gate or the image runs, as GitHub decides them ──
+type Result = "success" | "failure" | "skipped" | "cancelled";
+interface SimJob { needs?: string[]; if?: string; outputs?: Record<string, string>; steps?: Array<{ run?: string; if?: string; name?: string; uses?: string; id?: string; with?: Record<string, unknown> }> }
+const jobs = workflow.jobs as unknown as Record<string, SimJob>;
+const DOCS_IS = /^needs\.changes\.outputs\.docs (==|!=) '(true|false)'$/;
+/** One `if:` as GitHub evaluates it, in a run nobody cancelled: the terms the workflow uses joined by `&&`, and an
+ *  implied success() when none is a status function. Any other expression throws: it cannot pass unevaluated. */
+function evaluate(expr: string | undefined, job: SimJob, docs: string, okSoFar: boolean): boolean {
+  if (expr === undefined) return okSoFar;
+  const inner = /^\$\{\{ (.*) \}\}$/.exec(expr)?.[1];
+  if (inner === undefined) throw new Error(`an if the simulation does not know: ${expr}`);
+  let status = false;
+  const terms = inner.split(" && ").map((term) => {
+    if (term === "always()" || term === "!cancelled()") { status = true; return true; }
+    const m = DOCS_IS.exec(term);
+    if (m === null) throw new Error(`an if the simulation does not know: ${expr}`);
+    if (!(job.needs ?? []).includes("changes")) throw new Error(`${expr} reads needs.changes in a job that does not need it, where GitHub gives ''`);
+    return m[1] === "==" ? docs === m[2] : docs !== m[2];
+  });
+  return terms.every(Boolean) && (status || okSoFar);
+}
+/** A run of ci.yml: `changes` answers `changesResult` and `docs`, a job in `override` answers that, every other shard
+ *  succeeds. A gate's steps run as GitHub runs them: its `needs` step is needsProblems over the NEEDS it would get, and a
+ *  step that reads the shards' records fails unless every shard behind it succeeded. */
+function simulate(changesResult: Result, docs: string, override: Record<string, Result> = {}): { results: Record<string, Result>; ran: Record<string, string[]> } {
+  const results: Record<string, Result> = {}, ran: Record<string, string[]> = {};
+  const pending = Object.keys(jobs);
+  while (pending.length > 0) {
+    const id = pending.find((j) => (jobs[j]!.needs ?? []).every((n) => n in results));
+    assert.ok(id !== undefined, `a needs cycle or an unknown need among ${pending.join(", ")}`);
+    pending.splice(pending.indexOf(id), 1);
+    const job = jobs[id]!, needs = job.needs ?? [];
+    if (id === "changes") { results[id] = changesResult; continue; }
+    if (!evaluate(job.if, job, docs, needs.every((n) => results[n] === "success"))) { results[id] = "skipped"; continue; }
+    if (override[id] !== undefined) { results[id] = override[id]; continue; }
+    const NEEDS = JSON.stringify(Object.fromEntries(needs.map((n) => [n, { result: results[n], outputs: n === "changes" && changesResult === "success" ? { docs } : {} }])));
+    const shardsOk = needs.filter((n) => n !== "changes" && n !== "docs").every((n) => results[n] === "success");
+    let ok = true;
+    ran[id] = [];
+    for (const step of job.steps ?? []) {
+      if (!evaluate(step.if, job, docs, ok)) continue;
+      const label = step.name ?? step.run ?? step.uses ?? "?";
+      ran[id].push(label);
+      if (step.run === "node scripts/ci-shards.ts needs") ok &&= needsProblems(NEEDS).length === 0;
+      else if (/^node scripts\/(ci-shards\.ts verify|oracle-legs\.ts) /.test(step.run ?? "")) ok &&= shardsOk;
+    }
+    results[id] = ok ? "success" : "failure";
+  }
+  return { results, ran };
+}
+const GATES = ["checks", "image", "integration-oracle", "integration-rest"];
+
+test("docs ci.yml: every if is one the simulation knows, so none passes unevaluated", () => {
+  let n = 0;
+  for (const job of Object.values(jobs)) for (const expr of [job.if, ...(job.steps ?? []).map((s) => s.if)]) {
+    if (expr === undefined) continue;
+    n++;
+    for (const docs of ["true", "false", ""]) evaluate(expr, job, docs, true);
+  }
+  assert.ok(n >= 20, `${n} ifs read: has the file moved?`);
+  assert.throws(() => evaluate("${{ success() || needs.changes.outputs.docs }}", { needs: ["changes"] }, "true", true), /does not know/);
+  assert.throws(() => evaluate("${{ needs.changes.outputs.docs == 'true' }}", {}, "true", true), /does not need it/);
+});
+
+test("docs ci.yml simulated, a docs-only run: the four required checks run and pass, build, unit, oracle and rest are skipped, docs runs, the image builds nothing", () => {
+  const { results, ran } = simulate("success", "true");
+  for (const g of GATES) assert.equal(results[g], "success", g);
+  for (const j of shards.DOCS_SKIPS) assert.equal(results[j], "skipped", j);
+  assert.equal(results.docs, "success");
+  assert.deepEqual(ran.image, ["a docs-only run builds no image"], "a docs-only run checks out, builds and runs nothing of the image");
+  for (const g of ["checks", "integration-oracle", "integration-rest"]) assert.deepEqual(ran[g]!.filter((s) => /verify|ran|whole|download/.test(s)), [], `${g} reads no shard's records on a docs-only run`);
+  // and a docs job that failed fails checks alone
+  const failed = simulate("success", "true", { docs: "failure" }).results;
+  assert.equal(failed.checks, "failure");
+  assert.equal(failed["integration-oracle"], "success");
+});
+
+test("docs ci.yml simulated, a full run: every job runs but docs, the image builds, and a shard skipped or failed fails its gate", () => {
+  const { results, ran } = simulate("success", "false");
+  for (const g of GATES) assert.equal(results[g], "success", g);
+  for (const j of shards.DOCS_SKIPS) assert.equal(results[j], "success", j);
+  assert.equal(results.docs, "skipped");
+  assert.ok(ran.image!.includes("build mason-data") && !ran.image!.includes("a docs-only run builds no image"), ran.image!.join(", "));
+  for (const [shard, gate] of [["build", "checks"], ["unit", "checks"], ["oracle", "integration-oracle"], ["rest", "integration-rest"]] as const) {
+    for (const r of ["failure", "skipped", "cancelled"] as const) assert.equal(simulate("success", "false", { [shard]: r }).results[gate], "failure", `${shard} ${r}`);
+  }
+});
+
+test("docs ci.yml simulated, changes failed or with no verdict: every gate fails and the image still builds", () => {
+  for (const [result, docs] of [["failure", ""], ["cancelled", ""], ["success", ""], ["success", "maybe"]] as const) {
+    const { results, ran } = simulate(result, docs);
+    for (const g of ["checks", "integration-oracle", "integration-rest"]) assert.equal(results[g], "failure", `${g}, changes ${result} docs ${JSON.stringify(docs)}`);
+    assert.equal(results.image, "success");
+    assert.ok(ran.image!.includes("build mason-data"), "a failed changes still builds the image");
+    for (const j of [...shards.DOCS_SKIPS, "docs"]) assert.equal(results[j], "skipped", `${j}: only an exact 'false' or 'true' runs it`);
+  }
+});
+
+test("docs ci.yml: no paths filter, changes is builtins-only on Node 26 at depth 2, the docs job runs DOCS_TESTS, and the skipped jobs are DOCS_SKIPS", () => {
+  const text = fs.readFileSync(path.join(ROOT, ".github/workflows/ci.yml"), "utf8");
+  assert.deepEqual(text.split("\n").filter((l) => /^\s*paths(-ignore)?\s*:/.test(l)), [], "a paths filter can leave a required check unreported for ever");
+  const ch = jobs.changes!;
+  assert.equal(ch.needs, undefined);
+  assert.ok(!ch.steps!.some((s) => s.run === "npm ci"), "changes runs no npm ci: it reaches only Node's builtins");
+  assert.ok(Number(ch.steps!.find((s) => s.uses?.startsWith("actions/checkout@"))?.with?.["fetch-depth"]) >= 2, "the merge's parents are fetched");
+  assert.equal(ch.steps!.find((s) => s.uses?.startsWith("actions/setup-node@"))?.with?.["node-version"], "26");
+  const classify = ch.steps!.find((s) => s.run === "node scripts/ci-shards.ts changes");
+  assert.ok(classify?.id !== undefined, "changes runs the classifier, with an id");
+  assert.deepEqual(ch.outputs, { docs: `\${{ steps.${classify.id}.outputs.docs }}` });
+  const docs = jobs.docs!;
+  assert.deepEqual(docs.needs, ["changes"]);
+  assert.equal(docs.if, "${{ needs.changes.outputs.docs == 'true' }}");
+  assert.ok(docs.steps!.some((s) => s.run === "npm ci"));
+  assert.equal(docs.steps!.find((s) => s.uses?.startsWith("actions/setup-node@"))?.with?.["node-version"], "26");
+  assert.deepEqual(docs.steps!.filter((s) => s.run !== undefined && s.run !== "npm ci").map((s) => s.run), ["node scripts/ci-shards.ts docs"]);
+  assert.deepEqual(Object.keys(jobs).filter((id) => jobs[id]!.if === "${{ needs.changes.outputs.docs == 'false' }}").sort(), [...shards.DOCS_SKIPS].sort());
+  for (const id of shards.DOCS_SKIPS) assert.deepEqual(jobs[id]!.needs, ["changes"], id);
+  for (const id of GATES) assert.ok(jobs[id]!.needs?.includes("changes"), `${id} needs changes`);
+  assert.equal(jobs.image!.if, "${{ !cancelled() }}", "a plain skip of the image for a failed need would report success on a required check");
+});
+
+test("docs commands: the per-test bound before the files, the unpatterned files in one run, each pattern in a run of its own", () => {
+  const got = shards.docsCommands([{ file: "a.test.ts" }, { file: "b.test.ts", pattern: "x y" }, { file: "c.test.ts" }]);
+  assert.deepEqual(got, [["--test", ...gate.TEST_BOUND_ARGS, "a.test.ts", "c.test.ts"], ["--test", ...gate.TEST_BOUND_ARGS, "--test-name-pattern=x y", "b.test.ts"]]);
+  assert.ok(gate.TEST_BOUND_ARGS.some((a) => a.startsWith("--test-timeout=")));
+  const all = shards.docsCommands();
+  assert.deepEqual(all.flatMap((a) => a.filter((x) => x.endsWith(".test.ts"))).sort(), shards.DOCS_TESTS.map((d) => d.file).sort(), "every DOCS_TESTS file runs, once");
+});
+
+// ── DOCS_TESTS is every unit test that reads a doc ──
+/** The string literals of a TypeScript source, its comments and regular expressions skipped */
+function literalsOf(src: string): string[] {
+  const out: string[] = [];
+  let i = 0, last = "";
+  while (i < src.length) {
+    const c = src[i]!;
+    if (c === "/" && src[i + 1] === "/") { i = src.indexOf("\n", i); if (i < 0) break; continue; }
+    if (c === "/" && src[i + 1] === "*") { i = src.indexOf("*/", i + 2); if (i < 0) break; i += 2; continue; }
+    if (c === "/" && (last === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(last) || /\b(return|typeof|of|in)$/.test(src.slice(Math.max(0, i - 8), i).trimEnd()))) {
+      let j = i + 1, cls = false;
+      while (j < src.length && (src[j] !== "/" || cls) && src[j] !== "\n") { if (src[j] === "\\") j++; else if (src[j] === "[") cls = true; else if (src[j] === "]") cls = false; j++; }
+      i = j + 1; last = "x"; continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1, s = "";
+      while (j < src.length && src[j] !== c) { if (src[j] === "\\") { s += src[j + 1] ?? ""; j += 2; continue; } s += src[j]; j++; }
+      out.push(s); i = j + 1; last = "x"; continue;
+    }
+    if (!/\s/.test(c)) last = c;
+    i++;
+  }
+  return out;
+}
+const docsLiteral = (s: string): boolean => shards.docsPath(s) || shards.DOCS_FOLDERS.some((f) => s === f || (s.startsWith(`${f}/`) && !/\s/.test(s)));
+const READS = /\b(readFileSync|readdirSync|existsSync|globSync|statSync|readFile)\b|ls-files/;
+/** Unit test files that read a doc and run in no docs job, by their text: a docs literal beside a file read */
+function docsReadersLeftOut(files: Record<string, string>, listed: readonly string[], exempt: ReadonlyMap<string, string>): string[] {
+  return Object.entries(files).filter(([f, src]) => !listed.includes(f) && !exempt.has(f) && READS.test(src.replace(/\/\/.*$/gm, "")) && literalsOf(src).some(docsLiteral)).map(([f]) => f);
+}
+/** Unit test files that name a doc and need not run in the docs job, each with why */
+const DOCS_READ_EXEMPT: ReadonlyMap<string, string> = new Map([
+  ["tests/ci-shards.test.ts", "its docs paths are the classifier's inputs and git fixtures; it reads no doc"],
+  ["tests/cli-package.test.ts", "README.md is the npm package's file list (cli/README.md, code)"],
+  ["tests/duck-json-columns.test.ts", "\"docs\" is a synthetic table's name; it reads no doc"],
+  ["tests/duck-extensions.test.ts", "README.md is a platform package's file list (written by cli/extensions.ts)"],
+  ["tests/web-page.test.ts", "reads src/web/vendor/README.md, which the page serves: under src/, so code"],
+  ["tests/workflows.test.ts", "its docs paths are a PR's changed paths fed to the harness's evidence rules; it reads CLAUDE.md, which is code"],
+]);
+
+test("docs tests: every DOCS_TESTS file exists, every pattern names a test in it, and every unit test that reads a doc is listed or exempted", () => {
+  for (const { file, pattern } of shards.DOCS_TESTS) {
+    assert.ok(fs.existsSync(path.join(ROOT, file)), file);
+    if (pattern === undefined) continue;
+    const titles = [...fs.readFileSync(path.join(ROOT, file), "utf8").matchAll(/\btest\(\s*(["'`])((?:\\.|(?!\1).)*)\1/g)].map((m) => m[2]!);
+    assert.ok(titles.some((title) => new RegExp(pattern).test(title)), `${file}: --test-name-pattern=${pattern} names no test, so it would pass with 0 tests`);
+  }
+  const files = Object.fromEntries(testFiles("unit", ROOT).map((f) => [f, fs.readFileSync(path.join(ROOT, f), "utf8")]));
+  const listed = shards.DOCS_TESTS.map((d) => d.file);
+  assert.deepEqual(docsReadersLeftOut(files, listed, DOCS_READ_EXEMPT), [], "a unit test that reads a doc: add it to DOCS_TESTS (scripts/ci-shards.ts), or to DOCS_READ_EXEMPT with why");
+  for (const f of listed) assert.ok(docsReadersLeftOut({ [f]: files[f]! }, [], new Map()).length === 1, `${f} is in DOCS_TESTS but reads no doc by its text`);
+  for (const f of DOCS_READ_EXEMPT.keys()) assert.deepEqual(docsReadersLeftOut({ [f]: files[f] ?? "" }, [], new Map()), [f], `${f} is exempted but names no doc: drop it from DOCS_READ_EXEMPT`);
+});
+
+test("docs tests: the coverage guard catches the real thing", () => {
+  const z = P("tests", "z.test.ts");
+  const reader = `import * as fs from "node:fs";\ntest("z", () => { fs.readFileSync(${JSON.stringify(P("docs", "NEW.md"))}, "utf8"); });\n`;
+  assert.deepEqual(docsReadersLeftOut({ [z]: reader }, [], new Map()), [z]);
+  assert.deepEqual(docsReadersLeftOut({ [z]: 'const doc = fs.readFileSync(path.join(ROOT, "docs", "X.md"));' }, [], new Map()), [z], "a folder and a file, joined");
+  assert.deepEqual(docsReadersLeftOut({ [z]: 'fs.readFileSync(path.join(ROOT, "README.md"));' }, [], new Map()), [z]);
+  assert.deepEqual(docsReadersLeftOut({ [z]: reader }, [z], new Map()), [], "listed");
+  assert.deepEqual(docsReadersLeftOut({ [z]: `fs.readFileSync(path.join(ROOT, "CLAUDE.md")); // see "${P("docs", "X.md")}"` }, [], new Map()), [], "CLAUDE.md is code, and a comment is no read");
+  assert.deepEqual(docsReadersLeftOut({ [z]: 'fs.readFileSync(path.join(ROOT, "src", "a.ts")); const re = /"docs"/;' }, [], new Map()), [], "a regular expression is no literal");
 });

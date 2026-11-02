@@ -2414,6 +2414,21 @@ or splitting it is #338's; until then the warning names it.
 **Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
 and their spread is worth a third leg or a queue.
 
+### A docs-only path in CI (2026-11-02, issue 339)
+
+**Decision: a pull request that changes nothing but docs runs a `docs` job in place of build, the unit shards, the
+oracle legs and the rest shards**, worth about 34 runner-minutes a day by issue 78's count, and every required check
+still reports by name. A `changes` job decides it from git on the merge CI checked out (`HEAD^1..HEAD`, `--no-renames`),
+never the GitHub API's paged file list nor a third-party filter; a doc is an `.md` file at the root or under `docs/`,
+`deploy/` or `release-notes/`, never a CLAUDE.md, an allowlist so a new folder is code until decided otherwise
+(`docsPath`, `scripts/ci-shards.ts`). A workflow-level `paths-ignore` was rejected: a required check that never
+reports blocks the pull request for ever. Whatever `changes` cannot tell (a push to main, a HEAD that is not a merge, a
+git failure, no path) is a full run, and each gate reads the mode from its own `needs`, so a failed `changes` fails
+every gate rather than passing over skipped shards; `image` runs short of a cancel and builds unless the run is
+docs-only, since a job skipped for a failed need reports success on a required check. The `docs` job runs the unit
+tests that read a doc (`DOCS_TESTS`), and `tests/ci-shards.test.ts` holds that list to every unit test whose code reads
+one, simulates the workflow's jobs and gates in each mode, and runs `changes` over real merges.
+
 ## A libc order, read level by level
 
 Issue 128: under en_US.utf8 one value holding U+FE0F (`❤️`) or a Thai vowel refused a whole column's sort, group and
