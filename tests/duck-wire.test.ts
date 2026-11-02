@@ -5693,8 +5693,8 @@ test("a grouped collated output ordered by number, name or expression is its col
 // below more than once grew 3^depth (depth 12 took 880 ms, 16 about 70 s) on the planning thread every session waits
 // on, whatever the column's type. The class: work on the wire's path for a reader only another path has, with no bound
 // on its size. The decision: the wire never computes what only a generated table reads, and the walk is linear in the
-// analysed tree. (An int8: a numeric carried through every level grows in the rewrite's exact program, as on main, issue
-// 244)
+// analysed tree. (An int8: a numeric's nested and WITH chains are "issue 244" below, #483; its UNION ALL chain, whose
+// program is copied into each reference, is #484's)
 test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
   const catalogDb = new PGlite();
   try {
@@ -5712,6 +5712,106 @@ test("round 14: a wire statement's plan computes no generated table's outputs, a
       assert.ok(ms < 500, `${shape}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
     }
   } finally { await catalogDb.close(); }
+});
+
+/** each hazard-a and NATURAL statement's outcome, as main's (checked by scripts/duck-repro.ts at the base and the head) */
+const NATURAL_244 = "refused 0A000: a JOIN … USING or a NATURAL JOIN on a numeric the engine holds as a double";
+const EXPECTED_244: Record<string, string> = { 0: "as Postgres: 42804", 1: "as Postgres: 42804", 2: "as Postgres: 42804", 3: "answered", 4: NATURAL_244, 5: NATURAL_244 };
+
+// ISSUE 244, piece 1 (#483): the exact-numeric decisions about a FROM item's column were taken again at every
+// REFERENCE to it, so `a + a + a` over the level below asked that level three times a level (3^depth: 1::numeric nested
+// 768 ms at depth 8 and 99 s at 12 on main, the WITH chain 3.4 s at 8), on the planning thread every session waits on.
+// The class: a fact derived again at every reference. The decision: each is taken once per (query, output index)
+// (`decided`, src/duck/rewrite.ts), copied with its query, never recorded from inside an open recursive cycle or from
+// the walk's guard, and dropped when a `*` is written out in place. (The UNION ALL chain, whose PROGRAM is copied into
+// each reference, is #484's, and is not run here)
+test("issue 244: a numeric read three times a level through every level is planned within the bound, and answered as Postgres", async () => {
+  const catalogDb = new PGlite();
+  try {
+    for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
+    const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
+    // a first plan pays the catalog's and the parser's start: untimed
+    await plan("SELECT 1::numeric AS a");
+    for (const depth of DEEP_DEPTHS) for (const shape of ["nested", "with"] as const) {
+      const sql = deepChains("1::numeric", depth)[shape]!, started = performance.now();
+      await plan(sql);
+      const ms = performance.now() - started;
+      assert.ok(ms < 500, `${shape} over 1::numeric: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
+    }
+  } finally { await catalogDb.close(); }
+  const c = await client();
+  const level = (bottom: string, each: string, depth: number, alias = "s"): string => {
+    let s = bottom;
+    for (let i = 1; i <= depth; i++) s = `SELECT ${each} FROM (${s}) ${alias}${i}`;
+    return s;
+  };
+  try {
+    // a value the engine holds exactly, carried or read through every level, keeps its native plan
+    for (const sql of [`${level("SELECT o.amount AS c FROM orders o", "c", 4)} ORDER BY 1`, `${level("SELECT o.amount AS c FROM orders o", "c + 1 AS c", 3)} ORDER BY 1`]) {
+      const explained = (await c.query(`EXPLAIN (VERBOSE) ${sql}`)).rows.map((r: Record<string, string>) => r["QUERY PLAN"]).join("\n");
+      assert.doesNotMatch(explained, /__mason_numeric_(order|program|int|double|key)/, sql);
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+    const quotient = "SELECT b.x / 1 AS q FROM bigdec b";
+    const t = ["t0 AS (SELECT b.x / 1 AS a FROM bigdec b)", ...[1, 2, 3, 4].map((i) => `t${i} AS (SELECT a + a + a AS a FROM t${i - 1})`)];
+    assert.deepEqual(await unlike(c, [
+      // the depth-4 chains, over values two doubles tie
+      [`${level("SELECT b.x / 1 AS a FROM bigdec b", "a + a + a AS a", 4)} ORDER BY 1`, "ordered"],
+      [`WITH ${t.join(", ")} SELECT a, a::text FROM t4 ORDER BY 1`, "ordered"],
+      [`SELECT DISTINCT q FROM (${level(quotient, "q + 1 AS q", 3)}) s4 ORDER BY 1`, "ordered"],
+      // the rewrite's shapes over a quotient carried two levels down: grouped, by name and by number; the nulls idiom
+      [`SELECT s2.q, count(*) FROM (${level(quotient, "q + 1 AS q", 1)}) s2 GROUP BY s2.q ORDER BY 1`, "ordered"],
+      [`SELECT s2.q, count(*) FROM (${level(quotient, "q + 1 AS q", 1)}) s2 GROUP BY s2.q ORDER BY q`, "ordered"],
+      [`SELECT s2.q, count(*) FROM (${level(quotient, "q + 1 AS q", 1)}) s2 GROUP BY s2.q ORDER BY s2.q`, "ordered"],
+      [`${level("SELECT NULLIF(b.x, 2.5) / 1 AS q FROM bigdec b", "q + 1 AS q", 2)} ORDER BY q IS NULL, q`, "ordered"],
+      [`${level("SELECT NULLIF(b.x, 2.5) / 1 AS q FROM bigdec b", "q + 1 AS q", 2)} ORDER BY 1 NULLS FIRST`, "ordered"],
+      // a `*` beside a named column, and written out (hazard b: a decision read after its list was rewritten in place)
+      [`SELECT *, q FROM (SELECT q + 1 AS q, id FROM (SELECT b.x / 1 AS q, b.id FROM bigdec b) s1) s2 ORDER BY 2, 1`, "ordered"],
+      [`SELECT * FROM (${level(quotient, "q", 1)}) s2 ORDER BY 1`, "ordered"],
+      [`SELECT s2.*, 1 AS one FROM (${level(quotient, "q + 1 AS q", 1)}) s2 ORDER BY 1`, "ordered"],
+      // an arm exactArms wraps, read through levels; a UNION ALL's scales through levels; a widened reader
+      [`SELECT q + 1 AS q FROM (SELECT q FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL VALUES (1.5)) s1) s2 ORDER BY 1`, "ordered"],
+      [`SELECT q, q::text FROM (SELECT q FROM (SELECT b.x AS q FROM bigdec b UNION ALL SELECT b.id FROM bigdec b) s1) s2 ORDER BY 1, 2`, "ordered"],
+      [`SELECT q + 1.5::float8 AS f, q FROM (${level(quotient, "q", 1)}) s2 ORDER BY 2`, "ordered"],
+      // exactArms' trial copies and its real pass read one decision; a WITH query read in both arms after a level
+      [`SELECT q FROM (${level(quotient, "q + 1 AS q", 1)}) s2 UNION ALL SELECT q FROM (${level("SELECT b.x / 7 AS q FROM bigdec b", "q + 1 AS q", 1, "t")}) t2 ORDER BY 1`, "ordered"],
+      [`WITH w AS (SELECT q + 1 AS q FROM (${quotient}) s) SELECT q FROM w UNION ALL SELECT q + 1 FROM w ORDER BY 1`, "ordered"],
+      // hazard c: an ORDER BY 1 of a `*` written out at the walk (issue 252's case) reads what was decided before it
+      [`SELECT * FROM (${level(quotient, "q + 1 AS q", 1)}) s2 UNION ALL SELECT b.x FROM bigdec b ORDER BY 1`, "ordered"],
+      // (no collation applies: the column is a numeric)
+    ]), []);
+    // a parameter at a level, executed again after a later SET
+    const prepared = { name: "issue244", text: `SELECT q + $1 AS q FROM (${level(quotient, "q", 1)}) s2 ORDER BY 1`, values: ["0.5"], rowMode: "array", types: raw } as pg.QueryConfig;
+    const want = (await postgres(prepared.text, ["0.5"])).rows;
+    assert.deepEqual((await c.query(prepared)).rows, want);
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    assert.deepEqual((await c.query(prepared)).rows, want);
+    // HAZARD A, a recursive WITH's column decided inside its cycle and read outside it, and a NATURAL JOIN written as
+    // USING over a level: each answered as Postgres, or refused by its name, exactly as main (scripts/duck-repro.ts at
+    // the base and the head). (A quotient its recursive arm computes, read through a subquery, is answered with the
+    // engine's digits on main and here alike: issue 497, left out)
+    const recursive = "WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x / 1, r.n + 1 FROM r WHERE r.n < 2)";
+    const outcome = async (sql: string): Promise<string> => {
+      const failed = (e: { code: string; message: string }): string => `${e.code}: ${e.message}`;
+      const [got, want] = [await answer(c, sql).catch(failed), await postgres(sql).catch(failed)];
+      if (typeof got !== "string") return util.isDeepStrictEqual(got, want) ? "answered" : `differs: ${JSON.stringify(got.rows).slice(0, 200)}`;
+      return typeof want === "string" && want.slice(0, 5) === got.slice(0, 5) ? `as Postgres: ${got.slice(0, 5)}` : `refused ${got.slice(0, 81)}`;
+    };
+    const natural = (q: string, u: string): string => `SELECT count(*) FROM (SELECT q + 1 AS q FROM (SELECT ${q} AS q FROM bigdec b) s1) s NATURAL JOIN (SELECT q FROM (SELECT ${u} AS q FROM bigdec b) u1) u`;
+    const outcomes: Record<string, string> = {};
+    for (const [i, sql] of [
+      `${recursive} SELECT x, x::text, n FROM r ORDER BY 3, 1`,
+      `${recursive} SELECT DISTINCT x FROM r ORDER BY 1`,
+      `${recursive} SELECT count(*) FROM r WHERE r.x = 1.00000000000000000001`,
+      // the sixth round's way out, answered
+      "WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.x / 1 = 1.00000000000000000001",
+      natural("round(b.x / 1, 2)", "round(b.x / 1, 2) + 1"),
+      natural("b.x / 1", "b.x / 1 + 1"),
+    ].entries()) outcomes[String(i)] = await outcome(sql);
+    assert.deepEqual(outcomes, EXPECTED_244);
+  } finally { await c.end(); }
 });
 
 test("latest(x ORDER BY …) answers the x of the row its ORDER BY sorts last: arg_max_null over a row of keys when every key is ascending with NULLs last, last(x ORDER BY …) otherwise, refused without an ORDER BY", async () => {

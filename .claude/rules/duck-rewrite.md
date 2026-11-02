@@ -330,7 +330,11 @@ paths:
   max), a FROM item's column (`carry`), a key (`exactKey`), a union arm's value, a function's argument (`pgNumeric`) —
   asks it, never a property of its own (a declared scale, a column's kind). Unknown is not exact. A WITH query a FROM
   name reads is resolved by one resolver (`cteOf`), and a carry is decided from the cells its item EXPOSES, as written
-  (`exposedCells`). `tests/duck-wire.test.ts` "fourth round".
+  (`exposedCells`). `tests/duck-wire.test.ts` "fourth round". A FROM item's column is decided ONCE per (query body,
+  output index) — `outputExact`, `approximateAt`, `scalesDiffer`, one record (`decided`) copied by `clone` as `derived`
+  is — never recorded from inside an open recursive cycle (`over`'s provisional answer) or from `carry`'s walk-time
+  guard, and dropped when a `*` is written out in place; issue 244 (#483), detector tests/duck-plan-time.test.ts and
+  `tests/duck-wire.test.ts` "issue 244".
 
 ## What a column is
 

@@ -602,6 +602,9 @@ class Rewriter {
     // derived it selected its cells, and the copy, derived again, recorded none; a union beside it was two widths)
     const record = this.derived.get(v as object);
     if (record !== undefined) this.derived.set(out, record.map((e) => ({ ...e })));
+    // and its columns' decisions (`decided`), so a copy reads the decision its original took, never takes it again
+    const decisions = this.decisions.get(v as object);
+    if (decisions !== undefined) this.decisions.set(out, new Map(decisions));
     // and an arm `exactArms` wrapped is still the arm it reads
     if (this.armWrapped.has(v as object)) {
       const subquery = ((out.fromClause as AstNode[] | undefined)?.[0] !== undefined ? bodyOf((out.fromClause as AstNode[])[0]!).subquery : undefined) as AstNode | undefined;
@@ -1154,6 +1157,7 @@ class Rewriter {
       if (own.some((o) => o.twin)) throw this.twinRefused();
       return own.length === 0 ? [t] : own.map((o) => ({ ResTarget: { name: o.name, val: o.value } }));
     });
+    this.forgetDecisions();
   }
 
   /**
@@ -1901,6 +1905,7 @@ class Rewriter {
       return outputs.filter((o) => o.target === i).map((o): AstNode => ({ ResTarget: { name: o.name, val: o.value } }));
     });
     b.targetList = written;
+    this.forgetDecisions();
     return written;
   }
   /** the query levels a column reference the rewrite wrote is read in (a `*` written out), as `scopes` holds a written one's */
@@ -2041,7 +2046,8 @@ class Rewriter {
     // by (`exactArms`): a column the walk meets first (an ORDER BY 1 of a `*`, written out at the walk) whose query
     // selects no cells yet is the engine's value, never given cells late (issue 252: a UNION ALL's arm grew wider than
     // the arm beside it, 42804)
-    if (this.walking && !this.derived.has(bodyOf(found.query))) return null;
+    // (an answer of the walk's time alone: no decision that read it is recorded, `decided`)
+    if (this.walking && !this.derived.has(bodyOf(found.query))) { this.provisionalBelow = -1; return null; }
     const exact = this.innerExact(found.query).find((e) => e.column === found.index);
     if (exact === undefined) return this.uncarried(found, this.unwritable(found.query));
     // decided from what the item exposes, as it is written: its query (through a `*`, a WITH query's) holds the cells
@@ -2126,7 +2132,7 @@ class Rewriter {
   /** whether a query's i-th output is a numeric (or a numeric's text) the engine holds as a double where the plan has
    *  its program: in any arm of a set operation, through a `*` pass-through */
   private approximateAt(query: AstNode, index: number): boolean | null {
-    const own = this.over(query, false, (values) => values.some((v) => this.approximateValue(v)), index);
+    const own = this.decided(query, index, "approximate", () => this.over(query, false, (values) => values.some((v) => this.approximateValue(v)), index));
     // (a UNION ALL's numeric column whose arms write it at several scales is its arms' programs, `exactArms`, issue 227:
     // read outside it, it is carried as a quotient is, so each row keeps its own arm's scale)
     return own === false && this.scalesDiffer(query, index) ? true : own;
@@ -2137,30 +2143,60 @@ class Rewriter {
   private scalesDiffer(query: AstNode, index: number): boolean {
     const b = this.armWrapped.get(bodyOf(query)) ?? bodyOf(query);
     if (b.op !== "SETOP_UNION" || b.all !== true) return false;
-    // DECIDED ONCE per column (issue 244's class: a column read at every level of a deep chain, each level asking the
-    // level below, would otherwise be decided again per reference, exponentially in the depth)
-    const known = this.scalesDecided.get(b)?.get(index);
-    if (known !== undefined) return known;
-    const decide = (): boolean => {
+    // (decided once per column, `decided`: read from the record inside a recursive WITH's cycle too, as main read its own)
+    return this.decided(query, index, "scales", (): boolean => {
       if (this.setOperationColumns(b, false)?.[index]?.type !== NUMERIC) return false;
       const values = this.valuesAt(query, index);
       // (a recursive WITH query's own column read in its recursive arm writes the scale its rows compute, which no type
       // decides: the engine's, as before)
       const recursive = (v: unknown): boolean => Array.isArray(v) ? v.some(recursive) : isNode(v) ? (kindOf(v) === "ColumnRef" && this.fromColumn(v)?.recursive === true) || Object.values(bodyOf(v)).some(recursive) : false;
       return values !== null && !values.some(recursive) && new Set(values.filter((v) => !isNullValue(v)).map((v) => this.displayScale(v))).size > 1;
-    };
-    const differs = decide();
-    const own = this.scalesDecided.get(b) ?? new Map<number, boolean>();
-    own.set(index, differs);
-    this.scalesDecided.set(b, own);
-    return differs;
+    }, true);
   }
-  private readonly scalesDecided = new WeakMap<Body, Map<number, boolean>>();
+
+  /**
+   * A FROM ITEM'S COLUMN IS DECIDED ONCE (issue 244, the class "a fact derived again at every reference"): whether the
+   * engine holds it exactly (`outputExact`), whether its text needs its program (`approximateAt`) and whether a UNION
+   * ALL writes it at several scales (`scalesDiffer`) are each taken once per (query, output index) and read by every
+   * reference, so `a + a + a` over the level below asks that level once, never three times a level (3^depth). The
+   * record is keyed by the query's BODY as `valuesAt` reads it (an arm `exactArms` wrapped: the arm), stores the
+   * deciders' answers and derives nothing of its own, and is copied by `clone` as `derived` is, so a trial copy and the
+   * real pass read one decision. NEVER RECORDED: a decision that read an answer which holds only where it was asked —
+   * `over`'s provisional `met` for a recursive WITH query whose cycle was open before the decision began, or `carry`'s
+   * walk-time guard (issue 252) — so every answer read from the record is the one a fresh decision gives then. A query
+   * whose own cycle is open is never read from the record (it answers `met`, as `over` does; `always` for scalesDiffer,
+   * which no cycle answers). An in-place rewrite of a list a decision read (a `*` written out) drops the record whole
+   * (`forgetDecisions`).
+   */
+  private decided<T extends boolean | null>(query: AstNode, index: number, which: "exact" | "approximate" | "scales", decide: () => T, always = false): T {
+    if (!always && this.deciding.has(bodyOf(query))) return decide();
+    const key = this.armWrapped.get(bodyOf(query)) ?? bodyOf(query);
+    const at = `${which}:${index}`;
+    const record = this.decisions.get(key);
+    if (record?.has(at) === true) return record.get(at) as T;
+    const outer = this.provisionalBelow, depth = this.deciding.size;
+    this.provisionalBelow = Infinity;
+    try {
+      const answer = decide();
+      if (this.provisionalBelow >= depth) {
+        const own = this.decisions.get(key) ?? new Map<string, boolean | null>();
+        own.set(at, answer);
+        this.decisions.set(key, own);
+      }
+      return answer;
+    } finally { this.provisionalBelow = Math.min(outer, this.provisionalBelow); }
+  }
+  private decisions = new WeakMap<Body, Map<string, boolean | null>>();
+  /** the lowest `deciding` place a provisional answer was given at since the innermost decision began (-1: `carry`'s
+   *  walk-time guard, below every place); a decision is recorded only where none was below its own start */
+  private provisionalBelow = Infinity;
+  /** a list a decision read was rewritten in place: every decision is taken again, as it would be fresh */
+  private forgetDecisions(): void { this.decisions = new WeakMap(); }
 
   /** whether a FROM item's column is a value the engine computes exactly (`duckExact` of each value it can be); a
    *  column none of whose values is found is not (unknown is not exact) */
   private outputExact(query: AstNode, index: number): boolean {
-    return this.over(query, true, (values) => values.every((v) => this.duckExact(v)), index) ?? false;
+    return this.decided(query, index, "exact", () => this.over(query, true, (values) => values.every((v) => this.duckExact(v)), index) ?? false);
   }
 
   /** a decision over a query's i-th output's values (`valuesAt`), or `met` where it is met again inside itself: a
@@ -2169,11 +2205,14 @@ class Rewriter {
    *  called a column exact that nothing had decided) */
   private over(query: AstNode, met: boolean, decide: (values: AstNode[]) => boolean, index: number): boolean | null {
     const b = bodyOf(query);
-    if (this.deciding.has(b)) return met;
-    this.deciding.add(b);
+    const open = this.deciding.get(b);
+    // (a provisional answer: no decision begun outside this cycle records what read it, `decided`)
+    if (open !== undefined) { this.provisionalBelow = Math.min(this.provisionalBelow, open); return met; }
+    this.deciding.set(b, this.deciding.size);
     try { const values = this.valuesAt(query, index); return values === null ? null : decide(values); } finally { this.deciding.delete(b); }
   }
-  private readonly deciding = new WeakSet<Body>();
+  /** the bodies being decided (`over`), each at its place: the number open when it began */
+  private readonly deciding = new Map<Body, number>();
 
   /** the values a query's i-th output can be: each arm's of a set operation, each row's of a VALUES list, through a
    *  `*` pass-through; a `*` beside other columns by the output Postgres's analysis puts there. Null where the output
