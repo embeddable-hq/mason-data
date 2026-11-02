@@ -241,7 +241,7 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
   the conflict and the way out (merge the base and push); UNKNOWN, computed lazily after a push, is a wait. Detector:
   `tests/workflows.test.ts` runs the harness's wait against a stub `gh`; a wait by hand, nothing detects.
 - **One full `npm run check`, before a PR's first push.** A fix round after a review or a merge of main gets
-  `npm run typecheck`, `node --test tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
+  `npm run typecheck`, `node --test --test-timeout=300000 --test-force-exit tests/conventions.test.ts tests/cli-state-matrix.test.ts` and the test files of the
   change, and CI carries the full suite: the few real catches a full local run made in another file were all such fast
   checks. Which files are nearest is the author's judgement, not a guarantee: a recent change imports its way to most of
   the unit tests, so no list can be computed, and CI catches the rest. Detector: `checks` red on the PR.

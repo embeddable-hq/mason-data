@@ -245,9 +245,12 @@ test("with --skip-now a named failure at the commit is still PROVED", (t) => {
 
 test("a test that hangs at the commit holding a handle fails there by name, and the run ends: PROVED", async (t) => {
   const base = repo(t);
-  // at the commit `settle` never settles and holds an interval, as issue 139's hang did; on the tree it settles
+  // at the commit `settle` never settles and holds an interval, as issue 139's hang did; on the tree it settles. The
+  // interval ends its own process once its runner is gone or after 90 s (past the 60 s bound below), so a killed run
+  // of this file leaves no process behind
   const SETTLE = path.join("src", "settle.ts");
-  fs.writeFileSync(path.join(base.dir, SETTLE), `export const settle = (): Promise<void> => new Promise(() => { setInterval(() => {}, 1000); });\n`);
+  fs.writeFileSync(path.join(base.dir, SETTLE), `const born = Date.now(), runner = process.ppid;
+export const settle = (): Promise<void> => new Promise(() => { setInterval(() => { if (process.ppid !== runner || Date.now() - born > 90_000) process.exit(3); }, 500); });\n`);
   base.git("add", SETTLE);
   base.git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-m", "hangs");
   const r = { ...base, commit: base.git("rev-parse", "HEAD").trim() };

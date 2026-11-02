@@ -318,9 +318,14 @@ test("the heavy gates queue, and CI's steps do not need to", () => {
   assert.equal(scripts["test"], "node --test --test-timeout=300000 --test-force-exit 'tests/**/*.test.ts'");
 });
 
-/** A test that never settles and holds an interval, as issue 139's hang did (0.43 s of CPU in 2h07, never exiting). */
+/**
+ * A test that never settles and holds an interval, as issue 139's hang did (0.43 s of CPU in 2h07, never exiting). The
+ * interval ends its own process once its runner is gone (its parent is then init) or after 90 s, far past every bound
+ * here, so a run of this file that is itself killed (a gate cut short) leaves no process behind.
+ */
 const HANG = `import { test } from "node:test";
-test("hangs", () => new Promise(() => { setInterval(() => {}, 1000); }));
+const born = Date.now(), runner = process.ppid;
+test("hangs", () => new Promise(() => { setInterval(() => { if (process.ppid !== runner || Date.now() - born > 90_000) process.exit(3); }, 500); }));
 test("after", () => {});
 `;
 

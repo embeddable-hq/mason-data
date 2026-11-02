@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 // a namespace, not a named import: a tree whose gate.ts lacks the constant still loads, and the test fails by name
 import * as gate from "../scripts/gate.ts";
@@ -104,6 +104,34 @@ test("test-timeout: a run with the pair before the files, npm test alone, the ga
     "echo 'node --test a.ts'",
     "git commit -m 'npm test is blocked'",
   ]) assertAllowed("test-timeout", command);
+});
+
+/**
+ * Every test command the docs and the harness tell a session to run: a `node --test …` or `npm test …` that opens a
+ * backtick span (a prompt's escaped one too) or a line (a code block's, after its VAR=value words), up to the span's
+ * end, a comment or the line's end. `node --test` alone names the runner, not a command; `<ms>` is a placeholder.
+ */
+function instructedTestCommands(): { where: string; command: string }[] {
+  const files = execFileSync("git", ["ls-files", "-z", "*.md", ".claude/"], { cwd: ROOT, encoding: "utf8" }).split("\0")
+    .filter((f) => /\.(md|js)$/.test(f));
+  const found: { where: string; command: string }[] = [];
+  for (const file of files) {
+    fs.readFileSync(path.join(ROOT, file), "utf8").split("\n").forEach((line, i) => {
+      for (const m of line.matchAll(/(?:^\s*|`)((?:[A-Z_]+=\S*\s+)*(?:node --test\b|npm (?:run |run-script )?t(?:est)?(?![\w:-]))[^`#\\\n]*)/g)) {
+        const command = m[1]!.trim().replaceAll("<ms>", "1000");
+        if (command !== "node --test") found.push({ where: `${file}:${i + 1}`, command });
+      }
+    });
+  }
+  return found;
+}
+
+test("test-timeout: every test command the docs and the harness instruct is one the hook lets through", () => {
+  const commands = instructedTestCommands();
+  assert.ok(commands.some((c) => c.where.startsWith(".claude/workflows/pr-loop.js")), "the reader finds the harness's commands");
+  assert.ok(commands.some((c) => c.where.startsWith("CLAUDE.md")), "the reader finds CLAUDE.md's commands");
+  const blocked = commands.filter(({ command }) => run("test-timeout", bash(command)).code !== 0);
+  assert.deepEqual(blocked, [], "each of these would be blocked by the hook: give it --test-timeout=<ms> --test-force-exit before its files");
 });
 
 // ------------------------------------------------------------------ merge only the commit read

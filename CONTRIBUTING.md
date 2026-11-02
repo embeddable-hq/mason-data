@@ -42,7 +42,7 @@ The integration tests run the real copy, stream, listener and `mason serve`, and
 ```bash
 export IT_POSTGRES_URL=postgres://postgres:<password>@localhost:5432/postgres
 npm run test:integration                                   # every file
-node --test tests/integration/duck-oracle.itest.ts         # the oracle alone
+node --test --test-timeout=1800000 --test-force-exit tests/integration/duck-oracle.itest.ts   # the oracle alone
 ```
 
 CI runs both on every pull request, and is the full gate. On a shared machine, `npm run check` and `npm run test:integration`
