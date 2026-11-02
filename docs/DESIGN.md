@@ -2488,6 +2488,62 @@ it is: 744 s on one draw of a runner and 853 s on another of the same CPU model.
 of each other, and the slowest is at the slower oracle leg (874 s against 860 s), not below it. Making that file faster
 or splitting it is #338's; until then the warning names it.
 
+**#338: the floor split, and the concurrency measured (2026-11-02).** `tests/duck-generated.test.ts` became eleven
+files, each a section of it in its order and each test moved byte for byte (a parse of the base's file and the
+pieces, every `test(…)` call and top-level declaration compared by name), with what several read in
+`tests/duck-generated-ledger.ts`. The first cut (nine pieces) ran its rounds 5-6 piece at 201 s and its rounds 11-14
+piece at 213 s (run 41424964045), past the slowest `APART` file, so round 5, round 6 and round 12 became files of
+their own; round 12 is one test, 79-188 s on CI, the floor no file split goes under (a test is never edited). The
+PR's runs, unit (1) / (2) / (3) as run, and the slowest unit job:
+
+| run | weights | concurrency | wall as run | files' summed time | slowest unit job |
+|---|---|---|---|---|---|
+| 41417362676 (main, 7367201, the base) | 41409999918's | default (3) | | | 938 s |
+| 41424964045 (nine pieces) | the base's | default (3) | 422 / 389 / 258 s | 1253 / 1145 / 648 s | 434 s |
+| 41427067956 (eleven) | the base's | default (3) | 492 / 497 / 204 s | 1415 / 1464 / 588 s | 510 s |
+| 41429359348 | 41427067956's | default (3) | 314 / 262 / 343 s | 939 / 772 / 977 s | 355 s |
+| 41430352161 | 41427067956's | 4 | 379 / 302 / 434 s | 1460 / 1168 / 1579 s | 450 s, failed |
+
+Split, the generated tests cost more CPU than they did one at a time (the eleven pieces summed 1144-1173 s of file
+time in 41424964045 and 41427067956, where the one file took 744-913 s), since each world's catalog Postgres competes
+with its neighbours; the wall is what fell. **Four side by side was refused**: its run failed two tests that pass under
+the default (a chain's `until` past 20 s with `public.top` still building, and round 14's per-depth bound), and the
+slowest shard ran 90 s slower as run, its files' summed time about half as much again. `shardCommand` passes no `--test-concurrency` for a
+unit shard, so Node's default (`os.availableParallelism() - 1`, 3 on 4 vCPUs) stays. The gap between the shards
+(81 s in 41429359348) is the runners' (an EPYC 9V45 beside two 9V74s), not a file's: no one-file warning fires.
+
+**A test near its bound runs by itself (#338, the review's CI round).** With main merged in, run 41440605532 cancelled
+round 12 at the per-test bound (`test timed out after 300000ms`, unit (3), an EPYC 7763). Round 12 is CPU-bound: it took
+79-125 s in the base's one file, beside light files, and 151 to 300 s over this PR's runs in a file of its own beside
+other generated-world files (round 7-8, the core piece, round 6), slower still on a 7763. The split had moved the test
+next to its heaviest neighbours; `partition` balances summed file time, which says nothing of what runs at once. The
+class is a test pushed toward its bound by what its shard runs beside it, and the decision is that a file whose longest
+test has run past half the bound (`NEAR_BOUND_MS`, 150 s) is `ALONE`: its shard runs it after its other files with
+`--test-concurrency=1`, so nothing runs beside it, and `partition` counts it `SIDE_BY_SIDE` (3) times over, the wall it
+takes, placing it before the rest. Round 12, round 6 (157 s in 41431771794) and round 7-8 (round 7 158 s in
+41440605532) are listed; nothing else of the twenty slowest has crossed 150 s (`every command, in every state` 143 s
+and the slow vector's 145 s are the nearest). The timing reporter now records each file's longest top-level test, and
+`verify unit` warns of a file past `NEAR_BOUND_MS` not listed, or of one listed that crossed it even alone: the
+detector, a warning in every run's `checks`. The bound is never loosened, and no test is edited.
+
+The result, by each run's `unit tests` step (start to end), unit (1) / (2) / (3), and round 12's test, run alone:
+
+| run (commit) | weights | unit tests steps | round 12, alone | runners |
+|---|---|---|---|---|
+| 41417362676 (main, 7367201, the base) | 41409999918's | 374 / 284 / 921 s | (in the one file: 125 s) | |
+| 41440605532 (a7359c3, no ALONE) | 41431771794's | | cancelled at 300 s | unit (3) an EPYC 7763 |
+| 41444899410 (33bff1b, ALONE) | 41431771794's | 498 / 654 / 364 s | 143.0 s | three EPYC 7763s |
+| 41447115368 (5c8f53c) | 41444899410's | 562 / 472 / 296 s | 89.8 s | 7763, 7763, 9V45 |
+
+Round 12 now runs at half its bound or less on the slowest runner drawn (143 s of 300 s on a 7763, 90 s on a 9V45),
+round 6 at 100-102 s and round 7 at 95-96 s, each alone. That costs wall: an ALONE file's minutes are its shard's, so
+the slowest unit step is 562-654 s in these two runs, against 423-436 s before ALONE (41434452511, 41431771794) and
+921 s on main; the gain over main is kept, part of the split's is given up for a test that no longer meets its bound.
+The detector's first warning came in 41447115368: `every command, in every state` (tests/cli-state-matrix.test.ts),
+81.6 s in PR 346's run, took 151.5 s on a 7763, past `NEAR_BOUND_MS`; listing it is the next change, made from a run
+that measures it.
+
+
 **Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
 and their spread is worth a third leg or a queue.
 

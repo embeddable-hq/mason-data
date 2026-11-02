@@ -23,7 +23,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   did not expect while checking one (anything but a `StatementError`) is that table's refusal (`uncheckedRefusal`, a
   user's words, never the error's), its text logged once for the report, and the review goes on to the next table; thrown
   up, it stopped the review at that table for ever and left it `building` with no reason (PR 202 round 8). Detector:
-  tests/duck-generated.test.ts "round 8: a definition whose check throws unexpectedly". A table already built keeps serving and keeps being re-run from
+  tests/duck-generated-round7-8.test.ts "round 8: a definition whose check throws unexpectedly". A table already built keeps serving and keeps being re-run from
   the definition the ledger holds, so a bad edit costs no freshness. Detector: tests/duck-generated.test.ts.
 - **A table has no session.** What reads one (a time zone, a setting, a role, `'now'`) is refused from what Postgres
   RESOLVED, by `pg_proc.provolatile` and the cast's functions, never a list of names (`sessionReads`). `now()` is the run's
@@ -47,7 +47,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   analysed form the engine computes as a double (a variance, sqrt and its kin, avg or `/`, a cast from a double:
   `ENGINE_DOUBLES`) is refused by that form, whether or not the rewrite made a program for it; whether a program exists
   (src/duck/rewrite.ts `programNeeded`) is the wire's rule, and its silence stored `stddev(x)::numeric(p,s)` from the
-  double over an input with a typmod (PR 202 round 11). Detector: tests/duck-generated.test.ts "round 11", every such
+  double over an input with a typmod (PR 202 round 11). Detector: tests/duck-generated-round11-13-14.test.ts "round 11", every such
   node bare, under `::numeric` and under a typmod, over inputs with a typmod and without. A scale is a number or what decides it per row ("value", "rows", "picks"), never unknown: a null that meant both
   let 30 decimals through. What is not stored says ITS OWN reason (`verdict`, `notStoredRefusal`: a division; the
   variance family in ONE wording; sqrt, exp, ln, log or power picking decimals per value (a round over one says what
@@ -64,7 +64,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   value's form survives every conversion** (PR 202 round 12): a text read as a numeric keeps the form of what the text
   was made from (`textFrom` walks every text and JSON node down to it: a cast, `||`, a jsonb build and `->>`, a WITH
   column), so a typmod over a variance's text is refused by the variance, never stored from the engine's double; only a
-  stored column's or a JSON number's text is "a text". Detector: tests/duck-generated.test.ts "round 12". **The
+  stored column's or a JSON number's text is "a text". Detector: tests/duck-generated-round12.test.ts "round 12". **The
   walk follows the value wherever the analysis says it comes from**: a scalar sublink's subselect, a CTE's query, each
   arm of a set operation (the reason any arm's, the way out in every arm of that form) and a subquery in FROM, under any
   node (`outputExpressions` hangs what a VAR reads on it as `followed`). **The walk is the generated planner's alone,
@@ -73,7 +73,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   reference (pgtree.ts `Follow`), and `seen`, `textFrom` and `oidsOf` memoise by node (`Walk`), so each analysed node is
   visited once. A copy per VAR grew 3^depth for levels each reading the level below three times (880 ms at depth 12, on
   the wire's thread for every statement); a form's sites are capped (`MAX_SITES`), past which the way out is the
-  column cast whole. Detector: tests/duck-wire.test.ts and tests/duck-generated.test.ts "round 14", each shape at depth
+  column cast whole. Detector: tests/duck-wire.test.ts and tests/duck-generated-round11-13-14.test.ts "round 14", each shape at depth
   16 within 500 ms. The way out is the user's own SQL, deparsed,
   with only the cast moved (`sum(sqrt(abs(x))::double precision)`, `round(log(x), 2)::double precision`, a numeric cast
   from a double taken away, a text's cast given `numeric(20,4)`), every aggregate and wrapper kept, for EVERY form and
@@ -83,17 +83,18 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   precision` was). Where the engine computes a value, its engine type says only that it is not stored; why is the
   form's, and a variance, sqrt and its kin, or a double outranks a scale the program saw around it. Never a reason from
   an engine type, a node's own kind over a double, the outermost node or a constant: a raw-tree walk guessing types
-  from names gave a false reason in six rounds. Detector: tests/duck-generated.test.ts "round 5: every reason against
-  every wrapper", "round 6: a numeric's reason is the type each node computes" and "round 7: the walk follows a
-  sublink, a CTE, a set operation's arms and a subquery", each reason with its way out held exactly, built and stored.
+  from names gave a false reason in six rounds. Detector: tests/duck-generated-round5.test.ts "round 5: every
+  reason against every wrapper", tests/duck-generated-round6.test.ts "round 6: a numeric's reason is the type each
+  node computes", and tests/duck-generated-round7-8.test.ts "round 7: the walk follows a sublink, a CTE, a set
+  operation's arms and a subquery", each reason with its way out held exactly, built and stored.
 - **The run's connection is a session's, set up by the ONE set-up** (src/duck/store.ts `SessionSetup`: the session
   variable every Mason function reads first, the null order, the zone, the search_path, the settings `current_setting`
   reads), never by hand: a connection without `__mason_session` answers NULL from every Mason function (DuckDB's NULL in,
   NULL out), and a JSON number's cast stored NULL in every row with no error. What reads a session's settings is refused
-  at the plan ("it reads a session"). Detector: tests/duck-generated.test.ts, the run's session variables. **The review's
+  at the plan ("it reads a session"). Detector: tests/duck-generated-numeric-reasons.test.ts, the run's session variables. **The review's
   check has a connection of its own** (`GeneratedHost.checkConnection`, set up by the same set-up), never the run's: a
   run holds its connection in a transaction across awaits, and a check on it landed inside that transaction, between the
-  build's statements (PR 202 round 13, #224's class). Detector: tests/duck-generated.test.ts "round 13".
+  build's statements (PR 202 round 13, #224's class). Detector: tests/duck-generated-round11-13-14.test.ts "round 13".
 - **A run's failure is Postgres's error, by the ONE mapping a statement on the wire gets** (src/duck/store.ts
   `pgErrorOf`; `failureWords` reads it and matches no engine spelling): its message and SQLSTATE, Postgres's DETAIL
   where it has one, the way out its SQLSTATE has, no value of a row and no `__mason_` name. An engine error said in
@@ -102,15 +103,17 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   refusal at the write is the table's refusal with its options; a failure is run again on the back-off. A numeric field
   overflow is worded in ONE place (src/lib/pg-numeric.ts `fieldOverflow`: Postgres's message and DETAIL), which the
   engine's DECIMAL cast, the exact numeric's typmod and a Mason function's `mason[22003]` (its DETAIL on a line of its
-  own, src/duck/functions.ts) all reach. Detector: tests/duck-generated.test.ts "round 5: a run's failure is Postgres's
-  error" and "round 6: a numeric field overflow says Postgres's DETAIL on every path".
+  own, src/duck/functions.ts) all reach. Detector: tests/duck-generated-round5.test.ts "round 5: a run's failure is
+  Postgres's error" and tests/duck-generated-round6.test.ts "round 6: a numeric field overflow says Postgres's DETAIL
+  on every path".
 - **A made type is judged by the catalog's type of its NAME**, never the field's OID, which is the source's (and an oid
   is a string in Postgres's JSON: a number from the entrance, `readSourceFacts`). `dropLast` is refused. A domain and a
-  composite stay refused by name. Detector: tests/duck-generated.test.ts, a test per shape.
+  composite stay refused by name. Detector: tests/duck-generated-numeric.test.ts and
+  tests/duck-generated-numeric-reasons.test.ts, a test per shape.
 - **One source of an enum's labels, the synced table's ENUM.** A generated table stores the ENUM it was built with; a
   value added since is declared by the synced column (`schemaBuilt` hands the generated column its labels; `catalogDdl`
   keeps the first declaration). Such a table answers as a stale table until the re-copy's mark runs it. Detector: the
-  enum test of tests/duck-generated.test.ts.
+  enum tests of tests/duck-generated-numeric.test.ts.
 - **A run takes its snapshot and its marks on ONE writer's turn**: a commit is in the snapshot or marked for the next
   run, never neither. DuckDB's snapshot is a transaction's first read of a table, never its BEGIN, so the run reads the
   ledger there. A commit that changes a base marks it AFTER that commit, on that writer's turn, in memory, adding nothing
@@ -124,7 +127,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   child marks the child at the oldest base change that swap brought, never at the swap's time: the oldest any member of
   the run at or below that parent took, not the parent's own alone (`chainTook`). Measured against the base,
   never summed. `behindSince` is that change's time, what `mason wait <table>` reads (src/cli/readiness.ts
-  `generatedReadiness`). Detector: the chain lag tests of tests/duck-generated.test.ts, a restart's included.
+  `generatedReadiness`). Detector: the chain lag tests of tests/duck-generated-chain-lag.test.ts, a restart's included.
 - **A child's `target_lag` is never shorter than a generated parent's**: refused at its key (`fresherThan`), with the
   way out, and checked again when any table's target moves (the check's `seen` key holds them). A parent refused in its
   file but deployed is held at the target it runs at, its built one (`targetOf`).
@@ -141,7 +144,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   the catalog to say its columns first. A child of a parent refused or failed is not run, and says why in `waitingFor`
   (`blocker`): the entry keeps the parent's NAME only, and why is read when status is (`waitingWords`), never cached
   with it, since `mason wait` exits 1 on it; a child that fails is taken out of its parent's run, which goes on without it. Detector: the chain tests
-  of tests/duck-generated.test.ts, and the itest's children held to Postgres over the parent's view.
+  of tests/duck-generated-chains.test.ts and tests/duck-generated-chain-lag.test.ts, and the itest's children held to Postgres over the parent's view.
 - **A cycle is refused by name, with the tables in it**: from the SQL's names when the folder is read (`readsByName`,
   `findCycles`), else from what the plan reads at the check (`cycleOf`). A refused table keeps serving what it was built
   from, as any refusal does.
