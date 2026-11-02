@@ -219,6 +219,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   values). `SET IntervalStyle` to anything but `postgres` is now refused by name (`interval-style`), where it was
   accepted and ignored: every interval is written in Postgres's default style. Nothing to do on upgrade, unless a
   tool sets IntervalStyle: remove the setting, or set it to `postgres`.
+- **`now()` and the clock keywords now carry microseconds, as Postgres's do**: a prepared statement's `'now'` and its
+  run's `now()` no longer compare equal when both fall in one millisecond, and `current_time` and `localtimestamp(6)`
+  print Postgres's six fraction digits (they printed three).
 
 ## Known
 

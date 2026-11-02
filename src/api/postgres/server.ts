@@ -32,7 +32,9 @@
  *     statement of one Query message is one implicit transaction, and a transaction begun by a later statement of it
  *     starts at the same arrival), or at the first Parse or Bind since the last Sync (an implicit transaction lasts
  *     until Sync); `BEGIN` keeps it until `COMMIT` / `ROLLBACK`. So two statements inside `BEGIN … COMMIT` see one
- *     "now", two outside it can see two, and a prepared statement re-run moves with the clock.
+ *     "now", two outside it can see two, and a prepared statement re-run moves with the clock. The instant is
+ *     MICROSECONDS, as Postgres's (src/lib/instant.ts: one clock, one formatter for DuckDB, the catalog handed the same
+ *     integer), so two transactions inside one millisecond are two instants (GitHub issues 372, 363).
  *   - EVERY STATEMENT ANSWERED OR REFUSED IS RECORDED (`record`, src/duck/requests.ts `_mason.requests`).
  *
  * THE TRACE (`MASON_PG_TRACE=1`, `trace` here): every statement text a session receives — a simple Query's whole text
@@ -72,6 +74,7 @@ import { wrongDatabaseHint } from "../../lib/database-name.ts";
 import { attributeSetting, bindFilter, filterProbe, filterTypes, missingAttributes, type AttributeValues, type BoundFilter } from "../../duck/row-filter.ts";
 import { EncodeError, OID, fieldOf } from "./encode.ts";
 import { numericFromBinary, NumericError } from "../../lib/pg-numeric.ts";
+import { instantText, nowMicros } from "../../lib/instant.ts";
 import { parseSql, PostgresSyntaxError, stopParser } from "./parser.ts";
 import {
   FrontendDecoder, ProtocolError, authenticationCleartextPassword, authenticationOk, backendKeyData, bindComplete,
@@ -293,7 +296,8 @@ export interface PgApiOptions {
   log?: ((line: string) => void) | undefined;
   /** log every statement text a session receives, and every refusal (`MASON_PG_TRACE=1`) */
   trace?: boolean | undefined;
-  /** the clock "now" is read from, milliseconds since the epoch (`Date.now` when absent; a test pins it) */
+  /** the clock "now" is read from: MICROSECONDS since the epoch, an integer, as Postgres's transaction start
+   *  (src/lib/instant.ts `nowMicros` when absent; a test pins it) */
   clock?: (() => number) | undefined;
   /** every statement over a table is DuckDB's: its plan and its run */
   duck: DuckOptions;
@@ -614,7 +618,8 @@ interface Statement {
   explain?: { options: ExplainOptions; plan: DuckPlan };
   /** an EXPLAIN of a catalog statement (the sidecar's): its options, for the line its rows begin with */
   explainCatalog?: ExplainOptions;
-  /** the transaction's start as of the Parse: what a relative literal (`'now'`) of it means, as Postgres reads it then */
+  /** the transaction's start as of the Parse, in microseconds: what a relative literal (`'now'`) of it means, as
+   *  Postgres reads it then */
   parsedNow?: number;
 }
 
@@ -622,7 +627,7 @@ interface Portal {
   statement: Statement;
   /** the bound values as text (binary ones decoded by their type), null for NULL */
   params: (string | null)[];
-  /** the instant of the Bind: the statement's (`statement_timestamp()`) */
+  /** the instant of the Bind, in microseconds: the statement's (`statement_timestamp()`) */
   boundAt: number;
   resultFormats: number[];
   /**
@@ -743,7 +748,8 @@ class Session {
   presented: string | null = null;
   /** the database a public socket's startup named that is not this one: refused once the login is good */
   private wrongDatabase: string | null = null;
-  /** when the user was last found live (a user's session is asked again, `recheckMs`) */
+  /** when the user was last found live, in microseconds as the session's clock (a user's session is asked again,
+   *  `recheckMs`) */
   verifiedAt = 0;
   vars: Vars = defaultVars();
   /** the session's parameters as its startup left them (its packet's `application_name` and `options`): what RESET restores */
@@ -762,9 +768,10 @@ class Session {
   /** the statement runs in an IMPLICIT transaction block, as Postgres's IsTransactionBlock reads one: a Query of several
    *  statements, or a Sync's batch once an Execute completed (`extended`). A plain transaction of one statement is none */
   implicitBlock = false;
-  /** the instant the transaction began (Postgres's `now()`), null between transactions */
+  /** the instant the transaction began (Postgres's `now()`), in microseconds since the epoch (src/lib/instant.ts),
+   *  null between transactions */
   txNow: number | null = null;
-  /** the instant of the statement being run (`statement_timestamp()`): its Query's arrival or its Bind */
+  /** the instant of the statement being run (`statement_timestamp()`), in microseconds: its Query's arrival or its Bind */
   statementNow = 0;
   statements = new Map<string, Statement>();
   portals = new Map<string, Portal>();
@@ -1782,7 +1789,7 @@ class Session {
     const own = params.length === 0 ? params
       : await this.server.options.duck.parameters((b) => this.server.catalog.run(b), plan.params, params, this.sessionState());
     const values = [...own];
-    for (const [which, at] of Object.entries(plan.clock ?? {}) as Array<["parse" | "exec", number]>) values[at - 1] = new Date(clock[which]).toISOString();
+    for (const [which, at] of Object.entries(plan.clock ?? {}) as Array<["parse" | "exec", number]>) values[at - 1] = instantText(clock[which]);
     return values;
   }
 
@@ -2474,7 +2481,8 @@ class Session {
     const user = this.token?.user;
     if (recheck === undefined || user === undefined) return null;
     const now = this.server.now();
-    if (now - this.verifiedAt < this.door.recheckMs) return null;
+    // the instant is microseconds (src/lib/instant.ts), the interval milliseconds
+    if (now - this.verifiedAt < this.door.recheckMs * 1000) return null;
     try {
       // the user as the file has it NOW: its role given or taken since applies to this statement
       const fresh = await recheck(this.token!);
@@ -2851,8 +2859,8 @@ class Server {
     this.baseSettings.catch(() => { this.baseSettings = null; });
     return this.baseSettings;
   }
-  /** the clock "now" is read from */
-  now(): number { return (this.options.clock ?? Date.now)(); }
+  /** the clock "now" is read from: microseconds since the epoch (src/lib/instant.ts) */
+  now(): number { return (this.options.clock ?? nowMicros)(); }
   log(line: string): void { (this.options.log ?? ((l: string) => console.log(l)))(`[postgres] ${line}`); }
 
   /** the schema as of now; the catalog Postgres is replaced when it changed (or the roles did: `rolesNow`) */
