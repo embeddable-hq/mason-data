@@ -7,6 +7,7 @@ import * as path from "node:path";
 import * as url from "node:url";
 import ts from "typescript";
 import { BLOCKING, DEFERRED, parseRecords, recordsOfComment, render, stats, type ReviewRecord } from "../scripts/review-stats.ts";
+import { authority, ENGINE_RULES, globRe, globsOf, HOST_RULES } from "../scripts/evidence-owed.ts";
 
 // The coordinator's Workflow scripts, .claude/workflows/pr-loop.js and issue-loop.js, run CLAUDE.md "The loop" with
 // agents. Nothing else reads them before a run, and a run costs hours, so this is their detector: each is loaded as the
@@ -89,7 +90,7 @@ async function run(name: string, args: Record<string, unknown>, answers: Answers
     // a probe or review stub that does not say otherwise read an engine diff and ran a statement: a review that showed
     // none of the evidence it owed stops the run, and the tests of that give the key (0, a non-count, or undefined)
     if (PR_LOOPS.includes(name) && /^(probe \d+|review r\d+)$/.test(opts.label) && v && typeof v === "object") {
-      const ran: Record<string, unknown> = { changedPaths: ["src/duck/plan.ts"], statementsRun: 1, statementsMatched: 1, checksRun: 0 };
+      const ran: Record<string, unknown> = { changedPaths: ["src/duck/plan.ts"], statementsRun: 1, statementsMatched: 1, checksRun: 0, checksOnly: [] };
       return { ...Object.fromEntries(Object.entries(ran).filter(([k]) => !(k in v))), ...v };
     }
     return v;
@@ -1313,7 +1314,9 @@ test("pr-loop: the evidence a review owes is read from its diff's paths: stateme
   assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts.*`psql` on PATH/);
   rec = parseRecords(r.prompt("record"))[0]!;
   assert.equal(rec.reviewRounds, 0);
-  // the listener, the source's reader and an engine test owe statements too; a diff of both kinds owes both
+  // the listener, the source's reader and an engine test owe statements too; a diff of both kinds owes both. A shared
+  // path (src/cli/dev.ts) owes them too while the review waives nothing (checksOnly [], the stub's default): issue 286's
+  // cases are the test "a shared path …" below
   for (const p of ["src/api/postgres/server.ts", "src/cdc/poll.ts", "src/cli/dev.ts", "tests/duck-wire.test.ts", "docs/POSTGRES-API.md"]) {
     r = await run("pr-loop", { ...PR }, { ...START, "review r1": { ...cli, changedPaths: [p] } });
     assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement/, p);
@@ -1340,24 +1343,30 @@ test("pr-loop: the evidence a review owes is read from its diff's paths: stateme
 test("pr-loop: the paths that owe statements are the `paths:` of the engine's and the listener's rules files, and src/cdc/", () => {
   const listed = arrayOf("pr-loop", "STATEMENT_PATHS");
   const dir = path.join(ROOT, ".claude", "rules");
-  const globsOf = (f: string) => {
-    const front = /^---\n([\s\S]*?)\n---/.exec(fs.readFileSync(path.join(dir, f), "utf8"));
-    assert.ok(front, `${f} has front matter`);
-    return [...front[1]!.matchAll(/^\s+- "([^"]+)"$/gm)].map((m) => m[1]!);
-  };
-  const files = fs.readdirSync(dir).filter((f) => /^duck-.*\.md$|^postgres-api\.md$/.test(f));
-  assert.ok(files.length >= 10, "the engine's rules files and the listener's");
-  const authority = new Set([...files.flatMap(globsOf), "src/cdc/**"]);
-  // the same glob reading as the script's
-  const re = (g: string) => new RegExp(`^${g.split("**").map((p) => p.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*")).join(".*")}$`);
-  for (const g of authority) assert.ok(listed.some((l) => g === l || re(l).test(g)), `${g} (a rules file's path) owes statements, but STATEMENT_PATHS does not cover it`);
-  for (const l of listed) assert.ok(authority.has(l), `${l} is in STATEMENT_PATHS but in no engine or listener rules file`);
+  const files = fs.readdirSync(dir);
+  const read = (f: string) => fs.readFileSync(path.join(dir, f), "utf8");
+  assert.ok(files.filter((f) => ENGINE_RULES.test(f)).length >= 10, "the engine's rules files and the listener's");
+  // the rules' front matter is read by scripts/evidence-owed.ts alone (one module reads it)
+  const { statement, host } = authority(files, read);
+  const owed = new Set(statement);
+  for (const g of owed) assert.ok(listed.some((l) => g === l || globRe(l).test(g)), `${g} (a rules file's path) owes statements, but STATEMENT_PATHS does not cover it`);
+  for (const l of listed) assert.ok(owed.has(l), `${l} is in STATEMENT_PATHS but in no engine or listener rules file`);
   // and nothing of the CLI's or the web page's own owes statements
-  for (const f of ["cli.md", "web-ui.md"]) {
-    for (const g of globsOf(f).filter((g) => !authority.has(g))) {
-      assert.ok(!listed.some((l) => re(l).test(g)), `${g} (${f}) is made to owe statements`);
+  for (const f of HOST_RULES) {
+    for (const g of globsOf(read(f)).filter((g) => !owed.has(g))) {
+      assert.ok(!listed.some((l) => globRe(l).test(g)), `${g} (${f}) is made to owe statements`);
     }
   }
+  // HOST_PATHS, which makes a path SHARED (issue 286), is cli.md's and web-ui.md's `paths:`, the same in both workflows
+  assert.deepEqual(HOST_RULES, ["cli.md", "web-ui.md"]);
+  for (const name of PR_LOOPS) {
+    assert.deepEqual([...arrayOf(name, "HOST_PATHS")].sort(), [...host].sort(), `${name}: HOST_PATHS is the paths: of cli.md and web-ui.md`);
+    assert.deepEqual(arrayOf(name, "STATEMENT_PATHS"), listed, `${name}: STATEMENT_PATHS is pr-loop's`);
+  }
+  const shared = listed.filter((l) => !l.includes("*") && host.some((g) => globRe(g).test(l)));
+  assert.ok(shared.includes("src/cli/dev.ts"), "src/cli/dev.ts is shared");
+  assert.ok(!shared.some((s) => /^src\/(duck|api|cdc)\//.test(s)), "no engine, listener or source-reader path is shared");
+  assert.ok(!listed.filter((l) => /^src\/(duck|api|cdc)\//.test(l)).some((l) => host.some((g) => globRe(g).test(l))), "and no glob of theirs is");
 });
 
 test("review-stats: it reads and prints the checks run on other paths, and a record without them still reads", () => {
@@ -1431,6 +1440,141 @@ const H1 = {
 const SLIM: Answers = { ...START, implement: { ...(START["implement"] as object), handoff: H1 } };
 /** The one sentence pr-loop-slim's review adds to pr-loop's: the handoff is the author's report, never evidence. */
 const NOT_THE_HANDOFF = " The PR's `## Handoff` comment is the author's account too: never read it.";
+
+// Issue 286: PR 280 changed one line of src/cli/dev.ts (a sweep of tunnel files), a path in both an engine rules file's
+// `paths:` and cli.md's, and its review was made to run 332 statements that told it nothing. A SHARED path owes checks
+// only when scripts/evidence-owed.ts found no hunk of it reaching the engine AND the review agreed (checksOnly);
+// everything else, and every engine or listener path whatever is listed, still owes statements.
+test("pr-loop, pr-loop-slim: a shared path owes checks only when the review waives it in checksOnly; an engine path never", async () => {
+  const pr280 = { ...clean, changedPaths: ["src/cli/dev.ts", "src/cli/tunnel.ts", "tests/web-page.test.ts"], checksOnly: ["src/cli/dev.ts"], statementsRun: 0, statementsMatched: 0, checksRun: 5 };
+  for (const name of PR_LOOPS) {
+    const go = (review: object, extra: Answers = {}) =>
+      run(name, { ...PR }, { ...(name === "pr-loop" ? START : SLIM), "probe 1": pr280, "review r1": review, "CI 1": green, ...extra });
+    const status = async (review: object, extra: Answers = {}) => String((await go(review, extra)).result["status"]);
+    // PR 280's shape: checks, no statement, a clean first review
+    const r = await go(pr280);
+    assert.match(String(r.result["status"]), /^reviewed, no open blocking finding/, name);
+    assert.doesNotMatch(String(r.result["status"]), /ran no|read the code only/, name);
+    const rec = parseRecords(r.prompt("record"))[0]!;
+    assert.deepEqual([rec.reviewRounds, rec.statementsRun, rec.checksRun], [1, 0, name === "pr-loop" ? 10 : 5], name);
+    // nothing waived, or a waiver that cannot be read: statements are owed, as before, and the run does not crash
+    for (const checksOnly of [[], undefined, "src/cli/dev.ts", [1]]) {
+      assert.match(await status({ ...pr280, checksOnly }), /^unreviewed: review r1 ran no statement for src\/cli\/dev\.ts/, `${name} ${JSON.stringify(checksOnly)}`);
+    }
+    // an engine, listener or source-reader path is never waived, whatever is listed
+    assert.match(await status({ ...pr280, changedPaths: ["src/duck/plan.ts"], checksOnly: ["src/duck/plan.ts"], checksRun: 9 }), /^unreviewed: review r1 ran no statement for src\/duck\/plan\.ts/, name);
+    for (const p of ["src/api/postgres/server.ts", "src/cdc/poll.ts", "tests/duck-wire.test.ts", "docs/POSTGRES-API.md"]) {
+      assert.match(await status({ ...pr280, changedPaths: [p], checksOnly: [p] }), /^unreviewed: review r1 ran no statement/, `${name} ${p}`);
+    }
+    // a shared path listed is checks to the workflow (the script never marks a .cjs checks: its own test holds that)
+    assert.match(await status({ ...pr280, changedPaths: ["src/cli/mason.cjs"], checksOnly: ["src/cli/mason.cjs"] }), /^reviewed/, name);
+    // a waived shared path owes checks, beside the statements an engine path owes
+    assert.match(await status({ ...pr280, changedPaths: ["src/cli/dev.ts", "src/duck/sync.ts"], statementsRun: 300, statementsMatched: 300, checksRun: 0 }), /^unreviewed: review r1 ran no check for src\/cli\/dev\.ts/, name);
+    // the schema requires checksOnly, and the prompt names the script and the override
+    for (const l of name === "pr-loop" ? ["probe 1", "review r1"] : ["review r1"]) {
+      const schema = r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[]; properties: Record<string, { type: string; items?: { type: string } }> };
+      assert.ok(schema.required.includes("checksOnly"), `${name} ${l}: the schema requires checksOnly`);
+      assert.deepEqual([schema.properties["checksOnly"]!.type, schema.properties["checksOnly"]!.items?.type], ["array", "string"]);
+      assert.ok(r.prompt(l).includes("node scripts/evidence-owed.ts <base> <head>"), `${name} ${l}: names the script`);
+      assert.match(r.prompt(l), /Leave a path out, and it owes statements/, `${name} ${l}`);
+      assert.match(r.prompt(l), /except a shared path you report in checksOnly/, `${name} ${l}`);
+    }
+    if (name === "pr-loop-slim") {
+      assert.ok(r.prompt("implement").includes("node scripts/evidence-owed.ts origin/main HEAD"), "slim's SELF_CHECK names the script");
+      assert.match(r.prompt("implement"), /Leave a path out, and it owes statements[^\n]*\nFor each changed path[^\n]*except a shared path you report in checksOnly/);
+    }
+  }
+  // the probe's round reads the same waiver: no 'ran no statement' note
+  const p = await run("pr-loop", { ...PR }, { ...START, "probe 1": { ...clean, changedPaths: ["src/cli/dev.ts"], checksOnly: ["src/cli/dev.ts"], checksRun: 3, statementsRun: 0, statementsMatched: 0 }, "review r1": clean, "CI 1": green });
+  assert.match(String(p.result["status"]), /^reviewed/);
+  assert.doesNotMatch(String(p.result["status"]), /probe 1 ran no statement/);
+});
+
+// scripts/evidence-owed.ts over a synthetic repo: a base, then one head a case, each a commit off the base.
+test("evidence-owed: a shared path is decided by its hunks through the checker; anything it cannot settle owes statements", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-owed-test-"));
+  const g = (...a: string[]) => execFileSync("git", a, { cwd: repo, encoding: "utf8" }).trim();
+  const put = (f: string, text: string) => { fs.mkdirSync(path.dirname(path.join(repo, f)), { recursive: true }); fs.writeFileSync(path.join(repo, f), text); };
+  // the synthetic repo's own imports, spelt so the import guard (tests/conventions.test.ts) does not read them as this file's
+  const [DUCK, TUNNEL] = ["../duck/store.ts", "./tunnel.ts"];
+  const DEV = [
+    `import { DuckStore } from "${DUCK}";`,
+    `import { sweepTunnelFiles } from "${TUNNEL}";`,
+    "",
+    "// the run",
+    "export function start(dir: string): string {",
+    "  const store = new DuckStore();",
+    '  const greeting = "hello";',
+    "  return store.query('SELECT 1') + greeting + dir + String(sweepTunnelFiles);",
+    "}",
+    "",
+  ].join("\n");
+  try {
+    g("init", "-q", "-b", "main");
+    for (const [k, v] of [["user.email", "t@example.com"], ["user.name", "t"], ["commit.gpgsign", "false"]]) g("config", k!, v!);
+    put(".claude/rules/cli.md", '---\npaths:\n  - "src/cli/**"\n---\n# cli\n');
+    put(".claude/rules/duck-engine.md", '---\npaths:\n  - "src/duck/**"\n  - "src/cli/dev.ts"\n  - "src/cli/mason.cjs"\n---\n# engine\n');
+    put("tsconfig.json", JSON.stringify({ compilerOptions: { target: "es2023", module: "nodenext", moduleResolution: "nodenext", allowImportingTsExtensions: true, noEmit: true, strict: true } }));
+    put("src/duck/store.ts", "export class DuckStore { query(sql: string) { return sql } }\n");
+    put("src/cli/tunnel.ts", "export function sweepTunnelFiles(dir: string) { return dir }\n");
+    put("src/cli/dev.ts", DEV);
+    put("src/cli/mason.cjs", "module.exports = 1;\n");
+    put("notes/README.md", "# readme\n");
+    g("add", "-A");
+    g("commit", "-q", "-m", "base");
+    const base = g("rev-parse", "HEAD");
+    const head = (edit: () => void): string => {
+      g("checkout", "-q", "--detach", base);
+      edit();
+      g("add", "-A");
+      g("commit", "-q", "-m", "head");
+      return g("rev-parse", "HEAD");
+    };
+    const dev = (from: string, to: string) => () => put("src/cli/dev.ts", DEV.replace(from, to));
+    const owed = (b: string, h: string) => {
+      const r = spawnSync(process.execPath, [path.join(ROOT, "scripts", "evidence-owed.ts"), b, h], { cwd: repo, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      return Object.fromEntries(r.stdout.trim().split("\n").map((l) => JSON.parse(l) as { path: string; owes: string; why: string; declaredIn?: string }).map((o) => [o.path, o]));
+    };
+    const A = head(dev('  const greeting = "hello";\n', '  const greeting = "hello";\n  sweepTunnelFiles(dir);\n'));
+    assert.equal(owed(base, A)["src/cli/dev.ts"]!.owes, "checks", "A: a call to a CLI function reaches no engine code");
+    const B = head(dev("store.query('SELECT 1')", "store.query('SELECT 2')"));
+    const b = owed(base, B)["src/cli/dev.ts"]!;
+    assert.deepEqual([b.owes, b.declaredIn], ["statements", "src/duck/store.ts"], "B: an instance method resolves to the engine through the checker");
+    assert.match(b.why, /src\/duck\/store\.ts/);
+    const C = head(dev("  const store = new DuckStore();\n", ""));
+    assert.equal(owed(base, C)["src/cli/dev.ts"]!.owes, "statements", "C: a removed line is resolved in the base");
+    const D = head(dev("// the run\n", `// the run\nimport { DuckStore as S } from "${DUCK}";\nnew S();\n`));
+    assert.deepEqual([owed(base, D)["src/cli/dev.ts"]!.owes, owed(base, D)["src/cli/dev.ts"]!.declaredIn], ["statements", "src/duck/store.ts"], "D: an alias is followed");
+    const E = head(() => put("src/cli/dev.ts", DEV.replace("// the run", "// the run, started").replace('"hello"', '"hi"')));
+    assert.equal(owed(base, E)["src/cli/dev.ts"]!.owes, "checks", "E: a comment and a string literal");
+    const F = head(() => put("src/cli/mason.cjs", "module.exports = 2;\n"));
+    const f = owed(base, F)["src/cli/mason.cjs"]!;
+    assert.equal(f.owes, "statements", "F: a shared path that is not TypeScript");
+    assert.match(f.why, /could not tell/);
+    const G = head(() => fs.rmSync(path.join(repo, "src/cli/dev.ts")));
+    assert.equal(owed(base, G)["src/cli/dev.ts"]!.owes, "statements", "G: deleted");
+    assert.equal(owed(G, base)["src/cli/dev.ts"]!.owes, "statements", "G: added");
+    const H = head(() => { put("src/duck/store.ts", "export class DuckStore { query(sql: string) { return sql + '' } }\n"); put("src/cli/tunnel.ts", "export function sweepTunnelFiles(dir: string) { return dir + '' }\n"); put("notes/README.md", "# readme 2\n"); });
+    const h = owed(base, H);
+    assert.deepEqual([h["src/duck/store.ts"]!.owes, h["src/cli/tunnel.ts"]!.owes, h["notes/README.md"]!.owes], ["statements", "checks", "checks"], "H");
+    const I = head(dev('  const greeting = "hello";', "  const greeting = ;"));
+    const i = owed(base, I)["src/cli/dev.ts"]!;
+    assert.equal(i.owes, "statements", "I: a file that does not parse");
+    assert.match(i.why, /could not tell[^\n]*could not parse/);
+    // a commit that is not there: a failure, never a line of checks
+    const bad = spawnSync(process.execPath, [path.join(ROOT, "scripts", "evidence-owed.ts"), "f".repeat(40), A], { cwd: repo, encoding: "utf8" });
+    assert.notEqual(bad.status, 0);
+    assert.equal(bad.stdout, "");
+    assert.match(bad.stderr, /is not a commit/);
+    // nothing left behind: no worktree, nothing written under the repo
+    assert.equal(g("worktree", "list").split("\n").length, 1, "only the repo's own tree");
+    g("checkout", "-q", "--detach", I);
+    assert.equal(g("status", "--porcelain"), "");
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
 
 test("pr-loop-slim: no design stage, no design review and no probe; the rest of the loop is pr-loop's", async () => {
   const titles = meta("pr-loop-slim").phases.map((p) => p.title);
@@ -1696,7 +1840,7 @@ test("the pr-persistent skill restates no sentence of a prompt pr-loop-slim.js g
 /** A full run of the persistent arm: its args, and every stage answered explicitly, so the harness adds nothing the
  * render does not see. */
 const RACE_ARGS = { ...PR, repo: ROOT, brief: { brief: "the shared brief", shapes: ["SELECT shared_shape FROM t"], tests: ["tests/duck-wire.test.ts --test-name-pattern shared"] }, process: "pr-persistent" };
-const ran = (o: object) => ({ changedPaths: ["src/duck/plan.ts"], statementsRun: 300, statementsMatched: 299, checksRun: 0, ...o });
+const ran = (o: object) => ({ changedPaths: ["src/duck/plan.ts"], statementsRun: 300, statementsMatched: 299, checksRun: 0, checksOnly: [], ...o });
 const RACE_ANSWERS: Answers = {
   implement: { ...pushed("a"), statementsRun: 120, statementsMatched: 118, checksRun: 1, handoff: H1 },
   link: { linked: true, bodyFixed: false, detail: "listed 900" },

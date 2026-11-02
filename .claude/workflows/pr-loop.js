@@ -145,6 +145,12 @@ const PG_ACCESS = A.itEnv
 // .claude/rules/duck-*.md and postgres-api.md, which already map paths to those subsystems, and src/cdc/**, the source's
 // reader, which no rules file covers and CLAUDE.md "Local gates" counts with the engine. tests/workflows.test.ts holds
 // this list equal to those files' `paths:`. Every other path owes CHECKS: what it changed, run.
+// A path in both this list and the CLI's or the web page's `paths:` (cli.md, web-ui.md: HOST_PATHS) is SHARED, such
+// as src/cli/dev.ts: PR 280 changed one line of it, a sweep of tunnel files, and its review ran 332 statements that told
+// it nothing (issue 286). What a shared path owes is decided by its hunks, by scripts/evidence-owed.ts (the checker
+// resolves each changed line's names); a path it marks checks and the review judges reaches no engine code is reported
+// in checksOnly and owes checks; every case either cannot settle owes statements. tests/workflows.test.ts holds
+// HOST_PATHS equal to those files' `paths:`.
 const STATEMENT_PATHS = [
   'docs/POSTGRES-API.md', 'src/api/**', 'src/cdc/**', 'src/cli/dev.ts', 'src/cli/generated-files.ts', 'src/cli/mason.cjs', 'src/cli/pool-size.cjs', 'src/duck/**',
   'tests/duck-*.test.ts', 'tests/duck-executor*.ts', 'tests/duck-generated*.ts', 'tests/integration/duck-*.itest.ts', 'tests/postgres-api/**',
@@ -153,6 +159,11 @@ const STATEMENT_PATHS = [
 const globRe = (g) => new RegExp(`^${g.split('**').map((part) => part.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*')}$`)
 const STATEMENT_RES = STATEMENT_PATHS.map(globRe)
 const owesStatements = (path) => STATEMENT_RES.some((re) => re.test(path))
+const HOST_PATHS = [
+  'cli/**', 'src/cli/**', 'src/lib/did-you-mean.ts', 'src/web/**', 'tests/cli-*.test.ts', 'tests/web-*.test.ts',
+]
+const HOST_RES = HOST_PATHS.map(globRe)
+const isShared = (path) => owesStatements(path) && HOST_RES.some((re) => re.test(path))
 // How the statements are run: in files, dozens a call, at the head and at the base, the output to a file, and only the
 // counts and the differences read. `scale` says how many.
 const BATCH = (scale) => `RUN statements; never judge by reading alone. ${PSQL}. ${PG_ACCESS}
@@ -163,9 +174,12 @@ And a REGRESSION SWEEP: for each code path the diff touches (each function, bran
 Aim for ${scale}. Report statementsRun (the statements you ran at the head, each once) and statementsMatched (of those, the ones SAME at the head).`
 // what a non-engine path owes: what the diff changed, run at the head and the base
 const CHECKS = `RUN what it changed, at the head and at the base, and compare; never judge by reading alone: for src/cli/ or cli/, the \`mason\` command it changed in a project of its own under the system temp dir (\`node <tree>/src/cli/main.ts <command>\`, with and without --json, in each state it can meet); for src/web/, the page's JSON from the run's command server; for scripts/ or .claude/, the script or workflow with the inputs it reads, or the test that loads it (tests/workflows.test.ts for a workflow); for docs, each claim checked against the code it names, and tests/conventions.test.ts; and the change's own test files, bounded (\`node --test --test-timeout=120000 <file>\`). A check whose result the base gave right and the head does not is blocking: severity regression. Report checksRun: the checks you ran at the head, each once (a command, a script, a test file).`
+// What a shared path owes, said to every stage that decides the evidence (EVIDENCE, and slim's SELF_CHECK)
+const SHARED_RULE = `FIRST run \`node scripts/evidence-owed.ts <base> <head>\` in your head tree (its node_modules linked as below): it prints one JSON line a changed path, {path, owes, why}. A SHARED path is one matching both the engine's list below and any of ${HOST_PATHS.map((g) => `\`${g}\``).join(', ')} (the CLI's and the web page's); the script decides it by its hunks, "checks" when no changed line names an engine or listener declaration. Report checksOnly: the shared paths the script marked "checks" whose hunks you, having read them, judge reach no engine code; each owes CHECKS in place of statements. Leave a path out, and it owes statements, when a hunk changes the control flow or the arguments that reach an engine call without naming an engine symbol (a guard around sync.start(), a value later passed to new Sync), or when the script failed or did not run: leaving one out only ever adds evidence. A path the script marked "statements", or one not shared, is never waived, even if listed. checksOnly is [] when no path qualifies.`
 // The evidence a probe or review owes, both kinds stated, since only its diff says which applies
 const EVIDENCE = (scale) => `Report changedPaths: every path \`git diff --no-renames --name-only\` prints for the diff you read; the evidence you owe is decided from them.
-STATEMENTS, for a changed path matching any of ${STATEMENT_PATHS.map((g) => `\`${g}\``).join(', ')} (the engine and the listener): ${BATCH(scale)}
+${SHARED_RULE}
+STATEMENTS, for a changed path matching any of ${STATEMENT_PATHS.map((g) => `\`${g}\``).join(', ')} (the engine and the listener), except a shared path you report in checksOnly: ${BATCH(scale)}
 CHECKS, for every other changed path: ${CHECKS}
 A diff with both owes both. A review that owed statements and ran none, or owed checks and ran none, is no review: the run stops unreviewed.`
 
@@ -229,7 +243,7 @@ const blocks = (f) => !DEFERRED.includes(f.severity)
 const ofThisPr = (f) => f.origin !== 'base'
 // the line, as the review and the probe are told it
 const SEVERITY_RULE = "Give each finding its SEVERITY. Blocking, and sent back for a fix: wrong-answer (where Mason answers, it answers differently from Postgres: rows, text, types or OIDs, order, or SQLSTATE), crash (a crash, a hang, or a stuck state such as a table left `building`), data-loss (synced data lost or corrupted), security, regression (what the base got right is now wrong or refused). Not blocking, filed as an issue while the PR goes on: message (a refusal's wording, reason, HINT or DETAIL, or a way out that does not work, when the refusal itself is right), over-refusal (Mason refuses where Postgres answers, and the base refused it too: safe, and a gap), docs, quality (code quality, or a missing test of a shape already answered right). When you are unsure, the finding is blocking: give the blocking severity it would be."
-const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'statementsRun', 'statementsMatched', 'checksRun', 'changedPaths'], properties: {
+const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'statementsRun', 'statementsMatched', 'checksRun', 'changedPaths', 'checksOnly'], properties: {
   findings: { type: 'array', items: { type: 'object', required: ['input', 'expected', 'actual', 'atBase', 'origin', 'severity', 'classKey', 'classWhy', 'where'], properties: {
     input: { type: 'string', description: 'the failing statement or input, exactly, with the table it runs over' },
     expected: { type: 'string', description: "Postgres's answer (or the right one)" },
@@ -246,6 +260,7 @@ const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'stat
   statementsMatched: { type: 'integer', minimum: 0, description: "of those, the ones duck-repro printed SAME: Mason's answer equal to Postgres's" },
   checksRun: { type: 'integer', minimum: 0, description: 'the checks run at the head on the changed paths that owe no statements: each command, script or test file once; SQL statements are never counted here' },
   changedPaths: { type: 'array', items: { type: 'string' }, description: 'every path git diff --no-renames --name-only printed for the diff read, exactly' },
+  checksOnly: { type: 'array', items: { type: 'string' }, description: 'the changed SHARED paths scripts/evidence-owed.ts marked checks and that you judged reach no engine code: each owes checks, not statements; [] when none (a path left out owes statements)' },
 } }
 const FILED = { type: 'object', required: ['issues'], properties: {
   issues: { type: 'array', items: { type: 'object', required: ['classKey', 'source', 'issue', 'action'], properties: {
@@ -378,8 +393,12 @@ const RUN_CHECKS = 'run what the diff changed at the head and the base: the `mas
 function missingEvidence(a) {
   const paths = a.changedPaths
   if (!Array.isArray(paths) || paths.length === 0 || !paths.every((x) => typeof x === 'string' && x)) return { text: 'did not report the paths its diff changed, so the evidence it owed is not known', needs: `report changedPaths, and ${RUN_CHECKS}; ${NEEDS}` }
-  const engine = paths.filter(owesStatements)
-  const other = paths.filter((x) => !owesStatements(x))
+  // a shared path the review waived owes checks; a waiver of any other path is ignored, and one that is not an array of
+  // strings is read as none, so "couldn't tell" owes statements and never drops the review (issue 286)
+  const waived = Array.isArray(a.checksOnly) && a.checksOnly.every((x) => typeof x === 'string') ? a.checksOnly : []
+  const owes = (x) => owesStatements(x) && !(isShared(x) && waived.includes(x))
+  const engine = paths.filter(owes)
+  const other = paths.filter((x) => !owes(x))
   const miss = []
   const needs = []
   if (engine.length && !(isCount(a.statementsRun) && a.statementsRun > 0)) {

@@ -143,7 +143,9 @@ docs/DESIGN.md ("The independent review", "Local gates").
 3. **Review**, by Fable (the coordinating session or a Fable agent, never Opus: the reader must outread the author),
    in a fresh context given the diff and the code, never the author's report. It and the probe RUN what the diff
    changed, never judging by reading alone, at the head and the base; which evidence is read from the diff's paths
-   (`STATEMENT_PATHS`, the `paths:` of the engine's and the listener's rules files, and `src/cdc/`). The engine's and
+   (`STATEMENT_PATHS`, the `paths:` of the engine's and the listener's rules files, and `src/cdc/`); a path shared with
+   cli.md's or web-ui.md's `paths:` (`src/cli/dev.ts`) owes by its hunks, as `scripts/evidence-owed.ts` decides them,
+   and the review may only add to that (`checksOnly`). The engine's and
    the listener's owe SQL statements, batched through `scripts/duck-repro.ts`, only the differences read, hundreds in a
    full review, in the variant forms no author wrote and a regression sweep of each touched path's plain form, where a
    statement the base matched and the head does not blocks (`VARIANT_FORMS`, `BATCH`). Every other path owes checks:
