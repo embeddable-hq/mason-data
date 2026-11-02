@@ -685,55 +685,107 @@ function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly Ce
  * (src/lib/pg-numeric.ts; a FROM item's column read k times a level, `c + c - c` through every level), so each node is
  * judged ONCE (`storedNumeric`, memoised), and a node several parents read is written ONCE: its DECIMAL expression is a
  * column of its own (`layers`, `__mason_output."__mason_s<column>_<k>"`, computed below the column's SELECT, each layer
- * over the one before: src/duck/generated.ts), and every parent reads that column. Never one that Postgres would not
- * compute for every row: a node only a CASE's arm or a COALESCE's later argument reaches (`always` is the rest) and
- * that can raise (a `mod`, by zero; a typmod, past its precision) stays written in its parents, as before, since a layer
- * computes it for every row. A leaf (a cell, a literal) is short, and written where it is read.
+ * over the one before: src/duck/generated.ts), and every parent reads that column.
+ * A LAYER IS COMPUTED ONLY FOR THE ROWS THE INLINE EXPRESSION COMPUTES IT FOR (PR 520 review r1, the class
+ * shared-node-hoisted-out-of-its-condition): what reaches a node is read from the SQL `storedNumeric` writes (`edgesOf`):
+ * an operand of `+ - *`, a cast, a CASE's index, GREATEST's, COALESCE's first argument is computed whenever its parent
+ * is; a CASE's arm only where the index takes it, a later COALESCE argument only where every one before it is NULL, a
+ * `mod`'s dividend only where its divisor is not zero. A node every row computes (`always`) is a plain layer; any other
+ * is a layer under its GUARD, `CASE WHEN "__mason_g<column>_<k>" THEN … END`, the guard a boolean layer of its own —
+ * the OR, over each way the node is reached, of its parent's guard AND that way's condition — so the engine computes it
+ * for no row it would not have computed it for written in place (whatever the engine may raise on: an overflow, a
+ * division). A condition is written over leaves only (a cell, a literal), so every guard is computed before any value;
+ * a node reached under a condition over a computed value is written in its parents, as before this PR. A leaf is short,
+ * and written where it is read.
  */
 function storedProgram(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[], column: number): { stored: Stored | NotStored; layers: string[] } {
-  const children = (x: NumericProgram): NumericProgram[] => x.op === "cell" || x.op === "literal" ? [] : "args" in x
-    ? [...(x.op === "pick" ? [x.index] : []), ...x.args] : x.op === "rescale" ? [x.arg, x.scale] : [x.arg];
-  // each distinct node's parents (a node reached twice from one parent, `c + c`, counts twice)
-  const parents = new Map<NumericProgram, number>();
-  const count = (x: NumericProgram): void => {
-    for (const c of children(x)) {
-      const n = parents.get(c) ?? 0;
-      parents.set(c, n + 1);
-      if (n === 0) count(c);
+  const leaf = (x: NumericProgram): boolean => x.op === "cell" || x.op === "literal";
+  const judged = new Map<NumericProgram, Stored | NotStored>();
+  // a leaf's SQL, or null where it has none to compare (a value not stored): its condition cannot be written
+  const leafSql = (x: NumericProgram): string | null => {
+    if (!leaf(x)) return null;
+    const s = sub(x);
+    return "why" in s || s.sql === "NULL" ? null : s.sql;
+  };
+  type Edge = { child: NumericProgram; when: "always" | ((guard: string) => string | null) };
+  // HOW `storedNumeric` READS EACH CHILD: the edges of its SQL, by op (a CASE of a rescale is its first arm alone, and a
+  // division, a variance and a rescale's scale write none)
+  const edgesOf = (x: NumericProgram): Edge[] => {
+    const always = (c: NumericProgram): Edge => ({ child: c, when: "always" });
+    switch (x.op) {
+      case "cell": case "literal": case "div": case "stddev": return [];
+      case "add": case "sub": case "mul": case "greatest": case "least": return x.args.map(always);
+      case "neg": case "abs": case "floor": case "ceil": case "round": case "trunc": case "typmod": case "pad": case "rescale": return [always(x.arg)];
+      // CASE WHEN b = 0 THEN error(…) ELSE a % b END: the dividend only where the divisor is not zero
+      case "mod": return [always(x.args[1]), { child: x.args[0], when: (g) => { const b = leafSql(x.args[1]); return b === null ? null : `(${g} AND (${b} = 0) IS NOT TRUE)`; } }];
+      case "coalesce": return x.args.map((c, i): Edge => i === 0 ? always(c) : { child: c, when: (g) => {
+        const before = x.args.slice(0, i).map(leafSql);
+        return before.some((b) => b === null) ? null : `(${g} AND ${before.map((b) => `${b} IS NULL`).join(" AND ")})`;
+      } });
+      case "pick": {
+        if (x.args[0]?.op === "rescale") return [always(x.args[0])];
+        return [always(x.index), ...x.args.map((c, k): Edge => ({ child: c, when: (g) => { const i = leafSql(x.index); return i === null ? null : `(${g} AND CAST(${i} AS BIGINT) = ${k})`; } }))];
+      }
     }
   };
-  count(p);
-  // the nodes computed for every row: reached from the top through no CASE arm and no COALESCE argument but the first
+  // each distinct node's ways in, from the top (a node read twice by one parent, `c + c`, is read twice)
+  const into = new Map<NumericProgram, Array<{ parent: NumericProgram; edge: Edge }>>();
+  const walk = (x: NumericProgram): void => {
+    for (const edge of edgesOf(x)) {
+      const known = into.get(edge.child);
+      if (known === undefined) into.set(edge.child, [{ parent: x, edge }]);
+      else known.push({ parent: x, edge });
+      if (known === undefined) walk(edge.child);
+    }
+  };
+  walk(p);
+  // the nodes computed for every row: reached from the top along "always" edges alone
   const always = new Set<NumericProgram>();
   const reach = (x: NumericProgram): void => {
     if (always.has(x)) return;
     always.add(x);
-    const strict = x.op === "pick" ? [x.index] : x.op === "coalesce" ? x.args.slice(0, 1) : children(x);
-    strict.forEach(reach);
+    for (const e of edgesOf(x)) if (e.when === "always") reach(e.child);
   };
   reach(p);
-  const raisesMemo = new Map<NumericProgram, boolean>();
-  const raises = (x: NumericProgram): boolean => {
-    const known = raisesMemo.get(x);
-    if (known !== undefined) return known;
-    const v = x.op === "mod" || x.op === "typmod" || children(x).some(raises);
-    raisesMemo.set(x, v);
-    return v;
+  // A NODE'S GUARD: "TRUE" for one every row computes, a boolean layer's column for another, null where it cannot be
+  // written (a condition over a computed value): such a node is written in place, in its parents
+  const guards: string[] = [], guarded = new Map<NumericProgram, string | null>();
+  const guardOf = (x: NumericProgram): string | null => {
+    if (always.has(x)) return "TRUE";
+    if (guarded.has(x)) return guarded.get(x)!;
+    guarded.set(x, null);
+    const ways: string[] = [];
+    for (const { parent, edge } of into.get(x) ?? []) {
+      const g = guardOf(parent);
+      const way = g === null ? null : edge.when === "always" ? g : edge.when(g);
+      if (way === null) return null;
+      if (!ways.includes(way)) ways.push(way);
+    }
+    const name = `__mason_g${column}_${guards.length}`;
+    guards.push(`(${ways.join(" OR ")}) AS ${JSON.stringify(name)}`);
+    const read = `__mason_output.${JSON.stringify(name)}`;
+    guarded.set(x, read);
+    return read;
   };
-  const layers: string[] = [], judged = new Map<NumericProgram, Stored | NotStored>();
+  const values: string[] = [];
   const sub = (x: NumericProgram): Stored | NotStored => {
     const known = judged.get(x);
     if (known !== undefined) return known;
     let s = storedNumeric(x, types, cells, sub);
-    if (!("why" in s) && (parents.get(x) ?? 0) > 1 && x.op !== "cell" && x.op !== "literal" && s.sql !== "NULL" && (always.has(x) || !raises(x))) {
-      const name = `__mason_s${column}_${layers.length}`;
-      layers.push(`${s.sql} AS ${JSON.stringify(name)}`);
-      s = { ...s, sql: `__mason_output.${JSON.stringify(name)}` };
+    if (!("why" in s) && (into.get(x)?.length ?? 0) > 1 && !leaf(x) && s.sql !== "NULL") {
+      const guard = guardOf(x);
+      if (guard !== null) {
+        const name = `__mason_s${column}_${values.length}`;
+        values.push(`${guard === "TRUE" ? s.sql : `CASE WHEN ${guard} THEN ${s.sql} END`} AS ${JSON.stringify(name)}`);
+        s = { ...s, sql: `__mason_output.${JSON.stringify(name)}` };
+      }
     }
     judged.set(x, s);
     return s;
   };
-  return { stored: sub(p), layers };
+  const stored = sub(p);
+  // the guards first, each after its parents' (they read leaves and guards alone), then the values, children first
+  return { stored, layers: [...guards, ...values] };
 }
 
 /** a stored numeric's verdict, where all that is around it is known: null where it is stored (a picked value's `scale`:

@@ -204,3 +204,28 @@ test("round 14, a numeric (#484): a definition reading a numeric's program three
     }
   });
 });
+
+// PR 520's review, round 1 (the class shared-node-hoisted-out-of-its-condition): a shared node only a CASE arm reaches
+// was written as a layer the engine computed for EVERY row, so a value Postgres never computes (an arm no row takes)
+// overflowed the engine's 38 digits and the table was never built. The decision: a layer is computed under its guard,
+// the condition its parents read it under (`storedProgram`, src/duck/generated-plan.ts), so no row computes what written
+// in place it would not. Each definition is built, with Postgres's values. (The same under a later COALESCE argument
+// fails at main too, written in place: issue 525.)
+test("round 14, a numeric (PR 520 r1): a shared node under a CASE arm is computed only for the rows that reach it", async () => {
+  await withWorld({}, async (w) => {
+    // x is read twice under an arm no row takes (every id > 0; amount NULL in row 3), and its product passes 38 digits
+    const big = "SELECT id, amount, amount * 1000000000000000000000000000000 * 1000000000000000000000000000000 AS x FROM events";
+    const cases: Record<string, string> = {
+      r1_case: `SELECT id, CASE WHEN id > 0 THEN amount ELSE x + x END AS v FROM (${big}) s`,
+      // the same under a guard two levels deep: a CASE inside a CASE's arm, read three times a level
+      r1_nested: `SELECT id, CASE WHEN id > 0 THEN v ELSE v + v - v END AS v FROM (SELECT id, CASE WHEN id > 0 THEN amount ELSE x + x END AS v FROM (${big}) s) s2`,
+    };
+    for (const [name, sql] of Object.entries(cases)) w.write(name, `kind: scheduled\ntarget_lag: 1h\nsql: |\n  ${sql}\n`);
+    for (const name of Object.keys(cases)) {
+      const s = await w.until((x) => x.state === "refused" || x.state === "failed" || built(x), `public.${name}`);
+      assert.ok(built(s), `${name}: ${s.state} ${typeof s.error === "string" ? s.error : ""} ${JSON.stringify(s.refusals)}`);
+      assert.deepEqual(await w.rows(`SELECT CAST(id AS VARCHAR), CAST(v AS VARCHAR) FROM public.${name} ORDER BY id`),
+        [["1", "1.50"], ["2", "2.50"], ["3", null], ["4", "4.00"]], name);
+    }
+  });
+});
