@@ -706,6 +706,8 @@ function registerTurn(conn: DuckDBConnection): void {
   let allInvalid = new ArrayBuffer(256);   // a vector's rows; a larger vector size grows it
   // the bindings' own callback: `mainFunction`'s wrapper builds the output vector's row-by-row writer, which this never uses
   duckdb.scalar_function_set_function(turn.scalar_function, (_info, input, output) => {
+    // a hop like any call's: counted, so a test that holds a statement to no hop at all reads the turn's too
+    FUNCTION_CALLS.set(TURN_FUNCTION, (FUNCTION_CALLS.get(TURN_FUNCTION) ?? 0) + 1);
     beat(cancels);
     const chunk = new DuckDBDataChunk(input);
     const session = text(chunk.rowCount > 0 ? chunk.getColumnVector(0).getItem(0) as DuckDBValue : null);
