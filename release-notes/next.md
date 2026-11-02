@@ -15,6 +15,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason login` and `mason logout` sign this machine in to a hosted Mason service, and out of it.** Login prints a
+  page and a code to approve in a browser, then saves the login in `~/.config/mason/credentials.json` (0600), outside
+  every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this
+  machine). Nothing changes for a project, `mason start` or `mason serve`. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md)
+  is the API they speak.
 - **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
   COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
   of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE

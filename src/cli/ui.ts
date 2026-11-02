@@ -84,7 +84,7 @@ export function openCommand(platform: NodeJS.Platform, url: string): [command: s
 }
 
 /** Open `url` in the browser: null once the opener started, else why it could not (the URL is printed either way). */
-function openBrowser(url: string): Promise<string | null> {
+export function openBrowser(url: string): Promise<string | null> {
   const [command, args] = openCommand(process.platform, url);
   return new Promise((resolve) => {
     const child = spawn(command, args, { detached: true, stdio: "ignore" });
