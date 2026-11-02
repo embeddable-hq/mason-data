@@ -7,8 +7,8 @@
  * verified (fetch's own, never turned off); plain http only to this machine (127.0.0.1, ::1, localhost), for a service
  * run beside it. A base URL with a path, a query, a fragment or a user is refused before any byte is sent.
  *
- * WHAT IS SENT: every request carries `User-Agent: mason-cli/<version>` and `Accept: application/json`, a form body
- * where one is sent, and a redirect is never followed (a Bearer header must not travel to another origin, nor https
+ * WHAT IS SENT: every request carries `User-Agent: mason-cli/<version>` and `Accept: application/json`, a form or JSON
+ * body where one is sent, and a redirect is never followed (a Bearer header must not travel to another origin, nor https
  * fall back to http). Every request has a time limit, and an answer is read up to `MAX_BODY_BYTES`.
  *
  * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, every string the CLI prints is made
@@ -90,23 +90,33 @@ export function deviceName(hostname: string = os.hostname()): string {
   return name || "unknown";
 }
 
-/** An answer: its status, its JSON (undefined when it is not JSON), the request that drew it. */
-export interface Answer { status: number; json: unknown; what: string }
+/** An answer: its status, its JSON (undefined when it is not JSON), the request that drew it, and the seconds its
+ *  `Retry-After` asks for (delta-seconds, 1 to 3600; null when it sent none, or one in another form). */
+export interface Answer { status: number; json: unknown; what: string; retryAfter: number | null }
+
+/** `Retry-After` as delta-seconds (RFC 9110 10.2.3), 1 to 3600; null for none, an HTTP date or anything else. */
+export function retryAfterOf(v: string | null): number | null {
+  if (v === null || !/^\d{1,4}$/.test(v.trim())) return null;
+  const n = Number(v.trim());
+  return n >= 1 && n <= 3600 ? n : null;
+}
 
 /**
- * ONE REQUEST TO THE SERVICE: `form` as an urlencoded body, `token` as a Bearer header. The answer, or a Failure when
- * none came back whole: not reached, a redirect, too large. A status is the caller's to read.
+ * ONE REQUEST TO THE SERVICE: `form` as an urlencoded body or `json` as a JSON one, `token` as a Bearer header. The
+ * answer, or a Failure when none came back whole: not reached, a redirect, too large. A status is the caller's to read.
  */
-export async function call(service: Service, method: "GET" | "POST", path: string, o: { form?: Record<string, string>; token?: string } = {}): Promise<Answer | Failure> {
+export async function call(service: Service, method: "GET" | "POST", path: string, o: { form?: Record<string, string>; json?: unknown; token?: string } = {}): Promise<Answer | Failure> {
   const what = `${method} ${path}`;
   const secrets = o.token ? [o.token] : [];
   const headers: Record<string, string> = { "User-Agent": `mason-cli/${version()}`, Accept: "application/json" };
   if (o.form) headers["Content-Type"] = "application/x-www-form-urlencoded";
+  if (o.json !== undefined) headers["Content-Type"] = "application/json";
+  const body = o.form ? new URLSearchParams(o.form).toString() : o.json !== undefined ? JSON.stringify(o.json) : undefined;
   if (o.token) headers.Authorization = `Bearer ${o.token}`;
   let res: Response;
   try {
     res = await fetch(new URL(path, service.base), { method, headers, redirect: "manual", signal: AbortSignal.timeout(REQUEST_MS),
-      ...(o.form ? { body: new URLSearchParams(o.form).toString() } : {}) });
+      ...(body !== undefined ? { body } : {}) });
   } catch (e) {
     return { message: `could not reach ${service.base}`, code: "failed", why: serviceText(reachError(e), 300, secrets),
       fix: `check this machine is online, and that MASON_CLOUD_URL names the service (it is ${service.base})`, next: [] };
@@ -116,13 +126,13 @@ export async function call(service: Service, method: "GET" | "POST", path: strin
     return { message: `${service.base} answered ${what} with a redirect (${res.status})`, code: "failed",
       why: "Mason follows no redirect: a login must never travel to an address it was not given", fix: "set MASON_CLOUD_URL to the service's own address" };
   }
-  const body = await boundedText(res);
-  if (body === null) return { message: `${service.base} answered ${what} with more than ${MAX_BODY_BYTES / 1024} KiB`, code: "failed", why: "no documented answer is that large" };
+  const text = await boundedText(res);
+  if (text === null) return { message: `${service.base} answered ${what} with more than ${MAX_BODY_BYTES / 1024} KiB`, code: "failed", why: "no documented answer is that large" };
   let json: unknown;
   if (/^application\/(?:[\w.+-]+\+)?json\b/i.test(res.headers.get("content-type") ?? "")) {
-    try { json = JSON.parse(body); } catch { json = undefined; }
+    try { json = JSON.parse(text); } catch { json = undefined; }
   }
-  return { status: res.status, json, what };
+  return { status: res.status, json, what, retryAfter: retryAfterOf(res.headers.get("retry-after")) };
 }
 
 /** Why a fetch did not get an answer, in a line: the system's code, a certificate's reason, or the time limit. */
@@ -170,17 +180,26 @@ export function unexpected(service: Service, a: Answer, step: string): Failure {
  * when the answer is not that shape.
  */
 export function serviceFailure(a: Answer, secrets: readonly string[]): Failure | null {
-  if (a.status < 400 || !obj(a.json) || !obj(a.json.error)) return null;
-  const e = a.json.error;
+  if (a.status < 400 || !obj(a.json)) return null;
+  return failureShape(a.json.error, a.json.next, secrets);
+}
+
+/**
+ * THE FAILURE SHAPE, AS THE SERVICE SENDS IT: `error` `{ code, message, why?, fix? }` and `next` `[{ command, what? }]`
+ * (not a list: none), each string made printable and masked; null when it is not that shape. A `/v1/` failure's two keys
+ * (`serviceFailure`), and a deploy's `failure` (src/cli/deploy.ts), which carries the same four keys and `next` in one
+ * object.
+ */
+export function failureShape(error: unknown, nextList: unknown, secrets: readonly string[]): Failure | null {
+  if (!obj(error)) return null;
+  const e = error;
   if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || !str(e.message, 2000)) return null;
   const text = (v: unknown, max: number): string | undefined => typeof v === "string" && v ? serviceText(v, max, secrets) : undefined;
   const next: NextStep[] = [];
-  if (Array.isArray(a.json.next)) {
-    for (const n of a.json.next.slice(0, 10)) {
-      if (!obj(n) || !str(n.command, 300)) return null;
-      const what = text(n.what, 300);
-      next.push(what ? [serviceText(n.command, 300, secrets), what] : [serviceText(n.command, 300, secrets)]);
-    }
+  for (const n of Array.isArray(nextList) ? nextList.slice(0, 10) : []) {
+    if (!obj(n) || !str(n.command, 300)) return null;
+    const what = text(n.what, 300);
+    next.push(what ? [serviceText(n.command, 300, secrets), what] : [serviceText(n.command, 300, secrets)]);
   }
   return { message: serviceText(e.message, 2000, secrets), code: e.code, why: text(e.why, 2000), fix: text(e.fix, 2000), next };
 }

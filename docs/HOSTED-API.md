@@ -1,7 +1,7 @@
 # The hosted API
 
-What the `mason` CLI sends to a hosted Mason service, and what it expects back. `mason login` and `mason logout` speak
-it today (`src/cli/login.ts`, `src/cli/hosted.ts`). Any service that answers this API can be signed in to. This page is
+What the `mason` CLI sends to a hosted Mason service, and what it expects back. `mason login`, `mason logout` and
+`mason deploy` speak it today (`src/cli/login.ts`, `src/cli/deploy.ts`, `src/cli/hosted.ts`). Any service that answers this API can be signed in to. This page is
 the contract: a change to it is a change to both sides.
 
 ## The base URL
@@ -17,7 +17,7 @@ the contract: a change to it is a change to both sides.
 ## Every request
 
 - `User-Agent: mason-cli/<version>` and `Accept: application/json`.
-- A form body is `application/x-www-form-urlencoded`.
+- A form body is `application/x-www-form-urlencoded`; a JSON body (`mason deploy`'s) is `application/json`, UTF-8.
 - A redirect is never followed: it is a failure, so a Bearer header never travels to another address.
 - Each request has a 15 s time limit. An answer larger than 64 KiB is refused.
 - What comes back is untrusted. Each answer is held to the shape below. Anything else is a failure said by its status
@@ -97,6 +97,105 @@ retries one by itself.
 | `GET /v1/me` | `403` with the failure shape, code `refused`, next `mason login`: a CI token (`masondata_ci_…`) cannot say who a person is | says it as the service worded it |
 | any, `/oauth/revoke` included | `400`, `413` or `415`: a body the service cannot read | stops with the status; `mason logout` still removes the login, and says it was NOT revoked |
 | any | another status, or a body that is not JSON | a failure naming the request and the status, never the body |
+
+## Deploying a project: `mason deploy`
+
+A deploy sends a project's files to one replica and waits until Mason on the replica runs them, or refuses them. The
+replica is named `{org}/{name}`: each part matches `^[a-z0-9][a-z0-9-]{0,62}$` (the CLI refuses any other before it
+sends a byte, so a name is always safe in a path). Both requests carry `Authorization: Bearer <token>`.
+
+### What the CLI checks before it sends anything
+
+The project is checked on this machine by Mason's own readers, as `mason start` checks it before it connects: the
+`mason.yml` pin, the sources file, the roles file against the tables the sources file names, and the generated
+tables (a refused one is said, and does not stop the deploy, as it does not stop a start). No database is connected
+to. A project a start would refuse is refused here, in the CLI's failure shape, and nothing is sent. A sources file
+whose `url:` is written with its password is refused too: the service keeps the files, and a secret is never one of
+them (`url: ${DATABASE_URL}`, with `DATABASE_URL` set on the replica, is the way).
+
+The files are the project folder's project files, the one list `mason start` fingerprints (`src/lib/project-files.ts`):
+every `.yml` and `.yaml` under the folder (`mason/`), outside any folder or file whose name starts with `.` and outside
+`node_modules`. Never `.env`, `.mason/`, a dotfile or a file of another kind.
+
+- `path` is relative to the project folder, its parts joined by `/` (`sources/app.yml`, `mason.yml`,
+  `generated_tables/daily.yml`). Each part matches `^[A-Za-z0-9_][A-Za-z0-9._-]*$`, and the path is at most 255
+  characters.
+- Each file is a regular file inside the project folder; a symbolic link that leaves the folder is refused. Every file
+  the check above read is among those sent.
+- `content` is the file's text: its bytes, which must be valid UTF-8 (a file that is not is refused). `sha256` is the
+  SHA-256 of those bytes, as 64 lower-case hex digits.
+- At most 256 KiB (262,144 bytes) a file, 1 MiB (1,048,576 bytes) all the files' bytes together, and 500 files. The
+  CLI refuses past any of them, naming the file or the sizes.
+- `mason deploy --dry-run` prints each path, its size and its sha256, and sends nothing (it needs no login).
+
+### `POST /v1/replicas/{org}/{name}/deploys`
+
+`Content-Type: application/json`:
+
+```json
+{ "files": [{ "path": "sources/app.yml", "sha256": "2aab…", "content": "kind: postgres\n…" }], "client": { "version": "0.7.0" } }
+```
+
+- `files` is the whole project, sorted by `path`, each path once. The replica's project becomes exactly these files: a
+  file the replica had and the list lacks is removed. A deploy never merges.
+- `client.version` is the CLI's version (`dev` from a checkout).
+- The service checks each `sha256` against its `content`, the bounds above and the path grammar, and refuses what does
+  not hold (`422 invalid`). It may refuse a body over 8 MiB with `413` before reading it.
+
+`201`:
+
+```json
+{ "deploy": { "id": "dep_01HZX…", "status": "queued", "createdAt": "2026-11-02T10:00:00Z" } }
+```
+
+`id` matches `^[A-Za-z0-9_-]{1,64}$`; the CLI puts it in the next path. Other statuses, each with the failure shape
+("Failures of `/v1/`"), said by the CLI as the service worded it, exit 1:
+
+| Status | `code` | When |
+|---|---|---|
+| `401` | `unauthenticated` | no token, or one the service does not take; `next` `mason login` |
+| `403` | `refused` | the token may not deploy this replica (a viewer's, or a CI token made for another replica) |
+| `404` | `not_found` | no such replica in that organisation, or the token's account is not in the organisation: said the same way, so it never tells whether the name exists elsewhere |
+| `409` | `busy` | another deploy to this replica has not finished; `why` names its id |
+| `413` | `too_large` | past a bound above; `why` names the file or the sizes |
+| `422` | `invalid` | the service's own check of the files: `message` names the file and what is wrong, `why` the rest |
+
+When no answer comes back to the POST, whether the deploy was made is not known: the CLI says so, and the next
+`mason deploy` is answered `409 busy` if it was.
+
+### `GET /v1/replicas/{org}/{name}/deploys/{id}`
+
+`200`:
+
+```json
+{ "deploy": { "id": "dep_01HZX…", "status": "applying", "phase": "checking the sources file", "createdAt": "2026-11-02T10:00:00Z" } }
+```
+
+| Key | |
+|---|---|
+| `id` | the id the POST answered |
+| `status` | `queued`, `applying`, `starting`, `running`, `refused` or `failed` (below) |
+| `phase` | optional: what is under way within the status, one line of at most 200 characters |
+| `failure` | present when, and only when, `status` is `refused` or `failed`: `{ code, message, why?, fix?, next }`, the failure shape in one object (`next` a list of `{ command, what? }`, maybe empty) |
+| `createdAt` | when the POST was taken: ISO 8601 with its zone |
+| `finishedAt` | when it reached `running`, `refused` or `failed`: ISO 8601 with its zone; absent before |
+
+| `status` | Meaning | The CLI |
+|---|---|---|
+| `queued` | taken, waiting for its turn | waits |
+| `applying` | Mason on the replica checks the files and takes them | waits |
+| `starting` | Mason on the replica starts on the new files, until it serves | waits |
+| `running` | the replica runs these files: Mason there serves from them | exit 0 |
+| `refused` | Mason on the replica refused the files (a sources file naming a table the database lacks, a pin of another release line): `failure` is Mason's own failure, passed through unchanged. The replica runs what it ran before | prints `failure` unchanged, exit 1 |
+| `failed` | the deploy could not finish for a reason that is not the files' (the machine, the service): `failure` says what happened and what the replica runs now | prints `failure` unchanged, exit 1 |
+
+The CLI asks every 2 s, or after the seconds a `Retry-After` header (delta-seconds, 1 to 3600) asks for, on any
+answer. A `429`, a `5xx` or no answer at all cannot say how the deploy goes: the CLI asks again, until its
+`--timeout` (default `10m`, `1s` to `24h`). At the timeout it exits 124 and says the deploy may still finish, with its
+id. A `401`, `403` or `404` with the failure shape is said as the service worded it, exit 1.
+
+Every other answer to either request (another status, a body that is not JSON or not this shape, an id other than the
+one asked for, a `failure` beside another status) is a failure naming the request and the status, never the body, exit 1.
 
 ## Failures of `/v1/`
 

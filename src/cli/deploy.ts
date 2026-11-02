@@ -1,0 +1,426 @@
+/**
+ * `mason deploy` — THE PROJECT IN THIS FOLDER SENT TO A REPLICA ON A HOSTED MASON SERVICE, and its outcome waited for
+ * (docs/HOSTED-API.md "Deploying a project"). Only the project's files travel: what Mason reads to run it, never this
+ * machine's `.env`, `.mason/` or anything else beside them.
+ *
+ * 1. THE PROJECT IS CHECKED HERE FIRST, OFFLINE, by Mason's own readers, as `mason start` checks it before it connects
+ *    (src/cli/dev.ts): the version pin (src/lib/project-version.ts, src/cli/pin.ts), the sources file's text
+ *    (src/cli/sources.ts `readSourceFile`, the first half of `readSource`), the roles file against the tables the
+ *    sources file names (src/cli/roles.ts `roleProblems`, the check `resolveRoles` makes, without the database's
+ *    columns), and the generated tables (src/cli/generated-files.ts `readGenerated`, whose refusals are said and never
+ *    stop a project, as at a start). No database is connected to: the URL is the replica's environment's there, and the
+ *    `.env` here may name a development database. A project the check refuses is refused here, and nothing is sent.
+ *
+ * 2. THE FILES ARE `projectFiles` (src/lib/project-files.ts), the one list of a project's files, read whole: each a
+ *    regular file inside the project folder (a symbolic link that leaves it is refused), valid UTF-8, at most
+ *    `MAX_FILE_BYTES`, all of them at most `MAX_TOTAL_BYTES` and `MAX_FILES`, each path in the grammar the contract
+ *    names (`PATH_SEGMENT`). Every file the readers above read must be one of them: a file read through a linked folder,
+ *    which the list does not follow, would be checked here and missing there. A `url:` written with its password is
+ *    refused: the files are kept by the service, and a secret is never one of them.
+ *
+ * 3. `--dry-run` prints what would be sent (each path, its size, its sha256) and sends nothing.
+ *
+ * 4. THE REPLICA is `--replica <org>/<name>`, else `MASON_REPLICA`, each part `REPLICA_PART`; THE TOKEN is `MASON_TOKEN`,
+ *    else the saved login for the service (src/cli/credentials.ts) — never on a command line, never printed, masked in
+ *    everything printed from the service (`serviceText`).
+ *
+ * 5. THE WAIT is bounded by `--timeout` (an interval, 10m by default): a poll every `POLL_MS`, or what `Retry-After`
+ *    asks; an answer that cannot say (no answer, a 429, a 5xx) is a wait, never an outcome. Exit 0 only when the
+ *    replica runs this deploy; 1 when Mason there refused it (its failure printed as it came, unchanged) or the deploy
+ *    failed; 124 at the timeout, which stops nothing: the deploy's id says where to look.
+ */
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
+import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { environmentToken, readLogins, TOKEN_ENV } from "./credentials.ts";
+import { call, failureShape, isFailure, serviceFailure, serviceOf, serviceText, unexpected, type Service } from "./hosted.ts";
+import { maskedUrl } from "./preflight.ts";
+import { theProject, type Project } from "./project.ts";
+import { commandPinProblem } from "./pin.ts";
+import { readPin } from "../lib/project-version.ts";
+import { projectFiles } from "../lib/project-files.ts";
+import { readSourceFile, shownPath } from "./sources.ts";
+import { readRoles, roleProblems, rolesFailure, rolesFile } from "./roles.ts";
+import { readGenerated } from "./generated-files.ts";
+import { refusalText } from "../duck/generated-plan.ts";
+import { parseDuration } from "../lib/table-sync.ts";
+import { textEntry } from "../lib/log.ts";
+import { sayAgain } from "./commands.ts";
+import { err as styleErr, out as styleOut, stepRenderer } from "./style.ts";
+import { version } from "./version.ts";
+
+/** What one part of a replica's name may be: an organisation's slug, a replica's name. */
+export const REPLICA_PART = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const REPLICA_ENV = "MASON_REPLICA";
+/** The bounds of what a deploy sends: one file, all of them, how many. */
+export const MAX_FILE_BYTES = 256 * 1024;
+export const MAX_TOTAL_BYTES = 1024 * 1024;
+export const MAX_FILES = 500;
+/** One part of a sent path: what the contract takes (a dotfile is never a project file). */
+export const PATH_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+const MAX_PATH = 255;
+/** How often the deploy's state is asked for, when the service asks no other. */
+export const POLL_MS = 2_000;
+const DEFAULT_TIMEOUT = "10m";
+/** A deploy's id, as it goes into a path: the contract's grammar. */
+const DEPLOY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const STATUSES = ["queued", "applying", "starting", "running", "refused", "failed"] as const;
+type Status = typeof STATUSES[number];
+const FINAL: ReadonlySet<Status> = new Set(["running", "refused", "failed"]);
+
+const out = (m: string): void => { process.stdout.write(`${m}\n`); };
+const say = (m: string): void => { process.stderr.write(`${m}\n`); };
+
+export const DEPLOY: CommandSpec & { needs: "project" } = {
+  needs: "project",
+  name: "deploy",
+  summary: "send this project to a replica on a hosted Mason service, and wait until the replica runs it",
+  usage: `usage: mason deploy [--replica <org>/<name>] [--dry-run] [--timeout <interval>] [--json]
+
+  Sends this project's files (what mason/ holds that Mason reads: the sources file, mason.yml, roles.yml, the
+  generated tables — never .env, .mason/, a dotfile or a file that is not YAML) to a replica on a hosted Mason
+  service, then waits until Mason on the replica runs them, or refuses them. The project is checked here first, as
+  mason start checks it, without connecting to any database (the replica's own environment names its URL); a
+  project that would be refused is refused here, and nothing is sent. A url: written with its password is refused:
+  write url: \${DATABASE_URL} and set it on the replica.
+
+  The replica is --replica <org>/<name>, else MASON_REPLICA (each part lower case letters, digits and -). The login
+  is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default. Progress
+  goes to stderr; the answer is printed when it ends.
+
+    mason deploy --replica acme/shop
+    mason deploy --replica acme/shop --dry-run     what would be sent, sending nothing
+    MASON_REPLICA=acme/shop mason deploy --timeout 30m
+
+  --replica <org>/<name>   the replica to deploy to (else MASON_REPLICA)
+  --dry-run                print each file that would be sent, its size and its sha256, and send nothing (no
+                           login needed)
+  --timeout <interval>     how long to wait for the outcome (default ${DEFAULT_TIMEOUT}; 1s to 24h); the deploy goes on after it
+  --json                   as data, once it ends: { dryRun, replica (null when none is named on a dry run),
+                           service, files: [{ path, size, sha256 }], totalBytes, warnings (the generated tables
+                           refused, as mason start says them), deploy ({ id, status, phase, createdAt, finishedAt };
+                           null on a dry run), error (when the replica refused it, it failed or the wait timed out:
+                           { code, message, why, fix }), next }
+
+  Exit status: 0 the replica runs it (or a dry run printed); 1 refused here or by the service, refused by Mason on
+  the replica (its failure printed as it came), the deploy failed, or the service answered outside its contract; 2 a
+  wrong command line; 124 the wait timed out (nothing stopped: the deploy's id says where to look).
+`,
+  options: { replica: { type: "string" }, "dry-run": { type: "boolean", default: false }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
+  json: ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "deploy", "error", "next"],
+};
+
+/** A replica: its organisation and its name, and where it was named. */
+export interface Replica { org: string; name: string; from: "--replica" | typeof REPLICA_ENV }
+const replicaText = (r: Replica): string => `${r.org}/${r.name}`;
+
+/** The replica the command means: `--replica`, else `MASON_REPLICA`; null when neither names one, a Failure when it is
+ *  not `<org>/<name>` (never repeated beyond 200 characters, made printable). */
+export function replicaOf(flag: string | undefined, env: NodeJS.ProcessEnv = process.env): Replica | Failure | null {
+  const from = flag !== undefined ? "--replica" : env[REPLICA_ENV] !== undefined ? REPLICA_ENV : null;
+  if (from === null) return null;
+  const raw = (from === "--replica" ? flag : env[REPLICA_ENV]) ?? "";
+  const parts = raw.split("/");
+  if (parts.length === 2 && REPLICA_PART.test(parts[0]!) && REPLICA_PART.test(parts[1]!)) return { org: parts[0]!, name: parts[1]!, from };
+  return { message: `${from} ${JSON.stringify(serviceText(raw, 200))} is not <org>/<name>`, code: from === "--replica" ? "usage" : "refused",
+    why: "an organisation's slug and a replica's name, each 1 to 63 lower case letters, digits and -, starting with a letter or digit",
+    fix: from === "--replica" ? "name it as the service lists it: --replica acme/shop" : `set ${REPLICA_ENV}=<org>/<name> (acme/shop), or unset it and pass --replica`,
+    ...(from === "--replica" ? { usage: DEPLOY.usage } : {}) };
+}
+
+/** A file as it is sent: its path (relative to the project folder, `/` between its parts), size in bytes, sha256 of its
+ *  bytes (lower case hex), and its text. */
+export interface DeployFile { path: string; size: number; sha256: string; content: string }
+
+/** What the project's check says beside a pass: the generated tables refused (said, as a start says them). */
+export interface Checked { warnings: string[] }
+
+/** A `url:` that carries a password: in the URL's user part, or as a `password=` parameter. */
+function writesPassword(url: string): boolean {
+  return maskedUrl(url) !== url || /(?:^|[\s?&;])password\s*=/i.test(url);
+}
+
+/**
+ * THE PROJECT CHECKED AS `mason start` CHECKS IT BEFORE IT CONNECTS, offline: the pin, the sources file, the roles
+ * file against the tables the sources file names, the generated tables (said, never refusing). A Failure for what a
+ * start would refuse; else the warnings, and every file the check read (each must be among the files sent).
+ */
+export function checkProject(p: Project, cliVersion: string = version()): (Checked & { read: string[] }) | Failure {
+  const read: string[] = [];
+  // the pin: a mason.yml that cannot be read is refused whatever this command's version (a checkout's `dev` checks no
+  // version, and the replica's image reads the same file)
+  const pin = readPin(p.folder);
+  if ("problem" in pin) return { message: pin.problem, code: "refused", fix: `edit ${shownPath(p.root, pin.file)}: write version: <x.y.z>, the Mason version the project is written for` };
+  if (pin.pin !== null) read.push(pin.file);
+  const pinned = commandPinProblem(p.folder, cliVersion);
+  if (pinned) return { message: pinned.problem, code: "refused", ...(pinned.ways.length ? { fix: pinned.ways.join("; or ") } : {}) };
+
+  const src = readSourceFile(p.folder, p.root);
+  if ("message" in src) return src;
+  read.push(src.file);
+  if ("literal" in src.url && writesPassword(src.url.literal)) {
+    const shown = shownPath(p.root, src.file);
+    return { message: `${shown}: url: is written with its password`, code: "refused",
+      why: "a deploy sends the project's files to the service, which keeps them: a password is never one of them",
+      fix: `write url: \${DATABASE_URL} in ${shown}, and set DATABASE_URL on the replica (its own environment, on the service); keep the URL here in .env` };
+  }
+
+  const generated = readGenerated(p.folder, p.root);
+  for (const g of [...generated.definitions, ...generated.refused]) read.push(path.resolve(p.root, g.file));
+  const warnings = generated.refused.flatMap((g) => g.refusals.map((r) => refusalText(g.file, r)));
+
+  const roles = readRoles(p.folder, p.root);
+  if (roles !== null && "message" in roles) return roles;
+  if (roles !== null) {
+    read.push(rolesFile(p.folder));
+    // the tables the sources file names and the generated tables, as the start holds the roles to them — their columns
+    // are the database's, which a deploy does not read: the replica's start holds them
+    const named = [...src.tables.map((e) => ({ source: e.table, columns: null })),
+      ...[...generated.definitions, ...generated.refused].map((g) => ({ source: g.name, columns: [], pending: true as const }))];
+    const problems = roleProblems(roles, named);
+    if (problems.length) return rolesFailure(roles.file, p.root, problems);
+  }
+  return { warnings, read };
+}
+
+const bytes = (n: number): string => `${n.toLocaleString("en-US")} bytes`;
+
+/** A file refused, with the way out. */
+const refuse = (message: string, why: string, fix: string): Failure => ({ message, code: "refused", why, fix });
+
+/**
+ * THE FILES A DEPLOY SENDS: `projectFiles` of the project folder, each read and held to the contract's bounds, and
+ * every file the check read among them. A Failure naming the file and the bound otherwise.
+ */
+export function deployFiles(p: Project, read: readonly string[]): DeployFile[] | Failure {
+  const folder = p.folder, shownFolder = `${shownPath(p.root, folder)}/`;
+  // a project whose files are the application's own folder (mason init --folder .) would send every YAML file of the
+  // application — its compose files, its CI, its config — to the service: refused, fail closed
+  if (path.resolve(folder) === path.resolve(p.root)) {
+    return refuse("this project's files are its folder's own (mason init --folder .), beside the application's",
+      "a deploy sends every .yml and .yaml under the project's files, and here that is every one of the application's",
+      `move mason.yml, roles.yml, sources/ and generated_tables/ into a folder of their own (mason/), and set "folder": "mason" in ${shownPath(p.root, path.join(p.dir, "config.json"))}`);
+  }
+  let list: string[], realFolder: string;
+  try { list = projectFiles(folder); realFolder = fs.realpathSync(folder); }
+  catch (e) { return { message: `the project's files in ${shownFolder} cannot be listed`, code: "failed", why: (e as Error).message, fix: "make the folder readable, then mason deploy again" }; }
+  if (list.length > MAX_FILES) return refuse(`${shownFolder} has ${list.length} project files, over the ${MAX_FILES} a deploy sends`, "a project file is any .yml or .yaml under it", `move the files Mason does not read out of ${shownFolder}`);
+  const files: DeployFile[] = [];
+  let total = 0;
+  for (const file of list) {
+    const shown = shownPath(p.root, file);
+    const rel = path.relative(folder, file).split(path.sep).join("/");
+    const parts = rel.split("/");
+    if (rel.length > MAX_PATH || !parts.every((s) => PATH_SEGMENT.test(s))) {
+      return refuse(`${shown}: its path is not one a deploy sends`, `each part of a path is letters, digits, ., _ and -, starting with a letter, a digit or _, and the path at most ${MAX_PATH} characters`, "rename it (a generated table's file is named for its table)");
+    }
+    let real: string, st: fs.Stats;
+    try { real = fs.realpathSync(file); st = fs.statSync(real); }
+    catch (e) { return { message: `${shown} cannot be read`, code: "failed", why: (e as Error).message, fix: "make it readable, or move it out of the project folder" }; }
+    const inside = path.relative(realFolder, real);
+    if (inside === "" || inside.startsWith("..") || path.isAbsolute(inside)) {
+      return refuse(`${shown} is a symbolic link to ${real}, outside the project folder`, "a deploy sends the project folder's own files, and never follows a link out of it", `put the file itself in ${shownFolder}, or remove the link`);
+    }
+    if (!st.isFile()) return refuse(`${shown} is not a file`, "a project file is a regular file", `move it out of ${shownFolder}`);
+    if (st.size > MAX_FILE_BYTES) return refuse(`${shown} is ${bytes(st.size)}, over the ${bytes(MAX_FILE_BYTES)} (256 KiB) a deploy sends of one file`, "a project's files name tables, columns and SQL: none is that large", `shorten it, or move it out of ${shownFolder} if Mason does not read it`);
+    let buf: Buffer;
+    try { buf = fs.readFileSync(real); }
+    catch (e) { return { message: `${shown} cannot be read`, code: "failed", why: (e as Error).message, fix: "make it readable, or move it out of the project folder" }; }
+    if (buf.length > MAX_FILE_BYTES) return refuse(`${shown} is ${bytes(buf.length)}, over the ${bytes(MAX_FILE_BYTES)} (256 KiB) a deploy sends of one file`, "it grew while it was read", "mason deploy again once it is written");
+    let content: string;
+    try { content = new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+    catch { return refuse(`${shown} is not UTF-8 text`, "a deploy sends each file as UTF-8 text, as Mason reads it", "save it as UTF-8"); }
+    total += buf.length;
+    files.push({ path: rel, size: buf.length, sha256: createHash("sha256").update(buf).digest("hex"), content });
+  }
+  if (total > MAX_TOTAL_BYTES) {
+    const largest = [...files].sort((a, b) => b.size - a.size).slice(0, 3).map((f) => `${f.path} ${bytes(f.size)}`).join(", ");
+    return refuse(`the project's files are ${bytes(total)} in all, over the ${bytes(MAX_TOTAL_BYTES)} (1 MiB) a deploy sends`, `the largest: ${largest}`, `move the files Mason does not read out of ${shownFolder}`);
+  }
+  // every file the check read is sent: one read through a linked folder, which the list does not follow, would be
+  // checked here and missing on the replica
+  const sent = new Set(list.map((f) => path.resolve(f)));
+  const missing = read.filter((f) => !sent.has(path.resolve(f)));
+  if (missing.length) {
+    return refuse(`${shownPath(p.root, missing[0]!)} is read by Mason, and is not among the files a deploy sends`, "a folder of the project is a symbolic link, which a deploy does not follow",
+      `replace the link with the folder itself, inside ${shownFolder}`);
+  }
+  return files;
+}
+
+/** The deploy as the service says it (docs/HOSTED-API.md), every string made printable and masked. */
+export interface DeployState { id: string; status: Status; phase: string | null; createdAt: string; finishedAt: string | null; failure: Failure | null }
+
+const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const isTime = (v: unknown): v is string => typeof v === "string" && v.length <= 64 && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(v) && !Number.isNaN(Date.parse(v));
+
+/** `{ deploy: { … } }` held to its shape, the id this command asked for; null when it is not that shape. */
+export function deployStateOf(json: unknown, id: string | null, secrets: readonly string[]): DeployState | null {
+  if (!obj(json) || !obj(json.deploy)) return null;
+  const d = json.deploy;
+  if (typeof d.id !== "string" || !DEPLOY_ID.test(d.id) || (id !== null && d.id !== id)) return null;
+  if (typeof d.status !== "string" || !(STATUSES as readonly string[]).includes(d.status)) return null;
+  const status = d.status as Status;
+  if (d.phase !== undefined && d.phase !== null && (typeof d.phase !== "string" || d.phase.length > 200)) return null;
+  if (!isTime(d.createdAt) || (d.finishedAt !== undefined && d.finishedAt !== null && !isTime(d.finishedAt))) return null;
+  // a refusal or a failure carries the failure shape (its code, message, why, fix and next in one object), and nothing else does
+  let failure: Failure | null = null;
+  if (status === "refused" || status === "failed") {
+    if (!obj(d.failure)) return null;
+    failure = failureShape(d.failure, d.failure.next, secrets);
+    if (failure === null) return null;
+  } else if (d.failure !== undefined && d.failure !== null) return null;
+  const phase = typeof d.phase === "string" && d.phase.trim() !== "" ? serviceText(d.phase.trim().replace(/\n/g, " "), 200, secrets) : null;
+  return { id: d.id, status, phase, createdAt: d.createdAt, finishedAt: typeof d.finishedAt === "string" ? d.finishedAt : null, failure };
+}
+
+/** A status for a person, its phase beside it. */
+const STATUS_WORDS: Record<Status, string> = {
+  queued: "Queued: waiting for its turn on the replica",
+  applying: "Applying: Mason on the replica checks and takes the files",
+  starting: "Starting: Mason on the replica starts on the new files",
+  running: "Running: the replica runs the new files",
+  refused: "Refused by Mason on the replica",
+  failed: "The deploy failed",
+};
+const NEXT_AGAIN = (r: Replica): NextStep[] => [[`mason deploy --replica ${replicaText(r)}`, "deploy again, after the next edit"]];
+const stateLine = (s: DeployState): string => `${STATUS_WORDS[s.status]}${s.phase ? ` (${s.phase})` : ""}`;
+
+/** The token a deploy is sent with: MASON_TOKEN, else this machine's login to the service; a Failure naming mason login. */
+function tokenFor(service: Service): string | Failure {
+  const env = environmentToken();
+  if (env !== null) return env;
+  const read = readLogins();
+  if (isFailure(read)) return read;
+  const saved = read.logins.logins[service.base];
+  if (saved !== undefined) return saved.token;
+  return { message: `this machine is not signed in to ${service.base}`, code: "refused", why: `a deploy is sent as a person signed in (mason login), or with a token in ${TOKEN_ENV} (CI)`,
+    fix: `run mason login, then mason deploy again; in CI, set ${TOKEN_ENV} to a CI token`, next: [["mason login", `sign this machine in to ${service.base}`]] };
+}
+
+export async function deploy(argv: string[]): Promise<number> {
+  const f = parseCommand(DEPLOY, argv);
+  if (typeof f === "number") return f;
+  const json = f.values.json === true;
+  const dryRun = f.values["dry-run"] === true;
+  if (f.positionals.length) return failed("deploy", { message: "it takes no argument", code: "usage", why: "the project is the folder's, the replica --replica's", usage: DEPLOY.usage }, { json });
+  const timeoutText = typeof f.values.timeout === "string" ? f.values.timeout : DEFAULT_TIMEOUT;
+  const timeout = parseDuration(timeoutText);
+  if ("problem" in timeout) return failed("deploy", { message: `--timeout ${timeout.problem}`, code: "usage", usage: DEPLOY.usage }, { json });
+  const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined);
+  if (replica !== null && isFailure(replica)) return failed("deploy", replica, { json });
+  if (replica === null && !dryRun) {
+    return failed("deploy", { message: "no replica named", code: "usage", why: "a deploy goes to one replica of the service",
+      fix: `name it: mason deploy --replica <org>/<name>, or set ${REPLICA_ENV}=<org>/<name>`, usage: DEPLOY.usage }, { json });
+  }
+  const service = serviceOf();
+  if (isFailure(service)) return failed("deploy", service, { json });
+
+  // THE PROJECT, checked as a start checks it, offline; then its files
+  const t = theProject(process.cwd());
+  if ("problem" in t) return failed("deploy", t, { json });
+  const project = t.project;
+  const checked = checkProject(project);
+  if (isFailure(checked)) return failed("deploy", checked, { json });
+  const files = deployFiles(project, checked.read);
+  if (isFailure(files)) return failed("deploy", files, { json });
+  const totalBytes = files.reduce((n, x) => n + x.size, 0);
+  const listed = files.map(({ path: p, size, sha256 }) => ({ path: p, size, sha256 }));
+  const base = { replica: replica === null ? null : replicaText(replica), service: service.base, files: listed, totalBytes, warnings: checked.warnings };
+  if (!json) for (const w of checked.warnings) process.stderr.write(textEntry("  ! ", w));
+
+  if (dryRun) {
+    const next: NextStep[] = replica === null
+      ? [["mason deploy --replica <org>/<name>", "send it to a replica"]]
+      : [[`mason deploy --replica ${replicaText(replica)}`, "send it"]];
+    if (json) { out(jsonText(DEPLOY, { dryRun: true, ...base, deploy: null }, next)); return 0; }
+    const w = Math.max(...files.map((x) => x.path.length)), sw = Math.max(...files.map((x) => bytes(x.size).length));
+    out(reportText({
+      headline: `Would send ${files.length} file${files.length === 1 ? "" : "s"}, ${bytes(totalBytes)}, ${replica === null ? `to ${service.base} (no replica named)` : `to ${replicaText(replica)} on ${service.base}`}; nothing was sent`,
+      details: files.map((x): [string, string] => [x.path.padEnd(w), `${bytes(x.size).padStart(sw)}   sha256 ${x.sha256}`]),
+      next,
+    }, styleOut()));
+    return 0;
+  }
+  const r = replica!;
+  const token = tokenFor(service);
+  if (isFailure(token)) return failed("deploy", token, { json });
+  const secrets = [token];
+  const where = `/v1/replicas/${r.org}/${r.name}/deploys`;
+  const started = Date.now(), deadline = started + timeout.seconds * 1000;
+
+  // THE DEPLOY, SENT: 201 and its id, else the service's failure as it worded it
+  const sent = await call(service, "POST", where, { token, json: { files: files.map(({ path: p, sha256, content }) => ({ path: p, sha256, content })), client: { version: version() } } });
+  if (isFailure(sent)) {
+    return failed("deploy", { ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}no answer came back, so whether the deploy was made is not known`,
+      fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)`, exit: 1 }, { json });
+  }
+  if (sent.status !== 201) return failed("deploy", { ...(serviceFailure(sent, secrets) ?? unexpected(service, sent, "a deploy was sent")), exit: 1 }, { json });
+  const first = deployStateOf(sent.json, null, secrets);
+  if (first === null || first.status !== "queued") return failed("deploy", { ...unexpected(service, sent, "a deploy was sent"), exit: 1 }, { json });
+  const id = first.id;
+  const s = styleErr();
+  const terminal = !json && process.stderr.isTTY === true;
+  const steps = stepRenderer({ line: say, live: terminal ? process.stderr : null, style: s });
+  if (!json) say(`Sent ${files.length} file${files.length === 1 ? "" : "s"} (${bytes(totalBytes)}) to ${replicaText(r)} on ${service.base}: deploy ${id}`);
+
+  // THE WAIT: a line when the state changes (and every 30 s while it does not), a spinner beside it on a terminal
+  let state = first, said = "", saidAt = 0, unsure: string | null = null;
+  const show = (line: string): void => {
+    if (json) return;
+    if (terminal) { if (line !== said) { steps.begin(line); said = line; } return; }
+    if (sayAgain(line, said, saidAt, Date.now())) { say(`  ${line}`); said = line; saidAt = Date.now(); }
+  };
+  show(stateLine(state));
+  let waitMs = sent.retryAfter !== null ? sent.retryAfter * 1000 : POLL_MS;
+  const ended = (error: Failure | null): number => {
+    const value = { dryRun: false, ...base, deploy: { id, status: state.status, phase: state.phase, createdAt: state.createdAt, finishedAt: state.finishedAt } };
+    if (json) {
+      if (error === null) { out(jsonText(DEPLOY, value, NEXT_AGAIN(r))); return 0; }
+      out(jsonText(DEPLOY, { ...value, error: errorJson(error) }, error.next ?? []));
+      return exitOf(error);
+    }
+    // the step it ended on: the outcome's own line when it has one, else (a timeout, an answer outside the contract) the last
+    const line = FINAL.has(state.status) ? stateLine(state) : null;
+    if (terminal) { if (error === null) steps.done(line ?? undefined); else steps.fail(line ?? undefined); }
+    else if (line !== null && line !== said) say(`  ${line}`);
+    if (error !== null) return failed("deploy", error, { json: false });
+    out(reportText({ headline: `Deployed to ${replicaText(r)}: the replica runs it`,
+      details: [["deploy", id], ["service", service.base], ["files", `${files.length} (${bytes(totalBytes)})`], ["took", `${Math.max(1, Math.round((Date.now() - started) / 1000))} s`]],
+      next: NEXT_AGAIN(r) }, styleOut()));
+    return 0;
+  };
+  for (;;) {
+    if (FINAL.has(state.status)) {
+      if (state.status === "running") return ended(null);
+      // Mason on the replica refused it, or it failed: the service's failure as it came, never re-worded; exit 1 whatever its code
+      return ended({ ...state.failure!, exit: 1 });
+    }
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      return ended({ message: `deploy ${id} to ${replicaText(r)} did not finish within ${timeout.every}`, code: "timeout",
+        why: unsure !== null ? `the service could not say how it is going: ${unsure}` : `it was last: ${stateLine(state)}`,
+        fix: `nothing was stopped, and it may still finish: the service's web app shows deploy ${id} of ${replicaText(r)}, as GET ${where}/${id} does (docs/HOSTED-API.md); a longer wait is --timeout 30m`,
+        next: [] });
+    }
+    await sleep(Math.min(waitMs, left));
+    const a = await call(service, "GET", `${where}/${id}`, { token });
+    waitMs = POLL_MS;
+    // an answer that cannot say how it goes is a wait, never an outcome: the timeout bounds it
+    if (isFailure(a) || a.status === 429 || a.status >= 500) {
+      unsure = isFailure(a) ? serviceText(`${a.message}${a.why ? ` (${a.why})` : ""}`, 300, secrets) : `${a.what} answered ${a.status}`;
+      if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+      show(`${stateLine(state)}; the service could not say more just now (${unsure}): asking again`);
+      continue;
+    }
+    if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+    // a refusal of the question (the token revoked meanwhile, the replica gone) is the service's, as it worded it
+    if (a.status !== 200) return ended({ ...(serviceFailure(a, secrets) ?? unexpected(service, a, "the deploy's state was asked for")), exit: 1 });
+    const now = deployStateOf(a.json, id, secrets);
+    if (now === null) return ended({ ...unexpected(service, a, "the deploy's state was asked for"), exit: 1 });
+    state = now; unsure = null;
+    if (!FINAL.has(state.status)) show(stateLine(state));
+  }
+}

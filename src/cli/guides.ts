@@ -148,7 +148,7 @@ ${commands}
     0  done
     1  failed, with the reason
     2  the command line is wrong (without --json the usage follows)
-    124  ran out of time: mason wait
+    124  ran out of time: mason wait, mason deploy (nothing stopped)
   The codes:
 ${codes}
 

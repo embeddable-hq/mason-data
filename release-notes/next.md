@@ -20,6 +20,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this
   machine). Nothing changes for a project, `mason start` or `mason serve`. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md)
   is the API they speak.
+- **`mason deploy` sends the project to a replica on a hosted Mason service** (`--replica <org>/<name>`, else
+  `MASON_REPLICA`), and waits until the replica runs it or Mason there refuses it. The project is checked first as
+  `mason start` checks it, without connecting to any database; only its YAML under `mason/` is sent, never `.env` or
+  `.mason/`, and a `url:` written with its password is refused. `--dry-run` lists what would be sent and sends nothing.
 - **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
   COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
   of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE

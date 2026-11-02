@@ -161,7 +161,7 @@ export const FAILURE_CODES = {
   nothing_yet: "nothing to work on yet: no table added (the next steps say what adds one)",
   refused: "Mason refused what was asked, with the reason",
   failed: "the command tried and could not finish: the reason, and what to do",
-  timeout: "ran out of time — mason wait; nothing stopped (exit 124)",
+  timeout: "ran out of time — mason wait, mason deploy; nothing stopped (exit 124)",
 } as const;
 export type FailureCode = keyof typeof FAILURE_CODES;
 

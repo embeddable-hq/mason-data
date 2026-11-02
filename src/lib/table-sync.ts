@@ -67,8 +67,9 @@ export function intervalOf(seconds: number): string {
   return s % 3600 === 0 ? `${s / 3600}h` : s % 60 === 0 ? `${s / 60}m` : `${s}s`;
 }
 
-/** an interval (`<n>s|m|h`) read, or why it is not one, with the interval to write when there is one. ONE grammar with two
- *  entrances, each worded as it is written: a `sync:`'s `poll <interval>`, and a generated table's `target_lag:` */
+/** an interval (`<n>s|m|h`) read, or why it is not one, with the interval to write when there is one. ONE grammar with three
+ *  entrances, each worded as it is written: a `sync:`'s `poll <interval>`, a generated table's `target_lag:`, and a
+ *  command's wait (`parseDuration`) */
 function parseInterval(v: string, write = "poll "): { every: string; seconds: number } | { problem: string } {
   const m = /^(\d+(?:\.\d+)?)\s*([a-z]+)$/i.exec(v);
   const examples = write === "" ? "5s, 5m or 1h" : EXAMPLES;
@@ -95,6 +96,12 @@ function parseInterval(v: string, write = "poll "): { every: string; seconds: nu
  *  poll's takes, or what is wrong with it in the words a person fixes it from. */
 export function parseLag(v: unknown): { every: string; seconds: number } | { problem: string } {
   if (typeof v !== "string" || v.trim() === "") return { problem: `is ${v === null || v === undefined ? "nothing" : typeof v === "number" ? `the number ${String(v)}` : "not an interval"}: write how far behind the table may be, like 30s, 5m or 1h` };
+  return parseInterval(v.trim(), "");
+}
+
+/** A command's own wait, as an interval (`mason deploy --timeout 10m`): the grammar and range a poll's and a `target_lag:`
+ *  take, so a span of time is written one way at every entrance. */
+export function parseDuration(v: string): { every: string; seconds: number } | { problem: string } {
   return parseInterval(v.trim(), "");
 }
 
