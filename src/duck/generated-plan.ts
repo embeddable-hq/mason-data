@@ -598,16 +598,17 @@ const made = (sql: string, held: number, scale: Scale, from: readonly Stored[]):
  * `trunc(x, n)` (n < 0: none), a cast to numeric(p,s), `floor` and `ceil`, each rounded half away from zero as Postgres
  * rounds. A GREATEST, LEAST, COALESCE or CASE is the value it takes, each argument cast to the most decimals any holds so
  * none loses a digit. Not stored here: a division (the engine divides a numeric as a double; an average is one).
+ * One node at a time: its children are `sub`'s (`storedProgram`, which walks each distinct node once).
  */
-function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[]): Stored | NotStored {
+function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[], sub: (x: NumericProgram) => Stored | NotStored): Stored | NotStored {
   // a numeric read from text is its text until a typmod gives it a scale: nothing else computes over it
   const all = (args: readonly NumericProgram[]): Stored[] | NotStored => {
     const out: Stored[] = [];
-    for (const a of args) { const x = storedNumeric(a, types, cells); if ("why" in x) return x; if (x.scale === "text") return { why: "text" }; out.push(x); }
+    for (const a of args) { const x = sub(a); if ("why" in x) return x; if (x.scale === "text") return { why: "text" }; out.push(x); }
     return out;
   };
   const one = (arg: NumericProgram, make: (x: Stored) => Stored): Stored | NotStored => {
-    const x = storedNumeric(arg, types, cells);
+    const x = sub(arg);
     return "why" in x ? x : x.scale === "text" ? { why: "text" } : make(x);
   };
   // a scale the types fix again: the value cast to it
@@ -650,7 +651,7 @@ function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly Ce
     case "trunc": return toPlace("trunc", p.arg, p.scale);
     // numeric(p, s) past 38 digits holds what DECIMAL(38, s) does, for a value the engine computed
     case "typmod": {
-      const x = storedNumeric(p.arg, types, cells);
+      const x = sub(p.arg);
       return "why" in x ? x : fixed(x, x.sql, p.scale, Math.min(38, p.precision));
     }
     // past MAX_STORED_SCALE the cast could overflow: the value as held, its scale the types' (refused at the top, unless
@@ -659,7 +660,7 @@ function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly Ce
     case "greatest": case "least": case "coalesce": case "pick": {
       // a sum of numbers read from text (src/duck/rewrite.ts `summed`): its exact sum, or the double's NaN or Infinity,
       // which no stored numeric holds; the exact sum's refusal is the form's true reason
-      if (p.op === "pick" && p.args[0]?.op === "rescale") return storedNumeric(p.args[0], types, cells);
+      if (p.op === "pick" && p.args[0]?.op === "rescale") return sub(p.args[0]);
       const xs = all(p.args);
       if (!Array.isArray(xs)) return xs;
       const held = Math.max(0, ...xs.map((x) => x.held));
@@ -668,7 +669,7 @@ function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly Ce
       const scale: Scale = scales.size === 1 ? [...scales][0]! : scaleOf(xs, () => -1) === -1 ? "picks" : scaleOf(xs, () => -1);
       // (differing numbers: the value taken decides, "picks"; a scale decided per row stays so)
       if (p.op !== "pick") return made(`${p.op}(${args.join(", ")})`, held, scale, xs);
-      const index = storedNumeric(p.index, types, cells);
+      const index = sub(p.index);
       if ("why" in index) return index;
       return made(`(CASE CAST(${index.sql} AS BIGINT) ${args.map((a, i) => `WHEN ${i} THEN ${a}`).join(" ")} END)`, held, scale, [...xs, index]);
     }
@@ -677,6 +678,62 @@ function storedNumeric(p: NumericProgram, types: EngineTypes, cells: readonly Ce
     case "stddev": return { sql: "NULL", held: 0, peak: 0, scale: "value", engine: true };
     case "rescale": return one(p.arg, (x) => ({ ...x, scale: typeof x.scale === "number" ? "rows" : x.scale }));
   }
+}
+
+/**
+ * A PROGRAM AS STORED, LINEAR IN ITS DISTINCT NODES (issue 244, #484): a program's node may be shared by several parents
+ * (src/lib/pg-numeric.ts; a FROM item's column read k times a level, `c + c - c` through every level), so each node is
+ * judged ONCE (`storedNumeric`, memoised), and a node several parents read is written ONCE: its DECIMAL expression is a
+ * column of its own (`layers`, `__mason_output."__mason_s<column>_<k>"`, computed below the column's SELECT, each layer
+ * over the one before: src/duck/generated.ts), and every parent reads that column. Never one that Postgres would not
+ * compute for every row: a node only a CASE's arm or a COALESCE's later argument reaches (`always` is the rest) and
+ * that can raise (a `mod`, by zero; a typmod, past its precision) stays written in its parents, as before, since a layer
+ * computes it for every row. A leaf (a cell, a literal) is short, and written where it is read.
+ */
+function storedProgram(p: NumericProgram, types: EngineTypes, cells: readonly CellConv[], column: number): { stored: Stored | NotStored; layers: string[] } {
+  const children = (x: NumericProgram): NumericProgram[] => x.op === "cell" || x.op === "literal" ? [] : "args" in x
+    ? [...(x.op === "pick" ? [x.index] : []), ...x.args] : x.op === "rescale" ? [x.arg, x.scale] : [x.arg];
+  // each distinct node's parents (a node reached twice from one parent, `c + c`, counts twice)
+  const parents = new Map<NumericProgram, number>();
+  const count = (x: NumericProgram): void => {
+    for (const c of children(x)) {
+      const n = parents.get(c) ?? 0;
+      parents.set(c, n + 1);
+      if (n === 0) count(c);
+    }
+  };
+  count(p);
+  // the nodes computed for every row: reached from the top through no CASE arm and no COALESCE argument but the first
+  const always = new Set<NumericProgram>();
+  const reach = (x: NumericProgram): void => {
+    if (always.has(x)) return;
+    always.add(x);
+    const strict = x.op === "pick" ? [x.index] : x.op === "coalesce" ? x.args.slice(0, 1) : children(x);
+    strict.forEach(reach);
+  };
+  reach(p);
+  const raisesMemo = new Map<NumericProgram, boolean>();
+  const raises = (x: NumericProgram): boolean => {
+    const known = raisesMemo.get(x);
+    if (known !== undefined) return known;
+    const v = x.op === "mod" || x.op === "typmod" || children(x).some(raises);
+    raisesMemo.set(x, v);
+    return v;
+  };
+  const layers: string[] = [], judged = new Map<NumericProgram, Stored | NotStored>();
+  const sub = (x: NumericProgram): Stored | NotStored => {
+    const known = judged.get(x);
+    if (known !== undefined) return known;
+    let s = storedNumeric(x, types, cells, sub);
+    if (!("why" in s) && (parents.get(x) ?? 0) > 1 && x.op !== "cell" && x.op !== "literal" && s.sql !== "NULL" && (always.has(x) || !raises(x))) {
+      const name = `__mason_s${column}_${layers.length}`;
+      layers.push(`${s.sql} AS ${JSON.stringify(name)}`);
+      s = { ...s, sql: `__mason_output.${JSON.stringify(name)}` };
+    }
+    judged.set(x, s);
+    return s;
+  };
+  return { stored: sub(p), layers };
 }
 
 /** a stored numeric's verdict, where all that is around it is known: null where it is stored (a picked value's `scale`:
@@ -767,19 +824,21 @@ export const isNumeric = (c: { type: string }): boolean => /^numeric\b/.test(c.t
  * DECIMAL, an integer as HUGEINT (one type for a numeric of no decimals: a sum of int8, a sign), and a double refused.
  * Before either, the ONE authority: a column whose analysed form the engine computes as a double (`ENGINE_DOUBLES`) is
  * refused by that form, whether the rewrite made a program for it or not.
- * At the check (`planDefinition` with a `describe`) and again at the write, over the SQL that runs.
+ * At the check (`planDefinition` with a `describe`) and again at the write, over the SQL that runs. `layers`: the
+ * columns a computed numeric's shared nodes are written once in (`storedProgram`), each `<expression> AS "<name>"`
+ * over `__mason_output` as the layer before it left it, in order: the write computes each below the table's SELECT.
  */
-export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns: GeneratedColumn[] } | { refused: GeneratedRefusal[] } {
-  const refused: GeneratedRefusal[] = [], exprs = new Map<number, string>();
+export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns: GeneratedColumn[]; layers: string[] } | { refused: GeneratedRefusal[] } {
+  const refused: GeneratedRefusal[] = [], exprs = new Map<number, string>(), layers: string[] = [];
   // what the analysis says the engine computes as a double is refused by its form, whether or not the rewrite made a
   // program for it: no exact program carries one, and the rewrite's silence (src/duck/rewrite.ts `programNeeded`, the
   // wire's rule) stored `stddev(x)::numeric(p,s)` from the engine's double (PR 202 round 11)
   const engineDouble = (i: number): boolean => { const f = d.forms[i]; return f !== null && f !== undefined && ENGINE_DOUBLES.has(f.why); };
   for (const { column, program, cells } of d.numerics) {
-    const name = d.columns[column]!.name, stored = storedNumeric(program, types, cells);
+    const name = d.columns[column]!.name, { stored, layers: own } = storedProgram(program, types, cells, column);
     const no = engineDouble(column) ? { why: "engine" as const } : "why" in stored ? stored : verdict(stored);
     if (no !== null) refused.push(notStoredRefusal(name, no, d.forms[column] ?? null, d.roots[column]));
-    else exprs.set(column, (stored as Stored).sql);
+    else { exprs.set(column, (stored as Stored).sql); layers.push(...own); }
   }
   d.columns.forEach((c, i) => {
     if (!isNumeric(c) || d.numerics.some((n) => n.column === i)) return;
@@ -790,7 +849,7 @@ export function storedColumns(d: DefinitionPlan, types: EngineTypes): { columns:
     else refused.push(notStoredRefusal(c.name, type === "DOUBLE" || type === "FLOAT" ? { why: "engine" } : { why: "other", what: `a value the engine holds as ${type ?? "nothing it names"}` }, d.forms[i] ?? null, d.roots[i]));
   });
   if (refused.length > 0) return { refused };
-  return { columns: d.columns.map((c, i) => { const expr = exprs.get(i); return expr === undefined ? c : { ...c, duck: null, expr }; }) };
+  return { columns: d.columns.map((c, i) => { const expr = exprs.get(i); return expr === undefined ? c : { ...c, duck: null, expr }; }), layers };
 }
 
 /** the tables a definition's SQL names, by name alone (`schema.table`, a bare name `public`'s): what a cycle is told

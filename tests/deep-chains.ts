@@ -37,8 +37,9 @@ export const PLAN_TIME_BOUND_MS = 1000;
  * and `coalesce(b, b, b)` (no text that grows), never `a + a + a` or `b || b || b`. `sI` is the alias at level I. The
  * numeric c is read or carried through every level, and a quotient of it, since issue 244's first piece (#483) took a
  * FROM item's exact-numeric decisions once per column (on main `c + 1` took 399 ms and every column with c 1208 ms at
- * depth 32). Still left out, for #484, whose program is copied into each reference: `c + c - c`, which is exponential,
- * and the UNION ALL chain of a numeric (`deepChains`' union).
+ * depth 32); and read THREE times a level (`numericShapes`) since its second (#484), which made a carried column's
+ * program one node its references share, never a copy each (on main `c + c - c`'s record was 492 KB at depth 8, the
+ * mixed-scale union chain's SQL 3.6 MB, and its depth 10 failed to deparse).
  */
 export function deepShapes(depth: number): Record<string, string> {
   const levels = (start: string, level: (below: string, i: number) => string): string => {
@@ -85,5 +86,42 @@ export function deepShapes(depth: number): Record<string, string> {
     "a quotient passed through": `${levels("SELECT c / 3 AS q FROM t", (s, i) => `SELECT q FROM (${s}) s${i}`)} ORDER BY 1`,
     "q + 1": `${levels("SELECT c / 3 AS q FROM t", (s, i) => `SELECT q + 1 AS q FROM (${s}) s${i}`)} ORDER BY 1`,
     "q + 1, a WITH chain": `WITH ${qq.join(", ")} SELECT q FROM q${depth} ORDER BY 1`,
+    ...numericShapes(depth),
+  };
+}
+
+/** the shapes of `numericShapes`, by name */
+export const NUMERIC_SHAPES = ["344", "numeric union chain", "c + c - c", "q + q - q", "mixed-scale union, nested", "mixed-scale union, a chain",
+  "q + q - q, a WITH chain", "q + q - q, a UNION ALL chain of scales"] as const;
+/** the numeric shapes whose every level writes a program's text of its own (an ORDER BY key over a quotient: O(level)
+ *  distinct nodes at level I), or adds a cell that every level above carries (a UNION ALL's arm number and its own
+ *  cell): their SQL holds O(level) at each level, quadratic in the depth, as main's (the cells) or linear in it at each
+ *  level (the literal), where the record of every shape stays linear (tests/duck-plan-time.test.ts) */
+export const QUADRATIC_SQL: ReadonlySet<string> = new Set(["344", "numeric union chain", "mixed-scale union, nested", "mixed-scale union, a chain", "q + q - q, a UNION ALL chain of scales"]);
+
+/**
+ * Issue 244's second piece (#484): a numeric the engine does not hold as Postgres does (a quotient, a union of scales, a
+ * numeric whose scale the engine drops) read three times a level, `depth` levels deep, over `deepShapes`' table. "344"
+ * is issue 344's statement (a quotient, every level bounded); "mixed-scale" a quotient's arm beside an int and a
+ * char(4) (`SELECT a, d`), at the bottom ("nested") or at every level ("a chain").
+ */
+export function numericShapes(depth: number): Record<(typeof NUMERIC_SHAPES)[number], string> {
+  const levels = (start: string, level: (below: string, i: number) => string): string => {
+    let s = start;
+    for (let i = 1; i <= depth; i++) s = level(s, i);
+    return s;
+  };
+  const ab = "a + a - a AS a, coalesce(b, b, b) AS b";
+  const qq = ["q0 AS (SELECT c / 3 AS q FROM t)"];
+  for (let i = 1; i <= depth; i++) qq.push(`q${i} AS (SELECT q + q - q AS q FROM q${i - 1})`);
+  return {
+    "344": levels("SELECT c / 3 AS a, b FROM t", (s, i) => `SELECT ${ab} FROM (${s}) s${i} ORDER BY a, b LIMIT 100`),
+    "numeric union chain": deepChains("1::numeric", depth).union!,
+    "c + c - c": `${levels("SELECT c FROM t", (s, i) => `SELECT c + c - c AS c FROM (${s}) s${i}`)} ORDER BY 1`,
+    "q + q - q": `${levels("SELECT c / 3 AS q FROM t", (s, i) => `SELECT q + q - q AS q FROM (${s}) s${i}`)} ORDER BY 1`,
+    "mixed-scale union, nested": levels("SELECT c / 3 AS a, b FROM t UNION ALL SELECT a, d FROM t", (s, i) => `SELECT ${ab} FROM (${s}) s${i} ORDER BY a, b LIMIT 100`),
+    "mixed-scale union, a chain": levels("SELECT c / 3 AS a, b FROM t", (s, i) => `SELECT ${ab} FROM ((${s}) UNION ALL SELECT a, d FROM t) s${i} ORDER BY a, b LIMIT 100`),
+    "q + q - q, a WITH chain": `WITH ${qq.join(", ")} SELECT q, q::text FROM q${depth} ORDER BY 1`,
+    "q + q - q, a UNION ALL chain of scales": `${levels("SELECT c / 3 AS q FROM t", (s, i) => `SELECT q + q - q AS q FROM (${s} UNION ALL SELECT c / 7 FROM t) s${i}`)} ORDER BY 1`,
   };
 }

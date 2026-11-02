@@ -10,9 +10,9 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { stopParser } from "../src/api/postgres/parser.ts";
 import type { GeneratedHost } from "../src/duck/generated.ts";
-import { planDefinition, type EngineTypes } from "../src/duck/generated-plan.ts";
+import { planDefinition, storedColumns, type EngineTypes } from "../src/duck/generated-plan.ts";
 import { built, COUNTS, withWorld } from "./duck-generated-world.ts";
-import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
+import { DEEP_DEPTH, DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
 import { scheduled, overLedger, type R11Node, R11_NODES } from "./duck-generated-ledger.ts";
 
 after(() => stopParser());
@@ -106,7 +106,7 @@ test("round 13: a check while a run holds its transaction open never touches the
 // the bound: an int8 stored; a text read as a numeric at the top refused by the form the text was made from, sqrt's, met
 // at the bottom of every path; and with no form below, every path walked to the bottom, refused as a text. (A numeric
 // read through every level: its decisions are taken once per column since #483, tests/duck-wire.test.ts "issue 244";
-// its program copied into each reference, the UNION ALL chain's and `c + c - c`'s, is #484's)
+// its program, shared by its references since #484, is "round 14, a numeric" below)
 type R14Case = { bottom: string; op: string; top: (chain: string) => string; verdict: RegExp | null };
 const R14_CASES: R14Case[] = [
   { bottom: "1::int8", op: "+", top: (c) => c, verdict: null },
@@ -138,6 +138,69 @@ test("round 14: a definition whose every level reads the level below three times
         assert.deepEqual(r.refused.map((x) => c.verdict!.test(x.message)), [true], `${at}: ${JSON.stringify(r.refused)}`);
         assert.ok(r.refused[0]!.options.length > 0, `${at}: no way out`);
       }
+    }
+  });
+});
+
+// ISSUE 244, piece 2 (#484): a numeric read three times a level carries a PROGRAM (a numeric literal's scale the engine
+// drops, a UNION ALL's arms), which was copied into each reference (3^depth; on main `c + c - c` over a literal took
+// 709 ms to check at depth 4), and stored as DECIMAL arithmetic written out per copy. The decision: one node its
+// references share, judged once and written ONCE (`storedProgram`, src/duck/generated-plan.ts: a node several parents
+// read is a column of its own, computed in a layer below the table's SELECT). Each definition is checked within the
+// bound at every depth, its verdict and its stored values at depth 4 main's (measured by the same check at d73ef24), its
+// stored SQL linear in the depth, and the deepest built with Postgres's values (3^depth, and c + c - c is c).
+const R14_NUMERIC: Record<string, { sql: (depth: number) => string; value: (depth: number) => string[] }> = {
+  "1::numeric nested": { sql: (d) => deepChains("1::numeric", d).nested!, value: (d) => [String(3n ** BigInt(d))] },
+  "1::numeric, a WITH chain": { sql: (d) => deepChains("1::numeric", d).with!, value: (d) => [String(3n ** BigInt(d + 1))] },
+  // each arm's 1 at its own level: 3^k for k in 1..d, and the deepest twice
+  "1::numeric, a UNION ALL chain": { sql: (d) => deepChains("1::numeric", d).union!,
+    value: (d) => [...Array.from({ length: d }, (_v, k) => String(3n ** BigInt(k + 1))), String(3n ** BigInt(d))].sort() },
+  "c + c - c over 1.25::numeric(10,2)": { sql: (d) => {
+    let s = "SELECT 1.25::numeric(10,2) AS c";
+    for (let i = 1; i <= d; i++) s = `SELECT c + c - c AS c FROM (${s}) s${i}`;
+    return s;
+  }, value: () => ["1.25"] },
+};
+test("round 14, a numeric (#484): a definition reading a numeric's program three times a level is checked within the bound, stored as main stored it, in SQL linear in the depth", async () => {
+  await withWorld({}, async (w) => {
+    const planner = w.api.planner();
+    const host = (w.sync.generated as unknown as { host: GeneratedHost }).host;
+    const describe = async (sql: string): Promise<EngineTypes> => {
+      const p = await host.checkConnection().prepare(sql);
+      try { return new Map(Array.from({ length: p.columnCount }, (_, i) => { const type = p.columnType(i).toString(); return [[p.columnName(i), type], [`#${i}`, type]] as const; }).flat()); }
+      finally { p.destroySync(); }
+    };
+    const check = async (sql: string) => { await host.settleCheck(); return planDefinition(planner, sql, null, undefined, describe); };
+    assert.ok("definition" in await check("SELECT 1::numeric AS a"));
+    const tables: Array<{ name: string; depth: number; want: string[] }> = [];
+    for (const [i, [name, c]] of Object.entries(R14_NUMERIC).entries()) {
+      const written = new Map<number, number>();
+      for (const depth of DEEP_DEPTHS) {
+        const sql = c.sql(depth), started = performance.now();
+        const r = await check(sql);
+        const ms = performance.now() - started, at = `${name} at depth ${depth}`;
+        assert.ok(ms < 500, `${at}: checked in ${ms.toFixed(0)} ms`);
+        // stored, as main stores it at depth 4 (every one of these: d73ef24's check, and its build's values)
+        assert.ok("definition" in r, `${at}: ${JSON.stringify("refused" in r ? r.refused : null)}`);
+        const stored = storedColumns(r.definition, await describe(r.definition.plan.sql.text));
+        assert.ok("columns" in stored, `${at}: refused at the write`);
+        written.set(depth, stored.columns.reduce((n, x) => n + (x.expr?.length ?? 0), 0) + stored.layers.reduce((n, l) => n + l.length, 0));
+        if (depth === 4 || depth === DEEP_DEPTH) {
+          const table = `r14n_${i}_${depth}`;
+          w.write(table, `kind: scheduled\ntarget_lag: 1h\nsql: |\n  ${sql}\n`);
+          tables.push({ name: table, depth, want: c.value(depth) });
+        }
+      }
+      // what the write computes, linear: twice the levels at most 2.5 times the SQL (on main 3^depth)
+      // (a column with no program, the engine's DECIMAL as it is, writes none at any depth)
+      assert.ok(written.get(8) === 0 ? written.get(16) === 0 : written.get(16)! / written.get(8)! <= 2.5, `${name}: its stored SQL is ${written.get(16)} characters at depth 16, ${written.get(8)} at 8`);
+    }
+    for (const t of tables) {
+      const s = await w.until((x) => x.state === "refused" || x.state === "failed" || built(x), `public.${t.name}`);
+      assert.ok(built(s), `${t.name}: ${s.state} ${typeof s.error === "string" ? s.error : ""} ${JSON.stringify(s.refusals)}`);
+      const column = t.name.startsWith("r14n_3_") ? "c" : "a";
+      const rows = await w.rows(`SELECT CAST(${column} AS VARCHAR) FROM public.${t.name} ORDER BY 1`);
+      assert.deepEqual(rows.map((r) => r[0]), t.want, `${t.name} at depth ${t.depth}`);
     }
   });
 });

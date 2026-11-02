@@ -9,7 +9,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import {
-  add, aggregateType, ceil, div, divScale, evaluate, evaluateText, floor, mod, mul, numericBinary, numericText, parseNumeric, round, stddev, sub, trunc, withTypmod,
+  add, aggregateType, ceil, cellsOf, div, divScale, evaluate, evaluateText, floor, mapCells, mod, mul, numericBinary, numericText, parseNumeric, parseProgram, programJson, round, stddev, sub, trunc, withTypmod,
   wholeNumberOf, NumericError, numericOrderKey, numericToInteger, type NumericProgram, type PgNumeric,
 } from "../src/lib/pg-numeric.ts";
 
@@ -237,4 +237,68 @@ test("integer cast: a numeric's text to int2, int4 and int8 rounds half away fro
       assert.equal(got, want, `${v}::${type}`);
     }
   }
+});
+
+// ISSUE 244, #484: a FROM item's column read k times a level is ONE node the k references share (src/duck/rewrite.ts
+// `carried`), so a program is a DAG, and every reader is linear in its distinct nodes: the one text it leaves the planner
+// in (`programJson`, a node table) and its parser, `cellsOf`, `mapCells`, and evaluation, which computes a shared node at
+// most once a row and only where Postgres computes it. On main each reference held a copy: 3^depth nodes.
+test("a shared program (#484): one text linear in its distinct nodes, a tree's identity, each node once a row, and lazy as Postgres", async () => {
+  const cell = (key: string): NumericProgram => ({ op: "cell", key });
+  type Pair = { readonly args: readonly NumericProgram[] };
+  // P(i) = (P(i-1) - P(i-1)) + P(i-1), shared (one node a level), or copied (a tree): its value is P(0)'s, at P(0)'s scale
+  const chain = (depth: number, bottom: () => NumericProgram, shared: boolean): NumericProgram => {
+    if (!shared) {
+      const tree = (d: number): NumericProgram => d === 0 ? bottom() : { op: "add", args: [{ op: "sub", args: [tree(d - 1), tree(d - 1)] }, tree(d - 1)] };
+      return tree(depth);
+    }
+    let p = bottom();
+    for (let i = 1; i <= depth; i++) p = { op: "add", args: [{ op: "sub", args: [p, p] }, p] };
+    return p;
+  };
+  const quotient = (): NumericProgram => ({ op: "div", args: [cell("x"), { op: "literal", text: "3" }] });
+  const rows = [{ x: null }, { x: "-7.25" }, { x: "1.00000000000000000001" }, { x: "0" }];
+  const want = await Promise.all(rows.map(async (r) => (await db.query<{ v: string | null }>(`SELECT (${r.x === null ? "NULL" : `'${r.x}'`}::numeric / 3)::text AS v`)).rows[0]!.v));
+  // the tree and the same tree built with sharing: one text, and one value
+  const tree8 = chain(8, quotient, false), dag8 = chain(8, quotient, true);
+  assert.equal(programJson(tree8), programJson(dag8));
+  rows.forEach((r, i) => assert.equal(evaluateText(dag8, r), evaluateText(tree8, r), `row ${i}`));
+  // 64 levels: a text linear in the depth, parsed back to a program of the same value and the same text, Postgres's
+  const dag32 = chain(32, quotient, true), dag64 = chain(64, quotient, true);
+  const text64 = programJson(dag64);
+  assert.ok(text64.length / programJson(dag32).length < 2.2, `64 levels: ${text64.length} characters, 32: ${programJson(dag32).length}`);
+  const parsed = parseProgram(text64);
+  assert.equal(programJson(parsed), text64);
+  rows.forEach((r, i) => { assert.equal(evaluateText(dag64, r), want[i], `row ${i}`); assert.equal(evaluateText(parsed, r), want[i], `row ${i} parsed`); });
+  // the parsed program shares as the built one does (the level below is one node, read three times), and so does a
+  // structured clone (src/duck/executor.ts hands the record to its worker so)
+  for (const p of [parsed, structuredClone(dag64)]) {
+    const [left, right] = (p as Pair).args;
+    assert.equal(programJson(p), text64);
+    assert.equal((left as Pair).args[0], right);
+    assert.equal((left as Pair).args[1], right);
+  }
+  // each node at most once a row: the cell is read once by the special-value check and once by the value, at 64 levels
+  let reads = 0;
+  const counted = new Proxy({ x: "2.5" } as Record<string, unknown>, { get: (t, k) => { if (k === "x") reads++; return t[k as string]; } });
+  const started = performance.now();
+  assert.equal(evaluateText(dag64, counted), "0.83333333333333333333");
+  assert.ok(reads <= 2, `the cell read ${reads} times`);
+  assert.ok(performance.now() - started < 50, "64 levels evaluated within 50 ms");
+  // cellsOf: the distinct cells, over the distinct nodes
+  assert.deepEqual(cellsOf(dag64), ["x"]);
+  assert.deepEqual(cellsOf({ op: "add", args: [{ op: "mul", args: [cell("b"), cell("a")] }, { op: "sub", args: [cell("a"), cell("b")] }] }), ["b", "a"]);
+  // mapCells keeps the sharing, and asks once per cell node
+  let asked = 0;
+  const mapped = mapCells(dag64, (key) => { asked++; return cell(`${key}2`); });
+  assert.equal(asked, 1);
+  assert.equal(programJson(mapped), text64.replace('"key":"x"', '"key":"x2"'));
+  // LAZY AS POSTGRES: a division by zero shared by a CASE's untaken arm and a COALESCE's later argument is never computed
+  const z: NumericProgram = { op: "div", args: [cell("y"), { op: "literal", text: "0" }] };
+  const lazy: NumericProgram = { op: "add", args: [{ op: "pick", index: cell("i"), args: [cell("x"), z] }, { op: "coalesce", args: [cell("x"), z] }] };
+  assert.equal(evaluateText(lazy, { i: "0", x: "1.5", y: "1" }), "3.0");
+  assert.throws(() => evaluateText(lazy, { i: "1", x: "1.5", y: "1" }), (e: unknown) => e instanceof NumericError && e.sqlstate === "22012");
+  assert.throws(() => evaluateText(lazy, { i: "0", x: null, y: "1" }), (e: unknown) => e instanceof NumericError && e.sqlstate === "22012");
+  // a NaN under a shared node is refused by name, as before
+  assert.throws(() => evaluateText(dag8, { x: "NaN" }), (e: unknown) => e instanceof NumericError && e.sqlstate === "0A000" && e.gap === "numeric-special");
 });
