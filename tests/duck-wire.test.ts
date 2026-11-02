@@ -364,7 +364,7 @@ async function answer(c: pg.Client, text: string, values?: unknown[]): Promise<{
   return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows as unknown[][] };
 }
 async function postgres(text: string, values?: unknown[]): Promise<{ fields: Array<[string, number]>; rows: unknown[][] }> {
-  const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1009, 1022, 1082, 1114, 1184, 1186, 1700, 3802].map((o) => [o, (v: string) => v])) });
+  const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1009, 1014, 1015, 1022, 1082, 1114, 1184, 1186, 1700, 3802].map((o) => [o, (v: string) => v])) });
   return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows };
 }
 
@@ -5907,6 +5907,20 @@ test("collation resolver: a row comparison keys both sides of a column in the ty
       "SELECT id FROM colls WHERE (i, d::char(6)) <= ('b', 'b') ORDER BY id",
       // a char(n) beside a text is its text, without its padding
       "SELECT id FROM colls WHERE (i, 1) <= (d::char(6), 0) ORDER BY id",
+    ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  } finally { await c.end(); await a.close(); }
+});
+
+// (the array overload is verified by CI's oracle legs, so the listener here refuses nothing: what is held is its shape)
+test("collation resolver: percentile_disc of an array of fractions answers an array whatever text type the key is", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    for (const sql of [
+      "SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY d::char(4) COLLATE \"und-x-icu\") FROM colls",
+      "SELECT percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY i), percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY i::varchar(8)) FROM colls",
+      "SELECT id % 3, percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY d::char(6) COLLATE \"und-x-icu\") FROM colls GROUP BY 1 ORDER BY 1",
+      "SELECT percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY d::char(6) COLLATE \"und-x-icu\") FROM colls WHERE false",
+      "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY d::char(6) COLLATE \"und-x-icu\") FROM colls",
     ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
   } finally { await c.end(); await a.close(); }
 });

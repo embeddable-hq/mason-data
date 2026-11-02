@@ -99,6 +99,7 @@ const INTERVAL_SCALE: Record<string, string> = { second: "6", seconds: "6", mill
 const NUMBER_TYPES = new Set([INT2, INT4, INT8, FLOAT4, FLOAT8, NUMERIC]);
 /** an array type's element (the numbers', where an IN list's element type decides a comparison) */
 const NUMBER_ELEMENT: Record<number, number> = { 1005: INT2, 1007: INT4, 1016: INT8, 1021: FLOAT4, 1022: FLOAT8, 1231: NUMERIC };
+const FLOAT8_ARRAY = 1022;
 const TEXTS = new Set([TEXT, VARCHAR, BPCHAR, NAME, UNKNOWN]);
 /** the text types that carry a collation once analysed (an unknown literal carries none until it is resolved) */
 const COLLATED_TEXTS = new Set([TEXT, VARCHAR, BPCHAR, NAME]);
@@ -4237,8 +4238,9 @@ class Rewriter {
       const keyed: AstNode = { FuncCall: { ...b, agg_order: [{ SortBy: { ...sort, node: this.textKey(key!, c, this.typeOf(key!) === BPCHAR, "") } }] } };
       this.done.add(bodyOf(keyed));
       const value = (k: AstNode): AstNode => fn("decode", [fn("unhex", [fn("regexp_extract", [k, strConst("[^ ]*$")])])]);
-      // an array of fractions answers an array of keys
-      if (this.typeOf({ FuncCall: b }) === TEXT_ARRAY || this.typeOf({ FuncCall: b }) === VARCHAR_ARRAY) {
+      // an array of fractions answers an array of keys: the overload Postgres chose, read from its analysis of the
+      // call (a float8[] fraction), never from the answer's element type, which is whatever text type the key is
+      if (this.typed({ FuncCall: b })?.directArgs?.[0]?.type === FLOAT8_ARRAY) {
         const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_k")] } });
         return fn("list_transform", [keyed, op("->", each(), value(each()))]);
       }

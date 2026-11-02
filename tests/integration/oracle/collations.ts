@@ -150,6 +150,10 @@ export const COLLATION_CASES: Array<{ name: string; sql: string }> = [
   // #125 under ICU and libc
   { name: "collation: percentile_disc of the database's collation", sql: "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY d) FROM colls" },
   { name: "collation: percentile_disc of an array of fractions", sql: "SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY d) FROM colls" },
+  // the array form is the overload Postgres chose, whatever text type the key is: a char(n) answers a bpchar[] (#253 B, review r2)
+  { name: "collation: percentile_disc of an array of fractions over a char(n)", sql: "SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY b), percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY d::char(4)) FROM colls" },
+  { name: "collation: percentile_disc of an array of fractions over a char(n), grouped", sql: "SELECT id % 3, percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY b) FROM colls GROUP BY 1 ORDER BY 1" },
+  { name: "collation: percentile_disc of an array of fractions over a char(n), no row", sql: "SELECT percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY b) FROM colls WHERE false" },
   { name: "collation: mode() of the database's collation", sql: "SELECT mode() WITHIN GROUP (ORDER BY d) FROM colls" },
   { name: "collation: GREATEST and LEAST of the database's collation", sql: "SELECT id, greatest(d, 'b'), least(d || 'x', 'B') FROM colls ORDER BY id" },
   // refused by name, never another order
