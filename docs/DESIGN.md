@@ -2310,6 +2310,39 @@ setup, first sync and changes, so three legs are about 560 s on a mean runner an
 2 and unit (2) either way: no wall-time gain while those are the critical path, for one more runner. Larger runners cost
 money, and are the owner's call.
 
+### The unit shards split by measured time (2026-11-02, issue 337)
+
+**Decision: the unit shards are weighed by each file's time as a CI run measured it, through the oracle legs'
+mechanism.** A unit shard's `node --test` reports twice: spec on stdout, as before, and `scripts/test-times.ts`, which
+keeps the runner's own event for each FILE (one `test:complete` at nesting 0, line 1, column 1, named for the file: its
+whole wall time, load and top-level awaits included, sent too for a file that fails to load), never a sum of its tests.
+The shard's record (`ran-unit-<n>.json`) carries those times, its wall time and its CPU;
+`node scripts/ci-shards.ts weights <run-id>` writes `tests/fixtures/unit-weights.json` from a finished run of the
+commit checked out, every file by path and any other at the median. `partition` and `APART` are unchanged; the hand
+table had gone stale (every unlisted file weighed 3 s, `tests/duck-generated.test.ts` among them). The rest shards keep
+their hand table (#345).
+
+**The detector and its response.** `verify unit`, the `checks` job's last step, prints after its coverage verdict each
+shard's wall time and CPU and the gap, and past `UNIT_APART_MS` (60 s, as run: nothing is alike across unit shards to
+scale by) a GitHub warning. It names `weights <run-id>` when a split can close the gap, and the file when it cannot:
+when the slowest shard's longest file alone took more than the target past the fastest shard, since no shard runs
+faster than its longest file. Never the exit code.
+
+**Measured: one file is the floor.** PR 346's runs, the first on the hand table in ms (the base's split), the second on
+weights from the first:
+
+| run | unit (1) / (2) / (3), job | the shard holding duck-generated | that file | oracle legs 1 / 2 | rest 1 / 2 |
+|---|---|---|---|---|---|
+| 41409999918 (hand weights) | 229 / 808 / 197 s | (2): 791 s, 36 files, EPYC 9V74 | 744 s | 849 / 873 s | 418 / 693 s |
+| 41411857532 (measured) | 369 / 392 / 874 s | (3): 860 s, 23 files, EPYC 9V74 | 853 s | 756 / 860 s | 409 / 838 s |
+
+The measured split took every other weight off the shard holding `tests/duck-generated.test.ts` (936 s of file time
+there, against 1357 s before) and brought the other two within 25 s of each other (352 and 376 s, on Xeon 8573C and
+8370C runners), but that file alone is more than a shard's mean of file time (about 826 s), so its shard is as slow as
+it is: 744 s on one draw of a runner and 853 s on another of the same CPU model. The unit jobs are not within a minute
+of each other, and the slowest is at the slower oracle leg (874 s against 860 s), not below it. Making that file faster
+or splitting it is #338's; until then the warning names it.
+
 **Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
 and their spread is worth a third leg or a queue.
 
