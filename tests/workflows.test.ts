@@ -8,6 +8,7 @@ import * as url from "node:url";
 import ts from "typescript";
 import { BLOCKING, DEFERRED, parseRecords, recordsOfComment, render, stats, type ReviewRecord } from "../scripts/review-stats.ts";
 import { authority, ENGINE_RULES, globRe, globsOf, HOST_RULES } from "../scripts/evidence-owed.ts";
+import { deepShapes, PLAN_TIME_DEPTHS } from "./deep-chains.ts";
 
 // The coordinator's Workflow scripts, .claude/workflows/pr-loop.js and issue-loop.js, run CLAUDE.md "The loop" with
 // agents. Nothing else reads them before a run, and a run costs hours, so this is their detector: each is loaded as the
@@ -2241,4 +2242,49 @@ test("pr-loop, pr-loop-slim: `e` keeps its PRIMARY KEY, since duck-repro syncs o
   for (const l of ["probe 1", "review r1", "review r2"]) assert.match(full.prompt(l), E, `pr-loop "${l}"`);
   const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
   for (const l of ["implement", "review r1"]) assert.match(slim.prompt(l), E, `pr-loop-slim "${l}"`);
+});
+
+// ---------------------------------------------------------------- issue 264: no review ever timed a statement's plan, so
+// PR 202's planner walk that grew 3^depth reached its 14th round before a reviewer happened on it. One variant form is
+// DEEP, and it is timed at the head and at the base as well as compared: a head much slower is a regression, and blocks.
+test("variant forms: a deep form, timed at the head and at the base; a head much slower blocks (issue 264)", async () => {
+  const forms = arrayOf("pr-loop", "VARIANT_FORMS");
+  const deep = forms.filter((v) => /^a DEEP form/.test(v));
+  assert.equal(deep.length, 1, "one deep form");
+  const sql = [...deep[0]!.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
+  // the unit test's own statements at its top depth, so the review executes what the planner's test bounds
+  const top = PLAN_TIME_DEPTHS.at(-1)!;
+  const shapes = deepShapes(top);
+  assert.deepEqual(sql, [shapes["order by and limit"], shapes["union, a bound at every level"]], "the deep form is deepShapes' at the top depth");
+  assert.ok(sql[0]!.split("FROM (").length - 1 >= top, `the nested statement is ${top} levels deep`);
+  assert.ok(sql[1]!.split("UNION ALL").length - 1 >= top, `the UNION ALL chain is ${top} levels deep`);
+  // each level reads the one below three times, in a way no depth overflows or grows: never a + a + a or b || b || b
+  for (const s of sql) assert.ok(s.includes("a + a - a") && !/a \+ a \+ a|\|\|/.test(s), s);
+  // and every level is bounded, so Postgres never pulls it up into the next (its own pull-up grows 3^depth, and took
+  // down a Postgres at depth 11): a derived table without a bound would make the review's Postgres the thing that dies
+  for (const s of sql) assert.equal(s.split("LIMIT 100").length - 1, top, s);
+
+  const TIMING = [/TIME the DEEP form too[^\n]*run once at the head and once at the base/,
+    /\/usr\/bin\/time -p perl -e 'print STDERR "pid \$\$\\n"; alarm shift; exec @ARGV' 300 node scripts\/duck-repro\.ts <ddl\.sql> <deep\.sql>/,
+    /more than twice the base's AND more than 30 s longer is blocking, severity regression, origin this-pr/,
+    /a head killed by the bound or dead \(out of memory\) where the base finished is a hang, severity crash/,
+    /`duck_repro_<pid>` by the pid it printed first, never by a pattern/];
+  const WIDE = "regression (what the base got right is now wrong, refused, or much slower (the deep form's time))";
+  const full = await run("pr-loop", { ...PR }, { ...START, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": green });
+  const slim = await run("pr-loop-slim", { ...PR }, { ...SLIM, ...SLIM_CI_FIX });
+  for (const [r, labels, reviews] of [[full, ["probe 1", "review r1", "probe 2", "review r2"], ["review r1", "review r2"]],
+    [slim, ["implement", "fix r1", "CI fix 1", "review r1", "review r3"], ["review r1", "review r3"]]] as const) {
+    for (const l of labels) {
+      const p = r.prompt(l);
+      assert.ok(p.includes(deep[0]!), `${l}: the deep form, verbatim`);
+      for (const re of TIMING) assert.match(p, re, `${l}: the timing`);
+    }
+    for (const l of reviews) {
+      assert.ok(r.prompt(l).includes(WIDE), `${l}: a much slower head is a regression`);
+      const schema = JSON.stringify(r.calls.find((c) => c.opts.label === l)!.opts.schema);
+      assert.ok(schema.includes("regression: what the base got right is now wrong, refused, or much slower (the deep form's time);"), `${l}: the findings schema's regression`);
+    }
+  }
+  // the doc says what the harness does
+  assert.ok(fs.readFileSync(path.join(path.dirname(url.fileURLToPath(import.meta.url)), "..", "CLAUDE.md"), "utf8").includes(`a ${WIDE}`), "CLAUDE.md 'The loop' step 4");
 });

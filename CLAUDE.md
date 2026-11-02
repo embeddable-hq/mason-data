@@ -157,7 +157,7 @@ docs/DESIGN.md ("The independent review", "Local gates").
    it: a red run goes back with the review's findings, and beside a clean review it is read again by the CI stage.
 4. **Fix.** **Only a blocking finding sends the PR back**: a wrong answer (where Mason answers, its rows, text, types
    or OIDs, order or SQLSTATE differ from Postgres's), a crash, hang or stuck state, synced data lost or corrupted, a
-   security hole, a regression (what the base got right is now wrong or refused), or a red CI; when the reviewer is
+   security hole, a regression (what the base got right is now wrong, refused, or much slower (the deep form's time)), or a red CI; when the reviewer is
    unsure, it blocks. A refusal's wording, reason, HINT or DETAIL (the refusal itself right), an over-refusal (safe, and
    a gap), docs and code quality do not: they are filed, one issue per class, and the PR goes on, since a round spent
    on wording holds back a PR whose answers are already right (docs/DESIGN.md "Passing the review the first time").
