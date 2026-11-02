@@ -18,7 +18,7 @@
  * and `mason logout` says it cannot remove an environment variable.
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import { endText, failed, jsonText, parseCommand, reportText, serviceStyle, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { endText, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { environmentToken, readLogins, TOKEN_ENV, writeLogins, type Logins } from "./credentials.ts";
 import { DEFAULT_SERVICE_URL, expired, isFailure, pollToken, revoke, serviceOf, serviceText, startDevice, whoAmI, type DeviceCode, type Me, type Service } from "./hosted.ts";
 import { err as styleErr, out as styleOut, stepRenderer, type Style } from "./style.ts";
@@ -166,19 +166,24 @@ async function approved(service: Service, code: DeviceCode, json: boolean): Prom
     if (couldNot !== null) say(endText({ tips: [`Could not open a browser (${couldNot}): open the page yourself.`] }, s).replace(/^\n/, ""));
   }
   const minutes = Math.max(1, Math.round(code.expiresIn / 60));
-  const waiting = `Waiting for the code to be approved (it expires in ${minutes} min; Ctrl-C stops)`;
-  const steps = stepRenderer({ line: say, live: terminal ? process.stderr : null, style: s });
-  if (terminal) steps.begin(waiting); else say(`${waiting} …`);
+  const full = `Waiting for the code to be approved (it expires in ${minutes} min; Ctrl-C stops)`;
+  // a spinner's line is redrawn in place, so it must never reach the terminal's edge (src/cli/command.ts serviceStyle):
+  // the longest label that fits beside its frame, else no spinner and the wait said once, broken as any line
+  const room = (process.stderr.columns ?? 0) - 1 - 6;
+  const label = terminal ? [full, "Waiting for approval", "Waiting"].find((l) => l.length <= room) : undefined;
+  const live = label !== undefined;
+  const steps = stepRenderer({ line: (t) => say(strict(t, s)), live: live ? process.stderr : null, style: s });
+  if (live) steps.begin(label); else say(strict(`${full} …`, s));
   const deadline = Date.now() + code.expiresIn * 1000;
   let interval = code.interval;
   for (;;) {
-    if (Date.now() + interval * 1000 > deadline) { if (terminal) steps.fail(); return expired(code); }
+    if (Date.now() + interval * 1000 > deadline) { if (live) steps.fail(); return expired(code); }
     await sleep(interval * 1000);
     const p = await pollToken(service, code);
     if ("pending" in p) continue;
     if ("slowDown" in p) { interval += 5; continue; }
-    if (isFailure(p)) { if (terminal) steps.fail(); return p; }
-    if (terminal) steps.done("Approved"); else say("Approved");
+    if (isFailure(p)) { if (live) steps.fail(); return p; }
+    if (live) steps.done("Approved"); else say("Approved");
     return p.token;
   }
 }

@@ -1,6 +1,7 @@
 /**
- * A FAKE HOSTED SERVICE AND THE RUNS AGAINST IT, for tests/cli-login.test.ts and tests/cli-login-service.test.ts: an
- * http server of the test's own on 127.0.0.1 (no network), the real CLI as a child process pointed at it, and `mason`,
+ * A FAKE HOSTED SERVICE AND THE RUNS AGAINST IT, for tests/cli-login.test.ts, tests/cli-login-service.test.ts and
+ * tests/cli-login-terminal.test.ts: an http server of the test's own on 127.0.0.1 (no network), the real CLI as a
+ * child process pointed at it, and `mason`,
  * which holds EVERY run to the rules no answer of the service may break (src/cli/hosted.ts's header): no secret on
  * either stream; a failure's code the CLI's own; no line a person reads begun by the service's text — logical lines on
  * a pipe, visual lines at the terminal's width for a run on a terminal (`terminal`).
@@ -85,18 +86,27 @@ export const envFor = (h: string, url: string, extra: Record<string, string> = {
 export const OWN_STEP = /^ {2}(mason login|mason logout|env -u MASON_TOKEN mason login|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
 
 /**
- * THE LINES THE CLI BEGINS, all of them (a line that begins otherwise is not the CLI's: a service's text took a line's
- * start): a blank; its one Next: heading; a tip; its one failure; its headlines and its progress; a row of its own
- * labels; after Next:, a step of its own (OWN_STEP); and a continuation, indented 4 or more (src/cli/command.ts
- * CONTINUATION). What follows the start is the CLI's to choose, the service's value inside it.
+ * THE LINES THE CLI BEGINS, all of them: a line that begins otherwise is not the CLI's (a service's text took a line's
+ * start). Each is the start of a line the CLI writes; on a terminal too narrow for one, the CLI breaks it at a space
+ * (src/cli/command.ts strictLines), so a line may also be a WORD-PREFIX of one ("Signed in", "  mason", "✗ mason").
+ * Besides these: a blank, the one `Next:`, and a continuation, indented 4 or more (command.ts CONTINUATION).
  */
-const STARTS: readonly RegExp[] = [
-  /^$/, /^Next:$/, /^Tip: \S/, /^[✘✗] mason (login|logout): \S/,
-  /^(Signed in to |Signed out of |This machine is not signed in to |To sign in to |Waiting for the code to be approved )/,
-  /^([✔✓] )?Approved$/, /^[✘✗] Waiting for the code to be approved /,
-  /^ {2}(name|orgs|saved|account|revoked|removed from|file|page|code|why|fix) {2,}\S/,
-  /^ {4,}\S/,
+const HEADS: readonly string[] = [
+  "Signed in to ", "Signed out of ", "This machine is not signed in to ", "To sign in to ",
+  "Waiting for the code to be approved ", "Waiting for approval", "Waiting", "Approved", "✔ Approved", "✓ Approved",
+  "✘ Waiting", "✗ Waiting", "✘ mason login: ", "✗ mason login: ", "✘ mason logout: ", "✗ mason logout: ",
+  "Tip: This replaces the login of ", "Tip: The login was NOT revoked ", "Tip: MASON_TOKEN is set ", "Tip: Could not open a browser ",
+  ...["name", "orgs", "saved", "account", "revoked", "removed from", "file", "page", "code", "why", "fix"].map((l) => `  ${l} `),
 ];
+/** The steps under Next:, the CLI's own (OWN_STEP), as the start of their line. */
+const STEP_HEADS: readonly string[] = ["  mason login", "  mason logout", "  env -u MASON_TOKEN mason login", "  unset MASON_CLOUD_URL", "  chmod 600 ", "  chmod 700 "];
+
+/** Whether `line` is begun as one of `heads` begins (or is a word-prefix of one: the rest broken onto its continuations). */
+const begunAs = (line: string, heads: readonly string[]): boolean => heads.some((h) => {
+  if (line.startsWith(h)) return h.endsWith(" ") || line.length === h.length || /^\s/.test(line.slice(h.length));
+  const l = line.trimEnd();
+  return l.trim() !== "" && h.startsWith(l) && (h.length === l.length || h[l.length] === " ");
+});
 
 /** Columns as the CLI counts them for a line that holds a service's text: a character outside ASCII as two. */
 const cols = (ch: string): number => ch.codePointAt(0)! <= 0x7e ? 1 : 2;
@@ -121,21 +131,24 @@ export function seen(text: string, width: number | null): Array<{ line: string; 
   return out;
 }
 
-/** What is wrong with what a person sees of one stream, as sentences: a line the CLI did not begin, a second Next: or
- *  failure, a step under Next: that is not the CLI's, a line the terminal broke. */
-export function seenProblems(text: string, width: number | null): string[] {
+/** What is wrong with what a person sees of one stream, as sentences: a line the CLI did not begin, a second Next:,
+ *  a failure where there is none or a second, a step under Next: that is not the CLI's, a line the terminal broke.
+ *  `failed`: the run failed and this is its stderr, which then holds exactly one failure. */
+export function seenProblems(text: string, width: number | null, failed: boolean | null = null): string[] {
   const p: string[] = [];
-  const lines = seen(text, width);
   let afterNext = false, nexts = 0, failures = 0;
-  for (const { line, byTerminal } of lines) {
+  for (const { line, byTerminal } of seen(text, width)) {
     if (byTerminal) p.push(`the terminal broke a line, so a line begins where a value chose: ${JSON.stringify(line)}`);
+    if (line === "") continue;
     if (line === "Next:") { nexts++; afterNext = true; continue; }
-    if (/^[✘✗] mason /.test(line)) failures++;
-    if (afterNext && /^ {2}\S/.test(line)) { if (!OWN_STEP.test(line)) p.push(`a step the CLI does not give: ${JSON.stringify(line)}`); continue; }
-    if (!STARTS.some((re) => re.test(line))) p.push(`a line the CLI does not begin: ${JSON.stringify(line)}`);
+    if (/^ {4,}\S/.test(line)) continue;
+    if (/^[✘✗] mason/.test(line)) failures++;
+    if (afterNext && /^ {2}\S/.test(line)) { if (!begunAs(line, STEP_HEADS)) p.push(`a step the CLI does not give: ${JSON.stringify(line)}`); continue; }
+    if (!begunAs(line, HEADS)) p.push(`a line the CLI does not begin: ${JSON.stringify(line)}`);
   }
   if (nexts > 1) p.push(`${nexts} Next: headings`);
-  if (failures > 1) p.push(`${failures} failures`);
+  if (failed !== null && failures !== (failed ? 1 : 0)) p.push(`${failures} failures, where the run ${failed ? "failed once" : "did not fail"}`);
+  else if (failures > 1) p.push(`${failures} failures`);
   return p;
 }
 
@@ -171,7 +184,7 @@ export async function mason(h: string, argv: string[], env: Record<string, strin
     assert.equal(a.code, exitOf({ message: "", code: e.code }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
   }
   for (const [stream, text] of json ? [["stderr", a.stderr]] as const : [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
-    const p = seenProblems(text, o.terminal ?? null);
+    const p = seenProblems(text, o.terminal ?? null, stream === "stderr" && !json ? a.code !== 0 : null);
     assert.deepEqual(p, [], `${line}: what a person sees of its ${stream}:\n${text}`);
   }
   if (json) {

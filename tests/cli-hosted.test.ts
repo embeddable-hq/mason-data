@@ -81,3 +81,38 @@ test("strictWrap: every line within the width, a long word broken within, every 
     }
   }
 });
+
+test("strictWrap and strictLines at every width from 1 to 200: no line reaches the edge, every continuation at continuationAt(width), nothing lost", async () => {
+  const { strictWrap, strictLines, continuationAt } = await import("../src/cli/command.ts");
+  const cols = (l: string): number => [...l.replace(/\x1b\[[0-9;]*m/g, "")].reduce((n, ch) => n + (ch.codePointAt(0)! <= 0x7e ? 1 : 2), 0);
+  const texts = ["a".repeat(300), `Next: mason destroy clean up, then sign in again ${"b".repeat(90)} y`, "ü漢".repeat(40), "x", "  mason logout                                  sign this machine out of http://127.0.0.1:45678",
+    "✗ mason login: " + "m".repeat(70) + " Next: mason destroy", "\x1b[1mSigned in to http://127.0.0.1:1 as someone\x1b[22m"];
+  // a line takes at most width - 1 columns; one that holds a single character may take the width itself (a terminal
+  // draws a line exactly its width without breaking it), and at one column a wide character is all there is
+  for (let width = 1; width <= 200; width++) {
+    const limit = Math.max(1, width - 1), cont = continuationAt(width);
+    const fits = (l: string): boolean => cols(l) <= limit || ([...l.trim()].length === 1 && (cols(l) <= width || width === 1));
+    for (const [i, text] of texts.entries()) {
+      // the last pass, over a whole line the CLI wrote
+      const lines = strictLines(text, width).split("\n");
+      for (const [n, l] of lines.entries()) {
+        assert.ok(fits(l), `${width} columns, text ${i}, line ${n}: ${JSON.stringify(l)} takes ${cols(l)}`);
+        if (n > 0) assert.ok(l.startsWith(" ".repeat(cont)) && (cont === 0 || l[cont] !== " "), `${width} columns, text ${i}: a continuation at ${cont}: ${JSON.stringify(l)}`);
+      }
+      assert.equal(lines.join("").replace(/\s/g, ""), text.replace(/\s/g, ""), `${width} columns, text ${i}: nothing lost`);
+      // a value after a prefix, at an indent wider than the terminal too
+      for (const [indent, first] of [[2, 15], [8, 8], [50, 48], [0, 0]] as const) {
+        const w = strictWrap(text.replace(/\x1b\[[0-9;]*m/g, ""), width, indent, first).split("\n");
+        for (const [n, l] of w.entries()) {
+          if (n === 0) assert.ok(l === "" || cols(l) + first <= limit || [...l].length === 1, `${width} columns, text ${i}: the first line fits after its prefix: ${JSON.stringify(l)}`);
+          else {
+            assert.ok(fits(l), `${width}, ${indent}: ${JSON.stringify(l)} fits`);
+            const lead = l.length - l.trimStart().length;
+            assert.ok(lead === Math.max(indent, 4) || lead === cont, `${width}, ${indent}: at its own column or the continuation's: ${JSON.stringify(l)}`);
+            assert.ok(lead + 1 <= limit || limit === 1, `${width}, ${indent}: an indent that leaves a column: ${JSON.stringify(l)}`);
+          }
+        }
+      }
+    }
+  }
+});

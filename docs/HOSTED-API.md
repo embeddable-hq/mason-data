@@ -31,9 +31,12 @@ the contract: a change to it is a change to both sides.
   (below).
 - **On a terminal that holds for the lines a person sees, too.** A terminal breaks a line longer than its width at the
   width, wherever the text puts it, so a value sized to the width could make a line begin with anything. So the CLI
-  breaks every line of `mason login` and `mason logout` itself, the headline and a long word included, and starts
-  every continuation at column 4 or deeper, where none of its headings, failures, rows or steps start. A pipe, a file
-  and `--json` are not broken: what a program reads is unchanged.
+  breaks every line of `mason login` and `mason logout` itself, at the terminal's own width whatever it is, the
+  headline, a long word, a row's label and a step's command included, so no line reaches the terminal's edge. Every
+  continuation starts at column 4, where none of its headings, failures, rows or steps start; under 9 columns at
+  column 1, and under 3 at column 0, where no line the CLI begins fits at all. A column the CLI aligns a value to is
+  kept only while it leaves room; else its lines continue at the continuation's column. A pipe, a file and `--json` are
+  not broken: what a program reads is unchanged.
 
 ## Signing in: the device authorization grant (RFC 8628)
 
