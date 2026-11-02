@@ -96,7 +96,7 @@ after(async () => {
 
 // a skipped suite counts no test in the runner's summary: one skipped test carries the reason to `ℹ skipped`
 if (skip !== false) test("mason init demo end to end, as a person drives it", { skip }, () => undefined);
-describe("mason init demo, then the run as a person drives it", { timeout: 150_000, skip }, () => {
+describe("mason init demo, then the run as a person drives it", { timeout: 300_000, skip }, () => {
   test("mason init demo writes the demo's URL to .env, three of its four tables to the sources file (order_items left to add), demo: true to the config", async () => {
     const init = await mason(["init", "demo"]);
     assert.equal(init.code, 0, said(init));
@@ -114,6 +114,14 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     const sourcesFile = path.join(root, "mason", "sources", "demo.yml");
     fs.writeFileSync(sourcesFile, sources.replace(/^sync: poll 5s /m, "sync: poll 1s "));
     assert.equal(config().demo, true);
+    // the demo's generated table (src/demo/seed.ts DEMO_GENERATED): its target 2 s here, as a person would edit it (a
+    // target is not in what the table is built from, so the edit never rebuilds it)
+    const generatedFile = path.join(root, "mason", "generated_tables", "daily_orders.yml");
+    const generated = fs.readFileSync(generatedFile, "utf8");
+    assert.match(generated, /^kind: scheduled$/m);
+    assert.match(generated, /^target_lag: 30s /m);
+    assert.match(generated, /^ {2}FROM orders$/m);
+    fs.writeFileSync(generatedFile, generated.replace(/^target_lag: 30s /m, "target_lag: 2s "));
     // the roles file every project starts with (stage 1b): every user reads every synced table, said in a committed file
     assert.match(fs.readFileSync(path.join(root, "mason", "roles.yml"), "utf8"), /^default: everything {3}# [^\n]*\n\nroles:\n {2}everything:\n {4}tables: all /m);
     assert.ok(!fs.existsSync(demoDir), "nothing is hosted before mason start");
@@ -183,6 +191,75 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.match(text.stdout, /^ {2}Changes +each table as its sync: says \(a SELECT of its changed rows\) · sync: poll 1s for every table without its own · the demo database is checked this way only$/m);
     assert.match(text.stdout, /^Tables \(3 of 4 added\):$/m);
     for (const t of ["customers", "products", "orders"]) assert.match(text.stdout, new RegExp(`^ {2}public\\.${t} +█+ 100% +[\\d,]+ rows · synced · polled every 1s, (last \\d+ s ago|not polled yet)$`, "m"));
+  });
+
+  test("the demo's generated table, before mason add order_items: built from the synced orders, in mason status, read over the Postgres API, equal to Postgres's answer, and kept current", async () => {
+    // built from the three tables init adds: mason wait names it, as a person and as data. Issue 387: for a few seconds
+    // after a start the table is refused with `relation "orders" does not exist` though orders is synced, and mason wait
+    // exits 1 on it; that refusal alone is waited out (bounded), any other failure is this test's
+    const deadline = Date.now() + 30_000;
+    let w = await mason(["wait", "daily_orders", "--timeout", "60"]);
+    while (w.code === 1 && /refused: relation "orders" does not exist/.test(w.stderr) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1_000));
+      w = await mason(["wait", "daily_orders", "--timeout", "60"]);
+    }
+    assert.equal(w.code, 0, said(w));
+    const wj = await mason(["wait", "daily_orders", "--timeout", "60", "--json"]);
+    assert.equal(wj.code, 0, said(wj));
+    const waited = JSON.parse(wj.stdout) as { ready: boolean; generatedTable: { table: string } | null };
+    assert.equal(waited.ready, true);
+    assert.equal(waited.generatedTable?.table, "public.daily_orders");
+    // mason status: one generated table, scheduled, served, no refusal
+    type Generated = { table: string; kind: string; state: string; serving: boolean; error: string | null; refusals: unknown[]; waitingFor: string | null; lastRun: { at: string; rows: number } | null };
+    const generatedOf = async (): Promise<Generated> => {
+      const j = await mason(["status", "--json"]);
+      assert.equal(j.code, 0, said(j));
+      const st = JSON.parse(j.stdout) as { generatedTables: Generated[]; tables: { table: string }[] };
+      assert.deepEqual(st.generatedTables.map((g) => g.table), ["public.daily_orders"]);
+      assert.equal(st.tables.some((t) => t.table === "public.daily_orders"), false, "a generated table is not a synced one");
+      return st.generatedTables[0]!;
+    };
+    const g = await generatedOf();
+    assert.equal(g.kind, "scheduled");
+    assert.ok(["current", "behind"].includes(g.state), JSON.stringify(g));
+    assert.deepEqual([g.serving, g.error, g.refusals, g.waitingFor], [true, null, [], null], JSON.stringify(g));
+    assert.ok((g.lastRun?.rows ?? 0) > 0, JSON.stringify(g));
+    const text = await mason(["status"]);
+    assert.equal(text.code, 0, said(text));
+    assert.match(text.stdout, /^Generated tables \(tables declared in SQL; mason help generated\):$/m, said(text));
+    assert.match(text.stdout, /^ {2}daily_orders +scheduled whole, target 2s, /m, said(text));
+    // over the Postgres API, as a user the default role (everything) lets read every table
+    const u = await mason(["user", "add", "analyst", "--json"]);
+    assert.equal(u.code, 0, said(u));
+    const user = JSON.parse(u.stdout) as { user: string; password: string; host: string; port: number; database: string };
+    const client = new pg.Client({ host: user.host, port: user.port, database: user.database, user: user.user, password: user.password });
+    // the demo database itself (Postgres, hosted by the run): the arbiter of the equality below
+    const source = new pg.Client({ connectionString: demoUrl });
+    await client.connect();
+    await source.connect();
+    try {
+      const first = await client.query({ text: "SELECT day, status, orders, revenue FROM daily_orders ORDER BY day, status LIMIT 3", rowMode: "array", types: { getTypeParser: () => (v: string) => v } });
+      assert.deepEqual(first.fields.map((f) => [f.name, f.dataTypeID]), [["day", 1082], ["status", 25], ["orders", 20], ["revenue", 1700]]);
+      assert.equal(first.rows.length, 3);
+      for (const r of first.rows as string[][]) assert.match(r[3]!, /^\d+\.\d{2}$/, `revenue has its two decimals: ${JSON.stringify(r)}`);
+      // equal to Postgres's own answer over the same SQL, for the days no new order reaches (before yesterday, UTC): a
+      // literal date, so neither side reads a session; a status moved on only shifts a day's orders between statuses
+      const cutoff = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+      const answered = await client.query({ text: `SELECT day::text, sum(orders)::text AS orders, sum(revenue)::text AS revenue FROM daily_orders WHERE day < '${cutoff}' GROUP BY day ORDER BY day`, rowMode: "array" });
+      const postgres = await source.query({ text: `SELECT (created_at AT TIME ZONE 'UTC')::date::text AS day, count(*)::text AS orders, sum(total)::text AS revenue FROM orders WHERE (created_at AT TIME ZONE 'UTC')::date < '${cutoff}' GROUP BY 1 ORDER BY 1`, rowMode: "array" });
+      assert.ok(postgres.rows.length > 300, `a year of days: ${postgres.rows.length}`);
+      assert.deepEqual(answered.rows, postgres.rows);
+      // kept current: the writer's orders reach it once a wait that began after them returns
+      const total = async (): Promise<number> => Number((await client.query<{ n: string }>("SELECT sum(orders) AS n FROM daily_orders")).rows[0]!.n);
+      const before = await total(), runBefore = (await generatedOf()).lastRun!.at;
+      await new Promise((r) => setTimeout(r, 2_000));
+      const synced = Number((await client.query<{ n: string }>("SELECT count(*) AS n FROM orders")).rows[0]!.n);
+      const again = await mason(["wait", "daily_orders", "--timeout", "60"]);
+      assert.equal(again.code, 0, said(again));
+      const later = await total();
+      assert.ok(later >= synced && later > before, `daily_orders holds the synced orders: ${before}, then ${later}; ${synced} synced before the wait`);
+      assert.ok(Date.parse((await generatedOf()).lastRun!.at) > Date.parse(runBefore), "it ran again");
+    } finally { await client.end(); await source.end(); }
   });
 
   test("mason add order_items while the run is up, then mason wait: the fourth table lands in the sources file and is copied", async () => {
@@ -309,6 +386,7 @@ describe("mason init demo, then the run as a person drives it", { timeout: 150_0
     assert.equal(d.code, 0, said(d));
     assert.match(d.stdout, /not the demo database, which went with the synced data: the next mason start seeds it again/);
     assert.ok(!fs.existsSync(demoDir), ".mason/demo/ is gone");
+    assert.ok(fs.existsSync(path.join(root, "mason", "generated_tables", "daily_orders.yml")), "the generated table's file is the project's, kept");
     assert.equal(config().demo, true);
     await thenStop(async () => {
       const s = await mason(["start"]);

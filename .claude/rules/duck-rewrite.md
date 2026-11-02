@@ -377,8 +377,8 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
-again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
+again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
 - A constant as a key in ORDER BY, DISTINCT ON, WITH TIES and a window, by name, by number and as itself (`1 AS one`,
   `1.5::numeric`, `'1.5'::numeric`, `2147483648::int`, `'abc'::text::int`, every key a constant): a literal the engine

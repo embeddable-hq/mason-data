@@ -128,20 +128,21 @@ docs/DESIGN.md ("The independent review", "Local gates").
 
 1. **Brief.** Name what the tests must hold, not only what to build: the shapes the oracle must answer
    (`.claude/rules/duck-rewrite.md` lists them for a rewrite), and the tests the runs use, by `--test-name-pattern` and
-   `IT_ORACLE_ONLY`. Then a **design note**, before any code: the decision; for each fact the change needs, the module
-   that is its AUTHORITY (Postgres's analysis, `pgErrorOf`, the engine's prepared types), never a new derivation; the
-   principles and named classes it honours; the shapes (each form, wrapper and type, in the real run and the unit
-   world); what is out of scope. Fable reviews the note against the code it names; after two rounds the work goes on,
-   carrying what is still open.
+   `IT_ORACLE_ONLY`. An issue too big for one PR is split here instead: its pieces, in order, each able to ship alone,
+   one sub-issue each, and the run stops before any code. Then a **design note**, written by the implementer before any
+   code: the decision; for each fact the change needs, the module that is its AUTHORITY (Postgres's analysis,
+   `pgErrorOf`, the engine's prepared types), never a new derivation; the principles and named classes it honours; the
+   shapes (each form, wrapper and type, in the real run and the unit world); what is out of scope. No review comes
+   before the code: the review reads the note beside the diff.
 2. **Implement**, on Opus 5.5 (`model: "opus"` on an agent; `model: "claude-opus-5-5"` on a session, which otherwise
    inherits the coordinator's), in its own worktree, ending at the push with the PR and its head; the note goes in its
    body under `## Design`. Push as soon as the first commit is green locally ("Local gates" says which gate when); the
    review runs while CI does. Independent pieces run side by side: a batch lands in its slowest piece plus one review,
    never the sum. Before each push the author runs the `## What review probes` of each rules file its paths fall
-   under; before every review a fresh Opus **probes** the head with them again, and what it finds of the PR's is fixed
-   first: at most two rounds a push, never counted as review rounds. A probe that fails is noted, never a stop.
+   under, and checks at scale as the review will (the review's statements or checks, at the head and the base),
+   fixing what differs before the push. There is no probe stage: the author's own check took its place.
 3. **Review**, by Fable (the coordinating session or a Fable agent, never Opus: the reader must outread the author),
-   in a fresh context given the diff and the code, never the author's report. It and the probe RUN what the diff
+   in a fresh context given the diff and the code, never the author's report. It and the author RUN what the diff
    changed, never judging by reading alone, at the head and the base; which evidence is read from the diff's paths
    (`STATEMENT_PATHS`, the `paths:` of the engine's and the listener's rules files, and `src/cdc/`); a path shared with
    cli.md's or web-ui.md's `paths:` (`src/cli/dev.ts`) owes by its hunks, as `scripts/evidence-owed.ts` decides them,
@@ -184,9 +185,15 @@ docs/DESIGN.md ("The independent review", "Local gates").
    message to a lead with no background job started since and still running; a warning, never a block, because it
    reads the transcript by heuristic.
 
-The coordinator runs the loop with the Workflow tool: `.claude/workflows/pr-loop.js` for one PR, and
-`.claude/workflows/issue-loop.js` for an issue's tasks, planned first and read by the coordinator, then run. In them
-the brief, the plan and the design note are Opus's and only the reviews, the design's included, are Fable's. After the
+**One process runs the loop** (Tom, 2026-11-02). The top session follows `.claude/skills/up-next/SKILL.md`: it works
+the board's "Up next" three at a time in the owner's order, a bug that blocks merges first, and gives every request made
+in chat an issue and a run, never a direct agent. Each run is one Sonnet coordinator following
+`.claude/skills/pr-persistent/SKILL.md`, which keeps ONE Opus implementer alive across every fix round by SendMessage and
+renders every prompt from `.claude/workflows/pr-loop-slim.js`, never writing one. The coordinator never merges: the top
+session reads each diff in full and merges. An issue too big for one PR is split by the Brief: the run makes a
+sub-issue per piece, posts the plan on the issue and stops, and the top session starts the pieces in order. A decision
+only the owner makes goes to **Needs Tom**, and issues filed along the way go to **Backlog**. The brief and the design
+note are Opus's, and only the reviews are Fable's. After the
 implement push, GitHub itself must list the PR as closing its sub-issue (`closedByPullRequestsReferences`; for a
 stacked PR, which GitHub links only once it targets the default branch, the body must say `Closes`), or the body is
 fixed, or the run stops. Every exit with a PR posts a `Review record` comment on it, whose `json mason-review-record`
@@ -196,12 +203,9 @@ the PR's blocking ones make a fix round, count toward the class rule, or keep a 
 filed, one issue per class saying the PR's review met it and deferred it, and listed in the Review record. A finding
 the base already has is filed the same way, at whatever exit the run takes, and is never fixed in the PR nor counted
 toward its class rule: a PR that chases a class it did not make grows each round. Classes carry across a stack, so a class met on the PR below counts
-on the one above. A teammate needs Claude Code with the Workflow tool, the Opus and Fable models, and `gh`
-authenticated with the `project` scope for the board. Why: docs/DESIGN.md "The independent review". Detector:
-`tests/workflows.test.ts`. Two experimental processes are raced against each other on issue 176 (Tom, 2026-11-01),
-both keeping pr-loop's review word for word: `.claude/skills/pr-persistent/SKILL.md`, where the coordinator keeps ONE
-Opus implementer alive and sends it each review's findings by SendMessage, and `.claude/workflows/pr-loop-slim.js`,
-pr-loop without its design review and probe, whose fix agents carry the implementer's context in a `## Handoff`.
+on the one above. A teammate needs Claude Code with the Agent and SendMessage tools, the Opus, Fable and Sonnet
+models, and `gh` authenticated with the `project` scope for the board. Why: docs/DESIGN.md "The independent review".
+Detector: `tests/workflows.test.ts`.
 
 **The board says where each piece is**, so the owner reads progress there instead of asking: the [Mason work
 board](https://github.com/orgs/embeddable-hq/projects/4). An issue split into pieces has one sub-issue per PR
@@ -278,9 +282,9 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
   whose author GitHub cannot link to an account. The repository's admins can bypass it, so whoever merges still reads
   every job.
   Detector: the merge is refused, and the `push` run on main after it.
-- **Who merges what.** A PR that changes nothing under `src/` merges without the owner's word once its Fable review has
-  no open finding, CI is green at its head and the diff has been read in full; a PR that changes `src/`, and a release,
-  merge on the owner's word. It is queued pinned, as "The loop" step 5 says, and its landing is confirmed, never
+- **Who merges what** (Tom, 2026-10-31). Every PR, `src/` included, merges without the owner's word once its Fable
+  review has no open finding, CI is green at its head, the diff has been read in full, and a product change has its line
+  in `release-notes/next.md`. A release and a deploy merge on the owner's word. It is queued pinned, as "The loop" step 5 says, and its landing is confirmed, never
   assumed: PR 89 had not merged itself some while after its last check went green, and was merged by hand.
   Detector: the hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`, and lets
   `gh pr merge <n> --disable-auto` through.

@@ -49,7 +49,7 @@ paths:
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
-again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
+again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
 - None recorded yet; the harness's Learn step adds them.

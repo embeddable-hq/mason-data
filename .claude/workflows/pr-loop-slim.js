@@ -1,9 +1,10 @@
 export const meta = {
   name: 'pr-loop-slim',
-  description: 'One PR through CLAUDE.md "The loop", slim: brief, implement (Opus, who writes the design note and a Handoff comment), review (Fable) with CI read beside it, fix rounds that read and extend the Handoff, the class rule, learn, CI, then stop at the merge gate. Raced against pr-loop; no design review and no probe',
-  whenToUse: 'One sub-issue of a Mason issue, from brief to a reviewed, green PR ready for the merge decision, in the race against pr-loop (issue 176)',
+  description: 'One PR through CLAUDE.md "The loop": brief (or a split into pieces), implement (Opus, who writes the design note and a Handoff comment), review (Fable) with CI read beside it, fix rounds that read and extend the Handoff, the class rule, learn, CI, then stop at the merge gate. The source every prompt of the pr-persistent skill is rendered from',
+  whenToUse: 'The pr-persistent skill (.claude/skills/pr-persistent/SKILL.md) renders every stage from it, for one issue or one piece of a split, from brief to a reviewed, green PR ready for the merge decision; run by the Workflow tool, it is the same loop without the kept implementer',
   phases: [
-    { title: 'Brief', detail: 'Opus names the shapes and the tests', model: 'opus' },
+    { title: 'Brief', detail: 'Opus names the shapes and the tests, or splits an issue too big for one PR into pieces', model: 'opus' },
+    { title: 'Split', detail: 'a sub-issue per piece, the plan posted on the issue; the run stops there, and the top session starts each piece as a run', model: 'sonnet' },
     { title: 'Implement', detail: 'Opus, a worktree of its own: the design note before any code, the push, the note in the PR body, the Handoff comment', model: 'opus' },
     { title: 'Link', detail: "GitHub itself says the PR closes its sub-issue, or the body is fixed and asked again", model: 'sonnet' },
     { title: 'Review', detail: 'Fable, fresh context, findings with their class, their severity and whether the base has them', model: 'fable' },
@@ -15,11 +16,11 @@ export const meta = {
   ],
 }
 
-// pr-loop-slim: .claude/workflows/pr-loop.js with three changes, raced against it and against the pr-persistent skill
-// (.claude/skills/pr-persistent/SKILL.md) on issue 176 (Tom, 2026-11-01). On issue 192 one persistent Opus agent, sent
-// the review's findings by message, took 1 h 51 min where pr-loop took 5.5 h unfinished, on about 1/2.3 of its Opus
-// output tokens: a fix round rebuilt no context. A Workflow agent() is one-shot, so this script cannot message the
-// implementer again; it hands the context on instead.
+// pr-loop-slim: the source of every prompt of the one process (Tom, 2026-11-02; docs/DESIGN.md "The independent review").
+// The pr-persistent skill (.claude/skills/pr-persistent/SKILL.md) replays this script with its render.mjs, stage by
+// stage, against the results recorded so far, and sends every fix round to the ONE implementer it keeps alive. Run by the
+// Workflow tool, it is the same loop with a fresh fixer each round, since a Workflow agent() is one-shot: it hands the
+// context on instead. It began as .claude/workflows/pr-loop.js (retired) with three changes:
 //   1. No design stage, no design review and no probe: the implementer writes the design note itself, before any code,
 //      into the PR body under `## Design`.
 //   2. A HANDOFF: the implementer posts ONE PR comment headed `## Handoff` (the design decisions and why, what was tried
@@ -28,13 +29,18 @@ export const meta = {
 //      A comment, never a committed file, so nothing of it lands in the repository.
 //   3. The author checks at scale before every push (SELF_CHECK): the review's BATCH and CHECKS text, the differences
 //      fixed before the push, the counts returned. On issue 192 every correctness bug was found by running statements.
-// Everything else is pr-loop's, word for word where a prompt says it (the review, the re-check, the CI read: the review
-// adds one sentence, that the Handoff is the author's account and never read), and so are the args, the result's shape
-// and the Review record's block, whose designRounds and probeRounds are 0. tests/workflows.test.ts holds it so.
+// The review, the re-check and the CI read are the retired pr-loop's word for word, but for one sentence the review adds
+// (the Handoff is the author's account, never read); so are the args, the result's shape and the Review record's block,
+// whose designRounds and probeRounds are 0. tests/workflows.test.ts holds it so.
+// A SPLIT (issue 386): the Brief may find the issue too big for one PR and return `split`, its pieces in order. The run
+// then makes a sub-issue per piece, posts the plan on the issue and stops before Implement, with the pieces in its
+// status; the top session (.claude/skills/up-next/SKILL.md) starts each piece as a run of its own. This took the place
+// of issue-loop.js (retired), whose Plan is the split and whose Setup is the Split stage.
 // args: { issue, parent, title, base, branch, stackedOn, context, readFirst?, brief?, process?, knownClasses?, repo?, itEnv? }
 //   repo: the main checkout's path. Without it each agent finds the repository itself (WHERE), so the script runs for
 //   anyone on the team, from any checkout: no path of one machine is written here.
-//   brief: { brief, shapes, tests }, the Brief stage's shape: given, that stage is skipped (the race shares one brief).
+//   brief: { brief, shapes, tests, split? }, the Brief stage's shape: given, that stage is skipped (a coordinator that
+//   wrote it already); given with a split of two pieces or more, the run goes to the Split stage, as the Brief's would.
 //   process: who drives the run, said in the Review record's text: 'pr-loop-slim' (the Workflow tool, the default) or
 //   'pr-persistent' (the coordinator following .claude/skills/pr-persistent/SKILL.md, which replays this script to
 //   render each prompt, and sends every fix to the one implementer it keeps alive). Nothing else reads it.
@@ -45,7 +51,7 @@ export const meta = {
 //   their statements against through scripts/duck-repro.ts (a database of its own is made there and dropped). Without
 //   it, each starts a throwaway postgres:18 container of its own (wal_level=logical, a random password, a free loopback
 //   port) and removes it when done. No prompt prints the URL.
-// Every exit returns pr-loop's shape, result(status):
+// Every exit returns one shape, result(status), the split's included (pr and head null):
 //   { status, pr, head, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds }, the last two always [].
 const A = args
 const PROCESSES = ['pr-loop-slim', 'pr-persistent']
@@ -73,6 +79,7 @@ const MAX_CI_FIXES = 3
 const SIGNS = { opus: 'Opus 5.5', fable: 'Fable 5.1', sonnet: 'Sonnet 5.5' }
 const ON = {
   brief: { model: 'opus', effort: 'high' },
+  split: { model: 'sonnet', effort: 'low' },
   implement: { model: 'opus', effort: 'high', isolation: 'worktree' },
   link: { model: 'sonnet', effort: 'low' },
   review: { model: 'fable', effort: 'medium' },
@@ -213,10 +220,24 @@ For every other changed path, CHECKS: ${CHECKS}
 Fix what differs at the head and not at the base before you push, then run the statements that differed again. Report statementsRun, statementsMatched and checksRun in your result, counted as the review counts them.`
 const IMPLEMENT_SCALE = "a hundred statements or more: the brief's shapes, each in every variant form that reaches the code you touched, and the regression sweep of every path your diff touches"
 const FIX_SCALE = "your fix's paths: the fix's statements in the variant forms that reach the code it changed, and the regression sweep of that code; dozens"
+// A piece of a split: issue-loop.js's TASKS item, moved with its descriptions when that script was retired (issue 386)
+const PIECE = { type: 'object', required: ['title', 'branch', 'scope', 'stacked', 'readFirst'], properties: {
+  title: { type: 'string', description: 'short, as the sub-issue is titled: "<issue> · <piece>"' },
+  branch: { type: 'string', description: `kebab-case, issue-${A.issue}-<piece>` },
+  scope: { type: 'string', description: "what this PR changes and what it must not, the design section of the issue it implements, and how it is measured if it is a speed change; enough for a brief without this planner's context" },
+  stacked: { type: 'boolean', description: 'true when it needs the previous piece\'s code and so is based on its branch' },
+  readFirst: { type: 'string', description: 'the files and functions a brief must read first' },
+} }
+// ONE plain object schema, `split` optional: render.mjs's problem() and the Workflow tool read no oneOf or anyOf
 const BRIEF = { type: 'object', required: ['brief', 'shapes', 'tests'], properties: {
-  brief: { type: 'string', description: 'what to build, where, and the decision it takes' },
+  brief: { type: 'string', description: 'what to build, where, and the decision it takes; for a split, why the issue is split' },
   shapes: { type: 'array', items: { type: 'string' }, description: 'every shape the tests and oracle must hold, each a concrete SQL statement or input' },
   tests: { type: 'array', items: { type: 'string' }, description: 'the test files and --test-name-pattern / IT_ORACLE_ONLY the runs use' },
+  split: { type: 'array', items: PIECE, description: 'only when the issue cannot ship as ONE PR: its pieces, two or more, in order, each a PR that could ship alone' },
+} }
+const isPiece = (t) => !!t && typeof t === 'object' && ['title', 'branch', 'scope', 'readFirst'].every((k) => typeof t[k] === 'string') && typeof t.stacked === 'boolean'
+const SPLIT = { type: 'object', required: ['subIssues'], properties: {
+  subIssues: { type: 'array', items: { type: 'number' }, description: 'one per piece, in order' },
 } }
 // what the author ran at scale before the push (SELF_CHECK), counted as a review counts them
 const SELF_COUNTS = {
@@ -242,7 +263,7 @@ const isHandoff = (h) => !!h && typeof h === 'object' && ['decisions', 'rejected
 // a push of code (the implementer's, a fix's) says what its author ran at scale and returns the handoff; learn's
 // docs-only commit owes neither
 const CHECKED = { ...PUSHED, required: [...PUSHED.required, ...Object.keys(SELF_COUNTS), 'handoff'], properties: { ...PUSHED.properties, ...SELF_COUNTS, checksOnly: { type: 'array', items: { type: 'string' }, description: 'the changed shared paths scripts/evidence-owed.ts marked checks and you judged reach no engine code' }, handoff: HANDOFF } }
-// learn says when it started and ended, so the race reads its time apart from the rest (a Workflow script has no clock)
+// learn says when it started and ended, so the run log reads its time apart from the rest (a Workflow script has no clock)
 const STAMPS = {
   startedAt: { type: 'string', description: 'the output of `date -u +%FT%TZ`, run as your first command' },
   endedAt: { type: 'string', description: 'the output of `date -u +%FT%TZ`, run as your last command' },
@@ -326,8 +347,8 @@ let ciFixes = 0
 let last = null // the PR's last pushed head: { pr, head }
 const authored = [] // { label, statementsRun?, statementsMatched?, checksRun? }: the author's own check before each push
 let handoff = null // the HANDOFF object, as the last agent that wrote code returned it
-let learnTime = null // { startedAt, endedAt }: the Learn step's own time, for the race
-// pr-loop's shape, so issue-loop can run either: this script has no design round and no probe round
+let learnTime = null // { startedAt, endedAt }: the Learn step's own time, for the run log
+// the retired pr-loop's shape, kept so every reader of a result reads one: this script has no design or probe round
 const result = (status) => ({ status, pr: last ? last.pr : null, head: last ? last.head : null, rounds, fromBase, deferred, filed, classes, designRounds: [], probeRounds: [] })
 
 // The note is the implementer's, in the PR body. The HANDOFF object goes from agent to agent through this script, and
@@ -407,8 +428,8 @@ const sev = (f) => (f.severity ? { severity: f.severity } : {})
 // A round's counts, when its agent gave them (the schema requires them). The evidence it OWED is read from its diff's
 // paths (STATEMENT_PATHS): statements for the engine's and the listener's, checks for every other. A round that owed
 // evidence and shows none, or no valid count of it, or that did not say its paths (so what it owed is not known), ran
-// nothing anyone can see: a review's round is then UNRUN and stops the run as `unreviewed`, which issue-loop does not
-// read as passed; a probe's is noted, as a failed probe is (PR 245, round 1: a review that ran nothing was a clean
+// nothing anyone can see: a review's round is then UNRUN and stops the run as `unreviewed`, which no reader takes
+// as passed; a probe's is noted, as a failed probe is (PR 245, round 1: a review that ran nothing was a clean
 // round, so "never judge by reading alone" was asserted and never enforced)
 const isCount = (x) => Number.isInteger(x) && x >= 0
 const countsOf = (a) => ({
@@ -589,9 +610,10 @@ Give no fix and no patch. Also list what you judged correct.`,
 
 // ---------------------------------------------------------------- Brief
 if (!PROCESSES.includes(PROCESS)) return await finish(`args.process is ${JSON.stringify(PROCESS)}: it is one of ${PROCESSES.join(', ')}`)
-// A brief given in args (the race's processes share one) skips the stage; one that is not a brief stops the run.
-const givenBrief = A.brief && typeof A.brief.brief === 'string' && Array.isArray(A.brief.shapes) && Array.isArray(A.brief.tests) ? A.brief : null
-if (A.brief && !givenBrief) return await finish('args.brief is not a brief: { brief, shapes[], tests[] }, as the Brief stage returns')
+// A brief given in args skips the stage; one that is not a brief stops the run.
+const givenBrief = A.brief && typeof A.brief.brief === 'string' && Array.isArray(A.brief.shapes) && Array.isArray(A.brief.tests)
+  && (A.brief.split === undefined || (Array.isArray(A.brief.split) && A.brief.split.every(isPiece))) ? A.brief : null
+if (A.brief && !givenBrief) return await finish('args.brief is not a brief: { brief, shapes[], tests[], split? }, as the Brief stage returns')
 let brief = givenBrief
 if (!brief) {
   phase('Brief')
@@ -599,10 +621,34 @@ if (!brief) {
   `${WHERE}Write the brief for ONE PR of the Mason repo (${REPO}): sub-issue #${A.issue} of #${A.parent}, "${A.title}".
 Read issue #${A.parent} and its comments (\`gh issue view ${A.parent} --comments\`) for this task's part, and the code it builds on: branch \`${A.base}\` (\`git fetch origin ${A.base}\`; read with \`git show origin/${A.base}:<path>\`)${A.readFirst ? `, especially ${A.readFirst}` : ''}. Read the .claude/rules/ file of the subsystem it touches.
 ${A.context || ''}
-The brief follows CLAUDE.md "The loop" step 1: name what the tests must hold, not only what to build. List EVERY shape the tests (and for the engine, the oracle) must answer equal to Postgres, as concrete SQL over the tests' own tables, including the shapes .claude/rules/duck-rewrite.md requires of a rewrite and the fallback shapes that must stay as written. Name the test files and the --test-name-pattern / IT_ORACLE_ONLY the runs use. Do not write code.`,
+The brief follows CLAUDE.md "The loop" step 1: name what the tests must hold, not only what to build. List EVERY shape the tests (and for the engine, the oracle) must answer equal to Postgres, as concrete SQL over the tests' own tables, including the shapes .claude/rules/duck-rewrite.md requires of a rewrite and the fallback shapes that must stay as written. Name the test files and the --test-name-pattern / IT_ORACLE_ONLY the runs use. Do not write code.
+SPLIT only when the issue's "Done looks like" cannot ship as ONE PR small enough for one review, with its own tests (CLAUDE.md "How work is done here"): then return \`split\`, two pieces or more, in order, each a PR that could ship alone, a piece that needs another's code \`stacked\` on it and right after it, each scope written so a brief can be written from it alone; \`brief\` then says why it is split, and \`shapes\` and \`tests\` may be empty. Done or open work (merged PRs, open PRs, sub-issues in progress) is no piece. Otherwise return no \`split\`: the run implements the brief.`,
     { label: 'brief', phase: 'Brief', ...ON.brief, schema: BRIEF })
 }
 if (!brief) return await finish('brief failed')
+
+// ---------------------------------------------------------------- Split: an issue too big for one PR
+// The Brief's verdict, read before any code: no split (or an empty one) is the run as it always was. One piece is no
+// split, and its brief may be empty, so the run stops rather than implement it. Two or more: a sub-issue per piece and
+// the plan on the issue (issue-loop.js's Setup, moved), then a stop whose status carries the numbers, since the
+// coordinator reads only its DONE line; the top session starts each piece as a run of its own, in order.
+const pieces = Array.isArray(brief.split) ? brief.split : []
+if (pieces.length === 1) return await finish(`the brief split #${A.issue} into one piece, and a split of one piece is no split: nothing was implemented, as that brief may be empty; run the issue again, or the coordinator decides`)
+if (pieces.length >= 2) {
+  phase('Split')
+  const sign = SIGNS[ON.split.model]
+  const made = await agent(
+    `${WHERE}Mason issue #${A.issue} is too big for one PR: its brief split it into the pieces below, in order. First run \`${BOARD('In progress')}\`. Then make a sub-issue for each piece, in order, with the command given for it, run from ${REPO} (run board.ts from that file, never through \`node <(git show …)\`, which exits 0 having run nothing), and take the number it prints; then \`gh issue edit <n> --body-file <file>\` with the piece's scope and its read-first line, headed \`${signed(ON.split)}\`. Then comment once on #${A.issue}, headed the same way: why it is split (below), and the pieces in order, each with its sub-issue, its branch, whether it is stacked on the one before, and what to read first; say that each runs through the pr-persistent skill (.claude/skills/pr-persistent/SKILL.md), started by the top session in this order, a stacked piece only once the one below is pushed. Skip the comment when the issue already has one listing these same sub-issues. Move no other card, and write no code. Return the sub-issue numbers in order.
+Why it is split: ${brief.brief}
+Pieces:
+${pieces.map((t, i) => `${i + 1}. ${t.title}${t.stacked ? ' [stacked on the one before]' : ''}\n   sub-issue: \`node ${REPO}/scripts/board.ts sub ${A.issue} "${t.title}" --from "${sign}"\`\n   branch: ${t.branch}\n   read first: ${t.readFirst}\n   scope: ${t.scope}`).join('\n')}`,
+    { label: 'split', phase: 'Split', ...ON.split, schema: SPLIT })
+  const subs = made && Array.isArray(made.subIssues) ? made.subIssues : null
+  if (!subs) return await finish(`split failed: the split stage returned nothing, so which of the ${pieces.length} pieces' sub-issues were made is not known: read #${A.issue} and its sub-issues before running it again`)
+  if (subs.length !== pieces.length || !subs.every((n) => Number.isInteger(n) && n > 0)) return await finish(`split failed: the split stage returned ${JSON.stringify(subs)} for ${pieces.length} pieces, not one sub-issue a piece: read #${A.issue} and its sub-issues before running it again`)
+  const listed = pieces.map((t, i) => `#${subs[i]}${t.stacked && i > 0 ? ` (stacked on #${subs[i - 1]})` : ''}`).join(', ')
+  return await finish(`split into ${pieces.length} pieces: ${listed}; the plan is on #${A.issue}: the top session starts each as a run`)
+}
 
 // ---------------------------------------------------------------- Implement
 phase('Implement')
@@ -657,14 +703,14 @@ if (stopped) return await finish(stopped)
 
 // ---------------------------------------------------------------- Learn: each class met becomes a review probe
 // Before the CI loop, so CI covers its commit. Every blocking finding of this PR goes to the rules file of its
-// subsystem as a probe pr-loop's Probe stage and every review run; a class already listed gets this PR's number.
+// subsystem as a probe the author runs before each push and every review runs; a class already listed gets this PR's number.
 const learnable = history.filter((h) => h.findings.length)
 if (learnable.length) {
   phase('Learn')
   const learned = await agent(
     `${WHERE}Learn from PR ${last.pr}'s rounds. ${WORKTREE(`origin/${A.branch}`)} Move no card on the board.
 Every finding of this PR is below. For each CLASS, add or update ONE bullet in the \`## What review probes\` section of the .claude/rules/ file whose \`paths:\` covers the finding's file (its \`at:\`), adding the section at the file's end if it has none. A bullet gives the probe as a synthetic input shape (a statement over a synthetic table: never a real database's table, column or value, CLAUDE.md "The source database is production"), the class's slug, and PR ${last.pr}. A class already listed gets PR ${last.pr} added to its bullet, never a second bullet. Where a detector within reach (a convention test in tests/conventions.test.ts, a hook) would have caught a class, say so in the PR body under \`## Detector wanted\` (read it with \`gh pr view ${last.pr} --json body\`, keep it, write it with \`gh pr edit ${last.pr} --body-file <file>\`): the class and what the detector would assert. Write no test: the coordinator decides.
-Run \`date -u +%FT%TZ\` as your first command and as your last, and return each (startedAt, endedAt): the race reads Learn's time apart. ONE docs-only commit, touching .claude/rules/ only, then \`node --test --test-timeout=120000 --test-force-exit tests/workflows.test.ts tests/conventions.test.ts\`. The commit ends with \`${coAuthor(ON.learn)}\`. Push, and return the new head. About 20 tool calls.
+Run \`date -u +%FT%TZ\` as your first command and as your last, and return each (startedAt, endedAt): the run log reads Learn's time apart. ONE docs-only commit, touching .claude/rules/ only, then \`node --test --test-timeout=120000 --test-force-exit tests/workflows.test.ts tests/conventions.test.ts\`. The commit ends with \`${coAuthor(ON.learn)}\`. Push, and return the new head. About 20 tool calls.
 ${learnable.map((h) => `### ${h.label}\n${asFailures(h.findings)}`).join('\n\n')}`,
     { label: 'learn', phase: 'Learn', ...ON.learn, schema: LEARNED })
   if (learned) learnTime = { startedAt: learned.startedAt, endedAt: learned.endedAt }
@@ -696,7 +742,7 @@ for (let attempt = 1; attempt <= MAX_CI_FIXES + 1; attempt++) {
   const ci = await agent(CI_PROMPT(true), { label: `CI ${attempt}`, phase: 'CI', ...ON.ci, schema: CI })
   if (!ci) return await finish(`CI wait ${attempt} returned nothing: the coordinator looks`)
   // GitHub starts no CI run on a conflicting PR, so a conflict is never sent to a CI fix: the run stops naming the base
-  // and the way out, never 'reviewed', so issue-loop stops there too
+  // and the way out, never 'reviewed', so the coordinator stops there too
   if (ci.state === 'conflict') return await finish(`conflict: PR ${last.pr} conflicts with ${A.base}, and GitHub runs no CI on a conflicting PR: merge origin/${A.base} into ${A.branch} and push, then CI runs again (${ci.detail.slice(0, 300)})`)
   if (ci.state === 'timeout') return await finish('CI not finished within the bound')
   if (ci.state === 'green') return await finish('reviewed, no open blocking finding of this PR, CI green: ready for the merge decision')

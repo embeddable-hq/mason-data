@@ -632,7 +632,8 @@ export class PgCatalog {
 
   /** Runs raw frontend protocol bytes — one message or several (Parse, Bind, Describe, Execute, Sync in one buffer
    *  works) — and returns the backend's raw reply, starting the instance when needed. `at`: the instant the first
-   *  message runs at, the start of the transaction it begins (`asSession`; catalog-worker.ts `pinnedClock`). */
+   *  message runs at, the start of the transaction it begins (`asSession`; catalog-worker.ts `pinnedClock`), in
+   *  MICROSECONDS since the epoch as Postgres's (src/lib/instant.ts), which the catalog reads back exactly. */
   run(message: Uint8Array, at?: number): Promise<Uint8Array> {
     return this.#enqueue(async () => {
       const db = await this.#ensureStarted();

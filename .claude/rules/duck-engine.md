@@ -22,8 +22,8 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its Probe stage runs them
-again before each review. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
+again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
 
 - Each probe at the base as well as the head: a refusal the change turns into an answer must equal Postgres's, an answer
   it turns into a refusal is a regression, and a difference both share is the base's (PR 120, 170, 197).

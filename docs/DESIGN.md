@@ -130,6 +130,42 @@ four or five chunks of 1.3 – 2.7 s against a 0.5 s target to adapt. The estima
 rows sent the bar back to 0 % past it. **Where.** `src/duck/sync.ts` (`takeChunk`, `CopyLive`), `src/cli/commands.ts`;
 `tests/duck-copy-order.test.ts`.
 
+### Large values out of line (2026-11-02, issue 96)
+
+**Decision.** A chunk's ceiling is also held to what its pages hold OUT OF LINE: the source table's TOAST bytes
+(`pg_table_size(reltoastrelid)`, read from the catalog each attempt) a heap page's share of them, against an eighth of
+`store.memoryLimitBytes` split between `MASON_COPY_PARALLEL` readers, at least one page (`chunkCeiling`,
+`COPY_CHUNK_MEMORY_SHARE`); a table with nothing out of line keeps the rows ceiling exactly. A chunk that still runs out
+of memory (53200, `pgErrorOf`, a commit that cannot pin a block included; never 53400) rolls back, its range is given
+back (`giveBack`), and the copy reads on with one reader, each chunk at most half the one that ran out; a one-page
+chunk read alone that runs out fails the copy with the way out in the operator's words (`tooLargeText`), its chunks
+kept. No table is refused before it is read: whether the engine can write its values is the engine's to say, at the
+write.
+
+**Why.** A deployment's table of ~20,000 rows of ~68 KB of compressed `jsonb` (up to ~20 MB) had a heap of a few
+hundred pages, so its rows ceiling (131,072 pages at most) was the whole table: ONE chunk, which ran out of a 7.8 GiB
+limit at one reader and synced at 12 GB. Measured on DuckDB 2.0.0 (a laptop, `duckdb_memory()` sampled every 50 ms,
+synthetic tables, one reader unless said):
+
+| table on the source | one chunk (the base) | one page a chunk |
+|---|---|---|
+| `blobs`: 400 rows of ~1 MB of text, `STORAGE EXTERNAL`, 3 heap pages, 416 MiB of TOAST | fails at 128, 256, 384 MB; syncs at 448 MB (peak 427 MiB), 512 MB, 1 GB (peak 915 MiB, 803 of it overflow strings) | fails at 128 MB (a page is 136 MB); syncs at 384 MB (peak 367 MiB), and at 384 MB with 3 readers after one out of memory |
+| `docs`: 600 rows of ~512 KB of `jsonb` and one of ~8 MB, 5 heap pages, 320 MiB of TOAST | fails at 256, 384, 768 MB and 1.5 GB (1.3 GiB in the allocator) | fails at 384 MB; syncs at 768 MB (peak 505 MiB; one page read 366 MiB in the allocator, ~5.5 times its 67 MB on the source), and with 3 readers after one out of memory |
+| 4,000 rows of ~100 KB of text, 30 heap pages, 400 MiB of TOAST | syncs at 384 MB | at 128 MB: 14 chunks committed, then a checkpoint FATAL that invalidated the database; syncs with the checkpoint's vacuum off (peak 72 MiB) |
+
+So a chunk's memory follows its values, not its heap pages: uncompressed text held 1 to 2 times its bytes, `jsonb`
+about 5.5 times while it read (an eighth of the limit leaves that room, and the readers beside it, the stream, the
+polls and the queries their share). The third row is a limit chunks cannot lift: a checkpoint merges a table's small
+row groups (one a chunk of a few rows) into one of up to 122,880 rows, holding their values at once, and when that does
+not fit DuckDB invalidates the database (issue 371; 400 MiB merged under 366 MiB of limit, failed under 244 and 122 MiB).
+It stays open there: a first version of this change refused, before reading, a table whose out-of-line bytes in one
+row group times 0.75 passed the limit, and its review found that wrong (fix round 1 of PR 380): 140,000 rows of ~2.6 KB
+stored EXTERNAL (~1,030 heap pages, 365 MiB out of line) sync through a 128 MB limit, at the base in one chunk (4.9 s)
+and here in 37, and their checkpoint and reopen are fine. A formula over the source's catalog measured on one shape is
+no authority for what the engine can write; the engine's own failure at the write is.
+**Where.** `src/duck/sync.ts` (`chunkCeiling`, `readChunks`, `outOfLineBytes`), `src/duck/store.ts` (`pgErrorOf`:
+a commit out of memory is 53200); `tests/duck-copy-order.test.ts`, `tests/integration/duck-poll.itest.ts`.
+
 ### A copy beside the stream
 
 **Decision.** A rebuild runs on a DuckDB connection of its own, one at a time, writing only its table, side table and
@@ -534,6 +570,24 @@ owes statements, since "couldn't tell" is never checks. The review reports the s
 (`checksOnly`), and overrides the script by leaving one out, when a hunk changes the flow or the arguments into an
 engine call without naming an engine symbol; a waiver of any other path, or one that cannot be read, waives nothing.
 The script is also the one reader of the rules' front matter, which `tests/workflows.test.ts` imports.
+
+One process, not three (Tom, 2026-11-02; issue 386). Experiment 1, on issue 192, ran the `pr-loop.js` harness against
+ONE persistent Opus agent that was sent each review's findings by message. The harness had run 5.5 h, with 2 design,
+7 probe and 4 review rounds, and was still in CI; it used about 2.3 M Opus output tokens. The persistent agent was clean
+and green in 1 h 51 min, and it took about 1.0 M Opus output tokens over all its rounds, the later fix rounds included.
+The difference was continuity: a fix round rebuilt no context. Experiment 2 raced that agent, kept by a coordinator
+(the pr-persistent skill), against `pr-loop-slim.js`, the harness without its design review and probe, whose fixers
+read a `## Handoff` comment. On issue 137 it was a tie: 49 min for the skill (PR 279) and about 48 min for slim (PR 280,
+the coordinator's count), and both were clean at the first review. On issue 176 the skill's PR 272 was clean at its
+second review. At its second review slim's PR 274 had two new wrong answers of its own, and it was stopped. Tom then
+ran the skill with a Sonnet coordinator per issue, and decided: "As far as I'm concerned, this new process has won. The
+others weren't faster, better or cheaper." So `pr-loop.js` and `issue-loop.js` are retired. `pr-loop-slim.js` stays as
+the source the skill renders every prompt from, not as a process of its own. The top session's queue is a skill too
+(`.claude/skills/up-next/SKILL.md`). issue-loop's split moved into the Brief, as a verdict it may return in place of a
+brief: the pieces, each able to ship alone, in order, and which are stacked. The run then makes a sub-issue per piece,
+posts the plan and stops, and the top session starts each piece. Before, an issue too big for one PR was seen only if the top session
+spotted it, or late, as rounds piled up or the four-round bound stopped a run. `issue-loop.js` ran its pieces by
+`workflow('pr-loop')`, and a Workflow script cannot hold an implementer across rounds, since an `agent()` is one-shot.
 
 ### Issue labels and a bug's Severity (Tom, 2026-11-01)
 
@@ -1951,8 +2005,8 @@ be absent. Run with real OpenSSH and sshd on one machine, host and container; a 
 **Decision.** `mason serve` is `mason start --attach`'s run configured by the environment alone (`DATABASE_URL`,
 `MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_PG_*`), every bad setting on one
 report, the log on stdout, SIGTERM its stop (tini PID 1). `GET /healthz` (`MASON_HEALTH_PORT`, 4140) is 503 until the run
-answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with the
-copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
+answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:26-slim, CI's Node ("The Node CI runs on"), with
+the copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
 still copies); one replica, stop-then-start deploys;
 `deploy/mason-data/compose.yml` the quickstart. `version()` is `PostgreSQL 18.6 (mason-data <version>) …`, Postgres first
 since tools parse it. Item 1 of the server's plan was a login that does not expire: `mason user` ("Users").
@@ -2071,9 +2125,23 @@ container under 1 and 2 CPUs on Node 24 and 26, none in 20 runs of a PGlite and 
 `--stress-wasm-code-gc` there. Upstream's reporter: 0 in 191 processes with the two V8 commits on Node 24, 8 in 149
 without, and none on Node 26.10.
 
-**Still true.** The image (`docker/mason-data.Dockerfile`, `node:24-slim`) and a user's own Node 24 still carry the bug,
-and `mason serve` terminates a catalog worker at every idle stop: there it is a rare abort the supervisor restarts.
-Lift the guard when a Node 24 release carries nodejs/node#66376.
+**Still true.** A user's own Node 24 still carries the bug, and a run terminates a catalog worker at every idle stop:
+there it is a rare abort that `mason start`'s supervisor restarts (cli/README.md "Requirements" says so). Lift the
+guard when a Node 24 release carries nodejs/node#66376.
+
+**The image (2026-11-02, issue 67).** The image ran `node:24-slim` after CI had left it, so the crash CI no longer saw
+was still the image's, where `mason serve` stops the catalog's worker at every idle stop and the platform restarts what
+aborts. Tom chose the first of the issue's two options: the image runs CI's Node, `node:26-slim` (Debian 13), never
+`--no-wasm-code-gc` on Node 24, which covers the one known fault only. `tests/conventions.test.ts` ("the image runs the
+Node CI runs") holds the major of every `FROM node:…` in the Dockerfile EQUAL to `ciFacts(ci.yml).nodeMajor`
+(scripts/gate.ts), so the two cannot drift either way, and a tag that names no major is refused; ci.yml's `image` job
+loads the engine's native bindings, PGlite and libpg-query inside the built image and has each answer a statement,
+which `mason --version` never did. **Measured** on an arm64 Mac at load 6 to 11, the same smoke start on each image: a
+throwaway postgres:18 with a synthetic 5,000-row table synced by the stream, four aggregates and an
+`information_schema.columns` read equal to Postgres's, an insert seen after `mason wait`, `docker stop` in 2.4 s (Node
+26.13.0) and 2.6 s (Node 24.22.1), healthy after 81.8 s and 84.0 s (the first start's read of the database's collation),
+no `Check failed` in either log. `Check failed: end > addr`, seen once on Node 24 on an arm64 Mac at load ~114, was not
+met again and is not explained: it is not claimed to be this bug, nor fixed.
 
 ### The turn (2026-10-31, issue 127)
 
@@ -2345,6 +2413,21 @@ or splitting it is #338's; until then the warning names it.
 
 **Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
 and their spread is worth a third leg or a queue.
+
+### A docs-only path in CI (2026-11-02, issue 339)
+
+**Decision: a pull request that changes nothing but docs runs a `docs` job in place of build, the unit shards, the
+oracle legs and the rest shards**, worth about 34 runner-minutes a day by issue 78's count, and every required check
+still reports by name. A `changes` job decides it from git on the merge CI checked out (`HEAD^1..HEAD`, `--no-renames`),
+never the GitHub API's paged file list nor a third-party filter; a doc is an `.md` file at the root or under `docs/`,
+`deploy/` or `release-notes/`, never a CLAUDE.md, an allowlist so a new folder is code until decided otherwise
+(`docsPath`, `scripts/ci-shards.ts`). A workflow-level `paths-ignore` was rejected: a required check that never
+reports blocks the pull request for ever. Whatever `changes` cannot tell (a push to main, a HEAD that is not a merge, a
+git failure, no path) is a full run, and each gate reads the mode from its own `needs`, so a failed `changes` fails
+every gate rather than passing over skipped shards; `image` runs short of a cancel and builds unless the run is
+docs-only, since a job skipped for a failed need reports success on a required check. The `docs` job runs the unit
+tests that read a doc (`DOCS_TESTS`), and `tests/ci-shards.test.ts` holds that list to every unit test whose code reads
+one, simulates the workflow's jobs and gates in each mode, and runs `changes` over real merges.
 
 ## A libc order, read level by level
 
