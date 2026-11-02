@@ -2223,6 +2223,7 @@ class Session {
         catalog: { description, rows: statement.explainCatalog === undefined ? rows : catalogExplained(rows, statement.explainCatalog), sent: 0, done } });
       return [bound];
     }
+    await this.plannedAgainIfMoved(statement);
     const planned = statement.duck ?? statement.explain?.plan;
     const expected = planned !== undefined ? planned.params.length : 0;
     if (m.params.length !== expected) throw new PgError({ code: "08P01", message: `bind message supplies ${m.params.length} parameters, but prepared statement "${m.statement}" requires ${expected}` });
@@ -2354,29 +2355,34 @@ class Session {
     if (this.asked !== null && plan.jsonReads !== undefined) this.asked.jsonReads = plan.jsonReads;
   }
 
+  /**
+   * THE SEARCH_PATH MOVED SINCE A STATEMENT WAS PLANNED: at its Bind it is planned again under the session's state now,
+   * as Postgres's plancache plans a cached statement again (`GetCachedPlan` in exec_bind_message; GitHub issue 63) —
+   * never run against tables named under another path. Its parameters keep the types the Parse fixed; a result that
+   * moved (names, types, count) is Postgres's 0A000, and a refusal of the new plan (42P01) is the Bind's, as Postgres's.
+   * The portal keeps the plan it was bound with. The zone alone plans nothing again: the plan reads it at execution.
+   */
+  private async plannedAgainIfMoved(statement: Statement): Promise<void> {
+    const now = this.sessionState();
+    if (statement.raw === null || statement.duck === undefined || statement.plannedUnder === undefined || statement.plannedUnder.searchPath === now.searchPath) return;
+    const again = await this.duckPlan(statement.raw, statement.sql, statement.duck.params, now);
+    const result = (p: DuckPlan): string => JSON.stringify(p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null);
+    if (result(again) !== result(statement.duck)) throw new PgError({ code: "0A000", message: "cached plan must not change result type" });
+    statement.duck = again;
+    statement.plannedUnder = now;
+    delete statement.duckOnWire;
+  }
+
   /** an Execute of a DuckDB statement's portal: its cursor begun at the first, then paged or streamed */
   private async executeDuck(m: Extract<FrontendMessage, { type: "Execute" }>, portal: Portal, statement: Statement, controller: AbortController): Promise<Buffer[]> {
     // each Execute of a paged portal is a message of its own: the last one's row in the request log carries the reads
     if (statement.duck !== undefined) this.readsOf(statement.duck);
     if (portal.cursor === undefined) {
       if (statement.duck === undefined) throw new PgError({ code: "XX000", message: "a statement without its plan: report it (Mason's Postgres listener)" });
-      // THE SEARCH_PATH MOVED SINCE IT WAS PLANNED: planned again under the session's state now, as Postgres's plancache
-      // plans a cached statement again (GitHub issue 63) — never run against tables named under another path. Its
-      // parameters keep the types the Parse fixed; a result that moved (names, types, count) is Postgres's 0A000. The
-      // zone alone plans nothing again: the plan reads it at execution
-      const now = this.sessionState();
-      if (statement.raw !== null && statement.plannedUnder !== undefined && statement.plannedUnder.searchPath !== now.searchPath) {
-        const again = await this.duckPlan(statement.raw, statement.sql, statement.duck.params, now);
-        const result = (p: DuckPlan): string => JSON.stringify(p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null);
-        if (result(again) !== result(statement.duck)) throw new PgError({ code: "0A000", message: "cached plan must not change result type" });
-        statement.duck = again;
-        statement.plannedUnder = now;
-        delete statement.duckOnWire;
-      }
       // A ROLE'S ROW FILTERS MOVED SINCE THE PARSE (the roles file edited): planned again under them, as Postgres plans a
       // prepared statement again after its policies change — where its columns and parameters are what the Parse said
       if (statement.raw !== null && (statement.duck.rowsKey ?? "") !== rowsKeyOf(this.grants())) {
-        const again = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? now);
+        const again = await this.duckPlan(statement.raw, statement.sql, statement.paramOids, statement.plannedUnder ?? this.sessionState());
         const shape = (p: DuckPlan): string => JSON.stringify([p.params, p.fields?.map((f) => [f.name, f.oid, f.typmod]) ?? null]);
         if (shape(again) === shape(statement.duck)) { statement.duck = again; delete statement.duckOnWire; }
       }
