@@ -11,7 +11,8 @@
  */
 import { spawn } from "node:child_process";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import * as fs from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { COMMANDS } from "../src/cli/registry.ts";
 import { FAILURE_CODES } from "../src/cli/command.ts";
 
@@ -86,6 +87,23 @@ export function matrixEnv(extra: Record<string, string> = {}): Record<string, st
     env[k] = v;
   }
   return { ...env, MASON_DEBUG: "1", ...extra };
+}
+
+/**
+ * The environment additions for a `mason` process (and the run it spawns) that reads `bytes` as its container's memory
+ * limit: a preload, written in `dir`, that answers cgroup v2's `/sys/fs/cgroup/memory.max` with it, as a container's
+ * kernel would (src/duck/store.ts machineMemory reads that file; issue 301's floor is held on it). Nothing in src/ reads a
+ * test's variable: the file is the seam, as in a container.
+ */
+export function containerMemoryEnv(dir: string, bytes: number): Record<string, string> {
+  const hook = path.join(dir, "cgroup-memory.mjs");
+  fs.writeFileSync(hook, `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const read = fs.readFileSync;
+fs.readFileSync = function (file, ...rest) { return file === "/sys/fs/cgroup/memory.max" ? ${JSON.stringify(`${bytes}\n`)} : read.call(this, file, ...rest); };
+syncBuiltinESMExports();
+`);
+  return { NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` };
 }
 
 /** One `mason` command as a process: its exit, its two streams, how long it took. Killed after `timeoutMs`. */

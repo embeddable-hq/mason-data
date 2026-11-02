@@ -963,8 +963,9 @@ test("SHOW, SHOW ALL, the reported parameters and current_setting read a paramet
   const direct = [...new Set([...src.matchAll(/catalog\.run\(/g)].map((m) => enclosing(m.index)))].sort();
   // (checkRoles: the roles' row filters analysed once per roles file, as the catalog's own, never a session's request;
   // planner: a generated table's SQL, planned as no session, and refused where it reads a session's setting;
-  // canonicalElsewhere: a SET's value read by the catalog's own check, as validateElsewhere's)
-  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "showAll", "showStatement", "validateElsewhere", "canonicalElsewhere"].sort(),
+  // canonicalElsewhere: a SET's value read by the catalog's own check, as validateElsewhere's; routed: a statement of no
+  // table analysed to see whether it orders text, as duckPlan's analysis is, under the session's state it is passed)
+  assert.deepEqual(direct, ["catalogAs", "catalogSettings", "checkRoles", "duckPlan", "duckValues", "end", "explaining", "planner", "routed", "showAll", "showStatement", "validateElsewhere", "canonicalElsewhere"].sort(),
     "a catalog request beside catalogAs: carry the session's settings (catalogAs), or say here why it reads none of them");
   const calls = scannedFiles(["src"]).flatMap((f) => [...f.src.matchAll(/(?<!function )\bfixedParameter\(/g)].map((m) => `${f.name}:${f.src.slice(0, m.index).split("\n").length}`));
   assert.equal(calls.length, 1, `fixedParameter is called by sessionSetting alone: ${calls.join(", ")}`);
@@ -1497,4 +1498,64 @@ test("session state: the session's zone, path and order are read from Vars only 
   assert.ok(reads.length > 0, "the detector finds the setters' own writes");
   const outside = reads.filter((i) => !ranges.some(([from, to]) => i > from && i < to)).map((i) => src.slice(0, i).split("\n").length);
   assert.deepEqual(outside, [], "read the session's state by sessionState() (one reader, sessionSetting's)");
+});
+
+/**
+ * THE COLLATION RESOLVER (issue 253, decision B): which collation orders a text is Postgres's analysis, and what it
+ * means is src/duck/collation.ts's alone. Five readers each derived it their own way (the database's collation for
+ * every text, a COLLATE's name read off the raw tree, a table of byte-order names, a synthetic node's collation written
+ * as the default) and each was a wrong order somewhere (issues 121, 150, 213). So no engine file but the resolver
+ * holds a collation of its own, reads a COLLATE's name, asks pg_collation, or types a synthetic node's collation as a
+ * constant: it carries the collation of the node it stands for.
+ */
+export function collationReaders(name: string, src: string): string[] {
+  if (!name.startsWith("src/duck/") || name === "src/duck/collation.ts") return [];
+  const found: string[] = [];
+  const lines = src.split("\n");
+  lines.forEach((line, i) => {
+    const code = /^\s*(?:\/\*|\*)/.test(line) ? "" : line.replace(/\/\/.*$/, "");
+    for (const [re, what] of [[/\bthis\.collation\b(?!s)/, "a collation of its own"], [/\bBYTE_COLLATIONS\b/, "a table of byte-order names"],
+      [/\.collname\b|\bnamedCollation\b/, "a COLLATE's name read off the tree"], [/\bpg_collation\b/, "pg_collation asked"],
+      [/\bcollation:\s*(?:100|950|DEFAULT_COLLATION_OID)\b/, "a synthetic collation written as a constant"]] as const) {
+      if (re.test(code)) found.push(`${name}:${i + 1} ${what}: ${line.trim()}`);
+    }
+  });
+  return found;
+}
+
+test("collation resolver: no engine file but src/duck/collation.ts decides what a collation means", () => {
+  const engine = scannedFiles(["src"]).filter((f) => f.name.startsWith("src/duck/"));
+  assert.ok(engine.some((f) => f.name === "src/duck/rewrite.ts"), "the guard reads the rewrite");
+  assert.deepEqual(engine.flatMap((f) => collationReaders(f.name, f.src)), []);
+});
+
+test("the collation resolver guard would catch the real thing", () => {
+  assert.equal(collationReaders("src/duck/rewrite.ts", "    const c = this.collation;").length, 1);
+  assert.equal(collationReaders("src/duck/rewrite.ts", "    if (BYTE_COLLATIONS.has(n)) return null;").length, 1);
+  assert.equal(collationReaders("src/duck/rewrite.ts", "    const name = names(bodyOf(n).collname).at(-1);").length, 1);
+  assert.equal(collationReaders("src/duck/plan.ts", "  await rows(\"SELECT collprovider FROM pg_collation WHERE oid = 1\");").length, 1);
+  assert.equal(collationReaders("src/duck/rewrite.ts", "    this.synthetic.set(b, { node: \"VAR\", type, collation: 100, inputCollation: 0 });").length, 1);
+  // the resolver's own, a COLLATE built for the engine, the resolver's field and a comment are none
+  assert.deepEqual(collationReaders("src/duck/collation.ts", "  const c = this.collation; SELECT collname FROM pg_collation"), []);
+  assert.deepEqual(collationReaders("src/duck/rewrite.ts", "const collate = (n, name) => ({ CollateClause: { arg: n, collname: [S(name)] } }); this.collations.resolve(o); // this.collation"), []);
+});
+
+/** WORDS THAT STATE THE DEFAULT MEMORY LIMIT'S RULE ("half the machine's RAM", "half of it by default"): src/ says the
+ *  rule only through store.ts's DEFAULT_MEMORY_RULE, which is beside `defaultMemoryLimit`, the rule itself (a fact derived
+ *  in several places: PR 380's first-sync refusal said "half the machine's RAM when unset" after PR 382 changed the
+ *  default). Spill's "half of what is free" is another limit, and does not match. */
+export const DEFAULT_RULE_WORDS = /\bhalf (?:of )?(?:the|it|its)\b[^.;()]*?\b(?:RAM|machine|memory|container|limit)\b|\bhalf of it by default\b/i;
+
+test("the default memory limit's rule is said in src/ only through store.ts's DEFAULT_MEMORY_RULE (issue 301, PR 380)", () => {
+  // the detector meets the words it is for, and passes the spill's
+  assert.ok(DEFAULT_RULE_WORDS.test("(MASON_DUCKDB_MEMORY; half the machine's RAM when unset)"));
+  assert.ok(DEFAULT_RULE_WORDS.test("memory (the engine uses up to half of it by default"));
+  assert.ok(DEFAULT_RULE_WORDS.test("the engine may use half the container's memory limit by default"));
+  assert.ok(!DEFAULT_RULE_WORDS.test("what statements may spill to disk (default half of what is free, followed as the disk fills)"));
+  const store = fs.readFileSync(path.join(ROOT, "src/duck/store.ts"), "utf8");
+  assert.ok(literals(store).some((l) => DEFAULT_RULE_WORDS.test(l.text)), "store.ts says the rule, in DEFAULT_MEMORY_RULE");
+  const hits = scannedFiles(["src"]).filter((f) => f.name !== "src/duck/store.ts").flatMap((f) =>
+    (f.name.endsWith(".html") ? f.src.split("\n").map((text, n) => ({ line: n + 1, text })) : literals(f.src))
+      .filter((l) => DEFAULT_RULE_WORDS.test(l.text)).map((l) => `${f.name}:${l.line}: ${l.text}`));
+  assert.deepEqual(hits, [], "say the default through DEFAULT_MEMORY_RULE (src/duck/store.ts), never in words of its own");
 });

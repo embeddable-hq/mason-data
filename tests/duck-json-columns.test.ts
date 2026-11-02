@@ -15,6 +15,7 @@
  * test fails by its assertion (scripts/fails-without.ts).
  */
 import { test, after } from "node:test";
+import { CollationResolver } from "../src/duck/collation.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -250,7 +251,7 @@ test("a read is answered from its stored column only once it is ready, every rea
     const { keeper } = await keeperOver(store, kept, { eager: true });
     const plan = async (sql: string) => {
       const stmt = (await parseSql(sql)).stmts![0]!.stmt as Node;
-      return planKept({ catalog, text: sql, stmt: stmt, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null, kept: keeper });
+      return planKept({ catalog, text: sql, stmt: stmt, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null, kept: keeper });
     };
     const reader = await store.instance.connect();
     await reader.run("SET search_path = 'public'");
@@ -258,7 +259,7 @@ test("a read is answered from its stored column only once it is ready, every rea
     const sql = "SELECT id, j ->> 's' AS s, j #>> '{o,a,b,1}' AS deep, d.j -> 'arr' -> 0 AS first FROM docs d WHERE j ->> 'n' IS NOT NULL ORDER BY id";
     const s = { source: "public.docs", column: "j", steps: '["s"]', either: false, canonical: true, asText: true };
     // with the feature off nothing is read from a column, and the reads are still what the function computes
-    const off = await planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null, kept: null });
+    const off = await planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null, kept: null });
     assert.doesNotMatch(off.sql.text, /__mason_json_[0-9a-f]{12}/);
     // eager (the oracle's): each read stored before the plan is made, then read from its column
     const on = await plan(sql);
@@ -275,7 +276,7 @@ test("a read is answered from its stored column only once it is ready, every rea
     assert.deepEqual(await answer(on.sql.text), await answer(off.sql.text), "the stored reads answer what the calls answer");
     // a read whose path is not ready is the call: a keeper that knows no path
     const { keeper: empty } = await keeperOver(await newStore(), kept, {});
-    const cold = await planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null, kept: empty });
+    const cold = await planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null, kept: empty });
     assert.doesNotMatch(cold.sql.text, /__mason_json_[0-9a-f]{12}/);
     assert.equal(((cold as unknown as { jsonReads?: readonly string[] }).jsonReads ?? []).length, 4, "recorded even when none is stored");
     await empty.stop();
@@ -320,7 +321,7 @@ test("a stored read names its JSON column in every place as Postgres resolved it
     await pglite.exec(`CREATE TABLE public.docs (id integer PRIMARY KEY, j jsonb, k json); CREATE TABLE public.twin (id integer, "J" jsonb)`);
     const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
     const { keeper } = await keeperOver(store, kept, { eager: true });
-    const plan = async (sql: string, k: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null, kept: k });
+    const plan = async (sql: string, k: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null, kept: k });
     const reader = await store.instance.connect();
     await reader.run("SET search_path = 'public'");
     const answer = async (sql: string): Promise<unknown[][]> => (await reader.runAndReadAll(sql)).getRowsJS() as unknown[][];
@@ -535,7 +536,7 @@ test("a READY path is read from its stored column alone: the plan reads no docum
     await pglite.exec("CREATE TABLE public.docs (id integer PRIMARY KEY, j jsonb, k json)");
     const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
     const { keeper } = await keeperOver(store, kept, { eager: true });
-    const plan = async (sql: string, k: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null, kept: k });
+    const plan = async (sql: string, k: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null, kept: k });
     const reader = await store.instance.connect();
     await reader.run("SET search_path = 'public'");
     const answer = async (sql: string): Promise<unknown> => (await reader.runAndReadAll(sql)).getRowsJS() as unknown[][];
@@ -602,7 +603,7 @@ test("a jsonb's order is stored as its key: the function's on every row under C,
       const { keeper } = await keeperOver(store, kept, { eager: true });
       // the listener tells the keeper its collation (and registers the libc order's functions)
       const listener = await store.listener(k.collation, null, k.libc, () => [], keeper as never);
-      const plan = async (sql: string, kk: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: listener.collation, verified: null, kept: kk });
+      const plan = async (sql: string, kk: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: listener.collations, verified: null, kept: kk });
       const reader = await store.instance.connect();
       await reader.run("SET search_path = 'public'");
       const answer = async (sql: string): Promise<unknown> => { try { return (await reader.runAndReadAll(sql)).getRowsJS(); } catch (e) { return (e as Error).message.replace(/\n[\s\S]*/, ""); } };
@@ -737,7 +738,7 @@ test("a jsonb's key marked by a write after it was counted exact is never read a
     const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
     const { keeper, host } = await keeperOver(store, kept, { eager: true });
     const listener = await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, null, smallLibcOrder(), () => [], keeper as never);
-    const plan = async (sql: string, kk: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: listener.collation, verified: null, kept: kk });
+    const plan = async (sql: string, kk: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: listener.collations, verified: null, kept: kk });
     const reader = await store.instance.connect();
     await reader.run("SET search_path = 'public'");
     const answer = async (sql: string): Promise<unknown> => { try { return (await reader.runAndReadAll(sql)).getRowsJS(); } catch (e) { return (e as Error).message.replace(/\n[\s\S]*/, ""); } };
@@ -848,7 +849,7 @@ async function equalityOver(kept: KeptModule, options: Record<string, unknown>) 
   const listener = await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, null, smallLibcOrder(), () => [], over.keeper as never);
   assert.equal(listener.collation.kind, "libc");
   const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
-  const plan = async (sql: string, k: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: listener.collation, verified: null, kept: k });
+  const plan = async (sql: string, k: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: listener.collations, verified: null, kept: k });
   const reader = await store.instance.connect();
   await reader.run("SET search_path = 'public'");
   const text = (rs: unknown[][]): string[][] => rs.map((r) => r.map((v) => String(v)));
@@ -1116,7 +1117,7 @@ test("a path's spellings and its -> and ->> are ONE stored column, each read fro
     await pglite.exec("CREATE TABLE public.docs (id integer PRIMARY KEY, j jsonb, k json)");
     const catalog = (b: Uint8Array): Promise<Uint8Array> => pglite.execProtocolRaw(b);
     const { keeper } = await keeperOver(store, kept, { eager: true });
-    const plan = async (sql: string, k: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null, kept: k });
+    const plan = async (sql: string, k: Keeper | null) => planKept({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Node, base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null, kept: k });
     const reader = await store.instance.connect();
     await reader.run("SET search_path = 'public'");
     const answer = async (sql: string): Promise<unknown[][]> => (await reader.runAndReadAll(sql)).getRowsJS() as unknown[][];

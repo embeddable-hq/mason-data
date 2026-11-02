@@ -13,6 +13,7 @@
  * exponential (still planning when killed at depth 16).
  */
 import { test } from "node:test";
+import { CollationResolver } from "../src/duck/collation.ts";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
@@ -30,7 +31,7 @@ test("planning time (issue 264): every deep shape over a table plans within the 
     for (const s of ddl) await catalogDb.exec(s);
     const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
     const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
-      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: VERIFIED });
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: VERIFIED });
     // a first plan pays the catalog's and the parser's start: untimed
     await plan("SELECT a + a - a AS a, coalesce(b, b, b) AS b, coalesce(d, d, d) AS d FROM t ORDER BY 1");
     for (const depth of PLAN_TIME_DEPTHS) for (const [shape, sql] of Object.entries(deepShapes(depth))) {

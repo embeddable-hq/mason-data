@@ -10,11 +10,21 @@ paths:
 
 ## Memory and the machine (so Claude is aware of it)
 
-- **DuckDB's memory limit is HALF the machine's RAM by default** (`DEFAULT_MEMORY_LIMIT`, `src/duck/store.ts`;
-  `MASON_DUCKDB_MEMORY` overrides it, `8GB` / `512MiB`), and it shares ONE process with V8's heap and two PGlites —
-  DuckDB's own 80 % let the system kill the sync and every session together. On a dedicated box half is
+- **DuckDB's memory limit is HALF the memory by default, or what leaves `OUTSIDE_RESERVE_BYTES` (2.5 GiB) beside it
+  when that is less** (`defaultMemoryLimit`, `DEFAULT_MEMORY_LIMIT`, `src/duck/store.ts`; `MASON_DUCKDB_MEMORY` overrides
+  it, `8GB` / `512MiB`), and it shares ONE process with V8's heap, two PGlites and DuckDB's own memory its limit does
+  not count — DuckDB's own 80 % let the system kill the sync and every session together, and so did half of every
+  container up to 3 GiB (issue 301: up to 2.3 GiB measured outside the limit). On a dedicated box half is
   conservative; on a laptop a large copy and a BI query starve each other. What cannot spill fails ITS statement with
   53200 and a hint naming the variable; the run goes on.
+- **Under `MEMORY_FLOOR_BYTES` (3 GiB) a start goes on and WARNS while `MASON_DUCKDB_MEMORY` is unset, never refuses**
+  (Tom, PR 382): the default is then what leaves the reserve, never under `MIN_SHARE_BYTES` (128 MiB), the most room
+  for the rest (128 MiB up to 2.625 GiB, the size less 2.5 GiB from there to the floor), and the warning is
+  `memoryWarning`, the one function, said in three places (the run's log, `mason status` and `--json` `warnings` while
+  it runs, mason doctor's memory line as a warning, never a failure). Only a value that is not an amount is refused
+  (`memoryProblems`). Set, the variable is the operator's word at any size, and doctor says the room it leaves. The three constants are a
+  measurement (docs/DESIGN.md "Memory: the room outside the engine's limit"): a change that adds memory outside the
+  engine's limit (a worker, a WebAssembly instance, a cache) measures them again, never guesses.
 - **What statements spill has a ceiling under the free disk, and it follows the disk** (`spillCeiling`, `keepSpillCeiling`,
   `src/duck/store.ts`, issue 105): half of what is free plus what is spilled (the free bytes exclude the spill: half of the
   free bytes on top of it converges on the whole disk), or `MASON_SPILL_LIMIT`, never past 90% of that; re-read every 15 s. DuckDB's own is 90% of what was free at its first spill, read once (measured on a

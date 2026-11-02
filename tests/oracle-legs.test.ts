@@ -542,11 +542,94 @@ test("balance: leg 1 on a 1.24x faster runner with the same work (run 4139315108
   assert.match(lines[1]!, /^oracle leg 2: balance: setup 68\.3 s; statements and stages 672\.8 s as run, 608\.\d s in one machine's seconds; runner: Intel/);
 });
 
-test("balance: a real imbalance on alike runners, 120 s apart, warns once naming --weights with this run, or <run-id> outside CI", () => {
-  const legs120 = balanced([68000, 68000], [750000, 630000]);
+// ISSUE 347: one run past the target is never an order to rebalance from it. The warning branches on ONE fact,
+// `alikeRunners` of the measured Balance: every leg's CPU reported and the same string. Not alike (or unknown): no
+// command at all; alike: the command, conditioned on earlier runs on matching CPUs also past the target
+const EPYC_7763 = "AMD EPYC 7763 64-Core Processor × 4";
+const EPYC_9V74 = "AMD EPYC 9V74 80-Core Processor × 4";
+/** the warning invites no rebalance from this run: no `--weights` command, no run id as one, no "rebalance with" */
+const noRebalanceCommand = (line: string, runId: string): void => {
+  assert.doesNotMatch(line, /--weights/, line);
+  assert.doesNotMatch(line, /oracle-legs\.ts/, line);
+  assert.doesNotMatch(line, /rebalance with/, line);
+  assert.doesNotMatch(line, /<run-id>/, line);
+  assert.ok(!line.includes(` ${runId}\``) && !line.includes(`${runId} `), line);
+};
+/** the not-alike warning's substance: the gap, the target, each leg's CPU, the setup under-reading a newer CPU, and the
+ *  rule to rebalance only on a gap that persists across runs on matching CPUs */
+const saysReadBesideTheCpus = (line: string, gap: string, cpus: string[]): void => {
+  assert.match(line, /^::warning title=oracle legs::/, line);
+  assert.ok(line.includes(`${gap} apart in one machine's seconds`) && line.includes("past the target of 60.0 s"), line);
+  cpus.forEach((cpu, i) => assert.ok(line.includes(`leg ${i + 1}: ${cpu}`), `leg ${i + 1}'s CPU: ${line}`));
+  assert.match(line, /under-read a newer CPU/, line);
+  assert.match(line, /persists across runs whose legs ran on matching CPUs/, line);
+};
+
+test("balance: a gap past the target on different CPUs never names --weights (issue 347, PR 332's runs' shape)", () => {
+  const legs = balanced([55200, 68300], [700000, 520000], [EPYC_7763, EPYC_9V74]);
+  const b = legsBalance(legs);
+  assert.ok(b.measured && b.alikeRunners === false && b.apart > LEGS_APART_MS, JSON.stringify(b));
+  for (const runId of ["123", undefined]) {
+    const lines = balanceLines(legs, runId);
+    assert.equal(warning(lines).length, 1, lines.join("\n"));
+    const w = warning(lines)[0]!;
+    saysReadBesideTheCpus(w, `${(b.apart / 1000).toFixed(1)} s`, [EPYC_7763, EPYC_9V74]);
+    noRebalanceCommand(w, "123");
+    // the per-leg lines and the gap line as they were
+    assert.deepEqual(lines.filter((l) => !l.startsWith("::warning")), [
+      `oracle leg 1: balance: setup 55.2 s; statements and stages 700.0 s as run, ${(700000 * 61750 / 55200 / 1000).toFixed(1)} s in one machine's seconds; runner: ${EPYC_7763}`,
+      `oracle leg 2: balance: setup 68.3 s; statements and stages 520.0 s as run, ${(520000 * 61750 / 68300 / 1000).toFixed(1)} s in one machine's seconds; runner: ${EPYC_9V74}`,
+      `oracle legs: balance: 180.0 s apart as run, ${(b.apart / 1000).toFixed(1)} s in one machine's seconds (the target: 60.0 s or less)`,
+    ]);
+  }
+});
+
+test("balance: a CPU not reported is never alike: one leg's or every leg's, 120 s apart, warns without --weights", () => {
+  const one = legsBalance(balanced([68000, 68000], [750000, 630000], ["x × 4", undefined]));
+  assert.ok(one.measured && one.alikeRunners === false, JSON.stringify(one));
+  const oneLines = balanceLines(balanced([68000, 68000], [750000, 630000], ["x × 4", undefined]), "123");
+  assert.equal(warning(oneLines).length, 1, oneLines.join("\n"));
+  saysReadBesideTheCpus(warning(oneLines)[0]!, "120.0 s", ["x × 4", "not reported"]);
+  noRebalanceCommand(warning(oneLines)[0]!, "123");
+  // the base's 120 s legs, which report no CPU at all: once a warning naming --weights 123, now not alike
+  const none = balanced([68000, 68000], [750000, 630000]);
+  const noneB = legsBalance(none);
+  assert.ok(noneB.measured && noneB.alikeRunners === false, JSON.stringify(noneB));
+  const lines = balanceLines(none, "123");
+  assert.equal(warning(lines).length, 1, lines.join("\n"));
+  saysReadBesideTheCpus(warning(lines)[0]!, "120.0 s", ["not reported", "not reported"]);
+  noRebalanceCommand(warning(lines)[0]!, "123");
+  assert.deepEqual(lines.filter((l) => !l.startsWith("::warning")), [
+    "oracle leg 1: balance: setup 68.0 s; statements and stages 750.0 s as run, 750.0 s in one machine's seconds; runner: not reported",
+    "oracle leg 2: balance: setup 68.0 s; statements and stages 630.0 s as run, 630.0 s in one machine's seconds; runner: not reported",
+    "oracle legs: balance: 120.0 s apart as run, 120.0 s in one machine's seconds (the target: 60.0 s or less)",
+  ]);
+});
+
+test("balance: a real imbalance on matching CPUs, 120 s apart, warns once: rebalance only when earlier runs on matching CPUs were past the target too, then --weights with this run, or <run-id> outside CI", () => {
+  const legs120 = balanced([68000, 68000], [750000, 630000], [EPYC_7763, EPYC_7763]);
+  const b = legsBalance(legs120);
+  assert.ok(b.measured && b.alikeRunners === true, JSON.stringify(b));
   const lines = balanceLines(legs120, "123");
-  assert.deepEqual(warning(lines), ["::warning title=oracle legs::the legs are 120.0 s apart in one machine's seconds, past the target of 60.0 s: rebalance with `node scripts/oracle-legs.ts --weights 123` (from this run's oracle legs), read the diff of tests/fixtures/oracle-weights.json, and commit it"]);
-  assert.match(warning(balanceLines(legs120, undefined))[0]!, /--weights <run-id>`/);
+  assert.deepEqual(lines.filter((l) => !l.startsWith("::warning")), [
+    `oracle leg 1: balance: setup 68.0 s; statements and stages 750.0 s as run, 750.0 s in one machine's seconds; runner: ${EPYC_7763}`,
+    `oracle leg 2: balance: setup 68.0 s; statements and stages 630.0 s as run, 630.0 s in one machine's seconds; runner: ${EPYC_7763}`,
+    "oracle legs: balance: 120.0 s apart as run, 120.0 s in one machine's seconds (the target: 60.0 s or less)",
+  ]);
+  assert.equal(warning(lines).length, 1, lines.join("\n"));
+  const w = warning(lines)[0]!;
+  assert.match(w, /^::warning title=oracle legs::the legs are 120\.0 s apart in one machine's seconds, past the target of 60\.0 s/);
+  assert.ok(w.includes(EPYC_7763), w);
+  // conditioned before the command, never an unconditional order from this run
+  const command = w.indexOf("`node scripts/oracle-legs.ts --weights 123`");
+  assert.ok(command > 0, w);
+  assert.match(w.slice(0, command), /one run is not enough/);
+  assert.match(w.slice(0, command), /earlier runs whose legs ran on matching CPUs were also past the target/);
+  assert.ok(w.includes("tests/fixtures/oracle-weights.json"), w);
+  assert.doesNotMatch(w, /rebalance with|from this run's oracle legs/);
+  const outside = warning(balanceLines(legs120, undefined));
+  assert.equal(outside.length, 1);
+  assert.match(outside[0]!, /`node scripts\/oracle-legs\.ts --weights <run-id>`/);
 });
 
 test("balance: not measured, and why, never a gap of 0 or a scale of 1: a report with no times, a setup missing or 0, the legs not each present once", () => {
@@ -576,6 +659,32 @@ test("balance: three legs, every leg named and the gap the heaviest scaled load 
   const lines = balanceLines(three, "9");
   assert.deepEqual(lines.filter((l) => /^oracle leg \d: balance/.test(l)).map((l) => l.slice(0, 12)), ["oracle leg 1", "oracle leg 2", "oracle leg 3"]);
   assert.equal(warning(lines).length, 1);
+  noRebalanceCommand(warning(lines)[0]!, "9");
+});
+
+test("balance: three legs, two alike and one not, are not alike; all three alike, the conditional --weights", () => {
+  const mixed = balanced([40000, 60000, 80000], [400000, 600000, 1000000], ["a × 4", "a × 4", "b × 4"]);
+  const m = legsBalance(mixed);
+  assert.ok(m.measured && m.alikeRunners === false, JSON.stringify(m));
+  const lines = balanceLines(mixed, "9");
+  assert.equal(warning(lines).length, 1, lines.join("\n"));
+  saysReadBesideTheCpus(warning(lines)[0]!, "150.0 s", ["a × 4", "a × 4", "b × 4"]);
+  noRebalanceCommand(warning(lines)[0]!, "9");
+  const same = balanced([40000, 60000, 80000], [400000, 600000, 1000000], ["a × 4", "a × 4", "a × 4"]);
+  const s = legsBalance(same);
+  assert.ok(s.measured && s.alikeRunners === true, JSON.stringify(s));
+  const alike = warning(balanceLines(same, "9"));
+  assert.equal(alike.length, 1);
+  assert.match(alike[0]!, /earlier runs whose legs ran on matching CPUs were also past the target[\s\S]*`node scripts\/oracle-legs\.ts --weights 9`/);
+});
+
+test("balance: below the target, alike or not, no warning; the lines as they were", () => {
+  for (const cpu of [["a × 4", "b × 4"], ["a × 4", "a × 4"], [undefined, undefined]]) {
+    const lines = balanceLines(balanced([60000, 60000], [600000, 610000], cpu), "123");
+    assert.deepEqual(warning(lines), [], JSON.stringify(cpu));
+    assert.equal(lines.length, 3);
+    assert.equal(lines[2], "oracle legs: balance: 10.0 s apart as run, 10.0 s in one machine's seconds (the target: 60.0 s or less)");
+  }
 });
 
 test("the runner's CPU: on the time line when reported, the line as before when not; never in `measured`, so --write and --weights take legs of different CPUs", () => {

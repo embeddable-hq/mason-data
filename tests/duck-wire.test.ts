@@ -6,6 +6,7 @@
  * and types a statement answers with are held to what POSTGRES answers for the same SQL (PGlite).
  */
 import { test, after, before } from "node:test";
+import { CollationResolver } from "../src/duck/collation.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -17,7 +18,7 @@ import pg from "pg";
 import { PGlite } from "@electric-sql/pglite";
 import { citext } from "@electric-sql/pglite/contrib/citext";
 import { DuckDBInstance } from "@duckdb/node-api";
-import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, memoryLimitBytes, pgErrorOf } from "../src/duck/store.ts";
+import { DuckStore, DEFAULT_MEMORY_LIMIT, defaultMemoryLimit, machineMemoryBytes, MEMORY_FLOOR_BYTES, memoryLimitBytes, MIN_SHARE_BYTES, OUTSIDE_RESERVE_BYTES, pgErrorOf } from "../src/duck/store.ts";
 import { startPostgresApi, type PgApiServer } from "../src/api/postgres/server.ts";
 import { StatementError } from "../src/duck/statement.ts";
 import { mintToken, tokenProblem } from "../src/duck/token.ts";
@@ -363,7 +364,7 @@ async function answer(c: pg.Client, text: string, values?: unknown[]): Promise<{
   return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows as unknown[][] };
 }
 async function postgres(text: string, values?: unknown[]): Promise<{ fields: Array<[string, number]>; rows: unknown[][] }> {
-  const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1009, 1022, 1082, 1114, 1184, 1186, 1700, 3802].map((o) => [o, (v: string) => v])) });
+  const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1009, 1014, 1015, 1022, 1082, 1114, 1184, 1186, 1700, 3802].map((o) => [o, (v: string) => v])) });
   return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows };
 }
 
@@ -1106,7 +1107,7 @@ test("DuckDB's memory_limit text is held to the bytes it was set to, to the tent
 });
 
 // DuckDB's default is 80% of the machine's RAM, in the process that holds V8's heap, the PGlites and every session
-test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, spilling beside the copy", async () => {
+test("DuckDB's memory is bounded: half the RAM, or what leaves the reserve, unless MASON_DUCKDB_MEMORY says, spilling beside the copy", async () => {
   const setting = async (st: DuckStore, name: string): Promise<string> => String((await st.writer.runAndReadAll(`SELECT current_setting('${name}')`)).getRows()[0]![0]);
   const own = await DuckStore.open(path.join(dir, "limited.db"), () => undefined, { memoryLimit: "64MiB" });
   try {
@@ -1121,13 +1122,16 @@ test("DuckDB's memory is bounded: half the RAM unless MASON_DUCKDB_MEMORY says, 
     const compression = (await own.writer.runAndReadAll("SELECT column_name, compression FROM pragma_storage_info('packed') WHERE segment_type IN ('VARCHAR', 'BIGINT') GROUP BY 1, 2 ORDER BY 1, 2")).getRowsJS();
     assert.deepEqual(compression, [["i", "BitPacking"], ["j", "ZSTD"]], "the string column ZSTD, the integer its own");
   } finally { own.close(); }
-  // the shared store took the default: half the RAM, or of the container's limit (in whole MiB, DEFAULT_MEMORY_LIMIT),
-  // as DuckDB prints it: to a tenth of its unit
-  assert.equal(DEFAULT_MEMORY_LIMIT, defaultMemoryLimit(machineMemoryBytes()));
-  assert.ok(Math.abs(memoryLimitBytes(DEFAULT_MEMORY_LIMIT) - machineMemoryBytes() / 2) < 2 ** 20, `${DEFAULT_MEMORY_LIMIT} is half of ${machineMemoryBytes()} bytes`);
+  // the shared store took the default: half the RAM, or of the container's limit, or what leaves the reserve beside it
+  // when that is less (in whole MiB, DEFAULT_MEMORY_LIMIT; issue 301), as DuckDB prints it: to a tenth of its unit
+  const total = machineMemoryBytes();
+  assert.equal(DEFAULT_MEMORY_LIMIT, defaultMemoryLimit(total));
+  const rule = Math.min(total / 2, Math.max(MIN_SHARE_BYTES, total - OUTSIDE_RESERVE_BYTES));
+  assert.ok(Math.abs(memoryLimitBytes(DEFAULT_MEMORY_LIMIT) - rule) < 2 ** 20, `${DEFAULT_MEMORY_LIMIT} for ${total} bytes`);
+  assert.ok(total < MEMORY_FLOOR_BYTES || total - memoryLimitBytes(DEFAULT_MEMORY_LIMIT) >= OUTSIDE_RESERVE_BYTES, "the reserve is left beside it");
   assert.equal(store.memoryLimitBytes, memoryLimitBytes(DEFAULT_MEMORY_LIMIT));
   assert.ok(withinDuckDBRounding(await setting(store, "memory_limit"), store.memoryLimitBytes), `${await setting(store, "memory_limit")} for ${store.memoryLimitBytes} bytes`);
-  await assert.rejects(DuckStore.open(path.join(dir, "bad.db"), () => undefined, { memoryLimit: "lots" }), /MASON_DUCKDB_MEMORY="lots" is not an amount of memory: write it as 8GB or 512MiB/);
+  await assert.rejects(DuckStore.open(path.join(dir, "bad.db"), () => undefined, { memoryLimit: "lots" }), /^Error: MASON_DUCKDB_MEMORY="lots" is not an amount of memory: it is the memory the synced data's statements may use before they spill to disk — write it as 8GB or 512MiB, or unset it for the default/);
 });
 
 test("a statement past DuckDB's memory fails alone, 53200 with the way out, and the session goes on", async () => {
@@ -3263,16 +3267,57 @@ test("a set operation's ORDER BY sorts its column as Postgres resolved it, and a
 });
 
 /** each statement's answer against Postgres's (PGlite's), or the error each raises as `code: message`; `bag` compares the
- *  rows as a set, where ties leave their order to each engine; the statements that differ, with both answers */
+ *  rows as a set, where ties leave their order to each engine; the statements that differ, with both answers. A
+ *  statement whose LIMIT cuts inside a tie of distinct rows is one too (`cutInsideATie`): its rows are neither engine's
+ *  promise, so comparing them flakes by load (issue 370) */
 async function unlike(c: pg.Client, statements: ReadonlyArray<readonly [string, "ordered" | "bag"]>): Promise<string[]> {
   const differ: string[] = [];
   for (const [sql, how] of statements) {
     const as = (r: { fields: Array<[string, number]>; rows: unknown[][] }): unknown => ({ fields: r.fields, rows: how === "bag" ? r.rows.map((x) => JSON.stringify(x)).sort() : r.rows });
     const got = await answer(c, sql).then(as, (e: pg.DatabaseError) => `${e.code}: ${e.message}`);
     const want = await postgres(sql).then(as, (e: { code: string; message: string }) => `${e.code}: ${e.message}`);
-    if (!util.isDeepStrictEqual(got, want)) differ.push(`${sql}\n    mason:    ${JSON.stringify(got).slice(0, 300)}\n    postgres: ${JSON.stringify(want).slice(0, 300)}`);
+    // asked whether the answers agree or not, so the reason is named on every run, beside the rows when they differ
+    // (a statement Postgres refuses has no rows to cut: its comparison is the error's)
+    const undecided = typeof want === "string" ? undefined : await cutInsideATie(sql);
+    if (!util.isDeepStrictEqual(got, want)) differ.push(`${sql}\n    mason:    ${JSON.stringify(got).slice(0, 300)}\n    postgres: ${JSON.stringify(want).slice(0, 300)}${undecided === undefined ? "" : `\n    ${undecided}`}`);
+    else if (undecided !== undefined) differ.push(`${sql}\n    ${undecided}`);
   }
   return differ;
+}
+
+/** why the rows of `sql` are decided by neither engine, or undefined when they are (or `sql` ends in no `LIMIT n
+ *  [OFFSET m]` of literal counts under an ORDER BY). Its OUTERMOST query is read from Postgres's parse; what ties is
+ *  Postgres's own sort, asked as `FETCH FIRST j ROWS WITH TIES`, never the keys derived again: `j` rows WITH TIES
+ *  return more than `j` exactly when row `j` ties with row `j + 1`, whatever order either engine reads a tie in. A cut
+ *  (at the OFFSET and at the end of the LIMIT) inside a tie whose rows are not all the same row leaves which of them
+ *  come back to the engine's order. A DISTINCT ON is skipped: its sort holds its ON keys, which WITH TIES does not tie
+ *  on, so its ties are not the rows' (none ends in a LIMIT in this file) */
+async function cutInsideATie(sql: string): Promise<string | undefined> {
+  type Const = { A_Const?: { ival?: { ival?: number }; isnull?: boolean } };
+  const top = ((await parseSql(sql)).stmts?.[0]?.stmt as { SelectStmt?: { sortClause?: unknown[]; distinctClause?: unknown[]; limitOption?: string; limitCount?: Const; limitOffset?: Const } } | undefined)?.SelectStmt;
+  if (top?.limitOption !== "LIMIT_OPTION_COUNT" || top.limitCount === undefined || !top.sortClause?.length) return undefined;
+  // DISTINCT is `[{}]` in the parse, DISTINCT ON its keys
+  if (top.distinctClause?.some((k) => Object.keys(k as object).length > 0)) return undefined;
+  // a literal count: libpg-query's JSON omits a 0 (`{ ival: {} }`), so a present `ival` with none is 0, never absent
+  const literal = (k: Const | undefined): number | undefined => k?.A_Const?.ival !== undefined ? k.A_Const.ival.ival ?? 0 : undefined;
+  const count = literal(top.limitCount), offset = top.limitOffset === undefined ? 0 : literal(top.limitOffset);
+  if (count === undefined || offset === undefined) return undefined;
+  const tail = /\s(?:LIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?|OFFSET\s+(\d+)(?:\s+ROWS?)?\s+LIMIT\s+(\d+))\s*$/i.exec(sql);
+  // the parse says a trailing LIMIT this does not read: couldn't tell, said as such, never taken as decided
+  if (tail === null || Number(tail[1] ?? tail[4]) !== count || Number(tail[2] ?? tail[3] ?? 0) !== offset) return `the LIMIT tie check could not read this statement's LIMIT ${count} OFFSET ${offset}`;
+  const head = sql.slice(0, tail.index);
+  const withTies = async (j: number): Promise<unknown[][]> => (await postgres(`${head} FETCH FIRST ${j} ROWS WITH TIES`)).rows;
+  for (const cut of offset > 0 ? [offset, offset + count] : [count]) {
+    if (cut === 0) continue;
+    const through = await withTies(cut);
+    if (through.length === cut) continue; // row `cut` ties with no row after it
+    // the tie runs from its first row (the least j whose rows WITH TIES are all of `through`) to the end of `through`
+    let first = cut - 1;
+    while (first > 0 && (await withTies(first)).length === through.length) first--;
+    const tied = new Set(through.slice(first).map((r) => JSON.stringify(r)));
+    if (tied.size > 1) return `the LIMIT cuts inside a tie: its rows are decided by neither engine (rows ${first + 1} to ${through.length} tie, ${tied.size} of them distinct, cut after row ${cut})`;
+  }
+  return undefined;
 }
 
 test("a TABLE statement is found in Postgres's analysis: under FETCH … WITH TIES, and as a set operation's SELECT", async () => {
@@ -3353,7 +3398,10 @@ test("FETCH … WITH TIES carries every cell its exact numbers have, in every sh
       [`SELECT s.* FROM ${q} s ORDER BY s.g, 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
       [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
       [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 2, 3 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
-      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 3`, "bag"],
+      // (a key that decides the rows: `ORDER BY 3 LIMIT 3` cuts inside four rows tied at 3, its rows neither engine's
+      // promise, issue 370; the rows still tied here are one row twice)
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 3`, "ordered"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 3 OFFSET 2`, "ordered"],
       [`SELECT * FROM ${q} s UNION ALL SELECT * FROM ${q} s2 ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
       [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT r.id, r.id % 2, r.a / r.b FROM ratios r ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES`, "bag"],
       [`SELECT * FROM (SELECT * FROM ${q} s1) s2 ORDER BY 3, 1 FETCH FIRST 2 ROWS WITH TIES`, "bag"],
@@ -3374,6 +3422,43 @@ test("FETCH … WITH TIES carries every cell its exact numbers have, in every sh
       "SELECT r.a / r.b AS q, * FROM ratios r ORDER BY 2 {limit}",
       `SELECT *, s.id * 2 AS j FROM ${q} s ORDER BY 1 {limit}`,
     ]) assert.deepEqual((await answer(c, sql.replace("{limit}", "FETCH FIRST 2 ROWS WITH TIES"))).rows, (await answer(c, sql.replace("{limit}", "LIMIT 2"))).rows, sql);
+  } finally { await c.end(); }
+});
+
+test("a LIMIT that cuts inside a tie of distinct rows is a difference unlike() reports, whatever order either engine reads", async () => {
+  const c = await client();
+  try {
+    const q = "(SELECT r.id, r.id % 2 AS g, r.a / r.b AS q FROM ratios r)";
+    // four rows tie at q = 3 ((1,1,3) twice, (2,0,3) twice) and LIMIT 3 cuts inside them: named on every run, from
+    // Postgres's answer alone, never only by the runs whose engine order differs (issue 370)
+    const undecided = `WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 3`;
+    for (const how of ["bag", "ordered"] as const) {
+      const found = await unlike(c, [[undecided, how]]);
+      assert.equal(found.length, 1, how);
+      assert.match(found[0]!, /the LIMIT cuts inside a tie: its rows are decided by neither engine \(rows 1 to 4 tie, 2 of them distinct, cut after row 3\)/, how);
+    }
+    // a cut at the OFFSET, in either spelling: rows 2 and 3 of the tie are (1,1,3) and (2,0,3) in some order
+    for (const sql of [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 2 OFFSET 2`, `WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 OFFSET 2 LIMIT 2`]) {
+      const found = await unlike(c, [[sql, "bag"]]);
+      assert.equal(found.length, 1, sql);
+      assert.match(found[0]!, /cut after row 2\)/, sql);
+    }
+    // decided: a key that breaks the tie, a tie of one row repeated, no tie at the cut, a LIMIT that takes the whole
+    // tie, a LIMIT of 0, a LIMIT that is not the outermost query's, a WITH TIES
+    assert.deepEqual(await unlike(c, [
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 3`, "ordered"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 3 OFFSET 2`, "ordered"],
+      ["SELECT * FROM late_c UNION ALL TABLE late_c ORDER BY 1 LIMIT 3", "ordered"],
+      ["SELECT * FROM late_c UNION ALL TABLE late_c ORDER BY 2 DESC LIMIT 3", "ordered"],
+      ["SELECT r.id, r.a / r.b AS q FROM ratios r ORDER BY 2, 1 LIMIT 3", "ordered"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 4`, "bag"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 0`, "ordered"],
+      [`SELECT count(*) FROM (WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 LIMIT 3) s`, "ordered"],
+      [`(WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 LIMIT 2) UNION ALL (WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3, 1 FETCH FIRST 1 ROWS WITH TIES)`, "bag"],
+      [`WITH w AS ${q} SELECT * FROM w UNION ALL SELECT * FROM w ORDER BY 3 FETCH FIRST 3 ROWS WITH TIES`, "bag"],
+    ]), []);
+    // a row output Mason refuses by name (`row-value`), whose rows Postgres's tie leaves decided: one row repeated
+    assert.equal(await cutInsideATie("SELECT ROW(l.c, l.k) AS r FROM late l UNION ALL SELECT ROW(l.c, l.k) FROM late l ORDER BY 1 LIMIT 3"), undefined);
   } finally { await c.end(); }
 });
 
@@ -5551,7 +5636,7 @@ test("round 14: a wire statement's plan computes no generated table's outputs, a
     for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
     const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
     const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
-      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collation: { kind: "bytes" }, verified: null });
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
     // a first plan pays the catalog's and the parser's start: untimed
     await plan("SELECT 1::numeric AS a");
     for (const depth of DEEP_DEPTHS) for (const [shape, sql] of Object.entries(deepChains("1::int8", depth))) {
@@ -6066,4 +6151,157 @@ test("exact path round 2: JOIN … USING and NATURAL JOIN on a carried quotient 
     ] as const) assert.deepEqual(await answeredOrRefused(c, sql, "numeric-quotient-equality", how), [], sql);
     assert.deepEqual(await unlike(c, [[`SELECT count(*) FROM ${s} JOIN ${t} ON s.q = t.q`, "ordered"]]), []);
   } finally { await c.end(); }
+});
+
+// THE COLLATION RESOLVER (issue 253, decision B; issues 121, 122, 125, 150, 213): which collation orders a text is
+// Postgres's analysis, what it means src/duck/collation.ts's, and every reader asks it: a column's own collation, a
+// COLLATE on either side of a comparison, a derived table's COLLATE read through the table around it, and a SELECT of no
+// table that orders text, each answered as Postgres answers
+const COLLS_ROWS = "(1, ''), (2, ' alpha'), (3, '10'), (4, 'Beta'), (5, 'alpha'), (6, 'b'), (7, 'A'), (8, 'a'), (9, 'é'), (10, 'e'), (11, '-x'), (12, 'w'), (13, NULL)";
+const collsTable: PgSchema["tables"][number] = { name: "colls", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "d", type: "text" },
+  { name: "c", type: "text", collation: { schema: "pg_catalog", name: "C" } }, { name: "i", type: "text", collation: { schema: "pg_catalog", name: "und-x-icu" } }] };
+const PG_COLLATIONS = [
+  { schema: "pg_catalog", name: "C", provider: "c", collate: "C", locale: null, deterministic: true },
+  { schema: "pg_catalog", name: "POSIX", provider: "c", collate: "POSIX", locale: null, deterministic: true },
+  { schema: "pg_catalog", name: "und-x-icu", provider: "i", collate: null, locale: "und", deterministic: true },
+];
+let collsMade = false;
+async function makeColls(): Promise<void> {
+  if (collsMade) return;
+  collsMade = true;
+  await store.writer.run("CREATE TABLE public.colls (id INTEGER PRIMARY KEY, d VARCHAR, c VARCHAR, i VARCHAR)");
+  await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, x FROM (VALUES ${COLLS_ROWS}) AS s(id, x)`);
+  await truth.exec("CREATE TABLE public.colls (id int PRIMARY KEY, d text, c text COLLATE \"C\", i text COLLATE \"und-x-icu\")");
+  await truth.exec(`INSERT INTO public.colls SELECT id, x, x, x FROM (VALUES ${COLLS_ROWS}) AS s(id, x)`);
+}
+async function collsApi(duck: Parameters<typeof startPostgresApi>[0]["duck"], extra: NonNullable<PgSchema["collations"]> = []): Promise<{ api: PgApiServer; c: pg.Client }> {
+  await makeColls();
+  const withColls: PgSchema = { ...schema, tables: [...schema.tables, collsTable], collations: [...PG_COLLATIONS, ...extra] };
+  const a = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "app", masonVersion: "test",
+    authenticate: (password) => { const p = tokenProblem(API_KEY, password); if (p !== null) throw new Error(p); return { filters: [], subject: undefined }; },
+    schema: () => withColls, record: () => undefined, log: (l) => (logged.push(l), everLogged.push(l)), duck,
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: a.port, database: "app", user: "mason", password: mintToken(API_KEY, 600).token });
+  await c.connect();
+  return { api: a, c };
+}
+
+test("collation resolver: a column's own collation, a COLLATE on either side, a derived table's and no table's order are Postgres's", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    for (const sql of [
+      // #121 a column's own collation: a star, by number, a top N, compared, min and max, an aggregate's order, a window
+      "SELECT * FROM colls ORDER BY i, id", "SELECT * FROM colls ORDER BY 4 DESC NULLS LAST, 1 LIMIT 5", "SELECT id FROM colls WHERE i > 'b' ORDER BY id",
+      "SELECT min(i), max(i), min(c), max(c) FROM colls", "SELECT id, greatest(i, 'b'), least(i, 'B') FROM colls ORDER BY id",
+      "SELECT string_agg(i, ',' ORDER BY i) FROM colls", "SELECT id, row_number() OVER (ORDER BY i, id) FROM colls ORDER BY id",
+      "SELECT i, count(*) FROM colls GROUP BY i ORDER BY 1", "SELECT DISTINCT ON (i) i, id FROM colls ORDER BY i, id",
+      "SELECT a.i, b.id FROM colls a JOIN colls b ON b.id = a.id ORDER BY a.i, b.id LIMIT 4",
+      "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY i), mode() WITHIN GROUP (ORDER BY i) FROM colls",
+      "SELECT column_name, collation_name FROM information_schema.columns WHERE table_name = 'colls' ORDER BY ordinal_position",
+      // #150 a COLLATE on the right, the left, both, in BETWEEN, a row comparison
+      "SELECT id FROM colls WHERE d > 'b' COLLATE \"und-x-icu\" ORDER BY id", "SELECT id FROM colls WHERE d COLLATE \"und-x-icu\" > 'b' ORDER BY id",
+      "SELECT id FROM colls WHERE i <= 'B' COLLATE \"C\" ORDER BY id", "SELECT id FROM colls WHERE d BETWEEN 'A' AND 'b' COLLATE \"und-x-icu\" ORDER BY id",
+      "SELECT id FROM colls WHERE d NOT BETWEEN (' a' COLLATE \"und-x-icu\") AND 'z' ORDER BY id",
+      "SELECT id, CASE WHEN d > 'b' COLLATE \"und-x-icu\" THEN 1 ELSE 0 END FROM colls ORDER BY id",
+      "SELECT id, greatest(d, 'b' COLLATE \"und-x-icu\") FROM colls ORDER BY id", "SELECT min(d COLLATE \"und-x-icu\") FROM colls",
+      // a char(n) ordered without its padding, its value read back whole
+      "SELECT id, greatest(d::char(4) COLLATE \"und-x-icu\", 'b'), least(d::char(4), 'B' COLLATE \"und-x-icu\") FROM colls ORDER BY id",
+      // two equal char(n) values of another padding: the first argument, as Postgres keeps it
+      "SELECT id, least(d::char(6) COLLATE \"und-x-icu\", d::char(2)), greatest(d::char(2) COLLATE \"und-x-icu\", d::char(6)) FROM colls ORDER BY id",
+      // ... under byte order too, and a char(n) beside a text, which Postgres compares as a char(n)
+      "SELECT id, least(d::char(6) COLLATE \"C\", d::char(2)), greatest(d::char(2) COLLATE \"C\", d::char(6)) FROM colls ORDER BY id",
+      "SELECT id, least(d::char(6) COLLATE \"C\", d), greatest(d::char(4), d COLLATE \"C\") FROM colls ORDER BY id",
+      // #213 a derived table's COLLATE, read through the table around it
+      "SELECT * FROM (SELECT a.d COLLATE \"und-x-icu\" AS n FROM colls a ORDER BY 1 LIMIT 8) s ORDER BY s.n",
+      "SELECT * FROM (SELECT d COLLATE \"und-x-icu\" AS n, count(*) AS k FROM colls GROUP BY 1) s ORDER BY s.n",
+      "SELECT * FROM (SELECT d COLLATE \"und-x-icu\" AS n, count(*) AS k FROM colls GROUP BY 1) s ORDER BY 1",
+      "WITH s AS (SELECT d COLLATE \"und-x-icu\" AS n, id FROM colls) SELECT n FROM s ORDER BY n, id",
+      "SELECT n FROM (SELECT i AS n FROM colls UNION ALL SELECT i FROM colls) s ORDER BY n",
+      "SELECT max(n) FROM (SELECT d COLLATE \"und-x-icu\" AS n FROM colls) s",
+      // #122 no table under a COLLATE that is not byte order
+      "SELECT 'a' < 'B' COLLATE \"und-x-icu\", ' alpha' COLLATE \"und-x-icu\" < '10'",
+      "SELECT x FROM (VALUES ('b'), ('A'), (' a'), ('10')) AS v(x) ORDER BY x COLLATE \"und-x-icu\"",
+      // no table, computing a numeric: the catalog's exact digits (the synced data holds a VALUES list's otherwise)
+      "SELECT length((v.x / 1)::text), (v.x / 1)::text || '' FROM (VALUES (1.00000000000000000001::numeric(30,20)), (2.5)) AS v(x) ORDER BY 1, (v.x / 1)::text COLLATE \"und-x-icu\"",
+    ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    // no table, as a simple Query, naming a parameter: Postgres's 42P02 from the catalog, never a Bind's protocol error
+    await assert.rejects(c.query("SELECT $1::text < $2::text COLLATE \"und-x-icu\""), (e: pg.DatabaseError) => e.code === "42P02");
+    // Postgres's errors, from the analysis: two explicit COLLATEs, two implicit ones
+    await assert.rejects(c.query("SELECT id FROM colls WHERE c COLLATE \"C\" > i COLLATE \"und-x-icu\""), (e: pg.DatabaseError) => e.code === "42P21");
+    await assert.rejects(c.query("SELECT id FROM colls WHERE c > i"), (e: pg.DatabaseError) => e.code === "42P22");
+    await assert.rejects(c.query("SELECT c FROM colls UNION ALL SELECT i FROM colls ORDER BY 1"), (e: pg.DatabaseError) => e.code === "42P22");
+    // a bound statement: the resolver is asked at Parse, as at Query
+    const bound = { text: "SELECT id FROM colls WHERE i > $1 ORDER BY i, id", values: ["b"] };
+    assert.deepEqual((await c.query({ ...bound, rowMode: "array" })).rows, (await truth.query(bound.text, bound.values, { rowMode: "array" })).rows);
+  } finally { await c.end(); await a.close(); }
+});
+
+// (a row comparison is not verified, issue 284, so the listener here refuses nothing: what is held is its keys)
+test("collation resolver: a row comparison keys both sides of a column in the type Postgres compared it as", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    for (const sql of [
+      // a literal beside a char(n) is a char(n), its padding ignored ('b' equals 'b     ')
+      "SELECT id FROM colls WHERE (d::char(6) COLLATE \"und-x-icu\", id) < ('b', 99) ORDER BY id",
+      "SELECT id FROM colls WHERE (d::char(6) COLLATE \"und-x-icu\", id) <= ('b', 1) ORDER BY id",
+      "SELECT id FROM colls WHERE (i, d::char(6)) <= ('b', 'b') ORDER BY id",
+      // a char(n) beside a text is its text, without its padding
+      "SELECT id FROM colls WHERE (i, 1) <= (d::char(6), 0) ORDER BY id",
+    ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  } finally { await c.end(); await a.close(); }
+});
+
+// (the array overload is verified by CI's oracle legs, so the listener here refuses nothing: what is held is its shape)
+test("collation resolver: percentile_disc of an array of fractions answers an array whatever text type the key is", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    for (const sql of [
+      "SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY d::char(4) COLLATE \"und-x-icu\") FROM colls",
+      "SELECT percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY i), percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY i::varchar(8)) FROM colls",
+      "SELECT id % 3, percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY d::char(6) COLLATE \"und-x-icu\") FROM colls GROUP BY 1 ORDER BY 1",
+      "SELECT percentile_disc(ARRAY[0.5]) WITHIN GROUP (ORDER BY d::char(6) COLLATE \"und-x-icu\") FROM colls WHERE false",
+      "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY d::char(6) COLLATE \"und-x-icu\") FROM colls",
+    ]) assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+  } finally { await c.end(); await a.close(); }
+});
+
+test("collation resolver: refuses what it cannot follow by name, and a collation the source lacks is Postgres's 42704", async () => {
+  const extra = [{ schema: "public", name: "mason_num", provider: "i", collate: null, locale: "und-u-kn", deterministic: true },
+    { schema: "public", name: "mason_ci", provider: "i", collate: null, locale: "und-u-ks-level2", deterministic: false }];
+  const { api: a, c } = await collsApi(await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: [...PG_COLLATIONS, ...extra] }), extra);
+  try {
+    await assert.rejects(c.query("SELECT id FROM colls ORDER BY d COLLATE mason_num, id"), (e: pg.DatabaseError) => e.code === "0A000" && /mason_num/.test(e.message) && !/duckdb/i.test(e.message));
+    // a nondeterministic collation anywhere: its equality is not the engine's
+    await assert.rejects(c.query("SELECT id FROM colls WHERE d = 'B' COLLATE mason_ci"), (e: pg.DatabaseError) => e.code === "0A000" && /nondeterministic/.test(e.message));
+    // ... a statement of no table's too, though nothing in it orders: the catalog's mason_ci is not the source's
+    for (const sql of ["SELECT 'a' = 'A' COLLATE mason_ci", "SELECT 'a' COLLATE mason_ci IN ('A', 'z')",
+      "SELECT DISTINCT x COLLATE mason_ci FROM (VALUES ('a'), ('A')) AS v(x)",
+      "SELECT count(*) FROM (VALUES ('a'), ('A')) AS v(x) GROUP BY x COLLATE mason_ci",
+      "SELECT x FROM (VALUES ('b'), ('A')) AS v(x) WHERE x = 'a' COLLATE mason_ci"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /nondeterministic/.test(e.message), sql);
+    }
+    // PGlite has "unicode", a source that lacks it does not
+    await assert.rejects(c.query("SELECT id FROM colls ORDER BY d COLLATE \"unicode\""), (e: pg.DatabaseError) => e.code === "42704" && /"unicode"/.test(e.message));
+    // unused for an order, an ICU keyword is no refusal: equality is the C key
+    assert.deepEqual(await answer(c, "SELECT id FROM colls WHERE d = 'b' COLLATE mason_num"), { fields: [["id", 23]], rows: [["6"]] });
+  } finally { await c.end(); await a.close(); }
+});
+
+test("collation resolver: two libc collations in one session, each by its own order, the second read once on its first use", async () => {
+  const database = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" ", "-"], { collate: "en_US.utf8" });
+  const reversed = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({}).reverse()], [" ", "-"], { collate: "rv_RV.utf8" });
+  const rev = { schema: "public", name: "mason_rev", provider: "c", collate: "rv_RV.utf8", locale: null, deterministic: true };
+  let reads = 0;
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, database, () => copies, undefined,
+    { collations: [...PG_COLLATIONS, rev], readLibc: async (sc) => { reads++; assert.equal(sc.collate, "rv_RV.utf8"); return reversed; } }), [rev]);
+  try {
+    const sql = "SELECT id, d < 'c', d COLLATE mason_rev < 'c' FROM colls WHERE id IN (5, 6, 10, 12) ORDER BY d COLLATE mason_rev";
+    assert.deepEqual((await answer(c, sql)).rows, [["12", "f", "t"], ["10", "f", "t"], ["6", "t", "f"], ["5", "t", "f"]], sql);
+    const max = "SELECT max(d), max(d COLLATE mason_rev), (SELECT max(x COLLATE mason_rev) FROM (VALUES ('a'), ('z')) v(x)) FROM colls WHERE id IN (5, 6, 10, 12)";
+    assert.deepEqual((await answer(c, max)).rows, [["w", "alpha", "a"]], max);
+    // no table, under the database's libc order: the synced data's, never the catalog's byte order
+    assert.deepEqual((await answer(c, "SELECT 'a' < 'B', 'B' < 'a'")).rows, [["t", "f"]]);
+    assert.equal(reads, 1, "the second collation's order is read once, then held");
+  } finally { await c.end(); await a.close(); }
 });

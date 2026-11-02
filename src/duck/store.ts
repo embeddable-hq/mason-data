@@ -22,12 +22,20 @@ import { beginStatement, cancelStatement, slotName, statementCancelled } from ".
 import type { PgSession } from "../api/postgres/encode.ts";
 import type { DuckAnswer, DuckOptions, DuckRunner, DuckSession, ExplainHow } from "../api/postgres/server.ts";
 import { StatementError } from "./statement.ts";
-import { duckParameters, missingRelationHint, planDuck, quoteDuckKeywords } from "./plan.ts";
+import { duckParameters, missingRelationHint, ordersText, planDuck, quoteDuckKeywords } from "./plan.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
 import { VERIFIED } from "./verified.ts";
 import { registerFunctions, SESSION_VARIABLE, SETTINGS_VARIABLE } from "./functions.ts";
-import { duckCollation, type DuckCollation } from "./rewrite.ts";
+import { CollationResolver, duckCollation, isLibcCollation, type DuckCollation, type SourceCollation } from "./collation.ts";
+
+/** the source's collations as the listener resolves them (src/duck/collation.ts): its pg_collation rows, the libc
+ *  orders read at the start (a synced column's), by collcollate, and how one named first by a statement is read */
+export interface ListenerCollations {
+  collations?: readonly SourceCollation[];
+  libcOrders?: ReadonlyMap<string, LibcOrder>;
+  readLibc?: (c: SourceCollation) => Promise<LibcOrder>;
+}
 import { decodeLibcOrder, encodeLibcOrder, isCurrentLibcOrder, type LibcOrder } from "./libc-order.ts";
 import { dataRow } from "../api/postgres/protocol.ts";
 import { cellText, exactColumn, pgTypedColumn, wireColumn, type WireColumn } from "./types.ts";
@@ -76,12 +84,93 @@ const INSTANCE_SETTINGS = { late_materialization_max_rows: "10000", force_compre
 /**
  * DUCKDB'S MEMORY, BOUNDED FOR THIS PROCESS: DuckDB's default is 80% of the machine's RAM, in a process
  * that also holds V8's heap and two PGlites, which ends with the system killing every session and the sync together.
- * Half the RAM unless `MASON_DUCKDB_MEMORY` says (`8GB`, `512MiB`); past it a sort, a join or an aggregate spills to
- * `<file>.tmp` (DuckDB's own default, named here so it is the copy's folder), and what cannot spill fails ITS statement
- * with 53200 and the way out (pgErrorOf), the run going on.
+ * Unless `MASON_DUCKDB_MEMORY` says (`8GB`, `512MiB`), half the memory, or what leaves `OUTSIDE_RESERVE_BYTES` beside
+ * it when that is less (`defaultMemoryLimit`); past it a sort, a join or an aggregate spills to `<file>.tmp` (DuckDB's
+ * own default, named here so it is the copy's folder), and what cannot spill fails ITS statement with 53200 and the way
+ * out (pgErrorOf), the run going on.
+ *
+ * THE ROOM OUTSIDE THE LIMIT (issue 301, docs/DESIGN.md "Memory: the room outside the engine's limit"): the limit counts
+ * DuckDB's buffers, never Node's heap, the catalog's PGlite, the pg-eval PGlite nor what DuckDB allocates outside its
+ * buffer manager, and with half of a 1, 1.5, 2 or 3 GiB container that room was too small: the kernel killed the run in
+ * each. Measured with the limit at 256MiB, the process reached 2.3 GiB beside it (the pg-eval PGlite alone ~0.5 GiB of
+ * WebAssembly memory once a statement handed it 1.5 M values, the catalog's ~0.26 GiB). `OUTSIDE_RESERVE_BYTES` is that
+ * peak with a margin; `MEMORY_FLOOR_BYTES` the smallest container the whole path (a first sync, a generated table's
+ * build, writes on the stream, statements through the listener) ran in under this default. Under the floor, with
+ * `MASON_DUCKDB_MEMORY` unset, a start goes on and WARNS (`memoryWarning`: the run's start, mason status, mason doctor),
+ * its statements given MIN_SHARE_BYTES, the least room for them and the most for the rest (Tom's decision on PR 382: a
+ * warning, never a refusal); set, the variable is the operator's word at any size.
  */
-/** The default memory limit for a machine with `totalBytes` of RAM: half of it, in MiB (mason doctor says it for any machine). */
-export function defaultMemoryLimit(totalBytes: number): string { return `${Math.floor(totalBytes / 2 / 2 ** 20)}MiB`; }
+export const OUTSIDE_RESERVE_BYTES = 2560 * 2 ** 20;
+export const MEMORY_FLOOR_BYTES = 3072 * 2 ** 20;
+/** the statements' share where the reserve leaves less (under the floor, where a start warns): what let the run last
+ *  longest, measured (docs/DESIGN.md): at 2 GiB the whole path ran with it, as with 256MiB, and at 1.5 GiB it answered
+ *  every statement before the kill where 256MiB was killed in the writes; the same statements answered at both, one
+ *  wide aggregate failing alone (53200), and the old quarter, 512MiB, was killed at 2 GiB */
+export const MIN_SHARE_BYTES = 128 * 2 ** 20;
+/**
+ * The default memory limit for `totalBytes` of memory, in whole MiB (mason doctor says it for any machine): half of it,
+ * the page cache keeping the other half, or what leaves OUTSIDE_RESERVE_BYTES beside it when that is less (from 5 GiB
+ * up it is half), never under MIN_SHARE_BYTES (from 2.625 GiB down: under the floor, where a start warns), nor past half.
+ */
+export function defaultMemoryLimit(totalBytes: number): string {
+  const mib = 2 ** 20;
+  const half = Math.floor(totalBytes / 2 / mib), room = Math.floor((totalBytes - OUTSIDE_RESERVE_BYTES) / mib);
+  return `${Math.min(half, Math.max(MIN_SHARE_BYTES / mib, room))}MiB`;
+}
+
+/** A size as a reader recognises it: GiB to one decimal from 1 GiB up, else MiB. */
+export function memorySize(bytes: number): string {
+  return bytes >= 2 ** 30 ? `${(bytes / 2 ** 30).toFixed(1)} GiB` : `${Math.round(bytes / 2 ** 20)} MiB`;
+}
+
+/** what is wrong with the memory a start would run in, in the failure shape (src/cli/command.ts `Failure`'s words) */
+export interface MemoryProblem { message: string; why: string; fix: string }
+
+/** `MASON_DUCKDB_MEMORY` as it is set: null unset (or set empty, as the run reads it) */
+function memorySet(env: Readonly<Record<string, string | undefined>>): string | null {
+  const v = env.MASON_DUCKDB_MEMORY;
+  return v === undefined || v === "" ? null : v;
+}
+
+/** `MASON_DUCKDB_MEMORY` that is not an amount: the one text, for the store's open, mason serve, mason start and doctor */
+export function memorySettingWrong(text: string): MemoryProblem {
+  return { message: `MASON_DUCKDB_MEMORY=${JSON.stringify(text)} is not an amount of memory`,
+    why: "it is the memory the synced data's statements may use before they spill to disk",
+    fix: `write it as 8GB or 512MiB, or unset it for the default (${DEFAULT_MEMORY_LIMIT} here: ${DEFAULT_MEMORY_RULE})` };
+}
+/** THE DEFAULT'S RULE IN WORDS, the one text every message, help and guide that states the default says (a fact derived
+ *  in several places: PR 380's first-sync refusal said "half the machine's RAM" after the default had changed);
+ *  `defaultMemoryLimit` is the rule, and `tests/conventions.test.ts` holds src/ to saying it only through this */
+export const DEFAULT_MEMORY_RULE = `half the container's memory limit, else of the machine's RAM, or what leaves ${memorySize(OUTSIDE_RESERVE_BYTES)} ` +
+  `beside it when that is less, never under ${memorySize(MIN_SHARE_BYTES)}`;
+
+/**
+ * WHAT A START REFUSES OF THE MEMORY (mason serve's one report; mason start and mason doctor take the first):
+ * `MASON_DUCKDB_MEMORY` that is not an amount. A size under the floor is never refused: it is `memoryWarning`'s.
+ */
+export function memoryProblems(env: Readonly<Record<string, string | undefined>>): MemoryProblem[] {
+  const set = memorySet(env);
+  return set !== null && !MEMORY_LIMIT_RE.test(set) ? [memorySettingWrong(set)] : [];
+}
+
+/**
+ * THE ONE WARNING OF THE MEMORY: `memory` under MEMORY_FLOOR_BYTES while `MASON_DUCKDB_MEMORY` is unset (or not an
+ * amount, which is refused beside it). The start goes on; the run says it at its start and in what mason status reads
+ * (its warnings), and mason doctor's memory line says it, each from this text alone. `memory` is `machineMemory()`.
+ */
+export function memoryWarning(memory: MachineMemory, env: Readonly<Record<string, string | undefined>>): MemoryProblem | null {
+  const set = memorySet(env);
+  if ((set !== null && MEMORY_LIMIT_RE.test(set)) || memory.bytes >= MEMORY_FLOOR_BYTES) return null;
+  const size = memorySize(memory.bytes);
+  return { message: `${size} of memory is under the ${memorySize(MEMORY_FLOOR_BYTES)} Mason needs`,
+    why: `${size} is ${memory.from === "container" ? "the container's memory limit" : "the machine's RAM"}; ` +
+      `beside what the synced data's statements may use, Mason itself needs up to ${memorySize(OUTSIDE_RESERVE_BYTES)} (measured, with a margin), ` +
+      "and with less the system may stop the whole run, every session with it, when a first sync, a burst of writes or a statement needs the memory",
+    fix: `give it ${memorySize(MEMORY_FLOOR_BYTES)} or more (the container's memory limit), or set MASON_DUCKDB_MEMORY=<n> ` +
+      "to choose the statements' share yourself, the rest left to Mason (mason doctor says what it leaves)" };
+}
+/** a problem or the warning as one line: mason serve's settings report, the run's warning, mason doctor's detail */
+export function memoryProblemText(p: MemoryProblem): string { return `${p.message}: ${p.why} — ${p.fix}`; }
 
 /**
  * THE MEMORY THIS PROCESS MAY USE: the machine's RAM, or the container's limit where one is set — a cgroup v2
@@ -89,17 +178,21 @@ export function defaultMemoryLimit(totalBytes: number): string { return `${Math.
  * so half of it was more than a limited container had, and the kernel killed the run instead of DuckDB spilling
  * (the review of the cut). `read` is the test's.
  */
-export function machineMemoryBytes(read: (file: string) => string = (f) => fs.readFileSync(f, "utf8"), total: number = os.totalmem()): number {
-  let limit = total;
+export function machineMemory(read: (file: string) => string = (f) => fs.readFileSync(f, "utf8"), total: number = os.totalmem()): MachineMemory {
+  let limit: MachineMemory = { bytes: total, from: "machine" };
   for (const file of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
     let text: string;
     try { text = read(file).trim(); } catch { continue; }   // not a cgroup of that version, or not a container: the machine's RAM
     // v2 says `max` for no limit; v1 says a number near 2^63; either way a number below the RAM is the limit
     const n = Number(text);
-    if (text !== "max" && Number.isFinite(n) && n > 0 && n < limit) limit = n;
+    if (text !== "max" && Number.isFinite(n) && n > 0 && n < limit.bytes) limit = { bytes: n, from: "container" };
   }
   return limit;
 }
+/** the memory this process may use, and where it was read: the container's limit, or the machine's RAM */
+export interface MachineMemory { bytes: number; from: "container" | "machine" }
+/** `machineMemory`'s bytes: the one size the default limit and the floor are read against */
+export function machineMemoryBytes(read?: (file: string) => string, total?: number): number { return machineMemory(read, total).bytes; }
 export const DEFAULT_MEMORY_LIMIT = defaultMemoryLimit(machineMemoryBytes());
 
 /**
@@ -196,7 +289,7 @@ export class DuckStore {
   static async open(file: string, log: (line: string) => void, options: { memoryLimit?: string; spillLimit?: string; diskFree?: (dir: string) => number; silentMs?: number; closeGraceMs?: number; workerFile?: string; extensions?: Extensions } = {}): Promise<DuckStore> {
     const extensions = options.extensions ?? findExtensions();
     const memoryLimit = options.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
-    if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(`MASON_DUCKDB_MEMORY=${JSON.stringify(memoryLimit)} is not an amount of memory: write it as 8GB or 512MiB (unset, half the machine's RAM: ${DEFAULT_MEMORY_LIMIT})`);
+    if (!MEMORY_LIMIT_RE.test(memoryLimit)) throw new Error(memoryProblemText(memorySettingWrong(memoryLimit)));
     if (options.spillLimit !== undefined && !MEMORY_LIMIT_RE.test(options.spillLimit)) throw new Error(`MASON_SPILL_LIMIT=${JSON.stringify(options.spillLimit)} is not an amount of disk: write it as 40GB or 512MiB (unset, half of what is free on the disk)`);
     const spillSet = options.spillLimit === undefined ? null : memoryLimitBytes(options.spillLimit);
     const diskFree = options.diskFree ?? freeBytesAt;
@@ -283,7 +376,8 @@ export class DuckStore {
    *  order as `libcOrder` read it), refusing what is not `verified` (null: nothing is refused for it, the oracle's
    *  recording run alone). */
   async listener(collation: { provider: string; collate: string; locale: string | null } | undefined,
-    verified: ReadonlyMap<string, string> | null = VERIFIED, libc?: LibcOrder, copies: () => readonly CopyState[] = () => [], kept?: KeptRoutes): Promise<DuckOptions & { collation: DuckCollation }> {
+    verified: ReadonlyMap<string, string> | null = VERIFIED, libc?: LibcOrder, copies: () => readonly CopyState[] = () => [], kept?: KeptRoutes,
+    more: ListenerCollations = {}): Promise<DuckOptions & { collation: DuckCollation; collations: CollationResolver }> {
     const known = new Set((await this.writer.runAndReadAll("SELECT collname FROM pragma_collations()")).getRowsJson().map((r) => String(r[0])));
     quoteDuckKeywords((await this.writer.runAndReadAll("SELECT keyword_name FROM duckdb_keywords() WHERE keyword_category <> 'unreserved'")).getRowsJson().map((r) => String(r[0])));
     const named = collation === undefined ? { kind: "bytes" as const } : duckCollation(collation.provider, collation.collate, collation.locale, known);
@@ -291,16 +385,31 @@ export class DuckStore {
     const c: DuckCollation = named.kind === "libc" && libc?.bytes === true ? { kind: "bytes" } : named;
     if (c.kind === "libc") {
       if (libc === undefined) throw new Error(`the database orders text by the libc collation ${collation!.collate}, and its order was not read (Mason bug: report it)`);
-      await this.executor.registerLibcOrder(libc);
+      await this.executor.registerLibcOrder(c.collate, libc, true);
     }
+    // each other libc collation read at the start (a synced column's): its key's order, by its collcollate
+    for (const [collate, order] of more.libcOrders ?? []) if (!order.bytes) await this.executor.registerLibcOrder(collate, order, false);
+    // a libc collation named first by a statement: read from the source on its first use, kept in the copy, then the
+    // engine told its order before the plan that needs it is made (src/duck/collation.ts)
+    const readLibc = more.readLibc;
+    const resolver = new CollationResolver({ database: c, databaseCollate: collation !== undefined && isLibcCollation(collation.provider, collation.collate) ? collation.collate : null,
+      source: more.collations ?? null, known, libc: more.libcOrders ?? new Map(),
+      readLibc: readLibc === undefined ? null : async (sc) => {
+        const r = await this.libcOrder(sc.collate ?? "C", sc.version ?? null, () => readLibc(sc));
+        if (!r.order.bytes) await this.executor.registerLibcOrder(sc.collate ?? "C", r.order, false);
+        return r.order;
+      } });
     // a jsonb's stored key is this collation's (src/duck/kept.ts `orderBy`)
     await kept?.orderBy(c, c.kind === "libc" ? libc : undefined);
     return {
       collation: c,
+      collations: resolver,
       open: () => this.runner(),
       plan: (catalog, text, stmt, base, paramOids, under, userTypes, wireBound, grants, relations, outputs) =>
-        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collation: c, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
+        planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
       parameters: duckParameters,
+      // a SELECT of no table that orders text under a collation that is not byte order: the synced data's (issue 122)
+      ordersText: (catalog, text, paramOids, under, bindable) => ordersText({ catalog, text, paramOids, under, collations: resolver, bindable }),
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
       // a stored JSON path ready or gone (src/duck/kept.ts): the plans kept are made again

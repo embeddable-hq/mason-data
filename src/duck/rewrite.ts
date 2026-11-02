@@ -38,42 +38,14 @@ import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
+import type { DuckCollation, StatementCollations } from "./collation.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
 type AstNode = Record<string, Body>;
 
-/** How the source database orders text (pg_database's datlocprovider / datcollate / datlocale), as DuckDB can follow it. */
-export type DuckCollation =
-  /** byte order; `ascii` where the database's ctype is the C locale's too (upper() changes ASCII letters only) */
-  | { kind: "bytes"; ascii?: boolean }
-  /** ICU: DuckDB's own ICU collation of that locale gives the same order (held to Postgres by tests/integration/duck-oracle.itest.ts) */
-  | { kind: "icu"; name: string }
-  /** a libc locale (glibc's en_US.UTF-8, RDS's default): the order read from the database (src/duck/libc-order.ts) */
-  | { kind: "libc" };
-
-/** Whether pg_database's collation is a libc locale's (not C or POSIX), whose order is read from the database
- *  (src/duck/libc-order.ts) for `duckCollation`'s `libc` */
-export const isLibcCollation = (provider: string, collate: string): boolean =>
-  provider !== "b" && provider !== "i" && !/^(C|POSIX)([.].*)?$/i.test(collate);
-
-/** The source's collation as DuckDB follows it, from pg_database: `provider` c (libc), i (ICU) or b (builtin). */
-export function duckCollation(provider: string, collate: string, locale: string | null, known: ReadonlySet<string>): DuckCollation {
-  const icuName = (l: string): string | null => {
-    const lang = l.replace(/[.@].*$/, "").replace(/-/g, "_").toLowerCase();
-    if (known.has(lang)) return lang;
-    const base = lang.split("_")[0]!;
-    return known.has(base) ? base : null;
-  };
-  if (provider === "b") return { kind: "bytes" };
-  if (/^(C|POSIX)([.].*)?$/i.test(collate) && provider !== "i") return { kind: "bytes", ascii: true };
-  if (provider === "i") {
-    const name = icuName(locale ?? collate);
-    if (name === null) throw new Error(`the source database's ICU locale ${JSON.stringify(locale ?? collate)} has no collation in the engine: Mason cannot sort text as it does`);
-    return { kind: "icu", name };
-  }
-  return { kind: "libc" };
-}
+/** How text is ordered under a collation, and what an OID of the analysis means: src/duck/collation.ts, the one reader */
+export { duckCollation, isLibcCollation, type DuckCollation } from "./collation.ts";
 
 /**
  * A RESULT COLUMN'S EXACT NUMERIC: Postgres computes a numeric with every digit and its own scale rule (`7 / 2.0` is
@@ -95,8 +67,11 @@ export interface ExactColumn {
 /** a query's output columns' types, as `exactThrough` reads them */
 type Fields = ReadonlyArray<{ oid: number; typmod?: number }>;
 
-/** a column of a table's row type, as the catalog has it */
-export interface RowColumn { name: string; type: number; typmod: number }
+/** a column of a table's row type, as the catalog has it (its collation pg_attribute's attcollation) */
+export interface RowColumn { name: string; type: number; typmod: number; collation: number }
+
+/** Postgres's DEFAULT_COLLATION_OID: the database's collation, a collatable type's own (typcollation) */
+const DEFAULT_COLLATION_OID = 100;
 
 /** A statement Postgres would answer and this rewrite cannot make DuckDB answer the same: refused with the way out. */
 /** a statement the rewrite refuses: by a gap of src/duck/gaps.ts, or as Postgres refuses it (its SQLSTATE, not a gap) */
@@ -124,7 +99,15 @@ const INTERVAL_SCALE: Record<string, string> = { second: "6", seconds: "6", mill
 const NUMBER_TYPES = new Set([INT2, INT4, INT8, FLOAT4, FLOAT8, NUMERIC]);
 /** an array type's element (the numbers', where an IN list's element type decides a comparison) */
 const NUMBER_ELEMENT: Record<number, number> = { 1005: INT2, 1007: INT4, 1016: INT8, 1021: FLOAT4, 1022: FLOAT8, 1231: NUMERIC };
+const FLOAT8_ARRAY = 1022;
 const TEXTS = new Set([TEXT, VARCHAR, BPCHAR, NAME, UNKNOWN]);
+/** the text types that carry a collation once analysed (an unknown literal carries none until it is resolved) */
+const COLLATED_TEXTS = new Set([TEXT, VARCHAR, BPCHAR, NAME]);
+/** the hypothetical-set aggregates (`rank('b') WITHIN GROUP (ORDER BY t)`), which the engine has none of */
+const HYPOTHETICAL_SET = new Set(["rank", "dense_rank", "percent_rank", "cume_dist"]);
+/** Postgres's error where text is ordered under no collation it could determine (two implicit ones met: `c > i`, a set
+ *  operation's column of C and ICU). Postgres raises it where it compares; the plan, where it orders */
+const indeterminate = (): Unrewritable => new Unrewritable("could not determine which collation to use for string comparison", "Use the COLLATE clause to set the collation explicitly.", { postgres: "42P22" });
 const JSONS = new Set([JSON_OID, JSONB]);
 const JSONB_ARRAY = 3807;
 const HELD_TYPE_NAMES = new Map(Object.entries(HELD).map(([name, h]) => [h.oid, name] as const));
@@ -140,9 +123,6 @@ const TIMETZ = 1266;
 const TIME_ARRAY = 1183, TIMETZ_ARRAY = 1270;
 /** numeric[] and record[] */
 const NUMERIC_ARRAY = 1231, RECORD_ARRAY = 2287;
-/** pg_collation's C and POSIX: byte order */
-const BYTE_COLLATIONS = new Set([950, 951]);
-
 /** The DuckDB type a Postgres type is cast to (a typmod's numeric(p, s) included), or null where DuckDB has none. */
 function duckTypeOf(oid: number, typmod = -1): string[] | null {
   switch (oid) {
@@ -254,7 +234,8 @@ class Rewriter {
   private readonly types: Map<number, Typed[]>;
   private readonly analysed: PgAnalysis["outputs"];
   private readonly base: number;
-  private readonly collation: DuckCollation;
+  /** what each collation OID of the statement's analysis means (src/duck/collation.ts): the ONE reader of a collation */
+  private readonly collations: StatementCollations;
   private readonly params: readonly number[];
   /** bodies whose rule has run: a rule may wrap its own node, which must not be rewritten twice */
   private readonly done = new WeakSet<Body>();
@@ -311,12 +292,14 @@ class Rewriter {
   /** every read of a copied table's JSON column by literal steps the statement makes, stored or not: the request log's
    *  `json_reads`, which the keeper's policy reads (src/duck/kept.ts `review`) */
   readonly jsonReads = new Map<string, JsonRead>();
-  constructor(analysis: PgAnalysis, base: number, collation: DuckCollation, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY",
+  constructor(analysis: PgAnalysis, base: number, collations: StatementCollations, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY",
     enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set()) {
-    this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collation = collation; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
+    this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collations = collations; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
     this.enums = enums; this.kept = kept;
     for (const at of keyCounts) this.keyCounts.add(at + base);
-    this.caseMode = collation.kind === "icu" ? "icu" : collation.kind === "bytes" && collation.ascii === true ? "ascii" : "libc";
+    // (the case mapping reads the database's collation, where Postgres reads the call's: a gap of its own)
+    const db = collations.database;
+    this.caseMode = db.kind === "icu" ? "icu" : db.kind === "bytes" && db.ascii === true ? "ascii" : "libc";
     this.twins = caseTwins(analysis.tree);
     this.analysisTree = analysis.tree;
   }
@@ -430,7 +413,9 @@ class Rewriter {
    *  text rules (the collation's sort keys, LIKE's escape) apply to it */
   private foldCitext(n: AstNode): AstNode {
     const out = this.lowerOf(n);
-    this.synthetic.set(bodyOf(out), { node: "FUNCEXPR", type: TEXT, typmod: -1, args: [], oid: null, format: null, collation: 100, inputCollation: 100, levelsUp: null, datum: null, qualifier: null, renamed: null });
+    // (under the citext's own collation, as citext_cmp compares: its type's, the database's, where the analysis has none)
+    const collation = this.typed(n)?.collation ?? DEFAULT_COLLATION_OID;
+    this.synthetic.set(bodyOf(out), { node: "FUNCEXPR", type: TEXT, typmod: -1, args: [], oid: null, format: null, collation, inputCollation: collation, levelsUp: null, datum: null, qualifier: null, renamed: null });
     return out;
   }
 
@@ -463,6 +448,11 @@ class Rewriter {
 
   /** the analysed type of each expression's shape (its tree less offsets), from the first place it was analysed */
   private readonly byShape = new Map<string, Typed>();
+  /** each COLLATE's analysed node by its shape, from the first place it was analysed: an ORDER BY that repeats a target
+   *  (findTargetlistEntrySQL99) has none at its own offset (`collationOf`) */
+  private readonly collatedByShape = new Map<string, Typed>();
+  /** a COLLATE's analysed node, read once (`collateTyped`): a rule may rewrite its argument after */
+  private readonly collateOf = new WeakMap<Body, Typed>();
 
   /** after `adopt`: every expression of the statement whose offset Postgres analysed, by its shape */
   indexShapes(v: unknown): void {
@@ -471,6 +461,9 @@ class Rewriter {
     if (isNode(v)) {
       const t = this.typedAt(v);
       if (t !== null) { const k = shapeOf(v); if (!this.byShape.has(k)) this.byShape.set(k, t); }
+      // a COLLATE's own node (its collation, which `typedAt` reads through to its argument's type)
+      const own = kindOf(v) === "CollateClause" ? this.at(bodyOf(v), ["COLLATEEXPR"]) : null;
+      if (own !== null) { const k = shapeOf(v); if (!this.collatedByShape.has(k)) this.collatedByShape.set(k, own); }
     }
     for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) this.indexShapes(x);
   }
@@ -811,9 +804,9 @@ class Rewriter {
   private isRowType(oid: number): boolean { return oid === RECORD || this.userTypes.get(oid)?.startsWith("rowtype:") === true; }
 
   /** a typed reference to a FROM item's column (a row's, read as its columns) */
-  private typedRef(names: readonly string[], type: number, typmod: number): AstNode {
+  private typedRef(names: readonly string[], type: number, typmod: number, collation: number): AstNode {
     const n: AstNode = { ColumnRef: { fields: names.map(S) } };
-    this.synthetic.set(bodyOf(n), { node: "VAR", type, typmod, args: [], oid: null, format: null, collation: TEXTS.has(type) ? 100 : 0, inputCollation: 0, levelsUp: 0, datum: null, qualifier: null, renamed: null });
+    this.synthetic.set(bodyOf(n), { node: "VAR", type, typmod, args: [], oid: null, format: null, collation, inputCollation: 0, levelsUp: 0, datum: null, qualifier: null, renamed: null });
     return n;
   }
 
@@ -833,7 +826,7 @@ class Rewriter {
     if (t === null || t.node !== "VAR" || !this.isRowType(t.type)) return null;
     const alias = String(bodyOf(fields[0]!).sval);
     const table = this.rowTypes.get(t.type);
-    if (table !== undefined) return table.map((c) => ({ name: c.name, value: this.typedRef([alias, c.name], c.type, c.typmod), type: c.type }));
+    if (table !== undefined) return table.map((c) => ({ name: c.name, value: this.typedRef([alias, c.name], c.type, c.typmod, c.collation), type: c.type }));
     if (t.type !== RECORD) throw new Unrewritable(`a row of ${this.userTypes.get(t.type)?.replace(/^rowtype:/, "") ?? "a table"} is not supported by Mason: Mason synced the table in part`, "name its columns instead", "row-value");
     const source = this.fromSources(select).filter((q) => q.alias === alias);
     if (source.length !== 1) throw new Unrewritable("a row of this FROM item is not supported by Mason", "name its columns instead", "row-value");
@@ -845,7 +838,7 @@ class Rewriter {
       const val = bodyOf(x).val as AstNode;
       const name = bodyOf(x).name ?? figureColname(val);
       const typed = this.typed(val);
-      return { name, value: this.typedRef([alias, name], typed?.type ?? TEXT, typed?.typmod ?? -1), type: typed?.type ?? null };
+      return { name, value: this.typedRef([alias, name], typed?.type ?? TEXT, typed?.typmod ?? -1, typed?.collation ?? 0), type: typed?.type ?? null };
     });
   }
 
@@ -1340,7 +1333,7 @@ class Rewriter {
    *  rule, by its output's name: a key (a collation's, jsonb's), a citext's lower(), a char(n)'s rtrim(), a refusal */
   private sortsAsStored(n: AstNode): boolean {
     const type = this.typeOf(n);
-    const c = this.textCollation(n);
+    const c = this.orderedUnder(n);
     return (c === null || c.kind === "bytes") && type !== BPCHAR && !this.isCitext(type) && type !== INET && !(type !== null && [JSONB, JSONB_ARRAY, 1009, 1015].includes(type));
   }
 
@@ -3302,23 +3295,49 @@ class Rewriter {
 
   // ------------------------------------------------------------------------------------- sorting and collation
 
-  /** the collation a text expression compares under, as DuckDB follows it; null for a type that is no text */
-  private textCollation(n: AstNode): DuckCollation | null {
-    if (kindOf(n) === "CollateClause") return this.namedCollation(lastName(bodyOf(n).collname));
+  /**
+   * THE COLLATION A TEXT EXPRESSION CARRIES, as DuckDB follows it: Postgres's analysis of it (exprCollation, `Typed.collation`:
+   * a COLLATE's, a column's own, a derived table's or a set operation's column, a function's result), what the OID
+   * means the one resolver's (src/duck/collation.ts). Null for a value of no text type. Never a COLLATE's name, never
+   * the database's read directly (tests/conventions.test.ts "collation resolver").
+   */
+  private collationOf(n: AstNode): DuckCollation | null {
+    if (kindOf(n) === "CollateClause") {
+      const own = this.collateTyped(n);
+      if (own !== null) return TEXTS.has(own.type) || this.isCitext(own.type) ? this.collations.resolve(own.collation) : null;
+      // a COLLATE the analysis has nowhere is no expression Postgres ordered by: never its argument's collation
+      if (TEXTS.has(this.typeOf(n) ?? -1)) throw new Unrewritable("Mason could not read the collation of this COLLATE", "add the COLLATE where the value is selected, or COLLATE \"C\"", "collation-unknown");
+    }
     const t = this.typed(n);
-    if (t === null || !TEXTS.has(t.type)) return null;
-    if (BYTE_COLLATIONS.has(t.collation)) return { kind: "bytes" };
-    return this.collation;
+    const type = this.typeOf(n);
+    if (t === null || type === null || !TEXTS.has(type)) return null;
+    return this.collations.resolve(t.collation);
   }
 
-  private namedCollation(name: string): DuckCollation {
-    if (["c", "posix", "ucs_basic", "pg_c_utf8"].includes(name)) return { kind: "bytes" };
-    if (name === "default") return this.collation;
-    // Postgres's `unicode` is ICU's root locale, `und-x-icu` by another name
-    if (name === "unicode") return { kind: "icu", name: "en_us" };
-    const icu = /^(.*)-x-icu$/.exec(name);
-    if (icu) return { kind: "icu", name: icu[1] === "und" ? "en_us" : icu[1]!.replace(/-/g, "_") };
-    throw new Unrewritable(`collation "${name}" is not supported by Mason`, `write COLLATE "C" for byte order, or leave the COLLATE out for the database's`, "collation-unknown");
+  /** a COLLATE's analysed node: at its own offset, else (an ORDER BY repeating a target) the same COLLATE's where the
+   *  analysis has it — read before a rule rewrites its argument (`overGroups`), and kept for the node */
+  private collateTyped(n: AstNode): Typed | null {
+    const b = bodyOf(n);
+    const known = this.collateOf.get(b);
+    if (known !== undefined) return known;
+    const own = this.at(b, ["COLLATEEXPR"]) ?? this.collatedByShape.get(shapeOf(n)) ?? null;
+    if (own !== null) this.collateOf.set(b, own);
+    return own;
+  }
+
+  /** THE COLLATION A COMPARISON, A GREATEST / LEAST, AN AGGREGATE OR A WINDOW COMPARED ITS INPUTS UNDER: the analysed
+   *  node's inputcollid (`Typed.inputCollation`), never its left operand's (issue 150). Null where it compared none */
+  private inputCollationOf(t: Typed | null): DuckCollation | null {
+    if (t !== null && t.inputCollation === 0 && t.args.some((a) => COLLATED_TEXTS.has(a.type))) throw indeterminate();
+    return t === null || t.inputCollation === 0 ? null : this.collations.resolve(t.inputCollation);
+  }
+
+  /** the collation an ORDER BY key, a percentile's or a min's argument is ordered under: `collationOf`, and Postgres's
+   *  error where it could determine none (a set operation's column of C and ICU) */
+  private orderedUnder(n: AstNode): DuckCollation | null {
+    const c = this.collationOf(n);
+    if (c === null && kindOf(n) !== "CollateClause" && this.typed(n)?.collation === 0 && COLLATED_TEXTS.has(this.typeOf(n) ?? -1)) throw indeterminate();
+    return c;
   }
 
   /** the keys DuckDB sorts by for one text expression under a collation */
@@ -3328,7 +3347,7 @@ class Rewriter {
       case "bytes": return [plain];
       // (ICU ignores U+FE0F, a joiner: a tie there is two strings, which Postgres orders by their bytes, as under libc)
       case "icu": return [collate(this.cp(plain), c.name), plain];
-      case "libc": return libcKeys(this.cp, plain);
+      case "libc": return libcKeys(this.cp, plain, c.collate);
     }
   }
 
@@ -3368,7 +3387,7 @@ class Rewriter {
     const ordered = this.exactOrderKey(e, select ?? this.groupedWindowKeys.get(b) ?? null);
     if (ordered !== null) return [{ SortBy: { ...b, node: ordered } }];
     this.comparable(e, "ORDER BY");
-    const c = this.textCollation(e);
+    const c = this.orderedUnder(e);
     // a char(n) sorts without its padding (bpcharcmp)
     if (this.typeOf(e) === BPCHAR) { e = fn("rtrim", [e]); this.typedLike.set(bodyOf(e), b.node as AstNode); b.node = e; }
     if (c === null || (c.kind === "bytes" && kindOf(b.node as AstNode) !== "CollateClause")) return null;
@@ -3399,6 +3418,8 @@ class Rewriter {
       return Object.values(isNode(v) ? bodyOf(v) : v as Body).some(aggregated);
     };
     if (aggregated(value)) return e;
+    // (the COLLATE's collation read before its argument changes shape)
+    if (collated) this.collateTyped(e);
     const read = fn("any_value", [value]);
     this.typedLike.set(bodyOf(read), value);
     if (!collated) return read;
@@ -3452,7 +3473,9 @@ class Rewriter {
     if (type === JSONB) throw new Unrewritable(`${where} a jsonb value is not supported by Mason (Postgres orders and equates jsonb by its own rules)`, JSONB_WAY_OUT, "jsonb-compare");
     if (type === JSONB_ARRAY) throw new Unrewritable(`${where} a jsonb array is not supported by Mason (Postgres compares its elements by jsonb's rules)`, "compare an element (a[1]), or a::text", "jsonb-compare");
     if (this.rowHoldsJsonb(n)) throw new Unrewritable(`${where} a row holding a jsonb is not supported by Mason (Postgres compares the jsonb by its own rules)`, "list its members one by one: GROUP BY a, j", "jsonb-compare");
-    if ((type === 1009 || type === 1015) && this.collation.kind !== "bytes") throw new Unrewritable(`${where} a text array is not supported by Mason under the database's collation`, "sort by an element (a[1]) or by array_to_string(a, ',')", "text-array-order");
+    if ((type === 1009 || type === 1015) && this.collations.resolve(this.typed(n)?.collation ?? DEFAULT_COLLATION_OID)?.kind !== "bytes") {
+      throw new Unrewritable(`${where} a text array is not supported by Mason under its collation`, "sort by an element (a[1]) or by array_to_string(a, ',')", "text-array-order");
+    }
   }
 
   /**
@@ -3468,7 +3491,8 @@ class Rewriter {
 
   /** the key computed per row (`jsonbKey`): the functions src/duck/jsonb-order.ts `JSONB_KEY_FUNCTIONS` names */
   private jsonbKeyCall(e: AstNode): AstNode {
-    const c = this.collation;
+    // (Postgres compares a jsonb's strings under DEFAULT_COLLATION_OID, whatever the column's: the database's)
+    const c = this.collations.database;
     if (c.kind !== "icu") return fn(JSONB_KEY_FUNCTIONS[c.kind].key, [e]);
     const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_s")] } });
     const f = JSONB_KEY_FUNCTIONS.icu;
@@ -3506,7 +3530,7 @@ class Rewriter {
     const isNullKey = (): AstNode => op("=", column(), fn("unhex", [strConst(KEY_NULL_HEX)]));
     // a row marked since the key was counted exact is never read as a key: it raises (kept-route.ts markedError)
     if (ready.exact) {
-      const raise = markedRaise(MARKED_FUNCTIONS.key, fn("hex", [column()]), markedError(read, this.collation.kind === "libc"));
+      const raise = markedRaise(MARKED_FUNCTIONS.key, fn("hex", [column()]), markedError(read, this.collations.database.kind === "libc"));
       return caseWhen([[isNullKey(), nullConst()], [op("=", column(), recompute()), raise]], column());
     }
     return caseWhen([[or([isNull(column()), op("=", column(), recompute())]), computed()]], caseWhen([[isNullKey(), nullConst()]], column()));
@@ -3525,7 +3549,7 @@ class Rewriter {
     // refuses, so a stored one serves (keptKey) — both sides of an equality read the order's key; only a libc key
     // refuses a string (libc-uncovered), so under libc equality reads the C key: its own stored column where it is
     // (`EQUAL_STEPS`, src/duck/kept.ts), else computed
-    if (this.collation.kind !== "libc") return this.jsonbKey(e);
+    if (this.collations.database.kind !== "libc") return this.jsonbKey(e);
     return this.keptKey(e, EQUAL_STEPS) ?? fn(JSONB_KEY_FUNCTIONS.bytes.key, [e]);
   }
 
@@ -3636,19 +3660,82 @@ class Rewriter {
     b.distinctClause = values.map((v) => this.exactKey(v) ?? this.equated(this.clone(v), "SELECT DISTINCT"));
   }
 
+  /**
+   * AN EXPRESSION'S OWN COLLATE IS NEVER THE ENGINE'S: every reader that orders text (a sort, a comparison, GREATEST,
+   * min / max, WITHIN GROUP) builds its keys under the collation Postgres's analysis resolved, the COLLATE's included,
+   * however far it reached (a derived table's column, a set operation's); and what only equates is byte equality under
+   * any deterministic collation. A COLLATE left in the engine's SQL would carry the engine's own collation to whatever
+   * read the value next (a derived table's column sorted by bytes under another COLLATE) — so it is dropped.
+   */
   private collateClause(b: Body): AstNode | null {
-    // an expression's own COLLATE outside a sort: a comparison's is handled at the comparison; C needs nothing
-    const c = this.namedCollation(lastName(b.collname));
-    if (c.kind === "bytes") return b.arg as AstNode;
-    if (c.kind === "icu") { b.collname = [S(c.name)]; return null; }
-    return null;
+    return b.arg as AstNode;
   }
 
   /** a text comparison under the collation: `a < b` compares their keys */
   private compareText(name: string, l: AstNode, r: AstNode, c: DuckCollation): AstNode {
     if (c.kind === "icu") return op(name, icuKey(this.cp, strip(l), c.name), icuKey(this.cp, strip(r), c.name));
-    if (c.kind === "libc") return op(name, libcKey(this.cp, strip(l)), libcKey(this.cp, strip(r)));
+    if (c.kind === "libc") return op(name, libcKey(this.cp, strip(l), c.collate), libcKey(this.cp, strip(r), c.collate));
     return op(name, l, r);
+  }
+
+  /** A ROW COMPARISON (`(c, id) < ('b', 3)`): each column under its own collation, the one Postgres compared it under
+   *  (RowCompareExpr's inputcollids, found at its first left column's offset); a text column of a collation that is not
+   *  byte order compared by its key, which ends in the value's bytes (so equal keys are equal values) */
+  private rowCompared(name: string, l: AstNode, r: AstNode): AstNode | null {
+    const ls = (bodyOf(l).args ?? []) as AstNode[], rs = (bodyOf(r).args ?? []) as AstNode[];
+    const textual = [...ls, ...rs].some((x) => TEXTS.has(this.typeOf(x) ?? -1));
+    const first = ls[0];
+    const compared = first === undefined ? null : this.rowCompareAt(first);
+    const collations = compared?.inputCollations;
+    if (collations === undefined || collations.length !== ls.length || rs.length !== ls.length) {
+      if (textual) throw new Unrewritable(`Mason could not read the collations of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
+      return null;
+    }
+    if (collations.some((o, i) => o === 0 && [ls[i], rs[i]].some((x) => x !== undefined && COLLATED_TEXTS.has(this.typeOf(x) ?? -1)))) throw indeterminate();
+    const each = collations.map((o) => this.collations.resolve(o));
+    // both sides of a column in ONE shape, the type Postgres compared it as (`inputTypes`), never each side's own: a
+    // literal beside a char(n) is a char(n), compared without its padding (bpcharcmp), a char(n) beside a text its text
+    const types = compared?.inputTypes;
+    if (types === undefined || types.length !== ls.length) {
+      if (textual) throw new Unrewritable(`Mason could not read the types of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
+      return null;
+    }
+    const plain = (i: number): boolean => { const c = each[i]; return c === null || c === undefined || c.kind === "bytes"; };
+    if (types.every((t, i) => t !== BPCHAR && plain(i)) && ![...ls, ...rs].some((x) => this.typeOf(x) === BPCHAR)) return null;
+    const keyed = (xs: AstNode[]): AstNode[] => xs.map((x, i) => {
+      const c = each[i], t = types[i]!, v = this.widen(x, t);
+      if (c === null || c === undefined || c.kind === "bytes") return t === BPCHAR ? fn("rtrim", [strip(v)]) : v;
+      return this.textKey(v, c, t === BPCHAR, null);
+    });
+    return op(name, { RowExpr: { ...bodyOf(l), args: keyed(ls) } }, { RowExpr: { ...bodyOf(r), args: keyed(rs) } });
+  }
+
+  /** the row comparison Postgres made of a raw `ROW(…) < ROW(…)`, by its first left column (src/duck/pgtree.ts) */
+  private rowCompareAt(first: AstNode): Typed | null {
+    const own = bodyOf(first);
+    const at = typeof own.location === "number" ? own.location : kindOf(first) === "TypeCast" && isNode(own.arg) ? bodyOf(own.arg as AstNode).location : undefined;
+    return typeof at === "number" ? (this.types.get(at - this.base) ?? []).find((t) => t.node === "ROWCOMPAREEXPR") ?? null : null;
+  }
+
+  /** a text value's key under a collation that is not byte order, as ONE text that orders as Postgres does and ends in
+   *  the value's own bytes (`icuKey`, `libcKey`). A char(n) is ordered without its padding (bpcharcmp: `'b   '` is `'b'`,
+   *  which an ICU key, whose spaces weigh, would put after `'B'`), then its trimmed bytes, then `tie` (what decides
+   *  between two equal char(n) values of another padding), and its value whole, read back from the last bytes; `tie`
+   *  null where the key is only compared, never read back (a row comparison), so equal char(n) values have equal keys.
+   *  `padded`: the comparison is of char(n), as the CALLER read it from Postgres's analysis of the comparison, never
+   *  this value's own type (two sides of one comparison keyed in two shapes never compare equal) */
+  private textKey(a: AstNode, c: DuckCollation, padded: boolean, tie: string | null): AstNode {
+    const v = strip(a);
+    if (!padded) {
+      if (c.kind === "bytes") throw new Error("a text key under byte order is the value itself: only a char(n) is keyed (minMax)");
+      return c.kind === "libc" ? libcKey(this.cp, v, c.collate) : icuKey(this.cp, v, c.name);
+    }
+    const trimmed = (): AstNode => fn("rtrim", [this.cp(v)]);
+    // (under byte order the trimmed bytes are the order: their hex, a fixed two characters a byte, orders as they do)
+    const key = c.kind === "bytes" ? strConst("") : c.kind === "libc" ? fn("__mason_libc_key", [trimmed(), strConst(c.collate)]) : fn("icu_sort_key", [trimmed(), strConst(c.name)]);
+    // (compared, never read back: two char(n) values of another padding are EQUAL, so the key ends at the trimmed bytes)
+    if (tie === null) return concat(key, strConst(" "), fn("hex", [trimmed()]));
+    return concat(key, strConst(" "), fn("hex", [trimmed()]), strConst(` ${tie} `), fn("hex", [v]));
   }
 
   private minMax(b: Body): AstNode | null {
@@ -3658,10 +3745,17 @@ class Rewriter {
       throw new Unrewritable(`${b.op === "IS_LEAST" ? "LEAST" : "GREATEST"} of jsonb values is not supported by Mason (Postgres orders jsonb by its own rules)`, "ORDER BY the value … LIMIT 1 in a subquery", "jsonb-compare");
     }
     if (t !== null) b.args = (b.args as AstNode[]).map((a, i) => this.widen(a, t.args[i]?.type));
-    if (t === null || !TEXTS.has(t.type) || BYTE_COLLATIONS.has(t.inputCollation) || this.collation.kind === "bytes") return null;
+    if (t === null || !TEXTS.has(t.type)) return null;
+    // under the collation the GREATEST compared under (its inputcollid), never the database's whatever the arguments
+    const c = this.inputCollationOf(t);
+    // (under byte order a text's own order is the engine's; a char(n)'s is not: its padding is ignored, and of equal
+    // values of another padding Postgres keeps the first argument, so it is keyed as under any other collation)
+    if (c === null || (c.kind === "bytes" && t.type !== BPCHAR)) return null;
     // the greatest (least) of the values' keys, which end in the value's own bytes: the value is read back from them
-    const c = this.collation;
-    const keys = (b.args as AstNode[]).map((a) => c.kind === "libc" ? libcKey(this.cp, strip(a)) : icuKey(this.cp, strip(a), c.name));
+    // (equal char(n) values of another padding: Postgres keeps the first argument, which `tie` makes the least, or
+    // the greatest, of the equal keys)
+    const args = b.args as AstNode[];
+    const keys = args.map((a, i) => this.textKey(a, c, t.type === BPCHAR, String(b.op === "IS_LEAST" ? i : args.length - i).padStart(4, "0")));
     const best: AstNode = { MinMaxExpr: { ...b, args: keys } };
     this.done.add(bodyOf(best));
     return fn("decode", [fn("unhex", [fn("regexp_extract", [best, strConst("[^ ]*$")])])]);
@@ -3791,14 +3885,20 @@ class Rewriter {
           bodyOf(r!).items = bounds.map((x) => cast(x, ["double"]));
           return null;
         }
-        const c = this.textCollation(l!);
+        // Postgres splits it into two comparisons at its offset (`a >= b AND a <= c`; NOT: `a < b OR a > c`), each under
+        // its own collation (a COLLATE on one bound is that comparison's alone)
+        const compared = typeof b.location === "number" ? (this.types.get(b.location - this.base) ?? []).filter((x) => x.node === "OPEXPR") : [];
+        const textual = own.some((x) => x !== null && TEXTS.has(x));
+        if (textual && compared.length !== 2) throw new Unrewritable("Mason could not read the collations of this BETWEEN", "write the two comparisons: a >= b AND a <= c", "collation-unknown");
+        const [c1, c2] = textual ? [this.inputCollationOf(compared[0]!), this.inputCollationOf(compared[1]!)] : [null, null];
         // char(n): compared without the padding
         const trim = (x: AstNode): AstNode => this.typeOf(x) === BPCHAR ? fn("rtrim", [x]) : x;
-        if (c === null || c.kind === "bytes") {
+        if ((c1 === null || c1.kind === "bytes") && (c2 === null || c2.kind === "bytes")) {
           if (own.includes(BPCHAR)) { b.lexpr = trim(l!); bodyOf(r!).items = bounds.map(trim); }
           return null;
         }
-        const inside = and([this.compareText(">=", trim(l!), trim(bounds[0]!), c), this.compareText("<=", trim(this.clone(l!)), trim(bounds[1]!), c)]);
+        const bytes: DuckCollation = { kind: "bytes" };
+        const inside = and([this.compareText(">=", trim(l!), trim(bounds[0]!), c1 ?? bytes), this.compareText("<=", trim(this.clone(l!)), trim(bounds[1]!), c2 ?? bytes)]);
         return b.kind === "AEXPR_NOT_BETWEEN" ? not(inside) : inside;
       }
       case "AEXPR_OP_ANY": case "AEXPR_OP_ALL": {
@@ -3968,9 +4068,14 @@ class Rewriter {
       }
       case "<": case ">": case "<=": case ">=": {
         if (l === undefined || r === undefined) return null;
-        // the operands as rewritten so far (a citext lower-cased to text sorts under the collation)
-        const c = this.textCollation(b.lexpr as AstNode) ?? this.textCollation(b.rexpr as AstNode);
-        if (c === null || c.kind === "bytes" || (t !== null && BYTE_COLLATIONS.has(t.inputCollation))) return null;
+        // a row comparison: each column under its own collation (RowCompareExpr's inputcollids)
+        if (kindOf(l) === "RowExpr" && kindOf(r) === "RowExpr") return this.rowCompared(name, l, r);
+        // the operands as rewritten so far (a citext lower-cased to text sorts under the collation), compared under the
+        // collation the operator was resolved under (its inputcollid): a COLLATE on either side, or neither's own
+        const textual = [b.lexpr, b.rexpr].some((x) => isNode(x) && TEXTS.has(this.typeOf(x as AstNode) ?? -1));
+        if (textual && t === null) throw new Unrewritable(`Mason could not read the collation of this ${name}`, "add COLLATE \"C\" for byte order", "collation-unknown");
+        const c = textual ? this.inputCollationOf(t) : null;
+        if (c === null || c.kind === "bytes") return null;
         // the operands as Postgres cast them (a char(n) beside a text is its text without the padding)
         return this.compareText(name, b.lexpr as AstNode, b.rexpr as AstNode, c);
       }
@@ -4495,12 +4600,15 @@ class Rewriter {
   private textMinMax(name: string, b: Body, args: AstNode[]): AstNode | null {
     const arg = args[0];
     // a window's too (`max(t) OVER (…)`): arg_min / arg_max are DuckDB window aggregates as well
-    if (arg === undefined) return null;
-    const c = this.textCollation(arg);
+    if (arg === undefined || !TEXTS.has(this.typeOf(arg) ?? -1)) return null;
+    // under the collation the aggregate compared under (its inputcollid: one argument's own collation); a min the
+    // rewrite made of another has no node of its own, and reads its argument's
+    const agg = this.at(b, ["AGGREF", "WINDOWFUNC"]);
+    const c = agg !== null ? this.inputCollationOf(agg) : this.orderedUnder(arg);
     if (c === null || c.kind === "bytes") return null;
     // the value whose key is least (or greatest); a NULL value has no key and is skipped, as min skips it
     // (the value in three places, each its own copy: the walker rewrites a node in its first place alone)
-    const keys = c.kind === "icu" ? [collate(this.cp(strip(arg)), c.name), this.cp(strip(arg))] : libcKeys(this.cp, this.cp(strip(arg)));
+    const keys = c.kind === "icu" ? [collate(this.cp(strip(arg)), c.name), this.cp(strip(arg))] : libcKeys(this.cp, this.cp(strip(arg)), c.collate);
     const key = caseWhen([[not(isNull(this.cp(strip(arg)))), row(keys)]], null);
     return { FuncCall: { ...b, funcname: [S(name === "min" ? "arg_min" : "arg_max")], args: [strip(arg), key] } };
   }
@@ -4509,6 +4617,10 @@ class Rewriter {
    *  mode over the values in that order picks the same (its tie goes to the first it saw); percentile_disc / _cont
    *  take a position in the order, which DuckDB computes by bytes: refused for text under a libc collation */
   private withinGroup(name: string, b: Body): AstNode | null {
+    // a hypothetical-set aggregate: the engine has none, of any type under any collation
+    if (HYPOTHETICAL_SET.has(name)) {
+      throw new Unrewritable(`${name}() WITHIN GROUP is not supported by Mason`, "count the rows below the value in a subquery: SELECT count(*) + 1 FROM t WHERE x < 'value'", "hypothetical-set");
+    }
     const order = (b.agg_order ?? []) as AstNode[];
     const key = order[0] !== undefined ? bodyOf(order[0]).node as AstNode : undefined;
     // a jsonb's position in its order, or its most frequent value: DuckDB would pick by its text
@@ -4523,12 +4635,27 @@ class Rewriter {
       if (name === "mode") return { FuncCall: { ...b, args: [this.clone(key)], agg_order: undefined, agg_within_group: undefined } };
       if (args.length === 1) return { FuncCall: { ...b, funcname: [S("quantile_disc")], args: [this.clone(key), args[0]!], agg_order: undefined, agg_within_group: undefined } };
     }
-    const c = key === undefined ? null : this.textCollation(key);
+    const c = key === undefined ? null : this.orderedUnder(key);
     if (c === null || c.kind === "bytes") return null;
     if (name === "mode" && order.length === 1) {
       return { FuncCall: { ...b, args: [this.clone(key!)], agg_within_group: undefined } };
     }
-    if (c.kind === "libc") throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY text) under the database's libc collation is not supported by Mason`, "order by a number, or take the value with ORDER BY … LIMIT in a subquery", "percentile-text-libc");
+    // percentile_disc of text takes the value at a position in the collation's order: the position of its KEY, which
+    // orders as the collation does and ends in the value's own bytes, read back from it (as GREATEST's is)
+    if (name === "percentile_disc" && order.length === 1) {
+      const sort = bodyOf(order[0]!);
+      const keyed: AstNode = { FuncCall: { ...b, agg_order: [{ SortBy: { ...sort, node: this.textKey(key!, c, this.typeOf(key!) === BPCHAR, "") } }] } };
+      this.done.add(bodyOf(keyed));
+      const value = (k: AstNode): AstNode => fn("decode", [fn("unhex", [fn("regexp_extract", [k, strConst("[^ ]*$")])])]);
+      // an array of fractions answers an array of keys: the overload Postgres chose, read from its analysis of the
+      // call (a float8[] fraction), never from the answer's element type, which is whatever text type the key is
+      if (this.typed({ FuncCall: b })?.directArgs?.[0]?.type === FLOAT8_ARRAY) {
+        const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_k")] } });
+        return fn("list_transform", [keyed, op("->", each(), value(each()))]);
+      }
+      return value(keyed);
+    }
+    // (percentile_disc and mode() are the ordered-set aggregates of text; a hypothetical-set one is refused above)
     return null;
   }
 
@@ -5145,7 +5272,7 @@ class Rewriter {
     if (t !== null) {
       if (t.node !== "VAR" || t.functionColumn !== undefined || (t.levelsUp ?? 0) !== 0) return false;
       if (t.type === JSONB || t.type === BPCHAR || t.type === INET || this.isCitext(t.type)) return false;
-      const c = this.textCollation(e);
+      const c = this.collationOf(e);
       if (c !== null && c.kind !== "bytes") return false;
       if (t.relation !== undefined) return true;
     }
@@ -5645,16 +5772,17 @@ const shapeOf = (n: AstNode): string => JSON.stringify(n, (k, v: unknown) => k =
 
 const strip = (n: AstNode): AstNode => kindOf(n) === "CollateClause" ? bodyOf(n).arg as AstNode : n;
 
-/** glibc's order, as the source was MEASURED to order text (src/duck/libc-order.ts: its levels as one text), then the
- *  bytes, as Postgres breaks a tie */
-function libcKeys(copy: Copy, e: AstNode): AstNode[] {
-  return [fn("__mason_libc_key", [copy(e)]), e];
+/** glibc's order of the libc collation `collate` (its collcollate), as the source was MEASURED to order text
+ *  (src/duck/libc-order.ts: its levels as one text; the engine holds one order per collcollate, told by name), then
+ *  the bytes, as Postgres breaks a tie */
+function libcKeys(copy: Copy, e: AstNode, collate: string): AstNode[] {
+  return [fn("__mason_libc_key", [copy(e), strConst(collate)]), e];
 }
 
 /** the libc keys as ONE text that orders as they do: the key, a space (below every hex digit, so a shorter key
  *  orders first), the value's own bytes in hex */
-function libcKey(copy: Copy, e: AstNode): AstNode {
-  const [key, bytes] = libcKeys(copy, e) as [AstNode, AstNode];
+function libcKey(copy: Copy, e: AstNode, collate: string): AstNode {
+  const [key, bytes] = libcKeys(copy, e, collate) as [AstNode, AstNode];
   return concat(key, strConst(" "), fn("hex", [bytes]));
 }
 
@@ -6300,7 +6428,8 @@ export interface RewriteOptions {
   stmt: AstNode;
   base: number;
   analysis: PgAnalysis;
-  collation: DuckCollation;
+  /** the statement's collations, resolved (src/duck/collation.ts `CollationResolver.prepare`) */
+  collations: StatementCollations;
   userTypes?: ReadonlyMap<number, string>;
   rowTypes?: ReadonlyMap<number, readonly RowColumn[]>;
   timeZone?: string;
@@ -6312,10 +6441,10 @@ export interface RewriteOptions {
   keyCounts?: ReadonlySet<number>;
 }
 
-export function rewrite({ stmt, base, analysis, collation, userTypes = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
+export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
   wireBound = false, keyCounts = new Set() }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
-  const r = new Rewriter(analysis, base, collation, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts);
+  const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }

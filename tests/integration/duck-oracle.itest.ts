@@ -36,7 +36,8 @@
  * assert; `integration (oracle)` holds the reports to the whole. Without it a run is the whole, as ever. Which leg asks
  * a statement is `partition`'s, by measured cost: every run times each statement text, each stage and its fixed costs,
  * prints them on one `duck oracle: time:` line, and a leg's report carries them (`times`), from which
- * `node scripts/oracle-legs.ts --weights <run-id>` rewrites tests/fixtures/oracle-weights.json once the legs drift apart.
+ * `node scripts/oracle-legs.ts --weights <run-id>` rewrites tests/fixtures/oracle-weights.json once the legs' gap
+ * persists past the target across runs whose legs ran on matching CPUs (never from one run: issue 347).
  *
  * Needs IT_POSTGRES_URL (any wal_level; a database of its own is created and dropped), psql on PATH, and the copy's
  * extensions installed from this platform's package (`node cli/extensions.ts --node-modules node_modules`, once): the
@@ -51,7 +52,9 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import pg from "pg";
 import { DuckStore } from "../../src/duck/store.ts";
-import { readLibcOrder } from "../../src/duck/libc-order.ts";
+import { readLibcOrder, type LibcOrder } from "../../src/duck/libc-order.ts";
+import type { SourceCollation } from "../../src/duck/collation.ts";
+import { pgIdent } from "../../src/cdc/pg-wire.ts";
 import { isLibcCollation, nodesPlacedTwice } from "../../src/duck/rewrite.ts";
 import { Sync } from "../../src/duck/sync.ts";
 import { startPostgresApi, type PgApiServer } from "../../src/api/postgres/server.ts";
@@ -63,6 +66,7 @@ import { BI_SHAPES, META } from "./oracle/bi-shapes.ts";
 import { TYPE_MATRIX, TYPED, typedMutations } from "./oracle/type-matrix.ts";
 import { MERGE_COPIED, UNORDERED_LIMITS, UNORDERED_ROW_SHAPES, everyRowOnce, withinWhole, type UnorderedLimit } from "./oracle/unordered-limit.ts";
 import { GAP_CASES } from "./oracle/gap-cases.ts";
+import { COLLATION_CASES, COLLS_SCHEMA, collsMutations } from "./oracle/collations.ts";
 import { refusedAsNamed, SETTING_SCRIPTS, stepText, traceStep } from "./oracle/setting-scripts.ts";
 import { ANY, collationMet, decidedShapes, shapeDecision, shapesDecided, staleDecisions, type Answered, type Decided } from "./oracle/known.ts";
 import { shapes as shapesOf } from "./oracle/shapes.ts";
@@ -91,6 +95,12 @@ const SHAPES = process.env.IT_ORACLE_SHAPES !== "0";
 /** `IT_ORACLE_JSON_PATHS=eager` stores every JSON path a statement reads before it is planned (src/duck/kept.ts, the
  *  test's own option): every such read is then answered from its stored column, and must still answer as Postgres */
 const EAGER_JSON = process.env.IT_ORACLE_JSON_PATHS === "eager";
+/** `IT_ORACLE_COLLATION=icu|c`: the database made under ICU's root or C, not the service's default (CI's `collation`
+ *  job, .github/workflows/ci.yml): the collation resolver's statements (oracle/collations.ts) under each provider */
+const DATABASE_COLLATION = process.env.IT_ORACLE_COLLATION ?? "";
+if (!["", "icu", "c"].includes(DATABASE_COLLATION)) throw new Error(`IT_ORACLE_COLLATION=${DATABASE_COLLATION}: icu or c, or unset for the service's default`);
+const CREATE_DATABASE_WITH = DATABASE_COLLATION === "icu" ? " TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE 'und' LOCALE 'C.UTF-8'"
+  : DATABASE_COLLATION === "c" ? " TEMPLATE template0 LOCALE 'C'" : "";
 /** the DuckDB-alone pass's tallies (`duckdbAlone`, below): what docs/SQL-SUPPORT.md's comparison renders (tests/duck-gaps.test.ts) */
 const ALONE_FIXTURE = path.join(REPO, "tests", "fixtures", "oracle-duckdb-alone.json");
 const UPDATE_FIXTURE = process.env.UPDATE_FIXTURE === "1";
@@ -119,7 +129,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
+const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "coll", "colls", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -277,14 +287,13 @@ const KNOWN: Decided[] = [
   // (a source of another collation meets none of these, so `collation` decides staleness, and each gap's `heldBy` is this file:
   // Mason gap libc-mark-run-form
   // Mason gap libc-rare-letter
-  // Mason gap fromless-text-order)
+  // Mason gap fromless-numeric-text-order)
   { sql: /^SELECT 'a6ß' > E'a\\u03086ß' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-mark-run-form", why: "a mark's skipped run compares ß's third level with a digit's: glibc's one scale, Mason's per letter" },
-  { sql: /^SELECT 'a' < 'B'$/, collation: "not-c", kind: "value", gap: "fromless-text-order", why: "the catalog answers a SELECT of no table, in byte order (issue 141)" },
+  { sql: /^SELECT 1\.5 AS n, 'a' < 'B' AS lt$/, collation: "not-c", kind: "value", gap: "fromless-numeric-text-order", why: "a statement of no table that computes a numeric is the catalog's, whose text order is byte order" },
   { sql: /^SELECT E'\\uA79A' < E'\\u00C4' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-rare-letter", why: "a rare letter's weight no spelling of it says" },
   { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },
   { sql: /stddev\(DISTINCT (i4|n2)\)|stddev\(n\)/, kind: "text", gap: "numeric-stddev", why: "Postgres's numeric stddev of DISTINCT values, or of an unconstrained numeric, is exact to its scale; DuckDB's a double" },
-  { sql: /greatest\(ch, (t|vc)\)/, kind: "value", gap: "char-n-minmax", why: "least(char(5) '', text ''): Postgres compares without the padding" },
   { sql: /^SELECT min\(a \/ b\), max\(a \/ b\) FROM public\.one, \(VALUES/, kind: "text", gap: "min-max-scale-tie", why: "min of 0 / 7 and 0 / 1000000, equal values at two scales: Postgres keeps the last it reads, Mason the least operands" },
   { sql: /^SELECT var_samp\(x\) FROM \(SELECT 7 \/ 3\.0 AS x/, kind: "text", gap: "nested-exact-numeric", why: "the subquery's quotients are DuckDB's doubles where the outer query takes their variance (a sum, an avg, min / max and an ORDER BY read their programs)" },
   { sql: /^SELECT count\(\*\) FROM public\.one, \(VALUES \(1\.00000000000000000001::numeric\(30,20\)\), \(1\.00000000000000000002\)\) AS v\(x\) WHERE v\.x \/ 1 = ANY \(ARRAY\[1\.00000000000000000001\]\)$/, kind: "value", gap: "numeric-quotient-compare", why: "= ANY equates the two quotients' doubles, which Postgres's exact values tell apart" },
@@ -326,7 +335,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   // alike; a leg reports it, and `--weights` makes the legs' split from it
   const started = performance.now();
   const clock = new Clock(), stageClock = new Clock(), fixedClock = new Clock();
-  psql(adminUrl!, `CREATE DATABASE ${tag}`);
+  psql(adminUrl!, `CREATE DATABASE ${tag}${CREATE_DATABASE_WITH}`);
   psql(dbUrl, SCHEMA);
   const s = seed();
   psql(dbUrl, s.sql);
@@ -335,6 +344,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   psql(dbUrl, SESSION_STATE_DDL);
   psql(dbUrl, META);
   psql(dbUrl, TYPED);
+  psql(dbUrl, COLLS_SCHEMA);
   psql(dbUrl, ROWS_SCHEMA);
   // latest(x ORDER BY …), Mason's aggregate, declared here from the catalog's own definition: like with like
   psql(dbUrl, `${LATEST_SQL.map((s) => `${s};`).join("\n")}\n${LATEST_SCHEMA}`);
@@ -362,6 +372,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   await sync.open();
   sync.setTables([...added, ...shop, ...other]);
   sync.setViews(facts.views ?? []);
+  sync.setCollations(facts.collations ?? []);
   await fixedClock.time("first sync", () => sync!.once());
   assert.deepEqual(sync.state().filter((x) => x.phase !== "copied").map((x) => `${x.source} ${x.phase} ${x.error}`), [], "every table copied");
   // THE ORACLE RUNS AS A USER'S INSTALL DOES, with the copy's extensions from this platform's package (src/duck/extensions.ts):
@@ -386,7 +397,13 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, coll.collate, coll.version ?? null); } finally { c.pg.close(); }
   })).order : undefined;
   // the stored JSON paths as mason start serves them (on by default): a `*` reads each copy's visible columns
-  const duck = await theStore.listener(facts.collation, null, libc, () => [], theSync.kept);
+  // every other libc collation (the en_US column's under an ICU or a C database) read on its first use, as mason start does
+  const readLibc = async (sc: SourceCollation): Promise<LibcOrder> => {
+    const c = await connectSource(parsed.source);
+    if ("failure" in c) throw new Error(`connect: ${JSON.stringify(c.failure)}`);
+    try { return await readLibcOrder(async (sql) => (await c.pg.query(sql)).rows, sc.collate ?? "C", sc.version ?? null, `${pgIdent(sc.schema)}.${pgIdent(sc.name)}`); } finally { c.pg.close(); }
+  };
+  const duck = await theStore.listener(facts.collation, null, libc, () => [], theSync.kept, { ...(facts.collations === undefined ? {} : { collations: facts.collations }), readLibc });
   /**
    * DUCKDB ALONE (why a user would not just use DuckDB by itself): the same statement, as written, to
    * a plain connection of the same copy — no analysis, no rewrite, no Mason function — scored by the oracle's own
@@ -446,6 +463,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
     ...BI_SHAPES.map((q) => ({ group: "BI shape", name: q.name, sql: q.sql })),
     ...TYPE_MATRIX.map((q) => ({ group: "type matrix", name: q.name, sql: q.sql, ...(q.zone === undefined ? {} : { zone: q.zone }) })),
     ...GAP_CASES.map((q) => ({ group: "gap case", name: `gap case: ${q.gap}`, sql: q.sql })),
+    ...COLLATION_CASES.map((q) => ({ group: "collation", name: q.name, sql: q.sql })),
     ...LATEST_CASES.map((q) => ({ group: "latest", name: q.name, sql: q.sql })),
     { group: "decided", name: "numeric values of several scales", sql: MIXED_SCALE },
   ];
@@ -606,7 +624,7 @@ test("the DuckDB endpoint answers every statement exactly as Postgres does, befo
   }
   for (const round of [1, 2]) {
     await fixedClock.time(`changes round ${round}`, async () => {
-      psql(dbUrl, mutations(round) + typedMutations(round));
+      psql(dbUrl, mutations(round) + typedMutations(round) + ";\n" + collsMutations(round));
       await theSync.once();
     });
     await run(PHASES[round]!);

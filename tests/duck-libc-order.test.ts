@@ -292,3 +292,21 @@ test("a symbol's closing weight: below every class its letters alone, above ever
   assert.deepEqual(closedWeights([4, 3], [10, 20, 30], 2), [4, 3, 20]);
   assert.deepEqual(closedWeights([4, 3], [10, 20, 30], 3), [4, 3, 30]);
 });
+
+// A LIBC COLLATION OTHER THAN THE DATABASE'S (issue 253, decision B): its order read the same way under its own name,
+// every text the read makes (a chr(), an array of text) carrying that COLLATE, and its key named by its collcollate
+test("collation: an order read under a named collation wraps every text the read makes in that COLLATE, never a literal's", async () => {
+  const { readLibcOrder, collatedSql } = await lib();
+  assert.equal(collatedSql("SELECT chr(a) < chr(b), 'chr(1) ]::text[]', x FROM unnest(ARRAY['a', 'b']::text[]) AS u(s), unnest(ARRAY[1]::int[]), mychr(2)", "\"public\".\"rv\""),
+    "SELECT (chr(a) COLLATE \"public\".\"rv\") < (chr(b) COLLATE \"public\".\"rv\"), 'chr(1) ]::text[]', x FROM unnest(ARRAY['a', 'b']::text[] COLLATE \"public\".\"rv\") AS u(s), unnest(ARRAY[1]::int[]), mychr(2)");
+  const sent: string[] = [];
+  const order = await readLibcOrder(async (sql) => { sent.push(sql); return Array.from({ length: (sql.match(/,/g) ?? []).length ? 17 : 0 }, () => ["true"]); }, "rv_RV.utf8", null, "\"public\".\"rv\"");
+  assert.deepEqual([order.collate, order.bytes], ["rv_RV.utf8", true]);
+  assert.ok(sent.length > 0);
+  for (const s of sent) {
+    const bare = s.replace(/'(?:[^']|'')*'/g, "''");
+    assert.doesNotMatch(bare, /(?<!\()chr\(/, s);
+    assert.doesNotMatch(bare, /\]::text\[\](?! COLLATE "public"\."rv")/, s);
+  }
+});
+

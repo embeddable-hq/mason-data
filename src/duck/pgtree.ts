@@ -112,6 +112,14 @@ export interface Typed {
   /** the collation the expression's result carries (0 for none), and the one its inputs were compared under */
   collation: number;
   inputCollation: number;
+  /** a row comparison's (ROWCOMPAREEXPR) collation of each column it compares, in order */
+  inputCollations?: number[];
+  /** a row comparison's type of each column it compares, as Postgres coerced both sides to it (the left's: `('b', 3)`
+   *  beside a char(4) is compared as a char(4)) */
+  inputTypes?: number[];
+  /** an ordered-set aggregate's (AGGREF) direct arguments' types, as Postgres resolved the call: percentile_disc's
+   *  fraction is float8, or float8[] for the overload that answers an array */
+  directArgs?: Array<{ type: number; typmod: number }>;
   /** a VAR's query level: 0 this query's own column, 1 the query around it (a correlated subquery's) */
   levelsUp: number | null;
   /** a CONST's value as Postgres parsed it, its bytes (`constvalue`: `8 [ 0 -48 70 … ]`); null when NULL or not a CONST */
@@ -305,7 +313,7 @@ export function exprType(n: TreeNode): { type: number; typmod: number } | null {
       return r;
     }
     case "OPEXPR": case "DISTINCTEXPR": case "NULLIFEXPR": return n._node === "DISTINCTEXPR" ? { type: BOOL, typmod: -1 } : t("opresulttype");
-    case "SCALARARRAYOPEXPR": case "BOOLEXPR": case "NULLTEST": case "BOOLEANTEST": return { type: BOOL, typmod: -1 };
+    case "SCALARARRAYOPEXPR": case "BOOLEXPR": case "NULLTEST": case "BOOLEANTEST": case "ROWCOMPAREEXPR": return { type: BOOL, typmod: -1 };
     case "RELABELTYPE": case "COERCEVIAIO": case "ARRAYCOERCEEXPR": case "COERCETODOMAIN": return t("resulttype", "resulttypmod");
     case "CASEEXPR": return t("casetype");
     case "COALESCEEXPR": return t("coalescetype");
@@ -353,7 +361,14 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
       try { for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x); } finally { rtables.pop(); }
       return;
     }
-    const loc = num(v.location);
+    // a row comparison has no offset of its own: it is found at its first left column's (`rowCompareAt`)
+    const first = v._node === "ROWCOMPAREEXPR" && Array.isArray(v.largs) && isNode(v.largs[0] ?? null) ? v.largs[0] as TreeNode : null;
+    const placed = (x: TreeNode): number | null => {
+      const at = num(x.location ?? null);
+      // (an implicit cast Postgres added has none of its own: its argument's)
+      return (at === null || at < 0) && isNode(x.arg ?? null) ? placed(x.arg as TreeNode) : at;
+    };
+    const loc = first !== null ? placed(first) : num(v.location);
     const t = exprType(v);
     if (loc !== null && loc >= 0 && t !== null) {
       const typed = typedOf(v, t, rtables);
@@ -376,7 +391,7 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
     node: v._node, type: t.type, typmod: t.typmod, args,
     oid: num(v.opno ?? v.funcid ?? v.aggfnoid ?? v.winfnoid ?? null),
     format: num(v.funcformat ?? null),
-    collation: num(v.opcollid ?? v.funccollid ?? v.aggcollid ?? v.wincollid ?? v.varcollid ?? v.constcollid ?? v.collid ?? null) ?? 0,
+    collation: collationOf(v),
     inputCollation: num(v.inputcollid ?? null) ?? 0,
     levelsUp: v._node === "VAR" ? num(v.varlevelsup ?? null) : null,
     datum: v._node === "CONST" && v.constisnull !== "true" ? datumBytes(v.constvalue) : null,
@@ -384,6 +399,10 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
     renamed: v._node === "VAR" ? renamedOf(v, rtables) : null,
   };
   if (constantExpression(v)) typed.constant = true;
+  // a row comparison compares each column under its own collation (RowCompareExpr's inputcollids)
+  if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.inputcollids)) typed.inputCollations = v.inputcollids.filter((x) => x !== "o").map((x) => typeof x === "string" ? num(x) ?? 0 : 0);
+  if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.largs)) typed.inputTypes = v.largs.filter(isNode).map((a) => exprType(a)?.type ?? 0);
+  if (v._node === "AGGREF" && Array.isArray(v.aggdirectargs)) typed.directArgs = v.aggdirectargs.filter(isNode).map((a) => exprType(a) ?? { type: 0, typmod: -1 });
   if (v._node === "AGGREF") typed.keys = keysOf(v.args, v.aggorder, v.aggdistinct, []);
   const text = constText(v);
   if (text !== undefined) typed.text = text;
@@ -396,6 +415,80 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
   const fromFunction = v._node === "VAR" ? functionColumnOf(v, rtables) : null;
   if (fromFunction !== null) typed.functionColumn = fromFunction;
   return typed;
+}
+
+/**
+ * THE COLLATION AN EXPRESSION'S RESULT CARRIES, as Postgres's exprCollation reads it: each node keeps it in a field of
+ * its own (a COLLATE's `collOid`, a relabel's `resultcollid`, a CASE's `casecollid` …). A SUBLINK's is its subselect's
+ * first output's (an EXPR or ARRAY sublink; a test of one carries none). 0: none (a type that is not collatable).
+ */
+export function collationOf(v: TreeNode): number {
+  if (v._node === "SUBLINK") {
+    const sub = v.subselect;
+    const tl = isNode(sub ?? null) ? (sub as TreeNode).targetList : undefined;
+    const first = Array.isArray(tl) ? tl.find((e) => isNode(e) && e.resjunk !== "true") as TreeNode | undefined : undefined;
+    const kind = num(v.subLinkType);
+    return (kind === 4 || kind === 5) && first !== undefined && isNode(first.expr ?? null) ? collationOf(first.expr as TreeNode) : 0;
+  }
+  return num(v.opcollid ?? v.funccollid ?? v.aggcollid ?? v.wincollid ?? v.varcollid ?? v.constcollid ?? v.collOid ?? v.resultcollid ?? v.casecollid
+    ?? v.coalescecollid ?? v.minmaxcollid ?? v.array_collid ?? v.paramcollid ?? v.refcollid ?? v.collid ?? v.collation ?? null) ?? 0;
+}
+
+/**
+ * WHERE A STATEMENT'S ANALYSIS ORDERS A COLLATABLE VALUE, by the collation it orders under: a sort key of any query
+ * (its ORDER BY, a window's ORDER BY, an aggregate's ORDER BY or WITHIN GROUP), a GREATEST / LEAST, a row comparison,
+ * and — as candidates whose operator or function the caller names from the catalog — an operator's and an aggregate's
+ * or window function's input collation (`<` orders, `=` does not; `max` orders, `count` does not).
+ */
+export function textOrdering(tree: TreeValue): { orders: Set<number>; operators: Map<number, Set<number>>; functions: Map<number, Set<number>> } {
+  const orders = new Set<number>(), operators = new Map<number, Set<number>>(), functions = new Map<number, Set<number>>();
+  const add = (m: Map<number, Set<number>>, oid: number | null, coll: number): void => { if (oid === null || coll === 0) return; const s = m.get(oid) ?? new Set(); s.add(coll); m.set(oid, s); };
+  const sorted = (clauses: TreeValue | undefined, targets: TreeValue | undefined): void => {
+    if (!Array.isArray(clauses) || !Array.isArray(targets)) return;
+    for (const c of clauses) {
+      if (!isNode(c)) continue;
+      const ref = num(c.tleSortGroupRef ?? null);
+      const t = targets.find((x) => isNode(x) && ref !== null && num(x.ressortgroupref ?? null) === ref) as TreeNode | undefined;
+      const e = t !== undefined && isNode(t.expr ?? null) ? t.expr as TreeNode : null;
+      if (e !== null) { const coll = collationOf(e); if (coll !== 0) orders.add(coll); }
+    }
+  };
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (v === undefined || !isNode(v)) return;
+    if (v._node === "QUERY") {
+      sorted(v.sortClause, v.targetList);
+      if (Array.isArray(v.windowClause)) for (const w of v.windowClause) if (isNode(w)) sorted(w.orderClause, v.targetList);
+    }
+    if (v._node === "AGGREF") { sorted(v.aggorder, v.args); add(functions, num(v.aggfnoid ?? null), num(v.inputcollid ?? null) ?? 0); }
+    if (v._node === "WINDOWFUNC") add(functions, num(v.winfnoid ?? null), num(v.inputcollid ?? null) ?? 0);
+    if (v._node === "OPEXPR") add(operators, num(v.opno ?? null), num(v.inputcollid ?? null) ?? 0);
+    if (v._node === "MINMAXEXPR") { const coll = num(v.inputcollid ?? null) ?? 0; if (coll !== 0) orders.add(coll); }
+    if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.inputcollids)) for (const x of v.inputcollids) { const coll = typeof x === "string" ? num(x) ?? 0 : 0; if (coll !== 0) orders.add(coll); }
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return { orders, operators, functions };
+}
+
+/** EVERY COLLATION A STATEMENT'S ANALYSIS NAMES (an expression's, an operator's input, a row comparison's per column, a
+ *  FROM item's columns'), by OID: what src/duck/collation.ts resolves before the rewrite reads any */
+export function collationOids(tree: TreeValue): Set<number> {
+  const out = new Set<number>();
+  const field = /(collid|collids|collOid|^collation|^colcollations)$/;
+  const visit = (v: TreeValue | undefined, key: string): void => {
+    if (Array.isArray(v)) {
+      if (field.test(key)) { for (const x of v) if (typeof x === "string" && x !== "o") { const n = num(x); if (n !== null) out.add(n); } return; }
+      for (const x of v) visit(x, "");
+      return;
+    }
+    if (typeof v === "string") { if (field.test(key)) { const n = num(v); if (n !== null) out.add(n); } return; }
+    if (v === undefined || !isNode(v)) return;
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x, k);
+  };
+  visit(tree, "");
+  out.delete(0);
+  return out;
 }
 
 /** The output columns of one query, as its `targetList` numbers them. */

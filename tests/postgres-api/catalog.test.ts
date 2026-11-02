@@ -738,3 +738,39 @@ test("under SET ROLE the catalog answers FOR THE ROLE: information_schema and th
     assert.equal(decode(await withRoles.run(m.asRole(simpleQuery("SELECT 1"), "agent")))[0]?.type, "E");
   } finally { await withRoles.stop(); }
 });
+
+// THE SOURCE'S COLLATIONS (issue 253, decision B): the catalog declares each one the source has (a locale PGlite lacks
+// made under its provider's root, so its name and provider are the source's), and a column carries its own, so
+// Postgres's analysis names the collation a statement orders by, and information_schema says it as the source does
+test("collation: the catalog declares the source's collations, and each column's own", async () => {
+  const collated: PgSchema = {
+    database: "app",
+    tables: [{ name: "colls", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "d", type: "text" },
+      { name: "i", type: "text", collation: { schema: "pg_catalog", name: "und-x-icu" } }, { name: "n", type: "text", collation: { schema: "public", name: "mason_num" } },
+      { name: "r", type: "text", collation: { schema: "extra", name: "mason_rev" } }] }],
+    collations: [
+      { schema: "pg_catalog", name: "und-x-icu", provider: "i", collate: null, locale: "und", deterministic: true },
+      { schema: "public", name: "mason_num", provider: "i", collate: null, locale: "und-u-kn", deterministic: true },
+      { schema: "public", name: "mason_ci", provider: "i", collate: null, locale: "und-u-ks-level2", deterministic: false },
+      { schema: "extra", name: "mason_rev", provider: "c", collate: "rv_RV.utf8", locale: null, deterministic: true },
+      // a schema no table or column names: left out
+      { schema: "elsewhere", name: "unused", provider: "c", collate: "C", locale: null, deterministic: true },
+    ],
+  };
+  const ddl = catalogDdl(collated).join("\n");
+  assert.match(ddl, /"i" text COLLATE "pg_catalog"\."und-x-icu"/);
+  assert.match(ddl, /"r" text COLLATE "extra"\."mason_rev"/);
+  assert.doesNotMatch(ddl, /unused/);
+  // a source's 1,600 collations are one statement, never one each: a CREATE COLLATION each took the catalog's start past
+  // its deadline (about 18 ms each)
+  const many = Array.from({ length: 1600 }, (_, i) => ({ schema: "pg_catalog", name: `l${i}-x-icu`, provider: "i", collate: null, locale: `l${i}`, deterministic: true }));
+  assert.equal(catalogModule.collationDdl({ ...collated, collations: [...collated.collations!, ...many] }).length, 2, "a schema's CREATE, then one INSERT");
+  const own = new PgCatalog(collated, { log: () => undefined });
+  try {
+    assert.deepEqual(rowsOf(await own.run(simpleQuery(
+      "SELECT n.nspname, c.collname, c.collprovider, c.collisdeterministic FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace WHERE n.nspname IN ('public', 'extra') ORDER BY 1, 2"))),
+    [["extra", "mason_rev", "c", "t"], ["public", "mason_ci", "i", "f"], ["public", "mason_num", "i", "t"]]);
+    assert.deepEqual(rowsOf(await own.run(simpleQuery("SELECT column_name, collation_schema, collation_name FROM information_schema.columns WHERE table_name = 'colls' ORDER BY ordinal_position"))),
+      [["id", null, null], ["d", null, null], ["i", "pg_catalog", "und-x-icu"], ["n", "public", "mason_num"], ["r", "extra", "mason_rev"]]);
+  } finally { await own.stop(); }
+});

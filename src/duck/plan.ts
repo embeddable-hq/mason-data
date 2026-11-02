@@ -9,7 +9,7 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { heldName, heldType, isHeldArray } from "./held-types.ts";
-import { outputExpressions, type TreeValue } from "./pgtree.ts";
+import { collationOids, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -19,7 +19,8 @@ import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
 import { pgTyplen } from "./types.ts";
 import type { CopyState } from "./sync.ts";
-import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type DuckCollation, type EnumTypes, type RowColumn } from "./rewrite.ts";
+import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type EnumTypes, type RowColumn } from "./rewrite.ts";
+import type { CollationResolver, StatementCollations } from "./collation.ts";
 import { exposes, hideKept, readKey, searchSchemas, type KeptLookup, type KeptRoutes } from "./kept-route.ts";
 import { distinctCountTables, distinctKeyCounts, fanOutTables, groupedLimitTables, primaryKeysOf, uniqueColumnsOf, uniqueColumnsSql } from "./distinct-key.ts";
 import type { PrimaryKeys } from "./distinct-key.ts";
@@ -258,7 +259,8 @@ export interface PlanOptions {
   timeZone: string;
   /** the session's DateStyle (src/api/postgres/catalog.ts SessionState): Postgres folds a literal date in its order */
   dateStyle?: string;
-  collation: DuckCollation;
+  /** what each collation of the analysis means (src/duck/collation.ts): built once per listener */
+  collations: CollationResolver;
   verified: ReadonlyMap<string, string> | null;
   userTypes?: ReadonlyMap<string, number>;
   copies?: () => readonly CopyState[];
@@ -285,6 +287,55 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
     "read the value, or its text (x::text); compare, sort or take a field on the source's own columns", text);
 }
 
+/**
+ * A STATEMENT OF NO TABLE THAT ORDERS TEXT UNDER A COLLATION THAT IS NOT BYTE ORDER (issue 122): the catalog's database
+ * is C, so `SELECT 'a' < 'B'` answered there is byte order where the source's libc or ICU says otherwise. Its analysis
+ * (under the session's state) says where it orders a collatable value and under which collation (`textOrdering`); an
+ * operator or a function counts as ordering by the catalog's own name of it (`<`, `max` …, never `=` or `count`), and
+ * the resolver says whether that collation is byte order. True: the statement is planned for the synced data, made and
+ * refused like any other. A statement the analysis refuses stays the catalog's, which raises Postgres's own error.
+ */
+export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<boolean> {
+  const analysis = await analyze(o.catalog, o.text, o.paramOids, o.under);
+  if ("refused" in analysis) return false;
+  // the analysis as the session runs the statement: a simple Query binds no parameter, so one naming `$1` is Postgres's
+  // 42P02, which the catalog answers (the analysis above is a Parse's, which would infer its type)
+  if (!o.bindable && analysis.params.length > 0) return false;
+  const oids = collationOids(analysis.tree);
+  if (oids.size === 0) return false;
+  let resolved: StatementCollations;
+  // (a collation the source lacks, or one Mason cannot follow: the synced data's plan refuses it by name, never the
+  // catalog's byte order; a nondeterministic one wherever it is named, equality and GROUP BY included)
+  try { resolved = await o.collations.prepare((sql) => catalogRows(o.catalog, sql), oids); }
+  catch (e) { if (e instanceof Unrewritable) return true; throw e; }
+  // a statement of no table that holds a numeric (a literal such as 1.5 included) stays the catalog's, which computes it exactly, its text in byte
+  // order as before (Mason gap fromless-numeric-text-order): the synced data holds a VALUES list's numeric otherwise
+  // than Postgres (issue 342's class), and the catalog answered it right
+  if ([...analysis.types.values()].some((ts) => ts.some((t) => t.type === NUMERIC || t.type === NUMERIC_ARRAY))) return false;
+  const ordering = (coll: number): boolean => {
+    try { const c = resolved.resolve(coll); return c !== null && c.kind !== "bytes"; }
+    catch (e) { if (e instanceof Unrewritable) return true; throw e; }
+  };
+  const { orders, operators, functions } = textOrdering(analysis.tree);
+  if ([...orders].some(ordering)) return true;
+  const ops = [...operators].filter(([, cs]) => [...cs].some(ordering)).map(([oid]) => oid);
+  const fns = [...functions].filter(([, cs]) => [...cs].some(ordering)).map(([oid]) => oid);
+  if (ops.length + fns.length === 0) return false;
+  const named = await catalogRows(o.catalog, [
+    ...(ops.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_operator WHERE oid IN (${ops.join(", ")}) AND oprname IN ('<', '>', '<=', '>=')`] : []),
+    ...(fns.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_proc WHERE oid IN (${fns.join(", ")}) AND proname IN ('min', 'max')`] : [])].join(" UNION ALL "));
+  return named.length > 0;
+}
+
+const NUMERIC = 1700, NUMERIC_ARRAY = 1231;
+
+/** a rewrite's refusal as the statement's: a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its
+ *  SQLSTATE, and no gap */
+function unrewritableError(e: Unrewritable, text: string): StatementError {
+  return typeof e.gap === "string" ? gapRefusal(e.gap, e.message, e.hint, text)
+    : new StatementError({ code: e.gap.postgres, message: e.message, ...(e.hint !== "" ? { hint: e.hint } : {}) }, text);
+}
+
 /** the functions that read a held value's position, not its value: its type, a count, an array's shape and rows */
 const HELD_READERS = new Set(["1619", "2147", "2803", "3179", "2176", "2091", "2092", "2331", "2334", "730", "2922"]);
 
@@ -307,7 +358,7 @@ async function heldRefusal(catalog: Parameters<typeof catalogRows>[0], tree: Tre
  *  roles exist (the plan still names its reads, for an Execute under a role given later); undefined with no roles at all.
  *  `walls`: `text` is the statement with its filtered reads in place (expandRowFilters), each of which the wall ends */
 export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
-  const { catalog, text, stmt, base, paramOids, searchPath, timeZone, dateStyle = "ISO, MDY", collation, verified, userTypes = new Map<string, number>(), copies = () => [],
+  const { catalog, text, stmt, base, paramOids, searchPath, timeZone, dateStyle = "ISO, MDY", collations: resolver, verified, userTypes = new Map<string, number>(), copies = () => [],
     depth = 0, kept = null, wireBound = false, grants, walls = null, relations, outputs = false } = options;
   const started = performance.now();
   const under: SessionState = { searchPath, timeZone, dateStyle };
@@ -399,8 +450,8 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     for (const [oid, name] of await catalogRows(catalog, "SELECT t.oid::text, 'rowtype:' || n.nspname || '.' || t.typname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.oid >= 16384 AND t.typtype = 'c'")) {
       catalogTypes.set(Number(oid), name!);
       if (!used.has(Number(oid))) continue;
-      const columns = await catalogRows(catalog, `SELECT a.attname, a.atttypid::text, a.atttypmod::text FROM pg_attribute a JOIN pg_type t ON t.typrelid = a.attrelid WHERE t.oid = ${Number(oid)} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`);
-      rowTypes.set(Number(oid), columns.map(([n, type, typmod]) => ({ name: n!, type: Number(type), typmod: Number(typmod) })));
+      const columns = await catalogRows(catalog, `SELECT a.attname, a.atttypid::text, a.atttypmod::text, a.attcollation::text FROM pg_attribute a JOIN pg_type t ON t.typrelid = a.attrelid WHERE t.oid = ${Number(oid)} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`);
+      rowTypes.set(Number(oid), columns.map(([n, type, typmod, collation]) => ({ name: n!, type: Number(type), typmod: Number(typmod), collation: Number(collation ?? 0) })));
     }
     resolved = await nameUserKeys((sql) => catalogRows(catalog, sql), resolved);
     for (const f of fields ?? []) {
@@ -422,8 +473,13 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the stored JSON paths the statement's JSON reads may be answered from (src/duck/kept-route.ts)
   const lookup = kept === null ? null : await keptLookup(catalog, analysis.types, kept);
   const keyCounts = await distinctKeys(catalog, analysis.tree);
+  // WHAT EACH COLLATION OF THE ANALYSIS MEANS (src/duck/collation.ts), resolved before the rewrite reads any: a libc
+  // order not read yet is read here, before the plan is made; a collation the source lacks or Mason cannot follow refused
+  let collations: StatementCollations;
+  try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
+  catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collation, userTypes: catalogTypes, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them
@@ -436,11 +492,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
     if (lookup !== null && exposes(tree)) ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten({ at: (relid, attno) => lookup.at(relid, attno), ready: () => null }));
   }
   catch (e) {
-    // a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its SQLSTATE, and no gap
-    if (e instanceof Unrewritable) {
-      throw typeof e.gap === "string" ? gapRefusal(e.gap, e.message, e.hint, text)
-        : new StatementError({ code: e.gap.postgres, message: e.message, hint: e.hint }, text);
-    }
+    if (e instanceof Unrewritable) throw unrewritableError(e, text);
     throw e;
   }
   // a statement that lists a copy's columns without naming them reads its visible ones (src/duck/kept-route.ts); before

@@ -2073,6 +2073,83 @@ and a 7-day count over 196 M rows, Q2):
 So a copy's writes in flight are bounded (a chunk per reader). It does not yield between chunks: nothing counts the
 statements in flight, and DuckDB 2.0 has no per-connection thread or priority control (`SET SESSION threads` is refused).
 
+### Memory: the room outside the engine's limit (2026-11-02, issue 301)
+
+**Decision.** DuckDB's default limit is half the memory, or what leaves `OUTSIDE_RESERVE_BYTES` (2.5 GiB) beside it
+when that is less, never under `MIN_SHARE_BYTES` (128 MiB) (`src/duck/store.ts` `defaultMemoryLimit`; every text that
+states the default reads `DEFAULT_MEMORY_RULE` or the constants). With `MASON_DUCKDB_MEMORY` unset, a start under
+`MEMORY_FLOOR_BYTES` (3 GiB) goes on and WARNS, never refuses (Tom, on PR 382, 2026-11-02: the branch first refused
+it): `memoryWarning` is the one text, said in the run's log at its start, in `mason status` and its `--json`
+`warnings` while it runs, and in mason doctor's memory line, a warning and never a failure. Only a value that is not an
+amount is refused (`memoryProblems`), as on main. Set, the variable is the operator's word at any size. From 5 GiB up
+the default is half, as before.
+
+**Why.** The limit counts DuckDB's buffers only. Beside them, in one process: V8's heaps, the catalog's PGlite (started
+at the run's start, ~0.26 GiB of WebAssembly memory an instance in this run), the pg-eval PGlite (started by the
+first `__mason_pg_*` call, never stopped, and WebAssembly memory never shrinks), and DuckDB's own memory its buffer
+manager does not count. Under half, the kernel killed the whole run (exit 137, `OOMKilled` true) at every size tried.
+
+**The measurement** (synthetic only; the mason-data image on node:24-slim, Node 24.22.1, built from main at 7367201 and
+from the branch; `docker run --memory=<n> --memory-swap=<n> --cpus 4` beside a postgres:18 with `wal_level=logical` on
+a docker network; a laptop under other sessions' load). The source: `public.events`, 1.5 M rows with a ~1.5 kB jsonb
+of 40 keys (3.0 GB in Postgres), `sync: replication`. The path: the first sync; the issue's two generated tables
+(`requests` grouping by `tenant_id, coalesce(request_key, id)` with `latest(… ORDER BY started_at, id)`, and
+`daily_durations` with `percentile_cont(0.95)` over it) built with 4 idle psql sessions open; 2 minutes of `UPDATE … SET
+status = 'failed', payload = payload || '{"retried": true}'` of 6, 60 and 1000 rows in turn, committed one by one, the
+stream applying them; beside them and after them, through the listener: a tool's `pg_class` introspection, a group by
+tenant, a group by `payload->>'h07'`, the latest 100 rows with the payload, the generated table's days, and `count(DISTINCT
+substr(started_at::text, 1, 10)::date)`, which reaches the pg-eval worker. Every 2 s: the cgroup's `memory.current`,
+`memory.peak` and `memory.stat` anon and file, and each thread's `process.memoryUsage()` (a preload); the engine's own
+count from the usage samples (`duckdb_memory()`, a minute apart).
+
+| container | image | limit | verdict | where | peak anon / process RSS |
+|---|---|---|---|---|---|
+| 1 GiB | main | 512MiB (half) | killed | the start (the first sync) | 934 MiB / 1107 MiB |
+| 1.5 GiB | main | 768MiB | killed | the group by a JSON key, beside the writes | 1469 / 1572 |
+| 2 GiB | main | 1024MiB | killed | the pg-eval statement beside the writes | 1820 / 2020 |
+| 3 GiB, twice | main | 1536MiB | killed, both | the pg-eval statement beside the writes | 3042 / 3095 |
+| 3 GiB | main, `MASON_DUCKDB_MEMORY=256MiB` | 256MiB | the whole path | (one statement 53200 at that limit) | 2294 / 2588 |
+| 2 GiB, 2.5 GiB | the branch's first head | — | refused, exit 1, nothing killed | before anything was written | — |
+| 2 GiB | the warning's head, 3 runs at once | 256MiB | the whole path (one 53200: the group by a JSON key) | | 1737 / 1865 |
+| 2 GiB | the same, `MASON_DUCKDB_MEMORY=512MiB` (the old quarter) | 512MiB | killed | beside the writes | 2022 / 2069 |
+| 2 GiB | the same, `=128MiB`, alone | 128MiB | the whole path (the same one 53200) | | 1603 / 1705 |
+| 1.5 GiB | the same, 3 runs at once | 256MiB | killed | the generated tables' build | 1506 / 1510 |
+| 1.5 GiB | the same, alone | 256MiB | killed | beside the writes | 1500 / 1533 |
+| 1.5 GiB | the same, `=128MiB`, alone | 128MiB | killed, after every statement was answered (the same one 53200) | the statements after the writes | 1509 / 1509 |
+| 3 GiB (the floor) | the merged head on **Node 26.13.0** | 512MiB | the whole path, every statement answered | | 2385 / 2472 |
+| 2 GiB | the same, Node 26 | 128MiB | the whole path (the same one 53200) | | 1773 / 1975 |
+| 2 GiB | the same, Node 26, host load ~60 | 128MiB | not killed; the first sync past its 20 min bound, both generated tables refused when the catalog's start timed out (issue 409) | the first sync | 1749 (peak) |
+| 1.5 GiB | the same, Node 26 | 128MiB | killed | beside the writes | 1434 / 1503 |
+| 3 GiB (the floor) | branch | 512MiB | the whole path, every statement answered | | 1994 / 2131 |
+| 4 GiB | branch | 1536MiB | the whole path, every statement answered | | 3089 / 3279 |
+
+**What lies outside the limit**, by difference: with the limit at 256MiB the process reached 2.59 GiB at the pg-eval
+statement, so 2.3 GiB was outside the limit. At that moment the pg-eval worker's `external` was 509 MB, the catalog's
+259 MB, a third worker's 144 MB, the main thread's heap 157-203 MB and the executor's 71 MB; about 1 GiB is native memory
+nobody counts (DuckDB's allocations outside its buffer manager, the allocator's arenas across the engine's and libuv's
+threads, V8's code). The main thread's heap reached 621 MB during a build, not explained. The catalog cannot be "never
+started" on this path: the run starts it at its start (0 tables) and replaces it as tables appear. `OUTSIDE_RESERVE_BYTES`
+is the 2.3 GiB with ~10 % margin; at the floor and at 4 GiB the room used outside was 1.6-1.7 GiB, under it.
+
+**The share under the floor** is what let the run last longest: at 2 GiB the whole path ran with 128MiB and with
+256MiB, and the old quarter (512MiB) was killed; at 1.5 GiB every share was killed, 128MiB last, after every statement
+was answered, 256MiB in the writes. Both shares answered the same statements (the group by a JSON key failed alone,
+53200, at each). So `MIN_SHARE_BYTES` is 128MiB. Nothing under 128MiB was measured, and nothing under 1.5 GiB ran the
+whole path: under the floor the warning stays true at every share. One run each, on a laptop under load.
+
+**On Node 26** (the image's Node since PR 368; the runs above were Node 24.22.1), the merged head held all three
+constants: at the floor the whole path ran with every statement answered, the room used outside the limit about
+1.96 GiB (2472 MiB RSS less 512MiB), under the reserve; at 2 GiB the 128MiB share ran the whole path; 1.5 GiB was
+killed, under the floor where the warning says it may be. The pg-eval and catalog WebAssembly memory read lower on
+Node 26 (external ~0.25 GB against ~0.72 GB) and native memory higher, so the sum moved less than its parts.
+
+**Not known, and filed:** stopping the pg-eval worker when idle (issue 374), where the ~1 GiB of native memory goes
+(issue 375), a CI job that runs the image under a memory limit (issue 376). Issue 96 (a first sync's 53200 on large
+out-of-line values) is a different failure, not folded in. Detector: the unit tests hold the rule, the floor and the one
+warning (`tests/cli-doctor.test.ts`, `tests/serve.test.ts`, `tests/cli-state-matrix.test.ts`: a start under the floor
+STARTS, and says the warning once in the log, in `mason status` and in mason doctor); nothing in CI runs a
+container under a limit (issue 376), so a change that grows the memory outside the limit measures the constants again.
+
 ### What stands between this and production
 
 1. A self-signed certificate only encrypts; a verifying client needs a CA's (`MASON_PG_TLS_CERT` / `_KEY`).
@@ -2355,8 +2432,10 @@ Nor does the gap set CI's wall time: in five runs of six (with 41393819569, unit
 **The detector and its response.** The folder check `node scripts/oracle-legs.ts <folder>`, the `integration (oracle)`
 job's last step, prints after its coverage verdict one line a leg (its setup, its statements and stages as run and
 scaled, its runner's CPU, which a leg's report now carries in `times.cpu`) and one line of the gap, as run and scaled.
-Past `LEGS_APART_MS` (60 s, scaled) it prints a GitHub warning naming `node scripts/oracle-legs.ts --weights <run-id>`.
-It never moves the exit code: balance is a cost, never coverage, and a red required check on runner noise would be a
+Past `LEGS_APART_MS` (60 s, scaled) it prints one GitHub warning, never an order to rebalance from that run (below,
+issue 347): on legs whose CPUs differ or are not reported (`alikeRunners` false: unknown is never alike) it names each
+leg's CPU and no command; on matching CPUs it names `node scripts/oracle-legs.ts --weights <run-id>` for when earlier
+runs on matching CPUs were past the target too. It never moves the exit code: balance is a cost, never coverage, and a red required check on runner noise would be a
 flake. When it cannot tell (a report without times, a setup missing or 0, a leg missing) it says "not measured", never
 a gap of 0. The CPU is never in `measured`, which `--write` holds equal across the legs: two legs on different CPUs
 would refuse to write.
@@ -2369,7 +2448,18 @@ next run, on those weights, drew an EPYC 7763 and an EPYC 9V45: setups 1.61x apa
 gap is at least partly that leg looking light, not the split: the setup is a weaker proxy for the statements' speed across
 CPU generations than across draws of one. Rewriting the weights again from each such run would chase the draw. Not known:
 how often the legs draw different generations, and a better proxy (a fixed piece of the statements' own work, timed in
-each leg); the CPU in each leg's report lets the next runs say. Until then the warning is read beside the two CPUs.
+each leg); the CPU in each leg's report lets the next runs say.
+
+**The warning reads the CPUs itself (2026-11-02, issue 347).** Until then the warning was to be read beside the two
+CPUs, and still told the reader to rebalance from the run it read: acting on it rewrote the weights from noise. So it
+branches on one fact, `alikeRunners` of the measured balance (every leg's `times.cpu` reported and the same string).
+Not alike: it names each leg's CPU, says the setup can under-read a newer CPU so the gap may be the draw rather than the
+split, and to rebalance only when the gap persists across runs whose legs ran on matching CPUs; it names no command.
+Alike: one run is still not enough, and it names `--weights` only for when earlier runs on matching CPUs were past the
+target too. The target, the scale and the exit code are unchanged (no better proxy and no wider target, the owner's
+decision in the issue); the script reads one run, so whether a gap persisted is the reader's judgement across warnings,
+not a history the check keeps. `scripts/ci-shards.ts`'s unit-shard warning still names `weights <run-id>` from one run,
+and was not decided here.
 
 **Rejected.** A shared queue, each leg taking the next statement as it frees: two hosted jobs share no state but
 artifacts, read only after a job ends, so it needs a coordinator they do not have; and one job running both halves on a
@@ -2410,6 +2500,62 @@ there, against 1357 s before) and brought the other two within 25 s of each othe
 it is: 744 s on one draw of a runner and 853 s on another of the same CPU model. The unit jobs are not within a minute
 of each other, and the slowest is at the slower oracle leg (874 s against 860 s), not below it. Making that file faster
 or splitting it is #338's; until then the warning names it.
+
+**#338: the floor split, and the concurrency measured (2026-11-02).** `tests/duck-generated.test.ts` became eleven
+files, each a section of it in its order and each test moved byte for byte (a parse of the base's file and the
+pieces, every `test(…)` call and top-level declaration compared by name), with what several read in
+`tests/duck-generated-ledger.ts`. The first cut (nine pieces) ran its rounds 5-6 piece at 201 s and its rounds 11-14
+piece at 213 s (run 41424964045), past the slowest `APART` file, so round 5, round 6 and round 12 became files of
+their own; round 12 is one test, 79-188 s on CI, the floor no file split goes under (a test is never edited). The
+PR's runs, unit (1) / (2) / (3) as run, and the slowest unit job:
+
+| run | weights | concurrency | wall as run | files' summed time | slowest unit job |
+|---|---|---|---|---|---|
+| 41417362676 (main, 7367201, the base) | 41409999918's | default (3) | | | 938 s |
+| 41424964045 (nine pieces) | the base's | default (3) | 422 / 389 / 258 s | 1253 / 1145 / 648 s | 434 s |
+| 41427067956 (eleven) | the base's | default (3) | 492 / 497 / 204 s | 1415 / 1464 / 588 s | 510 s |
+| 41429359348 | 41427067956's | default (3) | 314 / 262 / 343 s | 939 / 772 / 977 s | 355 s |
+| 41430352161 | 41427067956's | 4 | 379 / 302 / 434 s | 1460 / 1168 / 1579 s | 450 s, failed |
+
+Split, the generated tests cost more CPU than they did one at a time (the eleven pieces summed 1144-1173 s of file
+time in 41424964045 and 41427067956, where the one file took 744-913 s), since each world's catalog Postgres competes
+with its neighbours; the wall is what fell. **Four side by side was refused**: its run failed two tests that pass under
+the default (a chain's `until` past 20 s with `public.top` still building, and round 14's per-depth bound), and the
+slowest shard ran 90 s slower as run, its files' summed time about half as much again. `shardCommand` passes no `--test-concurrency` for a
+unit shard, so Node's default (`os.availableParallelism() - 1`, 3 on 4 vCPUs) stays. The gap between the shards
+(81 s in 41429359348) is the runners' (an EPYC 9V45 beside two 9V74s), not a file's: no one-file warning fires.
+
+**A test near its bound runs by itself (#338, the review's CI round).** With main merged in, run 41440605532 cancelled
+round 12 at the per-test bound (`test timed out after 300000ms`, unit (3), an EPYC 7763). Round 12 is CPU-bound: it took
+79-125 s in the base's one file, beside light files, and 151 to 300 s over this PR's runs in a file of its own beside
+other generated-world files (round 7-8, the core piece, round 6), slower still on a 7763. The split had moved the test
+next to its heaviest neighbours; `partition` balances summed file time, which says nothing of what runs at once. The
+class is a test pushed toward its bound by what its shard runs beside it, and the decision is that a file whose longest
+test has run past half the bound (`NEAR_BOUND_MS`, 150 s) is `ALONE`: its shard runs it after its other files with
+`--test-concurrency=1`, so nothing runs beside it, and `partition` counts it `SIDE_BY_SIDE` (3) times over, the wall it
+takes, placing it before the rest. Round 12, round 6 (157 s in 41431771794) and round 7-8 (round 7 158 s in
+41440605532) are listed; nothing else of the twenty slowest has crossed 150 s (`every command, in every state` 143 s
+and the slow vector's 145 s are the nearest). The timing reporter now records each file's longest top-level test, and
+`verify unit` warns of a file past `NEAR_BOUND_MS` not listed, or of one listed that crossed it even alone: the
+detector, a warning in every run's `checks`. The bound is never loosened, and no test is edited.
+
+The result, by each run's `unit tests` step (start to end), unit (1) / (2) / (3), and round 12's test, run alone:
+
+| run (commit) | weights | unit tests steps | round 12, alone | runners |
+|---|---|---|---|---|
+| 41417362676 (main, 7367201, the base) | 41409999918's | 374 / 284 / 921 s | (in the one file: 125 s) | |
+| 41440605532 (a7359c3, no ALONE) | 41431771794's | | cancelled at 300 s | unit (3) an EPYC 7763 |
+| 41444899410 (33bff1b, ALONE) | 41431771794's | 498 / 654 / 364 s | 143.0 s | three EPYC 7763s |
+| 41447115368 (5c8f53c) | 41444899410's | 562 / 472 / 296 s | 89.8 s | 7763, 7763, 9V45 |
+
+Round 12 now runs at half its bound or less on the slowest runner drawn (143 s of 300 s on a 7763, 90 s on a 9V45),
+round 6 at 100-102 s and round 7 at 95-96 s, each alone. That costs wall: an ALONE file's minutes are its shard's, so
+the slowest unit step is 562-654 s in these two runs, against 423-436 s before ALONE (41434452511, 41431771794) and
+921 s on main; the gain over main is kept, part of the split's is given up for a test that no longer meets its bound.
+The detector's first warning came in 41447115368: `every command, in every state` (tests/cli-state-matrix.test.ts),
+81.6 s in PR 346's run, took 151.5 s on a 7763, past `NEAR_BOUND_MS`; listing it is the next change, made from a run
+that measures it.
+
 
 **Revisit** once unit (2) and rest shard 2 both finish faster than the slower leg: then the legs are CI's critical path,
 and their spread is worth a third leg or a queue.

@@ -15,6 +15,27 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
+  COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
+  of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE
+  "en_US"` on an ICU database, read from the source on its first use, as the database's own is). Before, these sorted
+  or compared under the database's collation, or byte order, without saying so. A `SELECT` of no table that sorts or
+  compares text (`SELECT 'a' < 'B'`) now answers under the database's collation rather than byte order (one that
+  also holds a numeric, such as `1.5`, still answers in byte order, its numbers exact), and
+  `percentile_disc` and `mode()` of text answer under every collation. Two kinds are refused by name rather than
+  answered differently: a nondeterministic collation, and an ICU collation with a keyword (`und-u-kn`); `rank(…)
+  WITHIN GROUP` and the other hypothetical-set aggregates are refused by name rather than with an internal error.
+- **On a container under 5 GiB the queries' default share of memory is smaller**: half the container's limit, as
+  before, or what leaves 2.5 GiB beside it when that is less, never under 128 MiB: 128 MiB of a container of 2.5 GiB or
+  less (half of it before: 1 GiB of a 2 GiB one), 512 MiB of 3 GiB (was 1.5 GiB), 1.5 GiB of 4 GiB (was 2 GiB). From 5 GiB up
+  it is half, unchanged. A query that needs more than its share spills to disk or fails
+  on its own (53200) where it used to take the whole run down with it; `MASON_DUCKDB_MEMORY` still sets the share.
+  `mason doctor` says the share and what it leaves, and warns when a share you set leaves under 2.5 GiB.
+- **Under 3 GiB of memory, with `MASON_DUCKDB_MEMORY` unset, Mason starts and warns** that the system may stop it: in
+  the log at its start, in `mason status` (and `warnings` in `--json`) while it runs, and in `mason doctor`. The
+  warning says the size it read, where it read it, what Mason needs beside its queries and the two ways out: give the
+  container 3 GiB or more, or set `MASON_DUCKDB_MEMORY` yourself. Measured, Mason uses up to 2.3 GiB beside its
+  queries' share, and under the old default the kernel killed the whole run at 1, 1.5, 2 and 3 GiB.
 - **The `mason-data` image now runs Node 26, where it ran Node 24**, the Node CI tests on: Node 24's V8 could now and
   then abort the server (nodejs/node#66366), for the platform to restart (compose's `restart: unless-stopped`). Nothing
   to do on upgrade, unless you build your own image FROM it with native modules of your own: rebuild them. A CLI on

@@ -276,7 +276,14 @@ paths:
   collation's**: the database's collation is deterministic (equal strings are equal bytes), so =, IN, GROUP BY,
   DISTINCT, PARTITION BY … read `equalKey`, and only ORDER BY, <, >, BETWEEN must read the collation's key of each
   string (ICU's, or the measured libc order's, which refuses a character it does not cover: equality must never
-  refuse what it never had to order). Under C and ICU the order's key equates exactly and never refuses, so
+  refuse what it never had to order). **Which collation orders is Postgres's analysis, what it means the resolver's**
+  (src/duck/collation.ts, issue 253 decision B): every reader asks `collationOf` / `inputCollationOf` /
+  `orderedUnder` for the node's exprCollation or inputcollid, resolved through the catalog's pg_collation row to the
+  source's, never the database's for every text, a COLLATE's name read off the raw tree, or a constant on a synthetic
+  node (which carries the collation of the node it stands for); `tests/conventions.test.ts` "collation resolver".
+  A collation of no determinate kind where text is ordered is Postgres's 42P22; a nondeterministic one anywhere, or an
+  ICU keyword where text is ordered, is refused by name (`collation-unknown`); a libc one other than the database's is
+  keyed by its own collcollate (`__mason_libc_key(s, collate)`), its order read from the source on its first use. Under C and ICU the order's key equates exactly and never refuses, so
   `equalKey` is it (and may be stored); under libc it is the C key, stored as a column of its own (`EQUAL_STEPS`, `.claude/rules/duck-stored-json.md`)
   or computed. A node the rewrite typed as another (`typedLike`) keeps
   that type through `clone`. `tests/duck-jsonb-order.test.ts` holds the key to
@@ -447,3 +454,22 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   it: `SELECT (c / 3)::text, c / 7 FROM t UNION ALL VALUES (NULL::text, 1.5) ORDER BY 2, 1`, through `SELECT * FROM (…)
   s`): the wrapper's column count and the VALUES rows' appended items derived in two places that disagree, 42804 "has 1
   columns available but 2 columns specified"; `texts-column-beside-values-arm-width` (PR 415).
+- A collation that is not the database's, in every reader: a column's own (`b text COLLATE "C"` on an ICU or en_US
+  database) through `*`, by number and in a join's top N; a `COLLATE` on the RIGHT of `<`, BETWEEN's upper bound, one
+  argument of GREATEST, inside min(); a derived table's or a view's `COLLATE` read through `s.n`, `1`, `n` and a
+  grouped one; two libc collations in one statement; a set operation of a C and an ICU column ordered by number (42P22):
+  a sort or comparison under the database's collation, or a byte order where the COLLATE said otherwise;
+  `collation-read-twice` (issue 253, decision B).
+- A row comparison whose one side is a char(n) column and whose other is an unknown literal Postgres coerced to bpchar
+  (over `t(id int, b text, d char(4))`, a row with `d = 'b   '`: `SELECT id FROM t WHERE (d, id) < ('b', 3) ORDER BY
+  id`, `(d, id) <= ('b', 1)`, `(b::char(2), id) < ('b', 3)`, `(b, d) <= ('b', 'b')`, a char(6) column under
+  `COLLATE "und-x-icu"`), beside the literal cast (`('b'::char(4), 3)`): the two sides of one column keyed in different
+  shapes (trimmed bpchar on one, plain text on the other) because the shape was read from each raw node's own type, not
+  from the analysed ROWCOMPAREEXPR's coerced argument types, so equal values never compare equal;
+  `row-key-shape-from-raw-type` (PR 413).
+- An ordered-set aggregate with an array of fractions over every text type its key handles (`SELECT
+  percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY d) FROM t` with `d char(4)`, the same under `COLLATE
+  "und-x-icu"`, over an empty table, grouped by another column), beside the text form: whether the answer is an array
+  decided from a list of element types (`TEXT_ARRAY`, `VARCHAR_ARRAY`) instead of from Postgres's analysis of the call
+  (the float8[] overload, an array result type), so bpchar[] (1014) is read as one scalar and the engine's error
+  escapes; `percentile-array-recognised-by-element-type-list` (PR 413).
