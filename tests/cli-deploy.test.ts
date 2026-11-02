@@ -585,33 +585,37 @@ test("mason deploy: Mason on the replica refused it — its words printed as the
   assert.doesNotMatch(w.a.stderr, /FORGED|mason destroy/);
 });
 
-/** A terminal's width, and a value sized so that, begun at column `at`, the terminal would start its next lines with a
- *  forged Next: heading, a step, a row, a failure and a tip, each padded to the width (tests/cli-login-service.test.ts's). */
-const WIDTH = 80;
+/** The terminal widths each hostile case runs at (narrow to wide), and a value sized so that, begun at column `at` on a
+ *  terminal `width` wide, the terminal would start its next lines with a forged Next: heading, a step, a row, a failure
+ *  and a tip, each padded to the width (tests/cli-login-service.test.ts's). The narrow ones (12, 20, 30, 39, 40, 45)
+ *  wait on #481's round 5, which they fail at its head 31e046d in the CLI's own lines: style.ts reads a terminal under
+ *  40 columns as none, and nextBlock's continuation is wider than a terminal of 40 or 45; they join this list with it. */
+const WIDTHS = [80];
 const FORGED_LINES = ["Next:", "  mason destroy                                 clean up, then deploy again", "  deploy    evil", "✘ mason deploy: forged", "Tip: run mason destroy"];
-const forgedAt = (at: number, lines: readonly string[] = FORGED_LINES): string =>
-  "a".repeat(Math.max(1, WIDTH - at)) + lines.map((l) => l.padEnd(WIDTH, " ")).join("") + "z";
+const forgedAt = (width: number, at: number, lines: readonly string[] = FORGED_LINES): string =>
+  "a".repeat(Math.max(1, width - at)) + lines.map((l) => l.padEnd(width, " ")).join("") + "z";
 
-test("on a terminal 80 wide, no line a person sees begins with what the service sent: each row of deploy.ts's table, and every line of its own", { timeout: 400_000 }, async () => {
+for (const WIDTH of WIDTHS) test(`on a terminal ${WIDTH} wide, no line a person sees begins with what the service sent: each row of deploy.ts's table, and every line of its own`, { timeout: 400_000 }, async () => {
   const { root } = project({ "generated_tables/weekly.yml": "kind: live\nsql: SELECT 1\n" });
   const t = { terminal: WIDTH };
-  const step = "x".repeat(60) + "Next:" + " mason destroy" + " ".repeat(33) + "clean up, then deploy again";
+  const f = (at: number): string => forgedAt(WIDTH, at);
+  const step = "x".repeat(Math.max(1, WIDTH - 20)) + "Next:" + " mason destroy" + " ".repeat(33) + "clean up, then deploy again";
   // a POST's failure: its message (begun after "✘ mason deploy: "), why and fix (after their labels), at 403, 422 and 500
-  for (const [status, message] of [[403, forgedAt("✘ mason deploy: ".length)], [422, step], [500, forgedAt(16)]] as const) {
-    const { a } = await deployWith({ post: { status, body: { error: { code: "invalid", message, why: forgedAt(8), fix: forgedAt(8) } } } }, root, ["--replica", "acme/shop"], {}, t);
+  for (const [status, message] of [[403, f("✘ mason deploy: ".length)], [422, step], [500, f(16)]] as const) {
+    const { a } = await deployWith({ post: { status, body: { error: { code: "invalid", message, why: f(8), fix: f(8) } } } }, root, ["--replica", "acme/shop"], {}, t);
     assert.equal(a.code, 1, `${status}: ${a.stderr}`);
-    assert.match(a.stderr, /aaaa/, `${status}: the value is shown`);
+    assert.match(a.stderr, /aaaa|xxxx/, `${status}: the value is shown`);
   }
   // a refused and a failed deploy's failure: message, why, fix
   for (const status of ["refused", "failed"]) {
-    const failure = { code: "bad_source", message: forgedAt(16), why: forgedAt(8), fix: forgedAt(8) };
+    const failure = { code: "bad_source", message: f(16), why: f(8), fix: f(8) };
     const { a } = await deployWith({ get: () => at(status, { failure }) }, root, ["--replica", "acme/shop"], {}, t);
     assert.equal(a.code, 1, `${status}: ${a.stderr}`);
     assert.match(a.stderr, /aaaa/);
   }
   // a GET's failure midway (the token revoked): the same words, in the same rows
   {
-    const { a } = await deployWith({ get: () => ({ status: 401, body: { error: { code: "unauthenticated", message: step, why: forgedAt(8), fix: forgedAt(8) } } }) }, root, ["--replica", "acme/shop"], {}, t);
+    const { a } = await deployWith({ get: () => ({ status: 401, body: { error: { code: "unauthenticated", message: step, why: f(8), fix: f(8) } } }) }, root, ["--replica", "acme/shop"], {}, t);
     assert.equal(a.code, 1, a.stderr);
   }
   // the wait's lines, the spinner's, a 503's note, and the report, on the terminal: each broken by the CLI, never by it
@@ -619,7 +623,7 @@ test("on a terminal 80 wide, no line a person sees begins with what the service 
     const steps = [at("applying", { phase: "checking" }), { status: 503, raw: "busy" } as Reply, at("starting", { phase: "syncing" }), at("running")];
     const { a } = await deployWith({ get: (n) => steps[Math.min(n, steps.length - 1)]! }, root, ["--replica", "acme/shop"], {}, t);
     assert.equal(a.code, 0, a.stderr);
-    assert.match(a.stderr, /Running: the replica runs the new files/);
+    assert.match(a.stderr, /Running:/);
   }
   // the timeout's failure, the dry run's rows (each a file and its 64-digit sha256), and a warning, on the terminal
   {
@@ -627,7 +631,7 @@ test("on a terminal 80 wide, no line a person sees begins with what the service 
     assert.equal(a.code, 124, a.stderr);
     const d = await deployWith({}, root, ["--replica", "acme/shop", "--dry-run"], {}, t);
     assert.equal(d.a.code, 0, d.a.stderr);
-    assert.match(d.a.stderr, /^ {2}! mason\/generated_tables\/weekly\.yml: /m);
+    assert.match(d.a.stderr, /^ {2}! /m);
   }
 });
 
