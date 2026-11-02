@@ -52,6 +52,11 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pg-server-"));
 let store: DuckStore;
 let listener: DuckOptions;
 let server: PgApiServer;
+/** the listener's clock when a test pins it (`clock` of startPostgresApi): microseconds since the epoch */
+let fixedNow: number | undefined;
+/** a microsecond wall clock of the test's own, beside the listener's (src/lib/instant.ts is not imported, so the file
+ *  loads with src/ as it was before it: scripts/fails-without.ts) */
+const microsNow = (): number => Math.floor((performance.timeOrigin + performance.now()) * 1000);
 
 const tokenFor = async (password: string): Promise<PgToken> => {
   if (password === "good-token") return {};
@@ -72,6 +77,7 @@ before(async () => {
     record: () => undefined,
     log: () => undefined,
     duck: listener,
+    clock: () => fixedNow ?? microsNow(),
   });
 });
 after(async () => {
@@ -698,6 +704,60 @@ describe("session state (GitHub issue 253): the session's settings reach every p
     } finally { await c.end(); }
   });
 
+  test("session state: the transaction's instant is microseconds on the catalog path: a prepared 'now' and its run's now() inside one millisecond are two instants, and the keywords print six digits (issues 372, 363)", async () => {
+    const c = await connect();
+    const AT = Date.UTC(2026, 0, 2, 20, 0, 0) * 1000;
+    try {
+      await c.query("SET TimeZone = 'UTC'");
+      // Parse, Bind, Execute and Sync in one batch: one implicit transaction, one instant (node-postgres's first run)
+      fixedNow = AT + 123_456;
+      assert.deepEqual((await c.query({ name: "p372", text: "SELECT $1::int AS n, now() = 'now' AS same", values: ["1"] })).rows, [{ n: 1, same: true }]);
+      assert.deepEqual((await c.query({ text: "SELECT $1::int AS n, now() = 'now' AS same", values: ["1"] })).rows, [{ n: 1, same: true }]);
+      // the run in a batch of its own, in the same millisecond and a later microsecond: the Parse's 'now' is not the run's now()
+      fixedNow = AT + 123_789;
+      assert.deepEqual((await c.query({ name: "p372", text: "SELECT $1::int AS n, now() = 'now' AS same", values: ["1"] })).rows, [{ n: 1, same: false }]);
+      // the bound relative word is the run's own instant
+      assert.deepEqual((await c.query({ text: "SELECT $1::timestamptz = now() AS same", values: ["now"] })).rows, [{ same: true }]);
+      // issue 363: the keywords print Postgres's six digits; a precision rounds the microseconds half up
+      fixedNow = AT + 123_456;
+      assert.deepEqual(await text(c, "SELECT now()::text, current_timestamp::text, current_time::text, localtime::text, localtimestamp::text, localtimestamp(6)::text"),
+        ["2026-01-02 20:00:00.123456+00", "2026-01-02 20:00:00.123456+00", "20:00:00.123456+00", "20:00:00.123456", "2026-01-02 20:00:00.123456", "2026-01-02 20:00:00.123456"]);
+      assert.deepEqual(await text(c, "SELECT 'now'::timestamptz(3) = now(), 'now'::timestamptz(6) = now(), current_timestamp(3)::text, localtimestamp(3)::text"),
+        ["false", "true", "2026-01-02 20:00:00.123+00", "2026-01-02 20:00:00.123"]);
+      fixedNow = AT + 123_500;
+      assert.deepEqual(await text(c, "SELECT current_timestamp(3)::text, localtime(3)::text"), ["2026-01-02 20:00:00.124+00", "20:00:00.124"]);
+      fixedNow = AT + 500_000;
+      assert.deepEqual(await text(c, "SELECT now()::text"), ["2026-01-02 20:00:00.5+00"]);
+      fixedNow = AT;
+      assert.deepEqual(await text(c, "SELECT now()::text"), ["2026-01-02 20:00:00+00"]);
+      // a block keeps its instant while the clock moves on by microseconds; two Queries outside one are two instants
+      fixedNow = AT + 7;
+      await c.query("BEGIN");
+      const a = await text(c, "SELECT now()::text");
+      fixedNow = AT + 10;
+      assert.deepEqual(await text(c, "SELECT now()::text"), a);
+      await c.query("COMMIT");
+      assert.deepEqual(a, ["2026-01-02 20:00:00.000007+00"]);
+      assert.deepEqual(await text(c, "SELECT now()::text"), ["2026-01-02 20:00:00.00001+00"]);
+    } finally { fixedNow = undefined; await c.end(); }
+  });
+
+  test("session state: the catalog's real clock never reads earlier than the transaction's microsecond (issue 372)", async () => {
+    const c = await connect();
+    const ordered = "SELECT statement_timestamp() >= now(), clock_timestamp() >= now(), clock_timestamp() >= statement_timestamp()";
+    try {
+      // the instant pinned at the real clock's microsecond, and a little ahead of it (the session's thread and the
+      // catalog's read two clocks, which may disagree inside a millisecond)
+      for (const ahead of [0, 900]) {
+        fixedNow = microsNow() + ahead;
+        assert.deepEqual(await text(c, ordered), ["true", "true", "true"], `alone, ahead ${ahead}`);
+        await c.query("BEGIN");
+        assert.deepEqual(await text(c, ordered), ["true", "true", "true"], `in a block, ahead ${ahead}`);
+        await c.query("COMMIT");
+      }
+    } finally { fixedNow = undefined; await c.end(); }
+  });
+
   test("session state: DateStyle's validity is Postgres's: two orders or two styles are its 22023, a non-ISO style Mason's 0A000 (review r1 of PR 333)", async () => {
     const c = await connect();
     try {
@@ -766,6 +826,32 @@ describe("session state (GitHub issue 253): the session's settings reach every p
       }
     } finally { await c.end(); }
   });
+});
+
+test("a user's session is asked again after recheckMs milliseconds of the listener's microsecond clock, not a thousandth of it (issue 372)", async () => {
+  let at = Date.UTC(2026, 0, 2, 20, 0, 0) * 1000;
+  let asked = 0;
+  const own = await startPostgresApi({
+    port: 0, host: "127.0.0.1", tls: null, database: "shop", masonVersion: "test",
+    authenticate: async () => ({ user: "ada" }),
+    recheck: async () => { asked++; },
+    recheckMs: 30_000,
+    schema: () => SCHEMA, record: () => undefined, log: () => undefined, duck: listener,
+    clock: () => at,
+  });
+  const c = new pg.Client({ host: "127.0.0.1", port: own.port, user: "ada", password: "pw", database: "shop" });
+  try {
+    await c.connect();
+    at += 29_999_000;
+    await c.query("SELECT 1");
+    assert.equal(asked, 0, "29.999 s after the login: the login's answer holds");
+    at += 1_000;
+    await c.query("SELECT 1");
+    assert.equal(asked, 1, "30 s after it: asked again");
+    at += 1_000;
+    await c.query("SELECT 1");
+    assert.equal(asked, 1, "the new answer holds for 30 s more");
+  } finally { await c.end(); await own.close(); }
 });
 
 test("session state: the splice of a catalog statement reaches every call of an override, read from the parse tree, and leaves the clock as written", async () => {

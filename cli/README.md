@@ -263,7 +263,12 @@ seeds it again.
 `mason doctor` checks all of this and says what is missing.
 
 - Node 22.13 or later. The SQL parser (`libpg-query`), the catalog (`PGlite`) and the engine (DuckDB) ship as
-  WebAssembly or prebuilt binaries: no native build, no Python or compiler needed.
+  WebAssembly or prebuilt binaries: no native build, no Python or compiler needed. Mason's CI and the `mason-data`
+  image run Node 26.
+- On Node 24 Mason runs, but a bug in Node 24's V8 (nodejs/node#66366, fixed in Node 26) can now and then abort it
+  with `Check failed: jit_page_->allocations_.erase(addr) == 1`, as a process exits or when the catalog's worker stops
+  after idling. `mason start` starts a run that died after it was ready again (not under `--attach`), and `mason status`
+  shows the restart. To avoid it, use Node 26, or a 22.x release from 22.13.
 - Memory: the engine may use half the container's memory limit by default, else half the machine's RAM
   (`MASON_DUCKDB_MEMORY=4GB` sets it; `mason doctor` says it). Sizing a server:
   [deploy/mason-data/README.md#memory](https://github.com/embeddable-hq/mason-data/blob/main/deploy/mason-data/README.md#memory).

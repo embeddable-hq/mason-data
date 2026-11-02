@@ -84,6 +84,10 @@ The demo also has a [generated table](#generated-tables), `daily_orders`: orders
 declared in `mason/generated_tables/daily_orders.yml` and kept current from the synced `orders`. `mason wait
 daily_orders` waits until it is built, and `mason status` shows it re-running as new orders arrive.
 
+Mason's CI and the `mason-data` image run Node 26. On Node 24 Mason runs, but a bug in Node 24's V8
+(nodejs/node#66366) can now and then abort it; `mason start` starts it again (not under `--attach`), and `mason status`
+shows the restart. Node 26, or a 22.x release from 22.13, avoids it ([Requirements](cli/README.md#requirements)).
+
 ### Try with your data
 
 **1. Add your tables and start Mason.**

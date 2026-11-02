@@ -83,7 +83,9 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   runs with PGlite's wall clock held at the session's instant (`PgCatalog.run`'s `at`, catalog-worker.ts
   `pinnedClock`), so the catalog's transaction start IS the session's and every reader of it (now(), the keywords, a
   relative word however it is spelt, computed or bound) agrees with the DuckDB path; a block's two paths see one
-  instant. A prepared statement whose search_path moved since its Parse is planned again
+  instant. The instant is MICROSECONDS, as Postgres's (issues 372, 363): one clock (`src/lib/instant.ts` `nowMicros`),
+  one formatter for the DuckDB path (`instantText`), and the same integer round-tripped exactly into the catalog
+  (`instantWallMs`), whose real clock after it is floored at it. A prepared statement whose search_path moved since its Parse is planned again
   (Postgres's plancache), and a result that moved is 0A000 `cached plan must not change result type`; a zone alone
   plans nothing again. DETECTOR: `tests/conventions.test.ts` "session state" (no SET of the four in src/ outside the
   appliers; `this.vars.timeZone` / `.searchPath` / `.dateStyle` read only where they are set), and the parameters'

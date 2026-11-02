@@ -130,6 +130,42 @@ four or five chunks of 1.3 – 2.7 s against a 0.5 s target to adapt. The estima
 rows sent the bar back to 0 % past it. **Where.** `src/duck/sync.ts` (`takeChunk`, `CopyLive`), `src/cli/commands.ts`;
 `tests/duck-copy-order.test.ts`.
 
+### Large values out of line (2026-11-02, issue 96)
+
+**Decision.** A chunk's ceiling is also held to what its pages hold OUT OF LINE: the source table's TOAST bytes
+(`pg_table_size(reltoastrelid)`, read from the catalog each attempt) a heap page's share of them, against an eighth of
+`store.memoryLimitBytes` split between `MASON_COPY_PARALLEL` readers, at least one page (`chunkCeiling`,
+`COPY_CHUNK_MEMORY_SHARE`); a table with nothing out of line keeps the rows ceiling exactly. A chunk that still runs out
+of memory (53200, `pgErrorOf`, a commit that cannot pin a block included; never 53400) rolls back, its range is given
+back (`giveBack`), and the copy reads on with one reader, each chunk at most half the one that ran out; a one-page
+chunk read alone that runs out fails the copy with the way out in the operator's words (`tooLargeText`), its chunks
+kept. No table is refused before it is read: whether the engine can write its values is the engine's to say, at the
+write.
+
+**Why.** A deployment's table of ~20,000 rows of ~68 KB of compressed `jsonb` (up to ~20 MB) had a heap of a few
+hundred pages, so its rows ceiling (131,072 pages at most) was the whole table: ONE chunk, which ran out of a 7.8 GiB
+limit at one reader and synced at 12 GB. Measured on DuckDB 2.0.0 (a laptop, `duckdb_memory()` sampled every 50 ms,
+synthetic tables, one reader unless said):
+
+| table on the source | one chunk (the base) | one page a chunk |
+|---|---|---|
+| `blobs`: 400 rows of ~1 MB of text, `STORAGE EXTERNAL`, 3 heap pages, 416 MiB of TOAST | fails at 128, 256, 384 MB; syncs at 448 MB (peak 427 MiB), 512 MB, 1 GB (peak 915 MiB, 803 of it overflow strings) | fails at 128 MB (a page is 136 MB); syncs at 384 MB (peak 367 MiB), and at 384 MB with 3 readers after one out of memory |
+| `docs`: 600 rows of ~512 KB of `jsonb` and one of ~8 MB, 5 heap pages, 320 MiB of TOAST | fails at 256, 384, 768 MB and 1.5 GB (1.3 GiB in the allocator) | fails at 384 MB; syncs at 768 MB (peak 505 MiB; one page read 366 MiB in the allocator, ~5.5 times its 67 MB on the source), and with 3 readers after one out of memory |
+| 4,000 rows of ~100 KB of text, 30 heap pages, 400 MiB of TOAST | syncs at 384 MB | at 128 MB: 14 chunks committed, then a checkpoint FATAL that invalidated the database; syncs with the checkpoint's vacuum off (peak 72 MiB) |
+
+So a chunk's memory follows its values, not its heap pages: uncompressed text held 1 to 2 times its bytes, `jsonb`
+about 5.5 times while it read (an eighth of the limit leaves that room, and the readers beside it, the stream, the
+polls and the queries their share). The third row is a limit chunks cannot lift: a checkpoint merges a table's small
+row groups (one a chunk of a few rows) into one of up to 122,880 rows, holding their values at once, and when that does
+not fit DuckDB invalidates the database (issue 371; 400 MiB merged under 366 MiB of limit, failed under 244 and 122 MiB).
+It stays open there: a first version of this change refused, before reading, a table whose out-of-line bytes in one
+row group times 0.75 passed the limit, and its review found that wrong (fix round 1 of PR 380): 140,000 rows of ~2.6 KB
+stored EXTERNAL (~1,030 heap pages, 365 MiB out of line) sync through a 128 MB limit, at the base in one chunk (4.9 s)
+and here in 37, and their checkpoint and reopen are fine. A formula over the source's catalog measured on one shape is
+no authority for what the engine can write; the engine's own failure at the write is.
+**Where.** `src/duck/sync.ts` (`chunkCeiling`, `readChunks`, `outOfLineBytes`), `src/duck/store.ts` (`pgErrorOf`:
+a commit out of memory is 53200); `tests/duck-copy-order.test.ts`, `tests/integration/duck-poll.itest.ts`.
+
 ### A copy beside the stream
 
 **Decision.** A rebuild runs on a DuckDB connection of its own, one at a time, writing only its table, side table and
@@ -1951,8 +1987,8 @@ be absent. Run with real OpenSSH and sshd on one machine, host and container; a 
 **Decision.** `mason serve` is `mason start --attach`'s run configured by the environment alone (`DATABASE_URL`,
 `MASON_API_KEY`, `MASON_PROJECT`, `MASON_DATA`, `MASON_NAME`, `MASON_PG_*`), every bad setting on one
 report, the log on stdout, SIGTERM its stop (tini PID 1). `GET /healthz` (`MASON_HEALTH_PORT`, 4140) is 503 until the run
-answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:24-slim with the
-copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
+answers, counts only (it takes no credential). The image (`docker/mason-data.Dockerfile`) is node:26-slim, CI's Node ("The Node CI runs on"), with
+the copy's extensions installed at build as the npm CLI has them ("The copy's extensions ship with Mason"; closed egress
 still copies); one replica, stop-then-start deploys;
 `deploy/mason-data/compose.yml` the quickstart. `version()` is `PostgreSQL 18.6 (mason-data <version>) …`, Postgres first
 since tools parse it. Item 1 of the server's plan was a login that does not expire: `mason user` ("Users").
@@ -2071,9 +2107,23 @@ container under 1 and 2 CPUs on Node 24 and 26, none in 20 runs of a PGlite and 
 `--stress-wasm-code-gc` there. Upstream's reporter: 0 in 191 processes with the two V8 commits on Node 24, 8 in 149
 without, and none on Node 26.10.
 
-**Still true.** The image (`docker/mason-data.Dockerfile`, `node:24-slim`) and a user's own Node 24 still carry the bug,
-and `mason serve` terminates a catalog worker at every idle stop: there it is a rare abort the supervisor restarts.
-Lift the guard when a Node 24 release carries nodejs/node#66376.
+**Still true.** A user's own Node 24 still carries the bug, and a run terminates a catalog worker at every idle stop:
+there it is a rare abort that `mason start`'s supervisor restarts (cli/README.md "Requirements" says so). Lift the
+guard when a Node 24 release carries nodejs/node#66376.
+
+**The image (2026-11-02, issue 67).** The image ran `node:24-slim` after CI had left it, so the crash CI no longer saw
+was still the image's, where `mason serve` stops the catalog's worker at every idle stop and the platform restarts what
+aborts. Tom chose the first of the issue's two options: the image runs CI's Node, `node:26-slim` (Debian 13), never
+`--no-wasm-code-gc` on Node 24, which covers the one known fault only. `tests/conventions.test.ts` ("the image runs the
+Node CI runs") holds the major of every `FROM node:…` in the Dockerfile EQUAL to `ciFacts(ci.yml).nodeMajor`
+(scripts/gate.ts), so the two cannot drift either way, and a tag that names no major is refused; ci.yml's `image` job
+loads the engine's native bindings, PGlite and libpg-query inside the built image and has each answer a statement,
+which `mason --version` never did. **Measured** on an arm64 Mac at load 6 to 11, the same smoke start on each image: a
+throwaway postgres:18 with a synthetic 5,000-row table synced by the stream, four aggregates and an
+`information_schema.columns` read equal to Postgres's, an insert seen after `mason wait`, `docker stop` in 2.4 s (Node
+26.13.0) and 2.6 s (Node 24.22.1), healthy after 81.8 s and 84.0 s (the first start's read of the database's collation),
+no `Check failed` in either log. `Check failed: end > addr`, seen once on Node 24 on an arm64 Mac at load ~114, was not
+met again and is not explained: it is not claimed to be this bug, nor fixed.
 
 ### The turn (2026-10-31, issue 127)
 

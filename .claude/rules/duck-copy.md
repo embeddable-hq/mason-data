@@ -45,6 +45,18 @@ paths:
   stop reads again and what `mason wait` can count. Each chunk is cut from what no committed chunk covers (`copyGaps`,
   `takeChunk`), so a resumed copy reads exactly its uncommitted ranges whatever size its chunks were.
   `tests/duck-copy-order.test.ts` holds the sizing, `duck-poll.itest.ts` a copy whose reader slows half way.
+- **A chunk's values out of line are held to the memory** (issue 96: a table of large `jsonb` values had a heap of a few
+  hundred pages, so its rows ceiling was the whole table, one chunk, out of a 7.8 GiB limit; `chunkCeiling`): the source's
+  TOAST bytes a heap page (`outOfLineBytes`, the catalog's, read once an attempt) bound the ceiling to an eighth of
+  `store.memoryLimitBytes` over `MASON_COPY_PARALLEL` (`COPY_CHUNK_MEMORY_SHARE`), at least one page; a table with nothing
+  out of line keeps the rows ceiling exactly. A chunk OUT OF MEMORY (53200 from `pgErrorOf`, never a regex of its own;
+  53400 is the spill's ceiling, disk, and fails as any error) rolls back, its range is given back (`giveBack`, which keeps
+  the gaps tiling), and the copy reads on with ONE reader, each chunk at most half the one that ran out, said once a
+  step; a one-page chunk read alone that runs out fails the copy with `tooLargeText` (the limit as set, raise
+  `MASON_DUCKDB_MEMORY`, `mason add … --columns`; never the engine's remedies), its chunks kept, backed off. No table is
+  refused before it is read by a formula over the source's catalog: what the engine can write is the engine's to say,
+  at the write (an up-front refusal by TOAST bytes refused 140,000 rows of ~2.6 KB that sync in 128 MB; PR 380). A
+  checkpoint merging small row groups of large values that do not fit invalidates the whole database (issue 371, open). `duck-poll.itest.ts` holds both shapes and the two out-of-memory paths (docs/DESIGN.md "Large values out of line").
 - **A copy's progress is rendered between commits** (`CopyLive`, `copyProgressNow`, `CopyState.progress`): the chunks
   done and about how many in all, the ones reading and how long the oldest has, the readers' measured rate and the time
   the pages left take at it, and the rows the chunks in flight have read by now at that rate, each held under 90 % of
@@ -118,3 +130,13 @@ again before each review. Its Learn step adds to this list; each bullet names th
 
 - A table holding every held built-in type and its array (point, money, macaddr, cidr, bit, tsvector, a range, `oid[]`):
   the copy writes what the poll and the stream write, and an older copy's layout is caught (PR 153).
+- A table of large out-of-line values (a few rows a heap page, ~1 MB of text `STORAGE EXTERNAL`, or `jsonb` of ~512 KB)
+  under a low `MASON_DUCKDB_MEMORY` at `MASON_COPY_PARALLEL` 3: it syncs in chunks of a page's values, or fails with
+  the operator's way out and never the engine's advice (issue 96); and many moderate ones (~2 KB, 140,000 rows) under
+  128 MB, never refused before they are read (PR 380). A checkpoint that invalidates the database is issue 371's.
+- `sizing-guard-from-derived-estimate`: a refusal decided up front by arithmetic on the source's catalog (out-of-line
+  bytes a row group times a share, against the memory limit), measured on one shape and applied to all. Sync
+  `CREATE TABLE t (id bigint PRIMARY KEY, v text)`, `v` `STORAGE EXTERNAL`, 140,000 rows of `repeat(md5(id::text), 64)`
+  (~365 MiB out of line) under `memoryLimit '128MB'`, `copyParallel` 3: it syncs and equals the source, as the base
+  does. The authority for "cannot be written" is the engine's own failure at the write (53200 at the commit or the
+  checkpoint), said as the chunk out-of-memory path says it, never a formula the base's behaviour contradicts (PR 380).
