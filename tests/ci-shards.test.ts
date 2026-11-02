@@ -350,6 +350,18 @@ test("verify unit says each shard's wall time and CPU and the gap, warns past a 
   const { GITHUB_RUN_ID: _, ...noRun } = process.env;
   const unnamed = spawnSync(process.execPath, [path.join(ROOT, "scripts", "ci-shards.ts"), "verify", "unit", far], { encoding: "utf8", cwd: ROOT, env: noRun });
   assert.match(unnamed.stdout, /weights <run-id>`/);
+  // one file's floor (PR 346's second run): the slowest shard's longest file alone is past the target from the fastest,
+  // so the warning names that file, never a rebalance that cannot close it
+  const floor = tmp(t);
+  unitRecords(floor, (n) => ({ wallMs: [351600, 376100, 860000][n - 1]!, times: Object.fromEntries(shardFiles("unit", n, ROOT).map((f, i) => [f, n === 3 && i === 0 ? 852800 : 4000])) }));
+  const held = program("ci-shards.ts", ["verify", "unit", floor], { GITHUB_RUN_ID: "123" });
+  assert.equal(held.status, 0, held.out);
+  const first3 = shardFiles("unit", 3, ROOT)[0]!;
+  assert.ok(held.out.includes(`::warning title=unit shards::the unit shards ran 508.4 s apart, past the target of 60.0 s, and no split closes it: ${first3} alone took 852.8 s of shard 3's 860.0 s, where the fastest shard took 351.6 s`), held.out);
+  assert.doesNotMatch(held.out, /weights 123/);
+  // within the target of the fastest, the longest file is no floor: rebalance
+  unitRecords(floor, (n) => ({ wallMs: [351600, 376100, 860000][n - 1]!, times: Object.fromEntries(shardFiles("unit", n, ROOT).map((f, i) => [f, n === 3 && i === 0 ? 400000 : 4000])) }));
+  assert.match(program("ci-shards.ts", ["verify", "unit", floor], { GITHUB_RUN_ID: "123" }).out, /::warning title=unit shards::.*rebalance with `node scripts\/ci-shards\.ts weights 123`/);
   // a file left out: 1 by coverage, the warning beside it
   const record1 = path.join(far, "ran-unit-1.json");
   const r1 = JSON.parse(fs.readFileSync(record1, "utf8")) as ShardRecord;

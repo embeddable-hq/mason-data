@@ -23,7 +23,8 @@
  * its own wall time and its runner's CPU. `weights` writes the fixture from a finished run's `ran-unit-*` records, as
  * `scripts/oracle-legs.ts --weights` writes the oracle's (the run check, the download and the fixture's text are
  * ci-layout.ts's, shared). `verify unit` then says how far apart the shards ran and warns past UNIT_APART_MS, naming
- * that command: balance is a cost, never coverage, so it never moves the exit code. This file never imports
+ * that command, or the one file no split can help (`balanceLines`): balance is a cost, never coverage, so it never moves
+ * the exit code. This file never imports
  * scripts/oracle-legs.ts, which reaches the engine's gaps and the oracle's decisions.
  */
 import { spawnSync } from "node:child_process";
@@ -169,8 +170,10 @@ export function coverageProblems(kind: Kind, records: readonly ShardRecord[], fi
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
 
 /** `verify unit`'s balance lines, after its coverage verdict: one a shard (its wall time as run, its files' times summed,
- *  its CPU) and one of the gap between the slowest and the fastest, and past UNIT_APART_MS a GitHub warning naming the
- *  command that rebalances (`runId`: GITHUB_RUN_ID, in CI this run). A cost, never coverage: nothing here moves the exit
+ *  its CPU) and one of the gap between the slowest and the fastest, and past UNIT_APART_MS a GitHub warning naming what
+ *  closes it: the command that rebalances (`runId`: GITHUB_RUN_ID, in CI this run), or, when the slowest shard's longest
+ *  file alone is past the target from the fastest shard, that file (no split runs a shard faster than its longest file;
+ *  PR 346's runs: tests/duck-generated.test.ts, 744 s and 853 s). A cost, never coverage: nothing here moves the exit
  *  code; a shard with no wall time is "not measured", never a gap of 0. */
 export function balanceLines(records: readonly ShardRecord[], runId: string | undefined): string[] {
   const shards = [...records].sort((a, b) => a.shard - b.shard);
@@ -182,7 +185,15 @@ export function balanceLines(records: readonly ShardRecord[], runId: string | un
   const slowest = shards.reduce((a, b) => b.wallMs! > a.wallMs! ? b : a), fastest = shards.reduce((a, b) => b.wallMs! < a.wallMs! ? b : a);
   const apart = slowest.wallMs! - fastest.wallMs!;
   lines.push(`unit shards: balance: ${seconds(apart)} apart as run, shard ${slowest.shard} the slowest and ${fastest.shard} the fastest (the target: ${seconds(UNIT_APART_MS)} or less)`);
-  if (apart > UNIT_APART_MS) lines.push(`::warning title=unit shards::the unit shards ran ${seconds(apart)} apart, past the target of ${seconds(UNIT_APART_MS)}: rebalance with \`${WEIGHTS_COMMAND(runId)}\` (from this run's unit shards), read the diff of ${UNIT_WEIGHTS_FILE}, and commit it`);
+  if (apart <= UNIT_APART_MS) return lines;
+  // ONE FILE'S FLOOR: a shard runs no faster than its longest file, so when that file alone is past the target from the
+  // fastest shard, no split closes the gap, and a warning to rebalance would send the reader to a command that cannot
+  const longest = Object.entries(slowest.times ?? {}).reduce<[string, number] | null>((a, x) => a === null || x[1] > a[1] ? x : a, null);
+  if (longest !== null && longest[1] - fastest.wallMs! > UNIT_APART_MS) {
+    lines.push(`::warning title=unit shards::the unit shards ran ${seconds(apart)} apart, past the target of ${seconds(UNIT_APART_MS)}, and no split closes it: ${longest[0]} alone took ${seconds(longest[1])} of shard ${slowest.shard}'s ${seconds(slowest.wallMs!)}, where the fastest shard took ${seconds(fastest.wallMs!)}. Make that file faster, or split it into files`);
+  } else {
+    lines.push(`::warning title=unit shards::the unit shards ran ${seconds(apart)} apart, past the target of ${seconds(UNIT_APART_MS)}: rebalance with \`${WEIGHTS_COMMAND(runId)}\` (from this run's unit shards), read the diff of ${UNIT_WEIGHTS_FILE}, and commit it`);
+  }
   return lines;
 }
 
