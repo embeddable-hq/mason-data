@@ -2098,6 +2098,10 @@ count from the usage samples (`duckdb_memory()`, a minute apart).
 | 1.5 GiB | the same, 3 runs at once | 256MiB | killed | the generated tables' build | 1506 / 1510 |
 | 1.5 GiB | the same, alone | 256MiB | killed | beside the writes | 1500 / 1533 |
 | 1.5 GiB | the same, `=128MiB`, alone | 128MiB | killed, after every statement was answered (the same one 53200) | the statements after the writes | 1509 / 1509 |
+| 3 GiB (the floor) | the merged head on **Node 26.13.0** | 512MiB | the whole path, every statement answered | | 2385 / 2472 |
+| 2 GiB | the same, Node 26 | 128MiB | the whole path (the same one 53200) | | 1773 / 1975 |
+| 2 GiB | the same, Node 26, host load ~60 | 128MiB | not killed; the first sync past its 20 min bound, both generated tables refused when the catalog's start timed out (issue 409) | the first sync | 1749 (peak) |
+| 1.5 GiB | the same, Node 26 | 128MiB | killed | beside the writes | 1434 / 1503 |
 | 3 GiB (the floor) | branch | 512MiB | the whole path, every statement answered | | 1994 / 2131 |
 | 4 GiB | branch | 1536MiB | the whole path, every statement answered | | 3089 / 3279 |
 
@@ -2114,6 +2118,12 @@ is the 2.3 GiB with ~10 % margin; at the floor and at 4 GiB the room used outsid
 was answered, 256MiB in the writes. Both shares answered the same statements (the group by a JSON key failed alone,
 53200, at each). So `MIN_SHARE_BYTES` is 128MiB. Nothing under 128MiB was measured, and nothing under 1.5 GiB ran the
 whole path: under the floor the warning stays true at every share. One run each, on a laptop under load.
+
+**On Node 26** (the image's Node since PR 368; the runs above were Node 24.22.1), the merged head held all three
+constants: at the floor the whole path ran with every statement answered, the room used outside the limit about
+1.96 GiB (2472 MiB RSS less 512MiB), under the reserve; at 2 GiB the 128MiB share ran the whole path; 1.5 GiB was
+killed, under the floor where the warning says it may be. The pg-eval and catalog WebAssembly memory read lower on
+Node 26 (external ~0.25 GB against ~0.72 GB) and native memory higher, so the sum moved less than its parts.
 
 **Not known, and filed:** stopping the pg-eval worker when idle (issue 374), where the ~1 GiB of native memory goes
 (issue 375), a CI job that runs the image under a memory limit (issue 376). Issue 96 (a first sync's 53200 on large
