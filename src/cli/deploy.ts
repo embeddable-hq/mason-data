@@ -45,7 +45,7 @@
  *   an HTTP status, Retry-After             a failure's or a wait's line            a number (Retry-After bounded, never printed)
  *   why a request got no answer             the wait's line, a failure's why        `call`'s own words, through `serviceText`
  *
- * So no value of the service's starts a line, adds a row or a `Next:` step, or puts a line break in --json.
+ * So no value of the service's starts a line, adds a row or a step to run next, or puts a line break in --json.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
