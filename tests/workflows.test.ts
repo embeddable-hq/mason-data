@@ -716,37 +716,143 @@ test("ci-wait: bounded, a deadline no pass starts after, a gh that never returns
   assert.ok(570 + 2 * 1 + 10 < 600, "a chunk at the cap, its last call's grace and Node's start end inside 600000 ms");
 });
 
-test("pr-loop-slim: a conflict exits the CI stage with the base and the way out, and sends nothing to a fix", async () => {
-  const conflict = { state: "conflict", detail: "PR 900 conflicts with main" };
-  const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
-  const common: Answers = {
-    "review r1": { findings: [base], judgedCorrect: [] }, "CI 1": conflict,
-    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
-  };
+// ---------------------------------------------------------------- a conflict CI reads is a stage, not an exit (issue
+// 452): the run's conflict exit was a status nobody read, and a clean PR sat an hour. The class: a run's stop that needs
+// another party, reported only in a result file nobody reads. The script merges the base itself, and resolves the case
+// that recurs (release-notes/next.md, insertions on both sides); every other case stops with a status that begins
+// `conflict:` and names the files, which the skills make the coordinator's ONE report at once.
+const conflictCI = { state: "conflict", detail: "PR 900 conflicts with main" };
+const mergedAt = (c: string, files = ["release-notes/next.md"]) => ({ state: "merged", head: sha(c), files, detail: `merged: ${c.repeat(7)}` });
+const MERGE_OPTS = { model: "sonnet", effort: "low", isolation: "worktree" };
+const MERGE_CMD = 'node scripts/merge-base.ts origin/main "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"';
+const baseFound = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
+const FILED_BASE = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] };
+/** A run that merges its base once, then meets a conflict its merge cannot resolve: both merge answers' text is read. */
+const MERGE_RUN: Answers = { ...SLIM, "review r1": clean, "CI 1": conflictCI, "merge 1": mergedAt("m"), "CI 2": conflictCI,
+  "merge 2": { state: "conflict", head: sha("m"), files: ["src/duck/plan.ts"], detail: "conflict: src/duck/plan.ts" } };
+
+test("pr-loop-slim: a conflict CI reads starts a merge stage on a fresh agent, never a CI fix, and CI runs again on the merged head", async () => {
   for (const name of PR_LOOPS) {
-    const r = await run(name, { ...PR }, { ...SLIM, ...common });
+    const r = await run(name, { ...PR }, { ...SLIM, "review r1": { findings: [baseFound], judgedCorrect: [] }, "CI 1": conflictCI, "merge 1": mergedAt("m"), "CI 2": green, file: FILED_BASE });
+    assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "merge 1", "CI 2", "file"], name);
+    const call = r.calls.find((c) => c.opts.label === "merge 1")!;
+    const { label: _l, schema: _s, phase, ...on } = call.opts;
+    assert.equal(phase, "Merge", `${name}: the merge's phase`);
+    assert.deepEqual(on, MERGE_OPTS, `${name}: a fresh Sonnet agent in a worktree of its own, never the implementer`);
+    const p = call.prompt;
+    for (const s of ["git checkout --detach origin/issue-300-a-piece", `\`${MERGE_CMD}\``, "`git push origin HEAD:issue-300-a-piece`", "`git ls-remote origin refs/heads/issue-300-a-piece`"]) {
+      assert.ok(p.includes(s), `${name}: the merge prompt says ${s}`);
+    }
+    for (const cmd of commandsOf(p)) assert.deepEqual(unplain(cmd), [], `${name}: \`${cmd}\` is plain`);
+    assert.ok(!r.labels.some((l) => /fix/.test(l)), `${name}: a conflict is never sent to a fix`);
+    // the head decides: the run goes on at the merged head, and the status names the merge for the top session
     const status = String(r.result["status"]);
-    assert.match(status, /^conflict/, `${name}: ${status}`);
-    assert.ok(status.includes("PR 900 conflicts with main") && status.includes("merge origin/main into issue-300-a-piece"), `${name}: the base and the way out: ${status}`);
-    assert.ok(!r.labels.some((l) => /^CI fix/.test(l)), `${name}: a conflict is never sent to a CI fix`);
+    assert.match(status, /^reviewed, no open blocking finding of this PR, CI green: ready for the merge decision/, status);
+    for (const s of ["origin/main", "mmmmmmm", "release-notes/next.md kept both sides"]) assert.ok(status.includes(s), `${name}: the status names the merge (${s}): ${status}`);
+    assert.match(r.prompt("CI 2"), /at head mmmmmmm/, `${name}: CI waits on the merged head`);
+    assert.equal(r.result["head"], sha("m"));
+    const rec = parseRecords(r.prompt("record"))[0]!;
+    assert.equal(rec.ciFixes, 0, `${name}: a merge is no CI fix`);
+    assert.equal(rec.status, status);
+  }
+});
+
+test("pr-loop-slim: a merge that leaves the conflict open stops the run with a status that begins `conflict:` and names the files or the reason", async () => {
+  for (const name of PR_LOOPS) {
+    const common: Answers = { ...SLIM, "review r1": { findings: [baseFound], judgedCorrect: [] }, "CI 1": conflictCI, file: FILED_BASE };
+    // another file conflicts: the files, the base and the way out, the top session's
+    let r = await run(name, { ...PR }, { ...common, "merge 1": { state: "conflict", head: sha("a"), files: ["src/duck/plan.ts", "release-notes/next.md"], detail: "conflict: src/duck/plan.ts release-notes/next.md" } });
+    let status = String(r.result["status"]);
+    assert.match(status, /^conflict: PR 900 conflicts with main\b/, status);
+    for (const s of ["src/duck/plan.ts", "release-notes/next.md", "the top session merges origin/main into issue-300-a-piece", "pushes, reads the merge, and CI runs again"]) assert.ok(status.includes(s), `${name}: ${s}: ${status}`);
+    assert.ok(!r.labels.includes("CI 2") && !r.labels.some((l) => /fix/.test(l)), `${name}: no CI 2 and no fix: ${r.labels}`);
     assert.ok(r.labels.includes("file") && r.labels.includes("record"), `${name}: file and record still run`);
-    assert.equal(parseRecords(r.prompt("record"))[0]!.status, status, `${name}: the record carries the status`);
-    assert.equal(parseRecords(r.prompt("record"))[0]!.ciFixes, 0);
-
+    assert.equal(parseRecords(r.prompt("record"))[0]!.status, status);
+    // nothing to merge, by its state or by its head: GitHub read a conflict the merge did not find, and the top session looks
+    for (const m of [{ state: "up-to-date", head: sha("a"), files: [], detail: "up to date" }, { ...mergedAt("a", []), detail: "merged: aaaaaaa" }]) {
+      r = await run(name, { ...PR }, { ...common, "merge 1": m });
+      status = String(r.result["status"]);
+      assert.match(status, /^conflict: /, `${name} ${m.state}: ${status}`);
+      assert.ok(status.includes("GitHub read a conflict the merge did not find") && status.includes("the top session looks"), `${name} ${m.state}: ${status}`);
+      assert.ok(!r.labels.includes("CI 2"), `${name} ${m.state}: the head did not move, so no CI 2`);
+    }
+    // the agent failed: the conflict is still open, never reviewed
+    r = await run(name, { ...PR }, { ...common, "merge 1": null });
+    status = String(r.result["status"]);
+    assert.match(status, /^conflict: /, status);
+    assert.ok(status.includes("merge 1 failed") && status.includes("the conflict is still open"), status);
+    // an answer that is not merged yet moved the branch: the head is the run's, and no CI reads an unreviewed push as ready
+    r = await run(name, { ...PR }, { ...common, "merge 1": { state: "conflict", head: sha("z"), files: [], detail: "push failed" } });
+    status = String(r.result["status"]);
+    assert.match(status, /^conflict: [^]*moved the branch to zzzzzzz/, status);
+    assert.equal(r.result["head"], sha("z"));
     // stacked: the base below, never main
-    const s = await run(name, { ...PR, base: "issue-300-below", stackedOn: "899" }, { ...SLIM, "review r1": clean, "CI 1": { state: "conflict", detail: "conflicts with issue-300-below" } });
-    assert.ok(String(s.result["status"]).includes("merge origin/issue-300-below into issue-300-a-piece"), String(s.result["status"]));
-    assert.ok(!String(s.result["status"]).includes("origin/main"), "a stacked PR merges the branch below");
+    const s = await run(name, { ...PR, base: "issue-300-below", stackedOn: "899" }, { ...SLIM, "review r1": clean, "CI 1": { state: "conflict", detail: "conflicts with issue-300-below" },
+      "merge 1": { state: "conflict", head: sha("a"), files: ["app/x.ts"], detail: "conflict: app/x.ts" } });
+    assert.ok(s.prompt("merge 1").includes('`node scripts/merge-base.ts origin/issue-300-below "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"`'), "a stacked PR merges the branch below");
+    assert.doesNotMatch(s.prompt("merge 1"), /origin\/main\b/, "never main");
+    const ss = String(s.result["status"]);
+    assert.ok(ss.startsWith("conflict: PR 900 conflicts with issue-300-below") && ss.includes("merges origin/issue-300-below into issue-300-a-piece") && !ss.includes("origin/main"), ss);
+  }
+});
 
-    // a conflict read beside a review is never a CI failure in that round's fix
+test("pr-loop-slim: every answer of a merge either starts CI at a new head or ends with a `conflict:` status, never reviewed and never a fix (issue 452)", async () => {
+  const answers: Array<[string, unknown]> = [
+    ["merged, a new head", mergedAt("m")],
+    ["merged with no file resolved", mergedAt("n", [])],
+    ["conflict", { state: "conflict", head: sha("a"), files: ["src/duck/plan.ts"], detail: "conflict: src/duck/plan.ts" }],
+    ["up to date", { state: "up-to-date", head: sha("a"), files: [], detail: "up to date" }],
+    ["merged, the head unchanged", mergedAt("a", [])],
+    ["null", null],
+  ];
+  for (const name of PR_LOOPS) {
+    for (const [what, m] of answers) {
+      const r = await run(name, { ...PR }, { ...SLIM, "review r1": clean, "CI 1": conflictCI, "merge 1": m, "CI 2": green });
+      const status = String(r.result["status"]);
+      assert.ok(!r.labels.some((l) => /fix/.test(l)), `${name} ${what}: no fix`);
+      if (r.labels.includes("CI 2")) {
+        assert.doesNotMatch(r.prompt("CI 2"), /at head aaaaaaa/, `${name} ${what}: CI 2 runs at a new head`);
+        assert.ok(status.includes(`merged origin/main into issue-300-a-piece at ${String((m as { head: string }).head).slice(0, 7)}`), `${name} ${what}: ${status}`);
+      } else {
+        assert.match(status, /^conflict: PR 900 conflicts with main\b/, `${name} ${what}: ${status}`);
+        assert.doesNotMatch(status, /reviewed, no open blocking/, `${name} ${what}`);
+        assert.ok(/src\/duck\/plan\.ts|did not find|failed/.test(status), `${name} ${what}: it names the files or the reason: ${status}`);
+      }
+    }
+  }
+});
+
+test("pr-loop-slim: merges are bounded apart from CI fixes; a merge eats no CI fix", async () => {
+  for (const name of PR_LOOPS) {
+    // conflict after every merge: three merges, then the conflict status, never a fourth
+    let r = await run(name, { ...PR }, { ...SLIM, "review r1": clean, "CI 1": conflictCI, "merge 1": mergedAt("b"), "CI 2": conflictCI, "merge 2": mergedAt("c"),
+      "CI 3": conflictCI, "merge 3": mergedAt("d"), "CI 4": conflictCI });
+    assert.deepEqual(core(r.labels).slice(3), ["CI 1", "merge 1", "CI 2", "merge 2", "CI 3", "merge 3", "CI 4"], name);
+    const status = String(r.result["status"]);
+    assert.match(status, /^conflict: [^]*still conflicting after 3 merges/, status);
+    assert.equal(r.result["head"], sha("d"));
+    // a merge, then three CI fixes: MAX_CI_FIXES untouched by the merge
+    r = await run(name, { ...PR }, { ...SLIM, "review r1": clean, "CI 1": conflictCI, "merge 1": mergedAt("b"),
+      "CI 2": red, "CI fix 1": { ...pushed("c"), flake: false }, "review r2": clean,
+      "CI 3": red, "CI fix 2": { ...pushed("d"), flake: false }, "review r3": clean,
+      "CI 4": red, "CI fix 3": { ...pushed("e"), flake: false }, "review r4": clean, "CI 5": red });
+    assert.deepEqual(core(r.labels).filter((l) => /^CI fix/.test(l)), ["CI fix 1", "CI fix 2", "CI fix 3"], name);
+    assert.match(r.prompt("CI 5"), /at head eeeeeee/);
+    assert.match(String(r.result["status"]), /^CI still red after 3 fixes/);
+    assert.equal(parseRecords(r.prompt("record"))[0]!.ciFixes, 3);
+  }
+});
+
+test("pr-loop-slim: a conflict read beside a review stays a log line: never a CI failure in the fix, never a merge before the reviews are clean", async () => {
+  for (const name of PR_LOOPS) {
     const f1 = await run(name, { ...PR }, {
       ...SLIM, "review r1": f("a"), "CI read r1": { state: "conflict", detail: "conflicts with main" },
       "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green,
     });
     assert.doesNotMatch(f1.prompt("fix r1"), /CI failed|conflicts with main/, `${name}: the fix is told no CI failure`);
+    assert.ok(!f1.labels.some((l) => /^merge/.test(l)), `${name}: no merge beside a review`);
     assert.match(String(f1.result["status"]), /^reviewed/);
   }
-
   // the rules a person's wait follows say the same
   const claude = fs.readFileSync(path.join(ROOT, "CLAUDE.md"), "utf8");
   const ciBullet = /^- \*\*A wait on CI is[\s\S]*?(?=^- \*\*)/m.exec(claude)?.[0] ?? "";
@@ -754,6 +860,151 @@ test("pr-loop-slim: a conflict exits the CI stage with the base and the way out,
   const step5 = /^5\. \*\*Merge\.\*\*[\s\S]*?(?=^\*\*One process runs the loop\*\*)/m.exec(claude)?.[0] ?? "";
   assert.ok(step5.includes("--json state,mergeable"), "CLAUDE.md's merge wait reads mergeable");
   assert.ok(upNextText().includes("--json state,mergeable"), "the up-next skill's merge wait reads mergeable: the top session merges");
+});
+
+// ---------------------------------------------------------------- scripts/merge-base.ts, against real throwaway git
+// repositories under os.tmpdir(), with no network: an "up" repository is origin, "work" a clone of it on a branch.
+const MERGE_BASE = path.join(ROOT, "scripts", "merge-base.ts");
+type MergeRepo = { dir: string; work: string; up: string; git: (cwd: string, ...args: string[]) => string; env: Record<string, string | undefined> };
+function mergeRepo(base: Record<string, string>, main: Record<string, string>, branch: Record<string, string>): MergeRepo {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "merge-base-")));
+  const cfg = path.join(dir, "gitconfig");
+  fs.writeFileSync(cfg, "");
+  // a config of its own, so a laptop's (commit.gpgsign, hooks) changes nothing
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: cfg, GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@example.com" };
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" });
+  const put = (root: string, files: Record<string, string>, msg: string) => {
+    for (const [f, text] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), text);
+    }
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", msg);
+  };
+  const up = path.join(dir, "up"), work = path.join(dir, "work");
+  fs.mkdirSync(up);
+  git(up, "init", "-q", "-b", "main");
+  put(up, base, "base");
+  git(dir, "clone", "-q", up, work);
+  git(work, "checkout", "-q", "-b", "issue-1-piece");
+  if (Object.keys(branch).length) put(work, branch, "the branch");
+  if (Object.keys(main).length) put(up, main, "main moved");
+  git(work, "fetch", "-q", "origin");
+  return { dir, work, up, git, env };
+}
+function mergeBaseRun(r: MergeRepo, ...args: string[]): { status: number | null; out: string; err: string; first: string } {
+  const p = spawnSync(process.execPath, [MERGE_BASE, ...args], { cwd: r.work, env: r.env, encoding: "utf8", timeout: 60_000 });
+  assert.equal(p.error, undefined, String(p.error));
+  return { status: p.status, out: p.stdout, err: p.stderr, first: p.stdout.split("\n")[0]! };
+}
+const NOTES_BASE = "# Next release\n\n## What changes\n\n- base note\n\n## Upgrading\n\n- nothing\n";
+const after = (line: string, add: string) => NOTES_BASE.replace(`${line}\n`, `${line}\n${add}`);
+/** The tree is as clean as a finished merge leaves it, and no merge is in progress. */
+function settled(r: MergeRepo, what: string): void {
+  assert.equal(r.git(r.work, "status", "--porcelain", "--untracked-files=no"), "", `${what}: the tree is clean`);
+  assert.ok(!fs.existsSync(path.join(r.work, ".git", "MERGE_HEAD")), `${what}: no merge in progress`);
+}
+
+test("merge-base: a merge with no conflict is committed with two parents and the trailer last; nothing to merge is exit 5", () => {
+  let r = mergeRepo({ "app/base.ts": "base\n" }, { "app/a.ts": "a\n" }, { "app/b.ts": "b\n" });
+  try {
+    const before = r.git(r.work, "rev-parse", "HEAD").trim();
+    const m = mergeBaseRun(r, "origin/main", "Co-Authored-By: X");
+    assert.equal(m.status, 0, m.out + m.err);
+    const head = r.git(r.work, "rev-parse", "HEAD").trim();
+    assert.equal(m.first, `merged: ${head}`);
+    assert.doesNotMatch(m.out, /resolved:/, "a clean merge resolved no file");
+    assert.equal(r.git(r.work, "rev-list", "--parents", "-n", "1", "HEAD").trim(), `${head} ${before} ${r.git(r.work, "rev-parse", "origin/main").trim()}`, "two parents: the branch, then the base");
+    const msg = r.git(r.work, "log", "-1", "--format=%B").trim();
+    assert.match(msg, /^Merge origin\/main into the branch\n/);
+    assert.ok(msg.endsWith("\nCo-Authored-By: X"), msg);
+    assert.equal(fs.readFileSync(path.join(r.work, "app/a.ts"), "utf8") + fs.readFileSync(path.join(r.work, "app/b.ts"), "utf8"), "a\nb\n");
+    settled(r, "clean merge");
+    // the branch now holds origin/main: up to date, exit 5, no commit
+    const again = mergeBaseRun(r, "origin/main", "Co-Authored-By: X");
+    assert.equal(again.status, 5, again.out + again.err);
+    assert.match(again.first, /^up to date\b/);
+    assert.equal(r.git(r.work, "rev-parse", "HEAD").trim(), head, "no new commit");
+    settled(r, "up to date");
+  } finally {
+    fs.rmSync(r.dir, { recursive: true, force: true });
+  }
+  // usage: no argument, or a ref that does not resolve: never 0, nothing committed, the tree clean
+  r = mergeRepo({ "app/base.ts": "base\n" }, { "app/a.ts": "a\n" }, { "app/b.ts": "b\n" });
+  try {
+    const before = r.git(r.work, "rev-parse", "HEAD").trim();
+    for (const args of [[], ["origin/nope"], ["origin/main", "trailer", "extra"]]) {
+      const m = mergeBaseRun(r, ...args);
+      assert.ok(m.status === 2 || m.status === 1, `${JSON.stringify(args)}: exit ${m.status}: ${m.err}`);
+      assert.ok(m.err.trim().length > 0, `${JSON.stringify(args)}: it says why`);
+      assert.equal(r.git(r.work, "rev-parse", "HEAD").trim(), before, `${JSON.stringify(args)}: nothing committed`);
+      settled(r, JSON.stringify(args));
+    }
+    assert.equal(mergeBaseRun(r).status, 2, "no argument is a usage error");
+    assert.match(mergeBaseRun(r, "origin/nope").err, /origin\/nope does not resolve/);
+    // its verdicts' exit codes are its own, never Node's 1, and its doc says so
+    const src = fs.readFileSync(MERGE_BASE, "utf8");
+    assert.deepEqual(new Function(`return (${/const VERDICT = (\{[^}]*\})/.exec(src)![1]})`)(), { merged: 0, conflict: 4, upToDate: 5, usage: 2 });
+    assert.match(src, /Any other exit \(1 is a git call that failed/);
+  } finally {
+    fs.rmSync(r.dir, { recursive: true, force: true });
+  }
+});
+
+test("merge-base: release-notes/next.md alone, insertions on both sides, keeps both; an edit of the same line on both sides is a conflict", () => {
+  let r = mergeRepo({ "release-notes/next.md": NOTES_BASE }, { "release-notes/next.md": after("- base note", "- main note A\n- main note B\n") }, { "release-notes/next.md": after("- base note", "- branch note\n") });
+  try {
+    const m = mergeBaseRun(r, "origin/main", "Co-Authored-By: X");
+    assert.equal(m.status, 0, m.out + m.err);
+    assert.match(m.out, /^merged: [0-9a-f]{40}\nresolved: release-notes\/next\.md \(kept both sides\)\n$/);
+    const text = fs.readFileSync(path.join(r.work, "release-notes/next.md"), "utf8");
+    for (const line of ["- base note", "- main note A", "- main note B", "- branch note", "- nothing"]) {
+      assert.equal(text.split("\n").filter((l) => l === line).length, 1, `${line} once: ${text}`);
+    }
+    assert.doesNotMatch(text, /^(<{7}|={7}|>{7})/m, "no conflict marker");
+    assert.equal(r.git(r.work, "show", "HEAD:release-notes/next.md"), text, "the file committed is the file kept");
+    const msg = r.git(r.work, "log", "-1", "--format=%B").trim();
+    assert.match(msg, /release-notes\/next\.md: kept both sides/);
+    assert.ok(msg.endsWith("\nCo-Authored-By: X"), msg);
+    settled(r, "notes kept both sides");
+  } finally {
+    fs.rmSync(r.dir, { recursive: true, force: true });
+  }
+  // both sides edited the same base line: never a union of the two edits
+  r = mergeRepo({ "release-notes/next.md": NOTES_BASE }, { "release-notes/next.md": NOTES_BASE.replace("- base note", "- base note, as main says") }, { "release-notes/next.md": NOTES_BASE.replace("- base note", "- base note, as the branch says") });
+  try {
+    const before = r.git(r.work, "rev-parse", "HEAD").trim();
+    const m = mergeBaseRun(r, "origin/main", "Co-Authored-By: X");
+    assert.equal(m.status, 4, m.out + m.err);
+    assert.equal(m.first, "conflict: release-notes/next.md");
+    assert.equal(r.git(r.work, "rev-parse", "HEAD").trim(), before, "HEAD unchanged");
+    assert.equal(fs.readFileSync(path.join(r.work, "release-notes/next.md"), "utf8"), NOTES_BASE.replace("- base note", "- base note, as the branch says"), "the branch's file, as it was");
+    settled(r, "same line edited");
+  } finally {
+    fs.rmSync(r.dir, { recursive: true, force: true });
+  }
+});
+
+test("merge-base: another file conflicting aborts the merge, next.md not resolved on its own; the paths are read from git's index", () => {
+  const r = mergeRepo({ "release-notes/next.md": NOTES_BASE, "app/x.ts": "one\ntwo\n" },
+    { "release-notes/next.md": after("- base note", "- main note\n"), "app/x.ts": "ONE (main)\ntwo\n" },
+    { "release-notes/next.md": after("- base note", "- branch note\n"), "app/x.ts": "ONE (branch)\ntwo\n" });
+  try {
+    const before = r.git(r.work, "rev-parse", "HEAD").trim();
+    const m = mergeBaseRun(r, "origin/main", "Co-Authored-By: X");
+    assert.equal(m.status, 4, m.out + m.err);
+    assert.match(m.first, /^conflict: /);
+    assert.deepEqual(m.first.slice("conflict: ".length).split(" ").sort(), ["app/x.ts", "release-notes/next.md"]);
+    assert.equal(r.git(r.work, "rev-parse", "HEAD").trim(), before, "HEAD unchanged");
+    assert.equal(fs.readFileSync(path.join(r.work, "release-notes/next.md"), "utf8"), after("- base note", "- branch note\n"), "next.md as the branch had it");
+    settled(r, "another file");
+    // the paths come from the index: the script never reads merge's printed text for them
+    const src = fs.readFileSync(MERGE_BASE, "utf8");
+    assert.match(src, /"--diff-filter=U"/);
+    assert.doesNotMatch(src, /CONFLICT \(|Automatic merge failed/, "merge's text is never parsed");
+  } finally {
+    fs.rmSync(r.dir, { recursive: true, force: true });
+  }
 });
 
 test("pr-loop-slim: the author is told to run the rules' review probes before every push", async () => {
@@ -1796,7 +2047,8 @@ test("the up-next skill: the top session's queue, its rules, how a run starts an
 test("both skills: no machine path, agent id or run state, and no sentence of a pr-loop-slim prompt (issue 386, PR 258's class)", async () => {
   const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green });
   const split = await run("pr-loop-slim", { ...PR }, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } });
-  const sentences = [...new Set([...r.calls, ...split.calls].flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50))];
+  const merge = await run("pr-loop-slim", { ...PR }, MERGE_RUN);
+  const sentences = [...new Set([...r.calls, ...split.calls, ...merge.calls, { prompt: String(merge.result["status"]) }].flatMap((c) => c.prompt.split(/(?<=[.:;])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50))];
   for (const [name, text] of [["pr-persistent", skillText()], ["up-next", upNextText()]] as const) {
     assert.doesNotMatch(text, MACHINE, `${name}: a machine path, a scratch folder or an agent id`);
     assert.deepEqual(sentences.filter((x) => text.includes(x)), [], `${name} restates a prompt of pr-loop-slim.js: render it instead`);
@@ -1830,7 +2082,8 @@ test("the pr-persistent skill: the render is one command, each stage is dispatch
 test("the skills and the render restate no sentence of a prompt pr-loop-slim.js gives its agents (PR 258's class)", async () => {
   const text = skillText() + "\n" + upNextText() + "\n" + fs.readFileSync(RENDER, "utf8");
   const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green });
-  const sentences = new Set(r.calls.flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50));
+  const merge = await run("pr-loop-slim", { ...PR }, MERGE_RUN);
+  const sentences = new Set([...r.calls, ...merge.calls].flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50));
   assert.ok(sentences.size > 100);
   const restated = [...sentences].filter((x) => text.includes(x));
   assert.deepEqual(restated, [], "the skill restates a prompt of pr-loop-slim.js: render it instead");
@@ -2049,6 +2302,45 @@ test("the pr-persistent render refuses an answer that is not its label's results
   assert.notEqual(bad.status, 0);
   assert.equal(bad.stdout, "");
   assert.match(bad.stderr, /^render\.mjs: \S+answers\.json is not JSON \([^\n]*\): [^\n]+\n$/);
+});
+
+// Issue 452: a conflict CI reads is a stage the render dispatches like any other, and a conflict DONE is the
+// coordinator's ONE report at once, never a wait; the top session merges what the run could not.
+test("the pr-persistent skill: a conflict renders the merge stage for a fresh agent, and a conflict DONE is slim's status (issue 452)", async () => {
+  const atConflict = upTo("CI 1", conflictCI);
+  const r = renderStage(RACE_ARGS, atConflict);
+  assert.equal(r.out, `STAGE "merge 1" (Merge) ${JSON.stringify(MERGE_OPTS)}: ${path.join(r.dir, "next", "merge-1.md")}\n`, "exactly one stage: the merge");
+  await sameNext(r, atConflict, "merge 1: slim's whole prompt and the results trailer");
+  // the merge leaves the conflict open: File and Record still run, then DONE with slim's own status
+  const open = { ...atConflict, "merge 1": { state: "conflict", head: sha("d"), files: ["src/duck/plan.ts"], detail: "conflict: src/duck/plan.ts" } };
+  await sameNext(open, open, "file after a merge that left the conflict open");
+  const all = { ...open, file: RACE_ANSWERS["file"], record: RACE_ANSWERS["record"] };
+  const want = await slimNext(RACE_ARGS, all) as { done: string };
+  assert.match(want.done, /^conflict: PR 900 conflicts with main\b[^]*src\/duck\/plan\.ts/, want.done);
+  const done = renderStage(RACE_ARGS, all);
+  onlyControlLines(done, "conflict DONE");
+  assert.equal(done.out, `DONE: ${want.done}\n`);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(done.dir, "result.json"), "utf8")).status, want.done);
+  // a merge that pushed: CI again at the new head, never a fix
+  const pushedMerge = { ...atConflict, "merge 1": mergedAt("m") };
+  const next = await sameNext(pushedMerge, pushedMerge, "CI 2 after the merge");
+  assert.match(next, /^STAGE "CI 2" \(CI\) /);
+});
+
+test("the skills: a conflict DONE is the coordinator's ONE report at once, and the top session merges the base (issue 452)", () => {
+  const text = skillText(), prose = text.replace(/\s+/g, " ");
+  // section 2: the merge is a fresh agent's, with the printed options, never the implementer's
+  const fresh = /\*\*Every other stage\*\*[^]*?(?=\n- \*\*|\n\n)/.exec(text)?.[0].replace(/\s+/g, " ") ?? "";
+  assert.ok(fresh.includes("`merge <k>`"), `section 2's fresh-agent list names merge <k>: ${fresh}`);
+  assert.ok(!/\*\*`fix r<n>`[^]*?SendMessage/.exec(text)?.[0].includes("merge"), "the implementer's list does not name the merge");
+  // section 3: a conflict DONE, reported at once as the ONE report, naming the files, with no wait after it
+  assert.match(prose, /\*\*A conflict\*\* \(`DONE: conflict: …`\)[^]*?the files the status names[^]*?your ONE report AT ONCE[^]*?naming the files from the status[^]*?Never wait on it, watch it, or leave a background job for it/);
+  const waits = (/## Waits\n([^]*?)(?=\n## )/.exec(text)?.[1] ?? "").replace(/\s+/g, " ");
+  assert.ok(waits.includes("A DONE ends the run") && waits.includes("No wait, watch or background job follows a DONE"), `## Waits: ${waits}`);
+  // up-next: the conflict DONE is step 6's CONFLICTING, merged with both sides of next.md kept, read, CI waited on, queued pinned
+  const up = upNextText().replace(/\s+/g, " ");
+  assert.match(up, /\*\*A conflict\*\* \(`conflict: …`\)[^]*?step 6's CONFLICTING[^]*?keeping both sides of `release-notes\/next\.md` and resolving the files the status names, and pushed[^]*?You write no code yourself[^]*?read the merge[^]*?one bounded background job \(`node <repo>\/scripts\/ci-wait\.ts <n> 540`[^]*?its diff read in full, and the merge queued pinned to it \(`--match-head-commit`\)/);
+  assert.match(up, /6\. \*\*Watch it land\*\*[^]*?On CONFLICTING/, "the step a conflict DONE refers to is the one that handles CONFLICTING");
 });
 
 test("pr-loop-slim: args.process names the arm in the record's text, and an unknown one stops the run", async () => {
@@ -2399,8 +2691,8 @@ test("plain: no command a harness prompt or a skill tells an agent to run is one
     for (const repo of [undefined, ROOT]) {
       for (const itEnv of [undefined, "/srv/it.env"]) {
         const args: Record<string, unknown> = { ...PR, ...(repo ? { repo } : {}), ...(itEnv ? { itEnv } : {}) };
-        // a full run, and a run that reaches the split stage (issue 386), so the split prompt's commands are read too
-        for (const answers of [SLIM_FULL, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
+        // a full run, and a run that reaches the split stage (issue 386), so the split prompt's commands are read too, and one that merges its base (issue 452)
+        for (const answers of [SLIM_FULL, MERGE_RUN, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
           const r = await run(name, args, answers);
           for (const c of r.calls) {
             labels.add(`${name}: ${c.opts.label.replace(/\d+/g, "n")}`);
@@ -2415,7 +2707,7 @@ test("plain: no command a harness prompt or a skill tells an agent to run is one
   assert.deepEqual([...bad].map(([k, w]) => `${k} in ${[...w].slice(0, 3).join(", ")}${w.size > 3 ? ` and ${w.size - 3} more` : ""}`), [],
     "a command an agent is told to run that Claude Code's worktree guard refuses in an isolated agent: make it one program with literal arguments, its logic in a script under scripts/");
   // every stage was rendered, and the commands the decision names are read, so the check is not vacuous
-  for (const l of ["brief", "split", "implement", "link", "review rn", "fix rn", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "file", "record"]) {
+  for (const l of ["brief", "split", "implement", "link", "review rn", "fix rn", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "merge n", "file", "record"]) {
     assert.ok(labels.has(`pr-loop-slim: ${l}`), `pr-loop-slim's ${l} was rendered`);
   }
   for (const cmd of ["node <repo>/scripts/ci-wait.ts 900 540", "mktemp -d", "git worktree add --detach <that path>/head <sha>", "git worktree remove <that path>/head",
@@ -2425,7 +2717,7 @@ test("plain: no command a harness prompt or a skill tells an agent to run is one
     'node <repo>/scripts/board.ts status 301 "In progress"', 'node <repo>/scripts/board.ts sub 301 "301 · schema" --from "Sonnet 5.5"',
     "gh pr merge <n> --auto --merge --match-head-commit <sha>", 'node <repo>/scripts/board.ts status <n> "Implementing"',
     "node <repo>/scripts/gh-text.ts issue 300", "node <repo>/scripts/gh-text.ts body 900", 'node <repo>/scripts/gh-text.ts comment-id 900 "## Handoff"',
-    'node <repo>/scripts/gh-text.ts search "<words>"', "node <repo>/scripts/gh-text.ts author <n>", "node <repo>/scripts/gh-text.ts issue <n>"]) {
+    'node <repo>/scripts/gh-text.ts search "<words>"', "node <repo>/scripts/gh-text.ts author <n>", "node <repo>/scripts/gh-text.ts issue <n>", MERGE_CMD, "git push origin HEAD:issue-300-a-piece", "git ls-remote origin refs/heads/issue-300-a-piece", "node <repo>/scripts/ci-wait.ts <n> 540"]) {
     assert.ok(seen.has(cmd), `the check reads \`${cmd}\``);
   }
   // and it catches each form the guard refused, as origin/main wrote them

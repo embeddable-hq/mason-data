@@ -262,6 +262,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   "orders" does not exist` though `orders` is synced: it waits for the table (`waiting for public.orders` in `mason
   status`) until the synced data can be read, then builds. `mason wait <table>` right after `mason start` now waits for
   it, where it exited 1 on that refusal.
+- **A generated table that reads another generated table is no longer refused at its first build** with `relation
+  "<parent>" does not exist` while the parent it reads had just been built: it waits for the parent (`waiting for
+  public.<parent>` in `mason status`) until the parent can be read, then builds. The refusal was said in the log, and a
+  `mason wait` in that moment exited 1; it now waits.
 - **A `time` compared with or combined with a `timetz` now answers as Postgres does.** Postgres casts the time to a
   `timetz` at the session zone's offset (as `tm::timetz` does); Mason ignored the offset, so `tm = '12:30-04'::timetz`
   matched 12:30 whatever its offset, a `UNION` of a time and a timetz column answered a `time` column, and `<`, a `CASE`

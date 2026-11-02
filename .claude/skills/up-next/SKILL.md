@@ -73,13 +73,20 @@ collaborators and names what it left out (CLAUDE.md "The loop").
    once the one below is pushed, with stackedOn (that PR, its branch as the base) and knownClasses (the `classes` in
    the run below's `result.json`) from the run below. The split issue stays **In progress** until its last piece
    merges.
-3. **Any other DONE**: read its diff in full (`gh pr diff <n>`), never only the report; the report and a green CI are
+3. **A conflict** (`conflict: …`): the run's reviews were clean, and its PR conflicts with its base in the files the
+   status names, which the run's own merge could not resolve. Handle it as step 6's CONFLICTING: have the branch
+   merged with its base (origin/main, or for a stacked piece the branch below) in a worktree of its own, keeping both
+   sides of `release-notes/next.md` and resolving the files the status names, and pushed. You write no code yourself:
+   a fresh agent does it. Then read the merge (`git show <new head>`), wait on its CI with one bounded background job
+   (`node <repo>/scripts/ci-wait.ts <n> 540`, again until it exits 0, 3 or 4), and once green, go on from step 4 at the
+   new head: its diff read in full, and the merge queued pinned to it (`--match-head-commit`).
+4. **Any other DONE**: read its diff in full (`gh pr diff <n>`), never only the report; the report and a green CI are
    claims, not evidence.
-4. **Merge under CLAUDE.md "Who merges what"** (Tom, 2026-10-31): every PR, `src/` included, merges without the owner's
+5. **Merge under CLAUDE.md "Who merges what"** (Tom, 2026-10-31): every PR, `src/` included, merges without the owner's
    word once its Fable review has no open finding, CI is green at its head, you have read the diff in full, and a
    product change has its line in `release-notes/next.md`. A release and a deploy merge on the owner's word only.
    Queue it pinned to the head you read: `gh pr merge <n> --auto --merge --match-head-commit <sha>`.
-5. **Watch it land**: leave one bounded background job that exits when `gh pr view <n> --json state,mergeable` says
+6. **Watch it land**: leave one bounded background job that exits when `gh pr view <n> --json state,mergeable` says
    MERGED, or CONFLICTING (a queued auto-merge on a conflicting PR never lands), or its bound passes. Confirm the merge,
    never assume it; then `node <repo>/scripts/board.ts status <n> "Done"`, and the queue file's row says
    `merged <sha>`. On CONFLICTING: withdraw the queued merge (`gh pr merge <n> --disable-auto`), have the branch merged with
