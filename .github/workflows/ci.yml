@@ -296,7 +296,7 @@ jobs:
   # en_US.utf8, so the legs above ask every statement under libc; this asks the resolver's statements
   # (tests/integration/oracle/collations.ts) and the collation gaps under the other two providers, in a database made on
   # the same service (IT_ORACLE_COLLATION). Not a leg: no leg report, and its artifact is outside `ran-oracle-*`, so
-  # the legs' whole (scripts/oracle-legs.ts) is the default database's alone. The whole oracle under each is issue ISSUE_FULL's.
+  # the legs' whole (scripts/oracle-legs.ts) is the default database's alone. The whole oracle under each is issue 403's.
   collation:
     name: oracle collation ${{ matrix.collation }}
     runs-on: ubuntu-latest

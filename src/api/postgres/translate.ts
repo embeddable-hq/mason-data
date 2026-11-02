@@ -66,6 +66,33 @@ function collect(n: unknown, kind: string, out: Node[] = []): Node[] {
   return out;
 }
 
+/**
+ * Whether a statement of no table has a construct that can order text, read off the raw tree: a sort (ORDER BY, a
+ * window's, an aggregate's or WITHIN GROUP's), <, >, <=, >= (BETWEEN, ANY / ALL and a subquery's among them),
+ * GREATEST / LEAST, min / max. One without (`SELECT 1`, `SELECT version()`, `current_setting(…)`, `'a' = 'A'`) is the
+ * catalog's without asking its analysis, which costs a statement several milliseconds (`ordersText`, issue 122): a
+ * statement it says may order is asked, so a false "may" costs time, never an answer.
+ */
+export function mayOrderText(n: unknown): boolean {
+  if (Array.isArray(n)) return n.some(mayOrderText);
+  if (n === null || typeof n !== "object") return false;
+  const named = (x: unknown): string[] => collect(x ?? [], "String").map((s) => String(bodyOf<{ sval?: string }>(s).sval ?? ""));
+  for (const [k, v] of Object.entries(n as Any)) {
+    if ((k === "sortClause" || k === "orderClause" || k === "agg_order") && Array.isArray(v) && v.length > 0) return true;
+    if (k === "MinMaxExpr") return true;
+    if ((k === "A_Expr" || k === "SubLink") && v !== null && typeof v === "object") {
+      const b = v as Any;
+      if (typeof b.kind === "string" && b.kind.includes("BETWEEN")) return true;
+      if (named(b.name ?? b.operName).some((o) => ORDERING_OPERATORS.has(o))) return true;
+    }
+    if (k === "FuncCall" && v !== null && typeof v === "object" && ORDERING_AGGREGATES.has((named((v as Any).funcname).at(-1) ?? "").toLowerCase())) return true;
+    if (mayOrderText(v)) return true;
+  }
+  return false;
+}
+const ORDERING_OPERATORS = new Set(["<", ">", "<=", ">="]);
+const ORDERING_AGGREGATES = new Set(["min", "max"]);
+
 const INFORMATION_SCHEMA = "information_schema";
 const PG_CATALOG = "pg_catalog";
 
@@ -129,7 +156,7 @@ export function duckTranslate(stmt: Node, text: string): Translation | { kind: "
   const ctes = (s.withClause?.ctes ?? []).map((n) => bodyOf<CommonTableExpr>(n));
   const names = new Set(ctes.map((c) => String(c.ctename ?? "")));
   const relations = collect(s, "RangeVar").map((n) => bodyOf<RangeVar>(n)).filter((r) => r.schemaname !== undefined || !names.has(String(r.relname ?? "")));
-  if (relations.length === 0) return { kind: "catalog", fromless: { names: pgColumnNames(s) } };
+  if (relations.length === 0) return mayOrderText(s) ? { kind: "catalog", fromless: { names: pgColumnNames(s) } } : { kind: "catalog" };
   if (relations.every(isCatalogRelation)) return { kind: "catalog" };
   return { kind: "duckdb", sql: text, names: pgColumnNames(s) };
 }

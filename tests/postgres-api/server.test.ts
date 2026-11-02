@@ -898,8 +898,10 @@ test("no table: a statement that orders text under a collation is the synced dat
     assert.deepEqual(await rows("SELECT 'a' < 'B' AS lt, 'a' = 'A' AS eq, 1 AS one"), [[false, false, 1]]);
     assert.deepEqual(await rows("SELECT relname FROM pg_class WHERE relname = 'pg_type'"), [["pg_type"]]);
     assert.equal(planned.length, before, "nothing of the catalog's planned for the synced data");
-    // a statement that reads a table is never asked
+    // a statement that reads a table is never asked, nor one of no table that nothing in it could order (its analysis
+    // costs milliseconds: `mayOrderText`)
     await rows("SELECT count(*) FROM orders");
-    assert.ok(!asked.some((a) => a.includes("orders")), asked.join("\n"));
+    for (const sql of ["SELECT 1 AS one", "SELECT version() IS NOT NULL", "SELECT current_setting('TimeZone'), 'a' = 'A', 'x' || 'y'"]) await rows(sql);
+    assert.deepEqual(asked.filter((a) => a.includes("orders") || /^SELECT (1 AS|version|current_setting)/.test(a)), [], asked.join("\n"));
   } finally { await c.end(); await s.close(); }
 });
