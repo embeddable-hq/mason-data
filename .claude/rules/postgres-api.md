@@ -254,3 +254,15 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   …`, `SELECT 1; SELECT E'now'::timestamptz = now()`, the same under EXPLAIN, a CTE or a sub-SELECT): a position read
   in the whole text's frame and used in the statement's, or the reverse, so a rewrite lands beside its token instead
   of on it; `offset-mixed-between-two-frames` (PR 333).
+- A statement of no table that only equates, groups, distincts or filters under a nondeterministic collation the
+  catalog declared (`CREATE COLLATION mason_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)`
+  on the source: `SELECT 'a' = 'A' COLLATE mason_ci`, `SELECT 'a' COLLATE mason_ci IN ('A', 'z')`, `SELECT DISTINCT x
+  COLLATE mason_ci FROM (VALUES ('a'), ('A')) AS v(x)`, the same under GROUP BY and WHERE), beside one that orders
+  text: kept as the catalog's because the routing asked only whether text is ORDERED, so PGlite's own locale answers
+  silently where the resolver would have refused the nondeterministic collation by name; any collation beyond 0/100
+  and byte order in the analysis must reach the resolver; `catalog-answers-under-declared-collation` (PR 413).
+- A statement of no table that the catalog's own analysis, as the session would run it, refuses (`SELECT $1::text <
+  $2::text` sent as a simple Query with no parameters: 42P02 "there is no parameter $1"), under each route a
+  statement of no table can take to the synced data (one that orders text, one under a collation): routed before
+  Postgres could refuse it, so the engine's protocol error (08P01) replaces Postgres's SQLSTATE; a statement is routed
+  only once the catalog's analysis of it succeeds; `fromless-routed-before-postgres-refuses` (PR 413).

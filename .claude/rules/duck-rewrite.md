@@ -441,3 +441,16 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   grouped one; two libc collations in one statement; a set operation of a C and an ICU column ordered by number (42P22):
   a sort or comparison under the database's collation, or a byte order where the COLLATE said otherwise;
   `collation-read-twice` (issue 253, decision B).
+- A row comparison whose one side is a char(n) column and whose other is an unknown literal Postgres coerced to bpchar
+  (over `t(id int, b text, d char(4))`, a row with `d = 'b   '`: `SELECT id FROM t WHERE (d, id) < ('b', 3) ORDER BY
+  id`, `(d, id) <= ('b', 1)`, `(b::char(2), id) < ('b', 3)`, `(b, d) <= ('b', 'b')`, a char(6) column under
+  `COLLATE "und-x-icu"`), beside the literal cast (`('b'::char(4), 3)`): the two sides of one column keyed in different
+  shapes (trimmed bpchar on one, plain text on the other) because the shape was read from each raw node's own type, not
+  from the analysed ROWCOMPAREEXPR's coerced argument types, so equal values never compare equal;
+  `row-key-shape-from-raw-type` (PR 413).
+- An ordered-set aggregate with an array of fractions over every text type its key handles (`SELECT
+  percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY d) FROM t` with `d char(4)`, the same under `COLLATE
+  "und-x-icu"`, over an empty table, grouped by another column), beside the text form: whether the answer is an array
+  decided from a list of element types (`TEXT_ARRAY`, `VARCHAR_ARRAY`) instead of from Postgres's analysis of the call
+  (the float8[] overload, an array result type), so bpchar[] (1014) is read as one scalar and the engine's error
+  escapes; `percentile-array-recognised-by-element-type-list` (PR 413).
