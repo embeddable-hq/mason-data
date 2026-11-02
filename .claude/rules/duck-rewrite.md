@@ -266,8 +266,8 @@ paths:
     [p1, …])` through a lambda, `bound`: every json_* call parses the whole document again). Held by
     `tests/duck-wire.test.ts` "a -> and an @> of a copied jsonb are DuckDB's own read", the plan fixture's FUNCTION_ROWS
     0 and `tests/duck-executor-starve.test.ts` "wide jsonb". A test that must EXERCISE the function (a cancel, a
-    timeout) reads `CALLED` (tests/duck-executor-harness.ts: `->` of an OBJECT, cast to text), which the harness holds
-    to a call — never a string's or an integer's `->`, a `->>` of a string, or a read's nullness. **A lambda's
+    timeout) reads `CALLED` (tests/duck-executor-harness.ts: an array element's `->>`, an index step, one call a row), which
+    the harness holds to a call — never a string's or an integer's `->`, a `->>` of a string, or a read's nullness. **A lambda's
     parameter is the rewrite's own name** (`__mason_*`), never a table's column to src/duck/late.ts (`ownName`): a late
     page carried `__mason_v` as a column (42703, PR for issue 130). **A constant path has one route however it is spelled**
     (`Rewriter.jsonPath`, `constRead`; issue 130): `'{a,b}'`, `ARRAY['a', 'b']`, either cast to `text[]`, `'a'::text`, the

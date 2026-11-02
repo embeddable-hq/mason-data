@@ -207,7 +207,9 @@ test("stopping while a statement is drained ends the process cleanly, and a stat
   let n = 0;
   for (const [what, env] of [
     ["a SELECT * cross join over a copy with a stored path", { SQL: "SELECT * FROM docs a, docs b", ROWS: "4000" }],
-    ["a function-calling count over a cross join", { SQL: `SELECT count(*) FROM docs a, docs b WHERE ${CALLED("a.j")} || ${CALLED("b.j")} <> ''`, ROWS: "4000" }],
+    // (with its path stored, `->` reads the stored column and the cast to text is the function a row: CALLED's read
+    // would come whole from the column, and call nothing)
+    ["a function-calling count over a cross join", { SQL: "SELECT count(*) FROM docs a, docs b WHERE (a.j->'n')::text || (b.j->'n')::text <> ''", ROWS: "4000" }],
     ["a scalar subquery's call, then a call-free cross join, without stored paths", { SQL: `SELECT a.id, b.id, (SELECT ${CALLED()} FROM docs WHERE id = 1) AS n FROM docs a, docs b`, ROWS: "4000", NO_KEEPER: "1" }],
   ] as const) {
     Object.assign(process.env, env);
@@ -225,8 +227,9 @@ test("stopping while a statement is drained ends the process cleanly, and a stat
     const r = await inProcess("stop-first", `
       const c = await client();
       // its path stored first (eager, the oracle's way: the plan itself stores it), so the stop meets the statement running
-      await c.query("SELECT ${CALLED()} FROM docs LIMIT 1");
-      const q = outcome(c.query("SELECT count(*) FROM docs a, docs b WHERE ${CALLED("a.j")} || ${CALLED("b.j")} <> ''"));
+      // (the cast to text of the stored read is the function a row, as in the cross join above)
+      await c.query("SELECT (j -> 'n')::text FROM docs LIMIT 1");
+      const q = outcome(c.query("SELECT count(*) FROM docs a, docs b WHERE (a.j->'n')::text || (b.j->'n')::text <> ''"));
       await sleep(1000);
       await keeper.stop();
       await store.close();
