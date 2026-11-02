@@ -5910,6 +5910,39 @@ test("exact path: the CAST reader reads a program's text, its nearest double and
   } finally { await c.end(); }
 });
 
+test("exact path: issue 217: a numeric power, exp, ln, log or sqrt cast to float8 is numeric_float8 of Postgres's digits, 22003 past a double's range", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT power(o.amount, 2)::double precision AS x FROM orders o ORDER BY o.id", "ordered"],
+      ["SELECT o.id, (o.amount ^ 2)::float8, exp(o.amount)::float8, ln(o.amount)::float8, log(o.amount)::float8, log10(o.amount)::float8, sqrt(o.amount)::float8 FROM orders o WHERE o.amount > 0 ORDER BY 1", "ordered"],
+      ["SELECT r.id, (r.a ^ 2)::double precision, power(r.a, 2)::double precision, CAST(exp(r.a) AS double precision) FROM ratios r ORDER BY 1", "ordered"],
+      ["SELECT *, power(o.amount, 2)::double precision AS p FROM orders o ORDER BY o.id", "ordered"],
+      ["SELECT power(o.amount, 2)::float8 AS p, count(*) FROM orders o GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT power(o.amount, 2)::float8 AS p, count(*) FROM orders o GROUP BY p ORDER BY p", "ordered"],
+      ["SELECT power(o.amount, 2)::float8, count(*) FROM orders o GROUP BY power(o.amount, 2)::float8 ORDER BY power(o.amount, 2)::float8 NULLS FIRST", "ordered"],
+      // past a double's range, and a non-zero value that underflows to 0: Postgres's 22003, the text quoted whole
+      ["SELECT power(10::numeric, 400)::double precision", "ordered"],
+      ["SELECT ((o.amount * 0 + 10) ^ 400)::float8 FROM orders o WHERE o.amount IS NOT NULL LIMIT 1", "ordered"],
+      ["SELECT ((o.amount * 0 + 0.01) ^ 170)::float8 FROM orders o WHERE o.amount IS NOT NULL LIMIT 1", "ordered"],
+      ["SELECT exp(o.amount * 0 + 800)::float8 FROM orders o WHERE o.amount IS NOT NULL LIMIT 1", "ordered"],
+      ["SELECT (-((o.amount * 0 + 10) ^ 401))::float8 FROM orders o WHERE o.amount IS NOT NULL LIMIT 1", "ordered"],
+      // in range, and a subnormal Postgres accepts
+      ["SELECT ((o.amount * 0 + 10) ^ 300)::float8, ((o.amount * 0 + 0.1) ^ 310)::float8 FROM orders o ORDER BY o.id", "ordered"],
+    ]), []);
+    // a parameter for the exponent, prepared and then executed again after a later SET
+    const bound = "SELECT o.id, (o.amount ^ $1)::float8, power(o.amount, $1)::double precision FROM orders o ORDER BY o.id";
+    assert.deepEqual(await unlikeBound(c, [[bound, ["2"]]]), []);
+    const want = (await postgres(bound, ["2"])).rows;
+    assert.deepEqual((await c.query({ name: "power_bound", text: bound, values: ["2"], rowMode: "array" })).rows.map((r) => r.map(String)), want.map((r) => r.map(String)));
+    await c.query("SET TimeZone = 'Europe/Paris'");
+    assert.deepEqual((await c.query({ name: "power_bound", text: bound, values: ["2"], rowMode: "array" })).rows.map((r) => r.map(String)), want.map((r) => r.map(String)), "after a SET");
+    // the errors are raised, never answered (an equal answer above could be two equal refusals of another kind)
+    await assert.rejects(c.query("SELECT power(10::numeric, 400)::double precision"),
+      (e: pg.DatabaseError) => e.code === "22003" && /^"1(0)+" is out of range for type double precision$/.test(e.message));
+  } finally { await c.end(); }
+});
+
 test("exact path: issue 242: a numeric the engine holds as a double with no program, cast to an integer, is refused by name", async () => {
   const c = await client();
   try {
