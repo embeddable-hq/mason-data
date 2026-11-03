@@ -232,31 +232,23 @@ Next:
   const v = JSON.parse(j.a.stdout) as Record<string, unknown>;
   assert.deepEqual(Object.entries(v).filter(([, x]) => typeof x === "string" && x.includes(PASSWORD)).map(([k]) => k), ["password", "url", "psql"]);
   assert.equal(j.a.stderr, "");
-  // a service that repeats it anywhere else: masked, every time, as a person and with --json
+  // a service that repeats it anywhere else: in a refusal's words, masked; in an answer, the answer refused whole —
+  // nothing of it printed — whatever key carries it (PR 609's review: a grammar alone is no mask)
   const carrying = `the password is ${PASSWORD}`;
-  for (const [verb, reply] of [
-    [["list"], listAnswer([row("metabase", { attributes: { tenant: carrying } })], { lastUsedNote: carrying, urlNote: carrying })],
-    [["remove", "metabase"], { status: 409, body: { error: { code: "refused", message: carrying, why: carrying, fix: carrying } } }],
-    [["add", "metabase"], { status: 409, body: { error: { code: "refused", message: carrying, why: carrying, fix: carrying } } }],
-    [["disable", "metabase"], ok({ disabled: { name: "metabase", id: ID, addedAt: AT, disabledAt: AT }, already: false, note: carrying })],
-    [["add", "other"], ok({ ...addedAnswer("other"), note: carrying })],
-  ] as Array<[string[], Reply]>) {
+  for (const [verb, reply, refusal] of [
+    [["remove", "metabase"], { status: 409, body: { error: { code: "refused", message: carrying, why: carrying, fix: carrying } } }, true],
+    [["add", "metabase"], { status: 409, body: { error: { code: "refused", message: `user_${PASSWORD.toUpperCase()}`, why: carrying, fix: `x${PASSWORD}` } } }, true],
+    [["list"], listAnswer([row("metabase", { attributes: { tenant: carrying } })], { lastUsedNote: carrying, urlNote: carrying }), false],
+    [["disable", "metabase"], ok({ disabled: { name: "metabase", id: ID, addedAt: AT, disabledAt: AT }, already: false, note: carrying }), false],
+    [["add", "other"], ok({ ...addedAnswer("other"), note: carrying }), false],
+  ] as Array<[string[], Reply, boolean]>) {
     for (const form of [[], ["--json"]]) {
       const r = await hosted(() => reply, [...verb, "--replica", R, ...form], { names: ["metabase", "other"] });
       const said = r.a.stdout + r.a.stderr;
-      if (verb[0] === "disable") {
-        // a key outside the answer's shape is never read, so never printed
-        assert.doesNotMatch(said, /the password is|mason_\*\*\*\*/, "disable: not printed");
-        continue;
-      }
-      if (verb.join(" ") === "add other") {
-        // another user's add prints its own password — the one it was asked for — and nothing else of the answer
-        assert.equal(said.split(PASSWORD).length - 1, 3, `${verb.join(" ")}: its own rows`);
-        assert.doesNotMatch(said, /the password is/);
-        continue;
-      }
-      assert.ok(!said.includes(PASSWORD), `${verb.join(" ")} ${form.join(" ")} printed the password:\n${said}`);
-      assert.match(said, /mason_\*\*\*\*/, `${verb.join(" ")}: masked`);
+      assert.equal(r.a.code, 1, `${verb.join(" ")}: ${said}`);
+      assert.ok(!said.toLowerCase().includes(PASSWORD), `${verb.join(" ")} ${form.join(" ")} printed the password:\n${said}`);
+      if (refusal) assert.match(said, /mason_\*\*\*\*/, `${verb.join(" ")}: masked`);
+      else assert.match(said, / answered (GET|POST) \/v1\/replicas\/acme\/shop\/users\S* with 200, where /, `${verb.join(" ")}: refused whole`);
       for (const text of [...filesUnder(r.home)]) assert.ok(!text.includes(PASSWORD), "no file holds it");
     }
   }

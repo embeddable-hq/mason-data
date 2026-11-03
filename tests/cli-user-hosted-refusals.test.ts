@@ -6,8 +6,12 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Reply } from "./hosted-fake.ts";
-import { addedAnswer, AT, hosted, ID, listAnswer, noTokenPrinted, ok, R, row } from "./user-hosted-fake.ts";
+import { randomBytes } from "node:crypto";
+import type { Reply, Req } from "./hosted-fake.ts";
+import { addedAnswer, AT, hosted, ID, LINK, listAnswer, noTokenPrinted, ok, R, row } from "./user-hosted-fake.ts";
+import { heldAdded, heldDisabled, heldEnabled, heldList, heldRemoved } from "../src/cli/user-hosted.ts";
+import { failureShape } from "../src/cli/hosted.ts";
+import { connectionUrl, psqlLine } from "../src/cli/pg-url.ts";
 
 test("mason user --replica: each refusal is the service's words, one line each, its code the CLI's by the HTTP status, exit 1, its next the CLI's; the service's code and next never steer it", async () => {
   const cases: Array<[number, string, string]> = [[400, "usage", "refused"], [401, "unauthenticated", "refused"], [403, "refused", "refused"], [404, "not_found", "not_found"],
@@ -83,6 +87,101 @@ test("mason user --replica: an answer outside the run's own shape is a failure b
       const text = json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr;
       assert.match(text, / answered (GET|POST|DELETE) \/v1\/replicas\/acme\/shop\/users\S* with 200, where /, what);
       assert.doesNotMatch(a.stdout + a.stderr, /hunter2|evil|destroy|Agent|yesterday/, what);
+    }
+  }
+});
+
+
+// ------------------------------------------------------------------ no printed field carries a secret (PR 609's review)
+
+/** A token as the service documents them, its body lower case letters and digits, so every grammar of a name takes it. */
+const lowerToken = (): string => `masondata_ci_${Array.from(randomBytes(43), (b) => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("")}`;
+const OTHER = `mason_fedcba9876543210_${"ab".repeat(16)}`;
+
+/**
+ * EVERY FIELD OF EVERY ANSWER THE COMMAND PRINTS (src/cli/user-hosted.ts's table), each given a secret in a form its
+ * grammar takes: the held token whole, its body, its body re-cased; another user's password, also after a word
+ * character and in upper case. Each answer is refused (null), and the same answer with a plain value in that field is
+ * not — and, for the token's forms, nor with no token held: the masks decide, never the grammar.
+ */
+test("every printed field of every answer, given a secret its grammar takes — the held token whole, its body, re-cased; another user's password, after a word character, in upper case — refuses the answer; the same field plain does not", () => {
+  const token = lowerToken(), body = token.slice("masondata_ci_".length);
+  const list = (u: Record<string, unknown> = {}, more: Record<string, unknown> = {}): unknown => ({ users: [row("metabase", { role: "tenant", roleFrom: "file", roleKnown: true,
+    attributes: { tenant: "42", regions: ["eu"] }, missingAttributes: ["region"], ...u })], lastUsedNote: "a note", urlNote: null, requestLogDays: 7, ...more });
+  const linkAdd = (host: string, database: string, more: Record<string, unknown> = {}): unknown => {
+    const answer = addedAnswer("x", { role: "tenant", roleFrom: "file", attributes: { tenant: "42" }, ...more });
+    const url = connectionUrl({ url: "", host, port: 5433, database, sslmode: "require" }, "x", answer.password as string);
+    return { ...answer, host, database, url, psql: psqlLine(url) };
+  };
+  type Field = [what: string, answer: (v: string) => unknown, read: (j: unknown, secrets: string[]) => unknown, plain: string];
+  const fields: Field[] = [
+    ["list: a user's name", (v) => list({ name: v, url: connectionUrl(LINK, v, null) }), (j, x) => heldList(j, x), "metabase"],
+    ["list: a user's url, its database", (v) => list({ url: `postgres://metabase@db.example:5433/${v}` }), (j, x) => heldList(j, x), "shop"],
+    ["list: a user's url, its host", (v) => list({ url: `postgres://metabase@${v}.example:5433/shop` }), (j, x) => heldList(j, x), "db"],
+    ["list: a user's role", (v) => list({ role: v }), (j, x) => heldList(j, x), "tenant"],
+    ["list: an attribute's name", (v) => list({ attributes: { [v]: "42" } }), (j, x) => heldList(j, x), "tenant"],
+    ["list: an attribute's value", (v) => list({ attributes: { tenant: v } }), (j, x) => heldList(j, x), "42"],
+    ["list: a list attribute's value", (v) => list({ attributes: { regions: ["eu", v] } }), (j, x) => heldList(j, x), "uk"],
+    ["list: a missing attribute", (v) => list({ missingAttributes: [v] }), (j, x) => heldList(j, x), "region"],
+    ["list: lastUsedNote", (v) => list({}, { lastUsedNote: v }), (j, x) => heldList(j, x), "a note"],
+    ["list: urlNote", (v) => list({}, { urlNote: v }), (j, x) => heldList(j, x), "a note"],
+    ["list: a key outside the shape", (v) => list({}, { note: v }), (j, x) => heldList(j, x), "a note"],
+    ["add: its database", (v) => linkAdd("db.example", v), (j, x) => heldAdded(j, "x", x), "shop"],
+    ["add: its host", (v) => linkAdd(`${v}.example`, "shop"), (j, x) => heldAdded(j, "x", x), "db"],
+    ["add: its role", (v) => linkAdd("db.example", "shop", { role: v }), (j, x) => heldAdded(j, "x", x), "tenant"],
+    ["add: an attribute's name", (v) => linkAdd("db.example", "shop", { attributes: { [v]: "42" } }), (j, x) => heldAdded(j, "x", x), "tenant"],
+    ["add: an attribute's value", (v) => linkAdd("db.example", "shop", { attributes: { tenant: v } }), (j, x) => heldAdded(j, "x", x), "42"],
+    ["add: a key outside the shape", (v) => ({ ...(linkAdd("db.example", "shop") as object), note: v }), (j, x) => heldAdded(j, "x", x), "a note"],
+    ["disable: a key outside the shape", (v) => ({ disabled: { name: "x", id: ID, addedAt: AT, disabledAt: AT }, already: false, note: v }), (j, x) => heldDisabled(j, "x", x), "a note"],
+    ["enable: a key outside the shape", (v) => ({ enabled: { name: "x", id: ID, addedAt: AT }, already: true, note: v }), (j, x) => heldEnabled(j, "x", x), "a note"],
+    ["remove: a key outside the shape", (v) => ({ removed: { name: "x", id: ID, addedAt: AT, removedAt: AT }, note: v }), (j, x) => heldRemoved(j, "x", x), "a note"],
+    ["a failure's code", (v) => ({ code: v, message: "refused" }), (j, x) => failureShape(j, x, { code: "refused", said: (c) => c, next: [] }), "busy"],
+  ];
+  // the forms each field is given, and whether the held token alone is what makes it a secret (its control: no token held)
+  const forms: Array<[what: string, value: (plain: string) => string, byToken: boolean]> = [
+    // the token whole has the documented token's shape, masked held or not, so its control is the shape's, not the grammar's
+    ["the token whole", () => token, false], ["the token's body", () => body, true], ["the token's body, upper case", () => body.toUpperCase(), true],
+    ["another user's password", () => OTHER, false], ["another user's password after a word character", (p) => `${p}_${OTHER}`, false],
+    ["another user's password in upper case", () => OTHER.toUpperCase(), false],
+  ];
+  const problems: string[] = [];
+  for (const [what, answer, read, plain] of fields) {
+    if (read(answer(plain), [token]) === null) problems.push(`${what}: the plain answer is refused`);
+    for (const [form, value, byToken] of forms) {
+      const v = value(plain);
+      if (read(answer(v), [token]) !== null) problems.push(`${what}, ${form}: taken`);
+      // the grammar takes it: with no token held, the same answer is read (a password's shape is masked held or not)
+      if (byToken && read(answer(v), []) === null && grammarTakes(what, v)) problems.push(`${what}, ${form}: refused with no token held, so the grammar decided`);
+    }
+  }
+  assert.deepEqual(problems, []);
+});
+
+/** Whether a field's grammar takes `v` as it is (else its refusal with no token held is the grammar's, rightly). */
+function grammarTakes(what: string, v: string): boolean {
+  if (/name|role|missing attribute|code/.test(what)) return /^[a-z0-9_][a-z0-9_.-]{0,62}$/.test(v) && !/^[_.-]/.test(v);
+  if (/host/.test(what)) return /^[A-Za-z0-9-]{1,63}$/.test(v);
+  return true;
+}
+
+test("mason user --replica end to end: a list whose user's url carries the token whole, a user named by its body, an add whose host carries it, a role spelling another user's password — each refused whole, nothing of it printed", async () => {
+  const tokenOf = (r: Req): string => String(r.headers.authorization).replace(/^Bearer /, "");
+  const bodyOf = (r: Req): string => tokenOf(r).replace(/^masondata_ci_/, "");
+  for (const [what, verb, reply] of [
+    ["list: a user's url carries the token whole", ["list"], (r: Req) => listAnswer([row("metabase", { url: `postgres://metabase@db.example:5433/${tokenOf(r)}` })])],
+    ["list: a user named by its body, lower case", ["list"], (r: Req) => listAnswer([row("x", { name: bodyOf(r).toLowerCase().replace(/^[^a-z0-9]+/, "a") })])],
+    ["add: its host carries the body", ["add", "x"], (r: Req) => {
+      const a = addedAnswer("x"), host = `${bodyOf(r)}.example`, url = connectionUrl({ ...LINK, host }, "x", a.password as string);
+      return ok({ ...a, host, url, psql: psqlLine(url) });
+    }],
+    ["add: a role spelling another user's password", ["add", "x"], () => ok(addedAnswer("x", { role: OTHER, roleFrom: "file" }))],
+  ] as Array<[string, string[], (r: Req) => Reply]>) {
+    for (const form of [[], ["--json"]]) {
+      const { a, token } = await hosted(reply, [...verb, "--replica", R, ...form], { names: ["metabase", "x"] });
+      const said = a.stdout + a.stderr, body = token.replace(/^masondata_ci_/, "");
+      assert.equal(a.code, 1, `${what}: ${said}`);
+      assert.match(said, / answered (GET|POST) \/v1\/replicas\/acme\/shop\/users\S* with 200, where /, what);
+      for (const secret of [body, body.toLowerCase(), OTHER]) assert.ok(!said.includes(secret.slice(0, 11)), `${what} ${form.join(" ")}: printed a secret:\n${said}`);
     }
   }
 });

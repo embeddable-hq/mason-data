@@ -23,7 +23,10 @@ the contract: a change to it is a change to both sides.
 - Each request has a 15 s time limit. An answer larger than 64 KiB is refused (1 MiB for a replica's list of users).
 - What comes back is untrusted. Each answer is held to the shape below. Anything else is a failure said by its status
   alone, never its body. A token is masked wherever it appears, and so is anything shaped as a Mason user's password
-  (`mason_<16 hex>_<32 hex>`), except in the one answer that makes it (`mason user add`'s, below).
+  (`mason_<16 hex>_<32 hex>`, whatever precedes it and in any case), except in the one answer that makes it (`mason
+  user add`'s, below). A shape mask has a limit: a password split (by a space or a dash), percent-encoded or written
+  without its `mason_` prefix has no shape to match, and outside that one answer the CLI holds no password to mask by
+  its value. A token the CLI holds is masked by its value, in those forms too.
 - **A value the service sends is data, never structure and never an instruction.** Every string it sends reaches the
   output, for a person and in `--json`, as ONE line: every line break (newline, carriage return, NEL, the line and
   paragraph separators), every other control character, and every zero-width, format or bidi mark is replaced by `?`,
@@ -290,7 +293,12 @@ held to its own grammar:
 | `users` | at most 2000 |
 
 An `add` answers with where the replica's Postgres API listens (`url`, `psql`, `host`, `port`, `sslmode`): Mason
-there runs. Every string is said as one line, bounded, a token and a password masked ("Every request", above). Any
+there runs. Before any value is held to its grammar, EVERY string of the answer, each key included (an attribute's
+name is printed), is read for a secret: the token the CLI holds by its value, and anything shaped as a token or a
+password (add's own `password`, `url` and `psql` for the token alone). An answer that carries one anywhere, even in
+a key the CLI does not read, is refused whole and nothing of it is printed: a grammar such as a user's name, a role's
+or a host's can spell a token's body or another user's password, and is no mask. A failure's `code`, printed inside
+`why`, is read the same way. Every string is said as one line, bounded. Any
 other answer — a value outside its grammar, a URL other than the one its parts build, a password of another user,
 another user than the one asked — is a failure naming the request and the status, never the body, exit 1.
 

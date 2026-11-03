@@ -28,7 +28,8 @@
  *   addedAt, removedAt, disabledAt,       rows, list's lines, --json                  `isServiceTime`
  *     lastUsedAt
  *   the password                          add's url, psql and password rows, --json   `mason_<its id>_<32 hex>` (src/duck/users.ts), add's alone;
- *                                                                                     anything shaped as one elsewhere is masked (`serviceText`)
+ *                                                                                     anything shaped as one elsewhere refused (`carriesNoSecret`)
+ *                                                                                     or, in a failure's words, masked (`serviceText`)
  *   database, host, port, sslmode         add's rows, --json                          the database name's rule, a host's letters, 1-65535, a closed set
  *   url, psql (add)                       add's rows, --json                          rebuilt here (`connectionUrl`, `psqlLine`): the service's must equal them
  *   url (list)                            --json                                      `postgres://<its name>@<host>:<port>/<database>`, no password
@@ -40,11 +41,16 @@
  *   already                               the headline chosen, --json                 a boolean
  *   an HTTP status                        a failure's why                             a number
  *
+ * BEFORE ANY OF THESE, every string of the answer, its keys included, is read by the secret masks (`carriesNoSecret`:
+ * the held token by its value, a token's shape, a password's shape — add's own password, url and psql for the token
+ * alone): an answer that would be masked anywhere is refused whole, so no grammar is ever the only thing between a
+ * secret and the output. A failure's code, printed inside why, is read by the same masks (`failureShape`).
+ *
  * An answer any of which does not hold is outside the contract: said by the request and its status, never its body.
  * What to run next is the CLI's own (`onReplica`: the local command's steps, each `mason user …` naming the replica).
  */
 import { failed, jsonText, serviceStyle, type Failure, type NextStep } from "./command.ts";
-import { call, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
+import { call, isFailure, isServiceTime, maskSecrets, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaText, tokenFor, type Replica } from "./replica.ts";
 import { err as styleErr, out as styleOut } from "./style.ts";
 import { connectionUrl, psqlLine } from "./pg-url.ts";
@@ -91,6 +97,28 @@ export function requestOf(r: Replica, o: { verb: Verb; name?: string | undefined
 }
 
 // ------------------------------------------------------------------ the answers, held to the run's own shapes
+
+/**
+ * NO STRING OF THE ANSWER CARRIES A SECRET (PR 609's review: a grammar alone is no mask — a user's name, a role, an
+ * attribute's name, a host, a database or a list's URL can spell a token's body or another user's password, and was
+ * printed as it came): EVERY string of the answer, each key included (an attribute's name is printed), is read by the
+ * secret masks (`maskSecrets`: the held token by its value, a token's shape, a password's shape), all of them against
+ * one record of what the answer shows of the token, before any is held to its grammar or printed. An answer any
+ * string of which a mask would change is outside the contract, refused whole: nothing of it is printed. `own`: the
+ * top-level keys that carry the password this answer makes (add's `password`, `url`, `psql`), read for the token alone.
+ */
+export function carriesNoSecret(json: unknown, secrets: readonly string[], own: readonly string[] = []): boolean {
+  const shown = new Map<string, Set<number>>();
+  const clean = (v: string, passwords: boolean): boolean => maskSecrets(v, secrets, shown, { passwords }) === v;
+  const walk = (v: unknown, passwords: boolean): boolean => {
+    if (typeof v === "string") return clean(v, passwords);
+    if (Array.isArray(v)) return v.every((x) => walk(x, passwords));
+    if (obj(v)) return Object.entries(v).every(([k, x]) => clean(k, true) && walk(x, passwords));
+    return true;
+  };
+  if (!obj(json)) return walk(json, true);
+  return Object.entries(json).every(([k, x]) => clean(k, true) && walk(x, !own.includes(k)));
+}
 
 /** A string the service sends, as one line: null when it is not a string. */
 const line = (v: unknown, max: number, secrets: readonly string[]): string | null => typeof v === "string" ? serviceText(v, max, secrets) : null;
@@ -145,7 +173,7 @@ function rowOf(v: unknown, secrets: readonly string[]): UserRow | null {
 
 /** `GET …/users?lastUsed=1`'s answer: mason user list --json's shape (its `next` never read); null when it is not it. */
 export function heldList(json: unknown, secrets: readonly string[]): UserList | null {
-  if (!obj(json) || !Array.isArray(json.users) || json.users.length > MAX_USERS) return null;
+  if (!obj(json) || !Array.isArray(json.users) || json.users.length > MAX_USERS || !carriesNoSecret(json, secrets)) return null;
   const users: UserRow[] = [];
   for (const v of json.users) { const u = rowOf(v, secrets); if (u === null) return null; users.push(u); }
   const note = (v: unknown): string | null | undefined => v === null ? null : line(v, 500, secrets) ?? undefined;
@@ -158,7 +186,7 @@ export function heldList(json: unknown, secrets: readonly string[]): UserList | 
 /** `POST …/users`'s answer: mason user add --json's shape with Mason up — where it listens, the URL rebuilt here by the
  *  one builder and equal to the service's —, for the name asked; null when it is not it. */
 export function heldAdded(json: unknown, asked: string, secrets: readonly string[]): Omit<AddedUser, "replaced"> | null {
-  if (!obj(json)) return null;
+  if (!obj(json) || !carriesNoSecret(json, secrets, ["password", "url", "psql"])) return null;
   const a = json;
   if (a.user !== asked || typeof a.id !== "string" || !ID.test(a.id) || !isServiceTime(a.addedAt)) return null;
   // the password is the user's, by its one grammar: its id, then its MAC
@@ -182,18 +210,18 @@ function userOf<K extends string>(v: unknown, asked: string, more: readonly K[])
   return { name: asked, id: v.id, addedAt: v.addedAt, ...Object.fromEntries(more.map((k) => [k, v[k] as string])) } as { name: string; id: string; addedAt: string } & Record<K, string>;
 }
 
-export function heldDisabled(json: unknown, asked: string): Disabled | null {
-  if (!obj(json) || typeof json.already !== "boolean") return null;
+export function heldDisabled(json: unknown, asked: string, secrets: readonly string[]): Disabled | null {
+  if (!obj(json) || typeof json.already !== "boolean" || !carriesNoSecret(json, secrets)) return null;
   const d = userOf(json.disabled, asked, ["disabledAt"]);
   return d === null ? null : { disabled: d, already: json.already };
 }
-export function heldEnabled(json: unknown, asked: string): Enabled | null {
-  if (!obj(json) || typeof json.already !== "boolean") return null;
+export function heldEnabled(json: unknown, asked: string, secrets: readonly string[]): Enabled | null {
+  if (!obj(json) || typeof json.already !== "boolean" || !carriesNoSecret(json, secrets)) return null;
   const e = userOf(json.enabled, asked, []);
   return e === null ? null : { enabled: e, already: json.already };
 }
-export function heldRemoved(json: unknown, asked: string): Removed | null {
-  if (!obj(json)) return null;
+export function heldRemoved(json: unknown, asked: string, secrets: readonly string[]): Removed | null {
+  if (!obj(json) || !carriesNoSecret(json, secrets)) return null;
   const r = userOf(json.removed, asked, ["removedAt"]);
   return r === null ? null : { removed: r };
 }
@@ -236,19 +264,19 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
       return print({ ...added }, next, () => addedReport(added, { roles: NO_ROLES, listener: null, next }, outStyle));
     }
     case "disable": {
-      const d = heldDisabled(a.json, o.name!);
+      const d = heldDisabled(a.json, o.name!, secrets);
       if (d === null) return outside();
       const next = onReplica(disabledNext(d.disabled.name), r);
       return print({ ...d }, next, () => disabledReport(d, true, next, outStyle));
     }
     case "enable": {
-      const e = heldEnabled(a.json, o.name!);
+      const e = heldEnabled(a.json, o.name!, secrets);
       if (e === null) return outside();
       const next = onReplica(enabledNext(e.enabled.name), r);
       return print({ ...e }, next, () => enabledReport(e, next, outStyle));
     }
     case "remove": {
-      const x = heldRemoved(a.json, o.name!);
+      const x = heldRemoved(a.json, o.name!, secrets);
       if (x === null) return outside();
       const next = onReplica(REMOVED_NEXT, r);
       return print({ ...x }, next, () => removedReport(x, true, next, outStyle));

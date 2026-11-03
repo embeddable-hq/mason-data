@@ -179,3 +179,14 @@ test("strictWrap and strictLines at every width from 1 to 200: no line reaches t
     }
   }
 });
+
+test("serviceText: a Mason user's password is masked whatever precedes it and in any case; split, encoded or without its prefix it has no shape, the limit of a shape mask", () => {
+  const pw = `mason_0123456789abcdef_${"a1b2".repeat(8)}`;
+  const t = (s: string): string => serviceText(s, 2000, [], new Map());
+  for (const s of [`the password is ${pw}`, `user_${pw}`, `x${pw}`, `1${pw}`, pw.toUpperCase(), `mason_${pw.slice(6).toUpperCase()}`, `postgres://u:${pw}@h:1/db`]) {
+    assert.ok(!t(s).toLowerCase().includes(pw), `${s} → ${t(s)}`);
+    assert.match(t(s), /mason_\*\*\*\*/i, s);
+  }
+  // the limit, as docs/HOSTED-API.md says it: no shape to match
+  for (const s of [pw.replace(/_/g, " "), pw.slice("mason_".length), pw.replace(/_/g, "%5F")]) assert.equal(t(s), s.replace(/\s+/g, " "), s);
+});

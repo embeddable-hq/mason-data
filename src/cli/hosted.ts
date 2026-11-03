@@ -52,10 +52,15 @@ export interface Service { base: string }
 
 /** The documented token shapes (docs/HOSTED-API.md), masked wherever they appear in what is printed. */
 const TOKEN_SHAPE = /\bmasondata_(pat|ci)_[A-Za-z0-9_-]{43}/g;
-/** A Mason user's password (src/duck/users.ts `userPassword`), masked wherever it appears in what is printed of the
- *  service's text: a password is printed by `mason user add`'s own rows alone, from its one answer, held to its grammar
- *  (src/cli/user-hosted.ts), never by a message, a note or a row of anything else. */
-const PASSWORD_SHAPE = /\bmason_[0-9a-f]{16}_[0-9a-f]{32}/g;
+/**
+ * A Mason user's password (src/duck/users.ts `userPassword`), masked wherever it appears in what is printed of the
+ * service's text: a password is printed by `mason user add`'s own rows alone, from its one answer, held to its grammar
+ * (src/cli/user-hosted.ts), never by a message, a note or a row of anything else. Matched whatever precedes it (a
+ * letter, a digit or `_` before `mason_` is no boundary a password needs: `user_mason_…`) and in any case. A SHAPE
+ * MASK HAS A LIMIT: a password split (by a space, a dash), percent-encoded or written without its `mason_` prefix has
+ * no shape to match, and outside add's answer the CLI holds no password to mask by its value.
+ */
+const PASSWORD_SHAPE = /mason_[0-9a-f]{16}_[0-9a-f]{32}/gi;
 /**
  * WHAT OF A HELD SECRET MAY BE PRINTED (`heldRuns`): a run of its body is any `HELD_RUN` or more of its characters in a
  * row, and what every run the process prints shows TOGETHER — across fields, strings and passes — is at most a quarter
@@ -121,6 +126,27 @@ export function serviceOf(env: NodeJS.ProcessEnv = process.env): Service | Failu
  * (`serviceStyle`).
  */
 export function serviceText(s: string, max: number, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN): string {
+  let t = maskSecrets(s, secrets, shown);
+  // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
+  // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
+  t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
+  // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
+  // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
+  t = t.replace(/\s+/g, " ").trim();
+  const chars = [...t];
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+}
+
+/**
+ * THE SECRET MASKS OF `serviceText`, ALONE, the one place a service's string is read for a secret: every secret named
+ * (`secrets`, the tokens this command holds) whole, and by the runs of their body that would show more than a quarter
+ * of it together with what `shown` records (`heldRuns`); anything shaped as a documented token; and, unless
+ * `passwords` is false (the one answer that makes a password, src/cli/user-hosted.ts), anything shaped as a Mason
+ * user's password. The value as it came, masked; unchanged when it carries none. A command that holds a value to a
+ * grammar asks this first, and refuses a value it changes (src/cli/user-hosted.ts `heldStrings`): a grammar alone is
+ * no mask.
+ */
+export function maskSecrets(s: string, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN, o: { passwords?: boolean } = {}): string {
   let t = s;
   for (const secret of secrets) if (secret) t = t.split(secret).join("****");
   // a held secret by its value (`heldRuns`): a mask leaves `****`, a separator, so what lay either side of it is read
@@ -147,15 +173,8 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
     }
     for (const [from, to] of merged.reverse()) t = `${t.slice(0, from)}****${t.slice(to)}`;
   }
-  t = t.replace(TOKEN_SHAPE, "masondata_$1_****").replace(PASSWORD_SHAPE, "mason_****");
-  // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
-  // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
-  t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
-  // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
-  // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
-  t = t.replace(/\s+/g, " ").trim();
-  const chars = [...t];
-  return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+  t = t.replace(TOKEN_SHAPE, "masondata_$1_****");
+  return o.passwords === false ? t : t.replace(PASSWORD_SHAPE, "mason_****");
 }
 
 /**
@@ -359,7 +378,8 @@ export function serviceFailure(a: Answer, secrets: readonly string[], next: (sta
 export function failureShape(error: unknown, secrets: readonly string[], as: { code: FailureCode; said: (code: string) => string; next: NextStep[] }): Failure | null {
   if (!obj(error)) return null;
   const e = error;
-  if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || !str(e.message, 2000)) return null;
+  // the code is printed as it came (inside why), so it is held to its grammar AND carries no secret (`maskSecrets`)
+  if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || maskSecrets(e.code, secrets) !== e.code || !str(e.message, 2000)) return null;
   const text = (v: unknown, max: number): string | undefined => typeof v === "string" && v ? serviceText(v, max, secrets) : undefined;
   const why = text(e.why, 2000);
   const said = as.said(e.code);
