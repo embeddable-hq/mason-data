@@ -6979,7 +6979,13 @@ test("issue 406: upper, lower and initcap map case under their input collation, 
   const under = { searchPath: "public", timeZone: "UTC", dateStyle: "ISO, MDY" } as Parameters<NonNullable<typeof listener.ordersText>>[3];
   for (const [sql, routed] of [["SELECT upper('ß')", true], ["SELECT initcap('a b'), lower('X')", true], ["SELECT 'a' = 'A', version() IS NOT NULL", false], ["SELECT upper('ß'), 1.5", false],
     // the synced data refuses what the catalog answers: the catalog keeps it, as before (never a refusal of it)
-    ["SELECT current_user, upper(current_user::text)", false], ["SELECT lower('now')::timestamptz IS NOT NULL", false]] as const) {
+    ["SELECT current_user, upper(current_user::text)", false], ["SELECT lower('now')::timestamptz IS NOT NULL", false],
+    // a session's value the synced data would answer with its own (`duckdb`, its own database's name, were it not
+    // refused as unverified): the catalog's, which answers it as this session's; an operator, md5 and a VALUES list move
+    ["SELECT lower(current_user)", false], ["SELECT upper(user), lower(session_user)", false], ["SELECT lower(current_catalog)", false],
+    ["SELECT upper(version()) LIKE 'POSTGRES%'", false], ["SELECT lower(current_database())", false],
+    ["SELECT upper(CASE WHEN current_user = 'postgres' THEN 'yes' ELSE 'no' END)", false],
+    ["SELECT upper('a' || 'ß'), lower(md5('a')) IS NOT NULL", true], ["SELECT upper(x) FROM (VALUES ('ß'), ('b')) v(x) ORDER BY 1", true]] as const) {
     assert.equal(mayOrderText((await parseSql(sql)).stmts![0]!.stmt) && await listener.ordersText!(catalog, sql, [], under, true, new Map()), routed, sql);
   }
 });
