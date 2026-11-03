@@ -9,7 +9,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   hands the password to its engine apart from what an error repeats, and masks any `password=` value in the errors it
   repeats. On its
   first start it removes the password from its own record of the sync, and says how many rows it scrubbed; it does not
-  rewrite log files. So: change the user's password (`ALTER ROLE … PASSWORD`) and its URL in `.env` (or `DATABASE_URL`),
+  rewrite log files, but `mason logs` (with `--start`, `-f` and `--json`) and the web page's log now show every
+  `password=` value in them as `****`, as they read them. So: change the user's password (`ALTER ROLE … PASSWORD`) and its URL in `.env` (or `DATABASE_URL`),
   then delete the old log files (`rm .mason/mason.log .mason/dev.log` with Mason stopped), and purge what a log
   collector kept. To see whether a log holds a password, `grep -c "password=" .mason/*.log`.
 
