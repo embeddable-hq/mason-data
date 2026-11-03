@@ -53,7 +53,11 @@ decision reads an error's raw words (`messageOf`) and never the ones Mason repea
 stream to both. **The trade:** a dependency that one day repeats the raw password in some other form than `password=`
 is not masked; the engine-alone and whole-run integration tests are what catch it, at the extension's next upgrade.
 Old log files are not rewritten (a log a person or a collector already read cannot be unread): the release note says
-to rotate the password and delete them.
+to rotate the password and delete them. Until they are, every reader of a log file masks the same form as it reads
+(issue 621): the files are named and read in one module (src/lib/log-read.ts `LogReader`, a convention test refusing any
+other read), a line released only whole whatever the reader's chunks, and a value that runs past its line masked to its
+end within its log entry, never past it, so a quote an older line left open cannot hide the rest of the file. The run's
+memory of its log (`/api/logs`) is masked by the same mask as an entry is kept.
 
 **The public boundary.** The repository is public, so the same day the owner ruled that no private service's code,
 infrastructure, hostnames or plans land here. A change such a service needs is made here as a generic feature, in

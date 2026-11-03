@@ -63,6 +63,7 @@ import { READY_LINE, readRestarts } from "./supervise.ts";
 import { dropOwnReplication, dropStatements, liveReadinessFailure, madeReplication, namedPublication, projectReplication, recordRefusal, replicationReadiness, staleReplication } from "./replication-mode.ts";
 import { textEntry } from "../lib/log.ts";
 import { LogBuffer } from "../lib/log-buffer.ts";
+import { logPath } from "../lib/log-read.ts";
 import { BIG_TABLE_ROWS, syncText, type TableSync } from "../lib/table-sync.ts";
 
 export interface DevOptions {
@@ -272,7 +273,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   // a demo project's file naming sync: replication (its database has no change log), refused before anything opens
   const demoFile = demoChangesRefusal(cfg, src, shownPath(project.root, src.file));
   if (demoFile) return failed("start", demoFile, { json: false });
-  const logFile = path.join(home, "mason.log");
+  const logFile = logPath(home, "run");
   const log = fs.createWriteStream(logFile, { flags: "a" });
   // one entry a line: a multi-line message's further lines indented under it (src/lib/log.ts `textEntry`);
   // mason serve gets the same entry, for the container's stdout (src/cli/serve.ts)

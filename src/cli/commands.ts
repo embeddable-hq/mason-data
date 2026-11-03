@@ -24,7 +24,8 @@ import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
 import type { RefusedQuery, SlowQuery } from "./run-server.ts";
-import { logEntries, logLineText } from "../lib/log-buffer.ts";
+import { entriesOfLines, logLineText } from "../lib/log-buffer.ts";
+import { LogReader, logPath } from "../lib/log-read.ts";
 import { catalogTable, entryName, looksSecret, tableNameProblem, type CatalogColumn, type CatalogTable, type ProjectSource } from "./sources.ts";
 import { addEntry, Refusal, removeEntries, sourceToEdit, type EditCatalog, type EditTarget, type PickResult, type RemoveResult } from "./source-edit.ts";
 import { connectSource, maskedUrl, parseSource, readSourceFacts, type SourceFacts, type SourceTable } from "./preflight.ts";
@@ -1756,31 +1757,31 @@ export async function logs(argv: string[]): Promise<number> {
   if ("problem" in t) return failed("logs", t, { json });
   // the run's log by default (mason logs once showed no actual logs: it showed
   // mason start's terminal, which after the start carries only warnings and errors)
-  const file = path.join(t.project.dir, f.values.start ? "dev.log" : "mason.log");
+  const file = logPath(t.project.dir, f.values.start ? "start" : "run");
   if (!fs.existsSync(file)) {
     return failed("logs", { message: `${file} does not exist yet`, code: "nothing_yet", why: `Mason has not run for ${t.project.config.name}`, next: [["mason start", "start it, in the background"]] }, { json });
   }
-  const text = fs.readFileSync(file, "utf8");
+  // read through the one reader, every line masked as it is read (src/lib/log-read.ts, issue 621: an older Mason's lines
+  // held the source's password in a `password=` value); a line not yet ended is -f's to show as it stands, else read whole
+  const reader = new LogReader(file);
+  const read = reader.readLines();
+  const unended = f.values.follow ? "" : reader.rest();
+  if (unended !== "") read.push(unended);
   // WHY THE FILE, even with the run up: it is the whole record (the run's memory keeps only its last LOG_KEPT entries,
   // src/lib/log-buffer.ts) and the only one when the run is down. The entries are parsed by the buffer's own parser, so
   // `{ at, text }` is the shape of GET /api/logs too (the run's answer, which a `mason serve` run has no file for).
   // -n counts entries, a multi-line one being ONE; dev.log's lines (the start's steps, indented under each other) are a line each.
-  const all = logEntries(text, { perLine: f.values.start === true });
+  const all = entriesOfLines(read, { perLine: f.values.start === true });
   const last = all.slice(Math.max(0, all.length - lines));
   if (json) { out(jsonText(LOGS, { lines: last }, [["mason logs --requests", "every statement the Postgres API met"]])); return 0; }
   for (const l of last) out(logLineText(l));
   if (!f.values.follow) return 0;
-  let offset = Buffer.byteLength(text);
   for (;;) {
+    // the lines written since, each masked once it is whole, then the line not ended yet as it stands, masked (a run
+    // killed mid-write leaves its last words unended); a new run that started the file over is read from its start
+    const more = reader.follow();
+    if (more !== "") process.stdout.write(more);
     await new Promise((res) => setTimeout(res, 500));
-    const size = fs.statSync(file).size;
-    if (size < offset) offset = 0;   // a new run started the file over
-    if (size === offset) continue;
-    const buf = Buffer.alloc(size - offset);
-    const fd = fs.openSync(file, "r");
-    try { fs.readSync(fd, buf, 0, buf.length, offset); } finally { fs.closeSync(fd); }
-    offset = size;
-    process.stdout.write(buf.toString());
   }
 }
 
