@@ -130,6 +130,11 @@ const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: str
       "CASE WHEN amount > 0 THEN amount ELSE 0.00 END AS k, greatest(amount, 1)::numeric(12,2) AS gc, -amount * n AS mi FROM ledger",
     orderBy: "id",
     statements: ["SELECT * FROM forms ORDER BY id", "SELECT id, w FROM forms WHERE md = 1.00 ORDER BY w DESC NULLS LAST, id"] },
+  // issue 242: an integer cast of a numeric the engine holds as a double, rounded half away from zero as Postgres's
+  { name: "rounded", schema: "public", table: "rounded",
+    sql: "SELECT id, (amount / 1.6)::int AS q4, (amount / 1)::int8 AS q8, nullif(amount / 1.6, 0)::int AS nz, sqrt(abs(amount) * 1.5625)::int AS sq, (n / 4.0)::int AS n4, sign(amount)::int AS sg FROM ledger",
+    orderBy: "id",
+    statements: ["SELECT * FROM rounded ORDER BY id", "SELECT q4, count(*) AS c FROM rounded GROUP BY q4 ORDER BY q4 NULLS FIRST"] },
   // PR 520's review r1 (shared-node-hoisted-out-of-its-condition): x is read twice, by a CASE arm no row takes, and its
   // product passes 38 digits; a layer computed for every row overflowed where Postgres computes nothing
   { name: "guarded", schema: "public", table: "guarded",

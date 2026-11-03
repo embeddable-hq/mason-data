@@ -6165,7 +6165,128 @@ test("exact path: the CAST reader reads a program's text, its nearest double and
       ["SELECT o.id, power(o.amount, 2)::double precision FROM orders o ORDER BY 1", "ordered"],
       ["SELECT b.id, (b.x / 1)::int, (b.x / b.y)::int8, (-b.x / 1)::int FROM bigdec b ORDER BY 1", "ordered"],
       ["SELECT b.id, (b.x / b.y)::double precision FROM bigdec b ORDER BY 1", "ordered"],
+      // issue 242: a NULLIF over a quotient is its operand's program, NULL where it equals the other by the exact keys
+      ["SELECT b.id, nullif(b.x / b.y, 0)::int, nullif(b.x / b.y, 0)::int8, nullif(b.x / b.y, 2.5)::int FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, nullif(b.x / b.y, 0), nullif(b.x / b.y, 2.5), nullif(b.x / 1, 1.00000000000000000001) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, (exp(ln(2.5)) * sign(b.x))::int, (exp(ln(2.5)) * sign(-b.x))::int8 FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, (SELECT nullif(c.x / c.y, 0)::int FROM bigdec c WHERE c.id = b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT *, nullif(b.x / b.y, 0)::int AS r FROM bigdec b ORDER BY b.id", "ordered"],
+      ["SELECT sum(nullif(b.x / b.y, 0)), max(nullif(b.x / b.y, 0))::int FROM bigdec b", "ordered"],
+      // what the base answered stays answered: sign's TINYINT, a DECIMAL's own cast, round and trunc, a float8's half to even
+      ["SELECT b.id, sign(b.x)::int, sign(b.x / b.y)::int, nullif(b.x, 0)::int, (b.x * 2)::int FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, trunc(b.x / b.y)::int, round(b.x / b.y)::int, ((b.x / b.y)::float8)::int, (b.x::float8 / b.y)::int8 FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT (sum(o.amount) / nullif(count(*), 0))::int, round(100.0 * sum(o.amount) / nullif(sum(o.qty), 0))::int FROM orders o", "ordered"],
+      ["SELECT b.id, ((b.x / b.y)::int)::text, ((b.x / b.y)::int)::numeric(10,2) FROM bigdec b ORDER BY 1", "ordered"],
     ]), []);
+    // a parameter in the NULLIF's quotient, prepared and then executed again after a later SET
+    const bound = "SELECT b.id, nullif(b.x / $1, 0)::int AS r FROM bigdec b ORDER BY b.id";
+    assert.deepEqual(await unlikeBound(c, [[bound, ["2"]]]), []);
+    const want = (await postgres(bound, ["2"])).rows;
+    assert.deepEqual((await c.query({ name: "nullif_bound", text: bound, values: ["2"], rowMode: "array" })).rows.map((r) => r.map(String)), want.map((r) => r.map(String)));
+    await c.query("SET TimeZone = 'Europe/Paris'");
+    assert.deepEqual((await c.query({ name: "nullif_bound", text: bound, values: ["2"], rowMode: "array" })).rows.map((r) => r.map(String)), want.map((r) => r.map(String)), "after a SET");
+  } finally { await c.end(); }
+});
+
+test("exact path: issue 242: an integer cast of percentile_disc or mode() of a quotient, or of any expression over it, is the picked row's exact value", async () => {
+  const c = await client();
+  try {
+    // review r2 of PR 506 asked these be refused by name, never the engine's 42883 / 42804; PR 506's class round answers
+    // them: the aggregate is the picked row's exact value (`pickedByExactKey`), so each cast is Postgres's, half away from zero
+    const over = "percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)";
+    assert.deepEqual(await unlike(c, [
+      `SELECT (${over})::int FROM bigdec b`, "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
+      `SELECT CAST(${over} AS bigint) FROM bigdec b`, `SELECT (${over} * 2)::int FROM bigdec b`, `SELECT (${over} + 0)::int FROM bigdec b`,
+      `SELECT round(${over})::int, trunc(${over})::int FROM bigdec b`, `SELECT abs(${over})::int FROM bigdec b`, `SELECT coalesce(${over}, 0)::int FROM bigdec b`,
+      `SELECT nullif(${over}, 0)::int FROM bigdec b`, `SELECT greatest(${over}, 0)::int FROM bigdec b`, `SELECT (x * 2)::int FROM (SELECT ${over} AS x FROM bigdec b) s`,
+      "WITH q AS (SELECT mode() WITHIN GROUP (ORDER BY b.x / b.y) AS x FROM bigdec b) SELECT (x / 2)::int8 FROM q",
+      `SELECT b.id % 2, (${over} * 2)::int FROM bigdec b GROUP BY 1 ORDER BY 1`, `SELECT (${over} * 2)::int FROM bigdec b UNION ALL SELECT 1 ORDER BY 1`,
+    ].map((sql) => [sql, "ordered"] as [string, "ordered"])), []);
+    assert.deepEqual(await unlike(c, [
+      // its old way out answers as Postgres does
+      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"],
+      // review r1 of PR 506, finding 2: what the engine holds as a DECIMAL (percentile_disc / mode of a column, min / max
+      // of Postgres's own power) is cast as Postgres casts it, never refused as a double
+      ["SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount))::int, (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount))::int8 FROM orders o", "ordered"],
+      ["SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) * 2)::int, (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) / 7)::int FROM orders o", "ordered"],
+      ["SELECT o.status, (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount DESC))::int FROM orders o GROUP BY o.status ORDER BY 1", "ordered"],
+      ["SELECT s.x::int FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount) AS x FROM orders o) s", "ordered"],
+      ["SELECT max(sqrt(o.amount))::int, min(sqrt(o.amount))::int8 FROM orders o", "ordered"],
+      // review r1 of PR 506, finding 1: a NULLIF's NULL read outside its subquery, regrouped: NULL, never its operand
+      ["SELECT x FROM (SELECT nullif(b.x / b.y, 2.5) AS x FROM bigdec b) s GROUP BY x ORDER BY 1", "ordered"],
+      ["WITH q AS (SELECT b.id, nullif(b.x / b.y, 2.5) AS x FROM bigdec b) SELECT x, count(*) FROM q GROUP BY x HAVING x IS NULL OR x > 1.1 ORDER BY 1", "ordered"],
+      ["SELECT coalesce(x, -1), x::int, x::text, x::float8 FROM (SELECT nullif(b.x / b.y, 2.5) AS x FROM bigdec b) s GROUP BY x ORDER BY 1", "ordered"],
+      ["SELECT DISTINCT x FROM (SELECT nullif(nullif(b.x / b.y, 2.5), 1.25) * 2 AS x FROM bigdec b) s ORDER BY 1", "ordered"],
+      ["SELECT s.x FROM (SELECT b.id, nullif(b.x / b.y, 2.5) AS x FROM bigdec b) s JOIN bigdec c ON c.id = s.id GROUP BY s.x ORDER BY 1", "ordered"],
+      // and a program's cast under an outer GROUP BY reads one row's text per group (the engine's 42803 before)
+      ["WITH q AS (SELECT b.x / b.y AS x FROM bigdec b) SELECT x::float8, x::text, x::int FROM q GROUP BY x ORDER BY 2", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path: percentile_disc or mode() ordered by a numeric Mason computes exactly answer the picked row's exact value, wherever it is read (PR 506's class round, issue 538)", async () => {
+  const c = await client();
+  try {
+    // (class refusal-wider-than-the-wrong-answer, and before it order-key-bytes-as-result: the engine answers what it sorts
+    // by; the rewrite sorts a row(order key, value) and answers the value, so no reader meets the key's bytes)
+    const forms: string[] = [];
+    for (const key of ["b.x / b.y", "exp(ln(2.5)) * sign(b.x)", "nullif(b.x / b.y, 0)", "coalesce(b.x / b.y, 0)", "b.x / b.y + 1", "round(b.x / b.y, 2)", "-(b.x / b.y)", "(b.x / b.y)::numeric(10,4)"]) {
+      const pd = `percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key})`, md = `mode() WITHIN GROUP (ORDER BY ${key})`;
+      forms.push(
+        // read as a value: printed, ::text, a cast, arithmetic, grouped, an array of nothing
+        `SELECT ${pd}, (${pd})::text, ${md}, ${pd} * 2, (${md})::float8 FROM bigdec b`,
+        `SELECT b.id % 3 AS g, ${pd}, ${md} FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT x, x::text FROM (SELECT ${pd} AS x FROM bigdec b) s`,
+        // only ordered (review r4): the SELECT's ORDER BY, WITH TIES, DISTINCT ON, a window's, a derived table's and a CTE's
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY ${pd} DESC NULLS LAST, 1`,
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY ${md}, 1 FETCH FIRST 1 ROWS WITH TIES`,
+        `SELECT b.id % 3 AS g, rank() OVER (ORDER BY ${pd}) FROM bigdec b GROUP BY 1 ORDER BY 2, 1`,
+        `SELECT g FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s ORDER BY x, g`,
+        `WITH q AS (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) SELECT g FROM q ORDER BY x DESC NULLS LAST, g LIMIT 2`,
+        // nullness, comparison, grouping, partitioning and joining (review r5, issue 538)
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING ${pd} IS NOT NULL ORDER BY 1`,
+        `SELECT b.id % 3 AS g, CASE WHEN ${pd} IS NULL THEN 0 ELSE 1 END FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING ${pd} = ${md} OR ${pd} > 1 ORDER BY 1`,
+        `SELECT count(x), count(DISTINCT x) FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s`,
+        `SELECT x, count(*) FROM (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) s GROUP BY x ORDER BY 1`,
+        `SELECT b.id % 3 AS g, count(*) OVER (PARTITION BY ${pd}) FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT s1.g, s2.g FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s1 JOIN (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) s2 ON s1.x = s2.x ORDER BY 1, 2`,
+      );
+    }
+    assert.deepEqual(await unlike(c, forms.map((sql) => [sql, "ordered"] as [string, "ordered"])), []);
+    // an array of fractions would answer the doubles of a numeric[]: refused by name, its way out answers
+    await assert.rejects(c.query("SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b"),
+      (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? "") && /ask for each fraction alone/.test(e.hint ?? ""));
+    assert.deepEqual(await unlike(c, [
+      ["SELECT percentile_disc(0.25) WITHIN GROUP (ORDER BY b.x / b.y), percentile_disc(0.75) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
+      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount), mode() WITHIN GROUP (ORDER BY o.amount), percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount * 2) FROM orders o", "ordered"],
+      ["SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path: issue 242's NULLIF, sign and picked value through PR 520's shared programs (#484): each read three times a level over a quotient chain, as Postgres", async () => {
+  const c = await client();
+  try {
+    // a node several parents share (src/lib/pg-numeric.ts, PR 520): NULLIF's pick, sign, and a percentile_disc / mode()
+    // pick (`pickedByExactKey`) each read three times a level, three levels up, then printed, cast and compared
+    const chain = (read: string, bottom: string, depth = 3): string => Array.from({ length: depth }, (_, i) => i + 1).reduce((s, k) => `SELECT id, ${read} AS q FROM (${s}) s${k}`, bottom);
+    const quotient = "SELECT b.id, b.x / b.y AS q FROM bigdec b";
+    const nz = chain("nullif(q, 0) + nullif(q, 0) - nullif(q, 0)", quotient);
+    const n25 = chain("nullif(q, 2.5) + nullif(q, 2.5) - nullif(q, 2.5)", quotient);
+    const sg = chain("sign(q) + sign(q) - sign(q)", quotient);
+    const pd = "SELECT 1 AS id, percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) AS q FROM bigdec b";
+    const md = "SELECT b.id % 2 AS id, mode() WITHIN GROUP (ORDER BY b.x / b.y) AS q FROM bigdec b GROUP BY 1";
+    assert.deepEqual(await unlike(c, [
+      `SELECT id, q, q::int, q::text FROM (${nz}) s ORDER BY id`,
+      `SELECT id, q, q::int8, q * 2 FROM (${n25}) s ORDER BY id`,
+      `SELECT id, q, (q * 2.5)::int FROM (${sg}) s ORDER BY id`,
+      `SELECT id, q, q::int, q::text FROM (${chain("q + q - q", pd)}) s ORDER BY id`,
+      `SELECT id, q, (q * 2)::int FROM (${chain("q + q - q", md)}) s ORDER BY id`,
+      `SELECT id, nullif(q, 0) + nullif(q, 0) - sign(q) * nullif(q, 0) AS v FROM (${chain("q + q - q", quotient, 2)}) s ORDER BY id`,
+      `SELECT q, count(*) FROM (${nz}) s GROUP BY q ORDER BY 1`,
+      `SELECT count(*) FROM (${n25}) s WHERE q IS NULL`,
+    ].map((sql) => [sql, "ordered"] as [string, "ordered"])), []);
   } finally { await c.end(); }
 });
 

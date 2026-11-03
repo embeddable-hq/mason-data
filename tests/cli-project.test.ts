@@ -171,6 +171,24 @@ test("mason init writes the project — config, the sources file, the URL in .en
     const outside = await quiet((io) => init(["postgres://u@localhost/x", "--skip-check", "--folder", "../elsewhere"], three, { io }));
     assert.equal(outside.value, 2);
     assert.match(outside.err, /--folder \.\.\/elsewhere is outside this folder/);
+    // a folder it cannot resolve can never become a project's folder: refused with why and the way out, never a crash,
+    // as a person and with --json, before anything is written (a loop, a file as a folder, a path too long)
+    fs.symlinkSync("loop", path.join(three, "loop"));
+    fs.writeFileSync(path.join(three, "docker-compose.yml"), "x: 1\n");
+    for (const [arg, why] of [["loop", /a symbolic link on the way leads back to itself \(a loop\) \(ELOOP\)/], ["docker-compose.yml/x", /a part of the path is a file, not a folder \(ENOTDIR\)/],
+      [Array.from({ length: 15 }, () => "x".repeat(300)).join("/"), /the path is longer than this system takes \(ENAMETOOLONG\)/]] as const) {
+      const plain = await quiet((io) => init(["postgres://u@localhost/x", "--skip-check", "--folder", arg], three, { io }));
+      assert.equal(plain.value, 2, plain.err);
+      assert.match(plain.err, /^✗ mason init: --folder .+ cannot be resolved to a folder\n {2}why {3}/);
+      assert.match(plain.err, why);
+      assert.match(plain.err, / {2}fix {3}name a folder of its own inside this one with --folder \(the default, mason, is one\), or fix the path/);
+      const json = await quiet((io) => init(["postgres://u@localhost/x", "--skip-check", "--folder", arg, "--json"], three, { io }));
+      assert.equal(json.value, 2, json.out);
+      const e = (JSON.parse(json.out) as { error: { code: string; why: string } }).error;
+      assert.equal(e.code, "usage");
+      assert.match(e.why, why);
+      assert.equal(fs.existsSync(path.join(three, ".mason")), false, "nothing written");
+    }
     // no URL and none in .env: which database?
     // (the shell given as empty: one with either variable set would answer it)
     const none = await quiet((io) => init([], three, { io, env: {} }));
