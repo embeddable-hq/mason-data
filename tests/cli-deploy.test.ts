@@ -14,7 +14,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
-import { seen } from "./hosted-fake.ts";
+import { bodyShown, echoForms, seen } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
 const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${randomBytes(32).toString("base64url")}`;
@@ -199,6 +199,7 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);
     assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `${line} printed a secret's body`);
+    assert.ok(!bodyShown(a.stdout, s) && !bodyShown(a.stderr, s), `${line} printed a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
   }
   return a;
 }
@@ -786,6 +787,36 @@ test("mason deploy: needs a project — none here is the state's answer, nothing
   assert.equal(a.code, 1);
   assert.equal((JSON.parse(a.stdout) as { error: { code: string } }).error.code, "no_project");
   assert.deepEqual(requests, []);
+});
+
+test("mason deploy: a service that echoes the token it was sent in another form — its body, split, re-cased, URL-encoded, a 12-character slice — has none of it printed, on stdout, stderr or in --json", { timeout: 200_000 }, async () => {
+  const { root } = project();
+  const token = newToken("ci"); SECRETS.push(token);
+  const words = (form: string) => ({ message: `the token ${form} is not known`, why: `it was sent as ${form}`, fix: `sign in again, not as ${form}` });
+  for (const [what, form] of echoForms(token)) {
+    // a refusal of the deploy sent, and a deploy Mason on the replica refused: the two failures the service words
+    const scripts: Array<[string, Script]> = [
+      ["the POST's 401", { post: { status: 401, body: { error: { code: "unauthenticated", ...words(form) }, next: [] } } }],
+      ["a refused deploy", { get: () => at("refused", { failure: { code: "bad_source", ...words(form) } }) }],
+    ];
+    for (const [where, script] of scripts) {
+      // a person's stderr for the POST's; the refused deploy's in --json alone, its stderr read there too (each run of
+      // a refused deploy waits out a poll, and its words go through the same failureShape)
+      for (const json of where === "a refused deploy" ? [true] : [false, true]) {
+        const { a } = await deployWith(script, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])], { MASON_TOKEN: token });
+        const at_ = `${what}, in ${where}${json ? ", --json" : ""}`;
+        assert.equal(a.code, 1, `${at_}: ${a.stdout}${a.stderr}`);
+        assert.ok(!(a.stdout + a.stderr).includes(form), `${at_}: printed as it came:\n${a.stdout}${a.stderr}`);
+        assert.ok(!bodyShown(a.stdout, token) && !bodyShown(a.stderr, token), `${at_}: the body is shown:\n${a.stdout}${a.stderr}`);
+        // what is printed is the service's words, the echo masked: never dropped, never re-worded (a slice's mask may take
+        // in a letter beside it that is the body's next, by chance: one in 36 a side, so its words are not held exact)
+        const said = json ? (JSON.parse(a.stdout) as { error: { message: string; fix: string } }).error : null;
+        if (what.includes("slice")) assert.equal((a.stdout + a.stderr).match(/\*{4}/g)?.length ?? 0, 3, at_);
+        else if (said) assert.deepEqual([said.message, said.fix], ["the token **** is not known", "sign in again, not as ****"], at_);
+        else assert.match(a.stderr, /✗ mason deploy: the token \*\*\*\* is not known\n {2}why {3}it was sent as \*\*\*\* \(/, at_);
+      }
+    }
+  }
 });
 
 test("no run of mason deploy printed a token, nor anything shaped as one", () => {

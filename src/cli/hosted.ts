@@ -11,8 +11,9 @@
  * body where one is sent, and a redirect is never followed (a Bearer header must not travel to another origin, nor https
  * fall back to http). Every request has a time limit, and an answer is read up to `MAX_BODY_BYTES`.
  *
- * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, and the token — the one this request
- * carries, and anything shaped as a documented token — is masked in all of it.
+ * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, and the token is masked in all of it: a
+ * token the command holds by its VALUE, whole, without its prefix, or any 12 of its characters in a row, however
+ * re-cased, split or percent-encoded (`heldSpans`); and anything shaped as a documented token, held or not.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (the decision of PR 481's class round: a
  * service forged a block of next steps with a newline in an email, and offered `mason destroy` as a next step). Two
@@ -50,6 +51,15 @@ export interface Service { base: string }
 
 /** The documented token shapes (docs/HOSTED-API.md), masked wherever they appear in what is printed. */
 const TOKEN_SHAPE = /\bmasondata_(pat|ci)_[A-Za-z0-9_-]{43}/g;
+/**
+ * The fewest characters in a row of a held secret's body that are masked wherever they appear (`heldSpans`). A body is
+ * 43 base64url characters; 12 of them, read in lower case, are about 62 bits, so a run of ordinary text matches one of
+ * a body's windows about once in 10^17 (no word is masked by chance), and fewer than 12 in a row leave over 180 bits
+ * of it unknown.
+ */
+const HELD_RUN = 12;
+/** How many times a value is read again after a mask (a mask joins what lay either side of it); past that, it is masked whole. */
+const MASK_PASSES = 4;
 /** The hosts plain http may name: this machine. */
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "localhost"]);
 
@@ -88,12 +98,22 @@ export function serviceOf(env: NodeJS.ProcessEnv = process.env): Service | Failu
  * TEXT FROM THE SERVICE, AS IT MAY BE PRINTED: ONE LINE (above: data, never structure) — every control character, the
  * newline and the carriage return included, and every line or paragraph separator, format or bidi mark replaced by
  * `?`, so none can end a line, move a cursor, clear a screen or reorder what a person reads; every run of white space
- * one space, none at either end; at most `max` characters; and every secret masked — the ones named, and anything
- * shaped as a documented token. On a terminal the line it sits in is broken by the CLI (`serviceStyle`).
+ * one space, none at either end; at most `max` characters; and every secret masked — the ones named (`secrets`, the
+ * tokens this command holds), by their value in any form an echo takes (`heldSpans`), and anything shaped as a
+ * documented token. The masks read the value as it came, before it is made one line and bounded, so neither uncovers
+ * what they would have masked. On a terminal the line it sits in is broken by the CLI (`serviceStyle`).
  */
 export function serviceText(s: string, max: number, secrets: readonly string[] = []): string {
   let t = s;
   for (const secret of secrets) if (secret) t = t.split(secret).join("****");
+  // a held secret by its value, in any form an echo takes (`heldSpans`); a mask leaves `****`, a separator, so what lay
+  // either side of it is read again as one run, until nothing is found; a value still holding one is masked whole
+  for (let pass = 0; ; pass++) {
+    const spans = heldSpans(t, secrets);
+    if (!spans.length) break;
+    if (pass === MASK_PASSES) return "****";
+    for (const [from, to] of spans.reverse()) t = `${t.slice(0, from)}****${t.slice(to)}`;
+  }
   t = t.replace(TOKEN_SHAPE, "masondata_$1_****");
   // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
   // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
@@ -103,6 +123,68 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   t = t.replace(/\s+/g, " ").trim();
   const chars = [...t];
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+}
+
+/**
+ * A HELD SECRET, BY ITS VALUE (issue 540: the shape alone let a token's body through, echoed without its prefix). The
+ * body of a secret this command holds is the value after a documented prefix, else the whole value (a token is opaque).
+ * The text is read as a run of body characters (`bodyChars`): ASCII letters in lower case, digits, `-` and `_`, a `%XX`
+ * escape as the character it encodes, a compatibility form (a full-width letter) as its ASCII one, and every other
+ * character skipped, as a separator. Any `HELD_RUN` such characters in a row that are as many in a row of a held body
+ * read the same way are masked, with the separators between them: read once keeping `-` and `_` (any slice of the
+ * body) and once skipping them too (a body split by dashes). A body shorter than that is masked at its whole length.
+ * The spans of `t` to mask, in order, none overlapping.
+ */
+function heldSpans(t: string, secrets: readonly string[]): Array<[number, number]> {
+  const marks: Array<[number, number]> = [];
+  for (const keep of [true, false]) {
+    const units = bodyChars(t, keep, true), read = units.map((u) => u.c).join("");
+    for (const secret of secrets) {
+      const body = bodyChars(/^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret, keep, false).map((u) => u.c).join("");
+      const n = Math.min(HELD_RUN, body.length);
+      if (n === 0) continue;
+      const windows = new Set<string>();
+      for (let i = 0; i + n <= body.length; i++) windows.add(body.slice(i, i + n));
+      // a run of marked characters in a row is one span, the separators between them in it
+      let start = -1, end = -1;
+      for (let i = 0; i + n <= units.length; i++) {
+        if (!windows.has(read.slice(i, i + n))) continue;
+        if (start >= 0 && i <= end + 1) { end = i + n - 1; continue; }
+        if (start >= 0) marks.push([units[start]!.from, units[end]!.to]);
+        start = i; end = i + n - 1;
+      }
+      if (start >= 0) marks.push([units[start]!.from, units[end]!.to]);
+    }
+  }
+  // a `-` or `_` beside a mask is the body's too (read skipping them, a body that begins or ends with one is masked
+  // without it): the mask takes it
+  for (const m of marks) {
+    while (m[0] > 0 && /[-_]/.test(t[m[0] - 1]!)) m[0]--;
+    while (m[1] < t.length && /[-_]/.test(t[m[1]]!)) m[1]++;
+  }
+  marks.sort((a, b) => a[0] - b[0]);
+  const spans: Array<[number, number]> = [];
+  for (const m of marks) {
+    const last = spans[spans.length - 1];
+    if (last && m[0] <= last[1]) last[1] = Math.max(last[1], m[1]);
+    else spans.push([m[0], m[1]]);
+  }
+  return spans;
+}
+
+/** The characters of `t` a held secret is compared by, each with the span of `t` it was read from (above). */
+function bodyChars(t: string, keepMarks: boolean, decode: boolean): Array<{ c: string; from: number; to: number }> {
+  const out: Array<{ c: string; from: number; to: number }> = [];
+  const kept = keepMarks ? /[a-z0-9_-]/ : /[a-z0-9]/;
+  for (let i = 0; i < t.length;) {
+    const cp = t.codePointAt(i)!;
+    let s = String.fromCodePoint(cp), to = i + s.length;
+    if (decode && s === "%" && /^[0-9a-f]{2}$/i.test(t.slice(i + 1, i + 3))) { s = String.fromCharCode(parseInt(t.slice(i + 1, i + 3), 16)); to = i + 3; }
+    else if (decode && cp > 0x7f) s = s.normalize("NFKC");
+    for (const c of s.toLowerCase()) if (kept.test(c)) out.push({ c, from: i, to });
+    i = to;
+  }
+  return out;
 }
 
 /** This machine's name, as the service lists the login: printable ASCII, at most 64 characters, never empty (the

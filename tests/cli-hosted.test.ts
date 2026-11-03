@@ -32,6 +32,54 @@ test("serviceText: one line, every line break, control, format and bidi characte
   assert.equal(serviceText("masondata_ci_short", 200), "masondata_ci_short", "only the documented shape is a token");
 });
 
+test("serviceText: a secret the command holds is masked by its value — without its prefix, split, re-cased, URL-encoded, in full-width letters, or any 12 characters of it in a row; ordinary words never", () => {
+  // a body of every kind of base64url character, a dash and an underscore among them
+  const body = "Ab3-dE_fG7hIjK9lMnOpQ2rStUvWx8yZaBcDeFgHiJk", token = `masondata_ci_${body}`;
+  assert.equal(body.length, 43);
+  const held = (s: string, max = 2000): string => serviceText(s, max, [token]);
+  const cases: Array<[string, string]> = [
+    [`try ${body} again`, "the body without its prefix"],
+    [`try ${body.match(/.{1,4}/g)!.join(" ")} again`, "split by spaces"],
+    [`try ${body.toUpperCase()} again`, "in upper case"],
+    [`try ${body.toLowerCase().match(/.{1,5}/g)!.join("-")} again`, "split by dashes"],
+    [`try ${body.match(/.{1,3}/g)!.join("\n​")} again`, "split by line breaks and zero-width marks"],
+    [`try ${[...body].map((c) => `%${c.charCodeAt(0).toString(16)}`).join("")} again`, "every character URL-encoded"],
+    [`try ${[...body].map((c) => /[A-Za-z0-9]/.test(c) ? String.fromCodePoint(c.codePointAt(0)! + 0xfee0) : c).join("")} again`, "in full-width letters"],
+    [`try ${body.slice(4, 16)} again`, "a 12-character slice"],
+    [`try ${body.slice(19, 25)}, ${body.slice(25, 31)} again`, "a 12-character slice in two halves"],
+  ];
+  for (const [text, what] of cases) assert.equal(held(text), "try **** again", what);
+  assert.equal(held(`the token ${token} is unknown`), "the token **** is unknown", "the token whole, as before");
+  // the prefix is a documented, public form, and stays: what follows it is masked
+  assert.equal(held(`try ${token.replaceAll("_", "%5F")} again`), "try masondata%5Fci%5F**** again", "the token URL-encoded, its prefix too");
+  // a mask joins what lay either side of it, which is read again: two halves of a slice around a token
+  assert.equal(held(`try ${body.slice(30, 36)}${token}${body.slice(36, 42)} again`), "try **** again");
+  // halves nested around it, of two held tokens, each pair one only once the mask inside it is made: read again up to
+  // four times; a value that still holds one after that is masked whole (fail closed)
+  const other = "k2Pq7Rs1Tu8Vw3Xy9Za4Bc0De5Fg6HiYJmUNo2Lq3Mr", tokens = [token, `masondata_pat_${other}`];
+  const nested = (depth: number): string => {
+    let s = token;
+    for (const [b, from] of ([[body, 0], [other, 0], [body, 14], [other, 14], [body, 28]] as const).slice(0, depth)) s = `${b.slice(from, from + 6)}.${s}.${b.slice(from + 6, from + 12)}`;
+    return `try ${s} again`;
+  };
+  assert.equal(serviceText(nested(4), 2000, tokens), "try **** again");
+  assert.equal(serviceText(nested(5), 2000, tokens), "****");
+  // a `-` or `_` the body begins or ends with goes with it, though the dashes that split it are skipped
+  assert.equal(serviceText(`try _${other.toLowerCase().match(/.{1,5}/g)!.join("-")}- again`, 2000, [`masondata_ci__${other}-`]), "try **** again");
+  // the mask reads the value as it came: the bound cannot cut a body into a part shown
+  assert.equal(held(`${"x ".repeat(5)}${body}`, 20), "x x x x x ****");
+  // fewer than 12 in a row are not masked (see HELD_RUN); the prefix alone is a documented, public form
+  assert.equal(held(`try ${body.slice(4, 15)} again`), `try ${body.slice(4, 15)} again`);
+  assert.equal(held("sign in with masondata_ci_ tokens"), "sign in with masondata_ci_ tokens");
+  // ordinary words, an address and a URL are left as they are
+  const prose = "ada@example.com cannot deploy acme/shop: the token was revoked at https://example.com/settings/tokens?page=2%20x";
+  assert.equal(held(prose), prose);
+  // a secret of another form, shorter than 12, is masked at its whole length, re-cased or split: fail closed
+  assert.equal(serviceText("a key of x/Ab9Z, or AB 9z, here", 200, ["ab9z"]), "a key of x/****, or ****, here");
+  // a token the command does not hold is still masked by its shape
+  assert.equal(held(`also masondata_pat_${"y".repeat(43)}`), "also masondata_pat_****");
+});
+
 test("parseLogins: the documented shape, or why not, never quoting the text", () => {
   assert.deepEqual(parseLogins('{"version":1,"logins":{}}'), { version: 1, logins: {} });
   const secret = "SECRET-IN-FILE";
