@@ -115,4 +115,16 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   the text (PR 170, 207).
 - `(j -> 'r')::text` under a GROUP BY of another expression: the engine's text (`2.45`), not Postgres's (`2.450`) (PR
   170; issue 212).
+- A jsonb member cast to a non-text type (`(j -> 'r')::float8`, `::int`, `::boolean`, `::numeric`, `::numeric / 3`,
+  `sum((j -> 'r')::numeric)`) over a synthetic `{"r": 2.450}`, `{"r": null}`, `{}`, `{"r": 9223372036854775807}`,
+  `{"r": 123456789012345678901234567890.5}`, `{"r": -0.0}`, plain, under `GROUP BY id, j -> 'r'`, `GROUP BY 1`,
+  through a derived table, a CTE and UNION ALL: JSON null reaching the engine's cast as the text `null` (22P02), or a
+  number's digits read through a double (`2.45` for `2.450`, a bigint's last digits lost); Postgres gives SQL NULL and
+  every digit written (class `jsonb-null-cast-to-number-engine-error`, PR 582).
+- A jsonb that is itself a GROUP BY key, sorted at the query level (`SELECT v::text FROM jq GROUP BY v ORDER BY v NULLS
+  FIRST`, `GROUP BY id, v ORDER BY v, id`, `ORDER BY v DESC NULLS LAST`, `DISTINCT ON (v) … GROUP BY v, id ORDER BY v,
+  id`, a VALUES-derived `x GROUP BY x ORDER BY x`) over nested values of every kind (`{"k": null}`, `{"k": "a"}`,
+  `{"k": 1}`, `{"k": true}`, `{"k": [1]}`, `{"k": {}}`, `{"k": {"a": 1}}`, SQL NULL): sorted by the group's equality
+  key, not Postgres's jsonb order, which the same ORDER BY ungrouped gets right (class
+  `grouped-jsonb-sorted-by-equality-key`, PR 582).
 - A stored path's fill given NULL over several rows: the NULL written in the column's own type (PR 144).
