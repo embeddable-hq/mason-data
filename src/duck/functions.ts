@@ -20,7 +20,7 @@ import { floatAsNumeric } from "./types.ts";
 import { intervalText } from "./types.ts";
 import { jsonbText, parseJson, writeJson, quoteJson, type Json } from "./jsonb.ts";
 import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
-import { compare, div, evaluateText, NumericError, numericOrderKey, numericText, numericToDouble, numericToInteger, parseNumeric, parseProgram, type NumericProgram } from "../lib/pg-numeric.ts";
+import { compare, div, evaluateText, fitsEngineType, NumericError, numericOrderKey, numericText, numericToDouble, numericToInteger, parseNumeric, parseProgram, type NumericProgram } from "../lib/pg-numeric.ts";
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
 import { gapMark } from "./gaps.ts";
@@ -852,6 +852,11 @@ export function registerFunctions(conn: DuckDBConnection): void {
     try { return evaluateText(parsedProgram(String(program)), values); }
     catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
   }, { nulls: "pass", varargs: true });
+  // WHETHER THE ENGINE'S TYPE HOLDS A BOUND NUMERIC EXACTLY (src/duck/rewrite.ts numericParamComparison, issue 214):
+  // DuckDB's name of the compared side's type (`typeof`) and the parameter's numeric_out text, both constants DuckDB
+  // folds at Execute, so this is called once a statement and the comparison it guards is the scan's own filter. A NULL
+  // is held by every type (the comparison's own NULL is Postgres's)
+  scalar(conn, "__mason_numeric_fits", [VARCHAR, VARCHAR], BOOLEAN, ([type, t]) => t === null || t === undefined || fitsEngineType(String(type), String(t)), { nulls: "pass" });
   // a numeric's ORDER KEY (src/duck/rewrite.ts exactOrderKey, issue 252): bytes that sort as numeric_cmp, so a program's
   // value is ordered, ranked and tied by its exact value, never by its double (1.00000000000000000001 and …02 are two)
   scalar(conn, "__mason_numeric_order", [VARCHAR], BLOB, ([t]) => {

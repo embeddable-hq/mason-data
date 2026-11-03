@@ -127,7 +127,7 @@ type On = "C, the key stored" | "libc" | "libc, the key stored";
 /** and where an invariant runs that no entry is planned in: the C shop of the stored key, through a listener with no
  *  keeper (the key per row over `SMALL_ORDERS`) */
 type Where = On | "C, nothing stored (the smaller shop)";
-interface Shape { name: string; sql: string; zone?: string; on?: On }
+interface Shape { name: string; sql: string; zone?: string; on?: On; values?: string[] }
 
 /** what PR #13's rewrites were made for, each in the spelling the tool sends (tests/duck-wire.test.ts holds their SQL
  *  and answers over small tables; here, their plans over a million rows) */
@@ -219,6 +219,10 @@ const REWRITTEN: Shape[] = [
   // a table's preview, plain and sorted by its key (late materialization: the winners' columns read after the sort)
   { name: "a table's preview: SELECT * LIMIT 100", sql: "SELECT * FROM orders LIMIT 100" },
   { name: "a table's sorted preview: ORDER BY the key LIMIT 1000", sql: "SELECT * FROM orders ORDER BY id DESC LIMIT 1000" },
+  // a filter an ORM or a BI tool binds (issue 214): a numeric parameter beside a DECIMAL column, the scan's own filter on
+  // the column under a guard DuckDB folds at Execute, no Mason function per row (never the parameter's double)
+  { name: "a numeric column = a bound parameter: the scan's filter", sql: "SELECT o.id FROM orders o WHERE o.amount = $1", values: ["19.99"] },
+  { name: "a numeric column BETWEEN two bound parameters: the scan's filter", sql: "SELECT count(*) FROM orders o WHERE o.amount BETWEEN $1 AND $2", values: ["10", "20"] },
 ];
 
 /** the BI shapes (tests/integration/oracle/bi-shapes.ts) whose plans are held: one of each structure — joins,
@@ -383,7 +387,7 @@ interface Skeleton {
    *  page's ORDER_BY sorts the winners a TOP_N found, and is no full sort) */
   full_sort: boolean;
 }
-interface Held extends Skeleton { name: string; sql: string; zone?: string; on?: On }
+interface Held extends Skeleton { name: string; sql: string; zone?: string; on?: On; values?: string[] }
 
 type JsonNode = Record<string, unknown> & { "Node Type": string; Plans?: JsonNode[] };
 const strings = (v: unknown): string[] => typeof v === "string" ? [v] : Array.isArray(v) ? v.flatMap(strings) : [];
@@ -632,17 +636,17 @@ after(async () => {
 
 /** Mason's EXPLAIN of a statement in a session zone, on a shop's listener: DuckDB's plan, the SQL Mason sends it and the
  *  functions it calls */
-async function explained(sql: string, zone = "UTC", { c }: Target = shop): Promise<{ plan: JsonNode; sent: string; functions: string[] }> {
+async function explained(sql: string, zone = "UTC", { c }: Target = shop, values?: string[]): Promise<{ plan: JsonNode; sent: string; functions: string[] }> {
   await c.query(`SET TimeZone = '${zone}'`);
-  const r = await c.query({ text: `EXPLAIN (VERBOSE, COSTS false, FORMAT JSON) ${sql}`, rowMode: "array", types: { getTypeParser: () => (v: string) => v } } as pg.QueryConfig);
+  const r = await c.query({ text: `EXPLAIN (VERBOSE, COSTS false, FORMAT JSON) ${sql}`, ...(values === undefined ? {} : { values }), rowMode: "array", types: { getTypeParser: () => (v: string) => v } } as pg.QueryConfig);
   const [doc] = JSON.parse(String((r.rows[0] as unknown[])[0])) as Array<{ Plan: JsonNode; Mason: { "Sent To Engine": string; "Mason Functions Engine Calls": string[] } }>;
   return { plan: doc!.Plan, sent: doc!.Mason["Sent To Engine"], functions: doc!.Mason["Mason Functions Engine Calls"] };
 }
 
 for (const shape of SHAPES) {
   test(`plan: ${shape.name}`, async () => {
-    const { plan, functions, sent } = await explained(shape.sql, shape.zone, await target(shape.on));
-    const now: Held = { name: shape.name, sql: shape.sql, ...(shape.zone === undefined ? {} : { zone: shape.zone }), ...(shape.on === undefined ? {} : { on: shape.on }),
+    const { plan, functions, sent } = await explained(shape.sql, shape.zone, await target(shape.on), shape.values);
+    const now: Held = { name: shape.name, sql: shape.sql, ...(shape.values === undefined ? {} : { values: shape.values }), ...(shape.zone === undefined ? {} : { zone: shape.zone }), ...(shape.on === undefined ? {} : { on: shape.on }),
       ...skeletonOf(plan, functions, sent) };
     measured.set(shape.name, now);
     if (UPDATE) return;
@@ -651,6 +655,7 @@ for (const shape of SHAPES) {
     assert.equal(was.sql, shape.sql, `"${shape.name}": the fixture holds another statement under this name — UPDATE_FIXTURE=1 npm run check, then read the diff`);
     assert.equal(was.zone, shape.zone, `"${shape.name}": the fixture holds it in another zone — UPDATE_FIXTURE=1 npm run check, then read the diff`);
     assert.equal(was.on, shape.on, `"${shape.name}": the fixture holds it planned over another shop — UPDATE_FIXTURE=1 npm run check, then read the diff`);
+    assert.deepEqual(was.values, shape.values, `"${shape.name}": the fixture holds it bound to other values — UPDATE_FIXTURE=1 npm run check, then read the diff`);
     const diff = lineDiff(lines(was), lines(now));
     assert.ok(diff.every((l) => l.startsWith("  ")),
       `the plan of "${shape.name}" changed (- the fixture's, + this run's). A regression (a delimiter join, an expression key under a top N, a full sort, a lost filter, more Mason calls): fix the change. A better plan: UPDATE_FIXTURE=1 npm run check, read the diff, and say which in the commit.\n` +
