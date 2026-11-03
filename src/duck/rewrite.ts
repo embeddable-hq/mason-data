@@ -759,6 +759,7 @@ class Rewriter {
       case "NullTest": return this.jsonNullTest(b);
       // CASE x WHEN v …: each WHEN is x = v, jsonb's equality for a jsonb (its keys compared)
       case "CaseExpr": {
+        this.caseOfNumericParam(b);
         if (!isNode(b.arg) || (this.typeOf(b.arg) !== JSONB && this.typeOf(b.arg) !== JSONB_ARRAY)) return null;
         b.arg = this.equated(b.arg, "CASE … WHEN of");
         for (const w of (b.args ?? []) as AstNode[]) if (isNode(bodyOf(w).expr)) bodyOf(w).expr = this.equalKey(bodyOf(w).expr as AstNode);
@@ -3314,7 +3315,8 @@ class Rewriter {
    * `numericCastWrite`); an operator, a function or an aggregate by what DuckDB computes from exact operands (+ - * a
    * DECIMAL, a sum / min / max / a window's or arg_min's pick the value's own type, a count an integer); the rewrite's
    * own integer casts (a variance's split squares) are integers. Anything else is not called exact: a quotient, `^`,
-   * `%`, an avg (DuckDB's doubles), a parameter (written as a double), a column a FROM item computes as a double
+   * `%`, an avg (DuckDB's doubles), a parameter (written as a double where it is read; COMPARED with a value this calls
+   * exact it is that value's own type or its exact key, `numericParamComparison`), a column a FROM item computes as a double
    * (`carry`), a function this does not know — whose value then has its program, or is the engine's everywhere.
    */
   private duckExact(n: AstNode): boolean {
@@ -3541,8 +3543,8 @@ class Rewriter {
   /**
    * TWO NUMERICS COMPARED FOR EQUALITY, each by its exact key (`exactKey`; a value the engine holds exactly by its own
    * text's key), or null where neither is decided exactly: the one comparison of a quotient, `=` and `<>`'s and
-   * NULLIF's (issue 242). A parameter alone is keyed only beside a value decided exactly (its bound text; DuckDB
-   * compares a column with it natively elsewhere)
+   * NULLIF's (issue 242). A parameter alone is keyed only beside a value decided exactly (its bound text); beside a
+   * value the ENGINE holds exactly it is never its double: `numericParamComparison`, asked first (issue 214)
    */
   private exactEquality(l: AstNode, r: AstNode): [AstNode, AstNode] | null {
     const kl = this.exactKey(l), kr = this.exactKey(r);
@@ -3550,6 +3552,96 @@ class Rewriter {
     const decided = (x: AstNode, k: AstNode | null): boolean => k !== null && kindOf(stripCasts(x)) !== "ParamRef";
     const sl = !decided(l, kl) && !decided(r, kr) ? null : side(l, kl), sr = sl === null ? null : side(r, kr);
     return sl !== null && sr !== null ? [sl, sr] : null;
+  }
+
+  /** a parameter of type numeric as it was bound, cast to nothing but numeric without a typmod (`$1`, `$1::numeric`):
+   *  its number, whose bound text is the value (Postgres's numeric_out, src/duck/analyze.ts readParameters); else null */
+  private plainNumericParam(x: AstNode): number | null {
+    let n = x;
+    while (kindOf(n) === "TypeCast" && isNode(bodyOf(n).arg)) {
+      const t = bodyOf(n).typeName;
+      if (!["numeric", "decimal"].includes(lastName(t?.names)) || ((t?.typmods ?? []) as unknown[]).length > 0 || Array.isArray(t?.arrayBounds)) return null;
+      n = bodyOf(n).arg as AstNode;
+    }
+    if (kindOf(n) !== "ParamRef") return null;
+    const number = Number(bodyOf(n).number);
+    return this.params[number - 1] === NUMERIC ? number : null;
+  }
+
+  /**
+   * A NUMERIC PARAMETER COMPARED WITH VALUES THE ENGINE HOLDS EXACTLY (issue 214, the class numeric-parameter-as-double):
+   * `x = $1`, `<>`, `<`, `<=`, `>`, `>=`, IS [NOT] DISTINCT FROM, NULLIF, IN a list and [NOT] BETWEEN, every
+   * other operand one `duckExact` calls exact (a DECIMAL column, an integer, + - * and sum / min / max of them) — never
+   * the parameter's double, which equates and orders values Postgres tells apart past 15 digits.
+   *
+   * NATIVE where the engine's own type of the compared value holds the bound value exactly: `CASE WHEN
+   * __mason_numeric_fits(typeof(x), $1::text) THEN x = $1 ELSE <keyed> END`. DuckDB casts the parameter into x's type
+   * (its prepared statement types the parameter by the comparison), which rounds a value past its scale and fails past
+   * its digits: so the guard decides, from DuckDB's own name of the type (`typeof`, never Postgres's typmod: a numeric(65,
+   * 30) is held as DECIMAL(38, the scale its values use), nor a type this module derives for an expression) and the bound
+   * text alone (src/lib/pg-numeric.ts `fitsEngineType`, the copy's own rule of what a DECIMAL holds). Both are constants,
+   * so DuckDB folds the guard at Execute: one call, and the comparison it keeps is the scan's own filter. A NULL fits.
+   *
+   * KEYED otherwise (a value past the scale or the digits, NaN, ±Infinity; a parameter under a cast with a typmod, which
+   * Postgres rounds first; more than one exact operand): each operand by its exact key, `__mason_numeric_key` for an
+   * equality, `__mason_numeric_order` for an order (numeric_cmp's: NaN above every number, ±Infinity outside them),
+   * the parameter by its bound text or its program's (`exactText`), a value the engine holds exactly by its own text.
+   * null: no numeric parameter here, or an operand with no exact value (a quotient: `exactEquality`; a value past 38
+   * digits: `numeric-over-38-digits`), left as it was.
+   */
+  private numericParamComparison(b: Body, operatorResolved = false): AstNode | null {
+    const kind = String(b.kind), name = lastName(b.name);
+    const equating = (kind === "AEXPR_OP" && ["=", "<>", "!="].includes(name)) || ["AEXPR_DISTINCT", "AEXPR_NOT_DISTINCT", "AEXPR_NULLIF", "AEXPR_IN"].includes(kind);
+    const ordering = (kind === "AEXPR_OP" && ["<", "<=", ">", ">="].includes(name)) || ["AEXPR_BETWEEN", "AEXPR_NOT_BETWEEN"].includes(kind);
+    const l = b.lexpr, r = b.rexpr;
+    if ((!equating && !ordering) || !isNode(l) || !isNode(r)) return null;
+    const listed = kind === "AEXPR_IN" || kind.includes("BETWEEN");
+    if (listed && kindOf(r) !== "List") return null;
+    const operands = [l, ...(listed ? (bodyOf(r).items ?? []) as AstNode[] : [r])];
+    // compared as numerics, by Postgres's own operator where it names one
+    if (!operands.every((x) => { const t = this.typeOf(x); return t === NUMERIC || (t !== null && INTEGERS.has(t)); })) return null;
+    if (kind === "AEXPR_OP" && !operatorResolved) { const t = this.typed({ A_Expr: b }); if (t?.args[0]?.type !== NUMERIC || t?.args[1]?.type !== NUMERIC) return null; }
+    const plain = operands.map((x) => this.plainNumericParam(x));
+    // a parameter under a cast with a typmod (`$1::numeric(30,20)`): its program's value, Postgres's rounding first
+    const ofParam = operands.map((x, i) => plain[i] !== null || (!this.duckExact(x) && kindOf(stripCasts(x)) === "ParamRef"
+      && this.params[Number(bodyOf(stripCasts(x)).number) - 1] === NUMERIC && this.exactText(x) !== null));
+    if (!ofParam.some(Boolean) || operands.some((x, i) => !ofParam[i] && !this.duckExact(x))) return null;
+    // NULLIF answers its first operand: a parameter there is printed, not compared (left as it was)
+    if (kind === "AEXPR_NULLIF" && ofParam[0]) return null;
+    const exactAt = operands.flatMap((_, i) => ofParam[i] ? [] : [i]);
+    // the native form: ONE value the engine holds exactly (first, or either side of an operator), every other operand a
+    // plain parameter, so each parameter is cast into that value's own type
+    const at = exactAt.length === 1 && exactAt[0] !== undefined && (exactAt[0] === 0 || kind === "AEXPR_OP") && plain.every((p, i) => i === exactAt[0] || p !== null) ? exactAt[0] : null;
+    const param = (n: number): AstNode => ({ ParamRef: { number: n } });
+    const f = equating ? "__mason_numeric_key" : "__mason_numeric_order";
+    const keys = operands.map((x, i) => fn(f, [plain[i] !== null ? cast(param(plain[i]!), ["varchar"]) : ofParam[i] ? this.exactText(x)! : cast(at === null ? x : this.clone(x), ["varchar"])]));
+    const rebuilt = (ops: AstNode[]): Body => ({ ...b, lexpr: ops[0]!, rexpr: listed ? { List: { items: ops.slice(1) } } : ops[1]! });
+    const keyed: AstNode = kind === "AEXPR_NULLIF" ? caseWhen([[op("=", keys[0]!, keys[1]!), nullConst()]], this.clone(l)) : { A_Expr: { ...rebuilt(keys), name: this.clone(b.name) } };
+    if (at === null) return keyed;
+    const exact = operands[at]!;
+    const guards = plain.flatMap((p, i) => i === at || p === null ? [] : [fn("__mason_numeric_fits", [fn("typeof", [this.clone(exact)]), cast(param(p), ["varchar"])])]);
+    // (the comparison as written, its parameters bare: this node, its exact operand walked as everywhere)
+    Object.assign(b, rebuilt(operands.map((x, i) => i === at ? x : param(plain[i]!))));
+    return caseWhen([[guards.length === 1 ? guards[0]! : and(guards), { A_Expr: b }]], keyed);
+  }
+
+  /** CASE x WHEN $1 …, x a value the engine holds exactly and a WHEN a numeric parameter (issue 214): each WHEN written
+   *  as the comparison it is, x = v, the parameter's by `numericParamComparison` (Postgres resolved each WHEN's `=` as
+   *  numeric's: every operand is a numeric or an integer, one a numeric parameter); x read once a WHEN, as CASE reads it */
+  private caseOfNumericParam(b: Body): void {
+    const arg = b.arg, whens = (b.args ?? []) as AstNode[];
+    if (!isNode(arg) || !this.duckExact(arg) || !whens.some((w) => isNode(bodyOf(w).expr) && kindOf(stripCasts(bodyOf(w).expr as AstNode)) === "ParamRef")) return;
+    let changed = false;
+    const compared = whens.map((w, i) => {
+      const x = i === 0 ? arg : this.clone(arg), v = bodyOf(w).expr as AstNode;
+      const viaParameter = this.numericParamComparison({ kind: "AEXPR_OP", name: [S("=")], lexpr: x, rexpr: v }, true);
+      if (viaParameter !== null) changed = true;
+      return viaParameter ?? op("=", x, v);
+    });
+    // (nothing changed where no WHEN is such a parameter: the clones are dropped unplaced)
+    if (!changed) return;
+    whens.forEach((w, i) => { bodyOf(w).expr = compared[i]!; });
+    delete b.arg;
   }
 
   /** null where a value is no numeric decided exactly; a refusal where it is one whose program cannot be read here (a
@@ -4205,6 +4297,10 @@ class Rewriter {
     // (an operand of a jsonb operator is a jsonb, a literal included: each is keyed, whatever its own analysis says)
     const lType = l === undefined ? null : this.typeOf(l);
     const comparing = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name);
+    // a numeric parameter compared with values the engine holds exactly: natively in their own type where it holds the
+    // bound value, else by exact keys — never the parameter's double (issue 214)
+    const viaParameter = this.numericParamComparison(b);
+    if (viaParameter !== null) return viaParameter;
     // a numeric decided exactly, compared for equality: by its exact key, the other side by its own (exactKey)
     if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 === NUMERIC && a1 === NUMERIC && l !== undefined && r !== undefined) {
       const sides = this.exactEquality(l, r);
@@ -5497,7 +5593,9 @@ class Rewriter {
   }
 
   private param(b: Body): AstNode | null {
-    // a parameter is bound as its text; Postgres decided its type, and DuckDB is told it
+    // a parameter is bound as its text; Postgres decided its type, and DuckDB is told it. A numeric one READ is the
+    // engine's double (a program over its `$n` cell where its digits are printed, `exactOf`); one COMPARED with a value
+    // the engine holds exactly never reaches here (`numericParamComparison`, issue 214)
     const oid = this.params[Number(b.number) - 1];
     // a text array is bound as the JSON Postgres read it to (src/duck/analyze.ts readParameters)
     if (oid === TEXT_ARRAY || oid === VARCHAR_ARRAY) return fn("from_json", [cast({ ParamRef: b }, ["varchar"]), strConst('["VARCHAR"]')]);

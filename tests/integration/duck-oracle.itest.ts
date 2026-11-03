@@ -129,7 +129,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "jcontain", "coll", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
+const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "jcontain", "coll", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
