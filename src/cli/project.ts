@@ -162,27 +162,48 @@ export function readProject(root: string): Project | BrokenProject | null {
   return { root, dir, folder: path.resolve(root, config.folder), config };
 }
 
+/** Where a project's files are, against its root: one of three places, or that it cannot be told, and why in plain words. */
+export type FolderPlace = { place: "inside" | "root" | "outside" } | { place: "unknown"; why: string };
+
+/** Why a path could not be resolved, in a person's words (the system's code beside them). */
+export function unresolvedWhy(e: unknown): string {
+  const code = (e as NodeJS.ErrnoException).code;
+  const words: Record<string, string> = {
+    ELOOP: "a symbolic link on the way leads back to itself (a loop)",
+    ENOTDIR: "a part of the path is a file, not a folder",
+    EACCES: "a folder on the way may not be read by this user",
+    EPERM: "a folder on the way may not be read by this user",
+    ENAMETOOLONG: "the path is longer than this system takes",
+  };
+  return code !== undefined && words[code] !== undefined ? `${words[code]} (${code})` : `the system could not resolve it (${code ?? (e as Error).message})`;
+}
+
 /**
  * WHERE A PROJECT'S FILES ARE, against its root (the folder `.mason/` is in): strictly `inside` it (a folder of their own,
  * `mason/`), the `root` itself (`mason init --folder .`), or `outside` it (`..`, `../app`, an absolute path elsewhere, a
  * link that leaves it). Read from the real paths — a folder not made yet by its nearest folder that is — so every
- * spelling of one place is one answer. The one authority: `mason init` refuses outside, `mason deploy` sends only from
- * inside (src/cli/deploy.ts: a root's or an outside folder's YAML is the application's, or anyone's).
+ * spelling of one place is one answer. A path that cannot be resolved (a loop, a file as a folder, a folder this user
+ * may not read, a path too long) is a fourth answer, `unknown` with why, never an exception: fail closed, each caller
+ * refuses it with the way out. The one authority: `mason init` refuses outside and unknown, `mason deploy` sends only
+ * from inside (src/cli/deploy.ts: a root's or an outside folder's YAML is the application's, or anyone's).
  */
-export function folderPlace(root: string, folder: string): "inside" | "root" | "outside" {
+export function folderPlace(root: string, folder: string): FolderPlace {
   const real = (p: string): string => {
     const rest: string[] = [];
     for (let d = path.resolve(p); ; d = path.dirname(d)) {
       try { return path.join(fs.realpathSync(d), ...rest.reverse()); }
       catch (e) {
+        // a part not made yet: the nearest one that is decides (a folder mason init will make); anything else is unknown
         if ((e as NodeJS.ErrnoException).code !== "ENOENT" || path.dirname(d) === d) throw e;
         rest.push(path.basename(d));
       }
     }
   };
-  const rel = path.relative(real(root), real(folder));
-  if (rel === "") return "root";
-  return rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel) ? "outside" : "inside";
+  let rel: string;
+  try { rel = path.relative(real(root), real(folder)); }
+  catch (e) { return { place: "unknown", why: unresolvedWhy(e) }; }
+  if (rel === "") return { place: "root" };
+  return { place: rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel) ? "outside" : "inside" };
 }
 
 /** Whether a lookup found a project it could read. */

@@ -203,7 +203,15 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const name = sourceless?.config.name ?? (f.values.name as string | undefined) ?? nameFromFolder(root);
   const folderArg = (f.values.folder as string | undefined) ?? "mason";
   const folder = sourceless?.folder ?? path.resolve(root, folderArg);
-  if (folderPlace(root, folder) === "outside") return usage(`--folder ${folderArg} is outside this folder`, "the project's files go in this folder or below it");
+  // the one authority on where the files go (src/cli/project.ts folderPlace): outside this folder, or a place it cannot
+  // resolve (a loop, a file as a folder, unreadable, too long), which can never become a project's folder, is refused
+  const place = folderPlace(root, folder);
+  const shownArg = folderArg.length > 200 ? `${folderArg.slice(0, 200)}…` : folderArg;
+  if (place.place === "outside") return usage(`--folder ${shownArg} is outside this folder`, "the project's files go in this folder or below it");
+  if (place.place === "unknown") {
+    return failed("init", { message: `--folder ${shownArg} cannot be resolved to a folder`, code: "usage", why: place.why,
+      fix: "name a folder of its own inside this one with --folder (the default, mason, is one), or fix the path" }, { json, io });
+  }
   if (fs.existsSync(folder) && !fs.statSync(folder).isDirectory()) return usage(`${folder} is a file, not a folder`, "--folder <dir> chooses another");
   const named = nameProblem(name);
   if (named) return usage(named);

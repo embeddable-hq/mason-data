@@ -14,6 +14,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
+import { unresolvedWhy } from "../src/cli/project.ts";
 import { seen } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
@@ -462,6 +463,45 @@ test("mason deploy: the project's files must be a folder strictly inside its roo
     const { a } = await deployWith({}, app, ["--replica", "acme/shop"]);
     assert.equal(a.code, 0, `absolute, inside: ${a.stderr}`);
   }
+});
+
+test("mason deploy: a project folder that cannot be resolved (a loop, a file as a folder, unreadable, too long) is refused saying why, in the failure shape, never a crash", async () => {
+  // each a shape the system refuses to resolve, made in a project of its own; the folder named in config.json
+  const shapes: Array<[string, RegExp, (root: string) => string]> = [
+    ["a link to itself", /a symbolic link on the way leads back to itself \(a loop\) \(ELOOP\)/, (root) => { fs.symlinkSync("mason", path.join(root, "mason")); return "mason"; }],
+    ["a loop of two links", /\(ELOOP\)/, (root) => { fs.symlinkSync("b", path.join(root, "a")); fs.symlinkSync("a", path.join(root, "b")); return "a"; }],
+    ["a file as a folder", /a part of the path is a file, not a folder \(ENOTDIR\)/, (root) => { fs.writeFileSync(path.join(root, "docker-compose.yml"), "x: 1\n"); return "docker-compose.yml/mason"; }],
+    ["a path too long", /the path is longer than this system takes \(ENAMETOOLONG\)/, () => Array.from({ length: 15 }, () => "x".repeat(300)).join("/")],
+  ];
+  // as root, a folder no user may read is read anyway: the unreadable shape is held where it can be made
+  if (process.getuid?.() !== 0) {
+    shapes.push(["a folder this user may not read", /may not be read by this user \(EACCES\)/, (root) => { fs.mkdirSync(path.join(root, "locked", "mason"), { recursive: true }); fs.chmodSync(path.join(root, "locked"), 0); return "locked/mason"; }]);
+  }
+  for (const [what, why, make] of shapes) {
+    const root = temp("mason-unresolved-");
+    fs.mkdirSync(path.join(root, ".mason"));
+    const folder = make(root);
+    fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder, remote: false, apiKey: "k".repeat(48) }), { mode: 0o600 });
+    for (const argv of [["--replica", "acme/shop"], ["--replica", "acme/shop", "--dry-run"], ["--replica", "acme/shop", "--json"]]) {
+      const { a, requests } = await deployWith({}, root, argv);
+      assert.equal(a.code, 1, `${what} ${argv.join(" ")}: ${a.stdout}${a.stderr}`);
+      assert.deepEqual(requests, [], `${what}: nothing sent`);
+      assert.doesNotMatch(a.stdout + a.stderr, /a bug in mason|\n\s+at /, `${what}: no crash`);
+      if (argv.includes("--json")) {
+        const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why: string; fix: string } }).error;
+        assert.equal(e.code, "refused", what);
+        assert.match(e.message, /^this project's files cannot be found: \.mason\/config\.json names "folder": ".*", which cannot be resolved$/, what);
+        assert.match(e.why, why, what);
+        assert.match(e.fix, /^set "folder" in \.mason\/config\.json to the project's folder, a folder of its own inside /, what);
+      } else {
+        assert.match(a.stderr, /^✗ mason deploy: this project's files cannot be found: \.mason\/config\.json names "folder": /m, what);
+        assert.match(a.stderr, why, what);
+      }
+    }
+    if (process.getuid?.() !== 0 && fs.existsSync(path.join(root, "locked"))) fs.chmodSync(path.join(root, "locked"), 0o700);
+  }
+  // the words, whoever runs this (an unreadable folder cannot be made as root)
+  assert.equal(unresolvedWhy(Object.assign(new Error("x"), { code: "EACCES" })), "a folder on the way may not be read by this user (EACCES)");
 });
 
 test("mason deploy: the replica is --replica, else MASON_REPLICA, each part held to its grammar; neither names both ways", async () => {

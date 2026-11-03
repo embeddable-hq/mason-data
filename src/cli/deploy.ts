@@ -241,13 +241,20 @@ const refuse = (message: string, why: string, fix: string): Failure => ({ messag
  */
 export function ownFolderRefusal(p: Project): Failure | null {
   const place = folderPlace(p.root, p.folder);
-  if (place === "inside") return null;
+  if (place.place === "inside") return null;
   const config = shownPath(p.root, path.join(p.dir, "config.json"));
+  // the config's value as it is written, bounded (a path may be long)
+  const named = JSON.stringify(p.config.folder.length > 200 ? `${p.config.folder.slice(0, 200)}…` : p.config.folder);
   const fix = `move mason.yml, roles.yml, sources/ and generated_tables/ into a folder of their own inside ${p.root} (mason/), and set "folder": "mason" in ${config}`;
-  return place === "root"
+  // a place that cannot be told is refused, saying it could not tell (fail closed), never thrown
+  if (place.place === "unknown") {
+    return refuse(`this project's files cannot be found: ${config} names "folder": ${named}, which cannot be resolved`, place.why,
+      `set "folder" in ${config} to the project's folder, a folder of its own inside ${p.root} (mason, as mason init writes it)`);
+  }
+  return place.place === "root"
     ? refuse("this project's files are its folder's own (mason init --folder .), beside the application's",
       "a deploy sends every .yml and .yaml under the project's files, and here that is every one of the application's", fix)
-    : refuse(`this project's files are outside its folder (${config} names ${JSON.stringify(p.config.folder)}, which is ${p.folder})`,
+    : refuse(`this project's files are outside its folder (${config} names ${named}, which is ${p.folder.length > 300 ? `${p.folder.slice(0, 300)}…` : p.folder})`,
       `a deploy sends every .yml and .yaml under the project's files, and outside ${p.root} that is anyone's`, fix);
 }
 
