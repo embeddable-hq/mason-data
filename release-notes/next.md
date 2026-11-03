@@ -210,16 +210,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A JSON value a `GROUP BY` names, such as `GROUP BY o.id, o.meta -> 'n'`, now reads as Postgres writes it wherever it
   is read**: its `::text`, `concat`, `format`, `jsonb_build_object`, `->>`, a `HAVING` or `ORDER BY` of its text, and a
   subquery or `WITH` around it. It lost the digits written (`2.450` read `2.45`, `0.10` read `0.1`) and an object's
-  spacing (`{"a":1}` for `{"a": 1}`), and a `#>` path so grouped failed with a syntax error.
-- **A JSON value cast to a number or a boolean answers as Postgres does**: `(meta -> 'n')::float8`, `::int`, `::bigint`
-  or `::boolean` of a JSON `null` is now SQL NULL instead of an error, grouped or not, and a JSON `2.5` cast to an integer
-  is `3`, rounded as Postgres rounds it. `::numeric` keeps every digit the JSON number was written with (`2.450`, never
-  `2.45`; `9223372036854775807`, never `9223372036854780000`), in a sum, a division, a `GROUP BY` and a subquery too. A
-  JSON string, boolean, array or object cast to a number (or a number cast to a boolean) fails as Postgres fails, `cannot
-  cast jsonb string to type integer` (22023), and `ARRAY[meta -> 'n']::int[]` or `::float8[]` casts each element the same
-  way; `::numeric[]` of a JSON array is refused with what to write instead. Under a `GROUP BY` of a JSON column, `ORDER BY` the name of an output
-  (`SELECT meta::text … GROUP BY meta ORDER BY meta`) sorts by that output's text, as Postgres does, instead of by the
-  JSON value.
+  spacing (`{"a":1}` for `{"a": 1}`), and a `#>` path so grouped failed with a syntax error. Under a `GROUP BY` of a
+  JSON column, `ORDER BY` the name of an output (`SELECT meta::text … GROUP BY meta ORDER BY meta`) sorts by that
+  output's text, as Postgres does, instead of by the JSON value.
 - **A numeric division or average is compared by its exact value**: `DISTINCT`, `GROUP BY`, `PARTITION BY`,
   `count(DISTINCT …)`, `=` and `<>` no longer treat two quotients as equal when they agree only in their first 17
   digits. A quotient in `ROLLUP` / `CUBE` / `GROUPING SETS`, in `sum(DISTINCT …)` and similar, or in a `UNION` /

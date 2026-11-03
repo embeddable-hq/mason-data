@@ -403,7 +403,7 @@ async function answer(c: pg.Client, text: string, values?: unknown[]): Promise<{
   return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows as unknown[][] };
 }
 async function postgres(text: string, values?: unknown[]): Promise<{ fields: Array<[string, number]>; rows: unknown[][] }> {
-  const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1000, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 1022, 1082, 1114, 1184, 1186, 1231, 1700, 3802].map((o) => [o, (v: string) => v])) });
+  const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1009, 1014, 1015, 1022, 1082, 1114, 1184, 1186, 1700, 3802].map((o) => [o, (v: string) => v])) });
   return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows };
 }
 
@@ -3963,32 +3963,11 @@ test("a jsonb expression's text under a GROUP BY of it is its stored text (issue
   } finally { await c.end(); }
 });
 
-// PR 582's review, round 1: (1) a jsonb cast to a number or a boolean is one route by the value's type, wherever it is read
-// (the column's read, a grouped expression's one any_value, a derived table's column): a JSON null is SQL NULL, never the
-// engine's cast of the text 'null' (22P02), and an integer the digits rounded half away from zero; (2) an ORDER BY's bare
-// name is the output it names first (`ORDER BY v` of `v::text` sorts the text), never the jsonb column grouped by its key
-test("a grouped jsonb's cast to a number is NULL for a JSON null, and an ORDER BY of an output's name sorts the output (PR 582 review r1)", async () => {
-  // (a jsonb's casts to a number or a boolean are not verified: a listener that refuses nothing holds the route)
-  const { api: a, c: open } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+// PR 582's review, round 1: an ORDER BY's bare name is the output it names first (`ORDER BY v` of `v::text` sorts the
+// text), never the jsonb column grouped by its key
+test("an ORDER BY of an output's name under a GROUP BY of a jsonb sorts the output (PR 582 review r1)", async () => {
   const c = await client();
   try {
-    const casts: Array<[string, "ordered" | "bag"]> = [];
-    for (const ty of ["float8", "real", "int", "bigint", "smallint"]) {
-      casts.push(
-        [`SELECT j.id, (j.j -> 'r')::${ty} AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id`, "ordered"],
-        [`SELECT j.id, (j.j -> 'r')::${ty} AS c FROM jnums j GROUP BY j.id ORDER BY j.id`, "ordered"],
-        [`SELECT j.id, (j.j -> 'r')::${ty} AS c FROM jnums j ORDER BY j.id`, "ordered"],
-        [`SELECT (j.j #> '{r}')::${ty} AS c, count(*) FROM jnums j GROUP BY j.j #> '{r}' ORDER BY 1 NULLS FIRST, 2`, "ordered"],
-        [`SELECT s.id, (s.k)::${ty} FROM (SELECT j.id, j.j -> 'r' AS k FROM jnums j) s ORDER BY s.id`, "ordered"],
-      );
-    }
-    casts.push(
-      ["SELECT (j.j -> 'r')::float8 + 1 AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
-      ["SELECT id, (v -> 'k')::float8, (v -> 'k')::int FROM jq WHERE id IN (1, 5, 11, 12) GROUP BY id, v -> 'k' ORDER BY id", "ordered"],
-      ["SELECT id, (v -> 'k')::boolean FROM jq WHERE id IN (5, 9, 12) GROUP BY id, v -> 'k' ORDER BY id", "ordered"],
-      ["SELECT x.id, (SELECT (y.j -> 'r')::float8 FROM jnums y WHERE y.id = x.id GROUP BY y.id, y.j -> 'r') FROM jnums x ORDER BY x.id", "ordered"],
-    );
-    assert.deepEqual(await unlike(open, casts), []);
     // (1, 1.0 and 1.00 are one group of jsonb's equality, whose text either may print: left out)
     assert.deepEqual(await unlike(c, [
       ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
@@ -4002,232 +3981,13 @@ test("a grouped jsonb's cast to a number is NULL for a JSON null, and an ORDER B
       ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST LIMIT 3", "ordered"],
       ["SELECT x::text AS x FROM (VALUES ('{\"k\": 1}'::jsonb), ('{\"k\": \"a\"}'), ('{\"k\": null}'), (NULL)) s(x) GROUP BY x ORDER BY x", "ordered"],
     ]), []);
-  } finally { await open.end(); await a.close(); await c.end(); }
-});
-
-// PR 582's review, round 2 (a class round of jsonb-null-cast-to-number-engine-error): a jsonb cast to an unconstrained
-// numeric keeps every digit the JSON number was written with (jsonb_numeric), in every reader that prints it — read as a
-// text cast to numeric is, its stored text Postgres's numeric_in reads (the program's cell), never the engine's double
-test("a jsonb cast to numeric keeps the number's every digit, in every reader (PR 582 review r2)", async () => {
-  // (numeric(jsonb) is not verified: a listener that refuses nothing holds the route)
-  const { api: a, c: open } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
-  try {
-    const big = `(VALUES (1, '9223372036854775807'::jsonb), (2, '1e30'), (3, '123456789012345678901234567890.5'), (4, '-0.0'), (5, '0.10'), (6, 'null'), (7, NULL), (8, '2.450')) v(i, x)`;
-    assert.deepEqual(await unlike(open, [
-      ["SELECT j.id, (j.j -> 'r')::numeric AS c FROM jnums j ORDER BY j.id", "ordered"],
-      ["SELECT j.id, (j.j #> '{r}')::numeric AS c FROM jnums j ORDER BY j.id", "ordered"],
-      ["SELECT j.id, ((j.j -> 'r')::numeric)::text AS c FROM jnums j ORDER BY j.id", "ordered"],
-      ["SELECT j.id, (j.j -> 'r')::numeric AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
-      ["SELECT j.id, (j.j -> 'r')::numeric AS c FROM jnums j GROUP BY j.id ORDER BY j.id", "ordered"],
-      ["SELECT (j.j -> 'r')::numeric AS c, count(*) FROM jnums j GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
-      ["SELECT (j.j -> 'r')::numeric AS c, count(*) FROM jnums j GROUP BY j.j -> 'r' ORDER BY 1 NULLS FIRST", "ordered"],
-      ["SELECT sum((j.j -> 'r')::numeric), max((j.j -> 'r')::numeric), min((j.j -> 'r')::numeric) FROM jnums j", "ordered"],
-      ["SELECT j.id, (j.j -> 'r')::numeric / 3 AS q, (j.j -> 'r')::numeric + 1 AS p FROM jnums j ORDER BY j.id", "ordered"],
-      ["SELECT s.id, s.k::numeric FROM (SELECT j.id, j.j -> 'r' AS k FROM jnums j) s ORDER BY s.id", "ordered"],
-      ["WITH w AS (SELECT j.id, (j.j -> 'r')::numeric AS c FROM jnums j) SELECT id, c FROM w ORDER BY id", "ordered"],
-      ["SELECT (j.j -> 'r')::numeric AS c FROM jnums j UNION ALL SELECT 1.50 ORDER BY 1 NULLS FIRST", "ordered"],
-      ["SELECT x.id, (SELECT (y.j -> 'r')::numeric FROM jnums y WHERE y.id = x.id) FROM jnums x ORDER BY x.id", "ordered"],
-      ["SELECT DISTINCT (j.j -> 'r')::numeric AS c FROM jnums j ORDER BY 1 NULLS FIRST", "ordered"],
-      ["SELECT j.id FROM jnums j WHERE (j.j -> 'r')::numeric > 1 ORDER BY (j.j -> 'r')::numeric", "ordered"],
-      [`SELECT i, x::numeric, (x::numeric)::text FROM ${big} ORDER BY i`, "ordered"],
-      [`SELECT i, x::numeric / 3 FROM ${big} WHERE i <> 2 ORDER BY i`, "ordered"],
-      [`SELECT sum(x::numeric) FROM ${big} WHERE i > 2`, "ordered"],
-    ]), []);
-    // and the allowlist's listener answers it, verified by the oracle's legs (numeric(jsonb), CI fix 1 of PR 582)
-    const c = await client();
-    try {
-      assert.deepEqual(await unlike(c, [
-        ["SELECT j.id, (j.j -> 'r')::numeric AS c, ((j.j -> 'r')::numeric)::text FROM jnums j ORDER BY j.id", "ordered"],
-        ["SELECT j.g, sum((j.j -> 'r')::numeric) FROM jnums j GROUP BY j.g ORDER BY 1", "ordered"],
-      ]), []);
-    } finally { await c.end(); }
-  } finally { await open.end(); await a.close(); }
-});
-
-// PR 582's review, round 4 (the class round of jsonb-null-cast-to-number-engine-error, met a third time, and
-// jsonb-cast-of-wrong-kind-sqlstate): EVERY way a jsonb reaches a cast to a number or a boolean goes through the one route
-// (`jsonbScalar`), which reads the JSON kind first, as Postgres's cannotCastJsonbValue does: a JSON null is SQL NULL, the
-// target's kind is converted, any other kind is Postgres's 22023 in its words. jnat's `b -> 'a'`: 9 to 17 numbers (1,
-// 1.0, 1.50, 1e2, 1e20, 1.0000000000000000001, the int64 edges, past uint64), 18 a string, 20 a JSON null, 21 / 22
-// booleans, 23 an array, 24 an object, 2 a missing key, 1 an SQL NULL; the whole `b`: 2 an object, 3 an array, 4 a
-// string, 5 a number, 6 a boolean, 7 a JSON null
-test("every way a jsonb reaches a cast to a number or a boolean (PR 582 review r4)", async () => {
-  // (the array casts' pieces are verified only by this push's oracle legs: a listener that refuses nothing holds the route)
-  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
-  try {
-    const good: Record<string, string> = {
-      smallint: "1, 2, 9, 10, 11, 12, 20", integer: "1, 2, 9, 10, 11, 12, 20", bigint: "1, 2, 9, 10, 11, 12, 15, 20",
-      real: "1, 2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20", "double precision": "1, 2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20",
-      numeric: "1, 2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20", "numeric(10,2)": "1, 2, 9, 10, 11, 12, 20", boolean: "1, 2, 20, 21, 22",
-    };
-    const statements: Array<[string, "ordered" | "bag"]> = [];
-    for (const [ty, ids] of Object.entries(good)) {
-      // (1) a plain cast, of a member and of the whole value; (2) CAST's spelling
-      statements.push([`SELECT id, (b -> 'a')::${ty} FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"]);
-      statements.push([`SELECT id, CAST(b -> 'a' AS ${ty}) FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"]);
-      statements.push([`SELECT id, b::${ty} FROM jnat WHERE id IN (1, 7, ${ty === "boolean" ? 6 : 5}) ORDER BY id`, "ordered"]);
-      // every other kind: Postgres's 22023, naming the kind and the type
-      for (const wrong of ty === "boolean" ? [9, 18, 23, 24] : [18, 21, 23, 24]) statements.push([`SELECT id, (b -> 'a')::${ty} FROM jnat WHERE id = ${wrong}`, "ordered"]);
-      for (const wrong of ty === "boolean" ? [2, 3, 4, 5] : [2, 3, 4, 6]) statements.push([`SELECT id, b::${ty} FROM jnat WHERE id = ${wrong}`, "ordered"]);
+    // a grouped jsonb cast to a number or a boolean is refused by name as main refuses it (the allowlist has not verified
+    // float8(jsonb), float4(jsonb), numeric(jsonb) or bool(jsonb): #648 holds them), never the engine's 22P02 of 'null'
+    for (const ty of ["float8", "real", "numeric(10,2)", "boolean", "int"]) {
+      const sql = `SELECT j.id, (j.j -> 'r')::${ty} AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id`;
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap unverified\b/.test(`${e.detail ?? ""} ${e.hint ?? ""}`), sql);
     }
-    for (const ty of ["integer", "numeric", "double precision", "boolean"]) {
-      // (1 and 1.0 are one numeric, whose text a group or a sort's tie may print either way: 1.0 left out)
-      const ids = ty === "numeric" ? "1, 2, 9, 11, 12, 14, 15, 20" : good[ty]!, bad = ty === "boolean" ? 9 : 18;
-      statements.push(
-        // (4) a CASE and a COALESCE arm
-        [`SELECT id, (CASE WHEN id > 0 THEN b -> 'a' END)::${ty} FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"],
-        [`SELECT id, coalesce(b -> 'x', b -> 'a')::${ty} FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"],
-        [`SELECT id, coalesce(b -> 'x', b -> 'a')::${ty} FROM jnat WHERE id = ${bad}`, "ordered"],
-        // (5) a derived table's, a CTE's and a scalar subquery's output
-        [`SELECT s.id, s.v::${ty} FROM (SELECT id, b -> 'a' AS v FROM jnat WHERE id IN (${ids})) s ORDER BY s.id`, "ordered"],
-        [`WITH w AS (SELECT id, b -> 'a' AS v FROM jnat) SELECT id, v::${ty} FROM w WHERE id = ${bad}`, "ordered"],
-        [`SELECT x.id, (SELECT y.b -> 'a' FROM jnat y WHERE y.id = x.id)::${ty} FROM jnat x WHERE x.id IN (${ids}) ORDER BY x.id`, "ordered"],
-        // (6) grouped, read per group by the key; (7) the cast repeated in GROUP BY and ORDER BY
-        [`SELECT id, (b -> 'a')::${ty} FROM jnat WHERE id IN (${ids}) GROUP BY id, b -> 'a' ORDER BY id`, "ordered"],
-        [`SELECT id, (b -> 'a')::${ty} FROM jnat WHERE id = ${bad} GROUP BY id, b -> 'a'`, "ordered"],
-        [`SELECT (b -> 'a')::${ty} AS v, count(*) FROM jnat WHERE id IN (${ids}) GROUP BY (b -> 'a')::${ty} ORDER BY (b -> 'a')::${ty} NULLS FIRST`, "ordered"],
-        [`SELECT (b -> 'a')::${ty} AS v FROM jnat WHERE id = ${bad} GROUP BY (b -> 'a')::${ty} ORDER BY (b -> 'a')::${ty}`, "ordered"],
-        // (8) a set operation's arm; (9) a function returning jsonb
-        [`SELECT (b -> 'a')::${ty} FROM jnat WHERE id IN (${ids}) UNION ALL SELECT NULL ORDER BY 1 NULLS FIRST`, "ordered"],
-        [`SELECT e::${ty} FROM jsonb_array_elements('[null, ${ty === "boolean" ? "true" : "2.50"}]'::jsonb) e ORDER BY 1 NULLS FIRST`, "ordered"],
-        [`SELECT j.id, e::${ty} FROM jnat j, jsonb_array_elements(CASE WHEN j.id = 23 THEN j.b -> 'a' END) e ORDER BY 1, 2`, "ordered"],
-        [`SELECT j.id, e::${ty} FROM jnat j, jsonb_array_elements(CASE WHEN j.id = 8 THEN j.b END) e`, "ordered"],
-        // (10) an array of it cast to an array of the type (the unconstrained numeric[] is refused by name: below)
-        ...ty === "numeric" ? [] : [
-          [`SELECT id, (ARRAY[b -> 'a'])::${ty}[] FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"] as [string, "ordered"],
-          [`SELECT id, (ARRAY[b -> 'a', b -> 'x'])::${ty}[] FROM jnat WHERE id = ${bad}`, "ordered"] as [string, "ordered"],
-          [`SELECT (array_agg(b -> 'a' ORDER BY id))::${ty}[] FROM jnat WHERE id IN (${ids})`, "ordered"] as [string, "ordered"],
-        ],
-      );
-    }
-    statements.push(
-      // (3) a cast spelt as a function; (10) numeric(p,s)[] and the other array types; (11) the numeric program's cell
-      ["SELECT id, numeric(b -> 'a') FROM jnat WHERE id IN (1, 2, 9, 11, 14, 20) ORDER BY id", "ordered"],
-      ["SELECT id, numeric(b -> 'a') FROM jnat WHERE id = 21", "ordered"],
-      ["SELECT id, (ARRAY[b -> 'a'])::numeric(10,2)[], (ARRAY[b -> 'a'])::smallint[], (ARRAY[b -> 'a'])::bigint[], (ARRAY[b -> 'a'])::real[] FROM jnat WHERE id IN (1, 9, 11, 20) ORDER BY id", "ordered"],
-      ["SELECT id, (ARRAY[b -> 'a'])::real[] FROM jnat WHERE id = 24", "ordered"],
-      // (an element of the array read back: the list the route makes subscripted as Postgres's array is)
-      ["SELECT id, ((ARRAY[b -> 'a'])::int[])[1], ((ARRAY[b -> 'a'])::float8[])[1], ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (1, 9, 11, 20) ORDER BY id", "ordered"],
-      ["SELECT id, ((ARRAY[b -> 'a'])::boolean[])[1] FROM jnat WHERE id IN (1, 20, 21) ORDER BY id", "ordered"],
-      ["SELECT id, (b -> 'a')::numeric / 3, ln((b -> 'a')::numeric), sum((b -> 'a')::numeric) OVER () FROM jnat WHERE id IN (9, 11, 12, 14) ORDER BY id", "ordered"],
-      ["SELECT id, (b -> 'a')::numeric / 3 FROM jnat WHERE id = 18", "ordered"],
-      ["SELECT ln((b -> 'a')::numeric) FROM jnat WHERE id = 24", "ordered"],
-      ["SELECT sum((b -> 'a')::numeric) FROM jnat WHERE id IN (9, 23)", "ordered"],
-    );
-    assert.deepEqual(await unlike(c, statements), []);
-    // an unconstrained numeric[] of a jsonb array: the engine's list cannot keep a number's written digits, so refused by
-    // name, as array_agg of a numeric program is
-    for (const sql of ["SELECT id, (ARRAY[b -> 'a'])::numeric[] FROM jnat WHERE id IN (9, 11) ORDER BY id", "SELECT (array_agg(b -> 'a'))::numeric[] FROM jnat WHERE id = 11",
-      "SELECT id, (ARRAY[b -> 'a'])::numeric(40,1)[] FROM jnat WHERE id IN (9, 11) ORDER BY id"]) {
-      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap array-subquery-element\b/.test(`${e.detail ?? ""} ${e.hint ?? ""} ${e.message}`), sql);
-    }
-  } finally { await c.end(); await a.close(); }
-});
-
-test("the jsonb route to a number is an ordinary value to every reader around it, and refused where a set operation's numeric column would read it at one scale (PR 582 review r5, r7)", async () => {
-  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
-  try {
-    const statements: Array<[string, "ordered" | "bag"]> = [];
-    // class 1: = ANY / <> ALL / IN / NOT IN / a comparison / CASE / COALESCE / NULLIF around every form the route answers,
-    // in a batch holding an SQL NULL document (1), a missing key (2) and a JSON null (20) beside the numbers
-    const forms = (ty: string): string[] => [`(b -> 'a')::${ty}`, `((ARRAY[b -> 'a'])::${ty}[])[1]`, `CAST(b -> 'a' AS ${ty})`];
-    for (const ty of ["smallint", "integer", "bigint", "real", "double precision", "numeric", "numeric(5,1)", "boolean"]) {
-      const k = ty === "boolean" ? "true" : "1", other = ty === "boolean" ? "false" : "2";
-      // (14's 1.0000000000000000001 left out: an unconstrained numeric's = ANY (ARRAY[…]) compares the engine's double,
-      // as a text's cast to numeric does on the base, a finding of its own)
-      const ids = ty === "boolean" ? "1, 2, 20, 21, 22" : ["smallint", "integer", "bigint", "numeric"].includes(ty) ? "1, 2, 9, 11, 12, 20" : "1, 2, 9, 11, 12, 14, 20";
-      for (const f of forms(ty).filter((f) => ty !== "numeric" || !f.includes("[]"))) {
-        statements.push(
-          [`SELECT id, ${k} = ANY (ARRAY[${f}]), ${k} <> ALL (ARRAY[${f}]), ${k} = ANY (ARRAY[${f}, ${other}]) FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"],
-          [`SELECT id FROM jnat WHERE id IN (${ids}) AND NOT (${k} = ANY (ARRAY[${f}])) ORDER BY id`, "ordered"],
-          [`SELECT id, ${f} IN (${k}, ${other}), ${f} NOT IN (${k}), ${f} = ${k}, ${f} <> ${k} FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"],
-          [`SELECT id, CASE WHEN ${f} = ${k} THEN 'y' ELSE 'n' END, NULLIF(${f}, ${k}), COALESCE(${f}, ${f}) FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"],
-        );
-      }
-      if (ty !== "numeric") statements.push([`SELECT id, ${k} = ANY ((ARRAY[b -> 'a'])::${ty}[]), ${k} <> ALL ((ARRAY[b -> 'a', b -> 'x'])::${ty}[]) FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"]);
-    }
-    // class 2: a set operation's arm, where Postgres resolved a type every arm is held as by the engine; the scalar
-    // numeric(p,s) beside an integer in a UNION ALL, each arm's text its own (`exactArms`)
-    statements.push(
-      ["SELECT (ARRAY[b -> 'a'])::int[] FROM jnat WHERE id IN (1, 2, 9, 20) UNION ALL VALUES ('{5}'::int[]) ORDER BY 1", "ordered"],
-      ["VALUES ('{5.5}'::float8[]) UNION ALL SELECT (ARRAY[b -> 'a'])::float8[] FROM jnat WHERE id IN (1, 2, 9, 11, 20)", "bag"],
-      ["SELECT ((ARRAY[b -> 'a'])::float8[])[1] FROM jnat WHERE id IN (1, 9, 11) UNION ALL SELECT 2.5::float8 ORDER BY 1", "ordered"],
-      ["SELECT ((ARRAY[b -> 'a'])::boolean[])[1] FROM jnat WHERE id IN (1, 21, 22) UNION SELECT true ORDER BY 1", "ordered"],
-      ["SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (1, 9, 11) INTERSECT SELECT 1 ORDER BY 1", "ordered"],
-      ["SELECT (b -> 'a')::numeric(10,3) FROM jnat WHERE id IN (9, 11, 12) UNION ALL SELECT 1", "bag"],
-      ["SELECT 1 UNION ALL SELECT (b -> 'a')::numeric(5,1) FROM jnat WHERE id IN (9, 11, 12)", "bag"],
-      // (PR 582 review r6, set-op-refusal-by-containment-not-engine-type: decided by the arms' types and scales, never by
-      // what a value contains) a value that is not the route's array, beside another scale
-      ["SELECT array_length((ARRAY[b -> 'a'])::int[], 1) FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1.5", "bag"],
-      ["SELECT cardinality((ARRAY[b -> 'a'])::int[]) + 0.5 FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1", "bag"],
-      ["SELECT CASE WHEN 1 = ANY ((ARRAY[b -> 'a'])::int[]) THEN 1.5 ELSE 2 END FROM jnat WHERE id IN (9, 11, 12) UNION ALL SELECT 3", "bag"],
-      ["SELECT sum(((ARRAY[b -> 'a'])::int[])[1]) FROM jnat WHERE id IN (9, 11, 12) UNION ALL SELECT 1.5", "bag"],
-      ["WITH q AS (SELECT ((ARRAY[b -> 'a'])::int[])[1] AS x FROM jnat WHERE id IN (1, 9, 11)) SELECT x FROM q UNION ALL SELECT 1.5", "bag"],
-      ["SELECT n FROM (SELECT cardinality((ARRAY[b -> 'a'])::int[]) AS n FROM jnat WHERE id IN (9, 11)) s UNION ALL SELECT 1.5", "bag"],
-      // the route's array or element beside one of its own writer and scale, under every set operation, a VALUES arm, a `*`,
-      // a derived table, a CTE and a nested set operation
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (1, 9, 11) UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (12, 20)", "bag"],
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (1, 9, 11) UNION SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (11, 12)", "bag"],
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (1, 9, 11) INTERSECT SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (11, 12)", "bag"],
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (1, 9, 11) EXCEPT ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 11", "bag"],
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT NULL", "bag"],
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT ARRAY[2.5::numeric(10,3)]", "bag"],
-      ["SELECT * FROM (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS x FROM jnat WHERE id IN (9, 11)) s UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 12", "bag"],
-      ["WITH w AS (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS x FROM jnat WHERE id IN (9, 11)) SELECT x FROM w UNION ALL SELECT x FROM w", "bag"],
-      ["(SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 12) UNION SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 14", "bag"],
-      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (1, 9, 11) UNION ALL SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id = 12", "bag"],
-      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (1, 9, 11) UNION ALL VALUES (2.450), (NULL)", "bag"],
-      ["SELECT ((ARRAY[b -> 'a'])::numeric(5,1)[])[1] FROM jnat WHERE id IN (9, 11) INTERSECT ALL SELECT ((ARRAY[b -> 'a'])::numeric(5,1)[])[1] FROM jnat WHERE id IN (11, 12)", "bag"],
-      ["SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1", "bag"],
-      // (PR 582 review r7: decided by the engine's type of each arm against the column Postgres resolved, never by a
-      // list of writers) every other writer of the same numeric(10,3)[] beside the route, under each set operation, a
-      // VALUES arm, a `*` of a derived table and of a CTE, a nested set operation; an arm of another type that has no row
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS x FROM jnat WHERE id IN (9, 11, 20) UNION ALL SELECT (ARRAY[id])::numeric(10,3)[] FROM jnat WHERE id IN (2, 3)", "bag"],
-      ["SELECT CAST(ARRAY[id] AS numeric(10,3)[]) FROM jnat WHERE id IN (2, 3) UNION SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11)", "bag"],
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) INTERSECT SELECT (ARRAY[1.5])::numeric(10,3)[]", "bag"],
-      ["SELECT (ARRAY[b -> 'a', b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) EXCEPT ALL SELECT (ARRAY[id, id])::numeric(10,3)[] FROM jnat WHERE id = 1", "bag"],
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL VALUES ((ARRAY[2.5])::numeric(10,3)[]), (NULL)", "bag"],
-      ["SELECT * FROM (SELECT (ARRAY[id])::numeric(10,3)[] AS x FROM jnat WHERE id IN (2, 3)) s UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11)", "bag"],
-      ["WITH w AS (SELECT (ARRAY[id])::numeric(10,3)[] AS x FROM jnat WHERE id IN (2, 3)) SELECT * FROM w UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11)", "bag"],
-      ["(SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT (ARRAY[id])::numeric(10,3)[] FROM jnat WHERE id = 2) UNION SELECT (ARRAY[1.5])::numeric(10,3)[]", "bag"],
-      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT '{1}'::numeric[] WHERE false", "bag"],
-      // an element beside an element of another writer, and beside an integer, under each set operation
-      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11, 20) UNION ALL SELECT ((ARRAY[id])::numeric(10,3)[])[1] FROM jnat WHERE id IN (2, 3)", "bag"],
-      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11, 20) UNION ALL SELECT 1", "bag"],
-      ["SELECT 1 UNION ALL SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11)", "bag"],
-      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11) EXCEPT SELECT 1", "bag"],
-      ["SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1.5", "bag"],
-    );
-    assert.deepEqual(await unlike(c, statements), []);
-    // where Postgres's column is numeric[], an arm the engine holds as another type than the column needs (a constant's
-    // double[], an integer[], another scale) is refused by name, at plan time or by the arm's first row, never one type's text
-    for (const sql of ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL VALUES ('{NULL}'::numeric(10,3)[])",
-      "VALUES ('{NULL}'::numeric(10,3)[]) UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11)",
-      "SELECT (ARRAY[b -> 'a'])::int[] FROM jnat WHERE id IN (9, 11) UNION ALL VALUES ('{1}'::numeric(10,3)[])",
-      "SELECT s.v FROM (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS v FROM jnat WHERE id IN (9, 11)) s UNION ALL VALUES ('{NULL}'::numeric(10,3)[])",
-      "SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT '{1}'::numeric[]",
-      "SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(5,1)[] FROM jnat WHERE id IN (9, 11)",
-      "SELECT * FROM (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS x FROM jnat WHERE id IN (9, 11)) s UNION ALL SELECT ARRAY[1.5]",
-      "VALUES (((SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 11))) UNION ALL SELECT '{1}'::numeric[]"]) {
-      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap array-subquery-element\b/.test(`${e.detail ?? ""} ${e.hint ?? ""} ${e.message}`), sql);
-    }
-    // an element beside an integer under a UNION is answered, at the registry's decided difference (mixed-scale-numeric:
-    // one scale for the column, `1000.000` for Postgres's `1000`), every value Postgres's
-    const union = "SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11, 20) UNION SELECT 1000 ORDER BY 1";
-    const values = (a: { rows: unknown[][] }): unknown[] => a.rows.map((r) => r[0] === null ? null : Number(r[0]));
-    assert.deepEqual(values(await answer(c, union)), values(await postgres(union)), union);
-    // where every arm agrees, the comparison is folded away: the engine is sent the value, its plan the arms' own
-    const plan = (await c.query({ text: "EXPLAIN SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat UNION ALL SELECT (ARRAY[id])::numeric(10,3)[] FROM jnat", rowMode: "array" } as pg.QueryConfig)).rows.map((r) => String((r as unknown[])[0])).join("\n");
-    assert.match(plan, /typeof\(/, "the arms' types are compared in the statement sent");
-    // (the engine's own plan, after Mason's lines: a projection of each arm's columns, no CASE and no call left in it)
-    const engine = plan.slice(plan.indexOf("\nUnion"));
-    assert.ok(engine.length > 1 && !/__mason_set_column_type|CASE|typeof/.test(engine), `no comparison is left in the engine's plan: ${plan}`);
-    // an unconstrained numeric's rows compared whole: its digits are its program's, which no set operation carries, so
-    // refused as a numeric program's rows are (a numeric(p,s) is the engine's DECIMAL, compared as the base compared it)
-    for (const sql of ["SELECT (b -> 'a')::numeric FROM jnat WHERE id IN (9, 11) EXCEPT SELECT 1", "SELECT (b -> 'a')::numeric FROM jnat WHERE id IN (9, 11) UNION SELECT 1"]) {
-      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-quotient-equality\b/.test(`${e.detail ?? ""} ${e.hint ?? ""} ${e.message}`), sql);
-    }
-  } finally { await c.end(); await a.close(); }
+  } finally { await c.end(); }
 });
 
 test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exact text (PR 207's review)", async () => {

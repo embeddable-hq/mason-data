@@ -92,13 +92,6 @@ export class Unrewritable extends Error {
 const INT2 = 21, INT4 = 23, INT8 = 20, FLOAT4 = 700, FLOAT8 = 701, NUMERIC = 1700, TEXT = 25, VARCHAR = 1043, BPCHAR = 1042, NAME = 19, TEXT_ARRAY = 1009, VARCHAR_ARRAY = 1015;
 const DATE = 1082, TIMESTAMP = 1114, TIMESTAMPTZ = 1184, INTERVAL = 1186, JSON_OID = 114, JSONB = 3802, UNKNOWN = 705, INET = 869, RECORD = 2249;
 const INTEGERS = new Set([INT2, INT4, INT8]);
-/** a jsonb's casts to a scalar Postgres reads from its JSON (jsonb_int2 … jsonb_numeric, jsonb_bool): each target's
- *  engine type its text is cast to, and its name as format_type writes it in Postgres's 22023 (`jsonbScalar`, the one
- *  reader); bool is 16 */
-const JSONB_SCALAR_CASTS: ReadonlyMap<number, readonly [string, string]> = new Map([[INT2, ["smallint", "smallint"]], [INT4, ["integer", "integer"]],
-  [INT8, ["bigint", "bigint"]], [FLOAT4, ["real", "real"]], [FLOAT8, ["double", "double precision"]], [NUMERIC, ["numeric", "numeric"]], [16, ["boolean", "boolean"]]]);
-/** an array of jsonb cast to an array of one of those (Postgres's ArrayCoerceExpr over the element's cast): the element */
-const JSONB_ARRAY_CASTS: ReadonlyMap<number, number> = new Map([[1005, INT2], [1007, INT4], [1016, INT8], [1021, FLOAT4], [1022, FLOAT8], [1231, NUMERIC], [1000, 16]]);
 const FLOATS = new Set([FLOAT4, FLOAT8]);
 /** the fields of a time that grow with it, ±Infinity of an infinite one (Postgres 14+); the rest are NULL of it */
 const MONOTONIC = new Set(["year", "years", "decade", "decades", "century", "centuries", "millennium", "millennia", "isoyear", "epoch", "julian"]);
@@ -1836,7 +1829,6 @@ class Rewriter {
       // where the analysis is not found, or the arm cannot be written, the statement is refused, never answered
       // with the engine's own unifying of the two
       if (found === undefined && (this.setOps ?? []).some((q) => q.columns.some((c, i) => c?.type === TIMETZ && q.armTypes.some((a) => a === null || a[i] === TIME)))) refuseTimetz();
-      if (found !== undefined && resolved !== null) this.guardArmTypes(b, found);
       if (found !== undefined && resolved !== null) for (const [ai, arm] of this.setOperationArms(b).entries()) {
         const armTypes = found.armTypes[ai] ?? null;
         const timeArm = (i: number): boolean => resolved[i]?.type === TIMETZ && (armTypes === null || armTypes[i] === TIME);
@@ -1872,97 +1864,6 @@ class Rewriter {
     for (const [k, x] of Object.entries(b)) this.castArms(armOf(k, x) ?? x, inner);
   }
 
-  /**
-   * A SET OPERATION'S numeric[] COLUMN, DECIDED BY THE ENGINE'S TYPE OF EACH ARM (PR 582 review r7, the class
-   * set-op-refusal-by-containment-not-engine-type): Postgres coerces every arm to the column it resolved
-   * (`setOperationOutputs`) and, where the arms' typmods differ, keeps each value at its own scale; the engine unifies the
-   * arms by its own rules, so a DECIMAL(10, 3)[] beside a double[] is a double[] (`{2.45}` for `{2.450}`) and beside a
-   * DECIMAL(5, 1)[] a DECIMAL(10, 3)[] (`{2.500}` for `{2.5}`). Two types are compared, each from its one authority: the
-   * engine type the column requires, `R` (`duckTypeOf` of Postgres's resolved numeric(p, s)[]; where Postgres resolved
-   * none, the one numeric(p, s) typmod its analysis gives the arms, `armTypmods`), and each arm's ENGINE type, as the
-   * engine binds the rewritten statement: `typeof`, which DuckDB folds at bind (the bound type `prepare` reports, which
-   * store.ts's `run` reads of a result). The rewrite runs before anything is prepared and an arm is no output column, so
-   * the comparison is written into the statement (`armTypeGuard`): it folds to the value where they agree, and to the
-   * registry's refusal where they do not. Two typmods among the arms are refused here: the engine's column has one type.
-   * None leaves the column to the engine, as it was. Each arm's value is guarded where it is written: its target, a
-   * VALUES row's item, each SELECT of a nested set operation, and through a `*` the FROM item's own (`passThrough`);
-   * an arm whose value is reached no other way is refused by name.
-   */
-  private guardArmTypes(b: Body, found: ReturnType<typeof setOperationOutputs>[number]): void {
-    found.columns.forEach((column, i) => {
-      if (column?.type !== NUMERIC_ARRAY) return;
-      const mods = new Set(found.armTypmods.map((m) => m?.[i] ?? -1).filter((m) => m >= 4));
-      const typmod = column.typmod >= 4 ? column.typmod : mods.size === 1 ? [...mods][0]! : mods.size === 0 ? -1 : null;
-      if (typmod === null) {
-        throw new Unrewritable("arrays of numbers of different numeric(p,s) types as one numeric[] column of a UNION, INTERSECT or EXCEPT are not supported by Mason (Postgres keeps each element's own scale, where the synced data's column holds one type)",
-          "cast every SELECT's value to the same numeric(p,s)[], or to text (`(…)::text`)", "array-subquery-element");
-      }
-      const type = typmod >= 4 ? duckTypeOf(NUMERIC, typmod) : null;
-      if (type === null || type[0] !== "decimal") return;
-      const guard = (x: AstNode): AstNode => this.armTypeGuard(x, type);
-      for (const arm of this.setOperationArms(b)) this.guardColumn(arm, i, guard);
-    });
-  }
-
-  /** the value of a query's i-th output column, wherever it is written, replaced by `guard` of it (`guardArmTypes`) */
-  private guardColumn(q: Body, i: number, guard: (x: AstNode) => AstNode): void {
-    if (isSetOp(q)) { for (const arm of this.setOperationArms(q)) this.guardColumn(arm, i, guard); return; }
-    if (Array.isArray(q.valuesLists)) {
-      for (const row of q.valuesLists as AstNode[]) {
-        const items = (isNode(row) ? bodyOf(row).items : row) as AstNode[] | undefined;
-        if (!Array.isArray(items) || !isNode(items[i])) throw this.unguarded();
-        if (!this.armGuards.has(bodyOf(items[i]!))) items[i] = guard(items[i]!);
-      }
-      return;
-    }
-    const targets = (q.targetList ?? []) as AstNode[];
-    if (targets.length === 1 && hasStar(bodyOf(targets[0]!).val)) {
-      const through = this.passThrough(q);
-      if (through === null || through.columns !== "star") throw this.unguarded();
-      this.guardColumn(bodyOf(through.query), i, guard);
-      return;
-    }
-    const t = targets[i];
-    if (t === undefined || targets.some((x) => hasStar(bodyOf(x).val)) || !isNode(bodyOf(t).val)) throw this.unguarded();
-    const tb = bodyOf(t);
-    if (this.armGuards.has(bodyOf(tb.val as AstNode))) return;
-    // (the column keeps its name: the CASE's would be `case`)
-    if (tb.name === undefined) tb.name = figureColname(tb.val as AstNode);
-    tb.val = guard(tb.val as AstNode);
-  }
-  private unguarded(): Unrewritable {
-    return new Unrewritable("an array of numbers as a numeric[] column of a UNION, INTERSECT or EXCEPT, reached through a form Mason cannot check its type in, is not supported by Mason (Postgres keeps each element's own scale, where the synced data's column holds one type)",
-      "select the column by name in each SELECT, or cast it to text (`(…)::text`)", "array-subquery-element");
-  }
-  /** the CASEs `armTypeGuard` wrote, so a value is guarded once (a nested set operation is its own and its parent's arm) */
-  private readonly armGuards = new WeakSet<Body>();
-
-  /** `x` as the engine type `type` (a DECIMAL(p, s), as a list) where the engine binds it as that type (or as a bare
-   *  NULL), else the registry's refusal: `typeof` is folded at bind, so the CASE is the value itself, or the call */
-  private armTypeGuard(x: AstNode, type: string[]): AstNode {
-    const engine = `DECIMAL(${type[1]},${type[2]})[]`;
-    const as = (v: AstNode): AstNode => ({ TypeCast: { arg: v, typeName: { names: [S("decimal")], typmods: type.slice(1).map((m) => intConst(Number(m))), typemod: -1, arrayBounds: [{ Integer: { ival: -1 } }] } } });
-    const typeOfX = (): AstNode => fn("typeof", [this.clone(x)]);
-    const agrees = or([op("=", typeOfX(), strConst(engine)), op("=", typeOfX(), strConst("\"NULL\""))]);
-    const guarded = caseWhen([[agrees, as(x)]], as(fn("__mason_set_column_type", [typeOfX(), strConst(engine)])));
-    this.armGuards.add(bodyOf(guarded));
-    return guarded;
-  }
-
-  /** the element type and numeric typmod of a single subscript of an array of numbers (`a[1]`: Postgres's subscript keeps
-   *  its array's typmod), or null: the array's typmod as Postgres's analysis gives it, or as its cast writes it (Postgres
-   *  types an ARRAY[…] cast whole with none, its elements each carrying it); `cast`: held as the engine's DECIMALs, a cast of no constant or a table's column */
-  private subscriptOf(v: AstNode): { element: number; typmod: number; cast: boolean } | null {
-    const b = bodyOf(v), ind = (b.indirection ?? []) as AstNode[];
-    if (kindOf(v) !== "A_Indirection" || ind.length !== 1 || kindOf(ind[0]!) !== "A_Indices" || bodyOf(ind[0]!).is_slice === true || !isNode(b.arg)) return null;
-    const arg = b.arg as AstNode, t = this.typed(arg);
-    const element = t === null ? undefined : NUMBER_ELEMENT[t.type];
-    if (t === null || element === undefined) return null;
-    // (a table's own column: the synced data holds a numeric(p, s)[] as DECIMALs, as it holds a numeric(p, s) column)
-    if (kindOf(arg) !== "TypeCast") return { element, typmod: t.typmod, cast: kindOf(arg) === "ColumnRef" && this.fromColumn(arg) === null };
-    const mods = ((bodyOf(arg).typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m));
-    return { element, typmod: mods.length === 0 || mods.some((m) => m === null) ? -1 : ((mods[0]! << 16) | (mods[1] ?? 0)) + 4, cast: isNode(bodyOf(arg).arg) && constString(stripCasts(bodyOf(arg).arg as AstNode)) === null };
-  }
   /**
    * `x` AS POSTGRES'S IMPLICIT time→timetz CAST (time_timetz, function 2047, COERCE_IMPLICIT_CAST): a cast node typed as
    * that FUNCEXPR, which the cast's own rule writes (`typeCast` → `timeAsTimetz`), so an implicit coercion and an
@@ -2683,26 +2584,7 @@ class Rewriter {
     // VALUES arm is typed by its rows as Postgres analysed them (issue 342: it was untyped, and the union the engine's)
     // (a column this computes nothing for is Postgres's to coerce, as it is written: only a numeric one is read here)
     const castExactly = (oid: number, to: number | undefined): boolean => oid === to || (to === NUMERIC && INTEGERS.has(oid));
-    // (an arm whose values the rewrite cannot type, `a[1]`, is typed as Postgres's analysis gives that SELECT's outputs,
-    // `setOperationOutputs`' armTypes, PR 582 review r7)
-    const leaves = this.setOperationArms(b), analysed = this.setOperationFound(b, false);
-    const typedArm = (a: AstNode): Array<{ oid: number; typmod: number }> | null => {
-      const own = this.armFields(a, fields);
-      if (own !== null) return own;
-      // (an arm that is a set operation of no clauses of its own is its SELECTs', where they agree)
-      const selects = isSetOp(bodyOf(a)) ? this.setOperationArms(bodyOf(a)) : [bodyOf(a)];
-      const at = selects.map((x) => leaves.indexOf(x));
-      if (analysed === undefined || at.some((k) => k < 0 || analysed.armTypes[k] === null || analysed.armTypes[k] === undefined)) return null;
-      // (its SELECTs of several types are a numeric where each is a numeric or an integer, as Postgres resolves them)
-      const each = at.map((k) => analysed.armTypes[k]!);
-      return fields.map((f, i) => {
-        const oids = new Set(each.map((x) => x[i] ?? -1));
-        const mods = new Set(at.map((k) => analysed.armTypmods[k]?.[i] ?? -1));
-        if (oids.size === 1) return { oid: [...oids][0]!, typmod: mods.size === 1 ? [...mods][0]! : -1 };
-        return { oid: f.oid === NUMERIC && [...oids].every((o) => castExactly(o, NUMERIC)) ? NUMERIC : -1, typmod: -1 };
-      });
-    };
-    if (arms.some((a) => { const f = typedArm(a); return f === null || f.some((x, i) => fields[i]?.oid === NUMERIC && !castExactly(x.oid, NUMERIC)); })) return [];
+    if (arms.some((a) => { const f = this.armFields(a, fields); return f === null || f.some((x, i) => fields[i]?.oid === NUMERIC && !castExactly(x.oid, NUMERIC)); })) return [];
     // THE TRIAL WRITES ONLY COPIES: of the arms, AND of the CTEs above them, which an arm that reads one appends its cells
     // to. A trial that wrote the real CTE left it selecting cells its arm, built again below, never read: arms of
     // different widths, which the engine refused (`WITH t AS (… sqrt(abs(x)) AS v …) SELECT v FROM t UNION ALL SELECT
@@ -3103,12 +2985,9 @@ class Rewriter {
         if (target !== "numeric" && target !== "decimal") return asCell();
         const arg = b.arg as AstNode;
         const from = this.typeOf(arg);
-        // (a jsonb's numeric(p, s) within 38 digits is the engine's DECIMAL(p, s) of the number's stored text, `jsonbScalar`:
-        // its exact value as it is, `duckExact`, never Postgres's jsonb_numeric run again over every row beside it)
-        if (from === JSONB && ((b.typeName?.typmods ?? []) as AstNode[]).length > 0 && numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], JSONB, null).as === "decimal") return asCell();
         const inner: Built | null = from !== null && FLOATS.has(from) ? numeric(cell(arg, from === FLOAT4 ? "float4" : "float8"))
           // a text: the digits Postgres's numeric_in reads (`1.50` keeps its scale, `1_000.5` is 1000.5)
-          : this.readAsNumeric(arg) !== null ? numeric(cell(this.readAsNumeric(arg)!, "parsed"))
+          : from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(arg) === null ? numeric(cell(pgCall("text", "a1::numeric", [this.clone(arg)]), "parsed"))
           : sub(arg);
         if (inner === null) return null;
         const mods = ((b.typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m));
@@ -3372,43 +3251,13 @@ class Rewriter {
    * src/duck/sync.ts), an integer whole, a literal as written, a column of no declared scale at the decimals the copy
    * holds (`mixed-scale-numeric`). Null for anything else.
    */
-  /**
-   * A TEXT OR A JSONB READ AS AN UNCONSTRAINED NUMERIC, row by row by Postgres's own numeric_in (src/duck/pg-eval.ts):
-   * THE ONE WRITER of that value's digits, for its program's cell (`exactOf`) and a function's argument (`pgNumeric`).
-   * A text is read as it is (`1.50` keeps its scale, `1_000.5` is 1000.5); a jsonb as its stored text (its `::text`,
-   * `pgText`), its JSON null SQL NULL: jsonb_numeric's number is the numeric numeric_in reads back from the text
-   * numeric_out wrote for it, every digit kept (the class round of PR 582, jsonb-null-cast-to-number-engine-error: the
-   * engine's double of the text dropped `2.450`'s scale and a bigint's last digits). Null for anything else, and for a
-   * constant (its literal is the writer's, `numericCastWrite`).
-   */
-  private readAsNumeric(arg: AstNode): AstNode | null {
-    const from = this.typeOf(arg);
-    if (from === null || constString(arg) !== null) return null;
-    if (TEXTS.has(from) && from !== UNKNOWN) return pgCall("text", "a1::numeric", [this.clone(arg)]);
-    // (Postgres's own jsonb_numeric of the stored text, its JSON null NULL on every version: a string, a boolean, an
-    // array or an object is its own 22023 there, as `jsonbScalar` says for the engine's value)
-    if (from === JSONB) return pgCall("text", "nullif(a1, 'null')::jsonb::numeric", [this.asJsonbText(this.clone(arg))]);
-    return null;
-  }
-
-  /** `x::text` of a jsonb as Postgres analyses it (a COERCEVIAIO to text), which the cast's own rule writes (`typeCast` →
-   *  `pgText`'s `__mason_jsonb_text`): the stored text, written once. (Its collation is the jsonb's, none: the text is
-   *  only ever read by numeric_in, never compared or sorted.) */
-  private asJsonbText(x: AstNode): AstNode {
-    const to: AstNode = { TypeCast: { arg: x, typeName: { names: [S("pg_catalog"), S("text")], typemod: -1 }, location: -1 } };
-    const collation = this.typed(x)?.collation ?? 0;
-    this.synthetic.set(bodyOf(to), { node: "COERCEVIAIO", type: TEXT, typmod: -1, args: [{ type: JSONB, typmod: -1 }], oid: null, format: 2,
-      collation, inputCollation: collation, levelsUp: null, datum: null, qualifier: null, renamed: null });
-    this.original.add(bodyOf(to));
-    return to;
-  }
-
   private pgNumeric(n: AstNode): AstNode | null {
     const b = bodyOf(n);
     if (kindOf(n) === "TypeCast") {
       const target = lastName(b.typeName?.names);
       if ((target !== "numeric" && target !== "decimal") || ((b.typeName?.typmods ?? []) as AstNode[]).length > 0 || !isNode(b.arg)) return null;
-      return this.readAsNumeric(b.arg);
+      const from = this.typeOf(b.arg);
+      return from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(b.arg) === null ? pgCall("text", "a1::numeric", [this.clone(b.arg)]) : null;
     }
     // (`x ^ y` of numerics is Postgres's numeric_power, power(x, y)'s function: issue 242)
     const raised = kindOf(n) === "A_Expr" && b.kind === "AEXPR_OP" && lastName(b.name) === "^" && isNode(b.lexpr) && isNode(b.rexpr);
@@ -3513,13 +3362,6 @@ class Rewriter {
       case "ColumnRef": { if (t === null || t.type !== NUMERIC) return false; const found = this.fromColumn(n); return found === null || (this.outputExact(found.query, found.index) && !this.scalesDiffer(found.query, found.index)); }
       // a scalar subquery: its one column
       case "SubLink": { const target = scalarTarget(n); return target !== null && this.duckExact(target); }
-      // an element of an integer array, or of a numeric(p, s)[] within 38 digits held as DECIMALs (a cast of no constant,
-      // a table's column; never a constant's, which the cast writes as a double[]): the engine's exact value. Its cell is still read by the
-      // engine's prepared type (store.ts exactColumns), and a double there keeps the engine's value
-      case "A_Indirection": {
-        const e = this.subscriptOf(n);
-        return e !== null && (INTEGERS.has(e.element) || (e.element === NUMERIC && e.cast && e.typmod >= 4 && ((e.typmod - 4) >> 16) <= 38));
-      }
       case "A_Const":
         if (b.isnull === true || b.ival !== undefined) return true;
         // a numeric constant as it is written (`numericConstText`, `decimalConst`): DuckDB's DECIMAL within 38 digits
@@ -3532,8 +3374,7 @@ class Rewriter {
         const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], this.typeOf(b.arg), constString(b.arg));
         switch (w.as) {
           // DuckDB's DECIMAL(p, s) of a text constant, or of a value it holds exactly (of a double: the double's)
-          // (a jsonb's: the route writes DuckDB's DECIMAL(p, s) of the number's stored text, `jsonbScalar`, PR 582 review r6)
-          case "decimal": return constString(b.arg) !== null || this.duckExact(b.arg) || this.typeOf(b.arg) === JSONB
+          case "decimal": return constString(b.arg) !== null || this.duckExact(b.arg)
             || (kindOf(b.arg) === "FuncCall" && EXACT_TEXTS.has(lastName(bodyOf(b.arg).funcname)));
           case "whole": return true;
           case "literal": return engineReadsExactly(w.text);
@@ -3958,8 +3799,6 @@ class Rewriter {
     if (t !== null && INTEGERS.has(t.type)) return 0;
     switch (k) {
       case "ColumnRef": return t !== null && t.type === NUMERIC && t.typmod >= 4 ? (t.typmod - 4) & 0xffff : null;
-      // an element of an array of numbers, at its array's scale (Postgres's subscript keeps the typmod; `subscriptOf`)
-      case "A_Indirection": { const e = this.subscriptOf(n); return e === null ? null : INTEGERS.has(e.element) ? 0 : e.element === NUMERIC && e.typmod >= 4 ? (e.typmod - 4) & 0xffff : null; }
       case "A_Const": return b.ival !== undefined ? 0 : b.fval !== undefined ? (positional(String(b.fval.fval)).split(".")[1] ?? "").length : null;
       case "A_Expr": {
         if (b.kind !== "AEXPR_OP") return null;
@@ -5607,37 +5446,6 @@ class Rewriter {
     return s[2] === null ? call : cast(call, s[2]);
   }
 
-  /**
-   * A JSONB VALUE CAST TO A NUMBER OR A BOOLEAN, THE ONE ROUTE (PR 582's class round of review r4,
-   * jsonb-null-cast-to-number-engine-error and jsonb-cast-of-wrong-kind-sqlstate): `v` read ONCE for its JSON kind
-   * (`jsonTypeof`, the one reader of it), as Postgres's jsonb_numeric / jsonb_int4 / jsonb_float8 / jsonb_bool read it
-   * (cannotCastJsonbValue): SQL NULL and a JSON null are NULL; the target's own kind (a number, for a number; a boolean,
-   * for a boolean) is its JSON text converted — an integer rounded half away from zero by numeric_int's rule with every
-   * digit kept (`__mason_numeric_int`), a numeric(p,s) at its scale, a float the nearest double, an unconstrained numeric
-   * the engine's double (its digits are its program's, `readAsNumeric`); any other kind is Postgres's 22023 in its words,
-   * the type named as format_type names it. Nothing else casts a jsonb to such a type (`JSONB_SCALAR_CASTS` is read here
-   * alone: tests/conventions.test.ts).
-   */
-  private jsonbScalar(v: () => AstNode, type: number, typmods: readonly AstNode[]): AstNode {
-    const [engine, named] = JSONB_SCALAR_CASTS.get(type)!;
-    const kind = jsonTypeof(v());
-    const text = cast(v(), ["varchar"]);
-    const w = type === NUMERIC ? numericCastWrite(typmods, JSONB, null) : null;
-    // (the engine's type of every arm: the CASE is one type, its wrong arm's too)
-    const to = w === null ? [engine] : w.as === "decimal" ? ["decimal", String(w.precision), String(w.scale)] : ["double"];
-    const converted = INTEGERS.has(type) ? cast(fn("__mason_numeric_int", [text, intConst(type === INT2 ? 16 : type === INT4 ? 32 : 64)]), to) : cast(text, to);
-    // the wrong kind's 22023 (JsonbTypeName's words: a number is `numeric` there, where jsonb_typeof says `number`), raised
-    // by a function the engine takes as deterministic, NEVER DuckDB's volatile error(): a volatile element of a list
-    // compared by = ANY / <> ALL makes the engine answer NULL for a row whose answer is false whenever another row of the
-    // batch holds a NULL element (PR 582 review r5, jsonb-scalar-route-null-in-list-compare)
-    const wrong = cast(fn("__mason_jsonb_cast_error", [kind, strConst(named)]), to);
-    return caseWhen([
-      [isNull(v()), nullConst()],
-      [op("=", jsonTypeof(v()), strConst("null")), nullConst()],
-      [op("=", jsonTypeof(v()), strConst(type === BOOL ? "boolean" : "number")), converted],
-    ], wrong);
-  }
-
   private typeCast(b: Body): AstNode | null {
     const target = lastName(b.typeName?.names);
     const t = this.typed({ TypeCast: b });
@@ -5646,30 +5454,6 @@ class Rewriter {
     // own (Postgres refers to the list's), and is the value the list's was parsed to — the same SQL on both sides
     if (t?.node === "CONST" && kindOf(arg) === "A_Const" && this.at(bodyOf(arg), ["CONST"]) === null) this.constLike.set(bodyOf(arg), t);
     const from = this.typeOf(arg);
-    // A JSONB CAST TO A NUMBER OR A BOOLEAN (PR 582: fix round 1, the class round of review r4): ONE route, `jsonbScalar`,
-    // by Postgres's analysed target, wherever the jsonb is read (a column, a grouped expression's per-group any_value, a
-    // derived table's, a CASE arm, a function's result) and however the cast is spelt (`::`, CAST, numeric(x)); an array
-    // of jsonb cast to an array of such a type, the same route per element
-    const typmods = (b.typeName?.typmods ?? []) as AstNode[];
-    if (t !== null && from === JSONB && JSONB_SCALAR_CASTS.has(t.type)) return bound(arg, "__mason_jv", (v) => this.jsonbScalar(v, t.type, typmods));
-    // (`ARRAY[j -> 'a', …]::int[]`: Postgres casts each element itself (transformArrayExpr), so the raw tree's elements
-    // are the jsonb values, each cast by the route; any other array of jsonb, `jsonb[]` cast as a whole, per element)
-    const element = t === null ? undefined : JSONB_ARRAY_CASTS.get(t.type);
-    const written = element === undefined || kindOf(arg) !== "A_ArrayExpr" ? null : (bodyOf(arg).elements ?? []) as AstNode[];
-    if (element !== undefined && (from === JSONB_ARRAY || (written !== null && written.some((e) => this.typeOf(e) === JSONB)))) {
-      // an unconstrained numeric[]: the engine's list holds each number as a double, never its written digits (`0.10`),
-      // so refused by name, as array_agg of a numeric program is (a numeric(p,s)[] is exact at its scale); so is an
-      // ARRAY[…] mixing a jsonb with a literal Postgres reads as one
-      // (a numeric(p,s)[] past the engine's 38 digits is the engine's double too, `numericCastWrite`)
-      if ((element === NUMERIC && numericCastWrite(typmods, JSONB, null).as !== "decimal") || (written !== null && written.some((e) => this.typeOf(e) !== JSONB))) {
-        throw new Unrewritable(`a jsonb array cast to ${element === NUMERIC ? "numeric[]" : "an array of numbers"} is not supported by Mason (Postgres answers each element's exact digits, which the engine holds as doubles)`,
-          "cast each element: ARRAY[(j -> 'a')::numeric] keeps the digits, or cast to numeric(p,s)[] or text[]", "array-subquery-element");
-      }
-      // (as a list_value: an ARRAY[…] the engine is sent cannot be subscripted as written, `ARRAY[…][1]`)
-      if (written !== null) return fn("list_value", written.map((e) => bound(e, "__mason_jv", (v) => this.jsonbScalar(v, element, typmods))));
-      const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_je")] } });
-      return fn("list_transform", [arg, op("->", each(), this.jsonbScalar(each, element, typmods))]);
-    }
     // a literal of a type the copy holds as its text, or of a timetz(n): the text Postgres writes it as
     if (t !== null && constString(arg) !== null && (heldType(t.type) !== undefined || t.type === TIMETZ)) {
       if (t.typmod >= 0) {

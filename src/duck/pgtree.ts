@@ -327,17 +327,7 @@ export function exprType(n: TreeNode): { type: number; typmod: number } | null {
     case "SQLVALUEFUNCTION": return t("type", "typmod");
     case "FIELDSELECT": return t("resulttype", "resulttypmod");
     case "SUBSCRIPTINGREF": return t("refrestype", "reftypmod");
-    case "ARRAYEXPR": {
-      // its elements' typmod where every element agrees on its type and typmod, as Postgres's exprTypmod reads an
-      // ArrayExpr (`(ARRAY[j -> 'a'])::numeric(10,3)[]` is an ARRAY of numeric(10,3) elements: numeric(10,3)[])
-      const r = t("array_typeid");
-      const elements = Array.isArray(n.elements) ? n.elements.filter(isNode) : [];
-      const common = num(n.multidims === "true" ? n.array_typeid : n.element_typeid);
-      const typed = elements.map((e) => exprType(e));
-      const first = typed[0]?.typmod ?? -1;
-      if (r !== null && first >= 0 && typed.length === elements.length && typed.every((x) => x !== null && x.type === common && x.typmod === first)) r.typmod = first;
-      return r;
-    }
+    case "ARRAYEXPR": return t("array_typeid");
     case "ROWEXPR": return t("row_typeid");
     case "COLLATEEXPR": return Array.isArray(n.arg) ? null : isNode(n.arg ?? null) ? exprType(n.arg as TreeNode) : null;
     case "SUBLINK": {
@@ -670,8 +660,8 @@ function limitOffsets(q: TreeNode): number[] {
  * its outputs hold none), and the offsets its own LIMIT and OFFSET hold. Each column is typed as no table's column:
  * what is known of it is the set operation's alone.
  */
-export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null>; armTypes: Array<number[] | null>; armTypmods: Array<number[] | null> }> {
-  const found: Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null>; armTypes: Array<number[] | null>; armTypmods: Array<number[] | null> }> = [];
+export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null>; armTypes: Array<number[] | null> }> {
+  const found: Array<{ arms: number[][]; limits: number[]; columns: Array<Typed | null>; armTypes: Array<number[] | null> }> = [];
   const held = (x: TreeValue | undefined): number[] => {
     if (Array.isArray(x)) return x.flatMap(held);
     // (a subquery in an output is a query of its own)
@@ -687,15 +677,12 @@ export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; 
       const arms: number[][] = [];
       // each arm's own output types, before the set operation coerced them to its columns' (null: not known)
       const armTypes: Array<number[] | null> = [];
-      // and their typmods (a numeric(p, s)'s), as Postgres's analysis gives each arm's output (-1: none)
-      const armTypmods: Array<number[] | null> = [];
       const leaves = (s: TreeValue | undefined): void => {
         if (s === undefined || !isNode(s)) return;
         if (s._node === "SETOPERATIONSTMT") { leaves(s.larg); leaves(s.rarg); return; }
         const rte = s._node === "RANGETBLREF" ? rtable[(num(s.rtindex ?? null) ?? 0) - 1] : undefined;
         const q = isNode(rte ?? null) ? (rte as TreeNode).subquery ?? null : null;
-        if (!isNode(q)) { arms.push([]); armTypes.push(null); armTypmods.push(null); return; }
-        armTypmods.push(Array.isArray(q.targetList) ? q.targetList.filter((t) => isNode(t) && t.resjunk !== "true").map((t) => { const e = (t as TreeNode).expr ?? null; return isNode(e) ? exprType(e)?.typmod ?? -1 : -1; }) : null);
+        if (!isNode(q)) { arms.push([]); armTypes.push(null); return; }
         armTypes.push(Array.isArray(q.targetList) ? q.targetList.filter((t) => isNode(t) && t.resjunk !== "true").map((t) => { const e = (t as TreeNode).expr ?? null; return isNode(e) ? exprType(e)?.type ?? 0 : 0; }) : null);
         const own = Array.isArray(q.targetList) ? held(q.targetList.filter((t) => isNode(t) && t.resjunk !== "true").map((t) => (t as TreeNode).expr ?? null)) : [];
         // (a VALUES's outputs read its rows at no offset of their own: it is known by its rows')
@@ -710,7 +697,7 @@ export function setOperationOutputs(tree: TreeValue): Array<{ arms: number[][]; 
         const { relation: _r, column: _c, functionColumn: _f, ...own } = typedOf(e, type, [rtable.filter(isNode)]);
         return { ...own, qualifier: null, renamed: null };
       });
-      found.push({ arms, limits: limitOffsets(v), columns, armTypes, armTypmods });
+      found.push({ arms, limits: limitOffsets(v), columns, armTypes });
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };

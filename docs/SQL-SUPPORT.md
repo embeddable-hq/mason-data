@@ -18,22 +18,22 @@ each). The copy is read-only.
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 87 forms of them verified |
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 262 functions, 388 operators, 97 aggregates, 58 window functions and 129 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 127 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 62 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,151 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,039 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,151 statements | Mason | DuckDB alone |
+| Of 7,039 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 93% | 26% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 7% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 18% |
-| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 23% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 22% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 13% |
 | wrong rows, or the rows in another order | — | 8% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 3% |
@@ -81,7 +81,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `json-of-type` | to_json / array_to_json / json_build_object of a value (or an array of elements) of a type Mason does not write as json | answers | refused | cast the value to text, a number, a boolean, a timestamp or json first |
 | `extract-julian` | extract(julian FROM …) | answers | refused | extract(epoch FROM …) / 86400 + 2440587.5 |
 | `with-ordinality` | a function in FROM … WITH ORDINALITY | numbers the rows | refused | row_number() OVER () instead |
-| `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; array_agg(x) of a numeric quotient or average not rounded to a fixed scale (round, trunc or a cast to numeric(p,s)); an array of jsonb cast to numeric[] (`(ARRAY[j -> 'a'])::numeric[]`), or arrays of numbers of different numeric(p,s) types, or held as another type than the numeric(p,s)[] the column needs (a constant's, an int[]), as one numeric[] column of a UNION, INTERSECT or EXCEPT; x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …) or array_agg(x::text), array_agg(x ORDER BY …) of a column in a subquery, or x = ANY (SELECT …) without the ARRAY |
+| `array-subquery-element` | ARRAY(SELECT x …) whose x is a numeric, an array or a row; array_agg(x) of a numeric quotient or average not rounded to a fixed scale (round, trunc or a cast to numeric(p,s)); x = ANY or ALL (ARRAY(SELECT …)) | a numeric[] computed exactly, a multi-dimensional array (2202E on an empty element, 22004 on a NULL one), a record[] | refused (DuckDB makes a list of doubles, of lists, of structs; it binds ANY (ARRAY(SELECT …)) as a comparison of its own) | ARRAY(SELECT x::text …) or array_agg(x::text), array_agg(x ORDER BY …) of a column in a subquery, or x = ANY (SELECT …) without the ARRAY |
 | `json-path-type` | a json read's path cast to a type that changes its text (`varchar(n)[]`, `char(n)[]`, `name[]`) | answers | refused | cast the path to `text[]` |
 | `multidim-array` | a multi-dimensional array literal, or one bound as a `text[]` parameter | answers | refused | a one-dimensional array |
 | `array-lower-bound` | a `text[]` parameter whose subscripts do not start at 1 (`[2:3]={a,b}`) | answers, its first element at subscript 2 | refused | bind the array without its bounds (`{a,b}`) |
@@ -165,7 +165,7 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (1157)
+## What is verified (1148)
 
 ### Types (93)
 
@@ -263,7 +263,7 @@ Not about one statement: what the prototype cannot do yet.
 - a value of type xid8
 - a value of type xml
 
-### Functions (262)
+### Functions (255)
 
 - the function "bit"(bit,integer,boolean)
 - the function "extract"(text,date)
@@ -277,7 +277,6 @@ Not about one statement: what the prototype cannot do yet.
 - the function "numeric"(bigint)
 - the function "numeric"(double precision)
 - the function "numeric"(integer)
-- the function "numeric"(jsonb)
 - the function "numeric"(numeric,integer)
 - the function "numeric"(real)
 - the function "numeric"(smallint)
@@ -318,7 +317,6 @@ Not about one statement: what the prototype cannot do yet.
 - the function array_upper(anyarray,integer)
 - the function ascii(text)
 - the function bool(integer)
-- the function bool(jsonb)
 - the function bpchar(character,integer,boolean)
 - the function btrim(text)
 - the function btrim(text,text)
@@ -357,12 +355,10 @@ Not about one statement: what the prototype cannot do yet.
 - the function float4(bigint)
 - the function float4(double precision)
 - the function float4(integer)
-- the function float4(jsonb)
 - the function float4(numeric)
 - the function float4(smallint)
 - the function float8(bigint)
 - the function float8(integer)
-- the function float8(jsonb)
 - the function float8(numeric)
 - the function float8(real)
 - the function float8(smallint)
@@ -378,18 +374,15 @@ Not about one statement: what the prototype cannot do yet.
 - the function host(inet)
 - the function initcap(text)
 - the function int2(integer)
-- the function int2(jsonb)
 - the function int2(real)
 - the function int4(bigint)
 - the function int4(boolean)
 - the function int4(double precision)
-- the function int4(jsonb)
 - the function int4(numeric)
 - the function int4(real)
 - the function int4(smallint)
 - the function int8(double precision)
 - the function int8(integer)
-- the function int8(jsonb)
 - the function int8(numeric)
 - the function int8(oid)
 - the function int8(real)
@@ -1080,7 +1073,7 @@ Not about one statement: what the prototype cannot do yet.
 - the window function sum(smallint)
 - the window function var_pop(numeric)
 
-### Casts (129)
+### Casts (127)
 
 - a cast from a table's row type to text
 - a cast from a type the source made to text
@@ -1140,8 +1133,6 @@ Not about one statement: what the prototype cannot do yet.
 - a cast from jsonb to character varying
 - a cast from jsonb to json
 - a cast from jsonb to text
-- a cast from jsonb[] to bigint[]
-- a cast from jsonb[] to real[]
 - a cast from jsonpath to text
 - a cast from line to text
 - a cast from lseg to text

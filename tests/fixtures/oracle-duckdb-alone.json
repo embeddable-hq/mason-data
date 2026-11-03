@@ -1,25 +1,25 @@
 {
-  "statements": 7151,
+  "statements": 7039,
   "mason": {
-    "exact": 6632,
-    "decided": 48,
-    "refused": 471,
+    "exact": 6524,
+    "decided": 47,
+    "refused": 468,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1825,
-    "name": 1300,
-    "refused": 1622,
-    "value": 941,
-    "rows": 597,
-    "text": 229,
-    "other": 637
+    "exact": 1823,
+    "name": 1292,
+    "refused": 1575,
+    "value": 921,
+    "rows": 592,
+    "text": 224,
+    "other": 612
   },
   "gaps": {
     "copyPhase": {
       "refused": {
         "array-remove-type": { "planted": 1, "natural": 0 },
-        "array-subquery-element": { "planted": 0, "natural": 12 },
+        "array-subquery-element": { "planted": 0, "natural": 9 },
         "bytea-forms": { "planted": 1, "natural": 0 },
         "citext-forms": { "planted": 0, "natural": 11 },
         "collation-unknown": { "planted": 1, "natural": 5 },
@@ -77,7 +77,7 @@
         "domain-column": { "planted": 1, "natural": 8 },
         "float-last-digit": { "planted": 0, "natural": 2 },
         "float-overflow": { "planted": 0, "natural": 3 },
-        "fromless-numeric-text-order": { "planted": 2, "natural": 0 },
+        "fromless-numeric-text-order": { "planted": 1, "natural": 0 },
         "libc-mark-run-form": { "planted": 1, "natural": 0 },
         "libc-rare-letter": { "planted": 1, "natural": 0 },
         "limit-errors": { "planted": 5, "natural": 2 },
@@ -95,11 +95,11 @@
       }
     },
     "everyAsk": {
-      "asked": 97788,
+      "asked": 96480,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
-        "array-subquery-element": { "planted": 0, "natural": 44 },
+        "array-subquery-element": { "planted": 0, "natural": 27 },
         "bytea-forms": { "planted": 3, "natural": 0 },
         "citext-forms": { "planted": 0, "natural": 95 },
         "collation-unknown": { "planted": 3, "natural": 15 },
@@ -126,10 +126,10 @@
         "like-any-array": { "planted": 3, "natural": 0 },
         "multidim-array": { "planted": 0, "natural": 17 },
         "numeric-double-integer": { "planted": 3, "natural": 0 },
-        "numeric-exact-sum": { "planted": 3, "natural": 11 },
+        "numeric-exact-sum": { "planted": 3, "natural": 8 },
         "numeric-math": { "planted": 3, "natural": 0 },
         "numeric-ordered-set": { "planted": 3, "natural": 0 },
-        "numeric-quotient-equality": { "planted": 9, "natural": 42 },
+        "numeric-quotient-equality": { "planted": 9, "natural": 40 },
         "numeric-special": { "planted": 0, "natural": 6 },
         "quote-ident": { "planted": 0, "natural": 9 },
         "regexp-flags": { "planted": 3, "natural": 0 },
@@ -142,7 +142,7 @@
         "similar-to-forms": { "planted": 3, "natural": 0 },
         "star-join-twin": { "planted": 3, "natural": 0 },
         "sum-real": { "planted": 0, "natural": 9 },
-        "text-array-order": { "planted": 0, "natural": 49 },
+        "text-array-order": { "planted": 0, "natural": 48 },
         "time-date-trunc": { "planted": 0, "natural": 36 },
         "time-timetz-coerced": { "planted": 9, "natural": 0 },
         "to-char-patterns": { "planted": 0, "natural": 6 },
@@ -157,7 +157,7 @@
         "domain-column": { "planted": 3, "natural": 24 },
         "float-last-digit": { "planted": 0, "natural": 3 },
         "float-overflow": { "planted": 0, "natural": 9 },
-        "fromless-numeric-text-order": { "planted": 6, "natural": 0 },
+        "fromless-numeric-text-order": { "planted": 3, "natural": 0 },
         "libc-mark-run-form": { "planted": 3, "natural": 0 },
         "libc-rare-letter": { "planted": 3, "natural": 0 },
         "limit-errors": { "planted": 15, "natural": 6 },

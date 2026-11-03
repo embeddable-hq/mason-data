@@ -931,20 +931,6 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // a division's divisor tested for zero (src/duck/rewrite.ts nonZero): Postgres's error, from a function DuckDB takes
   // as deterministic, where error() is volatile and refused in a DISTINCT aggregate's ORDER BY
   scalar(conn, "__mason_zero_divisor", [BOOLEAN], BOOLEAN, ([zero]) => { if (zero === true) throw new PgEvalError("22012", "division by zero"); return false; });
-  // a jsonb of the wrong kind cast to a number or a boolean (src/duck/rewrite.ts jsonbScalar): Postgres's 22023 in its
-  // words (JsonbTypeName: a number is `numeric`), from a function DuckDB takes as deterministic, where error() is
-  // volatile and changes what = ANY (ARRAY[…]) answers for the rows beside it
-  scalar(conn, "__mason_jsonb_cast_error", [VARCHAR, VARCHAR], VARCHAR, ([kind, target]) => {
-    throw new PgEvalError("22023", `cannot cast jsonb ${String(kind) === "number" ? "numeric" : String(kind)} to type ${String(target)}`);
-  });
-  // a set operation's arm whose value the engine holds as another type than the column Postgres resolved needs
-  // (src/duck/rewrite.ts guardArmTypes): the engine would convert it to its own union's type, where Postgres keeps each
-  // value at its own scale. Called only where the engine's bound type of the arm (`typeof`, folded at bind) disagrees
-  // (its arguments, the two types, are the plan's and named in EXPLAIN; the message quotes neither, as every refusal
-  // raised at a row quotes nothing of it)
-  scalar(conn, "__mason_set_column_type", [VARCHAR, VARCHAR], VARCHAR, () => {
-    throw new PgEvalError("0A000", `an array of numbers held as another type than the numeric(p,s)[] its column is, beside them as one numeric[] column of a UNION, INTERSECT or EXCEPT, is not supported by Mason: Postgres keeps each element's own scale, where the synced data's column holds one type (${gapMark("array-subquery-element")}); cast every SELECT's value to the same numeric(p,s)[], or to text`);
-  });
   // a numeric divided by a numeric (src/duck/rewrite.ts, `/`): Postgres's quotient, rounded at its scale (numeric_div),
   // as the nearest double, so two quotients Postgres finds equal (0.3 / 0.1 and 0.6 / 0.2) compare, group and count as
   // one, where DuckDB's double division gives each its own last bits. The text a client reads is the exact program's
