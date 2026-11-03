@@ -33,18 +33,92 @@ test("the URL: the user defaults to the OS user, the database never defaults, a 
   assert.equal(source("postgres://me:p%40ss@localhost/app").password, "p@ss");
 });
 
-test("a URL that cannot be read is said with its password masked, whatever the password holds", () => {
-  // the problem is printed, and under mason mcp kept in the MCP client's log file
+test("a source's URL is shown only when it reads whole as a postgres:// URL, its password masked; any other shape is never shown, and its refusal says the shape, never the value (issue 541)", () => {
+  // shown: the password masked, whatever it holds (an unencoded @ or : is the password's: the host is after the LAST @)
   for (const [url, shown] of [
-    ["postgres://claude:s3cret@127.0.0.1:99999/shop", '"postgres://claude:****@127.0.0.1:99999/shop" is not a URL'],
-    ["postgres://claude:s3cret@[::1/shop", '"postgres://claude:****@[::1/shop" is not a URL'],
-    ["postgres://claude:s3/cr@et@local host/shop", '"postgres://claude:****@local host/shop" is not a URL'],
-  ] as const) {
-    const r = parseSource(url);
-    assert.ok("problem" in r, url);
-    assert.ok(r.problem.startsWith(shown), r.problem);
-    assert.doesNotMatch(r.problem, /s3cret|s3\/cr|cr@et/, "never the password");
+    ["postgres://me:Pw541@localhost:5432/app", "postgres://me:****@localhost:5432/app"],
+    ["postgres://me:p@Pw541@db.example.com/app?sslmode=require", "postgres://me:****@db.example.com/app?sslmode=require"],
+    ["postgres://me:p:Pw541@localhost/app", "postgres://me:****@localhost/app"],
+    ["postgres://me:p%2FPw541%3F%23@localhost/app", "postgres://me:****@localhost/app"],
+    ["postgresql://me:Pw541@[::1]:5433/app", "postgresql://me:****@[::1]:5433/app"],
+    ["postgres://me@localhost/app", "postgres://me@localhost/app"],
+    ["postgres://me:Pw541@db/app?sslmode=require&application_name=svc", "postgres://me:****@db/app?sslmode=require&application_name=svc"],
+    ["postgres://me:Pw541@db/app?application_name=my-app.v2_1", "postgres://me:****@db/app?application_name=my-app.v2_1"],
+    // the query shown is the one read, written out again
+    ["postgres://me:Pw541@db/app?ssl%6Dode=%70refer", "postgres://me:****@db/app?sslmode=prefer"],
+    // a secret file's last newline, or a space pasted at either end: trimmed, as the parse trims it
+    ["postgres://me:Pw541@localhost/app\n", "postgres://me:****@localhost/app"],
+    [" postgres://me:Pw541@localhost/app\r\n", "postgres://me:****@localhost/app"],
+  ] as const) assert.equal(maskedUrl(url), shown, JSON.stringify(url));
+  assert.equal((parseSource("postgres://me:Pw541@localhost/app\n") as { source: { url: string } }).source.url, "postgres://me:Pw541@localhost/app");
+  // never shown: each a shape a mask that recognises shapes let through, or a parse that half-works would show part of
+  const never: Array<[string, RegExp]> = [
+    ["host=db user=me password=Pw541 dbname=app", /: it looks like a keyword\/value connection string \(host=… user=… password=…\)\. Write it as postgres:\/\/user:password@host:5432\/your_app/],
+    ["  password = Pw541 host=db", /keyword\/value connection string/],
+    ["Pw541", /: it is not a URL\./],
+    ["Pw541:x", /: it is not a URL\./],
+    ["", /: it is empty\./],
+    ["jdbc:postgresql://db/app?user=me&password=Pw541", /: it looks like a JDBC URL: drop jdbc:/],
+    ["mysql://me:Pw541@db/app", /: its scheme is mysql, not postgres:\/\/ or postgresql:\/\//],
+    ["Pw541://me@db/app", /: its scheme is not postgres:\/\/ or postgresql:\/\//],
+    // a password holding / ? or # unencoded: the URL splits there, the password's tail a path, a parameter, a fragment
+    ["postgres://me:12/Pw541@db/app", /: it does not read as one URL/],
+    ["postgres://me:12?Pw541@db/app", /: it does not read as one URL/],
+    ["postgres://me:12#Pw541@db/app", /: it does not read as one URL/],
+    ["postgres://me:ab/Pw541@db/app", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app#frag", /: it does not read as one URL/],
+    // a space or a control character, which a parse encodes or drops: never shown rewritten
+    ["postgres://me:Pw 541@db/app", /: it does not read as one URL/],
+    ["postgres://me:Pw\t541@db/app", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app\nPw541", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app?application_name=a@b", /: it does not read as one URL/],
+    ["postgres://me:Pw541@127.0.0.1:99999/app", /: it does not read as one URL .*the port is not a number up to 65535/],
+    ["postgres://me:Pw541@[::1/app", /: it does not read as one URL/],
+    ["postgres://me:Pw541@local host/app", /: it does not read as one URL/],
+    ["postgres:///app?password=Pw541", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app#", /: it does not read as one URL/],
+    // a connection keyword libpq reads from the query (a query password wins over the user's): a part Mason does not
+    // read is never shown, so the URL is not
+    ["postgres://me@db/app?password=Pw541", /: it has the parameter password, which Mason does not read \(it reads sslmode and application_name alone\): a password goes before the host, postgres:\/\/user:password@host:5432\/your_app\./],
+    ["postgres://me:x@db/app?sslmode=require&sslpassword=Pw541", /: it has the parameter sslpassword, which Mason does not read .*: a password goes before the host/],
+    ["postgres://me@db/app?PASSWORD=Pw541", /: it has the parameter password, which Mason does not read .*: a password goes before the host/],
+    ["postgres://me@db/app?pass%77ord=Pw541", /: it has the parameter password, which Mason does not read/],
+    ["postgres://me@db/app?password%3DPw541", /: it has a parameter Mason does not read \(it reads sslmode and application_name alone\): leave it out of the URL\./],
+    ["postgres://me@db/app?sslmode%3Dprefer&password=Pw541", /: it has the parameter password, and another, which Mason does not read/],
+    ["postgres://me@db/app?password=a&password=Pw541", /: it has the parameter password, which Mason does not read/],
+    ["postgres://me@db/app?sslmode=prefer&password=Pw541", /: it has the parameter password, which Mason does not read/],
+    ["postgres://me@db/app?application_name=svc&password=Pw541", /: it has the parameter password, which Mason does not read/],
+    ["postgres://me@db/app?password=Pw541;sslmode=prefer", /: it has the parameter password, which Mason does not read/],
+    ["postgres://me@db/app?Pw541=1", /: it has a parameter Mason does not read .*: leave it out of the URL\./],
+    ["postgres://me@db/app?Pw541", /: it has a parameter Mason does not read/],
+    ["postgres://me:Pw541@db/app?sslrootcert=%2Fx&channel_binding=require", /: it has the parameters sslrootcert, channel_binding, which Mason does not read .*: leave it out of the URL\./],
+    ["postgres://me:Pw541@db/app?pgbouncer=true", /: it has the parameter pgbouncer, which Mason does not read .*: leave it out of the URL\./],
+    // a parameter Mason reads, its VALUE not one the reading accepts: a password may hide in it (the review of #575)
+    ["postgres://me@db/app?sslmode=prefer%26password=Pw541", /: its sslmode is not one of disable, allow, prefer, require, verify-ca, verify-full\./],
+    ["postgres://me@db/app?sslmode=prefer;password=Pw541", /: its sslmode is not one of disable, allow, prefer, require, verify-ca, verify-full\./],
+    ["postgres://me:x@db/app?sslmode=Pw541", /: its sslmode is not one of/],
+    ["postgres://me:x@db/app?sslmode=prefer&sslmode=Pw541", /: it gives sslmode more than once: give it once\./],
+    ["postgres://me:x@db/app?application_name=password=Pw541", /: its application_name is not letters, digits, \. _ and - \(at most 64\): give it in those, or leave it out\./],
+    ["postgres://me:x@db/app?application_name=svc%20Pw541", /: its application_name is not letters/],
+    [`postgres://me:x@db/app?application_name=${"a".repeat(65)}`, /: its application_name is not letters/],
+    ["postgres://me:x@db/app?application_name=a&application_name=Pw541", /: it gives application_name more than once/],
+  ];
+  for (const [value, said] of never) {
+    // maskedUrl is shownUrl's null in a sentence (src/cli/preflight.ts)
+    assert.equal(maskedUrl(value), "a value that is not a postgres:// URL (not shown)", JSON.stringify(value));
+    const r = parseSource(value, "DATABASE_URL in .env");
+    assert.ok("problem" in r, JSON.stringify(value));
+    assert.ok(r.problem.startsWith("DATABASE_URL in .env is not a postgres:// URL: "), r.problem);
+    assert.match(r.problem, said);
+    assert.match(r.problem, /a password holding @ : \/ # \? % or a space is URL-encoded \(encodeURIComponent; @ is %40, \/ is %2F, # is %23\)$/);
+    assert.doesNotMatch(r.problem, /Pw|541|frag|99999|aaaa|svc/, "never a part of the value");
   }
+  // a %-escape that is none: refused naming where, never a crash or the value
+  const pct = parseSource("postgres://me:Pw%zz541@localhost/app", "MASON_URL");
+  assert.ok("problem" in pct);
+  assert.match(pct.problem, /^MASON_URL holds a % that starts no %-escape: a % in the user or the password is written %25\./);
+  const user = parseSource("postgres://m%zz@localhost", "DATABASE_URL");
+  assert.ok("problem" in user && /^DATABASE_URL holds a % that starts no %-escape/.test(user.problem), "the user's name too, where no database is named");
 });
 
 test("a database elsewhere is remote, and read over TLS unless the URL says otherwise", () => {
@@ -66,7 +140,7 @@ test("each connection failure says what to change", () => {
   assert.match(auth.message, /refused user me/);
   assert.ok(auth.hints.some((h) => /Homebrew and Postgres\.app/.test(h)));
   assert.ok(auth.hints.some((h) => /POSTGRES_PASSWORD/.test(h)));
-  assert.match(explainConnectError(new PgError({ C: "3D000", M: "database \"app\" does not exist" }), s).message, /has no database "app"/);
+  assert.match(explainConnectError(new PgError({ C: "3D000", M: "database \"app\" does not exist" }), s).message, /^localhost:5432 has no database by the name the URL gives \(the part after the port\)$/);
   const refused = explainConnectError(new Error("connecting to localhost:5432: connect ECONNREFUSED 127.0.0.1:5432"), s);
   assert.match(refused.message, /nothing is listening on localhost:5432/);
   assert.ok(refused.hints.some((h) => /54322/.test(h)));

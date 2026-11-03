@@ -224,8 +224,8 @@ function urlSettingProblems(project: string, data: string, env: Readonly<Record<
   } else return [];
   const found = appEnvValue(data, variable, env as NodeJS.ProcessEnv, { shellFirst: true });
   if (found === null) return [`${variable} is not set: the database to sync from, as the sources file's url: \${${variable}} names it`];
-  const p = parseSource(found.value);
-  return "problem" in p ? [`${variable}: ${p.problem}`] : [];
+  const p = parseSource(found.value, variable);
+  return "problem" in p ? [p.problem] : [];
 }
 
 /**

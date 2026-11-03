@@ -157,10 +157,11 @@ function portOf(url: string): number | null {
 
 /**
  * The database a URL names: reachable, its version, what this user can read — and, given `role` (the project's synced
- * tables), whether that user could write to it (src/cli/source-role.ts), on the same connection.
+ * tables), whether that user could write to it (src/cli/source-role.ts), on the same connection. `name` says where the
+ * URL is (`DATABASE_URL in .env`): a refusal names it, never the value (src/cli/preflight.ts shownUrl).
  */
-export async function databaseChecks(url: string, o: ConnectContext & { role?: RoleAsk } = {}): Promise<Check[]> {
-  const parsed = parseSource(url);
+export async function databaseChecks(url: string, o: ConnectContext & { role?: RoleAsk; name?: string } = {}): Promise<Check[]> {
+  const parsed = parseSource(url, o.name);
   if ("problem" in parsed) return [{ name: "database", ok: false, detail: parsed.problem }];
   const connected = await connectSource(parsed.source, o);
   if ("failure" in connected) return [{ name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: ${connected.failure.message}${connected.failure.hints.map((h) => `\n    - ${h}`).join("")}` }];
@@ -289,8 +290,8 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
       const src = projectSource(project);
       if ("message" in src) checks.push({ name: "database", ok: false, detail: `${src.message}${src.why ? `: ${src.why.replace(/\n/g, "; ")}` : ""}. ${src.fix?.split("\n")[0] ?? ""}`.trim() });
       // the demo database is Mason's own, inside the run: whom it connects as is not the person's to change
-      else if (project.config.demo === true) checks.push(...await databaseChecks(src.resolved, { demo: true }));
-      else checks.push(...await databaseChecks(src.resolved, { role: roleAsk(src, project.root) }));
+      else if (project.config.demo === true) checks.push(...await databaseChecks(src.resolved, { demo: true, name: src.from }));
+      else checks.push(...await databaseChecks(src.resolved, { role: roleAsk(src, project.root), name: src.from }));
     }
     // a project here whose config cannot be read: init would refuse, so "Ready: mason init" would send a person nowhere
     if ("code" in which && which.code === "bad_config") checks.push({ name: "project", ok: false, detail: `${which.problem}. ${(which.fix ?? "").replace(/^./, (c) => c.toUpperCase())}`.trim() });

@@ -573,12 +573,12 @@ test("no URL, a bad one, nothing listening, a refused password: the failure shap
     "Next:\n  mason help mcp                                how to add mason mcp to Claude Code or Claude Desktop\n");
   const notUrl = await runMason(dir, ["mcp", "--url", "mysql://x@y/z"], env);
   assert.equal(notUrl.code, 2);
-  assert.match(notUrl.stderr, /^✗ mason mcp: --url is not a Postgres URL: the URL's scheme is mysql; it must be postgres:\/\/ or postgresql:\/\//);
-  // a URL that cannot be read is said with its password masked: stderr is the MCP client's log file
+  assert.match(notUrl.stderr, /^✗ mason mcp: --url is not a postgres:\/\/ URL: its scheme is mysql, not postgres:\/\/ or postgresql:\/\//);
+  // a URL that cannot be read is never repeated, its password or any part (issue 541): stderr is the MCP client's log file
   const unreadable = await runMason(dir, ["mcp"], { ...env, MASON_URL: "postgres://claude:s3cret@127.0.0.1:99999/shop" });
   assert.equal(unreadable.code, 2);
-  assert.match(unreadable.stderr, /^✗ mason mcp: MASON_URL is not a Postgres URL: "postgres:\/\/claude:\*\*\*\*@127\.0\.0\.1:99999\/shop" is not a URL/);
-  assert.doesNotMatch(unreadable.stderr, /s3cret/);
+  assert.match(unreadable.stderr, /^✗ mason mcp: MASON_URL is not a postgres:\/\/ URL: it does not read as one URL \(a character that is not URL-encoded splits it: .*; or the port is not a number up to 65535\)\. Write it as postgres:\/\/user:password@host:5432\/your_app/);
+  assert.doesNotMatch(unreadable.stderr, /s3cret|99999/);
   const away = await runMason(dir, ["mcp"], { ...env, MASON_URL: "postgres://claude:x@127.0.0.1:1/shop" });
   assert.deepEqual([away.code, away.stdout], [1, ""]);
   assert.match(away.stderr, /^✗ mason mcp: could not connect to postgres:\/\/claude:\*\*\*\*@127\.0\.0\.1:1\/shop: nothing is listening on 127\.0\.0\.1:1\n {2}fix {3}start Mason \(mason start\) or check the URL's host and port: mason status says where the Postgres API listens\n/);

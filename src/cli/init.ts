@@ -270,7 +270,9 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     envFile = found.file;
     envVariable = found.variable;
   }
-  const parsed = parseSource(url);
+  // a problem names where the URL is (DATABASE_URL in .env, the URL given), never the value (src/cli/preflight.ts shownUrl)
+  const urlName = found !== null ? found.from : demo ? "the demo database's URL" : "the URL given";
+  const parsed = parseSource(url, urlName);
   if ("problem" in parsed) return usage(parsed.problem);
   const remote = f.values.remote === true || sourceless?.config.remote === true;
   // a kept file's variable gets this URL in .env when the folder's files give it none; one they give another value is said
@@ -318,7 +320,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
       const said: string[] = [];
       let needsRemote = false;
       const checked = await steps.step(`Connecting to ${db}${from}`, async () => {
-        const c = await checkSource(url, { remote, cmd: "mason init", say: (m) => said.push(m) });
+        const c = await checkSource(url, { remote, cmd: "mason init", say: (m) => said.push(m), name: urlName });
         if ("exit" in c) throw new StepFailed(said.filter((m) => !/: connecting to /.test(m)).join("\n"), c.exit);
         if ("needsRemote" in c) { needsRemote = true; return c.needsRemote; }
         return c;

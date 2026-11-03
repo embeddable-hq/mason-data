@@ -44,6 +44,7 @@
  */
 import { pgLiteral, type PgConnection } from "../cdc/pg-wire.ts";
 import type { Check } from "./doctor.ts";
+import { shownUrl } from "./preflight.ts";
 
 /** The privileges on a table that write or change it (SELECT is the one Mason needs), in their bit order (`mask`). */
 export const WRITE_PRIVILEGES = ["INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"] as const;
@@ -365,14 +366,16 @@ export function roleUnknown(why: string): Check {
   return { name: "role", ok: null, code: "role_unknown", detail: `could not tell whether the user Mason connects as may write to the database: ${why}` };
 }
 
-/** The URL `url` with `role` as its user and a placeholder for its password, nothing else of it changed. */
+/**
+ * The URL `url` with `role` as its user and a placeholder for its password, nothing else of it changed: built from what
+ * `shownUrl` shows (src/cli/preflight.ts, issue 541), so no part the URL is not read with is ever printed; a value it
+ * does not show is said in words.
+ */
 export function readerUrl(url: string, role: string): string {
-  try {
-    const u = new URL(url);
-    return `${u.protocol}//${role}:<its password>@${u.host}${u.pathname}${u.search}`;
-  } catch {
-    return `the database's URL with ${role} and its password as the user and password`;   // not a URL: said in words
-  }
+  const shown = shownUrl(url);
+  if (shown === null) return `the database's URL with ${role} and its password as the user and password`;
+  const u = new URL(shown);
+  return `${u.protocol}//${role}:<its password>@${u.host}${u.pathname}${u.search}`;
 }
 
 /**
