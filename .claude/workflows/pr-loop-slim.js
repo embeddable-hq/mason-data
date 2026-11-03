@@ -11,6 +11,7 @@ export const meta = {
     { title: 'Fix', detail: "reads the Handoff first and appends to it; this PR's blocking failures and classes and CI's, never the edit; a repeated class makes a class round", model: 'opus' },
     { title: 'Learn', detail: "each class met becomes a review probe in its rules file, one docs-only commit", model: 'opus' },
     { title: 'CI', detail: 'bounded wait on gh pr checks, with mergeable read first on every pass (GitHub runs no CI on a conflicting PR, so a conflict is its own verdict), beside each review and after the last; a CI fix gets a narrow re-check', model: 'sonnet' },
+    { title: 'Merge', detail: 'when CI reads the PR as conflicting, a fresh agent merges the base into the branch in a worktree of its own by scripts/merge-base.ts (release-notes/next.md alone, an insertion on both sides, keeps both), pushes, and CI runs again on the new head; any other conflict stops the run naming its files', model: 'sonnet' },
     { title: 'File', detail: "the base's findings and this PR's non-blocking ones, one issue per class, at every exit", model: 'sonnet' },
     { title: 'Record', detail: 'the Review record comment, with its machine-readable block, at every exit with a PR', model: 'sonnet' },
   ],
@@ -78,6 +79,9 @@ const BOARD = (status) => `node ${REPO}/scripts/board.ts status ${A.issue} "${st
 const MAX_ROUNDS = 4
 // the CI fixes a PR gets; the last one's CI is waited on too
 const MAX_CI_FIXES = 3
+// the merges of the base a PR gets when CI reads it conflicting, counted apart from the CI fixes: main can move again
+// during the next CI, so more than one, and never unbounded (CLAUDE.md "Nothing waits unwatched")
+const MAX_MERGES = 3
 
 // Each stage's model, and the name what it posts is signed with: a posting names the model that wrote it, read from
 // the same value as the agent's `model`, never written beside it.
@@ -91,6 +95,8 @@ const ON = {
   fix: { model: 'opus', effort: 'high', isolation: 'worktree' },
   learn: { model: 'opus', effort: 'medium', isolation: 'worktree' },
   ci: { model: 'sonnet', effort: 'low' },
+  // a merge of the base is mechanical, so a fresh agent, never the implementer; it writes a commit, so a worktree
+  merge: { model: 'sonnet', effort: 'low', isolation: 'worktree' },
   file: { model: 'sonnet', effort: 'medium' },
   record: { model: 'sonnet', effort: 'low' },
   learnCheck: { model: 'sonnet', effort: 'low' },
@@ -119,7 +125,17 @@ const CI_PROMPT = (board) => `${WHERE}${board ? `First run \`${BOARD('CI / queue
 \`${CI_WAIT(last.pr)}\`
 Each pass reads \`gh pr view <n> --json mergeable,mergeStateStatus\` first, and its \`mergeable\` decides before the checks do. CONFLICTING is the verdict conflict, at once and final, even when the head's checks finished green or red: GitHub starts no CI run on a PR with a merge conflict, so its "no checks reported" never ends, and a PR that cannot merge is not ready. Report conflict with the base it conflicts with and the \`gh pr view\` line the chunk printed; read no job's log for it. UNKNOWN (GitHub computes it lazily, just after a push) or a \`gh pr view\` that fails is "couldn't tell": a wait, never a verdict. Only MERGEABLE lets the checks decide; mergeStateStatus (DRAFT, BLOCKED, BEHIND, ...) is printed for the record and is never a verdict. \`gh pr checks\` exits 0 when all passed, 8 while any is pending, 1 on a failure, and also 1 with "no checks reported" just after a push, which is a wait, not a failure; a failure while others are still pending is a failure. Any other exit code is "couldn't tell": a wait, never green and never failed. On a failure, read each failing job's log: \`gh run view <run> --json jobs\`, then \`gh api repos/embeddable-hq/mason-data/actions/jobs/<id>/logs\` and the lines after "failing tests:" (for the oracle, the "differs:" lines and the first difference). Report each failing test's name and assertion text. Never re-run a job.`
 
-// Every agent that writes code runs with isolation 'worktree': a worktree made for it, which it may edit. A worktree
+// ONE TURN (issue 504): a stage's end that is not its result. Twice a pr-persistent implementer ended its first turn
+// with a commit and no push, PR or result, and the coordinator's wait on the result file ran to its bound. An agent run
+// by the Agent tool, or resumed by SendMessage, is not woken by a background job of its own once its turn has ended
+// (whether it ever is, is not known, so nothing may depend on it), and "about 50 tool calls, ending at the push" can be
+// read as a place to stop. So every stage that writes (the stages ON gives isolation 'worktree') is told, once, that its
+// turn ends only with its result; a gate that can outlast one tool call is waited on in the same turn by bounded
+// foreground commands, scripts/done-file.ts writing the gate's end to a file that scripts/wait-file.ts waits on, each
+// one plain command. pr-persistent's render replays this script, so the implementer's first leg and every fix round the
+// coordinator sends it by SendMessage carry it. tests/workflows.test.ts holds every writer's prompt to it.
+const ONE_TURN = `ONE TURN (issue 504): your turn ends only once this stage's work is done and your result returned, never before. The implementer's work is done after its push, its PR (\`gh pr create\`), its Handoff comment, and then its result; every other stage that writes is done after its push (or the no-push answer its prompt allows), and then its result. A commit that is not pushed is not done. No agent run here is woken by a background job of its own once its turn has ended, so nothing may wait on one: run every gate and test in the foreground, with the Bash tool's timeout set (up to 600000 ms). A gate that can outlast one tool call (\`npm run check\` first waits for a slot, CLAUDE.md "Local gates") is started with the Bash tool's run_in_background as \`node ${REPO}/scripts/done-file.ts <done file> npm run check > <log> 2>&1\`, both paths under the system temp dir, and waited on in this same turn by \`node ${REPO}/scripts/wait-file.ts <done file> 540\`, in the foreground with the Bash tool's timeout set to 600000, run again until it exits 0 (exit 8 is still running; still running after its sixth run, the gate is a hang, read as CLAUDE.md "Local gates" says); the done file then holds the gate's exit code, and the log its output. The tool-call budget this prompt gives is a guide, never a point to stop at: past it, finish the stage.`
+// Every agent that writes code runs with isolation 'worktree':a worktree made for it, which it may edit. A worktree
 // another agent made is another session's to the edit guard, so a fix agent sent to the implementer's worktree was
 // blocked and moved into the coordinator's own (PR 207, round 2): two writers on one tree. The implementer makes the
 // branch in its own worktree, which keeps it checked out; every agent after it works detached at the branch's tip and
@@ -325,6 +341,14 @@ const CI = { type: 'object', required: ['state', 'detail'], properties: {
   state: { type: 'string', enum: ['green', 'failed', 'timeout', 'conflict'] },
   detail: { type: 'string', description: 'for failed: each failing job, its failing test name and assertion text; for conflict: the base the PR conflicts with, and the gh pr view line the wait printed (mergeable, mergeStateStatus)' },
 } }
+// What the merge stage returns: scripts/merge-base.ts's verdict, and the head origin/<branch> holds after its push,
+// which is the authority for "merged", as a CI fix's head is (the head, not the flag).
+const MERGED = { type: 'object', required: ['state', 'head', 'files', 'detail'], properties: {
+  state: { type: 'string', enum: ['merged', 'conflict', 'up-to-date'], description: "merge-base.ts's verdict: exit 0 merged, 4 conflict, 5 up-to-date; any other exit, or a push that failed, is conflict with what it printed in detail" },
+  head: { type: 'string', description: 'the full sha origin/<branch> holds when you are done, as `git ls-remote` prints it' },
+  files: { type: 'array', items: { type: 'string' }, description: 'for merged, the files of its `resolved:` lines; for conflict, the paths of its `conflict:` line; else []' },
+  detail: { type: 'string', description: "merge-base.ts's first line; for any other exit or a failed push, what it printed" },
+} }
 const CHANGED = { type: 'object', required: ['files', 'endedAt'], properties: {
   files: { type: 'array', items: { type: 'string' }, description: 'every path git diff --no-renames --name-only printed, exactly' },
   endedAt: STAMPS.endedAt,
@@ -410,6 +434,7 @@ function fixPrompt(title, on, now, repeated, ciFailure) {
   const earlier = history.slice(0, history.indexOf(now))
   return `${WHERE}${title} on PR ${last.pr} (branch ${A.branch}) of the Mason repo. ${HANDOFF_READ(last.pr)}
 ${WORKTREE(`origin/${A.branch}`)} Run \`${BOARD('Fixing')}\` first. ${FROM_THE_CODE}
+${ONE_TURN}
 ${NOTE_AT(last.pr)}
 
 Every earlier round of this PR, oldest first: do not undo what one fixed, and do not re-check what one judged correct.
@@ -659,6 +684,7 @@ ${pieces.map((t, i) => `${i + 1}. ${t.title}${t.stacked ? ' [stacked on the one 
 phase('Implement')
 last = await agent(
   `${WHERE}Implement ONE PR in the Mason repo, about 50 tool calls, ending at the push. First run \`${BOARD('Implementing')}\`.
+${ONE_TURN}
 You run in a git worktree made for you; work only there. Start with \`git fetch origin ${A.base} && git checkout -b ${A.branch} origin/${A.base}\`.
 Task: #${A.issue} of #${A.parent}, "${A.title}".
 ${brief.brief}
@@ -714,6 +740,7 @@ if (learnable.length) {
   phase('Learn')
   const learned = await agent(
     `${WHERE}Learn from PR ${last.pr}'s rounds. ${WORKTREE(`origin/${A.branch}`)} Move no card on the board.
+${ONE_TURN}
 Every finding of this PR is below. For each CLASS, add or update ONE bullet in the \`## What review probes\` section of the .claude/rules/ file whose \`paths:\` covers the finding's file (its \`at:\`), adding the section at the file's end if it has none. A bullet gives the probe as a synthetic input shape (a statement over a synthetic table: never a real database's table, column or value, CLAUDE.md "The source database is production"), the class's slug, and PR ${last.pr}. A class already listed gets PR ${last.pr} added to its bullet, never a second bullet. Where a detector within reach (a convention test in tests/conventions.test.ts, a hook) would have caught a class, say so in the PR body under \`## Detector wanted\` (read it with \`${GH_TEXT(`body ${last.pr}`)}\`, keep it, write it with \`gh pr edit ${last.pr} --body-file <file>\`): the class and what the detector would assert. Write no test: the coordinator decides.
 Run \`date -u +%FT%TZ\` as your first command and as your last, and return each (startedAt, endedAt): the run log reads Learn's time apart. ONE docs-only commit, touching .claude/rules/ only, then \`node --test --test-timeout=120000 --test-force-exit tests/workflows.test.ts tests/conventions.test.ts\`. The commit ends with \`${coAuthor(ON.learn)}\`. Push, and return the new head. About 20 tool calls.
 ${learnable.map((h) => `### ${h.label}\n${asFailures(h.findings)}`).join('\n\n')}`,
@@ -739,40 +766,86 @@ ${learnable.map((h) => `### ${h.label}\n${asFailures(h.findings)}`).join('\n\n')
   }
 }
 
+// ---------------------------------------------------------------- Merge: the base into a branch CI reads as conflicting
+// GitHub starts no CI run on a conflicting PR, so a conflict is never sent to a CI fix (issue 255). It was an exit,
+// whose status nobody read: a clean PR sat an hour (issue 452; the class: a run's stop that needs another party,
+// reported only in a result file nobody reads). It is a stage now. The case that recurs, release-notes/next.md, which
+// every product PR adds a line to, gaining other PRs' notes on main, is resolved by scripts/merge-base.ts, the authority
+// for what conflicted (git's index) and whether it was only insertions into next.md; it runs from the worktree's own
+// tree, not <repo>, whose checkout can be behind origin/main (issue 468). Every other case stops the run with a status
+// that begins `conflict:` and names the files, which the skills make the coordinator's ONE report at once.
+const MERGE_PROMPT = (k) => `${WHERE}PR ${last.pr} (branch ${A.branch}) conflicts with ${A.base}: GitHub reads it CONFLICTING, and runs no CI on it until ${A.base} is merged into the branch. Merge it, as below; resolve nothing by hand. ${WORKTREE(`origin/${A.branch}`)} Move no card on the board.
+${ONE_TURN}
+Then run this one plain command in that worktree, in the foreground, as it is:
+\`node scripts/merge-base.ts origin/${A.base} "${coAuthor(ON.merge)}"\`
+It merges origin/${A.base} into the detached HEAD and never pushes. Its exit code is its verdict, and its first line says it: 0 merged (\`merged: <sha>\`, then a \`resolved: <path> (kept both sides)\` line for each file it resolved), 4 conflict (\`conflict: <path> <path>…\`, the merge aborted), 5 up to date (nothing to merge). Any other exit is "couldn't tell".
+- On exit 0, push it: \`git push origin HEAD:${A.branch}\`. Return state merged, files the paths of its \`resolved:\` lines (none for a merge with no conflict). If the push fails, return state conflict, files [], and the push's error in detail.
+- On exit 4, push nothing, and return state conflict, files the paths of its \`conflict:\` line.
+- On exit 5, push nothing, and return state up-to-date, files [].
+- On any other exit, push nothing, and return state conflict, files [], and what it printed in detail.
+In every case, then run \`git ls-remote origin refs/heads/${A.branch}\` and return its sha as head, and the script's first line as detail. Never force a push, never edit a file, and never run \`git merge\` yourself. About 10 tool calls.`
+// the status of a merge stage that left the conflict open: the PR, the base, what is known of it, and the way out,
+// the top session's (.claude/skills/up-next/SKILL.md)
+const conflictStatus = (why) => `conflict: PR ${last.pr} conflicts with ${A.base}, and GitHub runs no CI on a conflicting PR; ${why}: the top session merges origin/${A.base} into ${A.branch}${A.stackedOn ? ` (stacked on PR ${A.stackedOn})` : ''}, resolving the files named, pushes, reads the merge, and CI runs again`
+
 // ---------------------------------------------------------------- CI, until green, failures sent back as failures
 // A CI fix is a fix commit like any other, so it gets a narrow re-check (CLAUDE.md "The loop" step 4)
-// before CI again.
-for (let attempt = 1; attempt <= MAX_CI_FIXES + 1; attempt++) {
+// before CI again. A merge of the base is not: it changes none of the PR's own lines, CI on its head is its gate, and it
+// counts toward MAX_MERGES, never toward MAX_CI_FIXES. Each wait returns, merges or fixes, so the bound is their sum.
+let merges = 0
+let ciFixesHere = 0
+for (let attempt = 1; attempt <= MAX_CI_FIXES + MAX_MERGES + 1; attempt++) {
   phase('CI')
   const ci = await agent(CI_PROMPT(true), { label: `CI ${attempt}`, phase: 'CI', ...ON.ci, schema: CI })
   if (!ci) return await finish(`CI wait ${attempt} returned nothing: the coordinator looks`)
-  // GitHub starts no CI run on a conflicting PR, so a conflict is never sent to a CI fix: the run stops naming the base
-  // and the way out, never 'reviewed', so the coordinator stops there too
-  if (ci.state === 'conflict') return await finish(`conflict: PR ${last.pr} conflicts with ${A.base}, and GitHub runs no CI on a conflicting PR: merge origin/${A.base} into ${A.branch} and push, then CI runs again (${ci.detail.slice(0, 300)})`)
+  if (ci.state === 'conflict') {
+    const read = `CI ${attempt} read it: ${ci.detail.slice(0, 300)}`
+    if (merges >= MAX_MERGES) return await finish(conflictStatus(`${read}; still conflicting after ${MAX_MERGES} merges of origin/${A.base}`))
+    merges++
+    phase('Merge')
+    const m = await agent(MERGE_PROMPT(merges), { label: `merge ${merges}`, phase: 'Merge', ...ON.merge, schema: MERGED })
+    if (!m) return await finish(conflictStatus(`${read}; merge ${merges} failed, returning nothing, so the conflict is still open`))
+    const files = m.files.length ? m.files.join(', ') : 'no file named'
+    // the head decides whether anything was pushed; the state only says what the script read
+    const moved = typeof m.head === 'string' && m.head !== '' && m.head !== last.head
+    if (moved && m.state !== 'merged') {
+      last = { ...last, head: m.head }
+      return await finish(conflictStatus(`${read}; merge ${merges} answered ${m.state} (${files}; ${m.detail.slice(0, 200)}) yet moved the branch to ${m.head.slice(0, 7)}, which no review read`))
+    }
+    if (m.state === 'conflict') return await finish(conflictStatus(`merge ${merges} of origin/${A.base} conflicts in ${files} (${m.detail.slice(0, 200)}), and only release-notes/next.md alone, with insertions on both sides, is resolved by the run`))
+    if (!moved) return await finish(conflictStatus(`${read}; but merge ${merges} found nothing to merge (${m.state}: ${m.detail.slice(0, 200)}) and the head is still ${last.head.slice(0, 7)}: GitHub read a conflict the merge did not find, so the top session looks`))
+    last = { ...last, head: m.head }
+    notes.push(`merge ${merges}: merged origin/${A.base} into ${A.branch} at ${m.head.slice(0, 7)}${m.files.includes('release-notes/next.md') ? ', release-notes/next.md kept both sides' : ''}${m.files.filter((x) => x !== 'release-notes/next.md').length ? `, resolved ${m.files.filter((x) => x !== 'release-notes/next.md').join(', ')}` : ''}; no review read it, CI did: the top session reads the merge`)
+    log(`merge ${merges}: origin/${A.base} merged at ${m.head.slice(0, 7)}; CI again`)
+    continue
+  }
   if (ci.state === 'timeout') return await finish('CI not finished within the bound')
   if (ci.state === 'green') return await finish('reviewed, no open blocking finding of this PR, CI green: ready for the merge decision')
   log(`CI failed: ${ci.detail.slice(0, 200)}`)
-  if (attempt > MAX_CI_FIXES) return await finish(`CI still red after ${MAX_CI_FIXES} fixes: the coordinator decides`)
+  if (ciFixesHere >= MAX_CI_FIXES) return await finish(`CI still red after ${MAX_CI_FIXES} fixes: the coordinator decides`)
+  ciFixesHere++
   phase('Fix')
   ciFixes++
   const fixed = await agent(
     `${WHERE}CI failed on PR ${last.pr} (branch ${A.branch}). ${HANDOFF_READ(last.pr)}
-${WORKTREE(`origin/${A.branch}`)} Run \`${BOARD('Fixing')}\`. Start from the code: the files and tests the failure names and the handoff's keyFiles; read the whole diff (\`git diff origin/${A.base}...HEAD\`) only where those do not explain it. The failure:
+${WORKTREE(`origin/${A.branch}`)} Run \`${BOARD('Fixing')}\`.
+${ONE_TURN}
+Start from the code: the files and tests the failure names and the handoff's keyFiles; read the whole diff (\`git diff origin/${A.base}...HEAD\`) only where those do not explain it. The failure:
 ${ci.detail}
 ${NOTE_AT(last.pr)}
 Every round of this PR so far, oldest first: do not undo what one fixed.
 ${historyText(history)}
 Read the failure (CLAUDE.md "Local gates"). If it is this change's, fix it, with a test. If it is a flake (a test the change cannot have touched, failing on timing or load), say so with flake: true, change nothing and return the head unchanged: the coordinator quarantines it on main. If the oracle's allowlist or fixture is stale, regenerate it from this run (\`node scripts/oracle-legs.ts --write <run-id>\`) and read the diff. If ${A.base} has the fix, merge \`origin/${A.base}\`. ${FIX_GATES}
 ${SELF_CHECK(FIX_SCALE)}
-ONE push, whose commit ends with \`${coAuthor(ON.fix)}\`. ${HANDOFF_RETURN(last.pr, `CI fix ${attempt}`)} Return the new head.`,
-    { label: `CI fix ${attempt}`, phase: 'Fix', ...ON.fix, schema: CI_FIXED })
-  if (!fixed) return await finish(`CI fix ${attempt} failed`)
+ONE push, whose commit ends with \`${coAuthor(ON.fix)}\`. ${HANDOFF_RETURN(last.pr, `CI fix ${ciFixesHere}`)} Return the new head.`,
+    { label: `CI fix ${ciFixesHere}`, phase: 'Fix', ...ON.fix, schema: CI_FIXED })
+  if (!fixed) return await finish(`CI fix ${ciFixesHere} failed`)
   // the head decides whether anything was pushed; the flag only says why nothing was
   if (fixed.head === last.head) return await finish(fixed.flake
     ? `CI failed on a flake, nothing pushed: the coordinator quarantines it (${fixed.summary})`
-    : `CI fix ${attempt} pushed nothing: the coordinator decides`)
-  authored.push({ label: `CI fix ${attempt}`, ...countsOf(fixed) })
-  carry(fixed.handoff, `CI fix ${attempt}`)
+    : `CI fix ${ciFixesHere} pushed nothing: the coordinator decides`)
+  authored.push({ label: `CI fix ${ciFixesHere}`, ...countsOf(fixed) })
+  carry(fixed.handoff, `CI fix ${ciFixesHere}`)
   const prev = last.head
   last = fixed
   const again = await reviewAndFix({ kind: 'narrow', base: prev, what: `The commits since ${prev.slice(0, 7)} fix this CI failure:\n${ci.detail}\nCheck they fix it and change no answer Postgres would give.` })

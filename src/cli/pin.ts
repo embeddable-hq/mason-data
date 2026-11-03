@@ -7,6 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseVersion, pinFileText, projectPinProblem, PIN_FILE, type PinRefusal } from "../lib/project-version.ts";
+import { projectWriteRefusal } from "./project.ts";
 
 /** Why this mason command may not run the project in `folder`, or null (a checkout's `dev` checks nothing). */
 export function commandPinProblem(folder: string, cliVersion: string): PinRefusal | null {
@@ -26,10 +27,12 @@ export function cliPinProblem(folder: string, cliVersion: string): string | null
 
 /**
  * Write `folder`'s mason.yml with this command's version when it has none; the file written, or null when there was one
- * already (or this is a checkout's `dev`, which has no version to write).
+ * already (or this is a checkout's `dev`, which has no version to write), or when the project's files are read-only here
+ * (src/cli/project.ts `projectWriteRefusal`, asked of `root`, the project's: a deployed project's pin is the one committed).
  */
-export function ensurePin(folder: string, cliVersion: string): string | null {
+export function ensurePin(folder: string, cliVersion: string, root: string, env: Readonly<Record<string, string | undefined>> = process.env): string | null {
   if (parseVersion(cliVersion) === null) return null;
+  if (projectWriteRefusal(root, env) !== null) return null;
   const file = path.join(folder, PIN_FILE);
   if (fs.existsSync(file)) return null;
   fs.mkdirSync(folder, { recursive: true });

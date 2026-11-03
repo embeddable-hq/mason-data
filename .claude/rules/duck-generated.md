@@ -156,8 +156,13 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   records `copied` before its rebuild of the catalog, so the phase alone refused a definition at every `mason start`.
   A check's 42P01 for a table the sources file adds is a wait, also when the catalog moved while it planned (the
   host's answer is then the new catalog's, not the one the plan was made on), and `ready` reads the same answer.
-  Detector: tests/duck-generated.test.ts "the catalog holds it" and "the catalog the check planned on holds it", and
-  tests/cli-demo-start.test.ts's starts (no refusal said, `mason wait daily_orders` exits 0 the first time).
+  **A GENERATED base too** (issue 474): a run sets its table deployed, so serving, before its rebuild of the catalog
+  (which reads `served()`, so it must), and that rebuild waits behind any other; a check's 42P01 for a generated table
+  the folder defines (`defines`: a file names it or it was built) is a wait for it, whatever its state, never a refusal,
+  and a name nobody defines stays Postgres's refusal. Never a timing fix: the 42P01 is the authority that the plan's
+  catalog lacks it. Detector: tests/duck-generated.test.ts "the catalog holds it", "the catalog the check planned on
+  holds it" and "built but not yet in the catalog waits for it", and tests/cli-demo-start.test.ts's starts (no refusal
+  said, `mason wait daily_orders` exits 0 the first time).
 
 ## What review probes
 

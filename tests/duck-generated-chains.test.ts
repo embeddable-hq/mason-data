@@ -12,7 +12,7 @@ import * as path from "node:path";
 import type pg from "pg";
 import { MASON_SCHEMA } from "../src/duck/store.ts";
 import { stopParser } from "../src/api/postgres/parser.ts";
-import { built, COUNTS, refusedAt, served, withWorld } from "./duck-generated-world.ts";
+import { BUILD_BOUND_MS, built, COUNTS, refusedAt, served, withWorld } from "./duck-generated-world.ts";
 import { scheduled } from "./duck-generated-ledger.ts";
 
 after(() => stopParser());
@@ -109,7 +109,7 @@ test("a run asked while another is in flight waits for it, so a child is never l
   let release: (() => void) | null = null, held = false;
   const gate = new Promise<void>((r) => { release = r; });
   await withWorld({ counts: COUNTS, doubled: scheduled("SELECT tenant_id, requests * 2 AS doubled FROM counts", "tenant_id") }, async (w) => {
-    for (const end = Date.now() + 20_000; !held && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
+    for (const end = Date.now() + BUILD_BOUND_MS; !held && Date.now() < end;) { await w.sync.generated.review(); await new Promise((r) => setTimeout(r, 10)); }
     assert.ok(held, "the child's first run reached its swap");
     await w.store.writer.run("INSERT INTO public.events VALUES (7, 3, 'query', 'ok', '7', '2026-01-03 00:00:00+00', NULL, 1, NULL), (8, 3, 'load', 'ok', '8', NULL, NULL, 1, NULL)");
     w.sync.generated.changed("public.events");

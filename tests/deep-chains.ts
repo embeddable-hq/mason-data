@@ -35,8 +35,10 @@ export const PLAN_TIME_BOUND_MS = 1000;
  * c numeric(10,2), d char(4))` (tests/duck-plan-time.test.ts). Each shape, by name, `depth` levels deep, every level
  * reading the one below three times where the shape allows: `a + a - a` (no int overflow at any depth when executed)
  * and `coalesce(b, b, b)` (no text that grows), never `a + a + a` or `b || b || b`. `sI` is the alias at level I. The
- * numeric c is read nowhere: carried through every level it grows with the cube of the depth, and `c + c - c` is
- * exponential (issue 244, whose fix brings it here).
+ * numeric c is read or carried through every level, and a quotient of it, since issue 244's first piece (#483) took a
+ * FROM item's exact-numeric decisions once per column (on main `c + 1` took 399 ms and every column with c 1208 ms at
+ * depth 32). Still left out, for #484, whose program is copied into each reference: `c + c - c`, which is exponential,
+ * and the UNION ALL chain of a numeric (`deepChains`' union).
  */
 export function deepShapes(depth: number): Record<string, string> {
   const levels = (start: string, level: (below: string, i: number) => string): string => {
@@ -47,6 +49,8 @@ export function deepShapes(depth: number): Record<string, string> {
   const ab = "a + a - a AS a, coalesce(b, b, b) AS b";
   const qs = ["q0 AS (SELECT a, b FROM t)"];
   for (let i = 1; i <= depth; i++) qs.push(`q${i} AS (SELECT ${ab} FROM q${i - 1})`);
+  const qq = ["q0 AS (SELECT c / 3 AS q FROM t)"];
+  for (let i = 1; i <= depth; i++) qq.push(`q${i} AS (SELECT q + 1 AS q FROM q${i - 1})`);
   // level I's set operation, cycling from UNION at I = 0, each arm parenthesised with a bound of its own
   const setOps = ["UNION", "INTERSECT ALL", "EXCEPT ALL", "UNION ALL"];
   return {
@@ -73,5 +77,13 @@ export function deepShapes(depth: number): Record<string, string> {
     "bounded arms": levels("SELECT a FROM t", (s, i) => `SELECT a FROM ((${s}) UNION ALL (SELECT a FROM t ORDER BY a DESC LIMIT ${i})) s${i} ORDER BY a LIMIT 50`),
     "with ties": levels("SELECT a FROM t", (s, i) => `SELECT a + a - a AS a FROM (${s}) s${i} ORDER BY a FETCH FIRST 50 ROWS WITH TIES`),
     "all but c": `${levels("SELECT id, a, b, d FROM t", (s, i) => `SELECT id, a + a - a AS a, b, d FROM (${s}) s${i}`)} ORDER BY 1`,
+    // the numeric c, read or merely carried through every level (issue 244: each level's exact-numeric decisions about
+    // the column below are taken once, never again per reference; 3^depth on main for 1::numeric, tests/duck-wire.test.ts)
+    "c + 1": `${levels("SELECT c FROM t", (s, i) => `SELECT c + 1 AS c FROM (${s}) s${i}`)} ORDER BY 1`,
+    "c passed through": `${levels("SELECT c FROM t", (s, i) => `SELECT c FROM (${s}) s${i}`)} ORDER BY 1`,
+    "every column with c": `${levels("SELECT id, a, b, c, d FROM t", (s, i) => `SELECT id, ${ab}, c, d FROM (${s}) s${i}`)} ORDER BY 1`,
+    "a quotient passed through": `${levels("SELECT c / 3 AS q FROM t", (s, i) => `SELECT q FROM (${s}) s${i}`)} ORDER BY 1`,
+    "q + 1": `${levels("SELECT c / 3 AS q FROM t", (s, i) => `SELECT q + 1 AS q FROM (${s}) s${i}`)} ORDER BY 1`,
+    "q + 1, a WITH chain": `WITH ${qq.join(", ")} SELECT q FROM q${depth} ORDER BY 1`,
   };
 }
