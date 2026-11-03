@@ -4156,6 +4156,29 @@ test("the jsonb route to a number is an ordinary value to every reader around it
       ["SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (1, 9, 11) INTERSECT SELECT 1 ORDER BY 1", "ordered"],
       ["SELECT (b -> 'a')::numeric(10,3) FROM jnat WHERE id IN (9, 11, 12) UNION ALL SELECT 1", "bag"],
       ["SELECT 1 UNION ALL SELECT (b -> 'a')::numeric(5,1) FROM jnat WHERE id IN (9, 11, 12)", "bag"],
+      // (PR 582 review r6, set-op-refusal-by-containment-not-engine-type: decided by the arms' types and scales, never by
+      // what a value contains) a value that is not the route's array, beside another scale
+      ["SELECT array_length((ARRAY[b -> 'a'])::int[], 1) FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1.5", "bag"],
+      ["SELECT cardinality((ARRAY[b -> 'a'])::int[]) + 0.5 FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1", "bag"],
+      ["SELECT CASE WHEN 1 = ANY ((ARRAY[b -> 'a'])::int[]) THEN 1.5 ELSE 2 END FROM jnat WHERE id IN (9, 11, 12) UNION ALL SELECT 3", "bag"],
+      ["SELECT sum(((ARRAY[b -> 'a'])::int[])[1]) FROM jnat WHERE id IN (9, 11, 12) UNION ALL SELECT 1.5", "bag"],
+      ["WITH q AS (SELECT ((ARRAY[b -> 'a'])::int[])[1] AS x FROM jnat WHERE id IN (1, 9, 11)) SELECT x FROM q UNION ALL SELECT 1.5", "bag"],
+      ["SELECT n FROM (SELECT cardinality((ARRAY[b -> 'a'])::int[]) AS n FROM jnat WHERE id IN (9, 11)) s UNION ALL SELECT 1.5", "bag"],
+      // the route's array or element beside one of its own writer and scale, under every set operation, a VALUES arm, a `*`,
+      // a derived table, a CTE and a nested set operation
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (1, 9, 11) UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (12, 20)", "bag"],
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (1, 9, 11) UNION SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (11, 12)", "bag"],
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (1, 9, 11) INTERSECT SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (11, 12)", "bag"],
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (1, 9, 11) EXCEPT ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 11", "bag"],
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT NULL", "bag"],
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT ARRAY[2.5::numeric(10,3)]", "bag"],
+      ["SELECT * FROM (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS x FROM jnat WHERE id IN (9, 11)) s UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 12", "bag"],
+      ["WITH w AS (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS x FROM jnat WHERE id IN (9, 11)) SELECT x FROM w UNION ALL SELECT x FROM w", "bag"],
+      ["(SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 12) UNION SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 14", "bag"],
+      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (1, 9, 11) UNION ALL SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id = 12", "bag"],
+      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (1, 9, 11) UNION ALL VALUES (2.450), (NULL)", "bag"],
+      ["SELECT ((ARRAY[b -> 'a'])::numeric(5,1)[])[1] FROM jnat WHERE id IN (9, 11) INTERSECT ALL SELECT ((ARRAY[b -> 'a'])::numeric(5,1)[])[1] FROM jnat WHERE id IN (11, 12)", "bag"],
+      ["SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1", "bag"],
     );
     assert.deepEqual(await unlike(c, statements), []);
     // where Postgres's column is numeric or numeric[], the route's array or an element of it is another engine type than
@@ -4165,16 +4188,14 @@ test("the jsonb route to a number is an ordinary value to every reader around it
       "SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1",
       "SELECT 1 UNION ALL SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11)",
       "SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1.5",
-      "SELECT COALESCE(((ARRAY[b -> 'a'])::numeric(10,3)[])[1], (b -> 'a')::numeric(10,3)) FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1",
       "SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11) EXCEPT SELECT 1",
       "SELECT (ARRAY[b -> 'a'])::int[] FROM jnat WHERE id IN (9, 11) UNION ALL VALUES ('{1}'::numeric(10,3)[])",
       "SELECT s.v FROM (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS v FROM jnat WHERE id IN (9, 11)) s UNION ALL VALUES ('{NULL}'::numeric(10,3)[])"]) {
       await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap array-subquery-element\b/.test(`${e.detail ?? ""} ${e.hint ?? ""} ${e.message}`), sql);
     }
-    // the scalar's numeric beside an integer, compared whole (which arm's row a UNION or an INTERSECT keeps decides its
-    // scale): refused as a numeric program's rows are, never the engine's one scale
-    for (const sql of ["SELECT (b -> 'a')::numeric(10,3) FROM jnat WHERE id IN (9, 11, 12) INTERSECT SELECT 1",
-      "SELECT (b -> 'a')::numeric(10,3) FROM jnat WHERE id IN (9, 11) UNION SELECT 1", "SELECT (b -> 'a')::numeric FROM jnat WHERE id IN (9, 11) EXCEPT SELECT 1"]) {
+    // an unconstrained numeric's rows compared whole: its digits are its program's, which no set operation carries, so
+    // refused as a numeric program's rows are (a numeric(p,s) is the engine's DECIMAL, compared as the base compared it)
+    for (const sql of ["SELECT (b -> 'a')::numeric FROM jnat WHERE id IN (9, 11) EXCEPT SELECT 1", "SELECT (b -> 'a')::numeric FROM jnat WHERE id IN (9, 11) UNION SELECT 1"]) {
       await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-quotient-equality\b/.test(`${e.detail ?? ""} ${e.hint ?? ""} ${e.message}`), sql);
     }
   } finally { await c.end(); await a.close(); }
