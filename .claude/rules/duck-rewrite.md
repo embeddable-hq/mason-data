@@ -499,6 +499,20 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   decided from a list of element types (`TEXT_ARRAY`, `VARCHAR_ARRAY`) instead of from Postgres's analysis of the call
   (the float8[] overload, an array result type), so bpchar[] (1014) is read as one scalar and the engine's error
   escapes; `percentile-array-recognised-by-element-type-list` (PR 413).
+- A change that newly answers a piece (an operator such as `^(numeric,numeric)`, a function by OID) or registers a gap,
+  run on the wire with the allowlist in force (`tests/duck-wire.test.ts`, not `scripts/duck-repro.ts`, which has none):
+  over `t(id int primary key, a int, b text, c numeric(10,2), d char(4))`, `SELECT id, (c ^ 2)::float8, exp(c)::float8,
+  sqrt(c)::float8 FROM t WHERE c > 0 ORDER BY 1`, and `node --test --test-timeout=120000 --test-force-exit
+  tests/oracle-legs.test.ts`; then compare `src/duck/verified.ts` and `tests/fixtures/oracle-duckdb-alone.json` with what
+  the push's own `integration (oracle)` leg printed: the allowlist and fixture left from an older run, so the wire refuses
+  the PR's own shape (0A000 "which Mason has not verified") and a new gap no fixture statement meets fails
+  oracle-legs.test.ts; `allowlist-not-regenerated-from-push-ci` (PR 519).
+- A refusal added for a value an aggregate or call cannot answer exactly, read by each reader that never reads the value:
+  over the same `t`, `SELECT a FROM t GROUP BY a HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY c / 3) IS NOT NULL
+  ORDER BY a NULLS FIRST`, `SELECT a, mode() WITHIN GROUP (ORDER BY c / 3) IS NULL FROM t GROUP BY a ORDER BY 1`, inside
+  CASE, NOT, count(), EXISTS and a derived table read as `s.p IS NULL`, each run at the base and the head: the refusal
+  placed at the call instead of where the value's bytes are read, so a nullness-only read the base answered is now
+  refused; `refusal-at-the-call-not-the-reader` (PR 519).
 - A refusal placed where an aggregate or value is BUILT (an ordered-set aggregate over an exact quotient, a numeric
   key), each reader of that value run at the head and the base over `t (a int, c numeric(10,2), d char(4))` with
   NULLs and ties: the value only ORDERED BY (`SELECT d FROM t GROUP BY d ORDER BY percentile_disc(0.5) WITHIN GROUP

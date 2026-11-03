@@ -995,6 +995,42 @@ function* matrix(): Generator<Matrixed> {
   yield q("log / ln / exp / sqrt / power of a numeric", "SELECT id, log(10, n2), log(n2), ln(n2), log10(n2), exp(n2 / 100), sqrt(n2), power(n2, 2), round(log(n2), 3) FROM typed WHERE n2 BETWEEN 0.01 AND 1000 ORDER BY id");
   yield q("ln / sqrt of an unconstrained numeric, a quotient", "SELECT id, ln(n), sqrt(n), ln(n / 3), sqrt(n2 / 7) FROM typed WHERE n > 0 AND n < 1e6 AND n2 > 0 ORDER BY id");
   yield q("sum / avg of a numeric's ln", "SELECT sum(ln(n2)), avg(sqrt(n2)), sum(exp(n2 / 1000)) FROM typed WHERE n2 BETWEEN 0.01 AND 1000");
+  // issue 217: a numeric's power, ^, exp, ln, log or sqrt cast to float8 is numeric_float8 of Postgres's digits (the
+  // 0.10 row's square is 0.01, never 0.010000000000000002), and past a double's range, or a non-zero value underflowing
+  // to 0, Postgres's 22003 with the text quoted whole; a subnormal is answered
+  yield q("issue 217: power / ^ of a numeric cast to float8, every spelling", "SELECT id, power(n2, 2)::double precision, pow(n2, 3)::float8, (n2 ^ 2)::float8, (n2 ^ 0.5)::float8, " +
+    "power(n2, 2.5)::float8, CAST(n2 ^ 2 AS double precision), power(n2, 2)::pg_catalog.float8 FROM typed WHERE n2 BETWEEN 0.01 AND 1000 ORDER BY id");
+  yield q("issue 217: a numeric ^ an integer column, cast to float8", "SELECT id, (n2 ^ i2)::float8, power(n2, i2)::float8, power(n2, -1)::float8 FROM typed " +
+    "WHERE n2 BETWEEN 0.01 AND 1000 AND i2 BETWEEN -5 AND 7 ORDER BY id");
+  yield q("issue 217: exp / ln / log / log10 / sqrt of a numeric cast to float8", "SELECT id, exp(n2 / 100)::double precision, ln(n2)::double precision, log(n2)::float8, " +
+    "log10(n2)::float8, log(2, n2)::float8, log(n2, 10)::float8, sqrt(n2)::double precision FROM typed WHERE n2 BETWEEN 0.01 AND 1000 AND n2 <> 1 ORDER BY id");
+  yield q("issue 217: an unconstrained numeric and a quotient, cast to float8", "SELECT id, power(n, 2)::float8, (n ^ 2)::float8, ln(n)::float8, sqrt(n)::float8, " +
+    "exp(n2 / 3)::float8, ((n2 / 3) ^ 2)::float8, ln(n2 / 3)::float8 FROM typed WHERE n > 0 AND n < 1e6 AND n2 > 0 ORDER BY id");
+  yield q("issue 217: NULL rows cast to float8", "SELECT id, (n2 ^ 2)::float8, exp(n2)::float8, power(n2, 2)::float8 FROM typed WHERE n2 IS NULL OR id = 4 ORDER BY id");
+  yield q("issue 217: through a derived table", "SELECT x::float8, y::float8 FROM (SELECT id, n2 ^ 2 AS x, exp(n2 / 100) AS y FROM typed WHERE n2 BETWEEN 0.01 AND 1000) s ORDER BY id");
+  yield q("issue 217: through a CTE, the numeric printed beside", "WITH w AS (SELECT id, power(n2, 2) AS p, ln(n2) AS l, n2 ^ 2 AS r FROM typed WHERE n2 BETWEEN 0.01 AND 1000) " +
+    "SELECT id, p::float8, l::float8, r::float8, p, r FROM w ORDER BY id");
+  yield q("issue 217: compared in WHERE", "SELECT id FROM typed WHERE (n2 ^ 2)::float8 = 0.01::float8 OR power(n2, 2)::double precision = 2.25 OR n2 ^ 2 = 0.0100 ORDER BY id");
+  yield q("issue 217: grouped by number", "SELECT (n2 ^ 2)::float8 AS p, count(*) FROM typed WHERE n2 BETWEEN -1000 AND 1000 GROUP BY 1 ORDER BY 1");
+  yield q("issue 217: grouped by output name, NULLS FIRST", "SELECT power(t.n2, 2)::float8 AS p, count(*) FROM typed t WHERE t.n2 BETWEEN -1000 AND 1000 GROUP BY p ORDER BY p NULLS FIRST");
+  yield q("issue 217: DISTINCT", "SELECT DISTINCT power(n2, 2)::float8 FROM typed WHERE n2 BETWEEN -1000 AND 1000 ORDER BY 1");
+  yield q("issue 217: ordered by the casts", "SELECT id, exp(n2 / 100)::float8, (n2 ^ 2)::float8 FROM typed WHERE n2 BETWEEN 0.01 AND 1000 ORDER BY 2 DESC, 3, 1");
+  yield q("issue 217: a UNION ALL arm", "SELECT id, (n2 ^ 2)::float8 FROM typed WHERE n2 BETWEEN 0.01 AND 1000 UNION ALL SELECT 0, 0.01::float8 ORDER BY 1, 2");
+  yield q("issue 217: a scalar subquery", "SELECT t.id, (SELECT (u.n2 ^ 2)::float8 FROM typed u WHERE u.id = t.id), (SELECT exp(u.n2 / 100)::float8 FROM typed u WHERE u.id = t.id) " +
+    "FROM typed t WHERE t.id < 100 ORDER BY t.id");
+  yield q("issue 217: max / min of the casts", "SELECT max((n2 ^ 2)::float8), min(ln(n2)::float8), max(power(n2, 2)::double precision) FROM typed WHERE n2 BETWEEN 0.01 AND 1000");
+  yield q("issue 217: ^ past a double's range is 22003", "SELECT (n2 ^ 40)::float8 FROM typed WHERE id = 5");
+  yield q("issue 217: power past a double's range is 22003", "SELECT power(n2, 40)::double precision FROM typed WHERE id = 5");
+  yield q("issue 217: a negative past a double's range is 22003", "SELECT (-(n2 ^ 41))::float8 FROM typed WHERE id = 5");
+  yield q("issue 217: a non-zero value underflowing to 0 is 22003", "SELECT (n2 ^ 170)::float8 FROM typed WHERE id = 6");
+  yield q("issue 217: exp past a double's range is 22003", "SELECT exp(n2 + 798.50)::float8 FROM typed WHERE id = 2");
+  yield q("issue 217: a large power within range is answered", "SELECT (n2 ^ 30)::float8, power(n2, 30)::double precision FROM typed WHERE id = 5");
+  yield q("issue 217: a subnormal is answered", "SELECT (n2 ^ 310)::float8 FROM typed WHERE id = 4");
+  // review r3 of PR 519 (refusal-at-the-call-not-the-reader): an ordered-set aggregate over an exact order key read only
+  // for its nullness is answered (the key is NULL exactly when the value is); its value stays refused (numeric-ordered-set)
+  yield q("issue 217: percentile_disc / mode() over an exact key read only for its nullness", "SELECT id % 3 AS g, percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 3) IS NULL, " +
+    "mode() WITHIN GROUP (ORDER BY nullif(n2 / 7, 0)) IS NOT NULL, CASE WHEN percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 ^ 2) IS NULL THEN 'none' ELSE 'some' END " +
+    "FROM typed WHERE n2 BETWEEN -1000 AND 1000 OR n2 IS NULL GROUP BY 1 HAVING mode() WITHIN GROUP (ORDER BY n2 / 3) IS NOT NULL OR count(*) > 0 ORDER BY 1");
   // a UNION ALL whose arm reads a CTE, over an exact numeric: the trial of the arms' programs once wrote the real CTE,
   // leaving the arms of different widths, which the engine refused (PR 202 round 8); and its stored-column twin
   yield q("a CTE's sqrt read by one UNION ALL arm, beside the same sqrt", "WITH t AS (SELECT sqrt(abs(n2)) AS v FROM typed WHERE n2 BETWEEN -1000 AND 1000) " +

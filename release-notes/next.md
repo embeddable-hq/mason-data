@@ -262,6 +262,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   integer of a double the engine computes, such as `stddev(x)::int` of a numeric without a precision
   (`numeric-double-integer`: cast to float8 first); a generated table with one fails its build saying so. Nothing to do
   on upgrade.
+- **A numeric `power`, `^` or `exp` past a double's range, cast to `double precision`, now raises Postgres's error.**
+  `power(x, 400)::double precision` answered `Infinity`, and a value too small for a double (`(0.01 ^ 170)::float8`)
+  answered `0`; each now fails as Postgres does, 22003 `"<the value>" is out of range for type double precision`. A
+  value a double holds, however small (`1e-310`), is answered as before. Nothing to do on upgrade.
 - **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
   `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with
   "types cannot be matched", and an integer beside a `numeric(12,2)` showed `1.00` where Postgres shows `1`; each now
