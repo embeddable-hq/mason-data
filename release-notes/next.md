@@ -15,6 +15,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason login` and `mason logout` sign this machine in to a hosted Mason service, and out of it.** Login prints a
+  page and a code to approve in a browser, then saves the login in `~/.config/mason/credentials.json` (0600), outside
+  every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this
+  machine). Nothing changes for a project, `mason start` or `mason serve`. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md)
+  is the API they speak.
 - **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
   ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
   beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy

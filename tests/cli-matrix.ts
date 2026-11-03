@@ -49,6 +49,10 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   stop: [],
   destroy: [],
   serve: [],
+  // the service is matrixEnv's MASON_CLOUD_URL, where nothing listens: refused with the way out, nothing saved
+  login: [],
+  // nothing saved for that service in the matrix's HOME: said, exit 0, nothing sent
+  logout: [],
 };
 
 /**
@@ -83,10 +87,11 @@ export function matrixEnv(extra: Record<string, string> = {}): Record<string, st
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined) continue;
-    if (/^(PG|CLICKHOUSE_|MASON_|DATABASE_URL$|FORCE_COLOR$|NO_COLOR$|IT_)/.test(k)) continue;
+    if (/^(PG|CLICKHOUSE_|MASON_|DATABASE_URL$|FORCE_COLOR$|NO_COLOR$|IT_|XDG_CONFIG_HOME$)/.test(k)) continue;
     env[k] = v;
   }
-  return { ...env, MASON_DEBUG: "1", ...extra };
+  // a hosted service's commands (mason login, mason logout) never reach a real one from a test: port 1 answers nothing
+  return { ...env, MASON_DEBUG: "1", MASON_CLOUD_URL: "http://127.0.0.1:1", ...extra };
 }
 
 /**
