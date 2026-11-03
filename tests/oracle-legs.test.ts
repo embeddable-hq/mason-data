@@ -12,10 +12,11 @@ import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
 import { emptyShapeCount, NEW_SHAPES, shapeProblems, sumShapeTallies, type ShapeTally } from "./integration/oracle/shape-names.ts";
-import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, Clock, FIRST_LEG_RUNS_STAGES, partition, readWeights, timesLine, weightKey, weightsFromLegs, legScales, legsBalance, balanceLines, LEGS_APART_MS, weightsText, writeWeights, WEIGHTS_FILE, type Decision, type LegReport, type Measured, type Tallies, type Weights } from "../scripts/oracle-legs.ts";
+import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, Clock, FIRST_LEG_RUNS_STAGES, partition, readWeights, timesLine, weightKey, weightsFromLegs, legScales, legsBalance, balanceLines, LEGS_APART_MS, weightsText, writeWeights, WEIGHTS_FILE, README_FILE, SUPPORT_FILE, type Decision, type LegReport, type Measured, type Tallies, type Weights } from "../scripts/oracle-legs.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import type { GapTally } from "./integration/oracle/gap-tally.ts";
+import { README_END, README_START, renderGaps, renderReadmeSupport, spliceReadme, type AloneTallies } from "./sql-support.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -381,61 +382,137 @@ test("--write refuses legs that are not the whole, or that predate it, and legs 
   assert.match(JSON.stringify(filesFromLegs([a, { ...b, measured: { ...b.measured, machine: "another machine" } }], 2, verifiedNow)), /the legs measured on different machines/);
 });
 
-test("--write over a folder as `gh run download` leaves it: both files rewritten to what the legs measured, and nothing when a leg is missing", (t) => {
+/** A temp root as a checkout stands before `--write`: src/duck/verified.ts without `aggregate:2050`, the fixture `{}`,
+ *  README.md's generated block saying another statement count (its hand-written text the repo's), docs/SQL-SUPPORT.md
+ *  an old text. `seed()` writes them again; `seeded` is what each file was written as. */
+function staleRoot(t: { after: (fn: () => void) => void }, readme?: string) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-write-"));
   t.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
   const root = path.join(tmp, "repo"), dir = path.join(tmp, "download");
-  for (const f of [VERIFIED_FILE, FIXTURE_FILE]) fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
-  const stale = fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8").replace(/^ {2}\["aggregate:2050".*\n/m, "") + "";
-  fs.writeFileSync(path.join(root, VERIFIED_FILE), stale);
-  fs.writeFileSync(path.join(root, FIXTURE_FILE), "{}\n");
+  const repoReadme = fs.readFileSync(path.join(ROOT, README_FILE), "utf8");
+  const a = repoReadme.indexOf(README_START), z = repoReadme.indexOf(README_END, a);
+  assert.ok(a >= 0 && z > a && repoReadme.slice(a, z).includes("6,976"), "the repo's README block says the fixture's 6,976 statements: the stale one says another");
+  const seeded: Record<string, string> = {
+    [VERIFIED_FILE]: fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8").replace(/^ {2}\["aggregate:2050".*\n/m, ""),
+    [FIXTURE_FILE]: "{}\n",
+    [README_FILE]: readme ?? repoReadme.slice(0, a) + repoReadme.slice(a, z).replace("6,976", "6,879") + repoReadme.slice(z),
+    [SUPPORT_FILE]: "# an old SQL-SUPPORT.md\n",
+  };
+  const seed = (): void => { for (const [f, text] of Object.entries(seeded)) { fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true }); fs.writeFileSync(path.join(root, f), text); } };
+  seed();
+  fs.mkdirSync(dir, { recursive: true });
+  const read = (f: string): string => fs.readFileSync(path.join(root, f), "utf8");
+  return { root, dir, seeded, seed, read };
+}
+const FOUR = [FIXTURE_FILE, VERIFIED_FILE, README_FILE, SUPPORT_FILE];
+const COMMIT_FOUR = `oracle legs: read the diff, then commit the four files: ${FIXTURE_FILE}, ${VERIFIED_FILE}, ${README_FILE} and ${SUPPORT_FILE}`;
+
+test("--write over a folder as `gh run download` leaves it: the four files rewritten to what the legs measured, and nothing when a leg is missing", (t) => {
+  const { root, dir, seeded, read } = staleRoot(t);
   const reports = legsOfTheRepo();
   for (const r of reports) { fs.mkdirSync(path.join(dir, `ran-oracle-${r.leg}`), { recursive: true }); fs.writeFileSync(path.join(dir, `ran-oracle-${r.leg}`, reportName(r.leg)), JSON.stringify(r)); }
   fs.rmSync(path.join(dir, "ran-oracle-2", reportName(2)));
   const missing = writeFromLegs(dir, root);
   assert.equal(missing.code, 1);
   assert.match(missing.err.join("\n"), /nothing written/);
-  assert.equal(fs.readFileSync(path.join(root, FIXTURE_FILE), "utf8"), "{}\n");
+  for (const f of FOUR) assert.equal(read(f), seeded[f], `${f} as seeded`);
   fs.writeFileSync(path.join(dir, "ran-oracle-2", reportName(2)), JSON.stringify(reports[1]));
   const done = writeFromLegs(dir, root);
   assert.equal(done.code, 0, done.err.join("\n"));
-  assert.deepEqual(done.out, [`oracle legs: wrote ${FIXTURE_FILE}`, `oracle legs: wrote ${VERIFIED_FILE}`, "oracle legs: read the diff, then commit both files"]);
-  for (const f of [VERIFIED_FILE, FIXTURE_FILE]) assert.equal(fs.readFileSync(path.join(root, f), "utf8"), fs.readFileSync(path.join(ROOT, f), "utf8"), f);
+  assert.deepEqual(done.out, [...FOUR.map((f) => `oracle legs: wrote ${f}`), COMMIT_FOUR]);
+  // README.md's hand-written text is the repo's too, so the whole file is: only the block was replaced
+  for (const f of FOUR) assert.equal(read(f), fs.readFileSync(path.join(ROOT, f), "utf8"), f);
   // what else a whole run asserts is said after writing, and fails
   reports[0].differences = 2;
   fs.writeFileSync(path.join(dir, "ran-oracle-1", reportName(1)), JSON.stringify(reports[0]));
   const differ = writeFromLegs(dir, root);
   assert.equal(differ.code, 1);
-  assert.deepEqual(differ.out, [`oracle legs: unchanged ${FIXTURE_FILE}`, `oracle legs: unchanged ${VERIFIED_FILE}`]);
+  assert.deepEqual(differ.out, FOUR.map((f) => `oracle legs: unchanged ${f}`));
   assert.match(differ.err.join("\n"), /written, and still wrong: 2 statement\(s\) answered differently/);
 });
 
-test("--write as a whole run: a stale decision or a dead gap writes the fixture and leaves src/duck/verified.ts as it was", (t) => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "oracle-write-"));
-  t.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
-  const root = path.join(tmp, "repo"), dir = path.join(tmp, "download");
-  for (const f of [VERIFIED_FILE, FIXTURE_FILE]) fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
-  fs.mkdirSync(dir);
-  const stale = fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8").replace(/^ {2}\["aggregate:2050".*\n/m, "");
+test("--write renders the docs from the verified list it writes, never the one the process imported", (t) => {
+  const { root, dir, read } = staleRoot(t);
+  const reports = legsOfTheRepo();
+  for (const r of reports) { r.verified = r.verified.filter((k) => k !== "aggregate:2050"); delete r.names["aggregate:2050"]; fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r)); }
+  const done = writeFromLegs(dir, root);
+  assert.equal(done.code, 0, done.err.join("\n"));
+  const written = new Map([...VERIFIED].filter(([k]) => k !== "aggregate:2050"));
+  assert.equal(written.size, VERIFIED.size - 1);
+  const alone = JSON.parse(read(FIXTURE_FILE)) as AloneTallies;
+  assert.equal(read(README_FILE), spliceReadme(fs.readFileSync(path.join(ROOT, README_FILE), "utf8"), renderReadmeSupport(GAPS, written, alone)));
+  assert.match(read(README_FILE), new RegExp(`the ${(VERIFIED.size - 1).toLocaleString("en-US")} verified pieces`));
+  assert.equal(read(SUPPORT_FILE), renderGaps(GAPS, written, alone));
+  assert.ok(read(SUPPORT_FILE).includes(`\n## What is verified (${VERIFIED.size - 1})\n`));
+  assert.notEqual(read(SUPPORT_FILE), renderGaps(GAPS, VERIFIED, alone), "not what the imported VERIFIED renders");
+});
+
+test("--write renders the docs from the tallies it writes, never the repo's fixture", (t) => {
+  const { root, dir, read } = staleRoot(t);
+  const reports = legsOfTheRepo();
+  // 700 statements moved from exact to a wrong value in leg 1: the sums kept, the percentage moved
+  reports[0].tallies.duckdb.exact! -= 700;
+  reports[0].tallies.duckdb.value! += 700;
+  for (const r of reports) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r));
+  const done = writeFromLegs(dir, root);
+  assert.equal(done.code, 0, done.err.join("\n"));
+  const repo = JSON.parse(fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8")) as AloneTallies;
+  const alone = JSON.parse(read(FIXTURE_FILE)) as AloneTallies;
+  assert.equal(alone.duckdb.exact, repo.duckdb.exact - 700);
+  const pct = (n: number): string => `${Math.round(100 * n / alone.statements)}%`;
+  assert.notEqual(pct(alone.duckdb.exact), pct(repo.duckdb.exact), "the move is enough to move the rounded percentage");
+  assert.ok(read(README_FILE).includes(`**DuckDB alone answers only ${pct(alone.duckdb.exact)} of them`), "the README says the legs' percentage");
+  assert.ok(read(SUPPORT_FILE).includes(`| ${pct(alone.mason.exact)} | ${pct(alone.duckdb.exact)} |`) && read(SUPPORT_FILE).includes(`| ${pct(alone.mason.differs)} | ${pct(alone.duckdb.value)} |`), "the doc's comparison says the legs' numbers");
+  assert.equal(read(SUPPORT_FILE), renderGaps(GAPS, VERIFIED, alone));
+});
+
+test("--write with a README that has no generated block writes nothing, naming README.md and both lines", (t) => {
+  const { root, dir, seeded, read } = staleRoot(t, "# readme\n");
+  for (const r of legsOfTheRepo()) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r));
+  const got = writeFromLegs(dir, root);
+  assert.equal(got.code, 1);
+  assert.deepEqual(got.out, []);
+  const err = got.err.join("\n");
+  assert.ok(err.includes(README_FILE) && err.includes(README_START) && err.includes(README_END), err);
+  assert.match(err, /nothing written/);
+  for (const f of FOUR) assert.equal(read(f), seeded[f], `${f} as seeded`);
+});
+
+test("--write as a whole run: a stale decision or a dead gap writes the fixture and leaves src/duck/verified.ts and the docs as they were", (t) => {
+  const { root, dir, seeded, seed, read } = staleRoot(t);
   const reports = legsOfTheRepo();
   for (const r of reports) r.decisions = [{ sql: "/x/", why: "why", differed: false, decided: true }];
   const run = (): ReturnType<typeof writeFromLegs> => {
-    fs.writeFileSync(path.join(root, VERIFIED_FILE), stale);
-    fs.writeFileSync(path.join(root, FIXTURE_FILE), "{}\n");
+    seed();
     for (const r of reports) fs.writeFileSync(path.join(dir, reportName(r.leg)), JSON.stringify(r));
     return writeFromLegs(dir, root);
   };
+  const notRendered = `oracle legs: ${README_FILE} and ${SUPPORT_FILE} not rendered either, since ${VERIFIED_FILE} was not written: once it is, render them with \`UPDATE_FIXTURE=1 node --test --test-timeout=300000 --test-force-exit tests/duck-gaps.test.ts\` and read the diff`;
   const decided = run();
   assert.equal(decided.code, 1);
   assert.deepEqual(decided.out, [`oracle legs: wrote ${FIXTURE_FILE}`]);
   assert.match(decided.err.join("\n"), /no longer differs[\s\S]*src\/duck\/verified\.ts not written/);
-  assert.equal(fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"), stale, "verified.ts is left as it was");
-  assert.equal(fs.readFileSync(path.join(root, FIXTURE_FILE), "utf8"), fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8"), "the fixture is written first, as a whole run's");
+  assert.ok(decided.err.includes(notRendered), decided.err.join("\n"));
+  for (const f of [VERIFIED_FILE, README_FILE, SUPPORT_FILE]) assert.equal(read(f), seeded[f], `${f} is left as it was`);
+  assert.equal(read(FIXTURE_FILE), fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8"), "the fixture is written first, as a whole run's");
   for (const r of reports) { r.decisions = []; r.everyAsk = { refused: {}, decided: {} }; }
   const dead = run();
   assert.equal(dead.code, 1);
   assert.match(dead.err.join("\n"), /entries no oracle statement meets/);
-  assert.equal(fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"), stale);
+  assert.ok(dead.err.includes(notRendered), dead.err.join("\n"));
+  for (const f of [VERIFIED_FILE, README_FILE, SUPPORT_FILE]) assert.equal(read(f), seeded[f], `${f} is left as it was`);
+});
+
+test("the renderers' module, which --write imports, registers no test of its own", () => {
+  // run as a plain module, a node:test test it reached (a test file imported) would run and print its report
+  // outside this run's test context (NODE_TEST_CONTEXT would make a child report to it), and never rewriting a fixture
+  const { UPDATE_FIXTURE: _u, NODE_TEST_CONTEXT: _c, ...env } = process.env;
+  const plain = (file: string) => spawnSync(process.execPath, [path.join(ROOT, file)], { encoding: "utf8", timeout: 120_000, env });
+  const run = plain("tests/sql-support.ts");
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, "");
+  // the probe sees a test where there is one
+  assert.match(plain("tests/duck-gaps.test.ts").stdout, /\btests [1-9]\d*\b/);
 });
 
 test("--write <run-id> takes only a finished run of the commit checked out: another push's or branch's legs measured another tree", () => {

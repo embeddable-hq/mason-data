@@ -101,7 +101,7 @@ whose forms are refused by name.
 6. **The allowlist:** a new function, operator or cast is `unverified` until the oracle verified it. Add its statements,
    push, and once CI's oracle legs ran, `node scripts/oracle-legs.ts --write <run-id>` writes `src/duck/verified.ts` and
    `tests/fixtures/oracle-duckdb-alone.json` from them; read the diff: a piece is as wide as every statement that uses it.
-7. **Fixtures:** `UPDATE_FIXTURE=1 npm run check` then regenerates `docs/SQL-SUPPORT.md` from them. Read both diffs.
+7. **Fixtures:** the same `--write` renders README.md's counts and `docs/SQL-SUPPORT.md` from them. Read those diffs too.
 8. **For speed:** the plan fixture too (`tests/duck-plans.test.ts`, `tests/fixtures/duck-plans.json`). The oracle is blind to
    the plan.
 
