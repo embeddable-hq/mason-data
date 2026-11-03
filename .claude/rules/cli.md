@@ -216,7 +216,13 @@ CLI lacks).
   edits `.mason/users.json` beside it, `mason serve`'s data folder included). "User" is the word in everything it
   prints, never "token" or "credentials". `mason connect` (a token for a day) is gone: `mason user`
   is enough. `disable` keeps the user and its password and refuses its logins until `enable`; a no-op (disabled
-  already, not disabled) is said, `already: true`, exit 0.
+  already, not disabled) is said, `already: true`, exit 0. **With `--replica <org>/<name>` (else `MASON_REPLICA`) it is a
+  replica's users on a hosted service** (src/cli/user-hosted.ts; docs/HOSTED-API.md "The users of a replica"): one
+  request each, the run's own `/api/users` body, under `/v1/replicas/{org}/{name}/users`; needs no project; the answer
+  held to the run's answer shape, every printed value to its grammar (a table in the module's header: the password
+  `mason_<its id>_…`, the URL rebuilt by `connectionUrl` and equal to the service's), then printed by the local
+  command's own renderers (`listText`, `addedReport`, …) in serviceStyle, its next steps naming the replica
+  (`onReplica`). The replica and the token are src/cli/replica.ts's (`replicaOf`, `tokenFor`), deploy's too.
 - **A roles file is read by ONE module, in the sources file's words** (`src/cli/roles.ts`: `mason/roles.yml`,
   `default: <role>` and `roles: { <role>: { tables: all | { <table>: {} | { columns: [...] } | { exclude: [...] } } } }`;
   `tables: all` is every copied table, resolved at every read), validated at `mason

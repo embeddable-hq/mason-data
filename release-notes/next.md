@@ -29,6 +29,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `MASON_REPLICA`), and waits until the replica runs it or Mason there refuses it. The project is checked first as
   `mason start` checks it, without connecting to any database; only its YAML under `mason/` is sent, never `.env` or
   `.mason/`, and a `url:` written with its password is refused. `--dry-run` lists what would be sent and sends nothing.
+- **`mason user add|list|disable|enable|remove … --replica <org>/<name>` manages the users of a replica on a hosted
+  Mason service** (else `MASON_REPLICA`), with the same `--role`, `--set`, output and `--json` as for a project's own
+  users; Mason on the replica checks each. The password is printed once, by `add`. It needs no project on this machine,
+  and the login is `mason login`'s or `MASON_TOKEN`. Without `--replica` and `MASON_REPLICA`, `mason user` is unchanged.
 - **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
   ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
   beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy

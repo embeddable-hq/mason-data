@@ -76,6 +76,16 @@ export const MATRIX_EXTRA_ARGS: Readonly<Record<string, readonly (readonly strin
   user: [["add", "nobody", "--role", "no_such_role"], ["add", "nobody", "--role", "no_such_role", "--set", "tenant=1"]],
 };
 
+/**
+ * LINES THAT NAME A REPLICA ON A HOSTED SERVICE (`mason user … --replica`): they need no project, so every state answers
+ * them alike, and none with the state's code. The matrix's HOME has no login and its environment no MASON_TOKEN, so
+ * each is refused before a byte is sent (`refused`, mason login), whatever the folder holds. Without `--replica`, and
+ * with MASON_REPLICA unset (matrixEnv), every line above is the local command's, unchanged.
+ */
+export const MATRIX_HOSTED: Readonly<Record<string, ReadonlyArray<readonly string[]>>> = {
+  user: [["list", "--replica", "acme/shop"], ["add", "nobody", "--role", "agent", "--set", "tenant=1", "--replica", "acme/shop"], ["remove", "nobody", "--replica", "acme/shop"]],
+};
+
 /** The commands a state may not run in the matrix because they CHANGE it: they are the session's transitions. */
 export const TRANSITIONS: ReadonlySet<string> = new Set(["start", "stop"]);
 

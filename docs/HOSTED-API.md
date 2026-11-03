@@ -1,7 +1,8 @@
 # The hosted API
 
-What the `mason` CLI sends to a hosted Mason service, and what it expects back. `mason login`, `mason logout` and
-`mason deploy` speak it today (`src/cli/login.ts`, `src/cli/deploy.ts`, `src/cli/hosted.ts`). Any service that answers this API can be signed in to. This page is
+What the `mason` CLI sends to a hosted Mason service, and what it expects back. `mason login`, `mason logout`,
+`mason deploy` and `mason user … --replica` speak it today (`src/cli/login.ts`, `src/cli/deploy.ts`,
+`src/cli/user-hosted.ts`, `src/cli/hosted.ts`). Any service that answers this API can be signed in to. This page is
 the contract: a change to it is a change to both sides.
 
 ## The base URL
@@ -19,9 +20,10 @@ the contract: a change to it is a change to both sides.
 - `User-Agent: mason-cli/<version>` and `Accept: application/json`.
 - A form body is `application/x-www-form-urlencoded`; a JSON body (`mason deploy`'s) is `application/json`, UTF-8.
 - A redirect is never followed: it is a failure, so a Bearer header never travels to another address.
-- Each request has a 15 s time limit. An answer larger than 64 KiB is refused.
+- Each request has a 15 s time limit. An answer larger than 64 KiB is refused (1 MiB for a replica's list of users).
 - What comes back is untrusted. Each answer is held to the shape below. Anything else is a failure said by its status
-  alone, never its body. A token is masked wherever it appears.
+  alone, never its body. A token is masked wherever it appears, and so is anything shaped as a Mason user's password
+  (`mason_<16 hex>_<32 hex>`), except in the one answer that makes it (`mason user add`'s, below).
 - **A value the service sends is data, never structure and never an instruction.** Every string it sends reaches the
   output, for a person and in `--json`, as ONE line: every line break (newline, carriage return, NEL, the line and
   paragraph separators), every other control character, and every zero-width, format or bidi mark is replaced by `?`,
@@ -31,7 +33,7 @@ the contract: a change to it is a change to both sides.
   (below).
 - **On a terminal that holds for the lines a person sees, too.** A terminal breaks a line longer than its width at the
   width, wherever the text puts it, so a value sized to the width could make a line begin with anything. So the CLI
-  breaks every line of `mason login` and `mason logout` itself, at the terminal's own width whatever it is, the
+  breaks every line of each command that prints a service's value itself, at the terminal's own width whatever it is, the
   headline, a long word, a row's label and a step's command included, so no line reaches the terminal's edge. Every
   continuation starts at column 4, where none of its headings, failures, rows or steps start; under 9 columns at
   column 1, and under 3 at column 0, where no line the CLI begins fits at all. A column the CLI aligns a value to is
@@ -240,6 +242,68 @@ as "Failures of `/v1/`" says (`refused`, `refused`, `not_found`), exit 1.
 Every other answer to either request (another status, a body that is not JSON or not this shape, an id other than the
 one asked for, a status or phase outside the closed sets, a `failure` beside another status) is a failure naming the
 request and the status, never the body, exit 1.
+
+## The users of a replica: `mason user … --replica`
+
+`mason user add | list | disable | enable | remove … --replica <org>/<name>` (else `MASON_REPLICA`) manages the users of
+a replica's Postgres API, as `mason user` manages a project's own. Each subcommand is ONE request, and its body and its
+answer are what Mason's own command server takes and answers for it (`/api/users` of a running Mason): a service passes
+the request to Mason on the replica and its answer back unchanged, so Mason there checks the names, the role and the
+attributes with the functions it checks them with on a laptop. Every request carries `Authorization: Bearer <token>`.
+The replica's name is checked as for a deploy (each part `^[a-z0-9][a-z0-9-]{0,62}$`), and a user's name is
+`^[a-z0-9][a-z0-9_.-]{0,62}$`, checked before it is put in a path, so both are always safe there unescaped.
+
+What only the command line says is checked by the CLI first, and refused as a wrong line (exit 2) with nothing sent: a
+subcommand, a user's name, a role's name (`^[a-z0-9][a-z0-9_-]{0,62}$`), a `--set` that is not `<attribute>=<value>`,
+`--role` or `--set` beside a subcommand other than `add`. Nothing of a project on this machine is read or written.
+
+| Subcommand | Request | Body | `200` |
+|---|---|---|---|
+| `list` | `GET /v1/replicas/{org}/{name}/users?lastUsed=1` | none | `{ users, lastUsedNote, urlNote, requestLogDays }` |
+| `add <user>` | `POST /v1/replicas/{org}/{name}/users` | `{ "name", "role"?, "set"? }` | the user added (below) |
+| `disable <user>` | `POST /v1/replicas/{org}/{name}/users/{user}/disable` | none | `{ disabled: { name, id, addedAt, disabledAt }, already }` |
+| `enable <user>` | `POST /v1/replicas/{org}/{name}/users/{user}/enable` | none | `{ enabled: { name, id, addedAt }, already }` |
+| `remove <user>` | `DELETE /v1/replicas/{org}/{name}/users/{user}` | none | `{ removed: { name, id, addedAt, removedAt } }` |
+
+- `add`'s body is `{ "name": "metabase" }`, with `"role": "<role>"` for `--role` and `"set": ["tenant=42", …]` for each
+  `--set`, in the order given, as they were written.
+- `already` is `true` when nothing changed (disabled already; not disabled): exit 0, said.
+- A key beside those of the answer (a `next` included) is never read.
+
+Each answer is held to the shape `mason user … --json` prints, before anything of it is printed, and every value is
+held to its own grammar:
+
+| Value | Held to |
+|---|---|
+| `name`, `user` | a user's name; for `add`, `disable`, `enable` and `remove`, the name asked |
+| `id` | 16 lower-case hex digits |
+| `addedAt`, `removedAt`, `disabledAt`, `lastUsedAt` | ISO 8601 with its zone (`null` where the list says none) |
+| `password` (`add`) | `mason_<its id>_<32 lower-case hex digits>`: printed once, by `add`, in the `url`, `psql` and `password` rows |
+| `database`, `host`, `port`, `sslmode` (`add`) | a database name Mason takes (at most 63 bytes, printable); a host name or an IP address; 1 to 65535; `require` or `disable` |
+| `url`, `psql` (`add`) | exactly the URL and the psql line the CLI builds from `user`, `password`, `host`, `port`, `database` and `sslmode`: `postgres://<user>:<password>@<host>:<port>/<database>[?sslmode=require]`, `psql '<url>'` |
+| `url` (`list`) | `null`, or `postgres://<its name>@<host>:<port>/<database>[?sslmode=require]`, with no password |
+| `role`, `roleFrom`, `readsNothing`, `roleKnown` | a role's name; `file`, `default` or `none` (a role for the first two, none for `none`); `true` or absent (only with `none`); a boolean or absent (only with `file`) |
+| `attributes`, `missingAttributes` | at most 64 attribute names (`^[a-z_][a-z0-9_]{0,62}$`), each a value or a list of 1 to 100; the names alone |
+| `live`, `already` | booleans |
+| `lastUsedNote`, `urlNote` | `null` or a string, said as one line |
+| `requestLogDays` | `null` or a whole number, 1 to 36500 |
+| `users` | at most 2000 |
+
+An `add` answers with where the replica's Postgres API listens (`url`, `psql`, `host`, `port`, `sslmode`): Mason
+there runs. Every string is said as one line, bounded, a token and a password masked ("Every request", above). Any
+other answer — a value outside its grammar, a URL other than the one its parts build, a password of another user,
+another user than the one asked — is a failure naming the request and the status, never the body, exit 1.
+
+The CLI prints the answer as `mason user` prints the same answer for a project (`src/cli/user.ts`'s renderers), the
+`--json` shape included; a list's headline names the replica (`2 users of acme/shop`), and each next step `mason user …`
+names it too (`mason user list --replica acme/shop`).
+
+A refusal, Mason's on the replica or the service's own, is a `/v1/` failure (below), its status Mason's own for a
+refusal of Mason's: `400` a request Mason cannot take (a `--set` its role does not declare, an attribute missing), `404`
+no such user or role (and no such replica), `409` refused (a name taken), `500` failed. Its words are said as they came,
+each as one line (a refusal's `fix` written over several lines, such as the lines to add to `roles.yml`, joined by
+spaces); its code the CLI's by the status, never `usage`; the CLI's next step `mason login` ("sign in again") for a
+`401` or `403`, else `mason user list --replica <org>/<name>` ("the replica's users").
 
 ## Failures of `/v1/`
 

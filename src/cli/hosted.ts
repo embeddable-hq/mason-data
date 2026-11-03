@@ -50,6 +50,10 @@ export interface Service { base: string }
 
 /** The documented token shapes (docs/HOSTED-API.md), masked wherever they appear in what is printed. */
 const TOKEN_SHAPE = /\bmasondata_(pat|ci)_[A-Za-z0-9_-]{43}/g;
+/** A Mason user's password (src/duck/users.ts `userPassword`), masked wherever it appears in what is printed of the
+ *  service's text: a password is printed by `mason user add`'s own rows alone, from its one answer, held to its grammar
+ *  (src/cli/user-hosted.ts), never by a message, a note or a row of anything else. */
+const PASSWORD_SHAPE = /\bmason_[0-9a-f]{16}_[0-9a-f]{32}/g;
 /** The hosts plain http may name: this machine. */
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "localhost"]);
 
@@ -89,12 +93,12 @@ export function serviceOf(env: NodeJS.ProcessEnv = process.env): Service | Failu
  * newline and the carriage return included, and every line or paragraph separator, format or bidi mark replaced by
  * `?`, so none can end a line, move a cursor, clear a screen or reorder what a person reads; every run of white space
  * one space, none at either end; at most `max` characters; and every secret masked — the ones named, and anything
- * shaped as a documented token. On a terminal the line it sits in is broken by the CLI (`serviceStyle`).
+ * shaped as a documented token or a Mason user's password. On a terminal the line it sits in is broken by the CLI (`serviceStyle`).
  */
 export function serviceText(s: string, max: number, secrets: readonly string[] = []): string {
   let t = s;
   for (const secret of secrets) if (secret) t = t.split(secret).join("****");
-  t = t.replace(TOKEN_SHAPE, "masondata_$1_****");
+  t = t.replace(TOKEN_SHAPE, "masondata_$1_****").replace(PASSWORD_SHAPE, "mason_****");
   // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
   // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
   t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
@@ -123,11 +127,15 @@ export function retryAfterOf(v: string | null): number | null {
   return n >= 1 && n <= 3600 ? n : null;
 }
 
+/** A time the service sends: ISO 8601 with its zone, digits, `-`, `T`, `:` and `.` alone, and a time Date reads. */
+export const isServiceTime = (v: unknown): v is string => typeof v === "string" && v.length <= 64 && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(v) && !Number.isNaN(Date.parse(v));
+
 /**
  * ONE REQUEST TO THE SERVICE: `form` as an urlencoded body or `json` as a JSON one, `token` as a Bearer header. The
- * answer, or a Failure when none came back whole: not reached, a redirect, too large. A status is the caller's to read.
+ * answer, or a Failure when none came back whole: not reached, a redirect, larger than `maxBytes` (`MAX_BODY_BYTES`
+ * unless the contract documents another bound for this request). A status is the caller's to read.
  */
-export async function call(service: Service, method: "GET" | "POST", path: string, o: { form?: Record<string, string>; json?: unknown; token?: string } = {}): Promise<Answer | Failure> {
+export async function call(service: Service, method: "GET" | "POST" | "DELETE", path: string, o: { form?: Record<string, string>; json?: unknown; token?: string; maxBytes?: number } = {}): Promise<Answer | Failure> {
   const what = `${method} ${path}`;
   const secrets = o.token ? [o.token] : [];
   const headers: Record<string, string> = { "User-Agent": `mason-cli/${version()}`, Accept: "application/json" };
@@ -148,8 +156,9 @@ export async function call(service: Service, method: "GET" | "POST", path: strin
     return { message: `${service.base} answered ${what} with a redirect (${res.status})`, code: "failed",
       why: "Mason follows no redirect: a login must never travel to an address it was not given", fix: "set MASON_CLOUD_URL to the service's own address" };
   }
-  const text = await boundedText(res);
-  if (text === null) return { message: `${service.base} answered ${what} with more than ${MAX_BODY_BYTES / 1024} KiB`, code: "failed", why: "no documented answer is that large" };
+  const max = o.maxBytes ?? MAX_BODY_BYTES;
+  const text = await boundedText(res, max);
+  if (text === null) return { message: `${service.base} answered ${what} with more than ${max / 1024} KiB`, code: "failed", why: "no documented answer is that large" };
   let json: unknown;
   if (/^application\/(?:[\w.+-]+\+)?json\b/i.test(res.headers.get("content-type") ?? "")) {
     try { json = JSON.parse(text); } catch { json = undefined; }
@@ -167,8 +176,8 @@ function reachError(e: unknown): string {
   return cause?.message ?? err.message ?? String(e);
 }
 
-/** The body as text, or null past MAX_BODY_BYTES (the rest is not read). */
-async function boundedText(res: Response): Promise<string | null> {
+/** The body as text, or null past `max` bytes (the rest is not read). */
+async function boundedText(res: Response, max: number): Promise<string | null> {
   if (!res.body) return "";
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -179,7 +188,7 @@ async function boundedText(res: Response): Promise<string | null> {
     catch { return null; }   // a body cut off midway is no answer: said as one the caller cannot read
     if (r.done) break;
     size += r.value.byteLength;
-    if (size > MAX_BODY_BYTES) { await reader.cancel(); return null; }
+    if (size > max) { await reader.cancel(); return null; }
     chunks.push(r.value);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -220,11 +229,12 @@ export function serviceNext(status: number): NextStep[] {
 /**
  * A `/v1/` FAILURE: `{ error: { code, message, why?, fix? }, next: [{ command, what? }] }`, its message, why and fix
  * said as the service worded them, each one line (`serviceText`); its CODE the CLI's own (`codeOfStatus`), the
- * service's kept in `why`; its next step the CLI's own (`serviceNext`). Null when the answer is not that shape.
+ * service's kept in `why`; its next step the CLI's own (`serviceNext`, or the command's own `next` for the status, never
+ * the service's). Null when the answer is not that shape.
  */
-export function serviceFailure(a: Answer, secrets: readonly string[]): Failure | null {
+export function serviceFailure(a: Answer, secrets: readonly string[], next: (status: number) => NextStep[] = serviceNext): Failure | null {
   if (a.status < 400 || !obj(a.json)) return null;
-  return failureShape(a.json.error, secrets, { code: codeOfStatus(a.status), said: (code) => `the service said ${code}, HTTP ${a.status}`, next: serviceNext(a.status) });
+  return failureShape(a.json.error, secrets, { code: codeOfStatus(a.status), said: (code) => `the service said ${code}, HTTP ${a.status}`, next: next(a.status) });
 }
 
 /**

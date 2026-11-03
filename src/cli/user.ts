@@ -11,20 +11,22 @@
  * called by the run's command server; so are `disableUser` and `enableUser`.
  */
 import * as path from "node:path";
-import { failed, jsonText, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { failed, jsonText, parseCommand, reportText, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { reach } from "./state.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { connectionUrl, listenerTips, postgresLink, psqlLine, type PostgresLink } from "./pg-url.ts";
 import { changeUsers, isActive, isDisabled, keyFingerprint, newUserId, readUsers, underKey, userPassword, USER_NAME_RE, USER_NAME_RULE, USERS_FILE, type MasonUser } from "../duck/users.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
-import { out as styleOut } from "./style.ts";
+import { out as styleOut, type Style } from "./style.ts";
 import { NO_ROLES, type RoleGrants, type RolesLive } from "../duck/grants.ts";
 import { exampleRole, missingAttributesText, noRoleWayOut, problemText, rolesProblemText, readRoles, ROLE_NAME_RE, ROLE_NAME_RULE, ROLES_FILE, roleProblems, rolesFailure, rolesFile, userRole, usersMissingAttributes, type RoleFrom } from "./roles.ts";
 import { ATTRIBUTE_NAME_RE, ATTRIBUTE_NAME_RULE, whereAttributes, whereParts, type AttributeShape, type RowFilter } from "../duck/row-filter.ts";
 import { readSource, shownPath } from "./sources.ts";
 import { readState, type RunState } from "./commands.ts";
 import type { DevRun } from "./runs.ts";
-import { projectDatabase, type Project } from "./project.ts";
+import { projectDatabase, type PostgresListener, type Project } from "./project.ts";
+import { replicaOf } from "./replica.ts";
+import { hostedUser } from "./user-hosted.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 
@@ -32,11 +34,11 @@ export const USER: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "user",
   summary: "the users the Postgres API takes: a name and a password that does not expire, for a BI tool or an app",
-  usage: `usage: mason user add <name> [--role <role>] [--set <attribute>=<value> …] [--json]
-       mason user list [--json]
-       mason user disable <name> [--json]
-       mason user enable <name> [--json]
-       mason user remove <name> [--json]
+  usage: `usage: mason user add <name> [--role <role>] [--set <attribute>=<value> …] [--replica <org>/<name>] [--json]
+       mason user list [--replica <org>/<name>] [--json]
+       mason user disable <name> [--replica <org>/<name>] [--json]
+       mason user enable <name> [--replica <org>/<name>] [--json]
+       mason user remove <name> [--replica <org>/<name>] [--json]
 
   A user of this project's Postgres API: a name and a password, as a BI tool's datasource form asks for them
   (Metabase, Grafana, Superset, Power BI) or an app's DATABASE_URL carries them. Its password does not expire:
@@ -94,6 +96,14 @@ export const USER: CommandSpec & { needs: "project" } = {
     mason user enable metabase                 metabase connects again, with the same password
     mason user remove metabase                 metabase connects no more
     docker compose exec mason mason user add grafana   beside mason serve, in its data folder
+    mason user add metabase --replica acme/shop          a user of a replica on a hosted Mason service
+
+  --replica <org>/<name> manages the users of a replica on a hosted Mason service instead of this project's (else
+  MASON_REPLICA; each part lower case letters, digits and -): the same subcommands, --role and --set, the same
+  output and --json, the replica's Mason checking each as it does here. It needs no project here, and reads and writes
+  nothing of one. The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else
+  the default. A refusal is the service's words, each one line, its code the CLI's own by the HTTP status (not_found,
+  refused, failed: never usage), exit 1.
 
   <name>    ${USER_NAME_RULE}
   --json    as data: add { user (the name), id, addedAt, password, database, role (the role it reads as: its own
@@ -109,7 +119,7 @@ export const USER: CommandSpec & { needs: "project" } = {
             before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; remove { removed: { name,
             id, addedAt, removedAt } }; next
 `,
-  options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true } },
+  options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true }, replica: { type: "string" } },
   json: ["user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
 };
 
@@ -222,6 +232,10 @@ export function attributesToAdd(name: string, role: string | undefined, sets: re
 
 // ------------------------------------------------------------------ the role a user is added with
 
+/** Why `role` is not a role's name (a usage failure's message), or null: asked by `roleToAdd`, and by `mason user add
+ *  --role --replica` before a byte is sent. */
+export const roleNameProblem = (role: string): string | null => ROLE_NAME_RE.test(role) ? null : `${JSON.stringify(role)} is not a role name: ${ROLE_NAME_RULE}`;
+
 /**
  * WHY `role` IS NOT ONE A USER CAN BE ADDED WITH, against the roles as they are now (`live`: the listener's while the
  * run is up, the file's otherwise): a name of another shape, a file that cannot be read as it is, no roles file at
@@ -230,7 +244,8 @@ export function attributesToAdd(name: string, role: string | undefined, sets: re
  * that reads nothing by mistake — one whose role is removed LATER is refused at its next statement (fail closed).
  */
 export function roleToAdd(role: string, live: RolesLive): Failure | null {
-  if (!ROLE_NAME_RE.test(role)) return { message: `${JSON.stringify(role)} is not a role name: ${ROLE_NAME_RULE}`, code: "usage" };
+  const named = roleNameProblem(role);
+  if (named !== null) return { message: named, code: "usage" };
   const file = live.file ?? `mason/${ROLES_FILE}`;
   if (live.problem !== null) {
     return { message: `${file} cannot be read as it is now, so no user can be added with a role: ${live.problem}`, code: "bad_roles",
@@ -489,6 +504,110 @@ export function enableUser(file: string, name: string): { enabled: { name: strin
   return { enabled: { name: u.name, id: u.id, addedAt: u.addedAt }, already: !Array.isArray(r) };
 }
 
+// ------------------------------------------------------------------ what each answer prints
+// ONE RENDERER PER ANSWER, for this project's users and for a replica's on a hosted Mason service (src/cli/user-hosted.ts
+// renders the service's answer, held to the run's own answer shape, through these): the same answer prints the same
+// lines, for a person and with --json. `s`: serviceStyle there, so on a terminal every line is broken by the CLI.
+
+/** What `mason user list --json` answers, beside `next` (and `GET /api/users?lastUsed=1`). */
+export interface UserList { users: UserRow[]; lastUsedNote: string | null; urlNote: string | null; requestLogDays: number | null }
+
+/** What to run after a list. */
+export const listNext = (users: readonly UserRow[]): NextStep[] => [["mason user add <name>", "a user for a tool: its password and URL, printed once"],
+  ...(users.some((u) => u.removedAt === null && u.disabledAt !== null) ? [["mason user enable <name>", "a disabled user connects again, with the same password"] as NextStep] : []),
+  ...(users.some((u) => u.removedAt === null) ? [["mason user remove <name>", "that user connects no more"] as NextStep] : [])];
+
+/** `mason user list` for a person: the users of `of` (the project's name, or the replica's), a line each, then its tips
+ *  and `next`. `roles`: the roles as a command beside them sees them (NO_ROLES where none can be read here). */
+export function listText(of: string, l: UserList, roles: RolesLive, next: readonly NextStep[], s: Style = styleOut()): string {
+  const { users, lastUsedNote, requestLogDays } = l;
+  if (!users.length) return strict(withEnd(`${s.bold(`No users yet for ${of}.`)}`, { next }, s), s);
+  const active = users.filter((u) => u.removedAt === null);
+  const gone = users.filter((u) => u.removedAt !== null);
+  const width = Math.max(...users.map((u) => u.name.length));
+  const rolesFileShown = roles.file ?? `mason/${ROLES_FILE}`;
+  // the last use in the words the web page's Users page says it too (lastUsedText): "last used" before a time or "unknown"
+  const used = (u: UserRow): string => { const t = lastUsedText(u.lastUsedAt, lastUsedNote, requestLogDays, u.addedAt); return t === "never" ? "never used" : t.startsWith("not used") ? t : `last used ${t}`; };
+  const lines = active.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${u.role !== undefined ? `role ${u.role}${u.roleFrom === "default" ? " (default)" : ""}${u.attributes !== undefined ? ` (${attributesText(u.attributes)})` : ""}   ` : ""}${s.dim(`id ${u.id} · added ${stamp(u.addedAt)} UTC · ${used(u)}`)}` +
+    (u.disabledAt !== null ? `   ${s.yellow(`${disabledText(u.disabledAt)}: does not connect until mason user enable ${u.name}`)}`
+      : u.live ? "" : `   ${s.yellow("does not connect: the API key was rotated since it was added")}`) +
+    (u.roleKnown === false ? `   ${s.yellow(`its role ${u.role} is not in the roles file: its statements are refused`)}` : "") +
+    (u.readsNothing === true ? `   ${s.yellow(`has no role, and ${rolesFileShown} names no default: its statements are refused`)}` : "") +
+    (u.missingAttributes !== undefined ? `   ${s.yellow(`has no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}` : ""));
+  const disabled = active.filter((u) => u.disabledAt !== null);
+  const removedLines = gone.map((u) => `  ${s.dim(`${u.name.padEnd(width)}   id ${u.id} · added ${stamp(u.addedAt)} UTC · removed ${stamp(u.removedAt!)} UTC`)}`);
+  const rotated = active.filter((u) => !u.live && u.disabledAt === null);
+  const orphan = active.find((u) => u.roleKnown === false);
+  const roleless = active.find((u) => u.readsNothing === true);
+  const unset = active.find((u) => u.missingAttributes !== undefined);
+  return strict(withEnd(`${s.bold(`${active.length} user${active.length === 1 ? "" : "s"} of ${of}${disabled.length ? `, ${disabled.length} disabled` : ""}${gone.length ? `, ${gone.length} removed` : ""}`)}\n${[...lines, ...removedLines].join("\n")}`,
+    { tips: [...(rotated.length ? [`A user added under another API key does not connect: mason user remove ${rotated[0]!.name}, then mason user add ${rotated[0]!.name}.`] : []),
+      ...(orphan ? [`A role the roles file (mason/${ROLES_FILE}) does not name reads nothing: add ${orphan.role} to it, or mason user remove ${orphan.name}, then mason user add ${orphan.name} --role <role>.`] : []),
+      ...(unset ? [`A user without a value its role's rows are filtered by is refused at every statement: ${missingAttributesText({ name: unset.name, role: unset.role ?? "", missing: unset.missingAttributes! })}.`] : []),
+      ...(roleless ? [`A user with no role reads nothing while ${rolesFileShown} names no default: ${noRoleWayOut(roleless.name, rolesFileShown, exampleRole(roles))}.`] : []),
+      ...(roles.problem !== null && active.length ? [rolesProblemText(rolesFileShown, roles.problem)] : []),
+      ...(lastUsedNote !== null ? [`Last used: ${lastUsedNote}.`] : [])], next }, s), s);
+}
+
+/** What `mason user disable --json` answers, beside `next`; and enable's, and remove's. */
+export type Disabled = Exclude<ReturnType<typeof disableUser>, Failure>;
+export type Enabled = Exclude<ReturnType<typeof enableUser>, Failure>;
+export type Removed = Exclude<ReturnType<typeof removeUser>, Failure>;
+
+/** `mason user disable` for a person. `up`: Mason runs, so the sessions the user holds end at their next statement. */
+export const disabledReport = (r: Disabled, up: boolean, next: readonly NextStep[], s: Style = styleOut()): string => {
+  const d = r.disabled;
+  return reportText({ headline: r.already ? `The user ${d.name} is disabled already: nothing changed` : `The user ${d.name} disabled: it connects no more, until enabled`,
+    details: [["user", d.name], ["disabled", d.disabledAt], ...(r.already ? [] : [["sessions", up ? "those it holds end at their next statement" : "none: Mason is not running"] as const])],
+    tips: [disableEffect(d.name)], next }, s);
+};
+
+/** `mason user enable` for a person. */
+export const enabledReport = (r: Enabled, next: readonly NextStep[], s: Style = styleOut()): string => {
+  const e = r.enabled;
+  return reportText({ headline: r.already ? `The user ${e.name} is not disabled: nothing changed, it connects` : `The user ${e.name} enabled: it connects again, with the same password`,
+    details: [["user", e.name], ["added", e.addedAt]], next }, s);
+};
+
+/** `mason user remove` for a person. */
+export const removedReport = (r: Removed, up: boolean, next: readonly NextStep[], s: Style = styleOut()): string => {
+  const gone = r.removed;
+  return reportText({ headline: `The user ${gone.name} removed: it connects no more`,
+    details: [["user", gone.name], ["added", gone.addedAt], ["sessions", up ? "those it holds end at their next statement" : "none: Mason is not running"]],
+    tips: [`Adding ${gone.name} again makes a new password: the old one never connects again.`], next }, s);
+};
+
+/**
+ * `mason user add` for a person: the password, printed this once, in the url, psql and password rows (and nowhere else).
+ * The url, psql, host, port and ssl mode rows are there when the answer has them (Mason runs, so where it listens is
+ * known). `roles`: the roles as a command beside them sees them (the file's name in the role row; NO_ROLES where none
+ * can be read here); `listener`: how this run listens (its tips), null where it is not known here.
+ */
+export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolean }, o: { roles: RolesLive; listener: PostgresListener | null; next: readonly NextStep[] }, s: Style = styleOut()): string {
+  const { roles } = o;
+  return reportText({
+    headline: `The user ${r.user} added${r.replaced === true ? " (in place of one the API key's rotation had removed)" : ""}: its password is printed this once`,
+    details: [
+      ...(r.url !== undefined && r.psql !== undefined ? [["url", r.url] as const, ["psql", r.psql] as const] : []),
+      ["user", r.user], ["password", r.password], ["database", r.database],
+      ...(r.attributes !== undefined ? [["attributes", attributesText(r.attributes)] as const] : []),
+      ...(r.roleFrom === "file" ? [["role", `${r.role!} (mason/${ROLES_FILE} names what it reads)`] as const]
+        : r.roleFrom === "default" ? [["role", `${r.role!} (the file's default: ${roles.file ?? `mason/${ROLES_FILE}`})`] as const]
+        : r.readsNothing === true ? [["role", `none, and ${roles.file ?? `mason/${ROLES_FILE}`} names no default: it reads nothing until one is written`] as const] : []),
+      ...(r.host !== undefined && r.port !== undefined ? [["host", r.host] as const, ["port", String(r.port)] as const, ...(r.sslmode !== undefined && r.sslmode !== "disable" ? [["ssl mode", r.sslmode] as const] : [])] : []),
+    ],
+    tips: [
+      "Paste it into the tool now: Mason keeps no copy of the password. Lost, remove the user and add it again.",
+      ...(r.readsNothing === true ? [`Its statements are refused until it has a role: ${noRoleWayOut(r.user, roles.file ?? `mason/${ROLES_FILE}`, exampleRole(roles))}.`] : []),
+      ...(r.url === undefined ? ["Mason is not running: mason start, then mason status says the host and port this user connects to."] : []),
+      ...listenerTips(o.listener),
+      "It never expires: mason user remove ends it, at once and for every session it holds.",
+      "Rotating the API key (apiKey in .mason/config.json, MASON_API_KEY under mason serve) removes every user at once.",
+    ],
+    next: o.next,
+  }, s);
+}
+
 // ------------------------------------------------------------------ the command
 
 export async function user(argv: string[]): Promise<number> {
@@ -509,6 +628,15 @@ export async function user(argv: string[]): Promise<number> {
   if (verb !== "list") {
     const problem = userNameProblem(verb as "add" | "remove" | "disable" | "enable", name);
     if (problem !== null) return usage(problem);
+  }
+  // A REPLICA ON A HOSTED MASON SERVICE (--replica, else MASON_REPLICA): its users, asked of the service with the same
+  // request the run's /api/users takes, printed by the renderers above; nothing of a project here is read or written
+  const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, USER.usage);
+  if (replica !== null && "message" in replica) return failed("user", replica, { json });
+  if (replica !== null) {
+    const named = role === undefined ? null : roleNameProblem(role);
+    if (named !== null) return usage(named);
+    return hostedUser(replica, { verb: verb as "add" | "list" | "disable" | "enable" | "remove", name, role, sets, json });
   }
   const w = await reach(USER, json);
   if (w === null || w.project === null) return 1;
@@ -541,37 +669,9 @@ export async function user(argv: string[]): Promise<number> {
       }
     }
     const urlNote = up !== null ? null : NOT_RUNNING_URL;
-    const next: NextStep[] = [["mason user add <name>", "a user for a tool: its password and URL, printed once"],
-      ...(users.some((u) => u.removedAt === null && u.disabledAt !== null) ? [["mason user enable <name>", "a disabled user connects again, with the same password"] as NextStep] : []),
-      ...(users.some((u) => u.removedAt === null) ? [["mason user remove <name>", "that user connects no more"] as NextStep] : [])];
+    const next = listNext(users);
     if (json) { out(jsonText(USER, { users, lastUsedNote, urlNote, requestLogDays }, next)); return 0; }
-    const s = styleOut();
-    if (!users.length) { out(withEnd(`${s.bold(`No users yet for ${project.config.name}.`)}`, { next })); return 0; }
-    const active = users.filter((u) => u.removedAt === null);
-    const gone = users.filter((u) => u.removedAt !== null);
-    const width = Math.max(...users.map((u) => u.name.length));
-    const rolesFileShown = roles.file ?? `mason/${ROLES_FILE}`;
-    // the last use in the words the web page's Users page says it too (lastUsedText): "last used" before a time or "unknown"
-    const used = (u: UserRow): string => { const t = lastUsedText(u.lastUsedAt, lastUsedNote, requestLogDays, u.addedAt); return t === "never" ? "never used" : t.startsWith("not used") ? t : `last used ${t}`; };
-    const lines = active.map((u) => `  ${s.cyan(u.name.padEnd(width))}   ${u.role !== undefined ? `role ${u.role}${u.roleFrom === "default" ? " (default)" : ""}${u.attributes !== undefined ? ` (${attributesText(u.attributes)})` : ""}   ` : ""}${s.dim(`id ${u.id} · added ${stamp(u.addedAt)} UTC · ${used(u)}`)}` +
-      (u.disabledAt !== null ? `   ${s.yellow(`${disabledText(u.disabledAt)}: does not connect until mason user enable ${u.name}`)}`
-        : u.live ? "" : `   ${s.yellow("does not connect: the API key was rotated since it was added")}`) +
-      (u.roleKnown === false ? `   ${s.yellow(`its role ${u.role} is not in the roles file: its statements are refused`)}` : "") +
-      (u.readsNothing === true ? `   ${s.yellow(`has no role, and ${rolesFileShown} names no default: its statements are refused`)}` : "") +
-      (u.missingAttributes !== undefined ? `   ${s.yellow(`has no value for ${u.missingAttributes.join(", ")}: its statements are refused`)}` : ""));
-    const disabled = active.filter((u) => u.disabledAt !== null);
-    const removedLines = gone.map((u) => `  ${s.dim(`${u.name.padEnd(width)}   id ${u.id} · added ${stamp(u.addedAt)} UTC · removed ${stamp(u.removedAt!)} UTC`)}`);
-    const rotated = active.filter((u) => !u.live && u.disabledAt === null);
-    const orphan = active.find((u) => u.roleKnown === false);
-    const roleless = active.find((u) => u.readsNothing === true);
-    const unset = active.find((u) => u.missingAttributes !== undefined);
-    out(withEnd(`${s.bold(`${active.length} user${active.length === 1 ? "" : "s"} of ${project.config.name}${disabled.length ? `, ${disabled.length} disabled` : ""}${gone.length ? `, ${gone.length} removed` : ""}`)}\n${[...lines, ...removedLines].join("\n")}`,
-      { tips: [...(rotated.length ? [`A user added under another API key does not connect: mason user remove ${rotated[0]!.name}, then mason user add ${rotated[0]!.name}.`] : []),
-        ...(orphan ? [`A role the roles file (mason/${ROLES_FILE}) does not name reads nothing: add ${orphan.role} to it, or mason user remove ${orphan.name}, then mason user add ${orphan.name} --role <role>.`] : []),
-        ...(unset ? [`A user without a value its role's rows are filtered by is refused at every statement: ${missingAttributesText({ name: unset.name, role: unset.role ?? "", missing: unset.missingAttributes! })}.`] : []),
-        ...(roleless ? [`A user with no role reads nothing while ${rolesFileShown} names no default: ${noRoleWayOut(roleless.name, rolesFileShown, exampleRole(roles))}.`] : []),
-        ...(roles.problem !== null && active.length ? [rolesProblemText(rolesFileShown, roles.problem)] : []),
-        ...(lastUsedNote !== null ? [`Last used: ${lastUsedNote}.`] : [])], next }));
+    out(listText(project.config.name, { users, lastUsedNote, urlNote, requestLogDays }, roles, next));
     return 0;
   }
 
@@ -580,10 +680,7 @@ export async function user(argv: string[]): Promise<number> {
     if ("message" in r) return failed("user", r, { json });
     const next = disabledNext(r.disabled.name);
     if (json) { out(jsonText(USER, r, next)); return 0; }
-    const d = r.disabled;
-    out(reportText({ headline: r.already ? `The user ${d.name} is disabled already: nothing changed` : `The user ${d.name} disabled: it connects no more, until enabled`,
-      details: [["user", d.name], ["disabled", d.disabledAt], ...(r.already ? [] : [["sessions", w.state === "up" ? "those it holds end at their next statement" : "none: Mason is not running"] as const])],
-      tips: [disableEffect(d.name)], next }));
+    out(disabledReport(r, w.state === "up", next));
     return 0;
   }
 
@@ -592,21 +689,16 @@ export async function user(argv: string[]): Promise<number> {
     if ("message" in r) return failed("user", r, { json });
     const next = enabledNext(r.enabled.name);
     if (json) { out(jsonText(USER, r, next)); return 0; }
-    const e = r.enabled;
-    out(reportText({ headline: r.already ? `The user ${e.name} is not disabled: nothing changed, it connects` : `The user ${e.name} enabled: it connects again, with the same password`,
-      details: [["user", e.name], ["added", e.addedAt]], next }));
+    out(enabledReport(r, next));
     return 0;
   }
 
   if (verb === "remove") {
     const r = removeUser(file, name!);
     if ("message" in r) return failed("user", r, { json });
-    const gone = r.removed;
     const next = REMOVED_NEXT;
     if (json) { out(jsonText(USER, r, next)); return 0; }
-    out(reportText({ headline: `The user ${gone.name} removed: it connects no more`,
-      details: [["user", gone.name], ["added", gone.addedAt], ["sessions", w.state === "up" ? "those it holds end at their next statement" : "none: Mason is not running"]],
-      tips: [`Adding ${gone.name} again makes a new password: the old one never connects again.`], next }));
+    out(removedReport(r, w.state === "up", next));
     return 0;
   }
 
@@ -627,29 +719,9 @@ export async function user(argv: string[]): Promise<number> {
   if ("refused" in attributes) return failed("user", attributes.refused, { json });
   const r = addUser(file, apiKey, name!, { link, database, roles, ...(role !== undefined ? { role } : {}), attributes: attributes.values });
   if ("message" in r) return failed("user", r, { json });
-  const { replaced, ...added } = r;
+  const { replaced: _, ...added } = r;
   const next = addedNext(r.user, link !== null);
   if (json) { out(jsonText(USER, added, next)); return 0; }
-  out(reportText({
-    headline: `The user ${r.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}: its password is printed this once`,
-    details: [
-      ...(r.url !== undefined && r.psql !== undefined ? [["url", r.url] as const, ["psql", r.psql] as const] : []),
-      ["user", r.user], ["password", r.password], ["database", r.database],
-      ...(r.attributes !== undefined ? [["attributes", attributesText(r.attributes)] as const] : []),
-      ...(r.roleFrom === "file" ? [["role", `${r.role!} (mason/${ROLES_FILE} names what it reads)`] as const]
-        : r.roleFrom === "default" ? [["role", `${r.role!} (the file's default: ${roles.file ?? `mason/${ROLES_FILE}`})`] as const]
-        : r.readsNothing === true ? [["role", `none, and ${roles.file ?? `mason/${ROLES_FILE}`} names no default: it reads nothing until one is written`] as const] : []),
-      ...(link !== null ? [["host", link.host] as const, ["port", String(link.port)] as const, ...(link.sslmode ? [["ssl mode", link.sslmode] as const] : [])] : []),
-    ],
-    tips: [
-      "Paste it into the tool now: Mason keeps no copy of the password. Lost, remove the user and add it again.",
-      ...(r.readsNothing === true ? [`Its statements are refused until it has a role: ${noRoleWayOut(r.user, roles.file ?? `mason/${ROLES_FILE}`, exampleRole(roles))}.`] : []),
-      ...(link === null ? ["Mason is not running: mason start, then mason status says the host and port this user connects to."] : []),
-      ...listenerTips(run?.postgresListener ?? null),
-      "It never expires: mason user remove ends it, at once and for every session it holds.",
-      "Rotating the API key (apiKey in .mason/config.json, MASON_API_KEY under mason serve) removes every user at once.",
-    ],
-    next,
-  }));
+  out(addedReport(r, { roles, listener: run?.postgresListener ?? null, next }));
   return 0;
 }
