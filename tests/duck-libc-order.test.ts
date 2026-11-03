@@ -316,10 +316,14 @@ test("collation: an order read under a named collation wraps every text the read
  *  punctuation and the space none), and beside it what a column holds of the rest: `l` + U+00B7 a contraction of a
  *  weight of its own (glibc's `l·`), U+212A KELVIN SIGN and U+0130 the letter of their case, é, ß as ss, Hangul, an
  *  emoji and its selector, a combining acute of no first level; U+E000 and U+0378 not covered (refused) */
+/** the control characters the bounds once wrote as marks (issue 666, review r1: `E`, chr(2), appended to the value was
+ *  taken for the end of the text where the value held one), which glibc ignores at the first three levels: a value may
+ *  hold them, so the hand order covers them and the property draws them */
+const CONTROL = "\u0001\u0002\u007f";
 function boundOrder(): LibcOrder {
   const punctuation = [..." !\"#%&'()*+,-./:;<=>?@[\\]^_`{|}~"].join("");
   const o = handLibcOrder(["$", ..."0123456789", ...lettersOf({ e: "é", i: "İ", k: "K" }), "ⱼ"],
-    [punctuation + "·", "가", "❤️́"], { expansions: { "ß": "ss" } });
+    [punctuation + "·" + CONTROL, "가", "❤️́"], { expansions: { "ß": "ss" } });
   const element = { l1: [o.l1[0x2c7c]!], l2: [1], l3: [1], l4: [o.l4[0x6c]!], back: false };
   o.contractions.set(0x6c, [{ rest: [0xb7], element }]);
   o.contractions.set(0x4c, [{ rest: [0xb7], element: { ...element, l3: [2049] } }]);
@@ -331,8 +335,10 @@ test("libc bound: hi(a) < lo(b) orders the keys at the first level, lo <= hi, eq
   const { BOUND_CHARS } = await import("../src/duck/libc-bound.ts");
   const ascii = Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i));
   const pool = [...ascii, ..."abcAB01$ -.", "l·", "L·", "K", "İ", "é", "é", "ß", "가", "❤️", "", "͸"];
+  pool.push(...CONTROL);
   const long = "abcdefghij".repeat(6);
   const strings = [...randomStrings(pool, 20_000, 8, 0x5eed),
+    "abc", "ab\u0002cd", "aa", "a\u0002z", "aaz", "\u0002zz", "b", "\u0001", "\u0002", "\u007f", "ab\u0002", "ab\u007f", "ab\u0001c",
     "cel·la", "cella", "celLa", "cel·La", "cel·", "cell", "celm", "", " ", "$5", "5", "-5", "k", "K", "K", "Kb", "kb", "istanbul", "İstanbul",
     long, `${long}a`, `${long}b`, `${long}·`, `${long}l·`, long.slice(0, BOUND_CHARS), long.slice(0, BOUND_CHARS + 1), `${long.slice(0, BOUND_CHARS)}é`];
   const { failures, ruledOut } = await holdBounds(o, strings);

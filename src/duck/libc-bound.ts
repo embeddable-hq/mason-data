@@ -7,7 +7,7 @@
  * cannot rule out. Postgres's abbreviated keys, made exact by bounds.
  *
  * THE BOUNDS. Of a text s, `lo(s)` and `hi(s)` are texts, compared by their bytes, built by the engine alone
- * (`regexp_extract`, `lower`, `regexp_replace`, `||`: ~0.05 µs a row, parallel; `translate` was 1 µs), from the order
+ * (`strlen`, `regexp_full_match`, `regexp_extract`, `lower`, `regexp_replace`, `||`: ~0.05 µs a row, parallel; `translate` was 1 µs), from the order
  * READ FROM THE SOURCE for that collcollate (`LibcOrder`, never a hand-written table): the first-level weights of s's
  * leading run of MAPPED characters (`boundOf`: printable ASCII whose first level the order says without context:
  * covered, one weight or none, no sequence, no contraction that a mapped character could complete), at most
@@ -17,6 +17,10 @@
  * (a space, most punctuation) dropped. Then, with `L` < `E` < every character written < `H` (control characters):
  *  - s whole in the run: its weights then `E` (the level ends there), then `L` in lo and `H` in hi;
  *  - else (an unmapped character, the run's length reached): its weights so far, then `L` in lo and `H` in hi.
+ * The marks are written AFTER the weights, never read from s: whether s ended in the run is decided from s itself (at
+ * most `BOUND_CHARS` bytes, every one mapped), so a value holding chr(1), chr(2) or chr(127), which glibc ignores at the
+ * first three levels and no run holds, cannot pass for a mark (review r1 of PR 675: `E` appended to s and matched as
+ * the end of the text took a U+0002 inside it for the end, and `ab` U+0002 `cd` sorted before `abc`).
  * Case is folded only within the run: the engine's `lower()` maps U+212A KELVIN SIGN to `k`, which no run holds.
  * A contraction's first character (`l` of `l·`) ends a run before an unmapped character: its weight there is not known.
  * THE PROOF OBLIGATION: hi(a) < lo(b) implies libcKey(a) < libcKey(b) at the first level, strictly; lo(s) <= hi(s);
@@ -74,9 +78,9 @@ const and = (args: AstNode[]): AstNode => {
 const nullTest = (arg: AstNode, type: "IS_NULL" | "IS_NOT_NULL"): AstNode => ({ NullTest: { arg, nulltesttype: type } });
 const chr = (code: number): AstNode => call("chr", [int(code)]);
 
-/** what a libc order's bounds are written from: the run's pattern, and the pattern of its characters of no first-level
- *  weight (null: none) */
-export interface Bound { run: string; dropped: string | null }
+/** what a libc order's bounds are written from: the run's pattern, the pattern of a text whole in the run (every
+ *  character mapped), and the pattern of its characters of no first-level weight (null: none) */
+export interface Bound { run: string; whole: string; dropped: string | null }
 
 /** a character class of code points, as RE2 reads it: each as `\x{…}`, runs as ranges */
 function charClass(points: readonly number[]): string {
@@ -122,8 +126,9 @@ export function boundOf(o: LibcOrder): Bound | null {
       && written.every((g, i) => i === 0 || o.l1[written[i - 1]!]! < o.l1[g]!);
     if (plain.length > 0 && written.length > 0 && ordered) {
       bound = {
-        // (the longest run of mapped characters ending in one whose weight is known there, or in `E`, the text's end)
-        run: `^${charClass([...mapped])}*${charClass([...plain, E])}`,
+        // the longest run of mapped characters ending in one whose weight is known there; and the whole text mapped
+        run: `^${charClass([...mapped])}*${charClass(plain)}`,
+        whole: `${charClass([...mapped])}*`,
         dropped: dropped.length === 0 ? null : charClass(dropped),
       };
     }
@@ -132,9 +137,14 @@ export function boundOf(o: LibcOrder): Bound | null {
   return bound;
 }
 
-/** the run's weights of `x`, ending in `E` where x ended in the run */
+/** the run's weights of `x`, ending in `E` where x ended in the run: x of at most `BOUND_CHARS` bytes, each a mapped
+ *  character (a mapped one is one byte), is whole in it; otherwise the run is the longest prefix of x's first
+ *  `BOUND_CHARS + 1` characters ending in a plain one. No mark is ever read from x */
 function weightsOf(b: Bound, x: AstNode): AstNode {
-  const run = call("lower", [call("regexp_extract", [call("left", [op("||", x, chr(E)), int(BOUND_CHARS + 1)]), str(b.run)])]);
+  const head = (): AstNode => call("left", [structuredClone(x), int(BOUND_CHARS + 1)]);
+  const whole = and([op("<=", call("strlen", [structuredClone(x)]), int(BOUND_CHARS)), call("regexp_full_match", [head(), str(b.whole)])]);
+  const run = call("lower", [{ CaseExpr: { args: [{ CaseWhen: { expr: whole, result: op("||", structuredClone(x), chr(E)) } }],
+    defresult: call("regexp_extract", [head(), str(b.run)]) } }]);
   return b.dropped === null ? run : call("regexp_replace", [run, str(b.dropped), str(""), str("g")]);
 }
 /** `lo(x)` and `hi(x)` (the module's header), each its own copy of `x` */

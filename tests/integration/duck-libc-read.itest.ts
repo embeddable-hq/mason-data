@@ -105,8 +105,12 @@ test("the bounds of the order read: hi(a) < lo(b) orders the keys at the first l
     if (boundOf(o) === null) { t.skip(`${collate}'s order has no bounds`); return; }
     const ascii = range(0x20, 0x7e).map((g) => String.fromCodePoint(g));
     const pool = [...ascii, ..."abcAB01$ -.", "l·", "L·", "K", "İ", "é", "é", "ß", "가", "❤️", "", "͸"];
+    // the control characters the bounds once wrote as marks, which glibc ignores at the first three levels (review r1 of
+    // PR 675: U+0002 inside a value was taken for the end of the text)
+    pool.push("\u0001", "\u0002", "\u007f");
     const long = "httpsexamplecomitem".repeat(4);
     const strings = [...randomStrings(pool, 20_000, 8, 666),
+      "abc", "ab\u0002cd", "aa", "a\u0002z", "aaz", "\u0002zz", "b", "\u0002", "ab\u0001c", "ab\u007f",
       "cel·la", "cella", "celLa", "cel·La", "", "k", "K", "K", "Kb", "istanbul", "İstanbul", "$5", "5", "-5",
       long, `${long}a`, `${long}·`, `${long}l·`, long.slice(0, BOUND_CHARS), long.slice(0, BOUND_CHARS + 1), `${long.slice(0, BOUND_CHARS)}é`];
     const { failures, ruledOut } = await holdBounds(o, strings);

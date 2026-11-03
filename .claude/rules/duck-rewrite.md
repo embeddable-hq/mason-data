@@ -412,7 +412,9 @@ paths:
 - **A libc key is computed for a top N's and a min / max's candidates alone** (`src/duck/libc-bound.ts`, issue 666: the
   JavaScript key on every row was 10-15 s over 5 M rows, past the timeout at 93 M). Each value's two NATIVE bounds
   (`regexp_extract`, `lower`, `regexp_replace`) are written from the `LibcOrder` read for that collcollate, never a
-  table by hand: an order whose printable ASCII's folded bytes do not order its weights has none. The proof obligation,
+  table by hand: an order whose printable ASCII's folded bytes do not order its weights has none. Their marks (the
+  text's end, below and above every weight) are written after the weights and never read from the value: whether it
+  ended in the run is decided from the value itself, since a value may hold any control character (PR 675). The proof obligation,
   hi(a) < lo(b) implies libcKey(a) < libcKey(b) at the first level, lo <= hi, equal strings equal bounds, is held over the
   ENGINE's expressions by `holdBounds` (tests/libc-order-fixture.ts): the hand order's `l·`, U+212A, U+0130 and marks in
   `libc bound:`, the source's order in the read test's `bound`. The threshold's subquery clones the SELECT's one FROM

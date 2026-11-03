@@ -7317,8 +7317,8 @@ test("issue 406: upper, lower and initcap map case under their input collation, 
 // the rows a native bound of the key cannot rule out. The SQL sent says so (the bounds' regexp_extract, the threshold's
 // subquery), under the database's order and a column's own; every form the bound is not proved for is sent as written
 test("libc top N: a top N and an ungrouped min / max are bounded natively, the database's order and a column's own; every other form as written", async () => {
-  const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-"], { collate: "en_US.utf8" });
-  const british = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-"], { collate: "en_GB.utf8" });
+  const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_US.utf8" });
+  const british = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_GB.utf8" });
   const gb = { schema: "public", name: "mason_gb", provider: "c", collate: "en_GB.utf8", locale: null, deterministic: true };
   const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined,
     { collations: [...PG_COLLATIONS, gb], readLibc: async () => british }), [gb]);
@@ -7362,6 +7362,31 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       const text = await sent(sql);
       assert.ok(text.length > 0 && !text.includes("regexp_extract("), `${sql}: ${text}`);
     }
+    // a value holding a control character the order ignores (review r1 of PR 675): U+0002 inside it is not the end of the
+    // text, so 'ab' U+0002 'cd' sorts as 'abcd', after 'abc', and U+0002 'zz' as 'zz'
+    const control = new Map<number, string>([[100, "abc"], [101, "ab\u0002cd"], [102, "aa"], [103, "a\u0002z"], [104, "aaz"], [105, "\u0002zz"], [106, "b"], [107, "ab\u007f"], [108, "ab\u0001c"]]);
+    await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, x FROM (VALUES ${[...control].map(([id, x]) => `(${id}, '${x}')`).join(", ")}) AS s(id, x)`);
+    try {
+      const sorted = (ids: number[], desc: boolean): number[] => [...ids].sort((i, j) => {
+        const [x, y] = [control.get(i)!, control.get(j)!], [k, l] = [libcKey(letters, x), libcKey(letters, y)];
+        const by = k !== l ? (k < l ? -1 : 1) : Buffer.compare(Buffer.from(x), Buffer.from(y));
+        return by !== 0 ? (desc ? -by : by) : i - j;
+      });
+      const all = [...control.keys()];
+      for (const [sql, rows] of [
+        ["SELECT id FROM colls WHERE id >= 100 ORDER BY d, id LIMIT 3", ids(sorted(all, false).slice(0, 3))],
+        ["SELECT id FROM colls WHERE id >= 100 ORDER BY d DESC, id LIMIT 2", ids(sorted(all, true).slice(0, 2))],
+        ["SELECT id FROM colls WHERE id IN (100, 101) ORDER BY d, id LIMIT 1", ids(sorted([100, 101], false).slice(0, 1))],
+        ["SELECT id FROM colls WHERE id IN (103, 104) ORDER BY d, id LIMIT 1", ids(sorted([103, 104], false).slice(0, 1))],
+        ["SELECT id FROM colls WHERE id IN (105, 106) ORDER BY d DESC, id LIMIT 1", ids(sorted([105, 106], true).slice(0, 1))],
+        ["SELECT min(d), max(d) FROM colls WHERE id IN (100, 101)", [[control.get(sorted([100, 101], false)[0]!), control.get(sorted([100, 101], true)[0]!)]]],
+        ["SELECT min(d), max(d) FROM colls WHERE id >= 100", [[control.get(sorted(all, false)[0]!), control.get(sorted(all, true)[0]!)]]],
+      ] as Array<[string, unknown[][]]>) {
+        assert.match(await sent(sql), /regexp_extract\(/, sql);
+        assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+      }
+      assert.deepEqual(sorted([100, 101], false), [100, 101], "the order itself: 'abc' before 'ab' U+0002 'cd'");
+    } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 100"); }
   } finally { await c.end(); await a.close(); }
 });
 

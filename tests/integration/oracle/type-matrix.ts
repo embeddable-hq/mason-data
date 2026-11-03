@@ -141,7 +141,10 @@ export const JPATH: Array<string | null> = [
 
 /** coll_top's first rows, each value as written (the rest are numbered, src/duck/libc-bound.ts's cases): its one NULL */
 const COLL_TOP_FIRST: Array<string | null> = ["", " ", "cel·la", "cella", "celLa", "cel·La", "K", "k", "K", "İstanbul", "istanbul", "Istanbul", "$5", "5", "-5",
-  "item1", "Item 1", "item-1", "ITEM_1", "a", "A", null, "zz", "ZZ", "z z"];
+  "item1", "Item 1", "item-1", "ITEM_1", "a", "A", null, "zz", "ZZ", "z z",
+  // a control character glibc ignores at the first three levels, inside a value (review r1 of PR 675: U+0002 was read as
+  // the bounds' end of the text)
+  "abc", "ab\u0002cd", "a\u0002z", "aaz", "\u0002zz", "ab\u0001c", "ab\u007f", "\u0002", "b\u0002"];
 
 export const COLL: Array<[number, string | null]> = [
   [1, "대지"], [2, "Animal"], [3, "zebra"], [4, "Dob"], [5, "Do\uFFFDa"], [6, "$x"], [7, "€x"], [8, "@x"], [9, "~x"], [10, "ab"],
@@ -1250,6 +1253,12 @@ function* matrix(): Generator<Matrixed> {
     ["bytes (as written)", 'SELECT id FROM coll_top ORDER BY s COLLATE "C" LIMIT 5'],
     ["ICU (as written)", 'SELECT id FROM coll_top ORDER BY s COLLATE "und-x-icu" LIMIT 5'],
     ["equality (as written)", "SELECT count(*) FROM coll_top WHERE s = 'item1'"],
+    ["a control character inside a value", "SELECT id, s FROM coll_top WHERE s IN ('abc', 'ab' || chr(2) || 'cd', 'aaz') ORDER BY s, id LIMIT 2"],
+    ["a control character inside a value, descending", "SELECT id, s FROM coll_top WHERE s IN ('abc', 'ab' || chr(2) || 'cd') ORDER BY s DESC, id LIMIT 1"],
+    ["a control character after the first letter", "SELECT id, s FROM coll_top WHERE s IN ('a' || chr(2) || 'z', 'aaz') ORDER BY s, id LIMIT 1"],
+    ["a control character first, descending", "SELECT id, s FROM coll_top WHERE s IN (chr(2) || 'zz', 'z z', 'item1') ORDER BY s DESC, id LIMIT 1"],
+    ["control characters among every value", "SELECT id, s FROM coll_top WHERE s LIKE '%' || chr(2) || '%' OR s LIKE 'ab%' OR s = chr(2) ORDER BY s, id LIMIT 6"],
+    ["control characters among every value, descending", "SELECT id, s FROM coll_top WHERE s LIKE '%' || chr(2) || '%' OR s LIKE 'ab%' OR s LIKE 'z%' ORDER BY s DESC, id LIMIT 4"],
   ] as Array<[string, string]>) yield q(`text top N: ${name}`, sql);
   for (const [name, sql] of [
     ["min and max", "SELECT min(s), max(s) FROM coll_top"],
@@ -1266,6 +1275,9 @@ function* matrix(): Generator<Matrixed> {
     ["grouped (as written)", "SELECT n % 5, min(s), max(s) FROM coll_top GROUP BY 1 ORDER BY 1"],
     ["FILTER (as written)", "SELECT min(s) FILTER (WHERE n > 5), max(s) FROM coll_top"],
     ["a window (as written)", "SELECT id, max(s) OVER (PARTITION BY n % 3) FROM coll_top ORDER BY id LIMIT 5"],
+    ["a control character inside a value", "SELECT min(s), max(s) FROM coll_top WHERE s IN ('abc', 'ab' || chr(2) || 'cd')"],
+    ["a control character first", "SELECT min(s), max(s) FROM coll_top WHERE s IN (chr(2) || 'zz', 'z z')"],
+    ["control characters beside letters", "SELECT min(s), max(s) FROM coll_top WHERE s LIKE 'a%' OR s LIKE '%' || chr(2) || '%'"],
   ] as Array<[string, string]>) yield q(`text min/max: ${name}`, sql);
   // ---- the corpus rerun of fbbf8f08: what reached DuckDB and failed, and the pieces still unverified -------------------
   // a name another table has in another case: qualified with the table Postgres resolved it to
