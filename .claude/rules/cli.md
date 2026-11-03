@@ -36,7 +36,8 @@ CLI lacks).
   crash and records each restart (`mason status` `engine.restarts`).
   **A log file has ONE reader, which masks as it reads** (src/lib/log-read.ts `LogReader`; issue 621: an older Mason's lines held the source's password in a `password=` value): `mason logs` in
   every form, `mason start`'s watch of `dev.log` and the supervisor's scan read through it, and the files are named only
-  there (`logPath`); it releases a line only whole, whatever its chunks. The mask is #620's (`PasswordLineMask`, the
+  there (`logPath`); it releases a line only whole, whatever its chunks, holds nothing of a line between them
+  (its bytes are read again once it ends: work linear in the file), and `-f` shows the unended last line as it stands, masked. The mask is #620's (`PasswordLineMask`, the
   `password=` value alone, never a substring of the password). `/api/logs`' buffer is masked by it as an entry is kept.
   `tests/conventions.test.ts` refuses a log file named or read anywhere else.
 - **Every command's output has one shape**, the same format for every command so it is easy to scan. A command that

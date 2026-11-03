@@ -66,6 +66,13 @@ export class PasswordLineMask {
   /** what the previous line left open: a quoted value (to its closing quote), or the keyword with its value not begun */
   private open: { quote: true } | { keyword: string } | null = null;
 
+  /** A line not ended yet, masked as it stands, the state left as it was: what a follow shows of a line still being
+   *  written (src/lib/log-read.ts `follow`), the whole line read by `line` once its newline comes. */
+  peek(raw: string): string {
+    const open = this.open;
+    try { return this.line(raw); } finally { this.open = open; }
+  }
+
   /** One line (no newline), masked. */
   line(raw: string): string {
     if (raw.trim() === "" || /^\S/.test(raw)) this.open = null;   // a new entry: nothing carries into it

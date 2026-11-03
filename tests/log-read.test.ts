@@ -187,6 +187,85 @@ test("mason logs -f masks the lines it follows, a password= value cut between tw
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("mason logs -f shows a last line no newline ended (a run killed mid-write), as it stands, masked; more of it, and the lines after, as they come", async () => {
+  // the review of PR 641 (B1): -f waited for the newline, and a stopped run's last words never came
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-logs-unended-"));
+  try {
+    writeConfig(path.join(dir, ".mason"), newConfig("shop", "mason", false));
+    const file = path.join(dir, ".mason", "mason.log");
+    fs.writeFileSync(file, `${at(0)} [x] one\n${at(1)} [x] the run died mid-li`);
+    const follow = spawn(process.execPath, [MAIN, "logs", "-f"], { cwd: dir, env: { ...process.env, NO_COLOR: "1" } });
+    let said = "";
+    follow.stdout.on("data", (b: Buffer) => { said += b.toString(); });
+    follow.stderr.on("data", (b: Buffer) => { said += b.toString(); });
+    const until = async (want: string): Promise<void> => {
+      for (const end = Date.now() + 15_000; !said.endsWith(want) && Date.now() < end;) await new Promise((r) => setTimeout(r, 50));
+      assert.equal(said, want);
+    };
+    try {
+      await until(`${at(0)} [x] one\n${at(1)} [x] the run died mid-li`);
+      // the line completed by a later write, then one half written with its password cut, shown masked as it stands
+      const old = OLD_LINES[0]![0];
+      const cut = old.indexOf("'orders2024'") + 4;
+      fs.appendFileSync(file, `ne\n${old.slice(0, cut)}`);
+      await until(`${at(0)} [x] one\n${at(1)} [x] the run died mid-line\n${old.slice(0, old.indexOf("'orders2024'"))}****`);
+      fs.appendFileSync(file, `${old.slice(cut)}\n`);
+      await until(`${at(0)} [x] one\n${at(1)} [x] the run died mid-line\n${OLD_LINES[0]![1]}\n`);
+      noSecret(said, "mason logs -f");
+    } finally { follow.kill(); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a follow's answers, one after another, are the masked lines with the unended one's masked text so far, however the file is written", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "log-follow-"));
+  try {
+    const file = path.join(dir, "mason.log");
+    const text = [...OLD_LINES.map(([old]) => old), `${at(6)} [sync] failed: password='ünï\n    cødé' sslmode='prefer'`, `${at(7)} [sync] dönë`].join("\n") + "\n";
+    const R = LogReader();
+    const whole = new R(file);
+    fs.writeFileSync(file, text);
+    const want = whole.readAll();
+    // every cut of the file into two writes, a follow after each, at chunk sizes that cut inside lines too
+    for (const chunk of [3, 64, 1 << 20]) {
+      for (let cut = 0; cut <= text.length; cut += 7) {
+        fs.writeFileSync(file, "");
+        const r = new R(file, { chunk });
+        let shown = r.follow();
+        fs.appendFileSync(file, text.slice(0, cut));
+        const half = r.follow();
+        // a keyword whose value is not written yet ends it with no value: nothing to mask, and nothing shown
+        noSecret(half.replace(/password\s*(?:=\s*)?$/i, ""), `chunk ${chunk}, cut ${cut}`);
+        shown += half;
+        assert.equal(shown, want.slice(0, shown.length), `chunk ${chunk}, cut ${cut}: what is shown so far is the masked text's start`);
+        fs.appendFileSync(file, text.slice(cut));
+        shown += r.follow();
+        assert.equal(shown, want, `chunk ${chunk}, cut ${cut}`);
+        assert.equal(r.follow(), "", "nothing more, nothing said");
+      }
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the reader's work is linear in what it reads: a long line is read again once, never once a chunk, and nothing of it is held between chunks", () => {
+  // the review of PR 641 (B2): the partial joined to every 1 MiB chunk and split again, a 256 MiB line 36 s against 4.7
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "log-work-"));
+  try {
+    const file = path.join(dir, "mason.log");
+    const long = `${at(1)} [x] ${"a".repeat(200_000)} password='orders2024' ${"b".repeat(50_000)}`;
+    fs.writeFileSync(file, `${long}\n${at(2)} [x] short\n${long}`);
+    const R = LogReader();
+    for (const chunk of [64, 4096]) {
+      const r = new R(file, { chunk });
+      const got = r.readAll() + r.rest();
+      noSecret(got, `chunk ${chunk}`);
+      const { read, searched } = r.work;
+      const size = fs.statSync(file).size;
+      assert.equal(searched, size, `chunk ${chunk}: every byte searched for a newline once`);
+      assert.ok(read <= 2 * size, `chunk ${chunk}: ${read} bytes read for a file of ${size}: a line's bytes read again once at most, never once a chunk (held and joined to each chunk, ${Math.round(size * size / chunk / 2)})`);
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("the supervisor's scan of the run's terminal reads it through the reader: a fatal line is masked before it is recorded", async () => {
   const { scanLog } = await import("../src/cli/supervise.ts");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "log-scan-"));

@@ -33,9 +33,15 @@ const HEAD = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) /;
  * be an empty entry counted by `-n`.
  */
 export function logEntries(text: string, o: { perLine?: boolean } = {}): LogLine[] {
-  const out: LogLine[] = [];
   const lines = text.split("\n");
   if (lines[lines.length - 1] === "") lines.pop();   // the file's last newline ends its last line, it does not start another
+  return entriesOfLines(lines, o);
+}
+
+/** Lines (no newline), as `logEntries` reads a text's: what `mason logs` hands it from the reader (src/lib/log-read.ts
+ *  `readLines`), so a long line is never joined to the next and split again. */
+export function entriesOfLines(lines: readonly string[], o: { perLine?: boolean } = {}): LogLine[] {
+  const out: LogLine[] = [];
   for (const line of lines) {
     if (line.trim() === "") { if (o.perLine) out.push({ at: null, text: "" }); continue; }
     const last = out[out.length - 1];
