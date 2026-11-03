@@ -92,6 +92,9 @@ export class Unrewritable extends Error {
 const INT2 = 21, INT4 = 23, INT8 = 20, FLOAT4 = 700, FLOAT8 = 701, NUMERIC = 1700, TEXT = 25, VARCHAR = 1043, BPCHAR = 1042, NAME = 19, TEXT_ARRAY = 1009, VARCHAR_ARRAY = 1015;
 const DATE = 1082, TIMESTAMP = 1114, TIMESTAMPTZ = 1184, INTERVAL = 1186, JSON_OID = 114, JSONB = 3802, UNKNOWN = 705, INET = 869, RECORD = 2249;
 const INTEGERS = new Set([INT2, INT4, INT8]);
+/** a jsonb's casts to a scalar Postgres reads from its JSON (jsonb_int2 … jsonb_numeric, jsonb_bool), each the engine's type
+ *  its text is cast to (`typeCast`); bool is 16 */
+const JSONB_SCALAR_CASTS: ReadonlyMap<number, string> = new Map([[INT2, "smallint"], [INT4, "integer"], [INT8, "bigint"], [FLOAT4, "real"], [FLOAT8, "double"], [NUMERIC, "numeric"], [16, "boolean"]]);
 const FLOATS = new Set([FLOAT4, FLOAT8]);
 /** the fields of a time that grow with it, ±Infinity of an infinite one (Postgres 14+); the rest are NULL of it */
 const MONOTONIC = new Set(["year", "years", "decade", "decades", "century", "centuries", "millennium", "millennia", "isoyear", "epoch", "julian"]);
@@ -1533,12 +1536,19 @@ class Rewriter {
       return Object.values(isNode(v) ? bodyOf(v) : v as Body).every((x) => ofThisQuery(x, depth));
     };
     // `depth`: the subqueries between here and this query (a correlated subquery's column of this query is levelsUp 1)
-    const wrap = (v: unknown, depth: number): unknown => {
-      if (Array.isArray(v)) return v.map((x) => wrap(x, depth));
+    // `sorted`: an ORDER BY key, where a bare name is first an output's (findTargetlistEntrySQL92)
+    const wrap = (v: unknown, depth: number, sorted = false): unknown => {
+      if (Array.isArray(v)) return v.map((x) => wrap(x, depth, sorted));
       if (v === null || typeof v !== "object") return v;
       // a plain body (a window's OVER, a SubLink's select): its parts
-      if (!isNode(v)) { for (const [key, x] of Object.entries(v as Body)) if (key !== "location") (v as Body)[key] = wrap(x, depth); return v; }
+      if (!isNode(v)) { for (const [key, x] of Object.entries(v as Body)) if (key !== "location") (v as Body)[key] = wrap(x, depth, sorted); return v; }
       const k = kindOf(v), n = bodyOf(v);
+      // AN ORDER BY's OUTPUT NAME (`ORDER BY v` of `v::text`, Postgres's output column `v`) is the target, no column,
+      // whatever the column of that name is grouped as (fix round 1 of PR 582: `… GROUP BY v ORDER BY v` read the jsonb
+      // column through any_value and sorted by jsonb's key, where Postgres sorts by the output, its text). Only in the
+      // ORDER BY: in the list, a column grouped by its key has no analysed node at its own offset either (a VAR of the
+      // GROUP entry), and is the column
+      if (sorted && k === "ColumnRef" && depth === 0 && this.outputNamed(v, targets)) return v;
       const as = this.groupedAs(v, b);
       if (as === "engine") return v;
       if (as === "keyed" && (depth === 0 || ofThisQuery(v, depth))) return perGroup(v);
@@ -1554,8 +1564,7 @@ class Rewriter {
       if (k === "ColumnRef") {
         // an output name (`ORDER BY p` of `max(x) AS p`) is the target, no column: its shape may be another query's
         // column (the corpus run of fbbf8f08: `… GROUP BY p` outside read it as one, and any_value(p) nested aggregates)
-        const f = names(n.fields);
-        if (depth === 0 && f.length === 1 && this.typedAt(v) === null && targets.some((t) => bodyOf(t).name === f[0])) return v;
+        if (depth === 0 && this.outputNamed(v, targets)) return v;
         const t = this.typed(v);
         // a cell riding beside a FROM item's column the group decides (carry): its value is the group's too
         if (!(depth === 0 && isCellRef(v, this.cellPrefix)) && (t?.node !== "VAR" || t.levelsUp !== depth)) return v;
@@ -1565,12 +1574,12 @@ class Rewriter {
         this.typedLike.set(bodyOf(call), v);
         return call;
       }
-      for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth);
+      for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth, sorted);
       return v;
     };
     for (const t of targets) { const tb = bodyOf(t); tb.val = wrap(tb.val, 0); }
     if (b.havingClause !== undefined) b.havingClause = wrap(b.havingClause, 0);
-    if (Array.isArray(b.sortClause)) for (const s of b.sortClause as AstNode[]) { const sb = bodyOf(s); sb.node = wrap(sb.node, 0); }
+    if (Array.isArray(b.sortClause)) for (const s of b.sortClause as AstNode[]) { const sb = bodyOf(s); sb.node = wrap(sb.node, 0, true); }
   }
 
   /**
@@ -3915,6 +3924,13 @@ class Rewriter {
     return record;
   }
 
+  /** whether a bare name is an output's name Postgres bound it to, no column: it has no analysed node of its own (an
+   *  ORDER BY or HAVING naming an output is analysed as the target) and an output of the list bears it */
+  private outputNamed(ref: AstNode, targets: readonly AstNode[]): boolean {
+    const f = names(bodyOf(ref).fields);
+    return f.length === 1 && this.typedAt(ref) === null && targets.some((t) => bodyOf(t).name === f[0]);
+  }
+
   /** how SELECT `b`'s GROUP BY groups `e` (`grouping`): as written in the engine's clause, by a key in its place, or
    *  not at all (null) */
   private groupedAs(e: AstNode, b: Body | null): "engine" | "keyed" | null {
@@ -5333,6 +5349,20 @@ class Rewriter {
     // own (Postgres refers to the list's), and is the value the list's was parsed to — the same SQL on both sides
     if (t?.node === "CONST" && kindOf(arg) === "A_Const" && this.at(bodyOf(arg), ["CONST"]) === null) this.constLike.set(bodyOf(arg), t);
     const from = this.typeOf(arg);
+    // A JSONB CAST TO A NUMBER OR A BOOLEAN (fix round 1 of PR 582): ONE route, by the value's type wherever it is read
+    // (a column's read, a grouped expression's per-group any_value, a derived table's column): its JSON null is SQL NULL
+    // (jsonb_float8 and its kin answer NULL for it), anything else its JSON text, cast. The engine's cast of the text
+    // 'null' raised 22P02, and DuckDB's own `->` the base wrote read it only where that `->` was the engine's
+    const scalar = t === null || from !== JSONB ? undefined : JSONB_SCALAR_CASTS.get(t.type);
+    if (t !== null && scalar !== undefined) {
+      const text = fn("nullif", [cast(arg, ["varchar"]), strConst("null")]);
+      // (an integer is the number's digits rounded as numeric_int4 rounds them, half away from zero, every digit kept:
+      // never the engine's double, which rounds half to even and drops a bigint's last digits)
+      if (INTEGERS.has(t.type)) return cast(fn("__mason_numeric_int", [text, intConst(t.type === INT2 ? 16 : t.type === INT4 ? 32 : 64)]), [scalar]);
+      if (scalar !== "numeric") return cast(text, [scalar]);
+      const w = numericCastWrite((b.typeName?.typmods ?? []) as AstNode[], from, null);
+      return w.as === "decimal" ? cast(text, ["decimal", String(w.precision), String(w.scale)]) : cast(text, ["double"]);
+    }
     // a literal of a type the copy holds as its text, or of a timetz(n): the text Postgres writes it as
     if (t !== null && constString(arg) !== null && (heldType(t.type) !== undefined || t.type === TIMETZ)) {
       if (t.typmod >= 0) {

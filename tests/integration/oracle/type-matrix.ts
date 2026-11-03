@@ -916,6 +916,19 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb: grouped expression's text, a member the only key", "SELECT (o.meta -> 'n')::text AS n, count(*) FROM orders o GROUP BY o.meta -> 'n' ORDER BY 1 NULLS FIRST");
   yield q("jsonb: grouped expression's text, beside the key under a LIMIT", "SELECT (o.meta -> 'n')::text AS k, count(*) FROM orders o GROUP BY o.id, o.meta -> 'n' ORDER BY o.id LIMIT 5");
   yield q("jsonb: grouped expression's text, an array's spacing", "SELECT o.status, (o.meta -> 'tags')::text AS tags, count(*) FROM orders o GROUP BY o.status, o.meta -> 'tags' ORDER BY 1, 2");
+  // (PR 582's review, round 1) a jsonb's cast to a number or a boolean, grouped or not: a JSON null is SQL NULL, an
+  // integer the number rounded half away from zero (jorder's 5 to 22 are numbers an int holds, 23 to 25 are not; 1 to 4
+  // are SQL NULL, JSON null, true and false)
+  yield q("jsonb: grouped cast to a number, float8 and real", "SELECT id, j::float8, j::real FROM jorder WHERE id = 1 OR id = 2 OR id BETWEEN 5 AND 25 GROUP BY id, j ORDER BY id");
+  yield q("jsonb: grouped cast to a number, a member beside the key", "SELECT id, (j -> 'a')::float8, (j -> 'a')::int FROM jorder WHERE jsonb_typeof(j -> 'a') IN ('number', 'null') GROUP BY id, j -> 'a' ORDER BY id");
+  yield q("jsonb: grouped cast to a number, the integers", "SELECT id, j::int, j::bigint, j::smallint FROM jorder WHERE id BETWEEN 1 AND 22 AND id NOT IN (3, 4) GROUP BY id, j ORDER BY id");
+  yield q("jsonb: grouped cast to a number, a member the only key", "SELECT (j -> 'a')::float8 AS a, count(*) FROM jorder WHERE jsonb_typeof(j -> 'a') IN ('number', 'null') GROUP BY j -> 'a' ORDER BY 1 NULLS FIRST, 2");
+  yield q("jsonb: grouped cast to a boolean", "SELECT id, j::boolean, NOT j::boolean FROM jorder WHERE id BETWEEN 1 AND 4 GROUP BY id, j ORDER BY id");
+  yield q("jsonb: cast to a number through a derived table", "SELECT s.id, s.k::float8, s.k::int FROM (SELECT id, j AS k FROM jorder WHERE id BETWEEN 1 AND 22 AND id NOT IN (3, 4)) s ORDER BY s.id");
+  // an ORDER BY's bare name is the output it names first: `ORDER BY j` of `j::text` sorts the text, not the jsonb
+  yield q("jsonb: grouped column, ORDER BY the output's name", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j, id");
+  yield q("jsonb: grouped column, ORDER BY the output's name DESC", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j DESC NULLS LAST, id");
+  yield q("jsonb: grouped column, ORDER BY its own name beside an alias", "SELECT j::text AS t FROM jorder GROUP BY id, j ORDER BY j NULLS FIRST, id");
   // every other kind's text under a GROUP BY of its expression, held so the one rule leaves each as it was
   yield q("grouped expression's text: numeric scale", "SELECT id, (n * 1)::text, (n2 + 0)::text FROM typed GROUP BY id, n * 1, n2 + 0 ORDER BY id");
   yield q("grouped expression's text: floats", "SELECT id, (f8 * 1)::text, (f4 * 1)::text FROM typed GROUP BY id, f8 * 1, f4 * 1 ORDER BY id");

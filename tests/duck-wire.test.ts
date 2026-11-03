@@ -3954,6 +3954,48 @@ test("a jsonb expression's text under a GROUP BY of it is its stored text (issue
   } finally { await c.end(); }
 });
 
+// PR 582's review, round 1: (1) a jsonb cast to a number or a boolean is one route by the value's type, wherever it is read
+// (the column's read, a grouped expression's one any_value, a derived table's column): a JSON null is SQL NULL, never the
+// engine's cast of the text 'null' (22P02), and an integer the digits rounded half away from zero; (2) an ORDER BY's bare
+// name is the output it names first (`ORDER BY v` of `v::text` sorts the text), never the jsonb column grouped by its key
+test("a grouped jsonb's cast to a number is NULL for a JSON null, and an ORDER BY of an output's name sorts the output (PR 582 review r1)", async () => {
+  // (a jsonb's casts to a number or a boolean are not verified: a listener that refuses nothing holds the route)
+  const { api: a, c: open } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  const c = await client();
+  try {
+    const casts: Array<[string, "ordered" | "bag"]> = [];
+    for (const ty of ["float8", "real", "int", "bigint", "smallint"]) {
+      casts.push(
+        [`SELECT j.id, (j.j -> 'r')::${ty} AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id`, "ordered"],
+        [`SELECT j.id, (j.j -> 'r')::${ty} AS c FROM jnums j GROUP BY j.id ORDER BY j.id`, "ordered"],
+        [`SELECT j.id, (j.j -> 'r')::${ty} AS c FROM jnums j ORDER BY j.id`, "ordered"],
+        [`SELECT (j.j #> '{r}')::${ty} AS c, count(*) FROM jnums j GROUP BY j.j #> '{r}' ORDER BY 1 NULLS FIRST, 2`, "ordered"],
+        [`SELECT s.id, (s.k)::${ty} FROM (SELECT j.id, j.j -> 'r' AS k FROM jnums j) s ORDER BY s.id`, "ordered"],
+      );
+    }
+    casts.push(
+      ["SELECT (j.j -> 'r')::float8 + 1 AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT id, (v -> 'k')::float8, (v -> 'k')::int FROM jq WHERE id IN (1, 5, 11, 12) GROUP BY id, v -> 'k' ORDER BY id", "ordered"],
+      ["SELECT id, (v -> 'k')::boolean FROM jq WHERE id IN (5, 9, 12) GROUP BY id, v -> 'k' ORDER BY id", "ordered"],
+      ["SELECT x.id, (SELECT (y.j -> 'r')::float8 FROM jnums y WHERE y.id = x.id GROUP BY y.id, y.j -> 'r') FROM jnums x ORDER BY x.id", "ordered"],
+    );
+    assert.deepEqual(await unlike(open, casts), []);
+    // (1, 1.0 and 1.00 are one group of jsonb's equality, whose text either may print: left out)
+    assert.deepEqual(await unlike(c, [
+      ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
+      ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY id, v ORDER BY v, id", "ordered"],
+      ["SELECT max(id), v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v", "ordered"],
+      ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v DESC NULLS LAST", "ordered"],
+      ["SELECT DISTINCT ON (v) v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v, id ORDER BY v, id", "ordered"],
+      ["SELECT v::text AS t FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
+      ["SELECT v -> 'k' AS v FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
+      ["SELECT max(id) FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
+      ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST LIMIT 3", "ordered"],
+      ["SELECT x::text AS x FROM (VALUES ('{\"k\": 1}'::jsonb), ('{\"k\": \"a\"}'), ('{\"k\": null}'), (NULL)) s(x) GROUP BY x ORDER BY x", "ordered"],
+    ]), []);
+  } finally { await open.end(); await a.close(); await c.end(); }
+});
+
 test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exact text (PR 207's review)", async () => {
   const c = await client();
   const held = heldJson;

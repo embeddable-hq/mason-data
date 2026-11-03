@@ -211,6 +211,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   is read**: its `::text`, `concat`, `format`, `jsonb_build_object`, `->>`, a `HAVING` or `ORDER BY` of its text, and a
   subquery or `WITH` around it. It lost the digits written (`2.450` read `2.45`, `0.10` read `0.1`) and an object's
   spacing (`{"a":1}` for `{"a": 1}`), and a `#>` path so grouped failed with a syntax error.
+- **A JSON value cast to a number or a boolean answers as Postgres does**: `(meta -> 'n')::float8`, `::int`, `::bigint`
+  or `::boolean` of a JSON `null` is now SQL NULL instead of an error, grouped or not, and a JSON `2.5` cast to an integer
+  is `3`, rounded as Postgres rounds it. Under a `GROUP BY` of a JSON column, `ORDER BY` the name of an output
+  (`SELECT meta::text … GROUP BY meta ORDER BY meta`) sorts by that output's text, as Postgres does, instead of by the
+  JSON value.
 - **A numeric division or average is compared by its exact value**: `DISTINCT`, `GROUP BY`, `PARTITION BY`,
   `count(DISTINCT …)`, `=` and `<>` no longer treat two quotients as equal when they agree only in their first 17
   digits. A quotient in `ROLLUP` / `CUBE` / `GROUPING SETS`, in `sum(DISTINCT …)` and similar, or in a `UNION` /
