@@ -25,31 +25,48 @@ export const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kin
 /** A token's body: the value after its documented prefix. */
 export const bodyOf = (token: string): string => token.replace(/^masondata_(pat|ci)_/, "");
 
-/** The forms a service may echo a token it was sent in, besides the token whole (issue 540): each by what it is. */
-export function echoForms(token: string): Array<[what: string, form: string]> {
+/**
+ * The forms a service may echo a token it was sent in, besides the token whole (issue 540; the review of PR 591): each
+ * by what it is, the text each of a failure's message, why and fix carries, and whether the words printed are exact
+ * (else a mask may take in a letter beside it that is the body's next, by chance, or one field is shown).
+ */
+export function echoForms(token: string): Array<{ what: string; fields: [string, string, string]; exact: boolean }> {
   const body = bodyOf(token);
+  const pieces = (n: number): string[] => body.match(new RegExp(`.{1,${n}}`, "g"))!;
+  const each = (what: string, form: string, exact = true) => ({ what, fields: [form, form, form] as [string, string, string], exact });
   return [
-    ["its body", body],
-    ["its body split by spaces", body.match(/.{1,4}/g)!.join(" ")],
-    ["its body in upper case", body.toUpperCase()],
-    ["its body in lower case, split by dashes", body.toLowerCase().match(/.{1,5}/g)!.join("-")],
-    ["its body URL-encoded", [...body].map((c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`).join("")],
-    ["a 12-character slice of its body", body.slice(9, 21)],
+    each("its body", body),
+    each("its body split by spaces", pieces(4).join(" ")),
+    each("its body in upper case", body.toUpperCase()),
+    each("its body in lower case, split by dashes", body.toLowerCase().match(/.{1,5}/g)!.join("-")),
+    each("its body URL-encoded", [...body].map((c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`).join("")),
+    each("a 12-character slice of its body", body.slice(9, 21), false),
+    each("its body 11 characters at a time, a letter between", pieces(11).join(" x "), false),
+    each("its body 4 characters at a time, a colour code between", pieces(4).join("\u001b[31m"), false),
+    { what: "8 characters of its body in each of message, why and fix", fields: [body.slice(0, 8), body.slice(8, 16), body.slice(16, 24)], exact: false },
   ];
 }
 
 /**
- * Whether `text` shows a token's body: any 12 of its characters in a row, read case-blind, every percent escape
- * decoded and every separator skipped — once keeping `-` and `_` (a slice that holds one) and once skipping them too (a
- * body split by dashes). The detector, written apart from the mask it holds (src/cli/hosted.ts `heldSpans`).
+ * Whether `text` shows more of a token's body than a quarter of it, in every run of 4 or more of its characters
+ * together (the rule src/cli/hosted.ts `heldRuns` keeps, decided here apart from it: by brute force over every common
+ * substring). The text is read case-blind, every percent escape decoded, every character as its compatibility
+ * decomposition without its combining marks, and every separator skipped — once keeping `-` and `_` and once skipping
+ * them too. Run over all a command printed, its streams together: a quarter is what the command may show in all.
  */
 export function bodyShown(text: string, token: string): boolean {
-  const decoded = text.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))).toLowerCase();
-  for (const kept of [/[^a-z0-9_-]/g, /[^a-z0-9]/g]) {
-    const seen = decoded.replace(kept, ""), body = bodyOf(token).toLowerCase().replace(kept, "");
-    for (let i = 0; i + 12 <= body.length; i++) if (seen.includes(body.slice(i, i + 12))) return true;
+  const read = [...text.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))).normalize("NFKD")]
+    .filter((c) => !/\p{M}/u.test(c)).join("").toLowerCase();
+  const raw = bodyOf(token).toLowerCase(), covered = new Set<number>();
+  for (const kept of [/[a-z0-9_-]/, /[a-z0-9]/]) {
+    const seen = [...read].filter((c) => kept.test(c)).join("");
+    const at = [...raw].map((c, i) => [c, i] as const).filter(([c]) => kept.test(c)), body = at.map(([c]) => c).join("");
+    const least = Math.min(4, body.length);
+    for (let i = 0; i < body.length; i++) {
+      for (let n = least; i + n <= body.length && seen.includes(body.slice(i, i + n)); n++) for (let d = 0; d < n; d++) covered.add(at[i + d]![1]);
+    }
   }
-  return false;
+  return covered.size > Math.floor([...raw].filter((c) => /[a-z0-9_-]/.test(c)).length / 4);
 }
 
 /** Every secret any run may have seen, and every answer: the last test holds them apart. */
@@ -229,7 +246,7 @@ export async function mason(h: string, argv: string[], env: Record<string, strin
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);
     assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `${line} printed a secret's body`);
-    assert.ok(!bodyShown(a.stdout, s) && !bodyShown(a.stderr, s), `${line} printed a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
+    assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, s), `${line} printed more than a quarter of a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
   }
   return a;
 }

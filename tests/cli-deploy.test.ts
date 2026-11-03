@@ -199,7 +199,7 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);
     assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `${line} printed a secret's body`);
-    assert.ok(!bodyShown(a.stdout, s) && !bodyShown(a.stderr, s), `${line} printed a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
+    assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, s), `${line} printed more than a quarter of a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
   }
   return a;
 }
@@ -789,15 +789,15 @@ test("mason deploy: needs a project — none here is the state's answer, nothing
   assert.deepEqual(requests, []);
 });
 
-test("mason deploy: a service that echoes the token it was sent in another form — its body, split, re-cased, URL-encoded, a 12-character slice — has none of it printed, on stdout, stderr or in --json", { timeout: 200_000 }, async () => {
+test("mason deploy: a service that echoes the token it was sent in another form — its body, split, re-cased, URL-encoded, a slice, pieces, a piece in each field — shows no more than a quarter of it in all, on stdout, stderr or in --json", { timeout: 300_000 }, async () => {
   const { root } = project();
   const token = newToken("ci"); SECRETS.push(token);
-  const words = (form: string) => ({ message: `the token ${form} is not known`, why: `it was sent as ${form}`, fix: `sign in again, not as ${form}` });
-  for (const [what, form] of echoForms(token)) {
+  const words = ([m, w, f]: [string, string, string]) => ({ message: `the token ${m} is not known`, why: `it was sent as ${w}`, fix: `sign in again, not as ${f}` });
+  for (const { what, fields, exact } of echoForms(token)) {
     // a refusal of the deploy sent, and a deploy Mason on the replica refused: the two failures the service words
     const scripts: Array<[string, Script]> = [
-      ["the POST's 401", { post: { status: 401, body: { error: { code: "unauthenticated", ...words(form) }, next: [] } } }],
-      ["a refused deploy", { get: () => at("refused", { failure: { code: "bad_source", ...words(form) } }) }],
+      ["the POST's 401", { post: { status: 401, body: { error: { code: "unauthenticated", ...words(fields) }, next: [] } } }],
+      ["a refused deploy", { get: () => at("refused", { failure: { code: "bad_source", ...words(fields) } }) }],
     ];
     for (const [where, script] of scripts) {
       // a person's stderr for the POST's; the refused deploy's in --json alone, its stderr read there too (each run of
@@ -806,12 +806,11 @@ test("mason deploy: a service that echoes the token it was sent in another form 
         const { a } = await deployWith(script, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])], { MASON_TOKEN: token });
         const at_ = `${what}, in ${where}${json ? ", --json" : ""}`;
         assert.equal(a.code, 1, `${at_}: ${a.stdout}${a.stderr}`);
-        assert.ok(!(a.stdout + a.stderr).includes(form), `${at_}: printed as it came:\n${a.stdout}${a.stderr}`);
-        assert.ok(!bodyShown(a.stdout, token) && !bodyShown(a.stderr, token), `${at_}: the body is shown:\n${a.stdout}${a.stderr}`);
-        // what is printed is the service's words, the echo masked: never dropped, never re-worded (a slice's mask may take
-        // in a letter beside it that is the body's next, by chance: one in 36 a side, so its words are not held exact)
+        assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token), `${at_}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
+        // what is printed is the service's words, the echo masked: never dropped, never re-worded (where a mask may take
+        // in a letter beside it that is the body's next, by chance, or one field is shown, the words are not held exact)
         const said = json ? (JSON.parse(a.stdout) as { error: { message: string; fix: string } }).error : null;
-        if (what.includes("slice")) assert.equal((a.stdout + a.stderr).match(/\*{4}/g)?.length ?? 0, 3, at_);
+        if (!exact) assert.match(a.stdout + a.stderr, /\*{4}/, at_);
         else if (said) assert.deepEqual([said.message, said.fix], ["the token **** is not known", "sign in again, not as ****"], at_);
         else assert.match(a.stderr, /✗ mason deploy: the token \*\*\*\* is not known\n {2}why {3}it was sent as \*\*\*\* \(/, at_);
       }

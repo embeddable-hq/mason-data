@@ -231,25 +231,24 @@ test("the visual-line check itself: a line the terminal broke, a forged heading,
   assert.ok(seenProblems("Signed in\n  mason destroy\n", null).some((p) => p.includes("does not begin")), "a step outside Next:");
 });
 
-/** A refusal whose message, why and fix each repeat `form`. */
-const echoing = (status: number, form: string): Reply => ({ status, body: { error: { code: "unauthenticated", message: `the token ${form} is not known`,
-  why: `it was sent as ${form}`, fix: `sign in again, not as ${form}` }, next: [] } });
+/** A refusal whose message, why and fix repeat each its field of an echo (`echoForms`). */
+const echoing = (status: number, [m, w, f]: [string, string, string]): Reply => ({ status, body: { error: { code: "unauthenticated", message: `the token ${m} is not known`,
+  why: `it was sent as ${w}`, fix: `sign in again, not as ${f}` }, next: [] } });
 
-test("mason login: a service that echoes the token it was sent in another form — its body, split, re-cased, URL-encoded, a 12-character slice — has none of it printed, on stdout, stderr or in --json", { timeout: 200_000 }, async () => {
+test("mason login: a service that echoes the token it was sent in another form — its body, split, re-cased, URL-encoded, a slice, pieces, a piece in each field — shows no more than a quarter of it in all, on stdout, stderr or in --json", { timeout: 300_000 }, async () => {
   const token = newToken(); SECRETS.push(token);
-  for (const [what, form] of echoForms(token)) {
-    const fake = await fakeService({ token: () => granted(token), me: echoing(401, form) });
+  for (const { what, fields, exact } of echoForms(token)) {
+    const fake = await fakeService({ token: () => granted(token), me: echoing(401, fields) });
     try {
       for (const json of [false, true]) {
         const h = home();
         const a = await mason(h, ["login", ...(json ? ["--json"] : [])], envFor(h, fake.url));
         const at = `${what}${json ? ", --json" : ""}`;
         assert.equal(a.code, 1, `${at}: ${a.stdout}${a.stderr}`);
-        assert.ok(!(a.stdout + a.stderr).includes(form), `${at}: printed as it came:\n${a.stdout}${a.stderr}`);
-        assert.ok(!bodyShown(a.stdout, token) && !bodyShown(a.stderr, token), `${at}: the body is shown:\n${a.stdout}${a.stderr}`);
-        // the service's words, the echo masked: never dropped, never re-worded (a slice's mask may take in a letter beside
-        // it that is the body's next, by chance: one in 36 a side, so its words are not held exact)
-        if (what.includes("slice")) assert.equal((a.stdout + a.stderr).match(/\*{4}/g)?.length ?? 0, 3, at);
+        assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token), `${at}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
+        // the service's words, the echo masked: never dropped, never re-worded (where a mask may take in a letter beside
+        // it that is the body's next, by chance, or one field is shown, the words are not held exact)
+        if (!exact) assert.match(a.stdout + a.stderr, /\*{4}/, at);
         else if (json) {
           const e = (JSON.parse(a.stdout) as { error: { message: string; why: string; fix: string } }).error;
           assert.deepEqual([e.message, e.why, e.fix], ["the token **** is not known", "it was sent as **** (the service said unauthenticated, HTTP 401)", "sign in again, not as ****"], at);
@@ -259,10 +258,12 @@ test("mason login: a service that echoes the token it was sent in another form �
   }
 });
 
-test("mason logout: a login whose saved email, and a revoke refusal, echo its token in another form — its body, split, re-cased, URL-encoded, a 12-character slice — has none of it printed, on stdout, stderr or in --json", { timeout: 200_000 }, async () => {
+test("mason logout: a login whose saved email, and a revoke refusal, echo its token in another form — its body, split, re-cased, URL-encoded, a slice, pieces — shows no more than a quarter of it in all, on stdout, stderr or in --json", { timeout: 300_000 }, async () => {
   const token = newToken(); SECRETS.push(token);
-  for (const [what, form] of echoForms(token)) {
-    const fake = await fakeService({ revoke: echoing(401, form) });
+  for (const { what, fields, exact } of echoForms(token)) {
+    // the email is one field: an echo in pieces across fields is all of them in it
+    const form = [...new Set(fields)].join(".");
+    const fake = await fakeService({ revoke: echoing(401, fields) });
     try {
       for (const json of [false, true]) {
         const h = home();
@@ -271,10 +272,9 @@ test("mason logout: a login whose saved email, and a revoke refusal, echo its to
         const a = await mason(h, ["logout", ...(json ? ["--json"] : [])], envFor(h, fake.url));
         const at = `${what}${json ? ", --json" : ""}`;
         assert.equal(a.code, 0, `${at}: ${a.stdout}${a.stderr}`);
-        assert.ok(!(a.stdout + a.stderr).includes(form), `${at}: printed as it came:\n${a.stdout}${a.stderr}`);
-        assert.ok(!bodyShown(a.stdout, token) && !bodyShown(a.stderr, token), `${at}: the body is shown:\n${a.stdout}${a.stderr}`);
-        // (a slice's mask may take in a letter beside it that is the body's next, by chance: its words are not held exact)
-        if (what.includes("slice")) assert.match(a.stdout, /\*{4}/, at);
+        assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token), `${at}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
+        // (where a mask may take in a letter beside it that is the body's next, by chance, the words are not held exact)
+        if (!exact) assert.match(a.stdout, /\*{4}/, at);
         else if (json) assert.equal((JSON.parse(a.stdout) as { email: string }).email, "ada+****@example.com", at);
         else assert.match(a.stdout, /^ {2}account +ada\+\*\*\*\*@example\.com$/m, at);
         assert.equal(fs.existsSync(credentials(h)) && Object.keys(saved(h).logins).length, 0, "signed out all the same");
