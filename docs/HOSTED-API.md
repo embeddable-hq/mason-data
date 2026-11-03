@@ -294,11 +294,25 @@ held to its own grammar:
 
 An `add` answers with where the replica's Postgres API listens (`url`, `psql`, `host`, `port`, `sslmode`): Mason
 there runs. Before any value is held to its grammar, EVERY string of the answer, each key included (an attribute's
-name is printed), is read for a secret: the token the CLI holds by its value, and anything shaped as a token or a
-password (add's own `password`, `url` and `psql` for the token alone). An answer that carries one anywhere, even in
-a key the CLI does not read, is refused whole and nothing of it is printed: a grammar such as a user's name, a role's
-or a host's can spell a token's body or another user's password, and is no mask. A failure's `code`, printed inside
-`why`, is read the same way. Every string is said as one line, bounded. Any
+name is printed), is tested for a secret, one string at a time:
+
+- the token the CLI holds, whole, or 11 or more characters of its body in a row in that one string, read in any
+  case, percent-decoded, in its compatibility form, and with or without `-` and `_` (so split by them, by a dot or
+  a space, it is still read as one run);
+- anything shaped as a token or a password (add's own `password`, `url` and `psql` are tested for the token alone).
+
+An answer that carries one anywhere, even in a key the CLI does not read, is refused whole, and nothing of it is
+printed: a grammar such as a user's name, a role's or a host's can spell a token's body or another user's password,
+and is no mask. A failure's `code`, printed inside `why`, is tested the same way. The notes and a refusal's words are
+also masked as every service text is ("Every request", above).
+
+Why 11: an honest answer, which knows nothing of the token, is refused with a probability under 1 in a million at
+the largest answer read (1 MiB): at most W × 43 × 2 × 31^-n for a run of n over W characters read, about 10^-7 at
+worst and 3 × 10^-9 for 2000 users of random ids; at 10 the worst would be 4 × 10^-6.
+
+What the test leaves: up to 10 of the body's characters in a row in one string, in any number of strings, and a body
+spread with a character between each two (an encoding no mask reaches); a password's shape mask's limits, above.
+Every string is said as one line, bounded. Any
 other answer — a value outside its grammar, a URL other than the one its parts build, a password of another user,
 another user than the one asked — is a failure naming the request and the status, never the body, exit 1.
 

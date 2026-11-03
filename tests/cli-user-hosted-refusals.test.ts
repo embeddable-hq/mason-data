@@ -6,11 +6,17 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
 import type { Reply, Req } from "./hosted-fake.ts";
 import { addedAnswer, AT, hosted, ID, LINK, listAnswer, noTokenPrinted, ok, R, row } from "./user-hosted-fake.ts";
 import { heldAdded, heldDisabled, heldEnabled, heldList, heldRemoved } from "../src/cli/user-hosted.ts";
 import { failureShape } from "../src/cli/hosted.ts";
+// the exact test's run and reader, loaded so this file loads where they are not (a proof at an older commit)
+const hostedModule = await import("../src/cli/hosted.ts") as Record<string, unknown>;
+const echoRun = typeof hostedModule.ECHO_RUN === "number" ? hostedModule.ECHO_RUN : 11;
+const echoesSecret = (s: string, secrets: string[], run: number): boolean =>
+  typeof hostedModule.echoesSecret === "function" ? (hostedModule.echoesSecret as (s: string, x: string[], n: number) => boolean)(s, secrets, run) : assert.fail("no echoesSecret here");
+import { carriesNoSecret, MAX_LIST_BYTES } from "../src/cli/user-hosted.ts";
+import { createHash } from "node:crypto";
 import { connectionUrl, psqlLine } from "../src/cli/pg-url.ts";
 
 test("mason user --replica: each refusal is the service's words, one line each, its code the CLI's by the HTTP status, exit 1, its next the CLI's; the service's code and next never steer it", async () => {
@@ -95,7 +101,8 @@ test("mason user --replica: an answer outside the run's own shape is a failure b
 // ------------------------------------------------------------------ no printed field carries a secret (PR 609's review)
 
 /** A token as the service documents them, its body lower case letters and digits, so every grammar of a name takes it. */
-const lowerToken = (): string => `masondata_ci_${Array.from(randomBytes(43), (b) => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("")}`;
+const fieldBytes = seeded("mason-609-fields");
+const lowerToken = (): string => `masondata_ci_${Array.from(fieldBytes(43), (b) => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("")}`;
 const OTHER = `mason_fedcba9876543210_${"ab".repeat(16)}`;
 
 /**
@@ -141,6 +148,8 @@ test("every printed field of every answer, given a secret its grammar takes — 
   const forms: Array<[what: string, value: (plain: string) => string, byToken: boolean]> = [
     // the token whole has the documented token's shape, masked held or not, so its control is the shape's, not the grammar's
     ["the token whole", () => token, false], ["the token's body", () => body, true], ["the token's body, upper case", () => body.toUpperCase(), true],
+    // a piece of the body: ECHO_RUN of it in a row is an echo, and split by a separator the grammar takes it still is
+    ["11 of its body in a row", () => body.slice(7, 7 + echoRun), true], ["12 of its body, split by a dot", () => `${body.slice(3, 9)}.${body.slice(9, 15)}`, true],
     ["another user's password", () => OTHER, false], ["another user's password after a word character", (p) => `${p}_${OTHER}`, false],
     ["another user's password in upper case", () => OTHER.toUpperCase(), false],
   ];
@@ -155,11 +164,19 @@ test("every printed field of every answer, given a secret its grammar takes — 
     }
   }
   assert.deepEqual(problems, []);
+  // the limit, as the doc says it: 10 of the body in a row is no echo (chance explains it at 1 in about 10^-6 per answer)
+  const limit: string[] = [];
+  const piece = body.slice(7, 7 + echoRun - 1);
+  for (const [what, answer, read] of fields) if (grammarTakes(what, piece) && read(answer(piece), [token]) === null) limit.push(`${what}: 10 of the body refused`);
+  assert.deepEqual(limit, []);
 });
 
 /** Whether a field's grammar takes `v` as it is (else its refusal with no token held is the grammar's, rightly). */
 function grammarTakes(what: string, v: string): boolean {
-  if (/name|role|missing attribute|code/.test(what)) return /^[a-z0-9_][a-z0-9_.-]{0,62}$/.test(v) && !/^[_.-]/.test(v);
+  if (/user's name/.test(what)) return /^[a-z0-9][a-z0-9_.-]{0,62}$/.test(v);
+  if (/role/.test(what)) return /^[a-z0-9][a-z0-9_-]{0,62}$/.test(v);
+  if (/attribute's name|missing attribute/.test(what)) return /^[a-z_][a-z0-9_]{0,62}$/.test(v);
+  if (/code/.test(what)) return /^[a-z][a-z0-9_]*$/.test(v) && v.length <= 64;
   if (/host/.test(what)) return /^[A-Za-z0-9-]{1,63}$/.test(v);
   return true;
 }
@@ -184,6 +201,69 @@ test("mason user --replica end to end: a list whose user's url carries the token
       for (const secret of [body, body.toLowerCase(), OTHER]) assert.ok(!said.includes(secret.slice(0, 11)), `${what} ${form.join(" ")}: printed a secret:\n${said}`);
     }
   }
+});
+
+
+test("an add whose 200 is outside the contract says the replica may have made the user, whose password was not shown, and the way to see and remove it", async () => {
+  const { a } = await hosted(() => ok({ ...addedAnswer("x"), role: OTHER, roleFrom: "file" }), ["add", "x", "--replica", R, "--json"], { names: ["x"] });
+  assert.equal(a.code, 1, a.stdout);
+  const v = JSON.parse(a.stdout) as { error: { code: string; message: string; why: string; fix: string }; next: unknown };
+  assert.match(v.error.message, / answered POST \/v1\/replicas\/acme\/shop\/users with 200, where a user was added$/);
+  assert.match(v.error.why, /; the replica may have added x all the same, and its password was not shown$/);
+  assert.equal(v.error.fix, `mason user list --replica ${R} says whether it did; if so, mason user remove x --replica ${R}, then add it again`);
+  assert.deepEqual(v.next, [{ command: `mason user list --replica ${R}`, what: "the replica's users" }]);
+});
+
+// ------------------------------------------------------------------ an honest answer is not refused (PR 609's review, round 2)
+
+/** Bytes from a fixed seed (SHA-256 in counter mode): the same answers and tokens at every run. */
+function seeded(seed: string): (n: number) => Buffer {
+  let counter = 0, pool = Buffer.alloc(0);
+  return (n) => {
+    while (pool.length < n) pool = Buffer.concat([pool, createHash("sha256").update(`${seed}:${counter++}`).digest()]);
+    const out = pool.subarray(0, n); pool = pool.subarray(n); return out;
+  };
+}
+
+/**
+ * THE BOUND src/cli/hosted.ts `ECHO_RUN` IS DERIVED FROM, as a number: over W characters read in both views, an honest
+ * answer holds a run of n of a random body's 43 characters at most W × 43 × 2 × 31^-n of the time.
+ */
+const bound = (chars: number, n: number): number => chars * 43 * 2 * 31 ** -n;
+
+test("an honest answer at the contract's largest size — 2000 users, every value high-entropy, about 1 MiB — is never refused: the bound ECHO_RUN is derived from is under 1 in a million, and the measured rate of a shorter run stays within its own bound (a fixed seed)", { timeout: 600_000 }, () => {
+  // the derivation: the largest answer read (MAX_LIST_BYTES), each character read at most 18 times by its
+  // compatibility form, in two views — under 1 in a million at ECHO_RUN, not at one less
+  const bytes = seeded("mason-609-honest");
+  const b64 = (n: number): string => bytes(Math.ceil(n * 3 / 4)).toString("base64url").slice(0, n);
+  const hex = (n: number): string => bytes(Math.ceil(n / 2)).toString("hex").slice(0, n);
+  const uuid = (): string => { const h = hex(32); return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`; };
+  // every value high-entropy, the answer at its 1 MiB bound: a user's name of 43 characters, ids, a UUID tenant, an org id, a
+  // long random value — the shapes that tripped the quarter rule, at the size that tripped it most
+  const users = Array.from({ length: 2000 }, () => {
+    const name = `u${b64(42).toLowerCase().replace(/[^a-z0-9_.-]/g, "x")}`;
+    return row(name, { id: hex(16), url: connectionUrl(LINK, name, null), role: `r${b64(40).toLowerCase().replace(/[^a-z0-9_-]/g, "x")}`, roleFrom: "file", roleKnown: true,
+      attributes: { tenant: uuid(), org: `org_${b64(24)}` }, missingAttributes: [`m${hex(30)}`] });
+  });
+  const answer = { users, lastUsedNote: null, urlNote: null, requestLogDays: 7 };
+  const size = Buffer.byteLength(JSON.stringify(answer));
+  assert.ok(size <= MAX_LIST_BYTES && size > 0.9 * MAX_LIST_BYTES, `the answer is the contract's largest: ${size} bytes`);
+  const strings: string[] = [];
+  const walk = (v: unknown): void => { if (typeof v === "string") strings.push(v); else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) { strings.push(k); walk(x); } };
+  walk(answer);
+  const read = 2 * strings.reduce((n, x) => n + x.length, 0);
+  const tokens = Array.from({ length: 40 }, () => `masondata_ci_${bytes(32).toString("base64url")}`);
+  // at ECHO_RUN: none refused, the code path itself
+  const refused = tokens.filter((t) => !carriesNoSecret(answer, [t])).length;
+  assert.equal(refused, 0, `${refused} of ${tokens.length} honest answers refused`);
+  const worst = 2 * 18 * MAX_LIST_BYTES;
+  assert.equal(hostedModule.ECHO_RUN, echoRun, "src/cli/hosted.ts says ECHO_RUN");
+  assert.ok(bound(worst, echoRun) < 1e-6, `ECHO_RUN ${echoRun}: ${bound(worst, echoRun)}`);
+  assert.ok(bound(worst, echoRun - 1) >= 1e-6, `ECHO_RUN - 1 would do: ${bound(worst, echoRun - 1)}`);
+  // the model, where it can be seen: a run of 6 is met by chance in this answer, and no more often than its bound says
+  const short = tokens.filter((t) => strings.some((x) => echoesSecret(x, [t], 6))).length;
+  assert.ok(short <= Math.ceil(bound(read, 6) * tokens.length), `a run of 6: ${short} of ${tokens.length}, its bound ${bound(read, 6).toFixed(3)} each`);
+  assert.ok(short > 0, "a run of 6 is met by chance: the measurement can see the model");
 });
 
 noTokenPrinted(40);

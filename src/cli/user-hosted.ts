@@ -41,16 +41,18 @@
  *   already                               the headline chosen, --json                 a boolean
  *   an HTTP status                        a failure's why                             a number
  *
- * BEFORE ANY OF THESE, every string of the answer, its keys included, is read by the secret masks (`carriesNoSecret`:
- * the held token by its value, a token's shape, a password's shape — add's own password, url and psql for the token
- * alone): an answer that would be masked anywhere is refused whole, so no grammar is ever the only thing between a
- * secret and the output. A failure's code, printed inside why, is read by the same masks (`failureShape`).
+ * BEFORE ANY OF THESE, every string of the answer, its keys included, is put to the exact test (`carriesNoSecret`,
+ * src/cli/hosted.ts `carriesSecret`: an echo of the held token, `ECHO_RUN` of its body in a row in one string; a
+ * token's or a password's shape — add's own password, url and psql for the token alone): an answer that carries one
+ * anywhere is refused whole, so no grammar is ever the only thing between a secret and the output, and an honest answer
+ * is refused with a probability under 1 in a million whatever its size. A failure's code, printed inside why, is put to
+ * the same test (`failureShape`). The free text (the notes, a refusal's words) is masked too, by #591's quarter rule.
  *
  * An answer any of which does not hold is outside the contract: said by the request and its status, never its body.
  * What to run next is the CLI's own (`onReplica`: the local command's steps, each `mason user …` naming the replica).
  */
 import { failed, jsonText, serviceStyle, type Failure, type NextStep } from "./command.ts";
-import { call, isFailure, isServiceTime, maskSecrets, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
+import { call, carriesSecret, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaText, tokenFor, type Replica } from "./replica.ts";
 import { err as styleErr, out as styleOut } from "./style.ts";
 import { connectionUrl, psqlLine } from "./pg-url.ts";
@@ -101,15 +103,16 @@ export function requestOf(r: Replica, o: { verb: Verb; name?: string | undefined
 /**
  * NO STRING OF THE ANSWER CARRIES A SECRET (PR 609's review: a grammar alone is no mask — a user's name, a role, an
  * attribute's name, a host, a database or a list's URL can spell a token's body or another user's password, and was
- * printed as it came): EVERY string of the answer, each key included (an attribute's name is printed), is read by the
- * secret masks (`maskSecrets`: the held token by its value, a token's shape, a password's shape), all of them against
- * one record of what the answer shows of the token, before any is held to its grammar or printed. An answer any
- * string of which a mask would change is outside the contract, refused whole: nothing of it is printed. `own`: the
- * top-level keys that carry the password this answer makes (add's `password`, `url`, `psql`), read for the token alone.
+ * printed as it came): EVERY string of the answer, each key included (an attribute's name is printed), is put to the
+ * exact test (src/cli/hosted.ts `carriesSecret`: an echo of the held token, `ECHO_RUN` of its body in a row in that
+ * one string; a token's or a password's shape), before any is held to its grammar or printed. An answer any string of
+ * which carries one is outside the contract, refused whole: nothing of it is printed. The test is per string and
+ * exact, so an honest answer is refused with a probability under 1 in a million whatever its size (hosted.ts's
+ * derivation, measured by tests/cli-user-hosted-refusals.test.ts). `own`: the top-level keys that carry the password
+ * this answer makes (add's `password`, `url`, `psql`), read for the token alone.
  */
 export function carriesNoSecret(json: unknown, secrets: readonly string[], own: readonly string[] = []): boolean {
-  const shown = new Map<string, Set<number>>();
-  const clean = (v: string, passwords: boolean): boolean => maskSecrets(v, secrets, shown, { passwords }) === v;
+  const clean = (v: string, passwords: boolean): boolean => !carriesSecret(v, secrets, { passwords });
   const walk = (v: unknown, passwords: boolean): boolean => {
     if (typeof v === "string") return clean(v, passwords);
     if (Array.isArray(v)) return v.every((x) => walk(x, passwords));
@@ -134,14 +137,16 @@ function roleOf(u: Record<string, unknown>): { role?: string; roleFrom: RoleFrom
   return { ...(typeof u.role === "string" ? { role: u.role } : {}), roleFrom, ...(u.readsNothing === true ? { readsNothing: true as const } : {}) };
 }
 
-/** A user's attributes: at most 64 names, each a value (one line, bounded) or a list of 1 to 100 of them. */
-function attributesOf(v: unknown, secrets: readonly string[]): Record<string, string | string[]> | null {
+/** A user's attributes: at most 64 names, each a value (one line, bounded) or a list of 1 to 100 of them. A value is a
+ *  value (a tenant's id), put to the exact test with every string (`carriesNoSecret`), so it is made one line here
+ *  without the quarter rule of free text, which a thousand random ids would trip by chance (PR 609's review). */
+function attributesOf(v: unknown): Record<string, string | string[]> | null {
   if (!obj(v) || Object.keys(v).length > 64) return null;
   const outv: Record<string, string | string[]> = {};
   for (const [k, x] of Object.entries(v)) {
     if (!ATTRIBUTE_NAME_RE.test(k)) return null;
-    if (typeof x === "string") outv[k] = serviceText(x, 1000, secrets);
-    else if (Array.isArray(x) && x.length >= 1 && x.length <= 100 && x.every((y) => typeof y === "string")) outv[k] = x.map((y: string) => serviceText(y, 1000, secrets));
+    if (typeof x === "string") outv[k] = serviceText(x, 1000);
+    else if (Array.isArray(x) && x.length >= 1 && x.length <= 100 && x.every((y) => typeof y === "string")) outv[k] = x.map((y: string) => serviceText(y, 1000));
     else return null;
   }
   return outv;
@@ -151,7 +156,7 @@ const names = (v: unknown): v is string[] => Array.isArray(v) && v.length >= 1 &
 const timeOrNull = (v: unknown): v is string | null => v === null || isServiceTime(v);
 
 /** One row of a list, as `listUsers` makes it (src/cli/user.ts `UserRow`); null when it is not that shape. */
-function rowOf(v: unknown, secrets: readonly string[]): UserRow | null {
+function rowOf(v: unknown): UserRow | null {
   if (!obj(v)) return null;
   const u = v;
   if (typeof u.name !== "string" || !USER_NAME_RE.test(u.name) || typeof u.id !== "string" || !ID.test(u.id) || !isServiceTime(u.addedAt)
@@ -161,7 +166,7 @@ function rowOf(v: unknown, secrets: readonly string[]): UserRow | null {
     && /^postgres:\/\/[a-z0-9_.-]+@(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):\d{1,5}\/[A-Za-z0-9%._~!*'()-]+(?:\?sslmode=require)?$/.test(u.url))) return null;
   const role = roleOf(u);
   if (role === null) return null;
-  const attributes = u.attributes === undefined ? undefined : attributesOf(u.attributes, secrets);
+  const attributes = u.attributes === undefined ? undefined : attributesOf(u.attributes);
   if (attributes === null) return null;
   if (u.missingAttributes !== undefined && !names(u.missingAttributes)) return null;
   if (u.roleKnown !== undefined && (typeof u.roleKnown !== "boolean" || role.roleFrom !== "file")) return null;
@@ -175,7 +180,7 @@ function rowOf(v: unknown, secrets: readonly string[]): UserRow | null {
 export function heldList(json: unknown, secrets: readonly string[]): UserList | null {
   if (!obj(json) || !Array.isArray(json.users) || json.users.length > MAX_USERS || !carriesNoSecret(json, secrets)) return null;
   const users: UserRow[] = [];
-  for (const v of json.users) { const u = rowOf(v, secrets); if (u === null) return null; users.push(u); }
+  for (const v of json.users) { const u = rowOf(v); if (u === null) return null; users.push(u); }
   const note = (v: unknown): string | null | undefined => v === null ? null : line(v, 500, secrets) ?? undefined;
   const lastUsedNote = note(json.lastUsedNote), urlNote = note(json.urlNote);
   const days = json.requestLogDays;
@@ -198,7 +203,7 @@ export function heldAdded(json: unknown, asked: string, secrets: readonly string
   if (a.url !== url || a.psql !== psqlLine(url)) return null;
   const role = roleOf(a);
   if (role === null) return null;
-  const attributes = a.attributes === undefined ? undefined : attributesOf(a.attributes, secrets);
+  const attributes = a.attributes === undefined ? undefined : attributesOf(a.attributes);
   if (attributes === null) return null;
   return { user: asked, id: a.id, addedAt: a.addedAt, password: a.password, database: a.database, url, psql: psqlLine(url), host: a.host, port: a.port as number, sslmode: a.sslmode,
     ...role, ...(attributes !== undefined ? { attributes } : {}) };
@@ -259,7 +264,13 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
     }
     case "add": {
       const added = heldAdded(a.json, o.name!, secrets);
-      if (added === null) return outside();
+      // the service answered 200: the replica may have made the user, whose password nobody has now been shown
+      if (added === null) {
+        const f = unexpected(service, a, STEP[o.verb]);
+        return fail({ ...f, why: `${f.why}; the replica may have added ${o.name!} all the same, and its password was not shown`,
+          fix: `mason user list --replica ${replicaText(r)} says whether it did; if so, mason user remove ${o.name!} --replica ${replicaText(r)}, then add it again`,
+          next: [[`mason user list --replica ${replicaText(r)}`, "the replica's users"]] });
+      }
       const next = onReplica(addedNext(added.user, true), r);
       return print({ ...added }, next, () => addedReport(added, { roles: NO_ROLES, listener: null, next }, outStyle));
     }

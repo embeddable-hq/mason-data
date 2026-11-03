@@ -142,9 +142,8 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
  * (`secrets`, the tokens this command holds) whole, and by the runs of their body that would show more than a quarter
  * of it together with what `shown` records (`heldRuns`); anything shaped as a documented token; and, unless
  * `passwords` is false (the one answer that makes a password, src/cli/user-hosted.ts), anything shaped as a Mason
- * user's password. The value as it came, masked; unchanged when it carries none. A command that holds a value to a
- * grammar asks this first, and refuses a value it changes (src/cli/user-hosted.ts `heldStrings`): a grammar alone is
- * no mask.
+ * user's password. The value as it came, masked; unchanged when it carries none. For free text (a note, a refusal's
+ * words): a value held to a grammar is put to the exact test instead (`carriesSecret`).
  */
 export function maskSecrets(s: string, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN, o: { passwords?: boolean } = {}): string {
   let t = s;
@@ -223,6 +222,62 @@ function heldRuns(t: string, secrets: readonly string[]): Map<string, { spans: A
     if (spans.length) found.set(secret, { spans, covered, most: HELD_SHOWN(length) });
   }
   return found;
+}
+
+/**
+ * WHETHER A VALUE IS AN ECHO OF A HELD SECRET, exactly (PR 609's review, round 2: the quarter rule above bounds what a
+ * command SHOWS of a token across what it prints, which is right for masking a few sentences; read across a 2000-user
+ * answer of random identifiers, its chance runs of 4 refused up to a fifth of honest lists). A value is an echo when
+ * ONE string holds `ECHO_RUN` or more of the secret's body in a row, read as the mask reads it (`bodyChars`: re-cased,
+ * percent-decoded, in its compatibility form, with and without `-` and `_`), or the secret whole: never a count across
+ * strings, so an answer's size cannot make an honest value one.
+ *
+ * WHY 11 (the bound it is derived from: an honest answer is refused with a probability under 1 in a million). An honest
+ * answer is independent of the token, whose body is 43 random base64url characters: at a fixed place, a character of
+ * the answer equals the body's re-cased with a probability of at most 2/62 = 1/31 whatever the answer holds (the last
+ * character, of 16 values, at most 1/16, counted twice below). A run of n at one of the body's 43 places is then at
+ * most 31^-n, and over W characters read in both views, P(refused) ≤ W × 43 × 2 × 31^-n. The largest answer read is
+ * 1 MiB (src/cli/user-hosted.ts `MAX_LIST_BYTES`), each character read at most 18 times by its compatibility form, in
+ * two views: W ≤ 2 × 18 × 2^20, and n = 11 gives P ≤ 1.3 × 10^-7 (an ASCII answer: 7 × 10^-9); n = 10 would give 4 ×
+ * 10^-6. tests/cli-user-hosted-refusals.test.ts measures it with a fixed seed. WHAT IS LEFT: up to 10 of a body's
+ * characters in a row in one string, in any number of strings; a body spread otherwise (a character between each two)
+ * is an encoding, out of reach of any mask (the note of PR 591).
+ */
+export const ECHO_RUN = 11;
+const echoGrams = new Map<string, Array<{ keep: boolean; n: number; grams: Set<string> }>>();
+export function echoesSecret(s: string, secrets: readonly string[], run: number = ECHO_RUN): boolean {
+  for (const secret of secrets) {
+    if (!secret) continue;
+    if (s.includes(secret)) return true;
+    const key = `${run}\u0000${secret}`;
+    let views = echoGrams.get(key);
+    if (views === undefined) {
+      const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
+      views = [true, false].map((keep) => {
+        const body = bodyChars(raw, keep, false).map((u) => u.c).join("");
+        const n = Math.min(run, body.length), grams = new Set<string>();
+        for (let j = 0; n > 0 && j + n <= body.length; j++) grams.add(body.slice(j, j + n));
+        return { keep, n, grams };
+      });
+      echoGrams.set(key, views);
+    }
+    for (const { keep, n, grams } of views) {
+      if (n === 0) continue;
+      const read = bodyChars(s, keep, true).map((u) => u.c).join("");
+      for (let i = 0; i + n <= read.length; i++) if (grams.has(read.slice(i, i + n))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * WHETHER A STRING THE SERVICE SENT CARRIES A SECRET, exactly: an echo of a held secret (`echoesSecret`), anything
+ * shaped as a documented token, and — unless `passwords` is false (the one answer that makes a password) — anything
+ * shaped as a Mason user's password. The one test a value held to a grammar is put to before it is printed (a grammar
+ * alone is no mask: src/cli/user-hosted.ts `carriesNoSecret`, and a failure's code, `failureShape`).
+ */
+export function carriesSecret(s: string, secrets: readonly string[] = [], o: { passwords?: boolean } = {}): boolean {
+  return echoesSecret(s, secrets) || s.search(TOKEN_SHAPE) >= 0 || (o.passwords !== false && s.search(PASSWORD_SHAPE) >= 0);
 }
 
 /** The characters of `t` a held secret is compared by, each with the span of `t` it was read from (above). */
@@ -379,7 +434,7 @@ export function failureShape(error: unknown, secrets: readonly string[], as: { c
   if (!obj(error)) return null;
   const e = error;
   // the code is printed as it came (inside why), so it is held to its grammar AND carries no secret (`maskSecrets`)
-  if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || maskSecrets(e.code, secrets) !== e.code || !str(e.message, 2000)) return null;
+  if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || carriesSecret(e.code, secrets) || !str(e.message, 2000)) return null;
   const text = (v: unknown, max: number): string | undefined => typeof v === "string" && v ? serviceText(v, max, secrets) : undefined;
   const why = text(e.why, 2000);
   const said = as.said(e.code);
