@@ -23,7 +23,8 @@ export interface PgConnection {
 }
 
 const SSLMODES = new Set(["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]);
-const KNOWN_PARAMS = new Set(["sslmode", "application_name"]);
+/** The query parameters a URL may carry: the only ones read, and so the only ones a URL is shown with (src/cli/preflight.ts shownUrl). */
+export const KNOWN_PARAMS: ReadonlySet<string> = new Set(["sslmode", "application_name"]);
 
 /** Parse a `postgres://` / `postgresql://` URL. Throws on anything it cannot represent faithfully. */
 export function parseDatabaseUrl(url: string): PgConnection {

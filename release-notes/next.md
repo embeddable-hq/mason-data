@@ -311,13 +311,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   the work: eight levels took about a second to plan and twelve took over a minute, during which every other session's
   statements waited. A numeric read through a UNION ALL at every level is not yet covered.
 - **A database URL that is not a `postgres://` URL is no longer repeated in its refusal, password and all.** Given a
-  keyword/value string (`host=… user=… password=…`), a password on its own, or a URL whose password holds an unencoded
-  `/`, `?` or `#`, `mason start`, `mason serve`, `mason doctor`, `mason init`, `mason add`, `mason tables`, `mason
+  keyword/value string (`host=… user=… password=…`), a password on its own, a URL whose password holds an unencoded
+  `/`, `?` or `#`, or a URL carrying its password as a parameter (`?password=…`, `?sslpassword=…`), `mason start`, `mason serve`, `mason doctor`, `mason init`, `mason add`, `mason tables`, `mason
   status`, `mason destroy` and `mason mcp` printed the value (on stderr, in `--json` and in the logs) where they refused
   it. Each now names the variable and what the value looks like, and how to write it as
-  `postgres://user:password@host:5432/db`, never the value. A URL with a space, a control character or a `#` in it, or
-  an `@` after its host, is refused the same way rather than read in part: URL-encode the password (`@` is `%40`, `/` is
-  `%2F`). If such a value was ever passed to Mason, its password may be in a log or a CI run's output: change it.
+  `postgres://user:password@host:5432/db`, never the value. A URL with a space, a control character or a `#` in it, an
+  `@` after its host, or a parameter other than `sslmode` and `application_name`, is refused the same way rather than
+  read in part: URL-encode the password (`@` is `%40`, `/` is `%2F`), and put it before the host. If such a value was ever passed to Mason, its password may be in a log or a CI run's output: change it.
 
 ## Known
 

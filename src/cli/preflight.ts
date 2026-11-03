@@ -10,7 +10,7 @@
  */
 import * as os from "node:os";
 import { PgConnection, PgError } from "../cdc/pg-wire.ts";
-import { parseDatabaseUrl, type PgConnection as UrlParts } from "../lib/database-url.ts";
+import { KNOWN_PARAMS, parseDatabaseUrl, type PgConnection as UrlParts } from "../lib/database-url.ts";
 import type { Failure, NextStep } from "./command.ts";
 import type { SourceCollation } from "../duck/collation.ts";
 
@@ -28,17 +28,20 @@ export function isLocalHost(host: string): boolean {
  * with its password replaced by `****`, or null — never shown. It fails closed, so a secret masked by recognising its
  * shape cannot leak in another shape: shown only when the value parses WHOLE as a postgres:// URL with a host, nothing
  * dropped or rewritten by the parse (no space or control character inside it, which a parse strips or encodes; one at
- * either end, a secret file's last newline, is trimmed as the parse trims it), and no `@` or
- * `#` after the host (a password holding `/`, `?` or `#` unencoded splits the authority there, and its tail would be
- * shown as a path, a parameter or a fragment). A keyword/value string, a bare password, any other URL: null.
+ * either end, a secret file's last newline, is trimmed as the parse trims it), no `#` at all and no `@` after the host
+ * (a password holding `/`, `?` or `#` unencoded splits the authority there, and its tail would be shown as a path, a
+ * parameter or a fragment), and no query parameter but the ones the URL is read with (KNOWN_PARAMS: libpq takes any
+ * connection keyword there, `?password=…` included, so a part the parse does not read is never shown either). A
+ * keyword/value string, a bare password, any other URL: null.
  */
 export function shownUrl(value: string): string | null {
   const v = value.trim();
-  if (/[\s\x00-\x1f\x7f]/.test(v)) return null;
+  if (/[\s\x00-\x1f\x7f#]/.test(v)) return null;
   let u: URL;
   try { u = new URL(v); } catch { return null; }
   if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") return null;
-  if (!u.hostname || u.hash !== "" || /[@#]/.test(u.pathname + u.search)) return null;
+  if (!u.hostname || /@/.test(u.pathname + u.search)) return null;
+  for (const key of u.searchParams.keys()) if (!KNOWN_PARAMS.has(key)) return null;
   if (u.password) u.password = "****";
   return u.toString();
 }
@@ -54,6 +57,15 @@ const KNOWN_SCHEMES = new Set(["mysql", "mariadb", "mssql", "sqlserver", "oracle
   "http", "https", "file", "pg", "pgsql", "psql", "postgis", "postgre", "postgress", "postgresq"]);
 const ENCODE = "a password holding @ : / # ? % or a space is URL-encoded (encodeURIComponent; @ is %40, / is %2F, # is %23)";
 
+/** A postgres:// URL that reads whole but for a query parameter the URL is not read with (`?password=…`). */
+function unreadParameter(t: string): boolean {
+  if (!/^postgres(ql)?:\/\//i.test(t) || /[\s\x00-\x1f\x7f#]/.test(t)) return false;
+  let u: URL;
+  try { u = new URL(t); } catch { return false; }
+  // an @ after the host is a password split there (said as such), not a parameter
+  return u.hostname !== "" && !/@/.test(u.pathname + u.search) && [...u.searchParams.keys()].some((k) => !KNOWN_PARAMS.has(k));
+}
+
 /**
  * Why a value `shownUrl` will not show is not a URL Mason reads, told from its SHAPE alone (`name` says where it is):
  * what it looks like and how to write it, never a part of it, so a coding agent fixes it from the message alone.
@@ -64,6 +76,8 @@ function notShownProblem(value: string, name: string): string {
     : /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(t) ? "it looks like a keyword/value connection string (host=… user=… password=…)"
     : /^jdbc:/i.test(t) ? "it looks like a JDBC URL: drop jdbc:, and give the user and password before the host"
     : !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(t) ? "it is not a URL"
+    : unreadParameter(t) ? `it has a query parameter Mason does not read (it reads ${[...KNOWN_PARAMS].join(" and ")} alone): ` +
+      "the user and the password go before the host, and any other parameter is left out"
     : !/^postgres(ql)?:\/\//i.test(t) ? `its scheme is ${KNOWN_SCHEMES.has(t.slice(0, t.indexOf(":")).toLowerCase()) ? `${t.slice(0, t.indexOf(":")).toLowerCase()}, not` : "not"} postgres:// or postgresql://`
     : "it does not read as one URL (a character that is not URL-encoded splits it: an @ : / ? # % or a space in the password, an @ or # in the database " +
       "or a parameter; or the port is not a number up to 65535)";

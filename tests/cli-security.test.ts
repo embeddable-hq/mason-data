@@ -146,8 +146,8 @@ test("a tunnel adds its port's two loopback names and nothing else, for as long 
 /**
  * A SOURCE'S URL THAT NO MASK RECOGNISES (issue 541): every command that reads the source's URL — the sources file's
  * `${DATABASE_URL}` from .env, DATABASE_URL to mason serve, MASON_URL to mason mcp — given a keyword/value string, a bare
- * password, a URL whose password holds an unencoded @, and one whose password holds an unencoded / (which splits the
- * URL into a host, a port and a path). Each password is a marker no answer, stream, --json or log file may hold.
+ * password, a URL whose password holds an unencoded @, one whose password holds an unencoded / (which splits the
+ * URL into a host, a port and a path), and a password as a query parameter (`?password=`, `?sslpassword=`). Each password is a marker no answer, stream, --json or log file may hold.
  */
 test("a source URL in any shape never repeats its password: every command that reads it, person and --json, and the logs", { timeout: 600_000 }, async () => {
   const KEY = "k".repeat(48);
@@ -156,6 +156,9 @@ test("a source URL in any shape never repeats its password: every command that r
     ["Mk541BarePw", "Mk541BarePw"],
     ["postgres://mason:p@Mk541AtPw@127.0.0.1:1/shop", "Mk541AtPw"],
     ["postgres://mason:12/Mk541SlashPw@127.0.0.1:1/shop", "Mk541SlashPw"],
+    // a password libpq reads from the query, where no mask of the userinfo looks (the review of #575)
+    ["postgres://mason@127.0.0.1:1/shop?password=Mk541QueryPw", "Mk541QueryPw"],
+    ["postgres://mason:x@127.0.0.1:1/shop?sslmode=disable&sslpassword=Mk541SslPw", "Mk541SslPw"],
   ];
   const filesUnder = (dir: string): string[] => !fs.existsSync(dir) ? [] : fs.readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((d) => d.isFile()).map((d) => path.join(d.parentPath, d.name));

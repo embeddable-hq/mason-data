@@ -42,6 +42,7 @@ test("a source's URL is shown only when it reads whole as a postgres:// URL, its
     ["postgres://me:p%2FPw541%3F%23@localhost/app", "postgres://me:****@localhost/app"],
     ["postgresql://me:Pw541@[::1]:5433/app", "postgresql://me:****@[::1]:5433/app"],
     ["postgres://me@localhost/app", "postgres://me@localhost/app"],
+    ["postgres://me:Pw541@db/app?sslmode=require&application_name=svc", "postgres://me:****@db/app?sslmode=require&application_name=svc"],
     // a secret file's last newline, or a space pasted at either end: trimmed, as the parse trims it
     ["postgres://me:Pw541@localhost/app\n", "postgres://me:****@localhost/app"],
     [" postgres://me:Pw541@localhost/app\r\n", "postgres://me:****@localhost/app"],
@@ -72,6 +73,13 @@ test("a source's URL is shown only when it reads whole as a postgres:// URL, its
     ["postgres://me:Pw541@[::1/app", /: it does not read as one URL/],
     ["postgres://me:Pw541@local host/app", /: it does not read as one URL/],
     ["postgres:///app?password=Pw541", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app#", /: it does not read as one URL/],
+    // a connection keyword libpq reads from the query (a query password wins over the user's): a part Mason does not
+    // read is never shown, so the URL is not
+    ["postgres://me@db/app?password=Pw541", /: it has a query parameter Mason does not read \(it reads sslmode and application_name alone\): the user and the password go before the host/],
+    ["postgres://me:x@db/app?sslmode=require&sslpassword=Pw541", /: it has a query parameter Mason does not read/],
+    ["postgres://me@db/app?pass%77ord=Pw541", /: it has a query parameter Mason does not read/],
+    ["postgres://me@db/app?Pw541=1", /: it has a query parameter Mason does not read/],
   ];
   for (const [value, said] of never) {
     // maskedUrl is shownUrl's null in a sentence (src/cli/preflight.ts)
