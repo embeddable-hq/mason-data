@@ -50,6 +50,24 @@ const TEXT_ARRAY_PARAMETERS: Array<[string, string]> = [
   ["in ANY", "SELECT id FROM public.jpath WHERE id::text = ANY($1::text[]) ORDER BY id"],
   ["read whole", "SELECT $1::text[], array_to_string($1::text[], '|'), ($1::text[])[2], array_position($1::text[], '1') FROM public.one"],
 ];
+/** a numeric parameter beside a value the engine holds exactly (issue 214): each statement parsed once and run with
+ *  each value — one the column's type holds, one past its scale, past its digits, NaN, ±Infinity, NULL */
+const NUMERIC_PARAMETERS: Array<[string, string, Array<Array<string | null>>]> = [
+  ["= of a numeric(30,20)", "SELECT id FROM public.pnums WHERE x = $1 ORDER BY id",
+    [["2.5"], ["1.00000000000000000001"], ["1.000000000000000000015"], ["2.50000000000000000000000"], ["12345678901.5"], ["NaN"], ["Infinity"], [null]]],
+  ["every comparison in the list", "SELECT id, x = $1, x <> $1, x IS DISTINCT FROM $1, nullif(x, $1), CASE x WHEN $1 THEN 'hit' ELSE 'miss' END, x < $1, x >= $1 FROM public.pnums ORDER BY id",
+    [["1.00000000000000000001"], ["1.000000000000000000015"], [null], ["NaN"], ["-Infinity"]]],
+  ["< and > of a numeric(30,20)", "SELECT id FROM public.pnums WHERE x < $1 OR x > $2 ORDER BY id",
+    [["1.000000000000000000015", "2.5"], ["NaN", "-Infinity"], ["99999999999999999999999999999999999999999", "1.00000000000000000001"]]],
+  ["BETWEEN and IN", "SELECT id FROM public.pnums WHERE x BETWEEN $1 AND $2 OR x IN ($3, $4) ORDER BY id",
+    [["1.000000000000000000005", "1.000000000000000000015", "5", "2.5"], ["1.00000000000000000001", "1.00000000000000000002", "1.000000000000000000015", null]]],
+  ["a cast with a typmod on the parameter", "SELECT id FROM public.pnums WHERE x = $1::numeric(30,20) ORDER BY id", [["1.000000000000000000015"], ["2.5"]]],
+  ["an integer and an expression", "SELECT id FROM public.pnums WHERE id < $1::numeric OR x * 2 = $2 ORDER BY id", [["2.99999999999999999999", "2.00000000000000000002"], ["3", "10"]]],
+  ["a sum in a HAVING", "SELECT count(*) FROM (SELECT id % 2 AS g, sum(x) AS s FROM public.pnums GROUP BY 1 HAVING sum(x) = $1) h", [["3.50000000000000000001"], ["9.00000000000000000002"], ["3.5"]]],
+  ["an unconstrained numeric and a numeric(65,30)", "SELECT id FROM public.pnums WHERE u = $1 OR w < $2 ORDER BY id",
+    [["1.2345", "19.995"], ["1.23450000000000000001", "19.99"], ["NaN", "123456789012345678901234567890.251"], [null, "Infinity"]]],
+];
+
 const TEXT_ARRAY_STEPS: Step[] = [{ run: "p", values: ["{{1},{2}}"], refused: "multidim-array" }, { run: "p", values: ["[2:3]={1,2}"], refused: "array-lower-bound" }, { run: "p", values: ["{1,2}"] }];
 
 export const SETTING_SCRIPTS: SettingScript[] = [
@@ -199,6 +217,7 @@ export const SETTING_SCRIPTS: SettingScript[] = [
   // a json read's path as a parameter is not constant at the Parse (issue 130): each run reads its own, after a SET too
   ...PATH_PARAMETERS.map(([name, sql]) => s(`a json path as a parameter, ${name}`, { prepare: "p", sql }, ...PATH_VALUES.flatMap((v, i): Step[] => [{ run: "p", values: [v] }, `SET TimeZone = '${i % 2 === 0 ? "Asia/Tokyo" : "UTC"}'`, { run: "p", values: [v] }]))),
   ...TEXT_ARRAY_PARAMETERS.map(([name, sql]) => s(`a text[] parameter of two dimensions or other bounds, ${name}`, { prepare: "p", sql }, ...TEXT_ARRAY_STEPS)),
+  ...NUMERIC_PARAMETERS.map(([name, sql, values]) => s(`numeric parameter: ${name}`, { prepare: "p", sql }, ...values.map((v): Step => ({ run: "p", values: v })))),
   s("a json path element as a parameter", { prepare: "p", sql: "SELECT id, jb #>> ARRAY[$1], j #>> ARRAY[$1, 'b'], jsonb_extract_path_text(jb, $1, 'b') FROM public.jpath ORDER BY id" }, { run: "p", values: ["o"] }, "SET TimeZone = 'Asia/Tokyo'", { run: "p", values: ["k"] }, { run: "p", values: [null] }, { run: "p", values: ["0"] }),
   // native json (issue 130): an @> template known only at the Bind stays the function's; a native read prepared, run
   // again after a SET

@@ -333,6 +333,18 @@ paths:
   cells cannot ride (the item read by a `*` beside other columns, a NATURAL JOIN, its whole row) an equality refuses
   by name and a print is the listed `nested-exact-numeric`; a row holding one is refused, `row-value`.
   `tests/duck-wire.test.ts` "third round".
+  **A numeric PARAMETER compared with a value the engine holds exactly is never its double** (issue 214, the class
+  `numeric-parameter-as-double`; `numericParamComparison`): `=`, `<>`, `<` … `>=`, IS [NOT] DISTINCT FROM, NULLIF, IN,
+  [NOT] BETWEEN and CASE x WHEN of a `duckExact` value and plain parameters are `CASE WHEN __mason_numeric_fits(typeof(x),
+  $n::text) THEN <the comparison, its parameters bare> ELSE <every operand by its exact key> END`. The guard reads the
+  ENGINE's type (`typeof`, never Postgres's typmod: a numeric(65,30) is DECIMAL(38, the scale its values use)) and the
+  bound text, through the copy's own rule of what a DECIMAL holds (src/lib/pg-numeric.ts `numericWiderThan`,
+  `fitsEngineType`): both constants, so DuckDB folds it once at Execute and a value the type holds is the scan's own
+  filter (DuckDB casts a bare parameter into x's type, which ROUNDS past its scale and fails past its digits: never
+  unguarded). A value past the scale or the digits, NaN, ±Infinity, a cast with a typmod on the parameter (Postgres
+  rounds it first) and more than one exact operand are keyed (`__mason_numeric_key` to equate, `__mason_numeric_order`
+  to order). `tests/duck-wire.test.ts` "issue 214", the plan fixture's bound parameters, the oracle's "numeric parameter"
+  setting scripts.
 - **Whether a numeric is exact is ONE decision, `duckExact`, by how the value is WRITTEN for the engine** (PR 207's fourth
   round, a class round: a literal past 38 digits called exact where `decimalConst` writes a double; a variance's cells
   called inexact where the rewrite's own hugeint casts hold them; a program skipped over a double): a constant and a

@@ -311,6 +311,11 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   "INSERT INTO public.top_c SELECT g, g % 7 + 1, json_build_object('n', g, 'wide', repeat('d', 200)), CASE WHEN g % 5 = 0 THEN NULL ELSE 'l' || g % 3 END FROM generate_series(1, 40) g;" +
   "CREATE TABLE public.top_r (id int PRIMARY KEY, rowid int, a_id int); INSERT INTO public.top_r VALUES (1, 70, 1), (2, 60, 2), (3, 50, 2);" +
   "CREATE TABLE public.top_rc (id int PRIMARY KEY, \"RowId\" int, a_id int); INSERT INTO public.top_rc SELECT g, 5, g % 3 + 1 FROM generate_series(1, 6) g;" +
+  // A NUMERIC PARAMETER BESIDE A VALUE THE ENGINE HOLDS EXACTLY (issue 214): values a double's 15 digits equate, an
+  // unconstrained numeric and a numeric(65,30) the copy holds as DECIMAL(38, the scale their values use), a w of 30
+  // integer digits (oracle/setting-scripts.ts "numeric parameter")
+  "CREATE TABLE public.pnums (id int PRIMARY KEY, x numeric(30,20), u numeric, w numeric(65,30)); " +
+  "INSERT INTO public.pnums VALUES (1, 1.00000000000000000001, 1.2345, 19.99), (2, 1.00000000000000000002, 7, 123456789012345678901234567890.25), (3, 2.5, -0.5, 5), (4, 5, NULL, NULL), (5, 2.5, 1.25, 19.99), (6, NULL, 0, 0);" +
   // no primary key: the copy is keyed by a UNIQUE over NOT NULL columns, as a sources file's `key:` keys it, and the
   // catalog declares no key (oracle's `added`; src/cli/sources.ts addedTables)
   "CREATE TABLE public.top_n (a int NOT NULL, b int NOT NULL, note text, UNIQUE (a, b)); INSERT INTO public.top_n SELECT g % 3 + 1, g % 2, 'n' || g FROM generate_series(1, 6) g;" +
