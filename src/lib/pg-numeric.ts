@@ -155,6 +155,24 @@ export function numericToInteger(text: string, bits: 16 | 32 | 64): string {
   return r.toString();
 }
 
+/** A numeric cast to float8 (`numeric_float8`, which is `float8in(numeric_out(x))`, issue 217): NaN and ±Infinity are
+ *  themselves; any other text the double nearest it (`Number` of a decimal text rounds correctly, as `strtod` does).
+ *  Where that double is ±Infinity, or 0 for a value that is not zero, 22003 in Postgres's words (`float8in_internal`),
+ *  the text quoted whole; a subnormal (1e-310) is returned, as `float8in` returns it */
+export function numericToDouble(text: string): number {
+  const t = text.trim();
+  if (/^nan$/i.test(t)) return NaN;
+  if (/^\+?inf(inity)?$/i.test(t)) return Infinity;
+  if (/^-inf(inity)?$/i.test(t)) return -Infinity;
+  const d = Number(t);
+  if (Number.isNaN(d)) throw new NumericError(`invalid input syntax for type double precision: "${t}"`, "22P02");
+  if (!Number.isFinite(d) || (d === 0 && /[1-9]/.test(t.replace(/[eE].*$/, "")))) {
+    throw new NumericError(`"${t}" is out of range for type double precision`, "22003");
+  }
+  // (a numeric's zero is never negative: numeric_out writes `-0.00` as `0.00`, whose double is +0)
+  return d === 0 ? 0 : d;
+}
+
 /** The value at a larger scale (more trailing zeros), unchanged. */
 const atScale = (n: PgNumeric, scale: number): bigint => n.unscaled * pow10(scale - n.scale);
 

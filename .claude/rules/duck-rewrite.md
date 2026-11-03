@@ -499,6 +499,20 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   decided from a list of element types (`TEXT_ARRAY`, `VARCHAR_ARRAY`) instead of from Postgres's analysis of the call
   (the float8[] overload, an array result type), so bpchar[] (1014) is read as one scalar and the engine's error
   escapes; `percentile-array-recognised-by-element-type-list` (PR 413).
+- A change that newly answers a piece (an operator such as `^(numeric,numeric)`, a function by OID) or registers a gap,
+  run on the wire with the allowlist in force (`tests/duck-wire.test.ts`, not `scripts/duck-repro.ts`, which has none):
+  over `t(id int primary key, a int, b text, c numeric(10,2), d char(4))`, `SELECT id, (c ^ 2)::float8, exp(c)::float8,
+  sqrt(c)::float8 FROM t WHERE c > 0 ORDER BY 1`, and `node --test --test-timeout=120000 --test-force-exit
+  tests/oracle-legs.test.ts`; then compare `src/duck/verified.ts` and `tests/fixtures/oracle-duckdb-alone.json` with what
+  the push's own `integration (oracle)` leg printed: the allowlist and fixture left from an older run, so the wire refuses
+  the PR's own shape (0A000 "which Mason has not verified") and a new gap no fixture statement meets fails
+  oracle-legs.test.ts; `allowlist-not-regenerated-from-push-ci` (PR 519).
+- A refusal added for a value an aggregate or call cannot answer exactly, read by each reader that never reads the value:
+  over the same `t`, `SELECT a FROM t GROUP BY a HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY c / 3) IS NOT NULL
+  ORDER BY a NULLS FIRST`, `SELECT a, mode() WITHIN GROUP (ORDER BY c / 3) IS NULL FROM t GROUP BY a ORDER BY 1`, inside
+  CASE, NOT, count(), EXISTS and a derived table read as `s.p IS NULL`, each run at the base and the head: the refusal
+  placed at the call instead of where the value's bytes are read, so a nullness-only read the base answered is now
+  refused; `refusal-at-the-call-not-the-reader` (PR 519).
 - A refusal placed where an aggregate or value is BUILT (an ordered-set aggregate over an exact quotient, a numeric
   key), each reader of that value run at the head and the base over `t (a int, c numeric(10,2), d char(4))` with
   NULLs and ties: the value only ORDERED BY (`SELECT d FROM t GROUP BY d ORDER BY percentile_disc(0.5) WITHIN GROUP
@@ -514,3 +528,40 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   came from the push's CI legs (`node scripts/oracle-legs.ts --write <run-id>`, then `UPDATE_FIXTURE=1` over
   `tests/duck-gaps.test.ts`): a gap with no oracle statement meeting it, or a fixture not regenerated, keeps
   `integration (oracle)` red on every push; `gap-added-without-its-oracle-fixture` (PR 506).
+- A NULLIF over an exact numeric program read OUTSIDE its subquery or CTE, over `t (id int primary key, a int, b text,
+  c numeric(10,2), d char(4))` with a row `c = 0.00`, each run at the head and the base: `SELECT x FROM (SELECT
+  nullif(c / 1.6, 0) AS x FROM t) s GROUP BY x ORDER BY 1`, `nullif(c / 1.6, 2.5)`, nested `nullif(nullif(c / 1.6, 0),
+  2.5)`, `nullif(c / 1.6, 0) * 2`, under an outer GROUP BY, `HAVING x IS NULL`, `WHERE x IS NULL`, `WITH q AS (SELECT
+  id, nullif(c / 1.6, 0) AS x FROM t) SELECT coalesce(x, -1) FROM q GROUP BY x`, a JOIN, a second CTE, `x::text`,
+  `x::float8`: the NULL a pick carries as an index past its last arm is honoured by the inner reader and not by the one
+  that regroups it, so the NULL group prints the first operand's exact value (`0.00000000000000000000`,
+  `2.5000000000000000`) where Postgres prints NULL, and `coalesce(x, -1)` the operand, not -1. The decision: one
+  representation of a program's NULL that every reader of a carried program honours;
+  `nullif-pick-null-lost-outside-subquery` (PR 506).
+- A refusal of a value "held as a double", run at the head and the base over the same `t` (and an empty one): `SELECT
+  (percentile_disc(0.5) WITHIN GROUP (ORDER BY c))::int FROM t` of a plain numeric(10,2) column, `::int8`, `::int2`,
+  `(mode() WITHIN GROUP (ORDER BY c))::int8`, `SELECT max(c ^ 2)::int, min(c ^ 2)::int FROM t`, `max(x)::int` of
+  `sqrt(abs(c))` through a derived table, `WITH q AS (SELECT c ^ 2 AS x FROM t) SELECT sum(x)::int, max(x)::int, x::int
+  FROM q GROUP BY x ORDER BY 3`: the refusal decided by a syntactic list of forms known exact (`WRITTEN_EXACT`,
+  `VALUE_KEEPING`) instead of the type the engine holds (the prepared statement's DECIMAL, DOUBLE or BLOB), so
+  0A000 `numeric-double-integer` refuses at the head what the base answered with Postgres's integer. The decision:
+  refuse only where the engine's own type IS a double; `double-refusal-gated-by-exactness-allowlist` (PR 506).
+- A refusal moved from the rewrite to the run (a function testing `typeof(arg)` per row), its argument wrapped, at the
+  head and the base over the same `t`: `SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY c / 1.6) * 2)::int FROM
+  t`, `(… + 0)::int`, `round(…)::int`, `abs(…)::int`, `coalesce(percentile_disc(0.5) WITHIN GROUP (ORDER BY c / 1.6),
+  0)::int`, `nullif(…, 0)::int`, `SELECT (x * 2)::int FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY c / 1.6)
+  AS x FROM t) s`, the same with mode(), FROM an empty table, GROUP BY d, in a UNION ALL arm, under `greatest(…, 0)`:
+  the engine evaluates the wrapper over the held bytes before the check is reached, so the reader gets 42883
+  `*(BLOB, INTEGER_LITERAL)`, 42804 or 22P02 in the engine's words, no gap and no HINT, where the base refused by name
+  (`numeric-double-integer`). The decision: raise a refusal at the earliest module that knows its fact (the rewrite,
+  from the engine's type), the run's check only for what the rewrite cannot type;
+  `runtime-refusal-preempted-by-engine-error` (PR 506).
+- An ordered-set aggregate whose WITHIN GROUP expression is an exact order key, at the head and the base over the same
+  `t`: `SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY c ^ 2) FROM t`, `ORDER BY exp(ln(2.5)) * sign(c)`, `SELECT
+  (percentile_disc(0.5) WITHIN GROUP (ORDER BY c / 1.6))::text FROM t`, `::text::numeric`, `SELECT d, mode() WITHIN
+  GROUP (ORDER BY nullif(c / 1.6, 0)) FROM t GROUP BY d ORDER BY 1`, `SELECT (percentile_disc(ARRAY[0.5]) WITHIN GROUP
+  (ORDER BY c / 1.6))[1] FROM t`, each through derived tables: the expression is both the sort key and the result, so
+  ordering by the key answers the key's bytes, a bytea (OID 17) or its digits as text (`3050000075625`), where Postgres
+  answers the picked row's numeric (OID 1700, `16.000000000000000`, `0.75625000000000000000`). The decision: order by
+  the exact key, answer the picked row's value, never the key, while the readers that only order or test nullness stay
+  answered (`refusal-wider-than-the-wrong-answer` above); `order-key-bytes-as-result` (PR 506; issues 486, 538).
