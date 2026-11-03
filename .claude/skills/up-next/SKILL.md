@@ -83,7 +83,7 @@ collaborators and names what it left out (CLAUDE.md "The loop").
 4. **Any other DONE**: read its diff in full (`gh pr diff <n>`), never only the report; the report and a green CI are
    claims, not evidence.
 5. **Merge under CLAUDE.md "Who merges what"** (Tom, 2026-10-31): every PR, `src/` included, merges without the owner's
-   word once its Fable review has no open finding, CI is green at its head, you have read the diff in full, and a
+   word once its review has no open finding, CI is green at its head, you have read the diff in full, and a
    product change has its line in `release-notes/next.md`. A release and a deploy merge on the owner's word only.
    Queue it pinned to the head you read: `gh pr merge <n> --auto --merge --match-head-commit <sha>`.
 6. **Watch it land**: leave one bounded background job that exits when `gh pr view <n> --json state,mergeable` says

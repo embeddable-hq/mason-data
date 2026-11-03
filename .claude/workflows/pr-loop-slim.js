@@ -1,13 +1,13 @@
 export const meta = {
   name: 'pr-loop-slim',
-  description: 'One PR through CLAUDE.md "The loop": brief (or a split into pieces), implement (Opus, who writes the design note and a Handoff comment), review (Fable) with CI read beside it, fix rounds that read and extend the Handoff, the class rule, learn, CI, then stop at the merge gate. The source every prompt of the pr-persistent skill is rendered from',
-  whenToUse: 'The pr-persistent skill (.claude/skills/pr-persistent/SKILL.md) renders every stage from it, for one issue or one piece of a split, from brief to a reviewed, green PR ready for the merge decision; run by the Workflow tool, it is the same loop without the kept implementer',
+  description: 'One PR through CLAUDE.md "The loop": brief (or a split into pieces), implement (Opus, who writes the design note and a Handoff comment), review (Opus at high effort, a fresh agent) with CI read beside it, fix rounds that read and extend the Handoff, the class rule, learn, CI, then stop at the merge gate. The source every prompt of the pr-persistent skill is rendered from',
+  whenToUse: 'The pr-persistent skill (.claude/skills/pr-persistent/SKILL.md) renders every stage from it, for one issue or one piece of a split, from brief to a reviewed, green PR ready for the top session to read and merge; run by the Workflow tool, it is the same loop without the kept implementer',
   phases: [
     { title: 'Brief', detail: 'Opus names the shapes and the tests, or splits an issue too big for one PR into pieces', model: 'opus' },
     { title: 'Split', detail: 'a sub-issue per piece, the plan posted on the issue; the run stops there, and the top session starts each piece as a run', model: 'sonnet' },
     { title: 'Implement', detail: 'Opus, a worktree of its own: the design note before any code, the push, the note in the PR body, the Handoff comment', model: 'opus' },
     { title: 'Link', detail: "GitHub itself says the PR closes its sub-issue, or the body is fixed and asked again", model: 'sonnet' },
-    { title: 'Review', detail: 'Fable, fresh context, findings with their class, their severity and whether the base has them', model: 'fable' },
+    { title: 'Review', detail: 'Opus at high effort, a fresh agent in a fresh context, never the implementer: findings with their class, their severity and whether the base has them', model: 'opus' },
     { title: 'Fix', detail: "reads the Handoff first and appends to it; this PR's blocking failures and classes and CI's, never the edit; a repeated class makes a class round", model: 'opus' },
     { title: 'Learn', detail: "each class met becomes a review probe in its rules file, one docs-only commit", model: 'opus' },
     { title: 'CI', detail: 'bounded wait on gh pr checks, with mergeable read first on every pass (GitHub runs no CI on a conflicting PR, so a conflict is its own verdict), beside each review and after the last; a CI fix gets a narrow re-check', model: 'sonnet' },
@@ -85,13 +85,15 @@ const MAX_MERGES = 3
 
 // Each stage's model, and the name what it posts is signed with: a posting names the model that wrote it, read from
 // the same value as the agent's `model`, never written beside it.
-const SIGNS = { opus: 'Opus 5.5', fable: 'Fable 5.1', sonnet: 'Sonnet 5.5' }
+const SIGNS = { opus: 'Opus 5.5', sonnet: 'Sonnet 5.5' }
 const ON = {
   brief: { model: 'opus', effort: 'high' },
   split: { model: 'sonnet', effort: 'low' },
   implement: { model: 'opus', effort: 'high', isolation: 'worktree' },
   link: { model: 'sonnet', effort: 'low' },
-  review: { model: 'fable', effort: 'medium' },
+  // every review (a full one, a fix's narrow re-check, a CI fix's) is a fresh agent on this one value (issue 605,
+  // CLAUDE.md "The loop" step 3); a reviewer writes nothing, so no worktree
+  review: { model: 'opus', effort: 'high' },
   fix: { model: 'opus', effort: 'high', isolation: 'worktree' },
   learn: { model: 'opus', effort: 'medium', isolation: 'worktree' },
   ci: { model: 'sonnet', effort: 'low' },
@@ -751,7 +753,7 @@ ${learnable.map((h) => `### ${h.label}\n${asFailures(h.findings)}`).join('\n\n')
   else {
     // Learn's commit is not reviewed, so it may touch .claude/rules/ only, and that is read from git,
     // never taken from the agent's word: a head that changed anything else, or whose files could not be read, is not
-    // reported ready for the merge decision. --no-renames, as git detects renames by default and prints only a
+    // reported ready for the top session to merge. --no-renames, as git detects renames by default and prints only a
     // rename's new path: a file moved from src/ into .claude/rules/ must show its removal too. A head that moved
     // touched at least one path, so no path read is "couldn't tell", never "nothing outside".
     const prev = last.head
@@ -820,7 +822,7 @@ for (let attempt = 1; attempt <= MAX_CI_FIXES + MAX_MERGES + 1; attempt++) {
     continue
   }
   if (ci.state === 'timeout') return await finish('CI not finished within the bound')
-  if (ci.state === 'green') return await finish('reviewed, no open blocking finding of this PR, CI green: ready for the merge decision')
+  if (ci.state === 'green') return await finish('reviewed, no open blocking finding of this PR, CI green: ready for the top session to read and merge')
   log(`CI failed: ${ci.detail.slice(0, 200)}`)
   if (ciFixesHere >= MAX_CI_FIXES) return await finish(`CI still red after ${MAX_CI_FIXES} fixes: the coordinator decides`)
   ciFixesHere++
@@ -835,7 +837,7 @@ ${ci.detail}
 ${NOTE_AT(last.pr)}
 Every round of this PR so far, oldest first: do not undo what one fixed.
 ${historyText(history)}
-Read the failure (CLAUDE.md "Local gates"). If it is this change's, fix it, with a test. If it is a flake (a test the change cannot have touched, failing on timing or load), say so with flake: true, change nothing and return the head unchanged: the coordinator quarantines it on main. If the oracle's allowlist or fixture is stale, regenerate it from this run (\`node scripts/oracle-legs.ts --write <run-id>\`) and read the diff. If ${A.base} has the fix, merge \`origin/${A.base}\`. ${FIX_GATES}
+Read the failure (CLAUDE.md "Local gates"). If it is this change's, fix it, with a test. If it is a flake (a test the change cannot have touched, failing on timing or load), say so with flake: true, change nothing and return the head unchanged: the coordinator quarantines it on main. If the oracle's allowlist or fixture is stale, regenerate it from this run (\`node scripts/oracle-legs.ts --write <run-id>\`) and read the diff. If ${A.base} has the fix, merge \`origin/${A.base}\` into the branch (never the PR: the top session merges it). ${FIX_GATES}
 ${SELF_CHECK(FIX_SCALE)}
 ONE push, whose commit ends with \`${coAuthor(ON.fix)}\`. ${HANDOFF_RETURN(last.pr, `CI fix ${ciFixesHere}`)} Return the new head.`,
     { label: `CI fix ${ciFixesHere}`, phase: 'Fix', ...ON.fix, schema: CI_FIXED })

@@ -162,10 +162,11 @@ docs/DESIGN.md ("The independent review", "Local gates").
    never the sum. Before each push the author runs the `## What review probes` of each rules file its paths fall
    under, and checks at scale as the review will (the review's statements or checks, at the head and the base),
    fixing what differs before the push. There is no probe stage: the author's own check took its place.
-3. **Review**, by Fable (the coordinating session or a Fable agent, never Opus: the reader must outread the author),
-   in a fresh context given the diff and the code, never the author's report. It and the author RUN what the diff
-   changed, never judging by reading alone, at the head and the base; which evidence is read from the diff's paths
-   (`STATEMENT_PATHS`, the `paths:` of the engine's and the listener's rules files, and `src/cdc/`); a path shared with
+3. **Review**, by Opus 5.5 at effort high (`model: "opus"`, `effort: "high"`), a fresh agent, never the implementer:
+   its independence is the fresh context, the diff and the code without the author's report, and its own runs at head
+   and base (docs/DESIGN.md "The independent review"); a fix's narrow re-check is a review too, on the same terms. It
+   and the author RUN what the diff changed, never judging by reading alone, at the head and the base;
+   which evidence is read from the diff's paths (`STATEMENT_PATHS`, the `paths:` of the engine's and the listener's rules files, and `src/cdc/`); a path shared with
    cli.md's or web-ui.md's `paths:` (`src/cli/dev.ts`) owes by its hunks, as `scripts/evidence-owed.ts` decides them,
    and the review may only add to that (`checksOnly`). The engine's and
    the listener's owe SQL statements, batched through `scripts/duck-repro.ts`, only the differences read, hundreds in a
@@ -214,7 +215,7 @@ renders every prompt from `.claude/workflows/pr-loop-slim.js`, never writing one
 session reads each diff in full and merges. An issue too big for one PR is split by the Brief: the run makes a
 sub-issue per piece, posts the plan on the issue and stops, and the top session starts the pieces in order. A decision
 only the owner makes goes to **Needs Tom**, and issues filed along the way go to **Backlog**. The brief and the design
-note are Opus's, and only the reviews are Fable's. After the
+note are Opus's, and so are the reviews, each a fresh agent (step 3). After the
 implement push, GitHub itself must list the PR as closing its sub-issue (`closedByPullRequestsReferences`; for a
 stacked PR, which GitHub links only once it targets the default branch, the body must say `Closes`), or the body is
 fixed, or the run stops. Every exit with a PR posts a `Review record` comment on it, whose `json mason-review-record`
@@ -224,7 +225,7 @@ the PR's blocking ones make a fix round, count toward the class rule, or keep a 
 filed, one issue per class saying the PR's review met it and deferred it, and listed in the Review record. A finding
 the base already has is filed the same way, at whatever exit the run takes, and is never fixed in the PR nor counted
 toward its class rule: a PR that chases a class it did not make grows each round. Classes carry across a stack, so a class met on the PR below counts
-on the one above. A teammate needs Claude Code with the Agent and SendMessage tools, the Opus, Fable and Sonnet
+on the one above. A teammate needs Claude Code with the Agent and SendMessage tools, the Opus and Sonnet
 models, and `gh` authenticated with the `project` scope for the board. Why: docs/DESIGN.md "The independent review".
 Detector: `tests/workflows.test.ts`.
 
@@ -313,12 +314,14 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
   whose author GitHub cannot link to an account. The repository's admins can bypass it, so whoever merges still reads
   every job.
   Detector: the merge is refused, and the `push` run on main after it.
-- **Who merges what** (Tom, 2026-10-31). Every PR, `src/` included, merges without the owner's word once its Fable
+- **Who merges what** (Tom, 2026-10-31). Every PR, `src/` included, merges without the owner's word once its
   review has no open finding, CI is green at its head, the diff has been read in full, and a product change has its line
   in `release-notes/next.md`. A release and a deploy merge on the owner's word. It is queued pinned, as "The loop" step 5 says, and its landing is confirmed, never
   assumed: PR 89 had not merged itself some while after its last check went green, and was merged by hand.
-  Detector: the hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`, and lets
-  `gh pr merge <n> --disable-auto` through.
+  The top session merges (`.claude/skills/up-next/SKILL.md`): a coordinator, an implementer or any other sub-agent never
+  merges nor queues a merge, and reports the PR and its head instead (issue 588).
+  Detector: the hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`, and any
+  `gh pr merge` from a sub-agent (its hook input carries `agent_id`), and lets `gh pr merge <n> --disable-auto` through.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
   to fix, or it is a flake, the next rule. Detector: the hook `scripts/hooks/no-rerun.ts` blocks `gh run rerun`; a
   local gate run again on an unchanged tree, nothing detects (the gate could compare the tree's hash, and does not).

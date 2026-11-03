@@ -15,6 +15,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason doctor` warns when the user Mason connects as could write to your database**: a superuser or `BYPASSRLS`, the
+  owner of a synced table, or one holding `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` on a
+  synced table or `CREATE` on its schema — or a write that reaches its rows through a partition, an inheritance child or
+  parent, a foreign key's `ON DELETE` / `ON UPDATE` action, an updatable view or a rule; a foreign table or user
+  mapping; `ADMIN OPTION` on a role, or a server role — directly, through a role it is a member of, or granted to
+  `PUBLIC`. Mason only reads, so such a user lets a Mason bug or a stolen URL change the database. Each is a warning
+  (`!`, the exit status unchanged) with the statements that make a role that only reads (`REPLICATION` and a
+  publication where a table's `sync:` is replication), and in `--json` a stable `code` and the `fix`. The statements
+  change no role's privileges but the new one's: what `PUBLIC` holds is said for you to decide. **`SECURITY DEFINER`
+  code** the user reaches (by `EXECUTE`, a trigger on a table it may write, an event trigger, an aggregate) whose owner
+  may write the synced tables is listed for you to review, since what it writes is in its body, and the user is never
+  said to only read while it can run one. It is all asked of the catalog in one read, never tried.
 - **Behind a TCP load balancer or proxy, the request log can name each real client**: set `MASON_PG_PROXY_FROM` to the
   proxy's own addresses (CIDRs, comma-separated) and turn on its PROXY protocol v2 (an NLB's target group, HAProxy's
   `send-proxy-v2`). A connection from those addresses must then begin with the header, and one from any other address
@@ -33,6 +45,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   Mason service** (else `MASON_REPLICA`), with the same `--role`, `--set`, output and `--json` as for a project's own
   users; Mason on the replica checks each. The password is printed once, by `add`. It needs no project on this machine,
   and the login is `mason login`'s or `MASON_TOKEN`. Without `--replica` and `MASON_REPLICA`, `mason user` is unchanged.
+- **`mason login`, `mason logout` and `mason deploy` print at most a quarter of the token they hold when a
+  service repeats it**: the token whole, and its body without its `masondata_…_` prefix, re-cased, split by spaces,
+  dashes or other characters, URL-encoded, or in pieces of 4 or more characters, are each shown as `****` once
+  everything the command prints would show more than 10 of its 43 characters together, on stdout, stderr and in
+  `--json`. Before, a service's message that repeated the token without its prefix printed it, into a CI log too.
 - **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
   ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
   beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
@@ -334,6 +351,22 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `amount / 3`, a numeric read through a `UNION ALL` at every level, `c + c - c` at every level): deep nested numerics
   are planned, answered and stored in a generated table in bounded time. Before, eight such levels sent the synced data
   several megabytes of SQL and took about a second, and ten failed with an internal error or ran out of memory.
+- **A numeric column compared with a bound parameter matches the rows Postgres matches.** A filter an ORM, a driver's
+  prepared statement or a BI tool binds (`amount = $1`, `<`, `BETWEEN $1 AND $2`, `IN ($1, $2)`, `IS DISTINCT FROM`,
+  `NULLIF`, `CASE amount WHEN $1`) compared the value as a double, so past about 15 significant digits it matched rows
+  Postgres tells apart: `x = '1.00000000000000000001'` over a `numeric(30,20)` answered two rows where Postgres answers
+  one, and `<=` and `>` kept the wrong neighbours. The value is now compared in the column's own type wherever that type
+  holds it exactly, still the synced data's own filter, and otherwise (more decimals than the column, more digits,
+  `NaN`, `Infinity`) by its exact value. Nothing to do on upgrade.
+- **`upper`, `lower` and `initcap` change case as the source's collation does, under the database's collation, a
+  column's own and a `COLLATE`.** Each followed the database's collation whatever the call's, and read it from the
+  collation's sort order: under an ICU collation `initcap('o''hara')` was `O'Hara` where Postgres answers `O'hara`
+  (ICU title-cases a whole word), `upper('ß' COLLATE "und-x-icu")` was `ß` where it is `SS`, and under `COLLATE "C"`
+  `upper('é')` was `É` where C leaves it. A `SELECT` of no table, `SELECT upper('ß')`, answered `ẞ` where glibc's en_US
+  keeps `ß`. Now glibc's locales, C and POSIX, ICU's locales (Turkish's dotted and dotless i, Dutch's IJ, Greek's final
+  sigma), and the builtin `pg_c_utf8` and `pg_unicode_fast` are each followed. A libc collation of Turkish or Azeri
+  (`tr_TR`, `az_AZ`), whose i maps otherwise, is refused by name (`case-mapping-unknown`): write `COLLATE "tr-x-icu"`.
+  Nothing to do on upgrade.
 
 ## Known
 

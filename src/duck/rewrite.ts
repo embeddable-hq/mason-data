@@ -31,7 +31,7 @@ import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
-import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
+import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type NumericProgram } from "../lib/pg-numeric.ts";
 import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
@@ -39,7 +39,7 @@ import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUN
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
-import type { DuckCollation, StatementCollations } from "./collation.ts";
+import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -269,9 +269,6 @@ class Rewriter {
   /** a LEFT lateral of a list left DuckDB's join that a row count on the wire would stream (leftLateral): the
    *  listener plans the statement again for an Execute that sets one (PlannedSql.unboundedLateral) */
   unboundedLateral = false;
-  /** how the database changes a letter's case */
-  private readonly caseMode: CaseMode;
-
   /** the ANY / ALL comparisons already guarded against a NULL array (the guard holds the comparison, walked again) */
   private readonly nullArrayTested = new WeakSet<Body>();
   /** the catalog's enums: each one's labels in their declared order, and its array type's element */
@@ -298,9 +295,6 @@ class Rewriter {
     this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collations = collations; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
     this.enums = enums; this.kept = kept;
     for (const at of keyCounts) this.keyCounts.add(at + base);
-    // (the case mapping reads the database's collation, where Postgres reads the call's: a gap of its own)
-    const db = collations.database;
-    this.caseMode = db.kind === "icu" ? "icu" : db.kind === "bytes" && db.ascii === true ? "ascii" : "libc";
     this.twins = caseTwins(analysis.tree);
     this.analysisTree = analysis.tree;
   }
@@ -468,10 +462,29 @@ class Rewriter {
 
   private isCitext(oid: number | null): boolean { return oid !== null && this.userTypes.get(oid) === "citext"; }
 
-  /** a text lower-cased by the database's case rules (what Postgres's citext compares, sorts and groups: str_tolower
+  /** a text lower-cased by the database's case mapping (what Postgres's citext compares, sorts and groups: str_tolower
    *  under the default collation) */
   private lowerOf(n: AstNode): AstNode {
-    return this.caseMode === "libc" ? fn("lower", [n]) : fn("__mason_case", [n, boolConst(false), strConst(this.caseMode)]);
+    return this.caseCall("lower", n, this.collations.caseOf(DEFAULT_COLLATION_OID));
+  }
+
+  /** upper / lower / initcap of a text under a case mapping: glibc's upper and lower the engine's own (its upper with
+   *  `ß` kept, which glibc's towupper keeps: an exhaustive comparison over every code point differed only in letters
+   *  newer than the server's glibc), every other mapping src/duck/functions.ts's */
+  private caseCall(name: "upper" | "lower" | "initcap", arg: AstNode, m: CaseMapping): AstNode {
+    if (name === "initcap") return fn("__mason_initcap", [arg, strConst(m)]);
+    if (m !== "libc") return fn("__mason_case", [arg, boolConst(name === "upper"), strConst(m)]);
+    return name === "lower" ? fn("lower", [arg]) : fn("replace", [fn("upper", [fn("replace", [arg, strConst("ß"), strConst("﷐")])]), strConst("﷐"), strConst("ß")]);
+  }
+
+  /** THE CASE MAPPING an upper / lower / initcap call maps under: its input collation, as Postgres's analysis resolved
+   *  it (`Typed.inputCollation`: a COLLATE, a column's, a concatenation's, never the database's by default), and what
+   *  that collation means for case (src/duck/collation.ts `caseOf`). Postgres's 42P22 where the analysis could
+   *  determine none (two implicit collations in conflict) */
+  private caseMapping(t: Typed | null, name: string): CaseMapping {
+    const coll = t === null ? DEFAULT_COLLATION_OID : t.inputCollation;
+    if (coll === 0) throw new Unrewritable(`could not determine which collation to use for ${name}() function`, "Use the COLLATE clause to set the collation explicitly.", { postgres: "42P22" });
+    return this.collations.caseOf(coll);
   }
 
   /** a citext value as the text citext compares: lower-cased, typed as text under the database's collation, so the
@@ -746,6 +759,7 @@ class Rewriter {
       case "NullTest": return this.jsonNullTest(b);
       // CASE x WHEN v …: each WHEN is x = v, jsonb's equality for a jsonb (its keys compared)
       case "CaseExpr": {
+        this.caseOfNumericParam(b);
         if (!isNode(b.arg) || (this.typeOf(b.arg) !== JSONB && this.typeOf(b.arg) !== JSONB_ARRAY)) return null;
         b.arg = this.equated(b.arg, "CASE … WHEN of");
         for (const w of (b.args ?? []) as AstNode[]) if (isNode(bodyOf(w).expr)) bodyOf(w).expr = this.equalKey(bodyOf(w).expr as AstNode);
@@ -3301,7 +3315,8 @@ class Rewriter {
    * `numericCastWrite`); an operator, a function or an aggregate by what DuckDB computes from exact operands (+ - * a
    * DECIMAL, a sum / min / max / a window's or arg_min's pick the value's own type, a count an integer); the rewrite's
    * own integer casts (a variance's split squares) are integers. Anything else is not called exact: a quotient, `^`,
-   * `%`, an avg (DuckDB's doubles), a parameter (written as a double), a column a FROM item computes as a double
+   * `%`, an avg (DuckDB's doubles), a parameter (written as a double where it is read; COMPARED with a value this calls
+   * exact it is that value's own type or its exact key, `numericParamComparison`), a column a FROM item computes as a double
    * (`carry`), a function this does not know — whose value then has its program, or is the engine's everywhere.
    */
   private duckExact(n: AstNode): boolean {
@@ -3528,8 +3543,8 @@ class Rewriter {
   /**
    * TWO NUMERICS COMPARED FOR EQUALITY, each by its exact key (`exactKey`; a value the engine holds exactly by its own
    * text's key), or null where neither is decided exactly: the one comparison of a quotient, `=` and `<>`'s and
-   * NULLIF's (issue 242). A parameter alone is keyed only beside a value decided exactly (its bound text; DuckDB
-   * compares a column with it natively elsewhere)
+   * NULLIF's (issue 242). A parameter alone is keyed only beside a value decided exactly (its bound text); beside a
+   * value the ENGINE holds exactly it is never its double: `numericParamComparison`, asked first (issue 214)
    */
   private exactEquality(l: AstNode, r: AstNode): [AstNode, AstNode] | null {
     const kl = this.exactKey(l), kr = this.exactKey(r);
@@ -3537,6 +3552,96 @@ class Rewriter {
     const decided = (x: AstNode, k: AstNode | null): boolean => k !== null && kindOf(stripCasts(x)) !== "ParamRef";
     const sl = !decided(l, kl) && !decided(r, kr) ? null : side(l, kl), sr = sl === null ? null : side(r, kr);
     return sl !== null && sr !== null ? [sl, sr] : null;
+  }
+
+  /** a parameter of type numeric as it was bound, cast to nothing but numeric without a typmod (`$1`, `$1::numeric`):
+   *  its number, whose bound text is the value (Postgres's numeric_out, src/duck/analyze.ts readParameters); else null */
+  private plainNumericParam(x: AstNode): number | null {
+    let n = x;
+    while (kindOf(n) === "TypeCast" && isNode(bodyOf(n).arg)) {
+      const t = bodyOf(n).typeName;
+      if (!["numeric", "decimal"].includes(lastName(t?.names)) || ((t?.typmods ?? []) as unknown[]).length > 0 || Array.isArray(t?.arrayBounds)) return null;
+      n = bodyOf(n).arg as AstNode;
+    }
+    if (kindOf(n) !== "ParamRef") return null;
+    const number = Number(bodyOf(n).number);
+    return this.params[number - 1] === NUMERIC ? number : null;
+  }
+
+  /**
+   * A NUMERIC PARAMETER COMPARED WITH VALUES THE ENGINE HOLDS EXACTLY (issue 214, the class numeric-parameter-as-double):
+   * `x = $1`, `<>`, `<`, `<=`, `>`, `>=`, IS [NOT] DISTINCT FROM, NULLIF, IN a list and [NOT] BETWEEN, every
+   * other operand one `duckExact` calls exact (a DECIMAL column, an integer, + - * and sum / min / max of them) — never
+   * the parameter's double, which equates and orders values Postgres tells apart past 15 digits.
+   *
+   * NATIVE where the engine's own type of the compared value holds the bound value exactly: `CASE WHEN
+   * __mason_numeric_fits(typeof(x), $1::text) THEN x = $1 ELSE <keyed> END`. DuckDB casts the parameter into x's type
+   * (its prepared statement types the parameter by the comparison), which rounds a value past its scale and fails past
+   * its digits: so the guard decides, from DuckDB's own name of the type (`typeof`, never Postgres's typmod: a numeric(65,
+   * 30) is held as DECIMAL(38, the scale its values use), nor a type this module derives for an expression) and the bound
+   * text alone (src/lib/pg-numeric.ts `fitsEngineType`, the copy's own rule of what a DECIMAL holds). Both are constants,
+   * so DuckDB folds the guard at Execute: one call, and the comparison it keeps is the scan's own filter. A NULL fits.
+   *
+   * KEYED otherwise (a value past the scale or the digits, NaN, ±Infinity; a parameter under a cast with a typmod, which
+   * Postgres rounds first; more than one exact operand): each operand by its exact key, `__mason_numeric_key` for an
+   * equality, `__mason_numeric_order` for an order (numeric_cmp's: NaN above every number, ±Infinity outside them),
+   * the parameter by its bound text or its program's (`exactText`), a value the engine holds exactly by its own text.
+   * null: no numeric parameter here, or an operand with no exact value (a quotient: `exactEquality`; a value past 38
+   * digits: `numeric-over-38-digits`), left as it was.
+   */
+  private numericParamComparison(b: Body, operatorResolved = false): AstNode | null {
+    const kind = String(b.kind), name = lastName(b.name);
+    const equating = (kind === "AEXPR_OP" && ["=", "<>", "!="].includes(name)) || ["AEXPR_DISTINCT", "AEXPR_NOT_DISTINCT", "AEXPR_NULLIF", "AEXPR_IN"].includes(kind);
+    const ordering = (kind === "AEXPR_OP" && ["<", "<=", ">", ">="].includes(name)) || ["AEXPR_BETWEEN", "AEXPR_NOT_BETWEEN"].includes(kind);
+    const l = b.lexpr, r = b.rexpr;
+    if ((!equating && !ordering) || !isNode(l) || !isNode(r)) return null;
+    const listed = kind === "AEXPR_IN" || kind.includes("BETWEEN");
+    if (listed && kindOf(r) !== "List") return null;
+    const operands = [l, ...(listed ? (bodyOf(r).items ?? []) as AstNode[] : [r])];
+    // compared as numerics, by Postgres's own operator where it names one
+    if (!operands.every((x) => { const t = this.typeOf(x); return t === NUMERIC || (t !== null && INTEGERS.has(t)); })) return null;
+    if (kind === "AEXPR_OP" && !operatorResolved) { const t = this.typed({ A_Expr: b }); if (t?.args[0]?.type !== NUMERIC || t?.args[1]?.type !== NUMERIC) return null; }
+    const plain = operands.map((x) => this.plainNumericParam(x));
+    // a parameter under a cast with a typmod (`$1::numeric(30,20)`): its program's value, Postgres's rounding first
+    const ofParam = operands.map((x, i) => plain[i] !== null || (!this.duckExact(x) && kindOf(stripCasts(x)) === "ParamRef"
+      && this.params[Number(bodyOf(stripCasts(x)).number) - 1] === NUMERIC && this.exactText(x) !== null));
+    if (!ofParam.some(Boolean) || operands.some((x, i) => !ofParam[i] && !this.duckExact(x))) return null;
+    // NULLIF answers its first operand: a parameter there is printed, not compared (left as it was)
+    if (kind === "AEXPR_NULLIF" && ofParam[0]) return null;
+    const exactAt = operands.flatMap((_, i) => ofParam[i] ? [] : [i]);
+    // the native form: ONE value the engine holds exactly (first, or either side of an operator), every other operand a
+    // plain parameter, so each parameter is cast into that value's own type
+    const at = exactAt.length === 1 && exactAt[0] !== undefined && (exactAt[0] === 0 || kind === "AEXPR_OP") && plain.every((p, i) => i === exactAt[0] || p !== null) ? exactAt[0] : null;
+    const param = (n: number): AstNode => ({ ParamRef: { number: n } });
+    const f = equating ? "__mason_numeric_key" : "__mason_numeric_order";
+    const keys = operands.map((x, i) => fn(f, [plain[i] !== null ? cast(param(plain[i]!), ["varchar"]) : ofParam[i] ? this.exactText(x)! : cast(at === null ? x : this.clone(x), ["varchar"])]));
+    const rebuilt = (ops: AstNode[]): Body => ({ ...b, lexpr: ops[0]!, rexpr: listed ? { List: { items: ops.slice(1) } } : ops[1]! });
+    const keyed: AstNode = kind === "AEXPR_NULLIF" ? caseWhen([[op("=", keys[0]!, keys[1]!), nullConst()]], this.clone(l)) : { A_Expr: { ...rebuilt(keys), name: this.clone(b.name) } };
+    if (at === null) return keyed;
+    const exact = operands[at]!;
+    const guards = plain.flatMap((p, i) => i === at || p === null ? [] : [fn("__mason_numeric_fits", [fn("typeof", [this.clone(exact)]), cast(param(p), ["varchar"])])]);
+    // (the comparison as written, its parameters bare: this node, its exact operand walked as everywhere)
+    Object.assign(b, rebuilt(operands.map((x, i) => i === at ? x : param(plain[i]!))));
+    return caseWhen([[guards.length === 1 ? guards[0]! : and(guards), { A_Expr: b }]], keyed);
+  }
+
+  /** CASE x WHEN $1 …, x a value the engine holds exactly and a WHEN a numeric parameter (issue 214): each WHEN written
+   *  as the comparison it is, x = v, the parameter's by `numericParamComparison` (Postgres resolved each WHEN's `=` as
+   *  numeric's: every operand is a numeric or an integer, one a numeric parameter); x read once a WHEN, as CASE reads it */
+  private caseOfNumericParam(b: Body): void {
+    const arg = b.arg, whens = (b.args ?? []) as AstNode[];
+    if (!isNode(arg) || !this.duckExact(arg) || !whens.some((w) => isNode(bodyOf(w).expr) && kindOf(stripCasts(bodyOf(w).expr as AstNode)) === "ParamRef")) return;
+    let changed = false;
+    const compared = whens.map((w, i) => {
+      const x = i === 0 ? arg : this.clone(arg), v = bodyOf(w).expr as AstNode;
+      const viaParameter = this.numericParamComparison({ kind: "AEXPR_OP", name: [S("=")], lexpr: x, rexpr: v }, true);
+      if (viaParameter !== null) changed = true;
+      return viaParameter ?? op("=", x, v);
+    });
+    // (nothing changed where no WHEN is such a parameter: the clones are dropped unplaced)
+    if (!changed) return;
+    whens.forEach((w, i) => { bodyOf(w).expr = compared[i]!; });
+    delete b.arg;
   }
 
   /** null where a value is no numeric decided exactly; a refusal where it is one whose program cannot be read here (a
@@ -4192,6 +4297,10 @@ class Rewriter {
     // (an operand of a jsonb operator is a jsonb, a literal included: each is keyed, whatever its own analysis says)
     const lType = l === undefined ? null : this.typeOf(l);
     const comparing = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name);
+    // a numeric parameter compared with values the engine holds exactly: natively in their own type where it holds the
+    // bound value, else by exact keys — never the parameter's double (issue 214)
+    const viaParameter = this.numericParamComparison(b);
+    if (viaParameter !== null) return viaParameter;
     // a numeric decided exactly, compared for equality: by its exact key, the other side by its own (exactKey)
     if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 === NUMERIC && a1 === NUMERIC && l !== undefined && r !== undefined) {
       const sides = this.exactEquality(l, r);
@@ -4667,12 +4776,11 @@ class Rewriter {
       case "every": b.funcname = [S("bool_and")]; return null;
       case "upper": case "lower": {
         if (args.length !== 1 || argType(0) === null || !TEXTS.has(argType(0)!)) return null;
-        // glibc's upper keeps ß (DuckDB's gives ẞ); its every other letter is DuckDB's (an exhaustive comparison over
-        // every code point differed only in letters newer than the server's glibc)
-        if (this.caseMode === "libc") return name === "lower" ? null : fn("replace", [fn("upper", [fn("replace", [args[0]!, strConst("ß"), strConst("\ufdd0")])]), strConst("\ufdd0"), strConst("ß")]);
-        return fn("__mason_case", [args[0]!, boolConst(name === "upper"), strConst(this.caseMode)]);
+        const m = this.caseMapping(t, name);
+        // (glibc's lower is the engine's own: the call left as it is)
+        return m === "libc" && name === "lower" ? null : this.caseCall(name, args[0]!, m);
       }
-      case "initcap": return args.length === 1 ? fn("__mason_initcap", [args[0]!, strConst(this.caseMode)]) : null;
+      case "initcap": return args.length === 1 ? this.caseCall("initcap", args[0]!, this.caseMapping(t, name)) : null;
       case "btrim": b.funcname = [S("trim")]; b.funcformat = "COERCE_EXPLICIT_CALL"; return null;
       case "to_hex":
         // an integer's two's complement in its own width, in lower case
@@ -5485,7 +5593,9 @@ class Rewriter {
   }
 
   private param(b: Body): AstNode | null {
-    // a parameter is bound as its text; Postgres decided its type, and DuckDB is told it
+    // a parameter is bound as its text; Postgres decided its type, and DuckDB is told it. A numeric one READ is the
+    // engine's double (a program over its `$n` cell where its digits are printed, `exactOf`); one COMPARED with a value
+    // the engine holds exactly never reaches here (`numericParamComparison`, issue 214)
     const oid = this.params[Number(b.number) - 1];
     // a text array is bound as the JSON Postgres read it to (src/duck/analyze.ts readParameters)
     if (oid === TEXT_ARRAY || oid === VARCHAR_ARRAY) return fn("from_json", [cast({ ParamRef: b }, ["varchar"]), strConst('["VARCHAR"]')]);

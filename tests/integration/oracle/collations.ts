@@ -17,16 +17,91 @@ export const COLLS_SCHEMA =
   `INSERT INTO public.colls SELECT id, x, x, x, x, x, x FROM (VALUES ${VALUES.map(([id, v]) => `(${id}, ${lit(v)})`).join(", ")}) AS s(id, x); ` +
   "CREATE VIEW public.colls_v AS SELECT id, i, d COLLATE \"und-x-icu\" AS n FROM public.colls; " +
   "CREATE COLLATION public.mason_num (provider = icu, locale = 'und-u-kn'); " +
-  "CREATE COLLATION public.mason_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);";
+  "CREATE COLLATION public.mason_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false); " +
+  collsCaseSchema();
+
+/**
+ * CASE MAPPING (issue 406): `colls_case`, whose columns hold the same value under the database's collation, C, ICU's
+ * root, glibc's en_US, ICU's Turkish and an ICU char(n), each value one whose case maps otherwise under one of them
+ * (`ß`, `İ` and `ı`, the digraphs `ǅ`, an apostrophe in a word, a final sigma, the ligatures, a word's full stop and
+ * underscore)
+ */
+function collsCaseSchema(): string {
+  const values: Array<[number, string | null]> = [[1, "straße"], [2, "İstanbul"], [3, "ıi Iİ"], [4, "ǅemal ǆ Ǆ"], [5, "o'hara"], [6, "o'neil mcDONALD-smith"],
+    [7, "ΟΔΟΣ σοφός"], [8, "ﬁne ŉ"], [9, "hello.world a_b x2y 1st"], [10, "élan ÉCOLE"], [11, null], [12, ""], [13, "ǉubljana"], [14, "'quoted' (paren) -dash"]];
+  return "CREATE TABLE public.colls_case (id int PRIMARY KEY, d text, c text COLLATE \"C\", i text COLLATE \"und-x-icu\", l text COLLATE \"en_US\", t text COLLATE \"tr-x-icu\", b char(24) COLLATE \"und-x-icu\"); " +
+    `INSERT INTO public.colls_case SELECT id, x, x, x, x, x, x FROM (VALUES ${values.map(([id, v]) => `(${id}, ${lit(v)})`).join(", ")}) AS s(id, x);`;
+}
 
 /** a round of changes the poll (and the stream) carries: a value moved, one added, one gone */
 export function collsMutations(round: number): string {
   return round === 1
     ? "UPDATE public.colls SET d = 'Alpha', c = 'Alpha', i = 'Alpha', l = 'Alpha', v = 'Alpha', b = 'Alpha' WHERE id = 5; " +
-      "INSERT INTO public.colls VALUES (14, '_y', '_y', '_y', '_y', '_y', '_y'), (15, 'ä', 'ä', 'ä', 'ä', 'ä', 'ä');"
+      "INSERT INTO public.colls VALUES (14, '_y', '_y', '_y', '_y', '_y', '_y'), (15, 'ä', 'ä', 'ä', 'ä', 'ä', 'ä'); " +
+      "UPDATE public.colls_case SET d = 'ßtraße', c = 'ßtraße', i = 'ßtraße', l = 'ßtraße', t = 'ßtraße', b = 'ßtraße' WHERE id = 1; " +
+      "INSERT INTO public.colls_case VALUES (15, 'ǈ ǋ ǲ', 'ǈ ǋ ǲ', 'ǈ ǋ ǲ', 'ǈ ǋ ǲ', 'ǈ ǋ ǲ', 'ǈ ǋ ǲ');"
     : "DELETE FROM public.colls WHERE id = 14; UPDATE public.colls SET d = NULL, c = NULL, i = NULL, l = NULL, v = NULL, b = NULL WHERE id = 12; " +
-      "INSERT INTO public.colls VALUES (16, 'B', 'B', 'B', 'B', 'B', 'B');";
+      "INSERT INTO public.colls VALUES (16, 'B', 'B', 'B', 'B', 'B', 'B'); " +
+      "DELETE FROM public.colls_case WHERE id = 14; UPDATE public.colls_case SET d = NULL, c = NULL, i = NULL, l = NULL, t = NULL, b = NULL WHERE id = 4;";
 }
+
+/** issue 406's statements: upper, lower and initcap under each column's collation, a COLLATE's, a derived table's,
+ *  and of no table, in the forms .claude/rules/duck-rewrite.md asks of a rewrite */
+const CASE_CASES: Array<{ name: string; sql: string }> = [
+  { name: "the BI shape initcap", sql: "SELECT c.id, initcap(c.name) AS n FROM customers c ORDER BY c.id" },
+  ...["d", "c", "i", "l", "t", "b"].map((col) => ({ name: `the ${col} column`, sql: `SELECT id, upper(${col}), lower(${col}), initcap(${col}) FROM colls_case ORDER BY id` })),
+  { name: "lengths", sql: "SELECT id, length(lower(i)), octet_length(lower(i)), length(lower(l)), octet_length(upper(i)), length(upper(c)) FROM colls_case ORDER BY id" },
+  { name: "upper under a COLLATE", sql: "SELECT id, upper(d COLLATE \"C\"), upper(d COLLATE \"und-x-icu\"), upper(d COLLATE \"en_US\"), upper(d COLLATE \"tr-x-icu\") FROM colls_case ORDER BY id" },
+  { name: "lower under a COLLATE", sql: "SELECT id, lower(d COLLATE \"C\"), lower(d COLLATE \"und-x-icu\"), lower(d COLLATE \"en_US\"), lower(d COLLATE \"tr-x-icu\") FROM colls_case ORDER BY id" },
+  { name: "initcap under a COLLATE", sql: "SELECT id, initcap(d COLLATE \"C\"), initcap(d COLLATE \"und-x-icu\"), initcap(d COLLATE \"en_US\"), initcap(d COLLATE \"tr-x-icu\") FROM colls_case ORDER BY id" },
+  { name: "a COLLATE over a column's own", sql: "SELECT id, upper(i COLLATE \"C\"), initcap(l COLLATE \"und-x-icu\"), initcap(c COLLATE \"en_US\"), lower(t COLLATE \"und-x-icu\") FROM colls_case ORDER BY id" },
+  { name: "a COLLATE on the result", sql: "SELECT id, upper(d) COLLATE \"C\", upper(d COLLATE \"C\"), initcap(i) COLLATE \"C\" FROM colls_case ORDER BY id" },
+  { name: "a concatenation", sql: "SELECT id, upper(i || 'ß'), initcap(l || ' o''hara'), lower(c || 'İ') FROM colls_case ORDER BY id" },
+  { name: "two implicit collations (42P22)", sql: "SELECT id, upper(CASE WHEN id > 3 THEN i ELSE l END) FROM colls_case ORDER BY id" },
+  { name: "an implicit ICU beside the default", sql: "SELECT id, upper(CASE WHEN id > 3 THEN i ELSE d END) FROM colls_case ORDER BY id" },
+  { name: "compared", sql: "SELECT id FROM colls_case WHERE lower(i) = lower('İSTANBUL') ORDER BY id" },
+  { name: "LIKE", sql: "SELECT id FROM colls_case WHERE upper(l) LIKE 'STRA%' OR upper(i) LIKE 'STRA%' ORDER BY id" },
+  { name: "grouped, ordered by number", sql: "SELECT upper(i) AS u, count(*) FROM colls_case GROUP BY 1 ORDER BY 1" },
+  { name: "grouped, ordered by name", sql: "SELECT upper(i) AS u, count(*) FROM colls_case GROUP BY 1 ORDER BY u" },
+  { name: "grouped, ordered by expression", sql: "SELECT upper(i), count(*) FROM colls_case GROUP BY upper(i) ORDER BY upper(i)" },
+  { name: "grouped by the qualified column", sql: "SELECT upper(colls_case.c), count(*) FROM colls_case GROUP BY upper(colls_case.c) ORDER BY upper(colls_case.c)" },
+  { name: "ordered by initcap", sql: "SELECT id, initcap(i) FROM colls_case ORDER BY initcap(i), id" },
+  { name: "the nulls idiom with a bare output name", sql: "SELECT id, upper(i) AS u FROM colls_case ORDER BY u IS NULL, u, id" },
+  { name: "DISTINCT ON", sql: "SELECT DISTINCT ON (lower(i)) lower(i), id FROM colls_case ORDER BY lower(i), id" },
+  { name: "aggregated", sql: "SELECT string_agg(initcap(i), '|' ORDER BY id), string_agg(upper(l), '|' ORDER BY id), max(upper(c)) FROM colls_case" },
+  { name: "a window", sql: "SELECT id, first_value(initcap(i)) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM colls_case ORDER BY id" },
+  { name: "a star beside the named column", sql: "SELECT *, initcap(i) FROM colls_case ORDER BY id" },
+  { name: "a derived table's COLLATE", sql: "SELECT upper(n), initcap(n) FROM (SELECT id, d COLLATE \"und-x-icu\" AS n FROM colls_case) s ORDER BY id" },
+  { name: "a CTE's COLLATE", sql: "WITH s AS (SELECT id, d COLLATE \"C\" AS n FROM colls_case) SELECT id, upper(n), initcap(n) FROM s ORDER BY id" },
+  { name: "a derived table not folded", sql: "SELECT id, initcap(i) FROM (SELECT id, i FROM colls_case OFFSET 0) s ORDER BY id" },
+  { name: "a derived UNION ALL", sql: "SELECT upper(n) FROM (SELECT i AS n, id FROM colls_case UNION ALL SELECT i, id + 100 FROM colls_case) s ORDER BY id" },
+  { name: "a view's COLLATE", sql: "SELECT id, upper(n), initcap(n), lower(i) FROM colls_v ORDER BY id" },
+  { name: "a UNION ALL of two mappings (42P22)", sql: "SELECT upper(i) FROM colls_case UNION ALL SELECT upper(l) FROM colls_case ORDER BY 1" },
+  { name: "a scalar subquery and ARRAY(…)", sql: "SELECT (SELECT upper(i) FROM colls_case WHERE id = 1), ARRAY(SELECT initcap(i) FROM colls_case ORDER BY id LIMIT 6)" },
+  { name: "a join", sql: "SELECT a.id, upper(a.i), initcap(b.l) FROM colls_case a JOIN colls_case b ON b.id = a.id ORDER BY a.id LIMIT 4" },
+  { name: "a join's top N by the mapped column", sql: "SELECT a.id, upper(a.i) AS u FROM colls_case a JOIN colls_case b ON b.id = a.id ORDER BY u, a.id LIMIT 4" },
+  { name: "a NULL", sql: "SELECT upper(NULL::text COLLATE \"und-x-icu\"), initcap(NULL::text), lower(i) FROM colls_case WHERE id = 11" },
+  { name: "a char(n) and a varchar", sql: "SELECT id, upper(b), initcap(b), length(upper(b)), upper(l::varchar(30)), initcap(i::char(30)) FROM colls_case ORDER BY id" },
+  // no table: the synced data's, never the catalog's own mapping
+  { name: "no table, the issue's statement", sql: "SELECT initcap('o''neil mcDONALD-smith'), upper('ß'), lower('İ')" },
+  { name: "no table, ICU", sql: "SELECT upper('ß' COLLATE \"und-x-icu\"), lower('İ' COLLATE \"und-x-icu\"), initcap('o''hara' COLLATE \"und-x-icu\"), initcap('ǆemal ßtraße' COLLATE \"und-x-icu\")" },
+  { name: "no table, C and en_US", sql: "SELECT upper('é' COLLATE \"C\"), lower('É' COLLATE \"C\"), initcap('élan x2y' COLLATE \"C\"), upper('ß' COLLATE \"en_US\")" },
+  { name: "no table, Turkish", sql: "SELECT upper('i' COLLATE \"tr-x-icu\"), lower('I' COLLATE \"tr-x-icu\"), initcap('istanbul' COLLATE \"tr-x-icu\")" },
+  { name: "no table, a dotted I and a final sigma", sql: "SELECT length(lower('İ')), octet_length(lower('İ' COLLATE \"und-x-icu\")), lower('ΟΔΟΣ'), lower('ΟΔΟΣ' COLLATE \"und-x-icu\"), upper('ﬁ'), upper('ﬁ' COLLATE \"und-x-icu\")" },
+  { name: "no table, VALUES", sql: "SELECT initcap(x), upper(x), lower(x) FROM (VALUES ('ǆemal'), ('o''hara'), ('ΟΔΟΣ'), ('ß'), (NULL)) AS v(x)" },
+  { name: "no table, the builtin collations", sql: "SELECT upper('ß' COLLATE pg_unicode_fast), upper('ß' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_unicode_fast), upper('é' COLLATE ucs_basic)" },
+  { name: "no table, ASCII", sql: "SELECT upper('abc'), lower('ABC'), initcap('abc def')" },
+  // no table, what the synced data does not run as written: the catalog's, never the engine's error (review r1 of PR 568)
+  // (no initcap of a word with an apostrophe: the catalog's own mapping makes O'Hara where ICU's makes O'hara, the listed
+  // fromless-numeric-text-order; ASCII words whose case every mapping agrees on)
+  { name: "no table, a pg_catalog-qualified name", sql: "SELECT pg_catalog.lower('ABC'), pg_catalog.upper('abc'), pg_catalog.length('abc'), pg_catalog.initcap('abc def')" },
+  // a value of the server, which the synced data would answer with its own: the catalog's (review r2 of PR 568)
+  { name: "no table, a value of the server", sql: "SELECT upper(version()) LIKE 'POSTGRES%', upper(substr(version(), 1, 10)), upper(split_part(version(), ' ', 1)), upper(format_type(23, NULL)), (SELECT count(*) FROM (SELECT upper(version()) AS v) s WHERE v LIKE 'POSTGRES%')" },
+  { name: "no table, a typed literal", sql: "SELECT upper(char 'abc'), upper(character 'abc'), initcap(char 'abc'), upper(n'abc'), upper('abc'::unknown)" },
+  { name: "no table, a char VALUES list", sql: "SELECT upper(x) FROM (VALUES (char 'abc')) v(x)" },
+  { name: "no table, an empty select list", sql: "SELECT upper('abc') FROM (SELECT) s" },
+  { name: "no table, no case function stays the catalog's", sql: "SELECT 'a' = 'A', version() IS NOT NULL" },
+].map((q) => ({ name: `collation: case ${q.name}`, sql: q.sql }));
 
 const DERIVED = "(SELECT d COLLATE \"und-x-icu\" AS n FROM colls)";
 
@@ -189,4 +264,5 @@ export const COLLATION_CASES: Array<{ name: string; sql: string }> = [
   { name: "collation: LIKE of an ICU column", sql: "SELECT id FROM colls WHERE i LIKE 'b%' ORDER BY id" },
   { name: "collation: equality of an ICU column", sql: "SELECT id FROM colls WHERE i = 'b' ORDER BY id" },
   { name: "collation: PARTITION BY an ICU column", sql: "SELECT id, count(*) OVER (PARTITION BY i) FROM colls ORDER BY id" },
+  ...CASE_CASES,
 ];

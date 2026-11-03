@@ -207,9 +207,9 @@ export interface SourceFacts {
    * on a server the database was restored to. null when this user may not read it (a function revoked from PUBLIC)
    */
   systemIdentifier: string | null;
-  /** how the database orders text (pg_database: `provider` c libc, i ICU, b builtin; `locale` ICU's or builtin's):
+  /** how the database orders text and maps its case (pg_database: `provider` c libc, i ICU, b builtin; `ctype` its datctype; `locale` ICU's or builtin's):
    *  Mason sorts as it does (src/duck/rewrite.ts DuckCollation) */
-  collation?: { provider: string; collate: string; locale: string | null; version?: string | null };
+  collation?: { provider: string; collate: string; ctype?: string | null; locale: string | null; version?: string | null };
   /** the database's collations (pg_collation, of its encoding): the catalog declares those it lacks, and what a
    *  collation a statement names means is the source's row of that name (src/duck/collation.ts) */
   collations?: SourceCollation[];
@@ -226,7 +226,7 @@ export async function readCollations(pg: Pick<PgConnection, "query">, versionNum
   const version = versionNum >= COLLATION_ACTUAL_NUM ? "CASE WHEN c.collprovider = 'c' THEN pg_collation_actual_version(c.oid) END" : "NULL::text";
   const rows = JSON.parse((await pg.query(`SELECT coalesce(json_agg(to_jsonb(c) || jsonb_build_object('schema', n.nspname, 'actual', ${version}) ORDER BY c.oid), '[]')::text ` +
     "FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace WHERE c.collencoding IN (-1, pg_char_to_encoding(getdatabaseencoding()))")).rows[0]?.[0] ?? "[]") as Array<Record<string, string | boolean | null>>;
-  return rows.map((r) => ({ schema: String(r.schema), name: String(r.collname), provider: String(r.collprovider ?? "c"), collate: (r.collcollate ?? null) as string | null,
+  return rows.map((r) => ({ schema: String(r.schema), name: String(r.collname), provider: String(r.collprovider ?? "c"), collate: (r.collcollate ?? null) as string | null, ctype: (r.collctype ?? null) as string | null,
     locale: (r.colllocale ?? r.colliculocale ?? (r.collprovider === "i" ? r.collcollate : null) ?? null) as string | null, deterministic: r.collisdeterministic !== false,
     version: (r.actual ?? r.collversion ?? null) as string | null }));
 }
@@ -357,7 +357,7 @@ export async function readSourceFacts(pg: PgConnection, counted: Map<number, num
   const db = JSON.parse((await pg.query("SELECT to_jsonb(d)::text FROM pg_database d WHERE datname = current_database()")).rows[0]?.[0] ?? "{}") as Record<string, string | null>;
   // the library's version of it NOW (Postgres 15+; glibc's for libc): datcollversion is what the database was created or
   // last refreshed under, so it stays where it was through an OS upgrade, which is what must read the order again
-  const collation = { provider: db.datlocprovider ?? "c", collate: db.datcollate ?? "C", locale: db.datlocale ?? db.daticulocale ?? null, version: await collationVersion(pg, Number(r[0]), db.datcollversion ?? null) };
+  const collation = { provider: db.datlocprovider ?? "c", collate: db.datcollate ?? "C", ctype: db.datctype ?? db.datcollate ?? "C", locale: db.datlocale ?? db.daticulocale ?? null, version: await collationVersion(pg, Number(r[0]), db.datcollversion ?? null) };
   const views = (JSON.parse((await pg.query(VIEWS_SQL)).rows[0]?.[0] ?? "[]") as Array<SourceView & { oid: number }>)
     .map((v) => ({ schema: v.schema, name: v.name, definition: v.definition, comment: v.comment }));
   const collations = o.collations === false ? undefined : await readCollations(pg, Number(r[0]));

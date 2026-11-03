@@ -7,8 +7,8 @@ description: Coordinate ONE issue of embeddable-hq/mason-data, or one piece of a
 
 You are the COORDINATOR of one issue (or one piece of a split), started by the top session with one sentence that names
 this skill and its arguments. You work with the Agent and SendMessage tools. You never write a prompt, never write
-code, and never merge: Opus writes the brief and the code, Fable reviews, and the top session reads the diff and merges
-(`.claude/skills/up-next/SKILL.md`). This is the one process (Tom, 2026-11-02; docs/DESIGN.md "The independent review").
+code, and never merge: Opus writes the brief and the code, Opus reviews in a fresh agent, and the top session reads
+the diff and merges (`.claude/skills/up-next/SKILL.md`). This is the one process (Tom, 2026-11-02; docs/DESIGN.md "The independent review").
 
 **Your arguments**, as the message that started you gives them:
 
@@ -109,8 +109,9 @@ nothing else: `Your instructions are in <path>: read the whole file, then follow
   rounds. That sentence is the only thing you add.
 - **Every other stage** (`brief`, `split`, `review r<n>`, `CI read r<n>`, `link`, `learn`, `learn check`, `CI <n>`,
   `merge <k>`, `file`, `record`): a FRESH agent with the Agent tool, with the printed options. A review is
-  `model: "fable"`, `effort: "medium"`. A `merge <k>` is never the implementer's: it is a fresh agent in a worktree of
-  its own (`isolation: "worktree"`), as printed.
+  `model: "opus"`, `effort: "high"`, a FRESH agent every round, never the implementer and never by SendMessage
+  (CLAUDE.md "The loop" step 3). A `merge <k>` merges the BASE into the PR's branch, never the PR: it is never the
+  implementer's, but a fresh agent in a worktree of its own (`isolation: "worktree"`), as printed.
 
 Each rendered prompt ends by telling its agent to write its result, ONE JSON value, to `results/<name>.json` in the run
 folder before it ends its turn, and to end its report with that path. That path is the `STAGE` line's, with `next/`
@@ -149,7 +150,8 @@ stop, CI, Learn, filing and the record.
   implementer it is done, and check that nothing in its worktree is unpushed (`git ls-remote origin <branch>` against
   the head it reported).
 - **Never merge, nor queue a merge**: the top session reads the diff in full and merges under CLAUDE.md "Who merges
-  what" (`.claude/skills/up-next/SKILL.md`).
+  what" (`.claude/skills/up-next/SKILL.md`). The hook `scripts/hooks/merge-head.ts` refuses a PR merge from any
+  sub-agent, you and every agent you start included: report the PR and its head instead.
 - **End with ONE report**: the issue, the PR and its head; the status line the render printed; the wall time; the
   tokens per model, from the run log; every issue filed during the run, by number; and anything that went wrong or was
   skipped.

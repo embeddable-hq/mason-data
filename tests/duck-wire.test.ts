@@ -38,7 +38,8 @@ import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
-import { DEEP_DEPTHS, PLAN_TIME_BOUND_MS, deepChains, deepShapes, numericShapes } from "./deep-chains.ts";
+import { mayOrderText } from "../src/api/postgres/translate.ts";
+import { DEEP_DEPTHS, deepChains, deepShapes, numericShapes, planTimeBound } from "./deep-chains.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -131,6 +132,10 @@ const DDL = [
   // quotients equal to a double's 17 digits that Postgres tells apart (PR 207's class round)
   "CREATE TABLE public.bigdec (id INTEGER PRIMARY KEY, x DECIMAL(30,20), y DECIMAL(30,20))",
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
+  // issue 214: an unconstrained numeric and a numeric(65,30), held as the copy holds them, DECIMAL(38, the scale their
+  // values use) (src/duck/sync.ts "A NUMERIC THE EXTENSION WOULD READ AS A DOUBLE"), a w of 30 integer digits
+  "CREATE TABLE public.pnum (id INTEGER PRIMARY KEY, u DECIMAL(38,4), w DECIMAL(38,2))",
+  "INSERT INTO public.pnum VALUES (1, 1.2345, 19.99), (2, 7, 123456789012345678901234567890.25), (3, -0.5, 5), (4, NULL, NULL)",
   // issue 244's deep chains executed (#484): `deepShapes`' table, ten rows of NULLs, duplicates, ties, a padded char(4)
   "CREATE TABLE public.deep_t (id INTEGER PRIMARY KEY, a INTEGER, b VARCHAR, c DECIMAL(10,2), d VARCHAR)",
   "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab  '), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a   '), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz  '), " +
@@ -211,6 +216,8 @@ const PG_DDL = [
   "CREATE TABLE public.big AS SELECT g AS id, 'v' || g AS v FROM generate_series(0, 149999) g",
   "CREATE TABLE public.bigdec (id integer PRIMARY KEY, x numeric(30,20), y numeric(30,20))",
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
+  "CREATE TABLE public.pnum (id integer PRIMARY KEY, u numeric, w numeric(65,30))",
+  "INSERT INTO public.pnum VALUES (1, 1.2345, 19.99), (2, 7, 123456789012345678901234567890.25), (3, -0.5, 5), (4, NULL, NULL)",
   "CREATE TABLE public.deep_t (id integer PRIMARY KEY, a integer, b text, c numeric(10,2), d char(4))",
   "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab'), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a'), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz'), " +
     "(6, 2, 'y', NULL, 'b'), (7, 9, 'x', 1.01, 'ab'), (8, -1, 'w', 3.33, 'c'), (9, 4, NULL, 2.50, 'd'), (10, 1, 'v', -0.01, 'e')",
@@ -289,6 +296,8 @@ const schema: PgSchema = {
     { name: "big", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "text" }] },
     { name: "bigdec", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "x", type: "numeric", spelled: "numeric(30,20)" }, { name: "y", type: "numeric", spelled: "numeric(30,20)" }] },
+    { name: "pnum", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric" }, { name: "w", type: "numeric", spelled: "numeric(65,30)" }] },
     { name: "deep_t", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "a", type: "int4" }, { name: "b", type: "text" }, { name: "c", type: "numeric", spelled: "numeric(10,2)" }, { name: "d", type: "text", spelled: "character(4)" }] },
     { name: "ratios", primaryKey: ["id"], joins: [],
@@ -496,7 +505,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -3922,6 +3931,80 @@ test("a numeric quotient passed through a DISTINCT shows Postgres's exact text (
   } finally { await c.end(); }
 });
 
+test("issue 214: a numeric parameter beside a value the engine holds exactly is compared exactly, natively where its type holds it", async () => {
+  const c = await client();
+  try {
+    const x = "SELECT b.id FROM bigdec b WHERE";
+    const shapes: Array<[string, Array<Array<string | null>>]> = [
+      [`${x} b.x = $1 ORDER BY 1`, [["1.00000000000000000001"], ["1.00000000000000000002"], ["1.000000000000000000015"], ["1.000000000000000000014"], ["-1.000000000000000000015"],
+        ["0.000000000000000000001"], ["2.5"], ["2.50000000000000000000000"], ["12345678901.5"], ["99999999999999999999999999999999999999999.5"], ["NaN"], ["Infinity"], ["-Infinity"], [null]]],
+      ["SELECT b.id, b.x = $1, b.x <> $1, b.x IS DISTINCT FROM $1, b.x IS NOT DISTINCT FROM $1, nullif(b.x, $1), CASE b.x WHEN $1 THEN 'hit' ELSE 'miss' END FROM bigdec b ORDER BY 1",
+        [["1.00000000000000000001"], ["1.000000000000000000015"], [null], ["NaN"]]],
+      [`${x} $1 = b.x ORDER BY 1`, [["1.00000000000000000001"]]],
+      [`${x} $1 < b.x ORDER BY 1`, [["1.000000000000000000015"]]],
+      [`${x} b.x < $1 ORDER BY 1`, [["1.000000000000000000015"], ["1.00000000000000000002"], ["NaN"], ["Infinity"], ["-Infinity"], ["-99999999999999999999999999999999999999999"], ["99999999999999999999999999999999999999999"]]],
+      [`${x} b.x <= $1 ORDER BY 1`, [["1.000000000000000000015"], ["1.00000000000000000002"], ["1.000000000000000000019"]]],
+      [`${x} b.x > $1 ORDER BY 1`, [["1.000000000000000000015"], ["1.00000000000000000001"], ["NaN"], ["-Infinity"]]],
+      [`${x} b.x >= $1 ORDER BY 1`, [["1.000000000000000000011"], ["2.5"]]],
+      [`${x} b.x BETWEEN $1 AND $2 ORDER BY 1`, [["1.000000000000000000005", "1.000000000000000000015"], ["1.00000000000000000001", "1.00000000000000000002"], ["1", null]]],
+      [`${x} b.x NOT BETWEEN $1 AND $2 ORDER BY 1`, [["1.000000000000000000005", "1.000000000000000000015"]]],
+      [`${x} b.x IN ($1, $2) ORDER BY 1`, [["1.00000000000000000001", "5"], ["1.000000000000000000015", "2.5"], [null, "5"]]],
+      [`${x} b.x NOT IN ($1, $2) ORDER BY 1`, [["1.00000000000000000001", "5"], ["1.000000000000000000015", "2.5"]]],
+      [`${x} b.x IN ($1, 5) ORDER BY 1`, [["1.00000000000000000001"]]],
+      [`${x} b.x = $1::numeric(30,20) ORDER BY 1`, [["1.000000000000000000015"]]],
+      [`${x} b.x < $1::numeric(30,20) ORDER BY 1`, [["1.000000000000000000015"]]],
+      [`${x} b.x = $1::numeric ORDER BY 1`, [["1.000000000000000000015"], ["1.00000000000000000001"]]],
+      [`${x} b.x * 2 = $1 ORDER BY 1`, [["2.00000000000000000002"]]],
+      [`${x} b.x + b.y > $1 ORDER BY 1`, [["2.000000000000000000015"]]],
+      ["SELECT b.y, sum(b.x) FROM bigdec b GROUP BY b.y HAVING sum(b.x) = $1 ORDER BY 1", [["4.50000000000000000003"], ["4.50000000000000000002"]]],
+      [`${x} b.id = $1::numeric ORDER BY 1`, [["1.00000000000000000001"], ["1"]]],
+      [`${x} b.id < $1::numeric ORDER BY 1`, [["2.99999999999999999999"], ["3"], ["99999999999999999999"]]],
+      [`${x} b.x / 1 = $1 ORDER BY 1`, [["1.00000000000000000001"]]],
+      ["SELECT o.id FROM orders o WHERE o.amount = $1 ORDER BY 1", [["42.001"], ["42.00"], ["42"]]],
+      ["SELECT o.id FROM orders o WHERE o.amount BETWEEN $1 AND $2 ORDER BY 1", [["41.995", "42.005"]]],
+      ["SELECT p.id FROM pnum p WHERE p.u = $1 ORDER BY 1", [["1.2345"], ["1.23450000000000000001"], ["7"]]],
+      ["SELECT p.id FROM pnum p WHERE p.w = $1 ORDER BY 1", [["19.99"], ["19.990000000000000000000000000001"], ["123456789012345678901234567890.25"]]],
+      ["SELECT p.id FROM pnum p WHERE p.w < $1 ORDER BY 1", [["19.995"], ["123456789012345678901234567890.251"]]],
+      ["SELECT p.id, p.w > $1, p.u >= $1 FROM pnum p ORDER BY 1", [["5"], ["5.000000000000000000000000000001"]]],
+    ];
+    for (const [sql, bindings] of shapes) {
+      for (const values of bindings) assert.deepEqual(await answer(c, sql, values), await postgres(sql, values), `${sql} bound ${JSON.stringify(values)}`);
+    }
+    // the issue's own: Postgres's rows, never the double's
+    const ids = async (sql: string, values: Array<string | null>): Promise<unknown[]> => (await answer(c, sql, values)).rows.map((r) => r[0]);
+    assert.deepEqual(await ids(`${x} b.x = $1 ORDER BY 1`, ["1.00000000000000000001"]), ["1"]);
+    assert.deepEqual(await ids(`${x} b.x <= $1 ORDER BY 1`, ["1.000000000000000000015"]), ["1"]);
+    assert.deepEqual(await ids(`${x} b.x = $1::numeric(30,20) ORDER BY 1`, ["1.000000000000000000015"]), ["2"]);
+    // = ANY of a numeric[] parameter: Postgres's rows, or an error — never the double's [1, 2, 4] (its element type is
+    // issue 583's: unchanged here)
+    const any = `${x} b.x = ANY($1::numeric[]) ORDER BY 1`;
+    const anyAnswer = await answer(c, any, ["{1.00000000000000000001,5}"]).catch((e: unknown) => e as Error);
+    if (!(anyAnswer instanceof Error)) assert.deepEqual(anyAnswer, await postgres(any, ["{1.00000000000000000001,5}"]), any);
+    // one Parse's plan, several values (a prepared statement executed again)
+    const prepared = `${x} b.x = $1 ORDER BY 1`;
+    for (const [value, rows] of [["2.5", ["3", "5"]], ["1.000000000000000000015", []], ["1.00000000000000000001", ["1"]], [null, []]] as Array<[string | null, string[]]>) {
+      const r = await c.query({ name: "issue214", text: prepared, values: [value], rowMode: "array", types: raw } as pg.QueryConfig);
+      assert.deepEqual(r.rows.map((row) => (row as unknown[])[0]), rows, `prepared, bound ${String(value)}`);
+    }
+    // the native case: the engine's own comparison, no exact key computed per row — each Mason call over constants only,
+    // folded by DuckDB once (the guard, and the keyed branch's parameter key it drops); a value the type does not hold is
+    // keyed row by row (150,000 rows: dozens of vectors)
+    const counts = async (): Promise<Map<string, number>> => new Map(await store.functionCalls());
+    const calledFor = async (sql: string, values: string[]): Promise<Array<[string, number]>> => {
+      const before = await counts();
+      assert.deepEqual(await answer(c, sql, values), await postgres(sql, values), `${sql} bound ${JSON.stringify(values)}`);
+      return [...await counts()].map(([k, v]): [string, number] => [k, v - (before.get(k) ?? 0)]).filter(([, n]) => n > 0);
+    };
+    for (const [sql, values] of [["SELECT count(*) FROM big WHERE id < $1::numeric", ["100"]], ["SELECT count(*) FROM big WHERE id::numeric = $1", ["99999"]],
+      [`${x} b.x = $1 ORDER BY 1`, ["2.5"]], [`${x} b.x BETWEEN $1 AND $2 ORDER BY 1`, ["1", "2.5"]]] as Array<[string, string[]]>) {
+      const called = await calledFor(sql, values);
+      assert.ok(called.some(([k]) => k === "__mason_numeric_fits") && called.every(([, n]) => n <= values.length), `${sql}: ${JSON.stringify(called)}`);
+    }
+    const keyed = await calledFor("SELECT count(*) FROM big WHERE id < $1::numeric", ["100.5"]);
+    assert.ok(keyed.some(([k, n]) => k === "__mason_numeric_order" && n > 10), `a value an integer does not hold is keyed row by row: ${JSON.stringify(keyed)}`);
+  } finally { await c.end(); }
+});
+
 test("a numeric quotient is compared by its exact value wherever it is equated (PR 207's class round, C1-C8)", async () => {
   const c = await client();
   try {
@@ -5909,7 +5992,8 @@ test("issue 484: a numeric's program shared by its references is executed at dep
   };
   try {
     // THE BOUND: the integer forms of `deepShapes` at depth 32 executed here (the review's deep variant form, which no
-    // program reads), and the numeric ones within max(2 x PLAN_TIME_BOUND_MS, 2 x the slower integer form's time). Each
+    // program reads), and the numeric ones within max(2 x the shape's planning-time bound, 2 x the slower integer form's
+    // time): `planTimeBound`, its cost curve's, since an answer's time includes its plan's (issue 569). Each
     // statement once, so none is answered from what an earlier one left; the session and the table warmed first
     await answer(c, "SELECT count(*) FROM deep_t");
     const integer = deepShapes(32);
@@ -5921,7 +6005,7 @@ test("issue 484: a numeric's program shared by its references is executed at dep
       t.diagnostic(`${shape} (integers) at depth 32: ${ms.toFixed(0)} ms`);
       integerMs = Math.max(integerMs, ms);
     }
-    const bound = Math.max(2 * PLAN_TIME_BOUND_MS, 2 * integerMs);
+    const boundOf = (shape: string): number => Math.max(2 * planTimeBound(shape), 2 * integerMs);
     const arm = "SELECT a, d FROM deep_t";
     const shallow = (depth: number): Record<keyof ReturnType<typeof shapes>, string> => ({
       "c + c - c": "SELECT c FROM deep_t ORDER BY 1",
@@ -5936,8 +6020,8 @@ test("issue 484: a numeric's program shared by its references is executed at dep
       const started = performance.now();
       const got = await answer(c, over(sql));
       const ms = performance.now() - started;
-      t.diagnostic(`${shape} at depth ${depth}: ${ms.toFixed(0)} ms (bound ${bound.toFixed(0)} ms, the integer forms ${integerMs.toFixed(0)} ms)`);
-      assert.ok(ms < bound, `${shape}: answered in ${ms.toFixed(0)} ms at depth ${depth}, past the bound of ${bound.toFixed(0)} ms (the integer forms ${integerMs.toFixed(0)} ms)`);
+      t.diagnostic(`${shape} at depth ${depth}: ${ms.toFixed(0)} ms (bound ${boundOf(shape).toFixed(0)} ms, the integer forms ${integerMs.toFixed(0)} ms)`);
+      assert.ok(ms < boundOf(shape), `${shape}: answered in ${ms.toFixed(0)} ms at depth ${depth}, past the bound of ${boundOf(shape).toFixed(0)} ms (the integer forms ${integerMs.toFixed(0)} ms)`);
       assert.deepEqual(got, await postgres(shallow(depth)[shape]), `${shape} at depth ${depth}`);
     }
     // depth 4: Postgres answers each itself
@@ -6956,6 +7040,141 @@ test("collation resolver: refuses what it cannot follow by name, and a collation
     // unused for an order, an ICU keyword is no refusal: equality is the C key
     assert.deepEqual(await answer(c, "SELECT id FROM colls WHERE d = 'b' COLLATE mason_num"), { fields: [["id", 23]], rows: [["6"]] });
   } finally { await c.end(); await a.close(); }
+});
+
+// ISSUE 406: upper, lower and initcap map case under THEIR input collation (Postgres's analysis says which), as that
+// collation's ctype says (src/duck/collation.ts caseOf), never the database's by default; a statement of no table that
+// calls one is the synced data's, never the catalog's own mapping. Every answer here is Postgres 18's (postgres:18), never
+// the unit world's PGlite, whose mapping is its own
+const CASE_COLLATIONS = [
+  { schema: "pg_catalog", name: "tr-x-icu", provider: "i", collate: null, locale: "tr", deterministic: true },
+  { schema: "pg_catalog", name: "en_US", provider: "c", collate: "en_US.utf8", ctype: "en_US.utf8", locale: null, deterministic: true },
+  { schema: "pg_catalog", name: "tr_TR", provider: "c", collate: "tr_TR.utf8", ctype: "tr_TR.utf8", locale: null, deterministic: true },
+  { schema: "pg_catalog", name: "pg_c_utf8", provider: "b", collate: null, locale: "C.UTF-8", deterministic: true },
+  { schema: "pg_catalog", name: "pg_unicode_fast", provider: "b", collate: null, locale: "PG_UNICODE_FAST", deterministic: true },
+  { schema: "public", name: "mason_num", provider: "i", collate: null, locale: "und-u-kn", deterministic: true },
+];
+test("issue 406: upper, lower and initcap map case under their input collation, and a statement of no table calling one is the synced data's", async () => {
+  // no table, the database's en_US: glibc keeps ß, the catalog's own mapping made it ẞ
+  const plain = await client();
+  try {
+    assert.deepEqual((await answer(plain, "SELECT initcap('o''neil mcDONALD-smith'), upper('ß'), lower('İ')")).rows, [["O'Neil Mcdonald-Smith", "ß", "i"]]);
+    assert.deepEqual((await answer(plain, "SELECT upper('abc'), lower('ABC'), initcap('abc def')")).rows, [["ABC", "abc", "Abc Def"]]);
+    assert.deepEqual((await answer(plain, "SELECT initcap(x), upper(x), lower(x) FROM (VALUES ('ǆemal'), ('o''hara'), ('ΟΔΟΣ'), ('ß'), (NULL)) AS v(x)")).rows,
+      [["Ǆemal", "ǄEMAL", "ǆemal"], ["O'Hara", "O'HARA", "o'hara"], ["Οδοσ", "ΟΔΟΣ", "οδοσ"], ["ß", "ß", "ß"], [null, null, null]]);
+  } finally { await plain.end(); }
+  const listener = await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] });
+  const { api: a, c } = await collsApi(listener, CASE_COLLATIONS);
+  try {
+    for (const [sql, rows] of [
+      // a column's own collation: ICU's full mapping and titlecasing, C's ASCII letters, the database's glibc
+      ["SELECT upper(i || 'ß'), lower(i || 'İ'), initcap(i || 'o''hara ǆemal') FROM colls WHERE id = 1", [["SS", "i̇", "O'hara ǅemal"]]],
+      ["SELECT upper(c || 'é'), lower(c || 'É'), initcap(c || 'élan x2y') FROM colls WHERE id = 1", [["é", "É", "éLan X2y"]]],
+      ["SELECT upper(d || 'ß'), lower(d || 'İ'), initcap(d || 'o''hara ǆemal') FROM colls WHERE id = 1", [["ß", "i", "O'Hara Ǆemal"]]],
+      // a COLLATE on the argument, never on the result
+      ["SELECT upper(d COLLATE \"tr-x-icu\" || 'i'), lower('I' COLLATE \"tr-x-icu\"), initcap('istanbul' COLLATE \"tr-x-icu\") FROM colls WHERE id = 1", [["İ", "ı", "İstanbul"]]],
+      ["SELECT upper(d || 'é') COLLATE \"C\", upper((d || 'é') COLLATE \"C\") FROM colls WHERE id = 1", [["É", "é"]]],
+      ["SELECT upper('ß' COLLATE pg_unicode_fast), upper('ß' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_unicode_fast) FROM colls WHERE id = 1", [["SS", "ß", "Ǆa ßb", "ǅa Ssb"]]],
+      // an ICU keyword Mason cannot ORDER by maps case as its language does
+      ["SELECT upper(d COLLATE mason_num || 'ß') FROM colls WHERE id = 1", [["SS"]]],
+      // no table, under a COLLATE
+      ["SELECT upper('ß' COLLATE \"und-x-icu\"), lower('İ' COLLATE \"und-x-icu\"), initcap('o''hara' COLLATE \"und-x-icu\"), upper('é' COLLATE \"C\")", [["SS", "i̇", "O'hara", "é"]]],
+    ] as const) assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+    // two implicit collations: Postgres's 42P22, for the function
+    await assert.rejects(c.query("SELECT upper(CASE WHEN id > 3 THEN i ELSE c END) FROM colls"),
+      (e: pg.DatabaseError) => e.code === "42P22" && e.message === "could not determine which collation to use for upper() function");
+    // a Turkish libc ctype: refused by name, its equality still answered
+    await assert.rejects(c.query("SELECT upper(d COLLATE \"tr_TR\") FROM colls"),
+      (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap case-mapping-unknown/.test(e.detail ?? "") && /tr_TR/.test(e.message) && /COLLATE "C"/.test(e.hint ?? ""));
+    assert.deepEqual((await answer(c, "SELECT id FROM colls WHERE d = 'b' COLLATE \"tr_TR\"")).rows, [["6"]]);
+    // the ORDER refusal of an ICU keyword stays
+    await assert.rejects(c.query("SELECT id FROM colls ORDER BY upper(d COLLATE mason_num)"), (e: pg.DatabaseError) => e.code === "0A000" && /mason_num/.test(e.message));
+  } finally { await c.end(); await a.close(); }
+
+  // THE SQL SENT: the database's glibc maps by the engine's own upper (ß kept) and lower, never a function a row; another
+  // collation's mapping is the function's, told its mapping
+  const catalogDb = new PGlite({ extensions: { citext } });
+  try {
+    for (const s of catalogDdl({ ...schema, tables: [...schema.tables, collsTable], collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] })) await catalogDb.exec(s);
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
+    const sent = async (sql: string, collations = listener.collations) => (await planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations, verified: null })).sql.text;
+    const native = await sent("SELECT upper(d), lower(d) FROM colls");
+    assert.match(native, /replace\(upper\(replace\(/, native);
+    assert.match(native, /lower\(/, native);
+    assert.doesNotMatch(native, /__mason_/, native);
+    assert.match(await sent("SELECT upper(i) FROM colls"), /__mason_case\(.*, true, 'icu:und'\)/);
+    assert.match(await sent("SELECT upper(d COLLATE \"C\") FROM colls"), /__mason_case\(.*'ascii'\)/);
+    assert.match(await sent("SELECT lower(d COLLATE \"tr-x-icu\") FROM colls"), /__mason_case\(.*false, 'icu:tr'\)/);
+    assert.match(await sent("SELECT initcap(d) FROM colls"), /__mason_initcap\(.*'libc'\)/);
+    assert.match(await sent("SELECT initcap(i) FROM colls"), /__mason_initcap\(.*'icu:und'\)/);
+    // the database's case mapping is its CTYPE's: datcollate C with datctype en_US maps as en_US, en_US with C ASCII only
+    const cOrder = await store.listener({ provider: "c", collate: "C", ctype: "en_US.UTF-8", locale: null }, undefined, undefined, () => copies, undefined, { collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] });
+    assert.doesNotMatch(await sent("SELECT upper(d) FROM colls", cOrder.collations), /__mason_/);
+    const cCtype = await store.listener({ provider: "c", collate: "en_US.utf8", ctype: "C", locale: null }, undefined,
+      handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" "], { collate: "en_US.utf8" }), () => copies, undefined, { collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] });
+    assert.match(await sent("SELECT upper(d) FROM colls", cCtype.collations), /__mason_case\(.*'ascii'\)/);
+    // an ICU database: its locale's
+    const icu = await store.listener({ provider: "i", collate: "und", ctype: "und", locale: "und" }, undefined, undefined, () => copies, undefined, { collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] });
+    assert.match(await sent("SELECT upper(d) FROM colls", icu.collations), /__mason_case\(.*'icu:und'\)/);
+  } finally { await catalogDb.close(); }
+
+  // NO TABLE: the raw tree may hold a case function, and the analysis says it does ("case"); a numeric, a date, a time or
+  // a json keeps it the catalog's (a listed difference, Mason gap fromless-numeric-text-order)
+  const catalog = (b: Uint8Array): Promise<Uint8Array> => truth.execProtocolRaw(b);
+  const under = { searchPath: "public", timeZone: "UTC", dateStyle: "ISO, MDY" } as Parameters<NonNullable<typeof listener.ordersText>>[3];
+  for (const [sql, verdict] of [["SELECT upper('ß')", "case"], ["SELECT initcap('a b'), lower('X')", "case"], ["SELECT 'a' = 'A', version() IS NOT NULL", null],
+    ["SELECT upper('ß'), 1.5", null], ["SELECT lower('now')::timestamptz IS NOT NULL", null], ["SELECT upper(x) FROM (VALUES ('ß'), ('b')) v(x) ORDER BY 1", "case"],
+    // a value of the server or the session, which the synced data answers with ITS OWN, whatever its allowlist says (a run
+    // that succeeds says nothing of it: review r2 of PR 568, fromless-case-route-run-success-read-as-sameness): a session
+    // keyword, and a function Postgres does not call immutable (version() and format_type() are stable, the analysis
+    // resolving pg_catalog's), keep it the catalog's; an immutable function and an operator move
+    ["SELECT upper(version()) LIKE 'POSTGRES%'", null], ["SELECT lower(version()) LIKE 'postgresql %'", null], ["SELECT initcap(version()) LIKE 'Postgresql%'", null],
+    ["SELECT position('postgres' IN lower(version())) > 0", null], ["SELECT upper(substr(version(), 1, 10))", null], ["SELECT upper(split_part(version(), ' ', 1))", null],
+    ["SELECT count(*) FROM (SELECT upper(version()) AS v) s WHERE v LIKE 'POSTGRES%'", null], ["SELECT upper(format_type(23, NULL))", null],
+    ["SELECT lower(current_user)", null], ["SELECT upper(user), lower(session_user)", null], ["SELECT lower(current_catalog)", null], ["SELECT lower(current_database())", null],
+    ["SELECT upper(current_setting('TimeZone'))", null], ["SELECT upper(md5('a')), lower('A' || 'ß')", "case"], ["SELECT upper(substr('abc', 1, 2))", "case"]] as const) {
+    assert.equal(mayOrderText((await parseSql(sql)).stmts![0]!.stmt) ? await listener.ordersText!(catalog, sql, [], under, true) : null, verdict, sql);
+  }
+  // ...and is the synced data's only where the synced data's RUN answers it, never its plan alone (review r1 of PR 568,
+  // fromless-case-route-plan-not-run): what the rewrite leaves as written and the engine fails on (a pg_catalog-qualified
+  // name, a typed literal of a type the engine lacks, an empty select list), and a session's value the synced data would
+  // answer with its own, are the catalog's, as before: never the engine's error, never `duckdb`. The same over a simple
+  // Query, a Parse (a named statement) and an EXPLAIN. `upper('ß')` beside each says who answered: ß the synced data's
+  // glibc, ẞ the catalog's own mapping
+  const wire = await client();
+  try {
+    for (const [sql, rows] of [
+      ["SELECT pg_catalog.lower('ABC')", [["abc"]]],
+      ["SELECT pg_catalog.upper('abc'), pg_catalog.length('abc')", [["ABC", "3"]]],
+      ["SELECT upper('abc'), pg_catalog.length('abc')", [["ABC", "3"]]],
+      ["SELECT upper(char 'abc')", [["ABC"]]],
+      ["SELECT upper(character 'abc'), initcap(char 'abc')", [["ABC", "Abc"]]],
+      ["SELECT upper(x) FROM (VALUES (char 'abc')) v(x)", [["ABC"]]],
+      ["SELECT upper('abc' COLLATE \"C\"), upper(n'abc')", [["ABC", "ABC"]]],
+      ["SELECT upper('abc'::unknown)", [["ABC"]]],
+      ["SELECT upper('abc') FROM (SELECT) s", [["ABC"]]],
+      ["SELECT (SELECT pg_catalog.upper(x) FROM (VALUES ('abc')) v(x)), upper('ß')", [["ABC", "ß"]]],
+      ["SELECT upper(version()) LIKE 'POSTGRES%', upper('ß')", [["t", "ẞ"]]],
+      ["SELECT lower(current_user) = current_user::text, upper('ß')", [["t", "ẞ"]]],
+      // what the synced data answers stays its own
+      ["SELECT upper('ß'), lower('İ'), initcap('o''neil mcDONALD-smith')", [["ß", "i", "O'Neil Mcdonald-Smith"]]],
+    ] as const) {
+      assert.deepEqual((await answer(wire, sql)).rows, rows, sql);
+      const named = (await wire.query({ name: `p406_${rows.length}_${sql.length}`, text: sql, rowMode: "array", types: raw } as pg.QueryConfig)).rows;
+      assert.deepEqual(named, rows, `a Parse of ${sql}`);
+      assert.ok((await answer(wire, `EXPLAIN ${sql}`)).rows.length > 0, `EXPLAIN ${sql}`);
+    }
+    // a parameter has no value before its Bind: the catalog's, as before (the listed difference)
+    assert.deepEqual((await answer(wire, "SELECT upper($1::text)", ["abc"])).rows, [["ABC"]]);
+    // the statement's timeout during that run is its answer, never a reason to run it again on the catalog
+    await wire.query("SET statement_timeout = 300");
+    const t = Date.now();
+    await assert.rejects(wire.query("SELECT count(upper(x::text)) FROM generate_series(1, 2000000000) x"),
+      (e: pg.DatabaseError) => e.code === "57014" && e.message === "canceling statement due to statement timeout");
+    assert.ok(Date.now() - t < 5000, `stopped after ${Date.now() - t} ms`);
+    await wire.query("SET statement_timeout = 0");
+  } finally { await wire.end(); }
 });
 
 test("collation resolver: two libc collations in one session, each by its own order, the second read once on its first use", async () => {
