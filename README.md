@@ -583,7 +583,7 @@ always tells you what to run next. `mason help agent` is the page an agent shoul
 | [`cli/README.md`](cli/README.md) | every command and option of `mason` |
 | [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) | the Postgres API: how a tool connects, which SQL is answered, and what is refused |
 | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | what you can see about a running Mason: each command, its endpoint and its JSON |
-| [`docs/HOSTED-API.md`](docs/HOSTED-API.md) | the API `mason login`, `mason logout` and `mason deploy` speak to a hosted Mason service, and where the login is kept |
+| [`docs/HOSTED-API.md`](docs/HOSTED-API.md) | the API `mason login`, `mason logout`, `mason deploy` and `mason user --replica` speak to a hosted Mason service, and where the login is kept |
 | [`docs/WEB-UI.md`](docs/WEB-UI.md) | the web page (`mason ui`): its pages, how access to it is protected, and how to extend it |
 | [`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) | what is verified to answer exactly as Postgres does, and what is not (generated from the code) |
 | [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) | when Mason is faster than a Postgres read replica: every measurement and how it was taken (generated from the benchmark results) |
