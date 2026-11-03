@@ -192,3 +192,13 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   without `::double precision`), and an unmapped engine error (`chr(2147483647)`): Postgres's DETAIL on one path only,
   the engine's words in the record (PR 202).
 - `stop()` while a run plans or a review checks: a spurious `generated_failed` at shutdown (PR 156).
+- A stored definition whose shared node sits only under a condition no row takes, the node raising in the engine:
+  `SELECT id, CASE WHEN id > 0 THEN amount ELSE x + x END AS v FROM (SELECT id, amount, amount * 1e30 * 1e30 AS x
+  FROM events) s` (`amount numeric(12,2)`), and the same under a COALESCE's later argument and with `round`, `trunc`,
+  a typmod cast or `mod` as the node: the table builds as Postgres answers, never `numeric field overflow` from a
+  layer column computed for every row (`shared-node-hoisted-out-of-its-condition`, PR 520).
+- A stored definition nested n levels deep, each level bounded so Postgres keeps it (`SELECT id, CASE WHEN id > 0 THEN
+  v + v - v ELSE v - v + v END AS v FROM (<level below>) s ORDER BY id LIMIT 100`, the bottom `SELECT id, amount AS v
+  FROM events`), at n = 7, 8 and 16 at the head and the base: the layers stay the shared nodes' count, and no depth the
+  base built meets the engine's expression-depth limit or a stack overflow at the head
+  (`guard-layers-multiply-the-nesting`, PR 520).
