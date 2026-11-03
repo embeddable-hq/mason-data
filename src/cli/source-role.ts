@@ -4,11 +4,21 @@
  * write either: one that can lets a Mason bug, or a stolen URL, change production. Said as WARNINGS, never a refusal:
  * a start goes on, and the way out is the statements that make a role that only reads.
  *
- * ONE catalog read (`ROLE_FACTS_SQL`), no write ever attempted, and every privilege decided by Postgres itself:
+ * ONE catalog read (`roleFactsSql`), no write ever attempted, and every privilege decided by Postgres itself:
  * `has_table_privilege`, `has_any_column_privilege` (a column's INSERT, UPDATE or REFERENCES is a write too) and
- * `has_schema_privilege`, asked for the role and for every role it is a member of (`pg_has_role … 'MEMBER'`, the widest
- * membership: a role it may SET ROLE to without inheriting is counted too), and for PUBLIC, which every role holds; never
- * an ACL read by hand. A partitioned table's partitions are asked too: a partition can be written to directly.
+ * `has_schema_privilege`, asked for the role, for every role whose privileges it holds or may SET ROLE to
+ * (`pg_has_role … 'USAGE'` or `'SET'` from Postgres 16; `'MEMBER'` before, when any membership could SET ROLE), and for
+ * PUBLIC, which every role holds; never an ACL read by hand.
+ *
+ * A synced table's rows are written through other relations too, and each is asked (PR 572's review: an updatable view
+ * and an INHERITS child were said to "only read"): every descendant by `pg_inherits` at any depth (a partition, or a
+ * child, whose rows a SELECT on the parent reads), and every relation whose rules depend on one of them (`pg_rewrite`
+ * through `pg_depend`: a view over it, at any depth, or a rule that writes it), for the INSERT, UPDATE and DELETE that
+ * `pg_relation_is_updatable` says it takes (auto-updatable, an INSTEAD OF trigger or an INSTEAD rule). NOT asked: what
+ * a function writes (a trigger's, or a SECURITY DEFINER one's), whose body the catalog's dependencies do not record.
+ *
+ * The statement runs under `search_path = pg_catalog` (`SET LOCAL`, ending with it, as VIEWS_SQL does), so no function,
+ * operator or table of the role's own schemas can stand in for the catalog's.
  */
 import { pgLiteral, type PgConnection } from "../cdc/pg-wire.ts";
 import type { Check } from "./doctor.ts";
@@ -42,18 +52,23 @@ export interface RoleAsk {
 
 /** A role the connected one is, or is a member of. */
 export interface RoleFact { name: string; self: boolean; superuser: boolean; bypassrls: boolean }
-/** A synced table, or a partition of one, and who may write to it. */
+/** How a relation reaches a synced table's rows: it IS one, a partition or an INHERITS child of one (at any depth), a
+ *  view over one (at any depth), or another relation whose rules write one. */
+export type RelationKind = "table" | "partition" | "child" | "view" | "rule";
+/** A synced table, or a relation that writes its rows, and who may write to it. */
 export interface RelationFact {
   /** `schema.table`, and as SQL names it (quote_ident's) */
   name: string; sql: string;
-  /** a partition of a synced table (the entry it is under is `entry`) */
-  partition: boolean; entry: string;
+  /** how it reaches the synced table `entry` */
+  kind: RelationKind; entry: string;
   schemaSql: string;
   owner: string;
-  /** the owner is the role or one it is a member of */
+  /** a table, partition or child whose owner is the role or one it is a member of (a view's owner writes through it only
+   *  what the view's privileges say: those are asked) */
   owned: boolean;
   rowSecurity: boolean;
-  /** each role of `roles` (and PUBLIC) holding a write privilege on it, with those it holds; empty under a superuser */
+  /** each role of `roles` (and PUBLIC) holding a write privilege on it, with those it holds — of a view or a rule's
+   *  relation, only the INSERT, UPDATE and DELETE it takes; empty under a superuser */
   privileges: Array<{ role: string; privileges: string[] }>;
 }
 /** A schema a synced table is in. */
@@ -73,39 +88,52 @@ export interface RoleFacts {
 }
 
 /**
- * Everything the checks read, in ONE statement, for the tables `tables` names (a JSON list of {schema, table}).
- * A superuser holds every privilege: what else it holds is not asked.
+ * Everything the checks read, in ONE statement under the catalog's search_path, for the tables `tables` names (a JSON
+ * list of {schema, table}). A superuser holds every privilege: what else it holds is not asked.
  */
 export function roleFactsSql(tables: RoleAsk["tables"]): string {
   const want = pgLiteral(JSON.stringify(tables.map((t) => ({ schema: t.schema, table: t.table }))));
   const writes = WRITE_PRIVILEGES.map((p) => `'${p}'`).join(", ");
-  return `WITH me AS (SELECT oid, rolname, rolsuper FROM pg_roles WHERE rolname = current_user),
+  return `SET LOCAL search_path = pg_catalog; WITH RECURSIVE me AS (SELECT oid, rolname, rolsuper FROM pg_roles WHERE rolname = current_user),
+-- the roles whose privileges it holds or that it may switch to (Postgres 16 split the two, before it any membership was both)
 r AS (SELECT p.oid, p.rolname, p.rolsuper, p.rolbypassrls, p.oid = me.oid AS self FROM pg_roles p, me
-  WHERE p.oid = me.oid OR (NOT me.rolsuper AND pg_has_role(me.oid, p.oid, 'MEMBER'))),
+  WHERE p.oid = me.oid OR (NOT me.rolsuper AND CASE WHEN current_setting('server_version_num')::int >= 160000
+    THEN pg_has_role(me.oid, p.oid, 'USAGE') OR pg_has_role(me.oid, p.oid, 'SET') ELSE pg_has_role(me.oid, p.oid, 'MEMBER') END)),
 su AS (SELECT EXISTS (SELECT FROM r WHERE rolsuper) AS any),
 want AS (SELECT w.schema, w."table" FROM json_to_recordset(${want}::json) AS w(schema text, "table" text)),
-rel AS (SELECT w.schema, w."table", c.oid, c.relkind FROM want w JOIN pg_namespace n ON n.nspname = w.schema
+rel AS (SELECT w.schema, w."table", c.oid FROM want w JOIN pg_namespace n ON n.nspname = w.schema
   JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = w."table" AND c.relkind IN ('r', 'p')),
-part AS (SELECT schema || '.' || "table" AS entry, oid, false AS partition FROM rel
-  UNION SELECT rel.schema || '.' || rel."table", pt.relid, true FROM rel CROSS JOIN LATERAL pg_partition_tree(rel.oid) pt WHERE rel.relkind = 'p' AND pt.relid <> rel.oid),
+-- what writes a relation's rows: its inheritance children (partitions too), and a relation whose rules depend on it
+edge AS (SELECT inhparent AS src, inhrelid AS dst, 1 AS via FROM pg_inherits
+  UNION ALL SELECT d.refobjid, rw.ev_class, 2 FROM pg_depend d JOIN pg_rewrite rw ON rw.oid = d.objid
+    WHERE d.classid = 'pg_rewrite'::regclass AND d.refclassid = 'pg_class'::regclass AND rw.ev_class <> d.refobjid),
+-- each synced table, and every relation that reaches its rows, at any depth: UNION stops at what it has seen
+reach AS (SELECT schema || '.' || "table" AS entry, oid, 0 AS via FROM rel
+  UNION SELECT x.entry, e.dst, e.via FROM reach x JOIN edge e ON e.src = x.oid),
+route AS (SELECT DISTINCT ON (x.entry, x.oid) x.entry, x.oid, c.relkind,
+    CASE WHEN x.via = 0 THEN 'table' WHEN x.via = 1 AND c.relispartition THEN 'partition' WHEN x.via = 1 THEN 'child' WHEN c.relkind = 'v' THEN 'view' ELSE 'rule' END AS kind,
+    x.via, CASE WHEN x.via = 2 THEN pg_relation_is_updatable(x.oid, true) ELSE 0 END AS updatable
+  FROM reach x JOIN pg_class c ON c.oid = x.oid ORDER BY x.entry, x.oid, x.via),
 who AS (SELECT rolname AS role, CASE WHEN self THEN 0 ELSE 1 END AS ord FROM r UNION ALL SELECT 'public', 2)
 SELECT json_build_object(
   'user', me.rolname, 'user_sql', quote_ident(me.rolname), 'database_sql', quote_ident(current_database()),
   'roles', (SELECT json_agg(json_build_object('name', rolname, 'self', self, 'superuser', rolsuper, 'bypassrls', rolbypassrls) ORDER BY NOT self, rolname) FROM r),
   'relations', (SELECT coalesce(json_agg(json_build_object('name', n.nspname || '.' || c.relname, 'sql', quote_ident(n.nspname) || '.' || quote_ident(c.relname),
-      'partition', x.partition, 'entry', x.entry, 'schema_sql', quote_ident(n.nspname), 'owner', pg_get_userbyid(c.relowner),
-      'owned', c.relowner IN (SELECT oid FROM r), 'row_security', c.relrowsecurity,
+      'kind', x.kind, 'entry', x.entry, 'schema_sql', quote_ident(n.nspname), 'owner', pg_get_userbyid(c.relowner),
+      'owned', x.via < 2 AND c.relowner IN (SELECT oid FROM r), 'row_security', c.relrowsecurity,
       'privileges', CASE WHEN su.any THEN '[]'::json ELSE (SELECT coalesce(json_agg(json_build_object('role', CASE WHEN g.ord = 2 THEN 'PUBLIC' ELSE g.role END, 'privileges', g.privs) ORDER BY g.ord, g.role), '[]'::json)
         FROM (SELECT w.role, w.ord, (SELECT coalesce(array_agg(u.p ORDER BY u.o), '{}') FROM unnest(ARRAY[${writes}]) WITH ORDINALITY AS u(p, o)
+            -- through a view or a rule only what it takes (pg_relation_is_updatable: 4 UPDATE, 8 INSERT, 16 DELETE)
+            WHERE (x.via < 2 OR (u.p = 'UPDATE' AND x.updatable & 4 <> 0) OR (u.p = 'INSERT' AND x.updatable & 8 <> 0) OR (u.p = 'DELETE' AND x.updatable & 16 <> 0))
             -- a column's INSERT, UPDATE or REFERENCES writes too: has_any_column_privilege asks the table's and every column's
-            WHERE CASE WHEN u.p IN ('INSERT', 'UPDATE', 'REFERENCES') THEN has_any_column_privilege(w.role::name, c.oid, u.p) ELSE has_table_privilege(w.role::name, c.oid, u.p) END) AS privs
-          FROM who w) g WHERE cardinality(g.privs) > 0) END) ORDER BY x.partition, x.entry, n.nspname, c.relname), '[]'::json)
-    FROM part x JOIN pg_class c ON c.oid = x.oid JOIN pg_namespace n ON n.oid = c.relnamespace),
+              AND CASE WHEN u.p IN ('INSERT', 'UPDATE', 'REFERENCES') THEN has_any_column_privilege(w.role::name, c.oid, u.p) ELSE has_table_privilege(w.role::name, c.oid, u.p) END) AS privs
+          FROM who w) g WHERE cardinality(g.privs) > 0) END) ORDER BY x.via, x.entry, n.nspname, c.relname), '[]'::json)
+    FROM route x JOIN pg_class c ON c.oid = x.oid JOIN pg_namespace n ON n.oid = c.relnamespace),
   'schemas', (SELECT coalesce(json_agg(json_build_object('name', n.nspname, 'sql', quote_ident(n.nspname), 'owner', pg_get_userbyid(n.nspowner),
       'owned', n.nspowner IN (SELECT oid FROM r),
       'create', CASE WHEN su.any THEN '[]'::json ELSE (SELECT coalesce(json_agg(rr.rolname ORDER BY NOT rr.self, rr.rolname), '[]'::json) FROM r rr WHERE has_schema_privilege(rr.rolname, n.oid, 'CREATE')) END,
       'public_create', has_schema_privilege('public'::name, n.oid, 'CREATE')) ORDER BY n.nspname), '[]'::json)
-    FROM pg_namespace n WHERE n.oid IN (SELECT c.relnamespace FROM part JOIN pg_class c ON c.oid = part.oid)),
+    FROM pg_namespace n WHERE n.oid IN (SELECT c.relnamespace FROM route x JOIN pg_class c ON c.oid = x.oid WHERE x.via < 2)),
   'missing', (SELECT coalesce(json_agg(w.schema || '.' || w."table"), '[]'::json) FROM want w WHERE NOT EXISTS (SELECT FROM rel WHERE rel.schema = w.schema AND rel."table" = w."table")),
   'taken', (SELECT coalesce(json_agg(rolname ORDER BY rolname), '[]'::json) FROM pg_roles WHERE rolname LIKE '${READER_ROLE.replace(/_/g, "\\_")}%'),
   'rds_replication', EXISTS (SELECT FROM pg_roles WHERE rolname = 'rds_replication')
@@ -115,7 +143,7 @@ SELECT json_build_object(
 interface FactsRow {
   user: string; user_sql: string; database_sql: string;
   roles: Array<{ name: string; self: boolean; superuser: boolean; bypassrls: boolean }>;
-  relations: Array<{ name: string; sql: string; partition: boolean; entry: string; schema_sql: string; owner: string; owned: boolean; row_security: boolean; privileges: Array<{ role: string; privileges: string[] }> }>;
+  relations: Array<{ name: string; sql: string; kind: RelationKind; entry: string; schema_sql: string; owner: string; owned: boolean; row_security: boolean; privileges: Array<{ role: string; privileges: string[] }> }>;
   schemas: Array<{ name: string; sql: string; owner: string; owned: boolean; create: string[]; public_create: boolean }>;
   missing: string[]; taken: string[]; rds_replication: boolean;
 }
@@ -127,7 +155,7 @@ export async function readRoleFacts(pg: Pick<PgConnection, "query">, tables: Rol
   return {
     user: row.user, userSql: row.user_sql, databaseSql: row.database_sql,
     roles: row.roles,
-    relations: row.relations.map((x) => ({ name: x.name, sql: x.sql, partition: x.partition, entry: x.entry, schemaSql: x.schema_sql, owner: x.owner, owned: x.owned,
+    relations: row.relations.map((x) => ({ name: x.name, sql: x.sql, kind: x.kind, entry: x.entry, schemaSql: x.schema_sql, owner: x.owner, owned: x.owned,
       rowSecurity: x.row_security, privileges: x.privileges })),
     schemas: row.schemas.map((s) => ({ name: s.name, sql: s.sql, owner: s.owner, owned: s.owned, create: s.create, publicCreate: s.public_create })),
     missing: row.missing, taken: row.taken, rdsReplication: row.rds_replication,
@@ -141,6 +169,12 @@ function route(others: readonly string[]): string {
   const roles = others.filter((r) => r !== "PUBLIC");
   const parts = [...(roles.length ? [`through ${list(roles)}, which it is a member of`] : []), ...(others.includes("PUBLIC") ? ["granted to PUBLIC, which every role is"] : [])];
   return parts.length ? ` (${parts.join("; ")})` : "";
+}
+
+/** " (a partition of public.events)": how a relation that is not a synced table reaches one */
+function via(x: Pick<RelationFact, "kind" | "entry">): string {
+  return { table: "", partition: ` (a partition of ${x.entry})`, child: ` (a child of ${x.entry}, by INHERITS: its rows are ${x.entry}'s)`,
+    view: ` (a view that writes ${x.entry})`, rule: ` (its rules write ${x.entry})` }[x.kind];
 }
 
 const WHY = "Mason only reads, so a role that may write lets a Mason bug or a stolen URL change your database";
@@ -165,7 +199,7 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
   const owned = f.relations.filter((x) => x.owned);
   if (owned.length) {
     const others = [...new Set(owned.map((x) => x.owner).filter((o) => o !== f.user))];
-    out.push(warn("role_owns_table", `${f.user} owns ${list(owned.map((x) => x.partition ? `${x.name} (a partition of ${x.entry})` : x.name))}${route(others)}: ` +
+    out.push(warn("role_owns_table", `${f.user} owns ${list(owned.map((x) => `${x.name}${via(x)}`))}${route(others)}: ` +
       "an owner may write to, alter or drop a table whatever is granted"));
   }
   // an owner holds every privilege on its table: the owner's line said it
@@ -174,7 +208,7 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
     const held = writable.map((x) => {
       const privs = WRITE_PRIVILEGES.filter((p) => x.privileges.some((g) => g.privileges.includes(p)));
       const others = x.privileges.filter((g) => g.role !== f.user).map((g) => g.role);
-      return `${privs.join(", ")} on ${x.name}${x.partition ? ` (a partition of ${x.entry})` : ""}${route(others)}`;
+      return `${privs.join(", ")} on ${x.name}${via(x)}${route(others)}`;
     });
     out.push(warn("role_writes_table", `${f.user} may ${held.join("; ")}`));
   }
@@ -185,9 +219,10 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
   }
   if (out.length) return out;
   const unread = f.missing.length ? ` (not asked of ${list(f.missing)}, which the database does not have: mason start says so)` : "";
-  const synced = f.relations.filter((x) => !x.partition).length;
+  const synced = f.relations.filter((x) => x.kind === "table").length;
   return [{ name: "role", ok: true, detail: `${f.user} only reads: not a superuser, no BYPASSRLS, ` +
-    (synced ? `and it neither owns nor may write to the ${synced} synced table(s), nor CREATE in their schemas` : "and no table is added yet (the tables are asked once one is)") + unread }];
+    (synced ? `and it neither owns nor may write to the ${synced} synced table(s) — their partitions, inheritance children and the views and rules that write them ` +
+      "included — nor CREATE in their schemas (what a function it may call writes is not asked)" : "and no table is added yet (the tables are asked once one is)") + unread }];
 }
 
 /** The line a check is when the role could not be asked: said, never taken for "only reads". */
@@ -215,7 +250,7 @@ export function readerUrl(url: string, role: string): string {
 export function readOnlyFix(f: RoleFacts, ask: RoleAsk): string {
   let role: string = READER_ROLE;
   for (let n = 2; f.taken.includes(role); n++) role = `${READER_ROLE}${n}`;
-  const tables = f.relations.filter((x) => !x.partition);
+  const tables = f.relations.filter((x) => x.kind === "table");
   const schemas = [...new Set(tables.map((x) => x.schemaSql))];
   const replication = ask.replicated.length > 0;
   const replicating = replication && !f.rdsReplication;

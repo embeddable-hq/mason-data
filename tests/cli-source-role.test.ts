@@ -13,7 +13,7 @@ const doctorModule = () => import("../src/cli/doctor.ts");
 
 const rel = (name: string, o: Partial<RelationFact> = {}): RelationFact => {
   const [schema, table] = name.split(".") as [string, string];
-  return { name, sql: `${schema}.${/^[a-z_][a-z0-9_]*$/.test(table) ? table : `"${table}"`}`, partition: false, entry: name, schemaSql: schema, owner: "admin", owned: false, rowSecurity: false, privileges: [], ...o };
+  return { name, sql: `${schema}.${/^[a-z_][a-z0-9_]*$/.test(table) ? table : `"${table}"`}`, kind: "table", entry: name, schemaSql: schema, owner: "admin", owned: false, rowSecurity: false, privileges: [], ...o };
 };
 const facts = (o: Partial<RoleFacts> = {}): RoleFacts => ({
   user: "app", userSql: "app", databaseSql: "shop",
@@ -31,7 +31,8 @@ const ask = (o: Partial<RoleAsk> = {}): RoleAsk => ({
 test("a role that only reads: one line, ok, no code and no way out", async () => {
   const { roleChecks } = await roleModule();
   assert.deepEqual(roleChecks(facts(), ask()), [{ name: "role", ok: true,
-    detail: "app only reads: not a superuser, no BYPASSRLS, and it neither owns nor may write to the 2 synced table(s), nor CREATE in their schemas" }]);
+    detail: "app only reads: not a superuser, no BYPASSRLS, and it neither owns nor may write to the 2 synced table(s) — their partitions, inheritance children " +
+      "and the views and rules that write them included — nor CREATE in their schemas (what a function it may call writes is not asked)" }]);
   const none = roleChecks(facts({ relations: [], schemas: [], missing: ["public.gone"] }), ask());
   assert.equal(none.length, 1);
   assert.equal(none[0]!.ok, true);
@@ -56,7 +57,7 @@ test("BYPASSRLS, an owner, a write privilege and CREATE: a warning each, with it
     relations: [
       rel("public.orders", { owned: true, owner: "app" }),
       rel("billing.Invoices", { owned: true, owner: "writers", privileges: [{ role: "app", privileges: ["UPDATE", "INSERT"] }, { role: "writers", privileges: ["UPDATE"] }] }),
-      rel("public.events_2026", { partition: true, entry: "public.events", privileges: [{ role: "app", privileges: ["TRIGGER"] }, { role: "PUBLIC", privileges: ["TRIGGER"] }] }),
+      rel("public.events_2026", { kind: "partition", entry: "public.events", privileges: [{ role: "app", privileges: ["TRIGGER"] }, { role: "PUBLIC", privileges: ["TRIGGER"] }] }),
     ],
     schemas: [{ name: "billing", sql: "billing", owner: "writers", owned: true, create: ["app", "writers"], publicCreate: false },
       { name: "public", sql: "public", owner: "admin", owned: false, create: ["app"], publicCreate: true }],
@@ -84,9 +85,24 @@ test("BYPASSRLS, an owner, a write privilege and CREATE: a warning each, with it
   assert.equal(new Set(checks.map((c) => c.fix)).size, 1, "one way out, shared");
 });
 
+test("a write through another relation is named by its route: a partition, an INHERITS child, a view, a rule; the way out grants on the synced tables alone", async () => {
+  const { roleChecks, readOnlyFix } = await roleModule();
+  const f = facts({ relations: [rel("public.orders"), rel("billing.Invoices"),
+    rel("public.orders_2026", { kind: "child", entry: "public.orders", owned: true, owner: "app" }),
+    rel("public.orders_v", { kind: "view", entry: "public.orders", privileges: [{ role: "app", privileges: ["UPDATE"] }] }),
+    rel("public.orders_log", { kind: "rule", entry: "public.orders", privileges: [{ role: "PUBLIC", privileges: ["INSERT"] }] })] });
+  const checks = roleChecks(f, ask());
+  assert.deepEqual(checks.map((c) => c.code), ["role_owns_table", "role_writes_table"]);
+  assert.match(checks[0]!.detail, /^app owns public\.orders_2026 \(a child of public\.orders, by INHERITS: its rows are public\.orders's\): /);
+  assert.match(checks[1]!.detail, /^app may UPDATE on public\.orders_v \(a view that writes public\.orders\); INSERT on public\.orders_log \(its rules write public\.orders\) \(granted to PUBLIC, which every role is\)\. /);
+  const fix = readOnlyFix(f, ask());
+  assert.match(fix, /^GRANT SELECT ON public\.orders, billing\."Invoices" TO mason_reader;$/m, "SELECT on the synced tables, never on a route");
+  assert.match(fix, /^REVOKE INSERT ON public\.orders_log FROM PUBLIC;/m, "PUBLIC's write through a route is revoked too");
+});
+
 test("the way out: a role that may LOGIN and SELECT the synced tables alone, its URL in a variable of Mason's own", async () => {
   const { readOnlyFix } = await roleModule();
-  assert.equal(readOnlyFix(facts({ relations: [rel("public.orders", { rowSecurity: true }), rel("billing.Invoices"), rel("public.orders_1", { partition: true, entry: "public.orders" })] }), ask()), [
+  assert.equal(readOnlyFix(facts({ relations: [rel("public.orders", { rowSecurity: true }), rel("billing.Invoices"), rel("public.orders_1", { kind: "partition", entry: "public.orders" }), rel("public.orders_v", { kind: "view", entry: "public.orders" })] }), ask()), [
     "-- as the database's owner (on the primary):",
     "CREATE ROLE mason_reader LOGIN PASSWORD '<a new password>';",
     "GRANT CONNECT ON DATABASE shop TO mason_reader;",
@@ -125,14 +141,20 @@ test("the way out where a table streams: REPLICATION (rds_replication where that
   assert.doesNotMatch(readOnlyFix(facts(), ask()), /REPLICATION|PUBLICATION/, "polled tables need neither");
 });
 
-test("the catalog read is ONE statement that reads: no write, every name a literal, quotes doubled", async () => {
+test("the catalog read is ONE statement that reads, under the catalog's search_path: no write, every name a literal, quotes doubled", async () => {
   const { roleFactsSql } = await roleModule();
-  const sql = roleFactsSql([{ schema: "public", table: "o'brien" }, { schema: "My Schema", table: "Orders" }]);
-  assert.match(sql, /^WITH /);
-  assert.doesNotMatch(sql, /;/, "one statement");
+  const whole = roleFactsSql([{ schema: "public", table: "o'brien" }, { schema: "My Schema", table: "Orders" }]);
+  // the guard, as VIEWS_SQL's: no function, operator or table of the role's own schemas stands in for the catalog's
+  const GUARD = "SET LOCAL search_path = pg_catalog; ";
+  assert.ok(whole.startsWith(GUARD), whole.slice(0, 80));
+  const sql = whole.slice(GUARD.length);
+  assert.match(sql, /^WITH RECURSIVE /);
+  assert.doesNotMatch(sql, /;/, "one statement after the guard");
   assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|SET)\s+(INTO|ON|TABLE|ROLE|SCHEMA|PUBLICATION|LOCAL|\w+\s*\()/i, "no write or setting, only privilege names asked of has_*_privilege");
   assert.ok(sql.includes(`'[{"schema":"public","table":"o''brien"},{"schema":"My Schema","table":"Orders"}]'::json`), sql.slice(0, 400));
-  for (const fn of ["has_table_privilege", "has_any_column_privilege", "has_schema_privilege", "pg_has_role", "pg_partition_tree"]) assert.ok(sql.includes(fn), fn);
+  for (const fn of ["has_table_privilege", "has_any_column_privilege", "has_schema_privilege", "pg_has_role", "pg_inherits", "pg_rewrite", "pg_depend", "pg_relation_is_updatable"]) assert.ok(sql.includes(fn), fn);
+  // a membership counts where it gives the privileges or SET ROLE (Postgres 16's options), never merely by being one
+  assert.match(sql, /THEN pg_has_role\(me\.oid, p\.oid, 'USAGE'\) OR pg_has_role\(me\.oid, p\.oid, 'SET'\) ELSE pg_has_role\(me\.oid, p\.oid, 'MEMBER'\) END/);
   assert.doesNotMatch(sql, /relacl|nspacl|aclexplode/, "Postgres decides each privilege, never an ACL read by hand");
 });
 
