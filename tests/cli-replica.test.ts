@@ -6,60 +6,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { ANSWERS, envFor, fakeService, home, mason, newToken, runForms, runToken, SECRETS, showsRun, type Lines, type Reply, type Req } from "./hosted-fake.ts";
+import { ANSWERS, envFor, fakeService, home, newToken, runForms, runToken, SECRETS, showsRun, type Reply, type Req } from "./hosted-fake.ts";
 import { runMason, type Answer } from "./cli-matrix.ts";
+import { AT, created, hosted, ok, ONE, PASSWORD, project, REPLICAS, replicaOf, URL_ } from "./replica-fake.ts";
 import { checkLines, heldReplica, MIN_PASSWORD, urlPassword, wordless } from "../src/cli/replica-hosted.ts";
 import { carriesNoSecret } from "../src/cli/hosted.ts";
-
-const AT = "2026-11-02T10:00:00.000Z";
-/** The database's password: long enough (12) to be held by the exact test and the output's gate, as the token is. */
-const PASSWORD = "Zq8vLm2Xr7Tp";
-const URL_ = `postgres://app_reader:${PASSWORD}@db.example:5432/app`;
-const REPLICAS = "/v1/replicas/acme";
-const ONE = `${REPLICAS}/shop`;
-const replicaOf = (more: Record<string, unknown> = {}): Record<string, unknown> =>
-  ({ org: "acme", name: "shop", region: "eu", sizeGb: 50, hostId: "brisk-otter-4821", state: "ready", createdAt: AT, allowlist: [], pending: [], ...more });
-const CHECKS = [{ source: "app", outcome: "passed", checks: [{ name: "connects", status: "ok", detail: "Postgres 16 answers" },
-  { name: "the role", status: "warn", detail: "it may write to a synced table", fix: "a role that only reads" }], missing: [] }];
-const created = (more: Record<string, unknown> = {}): Reply => ({ status: 201, body: { replica: replicaOf(more), checks: CHECKS }, headers: { "retry-after": "1" } });
-const ok = (body: unknown, headers?: Record<string, string>): Reply => ({ status: 200, body, ...(headers ? { headers } : {}) });
-
-/** The lines mason replica begins (tests/hosted-fake.ts's rule, in its words); a list's row is begun by a replica's name. */
-const OWN_STEP = /^ {2}(mason login|mason doctor|mason replica (create|list|status)( \S+)*|mason (deploy|token create) --replica acme\/shop)(\s|$)/;
-const LINES: Lines = {
-  heads: ["Created ", "Creating ", "acme/shop on ", "No replicas yet in ", "Mason's checks of the database ", "✘ mason replica: ", "✗ mason replica: ",
-    "  ok ", "  !  ", "  !! ", "  ?  ", "  The creation's answer was lost ", "  checking: ", "  creating: ", "Tip: The service does not keep ", "Tip: acme has more ",
-    ...["state", "region", "size", "host", "created", "allowlist", "pending", "why", "fix"].map((l) => `  ${l} `)],
-  steps: ["  mason login", "  mason doctor", "  mason replica ", "  mason deploy ", "  mason token "], ownStep: OWN_STEP,
-  row: (line) => /^\d+ replicas? in /.test(line) || /^ {2}(acme|beta)\/[a-z]+ /.test(line),
-};
-
-/** A project whose sources file names its database by DATABASE_URL, set in its .env (or as `env` says). */
-function project(o: { url?: string | null; file?: string } = {}): string {
-  const root = home();
-  fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
-  fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
-  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
-  fs.writeFileSync(path.join(root, "mason", "sources", "app.yml"), o.file ?? "kind: postgres\nurl: ${DATABASE_URL}\ntables:\n  orders: {}\n");
-  if (o.url !== null) fs.writeFileSync(path.join(root, ".env"), `DATABASE_URL=${o.url ?? URL_}\n`);
-  return root;
-}
-
-/** One run in `cwd` against a fresh fake whose replica endpoints `v1` answers, signed in by MASON_TOKEN; its requests. */
-async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: { cwd?: string; token?: string; terminal?: number; me?: Reply } = {}): Promise<{ a: Answer; requests: Req[]; token: string }> {
-  const token = o.token ?? newToken("pat"); SECRETS.push(token);
-  const fake = await fakeService({ v1, ...(o.me ? { me: o.me } : {}) });
-  const h = home();
-  try {
-    const a = await mason(o.cwd ?? h, ["replica", ...argv], envFor(h, fake.url, { MASON_TOKEN: token }), { lines: LINES, ...(o.terminal ? { terminal: o.terminal } : {}) });
-    // the database's URL: never its password, in any form a run prints
-    for (const text of [a.stdout, a.stderr]) assert.ok(!text.includes(PASSWORD) && !text.toLowerCase().includes(PASSWORD.toLowerCase()), `mason replica ${argv.join(" ")} printed the database's password:\n${a.stdout}${a.stderr}`);
-    assert.ok(!a.argv.some((x) => x.includes(PASSWORD) || x.includes("postgres://")), "the URL is never on the command line");
-    return { a, requests: fake.requests.filter((r) => r.path.startsWith("/v1/")), token };
-  } finally { await fake.close(); }
-}
 
 test("mason replica create: the URL is read by the variable the sources file names, sent once in the body beside that variable's name, never on the command line or printed; the checks are said one line each; the replica's state waited for until it is ready", async () => {
   const root = project();
@@ -289,52 +240,6 @@ test("the pure pieces: a replica held to its grammars, the free text kept out of
   assert.deepEqual(urlPassword("postgres://u:p%40ss%21wd%2A%2A@h/d"), { password: "p@ss!wd**" }, "decoded, every character counted");
   assert.deepEqual(urlPassword("postgres://u:ab%zzcdefgh@h/d"), { password: "ab%zzcdefgh" }, "a malformed escape: held as written, never dropped");
   assert.deepEqual(checkLines([{ source: "app", outcome: "unknown", checks: [{ name: "a", status: "unknown", detail: "b", fix: null }], missing: [] }]), ["Mason's checks of the database app names: unknown", "  ?  a: b"]);
-});
-
-/** Whether `text` shows `password` whole: as written, in any case, or %-encoded (as a URL writes it), or decoded from that. */
-const showsPassword = (text: string, password: string): boolean => {
-  const t = text.toLowerCase(), decoded = text.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))).toLowerCase();
-  return [password, encodeURIComponent(password)].some((p) => t.includes(p.toLowerCase()) || decoded.includes(p.toLowerCase()));
-};
-
-test("the database's password is held by ONE rule at every boundary, whatever its length from 8 and its alphabet: echoed in a value held to a grammar (hostId, region, an allowlist entry, a key), in a check's words, a refusal's words or a pending change's failure — as written, re-cased or %-encoded — it is never printed whole; one under 8 is not sent (PR 660's review, B1)", { timeout: 600_000 }, async () => {
-  const passwords = ["abcdefgh", "ab3def6hjk", "Zq8vLm2Xr7Tp", "!*!*!*!*!*!*!*!*!*!*!*a1", "!!!!!!!!!!!!!!!!ab", "pass word 1", "pässwörd99", "deadbeefcafe"];
-  const forms = [(p: string) => p, (p: string) => p.toUpperCase(), (p: string) => encodeURIComponent(p)];
-  const slots: Array<[string, (e: string) => Reply]> = [
-    ["hostId", (e) => created({ hostId: e })],
-    ["region", (e) => created({ region: e })],
-    ["an allowlist entry", (e) => created({ allowlist: [`${e}/1`] })],
-    ["a key", (e) => ({ status: 201, body: { replica: { ...replicaOf(), [e]: 1 }, checks: CHECKS } })],
-    ["a check's detail", (e) => ({ status: 201, body: { replica: replicaOf(), checks: [{ ...CHECKS[0], checks: [{ name: "connects", status: "ok", detail: `connected with ${e}` }] }] } })],
-    ["a check's name and missing", (e) => ({ status: 201, body: { replica: replicaOf(), checks: [{ ...CHECKS[0], checks: [{ name: e, status: "ok", detail: "x" }], missing: [e] }] } })],
-    ["a refusal's words", (e) => ({ status: 403, body: { error: { code: "refused", message: `refused ${e}`, why: e, fix: `x${e}x` } } })],
-    ["a pending change's failure", (e) => created({ pending: [{ change: "allowlist", state: "failed", attempts: 1, failure: `could not ${e}` }] })],
-  ];
-  let runs = 0;
-  for (const [i, password] of passwords.entries()) {
-    const root = project({ url: `postgres://app:${encodeURIComponent(password)}@db.example:5432/app` });
-    for (const [j, [what, reply]] of slots.entries()) {
-      const form = forms[(i + j) % forms.length]!;
-      const json = (i + j) % 2 === 0 ? ["--json"] : [];
-      const { a, requests } = await hosted(() => reply(form(password)), ["create", "acme/shop", "--region", "eu", "--size", "50", ...json], { cwd: root });
-      runs++;
-      assert.equal(JSON.parse(requests[0]!.body).sources[0].url, `postgres://app:${encodeURIComponent(password)}@db.example:5432/app`, "the URL is sent as it was read");
-      assert.ok(!showsPassword(a.stdout + a.stderr, password), `${JSON.stringify(password)} in ${what} (${form("x") === "x" ? "as written" : form("x") === "X" ? "re-cased" : "encoded"}) was printed:\n${a.stdout}${a.stderr}`);
-    }
-  }
-  assert.equal(runs, passwords.length * slots.length);
-  // under 8 characters, whatever they are: refused before a byte is sent, its length said, never it
-  for (const short of ["x", "ab3d", "!*!*a1", "hunter2"]) {
-    const fake = await fakeService({ v1: () => created() });
-    try {
-      const a = await runMason(project({ url: `postgres://app:${encodeURIComponent(short)}@db.example:5432/app` }), ["replica", "create", "acme/shop", "--region", "eu", "--size", "50", "--json"], envFor(home(), fake.url, { MASON_TOKEN: newToken() }));
-      const e = (JSON.parse(a.stdout) as { error: { code: string; message: string } }).error;
-      assert.deepEqual([a.code, e.code], [1, "refused"], short);
-      assert.equal(e.message, `the password in DATABASE_URL (DATABASE_URL in .env) is ${[...short].length} character${short.length === 1 ? "" : "s"} long, under the 8 this command sends`);
-      assert.ok(!a.stdout.includes(short) || short === "x", short);
-      assert.deepEqual(fake.requests, [], `${short}: nothing sent`);
-    } finally { await fake.close(); }
-  }
 });
 
 test("a replica's state answer carrying the token in a value its grammar takes — status, and a poll of create's wait — is refused whole by the exact test, said by its status (never left to the output's gate)", async () => {
