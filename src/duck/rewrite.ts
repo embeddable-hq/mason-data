@@ -3449,6 +3449,9 @@ class Rewriter {
   /** each cast in a grouped SELECT, by the SELECT: a program's text the CAST reader builds there is read per group
    *  (`overGroups`), never over cells the group does not decide (review r1 of PR 506: the engine's 42803) */
   private readonly groupedCasts = new WeakMap<Body, Body>();
+  /** each percentile_disc or mode() picked by an exact order key (`picksByExactKey`) that is an ORDER BY key itself
+   *  (`sortBy`, the one place a sort key is read): the only place its value is not read, so the one place it is kept */
+  private readonly onlyOrders = new WeakSet<Body>();
 
   /** whether a value is a NUMERIC's text (`x::text`, `(x / 3)::text`, under a COLLATE, a subquery's column carrying
    *  one) or a NULL: what a "text" cell may hold, its program parsing it as a numeric */
@@ -3720,6 +3723,14 @@ class Rewriter {
         if (ordered !== null) return [{ SortBy: { ...b, node: ordered } }];
         e = this.overGroups(this.clone(out.value), select);
       }
+    }
+    // AN ORDERED-SET AGGREGATE THAT ONLY ORDERS (`… GROUP BY d ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY
+    // c / 1.6)`, a window's or a derived table's ORDER BY): its value is never read, and the order key's bytes the engine
+    // answers order the groups as the exact value does, so the key is the aggregate itself and `withinGroup` lets it be
+    // (review r4 of PR 506, class refusal-wider-than-the-wrong-answer). Any reader of its value refuses it there
+    if (kindOf(e) === "FuncCall" && this.picksByExactKey(bodyOf(e))) {
+      this.onlyOrders.add(bodyOf(e));
+      return null;
     }
     // a derived table's column read through `s.*` (`SELECT s.* FROM (…) AS s ORDER BY s.pod`, a tool's wrapper): Postgres
     // analysed the ORDER BY as the star's expansion, at no offset of its own, so the column has no type here — it is the
@@ -4986,8 +4997,8 @@ class Rewriter {
     }
     // A NUMERIC THE RULES SORT BY ITS EXACT ORDER KEY (a quotient, a NULLIF, a power, …): the engine's percentile_disc and
     // mode() return what they sort by, so they would answer the key's bytes for the row's value (issue 486, review r3 of
-    // PR 506): refused by name, whatever reads the result
-    if (this.picksByExactKey(b)) {
+    // PR 506): refused by name wherever its value is read, kept where it is an ORDER BY key and nothing more (`sortBy`)
+    if (this.picksByExactKey(b) && !this.onlyOrders.has(b)) {
       throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY a numeric Mason computes exactly, such as a quotient) is not supported by Mason (Postgres answers the picked row's exact value)`,
         `order by the value as a float8, ${name}(${name === "mode" ? "" : "0.5"}) WITHIN GROUP (ORDER BY (a / b)::float8), which picks and answers the double, or as an integer, ORDER BY (a / b)::int`, "numeric-ordered-set");
     }
