@@ -484,6 +484,7 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["function:3277", "the function array_position(anycompatiblearray,anycompatible)"],
   ["function:3294", "the function current_setting(text,boolean)"],
   ["function:3396", "the function regexp_match(text,text)"],
+  ["function:3449", "the function \"numeric\"(jsonb)"],
   ["function:3450", "the function int2(jsonb)"],
   ["function:3451", "the function int4(jsonb)"],
   ["function:3452", "the function int8(jsonb)"],

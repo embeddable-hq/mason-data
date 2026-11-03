@@ -4033,6 +4033,14 @@ test("a jsonb cast to numeric keeps the number's every digit, in every reader (P
       [`SELECT i, x::numeric / 3 FROM ${big} WHERE i <> 2 ORDER BY i`, "ordered"],
       [`SELECT sum(x::numeric) FROM ${big} WHERE i > 2`, "ordered"],
     ]), []);
+    // and the allowlist's listener answers it, verified by the oracle's legs (numeric(jsonb), CI fix 1 of PR 582)
+    const c = await client();
+    try {
+      assert.deepEqual(await unlike(c, [
+        ["SELECT j.id, (j.j -> 'r')::numeric AS c, ((j.j -> 'r')::numeric)::text FROM jnums j ORDER BY j.id", "ordered"],
+        ["SELECT j.g, sum((j.j -> 'r')::numeric) FROM jnums j GROUP BY j.g ORDER BY 1", "ordered"],
+      ]), []);
+    } finally { await c.end(); }
   } finally { await open.end(); await a.close(); }
 });
 
