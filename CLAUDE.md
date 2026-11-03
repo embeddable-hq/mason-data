@@ -189,7 +189,9 @@ docs/DESIGN.md ("The independent review", "Local gates").
    carries the note and every earlier round's findings and judged-correct list. The author comes back in ONE push, not
    one per finding. The second blocking finding of a class on a PR makes the next round a CLASS round: it first writes
    down every case of the class, in the PR, gives each a test, then fixes the decision that makes the class
-   impossible, naming its authority and checked against the note; give it room (about 60 calls). Every fix commit gets
+   impossible, naming its authority and checked against the note; give it room (about 60 calls). The decision and
+   its authority are written in the PR body's `## Design` and read against the code by a fresh Opus at high effort
+   before any code, two design reviews at most (docs/DESIGN.md "The independent review", issue 649). Every fix commit gets
    a narrow re-check, the same way. Once the reviews are clean (nothing blocking), each blocking class met is
    **learnt**: a bullet in its rules file's `## What review probes` (a synthetic shape, the class, the PR), in one
    commit before CI whose files, read from git, must all be under `.claude/rules/`. Detector: the reviewer's classes

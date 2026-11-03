@@ -20,6 +20,8 @@ the diff and merges (`.claude/skills/up-next/SKILL.md`). This is the one process
 - For a **piece of a split** only: `parent` (the split issue), `stackedOn` (the PR of the piece below, when this piece
   is stacked on it) with that piece's branch as the base, and `knownClasses` (the `classes` of the run below, read from
   its `result.json`), so a class met on the PR below counts on this one too (CLAUDE.md "The loop").
+- For a **shrink** only: `shrinkOf`, the PR of an earlier run of this issue that stopped at the round bound with a
+  `shrink:` status, and that run's folder. This run ships the stopped PR's safe subset in a PR of its own (issue 649).
 
 **Why one implementer.** On issue 192, ONE persistent Opus agent that was sent the review's findings by message took
 1 h 51 min. The pr-loop harness took 5.5 h and did not finish, on about 2.3 times the Opus output tokens. The
@@ -57,6 +59,11 @@ Make the run folder, `<runs>/issue-<n>`. In it, write `args.json`, pr-loop-slim'
   first sentence is instead: "This is a piece of #<parent>'s split, whose plan is on #<parent>: its one PR closes
   #<n>."
 - NO `brief`: the Brief stage runs on Opus, and its verdict may be a split.
+- For a **shrink** (`shrinkOf` given): `shrinkOf` is the stopped PR, as a string, so the script knows this run is a
+  shrink and its own bound ends `bound:`, never a second `shrink:`; `branch` is `"upnext-<n>-shrink"`, since the stopped run's `upnext-<n>` still
+  exists; `knownClasses` is the `classes` of the stopped run's `result.json`, so a class it met counts here; and the
+  context line's first sentence names the stopped PR, quotes its `shrink:` status as that run's `result.json` holds it,
+  and says this run ships that PR's safe subset and closes #<n>, in place of the "not split yet" sentence.
 
 Then write `answers.json` holding `{}`, make `results/` (each agent writes its result there), and PIN the script and
 its render: copy `.claude/workflows/pr-loop-slim.js` and `.claude/skills/pr-persistent/render.mjs` into the run folder,
@@ -104,13 +111,15 @@ nothing else: `Your instructions are in <path>: read the whole file, then follow
 - **`implement`**: start ONE implementer with the Agent tool and the printed options (`model: "opus"`,
   `effort: "high"`, `isolation: "worktree"`; the tool's `effort` is set because this skill asks for it). Keep its
   agent ID: this agent is the PR's author until the end.
-- **`fix r<n>`, `fix r<n> (class)` and `CI fix <n>`**: send the sentence to THE SAME implementer with SendMessage, never
-  to a new agent. Tell it once, in the first such message, that it keeps its worktree and its context between
-  rounds. That sentence is the only thing you add.
-- **Every other stage** (`brief`, `split`, `review r<n>`, `CI read r<n>`, `link`, `learn`, `learn check`, `CI <n>`,
-  `merge <k>`, `file`, `record`): a FRESH agent with the Agent tool, with the printed options. A review is
-  `model: "opus"`, `effort: "high"`, a FRESH agent every round, never the implementer and never by SendMessage
-  (CLAUDE.md "The loop" step 3). A `merge <k>` merges the BASE into the PR's branch, never the PR: it is never the
+- **`fix r<n>`, `fix r<n> (class)`, `class design r<n>` and `CI fix <n>`**: send the sentence to THE SAME implementer
+  with SendMessage, never to a new agent. Tell it once, in the first such message, that it keeps its worktree and its
+  context between rounds. That sentence is the only thing you add. A `class design r<n>` (and its `#2`, a revision)
+  is the author's: it writes the class round's decision and authority in the PR body before any code.
+- **Every other stage** (`brief`, `split`, `review r<n>`, `design review r<n>`, `CI read r<n>`, `link`, `learn`,
+  `learn check`, `CI <n>`, `merge <k>`, `file`, `record`): a FRESH agent with the Agent tool, with the printed options.
+  A review is `model: "opus"`, `effort: "high"`, a FRESH agent every round, never the implementer and never by
+  SendMessage (CLAUDE.md "The loop" step 3). A `design review r<n>` (and its `#2`) is a review too: a fresh Opus at
+  high effort, never the implementer, reading the class design against the code. A `merge <k>` merges the BASE into the PR's branch, never the PR: it is never the
   implementer's, but a fresh agent in a worktree of its own (`isolation: "worktree"`), as printed.
 
 Each rendered prompt ends by telling its agent to write its result, ONE JSON value, to `results/<name>.json` in the run
@@ -144,6 +153,14 @@ stop, CI, Learn, filing and the record.
   saying first that the PR conflicts and naming the files from the status. Never wait on it, watch it, or leave a
   background job for it: nothing of the run moves again until the top session merges the base, and a coordinator that
   waited on a conflict instead of reporting it left a clean PR unmerged for an hour (issue 452).
+- **A shrink** (`DONE: shrink: …`): the run stopped at the round bound, its PR with a blocking finding open or a head
+  no review re-checked. Its default next step is the shrink, a NEW run of this issue with `shrinkOf`, which the top
+  session starts; another round past the bound is the owner's word only. So never send the implementer a round past
+  the bound. Post the run log (next bullet) first, then send your ONE report AT ONCE, quoting the status whole: it
+  names the last clean head. Nothing of the run is waited on after it.
+- **A bound** (`DONE: bound: …`): a shrink run reached its own round bound. A shrink counts against the bound it
+  enforces, so nothing restarts by itself: report it as a shrink DONE is reported, run log first, ONE report at once,
+  saying that it is the owner's to decide.
 - **Any other DONE**: post the run log as ONE comment on the PR, headed `### From Claude (<your model>)` and
   `## Run log`. Give each stage's wall time, Learn's own time on its own row, each agent's tokens, and your own on the
   last row. The Review record is the `record` stage's comment, as rendered, so do not add the log to it. Then tell the
@@ -175,6 +192,7 @@ lacks one, the hook says what to run instead: that is expected, not a failure.
 
 - write or edit a prompt, or a result;
 - merge, or queue a merge;
+- send the implementer a round the render did not print, a round past the bound above all;
 - ask the owner anything: if something blocks you, stop and report what is blocked and why;
 - run a heavy gate yourself (`npm run check`, the full oracle, `npm run test:integration`);
 - touch another run's folder, branch or PR;
