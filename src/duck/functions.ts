@@ -853,7 +853,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // where Postgres rounds the exact value half away from zero, and bytes are no number: each refused by name
   scalar(conn, "__mason_numeric_int_of", [VARCHAR, VARCHAR, INTEGER], VARCHAR, ([type, t, bits]) => {
     if (/^(DOUBLE|FLOAT|REAL|BLOB)$/i.test(String(type))) {
-      throw new PgEvalError("0A000", `a numeric the engine holds as a double, which Mason cannot compute exactly here, cast to an integer type is not supported by Mason (${gapMark("numeric-double-integer")}): Postgres rounds the exact value half away from zero, the double would round half to even; cast the value to an integer inside the aggregate, percentile_disc(0.5) WITHIN GROUP (ORDER BY (a / b)::int), or cast it to float8 first`);
+      throw new PgEvalError("0A000", `a numeric the engine holds as a double, which Mason cannot compute exactly here, cast to an integer type is not supported by Mason (${gapMark("numeric-double-integer")}): Postgres rounds the exact value half away from zero, the double would round half to even; cast it to float8 first, (stddev(x)::float8)::int, which rounds the double as Postgres rounds a float8`);
     }
     try { return numericToInteger(String(t), Number(bits) as 16 | 32 | 64); }
     catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }

@@ -44,7 +44,7 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   engine type** (`storedColumns`): a program's cells, and a numeric the engine answers itself (no program, a passthrough
   among them: a DECIMAL stored, an integer as HUGEINT, a double refused, never stored as a double under a numeric's
   name). An integer column converted from a numeric holds the value the plan's SQL computes, which the rewrite's CAST
-  reader makes exact (`__mason_numeric_int`, half away from zero) or refuses what it makes bytes at load (`numeric-double-integer`), and by the engine's own type at the run casts a decimal or refuses a double (a failed build), so it needs no
+  reader makes exact (`__mason_numeric_int`, half away from zero; percentile_disc / mode() of a division included, the picked row's exact value), and by the engine's own type at the run casts a decimal or refuses a double (`numeric-double-integer`, a failed build), so it needs no
   form walk (issue 242). **Before its engine type, its FORM: the analysis is the one authority on what is stored.** A column whose
   analysed form the engine computes as a double (a variance, sqrt and its kin, avg or `/`, a cast from a double:
   `ENGINE_DOUBLES`) is refused by that form, whether or not the rewrite made a program for it; whether a program exists

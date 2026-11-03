@@ -235,9 +235,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
 - **A `NULLIF` of a numeric division cast to an integer rounds as Postgres does**: `nullif(x / 1.6, 0)::int` of 4.00
   was `2` and is `3` (half away from zero), in a query and in a generated table, and `nullif(x / y, 0)` shows
-  Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. A cast to an integer of a numeric Mason
-  cannot compute exactly (`percentile_disc` or `mode()` of a division) is refused by name (`numeric-double-integer`)
-  rather than failing with the engine's error; a generated table with one is refused when it is loaded, or, for a double only the rows show, fails its build saying so. Nothing to do
+  Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. `percentile_disc` and `mode()` ordered by a
+  division answer the picked row's exact value, where they answered bytes (`\x3305…`) or the engine's error: printed,
+  cast, compared, tested for NULL, grouped or joined on, in a query and in a generated table. Two kinds are refused by
+  name: an array of fractions over a division (`numeric-ordered-set`: ask for each fraction alone), and a cast to an
+  integer of a double the engine computes, such as `stddev(x)::int` of a numeric without a precision
+  (`numeric-double-integer`: cast to float8 first); a generated table with one fails its build saying so. Nothing to do
   on upgrade.
 - **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
   `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with

@@ -6078,23 +6078,22 @@ test("exact path: the CAST reader reads a program's text, its nearest double and
   } finally { await c.end(); }
 });
 
-test("exact path: issue 242: a numeric the engine holds as a double with no program, cast to an integer, is refused by name", async () => {
+test("exact path: issue 242: an integer cast of percentile_disc or mode() of a quotient, or of any expression over it, is the picked row's exact value", async () => {
   const c = await client();
   try {
-    // review r2 of PR 506 (runtime-refusal-preempted-by-engine-error): the bytes are the rewrite's own, so a cast of
-    // them, or of any expression over them, is refused by name before the engine runs, never the engine's 42883 / 42804
+    // review r2 of PR 506 asked these be refused by name, never the engine's 42883 / 42804; PR 506's class round answers
+    // them: the aggregate is the picked row's exact value (`pickedByExactKey`), so each cast is Postgres's, half away from zero
     const over = "percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)";
-    for (const sql of [`SELECT (${over})::int FROM bigdec b`, "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
+    assert.deepEqual(await unlike(c, [
+      `SELECT (${over})::int FROM bigdec b`, "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
       `SELECT CAST(${over} AS bigint) FROM bigdec b`, `SELECT (${over} * 2)::int FROM bigdec b`, `SELECT (${over} + 0)::int FROM bigdec b`,
       `SELECT round(${over})::int, trunc(${over})::int FROM bigdec b`, `SELECT abs(${over})::int FROM bigdec b`, `SELECT coalesce(${over}, 0)::int FROM bigdec b`,
       `SELECT nullif(${over}, 0)::int FROM bigdec b`, `SELECT greatest(${over}, 0)::int FROM bigdec b`, `SELECT (x * 2)::int FROM (SELECT ${over} AS x FROM bigdec b) s`,
       "WITH q AS (SELECT mode() WITHIN GROUP (ORDER BY b.x / b.y) AS x FROM bigdec b) SELECT (x / 2)::int8 FROM q",
-      `SELECT b.id % 2, (${over} * 2)::int FROM bigdec b GROUP BY 1`, `SELECT (${over} * 2)::int FROM bigdec b UNION ALL SELECT 1`]) {
-      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-double-integer/.test(e.detail ?? "")
-        && /cast to (integer|bigint), is not supported by Mason/.test(e.message) && /ORDER BY \(a \/ b\)::int/.test(e.hint ?? ""), sql);
-    }
+      `SELECT b.id % 2, (${over} * 2)::int FROM bigdec b GROUP BY 1 ORDER BY 1`, `SELECT (${over} * 2)::int FROM bigdec b UNION ALL SELECT 1 ORDER BY 1`,
+    ].map((sql) => [sql, "ordered"] as [string, "ordered"])), []);
     assert.deepEqual(await unlike(c, [
-      // its way out answers as Postgres does
+      // its old way out answers as Postgres does
       ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"],
       // review r1 of PR 506, finding 2: what the engine holds as a DECIMAL (percentile_disc / mode of a column, min / max
       // of Postgres's own power) is cast as Postgres casts it, never refused as a double
@@ -6115,41 +6114,44 @@ test("exact path: issue 242: a numeric the engine holds as a double with no prog
   } finally { await c.end(); }
 });
 
-test("exact path: percentile_disc or mode() ordered by a numeric Mason computes exactly is refused by name, never the order key's bytes (review r3 of PR 506)", async () => {
+test("exact path: percentile_disc or mode() ordered by a numeric Mason computes exactly answer the picked row's exact value, wherever it is read (PR 506's class round, issue 538)", async () => {
   const c = await client();
   try {
-    // (class order-key-bytes-as-result: the engine answers what it sorts by, and the rules sort such a value by its exact
-    // order key; PR 506 made c ^ 2, exp(…) * sign(c) and a NULLIF programs, so they reached it too)
-    for (const key of ["b.x / b.y", "b.x ^ 2", "exp(ln(2.5)) * sign(b.x)", "nullif(b.x / b.y, 0)", "coalesce(b.x / b.y, 0)"]) {
-      for (const sql of [`SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) FROM bigdec b`,
-        `SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}))::text FROM bigdec b`,
-        `SELECT b.id % 2, mode() WITHIN GROUP (ORDER BY ${key}) FROM bigdec b GROUP BY 1 ORDER BY 1`,
-        `SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY ${key}) FROM bigdec b`,
-        `SELECT x FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) AS x FROM bigdec b) s`,
-        `SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) * 2 FROM bigdec b`]) {
-        await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? "")
-          && /WITHIN GROUP \(ORDER BY a numeric Mason computes exactly/.test(e.message) && /ORDER BY \(a \/ b\)::float8/.test(e.hint ?? ""), sql);
-      }
+    // (class refusal-wider-than-the-wrong-answer, and before it order-key-bytes-as-result: the engine answers what it sorts
+    // by; the rewrite sorts a row(order key, value) and answers the value, so no reader meets the key's bytes)
+    const forms: string[] = [];
+    for (const key of ["b.x / b.y", "exp(ln(2.5)) * sign(b.x)", "nullif(b.x / b.y, 0)", "coalesce(b.x / b.y, 0)", "b.x / b.y + 1", "round(b.x / b.y, 2)", "-(b.x / b.y)", "(b.x / b.y)::numeric(10,4)"]) {
+      const pd = `percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key})`, md = `mode() WITHIN GROUP (ORDER BY ${key})`;
+      forms.push(
+        // read as a value: printed, ::text, a cast, arithmetic, grouped, an array of nothing
+        `SELECT ${pd}, (${pd})::text, ${md}, ${pd} * 2, (${md})::float8 FROM bigdec b`,
+        `SELECT b.id % 3 AS g, ${pd}, ${md} FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT x, x::text FROM (SELECT ${pd} AS x FROM bigdec b) s`,
+        // only ordered (review r4): the SELECT's ORDER BY, WITH TIES, DISTINCT ON, a window's, a derived table's and a CTE's
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY ${pd} DESC NULLS LAST, 1`,
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY ${md}, 1 FETCH FIRST 1 ROWS WITH TIES`,
+        `SELECT b.id % 3 AS g, rank() OVER (ORDER BY ${pd}) FROM bigdec b GROUP BY 1 ORDER BY 2, 1`,
+        `SELECT g FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s ORDER BY x, g`,
+        `WITH q AS (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) SELECT g FROM q ORDER BY x DESC NULLS LAST, g LIMIT 2`,
+        // nullness, comparison, grouping, partitioning and joining (review r5, issue 538)
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING ${pd} IS NOT NULL ORDER BY 1`,
+        `SELECT b.id % 3 AS g, CASE WHEN ${pd} IS NULL THEN 0 ELSE 1 END FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING ${pd} = ${md} OR ${pd} > 1 ORDER BY 1`,
+        `SELECT count(x), count(DISTINCT x) FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s`,
+        `SELECT x, count(*) FROM (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) s GROUP BY x ORDER BY 1`,
+        `SELECT b.id % 3 AS g, count(*) OVER (PARTITION BY ${pd}) FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT s1.g, s2.g FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s1 JOIN (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) s2 ON s1.x = s2.x ORDER BY 1, 2`,
+      );
     }
+    assert.deepEqual(await unlike(c, forms.map((sql) => [sql, "ordered"] as [string, "ordered"])), []);
+    // an array of fractions would answer the doubles of a numeric[]: refused by name, its way out answers
+    await assert.rejects(c.query("SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b"),
+      (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? "") && /ask for each fraction alone/.test(e.hint ?? ""));
     assert.deepEqual(await unlike(c, [
-      // its ways out answer as Postgres does, and a column, an integer or a float8 key stays the engine's own
-      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::float8), mode() WITHIN GROUP (ORDER BY (b.x / b.y)::float8) FROM bigdec b", "ordered"],
-      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int), mode() WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"],
+      ["SELECT percentile_disc(0.25) WITHIN GROUP (ORDER BY b.x / b.y), percentile_disc(0.75) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
       ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount), mode() WITHIN GROUP (ORDER BY o.amount), percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount * 2) FROM orders o", "ordered"],
       ["SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
-      // review r4 of PR 506 (refusal-wider-than-the-wrong-answer): where the aggregate only ORDERS, its value is never
-      // read and the exact order key orders the groups as the value does, so it is answered, as at the base
-      ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y), 1", "ordered"],
-      ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY mode() WITHIN GROUP (ORDER BY nullif(b.x / b.y, 0)) DESC NULLS LAST, 1", "ordered"],
-      ["SELECT b.id % 3 AS g, rank() OVER (ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / 3), b.id % 3) FROM bigdec b GROUP BY 1 ORDER BY 2", "ordered"],
-      ["SELECT g FROM (SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY exp(ln(2.5)) * sign(b.x)), 1 LIMIT 2) s ORDER BY 1", "ordered"],
     ]), []);
-    // and where its value is read in the same statement, it is refused as before
-    for (const sql of ["SELECT b.id % 3, percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)",
-      "SELECT b.id % 3 FROM bigdec b GROUP BY 1 ORDER BY -percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)",
-      "SELECT b.id % 3 FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) > 1"]) {
-      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? ""), sql);
-    }
   } finally { await c.end(); }
 });
 

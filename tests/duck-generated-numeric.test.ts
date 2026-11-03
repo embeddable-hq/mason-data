@@ -193,9 +193,10 @@ test("issue 242: an integer cast of a numeric the engine holds as a double is st
     assert.deepEqual((await typed(w, "SELECT id, x FROM unioned ORDER BY id, x")).rows.map((x) => text(x[1])), ["1", "1", null, null, "-3", "-2", "3", "4"]);
     assert.deepEqual((await typed(w, "SELECT x, c FROM grouped ORDER BY x NULLS FIRST")).rows.map((x) => x.map(text)), [[null, "1"], ["-2", "1"], ["1", "1"], ["3", "1"]]);
     if (restarted) return;
-    // the bytes the rewrite makes (percentile_disc / mode() of a quotient, and any expression over them): refused AT LOAD,
-    // by the gap's words and its way out (review r2 of PR 506); a double the engine computes (a stddev of an unconstrained
-    // numeric) is known only with the rows: its build fails naming the gap; neither is ever stored from the double
+    // percentile_disc / mode() of a quotient pick the row by its exact order and answer its exact value (PR 506's class
+    // round): stored as Postgres rounds it, half away from zero (0.6875 is 1; mode's -1.5625 * 2 = -3.125 is -3); a double
+    // the engine computes (a stddev of an unconstrained numeric) is known only with the rows: its build fails naming the
+    // gap; neither is ever stored from the double
     w.write("pdisc", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount / 1.6))::int AS x FROM ledger"));
     w.write("moded", scheduledH("SELECT (mode() WITHIN GROUP (ORDER BY amount / 1.6) * 2)::int AS x FROM ledger"));
     w.write("spreadint", scheduledH("SELECT stddev(big)::int AS x FROM ledger"));
@@ -203,11 +204,10 @@ test("issue 242: an integer cast of a numeric the engine holds as a double is st
     w.write("nulled", scheduledH("SELECT id, nullif(amount / 1.6, 0) AS x FROM ledger"));
     // percentile_disc of a DECIMAL column is the column's own value, cast as Postgres casts it
     w.write("pdiscol", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount))::int AS p, (percentile_disc(0.1) WITHIN GROUP (ORDER BY amount))::int8 AS m FROM ledger"));
-    for (const name of ["pdisc", "moded", "nulled"]) await w.until((s) => s.state === "refused", `public.${name}`);
-    for (const name of ["pdisc", "moded"]) {
-      const refusals = w.status(`public.${name}`).refusals;
-      refusedAt(refusals, "sql", /^a numeric Mason cannot compute exactly \(percentile_disc or mode\(\) of a value Mason orders by its exact digits\), cast to integer, is not supported by Mason/);
-      assert.ok(refusals[0]!.options.some((o) => o.includes("ORDER BY (a / b)::int")), JSON.stringify(refusals));
+    await w.until((s) => s.state === "refused", "public.nulled");
+    for (const [name, want] of [["pdisc", "1"], ["moded", "-3"]] as const) {
+      await w.until(served(w.logged), `public.${name}`);
+      assert.deepEqual((await typed(w, `SELECT x FROM ${name}`)).rows.map((x) => x.map(text)), [[want]], name);
     }
     await w.until((s) => s.state === "failed", "public.spreadint");
     assert.match(w.status("public.spreadint").error ?? "", /cast to an integer type is not supported by Mason \(Mason gap numeric-double-integer\)/, JSON.stringify(w.status("public.spreadint")));
