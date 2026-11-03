@@ -634,9 +634,21 @@ posts the plan and stops, and the top session starts each piece. Before, an issu
 spotted it, or late, as rounds piled up or the four-round bound stopped a run. `issue-loop.js` ran its pieces by
 `workflow('pr-loop')`, and a Workflow script cannot hold an implementer across rounds, since an `agent()` is one-shot.
 
+**The reviewer moves to Opus at high effort (Tom, 2026-11-03).** Tom: "From now on, let's change our reviews to use
+Opus with High effort, instead of Fable" (issue 605). The rule it replaces, from PR 170's era ("The loop as workflows"
+above), had the reviews on Fable, never Opus, because the reader must outread the author: a stronger model was what
+made the review independent. Now every review, a full one and each fix's narrow re-check alike, runs on the same model
+as the author at the same effort (`ON.review` in `.claude/workflows/pr-loop-slim.js`, the one value every review
+stage reads). Its independence is carried by the rest of what made a review independent all along: a fresh agent,
+never the implementer, given the diff and the code and never the author's report or its `## Handoff`, and its own runs
+of what the diff changed at the head and the base. What to watch is the number `scripts/review-stats.ts` prints, the
+share of reviewed PRs whose first review found nothing blocking, before and after this switch: a share that rises with
+no fall in what CI's oracle and the merged PRs later show wrong would say the reviews got easier to pass, not the PRs
+better.
+
 ### Who may give an agent words (Tom, 2026-11-02)
 
-**Decision.** The agents that work this repository (the up-next session, its coordinators, and the Opus and Fable
+**Decision.** The agents that work this repository (the up-next session, its coordinators, and the Opus
 agents they start) read an issue's or a PR's people-written text, its title, body, comments, reviews, inline review
 comments and search results, only through one script, `scripts/gh-text.ts` (issue 438). It reads GitHub's REST
 `author_association` on each item and keeps OWNER, MEMBER and COLLABORATOR, an allowlist, so every other value, a

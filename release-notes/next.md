@@ -26,6 +26,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason doctor` warns when the user Mason connects as could write to your database**: a superuser or `BYPASSRLS`, the
+  owner of a synced table, or one holding `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` on a
+  synced table or `CREATE` on its schema — or a write that reaches its rows through a partition, an inheritance child or
+  parent, a foreign key's `ON DELETE` / `ON UPDATE` action, an updatable view or a rule; a foreign table or user
+  mapping; `ADMIN OPTION` on a role, or a server role — directly, through a role it is a member of, or granted to
+  `PUBLIC`. Mason only reads, so such a user lets a Mason bug or a stolen URL change the database. Each is a warning
+  (`!`, the exit status unchanged) with the statements that make a role that only reads (`REPLICATION` and a
+  publication where a table's `sync:` is replication), and in `--json` a stable `code` and the `fix`. The statements
+  change no role's privileges but the new one's: what `PUBLIC` holds is said for you to decide. **`SECURITY DEFINER`
+  code** the user reaches (by `EXECUTE`, a trigger on a table it may write, an event trigger, an aggregate) whose owner
+  may write the synced tables is listed for you to review, since what it writes is in its body, and the user is never
+  said to only read while it can run one. It is all asked of the catalog in one read, never tried.
 - **Behind a TCP load balancer or proxy, the request log can name each real client**: set `MASON_PG_PROXY_FROM` to the
   proxy's own addresses (CIDRs, comma-separated) and turn on its PROXY protocol v2 (an NLB's target group, HAProxy's
   `send-proxy-v2`). A connection from those addresses must then begin with the header, and one from any other address
@@ -40,6 +52,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `MASON_REPLICA`), and waits until the replica runs it or Mason there refuses it. The project is checked first as
   `mason start` checks it, without connecting to any database; only its YAML under `mason/` is sent, never `.env` or
   `.mason/`, and a `url:` written with its password is refused. `--dry-run` lists what would be sent and sends nothing.
+- **`mason login`, `mason logout` and `mason deploy` print at most a quarter of the token they hold when a
+  service repeats it**: the token whole, and its body without its `masondata_…_` prefix, re-cased, split by spaces,
+  dashes or other characters, URL-encoded, or in pieces of 4 or more characters, are each shown as `****` once
+  everything the command prints would show more than 10 of its 43 characters together, on stdout, stderr and in
+  `--json`. Before, a service's message that repeated the token without its prefix printed it, into a CI log too.
 - **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
   ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
   beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
@@ -357,6 +374,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   sigma), and the builtin `pg_c_utf8` and `pg_unicode_fast` are each followed. A libc collation of Turkish or Azeri
   (`tr_TR`, `az_AZ`), whose i maps otherwise, is refused by name (`case-mapping-unknown`): write `COLLATE "tr-x-icu"`.
   Nothing to do on upgrade.
+- **A database URL that is not a `postgres://` URL is no longer repeated in its refusal, password and all.** Given a
+  keyword/value string (`host=… user=… password=…`), a password on its own, a URL whose password holds an unencoded
+  `/`, `?` or `#`, or a URL carrying its password as a parameter (`?password=…`, `?sslpassword=…`), `mason start`, `mason serve`, `mason doctor`, `mason init`, `mason add`, `mason tables`, `mason
+  status`, `mason destroy` and `mason mcp` printed the value (on stderr, in `--json` and in the logs) where they refused
+  it. Each now names the variable and what the value looks like, and how to write it as
+  `postgres://user:password@host:5432/db`, never the value. A URL with a space, a control character or a `#` in it, an
+  `@` after its host, a parameter other than `sslmode` and `application_name`, a parameter given twice, an `sslmode`
+  that is not one of libpq's six, or an `application_name` of other than letters, digits, `.`, `_` and `-` (at most 64)
+  is refused the same way rather than read in part: URL-encode the password (`@` is `%40`, `/` is `%2F`), and put it
+  before the host. A refusal names a parameter only when it is one of libpq's own, and a missing database's refusal no
+  longer repeats its name (the databases there are listed). If such a value was ever passed to Mason, its password may be in a log or a CI run's output: change it.
 
 ## Known
 

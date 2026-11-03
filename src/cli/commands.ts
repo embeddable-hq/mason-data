@@ -979,8 +979,8 @@ async function readCatalog(p: Project): Promise<{ src: ProjectSource; database: 
   if ("message" in src) return src;
   const demo = p.config.demo === true;
   const fix = `change the URL where it is (${src.from}) when the database's password or host changed`;
-  const parsed = parseSource(src.resolved);
-  if ("problem" in parsed) return { message: `the database's URL (${src.from}): ${parsed.problem}`, code: "bad_source", fix };
+  const parsed = parseSource(src.resolved, src.from);
+  if ("problem" in parsed) return { message: parsed.problem, code: "bad_source", fix };
   const connected = await connectSource(parsed.source, { demo });
   if ("failure" in connected) {
     // the demo database's way out is its run (src/cli/demo.ts): its hint is the fix, mason start the next command

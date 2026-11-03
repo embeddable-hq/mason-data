@@ -222,7 +222,7 @@ export function parseSourceText(text: string, name: string, file: string): Sourc
     const bare = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v.url.trim());
     if (m) url = { env: m[1]! };
     else if (bare) problems.push(`url: $${bare[1]} — write \${${bare[1]}}: a variable is named in braces`);
-    else if (v.url.includes("${")) problems.push(`url: ${JSON.stringify(v.url)} — write the URL whole, or \${NAME} alone: the whole URL in one variable, like \${DATABASE_URL}`);
+    else if (v.url.includes("${")) problems.push("url: holds a ${NAME} inside a longer value (not shown: it may hold a password) — write the URL whole, or ${NAME} alone: the whole URL in one variable, like ${DATABASE_URL}");
     else url = { literal: v.url.trim() };
   }
 

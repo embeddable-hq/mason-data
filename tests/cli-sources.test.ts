@@ -68,7 +68,7 @@ test("every mistake in the file is told its key, what is wrong and the way out �
   assert.deepEqual(problems("url: ${DATABASE_URL}\ntables: {}\n"), ["kind: missing — write kind: postgres (the kind of database this source is)"]);
   assert.deepEqual(problems("kind: postgres\ntables: {}\n"), ["url: missing — write url: ${DATABASE_URL} (DATABASE_URL in .env or the shell), or a postgres:// URL"]);
   assert.deepEqual(problems("kind: postgres\nurl: postgres://u:${PASS}@h/db\ntables: {}\n"),
-    ['url: "postgres://u:${PASS}@h/db" — write the URL whole, or ${NAME} alone: the whole URL in one variable, like ${DATABASE_URL}']);
+    ["url: holds a ${NAME} inside a longer value (not shown: it may hold a password) — write the URL whole, or ${NAME} alone: the whole URL in one variable, like ${DATABASE_URL}"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\n"), ["tables: missing — write tables: {} (mason add adds a table to it)"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\ntables: [orders]\n"), ["tables: is one entry per table, like tables: { orders: {}, customers: { columns: [id, name] } }"]);
   assert.deepEqual(problems("kind: postgres\nurl: ${DATABASE_URL}\ntable: {}\n"), [

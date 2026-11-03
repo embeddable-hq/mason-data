@@ -107,8 +107,8 @@ async function theUrl(given: string | undefined, cwd: string): Promise<{ url: st
 
 /** The URL read as a connection: the CLI's own reading (src/cli/preflight.ts parseSource, TLS as the URL's sslmode). */
 function theSource(url: string, from: string): Source | Failure {
-  const p = parseSource(url);
-  if ("problem" in p) return { message: `${from} is not a Postgres URL: ${p.problem}`, code: "usage", fix: `the URL mason user add printed: ${EXAMPLE_URL}`, next: [HELP_STEP] };
+  const p = parseSource(url, from);
+  if ("problem" in p) return { message: p.problem, code: "usage", fix: `the URL mason user add printed: ${EXAMPLE_URL}`, next: [HELP_STEP] };
   return p.source;
 }
 

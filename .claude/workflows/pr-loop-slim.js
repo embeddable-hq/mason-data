@@ -1,13 +1,13 @@
 export const meta = {
   name: 'pr-loop-slim',
-  description: 'One PR through CLAUDE.md "The loop": brief (or a split into pieces), implement (Opus, who writes the design note and a Handoff comment), review (Fable) with CI read beside it, fix rounds that read and extend the Handoff, the class rule, learn, CI, then stop at the merge gate. The source every prompt of the pr-persistent skill is rendered from',
+  description: 'One PR through CLAUDE.md "The loop": brief (or a split into pieces), implement (Opus, who writes the design note and a Handoff comment), review (Opus at high effort, a fresh agent) with CI read beside it, fix rounds that read and extend the Handoff, the class rule, learn, CI, then stop at the merge gate. The source every prompt of the pr-persistent skill is rendered from',
   whenToUse: 'The pr-persistent skill (.claude/skills/pr-persistent/SKILL.md) renders every stage from it, for one issue or one piece of a split, from brief to a reviewed, green PR ready for the top session to read and merge; run by the Workflow tool, it is the same loop without the kept implementer',
   phases: [
     { title: 'Brief', detail: 'Opus names the shapes and the tests, or splits an issue too big for one PR into pieces', model: 'opus' },
     { title: 'Split', detail: 'a sub-issue per piece, the plan posted on the issue; the run stops there, and the top session starts each piece as a run', model: 'sonnet' },
     { title: 'Implement', detail: 'Opus, a worktree of its own: the design note before any code, the push, the note in the PR body, the Handoff comment', model: 'opus' },
     { title: 'Link', detail: "GitHub itself says the PR closes its sub-issue, or the body is fixed and asked again", model: 'sonnet' },
-    { title: 'Review', detail: 'Fable, fresh context, findings with their class, their severity and whether the base has them', model: 'fable' },
+    { title: 'Review', detail: 'Opus at high effort, a fresh agent in a fresh context, never the implementer: findings with their class, their severity and whether the base has them', model: 'opus' },
     { title: 'Fix', detail: "reads the Handoff first and appends to it; this PR's blocking failures and classes and CI's, never the edit; a repeated class makes a class round", model: 'opus' },
     { title: 'Learn', detail: "each class met becomes a review probe in its rules file, one docs-only commit", model: 'opus' },
     { title: 'CI', detail: 'bounded wait on gh pr checks, with mergeable read first on every pass (GitHub runs no CI on a conflicting PR, so a conflict is its own verdict), beside each review and after the last; a CI fix gets a narrow re-check', model: 'sonnet' },
@@ -85,13 +85,15 @@ const MAX_MERGES = 3
 
 // Each stage's model, and the name what it posts is signed with: a posting names the model that wrote it, read from
 // the same value as the agent's `model`, never written beside it.
-const SIGNS = { opus: 'Opus 5.5', fable: 'Fable 5.1', sonnet: 'Sonnet 5.5' }
+const SIGNS = { opus: 'Opus 5.5', sonnet: 'Sonnet 5.5' }
 const ON = {
   brief: { model: 'opus', effort: 'high' },
   split: { model: 'sonnet', effort: 'low' },
   implement: { model: 'opus', effort: 'high', isolation: 'worktree' },
   link: { model: 'sonnet', effort: 'low' },
-  review: { model: 'fable', effort: 'medium' },
+  // every review (a full one, a fix's narrow re-check, a CI fix's) is a fresh agent on this one value (issue 605,
+  // CLAUDE.md "The loop" step 3); a reviewer writes nothing, so no worktree
+  review: { model: 'opus', effort: 'high' },
   fix: { model: 'opus', effort: 'high', isolation: 'worktree' },
   learn: { model: 'opus', effort: 'medium', isolation: 'worktree' },
   ci: { model: 'sonnet', effort: 'low' },

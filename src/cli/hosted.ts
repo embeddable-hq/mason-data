@@ -11,8 +11,10 @@
  * body where one is sent, and a redirect is never followed (a Bearer header must not travel to another origin, nor https
  * fall back to http). Every request has a time limit, and an answer is read up to `MAX_BODY_BYTES`.
  *
- * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, and the token — the one this request
- * carries, and anything shaped as a documented token — is masked in all of it.
+ * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, and the token is masked in all of it: a
+ * token the command holds by its VALUE — whole, or every run of 4 or more of its body's characters once the runs the
+ * command prints would show more than a quarter of it together, however re-cased, split or percent-encoded
+ * (`heldRuns`); and anything shaped as a documented token, held or not.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (the decision of PR 481's class round: a
  * service forged a block of next steps with a newline in an email, and offered `mason destroy` as a next step). Two
@@ -50,6 +52,25 @@ export interface Service { base: string }
 
 /** The documented token shapes (docs/HOSTED-API.md), masked wherever they appear in what is printed. */
 const TOKEN_SHAPE = /\bmasondata_(pat|ci)_[A-Za-z0-9_-]{43}/g;
+/**
+ * WHAT OF A HELD SECRET MAY BE PRINTED (`heldRuns`): a run of its body is any `HELD_RUN` or more of its characters in a
+ * row, and what every run the process prints shows TOGETHER — across fields, strings and passes — is at most a quarter
+ * of the body (`HELD_SHOWN`), else each run is masked. A quarter of a 43-character body is 10 characters, about 60
+ * bits, leaving at least 33 (about 198 bits) unknown, so no run, nor any number of runs together, puts the token in
+ * reach; any run of a body shorter than 16 is masked (a quarter of it rounds below a run): fail closed. Four, because a
+ * 4-character window of ordinary text matches one of a body's 40 windows about once in 40,000 (36^4 / 40), and runs
+ * that cover 11 of its characters are three such chances in one command (no text a service words is masked by
+ * chance); and a run of 3 or fewer between other characters is no echo but an encoding, which a service that holds
+ * the token can make in any form it likes, out of reach of any mask (the note of PR 591).
+ */
+const HELD_RUN = 4;
+const HELD_SHOWN = (bodyLength: number): number => Math.floor(bodyLength / 4);
+/** How many times a value is masked before it is given up: a mask joins what lay either side of it, so the value is
+ *  read again; read a fifth time and still holding a run to mask, it is masked whole. */
+const MASK_PASSES = 4;
+/** What this process has printed of each held secret: the positions of its body every run shown covered (one command
+ *  is one process, so this is what the command printed, in every field and stream). */
+const SHOWN = new Map<string, Set<number>>();
 /** The hosts plain http may name: this machine. */
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "localhost"]);
 
@@ -88,12 +109,40 @@ export function serviceOf(env: NodeJS.ProcessEnv = process.env): Service | Failu
  * TEXT FROM THE SERVICE, AS IT MAY BE PRINTED: ONE LINE (above: data, never structure) — every control character, the
  * newline and the carriage return included, and every line or paragraph separator, format or bidi mark replaced by
  * `?`, so none can end a line, move a cursor, clear a screen or reorder what a person reads; every run of white space
- * one space, none at either end; at most `max` characters; and every secret masked — the ones named, and anything
- * shaped as a documented token. On a terminal the line it sits in is broken by the CLI (`serviceStyle`).
+ * one space, none at either end; at most `max` characters; and every secret masked — the ones named (`secrets`, the
+ * tokens this command holds) whole, and by the runs of their body that would show more than a quarter of it together
+ * with what this process printed before (`heldRuns`, `shown`: the process's own record unless a test gives one), and
+ * anything shaped as a documented token. The masks read the value as it came, before it is made one line and bounded,
+ * so neither uncovers what they would have masked. On a terminal the line it sits in is broken by the CLI
+ * (`serviceStyle`).
  */
-export function serviceText(s: string, max: number, secrets: readonly string[] = []): string {
+export function serviceText(s: string, max: number, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN): string {
   let t = s;
   for (const secret of secrets) if (secret) t = t.split(secret).join("****");
+  // a held secret by its value (`heldRuns`): a mask leaves `****`, a separator, so what lay either side of it is read
+  // again as one run; read MASK_PASSES + 1 times and still holding a run to mask, the value is masked whole
+  for (let pass = 0; ; pass++) {
+    const found = heldRuns(t, secrets);
+    const spans: Array<[number, number]> = [];
+    for (const [secret, f] of found) {
+      const seen = new Set([...(shown.get(secret) ?? []), ...f.covered]);
+      if (seen.size > f.most) spans.push(...f.spans);
+    }
+    if (!spans.length) {
+      // what is printed is recorded, so the next field's runs are counted with these
+      for (const [secret, f] of found) shown.set(secret, new Set([...(shown.get(secret) ?? []), ...f.covered]));
+      break;
+    }
+    if (pass === MASK_PASSES) return "****";
+    spans.sort((a, b) => a[0] - b[0]);
+    const merged: Array<[number, number]> = [];
+    for (const m of spans) {
+      const last = merged[merged.length - 1];
+      if (last && m[0] <= last[1]) last[1] = Math.max(last[1], m[1]);
+      else merged.push([m[0], m[1]]);
+    }
+    for (const [from, to] of merged.reverse()) t = `${t.slice(0, from)}****${t.slice(to)}`;
+  }
   t = t.replace(TOKEN_SHAPE, "masondata_$1_****");
   // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
   // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
@@ -103,6 +152,70 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   t = t.replace(/\s+/g, " ").trim();
   const chars = [...t];
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+}
+
+/**
+ * A HELD SECRET, BY ITS VALUE (issue 540: the shape alone let a token's body through, echoed without its prefix). The
+ * body of a secret this command holds is the value after a documented prefix, else the whole value (a token is opaque).
+ * The text is read as body characters (`bodyChars`): ASCII letters in lower case, digits, `-` and `_`, a `%XX` escape
+ * as the character it encodes, any other character as its compatibility decomposition without its combining marks (a
+ * full-width letter, an accented one, precomposed or not), and everything else skipped, as a separator. For each held
+ * secret: the spans of `t` that are runs of its body (`HELD_RUN` or more in a row, read once keeping `-` and `_` and once
+ * skipping them, so a body split by dashes is read too), with a `-` or `_` beside one; the positions of the body they
+ * cover; and how many the process may show (`HELD_SHOWN`). Nothing for a secret none of `t` runs with.
+ */
+function heldRuns(t: string, secrets: readonly string[]): Map<string, { spans: Array<[number, number]>; covered: Set<number>; most: number }> {
+  const found = new Map<string, { spans: Array<[number, number]>; covered: Set<number>; most: number }>();
+  const views = [true, false].map((keep) => { const units = bodyChars(t, keep, true); return { keep, units, read: units.map((u) => u.c).join("") }; });
+  for (const secret of secrets) {
+    const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
+    const length = bodyChars(raw, true, false).length;
+    if (length === 0) continue;
+    const n = Math.min(HELD_RUN, length), spans: Array<[number, number]> = [], covered = new Set<number>();
+    for (const { keep, units, read } of views) {
+      const body = bodyChars(raw, keep, false), text = body.map((u) => u.c).join("");
+      const at = new Map<string, number[]>();
+      for (let j = 0; j + n <= text.length; j++) { const w = text.slice(j, j + n); at.set(w, [...(at.get(w) ?? []), j]); }
+      const marked = new Array<boolean>(units.length).fill(false);
+      for (let i = 0; i + n <= units.length; i++) {
+        const js = at.get(read.slice(i, i + n));
+        if (!js) continue;
+        for (let d = 0; d < n; d++) marked[i + d] = true;
+        for (const j of js) for (let d = 0; d < n; d++) covered.add(body[j + d]!.from);
+      }
+      // the marked characters in a row are one span, the separators between them in it
+      for (let i = 0; i < units.length; i++) {
+        if (!marked[i]) continue;
+        let e = i;
+        while (e + 1 < units.length && marked[e + 1]) e++;
+        const span: [number, number] = [units[i]!.from, units[e]!.to];
+        // a `-` or `_` beside a run is the body's too (read skipping them, a body that begins or ends with one is a run
+        // without it), and a combining mark after it is its last letter's: the mask takes them
+        while (span[0] > 0 && /[-_]/.test(t[span[0] - 1]!)) span[0]--;
+        while (span[1] < t.length && /[-_\p{M}]/u.test(t[span[1]]!)) span[1]++;
+        spans.push(span);
+        i = e;
+      }
+    }
+    if (spans.length) found.set(secret, { spans, covered, most: HELD_SHOWN(length) });
+  }
+  return found;
+}
+
+/** The characters of `t` a held secret is compared by, each with the span of `t` it was read from (above). */
+function bodyChars(t: string, keepMarks: boolean, decode: boolean): Array<{ c: string; from: number; to: number }> {
+  const out: Array<{ c: string; from: number; to: number }> = [];
+  const kept = keepMarks ? /[a-z0-9_-]/ : /[a-z0-9]/;
+  for (let i = 0; i < t.length;) {
+    const cp = t.codePointAt(i)!;
+    let s = String.fromCodePoint(cp), to = i + s.length;
+    if (decode && s === "%" && /^[0-9a-f]{2}$/i.test(t.slice(i + 1, i + 3))) { s = String.fromCharCode(parseInt(t.slice(i + 1, i + 3), 16)); to = i + 3; }
+    // one reading for every spelling of a character: its compatibility decomposition, its combining marks dropped
+    else if (decode && cp > 0x7f) s = s.normalize("NFKD").replace(/\p{M}/gu, "");
+    for (const c of s.toLowerCase()) if (kept.test(c)) out.push({ c, from: i, to });
+    i = to;
+  }
+  return out;
 }
 
 /** This machine's name, as the service lists the login: printable ASCII, at most 64 characters, never empty (the

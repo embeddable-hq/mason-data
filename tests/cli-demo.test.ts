@@ -47,7 +47,8 @@ test("the demo database's port is read from the URL it is kept in, at once (noth
   assert.deepEqual(demoPort("postgres://demo@db.example.com:5434/demo", from),
     { problem: `DATABASE_URL in .env names db.example.com, which is not this machine's loopback: the demo database is hosted by mason start on 127.0.0.1 alone (postgres://demo@127.0.0.1:5434/demo); ${wayOut}` });
   const notUrl = demoPort("not a url", from) as { problem: string };
-  assert.match(notUrl.problem, /^DATABASE_URL in \.env was changed: "not a url" is not a URL\..* The demo database is postgres:\/\/demo@127\.0\.0\.1:<port>\/demo; mason destroy and mason init demo again/);
+  assert.doesNotMatch(notUrl.problem, /not a url"/, "the value is never repeated (issue 541)");
+  assert.match(notUrl.problem, /^DATABASE_URL in \.env was changed: the URL is not a postgres:\/\/ URL: it is not a URL\. Write it as .* The demo database is postgres:\/\/demo@127\.0\.0\.1:<port>\/demo; mason destroy and mason init demo again/);
 });
 
 test("a demo project is polled: a table set to sync: replication, or a config edited to it, refused before anything starts; any other project untouched", () => {

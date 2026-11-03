@@ -299,7 +299,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   const db = maskedUrl(src.resolved);
   begin(`Connecting to ${db}`);
   const checkSaid: string[] = [];
-  const checked = await checkSource(src.resolved, { remote: cfg.remote, cmd: "mason start", say: (m) => checkSaid.push(m),
+  const checked = await checkSource(src.resolved, { remote: cfg.remote, cmd: "mason start", say: (m) => checkSaid.push(m), name: src.from,
     // the checklist's line says it is connecting; everything else checkSource says is the answer
     progress: () => undefined });
   if ("needsRemote" in checked) {
