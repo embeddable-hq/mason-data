@@ -268,7 +268,10 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
   slot for what the legs already measured. Detector: `integration (oracle)` red on the PR, naming the command.
 - **A heavy gate takes a slot.** `npm run check`, `npm run gate` and `npm run test:integration` queue for one of
   `MASON_GATE_SLOTS` machine-wide (`scripts/gate-slot.ts`) and say who they wait for, so a long wait is not a hang: start
-  a gate in the background, because the wait can outlast a tool's foreground limit. Anything else whole goes through it
+  a gate in the background, because the wait can outlast a tool's foreground limit. An agent run by the Agent tool or
+  resumed by SendMessage is not woken by its own background job once its turn ends, so it waits on the gate before
+  ending that turn, by `scripts/done-file.ts` and bounded foreground `scripts/wait-file.ts` calls, as the harness's
+  writer prompts spell out (issue 504). Anything else whole goes through it
   by hand (`scripts/gate-slot.ts <command>`); a bare `npm test` does not queue, so regenerate with
   `UPDATE_FIXTURE=1 npm run check`. A queue that fails exits non-zero and runs nothing. Detector:
   `tests/gate-slot.test.ts`, which holds all three scripts to it.

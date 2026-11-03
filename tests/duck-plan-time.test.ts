@@ -8,9 +8,10 @@
  * A file of its own, importing only the planner, the catalog's DDL, the parser and the allowlist, so that
  * scripts/fails-without.ts can load it at a0ab4ef (PR 202 before round 14), where the bound is what fails.
  *
- * Left out, for issue 244 to bring in with its fix: the numeric c read or merely carried through every level, which grows
- * with the cube of the depth on main (`c + 1` 261 ms and c passed through 222 ms at depth 32), and `c + c - c`, which is
- * exponential (still planning when killed at depth 16).
+ * The numeric c read or merely carried through every level, and a quotient of it, are in since issue 244's first piece
+ * (#483: a FROM item's exact-numeric decisions taken once per column; on main `c + 1` took 399 ms and every column with
+ * c 1208 ms at depth 32). Still left out, for #484 (a numeric's program copied into each reference): `c + c - c`, which
+ * is exponential (still planning when killed at depth 16), and a numeric's UNION ALL chain.
  */
 import { test } from "node:test";
 import { CollationResolver } from "../src/duck/collation.ts";

@@ -2717,7 +2717,8 @@ test("plain: no command a harness prompt or a skill tells an agent to run is one
     'node <repo>/scripts/board.ts status 301 "In progress"', 'node <repo>/scripts/board.ts sub 301 "301 · schema" --from "Sonnet 5.5"',
     "gh pr merge <n> --auto --merge --match-head-commit <sha>", 'node <repo>/scripts/board.ts status <n> "Implementing"',
     "node <repo>/scripts/gh-text.ts issue 300", "node <repo>/scripts/gh-text.ts body 900", 'node <repo>/scripts/gh-text.ts comment-id 900 "## Handoff"',
-    'node <repo>/scripts/gh-text.ts search "<words>"', "node <repo>/scripts/gh-text.ts author <n>", "node <repo>/scripts/gh-text.ts issue <n>", MERGE_CMD, "git push origin HEAD:issue-300-a-piece", "git ls-remote origin refs/heads/issue-300-a-piece", "node <repo>/scripts/ci-wait.ts <n> 540"]) {
+    'node <repo>/scripts/gh-text.ts search "<words>"', "node <repo>/scripts/gh-text.ts author <n>", "node <repo>/scripts/gh-text.ts issue <n>", MERGE_CMD, "git push origin HEAD:issue-300-a-piece", "git ls-remote origin refs/heads/issue-300-a-piece", "node <repo>/scripts/ci-wait.ts <n> 540",
+    "node <repo>/scripts/done-file.ts <done file> npm run check > <log> 2>&1", "node <repo>/scripts/wait-file.ts <done file> 540"]) {
     assert.ok(seen.has(cmd), `the check reads \`${cmd}\``);
   }
   // and it catches each form the guard refused, as origin/main wrote them
@@ -2878,6 +2879,116 @@ test("plain: wait-file exits 0 once its file is there and not empty, 8 at its bo
     const late = spawnSync(process.execPath, [SCRIPT, path.join(dir, "never.json"), "1"], { encoding: "utf8", env: { ...process.env, WAIT_FILE_INTERVAL_MS: "50" }, timeout: 30_000 });
     assert.equal(late.status, 8, late.stderr);
     for (const args of [[], [target], [target, "0"], [target, "x"], [target, "7201"]]) assert.equal(spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" }).status, 2, args.join(" "));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- issue 504: a stage's end that is not its result.
+// Twice a pr-persistent implementer ended its first turn with a commit and no push, PR or result, and the coordinator's
+// wait on the result file ran to its bound. Every stage that writes (ON's isolation 'worktree', read from each call's
+// options, never a second list) is told once, by pr-loop-slim's ONE_TURN, that its turn ends only with its result, that
+// no background job of its own wakes it, and that its tool-call budget is no place to stop.
+
+/** pr-loop-slim's ONE_TURN as a run with `repo` (or none) renders it: read from the script's source, never retyped. */
+function oneTurnOf(repo: string | undefined): string {
+  const m = /^const ONE_TURN = (`[^\n]*`)$/m.exec(source("pr-loop-slim"));
+  assert.ok(m, "pr-loop-slim declares ONE_TURN on one line: the one-turn rule every stage that writes is held to (issue 504)");
+  return new Function("REPO", `return (${m[1]})`)(repo ?? "<repo>") as string;
+}
+const timesIn = (text: string, s: string): number => text.split(s).length - 1;
+/** A full run whose writers are every kind: implement, a class fix (two findings of one class), a CI fix and learn. */
+const ONE_TURN_RUN: Answers = { ...SLIM,
+  "review r1": { findings: [finding({ classKey: "k", input: "SELECT r1a FROM t" }), finding({ classKey: "k", input: "SELECT r1b FROM t" })], judgedCorrect: [] },
+  "fix r1 (class)": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 },
+  "review r3": clean, "CI 2": green };
+/** A run whose fix is a plain round, not a class round. */
+const ONE_TURN_PLAIN: Answers = { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": green };
+
+test("pr-loop-slim: every stage that writes is told once that its turn ends only with its result, pushed (issue 504)", async () => {
+  for (const repo of [undefined, ROOT]) {
+    const args: Record<string, unknown> = { ...PR, ...(repo ? { repo } : {}) };
+    const ONE = oneTurnOf(repo);
+    const writers = new Set<string>();
+    for (const answers of [ONE_TURN_RUN, MERGE_RUN, ONE_TURN_PLAIN]) {
+      const r = await run("pr-loop-slim", args, answers);
+      for (const c of r.calls.filter((x) => x.opts.isolation === "worktree")) {
+        writers.add(c.opts.label.replace(/\d+/g, "n"));
+        assert.equal(timesIn(c.prompt, ONE), 1, `"${c.opts.label}" writes, so its prompt carries ONE_TURN exactly once`);
+        // a background job is started only under ONE_TURN, which says how it is waited on in the same turn
+        assert.doesNotMatch(c.prompt.replace(ONE, ""), /background|run_in_background|&\s*`/i, `"${c.opts.label}" starts a job in the background outside ONE_TURN`);
+      }
+    }
+    // the writers are read from the options, and every kind was seen, so the check is not vacuous
+    assert.deepEqual([...writers].sort(), ["CI fix n", "fix rn", "fix rn (class)", "implement", "learn", "merge n"]);
+    // the implementer's order: the push, then the PR, then the Handoff comment; ONE_TURN ends its turn after all three
+    const impl = (await run("pr-loop-slim", args, ONE_TURN_PLAIN)).prompt("implement");
+    const push = impl.indexOf("`git push -u origin issue-300-a-piece`");
+    const create = impl.indexOf("`gh pr create --base main --head issue-300-a-piece`");
+    const comment = impl.indexOf("`gh pr comment <your PR> --body-file <file>`");
+    assert.ok(push >= 0 && push < create && create < comment, "the implement prompt pushes, opens the PR, then posts the Handoff comment");
+    assert.match(ONE, /your turn ends only once this stage's work is done and your result returned, never before/);
+    assert.match(ONE, /The implementer's work is done after its push, its PR \(`gh pr create`\), its Handoff comment, and then its result/);
+    assert.match(ONE, /every other stage that writes is done after its push \(or the no-push answer its prompt allows\), and then its result/);
+    assert.match(ONE, /A commit that is not pushed is not done/);
+    assert.match(ONE, /The tool-call budget this prompt gives is a guide, never a point to stop at/);
+    assert.match(ONE, /No agent run here is woken by a background job of its own once its turn has ended, so nothing may wait on one/);
+    // how `npm run check` is run within the turn: two plain commands, the wait bounded and in the foreground
+    const R = repo ?? "<repo>";
+    const cmds = commandsOf(ONE);
+    for (const cmd of [`node ${R}/scripts/done-file.ts <done file> npm run check > <log> 2>&1`, `node ${R}/scripts/wait-file.ts <done file> 540`]) {
+      assert.ok(cmds.includes(cmd), `ONE_TURN names \`${cmd}\``);
+      assert.deepEqual(unplain(cmd), [], `\`${cmd}\` is plain`);
+    }
+    assert.match(ONE, /waited on in this same turn by `[^`]*wait-file\.ts[^`]*`, in the foreground with the Bash tool's timeout set to 600000, run again until it exits 0/);
+  }
+});
+
+test("the pr-persistent render carries ONE_TURN to the implementer's first leg and to a fix round sent by SendMessage (issue 504)", () => {
+  const ONE = oneTurnOf(ROOT);
+  const first = renderStage(RACE_ARGS, {});
+  const impl = first.files["implement.md"]!;
+  assert.equal(timesIn(impl, ONE), 1, "the implementer's first leg carries ONE_TURN once");
+  const trailer = RESULT_TRAILER(first.dir, "implement");
+  assert.ok(impl.indexOf(ONE) >= 0 && impl.indexOf(ONE) < impl.indexOf(trailer), "ONE_TURN, then the render's trailer, unchanged, naming results/implement.json");
+  assert.ok(trailer.includes(path.join("results", "implement.json")));
+  const { ["fix r1"]: _fix, ...beforeFix } = upTo("fix r1", null);
+  const round = renderStage(RACE_ARGS, beforeFix);
+  assert.match(round.out, /^STAGE "fix r1" /m, "the next stage is the fix round the coordinator sends to the implementer");
+  assert.equal(timesIn(round.files["fix-r1.md"]!, ONE), 1, "the fix round carries ONE_TURN once");
+});
+
+test("done-file: writes the command's end, and only its end, to a file wait-file reads; the exit code is the command's (issue 504)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "done-file-"));
+  const SCRIPT = path.join(ROOT, "scripts", "done-file.ts");
+  const WAIT = path.join(ROOT, "scripts", "wait-file.ts");
+  try {
+    const done = path.join(dir, "done");
+    fs.writeFileSync(done, "exit 0\n");
+    // a command that runs a while: a stale done file is removed at once, and the file appears only at the end
+    const child = spawn(process.execPath, [SCRIPT, done, process.execPath, "-e", "setTimeout(() => process.exit(3), 600)"], { stdio: "ignore" });
+    const t0 = Date.now();
+    await new Promise((r) => setTimeout(r, 200));
+    assert.ok(!fs.existsSync(done), "an earlier run's done file is gone before the command ends");
+    const waited = spawnSync(process.execPath, [WAIT, done, "20"], { encoding: "utf8", env: { ...process.env, WAIT_FILE_INTERVAL_MS: "50" }, timeout: 30_000 });
+    assert.equal(waited.status, 0, "wait-file ends once the command has ended");
+    assert.ok(Date.now() - t0 >= 550, "and not before");
+    const code = await new Promise<number | null>((resolve) => (child.exitCode !== null ? resolve(child.exitCode) : child.on("exit", resolve)));
+    assert.equal(code, 3, "done-file exits with the command's code");
+    assert.equal(fs.readFileSync(done, "utf8"), "exit 3\n");
+    // output is the command's, passed through
+    const out = spawnSync(process.execPath, [SCRIPT, done, process.execPath, "-e", "console.log('gate output')"], { encoding: "utf8" });
+    assert.equal(out.status, 0);
+    assert.equal(out.stdout, "gate output\n");
+    assert.equal(fs.readFileSync(done, "utf8"), "exit 0\n");
+    // a command that cannot start is said, never read as passed
+    const missing = spawnSync(process.execPath, [SCRIPT, done, path.join(dir, "no-such-command")], { encoding: "utf8" });
+    assert.equal(missing.status, 127);
+    assert.match(fs.readFileSync(done, "utf8"), /^error /);
+    // a usage error runs nothing and writes nothing
+    fs.rmSync(done);
+    for (const args of [[], [done], ["", "node"]]) assert.equal(spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" }).status, 2, args.join(" "));
+    assert.ok(!fs.existsSync(done));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

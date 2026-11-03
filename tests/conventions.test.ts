@@ -592,7 +592,9 @@ test("the planned-SQL guard would catch the real thing", () => {
  * ONE DEFINITION OF A `#>` PATH ELEMENT THAT IS AN ARRAY INDEX (src/duck/functions.ts `pathIndex`; a review finding):
  * the function read `+1` as a key and `1 ` as an index where Postgres's strtoint reads the reverse, and the
  * native read (src/duck/rewrite.ts jsonGet) had copied its regular expression, so a fix to one would have parted the
- * two. Each must ask pathIndex, and test no element against a pattern of digits of its own.
+ * two. Each must ask pathIndex, and test no element against a pattern of digits of its own. The native reads (jsonGet,
+ * a read's nullness, issue 130) read their steps through ONE function, `stepKeys`; jsonGet and the path writer
+ * (`duckJsonPath`) test no element of their own.
  */
 const ownIndexPattern = (body: string): string[] =>
   [...body.matchAll(/\/[^/\n]*(?:\\d|\[0-9\])[^/\n]*\/[a-z]*\.test\((?:s|s\.either|element)\)/g)].map((m) => m[0]);
@@ -604,11 +606,16 @@ const functionBody = (file: string, start: string): string => {
 };
 
 test("a #> path element is an array index by ONE definition: the function's step and the native read both ask pathIndex", () => {
-  for (const [file, start] of [["src/duck/functions.ts", "function step("], ["src/duck/rewrite.ts", "function jsonGet("]] as const) {
+  for (const [file, start] of [["src/duck/functions.ts", "function step("], ["src/duck/rewrite.ts", "function stepKeys("]] as const) {
     const body = functionBody(file, start);
     assert.match(body, /\bpathIndex\(/, `${file} ${start}…): an element read as an index must ask pathIndex`);
     assert.deepEqual(ownIndexPattern(body), [], `${file} ${start}…): an element tested against a pattern of its own`);
   }
+  for (const start of ["function jsonGet(", "function duckJsonPath("]) {
+    const body = functionBody("src/duck/rewrite.ts", start);
+    assert.deepEqual(ownIndexPattern(body), [], `src/duck/rewrite.ts ${start}…): an element tested against a pattern of its own`);
+  }
+  assert.match(functionBody("src/duck/rewrite.ts", "function jsonGet("), /\bstepKeys\(/, "jsonGet reads its steps through stepKeys");
 });
 
 test("the index guard would catch the real thing", () => {

@@ -168,6 +168,7 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 
 | Setting | Default | Change it when |
 |---|---|---|
+| `MASON_PROJECT_READONLY` | `0` | the project folder is deployed as committed (CI, GitOps, an image that carries it): `1` refuses every edit of its files — `mason add` and `mason remove` beside the server, the page's Add and Remove — with "edit the files and deploy them", where an edit would run what nobody committed until the next deploy undid it; anything but `0` or `1` refuses the start |
 | `MASON_UI_PORT` | 4039 | another service in the container wants it; the page stays on loopback whatever this says ("The web page") |
 | `MASON_PG_DATABASE` | `mason` | the sources file has no `database:` and a tool must keep the database name it has (a different `database:` in the file is refused) |
 | `MASON_DUCKDB_MEMORY` | half the container's memory limit, or what leaves 2.5 GiB beside it when that is less, never under 128 MiB; under 3 GiB, unset, a start warns that the system may stop it | the container's limit is not what the copy should have half of, or you choose its share under 3 GiB yourself ("Memory") |

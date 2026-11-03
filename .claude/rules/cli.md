@@ -278,6 +278,14 @@ CLI lacks).
   absent when older than two samples). Detectors: `MetricLabel` (a label of another name does not compile) and
   tests/conventions.test.ts (every label key literal); tests/cli-metrics.test.ts holds the renderer's reads to a closed
   list of numbers; tests/duck-sync-facts.test.ts counts the connections a cached status opens (none).
+- **Whether the project's files may be written is ONE function's** (`projectWriteRefusal`, src/cli/project.ts; issue
+  473): a deployment that ships its committed folder sets `MASON_PROJECT_READONLY=1`, which the run records in the config
+  at its start (`projectReadOnly`, removed at a start without), and EVERY writer of a project file asks it first and
+  writes nothing on its refusal — `sourceToEdit` (so `mason add`, `mason remove` and `/api/pick|remove`), the commands
+  before they reach the run, `serveSource`, `ensurePin`, `mason init` — either the environment or the record refusing,
+  so a command beside the run cannot un-say it; `/api/state` `sourcesReadOnly` is its answer, and the page offers no Add
+  or Remove. A value not 0 or 1 refuses the start (`startSettingRefusal`, `serveSettings`) and every edit. A new writer
+  of a project file asks it (tests/cli-project-readonly.test.ts, the state matrix's "deployed" state).
 - **`sync: replication` is the production change path on a laptop, per table** (src/cli/replication-mode.ts): the
   sources file alone decides — `mason start --replication`, `--poll` and `--publication` are gone, each answered with
   the line to write and exit 2 before anything starts (`removedStartFlags`, src/lib/table-sync.ts), and `MASON_CHANGES`

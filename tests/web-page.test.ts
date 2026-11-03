@@ -600,6 +600,28 @@ test("a sources file the server cannot write: no Add, Columns…, Name its key�
   assert.ok(!textOf(none).includes("Add one from the list"));
 });
 
+test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run answers says why, and the Tables list has no Add, Columns…, Name its key… or Remove; unset, it has", () => {
+  const renderTables = fn<[unknown], string>("renderTables");
+  // the run's own environment, as mason serve's run reads it: the state is the server's, rendered as it travels
+  const was = process.env.MASON_PROJECT_READONLY;
+  process.env.MASON_PROJECT_READONLY = "1";
+  let deployed: RunState;
+  try { deployed = stateOf(THREE_COPIED(), { tables: CATALOG }); }
+  finally { if (was === undefined) delete process.env.MASON_PROJECT_READONLY; else process.env.MASON_PROJECT_READONLY = was; }
+  const why = "the project's files are read-only here (MASON_PROJECT_READONLY=1); edit the files and deploy them: mason add or mason remove where the project is committed, then commit and deploy";
+  assert.equal(deployed.sourcesReadOnly, why);
+  const html = renderTables(deployed);
+  for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
+  assert.match(html, /data-sync-table/, "Sync stays: the sync is unchanged");
+  assert.ok(textOf(html).includes(`Tables are not added or removed from this page: ${why}.`));
+  // every table of the list is still written, added or not
+  for (const t of CATALOG) assert.ok(html.includes(`title="${t.source}"`), t.source);
+  // unset: nothing changes
+  assert.equal(CATALOG_STATE.sourcesReadOnly, null);
+  const open = renderTables(CATALOG_STATE);
+  for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(open.includes(control), control);
+});
+
 test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {
   const renderConnect = fn<[unknown, unknown?], string>("renderConnect");
   const { renderUsersConnect } = await import(path.join(WEB, "pages", "users.js") as string) as { renderUsersConnect: (pg: unknown, served?: boolean) => string };

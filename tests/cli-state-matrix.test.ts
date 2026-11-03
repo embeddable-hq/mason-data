@@ -98,13 +98,15 @@ function folderIn(state: string): string {
   }
   // what a 0.7.0 start recorded for a project it streamed (v0.7.0 src/cli/dev.ts), under the file 0.7.0 wrote: no sync:
   if (state === "streamed_0_7") Object.assign(config, V0_7_STREAMED);
+  // what a start under MASON_PROJECT_READONLY=1 records (src/cli/dev.ts): the project's files deployed, read-only here
+  if (state === "deployed") config.projectReadOnly = true;
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(config), { mode: 0o600 });
   return root;
 }
 
-const STATES = ["no_project", "stopped", "stale", "squatted", "broken", "demo", "streamed_0_7"] as const;
+const STATES = ["no_project", "stopped", "stale", "squatted", "broken", "demo", "streamed_0_7", "deployed"] as const;
 /** Which of src/cli/state.ts's states each folder is: a run recorded that does not answer is stopped. */
-const IS: Record<(typeof STATES)[number], ProjectState> = { no_project: "no_project", stopped: "stopped", stale: "stopped", squatted: "stopped", broken: "bad_config", demo: "stopped", streamed_0_7: "stopped" };
+const IS: Record<(typeof STATES)[number], ProjectState> = { no_project: "no_project", stopped: "stopped", stale: "stopped", squatted: "stopped", broken: "bad_config", demo: "stopped", streamed_0_7: "stopped", deployed: "stopped" };
 
 test("the states are src/cli/state.ts's, in order: each meets more than the one before", () => {
   assert.deepEqual(Object.keys(PROJECT_STATES), ["no_project", "bad_config", "stopped", "up"]);
@@ -455,6 +457,91 @@ test("mason add and mason remove need only the project: Mason stopped, they read
     assert.deepEqual([d.error.code, d.error.message, d.error.fix, d.next.map((n) => n.command)], ["unreachable",
       `could not connect to postgres://demo@${demoAt}/demo: the demo database is not running on ${demoAt}`, "the demo database runs inside mason start: start it first", ["mason start"]], `mason ${cmd}, a demo project stopped`);
     assert.equal(fs.readFileSync(path.join(root, "mason", "sources", "demo.yml"), "utf8"), was, "nothing written");
+  }
+});
+
+/** Every file under `root` but the run's own `.mason/`, with its bytes and its mtime: what an edit refused must leave as it was. */
+function projectFiles(root: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const e of fs.readdirSync(root, { recursive: true, withFileTypes: true })) {
+    if (!e.isFile()) continue;
+    const at = path.join(e.parentPath, e.name);
+    const rel = path.relative(root, at);
+    if (rel.startsWith(".mason")) continue;
+    out[rel] = `${fs.statSync(at).mtimeMs} ${fs.readFileSync(at, "base64")}`;
+  }
+  return out;
+}
+
+test("a deployed project (MASON_PROJECT_READONLY): mason add, mason remove and mason init are refused in every way it is said, with the Failure and nothing written; unset, nothing changes", async () => {
+  const deployedFailure = (e: { code: string; message: string; why?: string; fix?: string }, next: Array<{ command: string }>, message: string): void => {
+    assert.deepEqual([e.code, e.message, e.why, e.fix, next.map((n) => n.command)], ["refused", message,
+      "Mason runs them as they were deployed: an edit here would run what nobody committed, and the next deploy would undo it",
+      "edit the files and deploy them: mason add or mason remove where the project is committed, then commit and deploy", ["mason status"]]);
+  };
+  // the record (the run started with it), the setting in this shell, and the record under a shell saying 0: each refuses
+  const ways: Array<{ state: "deployed" | "stopped"; env: Record<string, string>; message: string }> = [
+    { state: "deployed", env: {}, message: "the project's files are read-only here (MASON_PROJECT_READONLY=1 when Mason last started)" },
+    { state: "deployed", env: { MASON_PROJECT_READONLY: "0" }, message: "the project's files are read-only here (MASON_PROJECT_READONLY=1 when Mason last started)" },
+    { state: "stopped", env: { MASON_PROJECT_READONLY: "1" }, message: "the project's files are read-only here (MASON_PROJECT_READONLY=1)" },
+  ];
+  for (const w of ways) {
+    for (const argv of [["add", "orders"], ["add", "orders", "--sync", "poll 30s"], ["remove", "orders"], ["init", "postgres://mason:secret@127.0.0.1:1/shop"]]) {
+      const root = folderIn(w.state);
+      const was = projectFiles(root);
+      const config = fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8");
+      const a = await runMason(root, [...argv, "--json"], matrixEnv(w.env));
+      const line = `${w.state} ${JSON.stringify(w.env)} mason ${argv.join(" ")}`;
+      assert.equal(a.code, 1, `${line}: ${a.stdout}${a.stderr}`);
+      const v = JSON.parse(a.stdout) as { error: { code: string; message: string; why?: string; fix?: string }; next: Array<{ command: string }> };
+      // mason init in a project with a sources file says that first: it is already the project (and writes nothing)
+      if (argv[0] === "init") assert.match(v.error.message, /already the Mason project/, line);
+      else deployedFailure(v.error, v.next, w.message);
+      assert.deepEqual(projectFiles(root), was, `${line}: no project file written`);
+      assert.equal(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8"), config, `${line}: the config as it was`);
+      // as a person: the failure's head, why and fix
+      const person = await runMason(root, argv, matrixEnv(w.env));
+      assert.equal(person.code, 1, line);
+      if (argv[0] !== "init") assert.ok(person.stderr.includes(`mason ${argv[0]}: ${w.message}`), `${line}: ${person.stderr}`);
+      assert.deepEqual(projectFiles(root), was, `${line}, as a person: no project file written`);
+    }
+  }
+  // mason init in a new folder under the setting: refused before the database is asked, nothing written at all
+  const empty = folderIn("no_project");
+  const init = await runMason(empty, ["init", "postgres://mason:secret@127.0.0.1:1/shop", "--json"], matrixEnv({ MASON_PROJECT_READONLY: "1" }));
+  assert.equal(init.code, 1, init.stdout + init.stderr);
+  const iv = JSON.parse(init.stdout) as { error: { code: string; message: string; why?: string; fix?: string }; next: Array<{ command: string }> };
+  deployedFailure(iv.error, iv.next, "the project's files are read-only here (MASON_PROJECT_READONLY=1)");
+  assert.deepEqual(fs.readdirSync(empty), [], "nothing written");
+  // a value that is neither 0 nor 1 cannot tell: the edit is refused, naming it, and mason start refuses to start
+  for (const bad of ["yes", "true", "2", " 1"]) {
+    const root = folderIn("stopped");
+    const was = projectFiles(root);
+    const a = await runMason(root, ["add", "orders", "--json"], matrixEnv({ MASON_PROJECT_READONLY: bad }));
+    const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; fix: string } }).error;
+    assert.deepEqual([a.code, e.code, e.message, e.fix], [1, "refused",
+      `MASON_PROJECT_READONLY=${JSON.stringify(bad)}: 1 (the project's files are deployed, and read-only here) or 0 (the default), so whether the project's files may be written here cannot be told`,
+      "set MASON_PROJECT_READONLY=1 or MASON_PROJECT_READONLY=0, or unset it"], bad);
+    const start = await runMason(root, ["start", "--json"], matrixEnv({ MASON_PROJECT_READONLY: bad }));
+    const se = (JSON.parse(start.stdout) as { error: { code: string; message: string } }).error;
+    assert.deepEqual([start.code, se.code, se.message], [1, "refused", `MASON_PROJECT_READONLY=${JSON.stringify(bad)}: 1 (the project's files are deployed, and read-only here) or 0 (the default)`], bad);
+    assert.equal(fs.existsSync(path.join(root, ".mason", "dev.log")), false, "refused before a run was spawned");
+    assert.deepEqual(projectFiles(root), was, bad);
+  }
+  // THE RECORD IS THE RUN'S (src/cli/dev.ts): a start with the setting records it, before it connects; one without removes it
+  const recordOf = (root: string): unknown => (JSON.parse(fs.readFileSync(path.join(root, ".mason", "config.json"), "utf8")) as { projectReadOnly?: unknown }).projectReadOnly;
+  const plain = folderIn("stopped");
+  const started = await runMason(plain, ["start", "--attach"], matrixEnv({ MASON_PROJECT_READONLY: "1" }), 90_000);
+  assert.equal(started.code, 1, "the database does not answer");
+  assert.equal(recordOf(plain), true, started.stdout + started.stderr);
+  const deployed = folderIn("deployed");
+  const unset = await runMason(deployed, ["start", "--attach"], matrixEnv(), 90_000);
+  assert.equal(unset.code, 1, "the database does not answer");
+  assert.equal(recordOf(deployed), undefined, unset.stdout + unset.stderr);
+  // unset, or 0, with no record: an edit goes on to the database as it always did (here it does not answer)
+  for (const env of [{}, { MASON_PROJECT_READONLY: "0" }]) {
+    const a = await runMason(folderIn("stopped"), ["add", "orders", "--json"], matrixEnv(env));
+    assert.equal((JSON.parse(a.stdout) as { error: { code: string } }).error.code, "unreachable", JSON.stringify(env));
   }
 });
 
