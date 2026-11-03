@@ -3975,7 +3975,7 @@ test("issue 214: a numeric parameter beside a value the engine holds exactly is 
     assert.deepEqual(await ids(`${x} b.x <= $1 ORDER BY 1`, ["1.000000000000000000015"]), ["1"]);
     assert.deepEqual(await ids(`${x} b.x = $1::numeric(30,20) ORDER BY 1`, ["1.000000000000000000015"]), ["2"]);
     // = ANY of a numeric[] parameter: Postgres's rows, or an error — never the double's [1, 2, 4] (its element type is
-    // issue 576's: unchanged here)
+    // issue 583's: unchanged here)
     const any = `${x} b.x = ANY($1::numeric[]) ORDER BY 1`;
     const anyAnswer = await answer(c, any, ["{1.00000000000000000001,5}"]).catch((e: unknown) => e as Error);
     if (!(anyAnswer instanceof Error)) assert.deepEqual(anyAnswer, await postgres(any, ["{1.00000000000000000001,5}"]), any);
