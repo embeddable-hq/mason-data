@@ -18,22 +18,22 @@ each). The copy is read-only.
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 87 forms of them verified |
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 127 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 261 functions, 388 operators, 97 aggregates, 58 window functions and 127 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 62 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,039 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,104 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,039 statements | Mason | DuckDB alone |
+| Of 7,104 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 93% | 26% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 7% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 18% |
-| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 22% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 23% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 13% |
 | wrong rows, or the rows in another order | — | 8% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 3% |
@@ -165,7 +165,7 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (1148)
+## What is verified (1154)
 
 ### Types (93)
 
@@ -263,7 +263,7 @@ Not about one statement: what the prototype cannot do yet.
 - a value of type xid8
 - a value of type xml
 
-### Functions (255)
+### Functions (261)
 
 - the function "bit"(bit,integer,boolean)
 - the function "extract"(text,date)
@@ -317,6 +317,7 @@ Not about one statement: what the prototype cannot do yet.
 - the function array_upper(anyarray,integer)
 - the function ascii(text)
 - the function bool(integer)
+- the function bool(jsonb)
 - the function bpchar(character,integer,boolean)
 - the function btrim(text)
 - the function btrim(text,text)
@@ -355,10 +356,12 @@ Not about one statement: what the prototype cannot do yet.
 - the function float4(bigint)
 - the function float4(double precision)
 - the function float4(integer)
+- the function float4(jsonb)
 - the function float4(numeric)
 - the function float4(smallint)
 - the function float8(bigint)
 - the function float8(integer)
+- the function float8(jsonb)
 - the function float8(numeric)
 - the function float8(real)
 - the function float8(smallint)
@@ -374,15 +377,18 @@ Not about one statement: what the prototype cannot do yet.
 - the function host(inet)
 - the function initcap(text)
 - the function int2(integer)
+- the function int2(jsonb)
 - the function int2(real)
 - the function int4(bigint)
 - the function int4(boolean)
 - the function int4(double precision)
+- the function int4(jsonb)
 - the function int4(numeric)
 - the function int4(real)
 - the function int4(smallint)
 - the function int8(double precision)
 - the function int8(integer)
+- the function int8(jsonb)
 - the function int8(numeric)
 - the function int8(oid)
 - the function int8(real)
