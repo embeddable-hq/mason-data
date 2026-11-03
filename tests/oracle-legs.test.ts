@@ -12,13 +12,15 @@ import { fileURLToPath } from "node:url";
 import { GAPS, type GapId } from "../src/duck/gaps.ts";
 import { collationMet, staleDecisions } from "./integration/oracle/known.ts";
 import { emptyShapeCount, NEW_SHAPES, shapeProblems, sumShapeTallies, type ShapeTally } from "./integration/oracle/shape-names.ts";
-import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, Clock, FIRST_LEG_RUNS_STAGES, partition, readWeights, timesLine, weightKey, weightsFromLegs, legScales, legsBalance, balanceLines, LEGS_APART_MS, weightsText, writeWeights, WEIGHTS_FILE, README_FILE, SUPPORT_FILE, type Decision, type LegReport, type Measured, type Tallies, type Weights } from "../scripts/oracle-legs.ts";
+import { staleOrDead, STAGES, deadGaps, filesFromLegs, FIXTURE_FILE, foldProblems, legRefused, movedTallies, parseLeg, partitionProblems, PHASES, statementId, sumTally, VERIFIED_FILE, verifiedDiff, wholeRunProblems, runProblems, writeFromLegs, Clock, FIRST_LEG_RUNS_STAGES, partition, readWeights, timesLine, weightKey, weightsFromLegs, legScales, legsBalance, balanceLines, LEGS_APART_MS, weightsText, writeWeights, WEIGHTS_FILE, type Decision, type LegReport, type Measured, type Tallies, type Weights } from "../scripts/oracle-legs.ts";
 import { reportName } from "../scripts/ci-layout.ts";
 import { VERIFIED } from "../src/duck/verified.ts";
 import type { GapTally } from "./integration/oracle/gap-tally.ts";
 import { README_END, README_START, renderGaps, renderReadmeSupport, spliceReadme, type AloneTallies } from "./sql-support.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+/** the two files `--write` renders, spelt here rather than imported, so the tests load against a script without them */
+const README_FILE = "README.md", SUPPORT_FILE = "docs/SQL-SUPPORT.md";
 
 const statements = Array.from({ length: 40 }, (_, i) => ({ group: "g", name: `statement ${i}`, sql: `SELECT ${i}` }));
 /** asked in every phase and held apart from the tallies, as oracle/unordered-limit.ts's are */
