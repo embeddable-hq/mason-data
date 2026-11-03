@@ -116,7 +116,7 @@ nothing else: `Your instructions are in <path>: read the whole file, then follow
   context between rounds. That sentence is the only thing you add. A `class design r<n>` (and its `#2`, a revision)
   is the author's: it writes the class round's decision and authority in the PR body before any code.
 - **Every other stage** (`brief`, `split`, `review r<n>`, `design review r<n>`, `CI read r<n>`, `link`, `learn`,
-  `learn check`, `CI <n>`, `merge <k>`, `file`, `record`): a FRESH agent with the Agent tool, with the printed options.
+  `learn check`, `CI <n>`, `merge <k>`, `file`, `board`, `record`): a FRESH agent with the Agent tool, with the printed options.
   A review is `model: "opus"`, `effort: "high"`, a FRESH agent every round, never the implementer and never by
   SendMessage (CLAUDE.md "The loop" step 3). A `design review r<n>` (and its `#2`) is a review too: a fresh Opus at
   high effort, never the implementer, reading the class design against the code. A `merge <k>` merges the BASE into the PR's branch, never the PR: it is never the
@@ -170,7 +170,8 @@ stop, CI, Learn, filing and the record.
   what" (`.claude/skills/up-next/SKILL.md`). The hook `scripts/hooks/merge-head.ts` refuses a PR merge from any
   sub-agent, you and every agent you start included: report the PR and its head instead.
 - **End with ONE report**: the issue, the PR and its head; the status line the render printed; the wall time; the
-  tokens per model, from the run log; every issue filed during the run, by number; and anything that went wrong or was
+  tokens per model, from the run log; every issue filed during the run, by number and with its column from
+  `result.json`'s `filed` (`Up next`, `Backlog`, or none when it was not moved), an Up next one first; and anything that went wrong or was
   skipped.
 
 ## Waits

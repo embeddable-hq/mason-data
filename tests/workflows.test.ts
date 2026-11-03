@@ -159,7 +159,16 @@ const DEFAULTS: Array<[RegExp, unknown]> = [
   [/^class design r\d+( #\d+)?$/, { decision: "the decision", authority: "src/duck/pgtree.ts, read where src/duck/plan.ts decides", cases: ["SELECT a FROM t"] }],
   [/^design review r\d+( #\d+)?$/, { sound: true, findings: [], judgedCorrect: [] }],
   [/^record$/, { url: "https://github.com/embeddable-hq/mason-data/pull/900#issuecomment-1" }],
+  // the board stage (issue 667), answered as one that ran every command it was given and saw each exit 0
+  [/^board$/, (c: Call) => boardDone(c.prompt)],
 ];
+/** A board stage's answer that every command its prompt gives ran and exited 0, read from the commands themselves. */
+function boardDone(prompt: string, exit = (_n: number) => 0) {
+  return { issues: [...prompt.matchAll(/scripts\/board\.ts status (\d+) "([^"]+)"/g)].map(([, n, column]) => ({
+    issue: Number(n), column, statusExit: exit(Number(n)), printed: "",
+    ...(prompt.includes(`scripts/board.ts severity ${n} `) ? { severityExit: 0 } : {}),
+  })) };
+}
 /** The labels of the stages the older tests were written for: brief, implement, review, fix, CI and file. */
 const core = (labels: string[]) => labels.filter((l) => !/^(design|class design|link|probe|CI read|learn|record)/.test(l));
 /** A run whose fix is a class round (issue 649): its design is not found sound once, revised and found sound, then a CI
@@ -203,11 +212,11 @@ test("pr-loop-slim: a finding the base has is filed once and never fixed, never 
     "CI fix 1": { ...pushed("c"), flake: false },
     "review r3": clean,
     "CI 2": { state: "green", detail: "" },
-    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
+    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed", kind: "bug", severity: "Medium" }] },
   });
   assert.deepEqual(labels, [
     "brief", "implement", "link", "review r1", "CI read r1", "fix r1",
-    "review r2", "CI read r2", "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "record",
+    "review r2", "CI read r2", "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "board", "record",
   ]);
 
   for (const c of calls.filter((c) => /^(fix|CI fix|learn|record)/.test(c.opts.label))) assert.ok(!c.prompt.includes(base.input), `"${c.opts.label}" was handed the base's finding`);
@@ -279,12 +288,12 @@ test("pr-loop-slim: each trigger of the class rule makes the next fix a class ro
 test("pr-loop-slim: every exit returns one shape, and the base's findings are filed at every exit", async () => {
   const base = finding({ origin: "base", classKey: "b", input: "SELECT on_base FROM t" });
   // MAX_ROUNDS: four reviews with findings, three fixes, then a stop that still files
-  const many: Answers = { ...SLIM, file: { issues: [{ classKey: "b", source: "base", issue: 951, action: "filed" }] } };
+  const many: Answers = { ...SLIM, file: { issues: [{ classKey: "b", source: "base", issue: 951, action: "filed", kind: "bug", severity: "Medium" }] } };
   for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [base] : [])], judgedCorrect: [] };
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
   let r = await run("pr-loop-slim", { ...PR }, many);
   assert.match(String(r.result["status"]), /^shrink: PR 900 stopped at the round bound \(4 review rounds\): 1 blocking finding\(s\) of its own are open \(c4\)/);
-  assert.deepEqual(r.labels.slice(-2), ["file", "record"], "the MAX_ROUNDS exit files the base's findings, then posts its record");
+  assert.deepEqual(r.labels.slice(-3), ["file", "board", "record"], "the MAX_ROUNDS exit files the base's findings, moves them on the board, then posts its record");
   assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
 
   // a CI wait that returns nothing
@@ -935,7 +944,7 @@ const mergedAt = (c: string, files = ["release-notes/next.md"]) => ({ state: "me
 const MERGE_OPTS = { model: "sonnet", effort: "low", isolation: "worktree" };
 const MERGE_CMD = 'node scripts/merge-base.ts origin/main "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"';
 const baseFound = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
-const FILED_BASE = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] };
+const FILED_BASE = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed", kind: "bug", severity: "Medium" }] };
 /** A run that merges its base once, then meets a conflict its merge cannot resolve: both merge answers' text is read. */
 const MERGE_RUN: Answers = { ...SLIM, "review r1": clean, "CI 1": conflictCI, "merge 1": mergedAt("m"), "CI 2": conflictCI,
   "merge 2": { state: "conflict", head: sha("m"), files: ["src/duck/plan.ts"], detail: "conflict: src/duck/plan.ts" } };
@@ -943,7 +952,7 @@ const MERGE_RUN: Answers = { ...SLIM, "review r1": clean, "CI 1": conflictCI, "m
 test("pr-loop-slim: a conflict CI reads starts a merge stage on a fresh agent, never a CI fix, and CI runs again on the merged head", async () => {
   for (const name of PR_LOOPS) {
     const r = await run(name, { ...PR }, { ...SLIM, "review r1": { findings: [baseFound], judgedCorrect: [] }, "CI 1": conflictCI, "merge 1": mergedAt("m"), "CI 2": green, file: FILED_BASE });
-    assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "merge 1", "CI 2", "file"], name);
+    assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "merge 1", "CI 2", "file", "board"], name);
     const call = r.calls.find((c) => c.opts.label === "merge 1")!;
     const { label: _l, schema: _s, phase, ...on } = call.opts;
     assert.equal(phase, "Merge", `${name}: the merge's phase`);
@@ -1263,10 +1272,10 @@ test("pr-loop-slim: a round with only non-blocking findings of the PR's is clean
     ...SLIM, "review r1": { findings: [a, b, o], judgedCorrect: [] }, "CI 1": green,
     file: (c: Call) => {
       assert.ok(c.prompt.includes("source 'deferred'") && !c.prompt.includes("source 'base'"), "only the deferred section");
-      return { issues: [{ classKey: "wording", source: "deferred", issue: 970, action: "filed" }, { classKey: "gap", source: "deferred", issue: 971, action: "filed" }] };
+      return { issues: [{ classKey: "wording", source: "deferred", issue: 970, action: "filed", kind: "bug", severity: "Medium" }, { classKey: "gap", source: "deferred", issue: 971, action: "filed", kind: "bug", severity: "Medium" }] };
     },
   });
-  assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "file"], "no fix round, no learn");
+  assert.deepEqual(core(r.labels), ["brief", "implement", "review r1", "CI 1", "file", "board"], "no fix round, no learn");
   assert.ok(!r.labels.includes("learn"));
   assert.match(String(r.result["status"]), /^reviewed, no open blocking finding of this PR, CI green.*3 non-blocking finding\(s\) of this PR filed \(#970, #971\), not fixed/);
   assert.doesNotMatch(String(r.result["status"]), /NOT filed/);
@@ -1292,6 +1301,117 @@ test("pr-loop-slim: a round with only non-blocking findings of the PR's is clean
     "review r2": clean, "CI 2": green, file: { issues: [] },
   });
   assert.deepEqual(core(redRun.labels), ["brief", "implement", "review r1", "CI 1", "CI fix 1", "review r2", "CI 2", "file"]);
+});
+
+// Issue 667 (Tom, 2026-11-03: "only critical ones should go straight to up next"): the File stage judges each new
+// issue's label and board Severity, and the script alone decides its column and renders the board stage's commands.
+const onBase = finding({ origin: "base", severity: "wrong-answer", classKey: "on-base", input: "SELECT b FROM t" });
+const issue667 = (issue: number, o: Record<string, unknown> = {}) => ({ classKey: "on-base", source: "base", issue, action: "filed", kind: "bug", severity: "Critical", ...o });
+const fileRun = (issues: unknown[] | null, more: Answers = {}, args: Record<string, unknown> = {}) =>
+  run("pr-loop-slim", { ...PR, ...args }, { ...SLIM, "review r1": { findings: [onBase], judgedCorrect: [] }, "CI 1": green, file: issues && { issues }, ...more });
+const filedOf = (r: { result: Result }) => r.result["filed"] as Array<Record<string, unknown>>;
+
+test("pr-loop-slim: a Critical bug the File stage files is moved to Up next, every other filed issue to Backlog (issue 667)", async () => {
+  // a Critical bug: a board stage after file, before record; the severity set and the card moved to Up next
+  const crit = await fileRun([issue667(990)]);
+  assert.deepEqual(crit.labels.slice(-3), ["file", "board", "record"]);
+  assert.ok(!crit.labels.includes("fix r1"), "a finding the base has never blocks the PR that found it");
+  const b = crit.prompt("board");
+  assert.ok(b.includes("`node <repo>/scripts/board.ts severity 990 Critical`") && b.includes('`node <repo>/scripts/board.ts status 990 "Up next"`'), b);
+  assert.ok(!b.includes('status 990 "Backlog"'));
+  assert.equal(filedOf(crit)[0]!["column"], "Up next");
+  assert.match(String(crit.result["status"]), /^reviewed, no open blocking finding of this PR, CI green.*; #990 \(Critical\) moved to Up next/);
+  const on = crit.calls.find((c) => c.opts.label === "board")!.opts;
+  assert.deepEqual({ model: on.model, effort: on.effort, isolation: on.isolation, phase: on.phase }, { model: "sonnet", effort: "low", isolation: undefined, phase: "File" });
+  assert.match(b, /never through `node <\(git show …\)`/, "board.ts is run from its file");
+  assert.match(b, /PR 900's card is moved by its own stages/);
+
+  // High, Medium and Low bugs: each its Severity, and Backlog, never Up next
+  for (const [n, level] of [[991, "High"], [992, "Medium"], [993, "Low"]] as const) {
+    const r = await fileRun([issue667(n, { severity: level })]);
+    const p = r.prompt("board");
+    assert.ok(p.includes(`scripts/board.ts severity ${n} ${level}\``) && p.includes(`scripts/board.ts status ${n} "Backlog"`), `${level}: ${p}`);
+    assert.ok(!p.includes(`${n} "Up next"`), level);
+    assert.equal(filedOf(r)[0]!["column"], "Backlog", level);
+    assert.doesNotMatch(String(r.result["status"]), /moved to Up next/, level);
+  }
+  // an enhancement goes to Backlog with no Severity, whatever severity it came back with
+  const w = later({ input: "SELECT wording FROM t" });
+  for (const severity of ["none", "Critical"]) {
+    const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": green,
+      file: { issues: [{ classKey: "wording", source: "deferred", issue: 994, action: "filed", kind: "enhancement", severity }] } });
+    const p = r.prompt("board");
+    assert.ok(p.includes('scripts/board.ts status 994 "Backlog"') && !p.includes("severity 994") && !p.includes('"Up next"'), `${severity}: ${p}`);
+    assert.equal(filedOf(r)[0]!["column"], "Backlog");
+  }
+  // a bug with no Severity: Backlog, no severity command, and the status names it
+  const none = await fileRun([issue667(995, { severity: "none" })]);
+  assert.ok(none.prompt("board").includes('scripts/board.ts status 995 "Backlog"') && !none.prompt("board").includes("severity 995"));
+  assert.match(String(none.result["status"]), /#995 filed as a bug with no Severity: judge it by CLAUDE\.md "What a session finds" and run `node <repo>\/scripts\/board\.ts severity 995 <Critical\|High\|Medium\|Low>`/);
+  assert.equal(filedOf(none)[0]!["column"], "Backlog");
+
+  // a comment on an existing issue moves nothing; when every issue is one, no board stage runs
+  const commented = await fileRun([issue667(996, { action: "commented" }), issue667(990)]);
+  assert.ok(!commented.prompt("board").includes("996"), "no board.ts command names an existing issue");
+  assert.deepEqual(filedOf(commented).map((i) => i["column"]), [null, "Up next"]);
+  const onlyComments = await fileRun([issue667(996, { action: "commented" })]);
+  assert.ok(!onlyComments.labels.includes("board"));
+  assert.equal(filedOf(onlyComments)[0]!["column"], null);
+  // nothing filed, or a File stage that failed: no board stage, and the statuses they said before
+  const nothing = await fileRun([]);
+  assert.ok(!nothing.labels.includes("board"));
+  assert.match(String(nothing.result["status"]), /the base's class\(es\) NOT filed: on-base: in fromBase/);
+  const failed = await fileRun(null);
+  assert.ok(!failed.labels.includes("board"));
+  assert.match(String(failed.result["status"]), /filing failed: the findings are in fromBase and deferred/);
+
+  // two filed in one run: one board stage, both commands, each column its own
+  const two = await fileRun([issue667(990), issue667(991, { classKey: "on-base-2", severity: "High" })]);
+  assert.equal(two.labels.filter((l) => l === "board").length, 1);
+  for (const s of ["severity 990 Critical", 'status 990 "Up next"', "severity 991 High", 'status 991 "Backlog"']) assert.ok(two.prompt("board").includes(s), s);
+  assert.deepEqual(filedOf(two).map((i) => i["column"]), ["Up next", "Backlog"]);
+
+  // a repo given: its path in every command; without, <repo>, as BOARD renders
+  const at = await fileRun([issue667(990)], {}, { repo: "/srv/checkout" });
+  assert.ok(at.prompt("board").includes('`node /srv/checkout/scripts/board.ts status 990 "Up next"`'));
+  assert.ok(at.prompt("board").includes("`node /srv/checkout/scripts/board.ts severity 990 Critical`"));
+
+  // the File prompt asks the label and the board's Severity, and moves nothing itself
+  const f = crit.prompt("file").replace(/\s+/g, " ");
+  for (const s of ["Label each NEW issue `bug` or `enhancement`", "judge a bug's board Severity", "Critical: a silent wrong answer, data loss or corruption, or a security hole, in a COMMON shape",
+    "A shape is COMMON only on the evidence the issue names", "When unsure between two, the higher", "are the review's, not the board's",
+    "Set no Severity and move no card on the board: the stage after you does", "PR 900's card is moved by its own stages"]) assert.ok(f.includes(s), `the File prompt says ${s}`);
+  const schema = crit.calls.find((c) => c.opts.label === "file")!.opts.schema as { properties: { issues: { items: { required: string[]; properties: Record<string, { enum?: string[] }> } } } };
+  const item = schema.properties.issues.items;
+  assert.ok(item.required.includes("kind") && item.required.includes("severity"));
+  assert.deepEqual(item.properties["kind"]!.enum, ["bug", "enhancement"]);
+  assert.deepEqual(item.properties["severity"]!.enum, ["Critical", "High", "Medium", "Low", "none"]);
+});
+
+test("pr-loop-slim: a filed issue's column is read from the board stage's return, never assumed (issue 667)", async () => {
+  const notMoved = /#990 NOT moved to Up next: run `node <repo>\/scripts\/board\.ts status 990 "Up next"`/;
+  for (const [what, answer] of [
+    ["a board stage that failed", null],
+    ["a board stage that omits the issue", { issues: [] }],
+    ["a status command that exited 1", (c: Call) => boardDone(c.prompt, () => 1)],
+    ["another column reported", { issues: [{ issue: 990, column: "Backlog", statusExit: 0, severityExit: 0, printed: "" }] }],
+  ] as const) {
+    const r = await fileRun([issue667(990)], { board: answer });
+    assert.equal(filedOf(r)[0]!["column"], null, what);
+    assert.match(String(r.result["status"]), notMoved, what);
+    assert.doesNotMatch(String(r.result["status"]), /#990 \(Critical\) moved/, `${what}: never said moved`);
+    assert.deepEqual(r.labels.slice(-2), ["board", "record"], `${what}: the record is still posted`);
+  }
+  // a Severity not set is said with its command, the column read on its own
+  const sev = await fileRun([issue667(990)], { board: { issues: [{ issue: 990, column: "Up next", statusExit: 0, severityExit: 1, printed: "gh failed" }] } });
+  assert.equal(filedOf(sev)[0]!["column"], "Up next");
+  assert.match(String(sev.result["status"]), /#990's Severity NOT set: run `node <repo>\/scripts\/board\.ts severity 990 Critical`/);
+  // two issues: each column read from its own reported move
+  const two = await fileRun([issue667(990), issue667(991, { classKey: "on-base-2", severity: "High" })],
+    { board: (c: Call) => boardDone(c.prompt, (n) => (n === 991 ? 1 : 0)) });
+  assert.deepEqual(filedOf(two).map((i) => i["column"]), ["Up next", null]);
+  assert.match(String(two.result["status"]), /#990 \(Critical\) moved to Up next/);
+  assert.match(String(two.result["status"]), /#991 NOT moved to Backlog: run `node <repo>\/scripts\/board\.ts status 991 "Backlog"`/);
 });
 
 test("pr-loop-slim: only a blocking finding of the PR's is fixed and counts toward a class round; the others never reach a fix", async () => {
@@ -1458,20 +1578,20 @@ test("pr-loop-slim: 'filed' is read from the issues the File stage returns, clas
   assert.match(s, /non-blocking class\(es\) of this PR NOT filed: wording, gap: in deferred/, s);
   assert.match(s, /the base's class\(es\) NOT filed: on-base: in fromBase/, s);
   // some classes filed, others not: only the filed ones are said filed, with their issue
-  s = await status([{ classKey: "wording", source: "deferred", issue: 980, action: "filed" }]);
+  s = await status([{ classKey: "wording", source: "deferred", issue: 980, action: "filed", kind: "bug", severity: "Medium" }]);
   assert.match(s, /1 non-blocking finding\(s\) of this PR filed \(#980\), not fixed/, s);
   assert.match(s, /NOT filed: gap: in deferred/, s);
   // an issue of the other source does not file a class: 'base' issues for the deferred classes, and the reverse
   s = await status([
-    { classKey: "wording", source: "base", issue: 981, action: "filed" }, { classKey: "gap", source: "base", issue: 982, action: "filed" },
-    { classKey: "on-base", source: "deferred", issue: 983, action: "filed" },
+    { classKey: "wording", source: "base", issue: 981, action: "filed", kind: "bug", severity: "Medium" }, { classKey: "gap", source: "base", issue: 982, action: "filed", kind: "bug", severity: "Medium" },
+    { classKey: "on-base", source: "deferred", issue: 983, action: "filed", kind: "bug", severity: "Medium" },
   ]);
   assert.match(s, /NOT filed: wording, gap: in deferred/, s);
   assert.match(s, /the base's class\(es\) NOT filed: on-base/, s);
   // every class filed under its own source: nothing said not filed
   s = await status([
-    { classKey: "wording", source: "deferred", issue: 984, action: "filed" }, { classKey: "gap", source: "deferred", issue: 985, action: "commented" },
-    { classKey: "on-base", source: "base", issue: 986, action: "filed" },
+    { classKey: "wording", source: "deferred", issue: 984, action: "filed", kind: "bug", severity: "Medium" }, { classKey: "gap", source: "deferred", issue: 985, action: "commented" },
+    { classKey: "on-base", source: "base", issue: 986, action: "filed", kind: "bug", severity: "Medium" },
   ]);
   assert.match(s, /2 non-blocking finding\(s\) of this PR filed \(#984, #985\), not fixed/, s);
   assert.doesNotMatch(s, /NOT filed/, s);
@@ -1926,11 +2046,11 @@ test("pr-loop-slim: no design stage and no probe, and a design review runs only 
     "CI fix 1": { ...pushed("c"), flake: false },
     "review r3": clean,
     "CI 2": green,
-    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
+    file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed", kind: "bug", severity: "Medium" }] },
   });
   assert.deepEqual(labels, [
     "brief", "implement", "link", "review r1", "CI read r1", "fix r1", "review r2", "CI read r2",
-    "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "record",
+    "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "board", "record",
   ]);
   assert.match(String(result["status"]), /^reviewed, no open blocking finding/);
   assert.deepEqual(shapeOf(result), RESULT_KEYS, "one shape at every exit, which every reader of a result reads");
@@ -1961,7 +2081,7 @@ test("pr-loop-slim: no design stage and no probe, and a design review runs only 
   // severity: a non-blocking finding of the PR's is deferred and filed, never fixed
   r = await run("pr-loop-slim", { ...PR }, {
     ...SLIM, "review r1": { findings: [finding({ severity: "message", classKey: "wording", input: "SELECT later FROM t" })], judgedCorrect: [] },
-    "CI 1": green, file: { issues: [{ classKey: "wording", source: "deferred", issue: 961, action: "filed" }] },
+    "CI 1": green, file: { issues: [{ classKey: "wording", source: "deferred", issue: 961, action: "filed", kind: "bug", severity: "Medium" }] },
   });
   assert.ok(!r.labels.some((l) => l.startsWith("fix")), "a non-blocking finding is never fixed");
   assert.ok(r.prompt("file").includes("SELECT later FROM t"));
@@ -2249,6 +2369,11 @@ test("the up-next skill: the top session's queue, its rules, how a run starts an
   assert.ok(prose.includes("Order: done: <issues> | running: <issue>") && prose.includes("| issue | coordinator agent | started | PR | state |"), "the queue file's format");
   assert.ok(text.includes("`gh pr merge <n> --auto --merge --match-head-commit <sha>`"), "the merge is queued pinned to the head read");
   assert.ok(prose.includes("the queue belongs on the board") && prose.includes("is open"), "the queue on the board stays an open question");
+  // issue 667: only a Critical bug filed along the way goes straight to Up next, in this skill and in CLAUDE.md
+  const rule = "A Critical bug filed along the way goes straight to **Up next**; every other issue filed along the way to **Backlog** (Tom, 2026-11-03)";
+  assert.ok(prose.includes(rule.replace(/^A/, "a")), "the up-next skill says where a filed issue goes");
+  assert.ok(fs.readFileSync(path.join(ROOT, "CLAUDE.md"), "utf8").replace(/\s+/g, " ").includes(rule),"CLAUDE.md says where a filed issue goes");
+  assert.doesNotMatch(prose, /Issues filed along the way\*\* go to \*\*Backlog\*\*/, "no longer every filed issue to Backlog");
   // a run starts only on an issue whose author is the repository's own (issue 438); any other goes to Needs Tom
   const gate = text.indexOf("`node <repo>/scripts/gh-text.ts author <n>`");
   const implementing = text.indexOf('`node <repo>/scripts/board.ts status <n> "Implementing"`');
@@ -2333,7 +2458,8 @@ const RACE_ANSWERS: Answers = {
   "review r4": ran({ findings: [], judgedCorrect: [] }),
   "CI read r4": green,
   "CI 2": green,
-  file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }] },
+  file: { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed", kind: "bug", severity: "Medium" }] },
+  board: { issues: [{ issue: 950, column: "Backlog", statusExit: 0, severityExit: 0, printed: "" }] },
   record: { url: "https://github.com/embeddable-hq/mason-data/pull/900#issuecomment-2" },
 };
 const fileOf = (label: string) => `${label.replace(/[^a-z0-9]+/gi, "-").replace(/-$/, "")}.md`;
@@ -2533,7 +2659,7 @@ test("the pr-persistent skill: a conflict renders the merge stage for a fresh ag
   // the merge leaves the conflict open: File and Record still run, then DONE with slim's own status
   const open = { ...atConflict, "merge 1": { state: "conflict", head: sha("d"), files: ["src/duck/plan.ts"], detail: "conflict: src/duck/plan.ts" } };
   await sameNext(open, open, "file after a merge that left the conflict open");
-  const all = { ...open, file: RACE_ANSWERS["file"], record: RACE_ANSWERS["record"] };
+  const all = { ...open, file: RACE_ANSWERS["file"], board: RACE_ANSWERS["board"], record: RACE_ANSWERS["record"] };
   const want = await slimNext(RACE_ARGS, all) as { done: string };
   assert.match(want.done, /^conflict: PR 900 conflicts with main\b[^]*src\/duck\/plan\.ts/, want.done);
   const done = renderStage(RACE_ARGS, all);
@@ -2551,6 +2677,9 @@ test("the skills: a conflict DONE is the coordinator's ONE report at once, and t
   // section 2: the merge is a fresh agent's, with the printed options, never the implementer's
   const fresh = /\*\*Every other stage\*\*[^]*?(?=\n- \*\*|\n\n)/.exec(text)?.[0].replace(/\s+/g, " ") ?? "";
   assert.ok(fresh.includes("`merge <k>`"), `section 2's fresh-agent list names merge <k>: ${fresh}`);
+  // issue 667: the board stage is a fresh agent's too, and the coordinator's report gives each filed issue's column
+  assert.ok(fresh.includes("`file`, `board`, `record`"), `section 2's fresh-agent list names board: ${fresh}`);
+  assert.match(prose, /\*\*End with ONE report\*\*[^]*?every issue filed during the run, by number and with its column from `result\.json`'s `filed` \(`Up next`, `Backlog`, or none when it was not moved\), an Up next one first/);
   assert.ok(!/\*\*`fix r<n>`[^]*?SendMessage/.exec(text)?.[0].includes("merge"), "the implementer's list does not name the merge");
   // section 3: a conflict DONE, reported at once as the ONE report, naming the files, with no wait after it
   assert.match(prose, /\*\*A conflict\*\* \(`DONE: conflict: …`\)[^]*?the files the status names[^]*?your ONE report AT ONCE[^]*?naming the files from the status[^]*?Never wait on it, watch it, or leave a background job for it/);
@@ -2741,6 +2870,23 @@ test("pr-loop-slim split, through render.mjs: a brief result with a split render
   assert.match(bad.out, /^DONE: brief failed$/m);
 });
 
+test("pr-loop-slim's board stage, through render.mjs: a file result with a Critical filed issue renders the board stage, Up next (issue 667)", () => {
+  const critical = { issues: [{ classKey: "base-class", source: "base", issue: 990, action: "filed", kind: "bug", severity: "Critical" }] };
+  const r = renderStage(RACE_ARGS, upTo("file", critical));
+  assert.equal(r.out, `STAGE "board" (File) ${JSON.stringify({ model: "sonnet", effort: "low" })}: ${path.join(r.dir, "next", "board.md")}\n`);
+  onlyControlLines(r, "board");
+  assert.ok(r.files["board.md"]!.includes(`\`node ${ROOT}/scripts/board.ts status 990 "Up next"\``), r.files["board.md"]);
+  assert.ok(r.files["board.md"]!.includes(`\`node ${ROOT}/scripts/board.ts severity 990 Critical\``));
+  // a file result without kind, or without severity, fails the File schema: read as null, and no board stage follows
+  for (const k of ["kind", "severity"]) {
+    const { [k]: _gone, ...without } = critical.issues[0]! as Record<string, unknown>;
+    const bad = renderStage(RACE_ARGS, upTo("file", { issues: [without] }));
+    assert.match(bad.out, new RegExp(`^NULL "file": answer\\.issues\\[0\\]\\.${k} is missing; read as null`, "m"), k);
+    assert.doesNotMatch(bad.out, /STAGE "board"/, k);
+    assert.match(bad.out, /^STAGE "record"/m, k);
+  }
+});
+
 test("the repo records one process: CLAUDE.md names the skills and the one workflow, and who merges what (issue 386)", () => {
   const claude = fs.readFileSync(path.join(ROOT, "CLAUDE.md"), "utf8");
   for (const s of ["pr-loop.js", "issue-loop.js", "raced", "experimental process"]) assert.ok(!claude.includes(s), `CLAUDE.md no longer says ${s}`);
@@ -2766,7 +2912,7 @@ test("reviews run on Opus at high effort in a fresh agent, never Fable (issue 60
     "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green, file: FILED_BASE,
   });
   assert.deepEqual(full.labels, ["brief", "implement", "link", "review r1", "CI read r1", "fix r1", "review r2", "CI read r2",
-    "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "record"]);
+    "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "board", "record"]);
   const split = await run("pr-loop-slim", { ...PR }, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } });
   const merge = await run("pr-loop-slim", { ...PR }, MERGE_RUN);
   const unreviewed = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...clean, statementsRun: 0, statementsMatched: 0 } });
@@ -3046,7 +3192,7 @@ const unplain = (cmd: string): string[] => UNPLAIN.filter(([re]) => re.test(cmd)
 
 test("plain: no command a harness prompt or a skill tells an agent to run is one the worktree guard refuses (issue 322)", async () => {
   const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
-  const filed = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }, { classKey: "wording", source: "deferred", issue: 951, action: "filed" }] };
+  const filed = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed", kind: "bug", severity: "Medium" }, { classKey: "wording", source: "deferred", issue: 951, action: "filed", kind: "bug", severity: "Medium" }] };
   const review1 = { findings: [finding({ classKey: "c-a", input: "SELECT a FROM t" }), base, later({ input: "SELECT later FROM t" })], judgedCorrect: [] };
   const SLIM_FULL: Answers = { ...SLIM, "review r1": review1, "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red,
     "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green, file: filed };
@@ -3081,14 +3227,14 @@ test("plain: no command a harness prompt or a skill tells an agent to run is one
   assert.deepEqual([...bad].map(([k, w]) => `${k} in ${[...w].slice(0, 3).join(", ")}${w.size > 3 ? ` and ${w.size - 3} more` : ""}`), [],
     "a command an agent is told to run that Claude Code's worktree guard refuses in an isolated agent: make it one program with literal arguments, its logic in a script under scripts/");
   // every stage was rendered, and the commands the decision names are read, so the check is not vacuous
-  for (const l of ["brief", "split", "implement", "link", "review rn", "fix rn", "class design rn", "design review rn", "class design rn #n", "design review rn #n", "fix rn (class)", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "merge n", "file", "record"]) {
+  for (const l of ["brief", "split", "implement", "link", "review rn", "fix rn", "class design rn", "design review rn", "class design rn #n", "design review rn #n", "fix rn (class)", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "merge n", "file", "board", "record"]) {
     assert.ok(labels.has(`pr-loop-slim: ${l}`), `pr-loop-slim's ${l} was rendered`);
   }
   for (const cmd of ["node <repo>/scripts/ci-wait.ts 900 540", "mktemp -d", "git worktree add --detach <that path>/head <sha>", "git worktree remove <that path>/head",
     "node --env-file=<env file> <tree>/scripts/duck-repro.ts <ddl.sql> <statements.sql> > <out> 2>&1", "node <repo>/scripts/review-postgres.ts start",
     "node <repo>/scripts/review-postgres.ts stop <name>", "node --env-file=<env file> <repo>/scripts/duck-repro-bounded.ts 300 <tree> <ddl.sql> <deep.sql> > <out> 2>&1",
     "mktemp", "gh pr comment 900 --body-file <that path>", "gh issue view 301 --json closedByPullRequestsReferences", "node <run folder>/render.mjs", "node <repo>/scripts/wait-file.ts <path> 1800", "git rev-parse origin/<base>",
-    'node <repo>/scripts/board.ts status 301 "In progress"', 'node <repo>/scripts/board.ts sub 301 "301 · schema" --from "Sonnet 5.5"',
+    'node <repo>/scripts/board.ts status 301 "In progress"', 'node <repo>/scripts/board.ts severity 950 Medium', 'node <repo>/scripts/board.ts status 950 "Backlog"', 'node <repo>/scripts/board.ts sub 301 "301 · schema" --from "Sonnet 5.5"',
     "gh pr merge <n> --auto --merge --match-head-commit <sha>", 'node <repo>/scripts/board.ts status <n> "Implementing"',
     "node <repo>/scripts/gh-text.ts issue 300", "node <repo>/scripts/gh-text.ts body 900", 'node <repo>/scripts/gh-text.ts comment-id 900 "## Handoff"',
     'node <repo>/scripts/gh-text.ts search "<words>"', "node <repo>/scripts/gh-text.ts author <n>", "node <repo>/scripts/gh-text.ts issue <n>", MERGE_CMD, "git push origin HEAD:issue-300-a-piece", "git ls-remote origin refs/heads/issue-300-a-piece", "node <repo>/scripts/ci-wait.ts <n> 540",
@@ -3419,7 +3565,7 @@ test("github text: no prompt or skill reads an issue's or a PR's text except thr
   assert.deepEqual(textReads("the `gh pr view` line the chunk printed"), [], "a bare name in prose is no read");
 
   const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" });
-  const filed = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed" }, { classKey: "wording", source: "deferred", issue: 951, action: "filed" }] };
+  const filed = { issues: [{ classKey: "base-class", source: "base", issue: 950, action: "filed", kind: "bug", severity: "Medium" }, { classKey: "wording", source: "deferred", issue: 951, action: "filed", kind: "bug", severity: "Medium" }] };
   const review1 = { findings: [finding({ classKey: "c-a", input: "SELECT a FROM t" }), base, later({ input: "SELECT later FROM t" })], judgedCorrect: [] };
   const FULL: Answers = { ...SLIM, "review r1": review1, "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red,
     "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green, file: filed };
@@ -3641,7 +3787,7 @@ test("no merge: no prompt pr-loop-slim renders, nor the pr-persistent skill, tel
       bad.push(...prMerges(String(r.result["status"] ?? "")).map((m) => `the status: ${m}`));
     }
   }
-  for (const l of ["brief", "split", "implement", "review rn", "fix rn", "fix rn (class)", "CI n", "CI fix n", "merge n", "learn", "file", "record"]) {
+  for (const l of ["brief", "split", "implement", "review rn", "fix rn", "fix rn (class)", "CI n", "CI fix n", "merge n", "learn", "file", "board", "record"]) {
     assert.ok(labels.has(l), `the "${l}" prompt was rendered, so the sweep is not vacuous`);
   }
   for (const [what, text] of [["pr-persistent SKILL.md", skillText()], ["render.mjs", fs.readFileSync(RENDER, "utf8")], ["pr-loop-slim.js", source("pr-loop-slim")]] as Array<[string, string]>) {
