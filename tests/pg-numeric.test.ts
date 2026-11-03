@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import {
   add, aggregateType, ceil, cellsOf, div, divScale, evaluate, evaluateText, floor, mapCells, mod, mul, numericBinary, numericText, parseNumeric, parseProgram, programJson, round, stddev, sub, trunc, withTypmod,
-  wholeNumberOf, NumericError, numericOrderKey, numericToInteger, type NumericProgram, type PgNumeric,
+  wholeNumberOf, NumericError, numericOrderKey, numericToDouble, numericToInteger, type NumericProgram, type PgNumeric,
 } from "../src/lib/pg-numeric.ts";
 
 const db = new PGlite();
@@ -237,6 +237,30 @@ test("integer cast: a numeric's text to int2, int4 and int8 rounds half away fro
       assert.equal(got, want, `${v}::${type}`);
     }
   }
+});
+
+test("numericToDouble: a numeric's text to float8 is the double nearest it, 22003 past a double's range or where it underflows to 0 (issue 217)", async () => {
+  const zeros = (n: number): string => "0".repeat(n);
+  const maxDouble = (17976931348623157n * 10n ** 292n).toString();
+  const cases: Array<[string, number | "error"]> = [
+    ["1.2100", 1.21], ["0.4900000000000000", 0.49], ["NaN", NaN], ["Infinity", Infinity], ["-Infinity", -Infinity],
+    [`1${zeros(309)}`, "error"], [`-1${zeros(309)}`, "error"], [`0.${zeros(339)}1`, "error"], [`-0.${zeros(339)}1`, "error"],
+    [`0.${zeros(309)}1`, 1e-310], ["0", 0], ["0.00", 0], ["-0.00", 0], [maxDouble, Number.MAX_VALUE],
+    ["0.1", 0.1], ["123456789012345678901234567890.123456789", 1.2345678901234568e29], ["-2.675", -2.675],
+  ];
+  for (const [text, value] of cases) {
+    // held to Postgres's own numeric_float8: the value's shortest text, or the error's SQLSTATE and words
+    const want = await db.query<{ v: string }>(`SELECT ('${text}'::numeric)::float8::text AS v`)
+      .then((x) => x.rows[0]!.v, (e: { code: string; message: string }) => `error ${e.code}: ${e.message}`);
+    let got: string;
+    try { got = String(numericToDouble(text)); } catch (e) { got = e instanceof NumericError ? `error ${e.sqlstate}: ${e.message}` : String(e); }
+    assert.equal(got, want, `${text.slice(0, 30)}…::float8`);
+    if (value === "error") assert.match(got, /^error 22003: ".*" is out of range for type double precision$/, text.slice(0, 30));
+    else assert.equal(numericToDouble(text), value, `${text.slice(0, 30)} = ${value}`);
+  }
+  // the text is quoted whole, as numeric_out wrote it
+  assert.throws(() => numericToDouble(`1${zeros(309)}`),
+    (e: unknown) => e instanceof NumericError && e.message === `"1${zeros(309)}" is out of range for type double precision`);
 });
 
 // ISSUE 244, #484: a FROM item's column read k times a level is ONE node the k references share (src/duck/rewrite.ts

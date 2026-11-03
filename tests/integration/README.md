@@ -46,7 +46,9 @@ leg refuses `IT_ORACLE_ONLY`, `UPDATE_VERIFIED=1` and `UPDATE_FIXTURE=1`. Each l
 both regenerated files (the keys verified and what each names, its tallies, its asks, what it measured on), so
 `node scripts/oracle-legs.ts --write <run-id>` downloads a CI run's `ran-oracle-*` artifacts and writes
 `src/duck/verified.ts` and `tests/fixtures/oracle-duckdb-alone.json` as a whole run's `UPDATE_VERIFIED=1` and
-`UPDATE_FIXTURE=1` would: that, not a local whole run, is how they are regenerated (CLAUDE.md "Local gates").
+`UPDATE_FIXTURE=1` would, then renders README.md's counts and `docs/SQL-SUPPORT.md` from what it wrote (the renderers
+`tests/duck-gaps.test.ts` holds them to, `tests/sql-support.ts`): that, not a local whole run, is how they are
+regenerated (CLAUDE.md "Local gates").
 It refuses to start without `IT_ORACLE_LEG_REPORT`, which `scripts/ci-shards.ts` sets, so a leg left in a shell fails rather
 than passes as the oracle; `npm run gate` strips both.
 
