@@ -68,6 +68,11 @@ export interface ExactColumn {
 /** a query's output columns' types, as `exactThrough` reads them */
 type Fields = ReadonlyArray<{ oid: number; typmod?: number }>;
 
+/** how the ENGINE's GROUP BY holds an expression Postgres groups (`grouping`): as written, by a key in its place whose
+ *  readers read the WHOLE expression per group (`keyed`), or by a key in its place whose readers read its COLUMNS per
+ *  group (`cells`) */
+type GroupedAs = "engine" | "keyed" | "cells";
+
 /** a column of a table's row type, as the catalog has it (its collation pg_attribute's attcollation) */
 export interface RowColumn { name: string; type: number; typmod: number; collation: number }
 
@@ -667,6 +672,7 @@ class Rewriter {
     if (isNode(v) && this.original.has(bodyOf(v))) this.original.add(bodyOf(out as AstNode));
     if (isNode(v) && this.elementsUnread.has(bodyOf(v))) this.elementsUnread.add(bodyOf(out as AstNode));
     if (isNode(v) && this.writtenKeys.has(bodyOf(v))) this.writtenKeys.add(bodyOf(out as AstNode));
+    if (isNode(v) && this.readPerGroup.has(bodyOf(v))) this.readPerGroup.add(bodyOf(out as AstNode));
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
     if (own !== undefined) this.synthetic.set(bodyOf(out as AstNode), own);
@@ -709,6 +715,20 @@ class Rewriter {
     if (isNode(v)) {
       const k = kindOf(v);
       const b = bodyOf(v);
+      // A COLUMN OF AN EXPRESSION GROUPED BY ITS KEY ALONE, READ PER GROUP (`readPerGroup`, decidedByKey; issue 665):
+      // wrapped here, after every rule above it has read the expression as Postgres analysed it; its own rule runs on it
+      // as the aggregate's argument, as on any column (a cell a carried program reads is the rewrite's own: no rule).
+      // ALL FROM ONE ROW: `first`, never any_value, which skips a NULL, so two columns of the expression could come from
+      // two rows (`(coalesce(x, 0) + coalesce(y, 0)) / 7` of (7, NULL) and (NULL, 7) is 1; of the one's 7 and the
+      // other's 7 it is 2). Every row of the group holds the one exact value, so one row's columns compute it; the
+      // engine's first() of a group's aggregates is one row for each (their states are made and merged together)
+      if (k === "ColumnRef" && this.readPerGroup.has(b)) {
+        this.readPerGroup.delete(b);
+        const call: AstNode = { FuncCall: { funcname: [S("first")], args: [v], funcformat: "COERCE_EXPLICIT_CALL" } };
+        this.done.add(bodyOf(call));
+        this.typedLike.set(bodyOf(call), v);
+        return this.walk(call);
+      }
       if (this.original.has(b)) {
         // ONE PLACE PER NODE: a body met again, outside its own rule's answer, is a node a rule placed twice — and the
         // second place would skip its rule (qualified or renamed in its first place alone; a review finding).
@@ -1544,21 +1564,29 @@ class Rewriter {
     };
     // `depth`: the subqueries between here and this query (a correlated subquery's column of this query is levelsUp 1)
     // `sorted`: an ORDER BY key, where a bare name is first an output's (findTargetlistEntrySQL92)
-    const wrap = (v: unknown, depth: number, sorted = false): unknown => {
-      if (Array.isArray(v)) return v.map((x) => wrap(x, depth, sorted));
+    const wrap = (v: unknown, depth: number, sorted = false, cells = false): unknown => {
+      if (Array.isArray(v)) return v.map((x) => wrap(x, depth, sorted, cells));
       if (v === null || typeof v !== "object") return v;
       // a plain body (a window's OVER, a SubLink's select): its parts
-      if (!isNode(v)) { for (const [key, x] of Object.entries(v as Body)) if (key !== "location") (v as Body)[key] = wrap(x, depth, sorted); return v; }
+      if (!isNode(v)) { for (const [key, x] of Object.entries(v as Body)) if (key !== "location") (v as Body)[key] = wrap(x, depth, sorted, cells); return v; }
       const k = kindOf(v), n = bodyOf(v);
       // AN ORDER BY's OUTPUT NAME (`ORDER BY v` of `v::text`, Postgres's output column `v`) is the target, no column,
       // whatever the column of that name is grouped as (fix round 1 of PR 582: `… GROUP BY v ORDER BY v` read the jsonb
       // column through any_value and sorted by jsonb's key, where Postgres sorts by the output, its text). Only in the
       // ORDER BY: in the list, a column grouped by its key has no analysed node at its own offset either (a VAR of the
-      // GROUP entry), and is the column
-      if (sorted && k === "ColumnRef" && depth === 0 && this.outputNamed(v, targets)) return v;
+      // GROUP entry), and is the column. Never inside an expression grouped by its key (`cells`): a name in an expression
+      // is the FROM's column, whatever output bears it (Metabase's bin `… AS amount` of `amount`; issue 665)
+      if (sorted && !cells && k === "ColumnRef" && depth === 0 && this.outputNamed(v, targets)) return v;
       const as = this.groupedAs(v, b);
       if (as === "engine") return v;
       if (as === "keyed" && (depth === 0 || ofThisQuery(v, depth))) return perGroup(v);
+      // AN EXPRESSION THE ENGINE GROUPS BY ITS KEY ALONE, READ THROUGH ITS COLUMNS (`cells`: a numeric decided exactly,
+      // issue 665): every column of this query in it is marked to be read per group (`readPerGroup`), so the
+      // expression, its double, its cast, its text and the programs built over it are computed once per group
+      const inCells = cells || as === "cells";
+      // (a column that is itself the expression grouped so: Postgres bound it to the column, whatever output shares its
+      // name; an ORDER BY's output name was returned above)
+      if (as === "cells" && k === "ColumnRef") { this.readPerGroup.add(n); return v; }
       // A CAST OF AN EXPRESSION READ PER GROUP IS TYPED BY ITS RESULT (PR 582 review r9, the class
       // grouped-jsonb-cast-typed-by-its-argument): a cast with no analysed node at its own place (a key that repeats a
       // target, Postgres's entry being the target's; a key a rule folded or copied) is otherwise typed by its argument,
@@ -1570,7 +1598,7 @@ class Rewriter {
         const result = this.byShape.get(shapeOf(v)) ?? this.typed(v);
         if (result !== null) this.synthetic.set(n, result);
       }
-      if (k === "SubLink") { for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth + 1); return v; }
+      if (k === "SubLink") { for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth + 1, false, inCells); return v; }
       if (k === "FuncCall" && n.over === undefined && this.typed(v)?.node === "AGGREF") return v;
       if (k === "ColumnRef" && hasStar(v)) {
         if (depth > 0) return v;
@@ -1582,17 +1610,18 @@ class Rewriter {
       if (k === "ColumnRef") {
         // an output name (`ORDER BY p` of `max(x) AS p`) is the target, no column: its shape may be another query's
         // column (the corpus run of fbbf8f08: `… GROUP BY p` outside read it as one, and any_value(p) nested aggregates)
-        if (depth === 0 && this.outputNamed(v, targets)) return v;
+        if (!cells && depth === 0 && this.outputNamed(v, targets)) return v;
         const t = this.typed(v);
         // a cell riding beside a FROM item's column the group decides (carry): its value is the group's too
         if (!(depth === 0 && isCellRef(v, this.cellPrefix)) && (t?.node !== "VAR" || t.levelsUp !== depth)) return v;
+        if (inCells) { this.readPerGroup.add(n); return v; }
         const call: AstNode = { FuncCall: { funcname: [S("any_value")], args: [v], funcformat: "COERCE_EXPLICIT_CALL" } };
         this.done.add(bodyOf(call));
         // typed as the column it reads: a sort's collation, a cast's source type
         this.typedLike.set(bodyOf(call), v);
         return call;
       }
-      for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth, sorted);
+      for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth, sorted, inCells);
       return v;
     };
     for (const t of targets) { const tb = bodyOf(t); tb.val = wrap(tb.val, 0); }
@@ -2213,18 +2242,23 @@ class Rewriter {
     if (built === undefined) { built = new Map(); this.carriedBy.set(cell, built); }
     let byOwner = built.get(c.program);
     if (byOwner === undefined) { byOwner = new Map(); built.set(c.program, byOwner); }
-    const known = byOwner.get(c.owner);
+    // (a column read per group, `readPerGroup`: its cells are read per group too, issue 665; a build reads them apart)
+    const perGroup = this.readPerGroup.has(bodyOf(ref));
+    const owner = perGroup ? `${c.owner}\u0000per group` : c.owner;
+    const known = byOwner.get(owner);
     if (known !== undefined) return known;
     const cells = new Map<string, NumericProgram>();
     const program = mapCells(c.program, (k) => {
       let at = cells.get(k);
       if (at === undefined) {
-        at = k.startsWith("$") ? { op: "cell", key: k } : cell({ ColumnRef: { fields: [S(c.owner), S(`${this.cellPrefix}${k}`)] } }, c.convs[Number(k)]);
+        const read: AstNode = { ColumnRef: { fields: [S(c.owner), S(`${this.cellPrefix}${k}`)] } };
+        if (perGroup) this.readPerGroup.add(bodyOf(read));
+        at = k.startsWith("$") ? { op: "cell", key: k } : cell(read, c.convs[Number(k)]);
         cells.set(k, at);
       }
       return at;
     });
-    byOwner.set(c.owner, program);
+    byOwner.set(owner, program);
     return program;
   }
   /** each program build's carried programs (`carried`), by its `cell`: by the item's record's program (the one object
@@ -3516,14 +3550,19 @@ class Rewriter {
    * (`numeric-quotient-equality`). null: no such value (one DuckDB holds exactly, or one with no program, which is the
    * engine's value everywhere).
    */
-  private exactKey(e: AstNode): AstNode | null {
+  private exactKey(e: AstNode, oneCall = false): AstNode | null {
     const type = this.typeOf(e);
     // a numeric's text: the program's text, which text's equality compares as it is
     if (type !== null && TEXTS.has(type)) return this.exactNumericText(e);
     if (type !== NUMERIC || this.duckExact(e)) return null;
     // (a scalar subquery, cast or not, is its program's one text cell: `exactOf`, issue 350)
     const exact = this.exactText(e);
-    return exact === null ? this.refuseUncarried(e) : fn("__mason_numeric_key", [exact]);
+    if (exact === null) return this.refuseUncarried(e);
+    // `oneCall` (a GROUP BY's key, computed for every row: issue 665): the program and its key in one call, the same
+    // program text and cells (`programText`, the one builder), the key of what `__mason_numeric_program` answers (its
+    // arguments after the session, which `fn` writes again)
+    if (oneCall && kindOf(exact) === "FuncCall" && lastName(bodyOf(exact).funcname) === "__mason_numeric_program") return fn("__mason_numeric_program_key", (bodyOf(exact).args as AstNode[]).slice(1));
+    return fn("__mason_numeric_key", [exact]);
   }
 
   /**
@@ -3553,6 +3592,12 @@ class Rewriter {
   /** each cast in a grouped SELECT, by the SELECT: a program's text the CAST reader builds there is read per group
    *  (`overGroups`), never over cells the group does not decide (review r1 of PR 506: the engine's 42803) */
   private readonly groupedCasts = new WeakMap<Body, Body>();
+  /** each column of an expression the engine groups by its key alone (`cells`, issue 665) where a SELECT's list, HAVING
+   *  or ORDER BY reads it (decidedByKey): read through any_value when the walk reaches it, so that the expression is
+   *  computed once per group, never once per row. Marked, never wrapped there: every rule above the column (a
+   *  division's, a cast's, a program built over it) reads the expression as written, typed by Postgres's analysis of
+   *  its shape, which an any_value inside it would change. A copy of one is marked too (`clone`) */
+  private readonly readPerGroup = new WeakSet<Body>();
 
   /** whether a value is a NUMERIC's text (`x::text`, `(x / 3)::text`, under a COLLATE, a subquery's column carrying
    *  one) or a NULL: what a "text" cell may hold, its program parsing it as a numeric */
@@ -3961,8 +4006,10 @@ class Rewriter {
     const aggregated = (v: unknown): boolean => {
       if (Array.isArray(v)) return v.some(aggregated);
       if (v === null || typeof v !== "object") return false;
-      if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || ["any_value", "count"].includes(lastName(bodyOf(v).funcname)))) return true;
+      if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || ["any_value", "first", "count"].includes(lastName(bodyOf(v).funcname)))) return true;
       if (isNode(v) && kindOf(v) === "SubLink") return true;
+      // (a column decidedByKey marked to be read per group: the value is computed per group over it, issue 665)
+      if (isNode(v) && kindOf(v) === "ColumnRef" && this.readPerGroup.has(bodyOf(v))) return true;
       return Object.values(isNode(v) ? bodyOf(v) : v as Body).some(aggregated);
     };
     if (aggregated(value)) return e;
@@ -4016,14 +4063,16 @@ class Rewriter {
    * (`groupedExpression`: an ordinal or an output name is its target's), RECORDED ONCE per SELECT before any rule writes
    * the clause for the engine (`select` asks first; `exactColumns`, before the walk, may). What the record says of each
    * is how the ENGINE's GROUP BY holds it: `engine`, as written; `keyed`, by a key a rule put in its place
-   * (`keyedGroups`: a jsonb by its equality key, so the engine groups 1.0 with 1.00 as Postgres does). A grouped
+   * (`keyedGroups`: a jsonb by its equality key, so the engine groups 1.0 with 1.00 as Postgres does), the expression
+   * read per group through one any_value of it; `cells`, by a key in its place too (a numeric decided exactly, by its
+   * exact key: issue 665), the expression computed per group over its columns, each read per group. A grouped
    * expression is grouped whatever the clause became: whether one is, and how, is read here alone (`groupedAs`), never
    * from the clause as a later rule left it — the clause read after `keyedGroups` lost the jsonb expression, so its
    * every reader took it for ungrouped and read its column through any_value (`any_value(j.j) -> 'r'`: 2.45 for 2.450).
    */
-  private readonly groupings = new WeakMap<object, Map<string, "engine" | "keyed">>();
+  private readonly groupings = new WeakMap<object, Map<string, GroupedAs>>();
 
-  private grouping(b: Body): Map<string, "engine" | "keyed"> {
+  private grouping(b: Body): Map<string, GroupedAs> {
     let record = this.groupings.get(b);
     if (record === undefined) {
       record = new Map();
@@ -4042,7 +4091,7 @@ class Rewriter {
 
   /** how SELECT `b`'s GROUP BY groups `e` (`grouping`): as written in the engine's clause, by a key in its place, or
    *  not at all (null) */
-  private groupedAs(e: AstNode, b: Body | null): "engine" | "keyed" | null {
+  private groupedAs(e: AstNode, b: Body | null): GroupedAs | null {
     return b === null ? null : this.grouping(b).get(shapeOf(e)) ?? null;
   }
 
@@ -4183,10 +4232,17 @@ class Rewriter {
       // (a column a `*` of the list expanded to, grouped by name, is analysed as that entry, at no offset of its own:
       // typed as the list's column it is, so its exact key is built — issue 252)
       const e = this.typed(grouped) === null && kindOf(grouped) === "ColumnRef" ? this.listedColumn(grouped, b) ?? grouped : grouped;
-      // a numeric decided exactly: grouped by its exact key too, the value kept a key so the list still reads it
-      // (its double is a function of the exact value, so the groups are the key's: exactKey)
-      const exact = this.exactKey(e);
-      if (exact !== null) return [g, exact];
+      // A NUMERIC DECIDED EXACTLY IS GROUPED BY ITS EXACT KEY ALONE (exactKey; issue 665): the key is the one thing
+      // computed for every row, in ONE call (`__mason_numeric_program_key`), and everything that reads the value (the
+      // list's double, a cast, its text, HAVING, the ORDER BY's exact order key, WITH TIES, the record's cells) is
+      // computed per group over its columns, each read per group (`cells`: decidedByKey, overGroups). Every row of a
+      // group holds one exact value, so any row's columns compute it. Grouped beside its key as well (4861a5b), the
+      // value's double, its program and its key were three calls a row, and the ORDER BY's program a fourth
+      const exact = this.exactKey(e, true);
+      if (exact !== null) {
+        this.grouping(b).set(shapeOf(grouped), "cells");
+        return [exact];
+      }
       if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return [g]; }
       // (the engine groups it by its key alone: every reader of the expression reads it per group, `groupedAs`)
       this.grouping(b).set(shapeOf(grouped), "keyed");
@@ -6240,7 +6296,7 @@ const NOT_EXACT = new Error("not exact");
 /** the engine's integer types, as the rewrite casts to them (`duckExact`: an integer is exact) */
 const DUCK_INTEGER_NAMES = new Set(["tinyint", "smallint", "integer", "int", "bigint", "hugeint", "int2", "int4", "int8"]);
 /** the functions whose value is one of their first argument's (or its sum), in its own type (`duckExact`) */
-const VALUE_KEEPING = new Set(["sum", "min", "max", "latest", "any_value", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
+const VALUE_KEEPING = new Set(["sum", "min", "max", "latest", "any_value", "first", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
 /** the numeric functions the walk writes as an exact DECIMAL or integer (`duckExact`): count, extract (`extract`: as
  *  the exact numeric Postgres returns), div of integers */
 const WRITTEN_EXACT = new Set(["count", "extract", "div"]);

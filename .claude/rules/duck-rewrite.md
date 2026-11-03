@@ -303,8 +303,14 @@ paths:
 
 - **A numeric the plan decides exactly is compared by its EXACT KEY, never its double** (`exactKey`, src/duck/rewrite.ts;
   PR 207's class round): a quotient or an avg the engine holds as a double equates values Postgres tells apart past 17
-  digits, so DISTINCT, DISTINCT ON, GROUP BY (beside the value), PARTITION BY, count(DISTINCT), `=` and `<>` read the
-  program's value without trailing zeros (`__mason_numeric_key`); a form where no key can be placed (a grouping set,
+  digits, so DISTINCT, DISTINCT ON, GROUP BY, PARTITION BY, count(DISTINCT), `=` and `<>` read the
+  program's value without trailing zeros (`__mason_numeric_key`). **A GROUP BY groups by the key ALONE, computed in ONE
+  call a row** (`__mason_numeric_program_key`, issue 665: beside the value, the double, the program and the key were
+  three calls a row, 3x the time): the expression is recorded `cells` (`grouping`), and decidedByKey marks its columns
+  (`readPerGroup`) so the walk reads each through any_value once every rule above it has read the expression as
+  Postgres's analysis typed its shape — the list's double, a cast, its text, HAVING, the ORDER BY's exact order key,
+  WITH TIES and a carried program's cells are each computed per GROUP, never inside any_value per row
+  (`tests/duck-plans.test.ts` "issue 665", FUNCTION_ROWS); a form where no key can be placed (a grouping set,
   another aggregate's DISTINCT, a set operation without ALL, a JOIN … USING or NATURAL JOIN on a subquery's quotient,
   `refuseMergedExact`) is refused, `numeric-quotient-equality`; IN a list keys every item (issue 358); = ANY, IS
   DISTINCT FROM, NULLIF, CASE x WHEN, < and > are the listed difference `numeric-quotient-compare`. A new context that

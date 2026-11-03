@@ -6357,6 +6357,50 @@ test("exact path: FETCH … WITH TIES keys a grouped query's quotient per group,
   } finally { await c.end(); }
 });
 
+// ISSUE 665: a numeric quotient grouped by its exact key ALONE (one call a row), every reader of it — the list's value,
+// its text, a cast, HAVING, the ORDER BY's exact key, a window, WITH TIES, a DISTINCT ON, the printed cells — computed
+// per group over the group's columns (src/duck/rewrite.ts keyedGroups, `readPerGroup`): each answer as Postgres's
+test("issue 665: a quotient grouped by its exact key alone is read per group by every reader, as Postgres answers", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // Metabase's week of year and its numeric auto-bin, as it writes them, and the week by ordinal, by name, unordered
+      ["SELECT ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) AS created_at, count(*) AS count FROM orders o GROUP BY ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) ORDER BY ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) ASC", "ordered"],
+      ["SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0), count(*) FROM orders o GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY w ORDER BY w DESC LIMIT 2", "ordered"],
+      ["SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY 1", "bag"],
+      ["SELECT (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) AS amount, count(*) AS count FROM orders o GROUP BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ORDER BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ASC", "ordered"],
+      ["SELECT floor(p.u / 2.5) * 2.5 AS b, count(*), sum(p.w) FROM pnum p GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT floor(o.qty / 3.0) * 3.0 AS b, count(*) FROM orders o GROUP BY 1 ORDER BY 1", "ordered"],
+      // a NULL group, and NULLs placed first
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      // quotients equal to a double's 17 digits: two groups, printed, cast, read as text, ordered, by two columns' cells
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY 1 DESC", "ordered"],
+      ["SELECT (b.x / 1)::text AS t, (b.x / 1)::numeric(30,20) AS c, (b.x / 1)::float8 AS f, count(*) FROM bigdec b GROUP BY b.x / 1 ORDER BY b.x / 1", "ordered"],
+      ["SELECT b.x / b.y AS q, count(*), min(b.id) FROM bigdec b GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 HAVING b.x / 1 > 2 ORDER BY (b.x / 1) * 2 DESC, 2", "ordered"],
+      ["SELECT b.x / 1 AS q, rank() OVER (ORDER BY b.x / 1 DESC) FROM bigdec b GROUP BY 1 ORDER BY 2, 1", "ordered"],
+      ["SELECT DISTINCT ON (b.x / 1) b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY b.x / 1, 2", "ordered"],
+      ["SELECT b.y, round(b.x / 3, 21) AS q, count(*) FROM bigdec b GROUP BY b.y, round(b.x / 3, 21) ORDER BY q DESC, 1", "ordered"],
+      // grouped inside a derived table and a scalar subquery, read outside
+      ["SELECT s.q, s.n FROM (SELECT b.x / 1 AS q, count(*) AS n FROM bigdec b GROUP BY 1) s ORDER BY s.q DESC LIMIT 2", "ordered"],
+      ["SELECT (SELECT max(s.n) FROM (SELECT count(*) AS n FROM bigdec b GROUP BY b.x / 1) s) AS biggest", "ordered"],
+      // equal values of different scales are one group
+      ["SELECT v.x / 2 AS q, count(*) FROM orders o CROSS JOIN (VALUES (1.0::numeric), (1.00), (2), (2.000)) AS v(x) WHERE o.id = 1 GROUP BY 1 ORDER BY 1", "ordered"],
+      // an empty input
+      ["SELECT b.x / 3 AS q, count(*) FROM bigdec b WHERE false GROUP BY 1 ORDER BY 1", "ordered"],
+      // a division by zero in the key: Postgres's 22012, raised by the key's one call
+      ["SELECT floor(o.amount / (o.qty - o.qty)) AS b, count(*) FROM orders o GROUP BY 1", "bag"],
+      // one row's columns compute a group's value, never two rows' (a NULL skipped): the order key and WITH TIES read
+      // first() of each column, so (7, NULL) and (NULL, 7) are the group 1, never (7, 7)'s 2
+      ["SELECT (coalesce(v.x, 0) + coalesce(v.y, 0)) / 7 AS q, count(*) FROM orders o CROSS JOIN (VALUES (7.00, NULL::numeric(10,2)), (NULL, 7.00), (14.00, NULL)) AS v(x, y) WHERE o.id = 1 GROUP BY 1 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+      ["SELECT count(*) FROM orders o CROSS JOIN (VALUES (7.00, NULL::numeric(10,2)), (NULL, 7.00), (14.00, NULL)) AS v(x, y) WHERE o.id = 1 GROUP BY (coalesce(v.x, 0) + coalesce(v.y, 0)) / 7 ORDER BY (coalesce(v.x, 0) + coalesce(v.y, 0)) / 7", "ordered"],
+      // the same program over a cell seen again (the key's cache) and over NULL cells
+      ["SELECT ceil(d.a / 7.0) AS w, count(*), sum(d.c) FROM deep_t d GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("exact path: the AGGREGATE reader sums and averages a program exactly, through a derived table or a CTE (issue 278)", async () => {
   const c = await client();
   try {

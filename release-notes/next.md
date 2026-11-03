@@ -183,6 +183,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   on the share it was printed for. Nothing to do on upgrade, unless a script of yours checks the old shape.
 - **A LIMIT with no ORDER BY over a many-to-many join is back to milliseconds**, where it had taken tens of seconds or
   minutes: it ran the whole join to pick its rows. Nothing to do on upgrade.
+- **Grouping by a numeric division is about three times faster again**, and faster than before it slowed: Metabase's
+  week of year (`ceil(… / 7.0)`), its numeric bins (`floor(x / 12.5) * 12.5`) and Grafana's `$__timeGroup` had become
+  about 3x slower when their answers were made exact, and the largest tables ran past the statement timeout (57014).
+  The answers stay exact. Nothing to do on upgrade.
 - **A small statement no longer waits tens of seconds beside a heavy one**: a statement that computes something per row
   (`to_char`, a numeric bin, jsonb `@>`) held every other session, up to 57 s on one deployment. A small statement now
   answers in under about a second or two.

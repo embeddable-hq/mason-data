@@ -590,6 +590,13 @@ function parsedProgram(text: string): NumericProgram {
   return p;
 }
 
+/** a numeric's EQUALITY KEY (src/duck/rewrite.ts exactKey): its exact text without trailing zeros, so two values
+ *  Postgres finds equal (5.0 and 5.00, 0 and -0.0) are one key and two it tells apart are two, whatever their doubles */
+function numericKey(s: string): string {
+  const kept = /^-?\d/.test(s) && s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
+  return kept === "-0" ? "0" : kept;
+}
+
 const text = (v: DuckDBValue | undefined): string | null => v === null || v === undefined ? null : String(v);
 
 /** a scalar function over VARCHAR (and BOOLEAN) arguments, one call per row; a thrown error is the statement's */
@@ -618,6 +625,65 @@ function scalar(conn: DuckDBConnection, name: string, params: Array<typeof VARCH
       } catch (e) {
         // Postgres's own message where the function raises one (src/duck/store.ts postgresWording reads the prefix), and
         // its SQLSTATE where the function says it
+        info.setError(raised(e));
+      }
+    },
+  }));
+}
+
+/**
+ * A PROGRAM'S EQUALITY KEY IN ONE CALL (src/duck/rewrite.ts keyedGroups, issue 665): `__mason_numeric_key` of
+ * `__mason_numeric_program`, computed in the one crossing a row. A GROUP BY's key is computed for every row of the
+ * table, so it is the one call of a grouped quotient that scales with the rows, and it is made cheap:
+ * - the program (the first argument after the session) is the rewrite's literal, the same on every row: read once a
+ *   vector, never decoded again for each row (a program's text is a hundred characters), and parsed once (`parsedProgram`);
+ * - a program is a function of its cells alone (`evaluateText`: no state, no clock), so a row whose cells' texts another
+ *   row of the program already had is given that row's key (`KEYS`, a few thousand kept a program): a week of the year
+ *   over millions of rows computes its 366 days once. An error (22012) is raised by the row that computes it, as before.
+ * Where the program is not one literal (two texts in a vector: never written by the rewrite), each row is its own.
+ */
+const KEYS = new Map<string, Map<string, string | null>>();
+const KEYS_KEPT = 4096;
+function programKeyFunction(conn: DuckDBConnection): void {
+  const name = "__mason_numeric_program_key";
+  conn.registerScalarFunction(DuckDBScalarFunction.create({
+    name, returnType: VARCHAR, varArgsType: VARCHAR, specialHandling: true,
+    mainFunction: (info, input, out) => {
+      FUNCTION_CALLS.set(name, (FUNCTION_CALLS.get(name) ?? 0) + 1);
+      FUNCTION_ROWS.set(name, (FUNCTION_ROWS.get(name) ?? 0) + input.rowCount);
+      const all = Array.from({ length: input.columnCount }, (_, c) => input.getColumnVector(c));
+      if (cancelled(info, all, input.rowCount)) return;
+      const [programs, ...cells] = all.slice(1);
+      const rows = input.rowCount, width = cells.length;
+      try {
+        const first = rows > 0 ? text(programs!.getItem(0) as DuckDBValue) : null;
+        const constant = first !== null && text(programs!.getItem(rows - 1) as DuckDBValue) === first;
+        let known = constant ? KEYS.get(first) : undefined;
+        if (constant && known === undefined) {
+          if (KEYS.size >= 64) KEYS.delete(KEYS.keys().next().value!);
+          known = new Map();
+          KEYS.set(first, known);
+        }
+        const parsed = constant ? parsedProgram(first) : null;
+        // the row's cells by their keys ("0", "1" …, an array's own), as the program reads them
+        const texts: Array<string | null> = new Array<string | null>(width);
+        for (let r = 0; r < rows; r++) {
+          beat(cancels);
+          const program = constant ? parsed : (() => { const t = text(programs!.getItem(r) as DuckDBValue); return t === null ? null : parsedProgram(t); })();
+          if (program === null) { out.setItem(r, null); continue; }
+          for (let i = 0; i < width; i++) texts[i] = text(cells[i]!.getItem(r) as DuckDBValue);
+          // (the cells' texts as one string: a NULL, which no numeric's text is, apart from every text)
+          const id = width === 1 ? (texts[0] ?? "\u0000") : texts.map((t) => t ?? "\u0000").join("\u0001");
+          let key = known?.get(id);
+          if (key === undefined) {
+            try { const t = evaluateText(program, texts as unknown as Readonly<Record<string, unknown>>); key = t === null ? null : numericKey(t); }
+            catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
+            if (known !== undefined) { if (known.size >= KEYS_KEPT) known.clear(); known.set(id, key); }
+          }
+          out.setItem(r, key);
+        }
+        out.flush();
+      } catch (e) {
         info.setError(raised(e));
       }
     },
@@ -970,11 +1036,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
   scalar(conn, "__mason_numeric_special", [VARCHAR], BOOLEAN, ([t]) => !/^-?\d/.test(String(t)));
   // a numeric's EQUALITY KEY (src/duck/rewrite.ts exactKey): its exact text without trailing zeros, so two values
   // Postgres finds equal (5.0 and 5.00, 0 and -0.0) are one key and two it tells apart are two, whatever their doubles
-  scalar(conn, "__mason_numeric_key", [VARCHAR], VARCHAR, ([t]) => {
-    const s = String(t);
-    const kept = /^-?\d/.test(s) && s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s;
-    return kept === "-0" ? "0" : kept;
-  });
+  scalar(conn, "__mason_numeric_key", [VARCHAR], VARCHAR, ([t]) => numericKey(String(t)));
   // a numeric program over a row's cells' texts (src/duck/rewrite.ts exactText): Postgres's exact value as numeric_out
   // writes it, where DuckDB computes a double (a quotient handed to ln)
   // The program is its one text (src/lib/pg-numeric.ts `programJson`, each shared node once), the same literal on every
@@ -984,6 +1046,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
     try { return evaluateText(parsedProgram(String(program)), values); }
     catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
   }, { nulls: "pass", varargs: true });
+  programKeyFunction(conn);
   // WHETHER THE ENGINE'S TYPE HOLDS A BOUND NUMERIC EXACTLY (src/duck/rewrite.ts numericParamComparison, issue 214):
   // DuckDB's name of the compared side's type (`typeof`) and the parameter's numeric_out text, both constants DuckDB
   // folds at Execute, so this is called once a statement and the comparison it guards is the scan's own filter. A NULL
