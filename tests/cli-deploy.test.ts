@@ -14,7 +14,6 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
-import { unresolvedWhy } from "../src/cli/project.ts";
 import { seen } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
@@ -501,7 +500,9 @@ test("mason deploy: a project folder that cannot be resolved (a loop, a file as 
     if (process.getuid?.() !== 0 && fs.existsSync(path.join(root, "locked"))) fs.chmodSync(path.join(root, "locked"), 0o700);
   }
   // the words, whoever runs this (an unreadable folder cannot be made as root)
-  assert.equal(unresolvedWhy(Object.assign(new Error("x"), { code: "EACCES" })), "a folder on the way may not be read by this user (EACCES)");
+  // (read by name, so the file loads at a commit without it, and this test fails there by its name)
+  const unresolvedWhy = (await import("../src/cli/project.ts") as Record<string, unknown>).unresolvedWhy as ((e: unknown) => string) | undefined;
+  assert.equal(unresolvedWhy?.(Object.assign(new Error("x"), { code: "EACCES" })), "a folder on the way may not be read by this user (EACCES)");
 });
 
 test("mason deploy: the replica is --replica, else MASON_REPLICA, each part held to its grammar; neither names both ways", async () => {
