@@ -219,9 +219,10 @@ export interface DuckOptions {
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
-  /** whether a statement of no table orders text under a collation that is not byte order, or maps case (src/duck/plan.ts
-   *  `ordersText`): then it is the synced data's, never the catalog's C database's. Absent: every such one is the catalog's */
-  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean, userTypes: ReadonlyMap<string, number>): Promise<boolean>;
+  /** whether a statement of no table orders text under a collation that is not byte order ("order"), or maps case
+   *  ("case": src/duck/plan.ts `ordersText`): "order" is the synced data's, never the catalog's C database's; "case" is
+   *  the synced data's where its run answers it (`Session.routed`). Absent: every such one is the catalog's */
+  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean): Promise<"order" | "case" | null>;
   /** moves when what a plan is made from moves outside the schema (a stored JSON path ready or gone, src/duck/kept.ts):
    *  the plans kept are made again */
   generation?(): number;
@@ -1532,11 +1533,45 @@ class Session {
    * under a collation that is not byte order is the synced data's (src/duck/plan.ts `ordersText`, decided by the
    * analysis, never the text), planned and refused like any other; every other stays the catalog's (SELECT 1, version(),
    * 'a' = 'A', anything under C).
+   * ONE THAT MAPS CASE (upper, lower, initcap: issue 406), which the catalog answered before by its own C.UTF-8's
+   * mapping, is the synced data's only where the synced data's RUN answers it (`answersCase`): the route's probe is the
+   * run, never the plan alone, since a construct the rewrite leaves as written (`pg_catalog.lower(…)`, `char 'abc'`,
+   * `FROM (SELECT)`) plans and fails only in the engine; where it fails, the catalog answers, as before.
    */
   private async routed(t: AnyTranslation, text: string, paramOids: readonly number[], bindable: boolean): Promise<AnyTranslation> {
     const ask = this.server.options.duck.ordersText;
     if (t.kind !== "catalog" || t.fromless === undefined || ask === undefined) return t;
-    return await ask((b) => this.server.catalog.run(b), text, paramOids, this.sessionState(), bindable, this.server.userTypes()) ? { kind: "duckdb", sql: text, names: t.fromless.names } : t;
+    const why = await ask((b) => this.server.catalog.run(b), text, paramOids, this.sessionState(), bindable);
+    if (why === null || why === "case" && !await this.answersCase(text, paramOids)) return t;
+    return { kind: "duckdb", sql: text, names: t.fromless.names };
+  }
+
+  /**
+   * WHETHER THE SYNCED DATA ANSWERS A STATEMENT OF NO TABLE THAT MAPS CASE: its plan made and RUN on this session's
+   * connection, under its state and clock, every row read and none sent. A statement the plan or the run refuses, or
+   * one with a parameter (no value before its Bind), is the catalog's, which answered it before (Mason gap
+   * fromless-numeric-text-order). Only a statement's failure is read so; any other is thrown.
+   */
+  private async answersCase(text: string, paramOids: readonly number[]): Promise<boolean> {
+    const raw = (await parseSql(text)).stmts?.[0];
+    if (raw?.stmt === undefined) return false;
+    const controller = new AbortController();
+    const disarm = this.armTimeout(controller);
+    try {
+      const plan = await this.duckPlan(raw, text, paramOids);
+      if (plan.params.length > 0) return false;
+      const now = this.txNow ?? this.statementNow;
+      const { cursor } = await this.duckAnswer(plan, [], [], { parse: now, exec: now }, controller);
+      try { while (!cursor.done) { await this.fill(cursor); cursor.pending = []; } }
+      finally { cursor.answer.close(); }
+      return true;
+    } catch (e) {
+      // the statement's own failure (Postgres's analysis, the rewrite's refusal, the engine's error at the run): said in
+      // the log and answered by the catalog, as before this route existed
+      if (!(e instanceof StatementError || e instanceof PgError || e instanceof EncodeError || e instanceof NumericError)) throw e;
+      this.server.log(`session ${this.id}: a statement of no table that maps case is answered by the catalog: the synced data's run failed (${e instanceof StatementError || e instanceof PgError ? `${e.fields.code} ` : ""}${e.message})`);
+      return false;
+    } finally { disarm(); }
   }
 
   /** One statement of a simple query: the whole reply but the ReadyForQuery. */

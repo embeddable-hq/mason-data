@@ -295,8 +295,9 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  * the resolver says whether that collation is byte order. "order": the statement is planned for the synced data, made
  * and refused like any other. A statement the analysis refuses stays the catalog's, which raises Postgres's own error.
  * "case" (issue 406): it calls upper, lower or initcap of text, under any collation (the catalog maps case by its own
- * C.UTF-8's rules, never the source's ctype): the synced data's where it plans the statement, the caller decides
- * (src/duck/store.ts `listener`), since what the catalog answered before is kept where the synced data refuses it.
+ * C.UTF-8's rules, never the source's ctype): the synced data's where its RUN answers the statement, which the caller
+ * decides (src/api/postgres/server.ts `answersCase`), since what the catalog answered before is kept where the synced
+ * data's plan or run fails.
  */
 export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<"order" | "case" | null> {
   const analysis = await analyze(o.catalog, o.text, o.paramOids, o.under);

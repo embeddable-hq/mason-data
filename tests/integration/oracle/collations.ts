@@ -91,6 +91,11 @@ const CASE_CASES: Array<{ name: string; sql: string }> = [
   { name: "no table, VALUES", sql: "SELECT initcap(x), upper(x), lower(x) FROM (VALUES ('ǆemal'), ('o''hara'), ('ΟΔΟΣ'), ('ß'), (NULL)) AS v(x)" },
   { name: "no table, the builtin collations", sql: "SELECT upper('ß' COLLATE pg_unicode_fast), upper('ß' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_unicode_fast), upper('é' COLLATE ucs_basic)" },
   { name: "no table, ASCII", sql: "SELECT upper('abc'), lower('ABC'), initcap('abc def')" },
+  // no table, what the synced data does not run as written: the catalog's, never the engine's error (review r1 of PR 568)
+  { name: "no table, a pg_catalog-qualified name", sql: "SELECT pg_catalog.lower('ABC'), pg_catalog.upper('abc'), pg_catalog.length('abc'), pg_catalog.initcap('o''hara')" },
+  { name: "no table, a typed literal", sql: "SELECT upper(char 'abc'), upper(character 'abc'), initcap(char 'abc'), upper(n'abc'), upper('abc'::unknown)" },
+  { name: "no table, a char VALUES list", sql: "SELECT upper(x) FROM (VALUES (char 'abc')) v(x)" },
+  { name: "no table, an empty select list", sql: "SELECT upper('abc') FROM (SELECT) s" },
   { name: "no table, no case function stays the catalog's", sql: "SELECT 'a' = 'A', version() IS NOT NULL" },
 ].map((q) => ({ name: `collation: case ${q.name}`, sql: q.sql }));
 

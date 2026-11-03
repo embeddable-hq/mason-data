@@ -23,7 +23,6 @@ import type { PgSession } from "../api/postgres/encode.ts";
 import type { DuckAnswer, DuckOptions, DuckRunner, DuckSession, ExplainHow } from "../api/postgres/server.ts";
 import { StatementError } from "./statement.ts";
 import { duckParameters, missingRelationHint, ordersText, planDuck, quoteDuckKeywords } from "./plan.ts";
-import { parseSql } from "../api/postgres/parser.ts";
 import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
 import { VERIFIED } from "./verified.ts";
@@ -413,19 +412,9 @@ export class DuckStore {
         planDuck({ catalog, text, stmt, base, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null, wireBound: wireBound ?? false, grants, ...(relations === undefined ? {} : { relations }), outputs: outputs ?? false }),
       parameters: duckParameters,
       // a SELECT of no table that orders text under a collation that is not byte order: the synced data's (issue 122);
-      // one that maps case (upper, lower, initcap: issue 406) is the synced data's where it plans it, and keeps the
-      // catalog's answer, as before, where it refuses it (a session's user, a relative time word: Mason gap
-      // fromless-numeric-text-order), never a refusal of what the catalog answered
-      ordersText: async (catalog, text, paramOids, under, bindable, userTypes) => {
-        const why = await ordersText({ catalog, text, paramOids, under, collations: resolver, bindable });
-        if (why !== "case") return why === "order";
-        const stmt = (await parseSql(text)).stmts?.[0]?.stmt;
-        if (stmt === undefined) return false;
-        try {
-          await planDuck({ catalog, text, stmt, base: 0, paramOids, searchPath: under.searchPath, timeZone: under.timeZone, dateStyle: under.dateStyle, collations: resolver, verified, userTypes, copies, kept: kept ?? null });
-          return true;
-        } catch (e) { if (e instanceof StatementError) return false; throw e; }
-      },
+      // one that maps case (upper, lower, initcap: issue 406) is the synced data's where its run answers it (the
+      // listener's `answersCase`), else the catalog's, as before
+      ordersText: (catalog, text, paramOids, under, bindable) => ordersText({ catalog, text, paramOids, under, collations: resolver, bindable }),
       // the sync's state, which EXPLAIN says how each copy is kept current from (src/duck/sync.ts KeptCurrent)
       copies,
       // a stored JSON path ready or gone (src/duck/kept.ts): the plans kept are made again

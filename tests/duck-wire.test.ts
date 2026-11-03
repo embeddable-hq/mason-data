@@ -6973,21 +6973,46 @@ test("issue 406: upper, lower and initcap map case under their input collation, 
     assert.match(await sent("SELECT upper(d) FROM colls", icu.collations), /__mason_case\(.*'icu:und'\)/);
   } finally { await catalogDb.close(); }
 
-  // NO TABLE: the raw tree may hold a case function, and the analysis says it does; a numeric keeps it the catalog's (a
-  // listed difference, Mason gap fromless-numeric-text-order)
+  // NO TABLE: the raw tree may hold a case function, and the analysis says it does ("case"); a numeric, a date, a time or
+  // a json keeps it the catalog's (a listed difference, Mason gap fromless-numeric-text-order)
   const catalog = (b: Uint8Array): Promise<Uint8Array> => truth.execProtocolRaw(b);
   const under = { searchPath: "public", timeZone: "UTC", dateStyle: "ISO, MDY" } as Parameters<NonNullable<typeof listener.ordersText>>[3];
-  for (const [sql, routed] of [["SELECT upper('ß')", true], ["SELECT initcap('a b'), lower('X')", true], ["SELECT 'a' = 'A', version() IS NOT NULL", false], ["SELECT upper('ß'), 1.5", false],
-    // the synced data refuses what the catalog answers: the catalog keeps it, as before (never a refusal of it)
-    ["SELECT current_user, upper(current_user::text)", false], ["SELECT lower('now')::timestamptz IS NOT NULL", false],
-    // a session's value the synced data would answer with its own (`duckdb`, its own database's name, were it not
-    // refused as unverified): the catalog's, which answers it as this session's; an operator, md5 and a VALUES list move
-    ["SELECT lower(current_user)", false], ["SELECT upper(user), lower(session_user)", false], ["SELECT lower(current_catalog)", false],
-    ["SELECT upper(version()) LIKE 'POSTGRES%'", false], ["SELECT lower(current_database())", false],
-    ["SELECT upper(CASE WHEN current_user = 'postgres' THEN 'yes' ELSE 'no' END)", false],
-    ["SELECT upper('a' || 'ß'), lower(md5('a')) IS NOT NULL", true], ["SELECT upper(x) FROM (VALUES ('ß'), ('b')) v(x) ORDER BY 1", true]] as const) {
-    assert.equal(mayOrderText((await parseSql(sql)).stmts![0]!.stmt) && await listener.ordersText!(catalog, sql, [], under, true, new Map()), routed, sql);
+  for (const [sql, verdict] of [["SELECT upper('ß')", "case"], ["SELECT initcap('a b'), lower('X')", "case"], ["SELECT 'a' = 'A', version() IS NOT NULL", null],
+    ["SELECT upper('ß'), 1.5", null], ["SELECT lower('now')::timestamptz IS NOT NULL", null], ["SELECT upper(x) FROM (VALUES ('ß'), ('b')) v(x) ORDER BY 1", "case"]] as const) {
+    assert.equal(mayOrderText((await parseSql(sql)).stmts![0]!.stmt) ? await listener.ordersText!(catalog, sql, [], under, true) : null, verdict, sql);
   }
+  // ...and is the synced data's only where the synced data's RUN answers it, never its plan alone (review r1 of PR 568,
+  // fromless-case-route-plan-not-run): what the rewrite leaves as written and the engine fails on (a pg_catalog-qualified
+  // name, a typed literal of a type the engine lacks, an empty select list), and a session's value the synced data would
+  // answer with its own, are the catalog's, as before: never the engine's error, never `duckdb`. The same over a simple
+  // Query, a Parse (a named statement) and an EXPLAIN. `upper('ß')` beside each says who answered: ß the synced data's
+  // glibc, ẞ the catalog's own mapping
+  const wire = await client();
+  try {
+    for (const [sql, rows] of [
+      ["SELECT pg_catalog.lower('ABC')", [["abc"]]],
+      ["SELECT pg_catalog.upper('abc'), pg_catalog.length('abc')", [["ABC", "3"]]],
+      ["SELECT upper('abc'), pg_catalog.length('abc')", [["ABC", "3"]]],
+      ["SELECT upper(char 'abc')", [["ABC"]]],
+      ["SELECT upper(character 'abc'), initcap(char 'abc')", [["ABC", "Abc"]]],
+      ["SELECT upper(x) FROM (VALUES (char 'abc')) v(x)", [["ABC"]]],
+      ["SELECT upper('abc' COLLATE \"C\"), upper(n'abc')", [["ABC", "ABC"]]],
+      ["SELECT upper('abc'::unknown)", [["ABC"]]],
+      ["SELECT upper('abc') FROM (SELECT) s", [["ABC"]]],
+      ["SELECT (SELECT pg_catalog.upper(x) FROM (VALUES ('abc')) v(x)), upper('ß')", [["ABC", "ß"]]],
+      ["SELECT upper(version()) LIKE 'POSTGRES%', upper('ß')", [["t", "ẞ"]]],
+      ["SELECT lower(current_user) = current_user::text, upper('ß')", [["t", "ẞ"]]],
+      // what the synced data answers stays its own
+      ["SELECT upper('ß'), lower('İ'), initcap('o''neil mcDONALD-smith')", [["ß", "i", "O'Neil Mcdonald-Smith"]]],
+    ] as const) {
+      assert.deepEqual((await answer(wire, sql)).rows, rows, sql);
+      const named = (await wire.query({ name: `p406_${rows.length}_${sql.length}`, text: sql, rowMode: "array", types: raw } as pg.QueryConfig)).rows;
+      assert.deepEqual(named, rows, `a Parse of ${sql}`);
+      assert.ok((await answer(wire, `EXPLAIN ${sql}`)).rows.length > 0, `EXPLAIN ${sql}`);
+    }
+    // a parameter has no value before its Bind: the catalog's, as before (the listed difference)
+    assert.deepEqual((await answer(wire, "SELECT upper($1::text)", ["abc"])).rows, [["ABC"]]);
+  } finally { await wire.end(); }
 });
 
 test("collation resolver: two libc collations in one session, each by its own order, the second read once on its first use", async () => {
