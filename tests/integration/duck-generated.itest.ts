@@ -137,6 +137,12 @@ const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: str
       "FROM (SELECT id, amount, amount * 1000000000000000000000000000000 * 1000000000000000000000000000000 AS x FROM ledger WHERE id < 10) s",
     orderBy: "id",
     statements: ["SELECT * FROM guarded ORDER BY id"] },
+  // PR 520's review r2 (guard-layers-multiply-the-nesting): eight levels of CASE arms, each reading v three times an arm,
+  // each bounded so Postgres never pulls it up; its guards once met the engine's expression-depth limit
+  { name: "case_chain", schema: "public", table: "case_chain",
+    sql: Array.from({ length: 8 }, (_, k) => k + 1).reduce((s, k) => `SELECT id, CASE WHEN id > 0 THEN v + v - v ELSE v - v + v END AS v FROM (${s}) s${k} ORDER BY id LIMIT 100`, "SELECT id, amount AS v FROM ledger"),
+    orderBy: "id",
+    statements: ["SELECT * FROM case_chain ORDER BY id", "SELECT sum(v) AS s, count(v) AS n FROM case_chain"] },
   { name: "kinds", schema: "public", table: "kinds",
     sql: "SELECT id, mood, name FROM ledger",
     orderBy: null,

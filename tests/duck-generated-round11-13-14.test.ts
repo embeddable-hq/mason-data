@@ -229,3 +229,42 @@ test("round 14, a numeric (PR 520 r1): a shared node under a CASE arm is compute
     }
   });
 });
+
+// PR 520's review, round 2 (the class guard-layers-multiply-the-nesting): a guard was a nested SELECT of its own for
+// every node on each way from a shared node to the top, so an 8-level chain of CASE arms wrote 1016 nested SELECTs and
+// met the engine's expression-depth limit: a table main built was never built. The decision: one SELECT a LEVEL of
+// columns (each reads only the levels below it), and a guard with one way in written in place, so the nesting is the
+// longest chain of guards and shared nodes, never their count: at most three nested SELECTs a level here. Built
+// with Postgres's values.
+test("round 14, a numeric (PR 520 r2): a chain of CASE arms reading a numeric three times a level is stored in at most three nested SELECTs a level (1016 at 8 levels before)", async () => {
+  await withWorld({}, async (w) => {
+    const planner = w.api.planner();
+    const host = (w.sync.generated as unknown as { host: GeneratedHost }).host;
+    const describe = async (sql: string): Promise<EngineTypes> => {
+      const p = await host.checkConnection().prepare(sql);
+      try { return new Map(Array.from({ length: p.columnCount }, (_, i) => { const type = p.columnType(i).toString(); return [[p.columnName(i), type], [`#${i}`, type]] as const; }).flat()); }
+      finally { p.destroySync(); }
+    };
+    // each level bounded, so Postgres never pulls it up into the next
+    const chain = (depth: number): string => {
+      let s = "SELECT id, amount AS v FROM events";
+      for (let k = 1; k <= depth; k++) s = `SELECT id, CASE WHEN id > 0 THEN v + v - v ELSE v - v + v END AS v FROM (${s}) s${k} ORDER BY id LIMIT 100`;
+      return s;
+    };
+    for (const depth of [4, 8]) {
+      await host.settleCheck();
+      const r = await planDefinition(planner, chain(depth), null, undefined, describe);
+      assert.ok("definition" in r, `depth ${depth}: ${JSON.stringify("refused" in r ? r.refused : null)}`);
+      const stored = storedColumns(r.definition, await describe(r.definition.plan.sql.text));
+      assert.ok("columns" in stored, `depth ${depth}: refused at the write`);
+      assert.ok(stored.layers.length <= 3 * depth, `depth ${depth}: ${stored.layers.length} nested SELECTs`);
+      w.write(`r2_case_${depth}`, `kind: scheduled\ntarget_lag: 1h\nsql: |\n  ${chain(depth)}\n`);
+    }
+    for (const depth of [4, 8]) {
+      const s = await w.until((x) => x.state === "refused" || x.state === "failed" || built(x), `public.r2_case_${depth}`);
+      assert.ok(built(s), `depth ${depth}: ${s.state} ${typeof s.error === "string" ? s.error : ""} ${JSON.stringify(s.refusals)}`);
+      assert.deepEqual(await w.rows(`SELECT CAST(id AS VARCHAR), CAST(v AS VARCHAR) FROM public.r2_case_${depth} ORDER BY id`),
+        [["1", "1.50"], ["2", "2.50"], ["3", null], ["4", "4.00"]], `depth ${depth}`);
+    }
+  });
+});
