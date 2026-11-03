@@ -20,6 +20,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this
   machine). Nothing changes for a project, `mason start` or `mason serve`. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md)
   is the API they speak.
+- **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
+  ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
+  beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
+  them", and the page's Tables list says why in place of the buttons (`sourcesReadOnly` in `mason status --json`). Before,
+  such an edit ran a config nobody committed, and the next deploy undid it without a word. A value other than `0` or `1`
+  refuses the start. Unset, nothing changes.
 - **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
   COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
   of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE
@@ -238,6 +244,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (`3`, half away from zero). A `*` beside a division (`SELECT *, a / 7 AS q …`, `SELECT s.*, 1 …`) showed 15 digits; it
   shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
+- **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
+  `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with
+  "types cannot be matched", and an integer beside a `numeric(12,2)` showed `1.00` where Postgres shows `1`; each now
+  answers as Postgres does. `(SELECT a / 7 FROM …)`, `min` / `max` / `first_value` / `lag` / `lead` of a division
+  over a window, `x / y IN (…)` and a grouped query's `ORDER BY` of a division by its alias now show, compare and sort
+  Postgres's digits. A division or an average rounded to a fixed scale (`round(x / y, 2)`, `trunc(x / y, 2)`,
+  `(x / y)::numeric(10,2)`) is still answered where it is joined by `USING` or `NATURAL JOIN`, or collected by
+  `array_agg`, as before. `array_agg` of an unrounded division, and `JOIN … USING` or `NATURAL JOIN` on a
+  subquery's unrounded division or average, are now refused by name with the way out (`array_agg((x / y)::text)`;
+  `JOIN … ON`), where they answered rounded numbers; `array_length` and `cardinality` of such an `array_agg` still
+  answer. Nothing to do on upgrade.
 
 - **A session's TimeZone, search_path and DateStyle now apply to every statement**, not only one that reads a synced
   table. A statement of no table (`SELECT '2026-01-02 03:04:05+00'::timestamptz`, `SELECT current_schemas(false)`,
@@ -267,6 +284,27 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   "orders" does not exist` though `orders` is synced: it waits for the table (`waiting for public.orders` in `mason
   status`) until the synced data can be read, then builds. `mason wait <table>` right after `mason start` now waits for
   it, where it exited 1 on that refusal.
+- **A generated table that reads another generated table is no longer refused at its first build** with `relation
+  "<parent>" does not exist` while the parent it reads had just been built: it waits for the parent (`waiting for
+  public.<parent>` in `mason status`) until the parent can be read, then builds. The refusal was said in the log, and a
+  `mason wait` in that moment exited 1; it now waits.
+- **A `time` compared with or combined with a `timetz` now answers as Postgres does.** Postgres casts the time to a
+  `timetz` at the session zone's offset (as `tm::timetz` does); Mason ignored the offset, so `tm = '12:30-04'::timetz`
+  matched 12:30 whatever its offset, a `UNION` of a time and a timetz column answered a `time` column, and `<`, a `CASE`
+  or a `COALESCE` of the two failed with an internal error. `GREATEST` and `LEAST` of `timetz` values now order them
+  by their instant, as `<` does (`23:59:59-05` is later than `23:59:59.999999+05:30`). A `UNION` arm written as `*`
+  over a time column beside a timetz one, a time `BETWEEN` a time bound and a timetz one, and a `CASE tm WHEN` a time
+  and `WHEN` a timetz are refused by name (`time-timetz-coerced`): cast the time, `tm::timetz`.
+- **A BI tool's JSON filter (`meta @> '{"status": "paid"}'`), its "is not empty" (`(meta -> 'status') IS NOT NULL`) and
+  a `->` read of a string, a whole number, a boolean or a JSON null no longer hold other sessions' statements**, and run
+  several times faster over wide documents: each was answered row by row on the thread every statement waits on, so
+  beside one over large JSON documents a `SELECT` of a small table on another session waited 10 s and more. They are
+  answered by the synced data's own SQL now; a template holding an array, a template known only from a parameter, and
+  a `->` of an object, an array or a decimal number are answered as before. Nothing to do on upgrade.
+- **A statement that reads a numeric through many levels of subqueries or WITH queries plans in milliseconds.** Each
+  level that read the level below more than once (`a + a + a` over a derived table, a chain of WITH queries) multiplied
+  the work: eight levels took about a second to plan and twelve took over a minute, during which every other session's
+  statements waited. A numeric read through a UNION ALL at every level is not yet covered.
 
 ## Known
 

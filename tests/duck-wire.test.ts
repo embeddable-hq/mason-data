@@ -63,6 +63,22 @@ const JQ: Array<[number, string | null]> = [[1, '{"k": 1}'], [2, '{"k": "a"}'], 
   [6, '{"k": "a"}'], [7, '{"k": {"a": 1}}'], [8, '{"k": {}}'], [9, '{"k": true}'], [10, '{"k": "A"}'], [11, '{"k": 2}'], [12, null],
   [13, '{"k": 1.00}'], [14, '{"k": "b"}']];
 const jqInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jq VALUES ${JQ.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${asHeld(v)}'`})`).join(", ")}`;
+/** documents a native `->` and `@>` meet (src/duck/rewrite.ts jsonValueRead, nativeContains), each held as a jsonb (the
+ *  copy's canonical text) and as a json: every root kind, numbers DuckDB types as integers and as DOUBLE (a point, an
+ *  exponent, past uint64, past a double's range), every scalar kind, nested objects, a key twice (json keeps both),
+ *  strings DuckDB writes as Postgres does and one it does not (`\u001f`), and keys a path must escape */
+const JNAT: Array<[number, string | null]> = [
+  [1, null], [2, "{}"], [3, "[]"], [4, '"s"'], [5, "5"], [6, "true"], [7, "null"], [8, '[{"a": 1}]'],
+  [9, '{"a": 1}'], [10, '{"a": 1.0}'], [11, '{"a": 1.50}'], [12, '{"a": 1e2}'], [13, '{"a": 100000000000000000000}'], [14, '{"a": 1.0000000000000000001}'],
+  [15, '{"a": 9223372036854775807}'], [16, '{"a": -9223372036854775809}'], [17, '{"a": 18446744073709551616}'], [18, '{"a": "1"}'], [19, '{"a": ""}'],
+  [20, '{"a": null}'], [21, '{"a": true}'], [22, '{"a": false}'], [23, '{"a": [1]}'], [24, '{"a": {}}'], [25, '{"a": {"b": 1}}'], [26, '{"a": {"b": {"c": "x"}, "d": 2}}'],
+  [27, '{"a": 1, "b": 1}'], [28, '{"a": 1, "a": 2}'], [29, '{"a": "é"}'], [30, String.raw`{"a": "x\ny"}`], [31, String.raw`{"a": "\u0001"}`], [32, String.raw`{"a": "\u001f"}`],
+  [33, String.raw`{"a": "q\"uote"}`], [34, String.raw`{"a": "back\\slash"}`], [35, String.raw`{"a": "a/b", "s": "\b\f\r\t` + "\u007f" + String.raw`😀"}`],
+  [36, String.raw`{"é": 1, "a\"b": 2, "a/b": 3, "a~b": 4, "": 5, "1": 6, "*": 7, "a.b": 8}`],
+  [37, String.raw`{"i": 7, "a": -5, "n": 2.50, "o": {"b": "deep"}, "arr": [1], "s": "x", "z": null, "t": true, "c": "\u0001"}`],
+  [38, String.raw`{"a": "\\u00e9"}`], [39, `{"a": 1${"0".repeat(400)}}`], [40, '{"a": -0, "b": 0.1}'],
+];
+const jnatInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jnat VALUES ${JNAT.map(([id, d]) => `(${id}, ${d === null ? "NULL, NULL" : `'${asHeld(d)}', '${d}'`})`).join(", ")}`;
 const jdocsInsert = (asHeld: (doc: string) => string): string => `INSERT INTO public.jdocs VALUES ${JDOCS.map(([id, b, j]) => `(${id}, ${b === null ? "NULL" : `'${asHeld(b)}'`}, ${j === null ? "NULL" : `'${j}'`})`).join(", ")}`;
 /** instants a truncation meets at its edges: each side of a daylight-saving change (Europe/Berlin's 2026-03-29 02:00
  *  and 2026-10-25 03:00, America/New_York's), a repeated hour's two halves, before 1970, a zone's local mean time
@@ -155,6 +171,8 @@ const DDL = [
   jqInsert(jsonbText),
   "CREATE TABLE public.jdocs (id INTEGER PRIMARY KEY, b JSON, j JSON)",
   jdocsInsert(jsonbText),
+  "CREATE TABLE public.jnat (id INTEGER PRIMARY KEY, b JSON, j JSON)",
+  jnatInsert(jsonbText),
   // a jsonb column whose name is jdocs.b's in another case: a bare "B" beside b is ambiguous to DuckDB
   "CREATE TABLE public.jcase (id INTEGER PRIMARY KEY, \"B\" JSON)",
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
@@ -222,6 +240,8 @@ const PG_DDL = [
   jqInsert((doc) => doc),
   "CREATE TABLE public.jdocs (id integer PRIMARY KEY, b jsonb, j json)",
   jdocsInsert((doc) => doc),
+  "CREATE TABLE public.jnat (id integer PRIMARY KEY, b jsonb, j json)",
+  jnatInsert((doc) => doc),
   "CREATE TABLE public.jcase (id integer PRIMARY KEY, \"B\" jsonb)",
   "INSERT INTO public.jcase VALUES (1, '{\"a\": \"upper\"}')",
   "CREATE TABLE public.instants (id integer PRIMARY KEY, at timestamptz)",
@@ -292,6 +312,7 @@ const schema: PgSchema = {
     { name: "rowid_cased", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "RowId", type: "int4" }] },
     { name: "jdocs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "jcase", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "B", type: "jsonb" }] },
+    { name: "jnat", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "b", type: "jsonb" }, { name: "j", type: "jsonb", spelled: "json" }] },
     { name: "instants", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "at", type: "timestamptz" }] },
     { name: "clock_times", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "tm", type: "timestamptz", spelled: "time" }] },
     { name: "nullish", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "ts", type: "timestamptz", spelled: "timestamp" }, { name: "t", type: "text" }, { name: "n", type: "int4" }] },
@@ -466,7 +487,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -1358,6 +1379,70 @@ test("a time as a timetz takes the offset of the transaction's date at the value
     fixedNow = Date.parse("2026-03-08T06:00:00Z") * 1000;
     await c.query("SET TimeZone = 'America/New_York'");
     assert.deepEqual((await c.query(prepared)).rows, [["12:30:00.5-04"]], "a prepared statement executed after a SET TimeZone");
+  } finally {
+    fixedNow = undefined;
+    await c.query("SET TimeZone = 'UTC'");
+    await c.end();
+  }
+});
+
+// A TIME BESIDE A TIMETZ is cast as Postgres casts it implicitly (time_timetz, function 2047, COERCE_IMPLICIT_CAST),
+// which the raw tree does not show: an operator's operand, a COALESCE's, a CASE's arm, a set operation's column. Its
+// value is the explicit cast's (issue 162's rule), sent as the SAME SQL, one path: before issue 167 a comparison ignored
+// the offset (12:30:00.5 equal to both 12:30:00.5-04 and -05), a union's column answered as a time (1083), and a CASE
+// or a `<` failed with the engine's error on mixing the two.
+test("a time beside a timetz is cast as Postgres casts it, by the explicit cast's own rule (issue 167)", async () => {
+  const c = await client();
+  const sent = (from: number): string => logged.slice(from).findLast((l) => l.startsWith("statement: "))?.replace(/^statement: [^—]*— /, "") ?? "";
+  const sentOf = async (sql: string): Promise<string> => { const from = logged.length; await c.query(sql); return sent(from); };
+  // the offset timeAsTimetz writes (src/duck/rewrite.ts), once a cast
+  const casts = (duck: string): number => duck.split("%s%02d:%02d:%02d").length - 1;
+  const cases: Array<[string, string, string[]]> = [
+    ["2026-11-01T04:31:00Z", "America/New_York", ["00:00:00-04", "01:30:00-05", "02:30:00-05", "12:30:00.5-05", "23:59:00-05", "24:00:00-05"]],
+    ["2026-03-08T06:00:00Z", "America/New_York", ["00:00:00-05", "01:30:00-05", "02:30:00-05", "12:30:00.5-04", "23:59:00-04", "24:00:00-04"]],
+    ["2026-11-01T04:31:00Z", "Asia/Kolkata", ["00:00:00+05:30", "01:30:00+05:30", "02:30:00+05:30", "12:30:00.5+05:30", "23:59:00+05:30", "24:00:00+05:30"]],
+  ];
+  try {
+    for (const [now, zone, times] of cases) {
+      fixedNow = Date.parse(now) * 1000;
+      await c.query(`SET TimeZone = '${zone}'`);
+      const what = `at ${now} in ${zone}`;
+      const rows = times.map((t, i) => [String(i + 1), t]);
+      // a COALESCE's argument, row for row the explicit cast's, 24:00 kept
+      assert.deepEqual(await answer(c, "SELECT id, COALESCE(NULL::timetz, tm) FROM clock_times ORDER BY id"), { fields: [["id", 23], ["coalesce", 1266]], rows }, what);
+      assert.deepEqual(await answer(c, "SELECT id, CASE WHEN id > 3 THEN tm::timetz ELSE tm END AS x FROM clock_times ORDER BY id"), { fields: [["id", 23], ["x", 1266]], rows }, `a CASE ${what}`);
+      // an operator's operand: the offset compared, one of -04 and -05 equal on each day, never both
+      for (const offset of ["-05", "-04", "+05:30"]) {
+        const sql = `SELECT id FROM clock_times WHERE tm = '12:30:00.5${offset}'::timetz ORDER BY id`;
+        assert.deepEqual((await answer(c, sql)).rows, times[3]!.endsWith(offset) ? [["4"]] : [], `${sql} ${what}`);
+      }
+      // (a timetz is ordered by its instant: its time less its offset, 03:00:00-05 at 08:00 UTC)
+      const utc = (t: string): number => { const [, h, m, s, sign, oh, om] = /^(\d+):(\d+):([\d.]+)([+-])(\d+)(?::(\d+))?$/.exec(t)!; return Number(h) * 3600 + Number(m) * 60 + Number(s) - (sign === "+" ? 1 : -1) * (Number(oh) * 3600 + Number(om ?? 0) * 60); };
+      assert.deepEqual((await answer(c, "SELECT id FROM clock_times WHERE tm < '03:00:00-05'::timetz ORDER BY id")).rows,
+        times.flatMap((t, i) => utc(t) < 8 * 3600 ? [[String(i + 1)]] : []), `< ${what}`);
+      // a set operation's column: a timetz (1266), each time arm cast, whichever comes first
+      assert.deepEqual(await answer(c, "SELECT tm FROM clock_times WHERE id IN (1, 4) UNION ALL SELECT NULL::timetz ORDER BY 1"),
+        { fields: [["tm", 1266]], rows: [[times[0]], [times[3]], [null]] }, `a union ${what}`);
+      assert.deepEqual((await answer(c, "SELECT NULL::timetz AS x UNION ALL SELECT tm FROM clock_times WHERE id = 6 ORDER BY 1")).rows, [[times[5]], [null]], `a union, the timetz arm first ${what}`);
+      // the value of a CASE whose every WHEN is a timetz
+      assert.deepEqual((await answer(c, "SELECT id, CASE tm WHEN '12:30:00.5-05'::timetz THEN 'a' WHEN '12:30:00.5-04'::timetz THEN 'b' END FROM clock_times WHERE id = 4")).rows,
+        [["4", times[3]!.endsWith("-05") ? "a" : times[3]!.endsWith("-04") ? "b" : null]], `CASE tm WHEN ${what}`);
+    }
+    // GREATEST and LEAST of a timetz by its instant, as `<` orders it (the engine's own put 23:59:59-05, at 04:59:59 UTC
+    // the next day, below 23:59:59.999999+05:30), a NULL skipped
+    assert.deepEqual((await answer(c, "SELECT GREATEST('23:59:59-05'::timetz, NULL, '23:59:59.999999+05:30'::timetz), LEAST(tm, '23:59:59-05'::timetz) FROM clock_times WHERE id = 6")).rows,
+      [["23:59:59-05", "24:00:00+05:30"]]);
+    // ONE PATH: the implicit cast sends the SQL the explicit one sends
+    assert.equal(await sentOf("SELECT id FROM clock_times WHERE tm = '12:30:00.5-05'::timetz ORDER BY id"), await sentOf("SELECT id FROM clock_times WHERE tm::timetz = '12:30:00.5-05'::timetz ORDER BY id"));
+    assert.equal(await sentOf("SELECT id, COALESCE(NULL::timetz, tm) FROM clock_times ORDER BY id"), await sentOf("SELECT id, COALESCE(NULL::timetz, tm::timetz) FROM clock_times ORDER BY id"));
+    // an explicit cast once each, never twice, and nothing where no time meets a timetz
+    assert.equal(casts(await sentOf("SELECT id, tm::timetz, timetz(tm), CAST(tm AS time with time zone) FROM clock_times ORDER BY id")), 3);
+    assert.equal(casts(await sentOf("SELECT id, COALESCE(tm::timetz, NULL::timetz) FROM clock_times ORDER BY id")), 1);
+    assert.equal(casts(await sentOf("SELECT id, tm < '12:00'::time, COALESCE(tm, '00:00'::time) FROM clock_times WHERE tm = '12:30:00.5' ORDER BY id")), 0);
+    assert.deepEqual((await answer(c, "SELECT tm FROM clock_times UNION ALL SELECT tm FROM clock_times ORDER BY 1 LIMIT 1")).fields, [["tm", 1083]]);
+    // an arm Mason cannot write (a `*`) is refused by name, never the engine's own unifying of the two
+    await assert.rejects(c.query("SELECT * FROM (SELECT tm FROM clock_times) s UNION ALL SELECT NULL::timetz"),
+      (e: Error & { code?: string; detail?: string }) => e.code === "0A000" && /Mason gap time-timetz-coerced/.test(`${e.message} ${e.detail ?? ""}`));
   } finally {
     fixedNow = undefined;
     await c.query("SET TimeZone = 'UTC'");
@@ -3871,8 +3956,11 @@ test("a numeric quotient is compared by its exact value wherever it is equated (
       await postgres(sql);
       await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /numeric-quotient-equality/.test(e.detail ?? ""), sql);
     }
-    // C9: the decided difference numeric-quotient-compare, as listed: IN equates the doubles
-    const listed = "SELECT b.id FROM bigdec b WHERE b.x / 1 IN (1.00000000000000000001) ORDER BY 1";
+    // C9: IN a list of values equates the exact keys, as = does (issue 350); the decided difference
+    // numeric-quotient-compare, as listed: = ANY of an array equates the doubles
+    const keyed = "SELECT b.id FROM bigdec b WHERE b.x / 1 IN (1.00000000000000000001, 7) ORDER BY 1";
+    assert.deepEqual((await answer(c, keyed)).rows, (await postgres(keyed)).rows);
+    const listed = "SELECT b.id FROM bigdec b WHERE b.x / 1 = ANY (ARRAY[1.00000000000000000001]) ORDER BY 1";
     assert.deepEqual((await postgres(listed)).rows, [["1"]]);
     assert.deepEqual((await answer(c, listed)).rows, [["1"], ["2"]]);
   } finally { await c.end(); }
@@ -4062,8 +4150,9 @@ test("every way out a numeric refusal names answers as Postgres does; a numeric 
         `SELECT count(*) FROM (SELECT b.x / 1 AS q, b.id FROM bigdec b) s JOIN ratios r ON r.id = s.id WHERE s.q = ${K}`],
       [`SELECT s FROM (SELECT b.x / 1 AS q FROM bigdec b) s WHERE s.q = ${K}`, /not its whole row/,
         `SELECT s.q FROM (SELECT b.x / 1 AS q FROM bigdec b) s WHERE s.q = ${K}`],
-      ["WITH RECURSIVE r(q, n) AS (SELECT round(b.x / 1, 2), 1 FROM bigdec b UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.q = 1.00", /outside the recursive WITH query/,
-        "WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE round(r.x / 1, 2) = 1.00"],
+      // (round(b.x / 1, 2) there is a value at a fixed scale, exact, and answered: PR 415, below)
+      [`WITH RECURSIVE r(q, n) AS (SELECT b.x / 1, 1 FROM bigdec b UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.q = ${K}`, /outside the recursive WITH query/,
+        `WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.x / 1 = ${K}`],
       ["SELECT count(*) FROM (VALUES ('1e-39'::numeric), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0", /38 digits or fewer/,
         "SELECT count(*) FROM (VALUES ('1e-37'::numeric), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0"],
       ["SELECT count(*) FROM (VALUES (1 / 3.0), (0)) v(x), ratios r WHERE r.id = 1 AND v.x = 0", /compute the value in the query that compares it/,
@@ -4511,6 +4600,53 @@ test("a ->> of a column is DuckDB's own read where it is Postgres's answer, the 
     for (const read of ["b ->> 's'", "b ->> 'missing'", "b ->> 'z'", "b -> 'o' ->> 'b'", "b #>> '{o,b}'", "b ->> ''", "b ->> '*'", "b ->> 'a.b'", "jsonb_extract_path_text(b, 'o', 'b')"]) assert.equal(await hops(read), 0, `${read} reached the function`);
     for (const read of ["j ->> 'a'", "j -> 'o' ->> 'k'", "j ->> 'missing'", "json_extract_path_text(j, 'o', 'k')"]) assert.equal(await hops(read, "WHERE id <> 1"), 0, `${read} reached the function`);
     for (const read of ["b ->> 'n'", "j ->> 'a'", "j -> 'o' ->> 'k'", "b -> 'arr' ->> 0", "b #>> '{arr,0}'", "b -> 'o'", "'{\"a\": \"x\"}'::jsonb ->> 'a'"]) assert.ok(await hops(read) > 0, `${read} never reached the function`);
+  } finally { await c.end(); }
+});
+
+// A `->` AND AN `@>` OF A COPIED JSONB ARE DUCKDB'S OWN (issue 130: a BI tool's `j @> '{"a": 1}'` and `(j -> 'a') IS
+// NOT NULL` over 20 kB documents held every other session's statement 10 s and more, each vector a hop to the executor's
+// loop). Where DuckDB's read is Postgres's answer (an integer, a boolean, a JSON null, a string DuckDB writes alike; a
+// read's nullness; a template of scalars) no row reaches a function; the rest goes on to it (the CASE's ELSE). Postgres's
+// answers are PGlite's own; the hops are every function's, the turn's included.
+test("a -> and an @> of a copied jsonb are DuckDB's own read where that is Postgres's answer, the function's for the rest", async () => {
+  const c = await client();
+  try {
+    const reads = ["b -> 'a'", "(b -> 'a')::text", "b -> 'b'", "b -> 'missing'", "b -> 'é'", `b -> 'a"b'`, "b -> 'a/b'", "b -> 'a~b'", "b -> ''", "b -> '1'", "b -> '*'", "b -> 'a.b'",
+      "b -> 's'", "b -> 'i'", "b -> 'n'", "b -> 'o'", "b -> 'arr'", "b -> 'z'", "b -> 't'", "b -> 'c'", "b -> 'a' -> 'b'", "b -> 'a' -> 'b' -> 'c'", "b #> '{a,b}'", "b #> '{a,d}'", "b #> '{o,b}'",
+      "jsonb_typeof(b -> 'a')", "b -> 'a' ->> 'b'", "j -> 'a'", "(j -> 'a')::text", "j -> '1'",
+      "(b -> 'a') IS NULL", "(b -> 'a') IS NOT NULL", "(b -> 'missing') IS NULL", "(b -> '1') IS NOT NULL", "(b #> '{a,b}') IS NOT NULL", "(b -> 'a' -> 'b') IS NULL", "(j -> 'a') IS NOT NULL", "(j -> 'a' -> 'b') IS NULL",
+      `b @> '{"a": 1}'`, `b @> '{"a": 1.0}'`, `b @> '{"a": 1.5}'`, `b @> '{"a": 1e2}'`, `b @> '{"a": 100}'`, `b @> '{"a": 0}'`, `b @> '{"a": -0}'`, `b @> '{"a": -5}'`, `b @> '{"b": 0.1}'`,
+      `b @> '{"a": 100000000000000000000}'`, `b @> '{"a": 1.0000000000000000001}'`, `b @> '{"a": 9223372036854775807}'`, `b @> '{"a": -9223372036854775809}'`, `b @> '{"a": 18446744073709551616}'`,
+      `b @> '{"a": "1"}'`, `b @> '{"a": ""}'`, `b @> '{"a": null}'`, `b @> '{"a": true}'`, `b @> '{"a": false}'`, `b @> '{}'`, `b @> '{"a": 1, "b": 1}'`, `b @> '{"a": 1, "a": 2}'`, `b @> '{"missing": null}'`,
+      `b @> '{"a": {}}'`, `b @> '{"a": {"b": 1}}'`, `b @> '{"a": {"b": 1.0}}'`, `b @> '{"a": {"b": {"c": "x"}}}'`, `b @> '{"a": {"d": 2, "b": {"c": "x"}}}'`, `b @> '{"a": [1]}'`, `b @> '{"a": []}'`,
+      `b @> '{"é": 1}'`, String.raw`b @> '{"a\"b": 2}'`, `b @> '{"a/b": 3}'`, `b @> '{"a~b": 4}'`, `b @> '{"": 5}'`, `b @> '{"1": 6}'`, `b @> '{"*": 7}'`, `b @> '{"a.b": 8}'`,
+      `b @> '{"a": "é"}'`, String.raw`b @> '{"a": "é"}'`, String.raw`b @> '{"a": "x\ny"}'`, String.raw`b @> '{"a": "\u0001"}'`, String.raw`b @> '{"a": "\u001f"}'`, String.raw`b @> '{"a": "q\"uote"}'`,
+      String.raw`b @> '{"a": "back\\slash"}'`, `b @> '{"a": "a/b"}'`, String.raw`b @> '{"a": "\\u00e9"}'`, `b @> '[1]'`, `b @> '1'`, `b @> 'null'`, `b @> NULL`, `NULL::jsonb @> '{"a": 1}'`,
+      `'{"a": 1}' <@ b`, `'{}' <@ b`, `b <@ '{"a": 1, "b": 1}'`, `b @> '{"a": 1}'::jsonb`, `b @> jsonb '{"a": 1}'`, `b @> CAST('{"a": 1}' AS jsonb)`, `b @> ' { "a" : 1 } '`, `b @> '{"a": 1}'::json::jsonb`,
+      `b @> jsonb_build_object('a', 1)`, `(b -> 'a') @> '{"b": 1}'`, `b::text::jsonb @> '{"a": 1}'`];
+    const sql = `SELECT id, ${reads.join(", ")} FROM jnat ORDER BY id`;
+    const [got, want] = [await answer(c, sql), await postgres(sql)];
+    for (const [i, row] of want.rows.entries()) for (const [k, v] of row.entries()) assert.equal(got.rows[i]![k], v, `row ${row[0]}: ${k === 0 ? "id" : reads[k - 1]}`);
+    assert.deepEqual(got.fields, want.fields);
+    // filtered, counted and grouped as a BI tool asks, and inside a subquery
+    for (const statement of [`SELECT count(*) FROM jnat WHERE b @> '{"a": 1}'`, `SELECT count(*) FROM jnat WHERE NOT (b @> '{"a": 1}')`, "SELECT count(*) FROM jnat WHERE (b -> 'a') IS NOT NULL",
+      "SELECT (b -> 'a') IS NULL AS m, count(*) FROM jnat GROUP BY 1 ORDER BY 1", `SELECT b @> '{"a": 1}' AS c, count(*) FROM jnat GROUP BY c ORDER BY c`,
+      "SELECT id, b -> 'b' AS b FROM jnat c ORDER BY (c.b -> 'a') IS NULL, id", `SELECT id FROM jnat c ORDER BY c.b @> '{"a": 1}', id`,
+      `SELECT id, (SELECT count(*) FROM jnat i WHERE i.b @> '{"a": 1}' AND i.id <= o.id), EXISTS (SELECT 1 FROM jnat i WHERE (i.b -> 'a') IS NOT NULL AND i.id = o.id) FROM jnat o ORDER BY id`,
+      `SELECT *, b -> 'a' AS v, b @> '{"a": 1}' AS c FROM jnat ORDER BY id`, `SELECT a.id, b.b @> '{"a": 1}', (b.b -> 'a') IS NULL FROM jnat a LEFT JOIN jnat b ON b.id = a.id + 1000 ORDER BY a.id`]) {
+      assert.deepEqual((await answer(c, statement)).rows, (await postgres(statement)).rows, statement);
+    }
+    const calls = async (): Promise<number> => [...(await store.functionCalls()).values()].reduce((a, b) => a + b, 0);
+    const hops = async (read: string): Promise<number> => {
+      const before = await calls();
+      await answer(c, `SELECT ${read} FROM jnat`);
+      return (await calls()) - before;
+    };
+    for (const read of ["b -> 's'", "b -> 'missing'", "b -> 'z'", "b -> 't'", "b -> 'i'", "(b -> 'o') IS NOT NULL", "(b -> 'arr') IS NULL", "b #> '{o,b}'", "(j -> 'a') IS NOT NULL", "(b -> 'a') IS NOT NULL",
+      `b @> '{"s": "x"}'`, `b @> '{"i": 7}'`, `b @> '{"n": 7}'`, `b @> '{"o": {"b": "deep"}}'`, `b @> '{}'`, `'{"z": null}' <@ b`]) assert.equal(await hops(read), 0, `${read} reached a function`);
+    for (const read of ["b -> 'o'", "b -> 'arr'", "b -> 'n'", "b -> 'c'", "b -> 'a'", `b @> '{"arr": [1]}'`, `b @> '[1]'`, `b @> jsonb_build_object('a', 1)`, "j -> 'a'", `'{"a": "x"}'::jsonb -> 'a'`]) {
+      assert.ok(await hops(read) > 0, `${read} never reached a function`);
+    }
   } finally { await c.end(); }
 });
 
@@ -5625,8 +5761,8 @@ test("a grouped collated output ordered by number, name or expression is its col
 // below more than once grew 3^depth (depth 12 took 880 ms, 16 about 70 s) on the planning thread every session waits
 // on, whatever the column's type. The class: work on the wire's path for a reader only another path has, with no bound
 // on its size. The decision: the wire never computes what only a generated table reads, and the walk is linear in the
-// analysed tree. (An int8: a numeric carried through every level grows in the rewrite's exact program, as on main, issue
-// 244)
+// analysed tree. (An int8: a numeric's nested and WITH chains are "issue 244" below, #483; its UNION ALL chain, whose
+// program is copied into each reference, is #484's)
 test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
   const catalogDb = new PGlite();
   try {
@@ -5644,6 +5780,106 @@ test("round 14: a wire statement's plan computes no generated table's outputs, a
       assert.ok(ms < 500, `${shape}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
     }
   } finally { await catalogDb.close(); }
+});
+
+/** each hazard-a and NATURAL statement's outcome, as main's (checked by scripts/duck-repro.ts at the base and the head) */
+const NATURAL_244 = "refused 0A000: a JOIN … USING or a NATURAL JOIN on a numeric the engine holds as a double";
+const EXPECTED_244: Record<string, string> = { 0: "as Postgres: 42804", 1: "as Postgres: 42804", 2: "as Postgres: 42804", 3: "answered", 4: NATURAL_244, 5: NATURAL_244 };
+
+// ISSUE 244, piece 1 (#483): the exact-numeric decisions about a FROM item's column were taken again at every
+// REFERENCE to it, so `a + a + a` over the level below asked that level three times a level (3^depth: 1::numeric nested
+// 768 ms at depth 8 and 99 s at 12 on main, the WITH chain 3.4 s at 8), on the planning thread every session waits on.
+// The class: a fact derived again at every reference. The decision: each is taken once per (query, output index)
+// (`decided`, src/duck/rewrite.ts), copied with its query, never recorded from inside an open recursive cycle or from
+// the walk's guard, and dropped when a `*` is written out in place. (The UNION ALL chain, whose PROGRAM is copied into
+// each reference, is #484's, and is not run here)
+test("issue 244: a numeric read three times a level through every level is planned within the bound, and answered as Postgres", async () => {
+  const catalogDb = new PGlite();
+  try {
+    for (const s of catalogDdl({ database: "app", tables: [] })) await catalogDb.exec(s);
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
+    const plan = async (sql: string) => planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
+    // a first plan pays the catalog's and the parser's start: untimed
+    await plan("SELECT 1::numeric AS a");
+    for (const depth of DEEP_DEPTHS) for (const shape of ["nested", "with"] as const) {
+      const sql = deepChains("1::numeric", depth)[shape]!, started = performance.now();
+      await plan(sql);
+      const ms = performance.now() - started;
+      assert.ok(ms < 500, `${shape} over 1::numeric: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
+    }
+  } finally { await catalogDb.close(); }
+  const c = await client();
+  const level = (bottom: string, each: string, depth: number, alias = "s"): string => {
+    let s = bottom;
+    for (let i = 1; i <= depth; i++) s = `SELECT ${each} FROM (${s}) ${alias}${i}`;
+    return s;
+  };
+  try {
+    // a value the engine holds exactly, carried or read through every level, keeps its native plan
+    for (const sql of [`${level("SELECT o.amount AS c FROM orders o", "c", 4)} ORDER BY 1`, `${level("SELECT o.amount AS c FROM orders o", "c + 1 AS c", 3)} ORDER BY 1`]) {
+      const explained = (await c.query(`EXPLAIN (VERBOSE) ${sql}`)).rows.map((r: Record<string, string>) => r["QUERY PLAN"]).join("\n");
+      assert.doesNotMatch(explained, /__mason_numeric_(order|program|int|double|key)/, sql);
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+    const quotient = "SELECT b.x / 1 AS q FROM bigdec b";
+    const t = ["t0 AS (SELECT b.x / 1 AS a FROM bigdec b)", ...[1, 2, 3, 4].map((i) => `t${i} AS (SELECT a + a + a AS a FROM t${i - 1})`)];
+    assert.deepEqual(await unlike(c, [
+      // the depth-4 chains, over values two doubles tie
+      [`${level("SELECT b.x / 1 AS a FROM bigdec b", "a + a + a AS a", 4)} ORDER BY 1`, "ordered"],
+      [`WITH ${t.join(", ")} SELECT a, a::text FROM t4 ORDER BY 1`, "ordered"],
+      [`SELECT DISTINCT q FROM (${level(quotient, "q + 1 AS q", 3)}) s4 ORDER BY 1`, "ordered"],
+      // the rewrite's shapes over a quotient carried two levels down: grouped, by name and by number; the nulls idiom
+      [`SELECT s2.q, count(*) FROM (${level(quotient, "q + 1 AS q", 1)}) s2 GROUP BY s2.q ORDER BY 1`, "ordered"],
+      [`SELECT s2.q, count(*) FROM (${level(quotient, "q + 1 AS q", 1)}) s2 GROUP BY s2.q ORDER BY q`, "ordered"],
+      [`SELECT s2.q, count(*) FROM (${level(quotient, "q + 1 AS q", 1)}) s2 GROUP BY s2.q ORDER BY s2.q`, "ordered"],
+      [`${level("SELECT NULLIF(b.x, 2.5) / 1 AS q FROM bigdec b", "q + 1 AS q", 2)} ORDER BY q IS NULL, q`, "ordered"],
+      [`${level("SELECT NULLIF(b.x, 2.5) / 1 AS q FROM bigdec b", "q + 1 AS q", 2)} ORDER BY 1 NULLS FIRST`, "ordered"],
+      // a `*` beside a named column, and written out (hazard b: a decision read after its list was rewritten in place)
+      [`SELECT *, q FROM (SELECT q + 1 AS q, id FROM (SELECT b.x / 1 AS q, b.id FROM bigdec b) s1) s2 ORDER BY 2, 1`, "ordered"],
+      [`SELECT * FROM (${level(quotient, "q", 1)}) s2 ORDER BY 1`, "ordered"],
+      [`SELECT s2.*, 1 AS one FROM (${level(quotient, "q + 1 AS q", 1)}) s2 ORDER BY 1`, "ordered"],
+      // an arm exactArms wraps, read through levels; a UNION ALL's scales through levels; a widened reader
+      [`SELECT q + 1 AS q FROM (SELECT q FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL VALUES (1.5)) s1) s2 ORDER BY 1`, "ordered"],
+      [`SELECT q, q::text FROM (SELECT q FROM (SELECT b.x AS q FROM bigdec b UNION ALL SELECT b.id FROM bigdec b) s1) s2 ORDER BY 1, 2`, "ordered"],
+      [`SELECT q + 1.5::float8 AS f, q FROM (${level(quotient, "q", 1)}) s2 ORDER BY 2`, "ordered"],
+      // exactArms' trial copies and its real pass read one decision; a WITH query read in both arms after a level
+      [`SELECT q FROM (${level(quotient, "q + 1 AS q", 1)}) s2 UNION ALL SELECT q FROM (${level("SELECT b.x / 7 AS q FROM bigdec b", "q + 1 AS q", 1, "t")}) t2 ORDER BY 1`, "ordered"],
+      [`WITH w AS (SELECT q + 1 AS q FROM (${quotient}) s) SELECT q FROM w UNION ALL SELECT q + 1 FROM w ORDER BY 1`, "ordered"],
+      // hazard c: an ORDER BY 1 of a `*` written out at the walk (issue 252's case) reads what was decided before it
+      [`SELECT * FROM (${level(quotient, "q + 1 AS q", 1)}) s2 UNION ALL SELECT b.x FROM bigdec b ORDER BY 1`, "ordered"],
+      // (no collation applies: the column is a numeric)
+    ]), []);
+    // a parameter at a level, executed again after a later SET
+    const prepared = { name: "issue244", text: `SELECT q + $1 AS q FROM (${level(quotient, "q", 1)}) s2 ORDER BY 1`, values: ["0.5"], rowMode: "array", types: raw } as pg.QueryConfig;
+    const want = (await postgres(prepared.text, ["0.5"])).rows;
+    assert.deepEqual((await c.query(prepared)).rows, want);
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    assert.deepEqual((await c.query(prepared)).rows, want);
+    // HAZARD A, a recursive WITH's column decided inside its cycle and read outside it, and a NATURAL JOIN written as
+    // USING over a level: each answered as Postgres, or refused by its name, exactly as main (scripts/duck-repro.ts at
+    // the base and the head). (A quotient its recursive arm computes, read through a subquery, is answered with the
+    // engine's digits on main and here alike: issue 497, left out)
+    const recursive = "WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x / 1, r.n + 1 FROM r WHERE r.n < 2)";
+    const outcome = async (sql: string): Promise<string> => {
+      const failed = (e: { code: string; message: string }): string => `${e.code}: ${e.message}`;
+      const [got, want] = [await answer(c, sql).catch(failed), await postgres(sql).catch(failed)];
+      if (typeof got !== "string") return util.isDeepStrictEqual(got, want) ? "answered" : `differs: ${JSON.stringify(got.rows).slice(0, 200)}`;
+      return typeof want === "string" && want.slice(0, 5) === got.slice(0, 5) ? `as Postgres: ${got.slice(0, 5)}` : `refused ${got.slice(0, 81)}`;
+    };
+    const natural = (q: string, u: string): string => `SELECT count(*) FROM (SELECT q + 1 AS q FROM (SELECT ${q} AS q FROM bigdec b) s1) s NATURAL JOIN (SELECT q FROM (SELECT ${u} AS q FROM bigdec b) u1) u`;
+    const outcomes: Record<string, string> = {};
+    for (const [i, sql] of [
+      `${recursive} SELECT x, x::text, n FROM r ORDER BY 3, 1`,
+      `${recursive} SELECT DISTINCT x FROM r ORDER BY 1`,
+      `${recursive} SELECT count(*) FROM r WHERE r.x = 1.00000000000000000001`,
+      // the sixth round's way out, answered
+      "WITH RECURSIVE r(x, n) AS (SELECT b.x, 1 FROM bigdec b UNION ALL SELECT r.x, r.n + 1 FROM r WHERE r.n < 2) SELECT count(*) FROM r WHERE r.x / 1 = 1.00000000000000000001",
+      natural("round(b.x / 1, 2)", "round(b.x / 1, 2) + 1"),
+      natural("b.x / 1", "b.x / 1 + 1"),
+    ].entries()) outcomes[String(i)] = await outcome(sql);
+    assert.deepEqual(outcomes, EXPECTED_244);
+  } finally { await c.end(); }
 });
 
 test("latest(x ORDER BY …) answers the x of the row its ORDER BY sorts last: arg_max_null over a row of keys when every key is ascending with NULLs last, last(x ORDER BY …) otherwise, refused without an ORDER BY", async () => {
@@ -5896,6 +6132,400 @@ test("exact path: a value the engine holds exactly keeps its native plan, with n
       assert.doesNotMatch(plan, /__mason_numeric_(order|program|int|double|key)/, sql);
       assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
     }
+  } finally { await c.end(); }
+});
+
+// ISSUE 358, THE CLASS exact-numeric-leaves-exact-path, ROUND 2: the readers PR 341 did not reach, each routed through
+// the same authorities (`duckExact`, `programOf` / `exactText`, `exactOrderKey`, `exactKey`, a set operation's record)
+const SET_ORDERED = "SELECT b.x / 1 FROM bigdec b UNION ALL SELECT b.x / b.y FROM bigdec b";
+/** a statement answered as Postgres answers it, or refused by the named gap (0A000 naming it) */
+async function answeredOrRefused(c: pg.Client, sql: string, gap: string, how: "ordered" | "bag" = "ordered"): Promise<string[]> {
+  const refused = await answer(c, sql).then(() => null, (e: pg.DatabaseError) => e.code === "0A000" && `${e.message} ${e.detail ?? ""} ${e.hint ?? ""}`.includes(gap) ? e : null);
+  return refused !== null ? [] : unlike(c, [[sql, how]]);
+}
+
+test("exact path round 2: a set operation's sort, LIMIT and WITH TIES read the exact order key of its record (#352)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      [`${SET_ORDERED} ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES`, "ordered"],
+      [`${SET_ORDERED} ORDER BY 1 LIMIT 2`, "ordered"],
+      [`${SET_ORDERED} ORDER BY 1 DESC`, "ordered"],
+      [`${SET_ORDERED} ORDER BY 1 DESC LIMIT 10 OFFSET 6`, "ordered"],
+      ["SELECT b.id, b.x / 1 FROM bigdec b UNION ALL SELECT b.id, b.x / b.y FROM bigdec b ORDER BY 2 DESC, 1", "ordered"],
+      ["SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT b.x / b.y FROM bigdec b ORDER BY q DESC LIMIT 3", "ordered"],
+      ["SELECT b.x / 1 AS q, (b.x / 1)::text AS t FROM bigdec b UNION ALL SELECT b.id, b.id::text FROM bigdec b ORDER BY 1 DESC, 2", "ordered"],
+      ["WITH s AS (SELECT b.x / 1 AS q FROM bigdec b) SELECT q FROM s UNION ALL SELECT q FROM s ORDER BY 1 FETCH FIRST 2 ROWS WITH TIES", "ordered"],
+      ["(SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT b.x / b.y FROM bigdec b ORDER BY 1 LIMIT 3) UNION ALL SELECT b.x / 1 FROM bigdec b ORDER BY 1 DESC", "ordered"],
+      ["SELECT * FROM (SELECT b.x / 1 AS q FROM bigdec b UNION ALL SELECT b.x / b.y FROM bigdec b) s ORDER BY q DESC LIMIT 3", "ordered"],
+      [`SELECT * FROM (${SET_ORDERED} ORDER BY 1 DESC LIMIT 3) s`, "ordered"],
+      [`WITH s AS (${SET_ORDERED} ORDER BY 1 LIMIT 2) SELECT * FROM s`, "ordered"],
+      [`${SET_ORDERED} ORDER BY 1 DESC NULLS FIRST FETCH FIRST 3 ROWS WITH TIES`, "ordered"],
+      ["SELECT b.x / 1 FROM bigdec b WHERE false UNION ALL SELECT b.x / b.y FROM bigdec b WHERE false ORDER BY 1 LIMIT 2", "ordered"],
+    ]), []);
+    assert.deepEqual(await unlikeBound(c, [bound(`${SET_ORDERED} ORDER BY 1 LIMIT $1`, ["2"])]), []);
+    // (a prepared statement executed after a later SET reads the plan made at its Parse)
+    const named = { name: "r2_352", text: `${SET_ORDERED} ORDER BY 1 LIMIT $1`, values: ["2"], rowMode: "array" as const, types: raw };
+    await c.query(named as pg.QueryConfig);
+    await c.query("SET TimeZone = 'Asia/Tokyo'");
+    assert.deepEqual((await c.query(named as pg.QueryConfig)).rows, (await postgres(`${SET_ORDERED} ORDER BY 1 LIMIT $1`, ["2"])).rows);
+    await c.query("RESET TimeZone");
+    // ARMS OF ONE SCALE KEEP THEIR NATIVE PLAN: no Mason function
+    for (const sql of ["SELECT o.amount FROM orders o UNION ALL SELECT o.amount FROM orders o ORDER BY 1 LIMIT 2", "SELECT o.amount FROM orders o UNION ALL SELECT o.amount * 1 FROM orders o ORDER BY 1"]) {
+      const plan = (await c.query(`EXPLAIN (VERBOSE) ${sql}`)).rows.map((r: Record<string, string>) => r["QUERY PLAN"]).join("\n");
+      assert.doesNotMatch(plan, /__mason_(numeric|float)_/, sql);
+      assert.deepEqual(await answer(c, sql), await postgres(sql), sql);
+    }
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a VALUES arm and a nested arm are typed by Postgres's analysis, every arm one width (#342)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["VALUES (0.5) UNION ALL SELECT o.amount / 3 FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT o.amount / 3 FROM orders o UNION ALL VALUES (0.5) ORDER BY 1", "ordered"],
+      ["(SELECT o.id, o.status, o.amount / 3 AS third FROM orders o ORDER BY o.id LIMIT 5) UNION ALL VALUES (0, 'v', 14::numeric) ORDER BY 1", "ordered"],
+      ["(WITH t AS (SELECT o.amount / 7 AS v FROM orders o) SELECT * FROM t UNION ALL SELECT v FROM t) UNION ALL (WITH t AS (SELECT o.amount / 7 AS v FROM orders o) SELECT * FROM t UNION ALL SELECT v FROM t) ORDER BY 1", "ordered"],
+      ["((SELECT * FROM (SELECT o.amount / 7 AS v FROM orders o) a UNION ALL SELECT o.amount / 3 FROM orders o) UNION ALL VALUES (1.5)) UNION ALL SELECT o.qty FROM orders o ORDER BY 1, 1::text", "ordered"],
+      ["VALUES (0.5), (NULL) UNION ALL SELECT o.amount / 3 FROM orders o", "bag"],
+      // (a set operation of its own WITH as an arm beside another: its `*` arm reads its own WITH query's cells)
+      ["(WITH t AS (SELECT o.amount / 7 AS v FROM orders o) SELECT * FROM t UNION ALL SELECT v FROM t ORDER BY 1 LIMIT 12) UNION ALL SELECT NULL", "bag"],
+      ["SELECT 1 UNION ALL ((WITH t AS (SELECT o.amount / 7 AS v FROM orders o) SELECT * FROM t UNION ALL SELECT v FROM t) ORDER BY 1 LIMIT 12)", "bag"],
+      // (a VALUES row's constant past the engine's 38 digits beside a table's column: each row its own text)
+      ["SELECT b.x FROM bigdec b UNION ALL VALUES ('0.001250000000000000000000000001'::numeric(65,30)) ORDER BY 1", "ordered"],
+      ["SELECT o.amount FROM orders o UNION ALL VALUES ('0.001250000000000000000000000000'::numeric(65,30))", "bag"],
+      // (a VALUES-first union read outside by its column1)
+      ["SELECT s.column1, s.column1::text FROM (VALUES (0.5) UNION ALL SELECT o.amount / 3 FROM orders o ORDER BY 1 LIMIT 6) AS s ORDER BY 2", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: each arm of a numeric set operation column prints at its own scale (#227)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT o.amount FROM orders o UNION ALL SELECT o.qty FROM orders o ORDER BY 1, 1::text", "ordered"],
+      ["SELECT o.qty FROM orders o UNION ALL SELECT 1.5 ORDER BY 1", "ordered"],
+      ["VALUES (0, 0.5) UNION ALL SELECT o.qty, o.amount FROM orders o ORDER BY 1, 2", "ordered"],
+      ["(SELECT o.id, o.amount FROM orders o ORDER BY o.id) UNION ALL SELECT NULL, 1 ORDER BY 1, 2", "ordered"],
+      ["SELECT o.amount FROM orders o UNION ALL SELECT o.qty FROM orders o", "bag"],
+      ["SELECT o.amount::text FROM orders o UNION ALL SELECT o.qty::text FROM orders o", "bag"],
+      ["SELECT v FROM (SELECT 1 AS v FROM orders o UNION ALL SELECT 1.5 FROM orders o) AS m ORDER BY v, v::text", "ordered"],
+      ["SELECT m.v, m.v::text FROM (SELECT o.qty AS v FROM orders o UNION ALL SELECT o.amount FROM orders o) AS m ORDER BY 2", "ordered"],
+      // (read outside the union by every reader: a scalar subquery, its text as a sort key, an aggregate, a WITH query)
+      ["SELECT (SELECT ms.p FROM (SELECT o.amount AS p FROM orders o UNION ALL SELECT o.qty FROM orders o) AS ms ORDER BY 1 DESC NULLS LAST, ms.p::text COLLATE \"C\" LIMIT 1), (SELECT ms.p FROM (SELECT o.amount AS p FROM orders o UNION ALL SELECT o.qty FROM orders o) AS ms ORDER BY 1 LIMIT 1)", "ordered"],
+      ["WITH ms AS (SELECT o.amount AS p FROM orders o UNION ALL SELECT o.qty FROM orders o) SELECT sum(ms.p), min(ms.p), max(ms.p), count(DISTINCT ms.p) FROM ms", "ordered"],
+      ["SELECT ms.p::text, ms.p * 2 FROM (SELECT o.amount AS p FROM orders o UNION ALL SELECT o.qty FROM orders o) AS ms ORDER BY 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a scalar subquery's column is its program, printed, cast, compared and sorted (#350)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT (SELECT b.x / 1 FROM bigdec b WHERE b.id = 2)", "ordered"],
+      ["SELECT (SELECT s.q FROM (SELECT b.x / 1 AS q FROM bigdec b WHERE b.id = 2) s)", "ordered"],
+      ["SELECT b.id, (SELECT c.x / c.y FROM bigdec c WHERE c.id = b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT (SELECT s.q FROM (SELECT b.x / 1 AS q FROM bigdec b ORDER BY 1 DESC LIMIT 1) s)", "ordered"],
+      ["SELECT (SELECT max(o.amount / 3) FROM orders o)", "ordered"],
+      ["SELECT (SELECT c.x / 1 FROM bigdec c WHERE c.id = 2)::numeric(30,20)", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.x / 1 IN ((SELECT c.x / 1 FROM bigdec c WHERE c.id = 2)::numeric(30,20)) ORDER BY 1", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.x / 1 = (SELECT c.x / 1 FROM bigdec c WHERE c.id = 2 UNION ALL SELECT 0 WHERE false)::numeric(30,20) ORDER BY 1", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.x / 1 = (SELECT c.x / 1 FROM bigdec c WHERE c.id = 2)::text::numeric ORDER BY 1", "ordered"],
+      ["SELECT b.id, (SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id)::text FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, (SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id)::int FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.id < 3 ORDER BY (SELECT b.x / 1) DESC", "ordered"],
+      ["SELECT b.id FROM bigdec b WHERE b.id < 3 ORDER BY (SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id) DESC", "ordered"],
+      ["SELECT b.id, (SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id) * 2 FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT sum((SELECT c.x / 1 FROM bigdec c WHERE c.id = b.id)) FROM bigdec b", "ordered"],
+      ["SELECT b.id, (SELECT b.x / 1) = (SELECT c.x / 1 FROM bigdec c WHERE c.id = 1) FROM bigdec b ORDER BY 1", "ordered"],
+      // (its own ORDER BY or GROUP BY naming the column by number or name sorts the value, never the text in its place)
+      ["SELECT (SELECT b.x / 1 AS q FROM bigdec b ORDER BY q DESC LIMIT 1), (SELECT b.x / b.y FROM bigdec b ORDER BY 1 LIMIT 1), (SELECT o.amount / 3 FROM orders o ORDER BY 1 DESC LIMIT 1)", "ordered"],
+      ["SELECT (SELECT o.amount / 3 FROM orders o GROUP BY 1 ORDER BY 1 DESC LIMIT 1)", "ordered"],
+      ["SELECT (SELECT o.amount / 3 FROM orders o GROUP BY o.amount / 3 ORDER BY 1 LIMIT 1), (SELECT o.amount / 3 FROM orders o GROUP BY o.id ORDER BY o.id LIMIT 1), (SELECT o.amount / 3 FROM orders o GROUP BY o.amount ORDER BY 1 DESC LIMIT 1)", "ordered"],
+    ]), []);
+    assert.deepEqual(await answeredOrRefused(c, "SELECT ARRAY(SELECT b.x / 1 FROM bigdec b ORDER BY 1)", "array-subquery-element"), []);
+  } finally { await c.end(); }
+});
+
+/**
+ * THE CLASS OF PR 415's REVIEWS r1 AND r2: a set operation's column Postgres resolved as text, read by an arm as a
+ * numeric. Every case the change reaches: each arm kind holding a numeric's text, each set operation, each way a
+ * numeric becomes text, the plain text arm (a column, a VALUES row, a literal) first, in the middle and last.
+ */
+const NUMERIC_TEXTS = ["(o.amount / 3)::text", "(o.amount / 3)::varchar", "(o.amount / 3) || ''", "format('%s', o.amount / 3)", "concat(o.amount / 3)", "to_char(o.amount / 3, 'FM9999990.0000000000')"];
+const SET_OPERATORS = ["UNION ALL", "UNION", "INTERSECT", "EXCEPT"];
+const ARM_KINDS: ReadonlyArray<(x: string) => string> = [
+  (x) => `SELECT ${x} FROM orders o`,
+  () => "VALUES ((1.5 / 7)::text), (NULL)",
+  (x) => `(WITH w AS (SELECT ${x} AS v FROM orders o) SELECT w.v FROM w)`,
+  (x) => `(WITH w AS (SELECT ${x} AS v FROM orders o UNION ALL SELECT o.status FROM orders o) SELECT w.v FROM w)`,
+  (x) => `SELECT s.v FROM (SELECT ${x} AS v FROM orders o) AS s`,
+  (x) => `(SELECT ${x} FROM orders o UNION ALL SELECT (o.amount / 7)::text FROM orders o)`,
+];
+const TEXT_ARMS = ["SELECT o.status FROM orders o", "VALUES ('abc'), (NULL)", "VALUES (NULL::text)", "SELECT o.status::char(4) FROM orders o"];
+function textColumnCases(): Array<[string, "ordered"]> {
+  const out: Array<[string, "ordered"]> = [];
+  const three = (op: string, arm: string, text: string, at: number): string => {
+    const arms = [arm, "SELECT (o.amount / 7)::text FROM orders o"];
+    arms.splice(at, 0, text);
+    return `${arms.join(` ${op} `)} ORDER BY 1`;
+  };
+  for (const x of NUMERIC_TEXTS) for (const op of SET_OPERATORS) for (let at = 0; at < 3; at++) out.push([three(op, `SELECT ${x} FROM orders o`, TEXT_ARMS[0]!, at), "ordered"]);
+  for (const kind of ARM_KINDS) for (const op of SET_OPERATORS) for (let at = 0; at < 3; at++) out.push([three(op, kind(NUMERIC_TEXTS[0]!), TEXT_ARMS[at % 2]!, at), "ordered"]);
+  for (const kind of ARM_KINDS) for (const text of TEXT_ARMS.slice(1)) for (let at = 0; at < 3; at++) out.push([three("UNION ALL", kind(NUMERIC_TEXTS[0]!), text, at), "ordered"]);
+  return out;
+}
+
+/**
+ * THE CLASS OF PR 415's REVIEW r3, refused-by-type-not-by-program, as narrowed after review r5: a value at a fixed scale
+ * (round / trunc(x, n), a cast to numeric(p, s)) of a quotient or an avg is computed as main computes it, the engine's
+ * double with its program, and the refusals this PR added for a quotient's double do not refuse it: a JOIN … USING or a
+ * NATURAL JOIN on it, and an array_agg of a cast of one (the engine's DECIMAL(p, s), as main's). Where main refuses
+ * (a set operation without ALL, a grouping set, sum(DISTINCT), a WITH query's or a subquery's column compared outside
+ * it, an array_agg of a round, whose doubles print 40.0 for 40.00), it is refused, never answered otherwise. An array_agg
+ * whose elements no reader sees (its length, its bounds) is answered whatever its elements.
+ */
+const FIXED_SCALES = ["round(o.amount / 3, 2)", "round(o.amount / 4, 2)", "trunc(o.amount / 3, 2)", "round(o.amount / 7)", "(o.amount / 3)::numeric(10,2)", "(o.amount / 4)::numeric(10,2)", "CAST(o.amount / 7 AS decimal(12,4))",
+  // (a negative scale is Postgres's 0; a value at a fixed scale of another)
+  "round(o.amount / 3, -1)", "trunc(o.amount / 7, -1)", "round((o.amount / 3)::numeric(10,4), 2)", "round(round(o.amount / 7, 4), 2)"];
+type FixedScaleCase = readonly [string, "answered" | "numeric-quotient-equality" | "array-subquery-element" | "numeric-exact-sum" | "row-value"];
+function fixedScaleCases(): FixedScaleCase[] {
+  const out: FixedScaleCase[] = [];
+  for (const x of FIXED_SCALES) {
+    // (a cast, and a round of one, are the engine's DECIMAL at Postgres's scale, as main writes them)
+    const decimal = /^\(|^CAST|^round\(\(/.test(x);
+    out.push(
+      // (this PR's USING refusal of a quotient's double: never of a value at a fixed scale, answered as main answers it)
+      [`SELECT count(*) FROM (SELECT ${x} AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)`, "answered"],
+      [`SELECT q FROM (SELECT ${x} AS q FROM orders o) s JOIN (SELECT ${x} AS q FROM orders o) u USING (q) ORDER BY q`, "answered"],
+      [`SELECT count(*) FROM (SELECT ${x} AS q FROM orders o) s NATURAL JOIN (SELECT ${x} AS q FROM orders o) u`, "answered"],
+      // (main's refusals: the merged column grouped outside the subquery, a set operation without ALL, a grouping set,
+      // sum(DISTINCT), a WITH query's column compared outside it)
+      [`SELECT q, count(*) FROM (SELECT ${x} AS q FROM orders o) s NATURAL JOIN (SELECT ${x} AS q FROM orders o) u GROUP BY q ORDER BY q`, "numeric-quotient-equality"],
+      [`SELECT ${x} FROM orders o UNION SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "numeric-quotient-equality"],
+      [`SELECT ${x} FROM orders o INTERSECT SELECT ${x} FROM orders o ORDER BY 1`, "numeric-quotient-equality"],
+      [`SELECT ${x} FROM orders o EXCEPT SELECT ${x} FROM orders o WHERE o.id = 1 ORDER BY 1`, "numeric-quotient-equality"],
+      [`SELECT ${x} AS q, count(*) FROM orders o GROUP BY ROLLUP (1) ORDER BY 1`, "numeric-quotient-equality"],
+      [`SELECT sum(DISTINCT ${x}), count(DISTINCT ${x}) FROM orders o`, "numeric-quotient-equality"],
+      [`WITH RECURSIVE r(q, n) AS (SELECT ${x}, 1 FROM orders o UNION ALL SELECT r.q, r.n + 1 FROM r WHERE r.n < 2) SELECT q, count(*) FROM r WHERE r.q = 6.67 OR r.q > 10 GROUP BY q ORDER BY q`, "numeric-quotient-equality"],
+      // (an array_agg of a cast is the engine's DECIMAL(p, s), main's; of a round, this PR's refusal of a double's list)
+      [`SELECT array_to_string(array_agg(${x} ORDER BY o.id), ',') FROM orders o`, decimal ? "answered" : "array-subquery-element"],
+      // (read by a list or a subquery, beside more decimals or not: main's path, the engine never cuts a scale)
+      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.67, 6.67, 40.00]) ORDER BY 1`, "answered"],
+      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[0.667, 6.6667, 40.001, 2.5]) ORDER BY 1`, "answered"],
+      [`SELECT o.id FROM orders o WHERE ${x} IN (SELECT (u.amount / 3)::numeric(10,4) FROM orders u) ORDER BY 1`, "answered"],
+    );
+  }
+  return out;
+}
+
+/**
+ * PR 415's reviews r4 and r5 (fixed-scale-whole-digits-cap, widening-reader-off-the-list): a value at a fixed scale past
+ * 10^20 (amount × 10^20 / 3), or beside a numeric of more decimals, in every reader the engine widens two numerics in —
+ * a row comparison, a comparison with a wider literal or a scalar subquery, BETWEEN, arithmetic, abs / sign / mod, an
+ * ORDER BY of a difference, a single-row VALUES, a list, a set operation, COALESCE / CASE / GREATEST — and printed with
+ * more whole digits than a DECIMAL holds beside its scale: answered as main answers it (the engine's double with its
+ * program), never a 22003 nor a cut scale, or refused where main refuses.
+ */
+function bigFixedScaleCases(): FixedScaleCase[] {
+  const big = "o.amount * 100000000000000000000";
+  return [
+    [`SELECT o.id, round(${big} / 3, 2), trunc(${big} / 7, 1), round(${big} / 3), (${big} / 3)::numeric(38,2) FROM orders o ORDER BY o.id`, "answered"],
+    [`SELECT o.id, round(${big} / 3, 2) FROM orders o WHERE o.id = 2`, "answered"],
+    [`SELECT o.id FROM orders o WHERE round(${big} / 3, 2) > 1000000000000000000000 ORDER BY 1`, "answered"],
+    [`SELECT round(${big} / 3, 2) AS q, count(*) FROM orders o GROUP BY 1 ORDER BY 1`, "answered"],
+    [`SELECT DISTINCT round(${big} / 3, 2) FROM orders o ORDER BY 1`, "answered"],
+    [`SELECT round(avg(${big}), 2), round(avg(${big}), 18), round(avg(${big}) / 7, 3), round(sum(${big}) / 7, 2) FROM orders o`, "answered"],
+    [`SELECT count(*) FROM (SELECT round(avg(${big}), 2) AS q FROM orders o) s JOIN (SELECT ${big} AS q FROM orders o) u USING (q)`, "answered"],
+    [`SELECT o.id, round(${big} / 3, 2) + o.amount / 7, round(${big} / 3, 2) - 0.333333333333333333, abs(round(${big} / 3, 2) - 2.5), sign(round(${big} / 3, 2) - 2.5) FROM orders o ORDER BY 1`, "answered"],
+    [`SELECT o.id FROM orders o WHERE round(${big} / 3, 2) = 2.33::numeric(38,18) OR round(${big} / 3, 2) > (SELECT max(u.amount) FROM orders u) ORDER BY 1`, "answered"],
+    [`SELECT o.id FROM orders o WHERE round(${big} / 3, 2) BETWEEN 0.333333333333333333 AND 10000000000000000000000 ORDER BY 1`, "answered"],
+    [`SELECT o.id FROM orders o ORDER BY round(${big} / 3, 2) - 0.333333333333333333 DESC, o.id`, "answered"],
+    [`SELECT o.id, v.x FROM orders o JOIN (VALUES (0.333333333333333333)) v(x) ON round(${big} / 3, 2) = v.x ORDER BY 1`, "answered"],
+    // (main's: a sum past 20 whole digits; an array_agg of a round, this PR's)
+    [`SELECT sum(round(${big} / 3, 2)), max(round(${big} / 3, 2)) FROM orders o`, "numeric-exact-sum"],
+    [`SELECT array_to_string(array_agg(round(${big} / 3, 2) ORDER BY o.id), ',') FROM orders o`, "array-subquery-element"],
+  ];
+}
+
+/** a row comparison of a value at a fixed scale beside one of more decimals (review r5's wrong answers): main's */
+function rowFixedScaleCases(): FixedScaleCase[] {
+  const out: FixedScaleCase[] = [];
+  for (const x of ["round(o.amount / 3, 2)", "round(o.amount / 3, 4)", "(o.amount / 3)::numeric(10,2)"]) {
+    out.push(
+      [`SELECT o.id FROM orders o WHERE (${x}, o.id) = ((o.amount / 3)::numeric(10,4), o.id) ORDER BY 1`, "row-value"],
+      [`SELECT o.id, row(${x}, o.id) = row(26.8333, o.id), (${x}, o.id) < (o.amount, o.id), (${x}, o.id) <> (26.8333, o.id) FROM orders o ORDER BY 1`, "row-value"],
+    );
+  }
+  return out;
+}
+
+/**
+ * Where the engine unifies a value at a fixed scale with another type — a list, a subquery's comparison, a set
+ * operation's arms, COALESCE / CASE / GREATEST — and the other has more decimals: main's path, so no scale is cut
+ */
+function widenedFixedScaleCases(): Array<[string, "ordered"]> {
+  const out: Array<[string, "ordered"]> = [];
+  for (const x of ["round(o.amount / 3, 2)", "round(o.amount / 3)", "(o.amount / 3)::numeric(10,2)"]) {
+    const y = x.replaceAll("o.", "u.");
+    out.push(
+      [`SELECT o.id FROM orders o WHERE ${x} = ANY (ARRAY[26.8333, 40.001, 14.0001, 0.5]) ORDER BY 1`, "ordered"],
+      [`SELECT o.id FROM orders o WHERE (o.amount / 3)::numeric(10,4) IN (SELECT ${y} FROM orders u) ORDER BY 1`, "ordered"],
+      [`SELECT o.id, ${x} = ANY (SELECT (u.amount / 3)::numeric(10,4) FROM orders u) FROM orders o ORDER BY 1`, "ordered"],
+      [`SELECT sum(s.x), count(DISTINCT s.x) FROM (SELECT ${x} AS x FROM orders o UNION ALL SELECT (o.amount / 3)::numeric(10,4) FROM orders o) s`, "ordered"],
+      // (each value compared, not printed: a CASE's mixed scales print as the listed mixed-scale-numeric, as main's)
+      [`SELECT o.id, coalesce(CASE WHEN o.id = 1 THEN NULL ELSE ${x} END, 0.3333) = 0.3333, greatest(${x}, 26.8333) = 26.8333, (CASE WHEN o.id = 2 THEN 0.3333 ELSE ${x} END) = 0.3333 FROM orders o ORDER BY 1`, "ordered"],
+    );
+  }
+  return out;
+}
+
+test("exact path round 2: a value at a fixed scale is answered as main answers it, never refused by its type, and an array whose elements no reader sees is answered (PR 415, refused-by-type-not-by-program)", async () => {
+  const c = await client();
+  try {
+    const cases = [...fixedScaleCases(), ...bigFixedScaleCases(), ...rowFixedScaleCases()];
+    assert.deepEqual(await unlike(c, [
+      ...cases.filter(([, e]) => e === "answered").map(([s]) => [s, "ordered"] as const),
+      ["SELECT count(*) FROM (SELECT round(avg(o.amount), 2) AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)", "ordered"],
+      ["SELECT q FROM (SELECT avg(o.amount)::numeric(12,2) AS q FROM orders o) s JOIN (SELECT avg(o.amount)::numeric(12,2) AS q FROM orders o) u USING (q)", "ordered"],
+      ["SELECT array_to_string(array_agg((o.amount / 4)::numeric(10,2) ORDER BY o.id), ',') FROM orders o", "ordered"],
+      ["SELECT array_length(array_agg(o.amount / 3), 1), cardinality(array_agg(o.amount / 3)), array_upper(array_agg(o.amount / 7), 1) FROM orders o", "ordered"],
+      ["SELECT array_length(array_agg(o.amount / 3), 1) FROM orders o WHERE false", "ordered"],
+      ["SELECT o.status, array_length(array_agg(o.amount / 7 ORDER BY o.id), 1) FROM orders o GROUP BY o.status ORDER BY 1", "ordered"],
+      ["SELECT array_length(array_agg(round(o.amount / 3, 2)), 1) FROM orders o", "ordered"],
+      // (an array_agg of a FROM item's column cast to numeric(p, s), and of a round of a cast, grouped: main's DECIMALs)
+      ["SELECT array_to_string(array_agg(s.q ORDER BY s.q), ',') FROM (SELECT o.status, avg(o.amount)::numeric(12,2) AS q FROM orders o GROUP BY o.status) s", "ordered"],
+      ["SELECT o.status, array_to_string(array_agg(round((o.amount / 3)::numeric(10,4), 2) ORDER BY o.id), ',') FROM orders o GROUP BY o.status ORDER BY 1", "ordered"],
+      // (a text read as numeric, rounded: its program parses a text, so it keeps the path it had, computed after the
+      // engine's answer — a generated table's TEXT reason reads it there, tests/duck-generated-round5.test.ts)
+      ["SELECT o.id, round((o.meta ->> 'k')::numeric, 2), trunc((o.meta ->> 'k')::numeric / 3, 2) FROM orders o ORDER BY o.id", "ordered"],
+      ...widenedFixedScaleCases(),
+    ]), []);
+    const failures: string[] = [];
+    for (const [s, gap] of cases) if (gap !== "answered") failures.push(...await answeredOrRefused(c, s, gap));
+    assert.deepEqual(failures, []);
+    // (what stays refused, where the engine's double would reach the answer: a plain quotient's and an avg's USING key,
+    // a JSON number's text rounded, an array_agg whose elements are read)
+    assert.deepEqual(await answeredOrRefused(c, "SELECT count(*) FROM (SELECT o.amount / 3 AS q FROM orders o) s JOIN (SELECT o.amount * (1.0 / 3) AS q FROM orders o) u USING (q)", "numeric-quotient-equality"), []);
+    assert.deepEqual(await answeredOrRefused(c, "SELECT array_agg(o.amount / 3 ORDER BY o.id) FROM orders o", "array-subquery-element"), []);
+    assert.deepEqual(await answeredOrRefused(c, "SELECT count(*) FROM (SELECT round((o.meta ->> 'k')::numeric, 2) AS q FROM orders o) s JOIN (SELECT o.amount AS q FROM orders o) u USING (q)", "numeric-quotient-equality"), []);
+    // (a set operation without ALL of a value at a fixed scale beside one of more decimals: main's refusal)
+    for (const op of ["UNION", "INTERSECT", "EXCEPT"]) {
+      assert.deepEqual(await answeredOrRefused(c, `SELECT round(o.amount / 3, 2) FROM orders o ${op} SELECT (o.amount / 3)::numeric(10,4) FROM orders o ORDER BY 1`, "numeric-quotient-equality"), []);
+    }
+    for (const x of ["round(o.amount / 3, 2)", "round(o.amount / 3)", "(o.amount / 3)::numeric(10,2)"]) {
+      assert.deepEqual(await answeredOrRefused(c, `SELECT o.id, v.x = 26.8333, v.x > 26.83 FROM orders o, LATERAL (VALUES (${x}), (26.8333)) v(x) ORDER BY o.id, 1`, "numeric-quotient-equality"), []);
+    }
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a text column of a set operation is never read as a numeric, whatever the arm, the operator, the conversion or the text arm's place (PR 415's class)", async () => {
+  const c = await client();
+  try {
+    // (main's own, never this PR's to fix: UNION, INTERSECT and EXCEPT without ALL of a numeric's text are refused by
+    // name, #298; a numeric made text by concat, format or || is the engine's double's text, #421 — answered, never an
+    // error)
+    const cases = textColumnCases();
+    const distinct = cases.filter(([s]) => / (UNION|INTERSECT|EXCEPT) (?!ALL)/.test(s));
+    const viaFunction = cases.filter(([s]) => !distinct.some(([d]) => d === s) && /concat\(|format\(|\|\| ''/.test(s));
+    const failures: string[] = [];
+    for (const [s] of distinct) failures.push(...await answeredOrRefused(c, s, "numeric-quotient-equality"));
+    for (const [s] of viaFunction) await answer(c, s).catch((e: Error) => failures.push(`${s}\n    mason: ${e.message}`));
+    assert.deepEqual(failures, []);
+    assert.deepEqual(await unlike(c, [
+      ...cases.filter(([s]) => !distinct.some(([d]) => d === s) && !viaFunction.some(([v]) => v === s)),
+      // (review r2: a VALUES arm beside a numeric's text column, the wrapper's width)
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL VALUES (NULL::text) ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL VALUES (NULL) ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL VALUES ((1.5 / 7)::text) ORDER BY 1", "ordered"],
+      ["VALUES ((1.5 / 7)::text) UNION ALL SELECT (o.amount / 3)::text FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text, o.id FROM orders o UNION ALL VALUES ((2.5 / 7)::text, 0), (NULL, 1) ORDER BY 2, 1", "ordered"],
+      ["SELECT (o.amount / 3)::text, o.amount / 7 FROM orders o UNION ALL VALUES (NULL::text, 1.5) ORDER BY 2, 1", "ordered"],
+      ["SELECT o.amount / 7, (o.amount / 3)::text FROM orders o UNION ALL VALUES (1.5, NULL::text) ORDER BY 1, 2", "ordered"],
+      ["VALUES (1.5, NULL::text) UNION ALL SELECT o.amount / 7, (o.amount / 3)::text FROM orders o ORDER BY 1, 2", "ordered"],
+      ["SELECT * FROM (SELECT (o.amount / 3)::text AS x, o.amount / 7 AS y FROM orders o) s UNION ALL VALUES (NULL::text, 1.5) ORDER BY 2, 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a text column of a set operation is a numeric's text only where every arm's is, never a text, a char(n) or a literal parsed as one (PR 415)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT o.status FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT o.status FROM orders o", "bag"],
+      ["SELECT o.status FROM orders o UNION ALL SELECT (o.amount / 3)::text FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT 'abc' ORDER BY 1", "ordered"],
+      ["SELECT 'abc' UNION ALL SELECT (o.amount / 3)::text FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT o.status::char(4) FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT avg(o.amount)::text FROM orders o UNION ALL SELECT o.status FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT o.amount::text FROM orders o UNION ALL SELECT o.status FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT x FROM (SELECT (o.amount / 3)::text AS x FROM orders o UNION ALL SELECT o.status FROM orders o) s ORDER BY 1", "ordered"],
+      ["SELECT x FROM (SELECT (o.amount / 3)::text AS x FROM orders o UNION ALL SELECT 'abc') s ORDER BY 1", "ordered"],
+      ["SELECT (o.amount / 3)::text, o.id FROM orders o UNION ALL SELECT o.status, o.id FROM orders o ORDER BY 2, 1", "ordered"],
+      // (every arm a numeric's text or a NULL: still the record's, each arm's quotient at Postgres's digits)
+      ["SELECT (o.amount / 3)::text FROM orders o UNION ALL SELECT (o.amount / 7)::text FROM orders o UNION ALL SELECT NULL ORDER BY 1", "ordered"],
+      ["SELECT (b.x / b.y)::text FROM bigdec b UNION ALL SELECT (b.x / 3)::text FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT (SELECT s.q FROM (SELECT * FROM ((SELECT o.id, o.amount / 7 AS q FROM orders o ORDER BY 2 FETCH FIRST 1 ROWS WITH TIES) UNION ALL SELECT 0, 1) s ORDER BY 1) AS s ORDER BY 1 DESC NULLS LAST, s.q::text COLLATE \"C\" LIMIT 1)", "ordered"],
+      ["(SELECT o.id, abs(o.amount), sign(o.amount), -o.amount, +o.amount FROM orders o ORDER BY o.id) UNION ALL SELECT NULL, 1, 1, 1, 1", "ordered"],
+      ["SELECT NULL, 1, 1, 1, 1 UNION ALL (SELECT o.id, abs(o.amount), sign(o.amount), -o.amount, +o.amount FROM orders o ORDER BY o.id)", "ordered"],
+      ["(SELECT b.id, abs(b.x), sign(b.x), -b.x, +b.x FROM bigdec b ORDER BY b.id) UNION ALL SELECT NULL, 1, 1, 1, 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a window's min, max, first_value, last_value, nth_value, lag and lead pick the program (#343)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT b.id, max(b.x / 1) OVER (), min(b.x / 1) OVER (ORDER BY b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT o.id, min(o.amount / 3) OVER (PARTITION BY o.status), max(o.amount / 3) OVER () FROM orders o ORDER BY o.id", "ordered"],
+      ["SELECT b.id, first_value(b.x / b.y) OVER (ORDER BY b.id DESC), last_value(b.x / 1) OVER (ORDER BY b.id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), nth_value(b.x / 1, 2) OVER (ORDER BY b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT s.id, lead(s.x, 1, 0) OVER (ORDER BY s.id), lag(s.x) OVER (ORDER BY s.id) FROM (SELECT o.id, o.amount / 3 AS x FROM orders o) s ORDER BY 1", "ordered"],
+      ["SELECT b.id FROM bigdec b ORDER BY max(b.x / 1) OVER (PARTITION BY b.id) DESC, b.id", "ordered"],
+      ["SELECT b.id FROM bigdec b ORDER BY first_value(b.x / 1) OVER (PARTITION BY b.id) DESC, b.id", "ordered"],
+      ["SELECT b.y, max(max(b.x / 1)) OVER (), min(min(b.x / b.y)) OVER () FROM bigdec b GROUP BY b.y ORDER BY 1", "ordered"],
+      ["SELECT b.id, lag(b.x / b.y, 1, b.x / 3) OVER (ORDER BY b.id) FROM bigdec b ORDER BY 1", "ordered"],
+      ["SELECT b.id, (max(b.x / 1) OVER ())::text, max(b.x / 1) OVER () * 2 FROM bigdec b ORDER BY 1", "ordered"],
+    ]), []);
+    assert.deepEqual(await answeredOrRefused(c, "SELECT array_agg(q ORDER BY q DESC) FROM (SELECT b.x / 1 AS q FROM bigdec b) s", "array-subquery-element"), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: a grouped query's output key is its analysed expression, whatever the GROUP BY's spelling (#353)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b WHERE b.id < 3 GROUP BY b.id, b.x ORDER BY q DESC", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b WHERE b.id < 3 GROUP BY b.id, b.x ORDER BY 2 DESC", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b GROUP BY b.id, b.x HAVING count(*) > 0 ORDER BY q DESC, 1", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b WHERE b.id < 3 GROUP BY b.id, b.x ORDER BY q DESC FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q, rank() OVER (ORDER BY b.x / 1 DESC) FROM bigdec b GROUP BY b.id, b.x ORDER BY 3, 1", "ordered"],
+      ["SELECT b.x / b.y AS q, count(*) FROM bigdec b GROUP BY b.x, b.y ORDER BY q DESC", "ordered"],
+      ["SELECT b.id, b.x / 1 AS q FROM bigdec b WHERE b.id < 3 GROUP BY b.id, b.x / b.y, b.x ORDER BY q DESC", "ordered"],
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("exact path round 2: JOIN … USING and NATURAL JOIN on a carried quotient equate its exact key, or refuse by name (#218)", async () => {
+  const c = await client();
+  try {
+    const s = "(SELECT b.x / 1 AS q FROM bigdec b) s", t = "(SELECT b.x / 1 AS q FROM bigdec b) t";
+    for (const [sql, how] of [
+      [`SELECT count(*) FROM ${s} JOIN ${t} USING (q)`, "ordered"],
+      [`SELECT count(*) FROM ${s} NATURAL JOIN ${t}`, "ordered"],
+      [`SELECT q FROM ${s} JOIN ${t} USING (q) ORDER BY 1`, "ordered"],
+      ["SELECT * FROM (SELECT b.id, b.x / 1 AS q FROM bigdec b) s LEFT JOIN (SELECT b.x / b.y AS q, b.id AS j FROM bigdec b) t USING (q) ORDER BY 2, 3", "ordered"],
+      ["SELECT q FROM (SELECT b.x / 1 AS q FROM bigdec b WHERE b.id < 4) s FULL JOIN (SELECT b.x / b.y AS q FROM bigdec b) t USING (q) ORDER BY 1", "ordered"],
+      // (a quotient over a VALUES list's typed constants, and over a value no program is built for: the engine's double either way)
+      ["SELECT count(*) FROM (SELECT v.x / 1 AS q FROM orders o, (VALUES (1.00000000000000000001::numeric(30,20))) AS v(x)) s JOIN (SELECT v.x / 1 AS q FROM orders o, (VALUES (1.00000000000000000002::numeric(30,20))) AS v(x)) t USING (q)", "ordered"],
+      ["SELECT count(*) FROM (SELECT sqrt(o.amount) AS q FROM orders o) s JOIN (SELECT sqrt(o.amount) AS q FROM orders o) t USING (q)", "ordered"],
+    ] as const) assert.deepEqual(await answeredOrRefused(c, sql, "numeric-quotient-equality", how), [], sql);
+    assert.deepEqual(await unlike(c, [[`SELECT count(*) FROM ${s} JOIN ${t} ON s.q = t.q`, "ordered"]]), []);
   } finally { await c.end(); }
 });
 

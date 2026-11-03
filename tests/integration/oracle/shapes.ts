@@ -154,7 +154,8 @@ async function firstShapes(sql: string, inOrder: boolean): Promise<Shaped[]> {
  *  - the bounds of the OUTERMOST query: `count-zero`, `count-negative`, `count-null`, `offset-negative`,
  *    `bound-expression`, `offset-zero` (none changes which rows a bound keeps: ties at a new boundary are undefined);
  *  - the numeric readers of every numeric output: `numeric-distinct`, `numeric-text`, `numeric-aggregate`,
- *    `numeric-ordered`, `numeric-ranked`.
+ *    `numeric-ordered`, `numeric-ranked`, `numeric-set-ordered` (a UNION ALL of two readers, ordered by each value and
+ *    its text) and `numeric-scalar` (each as a scalar subquery of the SELECT list, its greatest value).
  */
 const CHAR = new Set([25, 1043, 1042]), INTEGER = new Set([21, 20, 700, 701, 1700]), NUMERIC = 1700, BPCHAR = 1042;
 
@@ -331,6 +332,22 @@ export async function shapes(sql: string, inOrder: boolean, group: string, answe
     // each value ranked by its own order, DESC (issue 252): two values a double ties, ordered apart only by the exact
     // value (numeric-ordered's text tie-break orders them by accident)
     await derived("numeric-ranked", `SELECT ${numeric.map((c) => `${c}, rank() OVER (ORDER BY ${c} DESC)`).join(", ")} FROM (${sql}) AS mason_shape`, false);
+    // a set operation's ORDER BY over every numeric output and its text (issue 358): the base read back as its own tree
+    // in both arms, compared in order, each value DESC then its text, so two equal values at two scales are ordered
+    // apart by the text, never by chance (#328)
+    const reads = (side: unknown): unknown => isObject(side) && Array.isArray(side.fromClause) && side.fromClause.length === 1 ? (side.fromClause[0] as Ast).RangeSubselect?.subquery : undefined;
+    const listed = numeric.map((c, k) => `${c}, ${c}::text COLLATE "C" AS mason_t${k + 1}`).join(", ");
+    const setText = `SELECT ${listed} FROM (${sql}) AS mason_shape UNION ALL SELECT ${listed} FROM (${sql}) AS mason_shape ORDER BY ${numeric.map((_c, k) => `${2 * k + 1} DESC, ${2 * k + 2}`).join(", ")}`;
+    const set = (await stmtOf(setText))?.SelectStmt;
+    put("numeric-set-ordered", set !== undefined && set.op === "SETOP_UNION" && set.all === true && same(reads(set.larg), stmt) && same(reads(set.rarg), stmt) ? setText : null, true);
+    // each numeric output as a scalar subquery of the SELECT list (issue 358): its greatest value, a tie broken by its text
+    const scalarText = `SELECT ${numeric.map((c) => `(SELECT ${c} FROM (${sql}) AS mason_shape ORDER BY 1 DESC NULLS LAST, ${c}::text COLLATE "C" LIMIT 1)`).join(", ")}`;
+    const scalars = (await stmtOf(scalarText))?.SelectStmt?.targetList;
+    const scalarOk = Array.isArray(scalars) && scalars.length === numeric.length && scalars.every((t) => {
+      const sub = (((t as Ast).ResTarget?.val as Ast | undefined)?.SubLink?.subselect as Ast | undefined)?.SelectStmt;
+      return sub !== undefined && same(reads(sub), stmt);
+    });
+    put("numeric-scalar", scalarOk ? scalarText : null, false);
   }
   return { shaped, unspellable };
 }

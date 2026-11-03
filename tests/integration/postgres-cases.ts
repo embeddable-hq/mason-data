@@ -131,7 +131,7 @@ export const CASES: string[] = [
 export const T = "(SELECT 1 AS id, 'Ab' AS name, 1.5 AS x, timestamptz '2026-01-01 10:00:00+00' AS at UNION ALL SELECT 2, NULL, NULL, timestamptz '2026-01-02 00:30:00+00' UNION ALL SELECT 3, 'b', 2.5, timestamptz '2026-02-01 00:00:00+00' UNION ALL SELECT 4, 'c', -1.0, NULL) AS t";
 /** a numeric column whose values have their own scales: Postgres keeps each (`1`, `1.5`), DuckDB's DECIMAL has one (it
  *  reads the copied `public.one`, or the catalog Postgres would answer it, as Postgres by construction) */
-export const MIXED_SCALE = "SELECT v FROM (SELECT 1 AS v FROM public.one UNION ALL SELECT 1.5 FROM public.one) AS m ORDER BY v";
+export const MIXED_SCALE = "SELECT v FROM (SELECT 1 AS v FROM public.one UNION SELECT 1.5 FROM public.one) AS m ORDER BY v";
 export const U = "(SELECT 1 AS id, 10 AS k UNION ALL SELECT 2, 20 UNION ALL SELECT 5, NULL) AS u";
 // AT TIME ZONE's rows (Cube's zoned bucket): both instants London's clock reads 01:30 at on 2026-10-25 (it
 // falls back at 01:00Z), the hour after, a London midnight that is 23:00Z the day before, a São Paulo evening that is the

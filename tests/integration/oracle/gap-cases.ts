@@ -46,6 +46,9 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },
   { gap: "jsonb-compare", sql: "SELECT id, greatest(jb, '1') FROM typed ORDER BY id" },
   { gap: "held-type-compare", sql: "SELECT id FROM mapped ORDER BY mc, id" },
+  { gap: "time-timetz-coerced", sql: "SELECT * FROM (SELECT tm FROM typed) s UNION ALL SELECT tz FROM mapped ORDER BY 1" },
+  { gap: "time-timetz-coerced", sql: "SELECT id FROM typed WHERE tm BETWEEN '00:00'::time AND '12:30:00.5-05'::timetz ORDER BY id" },
+  { gap: "time-timetz-coerced", sql: "SELECT id, CASE tm WHEN '00:00'::time THEN 'a' WHEN '12:30:00.5-05'::timetz THEN 'b' END FROM typed ORDER BY id" },
   // the decided differences (KNOWN in duck-oracle.itest.ts)
   { gap: "domain-column", sql: "SELECT pg_typeof(di)::text FROM mapped LIMIT 1" },
   { gap: "limit-errors", sql: "SELECT l.id, (l.j ->> 'n')::int, c.name FROM late l LEFT JOIN late_c c ON c.id = l.c ORDER BY l.k DESC LIMIT 3" },
@@ -58,9 +61,11 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "min-max-scale-tie", sql: "SELECT min(a / b), max(a / b) FROM public.one, (VALUES (0::numeric, 7::numeric), (0, 1000000)) AS v(a, b)" },
   { gap: "numeric-quotient-equality", sql: "SELECT sum(DISTINCT a / b) FROM public.one, (VALUES (1::numeric, 3::numeric)) AS v(a, b)" },
   // (beside a table: a statement that reads none is the catalog Postgres's own answer, which differs from nothing)
-  { gap: "numeric-quotient-compare", sql: "SELECT count(*) FROM public.one, (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002)) AS v(x) WHERE v.x / 1 IN (1.00000000000000000001)" },
+  { gap: "numeric-quotient-compare", sql: "SELECT count(*) FROM public.one, (VALUES (1.00000000000000000001::numeric(30,20)), (1.00000000000000000002)) AS v(x) WHERE v.x / 1 = ANY (ARRAY[1.00000000000000000001])" },
   { gap: "nested-exact-numeric", sql: "SELECT var_samp(x) FROM (SELECT 7 / 3.0 AS x FROM public.one UNION ALL SELECT 1 / 3.0 FROM public.one) AS s" },
   { gap: "numeric-quotient-equality", sql: "SELECT count(*) FROM (SELECT 7 / 3.0 AS x, 1 AS id FROM public.one) AS s NATURAL JOIN (SELECT 1 AS id FROM public.one) AS t WHERE s.x = 2.3333333333333333" },
+  // a JOIN USING a computed quotient two doubles tie (issue 218): its merged column is refused, never keyed by the double
+  { gap: "numeric-quotient-equality", sql: "SELECT count(*) FROM (SELECT v.x / 1 AS q FROM public.one, (VALUES (1.00000000000000000001::numeric(30,20))) AS v(x)) AS s JOIN (SELECT v.x / 1 AS q FROM public.one, (VALUES (1.00000000000000000002::numeric(30,20))) AS v(x)) AS t USING (q)" },
   { gap: "row-value", sql: "SELECT count(*) FROM public.one WHERE (7 / 3.0, 1) = (2.3333333333333333, 1)" },
   { gap: "unicode-16-case", sql: "SELECT upper('\u{10D70}'), lower('\u{10D50}') FROM public.one" },
   // the session's own statement (Postico's connect): its fields and the rows the sessions set are held alike (KNOWN's `holds`)

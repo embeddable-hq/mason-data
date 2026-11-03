@@ -336,7 +336,14 @@ export class GeneratedTables {
 
   /** the tables a role may name, built or not: `columns` none until they are known (src/cli/roles.ts) */
   named(): Array<{ source: string; columns: ReadonlyArray<{ name: string }>; pending?: true }> {
-    return [...this.entries.values()].filter((e) => e.wanted !== null || e.deployed !== null).map((e) => e.deployed !== null ? { source: e.name, columns: e.deployed.columns } : { source: e.name, columns: [], pending: true as const });
+    return [...this.entries.values()].filter((e) => this.defines(e.name)).map((e) => e.deployed !== null ? { source: e.name, columns: e.deployed.columns } : { source: e.name, columns: [], pending: true as const });
+  }
+
+  /** `name` is a generated table this folder defines: a file that names it, or a table built from one; never a name
+   *  whose file is gone and was never built, nor one a file names that is refused before its SQL is read */
+  private defines(name: string): boolean {
+    const e = this.entries.get(name);
+    return e !== undefined && (e.wanted !== null || e.deployed !== null);
   }
 
   /** a base's commit changed its rows: called on the writer's turn, after that commit */
@@ -578,8 +585,15 @@ export class GeneratedTables {
       const moved = this.host.schema() !== schema;
       // a parent not built yet: waited for by name; why it is refused or its build failed is read when it is said
       const parent = x.gap === "generated-not-built" ? /the generated table (\S+) is not built yet/.exec(x.fields.message)?.[1] : undefined;
+      // A GENERATED BASE IS THERE WHEN THE CATALOG HOLDS IT TOO (issue 474): a run sets its table deployed, so serving,
+      // BEFORE its rebuild of the catalog (which reads `served()`, so it must), and that rebuild waits behind any other.
+      // A 42P01 for a table this folder defines is the catalog the plan was made on lacking it, whatever its state:
+      // waited for by name, and the parent's own trouble read where it is said (`waitingWords`). A name nobody defines
+      // (no file, or its file gone) stays Postgres's refusal
+      const generated = base !== undefined && adding === null && base !== e.name && this.defines(base);
       if (adding === "adding" || (adding === "copied" && moved)) { e.waitingFor = base!; e.refusals = []; }
       else if (parent !== undefined) { e.waitingFor = parent; e.refusals = []; }
+      else if (generated) { e.waitingFor = base!; e.refusals = []; }
       else { e.waitingFor = null; e.refusals = [refusalOf(x)]; }
     }
     this.say(e);
