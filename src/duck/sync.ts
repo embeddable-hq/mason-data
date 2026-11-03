@@ -78,6 +78,7 @@ import { numericWiderThan } from "../lib/pg-numeric.ts";
 import { gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
+import { errorCode, errorText, maskPasswordKeyword, messageOf } from "../lib/secret-mask.ts";
 import { BIG_TABLE_ROWS, intervalOf, msText, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
 
 /** how a run keeps its copies current: each table as its `sync:` says (`poll`; a table with none — a test's — polled at
@@ -805,11 +806,42 @@ export function streamRetryDelayMs(intervalMs: number, failures: number): number
 /** what Mason's backends on the source are called (pg_stat_activity.application_name): the copy's readers and the polls */
 export const SOURCE_APPLICATION_NAME = "mason-data";
 
-/** libpq's keyword form of the source, for DuckDB's ATTACH (a value quoted as libpq reads it) */
-export function libpqString(s: Pick<Source, "host" | "port" | "database" | "user" | "password" | "sslmode">): string {
-  const v = (x: string | number): string => `'${String(x).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-  return [`host=${v(s.host)}`, `port=${v(s.port)}`, `dbname=${v(s.database)}`, `user=${v(s.user)}`,
-    ...(s.password ? [`password=${v(s.password)}`] : []), `sslmode=${v(s.sslmode)}`, `application_name=${v(SOURCE_APPLICATION_NAME)}`].join(" ");
+/**
+ * THE ENGINE NEVER HOLDS THE SOURCE'S PASSWORD IN A STRING IT REPEATS (issue 599). DuckDB's `postgres` extension
+ * repeats an ATTACH's path whole in its error (`Unable to connect to Postgres at "<path>": …`), and every connection
+ * reads it in `duckdb_databases()`; a run whose source restarted under it wrote `password='…'` to its log, its ledger,
+ * `mason status` and the web page. So the path is `attachPath`'s, which takes nothing but the sslmode, and the
+ * credentials go through the extension's SECRET MANAGER (`sourceSecretSql`): a temporary, in-memory secret of TYPE
+ * postgres, made on the writer's turn just before the ATTACH that names it and dropped right after it, whatever the
+ * ATTACH did (`attach`). Measured on the extension pinned in cli/extensions.json: its error says the path alone,
+ * `duckdb_secrets()` says `password=redacted`, the attachment keeps the credentials it merged at the ATTACH (a copy's
+ * readers and a reconnect after a restart connect with the secret gone), and it quotes each value for libpq itself.
+ * Not PGPASSWORD: the process's environment is every child's, and setting it races the engine's threads reading it.
+ * Whatever a dependency repeats one day, the sync's exits mask it (src/lib/secret-mask.ts).
+ */
+export function attachPath(s: Pick<Source, "sslmode">): string {
+  const v = (x: string): string => `'${x.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  return [`sslmode=${v(s.sslmode)}`, `application_name=${v(SOURCE_APPLICATION_NAME)}`].join(" ");
+}
+
+/** THE ATTACH THE SYNC RUNS: the secret path's, always. A test that shows the mask alone (tests/integration/duck-secret.itest.ts)
+ *  replaces it through `attachSeamForTest`, which a run never imports: no option, setting or environment reaches it */
+const secretAttachSql = (s: Source): string => `ATTACH ${literal(attachPath(s))} AS ${SRC} (TYPE postgres, SECRET ${SOURCE_SECRET}, READ_ONLY)`;
+let attachSqlOf: (s: Source) => string = secretAttachSql;
+export const attachSeamForTest = {
+  /** replaces the ATTACH (null: the secret path's again), for a test's process alone */
+  set(f: ((s: Source) => string) | null): void { attachSqlOf = f ?? secretAttachSql; },
+};
+
+/** the secret the ATTACH names: an explicit name, so no other ATTACH takes it (only `__default_postgres` is taken
+ *  unnamed), and a wire session's planned SQL cannot name it */
+export const SOURCE_SECRET = "mason_source_credentials";
+
+/** the source's credentials as the extension's secret: temporary (in memory, never written to disk) and replaced, its
+ *  password left out when there is none (libpq then reads PGPASSWORD or a pgpass file, as it did before) */
+export function sourceSecretSql(s: Pick<Source, "host" | "port" | "database" | "user" | "password">): string {
+  return `CREATE OR REPLACE TEMPORARY SECRET ${SOURCE_SECRET} (TYPE postgres, HOST ${literal(s.host)}, PORT ${literal(String(s.port))}, ` +
+    `DATABASE ${literal(s.database)}, USER ${literal(s.user)}${s.password ? `, PASSWORD ${literal(s.password)}` : ""})`;
 }
 
 /** a table's columns as a copy is made with them: their names and source types, in order */
@@ -835,6 +867,18 @@ const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(s
  */
 const NUMERIC_TYPE = /^numeric(?:\((\d+)(?:,\s*(\d+))?\))?$/;
 const WIDER = "mason: a numeric value wider than its synced column";
+
+/** Whether a ROLLBACK's `e` says the engine had ended the transaction itself ("cannot rollback - no transaction is
+ *  active", after a COMMIT or a read out of memory): a decision, so it reads the raw words (`messageOf`) */
+export function endedTransaction(e: unknown): boolean {
+  return /no transaction is active/.test(messageOf(e));
+}
+
+/** Whether `e` is a numeric of `source` wider than its synced column (`WIDER`): a decision, so it reads the error's raw
+ *  words (`messageOf`), never the words Mason repeats (`errorText`) — the stream's, the catch-up's and the poll's alike */
+export function widerIn(e: unknown, source: string): boolean {
+  return messageOf(e).includes(`${WIDER} [${source}]`);
+}
 
 /** a source numeric the extension reads as a DOUBLE: no precision, or more than DuckDB's 38 digits */
 function readsAsDouble(type: string): boolean {
@@ -1140,8 +1184,15 @@ export class Sync {
    *  said, and the sync goes on (its state and its log line hold what happened) */
   private event(e: SyncEventInput): void {
     try { this.onEvent(e); }
-    catch (x) { this.log(`the sync's event (${e.kind}${e.table ? ` ${e.table}` : ""}) could not be recorded: ${x instanceof Error ? x.message : String(x)}`); }
+    catch (x) { this.log(`the sync's event (${e.kind}${e.table ? ` ${e.table}` : ""}) could not be recorded: ${this.errorText(x)}`); }
   }
+
+  /** A CAUGHT ERROR'S WORDS, AS THE SYNC REPEATS THEM (src/lib/secret-mask.ts `errorText`): every engine or driver
+   *  error becomes text here, once, where it enters — a log line, an event, a table's `error`, an answer is built from
+   *  it — a `password=` value masked, nothing else changed (no error the sync meets holds the password: it travels in
+   *  the temporary secret alone, whose own error is never repeated). A decision never reads these words: it reads
+   *  `messageOf`, the raw ones. tests/secret-mask.test.ts holds src/duck/sync.ts and stream.ts to both */
+  private errorText(e: unknown, o: { stack?: boolean } = {}): string { return errorText(e, o); }
 
   /** a whole-sync failure (`wholeFailure`) is over: said once, as a `recovered` event of no table */
   private recovered(what: keyof Sync["wholeFailure"], words: string): void {
@@ -1193,6 +1244,7 @@ export class Sync {
       this.recordedSync.set(source, sync);
     }
     await this.readPolledAt();
+    await this.scrubLedger();
     const r = await this.store.writer.runAndReadAll(`SELECT source, phase, "rows", bytes, seconds, epoch_ms(copied_at), error, columns::VARCHAR FROM ${MASON_SCHEMA}.copy_state`);
     for (const row of r.getRowsJS()) {
       const [source, phase, rows, bytes, seconds, copiedMs, error, columns] = row as [string, CopyPhase, bigint | null, bigint | null, number | null, number | bigint | null, string | null, string | null];
@@ -1215,6 +1267,42 @@ export class Sync {
     await this.generated.open();
     this.catalog = await this.store.instance.connect();
     await this.rebuildSchema();
+  }
+
+  /**
+   * THE LEDGER SCRUBBED OF A PASSWORD AN EARLIER MASON WROTE (issue 599): before the engine was given the credentials
+   * as a secret, a failed connection's error held `password='…'`, and every table's error (`copy_state.error`) and every
+   * event (`sync_events.message`) written then kept it, shown by mason status and the web page for as long as they stand.
+   * At every open, those two free-text fields alone are read where they hold a `password=` keyword, its value masked
+   * (`maskPasswordKeyword`: the exact leaked form, never a substring of the password now, which a table's name may hold)
+   * and written back by bound parameters where that changed them, said in the log with the way out: rotate the password.
+   */
+  private async scrubLedger(): Promise<void> {
+    const w = this.store.writer;
+    const KEYWORD = "%password%=%";
+    let scrubbed = 0;
+    const errors = (await w.runAndReadAll(`SELECT source, error FROM ${MASON_SCHEMA}.copy_state WHERE error ILIKE $1`, [KEYWORD])).getRowsJS() as [string, string][];
+    for (const [source, error] of errors) {
+      const masked = maskPasswordKeyword(error);
+      if (masked === error) continue;
+      await w.run(`UPDATE ${MASON_SCHEMA}.copy_state SET error = $1 WHERE source = $2`, [masked, source]);
+      scrubbed++;
+    }
+    // the events' table is SyncEvents' (src/duck/events.ts), opened before the sync by the run; a test's store may have none
+    const events = (await w.runAndReadAll(`SELECT count(*) FROM duckdb_tables() WHERE schema_name = $1 AND table_name = 'sync_events'`, [MASON_SCHEMA])).getRowsJS();
+    if (Number(events[0]![0]) > 0) {
+      const rows = (await w.runAndReadAll(`SELECT DISTINCT message FROM ${MASON_SCHEMA}.sync_events WHERE message ILIKE $1`, [KEYWORD])).getRowsJS() as [string][];
+      for (const [message] of rows) {
+        const masked = maskPasswordKeyword(message);
+        if (masked === message) continue;
+        const changed = await w.run(`UPDATE ${MASON_SCHEMA}.sync_events SET message = $1 WHERE message = $2`, [masked, message]);
+        scrubbed += changed.rowsChanged;
+      }
+    }
+    if (scrubbed > 0) {
+      this.log(`removed the database's password from ${scrubbed} error row(s) an earlier Mason wrote to its record of the sync (issue 599): ` +
+        `it was shown by mason status, mason logs --events and the web page, and may stand in .mason/*.log files — change the database user's password (ALTER ROLE … PASSWORD), then delete those log files`);
+    }
   }
 
   /** the tables the project adds now (its sources file): a new one is copied at the next pass unless its copy is already
@@ -1254,7 +1342,7 @@ export class Sync {
           this.behind.set(t.source, mark);
           void this.onWriter(() => this.store.writer.run(`INSERT OR REPLACE INTO ${MASON_SCHEMA}.catch_up VALUES (${literal(t.source)}, ${literal(why)}, now())`)).catch((e: unknown) => {
             // its next start catches it up again only by this row: said, and the mark kept for this run's own catch-up
-            this.log(`${t.source}: its catch-up could not be recorded (a stop before it ends catches it up again only if its sync changes): ${e instanceof Error ? e.message : String(e)}`);
+            this.log(`${t.source}: its catch-up could not be recorded (a stop before it ends catches it up again only if its sync changes): ${this.errorText(e)}`);
           });
         }
       } else {
@@ -1275,7 +1363,7 @@ export class Sync {
     const shape = (t: AddedTable): string => JSON.stringify([columnsKey(t.columns), t.key]);
     for (const t of tables) { const b = before.get(t.source); if (b !== undefined && shape(b) !== shape(t)) this.retries.delete(t.source); }
     // the tables copied before are served at once, not after this start's first pass (its copies may take hours)
-    const built = this.rebuildSchema().catch((e: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${e instanceof Error ? e.message : String(e)}`));
+    const built = this.rebuildSchema().catch((e: unknown) => this.log(`the catalog could not be rebuilt (it is at the next pass): ${this.errorText(e)}`));
     this.kick();
     return built;
   }
@@ -1558,7 +1646,7 @@ export class Sync {
     if (this.running !== null) { void this.running.then(() => this.kick()); return; }
     this.running = this.pass().then(() => { this.passFailed = false; }, (e: unknown) => {
       this.passFailed = true;
-      this.log(`sync pass failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.log(`sync pass failed: ${this.errorText(e)}`);
     }).finally(() => {
       this.running = null;
       if (this.stopped) return;
@@ -1650,6 +1738,13 @@ export class Sync {
    * every table again whole. Its failure is its caller's to say: the copies serve as they were, and the passes go on.
    */
   async pollNow(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
+    // its failure is the command server's answer, sent as it is: a refusal is Mason's own words, any other error's are
+    // made Mason's here (`errorText`), where they leave the sync
+    try { return await this.pollNowOf(sources); }
+    catch (e) { throw e instanceof PollRefused || e instanceof Stopping ? e : new Error(this.errorText(e)); }
+  }
+
+  private async pollNowOf(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
     if (this.mode === "recopy") throw new PollRefused("refused", "this run reads every table again whole at each pass (MASON_DUCK_SYNC=recopy), so there is nothing to poll");
     const tables = sources.map((s) => {
       const t = this.tables.get(s);
@@ -1984,7 +2079,7 @@ export class Sync {
     void this.onWriter(async () => {
       for (const source of this.joinedNow) if (stale(source)) await this.record({ ...this.states.get(source)!, error: null });
       this.recovered("stream", "the stream has everything the database wrote again");
-    }).catch((e: unknown) => this.log(`replication: a table's stream error could not be cleared (it is cleared at the next batch): ${e instanceof Error ? e.message : String(e)}`))
+    }).catch((e: unknown) => this.log(`replication: a table's stream error could not be cleared (it is cleared at the next batch): ${this.errorText(e)}`))
       .finally(() => { this.clearingStreamErrors = false; });
   }
   private clearingStreamErrors = false;
@@ -1999,7 +2094,7 @@ export class Sync {
     const r = this.replication!;
     this.refreshStreamed();
     const s = new ReplicationStream({
-      connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l),
+      connect: () => PgConnection.connect({ ...this.pgOptions(), replication: true }), slot: r.slot, publication: r.publication, log: (l) => this.log(l), errorText: (e) => this.errorText(e),
       target: { tables: () => this.streamed, apply: (batch, lsn, committedAt) => this.applyStreamed(batch, lsn, committedAt), applied: () => this.appliedLsn,
         refuse: (source, missing) => this.refuseStreamed(source, missing), current: () => { if (this.stream === s) this.streamCurrent(); } },
     });
@@ -2017,7 +2112,7 @@ export class Sync {
       // a numeric wider than its copy's DECIMAL: that table leaves the stream and is copied again, wider, and the stream
       // goes on at once without it (it joins again caught up from its new copy) — at most three times a run, past which
       // a value the stream keeps replaying is wider than any copy of now
-      const wider = [...this.tables.values()].find((t) => e.message.includes(`${WIDER} [${t.source}]`));
+      const wider = [...this.tables.values()].find((t) => widerIn(e, t.source));
       const n = wider === undefined ? 0 : (this.widened.get(wider.source) ?? 0) + 1;
       if (wider !== undefined && n <= 3) {
         this.widened.set(wider.source, n);
@@ -2027,7 +2122,7 @@ export class Sync {
         this.kick();
         return;
       }
-      const m = `replication: ${e.message}`;
+      const m = `replication: ${this.errorText(e)}`;
       // a failure that recurs must not restart the stream every second: each restart decodes the slot's WAL again on
       // the source
       this.streamFailures++;
@@ -2222,12 +2317,12 @@ export class Sync {
             if (slotDue) {
               // its own failure is the slot's line alone: the position read above stands
               try { this.slotWal = { wal: slotWalOf(await readSlot(pg, slot), slot, Date.now()), at: Date.now() }; }
-              catch (e) { this.slotWal = { wal: { error: `the slot could not be read: ${e instanceof Error ? e.message : String(e)}` }, at: Date.now() }; }
+              catch (e) { this.slotWal = { wal: { error: `the slot could not be read: ${this.errorText(e)}` }, at: Date.now() }; }
             }
           } finally { pg.close(); }
         } catch (e) {
           // answered as the status's (and the log line's) own words: the position could not be read, and why
-          const m = e instanceof Error ? e.message : String(e);
+          const m = this.errorText(e);
           this.dbPosition = { error: m, at: Date.now() };
           if (slotDue) this.slotWal = { wal: { error: `the database could not be reached: ${m}` }, at: Date.now() };
         } finally { this.dbPositionRead = null; }
@@ -2529,10 +2624,24 @@ export class Sync {
         const x = this.store.extensions;
         if (!x.shipped) this.log(`Mason's extensions are not installed with it here: ${x.why}. The first sync on this machine downloads its postgres extension`);
         try { await this.store.writer.run(loadPostgresSql(x)); }
-        catch (e) { throw new Error(extensionFailure(x, (e as Error).message)); }
+        catch (e) { throw new Error(extensionFailure(x, this.errorText(e))); }
         this.loaded = true;
       }
-      await this.store.writer.run(`ATTACH ${literal(libpqString(this.source))} AS ${SRC} (TYPE postgres, READ_ONLY)`);
+      const w = this.store.writer;
+      // the engine's own words are never repeated here: its statement held the password (`sourceSecretSql`)
+      try { await w.run(sourceSecretSql(this.source)); }
+      // ITS OWN WORDS ARE NEVER REPEATED: the statement held the password, and an error may quote its statement — its
+      // code alone is said (src/lib/secret-mask.ts errorCode)
+      catch (e) { throw new Error(`the database's credentials could not be set up for the sync (Mason bug: report it, with this code; the error's own words are not shown, as its statement held the password): ${errorCode(e) ?? "no code"}`); }
+      // the engine's failure to connect, in Mason's words (`errorText`) where it enters
+      try { await w.run(attachSqlOf(this.source)); }
+      catch (e) { throw new Error(this.errorText(e)); }
+      finally {
+        // the attachment keeps what it merged; the secret goes at once, whatever the ATTACH did. One left behind is
+        // the instance's, in memory, unreadable (duckdb_secrets() redacts it) and replaced at the next attach: said
+        try { await w.run(`DROP TEMPORARY SECRET IF EXISTS ${SOURCE_SECRET}`); }
+        catch (e) { this.log(`the database's credentials could not be removed from memory once it was attached (they stay there, never on disk, until the next attach replaces them): ${this.errorText(e)}`); }
+      }
       this.attached = true;
     }
     this.sourceUsers++;
@@ -2540,7 +2649,7 @@ export class Sync {
 
   /**
    * THE SOURCE IS ATTACHED ONLY WHILE A PASS OR A REBUILD READS IT. An attached database is every connection's — a wire
-   * session's too, and the rebuilds' — and its path is the connection string, password included (`duckdb_databases()`).
+   * session's too, and the rebuilds' — and its path (`duckdb_databases()`) is `attachPath`'s, which holds no credential.
    * A session runs only planned SQL (src/duck/plan.ts PlannedSql), which cannot name it; detached when its last user
    * ends (on the writer's turn, so never under a transaction reading it), it is not there to name either.
    */
@@ -2549,7 +2658,7 @@ export class Sync {
     if (this.sourceUsers > 0 || !this.attached) return;
     try { await this.store.writer.run(`DETACH ${SRC}`); this.attached = false; }
     // the pass's work stands; still attached, the next pass detaches it again (and attach() sees it is attached)
-    catch (e) { this.log(`the source could not be detached after the pass (tried again after the next): ${e instanceof Error ? e.message : String(e)}`); }
+    catch (e) { this.log(`the source could not be detached after the pass (tried again after the next): ${this.errorText(e)}`); }
   }
 
   /** one pass: every removed table dropped, every added table needing it queued for a copy (step 0: whole, again) or
@@ -2596,9 +2705,9 @@ export class Sync {
       catch (e) {
         // the way out on the table's own line: a failure that names none (a slot the database will not make, a role that
         // may not replicate) says the line that keeps the tables polled meanwhile — never a bare SQLSTATE's text
-        const said = e instanceof Error ? e.message : String(e);
+        const said = this.errorText(e);
         const names = this.replicatedTables().map((t) => t.source);
-        const m = `replication: ${said}${/sync: poll/.test(said) ? "" : ` — ${names.join(", ")} ${names.length === 1 ? "is" : "are"} NOT kept current until it is fixed: ` +
+        const m = `replication: ${said}${/sync: poll/.test(messageOf(e)) ? "" : ` — ${names.join(", ")} ${names.length === 1 ? "is" : "are"} NOT kept current until it is fixed: ` +
           `give ${names.length === 1 ? "its entry" : "their entries"} sync: poll <interval> (poll 5m) in the sources file to poll ${names.length === 1 ? "it" : "them"} instead`}`;
         this.event({ kind: "stream_failed", table: null, message: m });
         this.wholeFailure.prepare = m;
@@ -2613,12 +2722,12 @@ export class Sync {
       if (replicationReady) this.startStream();
     } else if (this.replication !== null && (this.slotKnown || this.stream !== null)) {
       try { await this.retireReplication(); }
-      catch (e) { replicationFailed = new Error(`no table's sync is replication now, but replication slot ${this.replication.slot} could not be dropped (it holds the database's WAL; tried again at the next pass): ${e instanceof Error ? e.message : String(e)}`); }
+      catch (e) { replicationFailed = new Error(`no table's sync is replication now, but replication slot ${this.replication.slot} could not be dropped (it holds the database's WAL; tried again at the next pass): ${this.errorText(e)}`); }
     }
     if (this.tables.size === 0) { await this.rebuildSchema(); if (replicationFailed !== null) throw replicationFailed; return; }
     try { await this.onWriter(() => this.attach()); }
     catch (e) {
-      const m = e instanceof Error ? e.message : String(e);
+      const m = this.errorText(e);
       this.event({ kind: "source_unreachable", table: null, message: `could not attach the database: ${m}` });
       this.wholeFailure.attach = m;
       // a table copied before keeps serving its copy (and its place in the catalog): the source being away is its error,
@@ -2683,7 +2792,7 @@ export class Sync {
         this.due.set(t.source, Date.now() + (s.mode === "poll" ? s.seconds * 1000 : this.intervalMs));
         // the table serves its copy as it was, and says why it is not current (mason status reads the ledger); the other
         // tables are polled as ever
-        const m = `the poll failed, and is tried again at the next one (the synced data serves as it was): ${e instanceof Error ? e.message : String(e)}`;
+        const m = `the poll failed, and is tried again at the next one (the synced data serves as it was): ${this.errorText(e)}`;
         this.log(`${t.source}: ${m}`);
         this.event({ kind: "poll_failed", table: t.source, message: m });
         await this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
@@ -2726,7 +2835,7 @@ export class Sync {
         if (!this.tables.has(next[0]) && this.states.has(next[0])) this.kick();
       }
     })().catch((e: unknown) => {
-      this.log(`a rebuild failed outside its own handling (Mason bug: report it): ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      this.log(`a rebuild failed outside its own handling (Mason bug: report it): ${this.errorText(e, { stack: true })}`);
     }).finally(() => {
       this.rebuilding = null;
       // what was queued behind a rebuild that threw is still queued
@@ -2748,7 +2857,7 @@ export class Sync {
       try { await this.onWriter(() => this.attach()); attached = true; }
       catch (e) {
         // the next pass says the same of every table, and queues it again
-        const m = `could not attach the database: ${e instanceof Error ? e.message : String(e)}`;
+        const m = `could not attach the database: ${this.errorText(e)}`;
         this.log(`${kind} of ${t.source} waits: ${m}`);
         this.event({ kind: "source_unreachable", table: t.source, message: `its ${kind} waits: ${m}` });
         const st = this.states.get(t.source)!;
@@ -2795,7 +2904,7 @@ export class Sync {
     // mason status — and is caught up again then: what was held is read again by that poll (still behind, nothing lost)
     const failed = (what: string, e: unknown): Promise<void> => {
       const when = this.backOff(t.source, Date.now() - started);
-      const m = `${what} (the synced data serves as it was; it is caught up by one poll again after ${when}): ${e instanceof Error ? e.message : String(e)}`;
+      const m = `${what} (the synced data serves as it was; it is caught up by one poll again after ${when}): ${this.errorText(e)}`;
       this.log(`${t.source}: ${m}`);
       this.event({ kind: "catch_up_failed", table: t.source, message: m });
       return this.onWriter(() => this.record({ ...this.states.get(t.source)!, error: m }));
@@ -2822,10 +2931,10 @@ export class Sync {
       if (held !== undefined && (held.truncated || held.keys.size > 0)) {
         try { await this.applyChanges(new Map([[t.source, held]]), "held"); }
         catch (e) {
-          const m = e instanceof Error ? e.message : String(e);
+          const m = this.errorText(e);
           this.refreshStreamed();
           // a numeric wider than its copy: copied again (`needsCopy`), and caught up after that copy
-          if (m.includes(`${WIDER} [${t.source}]`)) {
+          if (widerIn(e, t.source)) {
             this.snapshots.delete(t.source);
             this.log(`${t.source}: the changes the stream held during its catch-up could not be applied: it is read again whole, wider (${m})`);
             return "copy again";
@@ -3019,12 +3128,12 @@ export class Sync {
       await w.run("COMMIT");
     } catch (e) {
       try { await w.run("ROLLBACK"); }
-      catch (r) { this.log(`the poll's ROLLBACK failed too: ${r instanceof Error ? r.message : String(r)}`); }
+      catch (r) { this.log(`the poll's ROLLBACK failed too: ${this.errorText(r)}`); }
       // a stage made in the rolled-back transaction went with it
       pieced.length = 0;
       // a numeric wider than its copy: that table is copied again (wider) at the next pass, the others polled
       // matched against the tables' own names (a name may hold a space)
-      const wider = e instanceof Error ? tables.find((t) => e.message.includes(`${WIDER} [${t.source}]`))?.source : undefined;
+      const wider = e instanceof Error ? tables.find((t) => widerIn(e, t.source))?.source : undefined;
       if (wider !== undefined && this.snapshots.delete(wider)) {
         this.log(`poll: ${wider} has a numeric value wider than its synced DECIMAL column: it is read again whole at the next pass`);
         return [];
@@ -3146,7 +3255,7 @@ export class Sync {
       catch (e) {
         if (!(e instanceof StartOver)) throw e;
         // once: a second reason to start over is the copy's failure
-        this.log(`starting the sync of ${t.source} over, from its first page: ${e.message}`);
+        this.log(`starting the sync of ${t.source} over, from its first page: ${this.errorText(e)}`);
         kept = await this.forgetCopy(t, side);
         read = await this.readChunks(t, side, null, (p) => { kept = p; });
       }
@@ -3188,7 +3297,7 @@ export class Sync {
       // snapshot), as when the beginning and the first chunk were one transaction
       if (k !== null && k.done.length === 0) {
         try { k = await this.forgetCopy(t, side); }
-        catch (f) { this.log(`the sync of ${t.source} could not drop what it began (its next attempt continues it): ${f instanceof Error ? f.message : String(f)}`); }
+        catch (f) { this.log(`the sync of ${t.source} could not drop what it began (its next attempt continues it): ${this.errorText(f)}`); }
       }
       const through = k === null ? null : readThrough(k.done);
       const where = k === null ? null : through === null ? "with every page read (its swap is next)" : `at page ${through} of ${k.pages}${pastPages(k.done)}, ${k.rows} row(s) in`;
@@ -3199,7 +3308,7 @@ export class Sync {
         if (first) await this.record({ ...was, phase: "waiting", error: null }, undefined, w);
         return;
       }
-      const m = e instanceof Error ? e.message : String(e);
+      const m = this.errorText(e);
       // tried again after a wait that grows with each failure in a row: a copy failing for good must not read the
       // source at every pass (a 20-minute read of a production replica every 95 minutes) — and then
       // continued where it was, never read again from its first page
@@ -3221,7 +3330,7 @@ export class Sync {
     const needed = [...this.copyLive.values()].map((l) => l.diskNeeded).filter((n): n is number => n !== null);
     const projectedBytes = needed.length ? Math.round(needed.reduce((a, b) => a + b, 0)) : null;
     try { return { path: dir, freeBytes: this.diskFree(dir), projectedBytes }; }
-    catch (e) { return { path: dir, freeBytes: null, projectedBytes, error: `the free space where the synced data is could not be read: ${e instanceof Error ? e.message : String(e)}` }; }
+    catch (e) { return { path: dir, freeBytes: null, projectedBytes, error: `the free space where the synced data is could not be read: ${this.errorText(e)}` }; }
   }
 
   /** The DuckDB file's bytes with its write-ahead log's (what a copy adds lands in the log until a checkpoint). */
@@ -3411,10 +3520,10 @@ export class Sync {
             for (let attempt = 0; inTx && !rolledBack; attempt++) {
               try { await c.run("ROLLBACK"); rolledBack = true; }
               catch (r) {
-                const said = r instanceof Error ? r.message : String(r);
+                const said = this.errorText(r);
                 // the engine ended the transaction itself (measured: "cannot rollback - no transaction is active" after a
                 // COMMIT, or a read, out of memory): nothing of the chunk is left to roll back
-                if (/no transaction is active/.test(said)) { rolledBack = true; break; }
+                if (endedTransaction(r)) { rolledBack = true; break; }
                 if (attempt < 20 && pgErrorOf(r, "").fields.code === "53200") { await new Promise((ok) => setTimeout(ok, 100)); continue; }
                 this.log(`a chunk of ${t.source}'s sync could not be rolled back after it failed (its connection is closed with the sync): ${said}`);
                 break;
@@ -3699,7 +3808,7 @@ export class Sync {
       `${s.copiedAt === null ? "NULL" : `${literal(s.copiedAt)}::TIMESTAMPTZ`}, ${v(s.error)}, ${columns ? `${literal(JSON.stringify(columns))}::JSON` : `(SELECT columns FROM ${MASON_SCHEMA}.copy_state WHERE source = ${literal(s.source)})`})`;
     // the ledger is the record the commands read: a failed write is said, never silent, and the copy itself stands
     try { await c.run(sql); }
-    catch (e) { this.log(`recording ${s.source}'s sync state failed: ${e instanceof Error ? e.message : String(e)}`); }
+    catch (e) { this.log(`recording ${s.source}'s sync state failed: ${this.errorText(e)}`); }
   }
 
   /** the catalog rebuilt (`schemaBuilt`), after any rebuild already under way */

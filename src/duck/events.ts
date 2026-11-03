@@ -23,6 +23,7 @@
  *
  * The Postgres catalog never lists `_mason`, so a tool connected to the listener cannot read the events.
  */
+import { maskPasswordKeyword } from "../lib/secret-mask.ts";
 import type { DuckDBValue } from "@duckdb/node-api";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
 import { Batches, History, Streak } from "./history.ts";
@@ -179,7 +180,9 @@ export class SyncEvents {
 /** What a reader asks of the events: how many (the newest), from when (ISO), the failures only. */
 export interface EventsQuery { limit: number; since?: string; failed?: boolean }
 
-const eventOf = (at: string, kind: SyncEventKind, table: string | null, message: string): SyncEvent => ({ at, kind, failed: isFailure(kind), table, message });
+/** an event as read back, any `password=` value in its message masked (src/lib/secret-mask.ts `maskPasswordKeyword`,
+ *  the exact form an earlier Mason leaked, issue 599: the sync scrubs those rows at open, and this holds should one stay) */
+const eventOf = (at: string, kind: SyncEventKind, table: string | null, message: string): SyncEvent => ({ at, kind, failed: isFailure(kind), table, message: maskPasswordKeyword(message) });
 
 /**
  * THE EVENTS WITH THE RUN'S RESTARTS (src/cli/supervise.ts `.mason/restarts.json`), as ONE list newest last, asked as

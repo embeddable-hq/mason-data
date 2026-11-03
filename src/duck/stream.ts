@@ -45,6 +45,7 @@
  * unchanged-TOAST update) whose earlier row went in an earlier piece is applied as an UPDATE of the columns it carries,
  * as one whose row the copy holds always is.
  */
+import { errorText, messageOf } from "../lib/secret-mask.ts";
 import { decode, type RelationColumn, type TupleValue } from "../cdc/pgoutput.ts";
 import { PgConnection, formatLsn, pgIdent, pgLiteral } from "../cdc/pg-wire.ts";
 
@@ -294,11 +295,16 @@ export class ReplicationStream {
   private readonly publication: string;
   private readonly target: StreamTarget;
   private readonly log: (line: string) => void;
+  private readonly errorText: (e: unknown) => string;
   private readonly flushMs: number;
   private readonly flushRows: number;
 
-  constructor(o: { connect: () => Promise<PgConnection>; slot: string; publication: string; target: StreamTarget; log: (line: string) => void; flushMs?: number; flushRows?: number }) {
+  constructor(o: { connect: () => Promise<PgConnection>; slot: string; publication: string; target: StreamTarget; log: (line: string) => void; flushMs?: number; flushRows?: number;
+    /** a caught error's words as the stream repeats them, the source's password never among them (src/lib/secret-mask.ts
+     *  `errorText`, the sync's); a test's stream may leave it out */
+    errorText?: (e: unknown) => string }) {
     this.connect = o.connect; this.slot = o.slot; this.publication = o.publication; this.target = o.target; this.log = o.log;
+    this.errorText = o.errorText ?? ((e) => errorText(e));
     this.flushMs = o.flushMs ?? 500; this.flushRows = o.flushRows ?? PIECE_CHANGES;
     this.acked = this.target.applied();
     this.done = this.run();
@@ -317,7 +323,7 @@ export class ReplicationStream {
   /** ask the server where it is now: it answers with a keepalive at once (`caughtUp` waits on it) */
   poke(): void {
     try { this.repl?.sendStatus(this.acked, true); }
-    catch (e) { this.log(`replication: could not ask the source for its position (${(e as Error).message})`); }
+    catch (e) { this.log(`replication: could not ask the source for its position (${this.errorText(e)})`); }
   }
 
   private async run(): Promise<Error | null> {
@@ -327,7 +333,7 @@ export class ReplicationStream {
       catch (e) {
         if (this.stopping) break;
         const wait = Math.min(30_000, 1_000 * 2 ** Math.min(attempts++, 5));
-        this.log(`replication: the source is away (${(e as Error).message}); trying again in ${wait / 1000} s`);
+        this.log(`replication: the source is away (${this.errorText(e)}); trying again in ${wait / 1000} s`);
         await new Promise((r) => setTimeout(r, wait));
         continue;
       }
@@ -342,7 +348,7 @@ export class ReplicationStream {
       } catch (e) {
         if (this.stopping) break;
         if (!away(e)) { this.repl.close(); this.repl = null; return e as Error; }
-        this.log(`replication: the source went away (${(e as Error).message}); reconnecting`);
+        this.log(`replication: the source went away (${this.errorText(e)}); reconnecting`);
       } finally { this.repl?.close(); this.repl = null; }
       await new Promise((r) => setTimeout(r, 1_000));
     }
@@ -385,7 +391,7 @@ export class ReplicationStream {
     // the database writes for other tables (and the slot would hold it), and `mason status` would read it as behind
     const status = setInterval(() => {
       try { repl.sendStatus(this.acked, true); }
-      catch (e) { this.log(`replication: the status update could not be sent (${(e as Error).message})`); }
+      catch (e) { this.log(`replication: the status update could not be sent (${this.errorText(e)})`); }
     }, 10_000);
     const command = `START_REPLICATION SLOT ${pgIdent(this.slot)} LOGICAL 0/0 (proto_version '1', publication_names ${pgLiteral(`"${this.publication.replace(/"/g, '""')}"`)})`;
     try {
@@ -483,6 +489,7 @@ export function pgTime(us: bigint): Date {
 
 /** the source being away — closed, refused, reset, a shutdown — which a reconnect outlasts; anything else is the stream's */
 function away(e: unknown): boolean {
-  const m = e instanceof Error ? e.message : String(e);
+  // a decision: the raw words (src/lib/secret-mask.ts messageOf), never the ones Mason repeats
+  const m = messageOf(e);
   return /connection closed|ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|timed out|terminating connection|the database system is (shutting down|starting up)|server closed|is active for PID/i.test(m);
 }

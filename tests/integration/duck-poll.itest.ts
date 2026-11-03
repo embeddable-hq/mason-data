@@ -110,7 +110,7 @@ test("the copy and the xmin poll keep DuckDB equal to the source through every k
     assert.notEqual(heap("items", "id"), psql(dbUrl, "SELECT string_agg(id::text, ' ' ORDER BY id) FROM items"), "the source's heap is not in key order (else this proves nothing)");
     assert.deepEqual((await store.writer.runAndReadAll("SELECT count(*) FROM duckdb_constraints() WHERE schema_name <> '_mason'")).getRowsJS(), [[0n]], "no PRIMARY KEY, UNIQUE or other constraint on a copy");
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase, s.rows]), [["public.items", "copied", 50], ["shop.lines", "copied", 30]]);
-    // between passes the source is not attached: its path is the connection string, password included (the in-memory
+    // between passes the source is not attached: an attachment is every connection's, a wire session's included (the in-memory
     // catalog of the copies' visible columns, src/duck/kept-route.ts VISIBLE_CATALOG, is always there)
     assert.deepEqual((await store.writer.runAndReadAll("SELECT database_name FROM duckdb_databases() WHERE NOT internal AND database_name <> '__mason_visible' ORDER BY 1")).getRowsJS(), [["duck"]]);
 

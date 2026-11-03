@@ -150,6 +150,22 @@ paths:
 
 ## What the sync records
 
+- **The source's password is in no string the engine repeats, and in no error's words the sync repeats** (issue 599: the
+  extension's `Unable to connect to Postgres at "<path>"` repeated `password='…'` into the log, the ledger, `mason
+  status` and the web page when a source restarted under a run). The ONE `ATTACH … (TYPE postgres)` (`attach`) takes
+  `attachPath` (`sslmode` and `application_name`, nothing else) and the credentials as a TEMPORARY secret
+  (`sourceSecretSql`), dropped right after the ATTACH; never a keyword string, a PGPASSWORD or a new attach site. The
+  secret's statement is the one text that holds the password, so its error is said by its code alone. A caught engine or
+  driver error becomes words ONCE, where it enters, through `this.errorText` (src/lib/secret-mask.ts `errorText`; the
+  stream is handed it), which masks only a `password=` value — never a substring of the password, which a table's,
+  a user's or a slot's name may hold (the reviews of PR 620: `public.****ices`, `public.****_archive`, `for user
+  "****"` showed where it sat, and stuck `mason wait`). **A decision never reads those words**: it reads `messageOf`
+  (`widerIn`, `endedTransaction`, the stream's `away`). No answer is walked by a mask. `open` scrubs the `password=`
+  value from the ledger's `error` and `message` an earlier Mason wrote (`scrubLedger`, bound parameters). DETECTOR:
+  `tests/integration/duck-secret.itest.ts` (the engine alone, the mask alone through `attachSeamForTest`, a password
+  inside names, `mason start` under `dev`, `mason start` searched whole), `tests/secret-mask.test.ts` (the forms, and
+  sync.ts / stream.ts making an error's words only through `errorText` and deciding only on `messageOf`). ("Security
+  comes first")
 - **Every sync failure is a row of `_mason.sync_events`, kept as the request log is** (src/duck/events.ts: a failure
   was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
   says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy

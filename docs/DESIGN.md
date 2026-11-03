@@ -28,6 +28,33 @@ asks of every change what it exposes and to whom, even when the diff does not lo
 - users whose password is a MAC and whose list holds no secret (`src/duck/users.ts`);
 - a tunnel token kept off the command line (`src/cli/tunnel.ts`).
 
+**The source's password in the engine's errors (issue 599, 2026-11-03).** The sync attached the source with a libpq
+keyword string, `password='…'` inside, and DuckDB's postgres extension repeats an ATTACH's path whole when it cannot
+connect. A source that restarted, failed over or had its password changed under a run therefore wrote the password to
+the run's log, the ledger (each table's error, each event), `mason status`, `mason wait`, `mason sync` and the web page.
+Redacting at the catch would have been the symptom; the decision is that the engine never holds the password in a string
+it repeats: the credentials go through the extension's secret manager (a temporary, in-memory secret named by the ATTACH
+and dropped right after it), and the path says only `sslmode` and `application_name`. Measured on the pinned extension: its error then quotes
+that path, `duckdb_secrets()` redacts, the attachment keeps what it merged (new pool connections and reconnects work with
+the secret gone), and it quotes each value for libpq itself. PGPASSWORD was the other way and was not taken: the process's
+environment is every child's, and setting it races the engine's threads reading it.
+
+**How wide the mask is, and why.** Where the password can still reach an error decides it: in the temporary secret's
+own statement alone, whose error is said by its code; the ATTACH's path holds no credential, and the sync's own Postgres
+client sends the password only inside its auth messages. So no error the sync meets holds it, and the mask
+(`errorText`, src/lib/secret-mask.ts, applied once where a caught error becomes Mason's words) masks only the form a
+regression would bring back, a libpq `password=` value; it also scrubs rows an earlier Mason wrote, at open. It never
+masks a substring of the password. Two review rounds found why: walked over whole answers, a substring mask turned
+`public.devices` into `public.****ices` under the password `dev`, and `mason wait` never matched the table to its synced
+data; moved into an error's words, it showed `public.****_archive` under `orders2024` and `for user "****"` under a
+password equal to its user's name — each telling where the password sat — and a branch matching those words (a
+catch-up's wider numeric, a ROLLBACK already ended) flipped into a stuck state. So structure is never masked, a
+decision reads an error's raw words (`messageOf`) and never the ones Mason repeats, and a test holds the sync and the
+stream to both. **The trade:** a dependency that one day repeats the raw password in some other form than `password=`
+is not masked; the engine-alone and whole-run integration tests are what catch it, at the extension's next upgrade.
+Old log files are not rewritten (a log a person or a collector already read cannot be unread): the release note says
+to rotate the password and delete them.
+
 **The public boundary.** The repository is public, so the same day the owner ruled that no private service's code,
 infrastructure, hostnames or plans land here. A change such a service needs is made here as a generic feature, in
 generic words, which keeps this repo useful to every operator and reveals nothing that is not ours to publish.

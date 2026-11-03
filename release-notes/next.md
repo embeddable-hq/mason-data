@@ -2,6 +2,17 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## Before you upgrade
 
+- **Change the source database user's password if its database was ever unreachable under a running Mason** (a
+  restart, a failover, a password change, the network): the error each failed sync wrote held that password, whole, in
+  `.mason/mason.log` and `.mason/dev.log` (and `mason serve`'s stdout, so any log collector it feeds), in the record
+  of the sync, and so in `mason status`, `mason logs --events`, `mason wait`, `mason sync` and the web page. Mason now
+  hands the password to its engine apart from what an error repeats, and masks any `password=` value in the errors it
+  repeats. On its
+  first start it removes the password from its own record of the sync, and says how many rows it scrubbed; it does not
+  rewrite log files. So: change the user's password (`ALTER ROLE … PASSWORD`) and its URL in `.env` (or `DATABASE_URL`),
+  then delete the old log files (`rm .mason/mason.log .mason/dev.log` with Mason stopped), and purge what a log
+  collector kept. To see whether a log holds a password, `grep -c "password=" .mason/*.log`.
+
 - **A database under a glibc locale is read again on the first start, so its source must be reachable.** About 50-60 s
   on a laptop, read-only SELECTs over constants, once for a collation version. If the source cannot be reached then, the
   start exits and says so. Stored jsonb sort keys are dropped and refilled after it.
