@@ -3891,6 +3891,141 @@ test("a DISTINCT ON of a jsonb named by its output compares by jsonb's equality 
   } finally { await c.end(); }
 });
 
+// ISSUE 212: a jsonb EXPRESSION a GROUP BY names is a grouped expression, by the GROUP BY as Postgres analysed it (each
+// item resolved to the expression it groups, recorded before any rule writes the clause for the engine), so every
+// reader of it — a cast, an output function, HAVING, ORDER BY, a subquery around it — reads its stored text, per group,
+// through ONE any_value of the whole expression, never the column's (`any_value(j.j) -> 'r'` wrote 2.45 for 2.450, and
+// `any_value(j.j) #> '{r}'` was the engine's 42601)
+test("a jsonb expression's text under a GROUP BY of it is its stored text (issue 212)", async () => {
+  const c = await client();
+  const sent = async (sql: string): Promise<string> => {
+    logged.length = 0;
+    await c.query(sql);
+    const line = logged.findLast((l) => l.startsWith("statement: "));
+    assert.ok(line !== undefined, sql);
+    return line;
+  };
+  try {
+    const grouped: Array<[string, "ordered" | "bag"]> = [
+      ["SELECT (j.j -> 'r')::text AS k, count(*) AS n FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY j.j -> 'r', j.id ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k FROM jnums j GROUP BY j.id, (j.j -> 'r') ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS t, j.j -> 'r' AS k FROM jnums j GROUP BY j.id, k ORDER BY j.id", "ordered"],
+      ["SELECT j.id, j.j -> 'r', (j.j -> 'r')::text FROM jnums j GROUP BY 1, 2 ORDER BY 1", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY j.j -> 'r' ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY j.g, j.j -> 'r' ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT concat(j.j -> 'r', '|') AS a, format('%s', j.j -> 'r') AS b, (j.j -> 'r')::text || '' AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::varchar(3) AS k, (j.j -> 'r')::varchar AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT jsonb_build_object('x', j.j -> 'r')::text AS a, (j.j -> 'r') ->> 0 AS b, jsonb_typeof(j.j -> 'r') AS d FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k FROM jnums j GROUP BY j.id, j.j -> 'r' HAVING (j.j -> 'r')::text <> 'x' ORDER BY (j.j -> 'r')::text NULLS FIRST, j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k FROM jnums j GROUP BY j.id, j.j -> 'r' HAVING count(*) > 0 ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id FETCH FIRST 2 ROWS WITH TIES", "ordered"],
+      ["SELECT DISTINCT ON (j.g) j.g, (j.j -> 'r')::text AS k FROM jnums j GROUP BY j.g, j.id, j.j -> 'r' ORDER BY j.g, j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k, row_number() OVER (ORDER BY j.id) FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id LIMIT 3", "ordered"],
+      ["SELECT s.k FROM (SELECT (j.j -> 'r')::text AS k, j.id FROM jnums j GROUP BY j.id, j.j -> 'r') s ORDER BY s.id", "ordered"],
+      ["WITH s AS (SELECT (j.j -> 'r')::text AS k, j.id FROM jnums j GROUP BY j.id, j.j -> 'r') SELECT k FROM s ORDER BY id", "ordered"],
+      ["SELECT x.id, (SELECT (y.j -> 'r')::text FROM jnums y WHERE y.id = x.id GROUP BY y.id, y.j -> 'r') AS k FROM jnums x ORDER BY x.id", "ordered"],
+      ["SELECT (j.j #> '{r}')::text AS a, jsonb_typeof(j.j #> '{r}') AS b FROM jnums j GROUP BY j.id, j.j #> '{r}' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j #> '{r}')::text AS k FROM jnums j GROUP BY j.j #> '{r}' ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT (j.j #> ARRAY['r'])::text AS k FROM jnums j GROUP BY j.id, j.j #> ARRAY['r'] ORDER BY j.id", "ordered"],
+      // every jsonb kind (1, 1.0 and 1.00 are one group of jsonb's equality: each row its own group here)
+      ["SELECT id, (v -> 'k')::text, concat(v -> 'k', '|') FROM jq GROUP BY id, v -> 'k' ORDER BY id", "ordered"],
+      ["SELECT id, (v -> 'k' -> 'a')::text FROM jq GROUP BY id, v -> 'k' -> 'a' ORDER BY id", "ordered"],
+      // what was right stays so
+      ["SELECT j.j -> 'r' AS k, count(*) FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k FROM jnums j GROUP BY 1, j.id ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k FROM jnums j GROUP BY j.id ORDER BY j.id", "ordered"],
+      ["SELECT j.j::text AS k, count(*) FROM jnums j GROUP BY j.id, j.j ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY j.g, j.j ORDER BY j.g, 1", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k FROM jnums j ORDER BY j.id", "ordered"],
+      ["SELECT (j.j ->> 'r') AS k FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r') = '2.45'::jsonb AS k FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text AS k FROM jnums j WHERE j.id < 0 GROUP BY j.id, j.j -> 'r'", "ordered"],
+      ["SELECT x / 1 AS q, count(*) FROM bigdec GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+      ["SELECT x / 1 AS q, count(*) FROM bigdec GROUP BY x / 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+      ["SELECT x / 1 AS q, count(*) FROM bigdec GROUP BY q ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+      ["SELECT t.s COLLATE \"und-x-icu\" AS x, count(*) FROM texts t GROUP BY 1 ORDER BY 1", "ordered"],
+    ];
+    assert.deepEqual(await unlike(c, grouped), []);
+    // jsonb's numeric: Postgres's answer, or refused by the allowlist, which has not verified the cast
+    const numeric = "SELECT (j.j -> 'r')::numeric::text AS c FROM jnums j WHERE j.id <> 4 GROUP BY j.id, j.j -> 'r' ORDER BY j.id";
+    assert.deepEqual(await answeredOrRefused(c, numeric, "unverified"), [], numeric);
+    // a grouping set of a jsonb stays refused, by name
+    await assert.rejects(c.query("SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY ROLLUP (j.id, j.j -> 'r') ORDER BY j.id, 1"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap jsonb-compare\b/.test(`${e.detail ?? ""} ${e.hint ?? ""}`));
+    // the text is read by the jsonb text route over ONE any_value of the whole expression, never the column's
+    for (const sql of ["SELECT (j.j -> 'r')::text AS k, count(*) AS n FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id",
+      "SELECT (j.j #> '{r}')::text AS k FROM jnums j GROUP BY j.j #> '{r}' ORDER BY 1 NULLS FIRST"]) {
+      const line = await sent(sql);
+      assert.match(line, /__mason_jsonb_text\(.*any_value\(/, line);
+      assert.doesNotMatch(line, /any_value\("?j"?\."?j"?\)/, line);
+    }
+  } finally { await c.end(); }
+});
+
+// PR 582's review, round 1: an ORDER BY's bare name is the output it names first (`ORDER BY v` of `v::text` sorts the
+// text), never the jsonb column grouped by its key
+test("an ORDER BY of an output's name under a GROUP BY of a jsonb sorts the output (PR 582 review r1)", async () => {
+  const c = await client();
+  try {
+    // (1, 1.0 and 1.00 are one group of jsonb's equality, whose text either may print: left out)
+    assert.deepEqual(await unlike(c, [
+      ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
+      ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY id, v ORDER BY v, id", "ordered"],
+      ["SELECT max(id), v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v", "ordered"],
+      ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v DESC NULLS LAST", "ordered"],
+      ["SELECT DISTINCT ON (v) v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v, id ORDER BY v, id", "ordered"],
+      ["SELECT v::text AS t FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
+      ["SELECT v -> 'k' AS v FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
+      ["SELECT max(id) FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST", "ordered"],
+      ["SELECT v::text FROM jq WHERE id NOT IN (3, 13) GROUP BY v ORDER BY v NULLS FIRST LIMIT 3", "ordered"],
+      ["SELECT x::text AS x FROM (VALUES ('{\"k\": 1}'::jsonb), ('{\"k\": \"a\"}'), ('{\"k\": null}'), (NULL)) s(x) GROUP BY x ORDER BY x", "ordered"],
+    ]), []);
+    // a grouped jsonb cast to a number or a boolean is refused by name as main refuses it (the allowlist has not verified
+    // float8(jsonb), float4(jsonb), numeric(jsonb) or bool(jsonb): #648 holds them), never the engine's 22P02 of 'null'
+    for (const ty of ["float8", "real", "numeric(10,2)", "boolean", "int"]) {
+      const sql = `SELECT j.id, (j.j -> 'r')::${ty} AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id`;
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap unverified\b/.test(`${e.detail ?? ""} ${e.hint ?? ""}`), sql);
+    }
+  } finally { await c.end(); }
+});
+
+// PR 582's review, round 9: a cast of a grouped jsonb is typed by its RESULT, the text, at every position a key can
+// occupy. A key with no analysed node of its own (one folded from `x IS NULL, x DESC`, a window's ORDER BY or PARTITION
+// BY) was typed by its argument, the per-group read typed like the jsonb, so the text was sorted in jsonb's order (JSON
+// null first, numbers by value). Pinned where the grouped expression is replaced (`decidedByKey`), from Postgres's
+// analysis of the same cast. A jsonb cast to character stays refused by name, as main refuses it (#648 holds it).
+test("a grouped jsonb's text is sorted as text wherever a key reads it (PR 582 review r9)", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // ORDER BY, folded into one key with its NULLS from `x IS NULL, x DESC`, and its plain spellings
+      ["SELECT (j.j -> 'r')::text FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY (j.j -> 'r')::text IS NULL, (j.j -> 'r')::text DESC, j.id", "ordered"],
+      ["SELECT (v -> 'k')::text AS k FROM jq GROUP BY id, v -> 'k' ORDER BY (v -> 'k')::text IS NULL, (v -> 'k')::text DESC, id", "ordered"],
+      ["SELECT (j.j -> 'r')::varchar FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY (j.j -> 'r')::varchar IS NULL, (j.j -> 'r')::varchar DESC, j.id", "ordered"],
+      ["SELECT (j.j #> '{r}')::text FROM jnums j GROUP BY j.id, j.j #> '{r}' ORDER BY (j.j #> '{r}')::text IS NULL, (j.j #> '{r}')::text DESC, j.id", "ordered"],
+      ["SELECT j.id FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY (j.j -> 'r')::text NULLS FIRST, j.id", "ordered"],
+      ["SELECT j.id FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY (j.j -> 'r')::text DESC, j.id", "ordered"],
+      // a window's ORDER BY and PARTITION BY
+      ["SELECT (j.j -> 'r')::text, rank() OVER (ORDER BY (j.j -> 'r')::text) FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT j.id, rank() OVER (ORDER BY (j.j -> 'r')::text DESC) FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (v -> 'k')::text, rank() OVER (ORDER BY (v -> 'k')::text), id FROM jq WHERE id NOT IN (3, 13) GROUP BY id, v -> 'k' ORDER BY id", "ordered"],
+      ["SELECT j.g, (j.j -> 'r')::text, rank() OVER (PARTITION BY j.g ORDER BY (j.j -> 'r')::text) FROM jnums j GROUP BY j.g, j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT id, count(*) OVER (PARTITION BY (v -> 'k')::text) FROM jq GROUP BY id, v -> 'k' ORDER BY id", "ordered"],
+      // HAVING, WITH TIES, and the column grouped whole
+      ["SELECT j.id, (j.j -> 'r')::text FROM jnums j GROUP BY j.id, j.j -> 'r' HAVING (j.j -> 'r')::text > '1' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::text FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY (j.j -> 'r')::text DESC FETCH FIRST 2 ROWS WITH TIES", "ordered"],
+      // (the column grouped whole, its key folded from `v::text IS NULL, v::text DESC`, is the base's 42803 as on main)
+      ["SELECT v::text, rank() OVER (ORDER BY v::text) FROM jq WHERE id NOT IN (3, 13) GROUP BY id, v ORDER BY id", "ordered"],
+    ]), []);
+    // a jsonb cast to character is refused by name as main refuses it, grouped or not
+    for (const sql of ["SELECT (j.j -> 'r')::char(6) FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id",
+      "SELECT nullif((j.j -> 'r')::char(5), '-3') FROM jnums j ORDER BY j.id"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap unverified\b/.test(`${e.detail ?? ""} ${e.hint ?? ""}`), sql);
+    }
+  } finally { await c.end(); }
+});
+
 test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exact text (PR 207's review)", async () => {
   const c = await client();
   const held = heldJson;

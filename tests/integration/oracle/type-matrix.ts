@@ -901,6 +901,52 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb: a row holding one, compared (refused)", "SELECT id FROM jorder WHERE (id, j) = (2, '\"a\"') ORDER BY id");
   yield q("jsonb: an empty string, as a key, a member and the value", `SELECT id FROM jorder, (VALUES ('{"": 1}'::jsonb), ('[""]'), ('""'), ('{"": ""}')) v(x) WHERE id < 3 ORDER BY x, id`);
   yield q("jsonb: a 1,000-string array's last string", `SELECT id FROM jorder WHERE j::text LIKE '"%' ORDER BY ('[' || repeat('"x", ', 999) || (j::text) || ']')::jsonb, id`);
+  // ---- a grouped jsonb EXPRESSION's every reader reads its stored text, per group (issue 212: `GROUP BY id, j -> 'a'`
+  // took the expression for ungrouped once its key stood in its place, and read `any_value(j) -> 'a'`: 2.45 for 2.450,
+  // `{"a":1}` for `{"a": 1}`, the engine's 42601 for a `#>`). Every group one row: equal values written apart are
+  // jsonb-equal-text's ----
+  yield q("jsonb: grouped expression's text, cast", "SELECT id, (j -> 'a')::text FROM jorder GROUP BY id, j -> 'a' ORDER BY id");
+  yield q("jsonb: grouped expression's text, output functions", "SELECT id, concat(j -> 'a', '|'), format('%s', j -> 'a') FROM jorder GROUP BY id, j -> 'a' ORDER BY id");
+  yield q("jsonb: grouped expression's text, varchar(n) and varchar", "SELECT id, (j -> 'a')::varchar(4), (j -> 'a')::varchar FROM jorder GROUP BY id, j -> 'a' ORDER BY id");
+  yield q("jsonb: grouped expression's text, inside jsonb_build_object, ->> and jsonb_typeof", "SELECT id, jsonb_build_object('x', j -> 'a')::text, (j -> 'a') ->> 0, jsonb_typeof(j -> 'a') FROM jorder GROUP BY id, j -> 'a' ORDER BY id");
+  yield q("jsonb: grouped expression's text, grouped by output name", "SELECT id, j -> 'a' AS k, (j -> 'a')::text FROM jorder GROUP BY id, k ORDER BY id");
+  yield q("jsonb: grouped expression's text, grouped by number", "SELECT id, j -> 'a', (j -> 'a')::text FROM jorder GROUP BY 1, 2 ORDER BY 1");
+  yield q("jsonb: grouped expression's text, a #> path", "SELECT id, (j #> '{a,b}')::text, jsonb_typeof(j #> '{a,b}') FROM jorder GROUP BY id, j #> '{a,b}' ORDER BY id");
+  yield q("jsonb: grouped expression's text, HAVING and ORDER BY", "SELECT id, (j -> 'a')::text AS t FROM jorder GROUP BY id, j -> 'a' HAVING (j -> 'a')::text IS NOT NULL ORDER BY t, id");
+  yield q("jsonb: grouped expression's text, through a derived table", "SELECT s.t FROM (SELECT id, (j -> 'a')::text AS t FROM jorder GROUP BY id, j -> 'a') s ORDER BY s.id");
+  yield q("jsonb: grouped expression's text, a correlated subquery", "SELECT x.id, (SELECT (y.j -> 'a')::text FROM jorder y WHERE y.id = x.id GROUP BY y.id, y.j -> 'a') FROM jorder x ORDER BY x.id");
+  yield q("jsonb: grouped expression's text, its whole key under a LIMIT", "SELECT id, (j -> 'a')::text, count(*) FROM jorder GROUP BY id, j -> 'a' ORDER BY id LIMIT 10");
+  yield q("jsonb: grouped expression's text, the column grouped", "SELECT id, j::text FROM jorder GROUP BY id, j ORDER BY id");
+  // (a shop's order: meta -> 'n' is its numeric(12,2) amount, so equal values are equal texts; equal tags arrays too)
+  yield q("jsonb: grouped expression's text, a member the only key", "SELECT (o.meta -> 'n')::text AS n, count(*) FROM orders o GROUP BY o.meta -> 'n' ORDER BY 1 NULLS FIRST");
+  yield q("jsonb: grouped expression's text, beside the key under a LIMIT", "SELECT (o.meta -> 'n')::text AS k, count(*) FROM orders o GROUP BY o.id, o.meta -> 'n' ORDER BY o.id LIMIT 5");
+  yield q("jsonb: grouped expression's text, an array's spacing", "SELECT o.status, (o.meta -> 'tags')::text AS tags, count(*) FROM orders o GROUP BY o.status, o.meta -> 'tags' ORDER BY 1, 2");
+  // an ORDER BY's bare name is the output it names first: `ORDER BY j` of `j::text` sorts the text, not the jsonb
+  yield q("jsonb: grouped column, ORDER BY the output's name", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j, id");
+  yield q("jsonb: grouped column, ORDER BY the output's name DESC", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j DESC NULLS LAST, id");
+  yield q("jsonb: grouped column, ORDER BY its own name beside an alias", "SELECT j::text AS t FROM jorder GROUP BY id, j ORDER BY j NULLS FIRST, id");
+  // a cast of a grouped jsonb is typed by its RESULT, the text, at every position a key can occupy (PR 582 review r9: a key
+  // with no analysed node of its own, folded from `x IS NULL, x DESC` or written in a window, was sorted in jsonb's order).
+  // (DISTINCT ON of the cast, and the column grouped whole under a folded key, are the base's 42803; grouped ::char(n) is #648's, refused)
+  yield q("jsonb: grouped expression's text, ORDER BY IS NULL then DESC", "SELECT (j -> 'a')::text FROM jorder GROUP BY id, j -> 'a' ORDER BY (j -> 'a')::text IS NULL, (j -> 'a')::text DESC, id");
+  yield q("jsonb: grouped expression's text, ORDER BY a key not in the list", "SELECT id FROM jorder GROUP BY id, j -> 'a' ORDER BY (j -> 'a')::text DESC NULLS LAST, id");
+  yield q("jsonb: grouped expression's text, a window's ORDER BY", "SELECT id, (j -> 'a')::text, rank() OVER (ORDER BY (j -> 'a')::text) FROM jorder GROUP BY id, j -> 'a' ORDER BY id");
+  yield q("jsonb: grouped expression's text, a window's PARTITION BY", "SELECT id, count(*) OVER (PARTITION BY (j -> 'a')::text), row_number() OVER (PARTITION BY (j -> 'a')::text ORDER BY id) FROM jorder GROUP BY id, j -> 'a' ORDER BY id");
+  yield q("jsonb: grouped expression's text, HAVING a comparison", "SELECT id, (j -> 'a')::text FROM jorder GROUP BY id, j -> 'a' HAVING (j -> 'a')::text > '1' ORDER BY id");
+  yield q("jsonb: grouped expression's text, FETCH WITH TIES", "SELECT (j -> 'a')::text FROM jorder GROUP BY id, j -> 'a' ORDER BY (j -> 'a')::text DESC NULLS LAST FETCH FIRST 3 ROWS WITH TIES");
+  yield q("jsonb: grouped expression's varchar, ORDER BY IS NULL then DESC", "SELECT (j -> 'a')::varchar FROM jorder GROUP BY id, j -> 'a' ORDER BY (j -> 'a')::varchar IS NULL, (j -> 'a')::varchar DESC, id");
+  yield q("jsonb: grouped #> path's text, ORDER BY IS NULL then DESC", "SELECT (j #> '{a}')::text FROM jorder GROUP BY id, j #> '{a}' ORDER BY (j #> '{a}')::text IS NULL, (j #> '{a}')::text DESC, id");
+  yield q("jsonb: grouped column's text, a window's ORDER BY", "SELECT id, j::text, rank() OVER (ORDER BY j::text) FROM jorder GROUP BY id, j ORDER BY id");
+  // every other kind's text under a GROUP BY of its expression, held so the one rule leaves each as it was
+  yield q("grouped expression's text: numeric scale", "SELECT id, (n * 1)::text, (n2 + 0)::text FROM typed GROUP BY id, n * 1, n2 + 0 ORDER BY id");
+  yield q("grouped expression's text: floats", "SELECT id, (f8 * 1)::text, (f4 * 1)::text FROM typed GROUP BY id, f8 * 1, f4 * 1 ORDER BY id");
+  yield q("grouped expression's text: boolean", "SELECT id, (NOT b)::text, concat(NOT b, '|') FROM typed GROUP BY id, NOT b ORDER BY id");
+  // (`iv * 1`: typed's extreme interval doubled overflows, where the engine's SQLSTATE is not Postgres's, grouped or not)
+  yield q("grouped expression's text: interval and date", "SELECT id, (iv * 1)::text, (d + 1)::text FROM typed GROUP BY id, iv * 1, d + 1 ORDER BY id");
+  yield q("grouped expression's text: timestamptz", "SELECT id, (tz + interval '1 hour')::text FROM typed GROUP BY id, tz + interval '1 hour' ORDER BY id");
+  yield q("grouped expression's text: array", "SELECT id, (ai || 0)::text FROM typed GROUP BY id, ai || 0 ORDER BY id");
+  yield q("grouped expression's text: char(n) and a collated text", `SELECT id, (ch || '')::text, (t COLLATE "C" || 'x') AS c FROM typed GROUP BY id, ch || '', t COLLATE "C" || 'x' ORDER BY 3, 1`);
+  yield q("grouped expression's text: citext, inet and jsonb decided by the key", "SELECT id, ci, ip, jb, ci::text, ip::text, concat(ip, '|') FROM typed GROUP BY id ORDER BY id");
   // json has no ordering and no equality: Postgres refuses each (42883), and so does Mason, in Postgres's words
   yield q("json: sorted", "SELECT id FROM jorder ORDER BY js");
   yield q("json: grouped", "SELECT js, count(*) FROM jorder GROUP BY js");
