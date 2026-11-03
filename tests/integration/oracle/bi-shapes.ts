@@ -344,6 +344,8 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   // review r1 of PR 506: a NULLIF's NULL regrouped outside its subquery, and what the engine holds as a DECIMAL cast as such
   { name: "exact path: a NULLIF's NULL regrouped outside its subquery, cast half away from zero", sql: "SELECT x, x::int, x::text, count(*) FROM (SELECT nullif(v.a / 1.6, 2.5) AS x FROM (VALUES (1, 4.00::numeric(12,2)), (2, NULL), (3, 1.10), (4, 4.00), (5, -4.00)) AS v(id, a)) s GROUP BY x ORDER BY 1" },
   { name: "exact path: percentile_disc of a numeric column and max of a sqrt cast to an integer, half away from zero", sql: "SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount))::int, (percentile_disc(0.9) WITHIN GROUP (ORDER BY o.amount) / 7)::int8, max(sqrt(abs(o.amount)))::int FROM orders o" },
+  // review r4 of PR 506: an ordered-set aggregate of a quotient that only orders the groups is answered (its value never read)
+  { name: "exact path: percentile_disc and mode() of a quotient only in ORDER BY, a window's ORDER BY and a derived table's", sql: "SELECT s.status, s.r FROM (SELECT o.status, rank() OVER (ORDER BY mode() WITHIN GROUP (ORDER BY o.amount / 7), o.status) AS r FROM orders o GROUP BY o.status ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount / 7) DESC, o.status LIMIT 3) s ORDER BY 2, 1" },
   { name: "exact path: a subquery's column named like a hidden cell",sql: "SELECT s.__mason_cell_0 FROM (SELECT o.amount / 7.0 AS __mason_cell_0, o.id FROM orders o) s ORDER BY 1 LIMIT 2" },
   // Issue 358, round 2 of the exact path: each reader PR 341 did not reach, over numeric(30,20) rows two doubles tie
   // (read through `public.one`, so the engine answers them, never the catalog)

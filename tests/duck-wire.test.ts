@@ -6170,7 +6170,19 @@ test("exact path: percentile_disc or mode() ordered by a numeric Mason computes 
       ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int), mode() WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"],
       ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount), mode() WITHIN GROUP (ORDER BY o.amount), percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount * 2) FROM orders o", "ordered"],
       ["SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
+      // review r4 of PR 506 (refusal-wider-than-the-wrong-answer): where the aggregate only ORDERS, its value is never
+      // read and the exact order key orders the groups as the value does, so it is answered, as at the base
+      ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y), 1", "ordered"],
+      ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY mode() WITHIN GROUP (ORDER BY nullif(b.x / b.y, 0)) DESC NULLS LAST, 1", "ordered"],
+      ["SELECT b.id % 3 AS g, rank() OVER (ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / 3), b.id % 3) FROM bigdec b GROUP BY 1 ORDER BY 2", "ordered"],
+      ["SELECT g FROM (SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY exp(ln(2.5)) * sign(b.x)), 1 LIMIT 2) s ORDER BY 1", "ordered"],
     ]), []);
+    // and where its value is read in the same statement, it is refused as before
+    for (const sql of ["SELECT b.id % 3, percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)",
+      "SELECT b.id % 3 FROM bigdec b GROUP BY 1 ORDER BY -percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)",
+      "SELECT b.id % 3 FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) > 1"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? ""), sql);
+    }
   } finally { await c.end(); }
 });
 
