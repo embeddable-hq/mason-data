@@ -754,6 +754,11 @@ Medium, 2 Low, none Critical) and 29 features.
 Severity shows at the bottom. An issue with neither label is seen only by reading the list. There is no automatic
 check. A script that lists an open issue with neither label, or a bug with no Severity, would be one; it is not built.
 
+**Where a filed issue goes (Tom, 2026-11-03, issue 667).** "Only critical ones should go straight to up next": a run's
+File stage labels each new issue and judges a bug's Severity, and pr-loop-slim.js alone decides its column (a Critical
+bug to Up next, every other new issue to Backlog) and renders the `board` stage's commands; the column a run reports is
+read from what that stage says it ran, so a move that failed is said with the command to run, never assumed done.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:

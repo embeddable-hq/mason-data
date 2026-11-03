@@ -9,7 +9,7 @@ const run = (...args: string[]) => spawnSync(process.execPath, ["scripts/board.t
 test("a status the board does not have is refused with every status it has, before GitHub is asked", () => {
   const r = run("status", "174", "Reviewing");
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /"Reviewing" is no status of the board: one of "Backlog", "In progress", "Implementing", "In review", "Fixing", "CI \/ queued", "Needs Tom", "Done"/);
+  assert.match(r.stderr, /"Reviewing" is no status of the board: one of "Backlog", "Up next", "In progress", "Implementing", "In review", "Fixing", "CI \/ queued", "Needs Tom", "Done"/);
 });
 
 // a bug's severity is the board's Severity field (CLAUDE.md "What a session finds"): a level the field does not have is
@@ -49,4 +49,13 @@ test("a call to GitHub that fails says gh's words and the way out, never a stack
   const s = spawnSync(process.execPath, ["scripts/board.ts", "severity", "174", "High"], { encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" } });
   assert.equal(s.status, 1);
   assert.match(s.stderr, /^gh api repos\/embeddable-hq\/mason-data\/issues\/174 failed: .*gh auth refresh -h github\.com -s project/);
+});
+
+// "Up next" is a column of the board's Status field (option 833812b7, between Backlog and In progress): a Critical bug
+// filed during a run is moved there (issue 667), so the status reaches GitHub, never refused as one the board lacks
+test("\"Up next\" is a status of the board: it reaches GitHub, never refused (issue 667)", () => {
+  const r = spawnSync(process.execPath, ["scripts/board.ts", "status", "174", "Up next"], { encoding: "utf8", env: { ...process.env, PATH: "/nonexistent" } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /^gh api repos\/embeddable-hq\/mason-data\/issues\/174 failed: /);
+  assert.doesNotMatch(r.stderr, /is no status of the board/);
 });

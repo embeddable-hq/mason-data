@@ -216,7 +216,9 @@ in chat an issue and a run, never a direct agent. Each run is one Sonnet coordin
 renders every prompt from `.claude/workflows/pr-loop-slim.js`, never writing one. The coordinator never merges: the top
 session reads each diff in full and merges. An issue too big for one PR is split by the Brief: the run makes a
 sub-issue per piece, posts the plan on the issue and stops, and the top session starts the pieces in order. A decision
-only the owner makes goes to **Needs Tom**, and issues filed along the way go to **Backlog**. The brief and the design
+only the owner makes goes to **Needs Tom**. A Critical bug filed along the way goes straight to **Up next**; every
+other issue filed along the way to **Backlog** (Tom, 2026-11-03), moved by the run's `board` stage, never blocking the
+PR that found it. The brief and the design
 note are Opus's, and so are the reviews, each a fresh agent (step 3). After the
 implement push, GitHub itself must list the PR as closing its sub-issue (`closedByPullRequestsReferences`; for a
 stacked PR, which GitHub links only once it targets the default branch, the body must say `Closes`), or the body is

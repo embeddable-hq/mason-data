@@ -41,7 +41,9 @@ Its format, never its contents, is fixed here:
 - **A decision only the owner makes** stops that run: put its options and their numbers on the issue (headed as CLAUDE.md
   "Git workflow" says), move its card to **Needs Tom** (`node <repo>/scripts/board.ts status <n> "Needs Tom"`), and take
   the next.
-- **Issues filed along the way** go to **Backlog**, unless the owner says otherwise.
+- **Issues filed along the way**: a Critical bug filed along the way goes straight to **Up next**; every other issue
+  filed along the way to **Backlog** (Tom, 2026-11-03), unless the owner says otherwise. A run's board stage moves
+  them, and its DONE names each one's column; one it says NOT moved is moved by the command it names.
 - **The members of a class issue** are part of that class's run, never runs of their own: once the class's PR merges,
   check which members it closed, and queue the rest.
 - **Two runs on the same files** start one after the other, or the second's coordinator is told, in its context line,
