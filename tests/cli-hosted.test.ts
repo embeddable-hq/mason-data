@@ -6,7 +6,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { punyLabels } from "./hosted-fake.ts";
+import { spawnSync } from "node:child_process";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { bodyOf, ECHO_FORMS, newToken, printsWhole, punyLabels } from "./hosted-fake.ts";
+
+/** How many times `text` holds `value`, whole. */
+const times = (text: string, value: string): number => text.split(value).length - 1;
 import { carriesNoSecret, codeOfStatus, echoesSecret, DEFAULT_SERVICE_URL, deviceName, deviceOf, ECHO_RUN, isFailure, MAX_ANSWER_DEPTH, meOf, oauthFailure, serviceOf, serviceText, urlProblem, type Answer } from "../src/cli/hosted.ts";
 import { deployStateOf } from "../src/cli/deploy.ts";
 import { credentialsPath, environmentToken, parseLogins } from "../src/cli/credentials.ts";
@@ -72,8 +78,8 @@ test("serviceText: a secret the command holds is masked by its value — without
   assert.equal(held(`try ${body.slice(20, 30)} again`), `try ${body.slice(20, 30)} again`);
   assert.equal(held(`try ${pieces(3).join(" x ")}`), `try ${pieces(3).join(" x ")}`);
   assert.equal(held(`the token ${token} is unknown`), "the token **** is unknown", "the token whole, as before");
-  // the prefix is a documented, public form, and stays: what follows it is masked
-  assert.equal(held(`try ${token.replaceAll("_", "%5F")} again`), "try masondata%5Fci%5F**** again", "the token URL-encoded, its prefix too");
+  // the token URL-encoded, its prefix too: the one reading finds it whole, so it is masked whole (PR 660, R2-B1)
+  assert.equal(held(`try ${token.replaceAll("_", "%5F")} again`), "try **** again", "the token URL-encoded, its prefix too");
   assert.equal(held("sign in with masondata_ci_ tokens"), "sign in with masondata_ci_ tokens");
   // a mask joins what lay either side of it, which is read again: pieces of 2, which only a mask makes runs, nested
   // around the token three times over; read five times, a value still holding a run to mask is masked whole (fail closed)
@@ -429,3 +435,92 @@ test("the per-value tests read the value as printed too: a page cut inside a %XX
   assert.equal(deviceRead(device({ verification_uri: page }), [TOKEN]), null, "as printed, cut: refused");
   assert.equal(serviceText(`a\udc00b\ud800c😀d`, 100), "a?b?c😀d");
 });
+
+test("the output's gate lets the one value through ONCE (mason token create's CI token), exactly as it is, never broken by a line break: a second copy, a piece of it in another write, or another token's shape is refused at the write, the CLI's refusal in its place", () => {
+  const gate = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "output-gate.ts");
+  const value = newToken("ci"), login = newToken("pat");
+  const run = (writes: string[]): { stdout: string; stderr: string; code: number | null } => {
+    const script = `import { holdOutput, installOutputGate, gatedExit } from ${JSON.stringify(gate)};
+installOutputGate();
+holdOutput({ command: "token", json: false, secrets: [process.env.LOGIN] });
+holdOutput({ command: "token", json: false, secrets: [], once: process.env.VALUE });
+for (const w of JSON.parse(process.env.WRITES)) process.stdout.write(w);
+process.exitCode = gatedExit(0);
+`;
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, LOGIN: login, VALUE: value, WRITES: JSON.stringify(writes) }, encoding: "utf8" });
+    return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  };
+  const once = run([`  token     ${value}\n`, "  id        x\n"]);
+  assert.deepEqual([once.code, times(once.stdout, value)], [0, 1], once.stdout);
+  // the exact value alone: broken by a line break, it is no copy of the token, and is refused as any piece of it is
+  const broken = run([`  token\n    ${value.slice(0, 20)}\n    ${value.slice(20)}\n`]);
+  assert.equal(broken.code, 1, broken.stdout + broken.stderr);
+  assert.ok(!broken.stdout.includes(value.slice(20)), "nothing of the broken value written");
+  for (const [what, writes] of [["twice in one write", [`${value} ${value}\n`]], ["again in a later write", [`${value}\n`, `${value}\n`]],
+    ["11 of its body in a later write", [`${value}\n`, `id ${bodyOf(value).slice(5, 16)}\n`]], ["the login's body beside it", [`${value} ${bodyOf(login)}\n`]],
+    ["another token's shape", [`${value}\n`, `${newToken("ci")}\n`]]] as Array<[string, string[]]>) {
+    const r = run(writes);
+    assert.equal(r.code, 1, `${what}: ${r.stdout}`);
+    assert.ok(times(r.stdout, value) <= 1, what);
+    assert.match(r.stderr, /^✗ mason token: the service's answer would print a secret this command holds/m, what);
+    assert.ok(times(r.stderr, value) === 0, what);
+  }
+});
+
+/** Passwords of every alphabet a person chooses: accents, a ß, symbols with few letters, spaces, another script. */
+const PASSWORDS = ["Ünïcödé-pw", "pässwörd99", "straße Geheim", "!*!*!*!*zz", "Zq8vLm2Xr7Tp", "pass word 1", "密码密码密码密码", "ab3def6hjk", "!*!*!*!*!*!*!*!*!*!*!*a1"];
+
+test("ONE reading at every boundary (PR 660's class round, R2-B1): a held password in EVERY form of ECHO_FORMS refuses the exact test (a value, and a key), is masked whole in free text, and is refused by the output's gate; the password and the text read alike", async () => {
+  const { readingsCarry, readingsOf } = await import("../src/cli/output-gate.ts");
+  const problems: string[] = [];
+  for (const password of PASSWORDS) for (const [what, form] of ECHO_FORMS) {
+    const echo = form(password), at = `${JSON.stringify(password)} ${what}`;
+    if (carriesNoSecret({ value: `x ${echo} y` }, [password])) problems.push(`${at}: the exact test took it in a value`);
+    if (carriesNoSecret({ [echo]: 1 }, [password])) problems.push(`${at}: the exact test took it in a key`);
+    const masked = serviceText(`said ${echo} here`, 2000, [password], new Map());
+    if (printsWhole(masked, password)) problems.push(`${at}: the mask printed it: ${JSON.stringify(masked)}`);
+    if (!readingsCarry(readingsOf(`said ${echo} here`), [password])) problems.push(`${at}: the gate let it through`);
+  }
+  assert.deepEqual(problems, []);
+  // and nothing else: honest text that does not hold one passes every boundary unchanged
+  for (const password of PASSWORDS) {
+    const honest = "connected to the database as app_reader, Postgres 16 answers; 12 tables synced";
+    assert.equal(serviceText(honest, 2000, [password], new Map()), honest, password);
+    assert.ok(carriesNoSecret({ honest }, [password]), password);
+    assert.ok(!readingsCarry(readingsOf(honest), [password]), password);
+  }
+});
+
+test("a held password whose body (letters, digits, - and _) is 8 or more is read by its runs too, the secret's body by the text's own reading: spread with spaces or dots between its characters, accented or not, it refuses the exact test and the gate, and is masked", async () => {
+  const { readingsCarry, readingsOf } = await import("../src/cli/output-gate.ts");
+  const problems: string[] = [];
+  for (const password of ["pässwörd99", "Ünïcödé-straße", "Zq8vLm2Xr7Tp", "ab3def6hjk"]) {
+    for (const [what, echo] of [["spread by spaces", [...password].join(" ")], ["spread by dots, its accents dropped", [...password.normalize("NFD").replace(/\p{M}/gu, "")].join(".")],
+      ["spread by spaces, NFD", [...password.normalize("NFD")].join(" ")]] as Array<[string, string]>) {
+      const at = `${JSON.stringify(password)} ${what}`;
+      if (carriesNoSecret({ value: `x ${echo} y` }, [password])) problems.push(`${at}: the exact test took it`);
+      if (!readingsCarry(readingsOf(`x ${echo} y`), [password])) problems.push(`${at}: the gate let it through`);
+      if (serviceText(`x ${echo} y`, 2000, [password], new Map()).replace(/[^A-Za-z0-9]/g, "").toLowerCase().includes(password.normalize("NFD").replace(/[^A-Za-z0-9]/g, "").toLowerCase())) problems.push(`${at}: the mask printed its body`);
+    }
+  }
+  assert.deepEqual(problems, []);
+});
+
+test("a held secret whose body is too short for runs is masked whole alone, never by its runs: honest text with its few letters and digits is printed as it came", () => {
+  const password = "!*!*!*!*!*!*a1";
+  for (const honest of ["data1 a1 ka1", "a1b2 is not it", "the 1st a1"]) assert.equal(serviceText(honest, 2000, [password], new Map()), honest, honest);
+  assert.equal(serviceText(`x ${password.toUpperCase()} y`, 2000, [password], new Map()), "x **** y", "whole, in any case");
+});
+
+test("the output's gate reads a held secret whole across writes, however long: its tail keeps the longest secret, %XX-encoded, so a long password split between two writes is refused", async () => {
+  const { nothingWritten, writes } = await import("../src/cli/output-gate.ts");
+  const password = `${"!*".repeat(60)}zz`;   // 122 characters, a body of 2: held whole alone
+  for (const echo of [password, encodeURIComponent(password)]) {
+    for (const cut of [10, 60, Math.floor(echo.length / 2), echo.length - 5]) {
+      const first = writes(nothingWritten(), `said ${echo.slice(0, cut)}`, [password]);
+      assert.equal(first.secret, false, `${cut}: half of it is no echo`);
+      assert.equal(writes(first.after, `${echo.slice(cut)} here`, [password]).secret, true, `cut at ${cut} of ${echo.length}`);
+    }
+  }
+});
+

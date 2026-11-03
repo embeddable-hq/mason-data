@@ -197,6 +197,12 @@ const DDL = [
   "INSERT INTO public.invoices VALUES (7, 70.5)",
   "CREATE TABLE sales.accounts (id INTEGER PRIMARY KEY, owner VARCHAR)",
   "INSERT INTO sales.accounts VALUES (1, 'x')",
+  // a synced timetz beside a time, as the copy holds them (issue 664)
+  "CREATE TABLE public.timetz_runs (id INTEGER PRIMARY KEY, run_at TIMETZ, t_at TIME, n INTEGER)",
+  "INSERT INTO public.timetz_runs SELECT g, TIMETZ '07:30:00+00', TIME '07:30:00', g FROM range(1, 401) r(g)",
+  "INSERT INTO public.timetz_runs VALUES (401, '07:30:00.123+05:30', '07:30:00.123', 401), (402, '23:59:59.999999-04', '23:59:59.999999', 402), (403, '24:00:00+00', '24:00:00', 403), (404, NULL, NULL, 404)",
+  "CREATE TABLE public.timetz_runs3 (id INTEGER PRIMARY KEY, run_at3 TIMETZ)",
+  "INSERT INTO public.timetz_runs3 VALUES (1, '07:30:00.123+05:30'), (2, NULL)",
 ];
 // the same rows in Postgres, typed as the source would type them
 const PG_DDL = [
@@ -338,6 +344,10 @@ const schema: PgSchema = {
     // session state (GitHub issue 63), last: a name in two schemas, of one shape (invoices) and of two (accounts)
     { name: "invoices", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "total", type: "numeric", spelled: "numeric(10,3)" }] },
     { name: "accounts", schema: "sales", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "owner", type: "text" }] },
+    // issue 664, after the others: each column as the source spells it (src/duck/sync.ts pgColumn), timetz(3) its typmod
+    { name: "timetz_runs", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "run_at", type: "text", spelled: "time with time zone" },
+      { name: "t_at", type: "text", spelled: "time without time zone" }, { name: "n", type: "int4" }] },
+    { name: "timetz_runs3", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "run_at3", type: "text", spelled: "time(3) with time zone" }] },
   ],
   // as the source prints them under a search_path of pg_catalog alone (src/cli/preflight.ts VIEWS_SQL); `lost` reads a
   // table Mason has not copied, so the catalog leaves it out
@@ -506,7 +516,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "timetz_runs"], ["public", "timetz_runs3"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -983,7 +993,7 @@ test("the BI-tools test: a sum over a CASE has the scale of the arms its rows to
 
 /** One session over a raw socket, its reading in the test's hands (`pg` reads every reply as it comes); `startup` adds
  *  to its startup packet, and `reported` is the ParameterStatus the startup answered. */
-async function rawSession(port = api.port, startup: Record<string, string> = {}): Promise<{ socket: net.Socket; pid: number; secret: number; reported: Map<string, string>; untilReady(): Promise<BackendMessage[]>; end(): void; readonly bytes: number }> {
+async function rawSession(port = api.port, startup: Record<string, string> = {}): Promise<{ socket: net.Socket; pid: number; secret: number; reported: Map<string, string>; untilReady(): Promise<BackendMessage[]>; end(): void; readonly bytes: number; readonly raw: Buffer }> {
   const socket = net.connect(port, "127.0.0.1");
   await new Promise<void>((r) => socket.once("connect", () => r()));
   let chunks: Buffer[] = [];
@@ -991,12 +1001,14 @@ async function rawSession(port = api.port, startup: Record<string, string> = {})
   let wake: (() => void) | null = null;
   /** the bytes the last untilReady read, ReadyForQuery included */
   let bytes = 0;
+  let raw = Buffer.alloc(0);
   socket.on("data", (d: Buffer) => { chunks.push(d); tail = Buffer.concat([tail, d]).subarray(-6); wake?.(); });
   const ready = (): boolean => tail.length === 6 && tail[0] === 0x5a && tail.readInt32BE(1) === 5;
   const untilReady = async (): Promise<BackendMessage[]> => {
     while (!ready()) await new Promise<void>((r) => { wake = r; });
     const all = Buffer.concat(chunks);
     bytes = all.length;
+    raw = all;
     const ms = wire.replies(all);
     chunks = []; tail = Buffer.alloc(0);
     return ms;
@@ -1008,7 +1020,7 @@ async function rawSession(port = api.port, startup: Record<string, string> = {})
   const started = await untilReady();
   const key = started.find((m) => m.type === "BackendKeyData") as Extract<BackendMessage, { type: "BackendKeyData" }>;
   const reported = new Map(started.flatMap((m) => m.type === "ParameterStatus" ? [[m.name, m.value] as const] : []));
-  return { socket, pid: key.pid, secret: key.secret, reported, untilReady, end: () => { socket.destroy(); }, get bytes() { return bytes; } };
+  return { socket, pid: key.pid, secret: key.secret, reported, untilReady, end: () => { socket.destroy(); }, get bytes() { return bytes; }, get raw() { return raw; } };
 }
 const dataRows = (ms: BackendMessage[]): Array<Extract<BackendMessage, { type: "DataRow" }>> => ms.filter((m) => m.type === "DataRow") as Array<Extract<BackendMessage, { type: "DataRow" }>>;
 const finished = (word: string): boolean => logged.some((l) => l.startsWith("statement:") && l.includes(word));
@@ -1047,6 +1059,91 @@ test("an Execute's row limit pages through a streamed result, another statement 
     assert.deepEqual([dataRows(ms).length, text(dataRows(ms)[0]!), text(dataRows(ms).at(-1)!), ms.at(-2)!.type], [1000, "1000", "1999", "PortalSuspended"]);
     s.socket.write(Buffer.concat([wire.close("P", "c1"), wire.sync()]));
     assert.deepEqual((await s.untilReady()).map((m) => m.type), ["CloseComplete", "ReadyForQuery"]);
+  } finally { s.end(); }
+});
+
+// ISSUE 664: Metabase read a synced timetz at a network round trip a row, and the extended protocol was suspected. It is
+// not Mason's: Metabase reads a TIME column as a LocalTime, which pgJDBC refuses for a timetz on every row (against
+// Postgres too), and its c3p0 pool then pings the connection (pgJDBC's isValid, an empty simple Query) before the next
+// row. Every exchange of that path is held here to postgres:18's (18.6) own bytes, recorded from a raw session over the
+// same rows; the one field Mason does not send as Postgres does, a RowDescription's table OID and column number (0 in
+// Mason's), is issue 669's and left out of the comparison on both sides.
+const PG18_TIMETZ: Record<string, string[]> = {
+  describe: ["1 ", "t 0000", "T 000172756e5f617400000040010002000004f2000cffffffff0000", "Z 49"],
+  describeTypmod: ["1 ", "t 0000", "T 000172756e5f61743300000040070002000004f2000c000000030000", "Z 49"],
+  text: ["1 ", "2 ", "T 000172756e5f617400000040010002000004f2000cffffffff0000", "D 00010000000b30373a33303a30302b3030",
+    "D 00010000001230373a33303a30302e3132332b30353a3330", "D 00010000001232333a35393a35392e3939393939392d3034", "D 00010000000b32343a30303a30302b3030",
+    "D 0001ffffffff", "C 53454c454354203500", "Z 49"],
+  // timetz_send: the time in microseconds, then the zone in seconds WEST of UTC (+05:30 is -19800, -04 is 14400)
+  binary: ["1 ", "2 ", "T 000172756e5f617400000040010002000004f2000cffffffff0001", "D 00010000000c0000000649534e0000000000",
+    "D 00010000000c0000000649552e78ffffb2a8", "D 00010000000c000000141dd75fff00003840", "D 00010000000c000000141dd7600000000000",
+    "D 0001ffffffff", "C 53454c454354203500", "Z 49"],
+  // as pgJDBC asks once a statement is server-prepared: int4, timetz and time each in binary
+  binaryColumns: ["1 ", "2 ", "T 0003696400000040010001000000170004ffffffff000172756e5f617400000040010002000004f2000cffffffff0001745f6174000000400100030000043b0008ffffffff0001",
+    "D 000300000004000000010000000c0000000649534e0000000000000000080000000649534e00", "D 000300000004000000020000000c0000000649534e0000000000000000080000000649534e00",
+    "D 000300000004000000030000000c0000000649534e0000000000000000080000000649534e00", "C 53454c454354203300", "Z 49"],
+  mixed: ["1 ", "2 ", "T 000272756e5f617400000040010002000004f2000cffffffff000172756e5f61740000000000000000000019ffffffffffff0000",
+    "D 00020000000c0000000649534e00000000000000000b30373a33303a30302b3030", "C 53454c454354203100", "Z 49"],
+};
+/** each backend message as `<type> <body in hex>` */
+function framesOf(raw: Buffer): string[] {
+  const out: string[] = [];
+  for (let at = 0; at < raw.length;) {
+    const len = raw.readInt32BE(at + 1);
+    out.push(`${String.fromCharCode(raw[at]!)} ${raw.subarray(at + 5, at + 1 + len).toString("hex")}`);
+    at += 1 + len;
+  }
+  return out;
+}
+/** a RowDescription with each field's table OID and column number zeroed (issue 669); any other message as it is */
+function sansTable(frame: string): string {
+  if (!frame.startsWith("T ")) return frame;
+  const b = Buffer.from(frame.slice(2), "hex");
+  for (let i = 0, n = b.readInt16BE(0), at = 2; i < n; i++) {
+    at = b.indexOf(0, at) + 1;
+    b.writeInt32BE(0, at);
+    b.writeInt16BE(0, at + 4);
+    at += 18;
+  }
+  return `T ${b.toString("hex")}`;
+}
+
+test("a synced timetz under the extended protocol is postgres:18's bytes: Describe, text and binary DataRows, the typmod (issue 664)", async () => {
+  const s = await rawSession();
+  try {
+    const exchange = async (...frames: Buffer[]): Promise<string[]> => { s.socket.write(Buffer.concat(frames)); await s.untilReady(); return framesOf(s.raw).map(sansTable); };
+    const expect = (name: string): string[] => PG18_TIMETZ[name]!.map(sansTable);
+    const some = "SELECT run_at FROM timetz_runs WHERE id IN (1,401,402,403,404) ORDER BY id";
+    assert.deepEqual(await exchange(wire.parse("", "SELECT run_at FROM timetz_runs ORDER BY id"), wire.describe("S", ""), wire.sync()), expect("describe"), "Describe of the statement: OID 1266, length 12, typmod -1");
+    assert.deepEqual(await exchange(wire.parse("", "SELECT run_at3 FROM timetz_runs3"), wire.describe("S", ""), wire.sync()), expect("describeTypmod"), "a timetz(3) keeps its typmod 3");
+    const extended = (sql: string, formats: number[]): Promise<string[]> =>
+      exchange(wire.parse("", sql), wire.bind("", "", [], formats), wire.describe("P", ""), wire.execute("", 0), wire.sync());
+    assert.deepEqual(await extended(some, [0]), expect("text"), "text: timetz_out, 24:00:00 and a NULL included");
+    assert.deepEqual(await extended(some, [1]), expect("binary"), "binary: timetz_send");
+    assert.deepEqual(await extended("SELECT id, run_at, t_at FROM timetz_runs ORDER BY id LIMIT 3", [1]), expect("binaryColumns"), "binary per column: int4, timetz, time");
+    assert.deepEqual(await extended("SELECT run_at, run_at::text FROM timetz_runs WHERE id = 1", [1, 0]), expect("mixed"), "a format per column: binary, then text");
+  } finally { s.end(); }
+});
+
+test("a timetz read in pages under the extended protocol, an empty query (pgJDBC's ping) between its pages, is postgres:18's bytes (issue 664)", async () => {
+  const s = await rawSession();
+  try {
+    const exchange = async (...frames: Buffer[]): Promise<string[]> => { s.socket.write(Buffer.concat(frames)); await s.untilReady(); return framesOf(s.raw); };
+    // the rows of `SELECT id, run_at` in binary: the id, then 07:30:00+00 as timetz_send writes it
+    const rows = (from: number, to: number): string[] => Array.from({ length: to - from + 1 }, (_, i) =>
+      `D 000200000004${(from + i).toString(16).padStart(8, "0")}0000000c0000000649534e0000000000`);
+    // the simple-protocol ping, outside a transaction and in one
+    assert.deepEqual(await exchange(wire.query("")), ["I ", "Z 49"]);
+    assert.deepEqual(await exchange(wire.query("BEGIN READ ONLY")), ["C 424547494e00", "Z 54"]);
+    assert.deepEqual(await exchange(wire.query("")), ["I ", "Z 54"]);
+    assert.deepEqual(await exchange(wire.parse("", "SELECT id, run_at FROM timetz_runs ORDER BY id"), wire.bind("c2", "", [], [1]), wire.execute("c2", 50), wire.sync()),
+      ["1 ", "2 ", ...rows(1, 50), "s ", "Z 54"], "the first page, suspended");
+    assert.deepEqual(await exchange(wire.query("")), ["I ", "Z 54"], "pgJDBC's isValid between pages: an empty simple Query");
+    assert.deepEqual(await exchange(wire.execute("c2", 50), wire.sync()), [...rows(51, 100), "s ", "Z 54"], "the portal goes on where it stopped");
+    // an empty query by the extended protocol between pages, the unnamed portal beside the named one
+    assert.deepEqual(await exchange(wire.parse("", ""), wire.bind("", "", [], []), wire.describe("P", ""), wire.execute("", 0), wire.sync()), ["1 ", "2 ", "n ", "I ", "Z 54"]);
+    assert.deepEqual(await exchange(wire.execute("c2", 50), wire.sync()), [...rows(101, 150), "s ", "Z 54"], "and on again");
+    assert.deepEqual(await exchange(wire.query("COMMIT")), ["C 434f4d4d495400", "Z 49"]);
   } finally { s.end(); }
 });
 

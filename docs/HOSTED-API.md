@@ -1,8 +1,9 @@
 # The hosted API
 
 What the `mason` CLI sends to a hosted Mason service, and what it expects back. `mason login`, `mason logout`,
-`mason deploy` and `mason user … --replica` speak it today (`src/cli/login.ts`, `src/cli/deploy.ts`,
-`src/cli/user-hosted.ts`, `src/cli/hosted.ts`). Any service that answers this API can be signed in to. This page is
+`mason replica`, `mason token`, `mason deploy` and `mason user … --replica` speak it today (`src/cli/login.ts`,
+`src/cli/replica-hosted.ts`, `src/cli/token-hosted.ts`, `src/cli/deploy.ts`, `src/cli/user-hosted.ts`,
+`src/cli/hosted.ts`). Any service that answers this API can be signed in to. This page is
 the contract: a change to it is a change to both sides.
 
 ## The base URL
@@ -20,7 +21,8 @@ the contract: a change to it is a change to both sides.
 - `User-Agent: mason-cli/<version>` and `Accept: application/json`.
 - A form body is `application/x-www-form-urlencoded`; a JSON body (`mason deploy`'s) is `application/json`, UTF-8.
 - A redirect is never followed: it is a failure, so a Bearer header never travels to another address.
-- Each request has a 15 s time limit. An answer larger than 64 KiB is refused (1 MiB for a replica's list of users).
+- Each request has a 15 s time limit (60 s for a replica's creation, which waits on Mason's checks of the database). An
+  answer larger than 64 KiB is refused (1 MiB for a list: of a replica's users, of replicas, of CI tokens).
 - What comes back is untrusted. Each answer is held to the shape below. Anything else is a failure said by its status
   alone, never its body. A token is masked wherever it appears, and so is anything shaped as a Mason user's password
   (`mason_<16 hex>_<32 hex>`, whatever precedes it and in any case), except in the one answer that makes it (`mason
@@ -117,6 +119,184 @@ retries one by itself.
 | `GET /v1/me` | `403` with the failure shape, code `refused`, next `mason login`: a CI token (`masondata_ci_…`) cannot say who a person is | says its words as the service wrote them, code `refused` (below) |
 | any, `/oauth/revoke` included | `400`, `413` or `415`: a body the service cannot read | stops with the status; `mason logout` still removes the login, and says it was NOT revoked |
 | any | another status, or a body that is not JSON | a failure naming the request and the status, never the body |
+
+## Replicas: `mason replica`
+
+`mason replica create | list | status` makes and reads the replicas of an organisation. Every request carries
+`Authorization: Bearer <token>`. `{org}` and `{name}` follow the deploy's grammar (each `^[a-z0-9][a-z0-9-]{0,62}$`,
+checked before a byte is sent).
+
+| Subcommand | Request | Who | `200` / `201` |
+|---|---|---|---|
+| `list [<org>]` | `GET /v1/replicas/{org}` | a login, any role | `{ replicas: [Replica], more }` |
+| `create <org>/<name>` | `POST /v1/replicas/{org}` | a login, an admin or an owner | `201 { replica: Replica, checks: [SourceChecks] }` |
+| `status <org>/<name>` | `GET /v1/replicas/{org}/{name}` | a login, any role; a CI token made for that replica | `{ replica: Replica }` |
+
+`list` with no `<org>` asks `GET /v1/me` for the login's organisations (at most 20; past that it asks for one), then
+each one's list. `more` is `true` when the organisation has more replicas than the service answers at once.
+
+### `POST /v1/replicas/{org}`
+
+`Content-Type: application/json`, at most 64 KiB:
+
+```json
+{ "name": "shop", "region": "<region>", "sizeGb": 50, "sources": [{ "name": "app", "variable": "DATABASE_URL", "url": "postgres://…" }] }
+```
+
+- `name` is the replica's (the service may hold it to a stricter rule of its own, and refuses another with `400`).
+- `region` is one the service offers, and `sizeGb` one of its sizes, as a whole number: the synced data the replica
+  holds, in GB. The CLI checks only their form (a region's name, `--size` a whole number); which ones exist is the
+  service's to say, and it refuses another with `400`, naming the field.
+- `sources` holds exactly one source for now: `name` is the project's sources file's name without `.yml`; `variable`
+  the variable it reads the URL from (`url: ${DATABASE_URL}`); `url` that variable's value, `postgres://` or
+  `postgresql://`, at most 2 KiB. A service may take a `ca` too (PEM `CERTIFICATE` blocks); the CLI sends none yet.
+- Any other key is refused (`400`).
+
+**The URL.** The CLI reads it from `.env.local`, `.env` or the shell, by the variable the sources file names (the
+reader `mason start` uses), and from nowhere else: no flag takes it, so it never reaches a command line. A sources file
+with a `url:` written in it is refused before anything is sent: the replica reads its database's URL from a variable of
+its own environment, and a literal would be kept with the project's files. A value Mason could not connect by is
+refused too, and never repeated. The URL is sent this once, for Mason's checks of the database from the replica's side;
+a service never repeats it. The CLI holds its password as a secret of the command beside the token, in the ONE list
+every boundary reads: the exact test of every value (an answer that carries it in a value held to a grammar, or in a
+key, is refused whole), the masks of free text (a check's words, a refusal's, the system's words for an answer that
+did not come), and the output's gate. Each compares it with a text by ONE READING of both (`readUnits` in
+src/cli/hosted.ts), so it is found whatever form it is echoed in:
+
+- its case (upper, lower, mixed; `ß` and `SS` alike);
+- `%XX` escapes, of any or every byte, UTF-8 decoded;
+- each Unicode normal form (NFC, NFD, NFKC, NFKD): a compatibility form (full-width letters, a ligature) as its letters;
+- its accents dropped;
+- a zero-width, format or control character, or a terminal escape, between its characters;
+- another white space (a no-break space, a tab) for a space, or a run of spaces for one.
+
+It is found WHOLE in that reading, and, when it has 8 or more letters, digits, `-` and `_`, by those runs too (11 in
+a row, or all of them when fewer). What no reading reaches is outside this: a homoglyph from another script, its
+characters reversed or spread with other characters between them, base64 or another encoding.
+
+Two passwords are not sent, and the creation is refused before a byte is sent, naming neither the password nor its
+length:
+
+- one under 8 characters in that reading: nothing could tell it apart from ordinary words in what is printed;
+- one the CLI's own words hold: its lines, its steps, the replica's name or the service's address. The output's gate
+  would read it in an honest answer, after the replica was made. The rule reads every word a creation can print of its
+  own, rendered by the builders it prints with (`printedCorpus`), as the gate reads them.
+
+A password that only the service's own words and the CLI's together spell (`fix: set wal` across a check's fix) is
+still read by the gate, and that answer is refused, its words never printed.
+
+**The wait.** The service answers once it has run Mason's checks of the database, within the 60 s the CLI allows this
+one request. A POST that gets no answer may have made the replica: the CLI then asks `GET
+/v1/replicas/{org}/{name}` once, and goes on waiting when it is there (state `checking` while the checks run), or says
+it was not made (`404`), or that it cannot tell. After `201` the CLI asks `GET /v1/replicas/{org}/{name}` every 5 s (or
+after the seconds a `Retry-After` asks for) until the state is `ready` (exit 0) or `failed` (exit 1), and stops at
+`--timeout` (default `15m`, `1s` to `24h`: exit 124, nothing stopped). A `429`, a `5xx` or no answer is a wait, a `404`
+is a replica gone (`not_found`).
+
+**An account's first replica is made in the service's web app**, where it asks whether a person is creating it, which
+a command cannot answer. The API refuses it (`403`), and the CLI's next step says so, with the role that may create one;
+the replicas after it can be made by the API.
+
+`SourceChecks` is Mason's checks of the one source, as `mason doctor` runs them, scrubbed by the service of the
+credential: `{ source, outcome: "passed" | "failed" | "unknown", checks: [{ name, status: "ok" | "warn" | "failed" |
+"unknown", detail, fix? }], missing: [name] }`. A `warn` passes (a user that can write). `missing` names the checks
+that did not run. The CLI says each check on a line of its own, in the service's words, and each of those words one
+line (`serviceText`).
+
+A creation that did not pass answers with the failure shape (below), plus `failure`, which the CLI does not read, and,
+except when the service's own side failed, `checks`, which it says:
+
+| Status | `error.code` | When |
+|---|---|---|
+| `400` | `bad_request` | a key, a type or a bound of the body; a name taken in the organisation; a region or a size the service does not offer |
+| `403` | `refused` | a CI token; a viewer; an email not verified yet; the account's limit of replicas reached; an account that has not made its first replica in the web app |
+| `404` | `not_found` | no such organisation, or the login is not a member: said the same way |
+| `409` | `refused` | the token was revoked, or its role lowered, while the checks ran: nothing was made |
+| `413` | `too_large` | past 64 KiB |
+| `415` | `bad_request` | not `application/json` |
+| `422` | `checks_failed` | Mason's checks of the database failed: fix what `checks` says (`mason doctor` runs the same checks here), and create it again |
+| `429` | `slow_down` | too many replicas started this hour; `Retry-After` |
+| `503` | `checks_unknown`, `unavailable` | Mason could not tell whether the database is ready; or the service's side could not run the checks just now; `Retry-After` |
+
+The CLI's code follows the HTTP status, as for every `/v1/` failure; its next step is its own: `mason login` (as an
+admin or an owner) for a `401` or `403`, `mason doctor` and the same `mason replica create` for a `422`, `mason replica
+list <org>` for a `404`, else the same `mason replica create`.
+
+### `Replica`
+
+| Key | Held to |
+|---|---|
+| `org`, `name` | the organisation asked (and the name asked, for one replica); `^[a-z0-9][a-z0-9-]{0,62}$` |
+| `region` | `^[a-z0-9][a-z0-9-]{0,62}$` |
+| `sizeGb` | a whole number, 1 to 1,000,000 |
+| `hostId` | the replica's own host id, `^[a-z0-9][a-z0-9-]{0,62}$` |
+| `state` | `checking` (its checks run; nothing made yet), `creating` (its region makes it), `ready`, `failed` (its region did not make it, after every attempt: an admin tries again in the web app), `deleting` or `deleted` |
+| `createdAt` | ISO 8601 with its zone |
+| `allowlist` | the address ranges that may query it, each IPv4 or IPv6 with its prefix length; at most 1000 |
+| `pending` | what of its region's work is not done, at most 16: `[{ change: "create" \| "allowlist", state: "pending" \| "failed", attempts, failure?, nextAttemptAt? }]`, `failure` a sentence (said as one line), `nextAttemptAt` ISO 8601 |
+
+`--json` prints each replica with these keys, `failure` and `nextAttemptAt` `null` when absent.
+
+**What is tested first.** Before any value is held to its grammar, every string of each answer, each key included, is
+put to the exact test (`carriesNoSecret`: the token and the URL's password, and the shapes of a token or a password),
+but the service's words alone: a check's `name`, `detail` and `fix`, `missing`, a pending change's `failure` — free
+text, masked as a failure's words are. An answer that carries a secret anywhere else is refused whole, said by its
+status. Any other answer outside these shapes is a failure naming the request and the status, never the body.
+
+## CI tokens: `mason token`
+
+`mason token create | list | revoke` makes, lists and revokes an organisation's CI tokens. A CI token acts on ONE
+replica, for named scopes (`deploy`: `mason deploy`; `users`: `mason user … --replica`), until it expires. Each request
+takes a login of an admin or an owner of the organisation (a CI token makes, lists and revokes none: `403`).
+
+| Subcommand | Request | `200` / `201` |
+|---|---|---|
+| `create --replica <org>/<name>` | `POST /v1/tokens/{org}` | `201 { token: CiToken & { value } }` |
+| `list [<org>]` | `GET /v1/tokens/{org}` | `{ tokens: [CiToken], more }` |
+| `revoke <id> [--org <org>]` | `POST /v1/tokens/{org}/{id}/revoke`, no body | `{ revoked: { id, name } }` |
+
+`list` with no `<org>` asks `GET /v1/me`, then each organisation the login is an admin or an owner of; `revoke` with no
+`--org` takes the one such organisation, and asks which when there are several (exit 2).
+
+`POST`'s body, `application/json`: `{ "name": "github-actions", "replica": "shop", "scopes": ["deploy"],
+"expiresInDays": 90 }`.
+
+- `name` is 1 to 64 characters, with no control character (`--name`, default `ci`).
+- `replica` is the name of one of the organisation's replicas (`--replica <org>/<name>`, else `MASON_REPLICA`).
+- `scopes` holds each of `deploy` and `users` at most once (`--scope`, repeated; default `deploy`).
+- `expiresInDays` is a whole number, 1 to 365 (`--days`, default 90).
+- Any other key is refused. The CLI refuses a line outside these before it sends anything (exit 2).
+
+`CiToken` is `{ id, name, replica: "{org}/{name}", scopes, madeBy?, createdAt, lastUsedAt?, expiresAt }`:
+
+| Key | Held to |
+|---|---|
+| `id` | `^[A-Za-z0-9_-]{1,64}$`, so it is safe in the revoke's path; revoke's answer, the id asked |
+| `name`, `madeBy` | a string, said as one line (`madeBy` an email, absent or `null` in create's answer) |
+| `replica` | `<org>/<name>` of the organisation asked; create's, the replica asked |
+| `scopes` | each of `deploy` and `users`, once; create's, those asked |
+| `createdAt`, `expiresAt`, `lastUsedAt` | ISO 8601 with its zone (`lastUsedAt` `null` when never used) |
+
+**`value` is the token itself**: `masondata_ci_` and 43 base64url characters. The service answers it once, by the POST
+that made it (`Cache-Control: no-store`), and never again: not by the list nor by any other request. So the CLI prints
+it ONCE, alone on the first line it prints (never broken by the CLI: a terminal narrower than it wraps it, which a
+copy joins), or with `--json` in the one field `token.value` (so a CI setup step can pipe it into a secret store), and
+nowhere else:
+
+- the value is held to that form, and is not the login's own token nor an echo of it;
+- every other string of the answer, each key included, is put to the exact test against the login AND the value, so an
+  answer that carries the value a second time (in its name, its id, a key), or the login, is refused whole, and nothing
+  of it is printed: the CLI says a token may have been made all the same, and `mason token list` says which act;
+- the output's gate (src/cli/output-gate.ts) lets that one value through once, exactly as it is, and holds it as a
+  secret beside the login from the start: a second copy, 11 of its body in a row elsewhere, or anything else shaped as
+  a token, is refused at the write.
+
+Refusals: `400` a key, type or bound; `403` a CI token or a viewer; `404` no such organisation or not a member, no such
+replica in it (POST), or no live CI token by that id (revoke: revoked already, expired, or another organisation's);
+`409` revoked or demoted meanwhile, or (POST) the replica being deleted; `413` past 4 KiB, or any body sent to the
+revoke; `429` too many tokens made this hour. Each is said as "Failures of `/v1/`" says; the CLI's next step is its
+own: `mason login` (as an admin or an owner) for a `401` or `403`, `mason token list <org>` for a revoke's `404`,
+`mason replica list <org>` for a create's.
 
 ## Deploying a project: `mason deploy`
 
