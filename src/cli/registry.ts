@@ -22,6 +22,7 @@ import { SYNC, sync } from "./sync.ts";
 import { USAGE, usage } from "./usage.ts";
 import { CANCEL, cancel } from "./cancel.ts";
 import { SERVE, serve } from "./serve.ts";
+import { LOGIN, LOGOUT, login, logout } from "./login.ts";
 import { PROJECT_LINE } from "./dev.ts";
 import { version } from "./version.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
@@ -71,6 +72,9 @@ export const DEV: CommandSpec & { needs: "project" } = {
   MASON_PG_TLS_KEY (PEM files), or --self-signed-tls, which makes a certificate for the project in .mason/ and serves
   it again at every later start with the flag. Every client then connects with sslmode=require. A team whose own proxy
   or load balancer terminates TLS keeps it on 127.0.0.1, or sets MASON_PG_PLAIN=1 for a private network.
+  Behind a TCP proxy that sends the PROXY protocol v2, MASON_PG_PROXY_FROM=<cidr>[,<cidr>…] names the proxy's own
+  addresses: a connection from one must begin with the header, whose client the request log names, and a header from
+  any other address is refused.
 
   ${PROJECT_LINE}
 
@@ -159,7 +163,7 @@ export const STEPS: ReadonlyArray<[step: string, commands: readonly Command[]]> 
   ["Add your tables", [{ ...TABLES, run: tables }, { ...ADD, run: add }, { ...REMOVE, run: remove }, { ...WAIT, run: wait }]],
   ["Connect", [{ ...USER, run: user }, { ...MCP, run: mcp }, { ...SHARE, run: share }]],
   ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...CANCEL, run: cancel }, { ...USAGE, run: (argv) => usage(argv) }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
-  ["Go to production", [{ ...SERVE, run: serve }]],
+  ["Go to production", [{ ...SERVE, run: serve }, { ...LOGIN, run: login }, { ...LOGOUT, run: logout }]],
 ];
 
 /** Every command, in the order `mason --help` lists them. */

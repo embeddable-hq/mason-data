@@ -14,6 +14,131 @@
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { err as styleErr, out as styleOut, PLAIN, wrap, type Style } from "./style.ts";
 
+/**
+ * A LINE THAT HOLDS A HOSTED SERVICE'S TEXT IS BROKEN BY THE CLI, NEVER BY THE TERMINAL, AT EVERY WIDTH (PR 481's
+ * class rounds: a value sized to the terminal's width made the terminal start a visual line at column 0 with a forged
+ * `Next` heading, a step or a row; then the same under 40 columns, where no style wraps). src/cli/hosted.ts makes every
+ * value one line with no run of spaces (`serviceText`); the style a command gives its output when that output holds
+ * such a value (`serviceStyle`) makes every renderer here break every line it writes, at the terminal's own width
+ * (`Style.columns`, read when the output is drawn, whatever it is), so no line ever reaches the terminal's edge:
+ *
+ *   - a line takes at most width - 1 columns (one column at width 1), a character outside ASCII counted as two;
+ *   - it breaks at a space where one is in reach, else within the word; the headline, a row's label and a step's
+ *     command are broken as any text is (`strictLines`, the last pass of every renderer: `strict`);
+ *   - every continuation starts at `continuationAt(width)`: CONTINUATION (4) wherever the width leaves 4 columns after
+ *     it, else 1 (3 to 8 columns), else 0 (1 or 2 columns, where one character is a line). The CLI's own lines start at
+ *     0 (a heading, a failure, a tip) or 2 (a row, a step), never at 1 or 4, so a continuation can never be taken for
+ *     one; at 1 or 2 columns nothing the CLI starts a line with fits in a line, so none can be forged either;
+ *   - a value's own column (a row's, a step's description) is kept while it leaves `MIN_ROOM` columns, else its lines
+ *     continue at continuationAt(width), never one character a line under an indent wider than the terminal.
+ *
+ * So what a person sees begin a line is always the CLI's own. A pipe, a file and `--json` are unwrapped as ever (no
+ * terminal width): what an agent parses never changes.
+ */
+export const CONTINUATION = 4;
+/** The fewest columns a value's own column must leave it before its lines continue there. */
+const MIN_ROOM = 12;
+export const serviceStyle = (s: Style): Style => ({ ...s, untrusted: true });
+
+/** The columns a word takes, counted so a line never takes more than the terminal has: a character outside ASCII as two. */
+const columns = (w: string): number => { let n = 0; for (const ch of w) n += ch.codePointAt(0)! <= 0x7e ? 1 : 2; return n; };
+
+/** Where a continuation starts on a terminal `width` columns wide (above). */
+export const continuationAt = (width: number): number => lineLimit(width) - CONTINUATION >= 4 ? CONTINUATION : width >= 3 ? 1 : 0;
+/** The most columns one line may take on a terminal `width` wide: one short of its edge, never none. */
+const lineLimit = (width: number): number => Math.max(1, width - 1);
+
+/** The terminal width a style that holds a service's text breaks at; null when it is no terminal (or holds none). */
+const strictWidth = (s: Style): number | null => s.untrusted ? s.columns ?? s.width : null;
+
+/** `text` broken at `width` as `serviceStyle` asks (above), its first line after `firstUsed` columns of prefix: every
+ *  line within the limit, a long word broken within, every line after the first at `indent` while that leaves MIN_ROOM,
+ *  else at continuationAt(width). */
+export function strictWrap(text: string, width: number, indent: number, firstUsed: number): string {
+  const limit = lineLimit(width);
+  const cont = Math.max(indent, CONTINUATION) + MIN_ROOM <= limit ? Math.max(indent, CONTINUATION) : continuationAt(width);
+  const lines: string[] = [];
+  let line = "", taken = 0, used = firstUsed;
+  const room = (): number => Math.max(1, limit - used);
+  const breakLine = (): void => { lines.push(line); line = ""; taken = 0; used = cont; };
+  // a prefix that leaves no room: the text starts on the next line
+  if (limit - used < 1) breakLine();
+  for (const word of text.split(" ")) {
+    if (word === "") continue;
+    const wc = columns(word);
+    if (line && taken + 1 + wc <= room()) { line += ` ${word}`; taken += 1 + wc; continue; }
+    if (line) breakLine();
+    if (wc <= room()) { line = word; taken = wc; continue; }
+    for (const ch of word) {
+      const cc = columns(ch);
+      if (taken + cc > room() && line) breakLine();
+      line += ch; taken += cc;
+    }
+  }
+  lines.push(line);
+  return lines.join(`\n${" ".repeat(cont)}`);
+}
+
+/** A colour code, which takes no column. */
+const SGR = /^\x1b\[[0-9;]*m/;
+
+/**
+ * THE LAST PASS OF EVERY RENDERER under serviceStyle: each line of `text` that would reach the terminal's edge broken
+ * (above) — at its last space in reach, else within a word — its continuations at continuationAt(width), its colour codes
+ * taking no column and never split. A line within the limit is left as it is.
+ */
+export function strictLines(text: string, width: number): string {
+  const limit = lineLimit(width), cont = continuationAt(width);
+  const out: string[] = [];
+  for (const whole of text.split("\n")) {
+    const tokens: Array<{ t: string; w: number }> = [];
+    for (let i = 0; i < whole.length;) {
+      const sgr = SGR.exec(whole.slice(i));
+      if (sgr) { tokens.push({ t: sgr[0], w: 0 }); i += sgr[0].length; continue; }
+      const ch = String.fromCodePoint(whole.codePointAt(i)!);
+      tokens.push({ t: ch, w: columns(ch) }); i += ch.length;
+    }
+    if (tokens.reduce((n, k) => n + k.w, 0) <= limit) { out.push(whole); continue; }
+    // the line's own indent, kept while it leaves room for a word, else the continuation's
+    let lead = 0;
+    while (tokens[lead]?.t === " ") lead++;
+    const indent = (n: number): Array<{ t: string; w: number }> => Array.from({ length: n }, () => ({ t: " ", w: 1 }));
+    let line = indent(lead + MIN_ROOM <= limit ? lead : Math.min(lead, cont));
+    let taken = line.length, start = line.length;
+    // each token placed in turn; past the limit the line is broken at its last space past the indent, and what followed
+    // the space is placed again from there (so it is broken again if it must), else broken here, within the word
+    let placed: number[] = [];   // the source index of each of line's tokens past its indent
+    for (let i = lead; i < tokens.length; i++) {
+      const k = tokens[i]!;
+      if (taken + k.w > limit && taken > start) {
+        let at = -1;
+        for (let j = placed.length - 1; j > 0; j--) if (tokens[placed[j]!]!.t === " ") { at = j; break; }
+        const kept = at >= 0 ? line.slice(0, start + at) : line;
+        while (kept.length > start && kept[kept.length - 1]!.t === " ") kept.pop();
+        out.push(kept.map((x) => x.t).join(""));
+        if (at >= 0) i = placed[at]!;   // the loop's i++ places what followed the space
+        else i--;                       // this token begins the next line
+        line = indent(cont); taken = cont; start = cont; placed = [];
+        continue;
+      }
+      if (k.t === " " && taken === start && start > 0) continue;   // no space at a continuation's start
+      line.push(k); placed.push(i); taken += k.w;
+    }
+    // a continuation with nothing after its indent (the line ended in spaces) is no line
+    if (taken > start || start === 0) out.push(line.map((x) => x.t).join(""));
+  }
+  return out.join("\n");
+}
+
+/** A renderer's output, as serviceStyle asks it on a terminal (strictLines), else as it is. */
+export const strict = (text: string, s: Style): string => { const w = strictWidth(s); return w === null ? text : strictLines(text, w); };
+
+/** A renderer's wrap: the strict one for a style that holds a service's text on a terminal, else style.ts's. */
+const fit = (text: string, s: Style, indent: number, firstUsed = indent): string => {
+  const w = strictWidth(s);
+  return w === null ? wrap(text, s.width, indent, firstUsed) : strictWrap(text, w, indent, firstUsed);
+};
+
 export type Options = NonNullable<ParseArgsConfig["options"]>;
 
 export interface CommandSpec {
@@ -71,9 +196,12 @@ export function nextBlock(steps: readonly NextStep[], s: Style = styleOut()): st
   const step = ([command, what]: NextStep): string => {
     if (!what) return `  ${s.cyan(command)}`;
     const used = 2 + Math.max(command.length, NEXT_WIDTH) + 2;
-    return `  ${s.cyan(command.padEnd(NEXT_WIDTH))}  ${s.dim(wrap(what, s.width, 2 + NEXT_WIDTH + 2, used))}`;
+    // a terminal too narrow for the column under serviceStyle: what it does on the next line, at the continuation
+    const w = strictWidth(s);
+    if (w !== null && 2 + NEXT_WIDTH + 2 + MIN_ROOM > lineLimit(w)) return `  ${s.cyan(command)}\n${" ".repeat(continuationAt(w))}${s.dim(fit(what, s, continuationAt(w)))}`;
+    return `  ${s.cyan(command.padEnd(NEXT_WIDTH))}  ${s.dim(fit(what, s, 2 + NEXT_WIDTH + 2, used))}`;
   };
-  return ["", s.bold("Next:"), ...steps.map(step)].join("\n");
+  return strict(["", s.bold("Next:"), ...steps.map(step)].join("\n"), s);
 }
 
 /**
@@ -100,19 +228,20 @@ export interface Report {
   next?: readonly NextStep[] | undefined;
 }
 export function reportText(r: Report, s: Style = styleOut()): string {
-  const lines = [s.bold(r.headline)];
+  // a headline is a terminal's to wrap, unless it holds a service's text: then the CLI breaks it (above)
+  const lines = [s.bold(strictWidth(s) !== null ? fit(r.headline, s, CONTINUATION, 0) : r.headline)];
   const w = Math.max(0, ...(r.details ?? []).map(([label]) => label.length));
-  for (const [label, value] of r.details ?? []) lines.push(`  ${s.dim(label.padEnd(w))}   ${wrap(value, s.width, 2 + w + 3)}`);
-  return withEnd(lines.join("\n"), r, s);
+  for (const [label, value] of r.details ?? []) lines.push(`  ${s.dim(label.padEnd(w))}   ${fit(value, s, 2 + w + 3)}`);
+  return strict(withEnd(lines.join("\n"), r, s), s);
 }
 /**
  * The end of a command's output, to print on its own (out(endText(…))): its tips, then what to run next, each part after
  * a blank line; "" when it has neither. withEnd puts it after text a command has not printed yet.
  */
 export function endText(r: { tips?: readonly string[] | undefined; next?: readonly NextStep[] | undefined }, s: Style = styleOut()): string {
-  const tips = r.tips?.length ? `\n${r.tips.map((t) => s.dim(`Tip: ${wrap(t, s.width, 5)}`)).join("\n")}` : "";
+  const tips = r.tips?.length ? `\n${r.tips.map((t) => s.dim(`Tip: ${fit(t, s, 5)}`)).join("\n")}` : "";
   const next = r.next?.length ? nextBlock(r.next, s) : "";
-  return tips && next ? `${tips}\n${next}` : tips || next;
+  return strict(tips && next ? `${tips}\n${next}` : tips || next, s);
 }
 export function withEnd(text: string, r: { tips?: readonly string[] | undefined; next?: readonly NextStep[] | undefined }, s: Style = styleOut()): string {
   const end = endText(r, s);
@@ -217,14 +346,14 @@ export function failureText(cmd: string, f: Failure, s: Style = styleErr()): str
   const head = cmd ? `mason ${cmd}:` : "mason:";
   // the checklist's marks: ✘ on a terminal (beside its ✔), ✗ in plain text (beside its ✓); a style that colours is one
   const mark = s.red("x") === "x" ? "✗" : "✘";
-  const lines = [`${s.red(mark)} ${s.red(head)} ${s.bold(wrap(f.message, s.width, 2, mark.length + 1 + head.length + 1))}`];
+  const lines = [`${s.red(mark)} ${s.red(head)} ${s.bold(fit(f.message, s, 2, (strictWidth(s) === null ? mark.length : columns(mark)) + 1 + head.length + 1))}`];
   const rows: Array<[string, string]> = [...(f.why ? [["why", f.why] as [string, string]] : []), ...(f.fix ? [["fix", f.fix] as [string, string]] : [])];
   // a value of several lines (a list of failures, an entry to paste) keeps its lines, each under the first
-  for (const [label, value] of rows) lines.push(`  ${s.dim(label)}   ${value.split("\n").map((l, i) => i ? `${" ".repeat(8)}${wrap(l, s.width, 8)}` : wrap(l, s.width, 8)).join("\n")}`);
+  for (const [label, value] of rows) lines.push(`  ${s.dim(label)}   ${value.split("\n").map((l, i) => i ? `${" ".repeat(8)}${fit(l, s, 8)}` : fit(l, s, 8)).join("\n")}`);
   let text = lines.join("\n");
   if (f.next?.length) text += `\n${nextBlock(f.next, s)}`;
   if (f.usage) text += `\n\n${f.usage.replace(/\n$/, "")}`;
-  return text;
+  return strict(text, s);
 }
 
 /** A failure's `error` as --json carries it: on its own (failureJson), or beside a command's own keys when it did part of

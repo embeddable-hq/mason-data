@@ -48,8 +48,8 @@ mason user add metabase      # the BI tool's user: URL and password, printed onc
   `mason add` adds beside the server survives a redeploy. Its region is the service's, chosen once (a volume does not
   move): the region nearest your database. Default sizes: 5 GB on Hobby, 50 GB on Pro, extendable (live),
   never shrunk; 3,000 read and 3,000 write IOPS whatever the size. To ship your committed `mason/` folder instead, build
-  an image that carries it ([`deploy/fly/README.md`](../fly/README.md#the-project-folder) has the two-line Dockerfile)
-  and remove `MASON_PROJECT`.
+  an image that carries it ([`deploy/fly/README.md`](../fly/README.md#the-project-folder) has the two-line Dockerfile),
+  remove `MASON_PROJECT` and set `MASON_PROJECT_READONLY=1`, which refuses every edit beside the server.
 - **Memory**: `MASON_DUCKDB_MEMORY` is said explicitly (4 GB). Left unset, the copy takes half of the limit it reads
   from the container (or what leaves 2.5 GiB beside it when that is less), and what Railway's container shows there is not documented: `mason doctor` in the service's shell
   says what the copy may use; if it shows the machine's RAM rather than the plan's limit, set it to half the plan's

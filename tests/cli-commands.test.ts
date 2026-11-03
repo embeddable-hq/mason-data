@@ -411,7 +411,7 @@ test("msText: a duration in ms as a person reads it — ms under a second, then 
 
 test("mason logs --requests: a request a line, newest last — when, the outcome and SQLSTATE, the time, the rows, who, the statement and the error", () => {
   const { requestLine } = commands;
-  const base = { requestId: "r", session: 1, method: "QUERY", detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
+  const base = { requestId: "r", session: 1, method: "QUERY", clientAddress: null, detail: null, hint: null, queryTruncated: false, user: "", role: "", attributes: null, endedAt: "2026-10-26T14:02:12.357Z", bytesSent: 100 };
   assert.equal(requestLine({ ...base, startedAt: "2026-10-26T14:02:11.123Z", applicationName: "Metabase", tokenName: "", outcome: "ok", status: "completed", sqlstate: null, message: null,
     rows: 20, durationMs: 1234, query: "SELECT id\n FROM public.orders LIMIT 20" }, PLAIN),
     "2026-10-26 14:02:11  ok                   1.2 s      20 rows  Metabase  SELECT id FROM public.orders LIMIT 20");

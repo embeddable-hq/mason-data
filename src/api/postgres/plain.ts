@@ -15,7 +15,7 @@ export function isLoopback(host: string): boolean {
 /** Why a listener cannot start as configured, in parts — what is wrong, why, the way out — so each reader says it in its
  *  own shape: the service as one line (`problemText`), `mason start` as a Failure (src/cli/pg-tls.ts). `kind` lets a
  *  reader add a way out of its own: a plain listener off loopback is one `mason start --self-signed-tls` answers too. */
-export interface ListenerProblem { problem: string; why?: string; fix?: string; kind: "port" | "plain" | "plain_value" | "tls_pair" | "tls_read" }
+export interface ListenerProblem { problem: string; why?: string; fix?: string; kind: "port" | "plain" | "plain_value" | "tls_pair" | "tls_read" | "proxy_from" }
 
 /** A problem as one line: what, why, the way out — the service's refusal and log. */
 export function problemText(p: ListenerProblem): string {

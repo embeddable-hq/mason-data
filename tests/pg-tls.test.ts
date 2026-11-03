@@ -154,3 +154,41 @@ test("mason start refuses a plain listener off loopback before it starts anythin
   assert.equal((JSON.parse(both.stdout) as { error: { code: string } }).error.code, "usage");
   assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
 });
+
+test("MASON_PG_PROXY_FROM is the listener settings' too: unset changes nothing, a CIDR list is carried, anything else refused naming the entry", () => {
+  const home = tmp("mason-proxy-");
+  assert.deepEqual(pgListenerSettings({ MASON_PG_PROXY_FROM: "" }, "127.0.0.1"), { host: "127.0.0.1", port: 5433, tls: null });
+  const set = runListenerSettings({ MASON_PG_PROXY_FROM: "10.0.0.0/16,192.0.2.7" }, { port: 5444, selfSigned: false, home });
+  assert.ok(!("problem" in set) && set.proxyFrom !== undefined);
+  assert.deepEqual(set.proxyFrom.entries, ["10.0.0.0/16", "192.0.2.7"], "mason start hands the shell's setting to the one reader");
+  const bad = runListenerSettings({ MASON_PG_PROXY_FROM: "10.0.0.0/16,10.1.2.3/16" }, { port: 5444, selfSigned: false, home });
+  assert.ok("problem" in bad);
+  assert.equal(failureText("start", { ...bad, message: bad.problem }, PLAIN),
+    "✗ mason start: MASON_PG_PROXY_FROM=\"10.0.0.0/16,10.1.2.3/16\": \"10.1.2.3/16\" has bits set past its prefix: did you mean 10.1.0.0/16?\n" +
+    "  why   a PROXY header names the client every statement is recorded as, so it is believed only from the addresses this names\n" +
+    "  fix   Name the addresses of your TCP proxy or load balancer alone, comma-separated (MASON_PG_PROXY_FROM=10.0.0.0/16,10.1.0.0/16), " +
+    "or unset it to read no PROXY header — docs/POSTGRES-API.md \"Behind a TCP proxy\"");
+});
+
+test("mason start refuses a MASON_PG_PROXY_FROM that is not a CIDR list before it starts anything, naming it, as a person and with --json", async () => {
+  const root = tmp("mason-proxy-start-");
+  fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+  fs.mkdirSync(path.join(root, "mason", "sources"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({
+    name: "shop", source: "postgres://mason:secret@127.0.0.1:1/shop", folder: "mason", remote: false, apiKey: "k".repeat(48),
+    sourceServer: null, lastRun: null, running: null,
+  }), { mode: 0o600 });
+  const env = matrixEnv({ HOME: tmp("mason-proxy-home-"), PATH: path.dirname(process.execPath), MASON_PG_PROXY_FROM: "nlb.internal" });
+  for (const attach of [false, true]) {
+    const p = await runMason(root, ["start", ...(attach ? ["--attach"] : [])], env);
+    assert.equal(p.code, 1, p.stdout + p.stderr);
+    assert.match(p.stderr, /^✗ mason start: MASON_PG_PROXY_FROM="nlb\.internal": "nlb\.internal" is not an address or a CIDR .*a host name is not looked up\)\n {2}why {3}a PROXY header/);
+    assert.doesNotMatch(p.stdout + p.stderr, /Connecting to/, "refused before the database is connected to");
+  }
+  const j = await runMason(root, ["start", "--json"], env);
+  assert.equal(j.code, 1, j.stdout + j.stderr);
+  const v = JSON.parse(j.stdout) as { error: { code: string; message: string } };
+  assert.equal(v.error.code, "refused");
+  assert.match(v.error.message, /^MASON_PG_PROXY_FROM="nlb\.internal"/);
+  assert.ok(!fs.existsSync(path.join(root, ".mason", "dev.log")), "nothing was spawned");
+});

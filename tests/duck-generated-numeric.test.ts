@@ -218,5 +218,19 @@ test("issue 242: an integer cast of a numeric the engine holds as a double is st
     w.write("pdiscint", scheduledH("SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (amount / 1.6)::int) AS x FROM ledger"));
     await w.until(served(w.logged), "public.pdiscint");
     assert.deepEqual((await typed(w, "SELECT x FROM pdiscint")).rows.map((x) => x.map(text)), [["1"]]);
+    // through PR 520's SHARED programs (#484): a NULLIF, a sign and a picked value each read three times a level, over a
+    // quotient chain, stored half away from zero (0.6875 is 1, -1.5625 is -2, 2.5 is 3)
+    const chain = (read: string, bottom: string): string => [1, 2, 3].reduce((s, k) => `SELECT id, ${read} AS q FROM (${s}) s${k}`, bottom);
+    w.write("nzchain", scheduledH(`SELECT id, q::int AS x FROM (${chain("nullif(q, 0) + nullif(q, 0) - nullif(q, 0)", "SELECT id, amount / 1.6 AS q FROM ledger")}) s ORDER BY id`));
+    w.write("sgchain", scheduledH(`SELECT id, (q * 2.5)::int AS x FROM (${chain("sign(q) + sign(q) - sign(q)", "SELECT id, amount / 1.6 AS q FROM ledger")}) s ORDER BY id`));
+    w.write("pdchain", scheduledH("SELECT (x + x - x)::int AS x, (x + x - x * 2)::int8 AS y FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY amount / 1.6) AS x FROM ledger) s"));
+    for (const [name, sql, want] of [
+      ["nzchain", "SELECT id, x FROM nzchain ORDER BY id", [["1", "1"], ["3", null], ["9223372036854775806", "-2"], ["9223372036854775807", "3"]]],
+      ["sgchain", "SELECT id, x FROM sgchain ORDER BY id", [["1", "3"], ["3", null], ["9223372036854775806", "-3"], ["9223372036854775807", "3"]]],
+      ["pdchain", "SELECT x, y FROM pdchain", [["1", "0"]]],
+    ] as const) {
+      await w.until(served(w.logged), `public.${name}`);
+      assert.deepEqual((await typed(w, sql)).rows.map((x) => x.map(text)), want, name);
+    }
   });
 });

@@ -391,6 +391,32 @@ the refusal's own line above. It is a log line and nothing else:
 nothing is stored, and the password is no statement. It is how the tool corpus was recorded ("How it is
 tested"), and how to see what a tool you are connecting sends.
 
+### Behind a TCP proxy
+
+Behind a TCP load balancer or proxy (an AWS NLB, HAProxy, an edge of one's own), every connection's peer is the
+proxy, so the request log would name the proxy for every client. A proxy that sends the **PROXY protocol v2** header
+(haproxy's `proxy-protocol.txt`, section 2.2; HAProxy's `send-proxy-v2`, an NLB target group's "proxy protocol v2")
+tells Mason the client instead: set **`MASON_PG_PROXY_FROM`** to the **proxy's own addresses**, as CIDRs or single
+addresses, comma-separated (`MASON_PG_PROXY_FROM=10.0.0.0/16` for the subnets an NLB's nodes are in). Name nothing
+else: a header is a claim about who connected, and whoever may send one can make the request log name anyone.
+
+- **A connection from a named address must begin with a valid v2 header**, read before anything else on it (an
+  SSLRequest, a direct TLS start, the startup packet, a CancelRequest), at most 216 bytes past its first 16, whole
+  within 5 seconds; anything else (no header, a v1 text header, a UNIX or UDP one, a TLV past its end) is refused
+  (08P01, the reason in the log) and the connection closed. The PROXY command's source, IPv4 or IPv6 over TCP, is the
+  client's address; a LOCAL one (the proxy's own connection, a health check) keeps the proxy's.
+- **A connection from any other address is read as before**, and a PROXY header from it is refused, never believed.
+- **Unset (the default), no header is read from anyone**, and every client's address is the socket's peer.
+- TLS works after the header both ways (SSLRequest, `sslnegotiation=direct`), and a driver's cancel through the proxy
+  carries a header too, so it reaches its session.
+
+The client's address is the request log's `client_addr` (`clientAddress` in `mason logs --requests --json`), a v4-mapped
+IPv6 address shown as IPv4, and the `connected` log line's `from <address>`. A setting that is not a CIDR list refuses
+the start, naming the entry (`10.1.2.3/16` has bits past its prefix: did you mean `10.1.0.0/16`?); so does a list whose
+entries together name every IPv4 or every IPv6 address, however it is split (`0.0.0.0/0`, `0.0.0.0/1,128.0.0.0/1`, or
+`::/64`, which holds every v4-mapped address). An entry is read by the addresses it covers, a v4-mapped IPv6 one as the
+IPv4 address it is. A share's socket (`mason share`) never reads a header.
+
 ### From an MCP client
 
 `mason mcp` (`mason help mcp`) is an MCP server on stdio for Claude Code, Claude Desktop and other agents, and a client
@@ -532,7 +558,8 @@ that was answered is the protocol's chatter and is not recorded (`MASON_PG_TRACE
 over the catalog alone (`pg_class`, `information_schema`, `SELECT version()`) is a row only when it is refused. A statement a client
 stopped reading at a row count (an Execute's: JDBC's `setMaxRows`, `mason mcp`'s `max_rows`) is a row when its portal
 closes (a Sync, a Close, the session's end), with the rows it sent. A row has
-the session, `application_name`, the `mason user`, the method (`QUERY`, `PARSE`, `BIND`, `DESCRIBE`, `EXECUTE`,
+the session, `application_name`, the client's address (`client_addr`: the socket's peer, or behind a TCP proxy the client
+its PROXY header carries, "Behind a TCP proxy"), the `mason user`, the method (`QUERY`, `PARSE`, `BIND`, `DESCRIBE`, `EXECUTE`,
 `CONNECT`), the SQLSTATE, message, detail and hint sent, the rows sent, the bytes sent (every frame of the answer, its
 CommandComplete or ErrorResponse included, the ReadyForQuery after it not), the duration and the statement (cut at 64
 KiB, flagged when cut). Its outcome is the SQLSTATE's: `ok`, `refused` (the statement's own fault), `failed` (Mason's
@@ -558,6 +585,7 @@ whatever the session runs at that moment is stopped, as a `CancelRequest` stops 
 | `MASON_PG_HOST` | 127.0.0.1 | the listener's address |
 | `MASON_PG_TLS_CERT`, `MASON_PG_TLS_KEY` | unset (plain) | PEM files; both or neither; with them TLS is required |
 | `MASON_PG_DATABASE` | `mason` | `mason serve`: the database name a tool connects with, for a sources file with no `database:`; the two must agree when both are set, and `mason start` refuses it (the sources file is what says it on a project) |
+| `MASON_PG_PROXY_FROM` | unset | behind a TCP proxy that sends the PROXY protocol v2: the proxy's own addresses, CIDRs comma-separated; a connection from one must begin with a header, whose client the request log names, and a header from any other address is refused ("Behind a TCP proxy") |
 | `MASON_PG_PLAIN` | unset | `1`: a plain listener off loopback is on a private network; without it (or TLS) such a listener refuses to start |
 | `MASON_PG_CATALOG_TIMEOUT_MS` | 10000 | how long a catalog statement may take before the embedded Postgres is discarded and the statement refused |
 | `MASON_STATEMENT_TIMEOUT` | 5min | the longest one statement may run (Postgres's units; 0 for none); a session's `statement_timeout` may only shorten it |

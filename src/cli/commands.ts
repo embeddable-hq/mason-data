@@ -19,7 +19,7 @@ import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
 import { restartsFact, signalSupervisor, stopSupervisor, supervisorGone, type RestartsFact } from "./supervise.ts";
-import { DEMO_DIR, DUCK_FILE, STATE_DIR, databaseMoved, isProject, projectDatabase, projectSource, readProject, theProject, writeConfig, type Project } from "./project.ts";
+import { DEMO_DIR, DUCK_FILE, STATE_DIR, databaseMoved, isProject, projectDatabase, projectSource, projectWriteRefusal, readProject, theProject, writeConfig, type Project } from "./project.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { withPlaceholders, postgresFacts, postgresLink, type PostgresLink } from "./pg-url.ts";
 import { listenerText } from "./pg-tls.ts";
@@ -123,7 +123,8 @@ export interface RunState {
   ui?: boolean;
   /** this is `mason serve`'s run: `mason ui --ssh` opens its page from another machine */
   served?: boolean;
-  /** why the page offers no Add or Remove (a server's sources file cannot be written), or null */
+  /** why the page offers no Add or Remove (the project's files deployed read-only, MASON_PROJECT_READONLY; a server's
+   *  sources file that cannot be written), or null: src/cli/run-server.ts sourcesReadOnly */
   sourcesReadOnly?: string | null;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
@@ -406,8 +407,9 @@ const STATUS_USAGE = `usage: mason status [--json]
            startedAt, outcome, sqlstate, message, query, … }] (the latest statements refused, failed or cancelled, newest
            last, as mason logs --requests --json shows each: mason logs --requests --failed), queriesError (or null) },
            readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), served (this is
-           mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove, or
-           null), next }.
+           mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove — the
+           project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
+           server's sources file it cannot write — or null), next }.
            Each table's kept is how it is kept current now (absent for a table the sync does not hold):
            { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
            else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
@@ -1080,7 +1082,8 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   With Mason running the first sync starts at once; mason wait returns when it is done and the table is served. Before
   mason start (mason init && mason add orders && mason start) the entry is written, checked against the database as
   the run checks it, and the first sync begins at mason start. Adding a table again with other columns changes its entry,
-  and the table is synced again whole with them.
+  and the table is synced again whole with them. A project deployed as committed (MASON_PROJECT_READONLY=1 where Mason
+  runs) is refused, its files left as they are: add the table where the project is committed, then deploy.
 
   --columns <a,b,…>   only these columns (one table at a time: the list is that table's)
   --include <a,b,…>   these columns as well as every other one — a column that looks like a secret, named on purpose
@@ -1150,6 +1153,10 @@ export async function add(argv: string[]): Promise<number> {
   const where = await reach(ADD, json);
   // (a state with no project never meets the need: reach said it)
   if (where === null || where.project === null) return 1;
+  // a project whose files are deployed read-only (src/cli/project.ts projectWriteRefusal): refused before the run or the
+  // database is asked, whether Mason is up or down — the run's own record counts, whatever this shell's environment says
+  const readOnly = projectWriteRefusal(where.project.root, process.env);
+  if (readOnly !== null) return failed("add", readOnly, { json });
   if (where.state === "up") {
     // Mason up: the run adds it (the copy starts now, and the run's own re-read never races the file's write)
     const run = where.run;
@@ -1270,7 +1277,9 @@ const REMOVE_USAGE = `usage: mason remove <table>… [--json]
 
   Takes tables out of the project: each one's entry in the sources file (mason/sources/<name>.yml) is removed, the
   rest of the file as it was. With Mason running it stops syncing the table and drops its synced data at once; with Mason
-  stopped, what an earlier run synced is dropped at the next mason start.
+  stopped, what an earlier run synced is dropped at the next mason start. A project deployed as committed
+  (MASON_PROJECT_READONLY=1 where Mason runs) is refused, its files left as they are: remove it where the project is
+  committed, then deploy.
 
     mason remove customers
     mason remove customers billing.invoices     several at once
@@ -1297,6 +1306,9 @@ export async function remove(argv: string[]): Promise<number> {
   const where = await reach(REMOVE, json);
   // (a state with no project never meets the need: reach said it)
   if (where === null || where.project === null) return 1;
+  // read-only, as mason add (src/cli/project.ts projectWriteRefusal): refused before the run or the database is asked
+  const readOnly = projectWriteRefusal(where.project.root, process.env);
+  if (readOnly !== null) return failed("remove", readOnly, { json });
   if (where.state === "up") {
     // Mason up: the run removes it and drops the copy at once (src/cli/run-server.ts removeTables)
     const run = where.run;
@@ -1555,8 +1567,9 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --running        the statements running now (Mason must be running)
   --json           as data: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no
                    time); with --requests { requests: [{ requestId, startedAt, endedAt, session, applicationName,
-                   tokenName, user (the mason user), role, attributes (the user's values its role's row filters read, or
-                   null), method, outcome (ok, refused, failed, cancelled), status
+                   clientAddress (the client's address; behind a TCP proxy, the one its PROXY header carries),
+                   tokenName, user (the mason user), role, attributes (the user's values its role's row filters
+                   read, or null), method, outcome (ok, refused, failed, cancelled), status
                    (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
                    bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
                    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,

@@ -75,6 +75,10 @@ export interface ProjectConfig {
   /** `mason serve` wrote it from the environment (src/cli/serve.ts), and writes it again at every start; a project
    *  `mason init` made is never taken over by a serve */
   served?: boolean;
+  /** the run started with MASON_PROJECT_READONLY=1 (src/cli/dev.ts records it at every start, and removes it at a start
+   *  without): the project's files are deployed and may not be written here, by the run or by a command beside it
+   *  (`projectWriteRefusal`) */
+  projectReadOnly?: boolean;
   /** `mason init demo` made it: its database is the demo database `mason start` hosts in `.mason/demo/` (src/demo/source.ts),
    *  on the loopback port the sources file's URL names (the port is in that URL alone, never recorded twice). Read by
    *  polling only: the demo database has no change log. Kept by `mason destroy`, so the next start seeds it again */
@@ -237,12 +241,64 @@ export function databaseMoved(p: Project, answersAs: string): string | null {
   return says === answersAs ? null : says;
 }
 
+/** The setting that says the project's files are deployed, and read-only where Mason runs (`projectWriteRefusal`). */
+export const READONLY_SETTING = "MASON_PROJECT_READONLY";
+
+/** MASON_PROJECT_READONLY as the environment says it: 1 true, 0 or unset false, anything else what is wrong with it. */
+export function projectReadOnlySetting(env: Readonly<Record<string, string | undefined>>): boolean | { problem: string } {
+  const v = env[READONLY_SETTING];
+  if (v === undefined || v === "" || v === "0") return false;
+  if (v === "1") return true;
+  return { problem: `${READONLY_SETTING}=${JSON.stringify(v)}: 1 (the project's files are deployed, and read-only here) or 0 (the default)` };
+}
+
+/** what a refused edit of a deployed project says to run next */
+const READONLY_NEXT: NonNullable<Failure["next"]> = [["mason status", "what Mason syncs here, as the deployed files say"]];
+
+/**
+ * WHETHER THE PROJECT'S FILES MAY BE WRITTEN HERE — THE ONE AUTHORITY (issue 473): null when they may, else the refusal.
+ * A deployment that ships its committed project folder (CI, GitOps, a platform that deploys the folder) runs the files
+ * as committed: an edit on the server would run what nobody committed, and the next deploy would undo it without a word.
+ * MASON_PROJECT_READONLY=1 says so, and EVERY WRITER OF A PROJECT FILE ASKS THIS FIRST and writes nothing on a refusal:
+ * the sources file (`mason add` and `mason remove` at both entrances, the page's Add and Remove: src/cli/source-edit.ts
+ * `sourceToEdit`; `mason serve`'s first file, `serveSource`), `mason.yml` (src/cli/pin.ts `ensurePin`) and what `mason
+ * init` writes (the sources, roles and generated tables' files, `.env`, `.gitignore`). The users (`.mason/users.json`),
+ * the sync and every read are not the project's files, and are unchanged.
+ *
+ * Read from two places, either refusing: this process's environment, and THE RECORD the run makes in the project's
+ * config at its start (`projectReadOnly`, src/cli/dev.ts) — so a command beside the run (`docker compose exec mason
+ * mason add …`), with the run up or down, is refused whatever its own environment says (`MASON_PROJECT_READONLY=0
+ * mason add` does not un-say the run's). `root` is the project's (where `.mason/` is), or null where no record is to be
+ * read (`mason serve` before it writes the config: its own environment decides). Fail closed: a value that is not 0 or
+ * 1, or a config that cannot be read, cannot tell, and refuses.
+ */
+export function projectWriteRefusal(root: string | null, env: Readonly<Record<string, string | undefined>>): Failure | null {
+  const set = projectReadOnlySetting(env);
+  if (typeof set !== "boolean") {
+    return { message: `${set.problem}, so whether the project's files may be written here cannot be told`, code: "refused",
+      why: "Mason writes none of them until it can tell", fix: `set ${READONLY_SETTING}=1 or ${READONLY_SETTING}=0, or unset it`, next: READONLY_NEXT };
+  }
+  const p = root === null ? null : readProject(root);
+  if (p !== null && "broken" in p) {
+    return { message: `whether the project's files may be written here cannot be told: ${p.file}: ${p.broken}`, code: "refused",
+      why: "the config records whether Mason runs the project read-only, and Mason writes none of its files until it can tell", fix: brokenProblem(p).fix, next: READONLY_NEXT };
+  }
+  const recorded = p?.config.projectReadOnly === true;
+  if (!set && !recorded) return null;
+  return { message: `the project's files are read-only here (${READONLY_SETTING}=1${set ? "" : " when Mason last started"})`, code: "refused",
+    why: "Mason runs them as they were deployed: an edit here would run what nobody committed, and the next deploy would undo it",
+    fix: "edit the files and deploy them: mason add or mason remove where the project is committed, then commit and deploy",
+    next: READONLY_NEXT };
+}
+
 /**
  * A SETTING A START REFUSES, for the start that is typed and the run it spawns alike: read by the parent where the person
  * (or --json) reads the answer, and by the run, which `mason start --attach` and `mason serve` reach without the parent.
  * One list, because a check in the run alone reaches a background start as "the run stopped", its way out in a log.
  */
 export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { serve: boolean }): Failure | null {
+  const readOnly = projectReadOnlySetting(env);
+  if (typeof readOnly !== "boolean") return { message: readOnly.problem, code: "refused", fix: `set ${READONLY_SETTING}=1 or ${READONLY_SETTING}=0, or unset it` };
   const top = () => sourcesTop(p.root, p.folder);
   const pollMs = pollMsRetired(env, top);
   if (pollMs !== null) return { code: "refused", ...pollMs };

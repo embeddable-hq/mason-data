@@ -27,7 +27,7 @@ test("every request is read back as the listener built it: the statement, the ou
   const said: string[] = [];
   const ledger = await RequestLedger.open(store, (l) => said.push(l), { days: 7 });
   const t0 = Date.now() - 60_000;
-  ledger.record(row({ requestId: "a1", at: new Date(t0), session: 4, rows: 20, payload: "SELECT id FROM public.orders LIMIT 20", bytesSent: 812 }));
+  ledger.record(row({ requestId: "a1", at: new Date(t0), session: 4, rows: 20, payload: "SELECT id FROM public.orders LIMIT 20", bytesSent: 812, clientAddress: "203.0.113.7" }));
   ledger.record(row({ requestId: "a2", at: new Date(t0 + 1000), session: 4, method: "EXECUTE", status: 400, sqlstate: "42P01", error: 'relation "nope" does not exist',
     detail: "the detail", hint: "the hint", durationMs: 3, payload: "SELECT * FROM nope", client: "postgres:unnamed", tokenName: "bi-tool" }));
   ledger.record(row({ requestId: "a3", at: new Date(t0 + 2000), status: 500, sqlstate: "XX000", error: "it broke\nsecond line", payload: "x".repeat(10), payloadTruncated: true }));
@@ -35,10 +35,10 @@ test("every request is read back as the listener built it: the statement, the ou
   await ledger.flush();
   const all = await ledger.recent({ limit: 10 });
   assert.deepEqual(all.map((r) => r.requestId), ["a1", "a2", "a3"], "newest last");
-  assert.deepEqual(all[0], { requestId: "a1", startedAt: new Date(t0).toISOString(), session: 4, applicationName: "Metabase", tokenName: "", user: "", role: "", attributes: null, method: "QUERY", outcome: "ok", status: "completed",
+  assert.deepEqual(all[0], { requestId: "a1", startedAt: new Date(t0).toISOString(), session: 4, applicationName: "Metabase", clientAddress: "203.0.113.7", tokenName: "", user: "", role: "", attributes: null, method: "QUERY", outcome: "ok", status: "completed",
     sqlstate: null, message: null, detail: null, hint: null, rows: 20, durationMs: 12, endedAt: new Date(t0 + 12).toISOString(), bytesSent: 812,
-    query: "SELECT id FROM public.orders LIMIT 20", queryTruncated: false }, "ended: started + its duration; the bytes the listener counted");
-  assert.deepEqual(all[1], { requestId: "a2", startedAt: new Date(t0 + 1000).toISOString(), session: 4, applicationName: "", tokenName: "bi-tool", user: "", role: "", attributes: null, method: "EXECUTE", outcome: "refused", status: "failed",
+    query: "SELECT id FROM public.orders LIMIT 20", queryTruncated: false }, "ended: started + its duration; the bytes the listener counted; the client's address as client_addr");
+  assert.deepEqual(all[1], { requestId: "a2", startedAt: new Date(t0 + 1000).toISOString(), session: 4, applicationName: "", clientAddress: null, tokenName: "bi-tool", user: "", role: "", attributes: null, method: "EXECUTE", outcome: "refused", status: "failed",
     sqlstate: "42P01", message: 'relation "nope" does not exist', detail: "the detail", hint: "the hint", rows: null, durationMs: 3, endedAt: new Date(t0 + 1003).toISOString(),
     bytesSent: null, query: "SELECT * FROM nope", queryTruncated: false },
     "a client with no application_name is '', never the log's placeholder");

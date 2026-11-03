@@ -19,7 +19,8 @@ paths:
   `Session.refuse` alone, the one sender of a statement's ErrorResponse) (every request is
   recorded in an ops schema in DuckDB, so a failed one can be debugged later — a BI tool met an error on the test server
   and nothing could be found afterwards; the run passed `record: () => undefined`). The listener builds the row
-  (`recordRequest`, src/api/postgres/server.ts: SQLSTATE, message, DETAIL, HINT, rows, session, application_name, a
+  (`recordRequest`, src/api/postgres/server.ts: SQLSTATE, message, DETAIL, HINT, rows, session, application_name, the
+  client's address (`client_addr`, read from `Session.clientAddr` alone: src/api/postgres/proxy.ts `clientAddress`), a
   token's NAME, never the token, a `mason user`'s name and its ROLE), `RequestLedger` (src/duck/requests.ts) writes it in batches on a connection of its
   own — never the sync's writer turn — and keeps `MASON_HISTORY_DAYS` days (7). A failed write is said once and
   fails no statement. `mason logs --requests` and `mason status` read it through the run's command server, never the

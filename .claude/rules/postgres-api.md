@@ -129,6 +129,13 @@ differ from Postgres — the engine's own rules (what is answered, what is refus
   TLS start** (`directTls`): a connection's first byte 0x16 is a ClientHello (`sslnegotiation=direct`, a
   TLS terminator in front) and is TLS at once, ALPN `postgresql`, the bytes read unshifted onto the socket whole —
   never a second read path; a plain listener closes it saying so in the log.
+- **A PROXY header is believed only from the addresses `MASON_PG_PROXY_FROM` names** (`proxy.ts`, read by
+  `pgListenerSettings`; docs/POSTGRES-API.md "Behind a TCP proxy"): a connection from one MUST begin with a valid v2
+  header, read whole before anything else (SSLRequest, ClientHello, startup, CancelRequest), bounded at 216 bytes past
+  its first 16 and 5 s; a header from any other address, or on a share's socket, is refused, never believed. Why: a
+  header is a claim about who connected, and the request log is believed. **The client's address has ONE reader**
+  (`clientAddress`, kept as `Session.clientAddr`): the request log's `client_addr` and the `connected` line read it,
+  never `socket.remoteAddress`. DETECTOR: `tests/postgres-api/proxy.test.ts`, `tests/duck-proxy-wire.test.ts`.
 - **What a connection may do is its SOCKET'S, never the server's** (`Door`, `Session.door`, `openShare`; docs/POSTGRES-API.md
   "From a cloud BI tool"): TLS, who logs in, what a login is told. One server with two sockets, the same sessions,
   store, roles and request log, so a new socket is a door, never a branch in the session. **A share's socket is TLS or

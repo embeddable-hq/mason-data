@@ -15,6 +15,22 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Behind a TCP load balancer or proxy, the request log can name each real client**: set `MASON_PG_PROXY_FROM` to the
+  proxy's own addresses (CIDRs, comma-separated) and turn on its PROXY protocol v2 (an NLB's target group, HAProxy's
+  `send-proxy-v2`). A connection from those addresses must then begin with the header, and one from any other address
+  that sends a header is refused. Every request now records the client's address (`client_addr`, `clientAddress` in
+  `mason logs --requests --json`) and the `connected` log line says `from <address>`. Unset, nothing else changes.
+- **`mason login` and `mason logout` sign this machine in to a hosted Mason service, and out of it.** Login prints a
+  page and a code to approve in a browser, then saves the login in `~/.config/mason/credentials.json` (0600), outside
+  every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this
+  machine). Nothing changes for a project, `mason start` or `mason serve`. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md)
+  is the API they speak.
+- **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
+  ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
+  beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
+  them", and the page's Tables list says why in place of the buttons (`sourcesReadOnly` in `mason status --json`). Before,
+  such an edit ran a config nobody committed, and the next deploy undid it without a word. A value other than `0` or `1`
+  refuses the start. Unset, nothing changes.
 - **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
   COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
   of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE
@@ -302,7 +318,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A statement that reads a numeric through many levels of subqueries or WITH queries plans in milliseconds.** Each
   level that read the level below more than once (`a + a + a` over a derived table, a chain of WITH queries) multiplied
   the work: eight levels took about a second to plan and twelve took over a minute, during which every other session's
-  statements waited. A numeric read through a UNION ALL at every level is not yet covered.
+  statements waited. This now holds too for a numeric whose exact digits Mason works out itself (a quotient such as
+  `amount / 3`, a numeric read through a `UNION ALL` at every level, `c + c - c` at every level): deep nested numerics
+  are planned, answered and stored in a generated table in bounded time. Before, eight such levels sent the synced data
+  several megabytes of SQL and took about a second, and ten failed with an internal error or ran out of memory.
 
 ## Known
 
