@@ -8,8 +8,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ANSWERS, envFor, fakeService, home, newToken, runForms, runToken, SECRETS, showsRun, type Reply, type Req } from "./hosted-fake.ts";
 import { runMason, type Answer } from "./cli-matrix.ts";
-import { AT, created, hosted, ok, ONE, PASSWORD, project, REPLICAS, replicaOf, URL_ } from "./replica-fake.ts";
-import { checkLines, heldReplica, MIN_PASSWORD, urlPassword, wordless } from "../src/cli/replica-hosted.ts";
+import { AT, CHECKS, created, hosted, ok, ONE, PASSWORD, project, REPLICAS, replicaOf, URL_ } from "./replica-fake.ts";
+import { checkLines, heldReplica, MIN_PASSWORD, ownWordsHold, urlPassword, wordless, type CreateRun } from "../src/cli/replica-hosted.ts";
 import { carriesNoSecret } from "../src/cli/hosted.ts";
 
 test("mason replica create: the URL is read by the variable the sources file names, sent once in the body beside that variable's name, never on the command line or printed; the checks are said one line each; the replica's state waited for until it is ready", async () => {
@@ -234,8 +234,10 @@ test("the pure pieces: a replica held to its grammars, the free text kept out of
   assert.equal(carriesNoSecret(wordless({ ...j, replica: replicaOf({ hostId: PASSWORD }) }), [PASSWORD]), false);
   assert.equal(MIN_PASSWORD, 8);
   assert.deepEqual(urlPassword(`postgres://u:${PASSWORD}@h/d`), { password: PASSWORD });
-  assert.deepEqual(urlPassword("postgres://u:hunter2@h/d"), { short: 7 });
-  assert.deepEqual(urlPassword("postgres://u:x@h/d"), { short: 1 });
+  assert.deepEqual(urlPassword("postgres://u:hunter2@h/d"), { short: true });
+  assert.deepEqual(urlPassword("postgres://u:x@h/d"), { short: true });
+  assert.deepEqual(urlPassword(`postgres://u:${"%20".repeat(8)}@h/d`), { short: true }, "eight spaces read as nothing");
+  assert.deepEqual(urlPassword(`postgres://u:${encodeURIComponent("a\u200bb\u200bc\u200bd\u200be\u200bf\u200bg")}@h/d`), { short: true }, "zero-width marks read as nothing: 7 characters");
   assert.deepEqual(urlPassword("postgres://u@h/d"), { password: null }, "no password: nothing to hold");
   assert.deepEqual(urlPassword("postgres://u:p%40ss%21wd%2A%2A@h/d"), { password: "p@ss!wd**" }, "decoded, every character counted");
   assert.deepEqual(urlPassword("postgres://u:ab%zzcdefgh@h/d"), { password: "ab%zzcdefgh" }, "a malformed escape: held as written, never dropped");
@@ -263,6 +265,38 @@ test("mason replica create allows the creation's POST more than another request'
   }, ["create", "acme/shop", "--region", "eu", "--size", "50", "--json"], { cwd: root });
   assert.equal(r.a.code, 0, r.a.stdout);
   assert.deepEqual(r.requests.map((q) => q.method), ["POST"], "the POST's own answer, no GET after a lost one");
+});
+
+test("the CLI's own words of every honest create — made and ready, waited for, refused with checks, refused — hold no password the rule would send: every window of what was printed that is the CLI's own, taken as a password, is refused before sending (PR 660's review, R2-B2)", { timeout: 300_000 }, async () => {
+  const root = project();
+  let polls = 0;
+  const honest: Array<[string, (r: Req) => Reply]> = [
+    ["made, waited for, ready", (r) => r.method === "POST" ? created({ state: "creating" }) : polls++ % 2 ? ok({ replica: replicaOf() }) : { status: 503, body: {}, headers: { "retry-after": "1" } }],
+    ["refused with its checks", () => ({ status: 422, body: { error: { code: "checks_failed", message: "#" }, failure: "failed", checks: CHECKS } })],
+    ["refused: the first replica", () => ({ status: 403, body: { error: { code: "refused", message: "#", fix: "#" } } })],
+    ["lost, then found", (r) => r.method === "POST" ? "drop" : ok({ replica: replicaOf() })],
+  ];
+  // what the fake sent, said as a placeholder: the windows are the CLI's own words alone
+  // (and the system's words for an answer that did not come, which are masked as a service's are, never the CLI's own)
+  const theirs = [/brisk-otter-4821/g, /2026-11-02T10:00:00\.000Z/g, /Postgres 16 answers|it may write to a synced table|a role that only reads|the role|connects/g,
+    /(?<=The creation's answer was lost \()[^)]*/g];
+  const windows = new Set<string>();
+  let runs = 0;
+  for (const [, v1] of honest) for (const json of [[], ["--json"]]) {
+    const { a, url } = await hosted(v1, ["create", "acme/shop", "--region", "eu", "--size", "50", ...json], { cwd: root });
+    runs++;
+    const run: CreateRun = { r: { org: "acme", name: "shop", from: "argument" }, region: "eu", sizeGb: 50, timeout: { every: "15m", seconds: 900 }, base: url, variable: "DATABASE_URL", from: "DATABASE_URL in .env", source: "app" };
+    let text = `${a.stderr}\n${a.stdout}`;
+    for (const re of theirs) text = text.replace(re, "#");
+    for (const line of text.split("\n")) for (let i = 0; i + 11 <= line.length; i += 5) {
+      const w = line.slice(i, i + 11);
+      if (!w.includes("#") && w.replace(/[^A-Za-z0-9]/g, "").length >= 8) windows.add(JSON.stringify([w, run]));
+    }
+  }
+  assert.equal(runs, honest.length * 2);
+  assert.ok(windows.size > 100, `${windows.size} windows`);
+  const sent = [...windows].map((x) => JSON.parse(x) as [string, CreateRun]).filter(([w, run]) => !ownWordsHold(w, run)).map(([w]) => w);
+  assert.deepEqual(sent, [], "each would have been sent, and an honest run of it refused by the gate");
 });
 
 test("no run of mason replica printed a token or the database's password, nor put either on its command line", () => {

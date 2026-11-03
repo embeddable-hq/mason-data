@@ -33,11 +33,9 @@
  * INERT until a command holds a secret (`holdOutput`): every other command writes as it always did.
  */
 import { failed, serviceStyle, type Failure } from "./command.ts";
-import { bodyRead, ECHO_RUN, echoViews, shapedSecret, wholeIn } from "./hosted.ts";
+import { bodyRead, canonicalTexts, ECHO_RUN, echoViews, ESCAPES, shapedSecret, wholeInCanonical } from "./hosted.ts";
 import { err as styleErr } from "./style.ts";
 
-/** A terminal's control sequences (CSI, OSC), as a person never sees them. */
-const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g;
 /** The eight readings: [with escapes, without] × [keeping `-` and `_`, not] × [a `%XX` decoded, not]. */
 const READINGS = [true, false].flatMap((escapes) => [true, false].flatMap((keep) => [true, false].map((percent) => ({ escapes, keep, percent }))));
 const TAIL = ECHO_RUN - 1;
@@ -47,7 +45,7 @@ const RAW_TAIL = 80;
 const rawTail = (secrets: readonly string[]): number => Math.max(RAW_TAIL, ...secrets.map((x) => 3 * x.length));
 
 /** What a stream has written, as the gate reads it: the last characters of each reading, and of the text. */
-export interface Written { reads: string[]; raw: string }
+export interface Written { reads: string[]; raw: string; /** `raw` in the one reading, made once when it is first asked for */ canonical?: string[] }
 export const nothingWritten = (): Written => ({ reads: READINGS.map(() => ""), raw: "" });
 
 /**
@@ -92,8 +90,9 @@ export function readingsCarry(read: Written, secrets: readonly string[], o: { pa
   if (shapedSecret(read.raw, o) || shapedSecret(read.raw.replace(ESCAPES, ""), o)) return true;
   for (const secret of secrets) {
     if (!secret) continue;
-    // whole, as written, in any case or `%XX`-decoded, with its terminal escapes or without (src/cli/hosted.ts wholeIn)
-    if (wholeIn(read.raw, secret) || wholeIn(read.raw.replace(ESCAPES, ""), secret)) return true;
+    // whole, in the one reading, with its terminal escapes and without them (src/cli/hosted.ts wholeIn)
+    read.canonical ??= canonicalTexts(read.raw);
+    if (read.canonical.some((t) => wholeInCanonical(t, secret))) return true;
     for (const { keep, n, grams } of echoViews(secret, o.run ?? ECHO_RUN)) {
       if (n === 0) continue;
       // a text with no escape and no `%` reads the same in several ways: each distinct reading is scanned once

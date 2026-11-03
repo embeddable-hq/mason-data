@@ -39,17 +39,17 @@
  * 124 the wait timed out (nothing stopped: `mason replica status` says how it goes).
  */
 import { setTimeout as sleep } from "node:timers/promises";
-import { endText, errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { call, carriesNoSecret, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer, type Service } from "./hosted.ts";
+import { endText, errorJson, exitOf, failed, failureText, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { call, canonicalSecret, carriesNoSecret, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer, type Service } from "./hosted.ts";
 import { loginOrgs, orgNamed, REPLICA_PART, replicaNamed, replicaText, tokenFor, type Replica } from "./replica.ts";
-import { holdOutput, outputRefused } from "./output-gate.ts";
+import { holdOutput, readingsCarry, readingsOf, type Written } from "./output-gate.ts";
 import { theProject } from "./project.ts";
 import { readSource, shownPath } from "./sources.ts";
 import { parseSource } from "./preflight.ts";
 import { parseDuration } from "../lib/table-sync.ts";
 import { sayAgain } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
-import { err as styleErr, out as styleOut, type Style } from "./style.ts";
+import { err as styleErr, out as styleOut, PLAIN, type Style } from "./style.ts";
 
 /** How long the creation's POST may take: the service answers once Mason's checks of the source are done. */
 export const CREATE_MS = 60_000;
@@ -100,7 +100,9 @@ export const REPLICA: CommandSpec = {
   project's sources file names, by its variable (url: \${DATABASE_URL}): its value is read here, from .env.local,
   .env or the shell, and sent once to the service for Mason's checks of the source; it is never taken on the
   command line, never printed and never in --json, and the replica reads it by that variable. A url: written in
-  the file is refused: write url: \${DATABASE_URL} and put the URL in .env. create waits until the service has run
+  the file is refused: write url: \${DATABASE_URL} and put the URL in .env. A URL whose password is under 8
+  characters, or is in the words this command prints itself, is refused too, before anything is sent: nothing
+  could keep it out of what is printed. create waits until the service has run
   Mason's checks of the database (up to a minute) and says each check, one line each, as the service words them;
   then until its region has made the replica (--timeout bounds that wait; the replica is made all the same).
   An admin or an owner of the organisation creates one. An account's FIRST replica is made in the service's web
@@ -356,28 +358,135 @@ async function list(org: string | null, json: boolean): Promise<number> {
   return 0;
 }
 
-/** A password shorter than this is not sent: no boundary can tell it apart from ordinary words in what is printed. */
+/** A password shorter than this, in the one reading (src/cli/hosted.ts `canonicalSecret`), is not sent: no boundary can
+ *  tell it apart from ordinary words in what is printed. */
 export const MIN_PASSWORD = 8;
 
 /**
  * THE URL'S PASSWORD, AS THIS COMMAND HOLDS IT (PR 660's review, B1: one rule for every boundary): decoded (a malformed
  * escape as written), held beside the token in the ONE list of secrets every boundary reads — the exact test of every
- * value (`carriesNoSecret`), the masks of free text (`serviceText`) and the output's gate — each reading it whole (as
- * written, in any case, `%XX`-decoded: src/cli/hosted.ts `wholeIn`) and, when its body is long enough, by its runs
- * (`MIN_BODY_RUN`). None for a URL without one; `short` for one under `MIN_PASSWORD` characters, which is not sent.
+ * value (`carriesNoSecret`), the masks of free text (`serviceText`) and the output's gate — each by the one reading
+ * (src/cli/hosted.ts `readUnits`: whole, and by its runs when its body is long enough). None for a URL without one;
+ * `short` for one under `MIN_PASSWORD` characters in that reading, which is not sent.
  */
-export function urlPassword(url: string): { password: string | null } | { short: number } {
+export function urlPassword(url: string): { password: string | null } | { short: true } {
   let raw = "";
   try { raw = new URL(url).password; } catch { raw = ""; }   // not a URL: parseSource refused it before this
   // decoded, as a mask reads text; a malformed escape held as it is written, never dropped
   const password = ((): string => { try { return decodeURIComponent(raw); } catch { return raw; } })();
   if (password === "") return { password: null };
-  const length = [...password].length;
-  return length < MIN_PASSWORD ? { short: length } : { password };
+  return [...canonicalSecret(password)].length < MIN_PASSWORD ? { short: true } : { password };
 }
 
+/** What a creation prints from, before it sends anything: every value of this command line and this machine. */
+export interface CreateRun { r: Replica; region: string; sizeGb: number; timeout: { every: string; seconds: number }; base: string; variable: string; from: string; source: string }
+
+/**
+ * EVERY WORD A CREATION PRINTS OF ITS OWN, by the builders it prints with (`create` prints through these alone): its
+ * progress, the lines of a lost answer and of the wait, and each failure and report it can end with. What the service
+ * sends goes in where a builder takes it, through the masks and the exact test. `printedCorpus` renders them.
+ */
+export function createWords(c: CreateRun) {
+  const name = replicaText(c.r);
+  const again: NextStep = [`mason replica create ${name} --region ${c.region} --size ${c.sizeGb}`, "create it again"];
+  const status = statusStep(c.r);
+  return {
+    again, status,
+    progress: `Creating ${name} on ${c.base}: Mason checks the database ${c.variable} names (${c.from}) from the replica's side, up to a minute`,
+    lost: (why: string, st: ReplicaState): string => `  The creation's answer was lost (${why}); the service has ${name}, ${STATE_WORDS[st]}`,
+    wait: (st: ReplicaState, unsure: string | null): string => unsure === null ? STATE_WORDS[st] : `${STATE_WORDS[st]}; the service could not say more just now (${unsure}): asking again`,
+    unsureOf: (what: string, statusCode: number): string => `${what} answered ${statusCode}`,
+    /** a 403 says who may, and where an account's first replica is made (the API refuses it: a person is asked there) */
+    refusedNext: (st: number): NextStep[] => st === 403
+      ? [["mason login", `sign in as an admin or an owner of ${c.r.org}; an account's first replica is made in the service's web app, ${c.base}`]]
+      : refusedNext(st, c.r.org, "an admin or an owner", again),
+    /** the checks failed: they are Mason's own, which mason doctor runs here against the same database */
+    checksFailedNext: [["mason doctor", "the same checks of the database, run here"], again] as NextStep[],
+    lostFailure: (sent: Failure, absent: boolean): Failure => ({ ...sent,
+      why: `${sent.why ?? "no answer"}; ${absent ? "asked since, the service has no such replica: it was not made" : "whether it was made is not known"}`,
+      fix: `mason replica status ${name} says whether it was; if not, create it again`, next: [status, again] }),
+    failed: (why: string): Failure => ({ message: `${name} was not made: its region could not make it, after every attempt`, code: "failed", ...(why ? { why } : {}),
+      fix: `an admin or an owner of ${c.r.org} tries it again on its page in the service's web app (${c.base})`, next: [status] }),
+    deleted: (st: "deleting" | "deleted"): Failure => ({ message: `${name} is ${st === "deleting" ? "being deleted" : "deleted"}`, code: "refused",
+      why: "it was deleted while it was made", fix: `create it again, as ${name} or under another name`, next: [again] }),
+    timedOut: (st: ReplicaState): Failure => ({ message: `${name} was not ready within ${c.timeout.every}`, code: "timeout", why: `it was last ${STATE_WORDS[st]}`,
+      fix: `nothing was stopped, and its region goes on making it: mason replica status ${name} says how it goes; a longer wait is --timeout 30m`, next: [status] }),
+    gone: (): Failure => ({ message: `the service has no ${name} now`, code: "not_found", why: "it was made, and is gone: deleted, or its creation undone",
+      fix: `mason replica list ${c.r.org} says the organisation's replicas`, next: [[`mason replica list ${c.r.org}`, "the organisation's replicas"]] }),
+    report: (state: HostedReplica, next: readonly NextStep[], st: Style): string => reportText({ headline: `Created ${name} on ${c.base}: it is ready`,
+      details: rows(state).filter(([k]) => k !== "state"),
+      tips: ["The service does not keep the database's URL: the replica reads it by its variable, from its own environment."], next }, st),
+  };
+}
+
+/** The `/v1/` failures the contract documents for a creation and a state's answer, each status with its codes. */
+const DOCUMENTED: ReadonlyArray<[number, readonly string[]]> = [[400, ["bad_request"]], [401, ["unauthenticated"]], [403, ["refused"]], [404, ["not_found"]],
+  [409, ["refused", "busy"]], [413, ["too_large"]], [415, ["bad_request"]], [422, ["checks_failed"]], [429, ["slow_down"]], [500, ["failed"]],
+  [502, ["unavailable"]], [503, ["checks_unknown", "unavailable"]], [504, ["unavailable"]]];
+
+/**
+ * EVERYTHING A CREATION CAN PRINT OF ITS OWN, rendered (R2-B2: a password made of the CLI's own words failed an honest run,
+ * after the replica was made): each builder of `createWords`, with this run's own values, in each order it is printed —
+ * a person's stderr, stdout and the two together, and --json — every service's value a placeholder that carries no
+ * word. The output's gate reads what a run writes; what it could read of the CLI's own is in here.
+ */
+export function printedCorpus(c: CreateRun, tail = 256): string[] {
+  const w = createWords(c), service: Service = { base: c.base }, P = "#";
+  const failure = (f: Failure): string => failureText("replica", f, PLAIN);
+  const asJson = (v: Record<string, unknown>, next: readonly NextStep[]): string => jsonText(REPLICA, v, next);
+  const sample = (state: ReplicaState, pending: HostedReplica["pending"] = []): HostedReplica =>
+    ({ org: c.r.org, name: c.r.name, region: c.region, sizeGb: c.sizeGb, hostId: P, state, createdAt: P, allowlist: [], pending });
+  const pendings: Array<HostedReplica["pending"]> = [[], ...(["create", "allowlist"] as const).flatMap((change) => (["pending", "failed"] as const).flatMap((st) =>
+    [0, 1, 2].map((attempts) => [{ change, state: st, attempts, failure: P, nextAttemptAt: P }])))];
+  const checks: SourceChecks[] = OUTCOMES.map((outcome) => ({ source: c.source, outcome, checks: CHECK_STATUSES.map((status) => ({ name: P, status, detail: P, fix: P })), missing: [P] }));
+  const ends: Array<{ stdout: string } | { stderr: string }> = [];
+  const nexts: NextStep[][] = [nextOf(sample("ready")), [w.status]];
+  const failures: Failure[] = [w.failed(P), w.failed(""), w.deleted("deleting"), w.deleted("deleted"), w.gone(),
+    ...STATES.map((st) => w.timedOut(st)),
+    ...[{ why: P }, { why: "no answer within 60 s" }, { why: "no answer within 15 s" }].flatMap((x) => [true, false].map((absent) =>
+      w.lostFailure({ message: `could not reach ${c.base}`, code: "failed", why: x.why, fix: `check this machine is online, and that MASON_CLOUD_URL names the service (it is ${c.base})`, next: [] }, absent))),
+    ...DOCUMENTED.flatMap(([status, codes]) => codes.flatMap((code) => [P, undefined].map((why) => {
+      const f = serviceFailure({ status, json: { error: { code, message: P, ...(why ? { why, fix: P } : {}) } }, what: `POST /v1/replicas/${c.r.org}`, retryAfter: null }, [], w.refusedNext)!;
+      return status === 422 ? { ...f, next: w.checksFailedNext } : f;
+    }))),
+    ...[200, 201, ...DOCUMENTED.map(([st]) => st)].flatMap((status) => [true, false].flatMap((isJson) => ["a replica was created", "a replica's state was asked for"].map((step) =>
+      unexpected(service, { status, json: isJson ? {} : undefined, what: step === "a replica was created" ? `POST /v1/replicas/${c.r.org}` : `GET /v1/replicas/${c.r.org}/${c.r.name}`, retryAfter: null }, step))))];
+  for (const f of failures) ends.push({ stderr: failure(f) }, { stdout: asJson({ replica: sample("creating"), checks, error: errorJson(f) }, f.next ?? []) }, { stdout: asJson({ checks, error: errorJson(f) }, f.next ?? []) });
+  for (const pending of pendings) for (const next of nexts) {
+    ends.push({ stdout: w.report(sample("ready", pending), next, PLAIN) }, { stdout: asJson({ replica: sample("ready", pending), checks }, next) }, { stdout: asJson({ replica: sample("ready", pending), checks: null }, next) });
+  }
+  // the lines on stderr before an end, in the order they are printed: the progress, the checks or a lost answer's line,
+  // then the wait's lines (each state, as it is or unsure), in both orders
+  const unsure = [null, P, ...[429, 500, 502, 503, 504].map((st) => w.unsureOf(`GET /v1/replicas/${c.r.org}/${c.r.name}`, st)), `could not reach ${c.base} (no answer within 15 s)`];
+  const waits = (["checking", "creating"] as const).flatMap((st) => unsure.map((u) => `  ${w.wait(st, u)}`));
+  const before = [[w.progress, ...checkLines(checks), ...waits], [w.progress, ...STATES.map((st) => w.lost(P, st)), ...[...waits].reverse()]];
+  const spinner = `mason ${REPLICA.name}`;
+  const corpus: string[] = [];
+  for (const lines of before) {
+    const err = lines.join("\n");
+    corpus.push(`${spinner}\n${err}`);
+    // each end after what came before it: the gate reads across writes as far as its tail reaches (`tail`)
+    for (const end of ends) corpus.push(`${err.slice(-tail)}\n${"stdout" in end ? end.stdout : end.stderr}`);
+  }
+  for (const end of ends) corpus.push("stdout" in end ? end.stdout : end.stderr);
+  return corpus;
+}
+
+/**
+ * WHETHER THE CLI'S OWN WORDS HOLD THE PASSWORD, as the output's gate would read them (its own test, `readingsCarry`, on
+ * every text of `printedCorpus`): then an honest run would be refused by the gate, after the replica was made, blaming
+ * the service. Such a password is refused before anything is sent, in words that say so. The corpus's readings are made
+ * once a run.
+ */
+export function ownWordsHold(password: string, c: CreateRun): boolean {
+  const tail = Math.max(256, 3 * password.length), key = `${tail}\u0000${JSON.stringify(c)}`;
+  let reads = CORPUS.get(key);
+  if (reads === undefined) { reads = printedCorpus(c, tail).map((text) => readingsOf(text)); CORPUS.set(key, reads); }
+  return reads.some((read) => readingsCarry(read, [password]));
+}
+const CORPUS = new Map<string, Written[]>();
+
 async function create(r: Replica, o: { region: string; sizeGb: number; timeout: { every: string; seconds: number } }, json: boolean): Promise<number> {
-  const again: NextStep = [`mason replica create ${replicaText(r)} --region ${o.region} --size ${o.sizeGb}`, "create it again"];
   // THE DATABASE: the project's sources file names it by a variable, read here by the one reader
   const t = theProject(process.cwd());
   if ("problem" in t) return fail({ message: t.problem, code: t.code, why: t.why ?? "a replica syncs the database this project's sources file names", fix: t.fix, next: t.next }, json);
@@ -399,27 +508,33 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
       fix: `set ${variable} to the database's URL, postgres://user:password@host:5432/your_app` }, json);
   }
   const url = src.resolved;
+  const service = serviceOf();
+  if (isFailure(service)) return fail(service, json);
+  const run: CreateRun = { r, region: o.region, sizeGb: o.sizeGb, timeout: o.timeout, base: service.base, variable, from: src.from, source: src.name };
+  const w = createWords(run);
+  // THE PASSWORD, before anything is held or sent (neither refusal names it): one too short to be told apart from
+  // words, or one the CLI's own words hold, is not sent, since no honest run could print without the gate refusing it
   const pw = urlPassword(url);
+  const notSent = (message: string, why: string): number => fail({ message, code: "refused", why,
+    fix: "name a database user with another password in the URL, or create the replica in the service's web app" }, json);
   if ("short" in pw) {
-    return fail({ message: `the password in ${variable} (${src.from}) is ${pw.short} character${pw.short === 1 ? "" : "s"} long, under the ${MIN_PASSWORD} this command sends`, code: "refused",
-      why: "a password this short cannot be told apart from ordinary words in what the service answers, so nothing could keep it out of what is printed; it is not sent",
-      fix: "name a database user with a longer password in the URL, or create the replica in the service's web app" }, json);
+    return notSent(`the password in ${variable} (${src.from}) is shorter than the ${MIN_PASSWORD} characters this command sends`,
+      "a password this short cannot be told apart from ordinary words in what the service answers, so nothing could keep it out of what is printed; it is not sent");
+  }
+  if (pw.password !== null && ownWordsHold(pw.password, run)) {
+    return notSent(`the password in ${variable} (${src.from}) is in the words this command prints itself`,
+      "this command keeps the password out of everything it prints by finding it there, and its own words (its lines, its steps, the replica's name or the service's address) hold this one: it could not print its answer, so it is not sent");
   }
   const held = pw.password === null ? [] : [pw.password];
   const s = signedIn("a replica is created", `mason replica create ${replicaText(r)}`, json, held);
   if (isFailure(s)) return fail(s, json);
-  const { service, token } = s;
+  const { token } = s;
   // ONE list of what this command holds, read by every boundary: the exact test, the masks and the output's gate
   const secrets = [token, ...held];
   const where = `/v1/replicas/${r.org}`;
-  // a 403 says who may, and where an account's first replica is made (the API refuses it: a person is asked there)
-  const refusedOf = (a: Answer, step: string): Failure => serviceFailure(a, secrets, (st) => st === 403
-    ? [["mason login", `sign in as an admin or an owner of ${r.org}; an account's first replica is made in the service's web app, ${service.base}`]]
-    : refusedNext(st, r.org, "an admin or an owner", again)) ?? unexpected(service, a, step);
-  if (!json) say(`Creating ${replicaText(r)} on ${service.base}: Mason checks the database ${variable} names (${src.from}) from the replica's side, up to a minute`);
+  const refusedOf = (a: Answer, step: string): Failure => serviceFailure(a, secrets, w.refusedNext) ?? unexpected(service, a, step);
+  if (!json) say(w.progress);
 
-  // what the gate has refused already (the CLI's own words holding the password whole) sends nothing: its refusal stands
-  if (outputRefused()) return 1;
   // THE CREATION: the service checks the source, then answers 201, or why it was not made (with the checks, said)
   const sent = await call(service, "POST", where, { token, timeoutMs: CREATE_MS,
     json: { name: r.name, region: o.region, sizeGb: o.sizeGb, sources: [{ name: src.name, variable, url }] } });
@@ -430,11 +545,10 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
     // a POST that got no answer may have made the replica: its state says so (the contract)
     const a = await call(service, "GET", `${where}/${r.name}`, { token });
     const found = !isFailure(a) && a.status === 200 ? replicaAnswer(a, r, secrets) : null;
-    if (found === null) {
-      const known = !isFailure(a) && a.status === 404 ? "asked since, the service has no such replica: it was not made" : "whether it was made is not known";
-      return fail({ ...sent, why: `${sent.why ?? "no answer"}; ${known}`, fix: `mason replica status ${replicaText(r)} says whether it was; if not, create it again`, next: [statusStep(r), again] }, json);
-    }
-    if (!json) say(`  The creation's answer was lost (${sent.why ?? sent.message}); the service has ${replicaText(r)}, ${STATE_WORDS[found.state]}`);
+    // why it got no answer is the system's words, never the CLI's own: masked by what this command holds, as a service's are
+    const why = serviceText(sent.why ?? sent.message, 300, secrets);
+    if (found === null) return fail(w.lostFailure({ ...sent, why }, !isFailure(a) && a.status === 404), json);
+    if (!json) say(w.lost(why, found.state));
     state = found;
     if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
   } else {
@@ -442,8 +556,7 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
     if (sent.status !== 201) {
       const f = refusedOf(sent, "a replica was created");
       if (!json && checks !== null) for (const l of checkLines(checks)) say(l);
-      // the checks failed: they are Mason's own, which mason doctor runs here against the same database
-      const next: readonly NextStep[] = sent.status === 422 ? [["mason doctor", "the same checks of the database, run here"], again] : f.next ?? [];
+      const next: readonly NextStep[] = sent.status === 422 ? w.checksFailedNext : f.next ?? [];
       const failure = { ...f, next };
       if (json) { out(jsonText(REPLICA, { checks, error: errorJson(failure) }, next)); return exitOf(failure); }
       return fail(failure, false);
@@ -465,40 +578,27 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
     const next = error === null ? nextOf(state) : error.next ?? [];
     if (json) { out(jsonText(REPLICA, { replica: state, checks, ...(error ? { error: errorJson(error) } : {}) }, next)); return error ? exitOf(error) : 0; }
     if (error !== null) return fail(error, false);
-    out(reportText({ headline: `Created ${replicaText(r)} on ${service.base}: it is ready`, details: rows(state).filter(([k]) => k !== "state"),
-      tips: ["The service does not keep the database's URL: the replica reads it by its variable, from its own environment."], next }, outStyle()));
+    out(w.report(state, next, outStyle()));
     return 0;
   };
   for (;;) {
     if (state.state === "ready") return ended(null);
-    if (state.state === "failed") {
-      const why = state.pending.map((x) => x.failure).filter((x): x is string => x !== null).join("; ");
-      return ended({ message: `${replicaText(r)} was not made: its region could not make it, after every attempt`, code: "failed", ...(why ? { why } : {}),
-        fix: `an admin or an owner of ${r.org} tries it again on its page in the service's web app (${service.base})`, next: [statusStep(r)] });
-    }
-    if (state.state === "deleting" || state.state === "deleted") {
-      return ended({ message: `${replicaText(r)} is ${state.state === "deleting" ? "being deleted" : "deleted"}`, code: "refused", why: "it was deleted while it was made", fix: `create it again, as ${replicaText(r)} or under another name`, next: [again] });
-    }
-    show(STATE_WORDS[state.state]);
+    if (state.state === "failed") return ended(w.failed(state.pending.map((x) => x.failure).filter((x): x is string => x !== null).join("; ")));
+    if (state.state === "deleting" || state.state === "deleted") return ended(w.deleted(state.state));
+    show(w.wait(state.state, null));
     const left = deadline - Date.now();
-    if (left <= 0) {
-      return ended({ message: `${replicaText(r)} was not ready within ${o.timeout.every}`, code: "timeout", why: `it was last ${STATE_WORDS[state.state]}`,
-        fix: `nothing was stopped, and its region goes on making it: mason replica status ${replicaText(r)} says how it goes; a longer wait is --timeout 30m`, next: [statusStep(r)] });
-    }
+    if (left <= 0) return ended(w.timedOut(state.state));
     await sleep(Math.min(waitMs, left));
     const a = await call(service, "GET", `${where}/${r.name}`, { token });
     waitMs = REPLICA_POLL_MS;
     // an answer that cannot say how it goes is a wait, never an outcome: the timeout bounds it
     if (isFailure(a) || a.status === 429 || a.status >= 500) {
       if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
-      show(`${STATE_WORDS[state.state]}; the service could not say more just now (${isFailure(a) ? serviceText(a.why ?? a.message, 300, secrets) : `${a.what} answered ${a.status}`}): asking again`);
+      show(w.wait(state.state, isFailure(a) ? serviceText(a.why ?? a.message, 300, secrets) : w.unsureOf(a.what, a.status)));
       continue;
     }
     if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
-    if (a.status === 404) {
-      return ended({ message: `the service has no ${replicaText(r)} now`, code: "not_found", why: "it was made, and is gone: deleted, or its creation undone",
-        fix: `mason replica list ${r.org} says the organisation's replicas`, next: [[`mason replica list ${r.org}`, "the organisation's replicas"]] });
-    }
+    if (a.status === 404) return ended(w.gone());
     if (a.status !== 200) return ended(refusedOf(a, "a replica's state was asked for"));
     const now = replicaAnswer(a, r, secrets);
     if (now === null) return ended(unexpected(service, a, "a replica's state was asked for"));

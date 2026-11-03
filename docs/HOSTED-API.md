@@ -159,11 +159,31 @@ its own environment, and a literal would be kept with the project's files. A val
 refused too, and never repeated. The URL is sent this once, for Mason's checks of the database from the replica's side;
 a service never repeats it. The CLI holds its password as a secret of the command beside the token, in the ONE list
 every boundary reads: the exact test of every value (an answer that carries it in a value held to a grammar, or in a
-key, is refused whole), the masks of free text (a check's words, a refusal's), and the output's gate. Each reads it
-WHOLE, whatever its alphabet (as written, in any case, or `%XX`-decoded), and, when it has 8 or more letters, digits,
-`-` and `_`, by those runs too (11 in a row, or all of them when fewer). A password under 8 characters is not sent:
-nothing could tell it apart from ordinary words in what is printed, so the creation is refused before a byte is sent,
-naming its length, never it.
+key, is refused whole), the masks of free text (a check's words, a refusal's, the system's words for an answer that
+did not come), and the output's gate. Each compares it with a text by ONE READING of both (`readUnits` in
+src/cli/hosted.ts), so it is found whatever form it is echoed in:
+
+- its case (upper, lower, mixed; `ß` and `SS` alike);
+- `%XX` escapes, of any or every byte, UTF-8 decoded;
+- each Unicode normal form (NFC, NFD, NFKC, NFKD): a compatibility form (full-width letters, a ligature) as its letters;
+- its accents dropped;
+- a zero-width, format or control character, or a terminal escape, between its characters;
+- another white space (a no-break space, a tab) for a space, or a run of spaces for one.
+
+It is found WHOLE in that reading, and, when it has 8 or more letters, digits, `-` and `_`, by those runs too (11 in
+a row, or all of them when fewer). What no reading reaches is outside this: a homoglyph from another script, its
+characters reversed or spread with other characters between them, base64 or another encoding.
+
+Two passwords are not sent, and the creation is refused before a byte is sent, naming neither the password nor its
+length:
+
+- one under 8 characters in that reading: nothing could tell it apart from ordinary words in what is printed;
+- one the CLI's own words hold: its lines, its steps, the replica's name or the service's address. The output's gate
+  would read it in an honest answer, after the replica was made. The rule reads every word a creation can print of its
+  own, rendered by the builders it prints with (`printedCorpus`), as the gate reads them.
+
+A password that only the service's own words and the CLI's together spell (`fix: set wal` across a check's fix) is
+still read by the gate, and that answer is refused, its words never printed.
 
 **The wait.** The service answers once it has run Mason's checks of the database, within the 60 s the CLI allows this
 one request. A POST that gets no answer may have made the replica: the CLI then asks `GET

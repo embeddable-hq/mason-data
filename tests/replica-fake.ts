@@ -45,7 +45,7 @@ export function project(o: { url?: string | null; file?: string } = {}): string 
 }
 
 /** One run in `cwd` against a fresh fake whose replica endpoints `v1` answers, signed in by MASON_TOKEN; its requests. */
-export async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: { cwd?: string; token?: string; terminal?: number; me?: Reply } = {}): Promise<{ a: Answer; requests: Req[]; token: string }> {
+export async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: { cwd?: string; token?: string; terminal?: number; me?: Reply } = {}): Promise<{ a: Answer; requests: Req[]; token: string; url: string }> {
   const token = o.token ?? newToken("pat"); SECRETS.push(token);
   const fake = await fakeService({ v1, ...(o.me ? { me: o.me } : {}) });
   const h = home();
@@ -54,6 +54,6 @@ export async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: strin
     // the database's URL: never its password, in any form a run prints
     for (const text of [a.stdout, a.stderr]) assert.ok(!text.includes(PASSWORD) && !text.toLowerCase().includes(PASSWORD.toLowerCase()), `mason replica ${argv.join(" ")} printed the database's password:\n${a.stdout}${a.stderr}`);
     assert.ok(!a.argv.some((x) => x.includes(PASSWORD) || x.includes("postgres://")), "the URL is never on the command line");
-    return { a, requests: fake.requests.filter((r) => r.path.startsWith("/v1/")), token };
+    return { a, requests: fake.requests.filter((r) => r.path.startsWith("/v1/")), token, url: fake.url };
   } finally { await fake.close(); }
 }

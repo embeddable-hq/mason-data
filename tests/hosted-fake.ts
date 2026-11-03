@@ -367,3 +367,43 @@ export function writeSaved(h: string, logins: Record<string, { token: string; em
   fs.chmodSync(path.dirname(credentials(h)), 0o700);
   fs.writeFileSync(credentials(h), JSON.stringify({ version: 1, logins }), { mode: 0o600 });
 }
+
+/**
+ * EVERY FORM A SERVICE MAY ECHO A PASSWORD IN (PR 660's class round, R2-B1), each by what it is: what a test holds every
+ * boundary to. Each is read by a person, or a terminal, or a log, as the password: its case, its `%XX` escapes, each
+ * Unicode normal form, its accents dropped, its full-width letters, a zero-width or control character or a terminal
+ * escape between its characters, its white space another. What no reading reaches (a homoglyph, base64, a reversal)
+ * is out of this list, and said in docs/HOSTED-API.md.
+ */
+export const ECHO_FORMS: ReadonlyArray<readonly [what: string, form: (p: string) => string]> = [
+  ["as written", (p) => p],
+  ["upper case", (p) => p.toUpperCase()],
+  ["lower case", (p) => p.toLowerCase()],
+  ["URL-encoded", (p) => encodeURIComponent(p)],
+  ["every byte %XX", (p) => [...new TextEncoder().encode(p)].map((b) => `%${b.toString(16).padStart(2, "0").toUpperCase()}`).join("")],
+  ["NFC", (p) => p.normalize("NFC")],
+  ["NFD", (p) => p.normalize("NFD")],
+  ["NFKC", (p) => p.normalize("NFKC")],
+  ["NFKD", (p) => p.normalize("NFKD")],
+  ["NFD, every byte %XX", (p) => [...new TextEncoder().encode(p.normalize("NFD"))].map((b) => `%${b.toString(16).padStart(2, "0")}`).join("")],
+  ["its accents dropped", (p) => p.normalize("NFD").replace(/\p{M}/gu, "")],
+  ["full-width", (p) => [...p].map((c) => /[!-~]/.test(c) ? String.fromCodePoint(c.codePointAt(0)! + 0xfee0) : c).join("")],
+  ["a zero-width mark between its characters", (p) => [...p].join("​")],
+  ["a control character between its characters", (p) => [...p].join("\u0007")],
+  ["a terminal escape between its characters", (p) => [...p].join("\u001b[1m")],
+  ["its spaces no-break spaces", (p) => p.replace(/ /g, " ")],
+];
+
+/**
+ * WHAT A PERSON READS OF A TEXT, as this test reads it (its own reading, apart from src/'s): terminal escapes, controls
+ * and format characters gone, `%XX` runs decoded, every compatibility form decomposed, marks gone, case folded, white
+ * space one space. A password is printed whole when what a person reads of the output holds what a person reads of it.
+ */
+export function personReads(text: string): string {
+  let t = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g, "");
+  t = t.replace(/(?:%[0-9a-f]{2})+/gi, (run) => { try { return decodeURIComponent(run); } catch { return run; } });
+  t = t.normalize("NFKD").replace(/[\p{M}\p{Cf}]/gu, "").toUpperCase().toLowerCase().normalize("NFKD").replace(/[\p{M}\p{Cf}]/gu, "");
+  return t.replace(/[^\S\n]| /g, " ").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").replace(/ +/g, " ");
+}
+/** Whether a person reads `password` whole in `text` (`personReads`). */
+export const printsWhole = (text: string, password: string): boolean => personReads(text).includes(personReads(password).trim());

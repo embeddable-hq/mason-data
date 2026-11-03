@@ -134,6 +134,8 @@ export function serviceOf(env: NodeJS.ProcessEnv = process.env): Service | Failu
  */
 export function serviceText(s: string, max: number, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN): string {
   let t = maskSecrets(s, secrets, shown);
+  // the value as masked, read as the exact test reads it (with and without its escapes), before a line is made of it
+  if (echoesSecret(t, secrets)) return "****";
   // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
   // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
   t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
@@ -160,8 +162,8 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
  */
 export function maskSecrets(s: string, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN, o: { passwords?: boolean } = {}): string {
   let t = s;
-  // each held secret whole, in any case (`wholeIn`'s reading; an encoded one the exact test and the gate refuse)
-  for (const secret of secrets) if (secret) t = t.replace(new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "****");
+  // each held secret whole, in every form the one reading reads as it (`canonicalMap`): each span of `t` it is found in
+  for (const secret of secrets) t = maskWhole(t, secret);
   // a held secret by its value (`heldRuns`): a mask leaves `****`, a separator, so what lay either side of it is read
   // again as one run; read MASK_PASSES + 1 times and still holding a run to mask, the value is masked whole
   for (let pass = 0; ; pass++) {
@@ -202,15 +204,16 @@ export function maskSecrets(s: string, secrets: readonly string[] = [], shown: M
  */
 function heldRuns(t: string, secrets: readonly string[]): Map<string, { spans: Array<[number, number]>; covered: Set<number>; most: number }> {
   const found = new Map<string, { spans: Array<[number, number]>; covered: Set<number>; most: number }>();
-  const views = [true, false].map((keep) => { const units = bodyChars(t, keep, true); return { keep, units, read: units.map((u) => u.c).join("") }; });
+  const views = [true, false].map((keep) => { const units = bodyChars(t, keep); return { keep, units, read: units.map((u) => u.c).join("") }; });
   for (const secret of secrets) {
     const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
-    const length = bodyChars(raw, true, false).length;
+    const length = bodyChars(raw, true).length;
     // a body shorter than a run is masked whole alone (above), never by runs of ordinary words
     if (length < HELD_RUN) continue;
     const n = Math.min(HELD_RUN, length), spans: Array<[number, number]> = [], covered = new Set<number>();
     for (const { keep, units, read } of views) {
-      const body = bodyChars(raw, keep, false), text = body.map((u) => u.c).join("");
+      // the secret read by the reading the text is read by (`readUnits`): one reading, both sides (PR 660's review, R2-B1)
+      const body = bodyChars(raw, keep), text = body.map((u) => u.c).join("");
       const at = new Map<string, number[]>();
       for (let j = 0; j + n <= text.length; j++) { const w = text.slice(j, j + n); at.set(w, [...(at.get(w) ?? []), j]); }
       const marked = new Array<boolean>(units.length).fill(false);
@@ -262,20 +265,115 @@ export const ECHO_RUN = 11;
 /**
  * A HELD SECRET THAT IS NOT A TOKEN (the database's password `mason replica create` sends, src/cli/replica-hosted.ts):
  * its body may be short, or made of characters a body reading skips (`!*!*…a1`), so it is read by its runs only when its
- * body is at least `MIN_BODY_RUN` characters (a run of fewer is met by ordinary words), and WHOLE always (`wholeIn`): as
- * written, in any case, or with its `%XX` escapes decoded. Every held secret is read both ways at every boundary —
- * the exact test of a value (`echoesSecret`), the masks of free text (`maskSecrets`) and the output's gate
- * (src/cli/output-gate.ts `readingsCarry`) — so no boundary holds it by another rule (PR 660's review, B1).
+ * body is at least `MIN_BODY_RUN` characters (a run of fewer is met by ordinary words), and WHOLE always (`wholeIn`).
+ * Both by THE ONE READING (`readUnits`), the secret and the text alike, at every boundary — the exact test of a value
+ * (`echoesSecret`), the masks of free text (`maskSecrets`) and the output's gate (src/cli/output-gate.ts
+ * `readingsCarry`) — so no boundary, and no side of a comparison, reads it by another rule (PR 660's review, B1, R2-B1).
  */
 export const MIN_BODY_RUN = 8;
-/** `%XX` escapes decoded, one byte each: how a value is read for a secret written encoded. */
-const percentDecoded = (s: string): string => s.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
-/** Whether `s` holds `secret` whole: as written, in any case, or with its `%XX` escapes decoded. */
-export function wholeIn(s: string, secret: string): boolean {
-  if (!secret) return false;
-  const want = secret.toLowerCase();
-  return s.toLowerCase().includes(want) || (s.includes("%") && percentDecoded(s).toLowerCase().includes(want));
+
+/** A terminal's control sequences (CSI, OSC, a two-character escape): a text is read with them and without them, since
+ *  one between a secret's characters hides it from a reading that keeps them (`withoutEscapes`). */
+export const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g;
+/** `t` without its terminal escapes, the second reading of a text that holds one; else `t`. */
+export const withoutEscapes = (t: string): string => t.includes("\x1b") ? t.replace(ESCAPES, "") : t;
+const NO_TRACE = /[\p{M}\p{Cf}]/gu;
+/** One character as the one reading reads it: its compatibility decomposition (NFKD: NFC, NFD and NFKC alike, a
+ *  full-width or ligature form as its letters), its marks and format characters dropped (an accent, a zero-width or
+ *  bidi mark), its case folded (upper then lower: `ß` and `SS` alike), any white space one space, any other control
+ *  nothing. Its characters, in that reading. */
+function readOne(s: string): string {
+  const folded = s.normalize("NFKD").replace(NO_TRACE, "").toUpperCase().toLowerCase().normalize("NFKD").replace(NO_TRACE, "");
+  return folded.replace(/\s/gu, " ").replace(/\p{Cc}/gu, "");
 }
+
+/** A piece of a text as the one reading reads it: what it reads as (`c`, maybe nothing or several characters) and the span
+ *  of the text it was read from. */
+export interface Unit { c: string; from: number; to: number }
+
+/**
+ * THE ONE READING OF A TEXT FOR A SECRET (PR 660's review, R2-B1: the secret and the text were read two ways, and no
+ * Unicode form was one): each code point by `readOne`; a run of `%XX` escapes (unless `percent` is false) as what it
+ * encodes, UTF-8 where it is, a byte each where it is not. Every comparison of a held secret with a text reads BOTH by
+ * it: whole (`canonicalMap`), and by its body (`bodyChars`); a text with a terminal escape, with it and without it.
+ */
+export function readUnits(t: string, percent = true): Unit[] {
+  const out: Unit[] = [];
+  for (let i = 0; i < t.length;) {
+    if (percent && t[i] === "%") {
+      const m = /^(?:%[0-9a-f]{2})+/i.exec(t.slice(i));
+      if (m) {
+        const run = m[0];
+        let decoded: string;
+        try { decoded = decodeURIComponent(run); }
+        catch { decoded = run.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))); }   // not UTF-8: a byte each
+        out.push({ c: [...decoded].map(readOne).join(""), from: i, to: i + run.length });
+        i += run.length;
+        continue;
+      }
+    }
+    const code = t.charCodeAt(i);
+    // ASCII, as readOne reads it, without the normalisations it would leave unchanged: a letter in lower case, white
+    // space one space, a control nothing
+    if (code < 0x80) {
+      const c = code >= 65 && code <= 90 ? String.fromCharCode(code + 32) : (code >= 9 && code <= 13) || code === 32 ? " " : code < 32 || code === 127 ? "" : t[i]!;
+      out.push({ c, from: i, to: i + 1 });
+      i += 1;
+      continue;
+    }
+    const one = String.fromCodePoint(t.codePointAt(i)!);
+    out.push({ c: readOne(one), from: i, to: i + one.length });
+    i += one.length;
+  }
+  return out;
+}
+
+/** A text in the one reading, as one string (every run of spaces one), and for each of its characters the unit it was
+ *  read from: what a secret is found whole in, and the span it is masked by. */
+export function canonicalMap(t: string): { text: string; at: number[]; units: Unit[] } {
+  const units = readUnits(t);
+  let text = "";
+  const at: number[] = [];
+  units.forEach((u, k) => { for (const ch of u.c) { if (ch === " " && (text === "" || text.endsWith(" "))) continue; text += ch; at.push(k); } });
+  return { text, at, units };
+}
+
+const CANON = new Map<string, string>();
+/** A held secret in the one reading, as it is found whole: without white space at either end. */
+export function canonicalSecret(secret: string): string {
+  let c = CANON.get(secret);
+  if (c === undefined) { c = canonicalMap(secret).text.trim(); CANON.set(secret, c); }
+  return c;
+}
+
+/** Whether `s` holds `secret` whole, in the one reading: as written, re-cased, `%XX`-encoded, in any Unicode form,
+ *  its accents dropped, its white space another, a format or control character or a terminal escape inside it. */
+export function wholeIn(s: string, secret: string): boolean {
+  return canonicalSecret(secret) !== "" && canonicalTexts(s).some((t) => wholeInCanonical(t, secret));
+}
+/** `s` in the one reading, with its terminal escapes and (when it has one) without them: what a secret is found whole in. */
+export function canonicalTexts(s: string): string[] {
+  const bare = withoutEscapes(s);
+  return bare === s ? [canonicalMap(s).text] : [canonicalMap(s).text, canonicalMap(bare).text];
+}
+/** Whether a text already in the one reading (`canonicalTexts`) holds `secret` whole. */
+export const wholeInCanonical = (canonical: string, secret: string): boolean => { const want = canonicalSecret(secret); return want !== "" && canonical.includes(want); };
+
+/** `t` with every span the one reading finds `secret` whole in masked, `****`. */
+function maskWhole(t: string, secret: string): string {
+  const want = canonicalSecret(secret);
+  if (want === "") return t;
+  const m = canonicalMap(t), spans: Array<[number, number]> = [];
+  for (let i = m.text.indexOf(want); i >= 0; i = m.text.indexOf(want, i + 1)) spans.push([m.units[m.at[i]!]!.from, m.units[m.at[i + want.length - 1]!]!.to]);
+  if (!spans.length) return wholeIn(t, secret) ? "****" : t;
+  const merged: Array<[number, number]> = [];
+  for (const sp of spans) { const last = merged[merged.length - 1]; if (last && sp[0] <= last[1]) last[1] = Math.max(last[1], sp[1]); else merged.push([sp[0], sp[1]]); }
+  let out = t;
+  for (const [from, to] of merged.reverse()) out = `${out.slice(0, from)}****${out.slice(to)}`;
+  // a terminal escape between its characters: found only without them, so the value is masked whole (fail closed)
+  return wholeIn(out, secret) ? "****" : out;
+}
+
 const echoGrams = new Map<string, Array<{ keep: boolean; n: number; grams: Set<string> }>>();
 /** A held secret's runs of `run` (each of its body's windows, read once keeping `-` and `_` and once skipping them):
  *  what an echo is matched against, here and by the output's gate (src/cli/output-gate.ts). */
@@ -285,7 +383,7 @@ export function echoViews(secret: string, run: number = ECHO_RUN): Array<{ keep:
   if (views === undefined) {
     const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
     views = [true, false].map((keep) => {
-      const body = bodyChars(raw, keep, false).map((u) => u.c).join("");
+      const body = bodyChars(raw, keep).map((u) => u.c).join("");
       // a body too short to be told apart from words by its runs is read whole alone (`wholeIn`)
       const n = body.length < MIN_BODY_RUN ? 0 : Math.min(run, body.length), grams = new Set<string>();
       for (let j = 0; n > 0 && j + n <= body.length; j++) grams.add(body.slice(j, j + n));
@@ -300,9 +398,9 @@ export function echoesSecret(s: string, secrets: readonly string[], run: number 
     if (!secret) continue;
     if (wholeIn(s, secret)) return true;
     const views = echoViews(secret, run);
-    for (const { keep, n, grams } of views) {
+    for (const text of new Set([s, withoutEscapes(s)])) for (const { keep, n, grams } of views) {
       if (n === 0) continue;
-      const read = bodyChars(s, keep, true).map((u) => u.c).join("");
+      const read = bodyChars(text, keep).map((u) => u.c).join("");
       for (let i = 0; i + n <= read.length; i++) if (grams.has(read.slice(i, i + n))) return true;
     }
   }
@@ -326,7 +424,7 @@ export function shapedSecret(s: string, o: { passwords?: boolean } = {}): boolea
 
 /** `t` as a held secret is compared by (`bodyChars`), as one string: re-cased, in its compatibility form, `-` and `_`
  *  kept or not, a `%XX` escape read as what it encodes or (`percent` false) as the characters it is written with. */
-export const bodyRead = (t: string, keepMarks: boolean, percent: boolean): string => bodyChars(t, keepMarks, true, percent).map((u) => u.c).join("");
+export const bodyRead = (t: string, keepMarks: boolean, percent: boolean): string => bodyChars(t, keepMarks, percent).map((u) => u.c).join("");
 
 /**
  * NO STRING OF AN ANSWER CARRIES A SECRET (PR 609's decision, the one point every hosted command's answer passes, issue
@@ -366,19 +464,12 @@ export function carriesNoSecret(json: unknown, secrets: readonly string[], own: 
  *  the contract's. The walk's size is bounded by the answer's bytes (`call`'s `maxBytes`). */
 export const MAX_ANSWER_DEPTH = 32;
 
-/** The characters of `t` a held secret is compared by, each with the span of `t` it was read from (above). */
-function bodyChars(t: string, keepMarks: boolean, decode: boolean, percent: boolean = decode): Array<{ c: string; from: number; to: number }> {
-  const out: Array<{ c: string; from: number; to: number }> = [];
+/** The characters of `t` a held secret is compared by, its BODY (letters, digits, and `-` and `_` unless `keepMarks` is
+ *  false), in the one reading (`readUnits`), each with the span of `t` it was read from: the secret and the text alike. */
+function bodyChars(t: string, keepMarks: boolean, percent = true): Unit[] {
   const kept = keepMarks ? /[a-z0-9_-]/ : /[a-z0-9]/;
-  for (let i = 0; i < t.length;) {
-    const cp = t.codePointAt(i)!;
-    let s = String.fromCodePoint(cp), to = i + s.length;
-    if (percent && s === "%" && /^[0-9a-f]{2}$/i.test(t.slice(i + 1, i + 3))) { s = String.fromCharCode(parseInt(t.slice(i + 1, i + 3), 16)); to = i + 3; }
-    // one reading for every spelling of a character: its compatibility decomposition, its combining marks dropped
-    else if (decode && cp > 0x7f) s = s.normalize("NFKD").replace(/\p{M}/gu, "");
-    for (const c of s.toLowerCase()) if (kept.test(c)) out.push({ c, from: i, to });
-    i = to;
-  }
+  const out: Unit[] = [];
+  for (const u of readUnits(t, percent)) for (const c of u.c) if (kept.test(c)) out.push({ c, from: u.from, to: u.to });
   return out;
 }
 
