@@ -78,8 +78,9 @@ export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[
 export const MATRIX_EXTRA_ARGS: Readonly<Record<string, readonly (readonly string[])[]>> = {
   user: [["add", "nobody", "--role", "no_such_role"], ["add", "nobody", "--role", "no_such_role", "--set", "tenant=1"]],
   // create reads the project's sources file first: the state's answer, a url: written in the file (refused: the
-  // replica reads it by a variable), or, where it names one (the demo), not signed in; nothing is ever sent
-  replica: [["status", "acme/shop"], ["create", "acme/shop", "--region", "eu", "--size", "50"]],
+  // replica reads it by a variable), or, where it names one (the demo), not signed in; nothing is ever sent. delete
+  // needs no project: not signed in, in every state (without --yes, and no terminal, a wrong line before that)
+  replica: [["status", "acme/shop"], ["create", "acme/shop", "--region", "eu", "--size", "50"], ["delete", "acme/shop", "--yes"]],
   token: [["create", "--replica", "acme/shop"], ["revoke", "tok_1", "--org", "acme"]],
 };
 
@@ -131,11 +132,17 @@ syncBuiltinESMExports();
   return { NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` };
 }
 
-/** One `mason` command as a process: its exit, its two streams, how long it took. Killed after `timeoutMs`. */
-export function runMason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000, main = MAIN): Promise<Answer> {
+/** One `mason` command as a process: its exit, its two streams, how long it took. Killed after `timeoutMs`. `input`: what
+ *  its stdin reads, then its end (else it reads nothing). */
+export function runMason(cwd: string, argv: string[], env: Record<string, string>, timeoutMs = 60_000, main = MAIN, input?: string): Promise<Answer> {
   const t0 = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [main, ...argv], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = input === undefined ? spawn(process.execPath, [main, ...argv], { cwd, env, stdio: ["ignore", "pipe", "pipe"] }) : spawn(process.execPath, [main, ...argv], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    if (input !== undefined) {
+      // a command that exits without reading its stdin closes the pipe first: EPIPE is that, and nothing else is expected
+      child.stdin?.on("error", (e: NodeJS.ErrnoException) => { if (e.code !== "EPIPE") throw e; });
+      child.stdin?.end(input);
+    }
     let stdout = "", stderr = "";
     child.stdout.on("data", (b: Buffer) => { stdout += b.toString(); });
     child.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });

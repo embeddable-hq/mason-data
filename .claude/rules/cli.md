@@ -64,7 +64,7 @@ CLI lacks).
   what }]` from the SAME `NextStep` list the human output prints, and refuses a key the spec does not declare —
   `CommandSpec.json` names the answer's top-level keys, its usage's `--json` line names each (`tests/cli-help.test.ts`),
   so the help and the answer cannot drift. A list is wrapped (`{ tables: […], next }`), never printed bare. The EXIT CODE
-  is part of the contract: 0 done, 1 failed (said), 2 a wrong command line, 124 `mason wait`, `mason deploy` or `mason replica create` timed out. Human output goes
+  is part of the contract: 0 done, 1 failed (said), 2 a wrong command line, 124 `mason wait`, `mason deploy`, `mason replica create` or `mason replica delete` timed out. Human output goes
   to stdout, progress to stderr. **The answer reaches a pipe whole**: a pipe takes writes asynchronously and
   `process.exit` drops what is queued, so the process exits only through `exitWhenWritten` (src/cli/main.ts), once both
   streams are written (`tests/cli-pipe.test.ts`; `tests/conventions.test.ts` refuses another `process.exit` in src/cli).
@@ -368,7 +368,7 @@ CLI lacks).
   test (`carriesNoSecret`, src/cli/hosted.ts: a grammar is no mask, issue 627), an answer that carries the token refused
   whole, a timeout 124 with the deploy's id (tests/cli-deploy.test.ts, against a fake
   service on 127.0.0.1; every run's output held to carrying no token).
-- **`mason replica create | list | status` and `mason token create | list | revoke` are clients of the same service**
+- **`mason replica create | list | status | delete` and `mason token create | list | revoke` are clients of the same service**
   (src/cli/replica-hosted.ts, src/cli/token-hosted.ts; docs/HOSTED-API.md "Replicas", "CI tokens"), with deploy's and
   `user --replica`'s decisions, never new ones: `replicaNamed` / `orgNamed` / `tokenFor` (src/cli/replica.ts), every
   string of an answer to `carriesNoSecret` before its grammar (a check's and a pending change's words alone are free
@@ -381,8 +381,18 @@ CLI lacks).
   CLI's own words hold (`ownWordsHold` over `printedCorpus`, every builder create prints with), is not sent. **A CI token made is
   printed ONCE**: alone on the first line, never broken by the CLI (a value to copy), or `token.value` under `--json`;
   the gate's `once` lets that exact value through one time, holding it as a secret beside the login. An account's first replica is the web app's (a person is asked
-  there), said by the help and by a 403's next step. `create` waits for `ready` within `--timeout` (124 past it). No
-  `mason replica delete` yet: the service has no deletion endpoint (tests/cli-replica.test.ts, tests/cli-token.test.ts).
+  there), said by the help and by a 403's next step. `create` waits for `ready` within `--timeout` (124 past it)
+  (tests/cli-replica.test.ts, tests/cli-token.test.ts). **`delete` is asked for twice**: on the line, and typed back
+  exactly by a person at a terminal (what was typed never printed), else `--yes`; without either, a wrong line (exit 2)
+  before a byte is sent. It waits for the deletion's stage `finished` within `--timeout` (124 past it), each step said
+  once in the service's words, then each source's slot: dropped and verified gone, none there (exit 0), or NOT verified
+  gone (exit 1). **The statement a person runs by hand is Mason's own** (`byHandOf`: `dropStatements`,
+  src/cli/replication-mode.ts, the one authority; `listSlotsStatement` when the slot's name is not known), rendered from the
+  names the service gives, each held to `PG_NAME` first; a service's `byHand` is never printed, and one that is not
+  exactly that rendering puts the answer outside the contract, refused whole. It is written alone on its line,
+  indented, never broken by the CLI (a value to paste, as a CI token is). A deletion is held present exactly while the
+  state is `deleting` or `deleted`, its stage the state's (`heldDeletion`); `status` shows it the same way
+  (`deletionReport`), exit 0 (tests/cli-replica-delete.test.ts).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
   README's "Going to production", `mason help production` offline). Only the project folder
   travels. **`mason.yml` pins the version** the project is written for (src/lib/project-version.ts: init writes it,

@@ -34,6 +34,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   say them. `mason token create --replica <org>/<name>` makes a CI token for it and prints it once (in `token.value`
   with `--json`, for a secret store); `mason token list` and `mason token revoke <id>` manage them. An account's first
   replica is still made in the service's web app.
+- **`mason replica delete <org>/<name>` deletes a hosted replica, and says what it did to your database.** At a
+  terminal it asks you to type the replica's name back (elsewhere it needs `--yes`); an owner deletes one, signed in
+  within the last 15 minutes. It waits until the deletion is finished (`--timeout`, exit 124 past it), then says, for
+  each database, whether Mason's replication slot was dropped and verified gone. When it was not, it prints why and
+  the exact statement to run on that database (a slot left behind holds its WAL), and exits 1: run it, as a user that
+  may drop a replication slot. `mason replica status` shows a deletion in progress the same way.
 - **`mason doctor` warns when the user Mason connects as could write to your database**: a superuser or `BYPASSRLS`, the
   owner of a synced table, or one holding `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` on a
   synced table or `CREATE` on its schema — or a write that reaches its rows through a partition, an inheritance child or

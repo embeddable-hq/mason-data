@@ -1,11 +1,19 @@
 /**
- * `mason replica create | list | status` — A HOSTED MASON SERVICE'S REPLICAS, by its documented API alone
+ * `mason replica create | list | status | delete` — A HOSTED MASON SERVICE'S REPLICAS, by its documented API alone
  * (docs/HOSTED-API.md "Replicas"). Each is a client of it, as `mason deploy` and `mason user --replica` are:
  *
  *   create <org>/<name>   POST /v1/replicas/{org}  { name, region, sizeGb, sources: [{ name, variable, url }] }
  *                         201 { replica, checks }, then GET …/{name} until it is ready, failed or past --timeout
  *   list [<org>]          GET  /v1/replicas/{org}  { replicas, more } — each organisation of the login's when none is named
- *   status <org>/<name>   GET  /v1/replicas/{org}/{name}  { replica }
+ *   status <org>/<name>   GET  /v1/replicas/{org}/{name}  { replica } (with its deletion, while it is deleted)
+ *   delete <org>/<name>   DELETE /v1/replicas/{org}/{name}  { confirm: "<org>/<name>" }  202 (or 200, done already)
+ *                         { replica }, then GET …/{name} until its deletion is finished or past --timeout
+ *
+ * A DELETION'S SQL IS MASON'S OWN (docs/HOSTED-API.md, `DELETE /v1/replicas/{org}/{name}` and `DeletionSource`): for a source whose replication slot was not
+ * verified gone, the statement a person runs by hand is rendered here, by `dropStatements` (src/cli/replication-mode.ts,
+ * the one authority), from the slot's and the publication's names the service gives, each held to Postgres's name
+ * grammar (`PG_NAME`); a name it does not know is `listSlotsStatement`'s query. The service's own `byHand` is never
+ * printed: it must be exactly that rendering, else the answer is outside the contract and refused whole.
  *
  * THE DATABASE'S URL (create) is read here alone, by the variable the project's sources file names (`url: ${NAME}`,
  * src/cli/sources.ts `readSource`, the one reader: `.env.local`, `.env`, then the shell), never from a flag: it never
@@ -33,11 +41,21 @@
  *   a check's name, detail, fix; missing;   stderr's lines, --json                    one line each, bounded, masked (`serviceText`)
  *     a pending change's failure
  *   a check's source                        stderr's lines, --json                    the source sent
+ *   a deletion's stage, outcome, reason     rows, lines (the CLI's words), --json     closed sets (`STAGES`, …)
+ *   a deletion's times, a step's doneAt     rows, lines, --json                       `isServiceTime`
+ *   a step's id                             --json                                    `STEP_ID`, each once
+ *   a step's what, a source's why,          rows, stderr's lines, --json              one line each, bounded, masked (`serviceText`)
+ *     the handover's failure
+ *   a source's slot, publication            rows, the SQL's line, --json              `PG_NAME`; Mason's own publication `OWN_PUBLICATION`
+ *   a source's byHand                       nowhere: Mason's own rendering is         equal to `byHandOf`'s, else refused whole
  *
- * What to run next, the code and the exit are the CLI's own: 0 once the replica is ready (create) or said (list,
- * status); 1 refused (its words as they came), not made, failed or an answer outside the contract; 2 a wrong line;
- * 124 the wait timed out (nothing stopped: `mason replica status` says how it goes).
+ * What to run next, the code and the exit are the CLI's own: 0 once the replica is ready (create), said (list,
+ * status) or deleted with every slot dropped or none (delete); 1 refused (its words as they came), not made, failed, a
+ * slot not verified gone (its SQL printed) or an answer outside the contract; 2 a wrong line; 124 the wait timed out
+ * (nothing stopped: `mason replica status` says how it goes).
  */
+import { once } from "node:events";
+import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { endText, errorJson, exitOf, failed, failureText, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { call, canonicalSecret, carriesNoSecret, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer, type Service } from "./hosted.ts";
@@ -49,6 +67,7 @@ import { parseSource } from "./preflight.ts";
 import { parseDuration } from "../lib/table-sync.ts";
 import { sayAgain } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
+import { dropStatements, listSlotsStatement } from "./replication-mode.ts";
 import { err as styleErr, out as styleOut, PLAIN, type Style } from "./style.ts";
 
 /** How long the creation's POST may take: the service answers once Mason's checks of the source are done. */
@@ -87,10 +106,11 @@ export interface SourceChecks {
 
 export const REPLICA: CommandSpec = {
   name: "replica",
-  summary: "a hosted Mason service's replicas: create one for this project's database, list them, say how one is",
+  summary: "a hosted Mason service's replicas: create one for this project's database, list them, say how one is, delete one",
   usage: `usage: mason replica create <org>/<name> --region <region> --size <gb> [--timeout <interval>] [--json]
        mason replica list [<org>] [--json]
        mason replica status <org>/<name> [--json]
+       mason replica delete <org>/<name> [--yes] [--timeout <interval>] [--json]
 
   A replica is Mason run for you by a hosted Mason service, on a machine of its own, syncing this project's
   database. mason deploy then sends it the project's files, and mason token create a CI token for it.
@@ -111,7 +131,17 @@ export const REPLICA: CommandSpec = {
 
   list says the replicas of <org>, or of every organisation of this login when none is named (a CI token names
   one); status says one replica: its state (checking, creating, ready, failed, deleting, deleted), its region and
-  size, its host, its allowlist (the addresses that may query it), and what of its region's work is not done.
+  size, its host, its allowlist (the addresses that may query it), what of its region's work is not done, and,
+  while it is deleted, its deletion as delete says it.
+
+  delete deletes one, for good: the replica and its synced data go, and Mason's replication slot on its
+  database is dropped. At a terminal it asks for <org>/<name> to be typed back; elsewhere (and with --json) it
+  needs --yes. An owner of the organisation deletes one, signed in as a person within the last 15 minutes (mason
+  login; a CI token deletes none). It waits until the deletion is finished (--timeout bounds that wait; it goes
+  on all the same), saying each step as the service words it, then what it did to each database's replication
+  slot: dropped and verified gone, none there, or NOT verified gone, with why and the statement to run on that
+  database by hand. That statement is Mason's own, for the slot the service names; a service's answer that says
+  another is refused.
 
   The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default.
   Progress goes to stderr; the answer is printed when it ends.
@@ -119,27 +149,37 @@ export const REPLICA: CommandSpec = {
     mason replica create acme/shop --region <region> --size 50
     mason replica list
     mason replica status acme/shop --json
+    mason replica delete acme/shop
 
   --region <region>        create: the region it runs in, one the service offers
   --size <gb>              create: the synced data it holds, in GB, one size the service offers (50)
-  --timeout <interval>     create: how long to wait for its region to make it (default ${DEFAULT_TIMEOUT}; 1s to 24h)
-  --json                   as data, once it ends: { replica (create, status: { org, name, region, sizeGb, hostId,
-                           state, createdAt, allowlist, pending: [{ change (create, allowlist), state (pending,
-                           failed), attempts, failure, nextAttemptAt }] }), checks (create: [{ source, outcome
-                           (passed, failed, unknown), checks: [{ name, status (ok, warn, failed, unknown), detail,
-                           fix }], missing }], null when the service's answer was lost), replicas (list: each as
-                           replica is), more (list: true when an organisation has more than the service lists),
-                           error (create, when it was not made, failed or the wait timed out: { code, message,
-                           why, fix }), next }
+  --timeout <interval>     create: how long to wait for its region to make it; delete: for its deletion to finish
+                           (default ${DEFAULT_TIMEOUT}; 1s to 24h)
+  --yes                    delete: delete it without asking for its name to be typed back (CI, a coding agent)
+  --json                   as data, once it ends: { replica (create, status, delete: { org, name, region, sizeGb,
+                           hostId, state, createdAt, allowlist, pending: [{ change (create, allowlist), state
+                           (pending, failed), attempts, failure, nextAttemptAt }] }), deletion (status, delete:
+                           null while it is in none; { stage (requested, in_region, finished), requestedAt,
+                           handover: { attempts, failure, nextAttemptAt } or null, lastHeardAt, finishedAt, steps:
+                           [{ step, what, doneAt }], sources: [{ ordinal, outcome (dropped, no_slot,
+                           not_verified), reason (unreachable, refused, in_use, still_there, another_server,
+                           record_unreadable, failed, unprobed), why, slot, publication, publicationOwned,
+                           byHand (not_verified: the statement to run by hand), reportedAt }] }), checks (create:
+                           [{ source, outcome (passed, failed, unknown), checks: [{ name, status (ok, warn, failed,
+                           unknown), detail, fix }], missing }], null when the service's answer was lost), replicas
+                           (list: each as replica is), more (list: true when an organisation has more than the
+                           service lists), error (create, delete: when it was not made, not finished, a slot is
+                           not verified gone, refused or the wait timed out: { code, message, why, fix }), next }
 
-  Exit status: 0 the replica is ready (create), or said (list, status); 1 not signed in, refused by the service
-  (its words printed as they came, the code the CLI's own), not made (the checks failed: each is said), its
-  region could not make it, or the service answered outside its contract; 2 a wrong command line; 124 the wait
-  timed out (nothing stopped: mason replica status says how it goes). Whatever the service sends, it never
-  makes the exit 0, 2 or 124.
+  Exit status: 0 the replica is ready (create), said (list, status), or deleted with every replication slot
+  dropped or none there (delete); 1 not signed in, refused by the service (its words printed as they came, the
+  code the CLI's own), not made (the checks failed: each is said), its region could not make it, deleted with a
+  slot NOT verified gone (the statement to run is printed), or the service answered outside its contract; 2 a
+  wrong command line (delete without a terminal and without --yes); 124 the wait timed out (nothing stopped:
+  mason replica status says how it goes). Whatever the service sends, it never makes the exit 0, 2 or 124.
 `,
-  options: { region: { type: "string" }, size: { type: "string" }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
-  json: ["replica", "checks", "replicas", "more", "error", "next"],
+  options: { region: { type: "string" }, size: { type: "string" }, timeout: { type: "string" }, yes: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
+  json: ["replica", "deletion", "checks", "replicas", "more", "error", "next"],
 };
 
 /** Everything this command prints can hold the service's text, so it is all drawn in serviceStyle (src/cli/command.ts). */
@@ -160,7 +200,14 @@ const whole = (v: unknown, least: number, most: number): v is number => Number.i
  */
 export function wordless(json: unknown): unknown {
   if (!obj(json)) return json;
-  const replica = (r: unknown): unknown => obj(r) && Array.isArray(r.pending) ? { ...r, pending: r.pending.map((p: unknown) => obj(p) ? { ...p, failure: null } : p) } : r;
+  // a deletion's words: each step's what, each source's why, the handover's failure (its byHand is no free text: tested)
+  const deletion = (d: unknown): unknown => !obj(d) ? d : { ...d,
+    ...(obj(d.handover) ? { handover: { ...d.handover, failure: null } } : {}),
+    ...(Array.isArray(d.steps) ? { steps: d.steps.map((x: unknown) => obj(x) ? { ...x, what: null } : x) } : {}),
+    ...(Array.isArray(d.sources) ? { sources: d.sources.map((x: unknown) => obj(x) ? { ...x, why: null } : x) } : {}) };
+  const replica = (r: unknown): unknown => !obj(r) ? r : { ...r,
+    ...(Array.isArray(r.pending) ? { pending: r.pending.map((p: unknown) => obj(p) ? { ...p, failure: null } : p) } : {}),
+    ...("deletion" in r ? { deletion: deletion(r.deletion) } : {}) };
   const checks = (c: unknown): unknown => !obj(c) ? c : { ...c,
     ...(Array.isArray(c.missing) ? { missing: c.missing.map(() => null) } : {}),
     ...(Array.isArray(c.checks) ? { checks: c.checks.map((x: unknown) => obj(x) ? { ...x, name: null, detail: null, fix: null } : x) } : {}) };
@@ -214,6 +261,114 @@ export function heldChecks(v: unknown, source: string, secrets: readonly string[
   return held;
 }
 
+// ------------------------------------------------------------------ a deletion, held
+
+/** A deletion's stages: asked for and not handed over yet, under way (nobody may query it), finished (the tombstone). */
+export const STAGES = ["requested", "in_region", "finished"] as const;
+type Stage = typeof STAGES[number];
+/** What a deletion did to Mason's replication slot on a source's database. */
+export const SOURCE_OUTCOMES = ["dropped", "no_slot", "not_verified"] as const;
+/** Why a slot was not verified gone. */
+export const REASONS = ["unreachable", "refused", "in_use", "still_there", "another_server", "record_unreadable", "failed", "unprobed"] as const;
+type Reason = typeof REASONS[number];
+/** A step's id: lower case letters, digits and `_` (never printed for a person: its `what` is). */
+const STEP_ID = /^[a-z0-9_]{1,64}$/;
+/** A replication slot's or a publication's name as Postgres takes one unquoted in the statements a person runs: lower
+ *  case letters, digits and `_`, 1 to 63 (src/cli/replication-mode.ts `PG_NAME_BYTES`). */
+export const PG_NAME = /^[a-z0-9_]{1,63}$/;
+/** Mason's own publication (src/cdc/source.ts `replicationNames`): `mason_` and the rest of a name. */
+const OWN_PUBLICATION = /^mason_[a-z0-9_]{1,57}$/;
+const MAX_STEPS = 64;
+const MAX_SOURCES = 16;
+
+export interface DeletionSource {
+  ordinal: number; outcome: typeof SOURCE_OUTCOMES[number]; reason: Reason | null; why: string | null;
+  slot: string | null; publication: string | null; publicationOwned: boolean | null; byHand: string | null; reportedAt: string;
+}
+/** A replica's deletion as the service says it, every value held. */
+export interface Deletion {
+  stage: Stage; requestedAt: string; handover: { attempts: number; failure: string | null; nextAttemptAt: string | null } | null;
+  lastHeardAt: string | null; finishedAt: string | null;
+  steps: Array<{ step: string; what: string; doneAt: string | null }>;
+  sources: DeletionSource[];
+}
+
+/**
+ * THE STATEMENT A PERSON RUNS BY HAND for a slot not verified gone: Mason's own (`dropStatements`, the one authority),
+ * for the slot named and the publication only when the service says it is Mason's own; `listSlotsStatement` when the
+ * slot's name is not known. Every name was held to `PG_NAME` first.
+ */
+export function byHandOf(s: Pick<DeletionSource, "slot" | "publication" | "publicationOwned">): string {
+  if (s.slot === null) return listSlotsStatement();
+  const owned = s.publicationOwned === true && s.publication !== null;
+  return dropStatements({ slot: s.slot, publication: owned ? s.publication! : "", owned });
+}
+
+const absent = (v: unknown): boolean => v === undefined || v === null;
+const timeOrNull = (v: unknown): v is string | null | undefined => absent(v) || isServiceTime(v);
+
+/** One source's outcome, held: its ordinal its place, every name to `PG_NAME`, its byHand Mason's own; null when any
+ *  does not hold. */
+function heldSource(v: unknown, at: number, secrets: readonly string[]): DeletionSource | null {
+  if (!obj(v) || v.ordinal !== at || typeof v.outcome !== "string" || !(SOURCE_OUTCOMES as readonly string[]).includes(v.outcome) || !isServiceTime(v.reportedAt)) return null;
+  const outcome = v.outcome as DeletionSource["outcome"];
+  const name = (x: unknown): x is string | null | undefined => absent(x) || (typeof x === "string" && PG_NAME.test(x));
+  if (!name(v.slot) || !name(v.publication)) return null;
+  const slot = typeof v.slot === "string" ? v.slot : null, publication = typeof v.publication === "string" ? v.publication : null;
+  if (outcome === "dropped" && slot === null) return null;
+  // whether the publication is Mason's own: absent for no_slot; else true (then it is named, and Mason's own), false, null
+  let owned: boolean | null = null;
+  if (outcome === "no_slot") { if (!absent(v.publicationOwned)) return null; }
+  else {
+    if (v.publicationOwned !== true && v.publicationOwned !== false && v.publicationOwned !== null) return null;
+    owned = v.publicationOwned;
+    if (owned === true && (publication === null || !OWN_PUBLICATION.test(publication))) return null;
+  }
+  // a reason, its words and the SQL by hand: for a slot not verified gone alone
+  let reason: Reason | null = null, why: string | null = null, byHand: string | null = null;
+  if (outcome === "not_verified") {
+    if (typeof v.reason !== "string" || !(REASONS as readonly string[]).includes(v.reason) || (!absent(v.why) && typeof v.why !== "string")) return null;
+    reason = v.reason as Reason;
+    why = typeof v.why === "string" ? serviceText(v.why, 500, secrets) : null;
+    // the service's SQL is never printed: it must be exactly what Mason renders from the names it gave
+    byHand = byHandOf({ slot, publication, publicationOwned: owned });
+    if (v.byHand !== byHand) return null;
+  } else if (!absent(v.reason) || !absent(v.why) || !absent(v.byHand)) return null;
+  return { ordinal: at, outcome, reason, why, slot, publication, publicationOwned: owned, byHand, reportedAt: v.reportedAt };
+}
+
+/**
+ * A REPLICA'S DELETION, held to the contract: present exactly while its state is `deleting` (stage `requested` or
+ * `in_region`) or `deleted` (stage `finished`, its time said); the handover at `requested` alone; every step's id
+ * once; every source in order. `undefined` when the replica is in no deletion and carries none; null when anything
+ * does not hold. The answer around it has been put to the exact test (`wordless`).
+ */
+export function heldDeletion(v: unknown, state: ReplicaState, secrets: readonly string[]): Deletion | null | undefined {
+  const deleting = state === "deleting" || state === "deleted";
+  if (v === undefined) return deleting ? null : undefined;
+  if (!deleting || !obj(v) || typeof v.stage !== "string" || !(STAGES as readonly string[]).includes(v.stage)) return null;
+  const stage = v.stage as Stage;
+  if ((state === "deleted") !== (stage === "finished")) return null;
+  if (!isServiceTime(v.requestedAt) || !timeOrNull(v.lastHeardAt) || !timeOrNull(v.finishedAt) || (stage === "finished") !== isServiceTime(v.finishedAt)) return null;
+  let handover: Deletion["handover"] = null;
+  if (!absent(v.handover)) {
+    const h = v.handover;
+    if (stage !== "requested" || !obj(h) || !whole(h.attempts, 0, 1_000_000) || (!absent(h.failure) && typeof h.failure !== "string") || !timeOrNull(h.nextAttemptAt)) return null;
+    handover = { attempts: h.attempts as number, failure: words(h.failure, 500, secrets), nextAttemptAt: typeof h.nextAttemptAt === "string" ? h.nextAttemptAt : null };
+  }
+  if (!Array.isArray(v.steps) || v.steps.length > MAX_STEPS || !Array.isArray(v.sources) || v.sources.length > MAX_SOURCES) return null;
+  const steps: Deletion["steps"] = [], ids = new Set<string>();
+  for (const x of v.steps) {
+    if (!obj(x) || typeof x.step !== "string" || !STEP_ID.test(x.step) || ids.has(x.step) || typeof x.what !== "string" || !timeOrNull(x.doneAt)) return null;
+    ids.add(x.step);
+    steps.push({ step: x.step, what: serviceText(x.what, 300, secrets), doneAt: typeof x.doneAt === "string" ? x.doneAt : null });
+  }
+  const sources: DeletionSource[] = [];
+  for (const [i, x] of v.sources.entries()) { const s = heldSource(x, i, secrets); if (s === null) return null; sources.push(s); }
+  return { stage, requestedAt: v.requestedAt as string, handover, lastHeardAt: typeof v.lastHeardAt === "string" ? v.lastHeardAt : null,
+    finishedAt: typeof v.finishedAt === "string" ? v.finishedAt : null, steps, sources };
+}
+
 // ------------------------------------------------------------------ in the CLI's words
 
 const STATE_WORDS: Record<ReplicaState, string> = {
@@ -246,9 +401,73 @@ function rows(r: HostedReplica): Array<[string, string]> {
 }
 
 const statusStep = (r: Replica | HostedReplica): NextStep => [`mason replica status ${r.org}/${r.name}`, "how it is"];
+const listStep = (org: string): NextStep => [`mason replica list ${org}`, "the organisation's replicas"];
 const nextOf = (r: HostedReplica): NextStep[] => r.state === "ready"
   ? [[`mason deploy --replica ${r.org}/${r.name}`, "send this project to it"], [`mason token create --replica ${r.org}/${r.name}`, "a CI token for it"]]
-  : [statusStep(r)];
+  : r.state === "deleted" ? [listStep(r.org)] : [statusStep(r)];
+
+const STAGE_WORDS: Record<Stage, string> = {
+  requested: "requested: the service has not handed it to its region yet, and the addresses of its allowlist may still query it",
+  in_region: "under way: nobody may query it now",
+  finished: "finished",
+};
+const REASON_WORDS: Record<Reason, string> = {
+  unreachable: "its database could not be reached",
+  refused: "its database refused the drop",
+  in_use: "a reader still holds the slot",
+  still_there: "it was still there after the drop",
+  another_server: "the database answering is another server than the one the slot is on",
+  record_unreadable: "the replica's record of its slot could not be read",
+  failed: "the drop failed",
+  unprobed: "whether it is gone was not checked",
+};
+
+/** A deletion's stage, as a line: its words, and the handover's attempts while it is not handed over. */
+export function stageLine(d: Deletion): string {
+  const h = d.handover;
+  return `${STAGE_WORDS[d.stage]}${h ? ` (${h.attempts} attempt${h.attempts === 1 ? "" : "s"} to hand it over${h.nextAttemptAt ? `, the next at ${h.nextAttemptAt}` : ""})${h.failure ? `: ${h.failure}` : ""}` : ""}`;
+}
+
+/** What a deletion did to one source's replication slot, in the CLI's words (and a reason's words, the service's). */
+export function sourceWords(s: DeletionSource): string {
+  const slot = s.slot === null ? "its replication slot" : `replication slot ${s.slot}`;
+  if (s.outcome === "dropped") return `${slot}: dropped, verified gone`;
+  if (s.outcome === "no_slot") return s.slot === null ? "no replication slot: nothing to drop" : `${slot}: not there, nothing to drop`;
+  return `${slot}: NOT verified gone, ${REASON_WORDS[s.reason!]}${s.why ? ` (${s.why})` : ""}`;
+}
+
+/** A deletion, as rows: its stage, its times, each step (done or not yet), each source's outcome. */
+export function deletionRows(d: Deletion): Array<[string, string]> {
+  return [
+    ["deletion", `${stageLine(d)}; asked for at ${d.requestedAt}`],
+    ...(d.lastHeardAt ? [["last heard", d.lastHeardAt] as [string, string]] : []),
+    ...(d.finishedAt ? [["finished", d.finishedAt] as [string, string]] : []),
+    ...d.steps.map((x): [string, string] => ["step", x.doneAt ? `done: ${x.what} (at ${x.doneAt})` : `not yet: ${x.what}`]),
+    ...d.sources.map((x): [string, string] => [`source ${x.ordinal}`, sourceWords(x)]),
+  ];
+}
+
+/**
+ * THE STATEMENTS A PERSON RUNS BY HAND, for each source whose slot is not verified gone: a line of the CLI's saying where,
+ * then the statement (Mason's own, `byHandOf`) on a line of its own, indented, WRITTEN UNBROKEN: a statement to paste is
+ * no service text to break at a width (a break inside a name would be pasted with it); a terminal narrower than it wraps
+ * it softly. Its characters are the CLI's own words and names held to `PG_NAME`, so no piece of it begins a line of
+ * anyone's making. `[said, sql]` pairs; none when every slot was dropped or there was none.
+ */
+export function byHandLines(d: Deletion): Array<[said: string, sql: string]> {
+  return d.sources.filter((x) => x.outcome === "not_verified").map((x): [string, string] => [x.slot === null
+    ? `by hand, for source ${x.ordinal}: this lists Mason's replication slots on its database; drop this replica's with pg_drop_replication_slot('<its name>'), as a user that may`
+    : `by hand, for source ${x.ordinal}: run this on its database, as a user that may drop a replication slot (its owner, or one with REPLICATION)`, `    ${byHandOf(x)}`]);
+}
+
+/** A replica's report with its deletion: the rows, the statements by hand (unbroken), then the tips and next steps. */
+function deletionReport(r: { headline: string; details: Array<[string, string]>; deletion: Deletion | null; tips?: readonly string[]; next: readonly NextStep[] }, st: Style): string {
+  const hand = r.deletion === null ? [] : byHandLines(r.deletion);
+  const report = reportText({ headline: r.headline, details: r.details, ...(hand.length ? {} : { tips: r.tips, next: r.next }) }, st);
+  if (!hand.length) return report;
+  const end = endText({ tips: r.tips, next: r.next }, st);
+  return [report, ...hand.flatMap(([said, sql]) => ["", strict(`  ${said}:`, st), sql]), ...(end ? [end] : [])].join("\n");
+}
 
 /**
  * WHAT TO RUN AFTER THE SERVICE REFUSED: the CLI's own, by the status (the service's `next` is never read). A 401 or 403
@@ -268,11 +487,13 @@ export async function replica(argv: string[]): Promise<number> {
   const json = f.values.json === true;
   const usage = (message: string, fix?: string): number => fail({ message, code: "usage", ...(fix ? { fix } : {}), usage: REPLICA.usage }, json);
   const [verb, arg, ...rest] = f.positionals;
-  const VERBS = ["create", "list", "status"];
-  if (verb === undefined) return usage("create, list or status: mason replica list says the replicas");
-  if (!VERBS.includes(verb)) return usage(`there is no mason replica ${verb}: create, list or status${didYouMean(verb, VERBS)}`);
+  const VERBS = ["create", "list", "status", "delete"];
+  if (verb === undefined) return usage("create, list, status or delete: mason replica list says the replicas");
+  if (!VERBS.includes(verb)) return usage(`there is no mason replica ${verb}: create, list, status or delete${didYouMean(verb, VERBS)}`);
   if (rest.length) return usage(`mason replica ${verb} takes ${verb === "list" ? "one organisation at most" : "one replica"}: ${rest.join(" ")} is too many`);
-  for (const k of ["region", "size", "timeout"] as const) if (verb !== "create" && f.values[k] !== undefined) return usage(`--${k} goes with mason replica create`);
+  for (const k of ["region", "size"] as const) if (verb !== "create" && f.values[k] !== undefined) return usage(`--${k} goes with mason replica create`);
+  if (verb !== "create" && verb !== "delete" && f.values.timeout !== undefined) return usage("--timeout goes with mason replica create and mason replica delete");
+  if (verb !== "delete" && f.values.yes === true) return usage("--yes goes with mason replica delete");
   if (verb === "list") {
     const org = arg === undefined ? null : orgNamed(arg, REPLICA.usage);
     if (org !== null && isFailure(org)) return fail(org, json);
@@ -282,6 +503,16 @@ export async function replica(argv: string[]): Promise<number> {
   const r = replicaNamed(arg, "argument", REPLICA.usage);
   if (isFailure(r)) return fail(r, json);
   if (verb === "status") return status(r, json);
+  if (verb === "delete") {
+    const timeout = parseDuration(typeof f.values.timeout === "string" ? f.values.timeout : DEFAULT_TIMEOUT);
+    if ("problem" in timeout) return usage(`--timeout ${timeout.problem}`);
+    // a deletion is asked for twice: on the line, and typed back by a person at a terminal, else by --yes
+    if (f.values.yes !== true && !canAsk(json)) {
+      return usage(`mason replica delete asks for ${replicaText(r)} to be typed back at a terminal, and ${json ? "--json is no terminal" : "there is none here"}`,
+        `say it on the line: mason replica delete ${replicaText(r)} --yes`);
+    }
+    return remove(r, { timeout, yes: f.values.yes === true }, json);
+  }
   const region = typeof f.values.region === "string" ? f.values.region : undefined;
   const size = typeof f.values.size === "string" ? f.values.size : undefined;
   if (region === undefined || size === undefined) return usage(`mason replica create needs ${region === undefined ? "--region" : "--size"}`, "name both: mason replica create <org>/<name> --region <region> --size <gb> (the service's web app lists its regions and sizes)");
@@ -303,10 +534,14 @@ function signedIn(asked: string, again: string, json: boolean, more: readonly st
   return { service, token };
 }
 
-/** One replica's answer (`GET …/{name}`): its strings put to the exact test first, its words masked, by the one list. */
-function replicaAnswer(a: Answer, asked: Replica, secrets: readonly string[]): HostedReplica | null {
+/** One replica's answer (`GET …/{name}`, a deletion's): its strings put to the exact test first, its words masked, by
+ *  the one list; the replica and its deletion (null when it is in none), or null when either does not hold. */
+function replicaAnswer(a: Answer, asked: Replica, secrets: readonly string[]): { replica: HostedReplica; deletion: Deletion | null } | null {
   if (!obj(a.json) || !carriesNoSecret(wordless(a.json), secrets)) return null;
-  return heldReplica(a.json.replica, asked, secrets);
+  const replica = heldReplica(a.json.replica, asked, secrets);
+  if (replica === null) return null;
+  const deletion = heldDeletion((a.json.replica as Record<string, unknown>).deletion, replica.state, secrets);
+  return deletion === null ? null : { replica, deletion: deletion ?? null };
 }
 
 async function status(r: Replica, json: boolean): Promise<number> {
@@ -316,11 +551,12 @@ async function status(r: Replica, json: boolean): Promise<number> {
   const a = await call(service, "GET", `/v1/replicas/${r.org}/${r.name}`, { token });
   if (isFailure(a)) return fail(a, json);
   if (a.status !== 200) return fail(serviceFailure(a, secrets, (st) => refusedNext(st, r.org, "a member", statusStep(r))) ?? unexpected(service, a, "a replica's state was asked for"), json);
-  const held = replicaAnswer(a, r, secrets);
-  if (held === null) return fail(unexpected(service, a, "a replica's state was asked for"), json);
+  const answer = replicaAnswer(a, r, secrets);
+  if (answer === null) return fail(unexpected(service, a, "a replica's state was asked for"), json);
+  const { replica: held, deletion } = answer;
   const next = nextOf(held);
-  if (json) { out(jsonText(REPLICA, { replica: held }, next)); return 0; }
-  out(reportText({ headline: `${replicaText(r)} on ${service.base}: ${held.state}`, details: rows(held), next }, outStyle()));
+  if (json) { out(jsonText(REPLICA, { replica: held, deletion }, next)); return 0; }
+  out(deletionReport({ headline: `${replicaText(r)} on ${service.base}: ${held.state}`, details: [...rows(held), ...(deletion ? deletionRows(deletion) : [])], deletion, next }, outStyle()));
   return 0;
 }
 
@@ -544,7 +780,7 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
   if (isFailure(sent)) {
     // a POST that got no answer may have made the replica: its state says so (the contract)
     const a = await call(service, "GET", `${where}/${r.name}`, { token });
-    const found = !isFailure(a) && a.status === 200 ? replicaAnswer(a, r, secrets) : null;
+    const found = !isFailure(a) && a.status === 200 ? replicaAnswer(a, r, secrets)?.replica ?? null : null;
     // why it got no answer is the system's words, never the CLI's own: masked by what this command holds, as a service's are
     const why = serviceText(sent.why ?? sent.message, 300, secrets);
     if (found === null) return fail(w.lostFailure({ ...sent, why }, !isFailure(a) && a.status === 404), json);
@@ -602,6 +838,154 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
     if (a.status !== 200) return ended(refusedOf(a, "a replica's state was asked for"));
     const now = replicaAnswer(a, r, secrets);
     if (now === null) return ended(unexpected(service, a, "a replica's state was asked for"));
-    state = now;
+    state = now.replica;
+  }
+}
+
+// ------------------------------------------------------------------ delete
+
+/** Whether a person is there to type the replica's name back: a terminal both ways, and no --json (never an environment
+ *  variable: src/cli/share.ts's rule). */
+const canAsk = (json: boolean): boolean => !json && process.stdin.isTTY === true && process.stderr.isTTY === true;
+
+/**
+ * A PERSON TYPES THE REPLICA'S NAME BACK: whether they typed exactly it (nothing trimmed or re-cased, as the service takes
+ * the confirm). What was typed is never printed: it may be anything, a secret pasted in the wrong place. The terminal
+ * echoes it, as a terminal does; the CLI writes nothing of it.
+ */
+async function typedBack(name: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
+  const closed = once(rl, "close").then(() => null);
+  const answer = await Promise.race([rl.question("> "), closed]);
+  rl.close();
+  // the input ended with nothing typed (a terminal echoes no line for it): the prompt's line ends here
+  if (answer === null) process.stderr.write("\n");
+  return answer === name;
+}
+
+/** EVERY WORD A DELETION PRINTS OF ITS OWN, by the builders it prints with; what the service sends goes in where a
+ *  builder takes it, held and masked. */
+export function deleteWords(r: Replica, base: string, every: string) {
+  const name = replicaText(r);
+  const again: NextStep = [`mason replica delete ${name}`, "delete it again (a repeat changes nothing)"];
+  const status = statusStep(r);
+  const at = (seconds: number): string => new Date(Date.now() + seconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  return {
+    again, status,
+    ask: `Deleting ${name} on ${base} cannot be undone: the replica and its synced data go, and Mason's replication slot on its database is dropped. Type ${name} to delete it, anything else to keep it.`,
+    notTyped: { message: `${name} was not deleted: what was typed is not its name`, code: "refused",
+      why: "a deletion is asked for twice: on the command line, and typed back exactly (nothing trimmed, nothing re-cased)",
+      fix: `run it again and type ${name}; where no person is asked, mason replica delete ${name} --yes`, next: [[`mason replica delete ${name}`, "ask again"]] } as Failure,
+    progress: `Deleting ${name} on ${base}: each step is said as the service reports it, waiting up to ${every}`,
+    lost: (why: string, d: Deletion): string => `  The deletion's answer was lost (${why}); the service has ${name}, its deletion ${stageLine(d)}`,
+    unsure: (d: Deletion, why: string): string => `${stageLine(d)}; the service could not say more just now (${why}): asking again`,
+    headline: `Deleted ${name} on ${base}`,
+    /** a refusal's next step, the CLI's own, by the status (and a 403's code, which the service's words carry) */
+    refusedNext: (status: number, code: string, retryAfter: number | null): NextStep[] => {
+      if (status === 403 && code === "fresh_login_needed") {
+        return [["mason login", `sign in again, then mason replica delete ${name} within 15 minutes of it; or delete it on its page in the service's web app, ${base}`]];
+      }
+      if (status === 401 || status === 403) return [["mason login", `sign in as an owner of ${r.org}: an owner deletes a replica, signed in as a person (a CI token deletes none)`]];
+      if (status === 404) return [listStep(r.org)];
+      if (status === 429 || status === 503) return [[again[0], retryAfter !== null ? `again after ${at(retryAfter)} (in ${retryAfter} s), when the service takes it` : "again later: the service did not say when"]];
+      return [again];
+    },
+    lostFailure: (sent: Failure, seen: { absent: true } | { state: ReplicaState } | null): Failure => ({ ...sent,
+      why: `${sent.why ?? "no answer"}; ${seen === null ? "whether its deletion began is not known" : "absent" in seen ? `asked since, the service has no ${name} for this login` : `asked since, it is ${seen.state}: its deletion did not begin`}`,
+      fix: `mason replica status ${name} says whether it is being deleted; if it is not, delete it again (a repeat changes nothing)`, next: [status, again] }),
+    /** finished, with a slot not verified gone: the statements were printed, and the exit is 1 */
+    notVerified: (d: Deletion): Failure | null => {
+      const left = d.sources.filter((x) => x.outcome === "not_verified");
+      if (!left.length) return null;
+      const one = left.length === 1;
+      return { message: `${name} is deleted, and ${one ? `the replication slot of source ${left[0]!.ordinal} is` : `the replication slots of ${left.length} sources are`} NOT verified gone`, code: "failed",
+        why: "a replication slot holds its database's WAL while it exists, whatever the disk, until it is dropped",
+        fix: `run the statement printed for ${one ? "it" : "each"} on ${one ? "its database" : "each one's database"} (with --json, deletion.sources[].byHand): it is Mason's own, for the slot the service named`,
+        next: [[status[0], "its deletion's outcome, again"]] };
+    },
+    timedOut: (d: Deletion): Failure => ({ message: `${name}'s deletion did not finish within ${every}`, code: "timeout", why: `it was last ${stageLine(d)}`,
+      fix: `nothing was stopped, and its deletion goes on: mason replica status ${name} says how it goes; a longer wait is --timeout 30m`, next: [status] }),
+    gone: (): Failure => ({ message: `the service has no ${name} now`, code: "not_found",
+      why: "it was being deleted, and the service has no record of it now: what its deletion did to each replication slot is not known",
+      fix: `look for Mason's slots on each database it synced: ${listSlotsStatement()}`, next: [listStep(r.org)] }),
+  };
+}
+
+async function remove(r: Replica, o: { timeout: { every: string; seconds: number }; yes: boolean }, json: boolean): Promise<number> {
+  const name = replicaText(r);
+  const s = signedIn("a replica is deleted", `mason replica delete ${name}`, json);
+  if (isFailure(s)) return fail(s, json);
+  const { service, token } = s, secrets = [token];
+  const w = deleteWords(r, service.base, o.timeout.every);
+  // A PERSON TYPES IT BACK (else --yes said it on the line): nothing is sent before
+  if (!o.yes) {
+    say(w.ask);
+    if (!(await typedBack(name))) return fail(w.notTyped, json);
+  }
+  const where = `/v1/replicas/${r.org}/${r.name}`;
+  const step = "a replica's deletion was asked for";
+  if (!json) say(w.progress);
+
+  // THE DELETION: 202 under way, 200 done already (a repeat changes nothing), else why not, as the service worded it
+  const sent = await call(service, "DELETE", where, { token, json: { confirm: name } });
+  let state: HostedReplica, deletion: Deletion, waitMs = REPLICA_POLL_MS;
+  if (isFailure(sent)) {
+    // a DELETE that got no answer may have begun it: its state says so
+    const a = await call(service, "GET", where, { token });
+    const found = !isFailure(a) && a.status === 200 ? replicaAnswer(a, r, secrets) : null;
+    const why = serviceText(sent.why ?? sent.message, 300, secrets);
+    if (found === null || found.deletion === null) {
+      return fail(w.lostFailure({ ...sent, why }, found !== null ? { state: found.replica.state } : !isFailure(a) && a.status === 404 ? { absent: true } : null), json);
+    }
+    if (!json) say(w.lost(why, found.deletion));
+    state = found.replica; deletion = found.deletion;
+    if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+  } else {
+    if (sent.status !== 200 && sent.status !== 202) {
+      const e = obj(sent.json) && obj(sent.json.error) && typeof sent.json.error.code === "string" ? sent.json.error.code : "";
+      return fail(serviceFailure(sent, secrets, (st) => w.refusedNext(st, e, sent.retryAfter)) ?? unexpected(service, sent, step), json);
+    }
+    const held = replicaAnswer(sent, r, secrets);
+    // 202 is a deletion under way, 200 one finished: anything else is outside the contract
+    if (held === null || held.deletion === null || (sent.status === 202) !== (held.replica.state === "deleting")) return fail(unexpected(service, sent, step), json);
+    state = held.replica; deletion = held.deletion;
+    if (sent.retryAfter !== null) waitMs = sent.retryAfter * 1000;
+  }
+
+  // THE WAIT: until its deletion is finished, bounded by --timeout; each step said once, as it is done
+  const deadline = Date.now() + o.timeout.seconds * 1000;
+  let said = "", saidAt = 0;
+  const told = new Set<string>();
+  const show = (line: string): void => { if (!json && sayAgain(line, said, saidAt, Date.now())) { say(`  ${line}`); said = line; saidAt = Date.now(); } };
+  const done = (d: Deletion): void => { if (!json) for (const x of d.steps) if (x.doneAt !== null && !told.has(x.step)) { told.add(x.step); say(`  done: ${x.what}`); } };
+  const ended = (error: Failure | null): number => {
+    const next = error === null ? nextOf(state) : error.next ?? [];
+    if (json) { out(jsonText(REPLICA, { replica: state, deletion, ...(error ? { error: errorJson(error) } : {}) }, next)); return error ? exitOf(error) : 0; }
+    // finished: what it did to each slot, and the statements by hand (a failure after them says why the exit is 1)
+    if (deletion.stage === "finished") out(deletionReport({ headline: w.headline, details: deletionRows(deletion), deletion, next: error === null ? next : [] }, outStyle()));
+    return error === null ? 0 : fail(error, false);
+  };
+  for (;;) {
+    if (deletion.stage === "finished") { done(deletion); return ended(w.notVerified(deletion)); }
+    show(stageLine(deletion));
+    done(deletion);
+    const left = deadline - Date.now();
+    if (left <= 0) return ended(w.timedOut(deletion));
+    await sleep(Math.min(waitMs, left));
+    const a = await call(service, "GET", where, { token });
+    waitMs = REPLICA_POLL_MS;
+    // an answer that cannot say how it goes is a wait, never an outcome: the timeout bounds it
+    if (isFailure(a) || a.status === 429 || a.status >= 500) {
+      if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+      show(w.unsure(deletion, isFailure(a) ? serviceText(a.why ?? a.message, 300, secrets) : `${a.what} answered ${a.status}`));
+      continue;
+    }
+    if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
+    if (a.status === 404) return ended(w.gone());
+    if (a.status !== 200) return ended(serviceFailure(a, secrets, (st) => refusedNext(st, r.org, "a member", w.status)) ?? unexpected(service, a, step));
+    const now = replicaAnswer(a, r, secrets);
+    // a deletion does not end otherwise than finished: a replica in none now is outside the contract
+    if (now === null || now.deletion === null) return ended(unexpected(service, a, step));
+    state = now.replica; deletion = now.deletion;
   }
 }
