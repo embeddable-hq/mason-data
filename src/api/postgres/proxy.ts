@@ -153,18 +153,56 @@ function ipv6Text(b: Uint8Array): string {
   return run < 2 ? hex.join(":") : `${hex.slice(0, at).join(":")}::${hex.slice(at + run).join(":")}`;
 }
 
-/** One entry of the setting: an address family, the network's bytes and its prefix. */
+/** One entry of the setting as written: an address family, the network's bytes and its prefix. */
 interface Cidr { family: 4 | 6; bytes: Uint8Array; prefix: number }
 
-/** The addresses a PROXY header is believed from (`parseProxyFrom`): the entries as written, and each read. */
-export interface ProxyFrom { entries: string[]; cidrs: Cidr[] }
+/**
+ * EVERY ADDRESS IN ONE SPACE, as Mason means one: IPv6's 128 bits, an IPv4 address at its v4-mapped place
+ * (::ffff:a.b.c.d), since a v4-mapped peer or header source IS that IPv4 client (`shownAddress`). What an entry names and
+ * what the list covers are both read here, never from how an entry is spelt: `0.0.0.0/1,128.0.0.0/1` is every IPv4
+ * address, as `0.0.0.0/0` is, and `::/64` holds every v4-mapped address, so every IPv4 one too.
+ */
+const V4_START = 0xffffn << 32n;
+const V4_END = V4_START + (1n << 32n) - 1n;
+const ALL_END = (1n << 128n) - 1n;
 
-/** Whether `address` (as `shownAddress` shows one) is among those `from` names. */
+/** the places from `start` to `end`, both included */
+interface Range { start: bigint; end: bigint }
+
+/** The addresses a PROXY header is believed from (`parseProxyFrom`): the entries as written, and the places they name. */
+export interface ProxyFrom { entries: string[]; ranges: Range[] }
+
+const bigOf = (b: Uint8Array): bigint => b.reduce((n, x) => (n << 8n) | BigInt(x), 0n);
+
+/** an address's place (`V4_START`), or null when it is no address */
+function placeOf(address: string): bigint | null {
+  const v4 = ipv4Bytes(address);
+  if (v4 !== null) return V4_START | bigOf(v4);
+  const v6 = ipv6Bytes(address);
+  return v6 === null ? null : bigOf(v6);
+}
+
+/** the places an entry names */
+function rangeOf(c: Cidr): Range {
+  const start = c.family === 4 ? V4_START | bigOf(c.bytes) : bigOf(c.bytes);
+  return { start, end: start + (1n << BigInt((c.family === 4 ? 32 : 128) - c.prefix)) - 1n };
+}
+
+/** Whether `address` (as `shownAddress` shows one, or in any spelling of the same address) is among those `from` names. */
 export function proxyNames(from: ProxyFrom, address: string): boolean {
-  const v4 = ipv4Bytes(address), bytes = v4 ?? ipv6Bytes(address);
-  if (bytes === null) return false;
-  const family = v4 !== null ? 4 : 6;
-  return from.cidrs.some((c) => c.family === family && prefixEqual(c.bytes, bytes, c.prefix));
+  const at = placeOf(address);
+  return at !== null && from.ranges.some((r) => r.start <= at && at <= r.end);
+}
+
+/** whether `ranges` together hold every place from `lo` to `hi` */
+function covers(ranges: readonly Range[], lo: bigint, hi: bigint): boolean {
+  let next = lo;
+  for (const r of [...ranges].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0))) {
+    if (r.start > next) return false;
+    if (r.end >= next) next = r.end + 1n;
+    if (next > hi) return true;
+  }
+  return next > hi;
 }
 
 function prefixEqual(a: Uint8Array, b: Uint8Array, bits: number): boolean {
@@ -182,7 +220,8 @@ function network(bytes: Uint8Array, prefix: number): Uint8Array {
 
 const text = (family: 4 | 6, bytes: Uint8Array): string => family === 4 ? Array.from(bytes).join(".") : ipv6Text(bytes);
 
-/** One entry read, or what is wrong with it, with a did-you-mean where one is a fair guess. */
+/** One entry read, or what is wrong with it, with a did-you-mean where one is a fair guess: a guess is offered only
+ *  once it is read as an entry itself, so it is never one that would be refused in turn. */
 function cidrOf(entry: string): Cidr | { problem: string } {
   const quoted = JSON.stringify(entry);
   const m = /^([^/]*)(?:\/(\d{1,3}))?$/.exec(entry);
@@ -192,11 +231,14 @@ function cidrOf(entry: string): Cidr | { problem: string } {
   }
   const family = v4 !== null ? 4 : 6, bytes = (v4 ?? v6)!, max = family === 4 ? 32 : 128;
   const prefix = m[2] === undefined ? max : Number(m[2]);
-  if (family === 6 && v4Mapped(bytes) && (m[2] === undefined || prefix >= 96)) {
-    const mapped = bytes.subarray(12, 16);
-    return { problem: `${quoted} is an IPv4 address written as IPv6, which Mason reads as IPv4: did you mean ${text(4, mapped)}${prefix === 128 ? "" : `/${prefix - 96}`}?` };
-  }
   if (prefix > max) return { problem: `${quoted}: an IPv${family} prefix is at most /${max}` };
+  if (family === 6 && v4Mapped(bytes) && prefix >= 96) {
+    const p4 = prefix - 96, net4 = network(bytes.subarray(12, 16), p4);
+    const meant = `${text(4, net4)}${p4 === 32 ? "" : `/${p4}`}`, read = cidrOf(meant);
+    return { problem: "problem" in read
+      ? `${quoted} is IPv4 written as IPv6, which Mason reads as ${meant}, and ${read.problem}`
+      : `${quoted} is IPv4 written as IPv6, which Mason reads as IPv4: did you mean ${meant}?` };
+  }
   if (prefix === 0) return { problem: `${quoted} names every address, so any client could claim to be any other: name the proxy's own addresses` };
   const net = network(bytes, prefix);
   if (!prefixEqual(net, bytes, max)) return { problem: `${quoted} has bits set past its prefix: did you mean ${text(family, net)}/${prefix}?` };
@@ -205,17 +247,26 @@ function cidrOf(entry: string): Cidr | { problem: string } {
 
 /**
  * `MASON_PG_PROXY_FROM` read: null when it is unset or empty (no header is believed from anyone, as before), the
- * addresses it names, or every entry that is not an address or a CIDR, each said with what is wrong.
+ * addresses it names, or why not: every entry that is not an address or a CIDR, each said with what is wrong, or a list
+ * whose entries TOGETHER name every IPv4 or every IPv6 address (read as places, never spellings), under which any
+ * client could claim to be any other.
  */
 export function parseProxyFrom(value: string | undefined): ProxyFrom | null | { problem: string } {
   if (value === undefined || value.trim() === "") return null;
   const entries = value.split(",").map((e) => e.trim());
-  const cidrs: Cidr[] = [], wrong: string[] = [];
+  const ranges: Range[] = [], wrong: string[] = [];
   for (const e of entries) {
     if (e === "") { wrong.push("an empty entry between two commas"); continue; }
     const c = cidrOf(e);
-    if ("problem" in c) wrong.push(c.problem); else cidrs.push(c);
+    if ("problem" in c) wrong.push(c.problem); else ranges.push(rangeOf(c));
   }
-  if (wrong.length) return { problem: `${PROXY_SETTING}=${JSON.stringify(value)}: ${wrong.join("; ")}` };
-  return { entries, cidrs };
+  const setting = `${PROXY_SETTING}=${JSON.stringify(value)}`;
+  if (wrong.length) return { problem: `${setting}: ${wrong.join("; ")}` };
+  const every = [
+    ...(covers(ranges, V4_START, V4_END) ? ["every IPv4 address (0.0.0.0/0)"] : []),
+    // IPv6's every address but the v4-mapped ones, which are IPv4's and judged above
+    ...(covers(ranges, 0n, V4_START - 1n) && covers(ranges, V4_END + 1n, ALL_END) ? ["every IPv6 address (::/0)"] : []),
+  ];
+  if (every.length) return { problem: `${setting}: its entries together name ${every.join(" and ")}, so any client could claim to be any other: name the proxy's own addresses` };
+  return { entries, ranges };
 }

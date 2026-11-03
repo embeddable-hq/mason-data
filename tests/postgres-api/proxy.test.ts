@@ -117,12 +117,16 @@ test("MASON_PG_PROXY_FROM: unset or empty reads no header; addresses and CIDRs n
   const from = parseProxyFrom("10.0.0.0/16, 2001:db8::/32,192.0.2.10") as ProxyFrom;
   assert.deepEqual(from.entries, ["10.0.0.0/16", "2001:db8::/32", "192.0.2.10"]);
   for (const [address, named] of [["10.0.0.1", true], ["10.0.255.254", true], ["10.1.0.1", false], ["192.0.2.10", true], ["192.0.2.11", false],
-    ["2001:db8:ffff::1", true], ["2001:db9::1", false], ["::ffff:10.0.0.1", false], ["fe80::1%eth0", false]] as const) {
+    ["2001:db8:ffff::1", true], ["2001:db9::1", false], ["::ffff:10.0.0.1", true], ["::ffff:10.1.0.1", false], ["fe80::1%eth0", false]] as const) {
     assert.equal(proxyNames(from, address), named, address);
   }
   assert.equal(proxyNames(parseProxyFrom("10.0.0.0/9") as ProxyFrom, "10.127.255.255"), true, "a prefix inside a byte");
   assert.equal(proxyNames(parseProxyFrom("10.0.0.0/9") as ProxyFrom, "10.128.0.0"), false);
   assert.equal(proxyNames(parseProxyFrom("::1") as ProxyFrom, "::1"), true, "one IPv6 address: /128");
+  // an address is what it means, never how it is spelt: a v4-mapped one IS its IPv4 address, both ways
+  assert.equal(proxyNames(parseProxyFrom("0.0.0.0/1,2001:db8::/32") as ProxyFrom, "::ffff:127.0.0.1"), true);
+  assert.equal(proxyNames(parseProxyFrom("::1:0:0:0/80") as ProxyFrom, "10.0.0.1"), false, "a range beside the v4-mapped block names none of it");
+  assert.equal(proxyNames(parseProxyFrom("::/88") as ProxyFrom, "::ffff:1.2.3.4"), false);
 });
 
 test("MASON_PG_PROXY_FROM that is not a CIDR list is refused, naming every bad entry, with a did-you-mean where one is a fair guess", () => {
@@ -133,11 +137,40 @@ test("MASON_PG_PROXY_FROM that is not a CIDR list is refused, naming every bad e
   assert.match(problem("10.0.0.0/33"), /an IPv4 prefix is at most \/32/);
   assert.match(problem("::/129"), /an IPv6 prefix is at most \/128/);
   assert.match(problem("0.0.0.0/0"), /names every address, so any client could claim to be any other/);
-  assert.match(problem("::ffff:10.0.0.0/104"), /an IPv4 address written as IPv6.*did you mean 10\.0\.0\.0\/8\?/);
+  assert.match(problem("::ffff:10.0.0.0/104"), /IPv4 written as IPv6, which Mason reads as IPv4: did you mean 10\.0\.0\.0\/8\?/);
   assert.match(problem("::ffff:10.0.0.9"), /did you mean 10\.0\.0\.9\?/);
+  assert.match(problem("::ffff:10.0.0.9/104"), /did you mean 10\.0\.0\.0\/8\?/, "the guess is the network, never an entry refused for its host bits");
   assert.match(problem("10.0.0.0/8,,"), /an empty entry between two commas/);
   assert.match(problem("fe80::1%eth0"), /is not an address or a CIDR/);
   assert.match(problem("10.0.0.0/-1"), /is not an address or a CIDR/);
   const two = problem("10.0.0.0/8,bad,10.0.0.1/8");
   assert.match(two, /^MASON_PG_PROXY_FROM="10\.0\.0\.0\/8,bad,10\.0\.0\.1\/8": "bad" is not an address .*; "10\.0\.0\.1\/8" has bits set past its prefix: did you mean 10\.0\.0\.0\/8\?$/);
+});
+
+// THE CLASS: what an entry or a list names is read from its MEANING, the places it covers, never from its spelling
+// (review of PR 522: 0.0.0.0/0 was refused and 0.0.0.0/1,128.0.0.0/1, every IPv4 address too, was taken)
+test("a list whose entries together name every IPv4 or every IPv6 address is refused, however it is split or spelt; a did-you-mean is never itself refused", () => {
+  const problem = (v: string): string => { const r = parseProxyFrom(v); assert.ok(r !== null && "problem" in r, `${v}: ${JSON.stringify(r)}`); return r.problem; };
+  for (const every4 of ["0.0.0.0/1,128.0.0.0/1", "128.0.0.0/1, 0.0.0.0/2, 64.0.0.0/2", "0.0.0.0/1,128.0.0.0/2,192.0.0.0/2,10.0.0.0/8",
+    "::/64", "::fffe:0:0/95", "::/81,::8000:0:0/81", "0.0.0.0/1,128.0.0.0/1,2001:db8::/32"]) {
+    assert.match(problem(every4), /its entries together name every IPv4 address \(0\.0\.0\.0\/0\), so any client could claim to be any other/, every4);
+  }
+  for (const every6 of ["::/1,8000::/1", "8000::/1,::/2,4000::/2", "::/1,8000::/2,c000::/2"]) {
+    assert.match(problem(every6), /every IPv6 address \(::\/0\)/, every6);
+  }
+  assert.match(problem("::/1,8000::/1"), /every IPv4 address \(0\.0\.0\.0\/0\) and every IPv6 address/, "::/1 holds the v4-mapped addresses: both");
+  // all but a sliver is not every address, and is the operator's word
+  for (const most of ["0.0.0.0/1,128.0.0.0/2,192.0.0.0/3", "0.0.0.0/1", "8000::/1,4000::/2", "0.0.0.0/1,2001:db8::/32", "::/88"]) {
+    assert.ok(!("problem" in (parseProxyFrom(most) as object)), most);
+  }
+  // a v4-mapped entry's guess is read as an entry first: one that names every address says so, never suggests it
+  assert.equal(problem("::ffff:0:0/96"), 'MASON_PG_PROXY_FROM="::ffff:0:0/96": "::ffff:0:0/96" is IPv4 written as IPv6, which Mason reads as 0.0.0.0/0, and "0.0.0.0/0" names every address, so any client could claim to be any other: name the proxy\'s own addresses');
+  assert.doesNotMatch(problem("::ffff:0:0/96"), /did you mean/);
+  assert.match(problem("::ffff:0:0/129"), /an IPv6 prefix is at most \/128/, "a prefix past the family's is said as such, never turned into an IPv4 guess");
+  // every did-you-mean the setting can give is an entry it takes
+  for (const v of ["10.0.1.5/24", "2001:db8::1/32", "::ffff:10.0.0.9/104", "::ffff:10.0.0.9", "::ffff:192.168.1.1/120", "::ffff:255.255.255.255/97"]) {
+    const guess = /did you mean (\S+)\?/.exec(problem(v))?.[1];
+    assert.ok(guess !== undefined, v);
+    assert.ok(!("problem" in (parseProxyFrom(guess) as object)), `${v} suggests ${guess}, which is refused`);
+  }
 });

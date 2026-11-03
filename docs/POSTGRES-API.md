@@ -412,8 +412,10 @@ else: a header is a claim about who connected, and whoever may send one can make
 
 The client's address is the request log's `client_addr` (`clientAddress` in `mason logs --requests --json`), a v4-mapped
 IPv6 address shown as IPv4, and the `connected` log line's `from <address>`. A setting that is not a CIDR list refuses
-the start, naming the entry (`10.1.2.3/16` has bits past its prefix: did you mean `10.1.0.0/16`?); so does `0.0.0.0/0`,
-which names every address. A share's socket (`mason share`) never reads a header.
+the start, naming the entry (`10.1.2.3/16` has bits past its prefix: did you mean `10.1.0.0/16`?); so does a list whose
+entries together name every IPv4 or every IPv6 address, however it is split (`0.0.0.0/0`, `0.0.0.0/1,128.0.0.0/1`, or
+`::/64`, which holds every v4-mapped address). An entry is read by the addresses it covers, a v4-mapped IPv6 one as the
+IPv4 address it is. A share's socket (`mason share`) never reads a header.
 
 ### From an MCP client
 
