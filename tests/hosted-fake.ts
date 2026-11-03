@@ -36,6 +36,27 @@ const ECHO_BODY = "Qz7Vw2Xk9Pj4Ry8Tm3Lq6Hb1Ns5Gc0Fd-Ue_YoZi7Ka";
 export const echoToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${ECHO_BODY}`;
 
 /**
+ * A TOKEN WHOSE BODY HOLDS A RUN EVERY GRAMMAR TAKES (issue 627): 11 lower case letters (an OAuth error's grammar), 11
+ * digits (a time's fraction), then base64url of every kind; `n` picks one of two, so a command can hold two at once.
+ * Fixed, so a run's verdict is the same at every run; written in parts, so no line of this file is shaped as a token.
+ */
+export const RUNS = [{ letters: "qzvwxkpjrtm", digits: "40718293651", rest: "Hb1Ns5Gc0Fd-Ue_YoZi7K" }, { letters: "hgfmwyqcbnx", digits: "93850261749", rest: "Lk2Pq7Rs-Tu_Vw8Xy3Za4" }] as const;
+export const runToken = (kind: "pat" | "ci", n: 0 | 1 = 0): string => ["masondata", kind, `${RUNS[n].letters}${RUNS[n].digits}${RUNS[n].rest}`].join("_");
+/** The forms a test gives a value of a hosted command's answer (issue 627): the token whole, its body, its body in lower
+ *  case, and 11 of its characters in a row — its letters, or its digits for a value only digits fit. */
+export const runForms = (token: string, n: 0 | 1 = 0): Array<{ what: string; value: string; digits: string }> => {
+  const body = bodyOf(token);
+  return [{ what: "the token whole", value: token, digits: token }, { what: "its body", value: body, digits: body },
+    { what: "its body in lower case", value: body.toLowerCase(), digits: body.toLowerCase() }, { what: "11 of its characters in a row", value: RUNS[n].letters, digits: RUNS[n].digits }];
+};
+/** Whether `text` shows 11 of a token's body in a row, in any case (what a refused answer must print none of). */
+export const showsRun = (text: string, token: string): boolean => {
+  const t = text.toLowerCase(), b = bodyOf(token).toLowerCase();
+  for (let i = 0; i + 11 <= b.length; i++) if (t.includes(b.slice(i, i + 11))) return true;
+  return false;
+};
+
+/**
  * The forms a service may echo a token it was sent in, besides the token whole (issue 540; the review of PR 591): each
  * by what it is, the text each of a failure's message, why and fix carries, and whether the words printed are exact
  * (else a mask may take in a letter beside it that is the body's next, by chance, or one field is shown).

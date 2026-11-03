@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { BASE, DEVICE, SECRETS, bodyCovered, bodyShown, credentials, echoForms, echoToken, envFor, fakeService, granted, home, mason, newToken, noTokenLeaked, saved, writeSaved, type Reply, type Script } from "./hosted-fake.ts";
+import { BASE, DEVICE, ME, SECRETS, bodyCovered, bodyShown, credentials, echoForms, echoToken, envFor, fakeService, granted, home, mason, newToken, noTokenLeaked, runForms, runToken, saved, showsRun, writeSaved, type Reply, type Script } from "./hosted-fake.ts";
 
 test("mason login: an answer outside the contract is a failure said by its status, never followed (a redirect) nor repeated (its body), never retried", async () => {
   const echoed = newToken(); SECRETS.push(echoed);
@@ -300,6 +300,94 @@ test("mason logout: a login whose saved email, and a revoke refusal, echo its to
         assert.equal(fs.existsSync(credentials(h)) && Object.keys(saved(h).logins).length, 0, "signed out all the same");
       }
     } finally { await fake.close(); }
+  }
+});
+
+/**
+ * ISSUE 627: EVERY VALUE OF AN ANSWER LOGIN PRINTS, OR THAT A GRAMMAR ALONE HELD — the device code, the user code, each
+ * sign-in page, the intervals, an OAuth refusal's code, who signed in (email, name, each organisation's slug, name and
+ * role), a key outside the shape — carrying a token the command holds, in each form (`runForms`). Each run in both
+ * forms, side by side.
+ */
+async function eachForm(token: string, n: 0 | 1, run: (v: string, digits: string, json: boolean, at: string) => Promise<void>): Promise<void> {
+  await Promise.all(runForms(token, n).flatMap((form) => [false, true].map((json) => run(form.value, form.digits, json, `${form.what}${json ? ", --json" : ""}`))));
+}
+
+test("mason login: a device code's answer, an OAuth refusal or who signed in that carries a token it holds — the login it replaces, or the new one — whole, its body, in lower case, 11 of its characters in a row, is refused whole, by its status: nothing of it printed, opened, polled or saved (issue 627)", { timeout: 300_000 }, async () => {
+  // the login this one would replace: the service may echo it before it sends a token
+  const old = runToken("pat", 0); SECRETS.push(old);
+  const denied = (): Reply => ({ status: 400, body: { error: "access_denied" } });
+  const deviceCases: Array<[what: string, script: (v: string, digits: string) => Script, said: RegExp, polled: boolean]> = [
+    ["the device code", (v) => ({ device: { status: 200, body: { ...DEVICE, device_code: v } }, token: denied }), / answered POST \/oauth\/device\/code with 200, where a device code was expected$/, false],
+    ["the user code", (v) => ({ device: { status: 200, body: { ...DEVICE, user_code: v } }, token: denied }), / answered POST \/oauth\/device\/code with 200, where a device code was expected$/, false],
+    ["the sign-in page", (v) => ({ device: { status: 200, body: { ...DEVICE, verification_uri: `${BASE}/device?c=${v}` } }, token: denied }), / answered POST \/oauth\/device\/code with 200, where a device code was expected$/, false],
+    ["the page with its code", (v) => ({ device: { status: 200, body: { ...DEVICE, verification_uri_complete: `${BASE}/device?c=${v}` } }, token: denied }), / answered POST \/oauth\/device\/code with 200, where a device code was expected$/, false],
+    ["the interval", (_, d) => ({ device: { status: 200, body: { ...DEVICE, interval: d } }, token: denied }), / answered POST \/oauth\/device\/code with 200, where a device code was expected$/, false],
+    ["a key outside the shape", (v) => ({ device: { status: 200, body: { ...DEVICE, note: v } }, token: denied }), / answered POST \/oauth\/device\/code with 200, where a device code was expected$/, false],
+    ["the device code's OAuth refusal", (v) => ({ device: { status: 400, body: { error: v } } }), / answered POST \/oauth\/device\/code with 400, where a sign-in was asked for$/, false],
+    ["the poll's OAuth refusal", (v) => ({ token: () => ({ status: 400, body: { error: v, error_description: "no" } }) }), / answered POST \/oauth\/token with 400, where the sign-in was polled$/, true],
+  ];
+  for (const [what, script, said, polled] of deviceCases) {
+    await eachForm(old, 0, async (v, digits, json, form) => {
+      const fake = await fakeService(script(v, digits));
+      try {
+        const h = home();
+        writeSaved(h, { [fake.url]: { token: old, email: "ada@example.com", savedAt: "2026-11-01T00:00:00.000Z" } });
+        const a = await mason(h, ["login", ...(json ? ["--json"] : [])], envFor(h, fake.url));
+        const at = `${what}, ${form}`, all = `${a.stdout}\n${a.stderr}`;
+        assert.equal(a.code, 1, `${at}: ${all}`);
+        assert.match(json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr.split("\n").find((l) => l.startsWith("✗ mason login: "))!, said, `${at}: said by its status:\n${all}`);
+        assert.ok(!showsRun(all, old), `${at}: printed the token:\n${all}`);
+        assert.equal(fake.requests.some((r) => r.path === "/oauth/token"), polled, `${at}: polled only on a device code held`);
+        assert.equal(saved(h).logins[fake.url]!.token, old, `${at}: the saved login is kept`);
+      } finally { await fake.close(); }
+    });
+  }
+  // who signed in, carrying the new token (or the login it replaces): refused, the token revoked, never saved
+  const token = runToken("pat", 1); SECRETS.push(token);
+  const meCases: Array<[what: string, me: (v: string) => Record<string, unknown>, held: string, n: 0 | 1]> = [
+    ["the email", (v) => ({ ...ME, email: `${v}@example.com` }), token, 1],
+    ["the name", (v) => ({ ...ME, name: v }), token, 1],
+    ["an organisation's slug", (v) => ({ ...ME, orgs: [{ ...ME.orgs[0]!, slug: v }] }), token, 1],
+    ["an organisation's name", (v) => ({ ...ME, orgs: [{ ...ME.orgs[0]!, name: v }] }), token, 1],
+    ["an organisation's role", (v) => ({ ...ME, orgs: [{ ...ME.orgs[0]!, role: v }] }), token, 1],
+    ["a key outside the shape", (v) => ({ ...ME, note: v }), token, 1],
+    ["the name, the login it replaces", (v) => ({ ...ME, name: v }), old, 0],
+  ];
+  for (const [what, body, held, n] of meCases) {
+    await eachForm(held, n, async (v, _, json, form) => {
+      const fake = await fakeService({ token: () => granted(token), me: { status: 200, body: body(v) } });
+      try {
+        const h = home();
+        if (held === old) writeSaved(h, { [fake.url]: { token: old, email: "ada@example.com", savedAt: "2026-11-01T00:00:00.000Z" } });
+        const a = await mason(h, ["login", ...(json ? ["--json"] : [])], envFor(h, fake.url));
+        const at = `${what}, ${form}`, all = `${a.stdout}\n${a.stderr}`;
+        assert.equal(a.code, 1, `${at}: ${all}`);
+        assert.ok(all.includes(" answered GET /v1/me with 200, where the account signed in was asked for"), `${at}: said by its status:\n${all}`);
+        assert.ok(!showsRun(all, held) && !showsRun(all, token), `${at}: printed a token:\n${all}`);
+        assert.ok(fake.requests.some((r) => r.path === "/oauth/revoke" && r.form.token === token), `${at}: the token it could not use is revoked`);
+        if (held === old) assert.equal(saved(h).logins[fake.url]!.token, old, `${at}: the saved login is kept`);
+        else assert.equal(fs.existsSync(credentials(h)), false, `${at}: never saved`);
+      } finally { await fake.close(); }
+    });
+  }
+});
+
+test("mason logout: a revoke's answer is never read but for its status — one carrying the token whole, its body, in lower case or 11 of its characters in a row prints none of it, and the login is removed (issue 627)", { timeout: 300_000 }, async () => {
+  const token = runToken("pat", 0); SECRETS.push(token);
+  for (const [what, reply] of [["a 200", (v: string): Reply => ({ status: 200, body: { note: v } })], ["a 400", (v: string): Reply => ({ status: 400, body: { error: v, error_description: v } })]] as const) {
+    await eachForm(token, 0, async (v, _, json, form) => {
+      const fake = await fakeService({ revoke: reply(v) });
+      try {
+        const h = home();
+        writeSaved(h, { [fake.url]: { token, email: "ada@example.com", savedAt: "2026-11-01T00:00:00.000Z" } });
+        const a = await mason(h, ["logout", ...(json ? ["--json"] : [])], envFor(h, fake.url));
+        const at = `${what}, ${form}`, all = `${a.stdout}\n${a.stderr}`;
+        assert.equal(a.code, 0, `${at}: ${all}`);
+        assert.ok(!showsRun(all, token), `${at}: printed the token:\n${all}`);
+        assert.equal(Object.keys(saved(h).logins).length, 0, `${at}: signed out`);
+      } finally { await fake.close(); }
+    });
   }
 });
 

@@ -15,7 +15,8 @@ const hostedModule = await import("../src/cli/hosted.ts") as Record<string, unkn
 const echoRun = typeof hostedModule.ECHO_RUN === "number" ? hostedModule.ECHO_RUN : 11;
 const echoesSecret = (s: string, secrets: string[], run: number): boolean =>
   typeof hostedModule.echoesSecret === "function" ? (hostedModule.echoesSecret as (s: string, x: string[], n: number) => boolean)(s, secrets, run) : assert.fail("no echoesSecret here");
-import { carriesNoSecret, MAX_LIST_BYTES } from "../src/cli/user-hosted.ts";
+import { MAX_LIST_BYTES } from "../src/cli/user-hosted.ts";
+import { carriesNoSecret } from "../src/cli/hosted.ts";
 import { createHash } from "node:crypto";
 import { connectionUrl, psqlLine } from "../src/cli/pg-url.ts";
 

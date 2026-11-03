@@ -107,13 +107,16 @@ export async function login(argv: string[]): Promise<number> {
   const before = readLogins();
   if (isFailure(before)) return fail("login", before, { json });
 
-  const code = await startDevice(service);
+  // what this command holds that the service may echo before it sends a token: the login it replaces (src/cli/hosted.ts
+  // `carriesNoSecret`: an answer that carries it is refused whole)
+  const held = before.logins.logins[service.base] ? [before.logins.logins[service.base]!.token] : [];
+  const code = await startDevice(service, held);
   if (isFailure(code)) return fail("login", code, { json });
-  const token = await approved(service, code, json);
+  const token = await approved(service, code, json, held);
   if (isFailure(token)) return fail("login", token, { json });
 
   // who signed in, before anything is saved: a token the service will not say who it is is never kept
-  const me = await whoAmI(service, token);
+  const me = await whoAmI(service, token, held);
   if (isFailure(me)) { await revoke(service, token); return fail("login", me, { json }); }
   // read again just before the write, so a login another command saved meanwhile is kept
   const now = readLogins();
@@ -155,7 +158,7 @@ export async function login(argv: string[]): Promise<number> {
  * 3.5), until the token, a refusal, or the code's expiry. On a terminal a spinner turns beside the wait; elsewhere the
  * wait is one line.
  */
-async function approved(service: Service, code: DeviceCode, json: boolean): Promise<string | Failure> {
+async function approved(service: Service, code: DeviceCode, json: boolean, held: readonly string[]): Promise<string | Failure> {
   const page = code.verificationUriComplete ?? code.verificationUri;
   const s = errStyle();
   say(reportText({ headline: `To sign in to ${service.base}, open this page and approve the code:`,
@@ -179,7 +182,7 @@ async function approved(service: Service, code: DeviceCode, json: boolean): Prom
   for (;;) {
     if (Date.now() + interval * 1000 > deadline) { if (live) steps.fail(); return expired(code); }
     await sleep(interval * 1000);
-    const p = await pollToken(service, code);
+    const p = await pollToken(service, code, held);
     if ("pending" in p) continue;
     if ("slowDown" in p) { interval += 5; continue; }
     if (isFailure(p)) { if (live) steps.fail(); return p; }

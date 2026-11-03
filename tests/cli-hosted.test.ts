@@ -5,7 +5,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { codeOfStatus, DEFAULT_SERVICE_URL, deviceName, serviceOf, serviceText, urlProblem } from "../src/cli/hosted.ts";
+import { createHash } from "node:crypto";
+import { carriesNoSecret, codeOfStatus, DEFAULT_SERVICE_URL, deviceName, deviceOf, ECHO_RUN, isFailure, meOf, oauthFailure, serviceOf, serviceText, urlProblem, type Answer } from "../src/cli/hosted.ts";
+import { deployStateOf } from "../src/cli/deploy.ts";
 import { credentialsPath, environmentToken, parseLogins } from "../src/cli/credentials.ts";
 
 test("serviceOf: the default when MASON_CLOUD_URL is unset; its origin when it is an address alone; else refused", () => {
@@ -189,4 +191,115 @@ test("serviceText: a Mason user's password is masked whatever precedes it and in
   }
   // the limit, as docs/HOSTED-API.md says it: no shape to match
   for (const s of [pw.replace(/_/g, " "), pw.slice("mason_".length), pw.replace(/_/g, "%5F")]) assert.equal(t(s), s.replace(/\s+/g, " "), s);
+});
+
+// ------------------------------------------------------------------ a grammar is no mask (issue 627)
+
+/**
+ * A TOKEN WHOSE BODY HOLDS A RUN EVERY GRAMMAR TAKES: 11 lower case letters (an OAuth error's grammar), 11 digits (a
+ * time's fraction), then base64url of every kind. Written in parts, so no line of this file is shaped as a token.
+ */
+const LETTERS = "qzvwxkpjrtm", DIGITS = "40718293651";
+const BODY = `${LETTERS}${DIGITS}Hb1Ns5Gc0Fd-Ue_YoZi7K`;
+const TOKEN = ["masondata", "ci", BODY].join("_");
+const SERVICE = { base: "https://svc.example" };
+const AT = "2026-11-02T10:00:00Z";
+const answer = (status: number, json: unknown, what = "POST /x"): Answer => ({ status, json, what, retryAfter: null });
+
+/**
+ * EVERY VALUE A HOSTED COMMAND PRINTS THAT A GRAMMAR ALONE HELD ON main (src/cli/deploy.ts's table, src/cli/hosted.ts's
+ * readers), and every other string of the same answers: `answer(v)` puts `v` in the field, in a place its grammar may
+ * take it; `read` is null for an answer refused; `run` is which run of 11 of the body the grammar can take.
+ */
+type Field = [what: string, answer: (v: string) => unknown, read: (j: unknown, secrets: string[]) => unknown, plain: string, run: "letters" | "digits"];
+const deployRead = (id: string | null) => (j: unknown, x: string[]): unknown => deployStateOf(j, id, x, []);
+const deviceRead = (j: unknown, x: string[]): unknown => { const d = deviceOf(SERVICE, answer(200, j), x); return isFailure(d) ? null : d; };
+const meRead = (j: unknown, x: string[]): unknown => { const m = meOf(SERVICE, answer(200, j, "GET /v1/me"), x); return isFailure(m) ? null : m; };
+const oauthRead = (j: unknown, x: string[]): unknown => /refused this sign-in/.test(oauthFailure(SERVICE, answer(400, j), "a sign-in was asked for", x).message) ? j : null;
+const state = (more: Record<string, unknown>, id = "dep_01abc"): unknown => ({ deploy: { id, status: "queued", createdAt: AT, ...more } });
+const device = (more: Record<string, unknown>): unknown => ({ device_code: "dev-code-1", user_code: "WDJBMJHT", verification_uri: `${SERVICE.base}/device`, expires_in: 60, interval: 1, ...more });
+const me = (more: Record<string, unknown> = {}, org: Record<string, unknown> = {}): unknown => ({ email: "ada@example.com", name: "Ada", orgs: [{ slug: "acme", name: "Acme Inc", role: "owner", ...org }], ...more });
+const FIELDS: Field[] = [
+  ["deploy: the POST's id", (v) => state({}, v), deployRead(null), "dep_01abc", "letters"],
+  ["deploy: a status", (v) => state({ status: v }), deployRead(null), "queued", "letters"],
+  ["deploy: a phase", (v) => state({ status: "applying", phase: v }), deployRead(null), "checking", "letters"],
+  ["deploy: createdAt", (v) => state({ createdAt: `2026-11-02T10:00:00.${v}Z` }), deployRead(null), "5", "digits"],
+  ["deploy: finishedAt", (v) => state({ status: "running", finishedAt: `2026-11-02T10:01:00.${v}Z` }), deployRead("dep_01abc"), "5", "digits"],
+  ["deploy: a refusal's code", (v) => state({ status: "refused", finishedAt: AT, failure: { code: v, message: "refused" } }), deployRead("dep_01abc"), "bad_source", "letters"],
+  ["deploy: a key outside the shape", (v) => ({ ...(state({}) as object), note: v }), deployRead(null), "a note", "letters"],
+  ["deploy: a key named by it", (v) => state({ [v]: 1 }), deployRead(null), "note", "letters"],
+  ["login: the device code", (v) => device({ device_code: v }), deviceRead, "dev-code-1", "letters"],
+  ["login: the user code", (v) => device({ user_code: v }), deviceRead, "WDJBMJHT", "letters"],
+  ["login: the sign-in page", (v) => device({ verification_uri: `${SERVICE.base}/device?c=${v}` }), deviceRead, "x", "letters"],
+  ["login: the page with its code", (v) => device({ verification_uri_complete: `${SERVICE.base}/device?c=${v}` }), deviceRead, "x", "letters"],
+  // a number in its grammar, as a number; any other form as the string it is
+  ["login: expires_in", (v) => device({ expires_in: /^\d+$/.test(v) ? Number(v) : v }), deviceRead, "60", "digits"],
+  ["login: interval", (v) => device({ interval: /^\d+$/.test(v) ? Number(v) : v }), deviceRead, "5", "digits"],
+  ["login: a key outside the device code's shape", (v) => device({ note: v }), deviceRead, "a note", "letters"],
+  ["login: an OAuth refusal's code", (v) => ({ error: v }), oauthRead, "invalid_request", "letters"],
+  ["login: who signed in, the email", (v) => me({ email: `${v}@example.com` }), meRead, "ada", "letters"],
+  ["login: who signed in, the name", (v) => me({ name: v }), meRead, "Ada", "letters"],
+  ["login: an organisation's slug", (v) => me({}, { slug: v }), meRead, "acme", "letters"],
+  ["login: an organisation's name", (v) => me({}, { name: v }), meRead, "Acme Inc", "letters"],
+  ["login: an organisation's role", (v) => me({}, { role: v }), meRead, "owner", "letters"],
+  ["login: a key outside who signed in", (v) => me({ note: v }), meRead, "a note", "letters"],
+];
+/** The forms each field is given: the token whole, its body, its body in lower case, 11 of its characters in a row. */
+const FORMS: Array<[what: string, value: (run: "letters" | "digits") => string]> = [
+  ["the token whole", () => TOKEN], ["its body", () => BODY], ["its body in lower case", () => BODY.toLowerCase()],
+  ["11 of its characters in a row", (run) => run === "letters" ? LETTERS : DIGITS],
+];
+
+test("every value a hosted command prints that a grammar alone held — deploy's id, status, phase, times and a refusal's code; login's device code, user code, pages, intervals, OAuth code and who signed in; a key outside each shape — given the token whole, its body, its body in lower case or 11 of its characters in a row, refuses the answer; the same field plain does not", () => {
+  assert.equal(BODY.length, 43);
+  assert.equal(ECHO_RUN, LETTERS.length);
+  const problems: string[] = [];
+  for (const [what, answerOf, read, plain, run] of FIELDS) {
+    if (read(answerOf(plain), [TOKEN]) === null) problems.push(`${what}: the plain answer is refused`);
+    for (const [form, value] of FORMS) {
+      if (read(answerOf(value(run)), [TOKEN]) !== null) problems.push(`${what}, ${form}: taken`);
+    }
+    // the limit: 10 of the body in a row is no echo, taken wherever the grammar takes it
+    const ten = (run === "letters" ? LETTERS : DIGITS).slice(0, 10);
+    if (read(answerOf(ten), []) !== null && read(answerOf(ten), [TOKEN]) === null) problems.push(`${what}: 10 of the body refused`);
+  }
+  assert.deepEqual(problems, []);
+  // the masks decide, never the grammar alone: where a grammar takes a form with no token held, the token refuses it
+  const byToken = FIELDS.filter(([, answerOf, read, , run]) => read(answerOf(run === "letters" ? LETTERS : DIGITS), []) !== null).map(([what]) => what);
+  for (const what of ["deploy: the POST's id", "deploy: createdAt", "deploy: finishedAt", "deploy: a refusal's code", "login: the device code", "login: the sign-in page",
+    "login: an OAuth refusal's code", "login: who signed in, the name", "login: an organisation's role"]) assert.ok(byToken.includes(what), `${what}: its grammar takes 11 of the body`);
+  // a deploy's failure words are free text, masked as every failure's, never a refusal of the deploy's state
+  const refused = deployStateOf(state({ status: "refused", finishedAt: AT, failure: { code: "bad_source", message: `the token ${BODY} is not known` } }), "dep_01abc", [TOKEN], []);
+  assert.ok(refused !== null && refused.failure !== null);
+  assert.equal(refused.failure.message, "the token **** is not known");
+});
+
+/** Bytes from a fixed seed (SHA-256 in counter mode): the same answers and tokens at every run. */
+function seeded(seed: string): (n: number) => Buffer {
+  let counter = 0, pool = Buffer.alloc(0);
+  return (n) => {
+    while (pool.length < n) pool = Buffer.concat([pool, createHash("sha256").update(`${seed}:${counter++}`).digest()]);
+    const out = pool.subarray(0, n); pool = pool.subarray(n); return out;
+  };
+}
+
+test("an honest answer of deploy and login — every value high-entropy, random tokens from a fixed seed — is never refused, and reads as it came", () => {
+  const bytes = seeded("mason-627-honest");
+  const b64 = (n: number): string => bytes(Math.ceil(n * 3 / 4) + 1).toString("base64url").slice(0, n);
+  const letters = (n: number): string => Array.from(bytes(n), (b) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[b % 26]).join("");
+  const time = (): string => `2026-11-02T10:${String(bytes(1)[0]! % 60).padStart(2, "0")}:00.${String(bytes(2).readUInt16BE()).padStart(5, "0")}Z`;
+  const problems: string[] = [];
+  for (let i = 0; i < 2000; i++) {
+    const token = `masondata_ci_${bytes(32).toString("base64url")}`, saved = `masondata_pat_${bytes(32).toString("base64url")}`;
+    const id = b64(64), code = letters(8);
+    const states = [state({}, id), state({ status: "applying", phase: "checking", createdAt: time() }, id), state({ status: "running", createdAt: time(), finishedAt: time() }, id),
+      state({ status: "failed", finishedAt: time(), failure: { code: "machine_lost", message: `deploy ${b64(20)} failed`, why: b64(40) } }, id)];
+    for (const [n, s] of states.entries()) if (deployStateOf(s, n === 0 ? null : id, [token], []) === null) problems.push(`deploy state ${n}, token ${i}`);
+    const d = device({ device_code: b64(43), user_code: code, verification_uri: `${SERVICE.base}/device`, verification_uri_complete: `${SERVICE.base}/device?user_code=${code}&s=${b64(32)}` });
+    if (deviceRead(d, [saved]) === null) problems.push(`device code, token ${i}`);
+    const who = me({ email: `${b64(20).toLowerCase()}@example.com`, name: b64(30) }, { slug: b64(24).toLowerCase(), name: b64(30), role: "owner" });
+    if (meRead(who, [token, saved]) === null) problems.push(`who signed in, token ${i}`);
+    if (!carriesNoSecret({ error: b64(30).toLowerCase().replace(/[^a-z]/g, "_") }, [saved])) problems.push(`an OAuth refusal, token ${i}`);
+  }
+  assert.deepEqual(problems, []);
 });

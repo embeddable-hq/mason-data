@@ -14,7 +14,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
-import { bodyCovered, bodyShown, echoForms, echoToken, seen } from "./hosted-fake.ts";
+import { bodyCovered, bodyShown, echoForms, echoToken, runForms, runToken, seen, showsRun } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
 const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${randomBytes(32).toString("base64url")}`;
@@ -824,6 +824,43 @@ test("mason deploy: a service that echoes the token it was sent in another form 
       else if (said) assert.deepEqual([said.message, said.fix], ["the token **** is not known", "sign in again, not as ****"], at_);
       else assert.match(a.stderr, /✗ mason deploy: the token \*\*\*\* is not known\n {2}why {3}it was sent as \*\*\*\* \(/, at_);
     }
+  }
+});
+
+test("mason deploy: an answer whose deploy's id, status, phase, times, refusal's code or a key outside its shape carries the token — whole, its body, in lower case, 11 of its characters in a row — is refused whole, by its status: nothing of it is printed, for a person or in --json, and nothing steered by it (issue 627)", { timeout: 300_000 }, async () => {
+  const { root } = project();
+  const token = runToken("ci"); SECRETS.push(token);
+  const post = (deploy: Record<string, unknown>, more: Record<string, unknown> = {}): Script => ({ post: { status: 201, headers: { "retry-after": "1" }, body: { deploy: { id: ID, status: "queued", createdAt: CREATED, ...deploy }, ...more } } });
+  const get = (status: string, deploy: Record<string, unknown>, more: Record<string, unknown> = {}): Script => ({ get: () => {
+    const r = at(status, deploy) as { status: number; body: Record<string, unknown>; headers: Record<string, string> };
+    return { ...r, body: { ...r.body, ...more } };
+  } });
+  const cases: Array<[what: string, script: (v: string, digits: string) => Script, step: "POST" | "GET"]> = [
+    ["the POST's id", (v) => post({ id: v }), "POST"],
+    ["the POST's status", (v) => post({ status: v }), "POST"],
+    ["the POST's createdAt", (_, d) => post({ createdAt: `2026-11-02T10:00:00.${d}Z` }), "POST"],
+    ["a key outside the POST's shape", (v) => post({}, { note: v }), "POST"],
+    ["a poll's phase", (v) => get("applying", { phase: v }), "GET"],
+    ["a poll's finishedAt", (_, d) => get("running", { finishedAt: `2026-11-02T10:01:00.${d}Z` }), "GET"],
+    ["a refusal's code", (v) => get("refused", { failure: { code: v, message: "refused" } }), "GET"],
+    ["a key outside a poll's shape", (v) => get("running", {}, { note: v }), "GET"],
+  ];
+  // each case's forms side by side, as a person and with --json: the file's time is bounded
+  for (const [what, script, step] of cases) {
+    await Promise.all(runForms(token).flatMap((form) => [false, true].map(async (json) => {
+      {
+        const at_ = `${what}, ${form.what}${json ? ", --json" : ""}`;
+        const { a, requests } = await deployWith(script(form.value, form.digits), root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])], { MASON_TOKEN: token });
+        const said = `${a.stdout}\n${a.stderr}`;
+        assert.equal(a.code, 1, `${at_}: ${said}`);
+        const where = step === "POST" ? "POST /v1/replicas/acme/shop/deploys with 201, where a deploy was sent" : `GET /v1/replicas/acme/shop/deploys/${ID} with 200, where the deploy's state was asked for`;
+        const message = json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr;
+        assert.ok(message.includes(` answered ${where}`), `${at_}: said by its status:\n${said}`);
+        assert.ok(!showsRun(said, token) && !said.includes(token), `${at_}: printed the token:\n${said}`);
+        // a POST refused steers nothing: no request is made of an id it carried
+        if (step === "POST") assert.deepEqual(requests.map((r) => r.method), ["POST"], at_);
+      }
+    })));
   }
 });
 

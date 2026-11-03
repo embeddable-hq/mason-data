@@ -317,7 +317,9 @@ CLI lacks).
   (docs/HOSTED-API.md; src/cli/login.ts, src/cli/hosted.ts): no project needed. The service is `MASON_CLOUD_URL`, else
   `DEFAULT_SERVICE_URL`, its one constant, read by ONE function (`serviceOf`): https, or http to this machine, the
   address alone, refused before any byte is sent. Every answer is untrusted: held to its documented shape, a redirect
-  never followed, every token masked. **A service's value is data, never structure and never an instruction**
+  never followed, every token masked; every string of a device code's answer and of who signed in, keys included, put
+  to the exact test first (`carriesNoSecret`, with the login it replaces), and an OAuth refusal's code too, an answer
+  that carries a token refused whole (issue 627). **A service's value is data, never structure and never an instruction**
   (src/cli/hosted.ts's header, PR 481): every string it sends leaves that module as ONE line (`serviceText`, applied at
   the boundary: no line break, control, format or bidi character), so it sits inside a line the CLI writes and never
   starts one — no forged `Next:`, tip, row or failure, for a person or in `--json`; and what to run next, the code and
@@ -349,7 +351,9 @@ CLI lacks).
   an answer that cannot say is a wait, never an outcome; exit 0 only on `running`, a refusal is the replica's failure's
   words as they came, each one line, its code the CLI's (`failureShape`: `refused` / `failed`, the service's in `why`,
   its next step the CLI's: the service's `next` is never read), exit 1, a status or phase outside the closed sets a failure, the deploy's id held to its
-  grammar before it is in a path, a timeout 124 with the deploy's id (tests/cli-deploy.test.ts, against a fake
+  grammar before it is in a path, and before any grammar every string of each answer, keys included, put to the exact
+  test (`carriesNoSecret`, src/cli/hosted.ts: a grammar is no mask, issue 627), an answer that carries the token refused
+  whole, a timeout 124 with the deploy's id (tests/cli-deploy.test.ts, against a fake
   service on 127.0.0.1; every run's output held to carrying no token).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
   README's "Going to production", `mason help production` offline). Only the project folder
