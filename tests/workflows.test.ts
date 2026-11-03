@@ -60,7 +60,10 @@ function meta(name: string): Meta {
 }
 
 /** The name each model signs a posting with: each script's SIGNS is held to it. */
-const SIGNS: Record<string, string> = { opus: "Opus 5.5", fable: "Fable 5.1", sonnet: "Sonnet 5.5" };
+const SIGNS: Record<string, string> = { opus: "Opus 5.5", sonnet: "Sonnet 5.5" };
+/** What every review stage runs on (issue 605): Opus at high effort, a fresh agent that writes nothing, so no worktree. */
+const ON_REVIEW = { model: "opus", effort: "high", isolation: undefined };
+const reviewOn = (o: Opts) => ({ model: o.model, effort: o.effort, isolation: o.isolation });
 /** A script's SIGNS. */
 function signs(name: string): Record<string, string> {
   const m = /^const SIGNS = (\{[^\n]*\})$/m.exec(source(name));
@@ -208,12 +211,12 @@ test("pr-loop-slim: a finding the base has is filed once and never fixed, never 
   for (const c of calls) {
     const writes = /^(implement|fix|CI fix|learn$)/.test(c.opts.label);
     assert.equal(c.opts.isolation === "worktree", writes, `"${c.opts.label}": every writer, and only a writer, works in a worktree of its own`);
-    assert.equal(c.opts.model === "fable", /^review/.test(c.opts.label), `"${c.opts.label}": only reviews are Fable's`);
+    if (/^review/.test(c.opts.label)) assert.deepEqual(reviewOn(c.opts), ON_REVIEW, `"${c.opts.label}": a review runs on Opus at high effort, in no worktree (issue 605)`);
   }
   const opts = (l: string) => calls.find((c) => c.opts.label === l)!.opts;
   for (const l of ["brief", "implement", "fix r1", "CI fix 1"]) assert.deepEqual([opts(l).model, opts(l).effort], ["opus", "high"], l);
   assert.deepEqual([opts("learn").model, opts("learn").effort], ["opus", "medium"]);
-  for (const l of ["review r1", "review r2", "review r3"]) assert.equal(opts(l).effort, "medium", l);
+  for (const l of ["review r1", "review r2", "review r3"]) assert.deepEqual(reviewOn(opts(l)), ON_REVIEW, l);
   for (const l of ["file", "CI 1", "CI read r1", "link", "record"]) assert.equal(opts(l).model, "sonnet", l);
   assert.ok(prompt("fix r1").includes("tests/conventions.test.ts tests/cli-state-matrix.test.ts"), "a fix round runs the gates \"Local gates\" names for one");
 
@@ -1732,10 +1735,10 @@ test("pr-loop-slim: no design stage, no design review and no probe; the author's
   const opts = (l: string) => calls.find((c) => c.opts.label === l)!.opts;
   for (const c of calls) {
     assert.equal(c.opts.isolation === "worktree", /^(implement|fix|CI fix|learn$)/.test(c.opts.label), `"${c.opts.label}": every writer, and only a writer, works in a worktree of its own`);
-    assert.equal(c.opts.model === "fable", /^review/.test(c.opts.label), `"${c.opts.label}": only reviews are Fable's`);
+    if (/^review/.test(c.opts.label)) assert.deepEqual(reviewOn(c.opts), ON_REVIEW, `"${c.opts.label}": a review runs on Opus at high effort, in no worktree (issue 605)`);
   }
   for (const l of ["brief", "implement", "fix r1", "CI fix 1"]) assert.deepEqual([opts(l).model, opts(l).effort], ["opus", "high"], l);
-  for (const l of ["review r1", "review r2", "review r3"]) assert.equal(opts(l).effort, "medium", l);
+  for (const l of ["review r1", "review r2", "review r3"]) assert.deepEqual(reviewOn(opts(l)), ON_REVIEW, l);
   assert.ok(prompt("review r3").includes(`diff ${sha("f")} ${sha("c")}`), "the CI fix is re-checked narrowly, from the head before it");
 
   // the class rule
@@ -2482,6 +2485,102 @@ test("the repo records one process: CLAUDE.md names the skills and the one workf
   assert.match(whoProse, /The top session merges \(`\.claude\/skills\/up-next\/SKILL\.md`\)/, "the top session merges");
   assert.match(whoProse, /a coordinator, an implementer or any other sub-agent never merges nor queues a merge/, "no sub-agent merges");
   assert.match(whoProse, /Detector: the hook `scripts\/hooks\/merge-head\.ts` blocks[^.]*any `gh pr merge` from a sub-agent/, "its detector names the sub-agent block");
+});
+
+// Issue 605 (Tom, 2026-11-03): every review, a full one and each fix's narrow re-check alike, runs on Opus at high
+// effort in a fresh agent, never Fable. The one value is pr-loop-slim's ON.review; everything else reads it or points
+// at CLAUDE.md "The loop" step 3, which alone says who reviews and why.
+test("reviews run on Opus at high effort in a fresh agent, never Fable (issue 605)", async () => {
+  const full = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [baseFound, finding({ classKey: "c-a", input: "a" })], judgedCorrect: [] }, "fix r1": { ...pushed("b"), handoff: H1 },
+    "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green, file: FILED_BASE,
+  });
+  assert.deepEqual(full.labels, ["brief", "implement", "link", "review r1", "CI read r1", "fix r1", "review r2", "CI read r2",
+    "learn", "learn check", "CI 1", "CI fix 1", "review r3", "CI read r3", "CI 2", "file", "record"]);
+  const split = await run("pr-loop-slim", { ...PR }, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } });
+  const merge = await run("pr-loop-slim", { ...PR }, MERGE_RUN);
+  const unreviewed = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...clean, statementsRun: 0, statementsMatched: 0 } });
+  assert.match(String(unreviewed.result["status"]), /^unreviewed/);
+  for (const [what, r] of [["full", full], ["split", split], ["merge", merge], ["unreviewed", unreviewed]] as const) {
+    for (const c of r.calls) {
+      assert.notEqual(c.opts.model, "fable", `${what}: "${c.opts.label}" runs on Fable`);
+      assert.doesNotMatch(c.prompt, /\bfable\b/i, `${what}: the prompt of "${c.opts.label}" names Fable`);
+      if (/^review/.test(c.opts.label)) {
+        assert.deepEqual(reviewOn(c.opts), ON_REVIEW, `${what}: "${c.opts.label}" runs on Opus at high effort, in no worktree`);
+        // a fresh agent: told never to take the author's report, and never to read the Handoff, once
+        assert.ok(c.prompt.includes("Never take the author's report as evidence."), `${what}: "${c.opts.label}" is told not to take the author's report`);
+        assert.equal(c.prompt.split("The PR's `## Handoff` comment is the author's account too: never read it.").length - 1, 1, `${what}: "${c.opts.label}" is told once not to read the Handoff`);
+      }
+    }
+    assert.doesNotMatch(String(r.result["status"]), /\bfable\b/i, `${what}: the finish status names Fable`);
+  }
+  // a re-check is a review too: the full review, the fix's re-check and the CI fix's, each its own call, none a fix's
+  const reviews = full.calls.filter((c) => /^review/.test(c.opts.label));
+  assert.deepEqual(reviews.map((c) => c.opts.label), ["review r1", "review r2", "review r3"]);
+  assert.ok(reviews.every((c) => c.opts.phase === "Review"), "every review is the Review phase's");
+  assert.match(full.prompt("review r2"), /Narrowly re-check the latest fix/);
+  assert.ok(full.prompt("review r3").includes(`diff ${sha("f")} ${sha("c")}`), "the CI fix's re-check reads the diff from the learn head");
+  for (const c of reviews) for (const s of signatures(c.prompt)) assert.equal(s, "Opus 5.5", `"${c.opts.label}" signs as Opus`);
+
+  // the meta and SIGNS: no phase on Fable, the Review phase Opus at high effort in a fresh context
+  const phases = meta("pr-loop-slim").phases as Array<{ title: string; detail: string; model: string }>;
+  assert.doesNotMatch(meta("pr-loop-slim").description, /\bfable\b/i, "meta.description names no Fable");
+  assert.ok(phases.every((p) => p.model !== "fable"), "no phase runs on Fable");
+  const review = phases.find((p) => p.title === "Review")!;
+  assert.equal(review.model, "opus");
+  for (const re of [/Opus/, /high effort/, /fresh/]) assert.match(review.detail, re);
+  assert.deepEqual(signs("pr-loop-slim"), { opus: "Opus 5.5", sonnet: "Sonnet 5.5" }, "SIGNS keeps no model no stage runs on");
+  assert.doesNotMatch(source("pr-loop-slim"), /\bfable\b/i, "pr-loop-slim.js names no Fable");
+
+  // the skill's render prints the review's options as slim gives them
+  const keys = Object.keys(RACE_ANSWERS);
+  const rendered = renderStage(RACE_ARGS, Object.fromEntries(keys.slice(0, keys.indexOf("review r1")).map((k) => [k, RACE_ANSWERS[k]])));
+  const line = rendered.out.split("\n").find((l) => l.startsWith('STAGE "review r1"'));
+  assert.equal(line, `STAGE "review r1" (Review) {"model":"opus","effort":"high"}: ${path.join(rendered.dir, "next", "review-r1.md")}`);
+
+  // the pr-persistent skill: a review is a fresh Opus agent at high effort, never the implementer's by SendMessage
+  const skill = skillText();
+  assert.doesNotMatch(skill, /\bFable\b|"fable"/i, "the pr-persistent skill names no Fable");
+  const bullets = skill.split(/\n(?=- \*\*)/);
+  const fresh = bullets.find((b) => b.startsWith("- **Every other stage**"))?.replace(/\s+/g, " ") ?? "";
+  assert.ok(fresh.includes("`review r<n>`") && fresh.includes("a FRESH agent"), "a review is listed under the fresh-agent bullet");
+  assert.ok(fresh.includes('A review is `model: "opus"`, `effort: "high"`'), "a review is Opus at high effort");
+  const resumed = bullets.find((b) => b.startsWith("- **`fix r<n>`"))?.split("\n")[0] ?? "";
+  assert.match(resumed, /SendMessage|`CI fix <n>`/, "the SendMessage bullet is found");
+  assert.doesNotMatch(resumed.replace(/^- \*\*([^*]*)\*\*.*$/, "$1"), /review/, "the SendMessage bullet names no review label");
+
+  // the up-next skill merges once the review, whoever ran it, has no open finding
+  const upNext = upNextText();
+  assert.doesNotMatch(upNext, /\bFable\b/i, "the up-next skill names no Fable");
+  assert.ok(upNext.replace(/\s+/g, " ").includes("its review has no open finding"));
+
+  // CLAUDE.md says who reviews and why once, in "The loop" step 3
+  const claude = fs.readFileSync(path.join(ROOT, "CLAUDE.md"), "utf8");
+  assert.doesNotMatch(claude, /\bFable\b/, "CLAUDE.md names no Fable");
+  const [s3, s4] = [claude.indexOf("3. **Review**"), claude.indexOf("4. **Fix.**")];
+  assert.ok(s3 >= 0 && s4 > s3, "step 3 is found");
+  const step3 = claude.slice(s3, s4).replace(/\s+/g, " ");
+  for (const s of ["Opus 5.5", 'effort: "high"', "a fresh agent", "never the implementer", 'docs/DESIGN.md "The independent review"']) {
+    assert.ok(step3.includes(s), `step 3 says ${s}`);
+  }
+  const prose = claude.replace(/\s+/g, " ");
+  assert.equal(prose.split("its independence is the fresh context").length - 1, 1, "the reviewer's reason is said once");
+  assert.doesNotMatch(prose, /outread the author/, "the old reason is gone");
+  assert.match(prose, /the Opus and Sonnet models/, "a teammate needs the Opus and Sonnet models");
+  const who = /^- \*\*Who merges what\*\*[\s\S]*?(?=^- \*\*)/m.exec(claude)?.[0].replace(/\s+/g, " ") ?? "";
+  assert.match(who, /once its review has no open finding/);
+
+  // docs/DESIGN.md records the trade, dated, in "The independent review"
+  const design = fs.readFileSync(path.join(ROOT, "docs", "DESIGN.md"), "utf8");
+  const start = design.indexOf("### The independent review");
+  const section = design.slice(start, design.indexOf("\n### ", start + 1)).replace(/\s+/g, " ");
+  assert.match(section, /\*\*The reviewer moves to Opus at high effort \(Tom, 2026-11-03\)\.\*\*[^*]*outread the author/);
+  assert.doesNotMatch(design.replace(/\s+/g, " "), /the Opus and Fable agents they start/, "the present tense names no Fable agent");
+
+  // review-stats' doc comment names the review, not its model
+  const stats = fs.readFileSync(path.join(ROOT, "scripts", "review-stats.ts"), "utf8");
+  assert.doesNotMatch(stats, /\bFable\b/);
+  assert.ok(stats.includes("the review's round 1"));
 });
 
 // ---------------------------------------------------------------- issue 246: five rough edges in the prompts of the
