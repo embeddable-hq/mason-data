@@ -5,7 +5,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { codeOfStatus, DEFAULT_SERVICE_URL, deviceName, serviceOf, serviceText, urlProblem } from "../src/cli/hosted.ts";
+import { createHash } from "node:crypto";
+import { punyLabels } from "./hosted-fake.ts";
+import { carriesNoSecret, codeOfStatus, echoesSecret, DEFAULT_SERVICE_URL, deviceName, deviceOf, ECHO_RUN, isFailure, MAX_ANSWER_DEPTH, meOf, oauthFailure, serviceOf, serviceText, urlProblem, type Answer } from "../src/cli/hosted.ts";
+import { deployStateOf } from "../src/cli/deploy.ts";
 import { credentialsPath, environmentToken, parseLogins } from "../src/cli/credentials.ts";
 
 test("serviceOf: the default when MASON_CLOUD_URL is unset; its origin when it is an address alone; else refused", () => {
@@ -189,4 +192,240 @@ test("serviceText: a Mason user's password is masked whatever precedes it and in
   }
   // the limit, as docs/HOSTED-API.md says it: no shape to match
   for (const s of [pw.replace(/_/g, " "), pw.slice("mason_".length), pw.replace(/_/g, "%5F")]) assert.equal(t(s), s.replace(/\s+/g, " "), s);
+});
+
+// ------------------------------------------------------------------ a grammar is no mask (issue 627)
+
+/**
+ * A TOKEN WHOSE BODY HOLDS A RUN EVERY GRAMMAR TAKES: 11 lower case letters (an OAuth error's grammar), 11 digits (a
+ * time's fraction), then base64url of every kind. Written in parts, so no line of this file is shaped as a token.
+ */
+const LETTERS = "qzvwxkpjrtm", DIGITS = "40718293651";
+const BODY = `${LETTERS}${DIGITS}Hb1Ns5Gc0Fd-Ue_YoZi7K`;
+const TOKEN = ["masondata", "ci", BODY].join("_");
+const SERVICE = { base: "https://svc.example" };
+const AT = "2026-11-02T10:00:00Z";
+const answer = (status: number, json: unknown, what = "POST /x"): Answer => ({ status, json, what, retryAfter: null });
+
+/**
+ * EVERY VALUE A HOSTED COMMAND PRINTS THAT A GRAMMAR ALONE HELD ON main (src/cli/deploy.ts's table, src/cli/hosted.ts's
+ * readers), and every other string of the same answers: `answer(v)` puts `v` in the field, in a place its grammar may
+ * take it; `read` is null for an answer refused; `run` is which run of 11 of the body the grammar can take.
+ */
+type Field = [what: string, answer: (v: string) => unknown, read: (j: unknown, secrets: string[]) => unknown, plain: string, run: "letters" | "digits"];
+const deployRead = (id: string | null) => (j: unknown, x: string[]): unknown => deployStateOf(j, id, x, []);
+const deviceRead = (j: unknown, x: string[]): unknown => { const d = deviceOf(SERVICE, answer(200, j), x); return isFailure(d) ? null : d; };
+const meRead = (j: unknown, x: string[]): unknown => { const m = meOf(SERVICE, answer(200, j, "GET /v1/me"), x); return isFailure(m) ? null : m; };
+const oauthRead = (j: unknown, x: string[]): unknown => /refused this sign-in/.test(oauthFailure(SERVICE, answer(400, j), "a sign-in was asked for", x).message) ? j : null;
+const state = (more: Record<string, unknown>, id = "dep_01abc"): unknown => ({ deploy: { id, status: "queued", createdAt: AT, ...more } });
+const device = (more: Record<string, unknown>): unknown => ({ device_code: "dev-code-1", user_code: "WDJBMJHT", verification_uri: `${SERVICE.base}/device`, expires_in: 60, interval: 1, ...more });
+const me = (more: Record<string, unknown> = {}, org: Record<string, unknown> = {}): unknown => ({ email: "ada@example.com", name: "Ada", orgs: [{ slug: "acme", name: "Acme Inc", role: "owner", ...org }], ...more });
+const FIELDS: Field[] = [
+  ["deploy: the POST's id", (v) => state({}, v), deployRead(null), "dep_01abc", "letters"],
+  ["deploy: a status", (v) => state({ status: v }), deployRead(null), "queued", "letters"],
+  ["deploy: a phase", (v) => state({ status: "applying", phase: v }), deployRead(null), "checking", "letters"],
+  ["deploy: createdAt", (v) => state({ createdAt: `2026-11-02T10:00:00.${v}Z` }), deployRead(null), "5", "digits"],
+  ["deploy: finishedAt", (v) => state({ status: "running", finishedAt: `2026-11-02T10:01:00.${v}Z` }), deployRead("dep_01abc"), "5", "digits"],
+  ["deploy: a refusal's code", (v) => state({ status: "refused", finishedAt: AT, failure: { code: v, message: "refused" } }), deployRead("dep_01abc"), "bad_source", "letters"],
+  ["deploy: a key outside the shape", (v) => ({ ...(state({}) as object), note: v }), deployRead(null), "a note", "letters"],
+  ["deploy: a key named by it", (v) => state({ [v]: 1 }), deployRead(null), "note", "letters"],
+  ["login: the device code", (v) => device({ device_code: v }), deviceRead, "dev-code-1", "letters"],
+  ["login: the user code", (v) => device({ user_code: v }), deviceRead, "WDJBMJHT", "letters"],
+  ["login: the sign-in page", (v) => device({ verification_uri: `${SERVICE.base}/device?c=${v}` }), deviceRead, "x", "letters"],
+  ["login: the page with its code", (v) => device({ verification_uri_complete: `${SERVICE.base}/device?c=${v}` }), deviceRead, "x", "letters"],
+  // a number in its grammar, as a number; any other form as the string it is
+  ["login: expires_in", (v) => device({ expires_in: /^\d+$/.test(v) ? Number(v) : v }), deviceRead, "60", "digits"],
+  ["login: interval", (v) => device({ interval: /^\d+$/.test(v) ? Number(v) : v }), deviceRead, "5", "digits"],
+  ["login: a key outside the device code's shape", (v) => device({ note: v }), deviceRead, "a note", "letters"],
+  ["login: an OAuth refusal's code", (v) => ({ error: v }), oauthRead, "invalid_request", "letters"],
+  ["login: who signed in, the email", (v) => me({ email: `${v}@example.com` }), meRead, "ada", "letters"],
+  ["login: who signed in, the name", (v) => me({ name: v }), meRead, "Ada", "letters"],
+  ["login: an organisation's slug", (v) => me({}, { slug: v }), meRead, "acme", "letters"],
+  ["login: an organisation's name", (v) => me({}, { name: v }), meRead, "Acme Inc", "letters"],
+  ["login: an organisation's role", (v) => me({}, { role: v }), meRead, "owner", "letters"],
+  ["login: a key outside who signed in", (v) => me({ note: v }), meRead, "a note", "letters"],
+];
+/** The forms each field is given: the token whole, its body, its body in lower case, 11 of its characters in a row. */
+const FORMS: Array<[what: string, value: (run: "letters" | "digits") => string]> = [
+  ["the token whole", () => TOKEN], ["its body", () => BODY], ["its body in lower case", () => BODY.toLowerCase()],
+  ["11 of its characters in a row", (run) => run === "letters" ? LETTERS : DIGITS],
+];
+
+test("every value a hosted command prints that a grammar alone held — deploy's id, status, phase, times and a refusal's code; login's device code, user code, pages, intervals, OAuth code and who signed in; a key outside each shape — given the token whole, its body, its body in lower case or 11 of its characters in a row, refuses the answer; the same field plain does not", () => {
+  assert.equal(BODY.length, 43);
+  assert.equal(ECHO_RUN, LETTERS.length);
+  const problems: string[] = [];
+  for (const [what, answerOf, read, plain, run] of FIELDS) {
+    if (read(answerOf(plain), [TOKEN]) === null) problems.push(`${what}: the plain answer is refused`);
+    for (const [form, value] of FORMS) {
+      if (read(answerOf(value(run)), [TOKEN]) !== null) problems.push(`${what}, ${form}: taken`);
+    }
+    // the limit: 10 of the body in a row is no echo, taken wherever the grammar takes it
+    const ten = (run === "letters" ? LETTERS : DIGITS).slice(0, 10);
+    if (read(answerOf(ten), []) !== null && read(answerOf(ten), [TOKEN]) === null) problems.push(`${what}: 10 of the body refused`);
+  }
+  assert.deepEqual(problems, []);
+  // the masks decide, never the grammar alone: where a grammar takes a form with no token held, the token refuses it
+  const byToken = FIELDS.filter(([, answerOf, read, , run]) => read(answerOf(run === "letters" ? LETTERS : DIGITS), []) !== null).map(([what]) => what);
+  for (const what of ["deploy: the POST's id", "deploy: createdAt", "deploy: finishedAt", "deploy: a refusal's code", "login: the device code", "login: the sign-in page",
+    "login: an OAuth refusal's code", "login: who signed in, the name", "login: an organisation's role"]) assert.ok(byToken.includes(what), `${what}: its grammar takes 11 of the body`);
+  // a deploy's failure words are free text, masked as every failure's, never a refusal of the deploy's state
+  const refused = deployStateOf(state({ status: "refused", finishedAt: AT, failure: { code: "bad_source", message: `the token ${BODY} is not known` } }), "dep_01abc", [TOKEN], []);
+  assert.ok(refused !== null && refused.failure !== null);
+  assert.equal(refused.failure.message, "the token **** is not known");
+});
+
+/** Bytes from a fixed seed (SHA-256 in counter mode): the same answers and tokens at every run. */
+function seeded(seed: string): (n: number) => Buffer {
+  let counter = 0, pool = Buffer.alloc(0);
+  return (n) => {
+    while (pool.length < n) pool = Buffer.concat([pool, createHash("sha256").update(`${seed}:${counter++}`).digest()]);
+    const out = pool.subarray(0, n); pool = pool.subarray(n); return out;
+  };
+}
+
+test("an honest answer of deploy and login — every value high-entropy, random tokens from a fixed seed — is never refused, and reads as it came", () => {
+  const bytes = seeded("mason-627-honest");
+  const b64 = (n: number): string => bytes(Math.ceil(n * 3 / 4) + 1).toString("base64url").slice(0, n);
+  const letters = (n: number): string => Array.from(bytes(n), (b) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[b % 26]).join("");
+  const time = (): string => `2026-11-02T10:${String(bytes(1)[0]! % 60).padStart(2, "0")}:00.${String(bytes(2).readUInt16BE()).padStart(5, "0")}Z`;
+  const problems: string[] = [];
+  for (let i = 0; i < 2000; i++) {
+    const token = `masondata_ci_${bytes(32).toString("base64url")}`, saved = `masondata_pat_${bytes(32).toString("base64url")}`;
+    const id = b64(64), code = letters(8);
+    const states = [state({}, id), state({ status: "applying", phase: "checking", createdAt: time() }, id), state({ status: "running", createdAt: time(), finishedAt: time() }, id),
+      state({ status: "failed", finishedAt: time(), failure: { code: "machine_lost", message: `deploy ${b64(20)} failed`, why: b64(40) } }, id)];
+    for (const [n, s] of states.entries()) if (deployStateOf(s, n === 0 ? null : id, [token], []) === null) problems.push(`deploy state ${n}, token ${i}`);
+    const d = device({ device_code: b64(43), user_code: code, verification_uri: `${SERVICE.base}/device`, verification_uri_complete: `${SERVICE.base}/device?user_code=${code}&s=${b64(32)}` });
+    if (deviceRead(d, [saved]) === null) problems.push(`device code, token ${i}`);
+    const who = me({ email: `${b64(20).toLowerCase()}@example.com`, name: b64(30) }, { slug: b64(24).toLowerCase(), name: b64(30), role: "owner" });
+    if (meRead(who, [token, saved]) === null) problems.push(`who signed in, token ${i}`);
+    if (!carriesNoSecret({ error: b64(30).toLowerCase().replace(/[^a-z]/g, "_") }, [saved])) problems.push(`an OAuth refusal, token ${i}`);
+  }
+  assert.deepEqual(problems, []);
+});
+
+// ------------------------------------------------------------------ what is printed is what is tested (PR 645's review)
+
+test("a sign-in page is tested as the URL parser prints it: dot segments that join pieces of a held secret, in either page and either spelling, and a host whose xn-- form spells one, each refuse the device code's answer, nothing of it printed; an honest page is printed as before", () => {
+  const pieces = BODY.match(/.{1,10}/g)!;
+  const problems: string[] = [];
+  for (const dots of ["..", "%2E%2E", "%2e%2e", ".%2E", null]) {
+    // (null: the pieces as they would be printed, written so: the same page)
+    const page = `${SERVICE.base}/device/${pieces.join(dots === null ? "/" : `/x/${dots}/`)}`;
+    // the answer's own string holds no 11 of the body in a row (an `x` between each two pieces): the walk alone would take it
+    if (dots !== null) assert.ok(carriesNoSecret({ page }, [TOKEN]), `${dots}: the raw page reads as no echo`);
+    assert.ok(new URL(page).href.includes(pieces.join("/")), `${dots}: the parser joins the pieces`);
+    for (const field of ["verification_uri", "verification_uri_complete"]) {
+      if (deviceRead(device({ [field]: page }), [TOKEN]) !== null) problems.push(`${field}, ${dots}: taken`);
+    }
+  }
+  const labels = punyLabels(BODY, 3);
+  assert.ok(labels.length >= 2, `labels found: ${labels.length}`);
+  for (const field of ["verification_uri", "verification_uri_complete"]) {
+    const page = `https://${labels.join(".")}.example/device`;
+    assert.ok(carriesNoSecret({ page }, [TOKEN]), "the raw host reads as no echo");
+    const d = deviceOf(SERVICE, answer(200, device({ [field]: page })), [TOKEN]);
+    if (!isFailure(d) || /another address/.test(d.message) || d.message.includes("xn--")) problems.push(`${field}, a punycode host: ${JSON.stringify(d)}`);
+  }
+  assert.deepEqual(problems, []);
+  // honest: a page on the service's own origin as the parser writes it, and another address named
+  const ok = deviceOf(SERVICE, answer(200, device({ verification_uri_complete: `${SERVICE.base}/device/./a/../?user_code=WDJBMJHT` })), [TOKEN]);
+  assert.ok(!isFailure(ok) && ok.verificationUriComplete === `${SERVICE.base}/device/?user_code=WDJBMJHT`, JSON.stringify(ok));
+  const elsewhere = deviceOf(SERVICE, answer(200, device({ verification_uri: "https://bücher.example/device" })), [TOKEN]);
+  assert.ok(isFailure(elsewhere) && elsewhere.message === `${SERVICE.base} named a sign-in page on another address: https://xn--bcher-kva.example`, JSON.stringify(elsewhere));
+  // a page that holds no run of 11, but pieces the held secret's mask would take (two of 10, an x between): refused too,
+  // never printed masked nor whole
+  const split = `${SERVICE.base}/device/${pieces[0]}x${pieces[1]}`;
+  assert.ok(carriesNoSecret({ split }, [TOKEN]));
+  assert.equal(deviceRead(device({ verification_uri: split }), [TOKEN]), null);
+  // free text as serviceText prints it: no form of the token, split by what it makes one line, leaves it an echo
+  const echoed: string[] = [];
+  for (const [form, value] of FORMS) {
+    for (const v of [value("letters"), value("digits"), `${value("letters")}\n${value("digits")}`, pieces.join("\u0000"), pieces.join("\u202e  ")]) {
+      const line = serviceText(`said: ${v}`, 2000, [TOKEN], new Map());
+      if (echoesSecret(line, [TOKEN])) echoed.push(`serviceText, ${form}: ${line}`);
+    }
+  }
+  assert.deepEqual(echoed, []);
+});
+
+test("an answer nested deeper than any documented shape is refused, never a crash: the walk keeps its own stack, at 31 deep it reads, past MAX_ANSWER_DEPTH it refuses, and 500,000 deep (1 MiB) it refuses at once", () => {
+  const nest = (n: number): string => "[".repeat(n) + "]".repeat(n);
+  assert.equal(MAX_ANSWER_DEPTH, 32);
+  assert.equal(carriesNoSecret(JSON.parse(`{"x":${nest(MAX_ANSWER_DEPTH - 1)}}`), [TOKEN]), true);
+  assert.equal(carriesNoSecret(JSON.parse(`{"x":${nest(MAX_ANSWER_DEPTH)}}`), [TOKEN]), false);
+  assert.equal(carriesNoSecret(JSON.parse(`{"x":${nest(500_000)}}`), [TOKEN]), false);
+  assert.equal(carriesNoSecret(JSON.parse(nest(500_000)), []), false, "with no secret held too: a depth is no echo, it is outside the contract");
+  // objects as deep: the same
+  const deepObject = `${'{"a":'.repeat(40_000)}1${"}".repeat(40_000)}`;
+  assert.equal(carriesNoSecret(JSON.parse(deepObject), [TOKEN]), false);
+  // each reader: outside the contract, said by its status
+  const deep = JSON.parse(`{"x":${nest(32_000)}}`) as Record<string, unknown>;
+  assert.equal(deployStateOf({ ...(state({}) as object), ...deep }, null, [TOKEN], []), null);
+  assert.ok(isFailure(deviceOf(SERVICE, answer(200, { ...(device({}) as object), ...deep }), [TOKEN])));
+  assert.ok(isFailure(meOf(SERVICE, answer(200, { ...(me() as object), ...deep }, "GET /v1/me"), [TOKEN])));
+});
+
+// ------------------------------------------------------------------ the output's gate: the bytes written (PR 645's class round)
+
+/**
+ * EVERY TRANSFORMATION BETWEEN A SERVICE'S VALUE AND THE BYTES WRITTEN, each given a crafted value that passes the test
+ * of the value as it came, and whose bytes as written hold `ECHO_RUN` of the token's body in a row: the gate
+ * (src/cli/output-gate.ts `writes`) refuses each, reading what is written; the same bytes with the run one shorter pass.
+ */
+test("the output's gate reads the bytes written: a cut inside a %XX escape, a lone surrogate's or a line break's JSON escape, a colour code, the CLI's line breaks, a run split across writes or across the two streams, a token's shape split by a colour code — each refused; honest text and 10 in a row pass", async () => {
+  const { writes, nothingWritten } = await import("../src/cli/output-gate.ts");
+  const ten = BODY.slice(0, 10), next = BODY[10]!;
+  // each: what, the writes (stream, text) in order, and whether the gate must refuse
+  const cases: Array<[string, Array<["out" | "err", string]>]> = [
+    ["a cut inside a %XX escape (serviceText's bound)", [["err", `  page   https://svc.example/device/${ten}%${next}…\n`]]],
+    // (10 of the body before its `U`, and before its `N`: the escape's letter is the 11th)
+    ["a lone surrogate, as --json escapes it", [["out", JSON.stringify({ name: `${BODY.slice(24, 34)}\udc00` })]]],
+    ["a line break, as --json escapes it", [["out", JSON.stringify({ name: `${BODY.slice(15, 25)}\n` })]]],
+    ["a colour code after a value", [["err", `${ten}\x1b[${next}m\n`]]],
+    ["the CLI's own line break inside a value (serviceStyle)", [["err", `  name   ${BODY.slice(0, 5)}\n    ${BODY.slice(5, 11)}\n`]]],
+    ["a run split across two writes", [["err", `deploy ${BODY.slice(0, 6)}`], ["err", `${BODY.slice(6, 11)}\n`]]],
+    ["a run split across the two streams (a log of 2>&1)", [["out", BODY.slice(0, 6)], ["err", BODY.slice(6, 11)]]],
+    ["a run split by the CLI's own words, read past them", [["err", `${BODY.slice(0, 6)} — ${BODY.slice(6, 11)}`]]],
+    ["a token's shape split by a colour code", [["err", `masondata_ci_\x1b[1m${"Ab3-dE_fG7hIjK9lMnOpQ2rStUvWx8yZaBcDeFgHiJk"}\n`]]],
+    ["a token held, whole", [["out", `{"id":"${TOKEN}"}`]]],
+  ];
+  const run = (ws: Array<["out" | "err", string]>, secrets: string[]): boolean => {
+    const state = { out: nothingWritten(), err: nothingWritten(), both: nothingWritten() };
+    for (const [which, text] of ws) {
+      const own = writes(state[which], text, secrets), both = writes(state.both, text, secrets);
+      if (own.secret || both.secret) return true;
+      state[which] = own.after; state.both = both.after;
+    }
+    return false;
+  };
+  const problems: string[] = [];
+  for (const [what, ws] of cases) {
+    // the value as it came passes the per-value test (but for the shapes and the token whole, which every test refuses)
+    if (!run(ws, [TOKEN])) problems.push(`${what}: written`);
+  }
+  // honest: the CLI's words and an honest answer, and 10 of the body in a row, with or without escapes around them
+  for (const [what, ws] of [
+    ["10 of the body, then a separator", [["err", `deploy ${ten}\n  Queued: waiting\n`]]],
+    ["10 of the body in --json", [["out", JSON.stringify({ id: ten, status: "queued" }, null, 2)]]],
+    ["a report", [["out", "Deployed to acme/shop: the replica runs it\n  deploy    dep_01HZX\n  service   https://svc.example\n\nNext:\n  mason deploy --replica acme/shop   deploy again\n"]]],
+  ] as Array<[string, Array<["out" | "err", string]>]>) if (run(ws, [TOKEN])) problems.push(`${what}: refused`);
+  assert.deepEqual(problems, []);
+});
+
+test("the per-value tests read the value as printed too: a page cut inside a %XX escape at its bound is refused; a lone surrogate is made a ? by serviceText, as a control character is", () => {
+  // 10 of the body before a hex digit of it (its `4`): `%40` as it came is `@`, cut after `%4` it is the 11th
+  const head = `${SERVICE.base}/device/`, ten = BODY.slice(1, 11), next = BODY[11]!;
+  let page = "";
+  for (let n = 0; n < 400 && !page; n++) {
+    const pad = 2048 - (head.length + 6 * n + 12);
+    if (pad < 0) break;
+    const c = head + "é".repeat(n) + "~".repeat(pad) + `${ten}%${next}0`;
+    if (c.length <= 2048 && [...new URL(c).href].slice(0, 2048).join("").endsWith(`${ten}%${next}`)) page = c;
+  }
+  assert.ok(page !== "", "a page whose cut lands inside an escape");
+  assert.ok(carriesNoSecret({ page }, [TOKEN]), "as it came, 10 in a row: taken by the walk");
+  assert.equal(deviceRead(device({ verification_uri: page }), [TOKEN]), null, "as printed, cut: refused");
+  assert.equal(serviceText(`a\udc00b\ud800c😀d`, 100), "a?b?c😀d");
 });

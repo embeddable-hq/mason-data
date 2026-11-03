@@ -41,8 +41,8 @@
  *   already                               the headline chosen, --json                 a boolean
  *   an HTTP status                        a failure's why                             a number
  *
- * BEFORE ANY OF THESE, every string of the answer, its keys included, is put to the exact test (`carriesNoSecret`,
- * src/cli/hosted.ts `carriesSecret`: an echo of the held token, `ECHO_RUN` of its body in a row in one string; a
+ * BEFORE ANY OF THESE, every string of the answer, its keys included, is put to the exact test (src/cli/hosted.ts
+ * `carriesNoSecret`, `carriesSecret` on each: an echo of the held token, `ECHO_RUN` of its body in a row in one string; a
  * token's or a password's shape — add's own password, url and psql for the token alone): an answer that carries one
  * anywhere is refused whole, so no grammar is ever the only thing between a secret and the output, and an honest answer
  * is refused with a probability under 1 in a million whatever its size. A failure's code, printed inside why, is put to
@@ -52,8 +52,9 @@
  * What to run next is the CLI's own (`onReplica`: the local command's steps, each `mason user …` naming the replica).
  */
 import { failed, jsonText, serviceStyle, type Failure, type NextStep } from "./command.ts";
-import { call, carriesSecret, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
+import { call, carriesNoSecret, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaText, tokenFor, type Replica } from "./replica.ts";
+import { holdOutput } from "./output-gate.ts";
 import { err as styleErr, out as styleOut } from "./style.ts";
 import { connectionUrl, psqlLine } from "./pg-url.ts";
 import { USER_NAME_RE } from "../duck/users.ts";
@@ -99,29 +100,6 @@ export function requestOf(r: Replica, o: { verb: Verb; name?: string | undefined
 }
 
 // ------------------------------------------------------------------ the answers, held to the run's own shapes
-
-/**
- * NO STRING OF THE ANSWER CARRIES A SECRET (PR 609's review: a grammar alone is no mask — a user's name, a role, an
- * attribute's name, a host, a database or a list's URL can spell a token's body or another user's password, and was
- * printed as it came): EVERY string of the answer, each key included (an attribute's name is printed), is put to the
- * exact test (src/cli/hosted.ts `carriesSecret`: an echo of the held token, `ECHO_RUN` of its body in a row in that
- * one string; a token's or a password's shape), before any is held to its grammar or printed. An answer any string of
- * which carries one is outside the contract, refused whole: nothing of it is printed. The test is per string and
- * exact, so an honest answer is refused with a probability under 1 in a million whatever its size (hosted.ts's
- * derivation, measured by tests/cli-user-hosted-refusals.test.ts). `own`: the top-level keys that carry the password
- * this answer makes (add's `password`, `url`, `psql`), read for the token alone.
- */
-export function carriesNoSecret(json: unknown, secrets: readonly string[], own: readonly string[] = []): boolean {
-  const clean = (v: string, passwords: boolean): boolean => !carriesSecret(v, secrets, { passwords });
-  const walk = (v: unknown, passwords: boolean): boolean => {
-    if (typeof v === "string") return clean(v, passwords);
-    if (Array.isArray(v)) return v.every((x) => walk(x, passwords));
-    if (obj(v)) return Object.entries(v).every(([k, x]) => clean(k, true) && walk(x, passwords));
-    return true;
-  };
-  if (!obj(json)) return walk(json, true);
-  return Object.entries(json).every(([k, x]) => clean(k, true) && walk(x, !own.includes(k)));
-}
 
 /** A string the service sends, as one line: null when it is not a string. */
 const line = (v: unknown, max: number, secrets: readonly string[]): string | null => typeof v === "string" ? serviceText(v, max, secrets) : null;
@@ -244,6 +222,9 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
   if (isFailure(service)) return fail(service);
   const token = tokenFor(service, { asked: "a replica's users are asked for", again: `mason user ${o.verb}` });
   if (isFailure(token)) return fail(token);
+  // from here every byte written is put to the exact test against the token (src/cli/output-gate.ts); add prints the
+  // password it made, so a password's shape is its answer's there
+  holdOutput({ command: "user", json: o.json, secrets: [token], passwords: o.verb !== "add" });
   const secrets = [token];
   const req = requestOf(r, o);
   const a = await call(service, req.method, req.path, { token, ...(req.json !== undefined ? { json: req.json } : {}), ...(o.verb === "list" ? { maxBytes: MAX_LIST_BYTES } : {}) });

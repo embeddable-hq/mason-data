@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Reply, Req } from "./hosted-fake.ts";
 import { addedAnswer, AT, hosted, ID, LINK, listAnswer, noTokenPrinted, ok, R, row } from "./user-hosted-fake.ts";
+import { measureGate, SECRETS } from "./hosted-fake.ts";
 import { heldAdded, heldDisabled, heldEnabled, heldList, heldRemoved } from "../src/cli/user-hosted.ts";
 import { failureShape } from "../src/cli/hosted.ts";
 // the exact test's run and reader, loaded so this file loads where they are not (a proof at an older commit)
@@ -15,7 +16,8 @@ const hostedModule = await import("../src/cli/hosted.ts") as Record<string, unkn
 const echoRun = typeof hostedModule.ECHO_RUN === "number" ? hostedModule.ECHO_RUN : 11;
 const echoesSecret = (s: string, secrets: string[], run: number): boolean =>
   typeof hostedModule.echoesSecret === "function" ? (hostedModule.echoesSecret as (s: string, x: string[], n: number) => boolean)(s, secrets, run) : assert.fail("no echoesSecret here");
-import { carriesNoSecret, MAX_LIST_BYTES } from "../src/cli/user-hosted.ts";
+import { MAX_LIST_BYTES } from "../src/cli/user-hosted.ts";
+import { carriesNoSecret } from "../src/cli/hosted.ts";
 import { createHash } from "node:crypto";
 import { connectionUrl, psqlLine } from "../src/cli/pg-url.ts";
 
@@ -264,6 +266,65 @@ test("an honest answer at the contract's largest size — 2000 users, every valu
   const short = tokens.filter((t) => strings.some((x) => echoesSecret(x, [t], 6))).length;
   assert.ok(short <= Math.ceil(bound(read, 6) * tokens.length), `a run of 6: ${short} of ${tokens.length}, its bound ${bound(read, 6).toFixed(3)} each`);
   assert.ok(short > 0, "a run of 6 is met by chance: the measurement can see the model");
+});
+
+test("mason user --replica: an answer nested deeper than any documented shape — a list 500,000 deep within its 1 MiB, an add 32,000 deep within 64 KiB — is refused by its status, never a crash (PR 645's review: the walk's own stack)", { timeout: 300_000 }, async () => {
+  const nest = (n: number): string => "[".repeat(n) + "]".repeat(n);
+  for (const [what, verb, json, said] of [
+    ["list", ["list"], `{"users":[],"lastUsedNote":null,"urlNote":null,"requestLogDays":7,"x":${nest(500_000)}}`, / answered GET \/v1\/replicas\/acme\/shop\/users\?lastUsed=1 with 200, where /],
+    ["add", ["add", "x"], JSON.stringify(addedAnswer("x")).replace(/}$/, `,"x":${nest(32_000)}}`), / answered POST \/v1\/replicas\/acme\/shop\/users with 200, where /],
+  ] as Array<[string, string[], string, RegExp]>) {
+    for (const form of [[], ["--json"]]) {
+      const { a } = await hosted(() => ({ status: 200, json }), [...verb, "--replica", R, ...form], { names: ["x"] });
+      const all = a.stdout + a.stderr;
+      assert.equal(a.code, 1, `${what} ${form.join(" ")}: ${all}`);
+      assert.match(all, said, what);
+      assert.doesNotMatch(all, /call stack|RangeError|bug in mason/, what);
+    }
+  }
+});
+
+test("mason user --replica: what is tested is what is written (PR 645's class round) — an attribute's value of 10 of the token's body and a lone surrogate prints the surrogate as ?, never --json's \\udc00; a user's name of 10 of the body followed in the list by the CLI's word that is its 11th is refused at the write by the output's gate", { timeout: 120_000 }, async () => {
+  const bodyOf = (r: Req): string => String(r.headers.authorization).replace(/^Bearer masondata_ci_/, "");
+  // a lone surrogate after 10 of the token's body: whatever its next character, the escape is never written
+  {
+    const { a, token } = await hosted((r) => ({ status: 200, json: JSON.stringify((listAnswer([row("metabase", { attributes: { tenant: "TENANT" } })]) as { body: unknown }).body).replace("TENANT", `${bodyOf(r).slice(0, 10)}\\udc00`) }), ["list", "--replica", R, "--json"], { names: ["metabase"] });
+    assert.equal(a.code, 0, a.stdout + a.stderr);
+    assert.ok(!a.stdout.includes("\\u"), a.stdout);
+    assert.match(a.stdout, /"tenant": "[A-Za-z0-9_-]{10}\?"/);
+    assert.ok(!a.stdout.includes(token.slice(13, 24)));
+  }
+  // the gate: the token is the test's, so its 11th is the first letter written after the name, in --json ("id")
+  const token = ["masondata", "ci", "k7mw2qx9vbiTr4Lp8Zn3Hc6Df1Gs5Jy0Ue-Wa_Ob2Xm"].join("_"); SECRETS.push(token);
+  const { a } = await hosted(() => listAnswer([row("k7mw2qx9vb")]), ["list", "--replica", R, "--json"], { names: ["k7mw2qx9vb"], extra: { MASON_TOKEN: token } });
+  assert.equal(a.code, 1, a.stdout + a.stderr);
+  assert.equal((JSON.parse(a.stdout) as { error: { message: string } }).error.message, "the service's answer would print a secret this command holds, so nothing more of it is printed");
+  assert.ok(!a.stdout.includes("k7mw2qx9vb"), a.stdout);
+});
+
+test("mason user --replica: the output's gate refuses no honest answer by chance — a list of 40 users of high-entropy names and values, and an add with its password, as written for a person and in --json, against random tokens from a fixed seed: none refused at ECHO_RUN, and a run of 5 within its bound", { timeout: 300_000 }, async (t) => {
+  const bytes = seeded("mason-645-gate-users");
+  const b64 = (n: number): string => bytes(Math.ceil(n * 3 / 4) + 1).toString("base64url").slice(0, n);
+  // 40: the harness holds every run to showing no more than a quarter of any token the file made (hosted-fake `mason`,
+  // the quarter rule, across all of them), which a larger random answer trips by chance — the measurement is the gate's
+  const names = Array.from({ length: 40 }, () => `u${b64(30).toLowerCase().replace(/[^a-z0-9_.-]/g, "x")}`);
+  const users = names.map((n) => row(n, { attributes: { tenant: b64(36), org: `org_${b64(20)}` } }));
+  const lists: string[] = [], adds: string[] = [];
+  for (const form of [[], ["--json"]]) {
+    const l = await hosted(() => listAnswer(users), ["list", "--replica", R, ...form], { names });
+    assert.equal(l.a.code, 0, l.a.stderr);
+    const add = await hosted(() => ok(addedAnswer("x")), ["add", "x", "--replica", R, ...form], { names: ["x"] });
+    assert.equal(add.a.code, 0, add.a.stderr);
+    lists.push(l.a.stdout, l.a.stderr); adds.push(add.a.stdout, add.a.stderr);
+  }
+  // add prints the password it made: a password's shape is its answer's there (src/cli/user-hosted.ts holdOutput)
+  for (const [what, texts, passwords] of [["the list", lists, true], ["the add", adds, false]] as const) {
+    const m = await measureGate(texts, `mason-645-gate-users-tokens-${what}`, 300, { passwords });
+    t.diagnostic(`measured, ${what}: ${JSON.stringify(m)}`);
+    assert.equal(m.refused, 0, `${what}: ${m.refused} of 300 honest answers refused`);
+    assert.ok(m.bound < 1e-6, `${what}: the bound at ECHO_RUN: ${m.bound}`);
+    assert.ok(m.shortRefused <= m.shortBound, `${what}: a run of 5: ${m.shortRefused}, its bound ${m.shortBound}`);
+  }
 });
 
 noTokenPrinted(40);

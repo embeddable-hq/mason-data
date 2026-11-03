@@ -18,6 +18,7 @@ import { spinUntilOutput } from "./style.ts";
 import { CommandFailed, failed, wantsJson } from "./command.ts";
 import { RunUnreachable } from "./control.ts";
 import { exitWhenWritten } from "../lib/exit-when-written.ts";
+import { gatedExit, installOutputGate } from "./output-gate.ts";
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...args] = argv;
@@ -56,7 +57,10 @@ async function main(argv: string[]): Promise<number> {
   } finally { stop(); }
 }
 
-main(process.argv.slice(2)).then(exitWhenWritten, (e: unknown) => {
+// every byte written passes the output's gate, which a hosted command arms with the secrets it holds (src/cli/output-gate.ts):
+// installed before anything else wraps the streams (the spinner, below), and its refusal is the exit's (`gatedExit`)
+installOutputGate();
+main(process.argv.slice(2)).then((code) => exitWhenWritten(gatedExit(code)), (e: unknown) => {
   // an error no command said in its own words: its message, never a stack trace (CLAUDE.md: a message that needs a
   // stack to be understood is a bug — mason query orders printed one when Mason's API was not up yet).
   // MASON_DEBUG=1 prints where it happened, for the bug report it deserves. The same shape as every failure, JSON under --json.
@@ -65,5 +69,5 @@ main(process.argv.slice(2)).then(exitWhenWritten, (e: unknown) => {
   const code = failed(command ?? "", { message, code: "failed", fix: process.env.MASON_DEBUG ? undefined : "this is a bug in mason: MASON_DEBUG=1 prints where it happened, for the report" },
     { json: wantsJson(args, COMMANDS.find((c) => c.name === command)) });
   if (process.env.MASON_DEBUG) process.stderr.write(`${(e as Error).stack ?? ""}\n`);
-  exitWhenWritten(code);
+  exitWhenWritten(gatedExit(code));
 });

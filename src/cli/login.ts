@@ -19,9 +19,10 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { endText, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { environmentToken, readLogins, TOKEN_ENV, writeLogins, type Logins } from "./credentials.ts";
+import { environmentToken, readLogins, TOKEN_ENV, writeLogins, type Login, type Logins } from "./credentials.ts";
 import { DEFAULT_SERVICE_URL, expired, isFailure, pollToken, revoke, serviceOf, serviceText, startDevice, whoAmI, type DeviceCode, type Me, type Service } from "./hosted.ts";
 import { err as styleErr, out as styleOut, stepRenderer, type Style } from "./style.ts";
+import { holdOutput } from "./output-gate.ts";
 import { openBrowser } from "./ui.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -107,21 +108,32 @@ export async function login(argv: string[]): Promise<number> {
   const before = readLogins();
   if (isFailure(before)) return fail("login", before, { json });
 
-  const code = await startDevice(service);
+  // what this command holds that the service may echo before it sends a token: the login it replaces (src/cli/hosted.ts
+  // `carriesNoSecret`: an answer that carries it is refused whole)
+  const held = before.logins.logins[service.base] ? [before.logins.logins[service.base]!.token] : [];
+  // and from here every byte written is put to the exact test against what it holds (src/cli/output-gate.ts)
+  holdOutput({ command: "login", json, secrets: held });
+  const code = await startDevice(service, held);
   if (isFailure(code)) return fail("login", code, { json });
-  const token = await approved(service, code, json);
+  const token = await approved(service, code, json, held);
   if (isFailure(token)) return fail("login", token, { json });
+  holdOutput({ command: "login", json, secrets: [token] });
 
-  // who signed in, before anything is saved: a token the service will not say who it is is never kept
-  const me = await whoAmI(service, token);
-  if (isFailure(me)) { await revoke(service, token); return fail("login", me, { json }); }
-  // read again just before the write, so a login another command saved meanwhile is kept
-  const now = readLogins();
-  if (isFailure(now)) { await revoke(service, token); return fail("login", now, { json }); }
-  const was = now.logins.logins[service.base] ?? null;
-  const logins: Logins = { version: 1, logins: { ...now.logins.logins, [service.base]: { token, email: me.email, savedAt: new Date().toISOString() } } };
-  const saved = writeLogins(logins);
-  if (isFailure(saved)) { await revoke(service, token); return fail("login", saved, { json }); }
+  // FROM HERE THE SERVICE HAS GRANTED A TOKEN, which is kept only once it is saved: on every failure before that —
+  // one said, or one thrown (PR 645's review: a crash left a granted token live) — it is revoked, and a revoke that
+  // did not reach the service is said
+  let kept: { me: Me; was: Login | null; saved: { file: string } } | Failure;
+  try { kept = await keep(service, token, held); }
+  catch (e) {
+    const notRevoked = await revoke(service, token);
+    if (notRevoked === null) throw e;
+    throw new Error(`${e instanceof Error ? e.message : String(e)}; the token the service granted was NOT revoked (${notRevoked}): sign in to ${service.base} in a browser and revoke it there`, { cause: e });
+  }
+  if (isFailure(kept)) {
+    const notRevoked = await revoke(service, token);
+    return fail("login", notRevoked === null ? kept : { ...kept, why: `${kept.why ? `${kept.why}; ` : ""}the token the service granted was NOT revoked (${notRevoked}): sign in to ${service.base} in a browser and revoke it there` }, { json });
+  }
+  const { me, was, saved } = kept;
   // the login it replaced is revoked, so this machine never leaves a token it no longer holds alive on the service
   const replaced = was === null || was.token === token ? null : { email: serviceText(was.email, 320, [token, was.token]), revokeError: await revoke(service, was.token) };
 
@@ -151,11 +163,28 @@ export async function login(argv: string[]): Promise<number> {
 }
 
 /**
+ * WHAT A GRANTED TOKEN NEEDS BEFORE IT IS KEPT: who signed in (a token the service will not say who it is is never
+ * kept), the logins read again just before the write (so a login another command saved meanwhile is kept), and the
+ * write. A Failure when any is not had; the caller revokes the token then.
+ */
+async function keep(service: Service, token: string, held: readonly string[]): Promise<{ me: Me; was: Login | null; saved: { file: string } } | Failure> {
+  const me = await whoAmI(service, token, held);
+  if (isFailure(me)) return me;
+  const now = readLogins();
+  if (isFailure(now)) return now;
+  const was = now.logins.logins[service.base] ?? null;
+  const logins: Logins = { version: 1, logins: { ...now.logins.logins, [service.base]: { token, email: me.email, savedAt: new Date().toISOString() } } };
+  const saved = writeLogins(logins);
+  if (isFailure(saved)) return saved;
+  return { me, was, saved };
+}
+
+/**
  * The page and the code said, then the wait: a poll every `interval` seconds (five more at each slow_down, RFC 8628
  * 3.5), until the token, a refusal, or the code's expiry. On a terminal a spinner turns beside the wait; elsewhere the
  * wait is one line.
  */
-async function approved(service: Service, code: DeviceCode, json: boolean): Promise<string | Failure> {
+async function approved(service: Service, code: DeviceCode, json: boolean, held: readonly string[]): Promise<string | Failure> {
   const page = code.verificationUriComplete ?? code.verificationUri;
   const s = errStyle();
   say(reportText({ headline: `To sign in to ${service.base}, open this page and approve the code:`,
@@ -179,7 +208,7 @@ async function approved(service: Service, code: DeviceCode, json: boolean): Prom
   for (;;) {
     if (Date.now() + interval * 1000 > deadline) { if (live) steps.fail(); return expired(code); }
     await sleep(interval * 1000);
-    const p = await pollToken(service, code);
+    const p = await pollToken(service, code, held);
     if ("pending" in p) continue;
     if ("slowDown" in p) { interval += 5; continue; }
     if (isFailure(p)) { if (live) steps.fail(); return p; }
@@ -200,6 +229,8 @@ export async function logout(argv: string[]): Promise<number> {
   const read = readLogins();
   if (isFailure(read)) return fail("logout", read, { json });
   const entry = read.logins.logins[service.base];
+  const env = environmentToken();
+  if (entry !== undefined || env !== null) holdOutput({ command: "logout", json, secrets: [...(entry ? [entry.token] : []), ...(env !== null ? [env] : [])] });
   if (entry === undefined) {
     const next: NextStep[] = [["mason login", `sign this machine in to ${service.base}`]];
     if (json) { out(jsonText(LOGOUT, { service: service.base, signedOut: false, email: null, revoked: null, revokeError: null, environmentToken: fromEnv, file: read.file }, next)); return 0; }

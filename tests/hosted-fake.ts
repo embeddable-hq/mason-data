@@ -13,8 +13,8 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { randomBytes } from "node:crypto";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { createHash, randomBytes } from "node:crypto";
+import { domainToASCII, domainToUnicode, fileURLToPath, pathToFileURL } from "node:url";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
 
@@ -34,6 +34,71 @@ export const bodyOf = (token: string): string => token.replace(/^masondata_(pat|
  */
 const ECHO_BODY = "Qz7Vw2Xk9Pj4Ry8Tm3Lq6Hb1Ns5Gc0Fd-Ue_YoZi7Ka";
 export const echoToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${ECHO_BODY}`;
+
+/**
+ * A TOKEN WHOSE BODY HOLDS A RUN EVERY GRAMMAR TAKES (issue 627): 11 lower case letters (an OAuth error's grammar), 11
+ * digits (a time's fraction), then base64url of every kind; `n` picks one of two, so a command can hold two at once.
+ * Fixed, so a run's verdict is the same at every run; written in parts, so no line of this file is shaped as a token.
+ */
+export const RUNS = [{ letters: "qzvwxkpjrtm", digits: "40718293651", rest: "Hb1Ns5Gc0Fd-Ue_YoZi7K" }, { letters: "hgfmwyqcbnx", digits: "93850261749", rest: "Lk2Pq7Rs-Tu_Vw8Xy3Za4" }] as const;
+export const runToken = (kind: "pat" | "ci", n: 0 | 1 = 0): string => ["masondata", kind, `${RUNS[n].letters}${RUNS[n].digits}${RUNS[n].rest}`].join("_");
+/** The forms a test gives a value of a hosted command's answer (issue 627): the token whole, its body, its body in lower
+ *  case, and 11 of its characters in a row — its letters, or its digits for a value only digits fit. */
+export const runForms = (token: string, n: 0 | 1 = 0): Array<{ what: string; value: string; digits: string }> => {
+  const body = bodyOf(token);
+  return [{ what: "the token whole", value: token, digits: token }, { what: "its body", value: body, digits: body },
+    { what: "its body in lower case", value: body.toLowerCase(), digits: body.toLowerCase() }, { what: "11 of its characters in a row", value: RUNS[n].letters, digits: RUNS[n].digits }];
+};
+/** Whether `text` shows 11 of a token's body in a row, in any case, as it is or read past every character that is not a
+ *  letter or a digit (pieces split by `/`, `.` or a space): what a refused answer must print none of. */
+export const showsRun = (text: string, token: string): boolean => {
+  for (const view of [(s: string) => s.toLowerCase(), (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "")]) {
+    const t = view(text), b = view(bodyOf(token));
+    for (let i = 0; i + 11 <= b.length; i++) if (t.includes(b.slice(i, i + 11))) return true;
+  }
+  return false;
+};
+
+/** Host labels whose IDNA form, as the URL parser prints a host, is `xn--` and 11 of a body lower-cased in a row: the
+ *  Unicode label reads as no body character, its printed form as the run (PR 645's review). */
+export function punyLabels(body: string, most: number): string[] {
+  const runs = body.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 11);
+  const labels: string[] = [];
+  for (const w of runs) for (let i = 0; i + 11 <= w.length && labels.length < most; i++) {
+    for (const prefix of ["", "a", "ab", "z", "zz"]) {
+      const ascii = `xn--${prefix}${w.slice(i, i + 11)}`, u = domainToUnicode(ascii);
+      if (u && u !== ascii && !/[a-z0-9]/i.test(u) && domainToASCII(u) === ascii) { labels.push(u); break; }
+    }
+  }
+  return labels;
+}
+
+/**
+ * THE OUTPUT GATE'S FALSE-REFUSAL RATE ON HONEST OUTPUT, measured (PR 645's class round): each text as a command wrote
+ * it (a stream, and the two together), read once as the gate reads it, against `tokens` random tokens from a fixed
+ * seed (`passwords` false for a command that prints the password it made). How many the gate refuses at `ECHO_RUN` (none may be), and at a run of `short` (chance meets it, within the
+ * bound src/cli/hosted.ts derives: W × 43 × 2 × 31^-n for W characters read), so the measurement can see the model.
+ */
+export async function measureGate(texts: readonly string[], seed: string, tokens: number, o: { short?: number; passwords?: boolean } = {}): Promise<{ refused: number; shortRefused: number; shortBound: number; bound: number }> {
+  const { readingsOf, readingsCarry } = await import("../src/cli/output-gate.ts");
+  const { ECHO_RUN } = await import("../src/cli/hosted.ts");
+  const short = o.short ?? 5, passwords = o.passwords ?? true;
+  const reads = texts.map((t) => readingsOf(t));
+  const chars = reads.reduce((n, r) => n + r.reads.reduce((m, x) => m + x.length, 0), 0);
+  let counter = 0, pool = Buffer.alloc(0);
+  const bytes = (n: number): Buffer => {
+    while (pool.length < n) pool = Buffer.concat([pool, createHash("sha256").update(`${seed}:${counter++}`).digest()]);
+    const out = pool.subarray(0, n); pool = pool.subarray(n); return out;
+  };
+  let refused = 0, shortRefused = 0;
+  for (let i = 0; i < tokens; i++) {
+    const token = `masondata_ci_${bytes(32).toString("base64url")}`;
+    if (reads.some((r) => readingsCarry(r, [token], { passwords }))) refused++;
+    if (reads.some((r) => readingsCarry(r, [token], { run: short, passwords }))) shortRefused++;
+  }
+  const bound = (n: number): number => chars * 43 * 2 * 31 ** -n;
+  return { refused, shortRefused, shortBound: Math.ceil(bound(short) * tokens), bound: bound(ECHO_RUN) };
+}
 
 /**
  * The forms a service may echo a token it was sent in, besides the token whole (issue 540; the review of PR 591): each
@@ -94,7 +159,8 @@ const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
 export interface Req { at: number; method: string; path: string; search: string; headers: http.IncomingHttpHeaders; form: Record<string, string>; body: string }
-export type Reply = { status: number; body?: unknown; raw?: string; headers?: Record<string, string> } | "drop";
+/** `json`: a JSON body as text (one too deep for JSON.stringify to write); `raw`: a body that is not JSON. */
+export type Reply = { status: number; body?: unknown; raw?: string; json?: string; headers?: Record<string, string> } | "drop";
 export interface Script {
   device?: Reply;
   /** the n-th poll's answer (0-based) */
@@ -132,7 +198,7 @@ export async function fakeService(script: Script): Promise<{ url: string; reques
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
-      res.end(reply.raw ?? (reply.body === undefined ? "" : JSON.stringify(reply.body).replaceAll(BASE, `http://127.0.0.1:${port}`)));
+      res.end(reply.raw ?? (reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body))).replaceAll(BASE, `http://127.0.0.1:${port}`));
     });
   });
   let port = 0;

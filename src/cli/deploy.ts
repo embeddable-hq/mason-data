@@ -44,15 +44,22 @@
  *   an HTTP status, Retry-After             a failure's or a wait's line            a number (Retry-After bounded, never printed)
  *   why a request got no answer             the wait's line, a failure's why        `call`'s own words, through `serviceText`
  *
- * So no value of the service's starts a line, adds a row or a step to run next, or puts a line break in --json.
+ * So no value of the service's starts a line, adds a row or a step to run next, or puts a line break in --json. AND NO
+ * GRAMMAR IS EVER THE ONLY THING BETWEEN A SECRET AND THE OUTPUT (issue 627: `DEPLOY_ID` took the token whole, and the
+ * id was printed): before any of the grammars above, every string of the POST's answer and of each poll's, each key
+ * included, is put to the exact test (src/cli/hosted.ts `carriesNoSecret`: an echo of the token, `ECHO_RUN` of its body
+ * in a row in one string; a token's or a password's shape), and an answer that carries one is refused whole, said by its
+ * status. A failure's words (message, why, fix) alone are free text, masked by `serviceText` as every failure's are; its
+ * code is put to the same test (`failureShape`).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { call, failureShape, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected } from "./hosted.ts";
+import { call, carriesNoSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
+import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
 import { folderPlace, theProject, type Project } from "./project.ts";
 import { commandPinProblem } from "./pin.ts";
@@ -318,6 +325,12 @@ const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" 
 export function deployStateOf(json: unknown, id: string | null, secrets: readonly string[], again: NextStep[]): DeployState | null {
   if (!obj(json) || !obj(json.deploy)) return null;
   const d = json.deploy;
+  // BEFORE ANY GRAMMAR, every string of the answer, each key included, to the exact test (src/cli/hosted.ts
+  // `carriesNoSecret`, issue 627: an id its grammar took was the token whole, and printed): the id, the status, the
+  // phase, the times, the failure's code, a key outside the shape. A failure's words alone are left to its mask
+  // (`failureShape`), as every failure's are.
+  const words = obj(d.failure) ? { ...json, deploy: { ...d, failure: { ...d.failure, message: null, why: null, fix: null } } } : json;
+  if (!carriesNoSecret(words, secrets)) return null;
   if (typeof d.id !== "string" || !DEPLOY_ID.test(d.id) || (id !== null && d.id !== id)) return null;
   if (typeof d.status !== "string" || !(STATUSES as readonly string[]).includes(d.status)) return null;
   const status = d.status as Status;
@@ -403,6 +416,8 @@ export async function deploy(argv: string[]): Promise<number> {
   const r = replica!;
   const token = tokenFor(service, { asked: "a deploy is sent", again: "mason deploy" });
   if (isFailure(token)) return fail(token, { json });
+  // from here every byte written is put to the exact test against the token (src/cli/output-gate.ts)
+  holdOutput({ command: "deploy", json, secrets: [token] });
   const secrets = [token];
   const where = `/v1/replicas/${r.org}/${r.name}/deploys`;
   const started = Date.now(), deadline = started + timeout.seconds * 1000;

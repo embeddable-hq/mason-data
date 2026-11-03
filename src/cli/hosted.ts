@@ -14,7 +14,14 @@
  * WHAT COMES BACK IS UNTRUSTED: each answer is held to its documented shape, and the token is masked in all of it: a
  * token the command holds by its VALUE — whole, or every run of 4 or more of its body's characters once the runs the
  * command prints would show more than a quarter of it together, however re-cased, split or percent-encoded
- * (`heldRuns`); and anything shaped as a documented token, held or not.
+ * (`heldRuns`); and anything shaped as a documented token, held or not. A GRAMMAR IS NO MASK (PR 609, issue 627): before
+ * any value of an answer is held to its grammar or printed, every string of it, each key included, is put to the exact
+ * test (`carriesNoSecret`), and an answer that carries a secret is refused whole — a device code's answer (`deviceOf`),
+ * who signed in (`meOf`), a deploy's state (src/cli/deploy.ts), a replica's users (src/cli/user-hosted.ts); a failure's
+ * code too (`failureShape`, `oauthFailure`), its words masked. THESE ARE THE FIRST LINE; THE LAST IS THE BYTES WRITTEN
+ * (PR 645's class round: what was tested was not what was printed): every hosted command holds its secrets in the
+ * output's gate (src/cli/output-gate.ts `holdOutput`), which puts each write to stdout and stderr, as written, to the
+ * same exact test, and writes the command's refusal in place of what would carry one.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (the decision of PR 481's class round: a
  * service forged a block of next steps with a newline in an email, and offered `mason destroy` as a next step). Two
@@ -130,11 +137,17 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
   // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
   t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
+  // and a lone surrogate, which is no character: --json would write it as an escape (`\udc00`), whose letters and
+  // digits a reader reads (PR 645's review, round 2)
+  t = t.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "?");
   // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
   // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
   t = t.replace(/\s+/g, " ").trim();
   const chars = [...t];
-  return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+  const line = chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+  // and what is printed is what is tested (PR 645's review): the line as it leaves, put to the exact test too — its
+  // changes replace a character by a separator or cut the end, which join nothing, so this holds what they keep so
+  return echoesSecret(line, secrets) ? "****" : line;
 }
 
 /**
@@ -245,22 +258,28 @@ function heldRuns(t: string, secrets: readonly string[]): Map<string, { spans: A
  */
 export const ECHO_RUN = 11;
 const echoGrams = new Map<string, Array<{ keep: boolean; n: number; grams: Set<string> }>>();
+/** A held secret's runs of `run` (each of its body's windows, read once keeping `-` and `_` and once skipping them):
+ *  what an echo is matched against, here and by the output's gate (src/cli/output-gate.ts). */
+export function echoViews(secret: string, run: number = ECHO_RUN): Array<{ keep: boolean; n: number; grams: Set<string> }> {
+  const key = `${run}\u0000${secret}`;
+  let views = echoGrams.get(key);
+  if (views === undefined) {
+    const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
+    views = [true, false].map((keep) => {
+      const body = bodyChars(raw, keep, false).map((u) => u.c).join("");
+      const n = Math.min(run, body.length), grams = new Set<string>();
+      for (let j = 0; n > 0 && j + n <= body.length; j++) grams.add(body.slice(j, j + n));
+      return { keep, n, grams };
+    });
+    echoGrams.set(key, views);
+  }
+  return views;
+}
 export function echoesSecret(s: string, secrets: readonly string[], run: number = ECHO_RUN): boolean {
   for (const secret of secrets) {
     if (!secret) continue;
     if (s.includes(secret)) return true;
-    const key = `${run}\u0000${secret}`;
-    let views = echoGrams.get(key);
-    if (views === undefined) {
-      const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
-      views = [true, false].map((keep) => {
-        const body = bodyChars(raw, keep, false).map((u) => u.c).join("");
-        const n = Math.min(run, body.length), grams = new Set<string>();
-        for (let j = 0; n > 0 && j + n <= body.length; j++) grams.add(body.slice(j, j + n));
-        return { keep, n, grams };
-      });
-      echoGrams.set(key, views);
-    }
+    const views = echoViews(secret, run);
     for (const { keep, n, grams } of views) {
       if (n === 0) continue;
       const read = bodyChars(s, keep, true).map((u) => u.c).join("");
@@ -277,17 +296,64 @@ export function echoesSecret(s: string, secrets: readonly string[], run: number 
  * alone is no mask: src/cli/user-hosted.ts `carriesNoSecret`, and a failure's code, `failureShape`).
  */
 export function carriesSecret(s: string, secrets: readonly string[] = [], o: { passwords?: boolean } = {}): boolean {
-  return echoesSecret(s, secrets) || s.search(TOKEN_SHAPE) >= 0 || (o.passwords !== false && s.search(PASSWORD_SHAPE) >= 0);
+  return echoesSecret(s, secrets) || shapedSecret(s, o);
 }
 
+/** Whether `s` holds anything shaped as a documented token, or (unless `passwords` is false) a Mason user's password. */
+export function shapedSecret(s: string, o: { passwords?: boolean } = {}): boolean {
+  return s.search(TOKEN_SHAPE) >= 0 || (o.passwords !== false && s.search(PASSWORD_SHAPE) >= 0);
+}
+
+/** `t` as a held secret is compared by (`bodyChars`), as one string: re-cased, in its compatibility form, `-` and `_`
+ *  kept or not, a `%XX` escape read as what it encodes or (`percent` false) as the characters it is written with. */
+export const bodyRead = (t: string, keepMarks: boolean, percent: boolean): string => bodyChars(t, keepMarks, true, percent).map((u) => u.c).join("");
+
+/**
+ * NO STRING OF AN ANSWER CARRIES A SECRET (PR 609's decision, the one point every hosted command's answer passes, issue
+ * 627: a grammar alone is no mask — a deploy's id, a device code, a sign-in page, a user's name can each spell the token
+ * and were printed as they came): EVERY string of the answer, each key included, is put to the exact test
+ * (`carriesSecret`: an echo of a held secret, `ECHO_RUN` of its body in a row in that one string; a token's or a
+ * password's shape), before any is held to its grammar or printed. An answer any string of which carries one is outside
+ * the contract, refused whole: nothing of it is printed. The test is per string and exact, so an honest answer is
+ * refused with a probability under 1 in a million whatever its size (`ECHO_RUN`'s derivation). `own`: the top-level
+ * keys that carry the password this answer makes (src/cli/user-hosted.ts add's `password`, `url`, `psql`), read for the
+ * token alone. A FAILURE'S WORDS (a message, a why, a fix) are free text the CLI prints as the service worded them,
+ * masked (`serviceText`), never refused: a caller passes an answer without them, and its code is put to this test
+ * (`failureShape`, `oauthFailure`).
+ */
+export function carriesNoSecret(json: unknown, secrets: readonly string[], own: readonly string[] = []): boolean {
+  const clean = (v: string, passwords: boolean): boolean => !carriesSecret(v, secrets, { passwords });
+  // the walk keeps its own stack, never the call stack (PR 645's review: an answer of 10 KB nested 3000 deep overflowed
+  // it, a crash after login's token was granted), and an answer deeper than any documented shape is outside them all
+  const stack: Array<{ v: unknown; depth: number; passwords: boolean }> = [{ v: json, depth: 0, passwords: true }];
+  while (stack.length) {
+    const { v, depth, passwords } = stack.pop()!;
+    if (typeof v === "string") { if (!clean(v, passwords)) return false; continue; }
+    if (typeof v !== "object" || v === null) continue;
+    if (depth >= MAX_ANSWER_DEPTH) return false;
+    if (Array.isArray(v)) { for (const x of v) stack.push({ v: x, depth: depth + 1, passwords }); continue; }
+    for (const [k, x] of Object.entries(v)) {
+      if (!clean(k, true)) return false;
+      // `own` names top-level keys alone
+      stack.push({ v: x, depth: depth + 1, passwords: depth === 0 ? !own.includes(k) : passwords });
+    }
+  }
+  return true;
+}
+
+/** How deep an answer may nest (an object or an array in another): every documented answer is under 6 deep
+ *  (docs/HOSTED-API.md; a replica's user list, the deepest, is 4), so 32 is room, and anything deeper is no answer of
+ *  the contract's. The walk's size is bounded by the answer's bytes (`call`'s `maxBytes`). */
+export const MAX_ANSWER_DEPTH = 32;
+
 /** The characters of `t` a held secret is compared by, each with the span of `t` it was read from (above). */
-function bodyChars(t: string, keepMarks: boolean, decode: boolean): Array<{ c: string; from: number; to: number }> {
+function bodyChars(t: string, keepMarks: boolean, decode: boolean, percent: boolean = decode): Array<{ c: string; from: number; to: number }> {
   const out: Array<{ c: string; from: number; to: number }> = [];
   const kept = keepMarks ? /[a-z0-9_-]/ : /[a-z0-9]/;
   for (let i = 0; i < t.length;) {
     const cp = t.codePointAt(i)!;
     let s = String.fromCodePoint(cp), to = i + s.length;
-    if (decode && s === "%" && /^[0-9a-f]{2}$/i.test(t.slice(i + 1, i + 3))) { s = String.fromCharCode(parseInt(t.slice(i + 1, i + 3), 16)); to = i + 3; }
+    if (percent && s === "%" && /^[0-9a-f]{2}$/i.test(t.slice(i + 1, i + 3))) { s = String.fromCharCode(parseInt(t.slice(i + 1, i + 3), 16)); to = i + 3; }
     // one reading for every spelling of a character: its compatibility decomposition, its combining marks dropped
     else if (decode && cp > 0x7f) s = s.normalize("NFKD").replace(/\p{M}/gu, "");
     for (const c of s.toLowerCase()) if (kept.test(c)) out.push({ c, from: i, to });
@@ -447,19 +513,41 @@ export interface DeviceCode { deviceCode: string; userCode: string; verification
 /**
  * A PAGE THE SERVICE SENDS A PERSON TO, which is printed and, on a terminal, opened: on the service's OWN origin (the
  * address MASON_CLOUD_URL named, or the default), as the URL parser writes it, with no user or password. A page
- * elsewhere would send the person, and their code, to an address nobody chose: `elsewhere` names it. Null when it is
- * not a URL.
+ * elsewhere would send the person, and their code, to an address nobody chose: `elsewhere` names it, as it is printed.
+ * Null when it is not a URL, or when what would be printed carries a secret.
+ *
+ * WHAT IS PRINTED IS WHAT IS TESTED (PR 645's review: the answer's string passed the exact test, and the parser's
+ * `href` printed the saved login's body whole, in pieces of 10 — `/x/../` between them is a dot segment the parser
+ * removes — and nothing masked it; a host in Unicode labels is printed in its `xn--` form, which can spell the body):
+ * the parser's own serialisation, the `href` or the `origin`, is what is tested, as it is printed — by the exact test
+ * (`carriesSecret`), and by the held secrets' mask (`maskSecrets`), since a page is printed and opened whole, so a page
+ * the mask would change is no page to send a person to: either refuses it. An honest page is refused by the mask with
+ * a probability under 1 in a million (it must hold 3 runs of 4 of a 43-character body by chance).
  */
-function pageUrl(service: Service, v: unknown): { href: string } | { elsewhere: string } | null {
+function pageUrl(service: Service, v: unknown, secrets: readonly string[]): { href: string } | { elsewhere: string } | null {
   if (!str(v, 2048)) return null;
   let u: URL;
   try { u = new URL(v); } catch { return null; }
-  if (u.origin !== service.base) return { elsewhere: u.protocol === "https:" || u.protocol === "http:" ? u.origin : `${u.protocol}//` };
-  return u.username || u.password ? null : { href: serviceText(u.href, 2048) };
+  // and the line as it is printed, cut at `max` (PR 645's review, round 2: a cut inside a `%XX` escape left `%4…`, whose
+  // 4 the whole page's reading had decoded away)
+  const shown = (printed: string, max: number): string | null => {
+    const line = serviceText(printed, max);
+    return carriesSecret(printed, secrets) || carriesSecret(line, secrets) || maskSecrets(printed, secrets) !== printed ? null : line;
+  };
+  if (u.origin !== service.base) {
+    const at = shown(u.protocol === "https:" || u.protocol === "http:" ? u.origin : `${u.protocol}//`, 300);
+    return at === null ? null : { elsewhere: at };
+  }
+  if (u.username || u.password) return null;
+  const href = shown(u.href, 2048);
+  return href === null ? null : { href };
 }
 
-/** `POST /oauth/device/code`: a device code, or a Failure. */
-export async function startDevice(service: Service): Promise<DeviceCode | Failure> {
+/**
+ * `POST /oauth/device/code`: a device code, or a Failure. `secrets`: what the command holds that the service may echo (a
+ * login saved for this service, which a new one replaces).
+ */
+export async function startDevice(service: Service, secrets: readonly string[] = []): Promise<DeviceCode | Failure> {
   const a = await call(service, "POST", "/oauth/device/code", { form: { client_id: CLIENT_ID, device_name: deviceName() } });
   if (isFailure(a)) return a;
   if (a.status === 429) {
@@ -467,15 +555,24 @@ export async function startDevice(service: Service): Promise<DeviceCode | Failur
     return { message: `${service.base} is limiting sign-ins from this address (429)`, code: "failed", why: "too many sign-ins were asked for from here in a short time",
       fix: "try again in a few minutes", next: [["mason login", "in a few minutes"]] };
   }
-  if (a.status !== 200) return oauthFailure(service, a, "a sign-in was asked for", []);
+  if (a.status !== 200) return oauthFailure(service, a, "a sign-in was asked for", secrets);
+  return deviceOf(service, a, secrets);
+}
+
+/**
+ * A DEVICE CODE'S ANSWER (200), held: every string of it, each key included, put to the exact test first
+ * (`carriesNoSecret`: the device code, the user code, each page, a key outside the shape), then each to its grammar,
+ * the pages on the service's own origin (`pageUrl`). The device code, or a Failure said by the status alone.
+ */
+export function deviceOf(service: Service, a: Answer, secrets: readonly string[]): DeviceCode | Failure {
   const j = a.json;
-  if (!obj(j)) return unexpected(service, a, "a device code was expected");
+  if (!obj(j) || !carriesNoSecret(j, secrets)) return unexpected(service, a, "a device code was expected");
   const userCode = typeof j.user_code === "string" ? /^([A-Za-z]{4})-?([A-Za-z]{4})$/.exec(j.user_code) : null;
-  const page = pageUrl(service, j.verification_uri);
-  const completePage = j.verification_uri_complete === undefined ? null : pageUrl(service, j.verification_uri_complete);
+  const page = pageUrl(service, j.verification_uri, secrets);
+  const completePage = j.verification_uri_complete === undefined ? null : pageUrl(service, j.verification_uri_complete, secrets);
   for (const p of [page, completePage]) {
     if (p && "elsewhere" in p) {
-      return { message: `${service.base} named a sign-in page on another address: ${serviceText(p.elsewhere, 300)}`, code: "refused",
+      return { message: `${service.base} named a sign-in page on another address: ${p.elsewhere}`, code: "refused",
         why: `a sign-in page is printed and opened only on the service's own address, ${service.base}: anything else would send you, and the code, to an address nobody chose`,
         fix: "check MASON_CLOUD_URL names the service you mean; if it does, the service is answering outside its documented API" };
     }
@@ -487,14 +584,18 @@ export async function startDevice(service: Service): Promise<DeviceCode | Failur
     || (j.verification_uri_complete !== undefined && complete === null)
     || !Number.isInteger(expiresIn) || (expiresIn as number) < 1 || (expiresIn as number) > 3600
     || !Number.isInteger(interval) || (interval as number) < 1 || (interval as number) > 300) return unexpected(service, a, "a device code was expected");
-  return { deviceCode: j.device_code, userCode: `${userCode[1]}-${userCode[2]}`, verificationUri, verificationUriComplete: complete,
+  // the user code as it is printed, put to the test as it is printed (8 letters and a dash: it cannot hold ECHO_RUN)
+  const shownCode = `${userCode[1]}-${userCode[2]}`;
+  if (carriesSecret(shownCode, secrets)) return unexpected(service, a, "a device code was expected");
+  return { deviceCode: j.device_code, userCode: shownCode, verificationUri, verificationUriComplete: complete,
     expiresIn: expiresIn as number, interval: interval as number };
 }
 
 /** One poll of `POST /oauth/token`: the token, still pending, asked to slow down, or a Failure (denied, expired, refused). */
 export type Poll = { token: string } | { pending: true } | { slowDown: true } | Failure;
 
-export async function pollToken(service: Service, code: DeviceCode): Promise<Poll> {
+/** `secrets`: as `startDevice`'s (the token this poll is answered with is the service's to send, never one it echoes). */
+export async function pollToken(service: Service, code: DeviceCode, secrets: readonly string[] = []): Promise<Poll> {
   const a = await call(service, "POST", "/oauth/token", { form: { grant_type: DEVICE_GRANT, device_code: code.deviceCode, client_id: CLIENT_ID } });
   if (isFailure(a)) return a;
   if (a.status === 200) {
@@ -514,7 +615,7 @@ export async function pollToken(service: Service, code: DeviceCode): Promise<Pol
       fix: "run mason login again and approve the code it shows, signed in as the account this machine should use", next: again };
   }
   if (a.status === 400 && error === "expired_token") return expired(code);
-  return oauthFailure(service, a, "the sign-in was polled", []);
+  return oauthFailure(service, a, "the sign-in was polled", secrets);
 }
 
 /** The code ran out before it was approved: a timeout, its way out a new one. */
@@ -523,10 +624,14 @@ export function expired(code: DeviceCode): Failure {
     fix: "run mason login again, and approve the new code on the page it opens", next: [["mason login", "a new code, to approve"]] };
 }
 
-/** An OAuth endpoint's refusal (`{ error, error_description? }`, RFC 6749), or anything else it answered, as a Failure. */
-function oauthFailure(service: Service, a: Answer, step: string, secrets: readonly string[]): Failure {
+/**
+ * An OAuth endpoint's refusal (`{ error, error_description? }`, RFC 6749), or anything else it answered, as a Failure.
+ * Its code is printed as it came, so it is held to its grammar AND carries no secret (`carriesSecret`, as
+ * `failureShape` holds a `/v1/` failure's); its description is free text, masked (`serviceText`).
+ */
+export function oauthFailure(service: Service, a: Answer, step: string, secrets: readonly string[]): Failure {
   const j = obj(a.json) ? a.json : null;
-  if (j && str(j.error, 64) && /^[a-z_]+$/.test(j.error)) {
+  if (j && str(j.error, 64) && /^[a-z_]+$/.test(j.error) && !carriesSecret(j.error, secrets)) {
     return { message: `${service.base} refused this sign-in (${j.error}) when ${step}`, code: "failed",
       why: typeof j.error_description === "string" && j.error_description ? serviceText(j.error_description, 1000, secrets) : undefined,
       fix: "run mason login again; if it is refused again, this Mason may be older than the service expects: upgrade it", next: [["mason login", "try again"]] };
@@ -537,18 +642,30 @@ function oauthFailure(service: Service, a: Answer, step: string, secrets: readon
 /** Who a token signs in as: `GET /v1/me`. */
 export interface Me { email: string; name: string; orgs: Array<{ slug: string; name: string; role: string }> }
 
-export async function whoAmI(service: Service, token: string): Promise<Me | Failure> {
+/** `held`: what else the command holds that the service may echo (the login this one replaces). */
+export async function whoAmI(service: Service, token: string, held: readonly string[] = []): Promise<Me | Failure> {
   const a = await call(service, "GET", "/v1/me", { token });
   if (isFailure(a)) return a;
-  if (a.status !== 200) return serviceFailure(a, [token]) ?? unexpected(service, a, "the account signed in was asked for");
+  const secrets = [token, ...held];
+  if (a.status !== 200) return serviceFailure(a, secrets) ?? unexpected(service, a, "the account signed in was asked for");
+  return meOf(service, a, secrets);
+}
+
+/**
+ * `GET /v1/me`'s answer (200), held: every string of it, each key included, put to the exact test first
+ * (`carriesNoSecret`: the email, the name, each organisation's slug, name and role, a key outside the shape), then to
+ * its shape; each value then one line, masked (`serviceText`, with `secrets[0]`, the token it was asked with). Who
+ * signed in, or a Failure said by the status alone.
+ */
+export function meOf(service: Service, a: Answer, secrets: readonly string[]): Me | Failure {
   const j = a.json;
   const orgs = obj(j) && Array.isArray(j.orgs) ? j.orgs : null;
-  if (!obj(j) || !str(j.email, 320) || typeof j.name !== "string" || j.name.length > 300 || orgs === null || orgs.length > 1000
+  if (!obj(j) || !carriesNoSecret(j, secrets) || !str(j.email, 320) || typeof j.name !== "string" || j.name.length > 300 || orgs === null || orgs.length > 1000
     || !orgs.every((o) => obj(o) && str(o.slug, 200) && typeof o.name === "string" && o.name.length <= 300 && str(o.role, 32))) {
     return unexpected(service, a, "the account signed in was asked for");
   }
   // at the boundary: who signed in leaves here as one line each, the token masked in it (above), for every reader
-  const line = (v: string, max: number): string => serviceText(v, max, [token]);
+  const line = (v: string, max: number): string => serviceText(v, max, secrets.slice(0, 1));
   return { email: line(j.email, 320), name: line(j.name, 300),
     orgs: (orgs as Array<Record<string, string>>).map((o) => ({ slug: line(o.slug!, 200), name: line(o.name!, 200), role: line(o.role!, 32) })) };
 }

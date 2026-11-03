@@ -14,7 +14,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
-import { bodyCovered, bodyShown, echoForms, echoToken, seen } from "./hosted-fake.ts";
+import { bodyCovered, bodyShown, echoForms, echoToken, measureGate, runForms, runToken, seen, showsRun } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
 const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${randomBytes(32).toString("base64url")}`;
@@ -24,7 +24,8 @@ const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
 interface Req { method: string; path: string; headers: http.IncomingHttpHeaders; body: string }
-type Reply = { status: number; body?: unknown; raw?: string; headers?: Record<string, string> } | "drop";
+/** `json`: a JSON body as text (one too deep for JSON.stringify to write); `raw`: a body that is not JSON. */
+type Reply = { status: number; body?: unknown; raw?: string; json?: string; headers?: Record<string, string> } | "drop";
 interface Script {
   post?: Reply;
   /** the n-th GET's answer (0-based) */
@@ -52,7 +53,7 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
-      res.end(reply.raw ?? (reply.body === undefined ? "" : JSON.stringify(reply.body)));
+      res.end(reply.raw ?? reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body)));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -825,6 +826,119 @@ test("mason deploy: a service that echoes the token it was sent in another form 
       else assert.match(a.stderr, /✗ mason deploy: the token \*\*\*\* is not known\n {2}why {3}it was sent as \*\*\*\* \(/, at_);
     }
   }
+});
+
+test("mason deploy: an answer whose deploy's id, status, phase, times, refusal's code or a key outside its shape carries the token — whole, its body, in lower case, 11 of its characters in a row — is refused whole, by its status: nothing of it is printed, for a person or in --json, and nothing steered by it (issue 627)", { timeout: 300_000 }, async () => {
+  const { root } = project();
+  const token = runToken("ci"); SECRETS.push(token);
+  const post = (deploy: Record<string, unknown>, more: Record<string, unknown> = {}): Script => ({ post: { status: 201, headers: { "retry-after": "1" }, body: { deploy: { id: ID, status: "queued", createdAt: CREATED, ...deploy }, ...more } } });
+  const get = (status: string, deploy: Record<string, unknown>, more: Record<string, unknown> = {}): Script => ({ get: () => {
+    const r = at(status, deploy) as { status: number; body: Record<string, unknown>; headers: Record<string, string> };
+    return { ...r, body: { ...r.body, ...more } };
+  } });
+  const cases: Array<[what: string, script: (v: string, digits: string) => Script, step: "POST" | "GET"]> = [
+    ["the POST's id", (v) => post({ id: v }), "POST"],
+    ["the POST's status", (v) => post({ status: v }), "POST"],
+    ["the POST's createdAt", (_, d) => post({ createdAt: `2026-11-02T10:00:00.${d}Z` }), "POST"],
+    ["a key outside the POST's shape", (v) => post({}, { note: v }), "POST"],
+    ["a poll's phase", (v) => get("applying", { phase: v }), "GET"],
+    ["a poll's finishedAt", (_, d) => get("running", { finishedAt: `2026-11-02T10:01:00.${d}Z` }), "GET"],
+    ["a refusal's code", (v) => get("refused", { failure: { code: v, message: "refused" } }), "GET"],
+    ["a key outside a poll's shape", (v) => get("running", {}, { note: v }), "GET"],
+  ];
+  // each case's forms side by side, as a person and with --json: the file's time is bounded
+  for (const [what, script, step] of cases) {
+    await Promise.all(runForms(token).flatMap((form) => [false, true].map(async (json) => {
+      {
+        const at_ = `${what}, ${form.what}${json ? ", --json" : ""}`;
+        const { a, requests } = await deployWith(script(form.value, form.digits), root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])], { MASON_TOKEN: token });
+        const said = `${a.stdout}\n${a.stderr}`;
+        assert.equal(a.code, 1, `${at_}: ${said}`);
+        const where = step === "POST" ? "POST /v1/replicas/acme/shop/deploys with 201, where a deploy was sent" : `GET /v1/replicas/acme/shop/deploys/${ID} with 200, where the deploy's state was asked for`;
+        const message = json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr;
+        assert.ok(message.includes(` answered ${where}`), `${at_}: said by its status:\n${said}`);
+        assert.ok(!showsRun(said, token) && !said.includes(token), `${at_}: printed the token:\n${said}`);
+        // a POST refused steers nothing: no request is made of an id it carried
+        if (step === "POST") assert.deepEqual(requests.map((r) => r.method), ["POST"], at_);
+      }
+    })));
+  }
+});
+
+test("mason deploy: an answer nested deeper than any documented shape — 32,000 deep, within the 64 KiB an answer is read to — on the POST or on a poll, is refused by its status, never a crash, for a person or in --json (PR 645's review)", { timeout: 300_000 }, async () => {
+  const { root } = project();
+  const nest = "[".repeat(32_000) + "]".repeat(32_000);
+  const cases: Array<[what: string, script: Script, where: string]> = [
+    ["the POST", { post: { status: 201, headers: { "retry-after": "1" }, json: `{"deploy":{"id":"${ID}","status":"queued","createdAt":"${CREATED}"},"x":${nest}}` } },
+      "POST /v1/replicas/acme/shop/deploys with 201, where a deploy was sent"],
+    ["a poll", { get: () => ({ status: 200, json: `{"deploy":{"id":"${ID}","status":"running","createdAt":"${CREATED}","finishedAt":"${CREATED}"},"x":${nest}}` }) },
+      `GET /v1/replicas/acme/shop/deploys/${ID} with 200, where the deploy's state was asked for`],
+  ];
+  await Promise.all(cases.flatMap(([what, script, where]) => [false, true].map(async (json) => {
+    const { a } = await deployWith(script, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    const said = `${a.stdout}\n${a.stderr}`;
+    assert.equal(a.code, 1, `${what}${json ? ", --json" : ""}: ${said}`);
+    assert.ok((json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr).includes(` answered ${where}`), `${what}: said by its status:\n${said}`);
+    assert.doesNotMatch(said, /call stack|RangeError|bug in mason/, what);
+  })));
+});
+
+test("mason deploy: every byte written passes the output's gate — an id of 10 of the token's body, which every per-value test takes, followed in what is written by the CLI's own word that is the body's 11th character, is refused at the write: what was written shows 10 in a row at most, the refusal is the CLI's, exit 1, for a person and in --json (PR 645's class round)", { timeout: 120_000 }, async () => {
+  const { root } = project();
+  // the id is the body's first 10; the body's 11th is the first letter the CLI writes next: "Queued" on stderr for a
+  // person, "status" in --json (written in parts, so no line here is shaped as a token)
+  for (const [json, eleventh] of [[false, "Q"], [true, "s"]] as const) {
+    const token = ["masondata", "ci", `Ab3d5F7h9J${eleventh}Xk2Lm7Np4Rt8Vw3Ys6Hb1Cd5Fg0Jk-Ue`].join("_"); SECRETS.push(token);
+    const id = "Ab3d5F7h9J";
+    const script: Script = { post: { status: 201, headers: { "retry-after": "1" }, body: { deploy: { id, status: "queued", createdAt: CREATED } } },
+      get: () => ({ status: 200, body: { deploy: { id, status: "running", createdAt: CREATED, finishedAt: CREATED } } }) };
+    // the fake answers GET for ID alone: this id's polls are answered here by a fake of its own
+    const server = await idFake(id, script);
+    try {
+      const h = temp("mason-home-");
+      const a = await mason(root, ["deploy", "--replica", "acme/shop", ...(json ? ["--json"] : [])], envFor(h, server.url, { MASON_TOKEN: token }));
+      const all = `${a.stdout}\n${a.stderr}`;
+      assert.equal(a.code, 1, all);
+      const said = json ? (JSON.parse(a.stdout) as { error: { code: string; message: string } }).error : null;
+      if (said) assert.deepEqual([said.code, said.message], ["refused", "the service's answer would print a secret this command holds, so nothing more of it is printed"]);
+      else assert.match(a.stderr, /^✗ mason deploy: the service's answer would print a secret this command holds, so nothing more of it is printed$/m);
+      assert.ok(!showsRun(all, token), `nothing of 11 in a row is written:\n${all}`);
+      if (!json) assert.match(a.stderr, /: deploy Ab3d5F7h9J\n/, "what was written before it stays: 10 in a row");
+      assert.doesNotMatch(a.stdout, json ? /"deploy"/ : /Deployed to/, "the answer is not written");
+    } finally { await server.close(); }
+  }
+});
+
+/** A fake whose deploy is `id` (cli-deploy's own fake answers GET for ID alone). */
+async function idFake(id: string, script: Script): Promise<{ url: string; close: () => Promise<void> }> {
+  let gets = 0;
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      const p = new URL(req.url ?? "/", "http://x").pathname;
+      const reply = (req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? script.post : p === `/v1/replicas/acme/shop/deploys/${id}` ? script.get!(gets++) : { status: 404, body: {} }) as Exclude<Reply, "drop">;
+      res.writeHead(reply.status, { "content-type": "application/json", ...reply.headers });
+      res.end(JSON.stringify(reply.body));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
+}
+
+test("mason deploy: the output's gate refuses no honest deploy by chance — its output as written, a person's and --json, against 2,000 random tokens from a fixed seed, none refused at ECHO_RUN, and a run of 5 met by chance within its bound (the model the bound is derived from, seen)", { timeout: 120_000 }, async (t) => {
+  const { root } = project();
+  const texts: string[] = [];
+  for (const json of [false, true]) {
+    const steps = [at("applying", { phase: "checking" }), at("starting", { phase: "syncing" }), at("running")];
+    const { a } = await deployWith({ get: (n) => steps[Math.min(n, steps.length - 1)]! }, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 0, a.stderr);
+    texts.push(a.stdout, a.stderr, a.stdout + a.stderr);
+  }
+  const m = await measureGate(texts, "mason-645-gate-deploy", 2000);
+  t.diagnostic(`measured: ${JSON.stringify(m)}`);
+  assert.equal(m.refused, 0, `${m.refused} of 2000 honest deploys refused`);
+  assert.ok(m.bound < 1e-6, `the bound at ECHO_RUN: ${m.bound}`);
+  assert.ok(m.shortRefused > 0 && m.shortRefused <= m.shortBound, `a run of 5: ${m.shortRefused}, its bound ${m.shortBound}`);
 });
 
 test("no run of mason deploy printed a token, nor anything shaped as one", () => {
