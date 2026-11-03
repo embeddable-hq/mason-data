@@ -84,6 +84,10 @@ export const SERVE: CommandSpec = {
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
+    MASON_PG_PROXY_FROM     behind a TCP proxy or load balancer that sends the PROXY protocol v2: its own addresses,
+                            CIDRs comma-separated (10.0.0.0/16); a connection from one must begin with a header, whose
+                            client the request log names; a header from any other address is refused (default unset:
+                            none is read)
     MASON_DUCKDB_MEMORY     ${wrap(`the engine's memory, 4GB or 512MiB (default ${DEFAULT_MEMORY_RULE}; mason doctor says it); a statement past it fails alone with 53200. Unset, under ${memorySize(MEMORY_FLOOR_BYTES)} Mason starts and warns: the system may stop it`, 120, 28)}
     MASON_SPILL_LIMIT       what statements may spill to disk, 40GB or 512MiB (default half of what is free, followed as
                             the disk fills; never past 90% of it); a statement past it fails alone with 53400

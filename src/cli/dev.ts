@@ -566,6 +566,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   try {
     api = await startPostgresApi({
       port: pgAddress.port, host: pgAddress.host, tls: pgTls.tls, database, masonVersion: o.version, product: "mason-data", statementTimeoutMs,
+      // behind a TCP proxy (MASON_PG_PROXY_FROM, src/api/postgres/proxy.ts): its PROXY header read from its addresses alone
+      ...(listen.proxyFrom !== undefined ? { proxyFrom: listen.proxyFrom } : {}),
       ...listenerLogins(users, cfg.apiKey),
       roles: () => liveRoles.now(),
       schema: () => sync.schema(),
@@ -576,7 +578,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       duck: duckListener,
     });
   } catch (e) { fail("Starting the Postgres listener"); say(`  ${(e as Error).message}`); await requests.close(); await sync.stop(); await usage.close(); await events.close(); await store.close(); return 1; }
-  done(`Postgres listener on ${listenerText(pgTls.listener, api.port)}; ${statementTimeoutMs === 0 ? "statements without a time limit" : `each statement at most ${timeoutSetting.trim()}`} (MASON_STATEMENT_TIMEOUT); ` +
+  done(`Postgres listener on ${listenerText(pgTls.listener, api.port)}; ${listen.proxyFrom !== undefined ? `a PROXY protocol v2 header required from ${listen.proxyFrom.entries.join(", ")} (MASON_PG_PROXY_FROM); ` : ""}${statementTimeoutMs === 0 ? "statements without a time limit" : `each statement at most ${timeoutSetting.trim()}`} (MASON_STATEMENT_TIMEOUT); ` +
     `every request recorded for ${keptDays} day${keptDays === 1 ? "" : "s"} (MASON_HISTORY_DAYS; mason logs --requests)`);
   {
     // a user whose role the file no longer names reads nothing until it is added again (fail closed): said here, by name

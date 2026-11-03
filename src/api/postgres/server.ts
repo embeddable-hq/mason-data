@@ -47,6 +47,11 @@
  * one or the other (a plain startup is refused: the password travels in it). Without them it is plain, says so at
  * start, and closes a connection that opens with a ClientHello, saying why in the log.
  *
+ * BEHIND A TCP PROXY (`MASON_PG_PROXY_FROM`, proxy.ts): a connection from an address it names must begin with a PROXY
+ * protocol v2 header, read before anything else (an SSLRequest, a ClientHello, a startup packet, a CancelRequest), and
+ * the client the header carries is the session's address (`Session.clientAddr`, proxy.ts `clientAddress`); a header
+ * from any other address is refused, never believed.
+ *
  * TWO SOCKETS, ONE SERVER (`mason share`, `PgApiServer.openShare`): what a connection may do is a property of the socket
  * it arrived on (`Door`), carried into its session, never of the server: the same sessions, store, roles and request
  * log, with TLS required and a login of its own on the share's socket alone, so opening one drops no session and
@@ -85,6 +90,7 @@ import {
 } from "./protocol.ts";
 import { madeTypeName, typeNameParts, type PgApiType, type PgSchema } from "./schema.ts";
 import { Unsupported, duckTranslate, endsFailedBlock, type Translation } from "./translate.ts";
+import { clientAddress, PROXY_HEADER_MS, PROXY_SETTING, proxyNames, readProxyHeader, startsProxyHeader, type ProxyFrom } from "./proxy.ts";
 import type { Node } from "libpg-query";
 
 /** what a statement is: one the session or the catalog Postgres answers (translate.ts), one DuckDB answers, or an
@@ -304,6 +310,9 @@ export interface PgApiOptions {
   clock?: (() => number) | undefined;
   /** every statement over a table is DuckDB's: its plan and its run */
   duck: DuckOptions;
+  /** the addresses a PROXY protocol v2 header is believed from (`MASON_PG_PROXY_FROM`, proxy.ts): a connection from one
+   *  must begin with one, and one from any other address is refused; absent, no header is believed from anyone */
+  proxyFrom?: ProxyFrom | undefined;
 }
 
 /**
@@ -704,6 +713,8 @@ interface Door {
   public: boolean;
   logins: LoginQueue | null;
   refused?: ((user: string) => boolean) | undefined;
+  /** the addresses a PROXY header is believed from (proxy.ts); null: none, the header refused from every address */
+  proxyFrom: ProxyFrom | null;
 }
 
 /**
@@ -812,20 +823,51 @@ class Session {
   private readonly server: Server;
   /** the socket it arrived on: how it may start, and who may log in */
   readonly door: Door;
+  /**
+   * THE CLIENT'S ADDRESS (proxy.ts `clientAddress`, its one reader): the socket's peer, or the source the PROXY header
+   * of a proxy MASON_PG_PROXY_FROM names carries, once read; null on a public socket (a share's: its peer is the
+   * tunnel's, never the client's) and where the peer could not be read. The request log's `client_addr` and the log's
+   * connect line read it.
+   */
+  clientAddr: string | null;
+  /** the PROXY header a named proxy's connection begins with, while it is read: its bytes so far and its deadline */
+  private proxyHead: { bytes: Buffer; timer: NodeJS.Timeout } | null = null;
+  /** a named proxy's header was read: a second one is refused as one */
+  private proxied = false;
 
   constructor(socket: net.Socket, server: Server, door: Door) {
     this.server = server;
     this.door = door;
     this.socket = socket;
+    this.clientAddr = door.public ? null : clientAddress(socket.remoteAddress, null);
+    if (door.proxyFrom !== null) {
+      const peer = clientAddress(socket.remoteAddress, null);
+      if (peer === null) {
+        // fail closed: an address that cannot be read cannot be told from a named proxy's
+        this.server.log(`session ${this.id} refused: its address could not be read, so whether ${PROXY_SETTING} names it could not be told`);
+        process.nextTick(() => this.end("its address could not be read"));
+      } else if (proxyNames(door.proxyFrom, peer)) {
+        const timer = setTimeout(() => this.proxyRefused(`no whole PROXY protocol v2 header in ${PROXY_HEADER_MS / 1000} s`), PROXY_HEADER_MS);
+        timer.unref();
+        this.proxyHead = { bytes: Buffer.alloc(0), timer };
+      }
+    }
     this.attach(socket);
     door.logins?.admit(this);
   }
 
   private attach(socket: net.Socket): void {
-    socket.on("data", (chunk: Buffer) => {
-      // the connection's first byte says how it starts: a TLS ClientHello is TLS at once (`directTls`), anything else
-      // the protocol's startup phase, SSLRequest included
-      if (!this.sniffed) { this.sniffed = true; if (chunk[0] === TLS_HANDSHAKE) { this.directTls(chunk); return; } }
+    socket.on("data", (data: Buffer) => {
+      // a named proxy's PROXY header comes first, before anything else on the connection is looked at
+      const chunk = this.proxyHead === null ? data : this.readProxy(data);
+      if (chunk === null || chunk.length === 0) return;
+      // the connection's first byte says how it starts: a TLS ClientHello is TLS at once (`directTls`), a PROXY header
+      // where none is believed is refused, anything else the protocol's startup phase, SSLRequest included
+      if (!this.sniffed) {
+        this.sniffed = true;
+        if (chunk[0] === TLS_HANDSHAKE) { this.directTls(chunk); return; }
+        if (startsProxyHeader(chunk[0]!)) { this.unbelievedProxy(); return; }
+      }
       this.decoder.push(chunk); void this.drain();
     });
     socket.on("error", (err: Error) => { this.server.log(`session ${this.id}: socket error: ${err.message}`); this.end("socket error"); });
@@ -851,10 +893,47 @@ class Session {
       query: stored.text, queryTruncated: stored.truncated };
   }
 
+  /**
+   * The PROXY header of a named proxy's connection, as its bytes arrive (proxy.ts `readProxyHeader`): null while it is
+   * not whole or once it is refused, else the bytes after it, which are the client's. Bounded: past its 16 fixed bytes
+   * the header says its length, and one past MAX_PROXY_BODY is refused there.
+   */
+  private readProxy(data: Buffer): Buffer | null {
+    const head = this.proxyHead!;
+    head.bytes = head.bytes.length === 0 ? data : Buffer.concat([head.bytes, data]);
+    const read = readProxyHeader(head.bytes);
+    if ("more" in read) return null;
+    clearTimeout(head.timer);
+    this.proxyHead = null;
+    if ("refused" in read) { this.proxyRefused(read.refused); return null; }
+    this.clientAddr = clientAddress(this.socket.remoteAddress, read.header);
+    this.proxied = true;
+    return head.bytes.subarray(read.length);
+  }
+
+  /** A named proxy's connection that did not begin with a valid PROXY v2 header: refused, said in the log with why. */
+  private proxyRefused(why: string): void {
+    if (this.phase === "closed") return;
+    this.server.log(`session ${this.id} refused: ${why}, from ${this.clientAddr ?? "an address that could not be read"}, which ${PROXY_SETTING} names, ` +
+      `so it must begin with one — set the proxy to send the PROXY protocol v2 (HAProxy: send-proxy-v2), or take its address out of ${PROXY_SETTING} (docs/POSTGRES-API.md "Behind a TCP proxy")`);
+    this.fatal("08P01", "the connection did not begin with a valid PROXY protocol v2 header");
+  }
+
+  /** A PROXY header where none is believed: from an address MASON_PG_PROXY_FROM does not name, or a second one. Refused,
+   *  never read: a header is a claim about who connected, and only a named proxy may make it. */
+  private unbelievedProxy(): void {
+    // a share's socket is public: a stranger's bytes write no line of the log there
+    if (!this.door.public) this.server.log(`session ${this.id} refused: a PROXY protocol header from ${this.clientAddr ?? "an address that is not shown"}, ` +
+      (this.proxied ? "after the header its proxy sent: one header a connection" : this.door.proxyFrom === null ? "and this listener believes none" : `which ${PROXY_SETTING} does not name`) +
+      ` — a header is believed only from the addresses ${PROXY_SETTING} names: the proxy's own (docs/POSTGRES-API.md "Behind a TCP proxy")`);
+    this.fatal("08P01", "a PROXY protocol header, which this server takes only from the addresses of its own proxy");
+  }
+
   end(why: string): void {
     if (this.phase === "closed") return;
     const wasReady = this.phase === "ready";
     this.phase = "closed";
+    if (this.proxyHead !== null) { clearTimeout(this.proxyHead.timer); this.proxyHead = null; }
     this.closedBy = why;
     this.door.logins?.settled(this);
     if (wasReady) this.server.log(`session ${this.id} closed: ${why}`);
@@ -1107,7 +1186,7 @@ class Session {
     this.decoder.maxLength = MAX_MESSAGE_LENGTH;   // authenticated: a statement may be as long as the protocol allows
     // what is happening, as it happens (mason logs once showed little): who connected, and (end) who left
     this.server.log(`session ${this.id} connected: ${this.vars.applicationName === "" ? "a client with no application_name" : JSON.stringify(this.vars.applicationName)} as ${JSON.stringify(this.user)}` +
-      (token.user !== undefined ? ` (${this.door.who})` : ""));
+      (token.user !== undefined ? ` (${this.door.who})` : "") + (this.clientAddr !== null ? ` from ${this.clientAddr}` : ""));
     this.sendAll([authenticationOk(), ...this.reportChanges(), backendKeyData(this.id, this.secret), readyForQuery("I")]);
   }
 
@@ -1425,6 +1504,7 @@ class Session {
       requestId: crypto.randomUUID(), at: new Date(startedAt), method: asked?.method ?? "QUERY", durationMs: Date.now() - startedAt,
       client: `postgres:${this.vars.applicationName || "unnamed"}`, session: this.id, payload: stored.text, payloadTruncated: stored.truncated,
       caller: hashCaller(this.presented), bytesSent,
+      ...(this.clientAddr !== null ? { clientAddress: this.clientAddr } : {}),
       ...(user !== undefined ? { user } : {}),
       ...(role !== undefined ? { role } : {}),
       ...(this.token?.attributes !== undefined && Object.keys(this.token.attributes).length > 0 ? { attributes: this.token.attributes } : {}),
@@ -2836,7 +2916,8 @@ class Server {
   constructor(options: PgApiOptions) {
     this.options = options;
     this.door = { tls: options.tls === null ? null : tls.createSecureContext({ cert: options.tls.cert, key: options.tls.key }), authenticate: options.authenticate,
-      recheck: options.recheck, recheckMs: options.recheckMs ?? DEFAULT_RECHECK_MS, who: "a mason user", loginHint: USER_LOGIN_HINT, public: false, logins: null };
+      recheck: options.recheck, recheckMs: options.recheckMs ?? DEFAULT_RECHECK_MS, who: "a mason user", loginHint: USER_LOGIN_HINT, public: false, logins: null,
+      proxyFrom: options.proxyFrom ?? null };
     this.lastSchema = options.schema();
     this.lastRoles = options.roles?.() ?? NO_ROLES;
     const version = versionText(options.product ?? "Mason", options.masonVersion);
@@ -3074,7 +3155,9 @@ export async function startPostgresApi(options: PgApiOptions): Promise<PgApiServ
     port,
     async openShare(o) {
       const door: Door = { tls: tls.createSecureContext({ cert: o.tls.cert, key: o.tls.key }), authenticate: o.authenticate, recheck: o.recheck, recheckMs: 0, who: "a share",
-        loginHint: o.loginHint, public: true, logins: new LoginQueue(o.pendingLimit ?? DEFAULT_PENDING_LIMIT, o.pendingMs ?? DEFAULT_PENDING_MS, o.dropped), refused: o.refused };
+        loginHint: o.loginHint, public: true, logins: new LoginQueue(o.pendingLimit ?? DEFAULT_PENDING_LIMIT, o.pendingMs ?? DEFAULT_PENDING_MS, o.dropped), refused: o.refused,
+        // a tunnel's client comes from loopback: no header is believed on a share's socket
+        proxyFrom: null };
       // loopback whatever the run's own listener is bound to: a tunnel's client is on this machine
       const share = await listenOn(server, door, 0, "127.0.0.1");
       shares.add(share.listener);

@@ -32,6 +32,9 @@ docker compose exec mason mason user add metabase   # a user for the BI tool: th
 - **The Postgres API needs TLS** off the container's loopback: `MASON_PG_SELF_SIGNED_TLS=1` makes a certificate on the
   volume (it encrypts; clients connect with `sslmode=require`), or `MASON_PG_TLS_CERT` / `MASON_PG_TLS_KEY` name one a
   CA signed.
+- **Behind a TCP load balancer or proxy** (an AWS NLB, HAProxy), turn on its PROXY protocol v2 and set
+  `MASON_PG_PROXY_FROM` to the proxy's own addresses alone (its subnets, `10.0.0.0/16`), so the request log names each
+  real client rather than the proxy. Name nothing else: whoever may send the header can make the log name anyone.
 - **The first start takes about 15 seconds** before `/healthz` answers 200 (minutes on a heavily loaded machine; the
   image's health check allows 2), a restart under a second: the run reads how the database orders text once and keeps it.
 - **A tool connects with the database name `mason`**, whatever the project is called: one moving from your Postgres
@@ -158,6 +161,7 @@ Per-table or per-user detail (which table is stale, who sent what) would need a 
 | `MASON_API_KEY` | what the users' passwords are made with (`mason user add`), at least 32 characters (required); changing it removes every user |
 | `MASON_DATA` | the folder whose `.mason/` holds the copy and the state: mount the volume there (the image's `/mason/data`) |
 | `MASON_PG_TLS_CERT`, `MASON_PG_TLS_KEY` | its certificate, required off loopback; or `MASON_PG_SELF_SIGNED_TLS=1` for one made in `.mason/`, or `MASON_PG_PLAIN=1` behind a TLS proxy of your own |
+| `MASON_PG_PROXY_FROM` | behind a TCP load balancer or proxy that sends the PROXY protocol v2 (an AWS NLB, HAProxy): the proxy's own addresses, CIDRs comma-separated, so the request log names each real client; a connection from one must begin with the header, and one from any other address is refused (default unset: none is read; [docs/POSTGRES-API.md](../../docs/POSTGRES-API.md) "Behind a TCP proxy") |
 | `MASON_PG_HOST`, `MASON_PG_PORT` | the Postgres API's address |
 
 **Worth deciding**:

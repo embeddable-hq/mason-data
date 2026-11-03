@@ -15,6 +15,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Behind a TCP load balancer or proxy, the request log can name each real client**: set `MASON_PG_PROXY_FROM` to the
+  proxy's own addresses (CIDRs, comma-separated) and turn on its PROXY protocol v2 (an NLB's target group, HAProxy's
+  `send-proxy-v2`). A connection from those addresses must then begin with the header, and one from any other address
+  that sends a header is refused. Every request now records the client's address (`client_addr`, `clientAddress` in
+  `mason logs --requests --json`) and the `connected` log line says `from <address>`. Unset, nothing else changes.
 - **`mason login` and `mason logout` sign this machine in to a hosted Mason service, and out of it.** Login prints a
   page and a code to approve in a browser, then saves the login in `~/.config/mason/credentials.json` (0600), outside
   every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this

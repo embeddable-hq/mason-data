@@ -2346,7 +2346,7 @@ test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's
   const c = await client();
   try {
     // the session itself is in the log, as it happens (mason logs once showed little)
-    assert.ok(logged.some((l) => /^\[postgres\] session \d+ connected: a client with no application_name as "mason"$/.test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => /^\[postgres\] session \d+ connected: a client with no application_name as "mason" from 127\.0\.0\.1$/.test(l)), logged.join("\n"));
     logged.length = 0;
     const r = await c.query({ text: "EXPLAIN ANALYZE SELECT id, amount FROM orders WHERE qty > 1 ORDER BY id", rowMode: "array" });
     const lines = (r.rows as string[][]).map((x) => x[0]!);
