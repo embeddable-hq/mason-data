@@ -954,6 +954,17 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb: every way to a number, an array of a wrong kind", "SELECT id, (ARRAY[j])::int[] FROM jorder WHERE id = 26");
   yield q("jsonb: every way to a number, an element read back", "SELECT id, ((ARRAY[j])::int[])[1], ((ARRAY[j])::float8[])[1], ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id = 1 OR id = 2 OR id BETWEEN 5 AND 22 ORDER BY id");
   yield q("jsonb: every way to a number, an unconstrained numeric[] (refused)", "SELECT id, (ARRAY[j])::numeric[] FROM jorder WHERE id BETWEEN 5 AND 10 ORDER BY id");
+  // (PR 582 review r5: the route is an ordinary value to every reader around it, an SQL NULL and a JSON null in the batch)
+  const batch = "FROM jorder WHERE id = 1 OR id = 2 OR id BETWEEN 5 AND 22 ORDER BY id";
+  yield q("jsonb: every way to a number, = ANY and <> ALL beside a NULL", `SELECT id, 1 = ANY (ARRAY[j::int]), 1 <> ALL (ARRAY[j::float8]), 1 = ANY (ARRAY[j::numeric(10,3), 2]), 1 = ANY (ARRAY[((ARRAY[j])::bigint[])[1]]), 1 = ANY ((ARRAY[j])::real[]) ${batch}`);
+  yield q("jsonb: every way to a number, NOT = ANY in a WHERE", "SELECT id FROM (SELECT id, j FROM jorder WHERE id = 1 OR id = 2 OR id BETWEEN 5 AND 22 OFFSET 0) s WHERE NOT (1 = ANY (ARRAY[j::int])) ORDER BY id");
+  yield q("jsonb: every way to a number, IN, NOT IN and a comparison", `SELECT id, j::int IN (1, 2), j::float8 NOT IN (1), j::numeric(10,3) = 1, ((ARRAY[j])::int[])[1] < 2 ${batch}`);
+  yield q("jsonb: every way to a number, CASE, NULLIF and COALESCE around it", `SELECT id, CASE WHEN j::int = 1 THEN 'y' ELSE 'n' END, NULLIF(j::float8, 1), COALESCE(((ARRAY[j])::numeric(10,3)[])[1], j::numeric(10,3)) ${batch}`);
+  yield q("jsonb: every way to a number, booleans under = ANY, <> ALL and IN", "SELECT id, true = ANY (ARRAY[j::boolean]), true <> ALL ((ARRAY[j])::boolean[]), j::boolean IN (false) FROM jorder WHERE id BETWEEN 1 AND 4 ORDER BY id");
+  yield q("jsonb: every way to a number, a set operation's arm of one engine type", "SELECT (ARRAY[j])::int[] FROM jorder WHERE id = 1 OR id BETWEEN 5 AND 10 UNION ALL VALUES ('{5}'::int[])");
+  yield q("jsonb: every way to a number, an element beside a float8 arm", "SELECT ((ARRAY[j])::float8[])[1] FROM jorder WHERE id BETWEEN 5 AND 10 UNION ALL SELECT 2.5::float8");
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside a constant's (refused)", "SELECT (ARRAY[j])::numeric(10,3)[] FROM jorder WHERE id BETWEEN 5 AND 10 UNION ALL VALUES ('{NULL}'::numeric(10,3)[])");
+  yield q("jsonb: every way to a number, an element beside an integer (refused)", "SELECT ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id BETWEEN 5 AND 10 UNION ALL SELECT 1");
   // an ORDER BY's bare name is the output it names first: `ORDER BY j` of `j::text` sorts the text, not the jsonb
   yield q("jsonb: grouped column, ORDER BY the output's name", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j, id");
   yield q("jsonb: grouped column, ORDER BY the output's name DESC", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j DESC NULLS LAST, id");

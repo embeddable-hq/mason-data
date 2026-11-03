@@ -931,6 +931,12 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // a division's divisor tested for zero (src/duck/rewrite.ts nonZero): Postgres's error, from a function DuckDB takes
   // as deterministic, where error() is volatile and refused in a DISTINCT aggregate's ORDER BY
   scalar(conn, "__mason_zero_divisor", [BOOLEAN], BOOLEAN, ([zero]) => { if (zero === true) throw new PgEvalError("22012", "division by zero"); return false; });
+  // a jsonb of the wrong kind cast to a number or a boolean (src/duck/rewrite.ts jsonbScalar): Postgres's 22023 in its
+  // words (JsonbTypeName: a number is `numeric`), from a function DuckDB takes as deterministic, where error() is
+  // volatile and changes what = ANY (ARRAY[…]) answers for the rows beside it
+  scalar(conn, "__mason_jsonb_cast_error", [VARCHAR, VARCHAR], VARCHAR, ([kind, target]) => {
+    throw new PgEvalError("22023", `cannot cast jsonb ${String(kind) === "number" ? "numeric" : String(kind)} to type ${String(target)}`);
+  });
   // a numeric divided by a numeric (src/duck/rewrite.ts, `/`): Postgres's quotient, rounded at its scale (numeric_div),
   // as the nearest double, so two quotients Postgres finds equal (0.3 / 0.1 and 0.6 / 0.2) compare, group and count as
   // one, where DuckDB's double division gives each its own last bits. The text a client reads is the exact program's

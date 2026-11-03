@@ -1842,7 +1842,7 @@ class Rewriter {
         const targets = arm.targetList as AstNode[] | undefined;
         const rows = Array.isArray(arm.valuesLists) ? (arm.valuesLists as AstNode[]).map((r) => (isNode(r) ? bodyOf(r).items : r) as AstNode[]) : null;
         if (!isSetOp(arm) && !Array.isArray(targets) && rows !== null && rows.every(Array.isArray)) {
-          for (const items of rows) items.forEach((x, i) => { if (timeArm(i)) items[i] = this.asImplicitTimetz(x); });
+          for (const items of rows) items.forEach((x, i) => { this.refuseJsonbNumbersArm(x, resolved[i] ?? null); if (timeArm(i)) items[i] = this.asImplicitTimetz(x); });
           continue;
         }
         if (isSetOp(arm) || !Array.isArray(targets) || targets.some((t) => hasStar(bodyOf(t).val))) {
@@ -1851,6 +1851,7 @@ class Rewriter {
         }
         targets.forEach((t, i) => {
           const tb = bodyOf(t), column = resolved[i] ?? null;
+          this.refuseJsonbNumbersArm(tb.val, column);
           const own = isNode(tb.val) ? this.typed(tb.val as AstNode) : null;
           if (timeArm(i) && isNode(tb.val)) {
             // (the column keeps its name: the cast's would be `timetz`)
@@ -1869,6 +1870,43 @@ class Rewriter {
       }
     }
     for (const [k, x] of Object.entries(b)) this.castArms(armOf(k, x) ?? x, inner);
+  }
+
+  /**
+   * A JSONB'S ARRAY OF NUMBERS AS A SET OPERATION'S numeric OR numeric[] COLUMN, REFUSED (PR 582 review r5, the class "a set
+   * operation's column read as one arm's type"): the route (`typeCast`, JSONB_ARRAY_CASTS) holds `(ARRAY[j])::numeric(10,3)[]`
+   * as the engine's DECIMAL(10, 3)[] and an element of an int[] as an INTEGER, where the other arm's numeric or numeric[]
+   * (a constant's double[], a column's own DECIMAL) is another engine type: the engine unifies the two by its rules and
+   * writes every row at one scale (Postgres: `{1.000}` beside `{NULL}`, `1` beside `1.000`), and its numeric[] holds no
+   * element's own scale. Where Postgres resolved the column as numeric or numeric[] (`setOperationColumns`, the one
+   * authority), the array, an element or slice of it, or a FROM item's column holding one, is refused by name; any other
+   * resolved type (int[], float8[], bool[], float8) is one engine type in every arm, and answered.
+   */
+  private refuseJsonbNumbersArm(v: unknown, column: Typed | null): void {
+    if (column === null || (column.type !== NUMERIC && column.type !== NUMERIC_ARRAY) || !this.jsonbNumberArray(v)) return;
+    throw new Unrewritable("a jsonb array cast to an array of numbers, or an element of one, as a numeric column of a UNION, INTERSECT or EXCEPT is not supported by Mason (Postgres keeps each value's own scale, where the engine writes the column at one)",
+      "cast it to text in each SELECT (`(…)::text`), or cast each element: ARRAY[(j -> 'a')::numeric]", "array-subquery-element");
+  }
+  /** whether `v` holds the route's array of numbers (a jsonb[] or an ARRAY[…] of jsonb cast to int[], numeric(p,s)[] …)
+   *  anywhere in it (an element or slice of one, a COALESCE or a CASE of one, an operator's operand: the value is the
+   *  engine's type of it), or is a FROM item's column some value of which does */
+  private jsonbNumberArray(v: unknown): boolean {
+    if (Array.isArray(v)) return v.some((x) => this.jsonbNumberArray(x));
+    if (v === null || typeof v !== "object") return false;
+    if (!isNode(v)) return Object.values(v as Body).some((x) => this.jsonbNumberArray(x));
+    const k = kindOf(v), b = bodyOf(v);
+    if (k === "ColumnRef") {
+      const found = this.fromColumn(v);
+      // (decided once per FROM item's column, `decided`: a deep nesting reads each level's column many times)
+      return found !== null && this.decided(found.query, found.index, "jsonbNumbers",
+        () => this.over(found.query, false, (values) => values.some((x) => this.jsonbNumberArray(x)), found.index) ?? false);
+    }
+    const t = this.typed(v);
+    if (k === "TypeCast" && isNode(b.arg) && t !== null && JSONB_ARRAY_CASTS.has(t.type)) {
+      const arg = b.arg as AstNode;
+      if (this.typeOf(arg) === JSONB_ARRAY || (kindOf(arg) === "A_ArrayExpr" && ((bodyOf(arg).elements ?? []) as AstNode[]).some((e) => this.typeOf(e) === JSONB))) return true;
+    }
+    return Object.values(b).some((x) => this.jsonbNumberArray(x));
   }
 
   /**
@@ -2323,7 +2361,7 @@ class Rewriter {
    * which no cycle answers). An in-place rewrite of a list a decision read (a `*` written out) drops the record whole
    * (`forgetDecisions`).
    */
-  private decided<T extends boolean | null>(query: AstNode, index: number, which: "exact" | "approximate" | "scales", decide: () => T, always = false): T {
+  private decided<T extends boolean | null>(query: AstNode, index: number, which: "exact" | "approximate" | "scales" | "jsonbNumbers", decide: () => T, always = false): T {
     if (!always && this.deciding.has(bodyOf(query))) return decide();
     const key = this.armWrapped.get(bodyOf(query)) ?? bodyOf(query);
     const at = `${which}:${index}`;
@@ -5499,11 +5537,14 @@ class Rewriter {
     const kind = jsonTypeof(v());
     const text = cast(v(), ["varchar"]);
     const w = type === NUMERIC ? numericCastWrite(typmods, JSONB, null) : null;
-    const converted = INTEGERS.has(type) ? cast(fn("__mason_numeric_int", [text, intConst(type === INT2 ? 16 : type === INT4 ? 32 : 64)]), [engine])
-      : w !== null ? (w.as === "decimal" ? cast(text, ["decimal", String(w.precision), String(w.scale)]) : cast(text, ["double"]))
-      : cast(text, [engine]);
-    // (JsonbTypeName's words: a number is `numeric` there, where jsonb_typeof says `number`)
-    const wrong = fn("error", [concat(strConst("mason[22023]: cannot cast jsonb "), fn("replace", [kind, strConst("number"), strConst("numeric")]), strConst(` to type ${named}`))]);
+    // (the engine's type of every arm: the CASE is one type, its wrong arm's too)
+    const to = w === null ? [engine] : w.as === "decimal" ? ["decimal", String(w.precision), String(w.scale)] : ["double"];
+    const converted = INTEGERS.has(type) ? cast(fn("__mason_numeric_int", [text, intConst(type === INT2 ? 16 : type === INT4 ? 32 : 64)]), to) : cast(text, to);
+    // the wrong kind's 22023 (JsonbTypeName's words: a number is `numeric` there, where jsonb_typeof says `number`), raised
+    // by a function the engine takes as deterministic, NEVER DuckDB's volatile error(): a volatile element of a list
+    // compared by = ANY / <> ALL makes the engine answer NULL for a row whose answer is false whenever another row of the
+    // batch holds a NULL element (PR 582 review r5, jsonb-scalar-route-null-in-list-compare)
+    const wrong = cast(fn("__mason_jsonb_cast_error", [kind, strConst(named)]), to);
     return caseWhen([
       [isNull(v()), nullConst()],
       [op("=", jsonTypeof(v()), strConst("null")), nullConst()],
