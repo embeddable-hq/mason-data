@@ -168,7 +168,8 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
     out.push(warn("role_owns_table", `${f.user} owns ${list(owned.map((x) => x.partition ? `${x.name} (a partition of ${x.entry})` : x.name))}${route(others)}: ` +
       "an owner may write to, alter or drop a table whatever is granted"));
   }
-  const writable = f.relations.filter((x) => x.privileges.length > 0);
+  // an owner holds every privilege on its table: the owner's line said it
+  const writable = f.relations.filter((x) => !x.owned && x.privileges.length > 0);
   if (writable.length) {
     const held = writable.map((x) => {
       const privs = WRITE_PRIVILEGES.filter((p) => x.privileges.some((g) => g.privileges.includes(p)));
