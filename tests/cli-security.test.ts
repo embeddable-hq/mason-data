@@ -147,7 +147,8 @@ test("a tunnel adds its port's two loopback names and nothing else, for as long 
  * A SOURCE'S URL THAT NO MASK RECOGNISES (issue 541): every command that reads the source's URL — the sources file's
  * `${DATABASE_URL}` from .env, DATABASE_URL to mason serve, MASON_URL to mason mcp — given a keyword/value string, a bare
  * password, a URL whose password holds an unencoded @, one whose password holds an unencoded / (which splits the
- * URL into a host, a port and a path), and a password as a query parameter (`?password=`, `?sslpassword=`). Each password is a marker no answer, stream, --json or log file may hold.
+ * URL into a host, a port and a path), a password as a query parameter (`?password=`, `?sslpassword=`), and one inside
+ * the value of a parameter Mason reads (`sslmode=prefer%26password=…`, a repeated sslmode, an application_name). Each password is a marker no answer, stream, --json or log file may hold.
  */
 test("a source URL in any shape never repeats its password: every command that reads it, person and --json, and the logs", { timeout: 600_000 }, async () => {
   const KEY = "k".repeat(48);
@@ -159,6 +160,12 @@ test("a source URL in any shape never repeats its password: every command that r
     // a password libpq reads from the query, where no mask of the userinfo looks (the review of #575)
     ["postgres://mason@127.0.0.1:1/shop?password=Mk541QueryPw", "Mk541QueryPw"],
     ["postgres://mason:x@127.0.0.1:1/shop?sslmode=disable&sslpassword=Mk541SslPw", "Mk541SslPw"],
+    // a password inside the VALUE of a parameter Mason reads (the review of #575, round 2)
+    ["postgres://mason@127.0.0.1:1/shop?sslmode=prefer%26password=Mk541EncAmpPw", "Mk541EncAmpPw"],
+    ["postgres://mason@127.0.0.1:1/shop?sslmode=prefer;password=Mk541SemiPw", "Mk541SemiPw"],
+    ["postgres://mason:x@127.0.0.1:1/shop?sslmode=Mk541SslValuePw", "Mk541SslValuePw"],
+    ["postgres://mason:x@127.0.0.1:1/shop?sslmode=prefer&sslmode=Mk541RepeatPw", "Mk541RepeatPw"],
+    ["postgres://mason:x@127.0.0.1:1/shop?application_name=password=Mk541AppValuePw", "Mk541AppValuePw"],
   ];
   const filesUnder = (dir: string): string[] => !fs.existsSync(dir) ? [] : fs.readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((d) => d.isFile()).map((d) => path.join(d.parentPath, d.name));

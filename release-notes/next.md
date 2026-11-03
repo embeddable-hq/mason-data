@@ -316,8 +316,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   status`, `mason destroy` and `mason mcp` printed the value (on stderr, in `--json` and in the logs) where they refused
   it. Each now names the variable and what the value looks like, and how to write it as
   `postgres://user:password@host:5432/db`, never the value. A URL with a space, a control character or a `#` in it, an
-  `@` after its host, or a parameter other than `sslmode` and `application_name`, is refused the same way rather than
-  read in part: URL-encode the password (`@` is `%40`, `/` is `%2F`), and put it before the host. If such a value was ever passed to Mason, its password may be in a log or a CI run's output: change it.
+  `@` after its host, a parameter other than `sslmode` and `application_name`, a parameter given twice, an `sslmode`
+  that is not one of libpq's six, or an `application_name` of other than letters, digits, `.`, `_` and `-` (at most 64)
+  is refused the same way rather than read in part: URL-encode the password (`@` is `%40`, `/` is `%2F`), and put it
+  before the host. A refusal names a parameter only when it is one of libpq's own, and a missing database's refusal no
+  longer repeats its name (the databases there are listed). If such a value was ever passed to Mason, its password may be in a log or a CI run's output: change it.
 
 ## Known
 

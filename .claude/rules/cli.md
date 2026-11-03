@@ -355,8 +355,9 @@ file and the key, says what is wrong in their words, and gives the way out, on O
   `tests/conventions.test.ts` reads every literal in src/ for it).
 
 **A source's URL is shown only through `shownUrl` (src/cli/preflight.ts), which fails closed**: a value that reads whole
-as a postgres:// URL, with no part the parse does not read (a query parameter but `sslmode` and `application_name`, a
-fragment), is shown with its password masked, and any other value is never shown. Its refusal names the
+as a postgres:// URL, with no part the parse does not read (a fragment, or a query `queryProblem` in
+src/lib/database-url.ts refuses: a parameter not read, one given twice, a value the reading does not accept), is shown
+with its password masked, and any other value is never shown. Its refusal names the
 variable and what the value looks like, and never quotes it (issue 541: a mask that recognised one shape returned the
 others whole). Detectors: `tests/cli-security.test.ts` feeds every command a value in each such shape;
 `tests/conventions.test.ts` refuses a mask written anywhere else.

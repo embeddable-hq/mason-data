@@ -10,7 +10,7 @@
  */
 import * as os from "node:os";
 import { PgConnection, PgError } from "../cdc/pg-wire.ts";
-import { KNOWN_PARAMS, parseDatabaseUrl, type PgConnection as UrlParts } from "../lib/database-url.ts";
+import { parseDatabaseUrl, queryProblem, type PgConnection as UrlParts } from "../lib/database-url.ts";
 import type { Failure, NextStep } from "./command.ts";
 import type { SourceCollation } from "../duck/collation.ts";
 
@@ -30,9 +30,10 @@ export function isLocalHost(host: string): boolean {
  * dropped or rewritten by the parse (no space or control character inside it, which a parse strips or encodes; one at
  * either end, a secret file's last newline, is trimmed as the parse trims it), no `#` at all and no `@` after the host
  * (a password holding `/`, `?` or `#` unencoded splits the authority there, and its tail would be shown as a path, a
- * parameter or a fragment), and no query parameter but the ones the URL is read with (KNOWN_PARAMS: libpq takes any
- * connection keyword there, `?password=…` included, so a part the parse does not read is never shown either). A
- * keyword/value string, a bare password, any other URL: null.
+ * parameter or a fragment), and a query the URL is read by whole (src/lib/database-url.ts queryProblem: only the
+ * parameters read, each once, each value one the reading accepts — libpq takes any connection keyword there,
+ * `?password=…` included, and a value can hold one, `sslmode=prefer%26password=…`), so no part shown is one not read;
+ * the query shown is the one read, written out again. A keyword/value string, a bare password, any other URL: null.
  */
 export function shownUrl(value: string): string | null {
   const v = value.trim();
@@ -41,7 +42,8 @@ export function shownUrl(value: string): string | null {
   try { u = new URL(v); } catch { return null; }
   if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") return null;
   if (!u.hostname || /@/.test(u.pathname + u.search)) return null;
-  for (const key of u.searchParams.keys()) if (!KNOWN_PARAMS.has(key)) return null;
+  if (queryProblem(u.searchParams) !== null) return null;
+  u.search = u.searchParams.toString();
   if (u.password) u.password = "****";
   return u.toString();
 }
@@ -57,13 +59,13 @@ const KNOWN_SCHEMES = new Set(["mysql", "mariadb", "mssql", "sqlserver", "oracle
   "http", "https", "file", "pg", "pgsql", "psql", "postgis", "postgre", "postgress", "postgresq"]);
 const ENCODE = "a password holding @ : / # ? % or a space is URL-encoded (encodeURIComponent; @ is %40, / is %2F, # is %23)";
 
-/** A postgres:// URL that reads whole but for a query parameter the URL is not read with (`?password=…`). */
-function unreadParameter(t: string): boolean {
-  if (!/^postgres(ql)?:\/\//i.test(t) || /[\s\x00-\x1f\x7f#]/.test(t)) return false;
+/** What is wrong with the query of a postgres:// URL that reads whole but for it (queryProblem's words), else null. */
+function queryOf(t: string): string | null {
+  if (!/^postgres(ql)?:\/\//i.test(t) || /[\s\x00-\x1f\x7f#]/.test(t)) return null;
   let u: URL;
-  try { u = new URL(t); } catch { return false; }
+  try { u = new URL(t); } catch { return null; }
   // an @ after the host is a password split there (said as such), not a parameter
-  return u.hostname !== "" && !/@/.test(u.pathname + u.search) && [...u.searchParams.keys()].some((k) => !KNOWN_PARAMS.has(k));
+  return u.hostname === "" || /@/.test(u.pathname + u.search) ? null : queryProblem(u.searchParams);
 }
 
 /**
@@ -76,8 +78,7 @@ function notShownProblem(value: string, name: string): string {
     : /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(t) ? "it looks like a keyword/value connection string (host=… user=… password=…)"
     : /^jdbc:/i.test(t) ? "it looks like a JDBC URL: drop jdbc:, and give the user and password before the host"
     : !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(t) ? "it is not a URL"
-    : unreadParameter(t) ? `it has a query parameter Mason does not read (it reads ${[...KNOWN_PARAMS].join(" and ")} alone): ` +
-      "the user and the password go before the host, and any other parameter is left out"
+    : queryOf(t) !== null ? queryOf(t)!
     : !/^postgres(ql)?:\/\//i.test(t) ? `its scheme is ${KNOWN_SCHEMES.has(t.slice(0, t.indexOf(":")).toLowerCase()) ? `${t.slice(0, t.indexOf(":")).toLowerCase()}, not` : "not"} postgres:// or postgresql://`
     : "it does not read as one URL (a character that is not URL-encoded splits it: an @ : / ? # % or a space in the password, an @ or # in the database " +
       "or a parameter; or the port is not a number up to 65535)";
@@ -133,7 +134,8 @@ export function explainConnectError(e: unknown, s: Source, o: ConnectContext = {
         ],
       };
     }
-    if (e.code === "3D000") return { message: `${where} has no database ${JSON.stringify(s.database)}`, hints: [] };
+    // the database is not repeated (issue 541: a refusal echoes no part of the value); the hint lists the ones there are
+    if (e.code === "3D000") return { message: `${where} has no database by the name the URL gives (the part after the port)`, hints: [] };
     return { message: `${where}: ${msg}`, hints: [] };
   }
   if (/ECONNREFUSED/.test(msg)) {
