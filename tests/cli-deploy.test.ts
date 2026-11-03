@@ -103,37 +103,58 @@ function terminalEnv(width: number): Record<string, string> {
 }
 
 /**
- * THE LINES MASON DEPLOY BEGINS, all of them (tests/hosted-fake.ts's rule for login, in deploy's own words): a blank, its
- * one Next: heading, a tip, its one failure, its headlines and progress, the spinner's step lines, a warning, a row of
- * its own labels or a file of a dry run, the usage of a wrong line, and a continuation indented 4 or more. A line that
- * begins otherwise is a value's: the service's text took a line's start.
+ * THE LINES MASON DEPLOY BEGINS, all of them (tests/hosted-fake.ts's rule for login, in deploy's own words): a line that
+ * begins otherwise is a value's — the service's text took a line's start. On a terminal too narrow for one, the CLI
+ * breaks it at a space (src/cli/command.ts strictLines), so a line may also be a WORD-PREFIX of one ("✗ mason",
+ * "  mason deploy"). Besides these: a blank, the one `Next:`, a continuation indented 4 or more, and the usage of a
+ * wrong line (the CLI's text, read no further).
  */
-const STEP_WORDS = "(Queued|Applying|Starting|Running|Refused by Mason on the replica|The deploy failed)";
-const STARTS: readonly RegExp[] = [
-  /^\s*$/, /^Next:$/, /^Tip: \S/, /^[✘✗] mason deploy: \S/, /^usage: mason deploy /,
-  /^(Deployed to |Would send |Sent \d+ files? )/,
-  new RegExp(`^ {2}${STEP_WORDS}`), new RegExp(`^\\S ${STEP_WORDS}`), /^ {2}the service could not say more just now /,
-  /^ {2}! \S/,
-  /^ {2}(deploy|service|files|took|why|fix) {2,}\S/, /^ {2}[A-Za-z0-9_][\w./-]* +[\d,]+ bytes {3}sha256( |$)/,
-  /^ {4,}\S/,
+const STEP_WORDS = ["Queued: ", "Applying: ", "Starting: ", "Running: ", "Refused by Mason on the replica", "The deploy failed"];
+const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const HEADS: readonly string[] = [
+  "Deployed to ", "Would send ", "Sent ", "✘ mason deploy: ", "✗ mason deploy: ",
+  ...STEP_WORDS.flatMap((w) => [`  ${w}`, ...["✔", "✓", "✘", "✗", ...FRAMES].map((m) => `${m} ${w}`)]),
+  "  the service could not say more just now ", "  ! ",
+  ...["deploy", "service", "files", "took", "why", "fix"].map((l) => `  ${l} `),
 ];
+/** The steps under Next:, the CLI's own, as the start of their line. */
+const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
+  "  unset MASON_CLOUD_URL", "  chmod 600 ", "  chmod 700 "];
+/** A dry run's row begins with a file's path, as this test's projects name them (this machine's own words, never the
+ *  service's): on a narrow terminal the path itself is broken, so its row may begin with a part of it. */
+const DRY_PATHS = ["generated_tables/weekly.yml", "mason.yml", "roles.yml", "sources/shop.yml"];
+const dryRow = (line: string): boolean => {
+  const m = /^ {2}(\S+)( |$)/.exec(line);
+  return m !== null && DRY_PATHS.some((p) => p === m[1] || (p.startsWith(m[1]!) && m[2] === ""));
+};
+
+/** Whether `line` is begun as one of `heads` begins, or is a word-prefix of one (the rest broken onto continuations). */
+const begunAs = (line: string, heads: readonly string[]): boolean => heads.some((h) => {
+  if (line.startsWith(h)) return h.endsWith(" ") || line.length === h.length || /^\s/.test(line.slice(h.length));
+  const l = line.trimEnd();
+  return l.trim() !== "" && h.startsWith(l) && (h.length === l.length || h[l.length] === " ");
+});
 
 /** What is wrong with what a person sees of one stream of deploy (`seen`, at `width` on a terminal): a line it did not
- *  begin, a second Next: or failure, a step under Next: that is not its own, a line the terminal broke. A usage block
- *  after a failure is the CLI's text, read no further. */
-function deploySeenProblems(text: string, width: number | null): string[] {
+ *  begin, a second Next:, a failure where there is none or a second, a step under Next: that is not its own, a line the
+ *  terminal broke. `failed`: this is the stderr of a run that failed, which then holds exactly one failure. */
+function deploySeenProblems(text: string, width: number | null, failed: boolean | null): string[] {
   const p: string[] = [];
+  const dry = /^Would( |\n)/.test(text);
   let afterNext = false, nexts = 0, failures = 0;
   for (const { line, byTerminal } of seen(text, width)) {
     if (byTerminal) p.push(`the terminal broke a line, so a line begins where a value chose: ${JSON.stringify(line)}`);
-    if (/^usage: mason deploy /.test(line)) break;
+    if (/^usage: mason deploy( |$)/.test(line) || line === "usage:") break;
+    if (line.trim() === "") continue;
     if (line === "Next:") { nexts++; afterNext = true; continue; }
-    if (/^[✘✗] mason /.test(line)) failures++;
-    if (afterNext && /^ {2}\S/.test(line)) { if (!OWN_STEP.test(line)) p.push(`a step the CLI does not give: ${JSON.stringify(line)}`); continue; }
-    if (!STARTS.some((re) => re.test(line))) p.push(`a line the CLI does not begin: ${JSON.stringify(line)}`);
+    if (/^ {4,}\S/.test(line)) continue;
+    if (/^[✘✗] mason/.test(line)) failures++;
+    if (afterNext && /^ {2}\S/.test(line)) { if (!begunAs(line, STEP_HEADS)) p.push(`a step the CLI does not give: ${JSON.stringify(line)}`); continue; }
+    if (!begunAs(line, HEADS) && !(dry && dryRow(line))) p.push(`a line the CLI does not begin: ${JSON.stringify(line)}`);
   }
   if (nexts > 1) p.push(`${nexts} Next: headings`);
-  if (failures > 1) p.push(`${failures} failures`);
+  if (failed !== null && failures !== (failed ? 1 : 0)) p.push(`${failures} failures, where the run ${failed ? "failed once" : "did not fail"}`);
+  else if (failures > 1) p.push(`${failures} failures`);
   return p;
 }
 
@@ -159,7 +180,7 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
   // logical lines of a pipe otherwise; under --json, stderr alone (stdout is the data)
   for (const [stream, text] of argv.includes("--json") ? [["stderr", a.stderr]] as const : [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
     assert.ok(!text.split("\n").some((l) => /^\s*FORGED/.test(l)), `${line}: a line of ${stream} begins with the service's text:\n${text}`);
-    assert.deepEqual(deploySeenProblems(text, o.terminal ?? null), [], `${line}: what a person sees of its ${stream}:\n${text}`);
+    assert.deepEqual(deploySeenProblems(text, o.terminal ?? null, stream === "stderr" && !argv.includes("--json") ? a.code !== 0 : null), [], `${line}: what a person sees of its ${stream}:\n${text}`);
   }
   if (argv.includes("--json")) {
     const v = JSON.parse(a.stdout) as { next: Array<{ command: string }>; error?: { code?: string } };
@@ -602,14 +623,14 @@ for (const WIDTH of WIDTHS) test(`on a terminal ${WIDTH} wide, no line a person 
   for (const [status, message] of [[403, f("✘ mason deploy: ".length)], [422, step], [500, f(16)]] as const) {
     const { a } = await deployWith({ post: { status, body: { error: { code: "invalid", message, why: f(8), fix: f(8) } } } }, root, ["--replica", "acme/shop"], {}, t);
     assert.equal(a.code, 1, `${status}: ${a.stderr}`);
-    assert.match(a.stderr, /aaaa|xxxx/, `${status}: the value is shown`);
+    assert.match(a.stderr, /destroy/, `${status}: the value is shown`);
   }
   // a refused and a failed deploy's failure: message, why, fix
   for (const status of ["refused", "failed"]) {
     const failure = { code: "bad_source", message: f(16), why: f(8), fix: f(8) };
     const { a } = await deployWith({ get: () => at(status, { failure }) }, root, ["--replica", "acme/shop"], {}, t);
     assert.equal(a.code, 1, `${status}: ${a.stderr}`);
-    assert.match(a.stderr, /aaaa/);
+    assert.match(a.stderr, /destroy/);
   }
   // a GET's failure midway (the token revoked): the same words, in the same rows
   {
@@ -629,7 +650,7 @@ for (const WIDTH of WIDTHS) test(`on a terminal ${WIDTH} wide, no line a person 
     assert.equal(a.code, 124, a.stderr);
     const d = await deployWith({}, root, ["--replica", "acme/shop", "--dry-run"], {}, t);
     assert.equal(d.a.code, 0, d.a.stderr);
-    assert.match(d.a.stderr, /^ {2}! /m);
+    assert.match(d.a.stderr, /^ {2}!( |$)/m);
   }
 });
 
