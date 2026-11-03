@@ -1836,7 +1836,7 @@ class Rewriter {
       // where the analysis is not found, or the arm cannot be written, the statement is refused, never answered
       // with the engine's own unifying of the two
       if (found === undefined && (this.setOps ?? []).some((q) => q.columns.some((c, i) => c?.type === TIMETZ && q.armTypes.some((a) => a === null || a[i] === TIME)))) refuseTimetz();
-      if (found !== undefined && resolved !== null) this.refuseJsonbNumbersColumns(b, resolved);
+      if (found !== undefined && resolved !== null) this.guardArmTypes(b, found);
       if (found !== undefined && resolved !== null) for (const [ai, arm] of this.setOperationArms(b).entries()) {
         const armTypes = found.armTypes[ai] ?? null;
         const timeArm = (i: number): boolean => resolved[i]?.type === TIMETZ && (armTypes === null || armTypes[i] === TIME);
@@ -1873,123 +1873,95 @@ class Rewriter {
   }
 
   /**
-   * A SET OPERATION'S numeric[] COLUMN THAT IS THE ROUTE'S ARRAY, DECIDED BY ITS ARMS' WRITERS (PR 582 reviews r5 and r6,
-   * the classes "a set operation's column read as one arm's type" and set-op-refusal-by-containment-not-engine-type): the
-   * route (`typeCast`, JSONB_ARRAY_CASTS) holds `(ARRAY[j])::numeric(10,3)[]` as the engine's DECIMAL(10, 3)[], where a
-   * numeric(p,s)[] constant is a double[] and an int[] an INTEGER[]: the engine unifies the arms by its own rules and
-   * writes every row at one type and scale (`{1}` for Postgres's `{1.000}`). Read from Postgres's resolved column
-   * (`setOperationColumns`, the one authority the char(n) and timetz arm rules read) and each arm's values in that column
-   * (`valuesAt`: a VALUES row, a `*`, a nested set operation, a derived table's or a CTE's column by its own values): where
-   * the column is numeric[] and some arm's value IS the route's array, every arm's value must be held as that same
-   * DECIMAL(p, s)[] (`decimalList`), else the statement is refused by name. Nothing else is decided here: a value that
-   * merely CONTAINS the route (array_length of it, a sum of an element, a CASE testing it) is the type it is, and an
-   * element of the route is a numeric the record carries exactly (`duckExact`, `displayScale`) beside any other arm.
+   * A SET OPERATION'S numeric[] COLUMN, DECIDED BY THE ENGINE'S TYPE OF EACH ARM (PR 582 review r7, the class
+   * set-op-refusal-by-containment-not-engine-type): Postgres coerces every arm to the column it resolved
+   * (`setOperationOutputs`) and, where the arms' typmods differ, keeps each value at its own scale; the engine unifies the
+   * arms by its own rules, so a DECIMAL(10, 3)[] beside a double[] is a double[] (`{2.45}` for `{2.450}`) and beside a
+   * DECIMAL(5, 1)[] a DECIMAL(10, 3)[] (`{2.500}` for `{2.5}`). Two types are compared, each from its one authority: the
+   * engine type the column requires, `R` (`duckTypeOf` of Postgres's resolved numeric(p, s)[]; where Postgres resolved
+   * none, the one numeric(p, s) typmod its analysis gives the arms, `armTypmods`), and each arm's ENGINE type, as the
+   * engine binds the rewritten statement: `typeof`, which DuckDB folds at bind (the bound type `prepare` reports, which
+   * store.ts's `run` reads of a result). The rewrite runs before anything is prepared and an arm is no output column, so
+   * the comparison is written into the statement (`armTypeGuard`): it folds to the value where they agree, and to the
+   * registry's refusal where they do not. Two typmods among the arms are refused here: the engine's column has one type.
+   * None leaves the column to the engine, as it was. Each arm's value is guarded where it is written: its target, a
+   * VALUES row's item, each SELECT of a nested set operation, and through a `*` the FROM item's own (`passThrough`);
+   * an arm whose value is reached no other way is refused by name.
    */
-  private refuseJsonbNumbersColumns(b: Body, resolved: ReadonlyArray<Typed | null>): void {
-    const arms = this.setOperationArms(b);
-    resolved.forEach((column, i) => {
-      if (column?.type === NUMERIC) { this.refuseJsonbElementColumn(arms, i); return; }
+  private guardArmTypes(b: Body, found: ReturnType<typeof setOperationOutputs>[number]): void {
+    found.columns.forEach((column, i) => {
       if (column?.type !== NUMERIC_ARRAY) return;
-      // (each arm's values as `armScales` reads them: a VALUES's rows, a SELECT's own target, else `valuesAt`'s)
-      const values = arms.map((a): AstNode[] | null => {
-        const targets = (a.targetList ?? []) as AstNode[];
-        if (Array.isArray(a.valuesLists)) { const items = (a.valuesLists as AstNode[]).map((row) => ((bodyOf(row).items ?? []) as unknown[])[i]); return items.every(isNode) ? items as AstNode[] : null; }
-        if (!isSetOp(a) && targets.length > 0 && !targets.some((t) => hasStar(bodyOf(t).val))) { const v = targets[i] === undefined ? undefined : bodyOf(targets[i]!).val; return isNode(v) ? [v] : null; }
-        return this.valuesAt({ SelectStmt: a }, i);
-      });
-      if (!values.some((vs) => vs?.some((v) => this.jsonbRouteArray(v)) === true)) return;
-      // (the route's own typmod: a NULL arm leaves Postgres's column without one, where every value is still at its scale)
-      const route = values.flatMap((vs) => vs ?? []).find((v) => this.jsonbRouteArray(v) && kindOf(v) === "TypeCast");
-      const typmod = route === undefined ? column.typmod : this.routeTypmod(route);
-      const held = typmod >= 4 && (column.typmod === typmod || column.typmod === -1)
-        && values.every((vs) => vs !== null && vs.every((v) => isNullValue(v) || this.decimalList(v, typmod)));
-      if (held) return;
-      throw new Unrewritable("a jsonb array cast to an array of numbers beside another array of numbers as a numeric[] column of a UNION, INTERSECT or EXCEPT is not supported by Mason (Postgres keeps each element's own scale, where the engine writes the column at one)",
-        "cast it to text in each SELECT (`(…)::text`), or cast both to the same numeric(p,s)[]", "array-subquery-element");
+      const mods = new Set(found.armTypmods.map((m) => m?.[i] ?? -1).filter((m) => m >= 4));
+      const typmod = column.typmod >= 4 ? column.typmod : mods.size === 1 ? [...mods][0]! : mods.size === 0 ? -1 : null;
+      if (typmod === null) {
+        throw new Unrewritable("arrays of numbers of different numeric(p,s) types as one numeric[] column of a UNION, INTERSECT or EXCEPT are not supported by Mason (Postgres keeps each element's own scale, where the synced data's column holds one type)",
+          "cast every SELECT's value to the same numeric(p,s)[], or to text (`(…)::text`)", "array-subquery-element");
+      }
+      const type = typmod >= 4 ? duckTypeOf(NUMERIC, typmod) : null;
+      if (type === null || type[0] !== "decimal") return;
+      const guard = (x: AstNode): AstNode => this.armTypeGuard(x, type);
+      for (const arm of this.setOperationArms(b)) this.guardColumn(arm, i, guard);
     });
   }
 
-  /**
-   * A SET OPERATION'S numeric COLUMN WITH AN ELEMENT OF THE ROUTE'S ARRAY IN IT, decided by the arms' scales (`armScales`,
-   * Postgres's typmods and each value's written scale): the engine unifies its DECIMAL(p, s) (or INTEGER) with the other
-   * arms at one scale, where Postgres prints each row at its own arm's, and the record carries no element's cell. Where
-   * every arm's scale is the element's, one scale is every row's own, and the column is answered; else refused by name. A
-   * FROM item's column of an integer element is an integer column the record carries (`duckExact`), and is not decided here.
-   */
-  private refuseJsonbElementColumn(arms: Body[], i: number): void {
-    const element = (v: AstNode): boolean => kindOf(v) === "ColumnRef"
-      ? this.fromValues(v, (x) => this.routeSubscript(x) && this.routeElementType(x) === NUMERIC) : this.routeSubscript(v);
-    const values = arms.map((a) => this.valuesAt({ SelectStmt: a }, i) ?? (() => { const t = ((a.targetList ?? []) as AstNode[])[i]; return t !== undefined && isNode(bodyOf(t).val) ? [bodyOf(t).val as AstNode] : null; })());
-    if (!values.some((vs) => vs?.some(element) === true)) return;
-    const scales = new Set(arms.flatMap((a) => this.armScales({ SelectStmt: a }, i)));
-    if (scales.size === 1 && !scales.has(null)) return;
-    throw new Unrewritable("an element of a jsonb array cast to an array of numbers beside a value of another scale, as a numeric column of a UNION, INTERSECT or EXCEPT, is not supported by Mason (Postgres keeps each row's own scale, where the engine writes the column at one)",
-      "cast it to text in each SELECT (`(…)::text`), or cast every SELECT's value to the same numeric(p,s)", "array-subquery-element");
+  /** the value of a query's i-th output column, wherever it is written, replaced by `guard` of it (`guardArmTypes`) */
+  private guardColumn(q: Body, i: number, guard: (x: AstNode) => AstNode): void {
+    if (isSetOp(q)) { for (const arm of this.setOperationArms(q)) this.guardColumn(arm, i, guard); return; }
+    if (Array.isArray(q.valuesLists)) {
+      for (const row of q.valuesLists as AstNode[]) {
+        const items = (isNode(row) ? bodyOf(row).items : row) as AstNode[] | undefined;
+        if (!Array.isArray(items) || !isNode(items[i])) throw this.unguarded();
+        if (!this.armGuards.has(bodyOf(items[i]!))) items[i] = guard(items[i]!);
+      }
+      return;
+    }
+    const targets = (q.targetList ?? []) as AstNode[];
+    if (targets.length === 1 && hasStar(bodyOf(targets[0]!).val)) {
+      const through = this.passThrough(q);
+      if (through === null || through.columns !== "star") throw this.unguarded();
+      this.guardColumn(bodyOf(through.query), i, guard);
+      return;
+    }
+    const t = targets[i];
+    if (t === undefined || targets.some((x) => hasStar(bodyOf(x).val)) || !isNode(bodyOf(t).val)) throw this.unguarded();
+    const tb = bodyOf(t);
+    if (this.armGuards.has(bodyOf(tb.val as AstNode))) return;
+    // (the column keeps its name: the CASE's would be `case`)
+    if (tb.name === undefined) tb.name = figureColname(tb.val as AstNode);
+    tb.val = guard(tb.val as AstNode);
+  }
+  private unguarded(): Unrewritable {
+    return new Unrewritable("an array of numbers as a numeric[] column of a UNION, INTERSECT or EXCEPT, reached through a form Mason cannot check its type in, is not supported by Mason (Postgres keeps each element's own scale, where the synced data's column holds one type)",
+      "select the column by name in each SELECT, or cast it to text (`(…)::text`)", "array-subquery-element");
+  }
+  /** the CASEs `armTypeGuard` wrote, so a value is guarded once (a nested set operation is its own and its parent's arm) */
+  private readonly armGuards = new WeakSet<Body>();
+
+  /** `x` as the engine type `type` (a DECIMAL(p, s), as a list) where the engine binds it as that type (or as a bare
+   *  NULL), else the registry's refusal: `typeof` is folded at bind, so the CASE is the value itself, or the call */
+  private armTypeGuard(x: AstNode, type: string[]): AstNode {
+    const engine = `DECIMAL(${type[1]},${type[2]})[]`;
+    const as = (v: AstNode): AstNode => ({ TypeCast: { arg: v, typeName: { names: [S("decimal")], typmods: type.slice(1).map((m) => intConst(Number(m))), typemod: -1, arrayBounds: [{ Integer: { ival: -1 } }] } } });
+    const typeOfX = (): AstNode => fn("typeof", [this.clone(x)]);
+    const agrees = or([op("=", typeOfX(), strConst(engine)), op("=", typeOfX(), strConst("\"NULL\""))]);
+    const guarded = caseWhen([[agrees, as(x)]], as(fn("__mason_set_column_type", [typeOfX(), strConst(engine)])));
+    this.armGuards.add(bodyOf(guarded));
+    return guarded;
   }
 
-  /** whether `v` IS the route's array of numbers: a jsonb[], or an ARRAY[…] of jsonb, cast to int[], numeric(p,s)[] … (a
-   *  FROM item's column whose every value is one) */
-  private jsonbRouteArray(v: AstNode): boolean {
-    if (kindOf(v) === "ColumnRef") return this.fromValues(v, (x) => this.jsonbRouteArray(x));
-    const b = bodyOf(v), t = this.typed(v);
-    if (kindOf(v) !== "TypeCast" || !isNode(b.arg) || t === null || !JSONB_ARRAY_CASTS.has(t.type)) return false;
-    const arg = b.arg as AstNode;
-    return this.typeOf(arg) === JSONB_ARRAY || (kindOf(arg) === "A_ArrayExpr" && ((bodyOf(arg).elements ?? []) as AstNode[]).some((e) => this.typeOf(e) === JSONB));
-  }
-
-  /** whether the engine holds `v` as DECIMAL(p, s)[] of the numeric typmod `typmod`: the route's numeric(p,s)[] (within
-   *  38 digits, `jsonbScalar`), an ARRAY[…] of values each held as that DECIMAL (`duckExact` of a numeric(p, s)), or a FROM
-   *  item's column whose every value is one */
-  private decimalList(v: AstNode, typmod: number): boolean {
-    if (kindOf(v) === "ColumnRef") return this.fromValues(v, (x) => this.decimalList(x, typmod));
-    const t = this.typed(v);
-    if (t === null || t.type !== NUMERIC_ARRAY || ((typmod - 4) >> 16) > 38) return false;
-    if (this.jsonbRouteArray(v)) return this.routeTypmod(v) === typmod;
-    // (an ARRAY[…] is typed by its elements: Postgres's analysis gives the array itself no typmod)
-    return kindOf(v) === "A_ArrayExpr" && ((bodyOf(v).elements ?? []) as AstNode[]).every((e) => {
-      const et = this.typed(e);
-      return et !== null && et.type === NUMERIC && et.typmod === typmod && this.duckExact(e);
-    });
-  }
-
-  /** a decision over every value of the FROM item's column `ref` names (`over`, decided once per column); false where the
-   *  column's values are not found */
-  private fromValues(ref: AstNode, each: (x: AstNode) => boolean): boolean {
-    const found = this.fromColumn(ref);
-    return found !== null && (this.over(found.query, false, (values) => values.every(each), found.index) ?? false);
-  }
-
-  /** whether `v` is an element of the route's array the engine holds exactly: a single subscript of an int2 / int4 /
-   *  int8 or a numeric(p, s) within 38 digits array (an INTEGER, or the DECIMAL(p, s) of the number's stored text) */
-  private jsonbRouteElement(v: AstNode): boolean {
-    if (!this.routeSubscript(v)) return false;
-    const arg = bodyOf(v).arg as AstNode, t = this.typed(arg);
-    if (t === null) return false;
-    const element = JSONB_ARRAY_CASTS.get(t.type), typmod = this.routeTypmod(arg);
-    return element !== undefined && (INTEGERS.has(element) || (element === NUMERIC && typmod >= 4 && ((typmod - 4) >> 16) <= 38));
-  }
-
-  /** whether `v` is one subscript of the route's array, as written or a FROM item's column every value of which is it
-   *  (a derived table's, a CTE's) */
-  private routeSubscript(v: AstNode): boolean {
+  /** the element type and numeric typmod of a single subscript of an array of numbers (`a[1]`: Postgres's subscript keeps
+   *  its array's typmod), or null: the array's typmod as Postgres's analysis gives it, or as its cast writes it (Postgres
+   *  types an ARRAY[…] cast whole with none, its elements each carrying it); `cast`: held as the engine's DECIMALs, a cast of no constant or a table's column */
+  private subscriptOf(v: AstNode): { element: number; typmod: number; cast: boolean } | null {
     const b = bodyOf(v), ind = (b.indirection ?? []) as AstNode[];
-    if (kindOf(v) !== "A_Indirection" || ind.length !== 1 || kindOf(ind[0]!) !== "A_Indices" || bodyOf(ind[0]!).is_slice === true || !isNode(b.arg)) return false;
-    const arg = b.arg as AstNode;
-    return (kindOf(arg) === "TypeCast" || kindOf(arg) === "ColumnRef") && this.jsonbRouteArray(arg);
-  }
-
-  /** the element type of the route's array an element (`jsonbRouteElement`) is read from */
-  private routeElementType(v: AstNode): number | null {
-    const t = this.typed(bodyOf(v).arg as AstNode);
-    return t === null ? null : JSONB_ARRAY_CASTS.get(t.type) ?? null;
-  }
-
-  /** the numeric typmod the route's cast WRITES (`numeric(10,3)[]`: 10 << 16 | 3, + 4), -1 for none: Postgres's analysis
-   *  of an ARRAY[…] cast whole types the array it builds with no typmod, its elements each cast with it */
-  private routeTypmod(cast: AstNode): number {
-    const mods = ((bodyOf(cast).typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m));
-    if (mods.length === 0 || mods.some((m) => m === null)) return -1;
-    return ((mods[0]! << 16) | (mods[1] ?? 0)) + 4;
+    if (kindOf(v) !== "A_Indirection" || ind.length !== 1 || kindOf(ind[0]!) !== "A_Indices" || bodyOf(ind[0]!).is_slice === true || !isNode(b.arg)) return null;
+    const arg = b.arg as AstNode, t = this.typed(arg);
+    const element = t === null ? undefined : NUMBER_ELEMENT[t.type];
+    if (t === null || element === undefined) return null;
+    // (a table's own column: the synced data holds a numeric(p, s)[] as DECIMALs, as it holds a numeric(p, s) column)
+    if (kindOf(arg) !== "TypeCast") return { element, typmod: t.typmod, cast: kindOf(arg) === "ColumnRef" && this.fromColumn(arg) === null };
+    const mods = ((bodyOf(arg).typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m));
+    return { element, typmod: mods.length === 0 || mods.some((m) => m === null) ? -1 : ((mods[0]! << 16) | (mods[1] ?? 0)) + 4, cast: isNode(bodyOf(arg).arg) && constString(stripCasts(bodyOf(arg).arg as AstNode)) === null };
   }
   /**
    * `x` AS POSTGRES'S IMPLICIT time→timetz CAST (time_timetz, function 2047, COERCE_IMPLICIT_CAST): a cast node typed as
@@ -2711,7 +2683,26 @@ class Rewriter {
     // VALUES arm is typed by its rows as Postgres analysed them (issue 342: it was untyped, and the union the engine's)
     // (a column this computes nothing for is Postgres's to coerce, as it is written: only a numeric one is read here)
     const castExactly = (oid: number, to: number | undefined): boolean => oid === to || (to === NUMERIC && INTEGERS.has(oid));
-    if (arms.some((a) => { const f = this.armFields(a, fields); return f === null || f.some((x, i) => fields[i]?.oid === NUMERIC && !castExactly(x.oid, NUMERIC)); })) return [];
+    // (an arm whose values the rewrite cannot type, `a[1]`, is typed as Postgres's analysis gives that SELECT's outputs,
+    // `setOperationOutputs`' armTypes, PR 582 review r7)
+    const leaves = this.setOperationArms(b), analysed = this.setOperationFound(b, false);
+    const typedArm = (a: AstNode): Array<{ oid: number; typmod: number }> | null => {
+      const own = this.armFields(a, fields);
+      if (own !== null) return own;
+      // (an arm that is a set operation of no clauses of its own is its SELECTs', where they agree)
+      const selects = isSetOp(bodyOf(a)) ? this.setOperationArms(bodyOf(a)) : [bodyOf(a)];
+      const at = selects.map((x) => leaves.indexOf(x));
+      if (analysed === undefined || at.some((k) => k < 0 || analysed.armTypes[k] === null || analysed.armTypes[k] === undefined)) return null;
+      // (its SELECTs of several types are a numeric where each is a numeric or an integer, as Postgres resolves them)
+      const each = at.map((k) => analysed.armTypes[k]!);
+      return fields.map((f, i) => {
+        const oids = new Set(each.map((x) => x[i] ?? -1));
+        const mods = new Set(at.map((k) => analysed.armTypmods[k]?.[i] ?? -1));
+        if (oids.size === 1) return { oid: [...oids][0]!, typmod: mods.size === 1 ? [...mods][0]! : -1 };
+        return { oid: f.oid === NUMERIC && [...oids].every((o) => castExactly(o, NUMERIC)) ? NUMERIC : -1, typmod: -1 };
+      });
+    };
+    if (arms.some((a) => { const f = typedArm(a); return f === null || f.some((x, i) => fields[i]?.oid === NUMERIC && !castExactly(x.oid, NUMERIC)); })) return [];
     // THE TRIAL WRITES ONLY COPIES: of the arms, AND of the CTEs above them, which an arm that reads one appends its cells
     // to. A trial that wrote the real CTE left it selecting cells its arm, built again below, never read: arms of
     // different widths, which the engine refused (`WITH t AS (… sqrt(abs(x)) AS v …) SELECT v FROM t UNION ALL SELECT
@@ -3522,8 +3513,13 @@ class Rewriter {
       case "ColumnRef": { if (t === null || t.type !== NUMERIC) return false; const found = this.fromColumn(n); return found === null || (this.outputExact(found.query, found.index) && !this.scalesDiffer(found.query, found.index)); }
       // a scalar subquery: its one column
       case "SubLink": { const target = scalarTarget(n); return target !== null && this.duckExact(target); }
-      // an element of the route's numeric(p, s)[]: the DECIMAL(p, s) of the number's stored text (PR 582 review r6)
-      case "A_Indirection": return this.jsonbRouteElement(n);
+      // an element of an integer array, or of a numeric(p, s)[] within 38 digits held as DECIMALs (a cast of no constant,
+      // a table's column; never a constant's, which the cast writes as a double[]): the engine's exact value. Its cell is still read by the
+      // engine's prepared type (store.ts exactColumns), and a double there keeps the engine's value
+      case "A_Indirection": {
+        const e = this.subscriptOf(n);
+        return e !== null && (INTEGERS.has(e.element) || (e.element === NUMERIC && e.cast && e.typmod >= 4 && ((e.typmod - 4) >> 16) <= 38));
+      }
       case "A_Const":
         if (b.isnull === true || b.ival !== undefined) return true;
         // a numeric constant as it is written (`numericConstText`, `decimalConst`): DuckDB's DECIMAL within 38 digits
@@ -3962,9 +3958,8 @@ class Rewriter {
     if (t !== null && INTEGERS.has(t.type)) return 0;
     switch (k) {
       case "ColumnRef": return t !== null && t.type === NUMERIC && t.typmod >= 4 ? (t.typmod - 4) & 0xffff : null;
-      // an element of the route's numeric(p, s)[], at its array's scale (Postgres's subscript keeps the typmod)
-      // (its own entry is none: the element's type is its array's, as the route writes it)
-      case "A_Indirection": { if (!this.jsonbRouteElement(n)) return null; if (this.routeElementType(n) !== NUMERIC) return 0; const m = this.routeTypmod(b.arg as AstNode); return m >= 4 ? (m - 4) & 0xffff : null; }
+      // an element of an array of numbers, at its array's scale (Postgres's subscript keeps the typmod; `subscriptOf`)
+      case "A_Indirection": { const e = this.subscriptOf(n); return e === null ? null : INTEGERS.has(e.element) ? 0 : e.element === NUMERIC && e.typmod >= 4 ? (e.typmod - 4) & 0xffff : null; }
       case "A_Const": return b.ival !== undefined ? 0 : b.fval !== undefined ? (positional(String(b.fval.fval)).split(".")[1] ?? "").length : null;
       case "A_Expr": {
         if (b.kind !== "AEXPR_OP") return null;

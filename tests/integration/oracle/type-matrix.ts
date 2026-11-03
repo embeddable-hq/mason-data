@@ -330,6 +330,9 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   "CREATE VIEW public.star_v AS SELECT id, name, ci, ch FROM public.star_o;" +
   // JSONB IN POSTGRES'S ORDER (JORDER above), beside a json of the same text, which has no order at all
   `CREATE TABLE public.jorder (id int PRIMARY KEY, j jsonb, js json); INSERT INTO public.jorder VALUES ${JORDER.map((v, i) => `(${i + 1}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
+  // ARRAYS OF NUMBERS AT A TYPMOD (PR 582 review r7): a numeric(10,3)[] column beside the jsonb route's, with a NULL
+  // element, a NULL array and a zero
+  "CREATE TABLE public.narr (id int PRIMARY KEY, v numeric(10,3)[]); INSERT INTO public.narr VALUES (1, '{1.5}'), (2, '{2.25,NULL}'), (3, NULL), (4, '{0}');" +
   // INSTANTS AT A TRUNCATION'S EDGES (date_trunc of a timestamptz, in the session's zone or a zone of its own): each side
   // of Europe/Berlin's and America/New_York's changes of 2026, a repeated hour's two halves, before 1970, a zone's local
   // mean time (1880), the first instant of a week, a century and a millennium, a microsecond, ±infinity and NULL
@@ -969,7 +972,25 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb: every way to a number, an element beside its own kind, INTERSECT", "SELECT ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id BETWEEN 5 AND 14 INTERSECT SELECT ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id BETWEEN 8 AND 20");
   yield q("jsonb: every way to a number, a value holding the array beside another scale", "SELECT array_length((ARRAY[j])::int[], 1) FROM jorder WHERE id BETWEEN 5 AND 10 UNION ALL SELECT 1.5");
   yield q("jsonb: every way to a number, a CTE's integer element beside another scale", "WITH w AS (SELECT ((ARRAY[j])::int[])[1] AS x FROM jorder WHERE id = 1 OR id BETWEEN 5 AND 10) SELECT x FROM w UNION ALL SELECT 1.5");
-  yield q("jsonb: every way to a number, an element beside an integer (refused)", "SELECT ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id BETWEEN 5 AND 10 UNION ALL SELECT 1");
+  // (7, which no row equals: a DISTINCT over 1 beside 1.000 keeps either, the registry's mixed-scale-numeric)
+  yield q("jsonb: every way to a number, an element beside an integer, each arm its own text", "SELECT ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id BETWEEN 5 AND 10 UNION ALL SELECT 7");
+  // (PR 582 review r7: each arm's engine type against the column Postgres resolved, never a list of writers) every other
+  // writer of the same numeric(10,3)[], under each set operation and through each form an arm reaches its value by
+  const route = "SELECT (ARRAY[j])::numeric(10,3)[] FROM jorder WHERE id BETWEEN 5 AND 10";
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside a table's column", `${route} UNION ALL SELECT v FROM narr`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside a table's column, UNION", `SELECT v FROM narr UNION ${route}`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside a cast of a column", `${route} UNION ALL SELECT (ARRAY[id])::numeric(10,3)[] FROM narr`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside CAST of a literal list, INTERSECT", `${route} INTERSECT SELECT CAST(ARRAY[1.5] AS numeric(10,3)[])`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside a table's column, EXCEPT", `${route} EXCEPT SELECT v FROM narr`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside a VALUES arm", `${route} UNION ALL VALUES ((ARRAY[2.5])::numeric(10,3)[]), (NULL)`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] through * of a derived table", `SELECT * FROM (SELECT v FROM narr) s UNION ALL ${route}`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] through * of a CTE", `WITH w AS (SELECT v FROM narr) SELECT * FROM w UNION ALL ${route}`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] in a nested set operation", `(${route} UNION ALL SELECT v FROM narr) UNION SELECT (ARRAY[id])::numeric(10,3)[] FROM narr`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside an empty arm of another type", `${route} UNION ALL SELECT '{1}'::numeric[] WHERE false`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside another scale (refused)", `${route} UNION ALL SELECT (ARRAY[j])::numeric(5,1)[] FROM jorder WHERE id BETWEEN 5 AND 10`);
+  yield q("jsonb: every way to a number, a numeric(p,s)[] beside an unconstrained constant (refused)", `${route} UNION ALL SELECT '{1}'::numeric[]`);
+  yield q("jsonb: every way to a number, an element beside a column's element", "SELECT ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id BETWEEN 5 AND 10 UNION ALL SELECT v[1] FROM narr");
+  yield q("jsonb: every way to a number, an element beside an integer, EXCEPT", "SELECT ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id BETWEEN 5 AND 10 EXCEPT SELECT 1");
   // an ORDER BY's bare name is the output it names first: `ORDER BY j` of `j::text` sorts the text, not the jsonb
   yield q("jsonb: grouped column, ORDER BY the output's name", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j, id");
   yield q("jsonb: grouped column, ORDER BY the output's name DESC", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j DESC NULLS LAST, id");

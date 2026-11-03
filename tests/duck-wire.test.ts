@@ -4124,7 +4124,7 @@ test("every way a jsonb reaches a cast to a number or a boolean (PR 582 review r
   } finally { await c.end(); await a.close(); }
 });
 
-test("the jsonb route to a number is an ordinary value to every reader around it, and refused where a set operation's numeric column would read it at one scale (PR 582 review r5)", async () => {
+test("the jsonb route to a number is an ordinary value to every reader around it, and refused where a set operation's numeric column would read it at one scale (PR 582 review r5, r7)", async () => {
   const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
   try {
     const statements: Array<[string, "ordered" | "bag"]> = [];
@@ -4179,20 +4179,49 @@ test("the jsonb route to a number is an ordinary value to every reader around it
       ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (1, 9, 11) UNION ALL VALUES (2.450), (NULL)", "bag"],
       ["SELECT ((ARRAY[b -> 'a'])::numeric(5,1)[])[1] FROM jnat WHERE id IN (9, 11) INTERSECT ALL SELECT ((ARRAY[b -> 'a'])::numeric(5,1)[])[1] FROM jnat WHERE id IN (11, 12)", "bag"],
       ["SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1", "bag"],
+      // (PR 582 review r7: decided by the engine's type of each arm against the column Postgres resolved, never by a
+      // list of writers) every other writer of the same numeric(10,3)[] beside the route, under each set operation, a
+      // VALUES arm, a `*` of a derived table and of a CTE, a nested set operation; an arm of another type that has no row
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS x FROM jnat WHERE id IN (9, 11, 20) UNION ALL SELECT (ARRAY[id])::numeric(10,3)[] FROM jnat WHERE id IN (2, 3)", "bag"],
+      ["SELECT CAST(ARRAY[id] AS numeric(10,3)[]) FROM jnat WHERE id IN (2, 3) UNION SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11)", "bag"],
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) INTERSECT SELECT (ARRAY[1.5])::numeric(10,3)[]", "bag"],
+      ["SELECT (ARRAY[b -> 'a', b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) EXCEPT ALL SELECT (ARRAY[id, id])::numeric(10,3)[] FROM jnat WHERE id = 1", "bag"],
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL VALUES ((ARRAY[2.5])::numeric(10,3)[]), (NULL)", "bag"],
+      ["SELECT * FROM (SELECT (ARRAY[id])::numeric(10,3)[] AS x FROM jnat WHERE id IN (2, 3)) s UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11)", "bag"],
+      ["WITH w AS (SELECT (ARRAY[id])::numeric(10,3)[] AS x FROM jnat WHERE id IN (2, 3)) SELECT * FROM w UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11)", "bag"],
+      ["(SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT (ARRAY[id])::numeric(10,3)[] FROM jnat WHERE id = 2) UNION SELECT (ARRAY[1.5])::numeric(10,3)[]", "bag"],
+      ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT '{1}'::numeric[] WHERE false", "bag"],
+      // an element beside an element of another writer, and beside an integer, under each set operation
+      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11, 20) UNION ALL SELECT ((ARRAY[id])::numeric(10,3)[])[1] FROM jnat WHERE id IN (2, 3)", "bag"],
+      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11, 20) UNION ALL SELECT 1", "bag"],
+      ["SELECT 1 UNION ALL SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11)", "bag"],
+      ["SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11) EXCEPT SELECT 1", "bag"],
+      ["SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1.5", "bag"],
     );
     assert.deepEqual(await unlike(c, statements), []);
-    // where Postgres's column is numeric or numeric[], the route's array or an element of it is another engine type than
-    // the other arm's (a constant's double[], an integer, a column's own scale): refused by name, never one scale's text
+    // where Postgres's column is numeric[], an arm the engine holds as another type than the column needs (a constant's
+    // double[], an integer[], another scale) is refused by name, at plan time or by the arm's first row, never one type's text
     for (const sql of ["SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL VALUES ('{NULL}'::numeric(10,3)[])",
       "VALUES ('{NULL}'::numeric(10,3)[]) UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11)",
-      "SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1",
-      "SELECT 1 UNION ALL SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11)",
-      "SELECT ((ARRAY[b -> 'a'])::int[])[1] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT 1.5",
-      "SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11) EXCEPT SELECT 1",
       "SELECT (ARRAY[b -> 'a'])::int[] FROM jnat WHERE id IN (9, 11) UNION ALL VALUES ('{1}'::numeric(10,3)[])",
-      "SELECT s.v FROM (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS v FROM jnat WHERE id IN (9, 11)) s UNION ALL VALUES ('{NULL}'::numeric(10,3)[])"]) {
+      "SELECT s.v FROM (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS v FROM jnat WHERE id IN (9, 11)) s UNION ALL VALUES ('{NULL}'::numeric(10,3)[])",
+      "SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT '{1}'::numeric[]",
+      "SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id IN (9, 11) UNION ALL SELECT (ARRAY[b -> 'a'])::numeric(5,1)[] FROM jnat WHERE id IN (9, 11)",
+      "SELECT * FROM (SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] AS x FROM jnat WHERE id IN (9, 11)) s UNION ALL SELECT ARRAY[1.5]",
+      "VALUES (((SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat WHERE id = 11))) UNION ALL SELECT '{1}'::numeric[]"]) {
       await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap array-subquery-element\b/.test(`${e.detail ?? ""} ${e.hint ?? ""} ${e.message}`), sql);
     }
+    // an element beside an integer under a UNION is answered, at the registry's decided difference (mixed-scale-numeric:
+    // one scale for the column, `1000.000` for Postgres's `1000`), every value Postgres's
+    const union = "SELECT ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (9, 11, 20) UNION SELECT 1000 ORDER BY 1";
+    const values = (a: { rows: unknown[][] }): unknown[] => a.rows.map((r) => r[0] === null ? null : Number(r[0]));
+    assert.deepEqual(values(await answer(c, union)), values(await postgres(union)), union);
+    // where every arm agrees, the comparison is folded away: the engine is sent the value, its plan the arms' own
+    const plan = (await c.query({ text: "EXPLAIN SELECT (ARRAY[b -> 'a'])::numeric(10,3)[] FROM jnat UNION ALL SELECT (ARRAY[id])::numeric(10,3)[] FROM jnat", rowMode: "array" } as pg.QueryConfig)).rows.map((r) => String((r as unknown[])[0])).join("\n");
+    assert.match(plan, /typeof\(/, "the arms' types are compared in the statement sent");
+    // (the engine's own plan, after Mason's lines: a projection of each arm's columns, no CASE and no call left in it)
+    const engine = plan.slice(plan.indexOf("\nUnion"));
+    assert.ok(engine.length > 1 && !/__mason_set_column_type|CASE|typeof/.test(engine), `no comparison is left in the engine's plan: ${plan}`);
     // an unconstrained numeric's rows compared whole: its digits are its program's, which no set operation carries, so
     // refused as a numeric program's rows are (a numeric(p,s) is the engine's DECIMAL, compared as the base compared it)
     for (const sql of ["SELECT (b -> 'a')::numeric FROM jnat WHERE id IN (9, 11) EXCEPT SELECT 1", "SELECT (b -> 'a')::numeric FROM jnat WHERE id IN (9, 11) UNION SELECT 1"]) {
