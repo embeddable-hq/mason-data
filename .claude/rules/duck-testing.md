@@ -85,3 +85,8 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
 - A constraint stated in a design note without reading the code it names ("oracle-legs imports only Node's builtins",
   where it imports `src/duck/gaps.ts`; the rule is no node_modules dependency, transitively): it forbids what is
   allowed and misleads the implementer: `misstated-constraint` (PR 261).
+- A unit test made to read a doc it did not read before (a test of a script that renders `README.md` or
+  `docs/SQL-SUPPORT.md`, reading the file beside a `readFileSync`) and pushed without being added to the docs job's
+  list: the guard in `tests/ci-shards.test.ts` fires and the unit shards go red. List it in `DOCS_TESTS`
+  (`scripts/ci-shards.ts`) or in `DOCS_READ_EXEMPT` with why, and run `tests/ci-shards.test.ts` with the change's
+  nearest tests whenever a test gains a docs literal: `docs-reader-not-in-docs-job` (PR 553).

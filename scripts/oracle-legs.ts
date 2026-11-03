@@ -27,8 +27,11 @@
  * downloads that CI run's `ran-oracle-*` artifacts (`gh run download`), once the run has finished and only when it is
  * of the commit checked out (`runProblems`), or reads a folder of them (whose commit nothing checks), and writes both
  * files as a whole run's UPDATE_VERIFIED=1 and UPDATE_FIXTURE=1 would, through the same two writers (`verifiedText`,
- * `fixtureOf`) and in the same order (`writeFromLegs`): exit 0 when what the legs measured now holds, 1 when anything
- * else is wrong (nothing is written when the legs are not the whole, or are another commit's), 2 on a usage error.
+ * `fixtureOf`) and in the same order (`writeFromLegs`); then README.md's generated block and docs/SQL-SUPPORT.md,
+ * rendered from the very values it wrote by the renderers tests/duck-gaps.test.ts holds them to (tests/sql-support.ts),
+ * so no second step is left to forget (issue 516): exit 0 when what the legs measured now holds, 1 when anything else
+ * is wrong (nothing is written when the legs are not the whole, are another commit's, or the README has no generated
+ * block), 2 on a usage error.
  *
  * WHICH LEG ASKS WHAT IS SPLIT BY MEASURED COST (`partition`): every distinct statement text, the unordered limits'
  * too, goes to one leg, heaviest first into the lightest, with leg 1 starting from what its stages cost. The costs are
@@ -47,8 +50,8 @@
  * So does a leg with no IT_ORACLE_LEG_REPORT: nothing would hold its report to the whole, and half the statements
  * passing with no end-of-run assertion must never read as the oracle passing.
  *
- * THIS FILE AND scripts/ci-shards.ts RUN WITH NO `npm ci`, in the final jobs: what they import reaches only Node's
- * builtins (tests/conventions.test.ts).
+ * THIS FILE AND scripts/ci-shards.ts RUN WITH NO `npm ci`, in the final jobs: what they import, followed through the
+ * repo's own files, reaches no node_modules package (tests/conventions.test.ts).
  */
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -60,6 +63,7 @@ import { VERIFIED } from "../src/duck/verified.ts";
 import { decisionKey, staleDecisions } from "../tests/integration/oracle/known.ts";
 import { fixtureTally, fixtureText, type GapCounts, type GapTally } from "../tests/integration/oracle/gap-tally.ts";
 import { shapeProblems, sumShapeTallies, type ShapeTally } from "../tests/integration/oracle/shape-names.ts";
+import { README_END, README_START, renderGaps, renderReadmeSupport, spliceReadme, type AloneTallies } from "../tests/sql-support.ts";
 
 // the run check lives in ci-layout.ts, which scripts/ci-shards.ts shares; said from here too, for what imports it from here
 export { runProblems };
@@ -432,9 +436,20 @@ export function foldProblems(reports: readonly LegReport[], want: number, fixtur
 /** src/duck/verified.ts's text: its head comment kept, then every key verified, sorted, with what it names. The one
  *  writer of the file, a whole run's UPDATE_VERIFIED=1 and `--write` alike. */
 export function verifiedText(current: string, verified: Iterable<string>, names: ReadonlyMap<string, string>): string {
+  return listedText(current, verifiedMap(verified, names));
+}
+
+/** THE ONE BUILDER of the verified list: every key verified, once, sorted, with what it names (the key itself when
+ *  nothing names it). What src/duck/verified.ts says, and what `--write` renders the docs from. */
+export function verifiedMap(verified: Iterable<string>, names: ReadonlyMap<string, string>): ReadonlyMap<string, string> {
+  return new Map([...new Set(verified)].sort().map((k) => [k, names.get(k) ?? k]));
+}
+
+/** src/duck/verified.ts's text of a verified list: its head comment kept, then each key with what it names */
+function listedText(current: string, listed: ReadonlyMap<string, string>): string {
   const head = current.split("export const VERIFIED")[0]!;
   return `${head}export const VERIFIED: ReadonlyMap<string, string> = new Map([\n` +
-    [...new Set(verified)].sort().map((k) => `  [${JSON.stringify(k)}, ${JSON.stringify(names.get(k) ?? k)}],\n`).join("") + "]);\n";
+    [...listed].map(([k, v]) => `  [${JSON.stringify(k)}, ${JSON.stringify(v)}],\n`).join("") + "]);\n";
 }
 
 /** tests/fixtures/oracle-duckdb-alone.json's content: its one shape, a whole run's UPDATE_FIXTURE=1 and `--write` alike
@@ -442,8 +457,10 @@ export function verifiedText(current: string, verified: Iterable<string>, names:
 export const fixtureOf = (tallies: Tallies, copyPhase: GapTally, everyAsk: GapTally, asked: number, measured: Measured) =>
   ({ ...tallies, gaps: { copyPhase: fixtureTally(copyPhase), everyAsk: { asked, ...fixtureTally(everyAsk) } }, measured });
 
-/** The two files a whole run regenerates, from the legs' reports; or why the reports cannot give them. */
-export function filesFromLegs(reports: readonly LegReport[], want: number, verifiedNow: string): { verified: string; fixture: string } | { problems: string[] } {
+/** The two files a whole run regenerates, from the legs' reports, and the values they are written from (`listed`, the
+ *  verified list; `alone`, the fixture's object), which `--write` renders the docs from; or why the reports cannot give them. */
+export function filesFromLegs(reports: readonly LegReport[], want: number, verifiedNow: string):
+  { verified: string; fixture: string; listed: ReadonlyMap<string, string>; alone: ReturnType<typeof fixtureOf> } | { problems: string[] } {
   const partition = partitionProblems(reports, want);
   if (partition.length > 0) return { problems: partition };
   const old = reports.filter((r) => r.names === undefined || r.asks === undefined || r.measured === undefined).map((r) => r.leg);
@@ -453,7 +470,8 @@ export function filesFromLegs(reports: readonly LegReport[], want: number, verif
   const names = new Map(reports.flatMap((r) => Object.entries(r.names)));
   const fixture = fixtureOf(sumTallies(reports.map((r) => r.tallies)), sumTally(reports.map((r) => r.copyPhase)), sumTally(reports.map((r) => r.everyAsk)),
     reports.reduce((n, r) => n + r.asks, 0), reports[0]!.measured);
-  return { verified: verifiedText(verifiedNow, reports.flatMap((r) => r.verified), names), fixture: fixtureText(fixture) };
+  const listed = verifiedMap(reports.flatMap((r) => r.verified), names);
+  return { verified: listedText(verifiedNow, listed), fixture: fixtureText(fixture), listed, alone: fixture };
 }
 
 /** the legs' reports in a folder, or in its folders one deep (`gh run download` puts each artifact in one of its own) */
@@ -467,28 +485,45 @@ export function readReports(dir: string): LegReport[] {
 }
 
 export const VERIFIED_FILE = "src/duck/verified.ts", FIXTURE_FILE = "tests/fixtures/oracle-duckdb-alone.json";
+/** the two files rendered from them (tests/sql-support.ts): README.md's generated block, and the whole of the doc */
+export const README_FILE = "README.md", SUPPORT_FILE = "docs/SQL-SUPPORT.md";
+/** what renders README.md and docs/SQL-SUPPORT.md from the committed files, when `--write` could not */
+export const RENDER_COMMAND = "UPDATE_FIXTURE=1 node --test --test-timeout=300000 --test-force-exit tests/duck-gaps.test.ts";
 
-/** `--write`: the files under `root` from the reports in `dir`, in a whole run's order, and what to say. Nothing is
- *  written when the legs are not the whole. The fixture is written first, as a whole run writes it before its other
- *  assertions; then a stale decision or a dead gap writes no src/duck/verified.ts, as a whole run fails on them before
- *  it writes the file; a statement that differs is said after both, as a whole run fails on it after writing. */
+/** `--write`: the files under `root` from the reports in `dir`, in a whole run's order, and what to say. Every text is
+ *  computed first, so nothing is written when the legs are not the whole or the README has no generated block. The
+ *  fixture is written first, as a whole run writes it before its other assertions; then a stale decision or a dead gap
+ *  writes no src/duck/verified.ts, as a whole run fails on them before it writes the file, and so renders no docs
+ *  either (they would say a list the file does not); otherwise src/duck/verified.ts, README.md's block and
+ *  docs/SQL-SUPPORT.md, rendered from the very list and tallies written; a statement that differs is said after all
+ *  four, as a whole run fails on it after writing. */
 export function writeFromLegs(dir: string, root: string): { code: 0 | 1; out: string[]; err: string[] } {
   const reports = readReports(dir);
   const files = filesFromLegs(reports, SHARDS.oracle, fs.readFileSync(path.join(root, VERIFIED_FILE), "utf8"));
   if ("problems" in files) return { code: 1, out: [], err: [...files.problems.map((p) => `oracle legs: ${p}`), "oracle legs: nothing written"] };
+  // the fixture's object as fixtureOf built it: the oracle's tallies carry every key AloneTallies names (duck-oracle.itest.ts `tallies`)
+  const alone = files.alone as unknown as AloneTallies;
+  const readmeAt = path.join(root, README_FILE);
+  const readme = spliceReadme(fs.existsSync(readmeAt) ? fs.readFileSync(readmeAt, "utf8") : "", renderReadmeSupport(GAPS, files.listed, alone));
+  if (readme === null) return { code: 1, out: [], err: [`oracle legs: ${README_FILE} has no generated block to render the counts into: it needs the line ${README_START} and, after it, the line ${README_END}`, "oracle legs: nothing written"] };
+  const support = renderGaps(GAPS, files.listed, alone);
   const out: string[] = [];
   const put = (file: string, text: string): void => {
-    const was = fs.readFileSync(path.join(root, file), "utf8");
-    if (was !== text) fs.writeFileSync(path.join(root, file), text);
+    const at = path.join(root, file);
+    const was = fs.existsSync(at) ? fs.readFileSync(at, "utf8") : null;
+    if (was !== text) { fs.mkdirSync(path.dirname(at), { recursive: true }); fs.writeFileSync(at, text); }
     out.push(`oracle legs: ${was === text ? "unchanged" : "wrote"} ${file}`);
   };
   put(FIXTURE_FILE, files.fixture);
   const before = staleOrDead(reports);
-  if (before.length > 0) return { code: 1, out, err: [...before.map((p) => `oracle legs: ${p}`), `oracle legs: ${VERIFIED_FILE} not written, as a whole run writes it only past these`] };
+  if (before.length > 0) return { code: 1, out, err: [...before.map((p) => `oracle legs: ${p}`), `oracle legs: ${VERIFIED_FILE} not written, as a whole run writes it only past these`,
+    `oracle legs: ${README_FILE} and ${SUPPORT_FILE} not rendered either, since ${VERIFIED_FILE} was not written: once it is, render them with \`${RENDER_COMMAND}\` and read the diff`] };
   put(VERIFIED_FILE, files.verified);
+  put(README_FILE, readme);
+  put(SUPPORT_FILE, support);
   const differ = reports.reduce((n, r) => n + r.differences, 0);
   if (differ > 0) return { code: 1, out, err: [`oracle legs: written, and still wrong: ${differ} statement(s) answered differently from Postgres in the legs: each leg's log lists them`] };
-  out.push("oracle legs: read the diff, then commit both files");
+  out.push(`oracle legs: read the diff, then commit the four files: ${FIXTURE_FILE}, ${VERIFIED_FILE}, ${README_FILE} and ${SUPPORT_FILE}`);
   return { code: 0, out, err: [] };
 }
 
