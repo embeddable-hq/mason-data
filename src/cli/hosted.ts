@@ -138,7 +138,10 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
   t = t.replace(/\s+/g, " ").trim();
   const chars = [...t];
-  return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+  const line = chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+  // and what is printed is what is tested (PR 645's review): the line as it leaves, put to the exact test too — its
+  // changes replace a character by a separator or cut the end, which join nothing, so this holds what they keep so
+  return echoesSecret(line, secrets) ? "****" : line;
 }
 
 /**
@@ -299,15 +302,28 @@ export function carriesSecret(s: string, secrets: readonly string[] = [], o: { p
  */
 export function carriesNoSecret(json: unknown, secrets: readonly string[], own: readonly string[] = []): boolean {
   const clean = (v: string, passwords: boolean): boolean => !carriesSecret(v, secrets, { passwords });
-  const walk = (v: unknown, passwords: boolean): boolean => {
-    if (typeof v === "string") return clean(v, passwords);
-    if (Array.isArray(v)) return v.every((x) => walk(x, passwords));
-    if (obj(v)) return Object.entries(v).every(([k, x]) => clean(k, true) && walk(x, passwords));
-    return true;
-  };
-  if (!obj(json)) return walk(json, true);
-  return Object.entries(json).every(([k, x]) => clean(k, true) && walk(x, !own.includes(k)));
+  // the walk keeps its own stack, never the call stack (PR 645's review: an answer of 10 KB nested 3000 deep overflowed
+  // it, a crash after login's token was granted), and an answer deeper than any documented shape is outside them all
+  const stack: Array<{ v: unknown; depth: number; passwords: boolean }> = [{ v: json, depth: 0, passwords: true }];
+  while (stack.length) {
+    const { v, depth, passwords } = stack.pop()!;
+    if (typeof v === "string") { if (!clean(v, passwords)) return false; continue; }
+    if (typeof v !== "object" || v === null) continue;
+    if (depth >= MAX_ANSWER_DEPTH) return false;
+    if (Array.isArray(v)) { for (const x of v) stack.push({ v: x, depth: depth + 1, passwords }); continue; }
+    for (const [k, x] of Object.entries(v)) {
+      if (!clean(k, true)) return false;
+      // `own` names top-level keys alone
+      stack.push({ v: x, depth: depth + 1, passwords: depth === 0 ? !own.includes(k) : passwords });
+    }
+  }
+  return true;
 }
+
+/** How deep an answer may nest (an object or an array in another): every documented answer is under 6 deep
+ *  (docs/HOSTED-API.md; a replica's user list, the deepest, is 4), so 32 is room, and anything deeper is no answer of
+ *  the contract's. The walk's size is bounded by the answer's bytes (`call`'s `maxBytes`). */
+export const MAX_ANSWER_DEPTH = 32;
 
 /** The characters of `t` a held secret is compared by, each with the span of `t` it was read from (above). */
 function bodyChars(t: string, keepMarks: boolean, decode: boolean): Array<{ c: string; from: number; to: number }> {
@@ -476,15 +492,30 @@ export interface DeviceCode { deviceCode: string; userCode: string; verification
 /**
  * A PAGE THE SERVICE SENDS A PERSON TO, which is printed and, on a terminal, opened: on the service's OWN origin (the
  * address MASON_CLOUD_URL named, or the default), as the URL parser writes it, with no user or password. A page
- * elsewhere would send the person, and their code, to an address nobody chose: `elsewhere` names it. Null when it is
- * not a URL.
+ * elsewhere would send the person, and their code, to an address nobody chose: `elsewhere` names it, as it is printed.
+ * Null when it is not a URL, or when what would be printed carries a secret.
+ *
+ * WHAT IS PRINTED IS WHAT IS TESTED (PR 645's review: the answer's string passed the exact test, and the parser's
+ * `href` printed the saved login's body whole, in pieces of 10 — `/x/../` between them is a dot segment the parser
+ * removes — and nothing masked it; a host in Unicode labels is printed in its `xn--` form, which can spell the body):
+ * the parser's own serialisation, the `href` or the `origin`, is what is tested, as it is printed — by the exact test
+ * (`carriesSecret`), and by the held secrets' mask (`maskSecrets`), since a page is printed and opened whole, so a page
+ * the mask would change is no page to send a person to: either refuses it. An honest page is refused by the mask with
+ * a probability under 1 in a million (it must hold 3 runs of 4 of a 43-character body by chance).
  */
-function pageUrl(service: Service, v: unknown): { href: string } | { elsewhere: string } | null {
+function pageUrl(service: Service, v: unknown, secrets: readonly string[]): { href: string } | { elsewhere: string } | null {
   if (!str(v, 2048)) return null;
   let u: URL;
   try { u = new URL(v); } catch { return null; }
-  if (u.origin !== service.base) return { elsewhere: u.protocol === "https:" || u.protocol === "http:" ? u.origin : `${u.protocol}//` };
-  return u.username || u.password ? null : { href: serviceText(u.href, 2048) };
+  const shown = (printed: string, max: number): string | null =>
+    carriesSecret(printed, secrets) || maskSecrets(printed, secrets) !== printed ? null : serviceText(printed, max);
+  if (u.origin !== service.base) {
+    const at = shown(u.protocol === "https:" || u.protocol === "http:" ? u.origin : `${u.protocol}//`, 300);
+    return at === null ? null : { elsewhere: at };
+  }
+  if (u.username || u.password) return null;
+  const href = shown(u.href, 2048);
+  return href === null ? null : { href };
 }
 
 /**
@@ -512,11 +543,11 @@ export function deviceOf(service: Service, a: Answer, secrets: readonly string[]
   const j = a.json;
   if (!obj(j) || !carriesNoSecret(j, secrets)) return unexpected(service, a, "a device code was expected");
   const userCode = typeof j.user_code === "string" ? /^([A-Za-z]{4})-?([A-Za-z]{4})$/.exec(j.user_code) : null;
-  const page = pageUrl(service, j.verification_uri);
-  const completePage = j.verification_uri_complete === undefined ? null : pageUrl(service, j.verification_uri_complete);
+  const page = pageUrl(service, j.verification_uri, secrets);
+  const completePage = j.verification_uri_complete === undefined ? null : pageUrl(service, j.verification_uri_complete, secrets);
   for (const p of [page, completePage]) {
     if (p && "elsewhere" in p) {
-      return { message: `${service.base} named a sign-in page on another address: ${serviceText(p.elsewhere, 300)}`, code: "refused",
+      return { message: `${service.base} named a sign-in page on another address: ${p.elsewhere}`, code: "refused",
         why: `a sign-in page is printed and opened only on the service's own address, ${service.base}: anything else would send you, and the code, to an address nobody chose`,
         fix: "check MASON_CLOUD_URL names the service you mean; if it does, the service is answering outside its documented API" };
     }
@@ -528,7 +559,10 @@ export function deviceOf(service: Service, a: Answer, secrets: readonly string[]
     || (j.verification_uri_complete !== undefined && complete === null)
     || !Number.isInteger(expiresIn) || (expiresIn as number) < 1 || (expiresIn as number) > 3600
     || !Number.isInteger(interval) || (interval as number) < 1 || (interval as number) > 300) return unexpected(service, a, "a device code was expected");
-  return { deviceCode: j.device_code, userCode: `${userCode[1]}-${userCode[2]}`, verificationUri, verificationUriComplete: complete,
+  // the user code as it is printed, put to the test as it is printed (8 letters and a dash: it cannot hold ECHO_RUN)
+  const shownCode = `${userCode[1]}-${userCode[2]}`;
+  if (carriesSecret(shownCode, secrets)) return unexpected(service, a, "a device code was expected");
+  return { deviceCode: j.device_code, userCode: shownCode, verificationUri, verificationUriComplete: complete,
     expiresIn: expiresIn as number, interval: interval as number };
 }
 

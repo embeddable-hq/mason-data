@@ -14,7 +14,7 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { domainToASCII, domainToUnicode, fileURLToPath, pathToFileURL } from "node:url";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
 
@@ -49,12 +49,29 @@ export const runForms = (token: string, n: 0 | 1 = 0): Array<{ what: string; val
   return [{ what: "the token whole", value: token, digits: token }, { what: "its body", value: body, digits: body },
     { what: "its body in lower case", value: body.toLowerCase(), digits: body.toLowerCase() }, { what: "11 of its characters in a row", value: RUNS[n].letters, digits: RUNS[n].digits }];
 };
-/** Whether `text` shows 11 of a token's body in a row, in any case (what a refused answer must print none of). */
+/** Whether `text` shows 11 of a token's body in a row, in any case, as it is or read past every character that is not a
+ *  letter or a digit (pieces split by `/`, `.` or a space): what a refused answer must print none of. */
 export const showsRun = (text: string, token: string): boolean => {
-  const t = text.toLowerCase(), b = bodyOf(token).toLowerCase();
-  for (let i = 0; i + 11 <= b.length; i++) if (t.includes(b.slice(i, i + 11))) return true;
+  for (const view of [(s: string) => s.toLowerCase(), (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "")]) {
+    const t = view(text), b = view(bodyOf(token));
+    for (let i = 0; i + 11 <= b.length; i++) if (t.includes(b.slice(i, i + 11))) return true;
+  }
   return false;
 };
+
+/** Host labels whose IDNA form, as the URL parser prints a host, is `xn--` and 11 of a body lower-cased in a row: the
+ *  Unicode label reads as no body character, its printed form as the run (PR 645's review). */
+export function punyLabels(body: string, most: number): string[] {
+  const runs = body.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 11);
+  const labels: string[] = [];
+  for (const w of runs) for (let i = 0; i + 11 <= w.length && labels.length < most; i++) {
+    for (const prefix of ["", "a", "ab", "z", "zz"]) {
+      const ascii = `xn--${prefix}${w.slice(i, i + 11)}`, u = domainToUnicode(ascii);
+      if (u && u !== ascii && !/[a-z0-9]/i.test(u) && domainToASCII(u) === ascii) { labels.push(u); break; }
+    }
+  }
+  return labels;
+}
 
 /**
  * The forms a service may echo a token it was sent in, besides the token whole (issue 540; the review of PR 591): each
@@ -115,7 +132,8 @@ const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
 export interface Req { at: number; method: string; path: string; search: string; headers: http.IncomingHttpHeaders; form: Record<string, string>; body: string }
-export type Reply = { status: number; body?: unknown; raw?: string; headers?: Record<string, string> } | "drop";
+/** `json`: a JSON body as text (one too deep for JSON.stringify to write); `raw`: a body that is not JSON. */
+export type Reply = { status: number; body?: unknown; raw?: string; json?: string; headers?: Record<string, string> } | "drop";
 export interface Script {
   device?: Reply;
   /** the n-th poll's answer (0-based) */
@@ -153,7 +171,7 @@ export async function fakeService(script: Script): Promise<{ url: string; reques
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
-      res.end(reply.raw ?? (reply.body === undefined ? "" : JSON.stringify(reply.body).replaceAll(BASE, `http://127.0.0.1:${port}`)));
+      res.end(reply.raw ?? (reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body))).replaceAll(BASE, `http://127.0.0.1:${port}`));
     });
   });
   let port = 0;

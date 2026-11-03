@@ -24,7 +24,8 @@ const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
 interface Req { method: string; path: string; headers: http.IncomingHttpHeaders; body: string }
-type Reply = { status: number; body?: unknown; raw?: string; headers?: Record<string, string> } | "drop";
+/** `json`: a JSON body as text (one too deep for JSON.stringify to write); `raw`: a body that is not JSON. */
+type Reply = { status: number; body?: unknown; raw?: string; json?: string; headers?: Record<string, string> } | "drop";
 interface Script {
   post?: Reply;
   /** the n-th GET's answer (0-based) */
@@ -52,7 +53,7 @@ async function fakeService(script: Script): Promise<{ url: string; requests: Req
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
-      res.end(reply.raw ?? (reply.body === undefined ? "" : JSON.stringify(reply.body)));
+      res.end(reply.raw ?? reply.json ?? (reply.body === undefined ? "" : JSON.stringify(reply.body)));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -862,6 +863,24 @@ test("mason deploy: an answer whose deploy's id, status, phase, times, refusal's
       }
     })));
   }
+});
+
+test("mason deploy: an answer nested deeper than any documented shape — 32,000 deep, within the 64 KiB an answer is read to — on the POST or on a poll, is refused by its status, never a crash, for a person or in --json (PR 645's review)", { timeout: 300_000 }, async () => {
+  const { root } = project();
+  const nest = "[".repeat(32_000) + "]".repeat(32_000);
+  const cases: Array<[what: string, script: Script, where: string]> = [
+    ["the POST", { post: { status: 201, headers: { "retry-after": "1" }, json: `{"deploy":{"id":"${ID}","status":"queued","createdAt":"${CREATED}"},"x":${nest}}` } },
+      "POST /v1/replicas/acme/shop/deploys with 201, where a deploy was sent"],
+    ["a poll", { get: () => ({ status: 200, json: `{"deploy":{"id":"${ID}","status":"running","createdAt":"${CREATED}","finishedAt":"${CREATED}"},"x":${nest}}` }) },
+      `GET /v1/replicas/acme/shop/deploys/${ID} with 200, where the deploy's state was asked for`],
+  ];
+  await Promise.all(cases.flatMap(([what, script, where]) => [false, true].map(async (json) => {
+    const { a } = await deployWith(script, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    const said = `${a.stdout}\n${a.stderr}`;
+    assert.equal(a.code, 1, `${what}${json ? ", --json" : ""}: ${said}`);
+    assert.ok((json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr).includes(` answered ${where}`), `${what}: said by its status:\n${said}`);
+    assert.doesNotMatch(said, /call stack|RangeError|bug in mason/, what);
+  })));
 });
 
 test("no run of mason deploy printed a token, nor anything shaped as one", () => {

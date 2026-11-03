@@ -6,7 +6,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { carriesNoSecret, codeOfStatus, DEFAULT_SERVICE_URL, deviceName, deviceOf, ECHO_RUN, isFailure, meOf, oauthFailure, serviceOf, serviceText, urlProblem, type Answer } from "../src/cli/hosted.ts";
+import { punyLabels } from "./hosted-fake.ts";
+import { carriesNoSecret, codeOfStatus, echoesSecret, DEFAULT_SERVICE_URL, deviceName, deviceOf, ECHO_RUN, isFailure, MAX_ANSWER_DEPTH, meOf, oauthFailure, serviceOf, serviceText, urlProblem, type Answer } from "../src/cli/hosted.ts";
 import { deployStateOf } from "../src/cli/deploy.ts";
 import { credentialsPath, environmentToken, parseLogins } from "../src/cli/credentials.ts";
 
@@ -302,4 +303,66 @@ test("an honest answer of deploy and login — every value high-entropy, random 
     if (!carriesNoSecret({ error: b64(30).toLowerCase().replace(/[^a-z]/g, "_") }, [saved])) problems.push(`an OAuth refusal, token ${i}`);
   }
   assert.deepEqual(problems, []);
+});
+
+// ------------------------------------------------------------------ what is printed is what is tested (PR 645's review)
+
+test("a sign-in page is tested as the URL parser prints it: dot segments that join pieces of a held secret, in either page and either spelling, and a host whose xn-- form spells one, each refuse the device code's answer, nothing of it printed; an honest page is printed as before", () => {
+  const pieces = BODY.match(/.{1,10}/g)!;
+  const problems: string[] = [];
+  for (const dots of ["..", "%2E%2E", "%2e%2e", ".%2E", null]) {
+    // (null: the pieces as they would be printed, written so: the same page)
+    const page = `${SERVICE.base}/device/${pieces.join(dots === null ? "/" : `/x/${dots}/`)}`;
+    // the answer's own string holds no 11 of the body in a row (an `x` between each two pieces): the walk alone would take it
+    if (dots !== null) assert.ok(carriesNoSecret({ page }, [TOKEN]), `${dots}: the raw page reads as no echo`);
+    assert.ok(new URL(page).href.includes(pieces.join("/")), `${dots}: the parser joins the pieces`);
+    for (const field of ["verification_uri", "verification_uri_complete"]) {
+      if (deviceRead(device({ [field]: page }), [TOKEN]) !== null) problems.push(`${field}, ${dots}: taken`);
+    }
+  }
+  const labels = punyLabels(BODY, 3);
+  assert.ok(labels.length >= 2, `labels found: ${labels.length}`);
+  for (const field of ["verification_uri", "verification_uri_complete"]) {
+    const page = `https://${labels.join(".")}.example/device`;
+    assert.ok(carriesNoSecret({ page }, [TOKEN]), "the raw host reads as no echo");
+    const d = deviceOf(SERVICE, answer(200, device({ [field]: page })), [TOKEN]);
+    if (!isFailure(d) || /another address/.test(d.message) || d.message.includes("xn--")) problems.push(`${field}, a punycode host: ${JSON.stringify(d)}`);
+  }
+  assert.deepEqual(problems, []);
+  // honest: a page on the service's own origin as the parser writes it, and another address named
+  const ok = deviceOf(SERVICE, answer(200, device({ verification_uri_complete: `${SERVICE.base}/device/./a/../?user_code=WDJBMJHT` })), [TOKEN]);
+  assert.ok(!isFailure(ok) && ok.verificationUriComplete === `${SERVICE.base}/device/?user_code=WDJBMJHT`, JSON.stringify(ok));
+  const elsewhere = deviceOf(SERVICE, answer(200, device({ verification_uri: "https://bücher.example/device" })), [TOKEN]);
+  assert.ok(isFailure(elsewhere) && elsewhere.message === `${SERVICE.base} named a sign-in page on another address: https://xn--bcher-kva.example`, JSON.stringify(elsewhere));
+  // a page that holds no run of 11, but pieces the held secret's mask would take (two of 10, an x between): refused too,
+  // never printed masked nor whole
+  const split = `${SERVICE.base}/device/${pieces[0]}x${pieces[1]}`;
+  assert.ok(carriesNoSecret({ split }, [TOKEN]));
+  assert.equal(deviceRead(device({ verification_uri: split }), [TOKEN]), null);
+  // free text as serviceText prints it: no form of the token, split by what it makes one line, leaves it an echo
+  const echoed: string[] = [];
+  for (const [form, value] of FORMS) {
+    for (const v of [value("letters"), value("digits"), `${value("letters")}\n${value("digits")}`, pieces.join("\u0000"), pieces.join("\u202e  ")]) {
+      const line = serviceText(`said: ${v}`, 2000, [TOKEN], new Map());
+      if (echoesSecret(line, [TOKEN])) echoed.push(`serviceText, ${form}: ${line}`);
+    }
+  }
+  assert.deepEqual(echoed, []);
+});
+
+test("an answer nested deeper than any documented shape is refused, never a crash: the walk keeps its own stack, at 31 deep it reads, past MAX_ANSWER_DEPTH it refuses, and 500,000 deep (1 MiB) it refuses at once", () => {
+  const nest = (n: number): string => "[".repeat(n) + "]".repeat(n);
+  assert.equal(MAX_ANSWER_DEPTH, 32);
+  assert.equal(carriesNoSecret(JSON.parse(`{"x":${nest(MAX_ANSWER_DEPTH - 1)}}`), [TOKEN]), true);
+  assert.equal(carriesNoSecret(JSON.parse(`{"x":${nest(MAX_ANSWER_DEPTH)}}`), [TOKEN]), false);
+  assert.equal(carriesNoSecret(JSON.parse(`{"x":${nest(500_000)}}`), [TOKEN]), false);
+  assert.equal(carriesNoSecret(JSON.parse(nest(500_000)), []), false, "with no secret held too: a depth is no echo, it is outside the contract");
+  // objects as deep: the same
+  const deepObject = `${'{"a":'.repeat(40_000)}1${"}".repeat(40_000)}`;
+  assert.equal(carriesNoSecret(JSON.parse(deepObject), [TOKEN]), false);
+  // each reader: outside the contract, said by its status
+  const deep = JSON.parse(`{"x":${nest(32_000)}}`) as Record<string, unknown>;
+  assert.equal(deployStateOf({ ...(state({}) as object), ...deep }, null, [TOKEN], []), null);
+  assert.ok(isFailure(deviceOf(SERVICE, answer(200, { ...(device({}) as object), ...deep }), [TOKEN])));
+  assert.ok(isFailure(meOf(SERVICE, answer(200, { ...(me() as object), ...deep }, "GET /v1/me"), [TOKEN])));
 });

@@ -318,8 +318,10 @@ CLI lacks).
   `DEFAULT_SERVICE_URL`, its one constant, read by ONE function (`serviceOf`): https, or http to this machine, the
   address alone, refused before any byte is sent. Every answer is untrusted: held to its documented shape, a redirect
   never followed, every token masked; every string of a device code's answer and of who signed in, keys included, put
-  to the exact test first (`carriesNoSecret`, with the login it replaces), and an OAuth refusal's code too, an answer
-  that carries a token refused whole (issue 627). **A service's value is data, never structure and never an instruction**
+  to the exact test first (`carriesNoSecret`, with the login it replaces; its own stack, an answer deeper than
+  `MAX_ANSWER_DEPTH` refused), and an OAuth refusal's code too, an answer that carries a token refused whole (issue 627);
+  a page is tested as the URL parser prints it (`pageUrl`: dot segments removed, a host in its `xn--` form), and a token
+  granted is revoked on every failure before it is saved, a crash included (PR 645). **A service's value is data, never structure and never an instruction**
   (src/cli/hosted.ts's header, PR 481): every string it sends leaves that module as ONE line (`serviceText`, applied at
   the boundary: no line break, control, format or bidi character), so it sits inside a line the CLI writes and never
   starts one — no forged `Next:`, tip, row or failure, for a person or in `--json`; and what to run next, the code and

@@ -267,4 +267,20 @@ test("an honest answer at the contract's largest size — 2000 users, every valu
   assert.ok(short > 0, "a run of 6 is met by chance: the measurement can see the model");
 });
 
+test("mason user --replica: an answer nested deeper than any documented shape — a list 500,000 deep within its 1 MiB, an add 32,000 deep within 64 KiB — is refused by its status, never a crash (PR 645's review: the walk's own stack)", { timeout: 300_000 }, async () => {
+  const nest = (n: number): string => "[".repeat(n) + "]".repeat(n);
+  for (const [what, verb, json, said] of [
+    ["list", ["list"], `{"users":[],"lastUsedNote":null,"urlNote":null,"requestLogDays":7,"x":${nest(500_000)}}`, / answered GET \/v1\/replicas\/acme\/shop\/users\?lastUsed=1 with 200, where /],
+    ["add", ["add", "x"], JSON.stringify(addedAnswer("x")).replace(/}$/, `,"x":${nest(32_000)}}`), / answered POST \/v1\/replicas\/acme\/shop\/users with 200, where /],
+  ] as Array<[string, string[], string, RegExp]>) {
+    for (const form of [[], ["--json"]]) {
+      const { a } = await hosted(() => ({ status: 200, json }), [...verb, "--replica", R, ...form], { names: ["x"] });
+      const all = a.stdout + a.stderr;
+      assert.equal(a.code, 1, `${what} ${form.join(" ")}: ${all}`);
+      assert.match(all, said, what);
+      assert.doesNotMatch(all, /call stack|RangeError|bug in mason/, what);
+    }
+  }
+});
+
 noTokenPrinted(40);

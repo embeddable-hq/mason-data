@@ -7,7 +7,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { BASE, DEVICE, ME, SECRETS, bodyCovered, bodyShown, credentials, echoForms, echoToken, envFor, fakeService, granted, home, mason, newToken, noTokenLeaked, runForms, runToken, saved, showsRun, writeSaved, type Reply, type Script } from "./hosted-fake.ts";
+import { BASE, DEVICE, ME, SECRETS, bodyOf, bodyCovered, bodyShown, credentials, echoForms, echoToken, envFor, fakeService, granted, home, mason, newToken, noTokenLeaked, punyLabels, runForms, runToken, saved, showsRun, writeSaved, type Reply, type Script } from "./hosted-fake.ts";
+import * as os from "node:os";
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import { runMason } from "./cli-matrix.ts";
 
 test("mason login: an answer outside the contract is a failure said by its status, never followed (a redirect) nor repeated (its body), never retried", async () => {
   const echoed = newToken(); SECRETS.push(echoed);
@@ -371,6 +375,78 @@ test("mason login: a device code's answer, an OAuth refusal or who signed in tha
       } finally { await fake.close(); }
     });
   }
+});
+
+test("mason login: a sign-in page is tested as it is printed — dot segments the parser removes to join pieces of the login it replaces, in either page and spelling, pieces its mask would take, a host whose xn-- form spells it — each refuses the device code's answer by its status, nothing of it printed, opened or polled (PR 645's review)", { timeout: 300_000 }, async () => {
+  const old = runToken("pat", 0); SECRETS.push(old);
+  const body = bodyOf(old), pieces = body.match(/.{1,10}/g)!;
+  const labels = punyLabels(body, 3);
+  assert.ok(labels.length >= 2);
+  const pages: Array<[what: string, field: "verification_uri" | "verification_uri_complete", page: string]> = [];
+  for (const field of ["verification_uri", "verification_uri_complete"] as const) {
+    pages.push([`${field}, dot segments`, field, `${BASE}/device/${pieces.join("/x/../")}`], [`${field}, %2E%2E`, field, `${BASE}/device/${pieces.join("/x/%2E%2E/")}`],
+      [`${field}, two pieces of 10, an x between`, field, `${BASE}/device/${pieces[0]}x${pieces[1]}`], [`${field}, a host in xn-- labels`, field, `https://${labels.join(".")}.example/device`]);
+  }
+  await Promise.all(pages.flatMap(([what, field, page]) => [false, true].map(async (json) => {
+    const fake = await fakeService({ device: { status: 200, body: { ...DEVICE, [field]: page } }, token: () => ({ status: 400, body: { error: "access_denied" } }) });
+    try {
+      const h = home();
+      writeSaved(h, { [fake.url]: { token: old, email: "ada@example.com", savedAt: "2026-11-01T00:00:00.000Z" } });
+      const a = await mason(h, ["login", ...(json ? ["--json"] : [])], envFor(h, fake.url));
+      const at = `${what}${json ? ", --json" : ""}`, all = `${a.stdout}\n${a.stderr}`;
+      assert.equal(a.code, 1, `${at}: ${all}`);
+      assert.ok(all.includes(" answered POST /oauth/device/code with 200, where a device code was expected"), `${at}: said by its status:\n${all}`);
+      assert.ok(!showsRun(all, old) && !all.includes("xn--") && !all.toLowerCase().includes(pieces[0]!.toLowerCase()), `${at}: printed the page:\n${all}`);
+      assert.deepEqual(fake.requests.map((r) => r.path), ["/oauth/device/code"], `${at}: never polled`);
+    } finally { await fake.close(); }
+  })));
+});
+
+test("mason login: a device code's answer or who signed in nested deeper than any documented shape (32,000 deep) is refused by its status, never a crash; a token granted before it is revoked, never saved (PR 645's review)", { timeout: 300_000 }, async () => {
+  const token = runToken("pat", 1); SECRETS.push(token);
+  const nest = "[".repeat(32_000) + "]".repeat(32_000);
+  const device = JSON.stringify(DEVICE).replace(/}$/, `,"x":${nest}}`), me = JSON.stringify(ME).replace(/}$/, `,"x":${nest}}`);
+  for (const [what, script, said, granted_] of [
+    ["the device code", { device: { status: 200, json: device } }, " answered POST /oauth/device/code with 200, where a device code was expected", false],
+    ["who signed in", { token: () => granted(token), me: { status: 200, json: me } }, " answered GET /v1/me with 200, where the account signed in was asked for", true],
+  ] as Array<[string, Script, string, boolean]>) {
+    await Promise.all([false, true].map(async (json) => {
+      const fake = await fakeService(script);
+      try {
+        const h = home();
+        const a = await mason(h, ["login", ...(json ? ["--json"] : [])], envFor(h, fake.url));
+        const at = `${what}${json ? ", --json" : ""}`, all = `${a.stdout}\n${a.stderr}`;
+        assert.equal(a.code, 1, `${at}: ${all}`);
+        assert.ok(all.includes(said), `${at}: said by its status:\n${all}`);
+        assert.doesNotMatch(all, /call stack|RangeError|bug in mason/, at);
+        assert.equal(fake.requests.some((r) => r.path === "/oauth/revoke" && r.form.token === token), granted_, `${at}: the token granted is revoked`);
+        assert.equal(fs.existsSync(credentials(h)), false, `${at}: never saved`);
+      } finally { await fake.close(); }
+    }));
+  }
+});
+
+test("mason login: a failure THROWN after the service granted a token — a crash, not a failure said — still revokes the token, and says when the revoke did not reach the service; nothing saved (PR 645's review)", { timeout: 120_000 }, async () => {
+  const token = runToken("pat", 1); SECRETS.push(token);
+  // a crash between who signed in and the save, made by a preload (the file is the seam: nothing in src/ reads a test's
+  // variable): the time the login is saved at cannot be written
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-crash-"));
+  const hook = path.join(dir, "crash.mjs");
+  fs.writeFileSync(hook, `Date.prototype.toISOString = function () { throw new Error("injected crash"); };\n`);
+  try {
+    for (const [what, revoke, said] of [["the revoke taken", undefined, /^✗ mason login: injected crash$/m], ["the revoke not reached", "drop", /^✗ mason login: injected crash; the token the service granted was NOT revoked \(could not reach /m]] as Array<[string, Reply | undefined, RegExp]>) {
+      const fake = await fakeService({ token: () => granted(token), ...(revoke ? { revoke } : {}) });
+      try {
+        const h = home();
+        const a = await runMason(h, ["login"], { ...envFor(h, fake.url), NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` }, 60_000);
+        assert.equal(a.code, 1, `${what}: ${a.stdout}${a.stderr}`);
+        assert.match(a.stderr, said, what);
+        assert.ok(fake.requests.some((r) => r.path === "/oauth/revoke" && r.form.token === token), `${what}: the revoke was asked`);
+        assert.equal(fs.existsSync(credentials(h)), false, `${what}: never saved`);
+        assert.ok(!showsRun(a.stdout + a.stderr, token), `${what}: printed the token`);
+      } finally { await fake.close(); }
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("mason logout: a revoke's answer is never read but for its status — one carrying the token whole, its body, in lower case or 11 of its characters in a row prints none of it, and the login is removed (issue 627)", { timeout: 300_000 }, async () => {
