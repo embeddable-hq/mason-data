@@ -402,6 +402,8 @@ export class DuckStore {
         if (!r.order.bytes) await this.executor.registerLibcOrder(sc.collate ?? "C", r.order, false);
         return r.order;
       } });
+    // the database's own order, held where a plan reads each order by its collcollate (src/duck/libc-bound.ts)
+    if (c.kind === "libc" && libc !== undefined) resolver.hold(c.collate, libc);
     // a jsonb's stored key is this collation's (src/duck/kept.ts `orderBy`)
     await kept?.orderBy(c, c.kind === "libc" ? libc : undefined);
     return {
