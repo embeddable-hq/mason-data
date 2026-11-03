@@ -130,6 +130,19 @@ const DEFINITIONS: Array<{ name: string; schema: string; table: string; sql: str
       "CASE WHEN amount > 0 THEN amount ELSE 0.00 END AS k, greatest(amount, 1)::numeric(12,2) AS gc, -amount * n AS mi FROM ledger",
     orderBy: "id",
     statements: ["SELECT * FROM forms ORDER BY id", "SELECT id, w FROM forms WHERE md = 1.00 ORDER BY w DESC NULLS LAST, id"] },
+  // PR 520's review r1 (shared-node-hoisted-out-of-its-condition): x is read twice, by a CASE arm no row takes, and its
+  // product passes 38 digits; a layer computed for every row overflowed where Postgres computes nothing
+  { name: "guarded", schema: "public", table: "guarded",
+    sql: "SELECT id, CASE WHEN id > 0 THEN amount ELSE x + x END AS v, CASE WHEN id > 1 THEN x + x - x ELSE amount END AS w " +
+      "FROM (SELECT id, amount, amount * 1000000000000000000000000000000 * 1000000000000000000000000000000 AS x FROM ledger WHERE id < 10) s",
+    orderBy: "id",
+    statements: ["SELECT * FROM guarded ORDER BY id"] },
+  // PR 520's review r2 (guard-layers-multiply-the-nesting): eight levels of CASE arms, each reading v three times an arm,
+  // each bounded so Postgres never pulls it up; its guards once met the engine's expression-depth limit
+  { name: "case_chain", schema: "public", table: "case_chain",
+    sql: Array.from({ length: 8 }, (_, k) => k + 1).reduce((s, k) => `SELECT id, CASE WHEN id > 0 THEN v + v - v ELSE v - v + v END AS v FROM (${s}) s${k} ORDER BY id LIMIT 100`, "SELECT id, amount AS v FROM ledger"),
+    orderBy: "id",
+    statements: ["SELECT * FROM case_chain ORDER BY id", "SELECT sum(v) AS s, count(v) AS n FROM case_chain"] },
   { name: "kinds", schema: "public", table: "kinds",
     sql: "SELECT id, mood, name FROM ledger",
     orderBy: null,

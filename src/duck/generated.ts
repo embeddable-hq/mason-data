@@ -822,15 +822,18 @@ export class GeneratedTables {
         const { plan } = p.plan;
         // a computed numeric's DECIMAL arithmetic, over the engine types of the SQL that runs (a parent's side table now
         // there), never assumed: what the check held, the write holds again
-        const stored = !p.plan.columns.some(isNumeric) ? { columns: p.plan.columns } : storedColumns(p.plan, await engineTypes(c, plan.sql.text));
+        const stored = !p.plan.columns.some(isNumeric) ? { columns: p.plan.columns, layers: [] } : storedColumns(p.plan, await engineTypes(c, plan.sql.text));
         // refused here, it is a refusal as the check's are, with its options: never a failure retried on a timer
         if ("refused" in stored) throw new RefusedAtWrite(p.e, stored.refused);
-        const { columns } = stored;
+        const { columns, layers } = stored;
         const params: string[] = [];
         if (plan.clock?.exec !== undefined) params[plan.clock.exec - 1] = new Date(clock.at).toISOString();
         const aliases = columns.map((_, i) => `__mason_c${i}`);
+        // a computed numeric's shared nodes, each written once as a column of its own, a layer over the one before
+        // (src/duck/generated-plan.ts `storedProgram`): the columns' expressions read them by name
+        const from = layers.reduce((inner, layer) => `(SELECT *, ${layer} FROM ${inner}) AS __mason_output`, `(${plan.sql.text}) AS __mason_output(${aliases.join(", ")})`);
         const sql = `CREATE OR REPLACE TABLE ${p.side} (${columns.map((x) => ident(x.name)).join(", ")}) AS SELECT ${columns.map((x, i) => { const v = x.expr ?? aliases[i]!; return x.duck === null ? v : `CAST(${v} AS ${x.duck})`; }).join(", ")} ` +
-          `FROM (${plan.sql.text}) AS __mason_output(${aliases.join(", ")})`;
+          `FROM ${from}`;
         const { rowsChanged } = await this.host.interruptible(() => c.run(sql, params.length > 0 ? params : undefined));
         await this.onStep("written", p.e.name);
         written.push({ e: p.e, side: p.side, target: p.target, n: { definition: p.b.definition, fingerprint: p.b.fingerprint, columns, bases: p.plan.bases,

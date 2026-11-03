@@ -38,7 +38,7 @@ import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
-import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
+import { DEEP_DEPTHS, PLAN_TIME_BOUND_MS, deepChains, deepShapes, numericShapes } from "./deep-chains.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -131,6 +131,10 @@ const DDL = [
   // quotients equal to a double's 17 digits that Postgres tells apart (PR 207's class round)
   "CREATE TABLE public.bigdec (id INTEGER PRIMARY KEY, x DECIMAL(30,20), y DECIMAL(30,20))",
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
+  // issue 244's deep chains executed (#484): `deepShapes`' table, ten rows of NULLs, duplicates, ties, a padded char(4)
+  "CREATE TABLE public.deep_t (id INTEGER PRIMARY KEY, a INTEGER, b VARCHAR, c DECIMAL(10,2), d VARCHAR)",
+  "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab  '), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a   '), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz  '), " +
+    "(6, 2, 'y', NULL, 'b   '), (7, 9, 'x', 1.01, 'ab  '), (8, -1, 'w', 3.33, 'c   '), (9, 4, NULL, 2.50, 'd   '), (10, 1, 'v', -0.01, 'e   ')",
   "CREATE TABLE public.ratios (id INTEGER PRIMARY KEY, a DECIMAL(15,4), b DECIMAL(15,4), d DATE, team VARCHAR, n INTEGER)",
   "INSERT INTO public.ratios VALUES (1, 0.3, 0.1, '2026-01-02', '1st', 3), (2, 0.9, 0.3, NULL, '2nd', 5), (3, 0.7, 0.1, '2025-12-31', 'x', 10), (4, 2.1, 0.3, NULL, '3rd', 11)",
   // the BI-tools test: foreign keys to a unique index and to a UNIQUE constraint
@@ -207,6 +211,9 @@ const PG_DDL = [
   "CREATE TABLE public.big AS SELECT g AS id, 'v' || g AS v FROM generate_series(0, 149999) g",
   "CREATE TABLE public.bigdec (id integer PRIMARY KEY, x numeric(30,20), y numeric(30,20))",
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
+  "CREATE TABLE public.deep_t (id integer PRIMARY KEY, a integer, b text, c numeric(10,2), d char(4))",
+  "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab'), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a'), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz'), " +
+    "(6, 2, 'y', NULL, 'b'), (7, 9, 'x', 1.01, 'ab'), (8, -1, 'w', 3.33, 'c'), (9, 4, NULL, 2.50, 'd'), (10, 1, 'v', -0.01, 'e')",
   "CREATE TABLE public.ratios (id integer PRIMARY KEY, a numeric(15,4), b numeric(15,4), d date, team text, n integer)",
   "INSERT INTO public.ratios VALUES (1, 0.3, 0.1, '2026-01-02', '1st', 3), (2, 0.9, 0.3, NULL, '2nd', 5), (3, 0.7, 0.1, '2025-12-31', 'x', 10), (4, 2.1, 0.3, NULL, '3rd', 11)",
   "CREATE TABLE public.uparent (id integer PRIMARY KEY, code text, ref text UNIQUE)",
@@ -282,6 +289,8 @@ const schema: PgSchema = {
     { name: "big", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "text" }] },
     { name: "bigdec", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "x", type: "numeric", spelled: "numeric(30,20)" }, { name: "y", type: "numeric", spelled: "numeric(30,20)" }] },
+    { name: "deep_t", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "a", type: "int4" }, { name: "b", type: "text" }, { name: "c", type: "numeric", spelled: "numeric(10,2)" }, { name: "d", type: "text", spelled: "character(4)" }] },
     { name: "ratios", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "a", type: "numeric", spelled: "numeric(15,4)" }, { name: "b", type: "numeric", spelled: "numeric(15,4)" },
         { name: "d", type: "date" }, { name: "team", type: "text" }, { name: "n", type: "int4" }] },
@@ -487,7 +496,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -5761,8 +5770,7 @@ test("a grouped collated output ordered by number, name or expression is its col
 // below more than once grew 3^depth (depth 12 took 880 ms, 16 about 70 s) on the planning thread every session waits
 // on, whatever the column's type. The class: work on the wire's path for a reader only another path has, with no bound
 // on its size. The decision: the wire never computes what only a generated table reads, and the walk is linear in the
-// analysed tree. (An int8: a numeric's nested and WITH chains are "issue 244" below, #483; its UNION ALL chain, whose
-// program is copied into each reference, is #484's)
+// analysed tree. (An int8 and a float8, which carry no program: a numeric's chains are "issue 244" below, #483 and #484)
 test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
   const catalogDb = new PGlite();
   try {
@@ -5772,12 +5780,12 @@ test("round 14: a wire statement's plan computes no generated table's outputs, a
       base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
     // a first plan pays the catalog's and the parser's start: untimed
     await plan("SELECT 1::numeric AS a");
-    for (const depth of DEEP_DEPTHS) for (const [shape, sql] of Object.entries(deepChains("1::int8", depth))) {
+    for (const bottom of ["1::int8", "1::float8"]) for (const depth of DEEP_DEPTHS) for (const [shape, sql] of Object.entries(deepChains(bottom, depth))) {
       const started = performance.now();
       const planned = await plan(sql);
       const ms = performance.now() - started;
-      assert.equal(planned.outputs, undefined, `${shape}: the wire's plan holds the generated planner's outputs`);
-      assert.ok(ms < 500, `${shape}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
+      assert.equal(planned.outputs, undefined, `${shape} over ${bottom}: the wire's plan holds the generated planner's outputs`);
+      assert.ok(ms < 500, `${shape} over ${bottom}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
     }
   } finally { await catalogDb.close(); }
 });
@@ -5791,8 +5799,8 @@ const EXPECTED_244: Record<string, string> = { 0: "as Postgres: 42804", 1: "as P
 // 768 ms at depth 8 and 99 s at 12 on main, the WITH chain 3.4 s at 8), on the planning thread every session waits on.
 // The class: a fact derived again at every reference. The decision: each is taken once per (query, output index)
 // (`decided`, src/duck/rewrite.ts), copied with its query, never recorded from inside an open recursive cycle or from
-// the walk's guard, and dropped when a `*` is written out in place. (The UNION ALL chain, whose PROGRAM is copied into
-// each reference, is #484's, and is not run here)
+// the walk's guard, and dropped when a `*` is written out in place. The UNION ALL chain, whose PROGRAM was copied into
+// each reference (3^depth: 62 ms at depth 8 on main, a record of 360 KB), is in since #484, which shares it ("issue 484")
 test("issue 244: a numeric read three times a level through every level is planned within the bound, and answered as Postgres", async () => {
   const catalogDb = new PGlite();
   try {
@@ -5802,7 +5810,7 @@ test("issue 244: a numeric read three times a level through every level is plann
       base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
     // a first plan pays the catalog's and the parser's start: untimed
     await plan("SELECT 1::numeric AS a");
-    for (const depth of DEEP_DEPTHS) for (const shape of ["nested", "with"] as const) {
+    for (const depth of DEEP_DEPTHS) for (const shape of ["nested", "with", "union"] as const) {
       const sql = deepChains("1::numeric", depth)[shape]!, started = performance.now();
       await plan(sql);
       const ms = performance.now() - started;
@@ -5879,6 +5887,108 @@ test("issue 244: a numeric read three times a level through every level is plann
       natural("b.x / 1", "b.x / 1 + 1"),
     ].entries()) outcomes[String(i)] = await outcome(sql);
     assert.deepEqual(outcomes, EXPECTED_244);
+  } finally { await c.end(); }
+});
+
+// ISSUE 244, piece 2 (#484): a carried column's exact-numeric PROGRAM was copied into each reference to it, so a level
+// reading the column below k times held k copies of the level below's: k^depth nodes, whatever piece 1 memoised. On
+// main #344's statement (every level bounded, over a quotient) sent 1.5 MB at depth 8, the mixed-scale union chain 3.6
+// MB, its depth 10 failed to deparse (the program's literal's size: the rewritten tree's depth is two parentheses a
+// level at main and here alike) and its depth 32 ran out of memory. The class: a value copied where it is shared. The
+// decision: a program read by several references is ONE node they share (`carried`, src/duck/rewrite.ts), and every
+// reader is linear in its distinct nodes (src/lib/pg-numeric.ts: the one text, evaluation once a node a row, lazy).
+// Executed at depth 32 over `deep_t`, each held to Postgres's answer of the equivalent shallow statement (Postgres is
+// never asked the deep one: its own pull-up grows 3^depth), within a bound named from the integer forms' time; at depth
+// 4 each held to Postgres directly; and every reader of a shared program over values two doubles tie.
+test("issue 484: a numeric's program shared by its references is executed at depth 32 within the bound, and read as Postgres reads it", async (t) => {
+  const c = await client();
+  const over = (sql: string): string => sql.replace(/\bFROM t\b/g, "FROM deep_t");
+  const shapes = (depth: number) => {
+    const s = numericShapes(depth);
+    return { "c + c - c": s["c + c - c"], "q + q - q": s["q + q - q"], "344": s["344"], "mixed-scale union, nested": s["mixed-scale union, nested"], "mixed-scale union, a chain": s["mixed-scale union, a chain"] };
+  };
+  try {
+    // THE BOUND: the integer forms of `deepShapes` at depth 32 executed here (the review's deep variant form, which no
+    // program reads), and the numeric ones within max(2 x PLAN_TIME_BOUND_MS, 2 x the slower integer form's time). Each
+    // statement once, so none is answered from what an earlier one left; the session and the table warmed first
+    await answer(c, "SELECT count(*) FROM deep_t");
+    const integer = deepShapes(32);
+    let integerMs = 0;
+    for (const shape of ["order by and limit", "union, a bound at every level"]) {
+      const started = performance.now();
+      await answer(c, over(integer[shape]!));
+      const ms = performance.now() - started;
+      t.diagnostic(`${shape} (integers) at depth 32: ${ms.toFixed(0)} ms`);
+      integerMs = Math.max(integerMs, ms);
+    }
+    const bound = Math.max(2 * PLAN_TIME_BOUND_MS, 2 * integerMs);
+    const arm = "SELECT a, d FROM deep_t";
+    const shallow = (depth: number): Record<keyof ReturnType<typeof shapes>, string> => ({
+      "c + c - c": "SELECT c FROM deep_t ORDER BY 1",
+      "q + q - q": "SELECT c / 3 AS q FROM deep_t ORDER BY 1",
+      "344": "SELECT c / 3 AS a, b FROM deep_t ORDER BY a, b LIMIT 100",
+      "mixed-scale union, nested": `SELECT a, b FROM (SELECT c / 3 AS a, b FROM deep_t UNION ALL ${arm}) s ORDER BY a, b LIMIT 100`,
+      "mixed-scale union, a chain": `SELECT a, b FROM (SELECT c / 3 AS a, b FROM deep_t${` UNION ALL ${arm}`.repeat(depth)}) s ORDER BY a, b LIMIT 100`,
+    });
+    // climbing, so a walk that grows with the expansion fails the bound by name at 12 (main: seconds, or a statement it
+    // cannot write) instead of running out of memory at 32
+    for (const depth of [12, 32]) for (const [shape, sql] of Object.entries(shapes(depth)) as Array<[keyof ReturnType<typeof shapes>, string]>) {
+      const started = performance.now();
+      const got = await answer(c, over(sql));
+      const ms = performance.now() - started;
+      t.diagnostic(`${shape} at depth ${depth}: ${ms.toFixed(0)} ms (bound ${bound.toFixed(0)} ms, the integer forms ${integerMs.toFixed(0)} ms)`);
+      assert.ok(ms < bound, `${shape}: answered in ${ms.toFixed(0)} ms at depth ${depth}, past the bound of ${bound.toFixed(0)} ms (the integer forms ${integerMs.toFixed(0)} ms)`);
+      assert.deepEqual(got, await postgres(shallow(depth)[shape]), `${shape} at depth ${depth}`);
+    }
+    // depth 4: Postgres answers each itself
+    assert.deepEqual(await unlike(c, Object.values(shapes(4)).map((sql) => [over(sql), "ordered"] as const)), []);
+    // THE READERS of a shared program: three levels of `q + q - q` over values two doubles tie, each reader of it
+    const level = (bottom: string, depth: number): string => {
+      let s = bottom;
+      for (let i = 1; i <= depth; i++) s = `SELECT q + q - q AS q, id FROM (${s}) s${i}`;
+      return s;
+    };
+    const s3 = `(${level("SELECT b.x / 1 AS q, b.id FROM bigdec b", 2)}) s3`;
+    const nullable = `(${level("SELECT NULLIF(b.x, 2.5) / 1 AS q, b.id FROM bigdec b", 2)}) s3`;
+    assert.deepEqual(await unlike(c, [
+      [`${level("SELECT b.x / 1 AS q, b.id FROM bigdec b", 2)} ORDER BY 1, 2`, "ordered"],
+      [`SELECT q, q::text, q::float8, q::int FROM ${s3} ORDER BY 1, 2`, "ordered"],
+      [`SELECT DISTINCT q FROM ${s3} ORDER BY 1`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY q ORDER BY 1`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY q ORDER BY q`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY q ORDER BY s3.q`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY 1 ORDER BY 1`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES`, "ordered"],
+      [`SELECT DISTINCT ON (q) q, id FROM ${s3} ORDER BY q, id LIMIT 3`, "ordered"],
+      [`SELECT sum(q), min(q), max(q), avg(q) FROM ${s3}`, "ordered"],
+      [`SELECT q, rank() OVER (ORDER BY q), sum(q) OVER (ORDER BY id) FROM ${s3} ORDER BY id`, "ordered"],
+      [`SELECT count(*) FROM ${s3} WHERE q = 1.00000000000000000001`, "ordered"],
+      [`SELECT count(*) FROM ${s3} WHERE q <> 1.00000000000000000001`, "ordered"],
+      [`SELECT count(*) FROM ${s3} WHERE q IN (1.00000000000000000001, 2.5)`, "ordered"],
+      [`SELECT count(*) FROM ${s3} WHERE q = (SELECT max(q) FROM (${level("SELECT b.x / 1 AS q, b.id FROM bigdec b", 2)}) z)`, "ordered"],
+      // the untaken arm of a shared program is never computed (Postgres raises 22012 only for a row that takes it)
+      [`SELECT id, CASE WHEN id > 2 THEN q + q ELSE (q + q) / 0 END AS v FROM ${s3} WHERE id > 2 ORDER BY 1`, "ordered"],
+      [`SELECT id, coalesce(q, q / 0) FROM ${s3} ORDER BY 1`, "ordered"],
+      [`SELECT id, CASE WHEN id > 2 THEN q + q ELSE (q + q) / 0 END AS v FROM ${s3} ORDER BY 1`, "ordered"],
+      // the nulls idiom, and NULLS FIRST over a NULL at the bottom
+      [`SELECT q FROM ${s3} ORDER BY q IS NULL, q`, "ordered"],
+      [`SELECT q FROM ${nullable} ORDER BY q IS NULL, q`, "ordered"],
+      [`SELECT q FROM ${nullable} ORDER BY 1 NULLS FIRST`, "ordered"],
+      // a `*` beside the shared column
+      [`SELECT *, q FROM ${s3} ORDER BY 2, 1`, "ordered"],
+      // exactArms over shared arms built apart: equal trees decide as main did; and scales that differ
+      [`SELECT q FROM ${s3} UNION ALL SELECT q FROM (${level("SELECT b.x / 7 AS q, b.id FROM bigdec b", 2)}) t3 ORDER BY 1`, "ordered"],
+      [`SELECT q FROM ${s3} UNION ALL SELECT q FROM (${level("SELECT b.x / 1 AS q, b.id FROM bigdec b", 2)}) t3 ORDER BY 1`, "ordered"],
+      [`SELECT q FROM ${s3} UNION ALL SELECT b.x FROM bigdec b ORDER BY 1`, "ordered"],
+      // a VALUES arm beside a shared program
+      [`SELECT q FROM ${s3} UNION ALL VALUES (1.5) ORDER BY 1`, "ordered"],
+    ]), []);
+    // a parameter beside a shared program, executed again after a later SET
+    const prepared = { name: "issue484", text: `SELECT q + q - $1 AS q FROM ${s3} ORDER BY 1`, values: ["0.5"], rowMode: "array", types: raw } as pg.QueryConfig;
+    const want = (await postgres(prepared.text, ["0.5"])).rows;
+    assert.deepEqual((await c.query(prepared)).rows, want);
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    assert.deepEqual((await c.query(prepared)).rows, want);
   } finally { await c.end(); }
 });
 
