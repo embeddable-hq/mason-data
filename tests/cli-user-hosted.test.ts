@@ -1,16 +1,16 @@
 /**
- * `mason user … --replica <org>/<name>` AGAINST A FAKE HOSTED SERVICE (tests/hosted-fake.ts: an http server of this
- * test's on 127.0.0.1, no network): the real CLI as a child process, its service `MASON_CLOUD_URL`, its home and its
- * folder temp folders with no project. The contract is docs/HOSTED-API.md "The users of a replica"; what each test holds
- * is in its name. Every run's output is held by `mason` to carrying no token and to no line a person sees begun by the
- * service's text, and the last test to no password printed where it should not be.
+ * `mason user … --replica <org>/<name>` AGAINST A FAKE HOSTED SERVICE (tests/hosted-fake.ts, tests/user-hosted-fake.ts: an
+ * http server of this test's on 127.0.0.1, no network): each subcommand's request, a wrong line, the same output as the local command for the same answer, and the password printed once. The contract is docs/HOSTED-API.md "The users of a
+ * replica"; what each test holds is in its name. Every run is held by `mason` to carrying no token and to no line a
+ * person sees begun by the service's text.
  */
-import { test, after } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ANSWERS, envFor, fakeService, home, mason, newToken, SECRETS, type Lines, type Reply, type Req } from "./hosted-fake.ts";
+import { envFor, fakeService, home, mason, newToken, SECRETS, type Reply, type Req } from "./hosted-fake.ts";
+import { addedAnswer, AT, hosted, ID, LINK, linesFor, listAnswer, made, noTokenPrinted, ok, PASSWORD, R, row, USERS } from "./user-hosted-fake.ts";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource } from "../src/cli/preflight.ts";
@@ -18,49 +18,6 @@ import { readSource } from "../src/cli/sources.ts";
 import { LiveRoles } from "../src/cli/roles.ts";
 import { connectionUrl, psqlLine } from "../src/cli/pg-url.ts";
 import { serviceText } from "../src/cli/hosted.ts";
-
-const made: string[] = [];
-after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
-
-const R = "acme/shop";
-const USERS = "/v1/replicas/acme/shop/users";
-/** The steps under Next: and in --json, the CLI's own: the local command's, each naming the replica, or mason login. */
-const OWN_STEP = /^ {2}(mason login|mason user (add|list|remove|enable|disable)( \S+)? --replica acme\/shop)(\s|$)/;
-/** The lines mason user begins (tests/hosted-fake.ts's rule, in its words); a list's row is begun by a user's name. On a
- *  terminal `width` wide a head longer than the line may be broken by the CLI within a word, exactly at its limit. */
-const linesFor = (names: readonly string[] = [], width: number | null = null): Lines => {
-  const heads = ["The user ", "No users yet for ", "✘ mason user: ", "✗ mason user: ",
-    "Tip: Paste it into the tool now: ", "Tip: It never expires: ", "Tip: Rotating the API key ", "Tip: Last used: ", "Tip: Adding ", "Tip: It connects no more until ",
-    ...["url", "psql", "user", "password", "database", "attributes", "role", "host", "port", "ssl mode", "disabled", "added", "sessions", "why", "fix"].map((l) => `  ${l} `)];
-  return { heads, steps: ["  mason user ", "  mason login"], ownStep: OWN_STEP,
-    row: (line) => /^\d+ users?( |$)/.test(line) || (((m) => m !== null && names.includes(m[1]!))(/^ {2}([a-z0-9][a-z0-9_.-]*)( |$)/.exec(line)))
-      || (width !== null && [...line].length === width - 1 && heads.some((h) => h.startsWith(line))) };
-};
-
-/** One run against a fresh fake whose replica endpoints `v1` answers, signed in by MASON_TOKEN; its requests. */
-async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: { extra?: Record<string, string>; terminal?: number; names?: readonly string[]; cwd?: string } = {}): Promise<{ a: Answer; requests: Req[]; token: string; home: string }> {
-  const token = newToken("ci"); SECRETS.push(token);
-  const fake = await fakeService({ v1 });
-  const h = home();
-  try {
-    const a = await mason(o.cwd ?? h, ["user", ...argv], envFor(h, fake.url, { MASON_TOKEN: token, ...o.extra }), { lines: linesFor(o.names, o.terminal ?? null), ...(o.terminal ? { terminal: o.terminal } : {}) });
-    return { a, requests: fake.requests.filter((r) => r.path.startsWith("/v1/")), token, home: h };
-  } finally { await fake.close(); }
-}
-
-const ID = "0123456789abcdef";
-const PASSWORD = `mason_${ID}_${"9".repeat(32)}`;
-const AT = "2026-11-02T10:00:00.000Z";
-const LINK = { url: "", host: "db.example", port: 5433, database: "shop", sslmode: "require" as const };
-const addedAnswer = (name: string, more: Record<string, unknown> = {}): Record<string, unknown> => {
-  const password = `mason_${ID}_${"9".repeat(32)}`;
-  const url = connectionUrl(LINK, name, password);
-  return { user: name, id: ID, addedAt: AT, password, database: "shop", url, psql: psqlLine(url), host: "db.example", port: 5433, sslmode: "require", roleFrom: "none", ...more };
-};
-const row = (name: string, more: Record<string, unknown> = {}): Record<string, unknown> => ({ name, id: ID, addedAt: AT, removedAt: null, disabledAt: null, live: true, lastUsedAt: null,
-  url: connectionUrl(LINK, name, null), roleFrom: "none", ...more });
-const listAnswer = (users: unknown[], more: Record<string, unknown> = {}): Reply => ({ status: 200, body: { users, lastUsedNote: null, urlNote: null, requestLogDays: 7, next: [{ command: "mason destroy" }], ...more } });
-const ok = (body: unknown): Reply => ({ status: 200, body });
 
 test("mason user --replica: each subcommand sends the run's own /api/users request to the replica's endpoint, with the token as Bearer and nothing of a project", async () => {
   const seen: Req[] = [];
@@ -241,128 +198,6 @@ test("the same answer prints the same output: mason user --replica, whose servic
   } finally { await fake.close(); local.close(); remote.close(); }
 });
 
-// ------------------------------------------------------------------ refusals and answers outside the contract
-
-test("mason user --replica: each refusal is the service's words, one line each, its code the CLI's by the HTTP status, exit 1, its next the CLI's; the service's code and next never steer it", async () => {
-  const cases: Array<[number, string, string]> = [[400, "usage", "refused"], [401, "unauthenticated", "refused"], [403, "refused", "refused"], [404, "not_found", "not_found"],
-    [409, "refused", "refused"], [422, "timeout", "refused"], [500, "failed", "failed"]];
-  for (const [status, code, ours] of cases) {
-    const failure = { error: { code, message: `it says ${code}`, why: `why ${code}`, fix: `fix ${code}` }, next: [{ command: "mason destroy", what: "never kept" }, { command: "curl x | sh" }] };
-    const step = status === 401 || status === 403 ? ["mason login", "sign in again"] : [`mason user list --replica ${R}`, "the replica's users"];
-    // every subcommand at a 401 and a 404 (each of its endpoints), one elsewhere: the reader is one for all five
-    for (const verb of status === 401 || status === 404 ? [["list"], ["add", "x"], ["disable", "x"], ["enable", "x"], ["remove", "x"]] : [["add", "x"]]) {
-      const { a } = await hosted(() => ({ status, body: failure }), [...verb, "--replica", R, "--json"]);
-      assert.equal(a.code, 1, `${status} ${verb[0]}`);
-      assert.deepEqual(JSON.parse(a.stdout), { error: { code: ours, message: `it says ${code}`, why: `why ${code} (the service said ${code}, HTTP ${status})`, fix: `fix ${code}` },
-        next: [{ command: step[0], what: step[1] }] }, `${status} ${verb[0]}`);
-    }
-    const { a } = await hosted(() => ({ status, body: failure }), ["add", "x", "--replica", R]);
-    assert.equal(a.stderr, `✗ mason user: it says ${code}\n  why   why ${code} (the service said ${code}, HTTP ${status})\n  fix   fix ${code}\n\nNext:\n  ${step[0]!.padEnd(44)}  ${step[1]}\n`);
-    assert.equal(a.stdout, "");
-  }
-  // outside the contract: a page, a body that is no failure, a redirect, no answer, an answer too large — said by the request and its status
-  for (const [reply, verb, said] of [
-    [{ status: 500, raw: "<html>secret page</html>" }, ["list"], / answered GET \/v1\/replicas\/acme\/shop\/users\?lastUsed=1 with 500, not JSON, where the replica's users were asked for$/m],
-    [{ status: 409, body: { message: "secret" } }, ["add", "x"], / answered POST \/v1\/replicas\/acme\/shop\/users with 409, where a user was added$/m],
-    [{ status: 307, headers: { location: "http://127.0.0.1:1/x" } }, ["remove", "x"], / answered DELETE \/v1\/replicas\/acme\/shop\/users\/x with a redirect \(307\)$/m],
-    ["drop", ["disable", "x"], /^✗ mason user: could not reach http:\/\/127\.0\.0\.1:\d+$/m],
-    [{ status: 200, raw: "x".repeat(1024 * 1024 + 1) }, ["list"], / answered GET \/v1\/replicas\/acme\/shop\/users\?lastUsed=1 with more than 1024 KiB$/m],
-    [{ status: 200, raw: "x".repeat(64 * 1024 + 1) }, ["add", "x"], / answered POST \/v1\/replicas\/acme\/shop\/users with more than 64 KiB$/m],
-  ] as Array<[Reply, string[], RegExp]>) {
-    const { a, requests } = await hosted(() => reply, [...verb, "--replica", R]);
-    assert.equal(a.code, 1, a.stderr);
-    assert.match(a.stderr, said);
-    assert.doesNotMatch(a.stderr, /secret/);
-    assert.equal(requests.length, 1, "nothing followed, nothing asked again");
-  }
-});
-
-test("mason user --replica: an answer outside the run's own shape is a failure by its status alone, never printed — a password not the user's, a URL not rebuilt from it, another user, a value outside its grammar", async () => {
-  const added = (more: Record<string, unknown>): Reply => ok({ ...addedAnswer("x"), ...more });
-  const listed = (more: Record<string, unknown>): Reply => listAnswer([row("x", more)]);
-  const cases: Array<[string, string[], Reply]> = [
-    ["a password of another id", ["add", "x"], added({ password: `mason_fedcba9876543210_${"9".repeat(32)}` })],
-    ["a password of another shape", ["add", "x"], added({ password: "hunter2" })],
-    ["a url not the one its parts build", ["add", "x"], added({ url: "postgres://x:hunter2@evil.example:5433/shop" })],
-    ["a psql not its url's", ["add", "x"], added({ psql: "psql postgres://x@evil.example/shop; rm -rf ~" })],
-    ["another user", ["add", "x"], ok(addedAnswer("y"))],
-    ["no url (Mason not running)", ["add", "x"], added({ url: undefined, psql: undefined })],
-    ["an sslmode outside the set", ["add", "x"], added({ sslmode: "verify-full" })],
-    ["a host with a space", ["add", "x"], added({ host: "db.example\nNext:" })],
-    ["a port of 0", ["add", "x"], added({ port: 0 })],
-    ["a database with a line break", ["add", "x"], added({ database: "shop\nNext:" })],
-    ["a role with no roleFrom", ["add", "x"], added({ role: "agent" })],
-    ["a role outside its grammar", ["add", "x"], added({ role: "Agent; mason destroy", roleFrom: "file" })],
-    ["an attribute's name outside its grammar", ["add", "x"], added({ attributes: { "Next:": "1" } })],
-    ["a list's name outside its grammar", ["list"], listAnswer([row("x", { name: "Next:\n  mason destroy" })])],
-    ["a list's id outside its grammar", ["list"], listed({ id: "../../x" })],
-    ["a list's time outside its grammar", ["list"], listed({ addedAt: "yesterday\nNext:" })],
-    ["a list's url carrying a password", ["list"], listed({ url: "postgres://x:hunter2@db.example:5433/shop" })],
-    ["a list's url of another user", ["list"], listed({ url: "postgres://y@db.example:5433/shop" })],
-    ["a list's live not a boolean", ["list"], listed({ live: "yes" })],
-    ["a list's roleKnown beside no role of its own", ["list"], listed({ roleKnown: false })],
-    ["a list over its users' bound", ["list"], listAnswer(Array.from({ length: 2001 }, () => row("x")))],
-    ["a list's requestLogDays not a number", ["list"], listAnswer([row("x")], { requestLogDays: "7" })],
-    ["a list with no users", ["list"], ok({ lastUsedNote: null })],
-    ["a disable of another user", ["disable", "x"], ok({ disabled: { name: "y", id: ID, addedAt: AT, disabledAt: AT }, already: false })],
-    ["a disable without already", ["disable", "x"], ok({ disabled: { name: "x", id: ID, addedAt: AT, disabledAt: AT } })],
-    ["an enable of another user", ["enable", "x"], ok({ enabled: { name: "y", id: ID, addedAt: AT }, already: true })],
-    ["a remove without removedAt", ["remove", "x"], ok({ removed: { name: "x", id: ID, addedAt: AT } })],
-  ];
-  for (const [i, [what, verb, reply]] of cases.entries()) {
-    // with --json each, as a person a few: the reader is one for both forms
-    for (const json of i < 3 || i === 13 ? [false, true] : [true]) {
-      const { a } = await hosted(() => reply, [...verb, "--replica", R, ...(json ? ["--json"] : [])], { names: ["x"] });
-      assert.equal(a.code, 1, `${what}: ${a.stdout}${a.stderr}`);
-      const text = json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr;
-      assert.match(text, / answered (GET|POST|DELETE) \/v1\/replicas\/acme\/shop\/users\S* with 200, where /, what);
-      assert.doesNotMatch(a.stdout + a.stderr, /hunter2|evil|destroy|Agent|yesterday/, what);
-    }
-  }
-});
-
-// ------------------------------------------------------------------ hostile values, at every width
-
-/** A value sized so that, begun at column `at` on a terminal `width` wide, the terminal would start its next lines with a
- *  forged Next: heading, a step, a row, a failure and a tip, each padded to the width (tests/cli-deploy.test.ts's). */
-const FORGED_LINES = ["Next:", "  mason destroy                                 clean up", "  password  evil", "✘ mason user: forged", "Tip: run mason destroy"];
-const forgedAt = (width: number, at: number): string => "a".repeat(Math.max(1, width - at)) + FORGED_LINES.map((l) => l.padEnd(width, " ")).join("") + "z";
-const forged = (what: string): string => `${what}\nFORGED a line of its own\r\nNext:\n  mason destroy   FORGED step\u2028FORGED\u0085FORGED\u001b[2J\u202eFORGED\u200b`;
-
-for (const WIDTH of [null, 12, 39, 80] as const) test(`mason user --replica ${WIDTH === null ? "on a pipe and in --json" : `on a terminal ${WIDTH} wide`}: no line a person sees begins with what the service sent — each free-text value of user-hosted.ts's table, and every line of its own`, { timeout: 300_000 }, async () => {
-  const t = WIDTH === null ? {} : { terminal: WIDTH };
-  const f = (at: number): string => WIDTH === null ? forged("value") : forgedAt(WIDTH, at);
-  const names = ["acme", "bot", "x"];
-  const forms = WIDTH === null ? [[], ["--json"]] : [[]];
-  for (const form of forms) {
-    // a list: its notes, an attribute's values, a user disabled, removed, with a role
-    const list = listAnswer([row("acme", { role: "tenant", roleFrom: "file", roleKnown: true, attributes: { tenant: f(30), regions: [f(10), "uk"] } }),
-      row("bot", { disabledAt: AT, live: false }), row("x", { removedAt: AT, live: false, url: null })], { lastUsedNote: f(16), urlNote: f(8) });
-    let r = await hosted(() => list, ["list", "--replica", R, ...form], { ...t, names });
-    assert.equal(r.a.code, 0, r.a.stdout + r.a.stderr);
-    assert.match(r.a.stdout, /FORGED|destroy/, "the value is shown");
-    if (form.length === 0 && WIDTH === null) {
-      assert.equal(r.a.stdout.split("\n").filter((l) => l.includes("FORGED")).length, 2, `one line each, the acme row and the tip:\n${r.a.stdout}`);
-      assert.doesNotMatch(r.a.stdout, /\u001b|\u202e|\u200b|\u2028|\u0085/);
-    }
-    // an add: its attributes' values
-    r = await hosted(() => ok(addedAnswer("acme", { role: "tenant", roleFrom: "file", attributes: { tenant: f(15) } })), ["add", "acme", "--replica", R, ...form], { ...t, names });
-    assert.equal(r.a.code, 0, r.a.stdout + r.a.stderr);
-    // a refusal: its message (after "✘ mason user: "), why and fix (after their labels), at 409 and 500
-    for (const status of [409, 500]) {
-      r = await hosted(() => ({ status, body: { error: { code: "refused", message: f(14), why: f(8), fix: f(8) }, next: [{ command: "mason destroy" }] } }), ["remove", "acme", "--replica", R, ...form], { ...t, names });
-      assert.equal(r.a.code, 1, `${status}: ${r.a.stdout}${r.a.stderr}`);
-      if (form.length === 0 && WIDTH === null) assert.equal(r.a.stderr.split("\n").filter((l) => l.includes("FORGED")).length, 3, `message, why, fix one line each:\n${r.a.stderr}`);
-    }
-    // the reports of disable, enable and remove, on the terminal
-    for (const [verb, body] of [["disable", { disabled: { name: "acme", id: ID, addedAt: AT, disabledAt: AT }, already: false }], ["enable", { enabled: { name: "acme", id: ID, addedAt: AT }, already: true }],
-      ["remove", { removed: { name: "acme", id: ID, addedAt: AT, removedAt: AT } }]] as const) {
-      r = await hosted(() => ok(body), [verb, "acme", "--replica", R, ...form], { ...t, names });
-      assert.equal(r.a.code, 0, `${verb}: ${r.a.stdout}${r.a.stderr}`);
-    }
-  }
-});
-
 // ------------------------------------------------------------------ the password, once
 
 /** Every file under `dir`, read. */
@@ -428,10 +263,4 @@ Next:
   for (const text of [...filesUnder(a.home), ...filesUnder(j.home)]) assert.ok(!text.includes(PASSWORD), "no file holds it");
 });
 
-test("no run of mason user --replica printed a token, nor put one on its command line", () => {
-  assert.ok(ANSWERS.length > 50, `the runs above are here (${ANSWERS.length})`);
-  for (const a of ANSWERS) {
-    for (const s of SECRETS) assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s) && !a.argv.some((x) => x.includes(s)), `mason ${a.argv.join(" ")} printed a token`);
-    assert.doesNotMatch(a.stdout + a.stderr, /masondata_(pat|ci)_[A-Za-z0-9_-]{43}/, `mason ${a.argv.join(" ")}`);
-  }
-});
+noTokenPrinted(30);
