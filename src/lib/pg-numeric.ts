@@ -411,115 +411,160 @@ export function aggregateType(agg: "count" | "count_distinct" | "sum" | "average
  * a sum, a count, integer arithmetic) and the literals of the statement, combined as Postgres combines numerics. The
  * body path's average is `div(cell sum, cell count)`; the unrouted path's `round(sum(x) / 100.0, 2)` is
  * `round(div(cell, literal 100.0), 2)`. A NULL cell makes the whole value NULL, as every numeric operator is strict.
+ * Every field is read-only: a program is an immutable value, whose node several parents may share (below), so the
+ * compiler refuses any write to one.
  */
 export type NumericProgram =
-  | { op: "cell"; key: string }
-  | { op: "literal"; text: string }
-  | { op: "add" | "sub" | "mul" | "div"; args: [NumericProgram, NumericProgram] }
-  | { op: "neg"; arg: NumericProgram }
-  | { op: "round"; arg: NumericProgram; scale: number }
-  | { op: "typmod"; arg: NumericProgram; precision: number; scale: number }
-  | { op: "trunc"; arg: NumericProgram; scale: number }
-  | { op: "mod"; args: [NumericProgram, NumericProgram] }
-  | { op: "abs" | "floor" | "ceil"; arg: NumericProgram }
+  | { readonly op: "cell"; readonly key: string }
+  | { readonly op: "literal"; readonly text: string }
+  | { readonly op: "add" | "sub" | "mul" | "div"; readonly args: readonly [NumericProgram, NumericProgram] }
+  | { readonly op: "neg"; readonly arg: NumericProgram }
+  | { readonly op: "round"; readonly arg: NumericProgram; readonly scale: number }
+  | { readonly op: "typmod"; readonly arg: NumericProgram; readonly precision: number; readonly scale: number }
+  | { readonly op: "trunc"; readonly arg: NumericProgram; readonly scale: number }
+  | { readonly op: "mod"; readonly args: readonly [NumericProgram, NumericProgram] }
+  | { readonly op: "abs" | "floor" | "ceil"; readonly arg: NumericProgram }
   /** at least `scale` decimals, never rounded: the display scale Postgres's types give a value DuckDB holds with fewer
    *  (a numeric(65,30) copied as DECIMAL(38,2), its sum) */
-  | { op: "pad"; arg: NumericProgram; scale: number }
+  | { readonly op: "pad"; readonly arg: NumericProgram; readonly scale: number }
   /** the scale the ROWS decide, `scale` an integer program (a sum's: the most decimals a value summed has, numeric.c's
    *  add_var keeping the larger dscale): the value at it, padded, or its trailing zeros dropped — never a digit that is
    *  not zero (the value as it is then: a scale that would cut it is not this value's) */
-  | { op: "rescale"; arg: NumericProgram; scale: NumericProgram }
+  | { readonly op: "rescale"; readonly arg: NumericProgram; readonly scale: NumericProgram }
   /** GREATEST / LEAST: the value itself (its own scale), NULLs skipped; COALESCE: the first that is not NULL */
-  | { op: "greatest" | "least" | "coalesce"; args: NumericProgram[] }
+  | { readonly op: "greatest" | "least" | "coalesce"; readonly args: readonly NumericProgram[] }
   /** stddev / variance of an integer or a numeric from its count, sum and sum of squares (numeric_stddev_internal) */
-  | { op: "stddev"; args: [NumericProgram, NumericProgram, NumericProgram]; sample: boolean; variance: boolean }
+  | { readonly op: "stddev"; readonly args: readonly [NumericProgram, NumericProgram, NumericProgram]; readonly sample: boolean; readonly variance: boolean }
   /** CASE: `index` is the arm the row took (an integer), and only that arm is computed, as Postgres computes only it;
    *  an index past the arms (a CASE with no ELSE) is NULL */
-  | { op: "pick"; index: NumericProgram; args: NumericProgram[] };
+  | { readonly op: "pick"; readonly index: NumericProgram; readonly args: readonly NumericProgram[] };
 
-/** The cells a program reads. */
-export function cellsOf(p: NumericProgram): string[] {
+/**
+ * A PROGRAM IS AN IMMUTABLE VALUE, AND A NODE MAY HAVE SEVERAL PARENTS (issue 244, #484): a FROM item's column read k
+ * times by the level above is ONE node those k references share (src/duck/rewrite.ts `carried`), never k copies, so a
+ * chain of levels each reading the one below three times is linear in its depth, not 3^depth. Nothing changes a node
+ * once it is made (a shared node changed would change every reader), and every reader here is linear in the DISTINCT
+ * nodes: `cellsOf`, `evaluate` (each node at most once a row), `mapCells` (sharing kept) and the one text a program
+ * leaves the planner in, `programJson`.
+ */
+
+/** The cells a program reads, each once, in the order a walk from its root first meets them: over its DISTINCT nodes
+ *  (a node several parents share is walked once), memoised per node, since a program is never changed once made. */
+export function cellsOf(p: NumericProgram): readonly string[] {
+  const known = CELLS.get(p);
+  if (known !== undefined) return known;
+  const out = new Set<string>();
+  if (p.op === "cell") out.add(p.key);
+  else for (const child of childrenOf(p)) for (const k of cellsOf(child)) out.add(k);
+  const list = [...out];
+  CELLS.set(p, list);
+  return list;
+}
+const CELLS = new WeakMap<NumericProgram, readonly string[]>();
+
+/** a node's children, in the order its fields are written (an `index` before a pick's arms, a rescale's `scale` after its value) */
+function childrenOf(p: NumericProgram): readonly NumericProgram[] {
   switch (p.op) {
-    case "cell": return [p.key];
-    case "literal": return [];
-    case "add": case "sub": case "mul": case "div": case "mod": return [...cellsOf(p.args[0]), ...cellsOf(p.args[1])];
-    case "neg": case "round": case "typmod": case "trunc": case "abs": case "floor": case "ceil": case "pad": return cellsOf(p.arg);
-    case "greatest": case "least": case "coalesce": case "stddev": return p.args.flatMap(cellsOf);
-    case "pick": return [...cellsOf(p.index), ...p.args.flatMap(cellsOf)];
-    case "rescale": return [...cellsOf(p.arg), ...cellsOf(p.scale)];
+    case "cell": case "literal": return [];
+    case "add": case "sub": case "mul": case "div": case "mod": case "greatest": case "least": case "coalesce": case "stddev": return p.args;
+    case "neg": case "round": case "typmod": case "trunc": case "abs": case "floor": case "ceil": case "pad": return [p.arg];
+    case "pick": return [p.index, ...p.args];
+    case "rescale": return [p.arg, p.scale];
   }
 }
 
-/** The value of a program over one row, or null; throws NumericError where Postgres raises (a division by zero). */
-export function evaluate(p: NumericProgram, row: Readonly<Record<string, unknown>>): PgNumeric | null {
+/** The value of a program over one row, or null; throws NumericError where Postgres raises (a division by zero). Each
+ *  node several parents share is computed AT MOST ONCE for the row (`memo`, one a row), and only where Postgres
+ *  computes it: a CASE's untaken arm and a COALESCE's arguments after the first that is not NULL never are. */
+export function evaluate(p: NumericProgram, row: Readonly<Record<string, unknown>>, memo: Map<NumericProgram, PgNumeric | null> = new Map()): PgNumeric | null {
+  if (memo.has(p)) return memo.get(p)!;
+  const v = evaluateNode(p, row, memo);
+  memo.set(p, v);
+  return v;
+}
+
+function evaluateNode(p: NumericProgram, row: Readonly<Record<string, unknown>>, memo: Map<NumericProgram, PgNumeric | null>): PgNumeric | null {
+  const ev = (x: NumericProgram): PgNumeric | null => evaluate(x, row, memo);
   switch (p.op) {
     case "cell": {
       const v = row[p.key];
       return v === null || v === undefined ? null : numericOf(v);
     }
     case "literal": return parseNumeric(p.text);
-    case "neg": { const a = evaluate(p.arg, row); return a === null ? null : { unscaled: -a.unscaled, scale: a.scale }; }
-    case "round": { const a = evaluate(p.arg, row); return a === null ? null : round(a, p.scale); }
-    case "typmod": { const a = evaluate(p.arg, row); return a === null ? null : withTypmod(a, p.precision, p.scale); }
-    case "trunc": { const a = evaluate(p.arg, row); return a === null ? null : trunc(a, p.scale); }
-    case "pad": { const a = evaluate(p.arg, row); return a === null || a.scale >= p.scale ? a : { unscaled: a.unscaled * pow10(p.scale - a.scale), scale: p.scale }; }
+    case "neg": { const a = ev(p.arg); return a === null ? null : { unscaled: -a.unscaled, scale: a.scale }; }
+    case "round": { const a = ev(p.arg); return a === null ? null : round(a, p.scale); }
+    case "typmod": { const a = ev(p.arg); return a === null ? null : withTypmod(a, p.precision, p.scale); }
+    case "trunc": { const a = ev(p.arg); return a === null ? null : trunc(a, p.scale); }
+    case "pad": { const a = ev(p.arg); return a === null || a.scale >= p.scale ? a : { unscaled: a.unscaled * pow10(p.scale - a.scale), scale: p.scale }; }
     case "rescale": {
-      const a = evaluate(p.arg, row), s = evaluate(p.scale, row);
+      const a = ev(p.arg), s = ev(p.scale);
       if (a === null || s === null || s.scale !== 0 || s.unscaled < 0n) return a;
       const to = Number(s.unscaled);
       if (to >= a.scale) return { unscaled: a.unscaled * pow10(to - a.scale), scale: to };
       const by = pow10(a.scale - to);
       return a.unscaled % by === 0n ? { unscaled: a.unscaled / by, scale: to } : a;
     }
-    case "abs": { const a = evaluate(p.arg, row); return a === null ? null : { unscaled: abs(a.unscaled), scale: a.scale }; }
-    case "floor": { const a = evaluate(p.arg, row); return a === null ? null : floor(a); }
-    case "ceil": { const a = evaluate(p.arg, row); return a === null ? null : ceil(a); }
-    case "coalesce": { for (const x of p.args) { const v = evaluate(x, row); if (v !== null) return v; } return null; }
+    case "abs": { const a = ev(p.arg); return a === null ? null : { unscaled: abs(a.unscaled), scale: a.scale }; }
+    case "floor": { const a = ev(p.arg); return a === null ? null : floor(a); }
+    case "ceil": { const a = ev(p.arg); return a === null ? null : ceil(a); }
+    case "coalesce": { for (const x of p.args) { const v = ev(x); if (v !== null) return v; } return null; }
     case "greatest": case "least": {
       let best: PgNumeric | null = null;
       for (const x of p.args) {
-        const v = evaluate(x, row);
+        const v = ev(x);
         if (v !== null && (best === null || (p.op === "greatest" ? compare(v, best) > 0 : compare(v, best) < 0))) best = v;
       }
       return best;
     }
     case "mod": {
-      const a = evaluate(p.args[0], row), b = evaluate(p.args[1], row);
+      const a = ev(p.args[0]), b = ev(p.args[1]);
       return a === null || b === null ? null : mod(a, b);
     }
     case "pick": {
-      const i = evaluate(p.index, row);
-      const arm = i === null || i.scale !== 0 ? undefined : p.args[Number(i.unscaled)];
-      return arm === undefined ? null : evaluate(arm, row);
+      const arm = takenArm(p, ev);
+      return arm === undefined ? null : ev(arm);
     }
     case "stddev": {
-      const [n, x, x2] = p.args.map((a) => evaluate(a, row));
+      const [n, x, x2] = p.args.map(ev);
       return n === null || n === undefined || x === null || x === undefined || x2 === null || x2 === undefined ? null : stddev(n, x, x2, p.sample, p.variance);
     }
     default: {
-      const a = evaluate(p.args[0], row), b = evaluate(p.args[1], row);
+      const a = ev(p.args[0]), b = ev(p.args[1]);
       if (a === null || b === null) return null;
       return p.op === "add" ? add(a, b) : p.op === "sub" ? sub(a, b) : p.op === "mul" ? mul(a, b) : div(a, b);
     }
   }
 }
 
+/** the arm of a CASE the row took, by its index's value; undefined past the arms (a CASE with no ELSE) or for a NULL index */
+function takenArm(p: Extract<NumericProgram, { op: "pick" }>, ev: (x: NumericProgram) => PgNumeric | null): NumericProgram | undefined {
+  const i = ev(p.index);
+  return i === null || i.scale !== 0 ? undefined : p.args[Number(i.unscaled)];
+}
+
 /** a numeric's special values, as numeric_out writes them (a text read by numeric_in may be one) */
 const SPECIAL = /^(NaN|-?Infinity)$/;
 
 /** A special value the program passes through whole (a cell, padded or under a typmod), else undefined; arithmetic on
- *  one is refused by name (Postgres's NaN and ±Infinity rules are not this module's). */
-function specialOf(p: NumericProgram, row: Readonly<Record<string, unknown>>): string | undefined {
+ *  one is refused by name (Postgres's NaN and ±Infinity rules are not this module's). Once per node for the row
+ *  (`seen`), as `evaluate` is. */
+function specialOf(p: NumericProgram, row: Readonly<Record<string, unknown>>, memo: Map<NumericProgram, PgNumeric | null>, seen: Map<NumericProgram, string | undefined>): string | undefined {
+  if (seen.has(p)) return seen.get(p);
+  const v = specialNode(p, row, memo, seen);
+  seen.set(p, v);
+  return v;
+}
+
+function specialNode(p: NumericProgram, row: Readonly<Record<string, unknown>>, memo: Map<NumericProgram, PgNumeric | null>, seen: Map<NumericProgram, string | undefined>): string | undefined {
   if (p.op === "cell") { const v = row[p.key]; return typeof v === "string" && SPECIAL.test(v) ? v : undefined; }
-  if (p.op === "pad" || p.op === "rescale") return specialOf(p.arg, row);
+  if (p.op === "pad" || p.op === "rescale") return specialOf(p.arg, row, memo, seen);
   // the arm the row took (a special value in another is never read, as Postgres computes only the taken arm)
   if (p.op === "pick") {
-    const i = evaluate(p.index, row);
-    const arm = i === null || i.scale !== 0 ? undefined : p.args[Number(i.unscaled)];
-    return arm === undefined ? undefined : specialOf(arm, row);
+    const arm = takenArm(p, (x) => evaluate(x, row, memo));
+    return arm === undefined ? undefined : specialOf(arm, row, memo, seen);
   }
   if (p.op === "typmod") {
-    const v = specialOf(p.arg, row);
+    const v = specialOf(p.arg, row, memo, seen);
     if (v !== undefined && v !== "NaN") { const o = fieldOverflow(p.precision, p.scale, true); throw new NumericError(o.message, "22003", null, o.detail); }
     return v;
   }
@@ -530,10 +575,103 @@ function specialOf(p: NumericProgram, row: Readonly<Record<string, unknown>>): s
   return undefined;
 }
 
-/** The program's value as `numeric_out` writes it, or null. */
+/** The program's value as `numeric_out` writes it, or null: each node computed at most once for the row. */
 export const evaluateText = (p: NumericProgram, row: Readonly<Record<string, unknown>>): string | null => {
-  const special = specialOf(p, row);
+  const memo = new Map<NumericProgram, PgNumeric | null>();
+  const special = specialOf(p, row, memo, new Map());
   if (special !== undefined) return special;
-  const v = evaluate(p, row);
+  const v = evaluate(p, row, memo);
   return v === null ? null : numericText(v);
 };
+
+/** A program with each cell replaced (a parameter's `$n` too), its SHARING KEPT: a node several parents share is mapped
+ *  once and its one image shared alike, and `f` is asked once per cell node. */
+export function mapCells(p: NumericProgram, f: (key: string) => NumericProgram): NumericProgram {
+  const memo = new Map<NumericProgram, NumericProgram>();
+  const m = (x: NumericProgram): NumericProgram => {
+    const known = memo.get(x);
+    if (known !== undefined) return known;
+    const y = mapNode(x, m, f);
+    memo.set(x, y);
+    return y;
+  };
+  return m(p);
+}
+
+function mapNode(p: NumericProgram, m: (x: NumericProgram) => NumericProgram, f: (key: string) => NumericProgram): NumericProgram {
+  switch (p.op) {
+    case "cell": return f(p.key);
+    case "literal": return p;
+    case "add": case "sub": case "mul": case "div": case "mod": return { op: p.op, args: [m(p.args[0]), m(p.args[1])] };
+    case "neg": case "abs": case "floor": case "ceil": return { op: p.op, arg: m(p.arg) };
+    case "round": case "trunc": case "pad": return { op: p.op, arg: m(p.arg), scale: p.scale };
+    case "typmod": return { op: "typmod", arg: m(p.arg), precision: p.precision, scale: p.scale };
+    case "greatest": case "least": case "coalesce": return { op: p.op, args: p.args.map(m) };
+    case "stddev": return { op: "stddev", args: [m(p.args[0]), m(p.args[1]), m(p.args[2])], sample: p.sample, variance: p.variance };
+    case "pick": return { op: "pick", index: m(p.index), args: p.args.map(m) };
+    case "rescale": return { op: "rescale", arg: m(p.arg), scale: m(p.scale) };
+  }
+}
+
+/**
+ * A PROGRAM AS TEXT, THE ONE FORMAT a program leaves the planner in (the literal `__mason_numeric_program` is given, a
+ * record compared or measured): a table of its nodes, each DISTINCT node written once with its children as their places
+ * in the table, children before parents, and the root's place:
+ * `{"n":[{"op":"cell","key":"0"},{"op":"add","args":[0,0]}],"r":1}`. Its size is linear in the program's distinct
+ * nodes, however many parents share one. It is also the program's STRUCTURAL IDENTITY: each node is interned by its op,
+ * its fields and its children's places, so two programs equal as trees are one text whatever their sharing (a tree and
+ * the same tree built with sharing; two arms built apart), and two that differ are two.
+ */
+export function programJson(p: NumericProgram): string {
+  const nodes: string[] = [], interned = new Map<string, number>(), at = new Map<NumericProgram, number>();
+  const place = (x: NumericProgram): number => {
+    const known = at.get(x);
+    if (known !== undefined) return known;
+    const text = nodeJson(x, place);
+    let i = interned.get(text);
+    if (i === undefined) { i = nodes.length; nodes.push(text); interned.set(text, i); }
+    at.set(x, i);
+    return i;
+  };
+  const root = place(p);
+  return `{"n":[${nodes.join(",")}],"r":${root}}`;
+}
+
+/** one node's entry in `programJson`'s table: its fields in one order whatever order they were made in, a child as its place */
+function nodeJson(p: NumericProgram, place: (x: NumericProgram) => number): string {
+  const j = JSON.stringify;
+  const list = (xs: readonly NumericProgram[]): string => xs.map(place).join(",");
+  switch (p.op) {
+    case "cell": return `{"op":"cell","key":${j(p.key)}}`;
+    case "literal": return `{"op":"literal","text":${j(p.text)}}`;
+    case "add": case "sub": case "mul": case "div": case "mod": case "greatest": case "least": case "coalesce":
+      return `{"op":${j(p.op)},"args":[${list(p.args)}]}`;
+    case "neg": case "abs": case "floor": case "ceil": return `{"op":${j(p.op)},"arg":${place(p.arg)}}`;
+    case "round": case "trunc": case "pad": return `{"op":${j(p.op)},"arg":${place(p.arg)},"scale":${j(p.scale)}}`;
+    case "typmod": return `{"op":"typmod","arg":${place(p.arg)},"precision":${j(p.precision)},"scale":${j(p.scale)}}`;
+    case "stddev": return `{"op":"stddev","args":[${list(p.args)}],"sample":${j(p.sample)},"variance":${j(p.variance)}}`;
+    case "pick": { const index = place(p.index); return `{"op":"pick","index":${index},"args":[${list(p.args)}]}`; }
+    case "rescale": { const arg = place(p.arg); return `{"op":"rescale","arg":${arg},"scale":${place(p.scale)}}`; }
+  }
+}
+
+/** A program from `programJson`'s text: each node made once, every parent of it sharing it (a child's place is always
+ *  before its parent's, so one pass makes them). Throws on a text that is not one. */
+export function parseProgram(text: string): NumericProgram {
+  const raw = JSON.parse(text) as { n?: unknown; r?: unknown };
+  if (!Array.isArray(raw.n) || typeof raw.r !== "number") throw new Error("not a numeric program's text");
+  const made: NumericProgram[] = [];
+  const child = (i: unknown): NumericProgram => {
+    if (typeof i !== "number" || !(i >= 0 && i < made.length)) throw new Error("not a numeric program's text: a child after its parent");
+    return made[i]!;
+  };
+  for (const n of raw.n as Array<Record<string, unknown>>) {
+    const node: Record<string, unknown> = { ...n };
+    if (Array.isArray(n.args)) node.args = (n.args as unknown[]).map(child);
+    if (n.arg !== undefined) node.arg = child(n.arg);
+    if (n.index !== undefined) node.index = child(n.index);
+    if (n.op === "rescale") node.scale = child(n.scale);
+    made.push(node as NumericProgram);
+  }
+  return child(raw.r);
+}

@@ -23,6 +23,9 @@ export interface ApiLogRow {
   caller?: string | undefined;
   /** `postgres:<application_name>` (`postgres:unnamed` for none) */
   client?: string | undefined;
+  /** the client's address (src/api/postgres/proxy.ts `clientAddress`): the socket's peer, or the client a named proxy's
+   *  PROXY header carries; absent on a share's socket, whose peer is the tunnel's */
+  clientAddress?: string | undefined;
   /** the statement as the tool sent it, capped (`storedPayload`) */
   payload?: string | undefined;
   payloadTruncated?: boolean | undefined;

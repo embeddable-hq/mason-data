@@ -1059,7 +1059,7 @@ function computedOf(exact: readonly ExactColumn[], fields: ReadonlyArray<{ name:
 }
 
 /** whether the column's program reads cell j */
-const programReads = (e: ExactColumn, j: number): boolean => JSON.stringify(e.program).includes(`"key":"${j}"`);
+const programReads = (e: ExactColumn, j: number): boolean => cellsOf(e.program).includes(String(j));
 
 /** a statement on one line: whole in the log (its ORDER BY, past 160 characters, was what told a slow preview's
  *  cause), cut where it goes to a client in an error's detail */

@@ -346,7 +346,17 @@ paths:
   output index) — `outputExact`, `approximateAt`, `scalesDiffer`, one record (`decided`) copied by `clone` as `derived`
   is — never recorded from inside an open recursive cycle (`over`'s provisional answer) or from `carry`'s walk-time
   guard, and dropped when a `*` is written out in place; issue 244 (#483), detector tests/duck-plan-time.test.ts and
-  `tests/duck-wire.test.ts` "issue 244".
+  `tests/duck-wire.test.ts` "issue 244". **A carried column's PROGRAM is SHARED by its references, never copied** (#484):
+  every reference to one (FROM item, column) within one program's build is the same node (`carried`, memoised by the
+  build's `cell`), a program is an immutable value (`NumericProgram`'s fields are read-only, so the compiler refuses a
+  write to a shared node), and every consumer is linear in its DISTINCT nodes, through src/lib/pg-numeric.ts, the one
+  authority: the one text a program leaves the planner in (`programJson`, a node table that is also its structural
+  identity, so arms are compared as trees), `parseProgram`, `cellsOf`, `mapCells` (sharing kept), evaluation (each node
+  once a row, a CASE's untaken arm and a COALESCE's later argument never), and a stored numeric
+  (src/duck/generated-plan.ts `storedProgram`: each node judged once, a shared one written once as a layer's column).
+  Never `JSON.stringify` a program, nor recurse over one without a memo: a DAG's tree is k^depth. Detector:
+  tests/duck-plan-time.test.ts (`numericShapes` at depth 32 within the bound, the record linear), `tests/duck-wire.test.ts`
+  "issue 484", tests/pg-numeric.test.ts "a shared program", tests/duck-generated-round11-13-14.test.ts "round 14, a numeric".
 
 ## What a column is
 
@@ -503,3 +513,18 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   CASE, NOT, count(), EXISTS and a derived table read as `s.p IS NULL`, each run at the base and the head: the refusal
   placed at the call instead of where the value's bytes are read, so a nullness-only read the base answered is now
   refused; `refusal-at-the-call-not-the-reader` (PR 519).
+- A refusal placed where an aggregate or value is BUILT (an ordered-set aggregate over an exact quotient, a numeric
+  key), each reader of that value run at the head and the base over `t (a int, c numeric(10,2), d char(4))` with
+  NULLs and ties: the value only ORDERED BY (`SELECT d FROM t GROUP BY d ORDER BY percentile_disc(0.5) WITHIN GROUP
+  (ORDER BY c / 1.6), d`), under FETCH FIRST … WITH TIES, in DISTINCT ON, tested for NULL (`… HAVING
+  percentile_disc(0.5) WITHIN GROUP (ORDER BY c / 3) IS NOT NULL`), compared with a value of its own kind, grouped,
+  partitioned or joined on: a refusal keyed on the value's presence or its place in the statement refuses every
+  reader, including those the base answered right (a statement the base answered and the head refuses blocks). The
+  decision: refuse only where the value's bytes are read as a value, or answer it, decided by ONE reader, never a
+  list of places; `refusal-wider-than-the-wrong-answer` (PR 506).
+- A new entry in `src/duck/gaps.ts` (or a statement added under `tests/integration/oracle/`): run `node --test
+  --test-timeout=300000 --test-force-exit tests/oracle-legs.test.ts` and name, for each new entry, the statement in
+  `oracle/gap-cases.ts` that meets it; then check `tests/fixtures/oracle-duckdb-alone.json` and `src/duck/verified.ts`
+  came from the push's CI legs (`node scripts/oracle-legs.ts --write <run-id>`, then `UPDATE_FIXTURE=1` over
+  `tests/duck-gaps.test.ts`): a gap with no oracle statement meeting it, or a fixture not regenerated, keeps
+  `integration (oracle)` red on every push; `gap-added-without-its-oracle-fixture` (PR 506).

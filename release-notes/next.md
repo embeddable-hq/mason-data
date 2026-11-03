@@ -15,6 +15,26 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Behind a TCP load balancer or proxy, the request log can name each real client**: set `MASON_PG_PROXY_FROM` to the
+  proxy's own addresses (CIDRs, comma-separated) and turn on its PROXY protocol v2 (an NLB's target group, HAProxy's
+  `send-proxy-v2`). A connection from those addresses must then begin with the header, and one from any other address
+  that sends a header is refused. Every request now records the client's address (`client_addr`, `clientAddress` in
+  `mason logs --requests --json`) and the `connected` log line says `from <address>`. Unset, nothing else changes.
+- **`mason login` and `mason logout` sign this machine in to a hosted Mason service, and out of it.** Login prints a
+  page and a code to approve in a browser, then saves the login in `~/.config/mason/credentials.json` (0600), outside
+  every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this
+  machine). Nothing changes for a project, `mason start` or `mason serve`. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md)
+  is the API they speak.
+- **`mason deploy` sends the project to a replica on a hosted Mason service** (`--replica <org>/<name>`, else
+  `MASON_REPLICA`), and waits until the replica runs it or Mason there refuses it. The project is checked first as
+  `mason start` checks it, without connecting to any database; only its YAML under `mason/` is sent, never `.env` or
+  `.mason/`, and a `url:` written with its password is refused. `--dry-run` lists what would be sent and sends nothing.
+- **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
+  ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
+  beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
+  them", and the page's Tables list says why in place of the buttons (`sourcesReadOnly` in `mason status --json`). Before,
+  such an edit ran a config nobody committed, and the next deploy undid it without a word. A value other than `0` or `1`
+  refuses the start. Unset, nothing changes.
 - **Text is now ordered by the collation Postgres would use, wherever it comes from**: a column's own (`name text
   COLLATE "C"` on an en_US or ICU database), a `COLLATE` on either side of a comparison, inside `min()` or one argument
   of `GREATEST`, a derived table's or a view's `COLLATE`, and a libc collation other than the database's (`COLLATE
@@ -235,9 +255,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
 - **A `NULLIF` of a numeric division cast to an integer rounds as Postgres does**: `nullif(x / 1.6, 0)::int` of 4.00
   was `2` and is `3` (half away from zero), in a query and in a generated table, and `nullif(x / y, 0)` shows
-  Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. A cast to an integer of a numeric Mason
-  cannot compute exactly (`percentile_disc` or `mode()` of a division) is refused by name (`numeric-double-integer`)
-  rather than failing with the engine's error; a generated table with one is refused when it is loaded, or, for a double only the rows show, fails its build saying so. Nothing to do
+  Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. `percentile_disc` and `mode()` ordered by a
+  division answer the picked row's exact value, where they answered bytes (`\x3305…`) or the engine's error: printed,
+  cast, compared, tested for NULL, grouped or joined on, in a query and in a generated table. Two kinds are refused by
+  name: an array of fractions over a division (`numeric-ordered-set`: ask for each fraction alone), and a cast to an
+  integer of a double the engine computes, such as `stddev(x)::int` of a numeric without a precision
+  (`numeric-double-integer`: cast to float8 first); a generated table with one fails its build saying so. Nothing to do
   on upgrade.
 - **A numeric `power`, `^` or `exp` past a double's range, cast to `double precision`, now raises Postgres's error.**
   `power(x, 400)::double precision` answered `Infinity`, and a value too small for a double (`(0.01 ^ 170)::float8`)
@@ -303,7 +326,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A statement that reads a numeric through many levels of subqueries or WITH queries plans in milliseconds.** Each
   level that read the level below more than once (`a + a + a` over a derived table, a chain of WITH queries) multiplied
   the work: eight levels took about a second to plan and twelve took over a minute, during which every other session's
-  statements waited. A numeric read through a UNION ALL at every level is not yet covered.
+  statements waited. This now holds too for a numeric whose exact digits Mason works out itself (a quotient such as
+  `amount / 3`, a numeric read through a `UNION ALL` at every level, `c + c - c` at every level): deep nested numerics
+  are planned, answered and stored in a generated table in bounded time. Before, eight such levels sent the synced data
+  several megabytes of SQL and took about a second, and ten failed with an internal error or ran out of memory.
 
 ## Known
 

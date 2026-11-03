@@ -38,7 +38,7 @@ import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
-import { DEEP_DEPTHS, deepChains } from "./deep-chains.ts";
+import { DEEP_DEPTHS, PLAN_TIME_BOUND_MS, deepChains, deepShapes, numericShapes } from "./deep-chains.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -131,6 +131,10 @@ const DDL = [
   // quotients equal to a double's 17 digits that Postgres tells apart (PR 207's class round)
   "CREATE TABLE public.bigdec (id INTEGER PRIMARY KEY, x DECIMAL(30,20), y DECIMAL(30,20))",
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
+  // issue 244's deep chains executed (#484): `deepShapes`' table, ten rows of NULLs, duplicates, ties, a padded char(4)
+  "CREATE TABLE public.deep_t (id INTEGER PRIMARY KEY, a INTEGER, b VARCHAR, c DECIMAL(10,2), d VARCHAR)",
+  "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab  '), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a   '), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz  '), " +
+    "(6, 2, 'y', NULL, 'b   '), (7, 9, 'x', 1.01, 'ab  '), (8, -1, 'w', 3.33, 'c   '), (9, 4, NULL, 2.50, 'd   '), (10, 1, 'v', -0.01, 'e   ')",
   "CREATE TABLE public.ratios (id INTEGER PRIMARY KEY, a DECIMAL(15,4), b DECIMAL(15,4), d DATE, team VARCHAR, n INTEGER)",
   "INSERT INTO public.ratios VALUES (1, 0.3, 0.1, '2026-01-02', '1st', 3), (2, 0.9, 0.3, NULL, '2nd', 5), (3, 0.7, 0.1, '2025-12-31', 'x', 10), (4, 2.1, 0.3, NULL, '3rd', 11)",
   // the BI-tools test: foreign keys to a unique index and to a UNIQUE constraint
@@ -207,6 +211,9 @@ const PG_DDL = [
   "CREATE TABLE public.big AS SELECT g AS id, 'v' || g AS v FROM generate_series(0, 149999) g",
   "CREATE TABLE public.bigdec (id integer PRIMARY KEY, x numeric(30,20), y numeric(30,20))",
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
+  "CREATE TABLE public.deep_t (id integer PRIMARY KEY, a integer, b text, c numeric(10,2), d char(4))",
+  "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab'), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a'), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz'), " +
+    "(6, 2, 'y', NULL, 'b'), (7, 9, 'x', 1.01, 'ab'), (8, -1, 'w', 3.33, 'c'), (9, 4, NULL, 2.50, 'd'), (10, 1, 'v', -0.01, 'e')",
   "CREATE TABLE public.ratios (id integer PRIMARY KEY, a numeric(15,4), b numeric(15,4), d date, team text, n integer)",
   "INSERT INTO public.ratios VALUES (1, 0.3, 0.1, '2026-01-02', '1st', 3), (2, 0.9, 0.3, NULL, '2nd', 5), (3, 0.7, 0.1, '2025-12-31', 'x', 10), (4, 2.1, 0.3, NULL, '3rd', 11)",
   "CREATE TABLE public.uparent (id integer PRIMARY KEY, code text, ref text UNIQUE)",
@@ -282,6 +289,8 @@ const schema: PgSchema = {
     { name: "big", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "text" }] },
     { name: "bigdec", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "x", type: "numeric", spelled: "numeric(30,20)" }, { name: "y", type: "numeric", spelled: "numeric(30,20)" }] },
+    { name: "deep_t", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "a", type: "int4" }, { name: "b", type: "text" }, { name: "c", type: "numeric", spelled: "numeric(10,2)" }, { name: "d", type: "text", spelled: "character(4)" }] },
     { name: "ratios", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "a", type: "numeric", spelled: "numeric(15,4)" }, { name: "b", type: "numeric", spelled: "numeric(15,4)" },
         { name: "d", type: "date" }, { name: "team", type: "text" }, { name: "n", type: "int4" }] },
@@ -487,7 +496,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -2346,7 +2355,7 @@ test("EXPLAIN ANALYZE runs the statement and sends none of its rows: each step's
   const c = await client();
   try {
     // the session itself is in the log, as it happens (mason logs once showed little)
-    assert.ok(logged.some((l) => /^\[postgres\] session \d+ connected: a client with no application_name as "mason"$/.test(l)), logged.join("\n"));
+    assert.ok(logged.some((l) => /^\[postgres\] session \d+ connected: a client with no application_name as "mason" from 127\.0\.0\.1$/.test(l)), logged.join("\n"));
     logged.length = 0;
     const r = await c.query({ text: "EXPLAIN ANALYZE SELECT id, amount FROM orders WHERE qty > 1 ORDER BY id", rowMode: "array" });
     const lines = (r.rows as string[][]).map((x) => x[0]!);
@@ -5761,8 +5770,7 @@ test("a grouped collated output ordered by number, name or expression is its col
 // below more than once grew 3^depth (depth 12 took 880 ms, 16 about 70 s) on the planning thread every session waits
 // on, whatever the column's type. The class: work on the wire's path for a reader only another path has, with no bound
 // on its size. The decision: the wire never computes what only a generated table reads, and the walk is linear in the
-// analysed tree. (An int8: a numeric's nested and WITH chains are "issue 244" below, #483; its UNION ALL chain, whose
-// program is copied into each reference, is #484's)
+// analysed tree. (An int8 and a float8, which carry no program: a numeric's chains are "issue 244" below, #483 and #484)
 test("round 14: a wire statement's plan computes no generated table's outputs, and a deep statement is planned within the bound", async () => {
   const catalogDb = new PGlite();
   try {
@@ -5772,12 +5780,12 @@ test("round 14: a wire statement's plan computes no generated table's outputs, a
       base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
     // a first plan pays the catalog's and the parser's start: untimed
     await plan("SELECT 1::numeric AS a");
-    for (const depth of DEEP_DEPTHS) for (const [shape, sql] of Object.entries(deepChains("1::int8", depth))) {
+    for (const bottom of ["1::int8", "1::float8"]) for (const depth of DEEP_DEPTHS) for (const [shape, sql] of Object.entries(deepChains(bottom, depth))) {
       const started = performance.now();
       const planned = await plan(sql);
       const ms = performance.now() - started;
-      assert.equal(planned.outputs, undefined, `${shape}: the wire's plan holds the generated planner's outputs`);
-      assert.ok(ms < 500, `${shape}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
+      assert.equal(planned.outputs, undefined, `${shape} over ${bottom}: the wire's plan holds the generated planner's outputs`);
+      assert.ok(ms < 500, `${shape} over ${bottom}: planned in ${ms.toFixed(0)} ms at depth ${depth}`);
     }
   } finally { await catalogDb.close(); }
 });
@@ -5791,8 +5799,8 @@ const EXPECTED_244: Record<string, string> = { 0: "as Postgres: 42804", 1: "as P
 // 768 ms at depth 8 and 99 s at 12 on main, the WITH chain 3.4 s at 8), on the planning thread every session waits on.
 // The class: a fact derived again at every reference. The decision: each is taken once per (query, output index)
 // (`decided`, src/duck/rewrite.ts), copied with its query, never recorded from inside an open recursive cycle or from
-// the walk's guard, and dropped when a `*` is written out in place. (The UNION ALL chain, whose PROGRAM is copied into
-// each reference, is #484's, and is not run here)
+// the walk's guard, and dropped when a `*` is written out in place. The UNION ALL chain, whose PROGRAM was copied into
+// each reference (3^depth: 62 ms at depth 8 on main, a record of 360 KB), is in since #484, which shares it ("issue 484")
 test("issue 244: a numeric read three times a level through every level is planned within the bound, and answered as Postgres", async () => {
   const catalogDb = new PGlite();
   try {
@@ -5802,7 +5810,7 @@ test("issue 244: a numeric read three times a level through every level is plann
       base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations: CollationResolver.of({ kind: "bytes" }), verified: null });
     // a first plan pays the catalog's and the parser's start: untimed
     await plan("SELECT 1::numeric AS a");
-    for (const depth of DEEP_DEPTHS) for (const shape of ["nested", "with"] as const) {
+    for (const depth of DEEP_DEPTHS) for (const shape of ["nested", "with", "union"] as const) {
       const sql = deepChains("1::numeric", depth)[shape]!, started = performance.now();
       await plan(sql);
       const ms = performance.now() - started;
@@ -5879,6 +5887,108 @@ test("issue 244: a numeric read three times a level through every level is plann
       natural("b.x / 1", "b.x / 1 + 1"),
     ].entries()) outcomes[String(i)] = await outcome(sql);
     assert.deepEqual(outcomes, EXPECTED_244);
+  } finally { await c.end(); }
+});
+
+// ISSUE 244, piece 2 (#484): a carried column's exact-numeric PROGRAM was copied into each reference to it, so a level
+// reading the column below k times held k copies of the level below's: k^depth nodes, whatever piece 1 memoised. On
+// main #344's statement (every level bounded, over a quotient) sent 1.5 MB at depth 8, the mixed-scale union chain 3.6
+// MB, its depth 10 failed to deparse (the program's literal's size: the rewritten tree's depth is two parentheses a
+// level at main and here alike) and its depth 32 ran out of memory. The class: a value copied where it is shared. The
+// decision: a program read by several references is ONE node they share (`carried`, src/duck/rewrite.ts), and every
+// reader is linear in its distinct nodes (src/lib/pg-numeric.ts: the one text, evaluation once a node a row, lazy).
+// Executed at depth 32 over `deep_t`, each held to Postgres's answer of the equivalent shallow statement (Postgres is
+// never asked the deep one: its own pull-up grows 3^depth), within a bound named from the integer forms' time; at depth
+// 4 each held to Postgres directly; and every reader of a shared program over values two doubles tie.
+test("issue 484: a numeric's program shared by its references is executed at depth 32 within the bound, and read as Postgres reads it", async (t) => {
+  const c = await client();
+  const over = (sql: string): string => sql.replace(/\bFROM t\b/g, "FROM deep_t");
+  const shapes = (depth: number) => {
+    const s = numericShapes(depth);
+    return { "c + c - c": s["c + c - c"], "q + q - q": s["q + q - q"], "344": s["344"], "mixed-scale union, nested": s["mixed-scale union, nested"], "mixed-scale union, a chain": s["mixed-scale union, a chain"] };
+  };
+  try {
+    // THE BOUND: the integer forms of `deepShapes` at depth 32 executed here (the review's deep variant form, which no
+    // program reads), and the numeric ones within max(2 x PLAN_TIME_BOUND_MS, 2 x the slower integer form's time). Each
+    // statement once, so none is answered from what an earlier one left; the session and the table warmed first
+    await answer(c, "SELECT count(*) FROM deep_t");
+    const integer = deepShapes(32);
+    let integerMs = 0;
+    for (const shape of ["order by and limit", "union, a bound at every level"]) {
+      const started = performance.now();
+      await answer(c, over(integer[shape]!));
+      const ms = performance.now() - started;
+      t.diagnostic(`${shape} (integers) at depth 32: ${ms.toFixed(0)} ms`);
+      integerMs = Math.max(integerMs, ms);
+    }
+    const bound = Math.max(2 * PLAN_TIME_BOUND_MS, 2 * integerMs);
+    const arm = "SELECT a, d FROM deep_t";
+    const shallow = (depth: number): Record<keyof ReturnType<typeof shapes>, string> => ({
+      "c + c - c": "SELECT c FROM deep_t ORDER BY 1",
+      "q + q - q": "SELECT c / 3 AS q FROM deep_t ORDER BY 1",
+      "344": "SELECT c / 3 AS a, b FROM deep_t ORDER BY a, b LIMIT 100",
+      "mixed-scale union, nested": `SELECT a, b FROM (SELECT c / 3 AS a, b FROM deep_t UNION ALL ${arm}) s ORDER BY a, b LIMIT 100`,
+      "mixed-scale union, a chain": `SELECT a, b FROM (SELECT c / 3 AS a, b FROM deep_t${` UNION ALL ${arm}`.repeat(depth)}) s ORDER BY a, b LIMIT 100`,
+    });
+    // climbing, so a walk that grows with the expansion fails the bound by name at 12 (main: seconds, or a statement it
+    // cannot write) instead of running out of memory at 32
+    for (const depth of [12, 32]) for (const [shape, sql] of Object.entries(shapes(depth)) as Array<[keyof ReturnType<typeof shapes>, string]>) {
+      const started = performance.now();
+      const got = await answer(c, over(sql));
+      const ms = performance.now() - started;
+      t.diagnostic(`${shape} at depth ${depth}: ${ms.toFixed(0)} ms (bound ${bound.toFixed(0)} ms, the integer forms ${integerMs.toFixed(0)} ms)`);
+      assert.ok(ms < bound, `${shape}: answered in ${ms.toFixed(0)} ms at depth ${depth}, past the bound of ${bound.toFixed(0)} ms (the integer forms ${integerMs.toFixed(0)} ms)`);
+      assert.deepEqual(got, await postgres(shallow(depth)[shape]), `${shape} at depth ${depth}`);
+    }
+    // depth 4: Postgres answers each itself
+    assert.deepEqual(await unlike(c, Object.values(shapes(4)).map((sql) => [over(sql), "ordered"] as const)), []);
+    // THE READERS of a shared program: three levels of `q + q - q` over values two doubles tie, each reader of it
+    const level = (bottom: string, depth: number): string => {
+      let s = bottom;
+      for (let i = 1; i <= depth; i++) s = `SELECT q + q - q AS q, id FROM (${s}) s${i}`;
+      return s;
+    };
+    const s3 = `(${level("SELECT b.x / 1 AS q, b.id FROM bigdec b", 2)}) s3`;
+    const nullable = `(${level("SELECT NULLIF(b.x, 2.5) / 1 AS q, b.id FROM bigdec b", 2)}) s3`;
+    assert.deepEqual(await unlike(c, [
+      [`${level("SELECT b.x / 1 AS q, b.id FROM bigdec b", 2)} ORDER BY 1, 2`, "ordered"],
+      [`SELECT q, q::text, q::float8, q::int FROM ${s3} ORDER BY 1, 2`, "ordered"],
+      [`SELECT DISTINCT q FROM ${s3} ORDER BY 1`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY q ORDER BY 1`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY q ORDER BY q`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY q ORDER BY s3.q`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY 1 ORDER BY 1`, "ordered"],
+      [`SELECT q, count(*) FROM ${s3} GROUP BY 1 ORDER BY 2 DESC, 1 FETCH FIRST 1 ROWS WITH TIES`, "ordered"],
+      [`SELECT DISTINCT ON (q) q, id FROM ${s3} ORDER BY q, id LIMIT 3`, "ordered"],
+      [`SELECT sum(q), min(q), max(q), avg(q) FROM ${s3}`, "ordered"],
+      [`SELECT q, rank() OVER (ORDER BY q), sum(q) OVER (ORDER BY id) FROM ${s3} ORDER BY id`, "ordered"],
+      [`SELECT count(*) FROM ${s3} WHERE q = 1.00000000000000000001`, "ordered"],
+      [`SELECT count(*) FROM ${s3} WHERE q <> 1.00000000000000000001`, "ordered"],
+      [`SELECT count(*) FROM ${s3} WHERE q IN (1.00000000000000000001, 2.5)`, "ordered"],
+      [`SELECT count(*) FROM ${s3} WHERE q = (SELECT max(q) FROM (${level("SELECT b.x / 1 AS q, b.id FROM bigdec b", 2)}) z)`, "ordered"],
+      // the untaken arm of a shared program is never computed (Postgres raises 22012 only for a row that takes it)
+      [`SELECT id, CASE WHEN id > 2 THEN q + q ELSE (q + q) / 0 END AS v FROM ${s3} WHERE id > 2 ORDER BY 1`, "ordered"],
+      [`SELECT id, coalesce(q, q / 0) FROM ${s3} ORDER BY 1`, "ordered"],
+      [`SELECT id, CASE WHEN id > 2 THEN q + q ELSE (q + q) / 0 END AS v FROM ${s3} ORDER BY 1`, "ordered"],
+      // the nulls idiom, and NULLS FIRST over a NULL at the bottom
+      [`SELECT q FROM ${s3} ORDER BY q IS NULL, q`, "ordered"],
+      [`SELECT q FROM ${nullable} ORDER BY q IS NULL, q`, "ordered"],
+      [`SELECT q FROM ${nullable} ORDER BY 1 NULLS FIRST`, "ordered"],
+      // a `*` beside the shared column
+      [`SELECT *, q FROM ${s3} ORDER BY 2, 1`, "ordered"],
+      // exactArms over shared arms built apart: equal trees decide as main did; and scales that differ
+      [`SELECT q FROM ${s3} UNION ALL SELECT q FROM (${level("SELECT b.x / 7 AS q, b.id FROM bigdec b", 2)}) t3 ORDER BY 1`, "ordered"],
+      [`SELECT q FROM ${s3} UNION ALL SELECT q FROM (${level("SELECT b.x / 1 AS q, b.id FROM bigdec b", 2)}) t3 ORDER BY 1`, "ordered"],
+      [`SELECT q FROM ${s3} UNION ALL SELECT b.x FROM bigdec b ORDER BY 1`, "ordered"],
+      // a VALUES arm beside a shared program
+      [`SELECT q FROM ${s3} UNION ALL VALUES (1.5) ORDER BY 1`, "ordered"],
+    ]), []);
+    // a parameter beside a shared program, executed again after a later SET
+    const prepared = { name: "issue484", text: `SELECT q + q - $1 AS q FROM ${s3} ORDER BY 1`, values: ["0.5"], rowMode: "array", types: raw } as pg.QueryConfig;
+    const want = (await postgres(prepared.text, ["0.5"])).rows;
+    assert.deepEqual((await c.query(prepared)).rows, want);
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    assert.deepEqual((await c.query(prepared)).rows, want);
   } finally { await c.end(); }
 });
 
@@ -6111,23 +6221,22 @@ test("exact path: issue 217: a numeric power, exp, ln, log or sqrt cast to float
   } finally { await c.end(); }
 });
 
-test("exact path: issue 242: a numeric the engine holds as a double with no program, cast to an integer, is refused by name", async () => {
+test("exact path: issue 242: an integer cast of percentile_disc or mode() of a quotient, or of any expression over it, is the picked row's exact value", async () => {
   const c = await client();
   try {
-    // review r2 of PR 506 (runtime-refusal-preempted-by-engine-error): the bytes are the rewrite's own, so a cast of
-    // them, or of any expression over them, is refused by name before the engine runs, never the engine's 42883 / 42804
+    // review r2 of PR 506 asked these be refused by name, never the engine's 42883 / 42804; PR 506's class round answers
+    // them: the aggregate is the picked row's exact value (`pickedByExactKey`), so each cast is Postgres's, half away from zero
     const over = "percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)";
-    for (const sql of [`SELECT (${over})::int FROM bigdec b`, "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
+    assert.deepEqual(await unlike(c, [
+      `SELECT (${over})::int FROM bigdec b`, "SELECT (mode() WITHIN GROUP (ORDER BY b.x / b.y))::int AS m FROM bigdec b",
       `SELECT CAST(${over} AS bigint) FROM bigdec b`, `SELECT (${over} * 2)::int FROM bigdec b`, `SELECT (${over} + 0)::int FROM bigdec b`,
       `SELECT round(${over})::int, trunc(${over})::int FROM bigdec b`, `SELECT abs(${over})::int FROM bigdec b`, `SELECT coalesce(${over}, 0)::int FROM bigdec b`,
       `SELECT nullif(${over}, 0)::int FROM bigdec b`, `SELECT greatest(${over}, 0)::int FROM bigdec b`, `SELECT (x * 2)::int FROM (SELECT ${over} AS x FROM bigdec b) s`,
       "WITH q AS (SELECT mode() WITHIN GROUP (ORDER BY b.x / b.y) AS x FROM bigdec b) SELECT (x / 2)::int8 FROM q",
-      `SELECT b.id % 2, (${over} * 2)::int FROM bigdec b GROUP BY 1`, `SELECT (${over} * 2)::int FROM bigdec b UNION ALL SELECT 1`]) {
-      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-double-integer/.test(e.detail ?? "")
-        && /cast to (integer|bigint), is not supported by Mason/.test(e.message) && /ORDER BY \(a \/ b\)::int/.test(e.hint ?? ""), sql);
-    }
+      `SELECT b.id % 2, (${over} * 2)::int FROM bigdec b GROUP BY 1 ORDER BY 1`, `SELECT (${over} * 2)::int FROM bigdec b UNION ALL SELECT 1 ORDER BY 1`,
+    ].map((sql) => [sql, "ordered"] as [string, "ordered"])), []);
     assert.deepEqual(await unlike(c, [
-      // its way out answers as Postgres does
+      // its old way out answers as Postgres does
       ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"],
       // review r1 of PR 506, finding 2: what the engine holds as a DECIMAL (percentile_disc / mode of a column, min / max
       // of Postgres's own power) is cast as Postgres casts it, never refused as a double
@@ -6148,49 +6257,77 @@ test("exact path: issue 242: a numeric the engine holds as a double with no prog
   } finally { await c.end(); }
 });
 
-test("exact path: percentile_disc or mode() ordered by a numeric Mason computes exactly is refused by name, never the order key's bytes (review r3 of PR 506)", async () => {
+test("exact path: percentile_disc or mode() ordered by a numeric Mason computes exactly answer the picked row's exact value, wherever it is read (PR 506's class round, issue 538)", async () => {
   const c = await client();
   try {
-    // (class order-key-bytes-as-result: the engine answers what it sorts by, and the rules sort such a value by its exact
-    // order key; PR 506 made c ^ 2, exp(…) * sign(c) and a NULLIF programs, so they reached it too)
-    for (const key of ["b.x / b.y", "b.x ^ 2", "exp(ln(2.5)) * sign(b.x)", "nullif(b.x / b.y, 0)", "coalesce(b.x / b.y, 0)"]) {
-      for (const sql of [`SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) FROM bigdec b`,
-        `SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}))::text FROM bigdec b`,
-        `SELECT b.id % 2, mode() WITHIN GROUP (ORDER BY ${key}) FROM bigdec b GROUP BY 1 ORDER BY 1`,
-        `SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY ${key}) FROM bigdec b`,
-        `SELECT x FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) AS x FROM bigdec b) s`,
-        `SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key}) * 2 FROM bigdec b`]) {
-        await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? "")
-          && /WITHIN GROUP \(ORDER BY a numeric Mason computes exactly/.test(e.message) && /ORDER BY \(a \/ b\)::float8/.test(e.hint ?? ""), sql);
-      }
+    // (class refusal-wider-than-the-wrong-answer, and before it order-key-bytes-as-result: the engine answers what it sorts
+    // by; the rewrite sorts a row(order key, value) and answers the value, so no reader meets the key's bytes)
+    const forms: string[] = [];
+    for (const key of ["b.x / b.y", "exp(ln(2.5)) * sign(b.x)", "nullif(b.x / b.y, 0)", "coalesce(b.x / b.y, 0)", "b.x / b.y + 1", "round(b.x / b.y, 2)", "-(b.x / b.y)", "(b.x / b.y)::numeric(10,4)"]) {
+      const pd = `percentile_disc(0.5) WITHIN GROUP (ORDER BY ${key})`, md = `mode() WITHIN GROUP (ORDER BY ${key})`;
+      forms.push(
+        // read as a value: printed, ::text, a cast, arithmetic, grouped, an array of nothing
+        `SELECT ${pd}, (${pd})::text, ${md}, ${pd} * 2, (${md})::float8 FROM bigdec b`,
+        `SELECT b.id % 3 AS g, ${pd}, ${md} FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT x, x::text FROM (SELECT ${pd} AS x FROM bigdec b) s`,
+        // only ordered (review r4): the SELECT's ORDER BY, WITH TIES, DISTINCT ON, a window's, a derived table's and a CTE's
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY ${pd} DESC NULLS LAST, 1`,
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY ${md}, 1 FETCH FIRST 1 ROWS WITH TIES`,
+        `SELECT b.id % 3 AS g, rank() OVER (ORDER BY ${pd}) FROM bigdec b GROUP BY 1 ORDER BY 2, 1`,
+        `SELECT g FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s ORDER BY x, g`,
+        `WITH q AS (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) SELECT g FROM q ORDER BY x DESC NULLS LAST, g LIMIT 2`,
+        // nullness, comparison, grouping, partitioning and joining (review r5, issue 538)
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING ${pd} IS NOT NULL ORDER BY 1`,
+        `SELECT b.id % 3 AS g, CASE WHEN ${pd} IS NULL THEN 0 ELSE 1 END FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING ${pd} = ${md} OR ${pd} > 1 ORDER BY 1`,
+        `SELECT count(x), count(DISTINCT x) FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s`,
+        `SELECT x, count(*) FROM (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) s GROUP BY x ORDER BY 1`,
+        `SELECT b.id % 3 AS g, count(*) OVER (PARTITION BY ${pd}) FROM bigdec b GROUP BY 1 ORDER BY 1`,
+        `SELECT s1.g, s2.g FROM (SELECT b.id % 3 AS g, ${pd} AS x FROM bigdec b GROUP BY 1) s1 JOIN (SELECT b.id % 3 AS g, ${md} AS x FROM bigdec b GROUP BY 1) s2 ON s1.x = s2.x ORDER BY 1, 2`,
+      );
     }
+    assert.deepEqual(await unlike(c, forms.map((sql) => [sql, "ordered"] as [string, "ordered"])), []);
+    // an array of fractions would answer the doubles of a numeric[]: refused by name, its way out answers
+    await assert.rejects(c.query("SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b"),
+      (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? "") && /ask for each fraction alone/.test(e.hint ?? ""));
     assert.deepEqual(await unlike(c, [
-      // its ways out answer as Postgres does, and a column, an integer or a float8 key stays the engine's own
-      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::float8), mode() WITHIN GROUP (ORDER BY (b.x / b.y)::float8) FROM bigdec b", "ordered"],
-      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (b.x / b.y)::int), mode() WITHIN GROUP (ORDER BY (b.x / b.y)::int) FROM bigdec b", "ordered"],
+      ["SELECT percentile_disc(0.25) WITHIN GROUP (ORDER BY b.x / b.y), percentile_disc(0.75) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
       ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount), mode() WITHIN GROUP (ORDER BY o.amount), percentile_disc(0.5) WITHIN GROUP (ORDER BY o.amount * 2) FROM orders o", "ordered"],
       ["SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
-      // review r4 of PR 506 (refusal-wider-than-the-wrong-answer): where the aggregate only ORDERS, its value is never
-      // read and the exact order key orders the groups as the value does, so it is answered, as at the base
-      ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y), 1", "ordered"],
-      ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY mode() WITHIN GROUP (ORDER BY nullif(b.x / b.y, 0)) DESC NULLS LAST, 1", "ordered"],
-      ["SELECT b.id % 3 AS g, rank() OVER (ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / 3), b.id % 3) FROM bigdec b GROUP BY 1 ORDER BY 2", "ordered"],
-      ["SELECT g FROM (SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY exp(ln(2.5)) * sign(b.x)), 1 LIMIT 2) s ORDER BY 1", "ordered"],
     ]), []);
-    // and where its value is read in the same statement, it is refused as before
-    for (const sql of ["SELECT b.id % 3, percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b GROUP BY 1 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)",
-      "SELECT b.id % 3 FROM bigdec b GROUP BY 1 ORDER BY -percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y)",
-      "SELECT b.id % 3 FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) > 1"]) {
-      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? ""), sql);
-    }
   } finally { await c.end(); }
 });
 
-test("exact path: issue 217 review r3: percentile_disc or mode() over an exact order key read only for its nullness is answered, its value refused", async () => {
+test("exact path: issue 242's NULLIF, sign and picked value through PR 520's shared programs (#484): each read three times a level over a quotient chain, as Postgres", async () => {
   const c = await client();
   try {
-    // (class refusal-at-the-call-not-the-reader: the engine's answer is the order key's bytes, whose nullness is the
-    // value's, so a reader of nullness alone is answered as at the base; a reader of the value is refused)
+    // a node several parents share (src/lib/pg-numeric.ts, PR 520): NULLIF's pick, sign, and a percentile_disc / mode()
+    // pick (`pickedByExactKey`) each read three times a level, three levels up, then printed, cast and compared
+    const chain = (read: string, bottom: string, depth = 3): string => Array.from({ length: depth }, (_, i) => i + 1).reduce((s, k) => `SELECT id, ${read} AS q FROM (${s}) s${k}`, bottom);
+    const quotient = "SELECT b.id, b.x / b.y AS q FROM bigdec b";
+    const nz = chain("nullif(q, 0) + nullif(q, 0) - nullif(q, 0)", quotient);
+    const n25 = chain("nullif(q, 2.5) + nullif(q, 2.5) - nullif(q, 2.5)", quotient);
+    const sg = chain("sign(q) + sign(q) - sign(q)", quotient);
+    const pd = "SELECT 1 AS id, percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) AS q FROM bigdec b";
+    const md = "SELECT b.id % 2 AS id, mode() WITHIN GROUP (ORDER BY b.x / b.y) AS q FROM bigdec b GROUP BY 1";
+    assert.deepEqual(await unlike(c, [
+      `SELECT id, q, q::int, q::text FROM (${nz}) s ORDER BY id`,
+      `SELECT id, q, q::int8, q * 2 FROM (${n25}) s ORDER BY id`,
+      `SELECT id, q, (q * 2.5)::int FROM (${sg}) s ORDER BY id`,
+      `SELECT id, q, q::int, q::text FROM (${chain("q + q - q", pd)}) s ORDER BY id`,
+      `SELECT id, q, (q * 2)::int FROM (${chain("q + q - q", md)}) s ORDER BY id`,
+      `SELECT id, nullif(q, 0) + nullif(q, 0) - sign(q) * nullif(q, 0) AS v FROM (${chain("q + q - q", quotient, 2)}) s ORDER BY id`,
+      `SELECT q, count(*) FROM (${nz}) s GROUP BY q ORDER BY 1`,
+      `SELECT count(*) FROM (${n25}) s WHERE q IS NULL`,
+    ].map((sql) => [sql, "ordered"] as [string, "ordered"])), []);
+  } finally { await c.end(); }
+});
+
+test("exact path: issue 217 review r3: percentile_disc or mode() over an exact order key read for its nullness or its value is Postgres's", async () => {
+  const c = await client();
+  try {
+    // (class refusal-at-the-call-not-the-reader, review r3 of PR 519: a nullness read is answered, never refused at the call;
+    // since PR 506 the aggregate answers the picked row's exact value, so a reader of the value is Postgres's too)
     const keys = ["b.x / b.y", "b.x ^ 2", "nullif(b.x / b.y, 0)", "coalesce(b.x / b.y, 0)", "exp(ln(2.5)) * sign(b.x)", "b.x / b.y + 1",
       "round(b.x / b.y, 2)", "-(b.x / b.y)", "(b.x / b.y)::numeric(40,4)"];
     assert.deepEqual(await unlike(c, keys.flatMap((k): Array<[string, "ordered"]> => [
@@ -6199,20 +6336,20 @@ test("exact path: issue 217 review r3: percentile_disc or mode() over an exact o
     ]).concat([
       ["SELECT CASE WHEN percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL THEN 'none' ELSE 'some' END FROM bigdec b", "ordered"],
       ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING NOT (mode() WITHIN GROUP (ORDER BY b.x / b.y) IS NULL) ORDER BY 1", "ordered"],
-      ["SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL FROM bigdec b", "ordered"],
+      // (the ARRAY of fractions is refused at the call on main since PR 506, whatever reads it: #538, not this PR's)
       ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL FROM bigdec b WHERE false", "ordered"],
       ["SELECT o.id, (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NOT NULL FROM bigdec b WHERE b.id > o.id) FROM orders o ORDER BY 1", "ordered"],
       ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY nullif(b.x / b.y, 2.5)) IS NULL ORDER BY 1", "ordered"],
       // a group whose every key is NULL: IS NULL true, as Postgres answers it
       ["SELECT b.id % 3 AS g, percentile_disc(0.5) WITHIN GROUP (ORDER BY nullif(b.x / b.y, b.x / b.y)) IS NULL, mode() WITHIN GROUP (ORDER BY CASE WHEN b.id > 3 THEN b.x / b.y END) IS NULL FROM bigdec b GROUP BY 1 ORDER BY 1", "ordered"],
     ])), []);
-    // a reader of the value beside it is still refused, the nullness reader notwithstanding
-    for (const sql of ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL, percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b",
-      "SELECT coalesce(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y), 0) IS NULL FROM bigdec b",
-      "SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y))::text IS NULL FROM bigdec b",
-      "SELECT b.id % 3 FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) + 1 IS NOT NULL"]) {
-      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? ""), sql);
-    }
+    // a reader of the value beside it, its value under coalesce, ::text and + 1: the picked row's exact value, as Postgres
+    assert.deepEqual(await unlike(c, [
+      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL, percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b", "ordered"],
+      ["SELECT coalesce(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y), 0) IS NULL FROM bigdec b", "ordered"],
+      ["SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y))::text IS NULL FROM bigdec b", "ordered"],
+      ["SELECT b.id % 3 FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) + 1 IS NOT NULL ORDER BY 1", "ordered"],
+    ]), []);
   } finally { await c.end(); }
 });
 

@@ -25,7 +25,7 @@ CLI lacks).
   does not run. **The list is the runbook** (the commands in the order a user will likely need them): `STEPS`
   (src/cli/registry.ts) names each command's step — Learn (`help` first), Set up (`doctor`, `init`, `start`), Add your
   tables (`tables`, `add`, `remove`, `wait`), Connect (`user`, `mcp`, `share`), Run (`status`, `ui`, `sync`, `logs`, `cancel`, `usage`, `stop`, `destroy`), Go to
-  production (`serve`) — and `mason --help` prints the steps as headings, and under Learn the guides too, a line each
+  production (`serve`, `login`, `logout`, `deploy`) — and `mason --help` prints the steps as headings, and under Learn the guides too, a line each
   beside `mason help`; `COMMANDS` is derived from it. A command's old name (`dev`, `purge`, `rm`, `connect`, `list`, …)
   answers with the new one and exit 2 (src/cli/main.ts), never runs. Nothing a command prints refers to a repository
   path.
@@ -58,7 +58,7 @@ CLI lacks).
   what }]` from the SAME `NextStep` list the human output prints, and refuses a key the spec does not declare —
   `CommandSpec.json` names the answer's top-level keys, its usage's `--json` line names each (`tests/cli-help.test.ts`),
   so the help and the answer cannot drift. A list is wrapped (`{ tables: […], next }`), never printed bare. The EXIT CODE
-  is part of the contract: 0 done, 1 failed (said), 2 a wrong command line, 124 `mason wait` timed out. Human output goes
+  is part of the contract: 0 done, 1 failed (said), 2 a wrong command line, 124 `mason wait` or `mason deploy` timed out. Human output goes
   to stdout, progress to stderr. **The answer reaches a pipe whole**: a pipe takes writes asynchronously and
   `process.exit` drops what is queued, so the process exits only through `exitWhenWritten` (src/cli/main.ts), once both
   streams are written (`tests/cli-pipe.test.ts`; `tests/conventions.test.ts` refuses another `process.exit` in src/cli).
@@ -90,7 +90,8 @@ CLI lacks).
   gitignored by init: the name and the API key, never the URL) and the project's sources file (`mason/` unless
   `--folder`); it checks the database first (`checkSource`, the one check `mason start` makes too) and writes nothing
   when it fails. **A command means the nearest `.mason/` at or above the folder it runs in** (`theProject`,
-  src/cli/project.ts, as git finds `.git`). Nothing is kept in the home folder. Never a guess at "the only run on the
+  src/cli/project.ts, as git finds `.git`). Nothing of a project is kept in the home folder (a hosted service's login is
+  the person's, below). Never a guess at "the only run on the
   machine".
 - **`mason init demo` is an ordinary project on a database Mason hosts** (src/cli/demo.ts; the database is
   src/demo/source.ts): the files init always writes — `url: ${DATABASE_URL}`, here with three of the demo's four tables
@@ -278,6 +279,14 @@ CLI lacks).
   absent when older than two samples). Detectors: `MetricLabel` (a label of another name does not compile) and
   tests/conventions.test.ts (every label key literal); tests/cli-metrics.test.ts holds the renderer's reads to a closed
   list of numbers; tests/duck-sync-facts.test.ts counts the connections a cached status opens (none).
+- **Whether the project's files may be written is ONE function's** (`projectWriteRefusal`, src/cli/project.ts; issue
+  473): a deployment that ships its committed folder sets `MASON_PROJECT_READONLY=1`, which the run records in the config
+  at its start (`projectReadOnly`, removed at a start without), and EVERY writer of a project file asks it first and
+  writes nothing on its refusal — `sourceToEdit` (so `mason add`, `mason remove` and `/api/pick|remove`), the commands
+  before they reach the run, `serveSource`, `ensurePin`, `mason init` — either the environment or the record refusing,
+  so a command beside the run cannot un-say it; `/api/state` `sourcesReadOnly` is its answer, and the page offers no Add
+  or Remove. A value not 0 or 1 refuses the start (`startSettingRefusal`, `serveSettings`) and every edit. A new writer
+  of a project file asks it (tests/cli-project-readonly.test.ts, the state matrix's "deployed" state).
 - **`sync: replication` is the production change path on a laptop, per table** (src/cli/replication-mode.ts): the
   sources file alone decides — `mason start --replication`, `--poll` and `--publication` are gone, each answered with
   the line to write and exit 2 before anything starts (`removedStartFlags`, src/lib/table-sync.ts), and `MASON_CHANGES`
@@ -298,6 +307,44 @@ CLI lacks).
   (`publication:` in the sources file, else `PG_PUBLICATION`) is never created, altered or dropped** — only
   the slot goes — and a read replica needs one, refused by name before any slot is made (`readinessVerdict`;
   `.claude/rules/duck-sync.md`).
+- **`mason login` and `mason logout` are a client of a hosted Mason service, by its documented API alone**
+  (docs/HOSTED-API.md; src/cli/login.ts, src/cli/hosted.ts): no project needed. The service is `MASON_CLOUD_URL`, else
+  `DEFAULT_SERVICE_URL`, its one constant, read by ONE function (`serviceOf`): https, or http to this machine, the
+  address alone, refused before any byte is sent. Every answer is untrusted: held to its documented shape, a redirect
+  never followed, every token masked. **A service's value is data, never structure and never an instruction**
+  (src/cli/hosted.ts's header, PR 481): every string it sends leaves that module as ONE line (`serviceText`, applied at
+  the boundary: no line break, control, format or bidi character), so it sits inside a line the CLI writes and never
+  starts one — no forged `Next:`, tip, row or failure, for a person or in `--json`; and what to run next, the code and
+  the exit, and the page a person is sent to are the CLI's own: the code by HTTP status (`codeOfStatus`, never `usage`
+  or `timeout`, the service's code kept in `why`), the next step by status (`serviceNext`, the service's `next` never
+  read), the page on the service's own origin (`pageUrl`, refused naming both). **On a terminal the visual lines too**:
+  `serviceText` collapses white space, and a command whose output holds a service's text draws it in `serviceStyle`
+  (src/cli/command.ts), under which the CLI breaks every line itself at the terminal's own width, whatever it is
+  (`Style.columns`, set under the 40 columns where `width` is null; `strictWrap`, then `strictLines` as every
+  renderer's last pass: the headline, a long word, a label and a step too, a character outside ASCII as two columns),
+  never the terminal, and starts every continuation at `continuationAt(width)` (4; 1 under 9 columns; 0 under 3). tests/hosted-fake.ts `mason` holds every run of tests/cli-login.test.ts and
+  tests/cli-login-service.test.ts to it: every line a person sees, logical on a pipe and visual on a terminal of the
+  run's width (a preload, `terminal`; tests/cli-login-terminal.test.ts runs 12 to 80 columns), is one the CLI begins
+  and none the terminal broke (`seenProblems`), and no `--json` string has a line break. **The login is the person's, never a project's**
+  (src/cli/credentials.ts: `$XDG_CONFIG_HOME/mason/credentials.json`, else `~/.config/mason/`, 0600 in 0700, renamed
+  over, keyed by the base URL): a file or folder others can read is refused with the chmod, one that cannot be parsed
+  with its path, both checked before the device code is asked for. **A token never reaches a command line, the output
+  or `--json`**; `MASON_TOKEN` comes first, so login refuses while it is set and logout says it stays. Login says the
+  page and the code on stderr at once (an agent passes them on), its answer once, when it ends; logout removes the
+  login even when the revoke did not reach the service, and says it was NOT revoked (tests/cli-login.test.ts, against
+  a fake service on 127.0.0.1; every run's output held to carrying no token).
+- **`mason deploy` sends the project folder's files to a replica of that service and waits for the outcome**
+  (src/cli/deploy.ts; docs/HOSTED-API.md "Deploying a project"; needs the project). It checks the project first with the
+  readers `mason start` uses before it connects (`checkProject`: the pin, `readSourceFile` — `readSource`'s first half,
+  never its URL —, `roleProblems` against the tables the sources file names, `readGenerated`'s refusals said), connects
+  to no database, and refuses what a start would refuse, sending nothing. The files are `projectFiles` alone, held to
+  the contract's bounds (`deployFiles`), and every file the check read is among them. A literal `url:` with its password
+  is refused: the service keeps the files. The wait is bounded by `--timeout` (`parseDuration`, the interval grammar);
+  an answer that cannot say is a wait, never an outcome; exit 0 only on `running`, a refusal is the replica's failure's
+  words as they came, each one line, its code the CLI's (`failureShape`: `refused` / `failed`, the service's in `why`,
+  its next step the CLI's: the service's `next` is never read), exit 1, a status or phase outside the closed sets a failure, the deploy's id held to its
+  grammar before it is in a path, a timeout 124 with the deploy's id (tests/cli-deploy.test.ts, against a fake
+  service on 127.0.0.1; every run's output held to carrying no token).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the
   README's "Going to production", `mason help production` offline). Only the project folder
   travels. **`mason.yml` pins the version** the project is written for (src/lib/project-version.ts: init writes it,

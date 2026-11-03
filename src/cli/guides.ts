@@ -148,7 +148,7 @@ ${commands}
     0  done
     1  failed, with the reason
     2  the command line is wrong (without --json the usage follows)
-    124  ran out of time: mason wait
+    124  ran out of time: mason wait, mason deploy (nothing stopped)
   The codes:
 ${codes}
 
@@ -247,6 +247,7 @@ names the tables the server syncs, and its url: names the variable that holds th
      DATABASE_URL           the database to sync from (the variable the sources file's url: names)
      MASON_API_KEY          what the users' passwords are made with (openssl rand -hex 24)
      MASON_PROJECT          your mason/ folder, mounted (default ./mason)
+     MASON_PROJECT_READONLY=1   when that folder is deployed as committed: every edit beside the server is refused
      MASON_DATA             the volume whose .mason/ holds the synced data and the state (default .)
      MASON_PG_HOST=0.0.0.0 and TLS: MASON_PG_TLS_CERT / MASON_PG_TLS_KEY, or MASON_PG_SELF_SIGNED_TLS=1, or
      MASON_PG_PLAIN=1 behind a TLS proxy of your own

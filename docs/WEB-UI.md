@@ -269,8 +269,9 @@ under the server's own Host it needs the run's token, which never reaches your m
 
 **What the page does on a server.** Everything it does under `mason start`, with these differences:
 
-- **Add, Columns…, Name its key… and Remove are absent when the sources file cannot be written** (a project folder
-  mounted read-only: `/api/state` `sourcesReadOnly` says why, and the page says it too). Sync now, cancelling a
+- **Add, Columns…, Name its key… and Remove are absent when the sources file may not or cannot be written** (the
+  project deployed as committed, `MASON_PROJECT_READONLY=1`, whose edits `/api/pick` and `/api/remove` refuse; or a
+  project folder mounted read-only: `/api/state` `sourcesReadOnly` says why, and the page says it too). Sync now, cancelling a
   statement and the users work as they do on your machine.
 - **A closed tunnel says `mason ui --ssh`**, never `mason start`.
 - **Connect says what its URL's host is**: the Postgres API's address as the server sees it, often `localhost`, which a

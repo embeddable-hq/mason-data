@@ -193,9 +193,10 @@ test("issue 242: an integer cast of a numeric the engine holds as a double is st
     assert.deepEqual((await typed(w, "SELECT id, x FROM unioned ORDER BY id, x")).rows.map((x) => text(x[1])), ["1", "1", null, null, "-3", "-2", "3", "4"]);
     assert.deepEqual((await typed(w, "SELECT x, c FROM grouped ORDER BY x NULLS FIRST")).rows.map((x) => x.map(text)), [[null, "1"], ["-2", "1"], ["1", "1"], ["3", "1"]]);
     if (restarted) return;
-    // the bytes the rewrite makes (percentile_disc / mode() of a quotient, and any expression over them): refused AT LOAD,
-    // by the gap's words and its way out (review r2 of PR 506); a double the engine computes (a stddev of an unconstrained
-    // numeric) is known only with the rows: its build fails naming the gap; neither is ever stored from the double
+    // percentile_disc / mode() of a quotient pick the row by its exact order and answer its exact value (PR 506's class
+    // round): stored as Postgres rounds it, half away from zero (0.6875 is 1; mode's -1.5625 * 2 = -3.125 is -3); a double
+    // the engine computes (a stddev of an unconstrained numeric) is known only with the rows: its build fails naming the
+    // gap; neither is ever stored from the double
     w.write("pdisc", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount / 1.6))::int AS x FROM ledger"));
     w.write("moded", scheduledH("SELECT (mode() WITHIN GROUP (ORDER BY amount / 1.6) * 2)::int AS x FROM ledger"));
     w.write("spreadint", scheduledH("SELECT stddev(big)::int AS x FROM ledger"));
@@ -203,11 +204,10 @@ test("issue 242: an integer cast of a numeric the engine holds as a double is st
     w.write("nulled", scheduledH("SELECT id, nullif(amount / 1.6, 0) AS x FROM ledger"));
     // percentile_disc of a DECIMAL column is the column's own value, cast as Postgres casts it
     w.write("pdiscol", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount))::int AS p, (percentile_disc(0.1) WITHIN GROUP (ORDER BY amount))::int8 AS m FROM ledger"));
-    for (const name of ["pdisc", "moded", "nulled"]) await w.until((s) => s.state === "refused", `public.${name}`);
-    for (const name of ["pdisc", "moded"]) {
-      const refusals = w.status(`public.${name}`).refusals;
-      refusedAt(refusals, "sql", /^a numeric Mason cannot compute exactly \(percentile_disc or mode\(\) of a value Mason orders by its exact digits\), cast to integer, is not supported by Mason/);
-      assert.ok(refusals[0]!.options.some((o) => o.includes("ORDER BY (a / b)::int")), JSON.stringify(refusals));
+    await w.until((s) => s.state === "refused", "public.nulled");
+    for (const [name, want] of [["pdisc", "1"], ["moded", "-3"]] as const) {
+      await w.until(served(w.logged), `public.${name}`);
+      assert.deepEqual((await typed(w, `SELECT x FROM ${name}`)).rows.map((x) => x.map(text)), [[want]], name);
     }
     await w.until((s) => s.state === "failed", "public.spreadint");
     assert.match(w.status("public.spreadint").error ?? "", /cast to an integer type is not supported by Mason \(Mason gap numeric-double-integer\)/, JSON.stringify(w.status("public.spreadint")));
@@ -218,5 +218,19 @@ test("issue 242: an integer cast of a numeric the engine holds as a double is st
     w.write("pdiscint", scheduledH("SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (amount / 1.6)::int) AS x FROM ledger"));
     await w.until(served(w.logged), "public.pdiscint");
     assert.deepEqual((await typed(w, "SELECT x FROM pdiscint")).rows.map((x) => x.map(text)), [["1"]]);
+    // through PR 520's SHARED programs (#484): a NULLIF, a sign and a picked value each read three times a level, over a
+    // quotient chain, stored half away from zero (0.6875 is 1, -1.5625 is -2, 2.5 is 3)
+    const chain = (read: string, bottom: string): string => [1, 2, 3].reduce((s, k) => `SELECT id, ${read} AS q FROM (${s}) s${k}`, bottom);
+    w.write("nzchain", scheduledH(`SELECT id, q::int AS x FROM (${chain("nullif(q, 0) + nullif(q, 0) - nullif(q, 0)", "SELECT id, amount / 1.6 AS q FROM ledger")}) s ORDER BY id`));
+    w.write("sgchain", scheduledH(`SELECT id, (q * 2.5)::int AS x FROM (${chain("sign(q) + sign(q) - sign(q)", "SELECT id, amount / 1.6 AS q FROM ledger")}) s ORDER BY id`));
+    w.write("pdchain", scheduledH("SELECT (x + x - x)::int AS x, (x + x - x * 2)::int8 AS y FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY amount / 1.6) AS x FROM ledger) s"));
+    for (const [name, sql, want] of [
+      ["nzchain", "SELECT id, x FROM nzchain ORDER BY id", [["1", "1"], ["3", null], ["9223372036854775806", "-2"], ["9223372036854775807", "3"]]],
+      ["sgchain", "SELECT id, x FROM sgchain ORDER BY id", [["1", "3"], ["3", null], ["9223372036854775806", "-3"], ["9223372036854775807", "3"]]],
+      ["pdchain", "SELECT x, y FROM pdchain", [["1", "0"]]],
+    ] as const) {
+      await w.until(served(w.logged), `public.${name}`);
+      assert.deepEqual((await typed(w, sql)).rows.map((x) => x.map(text)), want, name);
+    }
   });
 });

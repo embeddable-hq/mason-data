@@ -77,3 +77,29 @@ export function singleRow(bytes: Buffer | Uint8Array): (Buffer | null)[] {
   const row = rows[0]!;
   return row.type === "DataRow" ? row.values : [];
 }
+
+/** an unsigned 16-bit big-endian number (a port, a length) */
+const u16 = (n: number): Buffer => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
+
+/**
+ * A PROXY protocol v2 header as haproxy's proxy-protocol.txt (section 2.2) lays it out, built here from the spec alone,
+ * never from src/api/postgres/proxy.ts: the 12-byte signature, version 2 and the command (0 LOCAL, 1 PROXY), the family
+ * and transport byte, the length of what follows, then `body` (the addresses and any TLVs).
+ */
+export function proxyV2(command: number, family: number, body: Buffer): Buffer {
+  return Buffer.concat([Buffer.from("0d0a0d0a000d0a515549540a", "hex"), Buffer.from([0x20 | command, family]), u16(body.length), body]);
+}
+
+/** A TLV: its type, a 2-byte length and the value. */
+export const proxyTlv = (type: number, value: Buffer): Buffer => Buffer.concat([Buffer.from([type]), u16(value.length), value]);
+
+/** A PROXY command's header for TCP over IPv4 (0x11): source, destination, their ports, then `tlvs`. */
+export function proxyV2Inet4(source: string, sourcePort: number, destination = "192.0.2.1", destinationPort = 5433, tlvs: Buffer = Buffer.alloc(0)): Buffer {
+  const ip = (a: string): Buffer => Buffer.from(a.split(".").map(Number));
+  return proxyV2(1, 0x11, Buffer.concat([ip(source), ip(destination), u16(sourcePort), u16(destinationPort), tlvs]));
+}
+
+/** A PROXY command's header for TCP over IPv6 (0x21): each address as its 32 hex digits. */
+export function proxyV2Inet6(sourceHex: string, sourcePort: number, destinationHex = "20010db8000000000000000000000001", destinationPort = 5433, tlvs: Buffer = Buffer.alloc(0)): Buffer {
+  return proxyV2(1, 0x21, Buffer.concat([Buffer.from(sourceHex, "hex"), Buffer.from(destinationHex, "hex"), u16(sourcePort), u16(destinationPort), tlvs]));
+}

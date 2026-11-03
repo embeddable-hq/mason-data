@@ -20,7 +20,7 @@ import { floatAsNumeric } from "./types.ts";
 import { intervalText } from "./types.ts";
 import { jsonbText, parseJson, writeJson, quoteJson, type Json } from "./jsonb.ts";
 import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
-import { compare, div, evaluateText, NumericError, numericOrderKey, numericText, numericToDouble, numericToInteger, parseNumeric, type NumericProgram } from "../lib/pg-numeric.ts";
+import { compare, div, evaluateText, NumericError, numericOrderKey, numericText, numericToDouble, numericToInteger, parseNumeric, parseProgram, type NumericProgram } from "../lib/pg-numeric.ts";
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
 import { gapMark } from "./gaps.ts";
@@ -445,6 +445,19 @@ const itemsOf = (v: DuckDBValue): Array<string | null> => (v as { items: DuckDBV
  *  src/duck/store.ts postgresWording sends apart, as Postgres does */
 const numericEvalError = (e: NumericError): PgEvalError => new PgEvalError(e.sqlstate, e.detail === null ? e.message : `${e.message}\nDETAIL: ${e.detail}`);
 
+/** a `__mason_numeric_program` literal parsed once (`parseProgram`): the same text is given on every row of a statement,
+ *  so the last few are kept by their text (a program is never changed once made, so one parse serves every row) */
+const PARSED = new Map<string, NumericProgram>();
+const PARSED_KEPT = 64;
+function parsedProgram(text: string): NumericProgram {
+  const known = PARSED.get(text);
+  if (known !== undefined) return known;
+  const p = parseProgram(text);
+  if (PARSED.size >= PARSED_KEPT) PARSED.delete(PARSED.keys().next().value!);
+  PARSED.set(text, p);
+  return p;
+}
+
 const text = (v: DuckDBValue | undefined): string | null => v === null || v === undefined ? null : String(v);
 
 /** a scalar function over VARCHAR (and BOOLEAN) arguments, one call per row; a thrown error is the statement's */
@@ -832,9 +845,11 @@ export function registerFunctions(conn: DuckDBConnection): void {
   });
   // a numeric program over a row's cells' texts (src/duck/rewrite.ts exactText): Postgres's exact value as numeric_out
   // writes it, where DuckDB computes a double (a quotient handed to ln)
+  // The program is its one text (src/lib/pg-numeric.ts `programJson`, each shared node once), the same literal on every
+  // row: parsed once per text (`parsedProgram`), and each node computed at most once a row
   scalar(conn, "__mason_numeric_program", [], VARCHAR, ([program, ...cells]) => {
     const values = Object.fromEntries(cells.map((c, i) => [String(i), text(c)]));
-    try { return evaluateText(JSON.parse(String(program)) as NumericProgram, values); }
+    try { return evaluateText(parsedProgram(String(program)), values); }
     catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
   }, { nulls: "pass", varargs: true });
   // a numeric's ORDER KEY (src/duck/rewrite.ts exactOrderKey, issue 252): bytes that sort as numeric_cmp, so a program's
@@ -853,7 +868,7 @@ export function registerFunctions(conn: DuckDBConnection): void {
   // where Postgres rounds the exact value half away from zero, and bytes are no number: each refused by name
   scalar(conn, "__mason_numeric_int_of", [VARCHAR, VARCHAR, INTEGER], VARCHAR, ([type, t, bits]) => {
     if (/^(DOUBLE|FLOAT|REAL|BLOB)$/i.test(String(type))) {
-      throw new PgEvalError("0A000", `a numeric the engine holds as a double, which Mason cannot compute exactly here, cast to an integer type is not supported by Mason (${gapMark("numeric-double-integer")}): Postgres rounds the exact value half away from zero, the double would round half to even; cast the value to an integer inside the aggregate, percentile_disc(0.5) WITHIN GROUP (ORDER BY (a / b)::int), or cast it to float8 first`);
+      throw new PgEvalError("0A000", `a numeric the engine holds as a double, which Mason cannot compute exactly here, cast to an integer type is not supported by Mason (${gapMark("numeric-double-integer")}): Postgres rounds the exact value half away from zero, the double would round half to even; cast it to float8 first, (stddev(x)::float8)::int, which rounds the double as Postgres rounds a float8`);
     }
     try { return numericToInteger(String(t), Number(bits) as 16 | 32 | 64); }
     catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }

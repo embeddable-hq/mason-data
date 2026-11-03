@@ -163,7 +163,7 @@ const activityOf = (o: { window?: Record<string, unknown>; clients?: unknown[]; 
   clientsTotal: o.clientsTotal ?? { clients: (o.clients ?? CLIENTS).length, sessions: (o.clients ?? CLIENTS).reduce((a: number, c) => a + (c as { sessions: number }).sessions, 0) } });
 const EVENT: SyncEvent = { at: "2026-10-27T09:03:10.123Z", kind: "poll_failed", failed: true, table: "public.orders", message: "poll: connection reset\nthe sync tries it again in 5 s" };
 const EVENTS = { events: [EVENT, { at: "2026-10-27T09:04:00.000Z", kind: "restart", failed: true, table: null, message: "the run was started again after it stopped" }], keptDays: 7 };
-const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", tokenName: "", user: "metabase", role: "", attributes: null,
+const REQUEST: LedgerRequest = { requestId: "0b9e5c1e-0000-4000-8000-000000000001", startedAt: "2026-10-27T09:02:00.500Z", session: 7, applicationName: "Metabase", clientAddress: null, tokenName: "", user: "metabase", role: "", attributes: null,
   method: "QUERY", outcome: "refused", status: "failed", sqlstate: "42P01", message: "relation \"nope\" does not exist\nLINE 1", detail: null, hint: null, rows: null, durationMs: 3,
   endedAt: "2026-10-27T09:02:00.503Z", bytesSent: 120, query: "SELECT *\n  FROM nope", queryTruncated: false };
 const FAILED_REQUESTS = { requests: [REQUEST, { ...REQUEST, requestId: "0b9e5c1e-0000-4000-8000-000000000002", applicationName: "", user: "", outcome: "cancelled", sqlstate: "57014",
@@ -598,6 +598,28 @@ test("a sources file the server cannot write: no Add, Columns…, Name its key�
   // no table added yet: nothing says Add
   const none = renderTables({ ...CATALOG_STATE, sourcesReadOnly: why, tables: CATALOG_STATE.tables.map((t) => ({ ...t, added: false, copy: null })) });
   assert.ok(!textOf(none).includes("Add one from the list"));
+});
+
+test("a project deployed read-only (MASON_PROJECT_READONLY=1): the state the run answers says why, and the Tables list has no Add, Columns…, Name its key… or Remove; unset, it has", () => {
+  const renderTables = fn<[unknown], string>("renderTables");
+  // the run's own environment, as mason serve's run reads it: the state is the server's, rendered as it travels
+  const was = process.env.MASON_PROJECT_READONLY;
+  process.env.MASON_PROJECT_READONLY = "1";
+  let deployed: RunState;
+  try { deployed = stateOf(THREE_COPIED(), { tables: CATALOG }); }
+  finally { if (was === undefined) delete process.env.MASON_PROJECT_READONLY; else process.env.MASON_PROJECT_READONLY = was; }
+  const why = "the project's files are read-only here (MASON_PROJECT_READONLY=1); edit the files and deploy them: mason add or mason remove where the project is committed, then commit and deploy";
+  assert.equal(deployed.sourcesReadOnly, why);
+  const html = renderTables(deployed);
+  for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(!html.includes(control), control);
+  assert.match(html, /data-sync-table/, "Sync stays: the sync is unchanged");
+  assert.ok(textOf(html).includes(`Tables are not added or removed from this page: ${why}.`));
+  // every table of the list is still written, added or not
+  for (const t of CATALOG) assert.ok(html.includes(`title="${t.source}"`), t.source);
+  // unset: nothing changes
+  assert.equal(CATALOG_STATE.sourcesReadOnly, null);
+  const open = renderTables(CATALOG_STATE);
+  for (const control of ["data-remove-table", "data-add-table", "data-choose"]) assert.ok(open.includes(control), control);
 });
 
 test("a server's Connect says the URL's host is the server's own view of itself; a laptop's page says nothing of it", async () => {
