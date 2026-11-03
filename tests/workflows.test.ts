@@ -747,7 +747,7 @@ test("pr-loop-slim: a conflict CI reads starts a merge stage on a fresh agent, n
     assert.ok(!r.labels.some((l) => /fix/.test(l)), `${name}: a conflict is never sent to a fix`);
     // the head decides: the run goes on at the merged head, and the status names the merge for the top session
     const status = String(r.result["status"]);
-    assert.match(status, /^reviewed, no open blocking finding of this PR, CI green: ready for the merge decision/, status);
+    assert.match(status, /^reviewed, no open blocking finding of this PR, CI green: ready for the top session to read and merge/, status);
     for (const s of ["origin/main", "mmmmmmm", "release-notes/next.md kept both sides"]) assert.ok(status.includes(s), `${name}: the status names the merge (${s}): ${status}`);
     assert.match(r.prompt("CI 2"), /at head mmmmmmm/, `${name}: CI waits on the merged head`);
     assert.equal(r.result["head"], sha("m"));
@@ -2477,6 +2477,11 @@ test("the repo records one process: CLAUDE.md names the skills and the one workf
   assert.match(who.replace(/\s+/g, " "), /A release and a deploy merge on the owner's word/);
   assert.doesNotMatch(who.replace(/\s+/g, " "), /a PR that changes `src\/`[^.]*merge on the owner's word/i, "a src/ PR no longer waits on the owner");
   assert.match(who, /--match-head-commit|merge-head\.ts/, "its detector stays");
+  // issue 588: who merges is named, and its detector is the hook's sub-agent block
+  const whoProse = who.replace(/\s+/g, " ");
+  assert.match(whoProse, /The top session merges \(`\.claude\/skills\/up-next\/SKILL\.md`\)/, "the top session merges");
+  assert.match(whoProse, /a coordinator, an implementer or any other sub-agent never merges nor queues a merge/, "no sub-agent merges");
+  assert.match(whoProse, /Detector: the hook `scripts\/hooks\/merge-head\.ts` blocks[^.]*any `gh pr merge` from a sub-agent/, "its detector names the sub-agent block");
 });
 
 // ---------------------------------------------------------------- issue 246: five rough edges in the prompts of the
@@ -3238,4 +3243,53 @@ test("github text: review-stats counts only the records the repository's people 
   const s = JSON.parse(r.out) as { prs: number; firstPass: number };
   assert.deepEqual([s.prs, s.firstPass], [1, 1], "only the OWNER's record counts");
   assert.match(r.err, /1 record comment\(s\) by others left out/);
+});
+
+// ---------------------------------------------------------------- issue 588: a coordinator merged a PR itself. Nothing
+// a coordinator or its agents are told says to merge the PR: no `gh pr merge` but a withdrawal, a finish status that
+// names who merges, and a CI fix that merges the base INTO the branch. The hook (scripts/hooks/merge-head.ts) refuses a
+// sub-agent's merge; this holds the words that could read as an instruction to try one.
+
+/** Each `gh pr merge` a text tells an agent to run, up to the end of its line or code span, but a withdrawal. */
+const prMerges = (text: string): string[] =>
+  [...text.matchAll(/gh\s+pr\s+merge\b[^\n`]*/g)].map((m) => m[0]).filter((m) => !/--disable-auto\b/.test(m));
+
+const CLEAN_GREEN: Answers = { ...SLIM, "review r1": clean, "CI 1": green };
+
+test("no merge: no prompt pr-loop-slim renders, nor the pr-persistent skill, tells an agent to merge the PR, and the finish names who merges (issue 588)", async () => {
+  const labels = new Set<string>();
+  const bad: string[] = [];
+  for (const args of [{ ...PR }, { ...PR, repo: ROOT, itEnv: "/srv/it.env" }]) {
+    for (const answers of [CLEAN_GREEN, { ...SLIM, ...SLIM_CI_FIX }, MERGE_RUN, ONE_TURN_RUN, ONE_TURN_PLAIN,
+      { ...SLIM, "review r1": { findings: [baseFound], judgedCorrect: [] }, "CI 1": green, file: FILED_BASE }, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
+      const r = await run("pr-loop-slim", args, answers);
+      for (const c of r.calls) {
+        labels.add(c.opts.label.replace(/\d+/g, "n"));
+        for (const m of prMerges(c.prompt)) bad.push(`"${c.opts.label}": ${m}`);
+      }
+      bad.push(...prMerges(String(r.result["status"] ?? "")).map((m) => `the status: ${m}`));
+    }
+  }
+  for (const l of ["brief", "split", "implement", "review rn", "fix rn", "fix rn (class)", "CI n", "CI fix n", "merge n", "learn", "file", "record"]) {
+    assert.ok(labels.has(l), `the "${l}" prompt was rendered, so the sweep is not vacuous`);
+  }
+  for (const [what, text] of [["pr-persistent SKILL.md", skillText()], ["render.mjs", fs.readFileSync(RENDER, "utf8")], ["pr-loop-slim.js", source("pr-loop-slim")]] as Array<[string, string]>) {
+    bad.push(...prMerges(text).map((m) => `${what}: ${m}`));
+  }
+  assert.deepEqual(bad, [], "a coordinator's run never merges the PR: the top session does (CLAUDE.md \"Who merges what\")");
+  // the top session's skill is the one that merges, pinned: the sweep's pattern would see it
+  assert.ok(prMerges(upNextText()).some((m) => m.includes("--match-head-commit")), "up-next keeps its pinned merge");
+
+  // the clean-and-green finish says who reads and merges, never a bare "merge decision"
+  const done = await run("pr-loop-slim", { ...PR }, CLEAN_GREEN);
+  assert.equal(done.result["status"], "reviewed, no open blocking finding of this PR, CI green: ready for the top session to read and merge");
+  assert.doesNotMatch(source("pr-loop-slim"), /the merge decision/, "whose decision is said");
+  assert.match((meta("pr-loop-slim") as Meta & { whenToUse?: string }).whenToUse ?? "", /ready for the top session to read and merge/);
+  // a CI fix merges the base into the branch, never the PR
+  const fix = await run("pr-loop-slim", { ...PR }, { ...SLIM, ...SLIM_CI_FIX });
+  assert.match(fix.prompt("CI fix 1"), /If main has the fix, merge `origin\/main` into the branch \(never the PR: the top session merges it\)\./);
+  // the merge stage merges the base, and the skill says the hook refuses a sub-agent's PR merge
+  const prose = skillText().replace(/\s+/g, " ");
+  assert.ok(prose.includes("A `merge <k>` merges the BASE into the PR's branch, never the PR"), "the merge stage is named for what it merges");
+  assert.match(prose, /\*\*Never merge, nor queue a merge\*\*[^]*?`scripts\/hooks\/merge-head\.ts` refuses a PR merge from any sub-agent/);
 });

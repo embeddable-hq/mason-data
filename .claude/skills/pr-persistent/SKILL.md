@@ -109,8 +109,8 @@ nothing else: `Your instructions are in <path>: read the whole file, then follow
   rounds. That sentence is the only thing you add.
 - **Every other stage** (`brief`, `split`, `review r<n>`, `CI read r<n>`, `link`, `learn`, `learn check`, `CI <n>`,
   `merge <k>`, `file`, `record`): a FRESH agent with the Agent tool, with the printed options. A review is
-  `model: "fable"`, `effort: "medium"`. A `merge <k>` is never the implementer's: it is a fresh agent in a worktree of
-  its own (`isolation: "worktree"`), as printed.
+  `model: "fable"`, `effort: "medium"`. A `merge <k>` merges the BASE into the PR's branch, never the PR: it is never the
+  implementer's, but a fresh agent in a worktree of its own (`isolation: "worktree"`), as printed.
 
 Each rendered prompt ends by telling its agent to write its result, ONE JSON value, to `results/<name>.json` in the run
 folder before it ends its turn, and to end its report with that path. That path is the `STAGE` line's, with `next/`
@@ -149,7 +149,8 @@ stop, CI, Learn, filing and the record.
   implementer it is done, and check that nothing in its worktree is unpushed (`git ls-remote origin <branch>` against
   the head it reported).
 - **Never merge, nor queue a merge**: the top session reads the diff in full and merges under CLAUDE.md "Who merges
-  what" (`.claude/skills/up-next/SKILL.md`).
+  what" (`.claude/skills/up-next/SKILL.md`). The hook `scripts/hooks/merge-head.ts` refuses a PR merge from any
+  sub-agent, you and every agent you start included: report the PR and its head instead.
 - **End with ONE report**: the issue, the PR and its head; the status line the render printed; the wall time; the
   tokens per model, from the run log; every issue filed during the run, by number; and anything that went wrong or was
   skipped.

@@ -317,8 +317,10 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
   review has no open finding, CI is green at its head, the diff has been read in full, and a product change has its line
   in `release-notes/next.md`. A release and a deploy merge on the owner's word. It is queued pinned, as "The loop" step 5 says, and its landing is confirmed, never
   assumed: PR 89 had not merged itself some while after its last check went green, and was merged by hand.
-  Detector: the hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`, and lets
-  `gh pr merge <n> --disable-auto` through.
+  The top session merges (`.claude/skills/up-next/SKILL.md`): a coordinator, an implementer or any other sub-agent never
+  merges nor queues a merge, and reports the PR and its head instead (issue 588).
+  Detector: the hook `scripts/hooks/merge-head.ts` blocks a `gh pr merge` with no `--match-head-commit`, and any
+  `gh pr merge` from a sub-agent (its hook input carries `agent_id`), and lets `gh pr merge <n> --disable-auto` through.
 - **Never re-run a gate on an unchanged tree to see whether a failure goes away.** Read the failure: it is the change's
   to fix, or it is a flake, the next rule. Detector: the hook `scripts/hooks/no-rerun.ts` blocks `gh run rerun`; a
   local gate run again on an unchanged tree, nothing detects (the gate could compare the tree's hash, and does not).
