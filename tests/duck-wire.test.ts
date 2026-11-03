@@ -38,7 +38,7 @@ import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
-import { DEEP_DEPTHS, PLAN_TIME_BOUND_MS, deepChains, deepShapes, numericShapes } from "./deep-chains.ts";
+import { DEEP_DEPTHS, deepChains, deepShapes, numericShapes, planTimeBound } from "./deep-chains.ts";
 
 const API_KEY = "k".repeat(48);
 
@@ -5909,7 +5909,8 @@ test("issue 484: a numeric's program shared by its references is executed at dep
   };
   try {
     // THE BOUND: the integer forms of `deepShapes` at depth 32 executed here (the review's deep variant form, which no
-    // program reads), and the numeric ones within max(2 x PLAN_TIME_BOUND_MS, 2 x the slower integer form's time). Each
+    // program reads), and the numeric ones within max(2 x the shape's planning-time bound, 2 x the slower integer form's
+    // time): `planTimeBound`, its cost curve's, since an answer's time includes its plan's (issue 569). Each
     // statement once, so none is answered from what an earlier one left; the session and the table warmed first
     await answer(c, "SELECT count(*) FROM deep_t");
     const integer = deepShapes(32);
@@ -5921,7 +5922,7 @@ test("issue 484: a numeric's program shared by its references is executed at dep
       t.diagnostic(`${shape} (integers) at depth 32: ${ms.toFixed(0)} ms`);
       integerMs = Math.max(integerMs, ms);
     }
-    const bound = Math.max(2 * PLAN_TIME_BOUND_MS, 2 * integerMs);
+    const boundOf = (shape: string): number => Math.max(2 * planTimeBound(shape), 2 * integerMs);
     const arm = "SELECT a, d FROM deep_t";
     const shallow = (depth: number): Record<keyof ReturnType<typeof shapes>, string> => ({
       "c + c - c": "SELECT c FROM deep_t ORDER BY 1",
@@ -5936,8 +5937,8 @@ test("issue 484: a numeric's program shared by its references is executed at dep
       const started = performance.now();
       const got = await answer(c, over(sql));
       const ms = performance.now() - started;
-      t.diagnostic(`${shape} at depth ${depth}: ${ms.toFixed(0)} ms (bound ${bound.toFixed(0)} ms, the integer forms ${integerMs.toFixed(0)} ms)`);
-      assert.ok(ms < bound, `${shape}: answered in ${ms.toFixed(0)} ms at depth ${depth}, past the bound of ${bound.toFixed(0)} ms (the integer forms ${integerMs.toFixed(0)} ms)`);
+      t.diagnostic(`${shape} at depth ${depth}: ${ms.toFixed(0)} ms (bound ${boundOf(shape).toFixed(0)} ms, the integer forms ${integerMs.toFixed(0)} ms)`);
+      assert.ok(ms < boundOf(shape), `${shape}: answered in ${ms.toFixed(0)} ms at depth ${depth}, past the bound of ${boundOf(shape).toFixed(0)} ms (the integer forms ${integerMs.toFixed(0)} ms)`);
       assert.deepEqual(got, await postgres(shallow(depth)[shape]), `${shape} at depth ${depth}`);
     }
     // depth 4: Postgres answers each itself
