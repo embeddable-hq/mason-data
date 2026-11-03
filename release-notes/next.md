@@ -15,6 +15,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason doctor` warns when the user Mason connects as could write to your database**: a superuser or `BYPASSRLS`, the
+  owner of a synced table, or one holding `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` on a
+  synced table or `CREATE` on its schema — or a write that reaches its rows through a partition, an inheritance child or
+  parent, a foreign key's `ON DELETE` / `ON UPDATE` action, an updatable view or a rule; a foreign table or user
+  mapping; `ADMIN OPTION` on a role, or a server role — directly, through a role it is a member of, or granted to
+  `PUBLIC`. Mason only reads, so such a user lets a Mason bug or a stolen URL change the database. Each is a warning
+  (`!`, the exit status unchanged) with the statements that make a role that only reads (`REPLICATION` and a
+  publication where a table's `sync:` is replication), and in `--json` a stable `code` and the `fix`. The statements
+  change no role's privileges but the new one's: what `PUBLIC` holds is said for you to decide. **`SECURITY DEFINER`
+  code** the user reaches (by `EXECUTE`, a trigger on a table it may write, an event trigger, an aggregate) whose owner
+  may write the synced tables is listed for you to review, since what it writes is in its body, and the user is never
+  said to only read while it can run one. It is all asked of the catalog in one read, never tried.
 - **Behind a TCP load balancer or proxy, the request log can name each real client**: set `MASON_PG_PROXY_FROM` to the
   proxy's own addresses (CIDRs, comma-separated) and turn on its PROXY protocol v2 (an NLB's target group, HAProxy's
   `send-proxy-v2`). A connection from those addresses must then begin with the header, and one from any other address

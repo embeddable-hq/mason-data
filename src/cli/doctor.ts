@@ -15,6 +15,10 @@ import { projectSource, type Project } from "./project.ts";
 import { DEFAULT_PG_PORT } from "../api/postgres/listener.ts";
 import { defaultMemoryLimit, machineMemory, memoryLimitBytes, memoryProblems, memoryProblemText, memorySize, memoryWarning, OUTSIDE_RESERVE_BYTES, type MachineMemory } from "../duck/store.ts";
 import { probeExtensions, type ExtensionProbe } from "../duck/extensions.ts";
+import { readRoleFacts, roleChecks, roleUnknown, ROLE_CODES, type RoleAsk } from "./source-role.ts";
+import { replicatedEntries, shownPath, type ProjectSource } from "./sources.ts";
+import { namedPublication } from "./replication-mode.ts";
+import type { PgConnection } from "../cdc/pg-wire.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 
@@ -34,14 +38,23 @@ export const DOCTOR_USAGE = `usage: mason doctor [--json]
   platform, so nothing is downloaded; else the first sync downloads them), the ports Mason listens on — with the way
   out for anything missing. In a
   project's folder it checks the project's database too; with Mason running for it, the run in a few lines instead: its
-  database, whether every added table is synced, the statements of the last day it refused or answered slowly.
+  database, whether every added table is synced, the statements of the last day it refused or answered slowly. Both
+  say whether the user Mason connects as could change a synced table's rows (a superuser, BYPASSRLS, an owner of a
+  synced table, a write privilege on one or CREATE on its schema; or a write that reaches its rows through a
+  partition, an inheritance child or parent, a foreign key's action, a view or a rule; SECURITY DEFINER code it
+  reaches; a foreign server; ADMIN OPTION or a server role; directly or through a role it is a member of), with the
+  statements that make a role that only reads.
 
     mason doctor
 
-  --json   as data: { ready, verdict, checks: [{ name, ok, detail, warn }], next: [{ command, what }] }; ok is true,
-           false, or null when it could not tell; warn (only when true): fine to run, but said loudly
+  --json   as data: { ready, verdict, checks: [{ name, ok, detail, warn, code, fix }], next: [{ command, what }] }; ok
+           is true, false, or null when it could not tell; warn (only when true): fine to run, but said loudly; code
+           (the role's lines): ${ROLE_CODES.slice(0, 5).join(", ")},
+           ${ROLE_CODES.slice(5).join(", ")};
+           fix (with code): the statements and the edit that make a role that only reads
 
-  Exit status: 0 everything checked is fine; 1 something is not (said, with the way out).
+  Exit status: 0 nothing failed — a warning (!) and a check that could not tell (?) are said, and leave it 0; 1
+  something failed (said, with the way out).
 `;
 
 export const DOCTOR: CommandSpec = {
@@ -53,7 +66,15 @@ export const DOCTOR: CommandSpec = {
 };
 
 /** One check: what was looked at, whether it is fine (null: could not tell), and the detail — a value, or what to do. */
-export interface Check { name: string; ok: boolean | null; detail: string; /** a start goes on, but the line is said loudly (`!`) */ warn?: true }
+export interface Check {
+  name: string; ok: boolean | null; detail: string;
+  /** a start goes on, but the line is said loudly (`!`) */
+  warn?: true;
+  /** a stable name for what the line found, for an agent (the role's: `ROLE_CODES`) */
+  code?: string;
+  /** the way out as statements and lines to change, printed under the checks once however many lines share it */
+  fix?: string;
+}
 
 /** The ports a mason start takes by default, and what listens on each. */
 export const PORTS: ReadonlyArray<[port: number, what: string]> = [[DEFAULT_UI_PORT, "the mason commands"], [DEFAULT_PG_PORT, "the Postgres API"]];
@@ -134,17 +155,54 @@ function portOf(url: string): number | null {
   try { const u = new URL(url); return u.port ? Number(u.port) : null; } catch { return null; }   // not a URL: no port to compare with
 }
 
-/** The database a URL names: reachable, its version, what this user can read. */
-export async function databaseCheck(url: string, o: ConnectContext = {}): Promise<Check> {
+/**
+ * The database a URL names: reachable, its version, what this user can read — and, given `role` (the project's synced
+ * tables), whether that user could write to it (src/cli/source-role.ts), on the same connection.
+ */
+export async function databaseChecks(url: string, o: ConnectContext & { role?: RoleAsk } = {}): Promise<Check[]> {
   const parsed = parseSource(url);
-  if ("problem" in parsed) return { name: "database", ok: false, detail: parsed.problem };
+  if ("problem" in parsed) return [{ name: "database", ok: false, detail: parsed.problem }];
   const connected = await connectSource(parsed.source, o);
-  if ("failure" in connected) return { name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: ${connected.failure.message}${connected.failure.hints.map((h) => `\n    - ${h}`).join("")}` };
+  if ("failure" in connected) return [{ name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: ${connected.failure.message}${connected.failure.hints.map((h) => `\n    - ${h}`).join("")}` }];
+  try {
+    const facts = await readSourceFacts(connected.pg);
+    const tooOld = versionProblem(facts);
+    if (tooOld) return [{ name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: ${tooOld}` }];
+    const database: Check = { name: "database", ok: true, detail: `${maskedUrl(parsed.source.url)}: Postgres ${facts.versionText}${facts.standby ? " (a read replica)" : ""}, ${facts.tables.length} table(s) this user can read` };
+    return o.role ? [database, ...await askRole(connected.pg, o.role)] : [database];
+  } finally { connected.pg.close(); }
+}
+
+/** The role's lines, from its one catalog read; a read that failed is "could not tell", never "only reads". */
+async function askRole(pg: Pick<PgConnection, "query">, ask: RoleAsk): Promise<Check[]> {
   let facts;
-  try { facts = await readSourceFacts(connected.pg); } finally { connected.pg.close(); }
-  const tooOld = versionProblem(facts);
-  if (tooOld) return { name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: ${tooOld}` };
-  return { name: "database", ok: true, detail: `${maskedUrl(parsed.source.url)}: Postgres ${facts.versionText}${facts.standby ? " (a read replica)" : ""}, ${facts.tables.length} table(s) this user can read` };
+  try { facts = await readRoleFacts(pg, ask.tables); } catch (e) { return [roleUnknown((e as Error).message)]; }
+  return roleChecks(facts, ask);
+}
+
+/** What the role check asks of a project's sources file: its tables, whether one streams, its publication, its URL. */
+export function roleAsk(src: ProjectSource, root: string, env: NodeJS.ProcessEnv = process.env): RoleAsk {
+  return {
+    tables: src.tables.map((e) => { const at = e.table.indexOf("."); return { schema: e.table.slice(0, at), table: e.table.slice(at + 1) }; }),
+    replicated: replicatedEntries(src).map((e) => e.table),
+    publication: namedPublication(src, env)?.name ?? null,
+    urlVariable: "env" in src.url ? src.url.env : null, urlFrom: src.from, file: shownPath(root, src.file), url: src.resolved,
+  };
+}
+
+/**
+ * The role's lines with Mason running (its own checks never connect to the database): the project's sources file read
+ * and the database asked, on a connection of its own. What cannot be read is "could not tell".
+ */
+export async function runRoleChecks(project: Project): Promise<Check[]> {
+  if (project.config.demo === true) return [];   // the demo database is Mason's own, inside the run
+  const src = projectSource(project);
+  if ("message" in src) return [roleUnknown(`${src.message} (mason status)`)];
+  const parsed = parseSource(src.resolved);
+  if ("problem" in parsed) return [roleUnknown(parsed.problem)];
+  const connected = await connectSource(parsed.source);
+  if ("failure" in connected) return [roleUnknown(`${maskedUrl(parsed.source.url)}: ${connected.failure.message}`)];
+  try { return await askRole(connected.pg, roleAsk(src, project.root)); } finally { connected.pg.close(); }
 }
 
 /** The run's health, from its own state: every table copied, failing, or still at work; and what it refused or answered slowly. */
@@ -229,13 +287,16 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
     if (project) {
       // the database the project's sources file names (src/cli/sources.ts): a file that cannot be read is the failing line
       const src = projectSource(project);
-      checks.push("message" in src ? { name: "database", ok: false, detail: `${src.message}${src.why ? `: ${src.why.replace(/\n/g, "; ")}` : ""}. ${src.fix?.split("\n")[0] ?? ""}`.trim() }
-        : await databaseCheck(src.resolved, { demo: project.config.demo === true }));
+      if ("message" in src) checks.push({ name: "database", ok: false, detail: `${src.message}${src.why ? `: ${src.why.replace(/\n/g, "; ")}` : ""}. ${src.fix?.split("\n")[0] ?? ""}`.trim() });
+      // the demo database is Mason's own, inside the run: whom it connects as is not the person's to change
+      else if (project.config.demo === true) checks.push(...await databaseChecks(src.resolved, { demo: true }));
+      else checks.push(...await databaseChecks(src.resolved, { role: roleAsk(src, project.root) }));
     }
     // a project here whose config cannot be read: init would refuse, so "Ready: mason init" would send a person nowhere
     if ("code" in which && which.code === "bad_config") checks.push({ name: "project", ok: false, detail: `${which.problem}. ${(which.fix ?? "").replace(/^./, (c) => c.toUpperCase())}`.trim() });
   } else {
     checks.push(...await runChecks(run));
+    if (project) checks.push(...await runRoleChecks(project));
   }
   const next = nextSteps(checks, run, project);
   const { ready, verdict } = verdictOf(checks, run, project);
@@ -248,6 +309,11 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
     if (run !== null && c.name === "mason start" && c.ok === true) continue;   // the verdict line said it
     const mark = markOf(c, s);
     out(`  ${mark} ${c.name.padEnd(w)}  ${wrap(c.detail, s.width, 2 + 3 + 1 + w + 2)}`);
+  }
+  // a way out several lines share, once, under them: SQL as what you type, the rest as its words
+  for (const fix of new Set(checks.map((c) => c.fix).filter((x): x is string => x !== undefined))) {
+    out("");
+    for (const line of fix.split("\n")) out(`    ${/;(\s+--.*)?$/.test(line) ? s.cyan(line) : line.startsWith("--") ? s.dim(line) : wrap(line, s.width, 4)}`);
   }
   if (run !== null) out(s.dim(`  its synced data and its state in ${run.home}. mason status for the details`));
   if (run === null || !ready) out(nextBlock(next));
