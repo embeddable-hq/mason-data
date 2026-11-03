@@ -78,6 +78,7 @@ import { numericWiderThan } from "../lib/pg-numeric.ts";
 import { gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
+import { maskDeep, maskError, maskSecret } from "../lib/secret-mask.ts";
 import { BIG_TABLE_ROWS, intervalOf, msText, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
 
 /** how a run keeps its copies current: each table as its `sync:` says (`poll`; a table with none — a test's — polled at
@@ -805,11 +806,33 @@ export function streamRetryDelayMs(intervalMs: number, failures: number): number
 /** what Mason's backends on the source are called (pg_stat_activity.application_name): the copy's readers and the polls */
 export const SOURCE_APPLICATION_NAME = "mason-data";
 
-/** libpq's keyword form of the source, for DuckDB's ATTACH (a value quoted as libpq reads it) */
-export function libpqString(s: Pick<Source, "host" | "port" | "database" | "user" | "password" | "sslmode">): string {
-  const v = (x: string | number): string => `'${String(x).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-  return [`host=${v(s.host)}`, `port=${v(s.port)}`, `dbname=${v(s.database)}`, `user=${v(s.user)}`,
-    ...(s.password ? [`password=${v(s.password)}`] : []), `sslmode=${v(s.sslmode)}`, `application_name=${v(SOURCE_APPLICATION_NAME)}`].join(" ");
+/**
+ * THE ENGINE NEVER HOLDS THE SOURCE'S PASSWORD IN A STRING IT REPEATS (issue 599). DuckDB's `postgres` extension
+ * repeats an ATTACH's path whole in its error (`Unable to connect to Postgres at "<path>": …`), and every connection
+ * reads it in `duckdb_databases()`; a run whose source restarted under it wrote `password='…'` to its log, its ledger,
+ * `mason status` and the web page. So the path is `attachPath`'s, which takes nothing but the sslmode, and the
+ * credentials go through the extension's SECRET MANAGER (`sourceSecretSql`): a temporary, in-memory secret of TYPE
+ * postgres, made on the writer's turn just before the ATTACH that names it and dropped right after it, whatever the
+ * ATTACH did (`attach`). Measured on the extension pinned in cli/extensions.json: its error says the path alone,
+ * `duckdb_secrets()` says `password=redacted`, the attachment keeps the credentials it merged at the ATTACH (a copy's
+ * readers and a reconnect after a restart connect with the secret gone), and it quotes each value for libpq itself.
+ * Not PGPASSWORD: the process's environment is every child's, and setting it races the engine's threads reading it.
+ * Whatever a dependency repeats one day, the sync's exits mask it (src/lib/secret-mask.ts).
+ */
+export function attachPath(s: Pick<Source, "sslmode">): string {
+  const v = (x: string): string => `'${x.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  return [`sslmode=${v(s.sslmode)}`, `application_name=${v(SOURCE_APPLICATION_NAME)}`].join(" ");
+}
+
+/** the secret the ATTACH names: an explicit name, so no other ATTACH takes it (only `__default_postgres` is taken
+ *  unnamed), and a wire session's planned SQL cannot name it */
+export const SOURCE_SECRET = "mason_source_credentials";
+
+/** the source's credentials as the extension's secret: temporary (in memory, never written to disk) and replaced, its
+ *  password left out when there is none (libpq then reads PGPASSWORD or a pgpass file, as it did before) */
+export function sourceSecretSql(s: Pick<Source, "host" | "port" | "database" | "user" | "password">): string {
+  return `CREATE OR REPLACE TEMPORARY SECRET ${SOURCE_SECRET} (TYPE postgres, HOST ${literal(s.host)}, PORT ${literal(String(s.port))}, ` +
+    `DATABASE ${literal(s.database)}, USER ${literal(s.user)}${s.password ? `, PASSWORD ${literal(s.password)}` : ""})`;
 }
 
 /** a table's columns as a copy is made with them: their names and source types, in order */
@@ -887,6 +910,8 @@ export class Sync {
   private readonly store: DuckStore;
   private readonly source: Source;
   private readonly log: (line: string) => void;
+  /** a test's ATTACH in place of the secret path's (`attachSqlForTest`), else null */
+  private readonly attachSql: string | null;
   private readonly intervalMs: number;
   private readonly mode: SyncMode;
   /** each polled table's watermark: the snapshot of the last poll that stored it */
@@ -1057,8 +1082,14 @@ export class Sync {
     options: { streamReportMs?: number; copyChunkRows?: number; copyParallel?: number; copyChunkSeconds?: number; onChunk?: (e: ChunkEvent) => void | Promise<void>; diskFree?: (dir: string) => number;
       json?: Partial<KeptOptions>; generated?: GeneratedOptions; onReplication?: (made: boolean) => void;
       /** each failure and notable event of the sync, as it happens (src/duck/events.ts): the run records them */
-      onEvent?: (e: SyncEventInput) => void } = {}) {
-    this.store = store; this.source = source; this.log = log; this.intervalMs = intervalMs; this.mode = mode;
+      onEvent?: (e: SyncEventInput) => void;
+      /** a test's: the ATTACH statement run instead of the secret path's, so a test shows the mask alone holding every
+       *  exit (tests/integration/duck-secret.itest.ts); never set by a run */
+      attachSqlForTest?: string } = {}) {
+    // EVERY LINE THE SYNC LOGS passes the one mask (src/lib/secret-mask.ts): the run's log, its terminal, mason serve's
+    // stdout and /api/logs all read what this callback is given
+    this.store = store; this.source = source; this.log = (line) => log(maskSecret(line, source.password)); this.intervalMs = intervalMs; this.mode = mode;
+    this.attachSql = options.attachSqlForTest ?? null;
     this.streamReportMs = options.streamReportMs ?? 60_000;
     this.copyChunkRows = options.copyChunkRows ?? COPY_CHUNK_ROWS;
     this.copyParallel = options.copyParallel ?? COPY_PARALLEL;
@@ -1139,9 +1170,14 @@ export class Sync {
   /** an event of the sync, to its record (src/duck/events.ts), which never throws into the sync; a sink that does is
    *  said, and the sync goes on (its state and its log line hold what happened) */
   private event(e: SyncEventInput): void {
-    try { this.onEvent(e); }
+    // its message masked (src/lib/secret-mask.ts): the ledger's events, /api/events and mason logs --events read it
+    try { this.onEvent({ ...e, message: this.mask(e.message) }); }
     catch (x) { this.log(`the sync's event (${e.kind}${e.table ? ` ${e.table}` : ""}) could not be recorded: ${x instanceof Error ? x.message : String(x)}`); }
   }
+
+  /** `text` with the source's password masked in every form (src/lib/secret-mask.ts): what each of the sync's exits
+   *  says — its log, its events, its ledger rows and its answers — passes it */
+  private mask(text: string): string { return maskSecret(text, this.source.password); }
 
   /** a whole-sync failure (`wholeFailure`) is over: said once, as a `recovered` event of no table */
   private recovered(what: keyof Sync["wholeFailure"], words: string): void {
@@ -1193,6 +1229,7 @@ export class Sync {
       this.recordedSync.set(source, sync);
     }
     await this.readPolledAt();
+    await this.scrubLedger();
     const r = await this.store.writer.runAndReadAll(`SELECT source, phase, "rows", bytes, seconds, epoch_ms(copied_at), error, columns::VARCHAR FROM ${MASON_SCHEMA}.copy_state`);
     for (const row of r.getRowsJS()) {
       const [source, phase, rows, bytes, seconds, copiedMs, error, columns] = row as [string, CopyPhase, bigint | null, bigint | null, number | null, number | bigint | null, string | null, string | null];
@@ -1215,6 +1252,43 @@ export class Sync {
     await this.generated.open();
     this.catalog = await this.store.instance.connect();
     await this.rebuildSchema();
+  }
+
+  /**
+   * THE LEDGER SCRUBBED OF A PASSWORD AN EARLIER MASON WROTE (issue 599): before the engine was given the credentials
+   * as a secret, a failed connection's error held `password='…'`, and every table's error (`copy_state`) and every
+   * event (`sync_events`) written then kept it, shown by mason status and the web page for as long as they stand. At
+   * every open, the rows whose text holds a `password=` keyword or this source's password are read, masked by the one
+   * mask (src/lib/secret-mask.ts) and written back where it changed them, said in the log with the way out (the
+   * password was exposed: rotate it). A row that the mask leaves as it is (a `password=` of no value) is not written.
+   */
+  private async scrubLedger(): Promise<void> {
+    const w = this.store.writer;
+    const pw = this.source.password;
+    const holds = (col: string): string => `(${col} ILIKE '%password%=%'${pw ? ` OR contains(${col}, ${literal(pw)})` : ""})`;
+    let scrubbed = 0;
+    const errors = (await w.runAndReadAll(`SELECT source, error FROM ${MASON_SCHEMA}.copy_state WHERE error IS NOT NULL AND ${holds("error")}`)).getRowsJS() as [string, string][];
+    for (const [source, error] of errors) {
+      const masked = this.mask(error);
+      if (masked === error) continue;
+      await w.run(`UPDATE ${MASON_SCHEMA}.copy_state SET error = $1 WHERE source = $2`, [masked, source]);
+      scrubbed++;
+    }
+    // the events' table is SyncEvents' (src/duck/events.ts), opened before the sync by the run; a test's store may have none
+    const events = (await w.runAndReadAll(`SELECT count(*) FROM duckdb_tables() WHERE schema_name = ${literal(MASON_SCHEMA)} AND table_name = 'sync_events'`)).getRowsJS();
+    if (Number(events[0]![0]) > 0) {
+      const rows = (await w.runAndReadAll(`SELECT DISTINCT message FROM ${MASON_SCHEMA}.sync_events WHERE message IS NOT NULL AND ${holds("message")}`)).getRowsJS() as [string][];
+      for (const [message] of rows) {
+        const masked = this.mask(message);
+        if (masked === message) continue;
+        const changed = await w.run(`UPDATE ${MASON_SCHEMA}.sync_events SET message = $1 WHERE message = $2`, [masked, message]);
+        scrubbed += changed.rowsChanged;
+      }
+    }
+    if (scrubbed > 0) {
+      this.log(`removed the database's password from ${scrubbed} error row(s) an earlier Mason wrote to its record of the sync (issue 599): ` +
+        `it was shown by mason status, mason logs --events and the web page, and may stand in .mason/*.log files — change the database user's password (ALTER ROLE … PASSWORD), then delete those log files`);
+    }
   }
 
   /** the tables the project adds now (its sources file): a new one is copied at the next pass unless its copy is already
@@ -1408,7 +1482,11 @@ export class Sync {
     for (const s of this.snapshots.keys()) this.snapshots.set(s, "0:0:");
   }
 
-  state(): CopyState[] {
+  /** every added table's state, as /api/state, mason status, mason wait and the web page read it: masked
+   *  (src/lib/secret-mask.ts), whatever a field repeats */
+  state(): CopyState[] { return maskDeep(this.stateUnmasked(), this.source.password); }
+
+  private stateUnmasked(): CopyState[] {
     const now = Date.now();
     // in the project's order, whatever order the copies ran and were recorded in (`copyOrder`)
     return [...this.tables.keys()].flatMap((source) => this.states.get(source) ?? [])
@@ -1650,6 +1728,12 @@ export class Sync {
    * every table again whole. Its failure is its caller's to say: the copies serve as they were, and the passes go on.
    */
   async pollNow(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
+    // mason sync's answer and its failure, masked (src/lib/secret-mask.ts): the command server sends either as it is
+    try { return maskDeep(await this.pollNowUnmasked(sources), this.source.password); }
+    catch (e) { throw maskError(e, this.source.password); }
+  }
+
+  private async pollNowUnmasked(sources: readonly string[]): Promise<{ at: string; tables: PolledTable[]; streamed?: StreamedAnswer[] }> {
     if (this.mode === "recopy") throw new PollRefused("refused", "this run reads every table again whole at each pass (MASON_DUCK_SYNC=recopy), so there is nothing to poll");
     const tables = sources.map((s) => {
       const t = this.tables.get(s);
@@ -2178,7 +2262,12 @@ export class Sync {
    * `metricsFacts`): a scraper's rate, or anyone's loop on the health port, must never become connections and SELECTs
    * on the source; the usage sampler, `mason status` and `mason wait` keep the reads fresh.
    */
-  async streamStatus({ refresh = true }: { refresh?: boolean } = {}): Promise<StreamStatus | null> {
+  async streamStatus(o: { refresh?: boolean } = {}): Promise<StreamStatus | null> {
+    // the stream's state as mason status, mason wait and /api/state read it: masked (src/lib/secret-mask.ts)
+    return maskDeep(await this.streamStatusUnmasked(o), this.source.password);
+  }
+
+  private async streamStatusUnmasked({ refresh = true }: { refresh?: boolean } = {}): Promise<StreamStatus | null> {
     if (!this.streams()) return null;
     const r = this.replication!;
     const s = this.stream;
@@ -2532,7 +2621,17 @@ export class Sync {
         catch (e) { throw new Error(extensionFailure(x, (e as Error).message)); }
         this.loaded = true;
       }
-      await this.store.writer.run(`ATTACH ${literal(libpqString(this.source))} AS ${SRC} (TYPE postgres, READ_ONLY)`);
+      const w = this.store.writer;
+      // the engine's own words are never repeated here: its statement held the password (`sourceSecretSql`)
+      try { await w.run(sourceSecretSql(this.source)); }
+      catch (e) { throw new Error(`the database's credentials could not be set up for the sync (Mason bug: report it): ${this.mask(e instanceof Error ? e.message : String(e))}`); }
+      try { await w.run(this.attachSql ?? `ATTACH ${literal(attachPath(this.source))} AS ${SRC} (TYPE postgres, SECRET ${SOURCE_SECRET}, READ_ONLY)`); }
+      finally {
+        // the attachment keeps what it merged; the secret goes at once, whatever the ATTACH did. One left behind is
+        // the instance's, in memory, unreadable (duckdb_secrets() redacts it) and replaced at the next attach: said
+        try { await w.run(`DROP TEMPORARY SECRET IF EXISTS ${SOURCE_SECRET}`); }
+        catch (e) { this.log(`the database's credentials could not be removed from memory once it was attached (they stay there, never on disk, until the next attach replaces them): ${e instanceof Error ? e.message : String(e)}`); }
+      }
       this.attached = true;
     }
     this.sourceUsers++;
@@ -2540,7 +2639,7 @@ export class Sync {
 
   /**
    * THE SOURCE IS ATTACHED ONLY WHILE A PASS OR A REBUILD READS IT. An attached database is every connection's — a wire
-   * session's too, and the rebuilds' — and its path is the connection string, password included (`duckdb_databases()`).
+   * session's too, and the rebuilds' — and its path (`duckdb_databases()`) is `attachPath`'s, which holds no credential.
    * A session runs only planned SQL (src/duck/plan.ts PlannedSql), which cannot name it; detached when its last user
    * ends (on the writer's turn, so never under a transaction reading it), it is not there to name either.
    */
@@ -3686,7 +3785,9 @@ export class Sync {
   /** the state, kept and written to the ledger, on the connection of the flow that knows it (awaited, and on the
    *  writer only on its turn: a statement on a connection lands inside the transaction open there). The table's row is
    *  that flow's alone while it writes it (a rebuild's table is not polled or streamed until caught up) */
-  private async record(s: CopyState, columns?: readonly SourceColumnInfo[], c: DuckConnection = this.store.writer): Promise<void> {
+  private async record(given: CopyState, columns?: readonly SourceColumnInfo[], c: DuckConnection = this.store.writer): Promise<void> {
+    // its error masked (src/lib/secret-mask.ts): the ledger's row and the state every answer reads
+    const s: CopyState = given.error === null ? given : { ...given, error: this.mask(given.error) };
     // A COPY CURRENT AGAIN after its poll, catch-up or stream failed (its error cleared by the flow that keeps it current,
     // never by a copy of it: that is its own `copied` event) — the one place an error is cleared, so the one place said
     const was = this.states.get(s.source);

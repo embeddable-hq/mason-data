@@ -28,6 +28,21 @@ asks of every change what it exposes and to whom, even when the diff does not lo
 - users whose password is a MAC and whose list holds no secret (`src/duck/users.ts`);
 - a tunnel token kept off the command line (`src/cli/tunnel.ts`).
 
+**The source's password in the engine's errors (issue 599, 2026-11-03).** The sync attached the source with a libpq
+keyword string, `password='…'` inside, and DuckDB's postgres extension repeats an ATTACH's path whole when it cannot
+connect. A source that restarted, failed over or had its password changed under a run therefore wrote the password to
+the run's log, the ledger (each table's error, each event), `mason status`, `mason wait`, `mason sync` and the web page.
+Redacting at the catch would have been the symptom; the decision is that the engine never holds the password in a string
+it repeats: the credentials go through the extension's secret manager (a temporary, in-memory secret named by the ATTACH
+and dropped right after it), and the path says only the sslmode. Measured on the pinned extension: its error then quotes
+that path, `duckdb_secrets()` redacts, the attachment keeps what it merged (new pool connections and reconnects work with
+the secret gone), and it quotes each value for libpq itself. PGPASSWORD was the other way and was not taken: the process's
+environment is every child's, and setting it races the engine's threads reading it. Behind it, one mask
+(src/lib/secret-mask.ts) at every exit of the sync, so a dependency that repeats a secret one day repeats `****`; it masks
+any `password=` value whatever it is, so rows an earlier Mason wrote are scrubbed at open. Old log files are not
+rewritten (a log a person or a collector already read cannot be unread): the release note says to rotate the password
+and delete them. The trade: a password that is also a word of Mason's messages masks that word there.
+
 **The public boundary.** The repository is public, so the same day the owner ruled that no private service's code,
 infrastructure, hostnames or plans land here. A change such a service needs is made here as a generic feature, in
 generic words, which keeps this repo useful to every operator and reveals nothing that is not ours to publish.
