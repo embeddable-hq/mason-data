@@ -1,7 +1,8 @@
 /**
- * A FAKE HOSTED SERVICE AND THE RUNS AGAINST IT, for tests/cli-login.test.ts, tests/cli-login-service.test.ts and
- * tests/cli-login-terminal.test.ts: an http server of the test's own on 127.0.0.1 (no network), the real CLI as a
- * child process pointed at it, and `mason`,
+ * A FAKE HOSTED SERVICE AND THE RUNS AGAINST IT, for tests/cli-login.test.ts, tests/cli-login-service.test.ts,
+ * tests/cli-login-terminal.test.ts and tests/cli-user-hosted.test.ts: an http server of the test's own on 127.0.0.1 (no
+ * network; a `/v1/` request other than `/v1/me` answered by the script's `v1`), the real CLI as a child process pointed
+ * at it, and `mason`,
  * which holds EVERY run to the rules no answer of the service may break (src/cli/hosted.ts's header): no secret on
  * either stream; a failure's code the CLI's own; no line a person reads begun by the service's text — logical lines on
  * a pipe, visual lines at the terminal's width for a run on a terminal (`terminal`).
@@ -92,7 +93,7 @@ export const ANSWERS: Answer[] = [];
 const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
-export interface Req { at: number; method: string; path: string; headers: http.IncomingHttpHeaders; form: Record<string, string> }
+export interface Req { at: number; method: string; path: string; search: string; headers: http.IncomingHttpHeaders; form: Record<string, string>; body: string }
 export type Reply = { status: number; body?: unknown; raw?: string; headers?: Record<string, string> } | "drop";
 export interface Script {
   device?: Reply;
@@ -100,6 +101,8 @@ export interface Script {
   token?: (n: number) => Reply;
   me?: Reply;
   revoke?: Reply;
+  /** any other request (a replica's endpoints): its answer, else 404 */
+  v1?: (r: Req) => Reply | Promise<Reply>;
 }
 
 /** The device code the fake hands out, by default: 1 s between polls, 60 s to approve, its pages on its own origin
@@ -117,13 +120,15 @@ export async function fakeService(script: Script): Promise<{ url: string; reques
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (b: Buffer) => { body += b.toString(); });
-    req.on("end", () => {
-      const p = new URL(req.url ?? "/", "http://x").pathname;
-      requests.push({ at: Date.now(), method: req.method ?? "", path: p, headers: req.headers, form: Object.fromEntries(new URLSearchParams(body)) });
+    req.on("end", async () => {
+      const u = new URL(req.url ?? "/", "http://x"), p = u.pathname;
+      const r: Req = { at: Date.now(), method: req.method ?? "", path: p, search: u.search, headers: req.headers, form: Object.fromEntries(new URLSearchParams(body)), body };
+      requests.push(r);
       const reply: Reply = p === "/oauth/device/code" ? script.device ?? { status: 200, body: DEVICE }
         : p === "/oauth/token" ? (script.token ?? (() => pending))(polls++)
         : p === "/v1/me" ? script.me ?? { status: 200, body: ME }
         : p === "/oauth/revoke" ? script.revoke ?? { status: 200, body: {} }
+        : script.v1 ? await script.v1(r)
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
       res.writeHead(reply.status, { "content-type": reply.raw === undefined ? "application/json" : "text/html", ...reply.headers });
@@ -198,7 +203,12 @@ export function seen(text: string, width: number | null): Array<{ line: string; 
 /** What is wrong with what a person sees of one stream, as sentences: a line the CLI did not begin, a second Next:,
  *  a failure where there is none or a second, a step under Next: that is not the CLI's, a line the terminal broke.
  *  `failed`: the run failed and this is its stderr, which then holds exactly one failure. */
-export function seenProblems(text: string, width: number | null, failed: boolean | null = null): string[] {
+/** The lines a command begins, for a command other than login and logout (`mason(…, { lines })`): its heads, the steps
+ *  under its Next:, and a test of a line of its own data (a list's row, begun by a name the test gave). */
+export interface Lines { heads: readonly string[]; steps: readonly string[]; ownStep: RegExp; row?: (line: string) => boolean }
+
+export function seenProblems(text: string, width: number | null, failed: boolean | null = null, lines?: Lines): string[] {
+  const heads = lines?.heads ?? HEADS, steps = lines?.steps ?? STEP_HEADS;
   const p: string[] = [];
   let afterNext = false, nexts = 0, failures = 0;
   for (const { line, byTerminal } of seen(text, width)) {
@@ -207,8 +217,8 @@ export function seenProblems(text: string, width: number | null, failed: boolean
     if (line === "Next:") { nexts++; afterNext = true; continue; }
     if (/^ {4,}\S/.test(line)) continue;
     if (/^[✘✗] mason/.test(line)) failures++;
-    if (afterNext && /^ {2}\S/.test(line)) { if (!begunAs(line, STEP_HEADS)) p.push(`a step the CLI does not give: ${JSON.stringify(line)}`); continue; }
-    if (!begunAs(line, HEADS)) p.push(`a line the CLI does not begin: ${JSON.stringify(line)}`);
+    if (afterNext && /^ {2}\S/.test(line)) { if (!begunAs(line, steps)) p.push(`a step the CLI does not give: ${JSON.stringify(line)}`); continue; }
+    if (!begunAs(line, heads) && !(lines?.row?.(line) ?? false)) p.push(`a line the CLI does not begin: ${JSON.stringify(line)}`);
   }
   if (nexts > 1) p.push(`${nexts} Next: headings`);
   if (failed !== null && failures !== (failed ? 1 : 0)) p.push(`${failures} failures, where the run ${failed ? "failed once" : "did not fail"}`);
@@ -237,7 +247,7 @@ function terminalEnv(width: number): Record<string, string> {
  * is the CLI's; and every line a person sees is one the CLI began (`seenProblems`) — at `terminal` columns for a run on
  * a terminal, the logical lines of a pipe otherwise.
  */
-export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number } = {}): Promise<Answer> {
+export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; lines?: Lines } = {}): Promise<Answer> {
   const a = await runMason(h, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal) } : env, o.timeoutMs ?? 60_000);
   ANSWERS.push(a);
   const line = `mason ${argv.join(" ")}${o.terminal ? ` (a terminal ${o.terminal} wide)` : ""}`;
@@ -248,7 +258,7 @@ export async function mason(h: string, argv: string[], env: Record<string, strin
     assert.equal(a.code, exitOf({ message: "", code: e.code }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
   }
   for (const [stream, text] of json ? [["stderr", a.stderr]] as const : [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
-    const p = seenProblems(text, o.terminal ?? null, stream === "stderr" && !json ? a.code !== 0 : null);
+    const p = seenProblems(text, o.terminal ?? null, stream === "stderr" && !json ? a.code !== 0 : null, o.lines);
     assert.deepEqual(p, [], `${line}: what a person sees of its ${stream}:\n${text}`);
   }
   if (json) {
@@ -258,7 +268,7 @@ export async function mason(h: string, argv: string[], env: Record<string, strin
       else if (typeof v === "object" && v !== null) for (const [k, x] of Object.entries(v)) walk(x, `${at}.${k}`);
     };
     walk(JSON.parse(a.stdout), "");
-    for (const n of (JSON.parse(a.stdout) as { next: Array<{ command: string }> }).next) assert.match(`  ${n.command}`, OWN_STEP, `${line} --json: a step the CLI does not give`);
+    for (const n of (JSON.parse(a.stdout) as { next: Array<{ command: string }> }).next) assert.match(`  ${n.command}`, o.lines?.ownStep ?? OWN_STEP, `${line} --json: a step the CLI does not give`);
   }
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);

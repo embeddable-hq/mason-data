@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { COMMANDS } from "../src/cli/registry.ts";
 import { PROJECT_STATES, meets, type ProjectState } from "../src/cli/state.ts";
-import { MATRIX_ARGS, MATRIX_EXTRA_ARGS, MATRIX_MORE, TRANSITIONS, answerProblems, containerMemoryEnv, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
+import { MATRIX_ARGS, MATRIX_EXTRA_ARGS, MATRIX_HOSTED, MATRIX_MORE, TRANSITIONS, answerProblems, containerMemoryEnv, matrixEnv, runMason, takesJson, type Answer } from "./cli-matrix.ts";
 import { createRunServer, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource, type SourceTable } from "../src/cli/preflight.ts";
 import type { CopyState, KeptCurrent, StreamStatus } from "../src/duck/sync.ts";
@@ -595,6 +595,36 @@ test("every command, in every state without a run, as a person and with --json: 
     if (json) for (const k of keysNamingAModel(a.stdout)) p.push(`mason ${a.argv.join(" ")}: --json answers with a key ${k}, where it says table or source`);
     // a key named source is the database, an object; a table is table
     if (json) for (const k of sourcesNotADatabase(a.stdout)) p.push(`mason ${a.argv.join(" ")}: --json answers ${k}, where source is the database's object and a table is table`);
+    return p.map((x) => `[${state}] ${x}`);
+  });
+  assert.deepEqual(problems, []);
+});
+
+test("mason user --replica, in every state without a run, as a person and with --json: no project is read, so every state answers alike — not signed in, refused before a byte is sent, never the state's code", { timeout: 300_000 }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "mason-matrix-home-"));
+  made.push(home);
+  const env = matrixEnv({ HOME: home, PATH: path.dirname(process.execPath) });
+  const jobs: Array<() => Promise<{ state: (typeof STATES)[number]; cmd: string; json: boolean; a: Answer; users: string | null }>> = [];
+  for (const state of STATES) {
+    for (const [cmd, lines] of Object.entries(MATRIX_HOSTED)) {
+      for (const line of lines) for (const json of [false, true]) {
+        jobs.push(async () => {
+          const root = folderIn(state);
+          const users = path.join(root, ".mason", "users.json");
+          const before = fs.existsSync(users) ? fs.readFileSync(users, "utf8") : null;
+          const a = await runMason(root, [cmd, ...line, ...(json ? ["--json"] : [])], env, 30_000);
+          return { state, cmd, json, a, users: (fs.existsSync(users) ? fs.readFileSync(users, "utf8") : null) === before ? null : users };
+        });
+      }
+    }
+  }
+  const answers = await pool(jobs, Math.max(2, Math.min(8, os.availableParallelism())));
+  assert.ok(answers.length >= STATES.length * 6);
+  const problems = answers.flatMap(({ state, cmd, json, a, users }) => {
+    const p = answerProblems(cmd, a, json, ["refused"]);
+    if (a.code !== 1) p.push(`mason ${a.argv.join(" ")}: exit ${a.code}, where not signed in is 1`);
+    if (!(json ? a.stdout : a.stderr).includes("this machine is not signed in to http://127.0.0.1:1")) p.push(`mason ${a.argv.join(" ")}: not the login's refusal:\n${a.stdout}${a.stderr}`);
+    if (users !== null) p.push(`mason ${a.argv.join(" ")}: changed ${users}`);
     return p.map((x) => `[${state}] ${x}`);
   });
   assert.deepEqual(problems, []);

@@ -53,6 +53,15 @@ export interface Service { base: string }
 /** The documented token shapes (docs/HOSTED-API.md), masked wherever they appear in what is printed. */
 const TOKEN_SHAPE = /\bmasondata_(pat|ci)_[A-Za-z0-9_-]{43}/g;
 /**
+ * A Mason user's password (src/duck/users.ts `userPassword`), masked wherever it appears in what is printed of the
+ * service's text: a password is printed by `mason user add`'s own rows alone, from its one answer, held to its grammar
+ * (src/cli/user-hosted.ts), never by a message, a note or a row of anything else. Matched whatever precedes it (a
+ * letter, a digit or `_` before `mason_` is no boundary a password needs: `user_mason_…`) and in any case. A SHAPE
+ * MASK HAS A LIMIT: a password split (by a space, a dash), percent-encoded or written without its `mason_` prefix has
+ * no shape to match, and outside add's answer the CLI holds no password to mask by its value.
+ */
+const PASSWORD_SHAPE = /mason_[0-9a-f]{16}_[0-9a-f]{32}/gi;
+/**
  * WHAT OF A HELD SECRET MAY BE PRINTED (`heldRuns`): a run of its body is any `HELD_RUN` or more of its characters in a
  * row, and what every run the process prints shows TOGETHER — across fields, strings and passes — is at most a quarter
  * of the body (`HELD_SHOWN`), else each run is masked. A quarter of a 43-character body is 10 characters, about 60
@@ -112,11 +121,31 @@ export function serviceOf(env: NodeJS.ProcessEnv = process.env): Service | Failu
  * one space, none at either end; at most `max` characters; and every secret masked — the ones named (`secrets`, the
  * tokens this command holds) whole, and by the runs of their body that would show more than a quarter of it together
  * with what this process printed before (`heldRuns`, `shown`: the process's own record unless a test gives one), and
- * anything shaped as a documented token. The masks read the value as it came, before it is made one line and bounded,
+ * anything shaped as a documented token or a Mason user's password. The masks read the value as it came, before it is made one line and bounded,
  * so neither uncovers what they would have masked. On a terminal the line it sits in is broken by the CLI
  * (`serviceStyle`).
  */
 export function serviceText(s: string, max: number, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN): string {
+  let t = maskSecrets(s, secrets, shown);
+  // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
+  // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
+  t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
+  // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
+  // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
+  t = t.replace(/\s+/g, " ").trim();
+  const chars = [...t];
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+}
+
+/**
+ * THE SECRET MASKS OF `serviceText`, ALONE, the one place a service's string is read for a secret: every secret named
+ * (`secrets`, the tokens this command holds) whole, and by the runs of their body that would show more than a quarter
+ * of it together with what `shown` records (`heldRuns`); anything shaped as a documented token; and, unless
+ * `passwords` is false (the one answer that makes a password, src/cli/user-hosted.ts), anything shaped as a Mason
+ * user's password. The value as it came, masked; unchanged when it carries none. For free text (a note, a refusal's
+ * words): a value held to a grammar is put to the exact test instead (`carriesSecret`).
+ */
+export function maskSecrets(s: string, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN, o: { passwords?: boolean } = {}): string {
   let t = s;
   for (const secret of secrets) if (secret) t = t.split(secret).join("****");
   // a held secret by its value (`heldRuns`): a mask leaves `****`, a separator, so what lay either side of it is read
@@ -144,14 +173,7 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
     for (const [from, to] of merged.reverse()) t = `${t.slice(0, from)}****${t.slice(to)}`;
   }
   t = t.replace(TOKEN_SHAPE, "masondata_$1_****");
-  // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
-  // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
-  t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
-  // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
-  // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
-  t = t.replace(/\s+/g, " ").trim();
-  const chars = [...t];
-  return chars.length > max ? `${chars.slice(0, max).join("")}…` : t;
+  return o.passwords === false ? t : t.replace(PASSWORD_SHAPE, "mason_****");
 }
 
 /**
@@ -202,6 +224,62 @@ function heldRuns(t: string, secrets: readonly string[]): Map<string, { spans: A
   return found;
 }
 
+/**
+ * WHETHER A VALUE IS AN ECHO OF A HELD SECRET, exactly (PR 609's review, round 2: the quarter rule above bounds what a
+ * command SHOWS of a token across what it prints, which is right for masking a few sentences; read across a 2000-user
+ * answer of random identifiers, its chance runs of 4 refused up to a fifth of honest lists). A value is an echo when
+ * ONE string holds `ECHO_RUN` or more of the secret's body in a row, read as the mask reads it (`bodyChars`: re-cased,
+ * percent-decoded, in its compatibility form, with and without `-` and `_`), or the secret whole: never a count across
+ * strings, so an answer's size cannot make an honest value one.
+ *
+ * WHY 11 (the bound it is derived from: an honest answer is refused with a probability under 1 in a million). An honest
+ * answer is independent of the token, whose body is 43 random base64url characters: at a fixed place, a character of
+ * the answer equals the body's re-cased with a probability of at most 2/62 = 1/31 whatever the answer holds (the last
+ * character, of 16 values, at most 1/16, counted twice below). A run of n at one of the body's 43 places is then at
+ * most 31^-n, and over W characters read in both views, P(refused) ≤ W × 43 × 2 × 31^-n. The largest answer read is
+ * 1 MiB (src/cli/user-hosted.ts `MAX_LIST_BYTES`), each character read at most 18 times by its compatibility form, in
+ * two views: W ≤ 2 × 18 × 2^20, and n = 11 gives P ≤ 1.3 × 10^-7 (an ASCII answer: 7 × 10^-9); n = 10 would give 4 ×
+ * 10^-6. tests/cli-user-hosted-refusals.test.ts measures it with a fixed seed. WHAT IS LEFT: up to 10 of a body's
+ * characters in a row in one string, in any number of strings; a body spread otherwise (a character between each two)
+ * is an encoding, out of reach of any mask (the note of PR 591).
+ */
+export const ECHO_RUN = 11;
+const echoGrams = new Map<string, Array<{ keep: boolean; n: number; grams: Set<string> }>>();
+export function echoesSecret(s: string, secrets: readonly string[], run: number = ECHO_RUN): boolean {
+  for (const secret of secrets) {
+    if (!secret) continue;
+    if (s.includes(secret)) return true;
+    const key = `${run}\u0000${secret}`;
+    let views = echoGrams.get(key);
+    if (views === undefined) {
+      const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
+      views = [true, false].map((keep) => {
+        const body = bodyChars(raw, keep, false).map((u) => u.c).join("");
+        const n = Math.min(run, body.length), grams = new Set<string>();
+        for (let j = 0; n > 0 && j + n <= body.length; j++) grams.add(body.slice(j, j + n));
+        return { keep, n, grams };
+      });
+      echoGrams.set(key, views);
+    }
+    for (const { keep, n, grams } of views) {
+      if (n === 0) continue;
+      const read = bodyChars(s, keep, true).map((u) => u.c).join("");
+      for (let i = 0; i + n <= read.length; i++) if (grams.has(read.slice(i, i + n))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * WHETHER A STRING THE SERVICE SENT CARRIES A SECRET, exactly: an echo of a held secret (`echoesSecret`), anything
+ * shaped as a documented token, and — unless `passwords` is false (the one answer that makes a password) — anything
+ * shaped as a Mason user's password. The one test a value held to a grammar is put to before it is printed (a grammar
+ * alone is no mask: src/cli/user-hosted.ts `carriesNoSecret`, and a failure's code, `failureShape`).
+ */
+export function carriesSecret(s: string, secrets: readonly string[] = [], o: { passwords?: boolean } = {}): boolean {
+  return echoesSecret(s, secrets) || s.search(TOKEN_SHAPE) >= 0 || (o.passwords !== false && s.search(PASSWORD_SHAPE) >= 0);
+}
+
 /** The characters of `t` a held secret is compared by, each with the span of `t` it was read from (above). */
 function bodyChars(t: string, keepMarks: boolean, decode: boolean): Array<{ c: string; from: number; to: number }> {
   const out: Array<{ c: string; from: number; to: number }> = [];
@@ -236,11 +314,15 @@ export function retryAfterOf(v: string | null): number | null {
   return n >= 1 && n <= 3600 ? n : null;
 }
 
+/** A time the service sends: ISO 8601 with its zone, digits, `-`, `T`, `:` and `.` alone, and a time Date reads. */
+export const isServiceTime = (v: unknown): v is string => typeof v === "string" && v.length <= 64 && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(v) && !Number.isNaN(Date.parse(v));
+
 /**
  * ONE REQUEST TO THE SERVICE: `form` as an urlencoded body or `json` as a JSON one, `token` as a Bearer header. The
- * answer, or a Failure when none came back whole: not reached, a redirect, too large. A status is the caller's to read.
+ * answer, or a Failure when none came back whole: not reached, a redirect, larger than `maxBytes` (`MAX_BODY_BYTES`
+ * unless the contract documents another bound for this request). A status is the caller's to read.
  */
-export async function call(service: Service, method: "GET" | "POST", path: string, o: { form?: Record<string, string>; json?: unknown; token?: string } = {}): Promise<Answer | Failure> {
+export async function call(service: Service, method: "GET" | "POST" | "DELETE", path: string, o: { form?: Record<string, string>; json?: unknown; token?: string; maxBytes?: number } = {}): Promise<Answer | Failure> {
   const what = `${method} ${path}`;
   const secrets = o.token ? [o.token] : [];
   const headers: Record<string, string> = { "User-Agent": `mason-cli/${version()}`, Accept: "application/json" };
@@ -261,8 +343,9 @@ export async function call(service: Service, method: "GET" | "POST", path: strin
     return { message: `${service.base} answered ${what} with a redirect (${res.status})`, code: "failed",
       why: "Mason follows no redirect: a login must never travel to an address it was not given", fix: "set MASON_CLOUD_URL to the service's own address" };
   }
-  const text = await boundedText(res);
-  if (text === null) return { message: `${service.base} answered ${what} with more than ${MAX_BODY_BYTES / 1024} KiB`, code: "failed", why: "no documented answer is that large" };
+  const max = o.maxBytes ?? MAX_BODY_BYTES;
+  const text = await boundedText(res, max);
+  if (text === null) return { message: `${service.base} answered ${what} with more than ${max / 1024} KiB`, code: "failed", why: "no documented answer is that large" };
   let json: unknown;
   if (/^application\/(?:[\w.+-]+\+)?json\b/i.test(res.headers.get("content-type") ?? "")) {
     try { json = JSON.parse(text); } catch { json = undefined; }
@@ -280,8 +363,8 @@ function reachError(e: unknown): string {
   return cause?.message ?? err.message ?? String(e);
 }
 
-/** The body as text, or null past MAX_BODY_BYTES (the rest is not read). */
-async function boundedText(res: Response): Promise<string | null> {
+/** The body as text, or null past `max` bytes (the rest is not read). */
+async function boundedText(res: Response, max: number): Promise<string | null> {
   if (!res.body) return "";
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -292,7 +375,7 @@ async function boundedText(res: Response): Promise<string | null> {
     catch { return null; }   // a body cut off midway is no answer: said as one the caller cannot read
     if (r.done) break;
     size += r.value.byteLength;
-    if (size > MAX_BODY_BYTES) { await reader.cancel(); return null; }
+    if (size > max) { await reader.cancel(); return null; }
     chunks.push(r.value);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -333,11 +416,12 @@ export function serviceNext(status: number): NextStep[] {
 /**
  * A `/v1/` FAILURE: `{ error: { code, message, why?, fix? }, next: [{ command, what? }] }`, its message, why and fix
  * said as the service worded them, each one line (`serviceText`); its CODE the CLI's own (`codeOfStatus`), the
- * service's kept in `why`; its next step the CLI's own (`serviceNext`). Null when the answer is not that shape.
+ * service's kept in `why`; its next step the CLI's own (`serviceNext`, or the command's own `next` for the status, never
+ * the service's). Null when the answer is not that shape.
  */
-export function serviceFailure(a: Answer, secrets: readonly string[]): Failure | null {
+export function serviceFailure(a: Answer, secrets: readonly string[], next: (status: number) => NextStep[] = serviceNext): Failure | null {
   if (a.status < 400 || !obj(a.json)) return null;
-  return failureShape(a.json.error, secrets, { code: codeOfStatus(a.status), said: (code) => `the service said ${code}, HTTP ${a.status}`, next: serviceNext(a.status) });
+  return failureShape(a.json.error, secrets, { code: codeOfStatus(a.status), said: (code) => `the service said ${code}, HTTP ${a.status}`, next: next(a.status) });
 }
 
 /**
@@ -349,7 +433,8 @@ export function serviceFailure(a: Answer, secrets: readonly string[]): Failure |
 export function failureShape(error: unknown, secrets: readonly string[], as: { code: FailureCode; said: (code: string) => string; next: NextStep[] }): Failure | null {
   if (!obj(error)) return null;
   const e = error;
-  if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || !str(e.message, 2000)) return null;
+  // the code is printed as it came (inside why), so it is held to its grammar AND carries no secret (`maskSecrets`)
+  if (!str(e.code, 64) || !/^[a-z][a-z0-9_]*$/.test(e.code) || carriesSecret(e.code, secrets) || !str(e.message, 2000)) return null;
   const text = (v: unknown, max: number): string | undefined => typeof v === "string" && v ? serviceText(v, max, secrets) : undefined;
   const why = text(e.why, 2000);
   const said = as.said(e.code);

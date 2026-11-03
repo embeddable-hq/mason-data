@@ -20,9 +20,8 @@
  *
  * 3. `--dry-run` prints what would be sent (each path, its size, its sha256) and sends nothing.
  *
- * 4. THE REPLICA is `--replica <org>/<name>`, else `MASON_REPLICA`, each part `REPLICA_PART`; THE TOKEN is `MASON_TOKEN`,
- *    else the saved login for the service (src/cli/credentials.ts) — never on a command line, never printed, masked in
- *    everything printed from the service (`serviceText`).
+ * 4. THE REPLICA is `--replica <org>/<name>`, else `MASON_REPLICA`, and THE TOKEN `MASON_TOKEN`, else the saved login
+ *    for the service: src/cli/replica.ts's one reader of each (`replicaOf`, `tokenFor`), `mason user --replica`'s too.
  *
  * 5. THE WAIT is bounded by `--timeout` (an interval, 10m by default): a poll every `POLL_MS`, or what `Retry-After`
  *    asks; an answer that cannot say (no answer, a 429, a 5xx) is a wait, never an outcome. Exit 0 only when the
@@ -41,7 +40,7 @@
  *   a deploy's failure next                 nowhere: never read                     the step is `again`'s, the CLI's
  *   the deploy's id                         stderr's lines, the report, --json      `DEPLOY_ID`, checked before it is in a path or printed
  *   status, phase                           stderr's lines (the CLI's words), --json  closed sets (`STATUSES`, `PHASES_OF`)
- *   createdAt, finishedAt                   --json deploy                           `isTime`: digits, `-`, `T`, `:`, `.`, a zone
+ *   createdAt, finishedAt                   --json deploy                           `isServiceTime`: digits, `-`, `T`, `:`, `.`, a zone
  *   an HTTP status, Retry-After             a failure's or a wait's line            a number (Retry-After bounded, never printed)
  *   why a request got no answer             the wait's line, a failure's why        `call`'s own words, through `serviceText`
  *
@@ -52,8 +51,8 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { environmentToken, readLogins, TOKEN_ENV } from "./credentials.ts";
-import { call, failureShape, isFailure, serviceFailure, serviceOf, serviceText, unexpected, type Service } from "./hosted.ts";
+import { call, failureShape, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected } from "./hosted.ts";
+import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
 import { maskedUrl } from "./preflight.ts";
 import { folderPlace, theProject, type Project } from "./project.ts";
 import { commandPinProblem } from "./pin.ts";
@@ -69,9 +68,6 @@ import { sayAgain } from "./commands.ts";
 import { err as styleErr, out as styleOut, stepRenderer, type Style } from "./style.ts";
 import { version } from "./version.ts";
 
-/** What one part of a replica's name may be: an organisation's slug, a replica's name. */
-export const REPLICA_PART = /^[a-z0-9][a-z0-9-]{0,62}$/;
-export const REPLICA_ENV = "MASON_REPLICA";
 /** The bounds of what a deploy sends: one file, all of them, how many. */
 export const MAX_FILE_BYTES = 256 * 1024;
 export const MAX_TOTAL_BYTES = 1024 * 1024;
@@ -153,24 +149,6 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   options: { replica: { type: "string" }, "dry-run": { type: "boolean", default: false }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
   json: ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "deploy", "error", "next"],
 };
-
-/** A replica: its organisation and its name, and where it was named. */
-export interface Replica { org: string; name: string; from: "--replica" | typeof REPLICA_ENV }
-const replicaText = (r: Replica): string => `${r.org}/${r.name}`;
-
-/** The replica the command means: `--replica`, else `MASON_REPLICA`; null when neither names one, a Failure when it is
- *  not `<org>/<name>` (never repeated beyond 200 characters, made printable). */
-export function replicaOf(flag: string | undefined, env: NodeJS.ProcessEnv = process.env): Replica | Failure | null {
-  const from = flag !== undefined ? "--replica" : env[REPLICA_ENV] !== undefined ? REPLICA_ENV : null;
-  if (from === null) return null;
-  const raw = (from === "--replica" ? flag : env[REPLICA_ENV]) ?? "";
-  const parts = raw.split("/");
-  if (parts.length === 2 && REPLICA_PART.test(parts[0]!) && REPLICA_PART.test(parts[1]!)) return { org: parts[0]!, name: parts[1]!, from };
-  return { message: `${from} ${JSON.stringify(serviceText(raw, 200))} is not <org>/<name>`, code: from === "--replica" ? "usage" : "refused",
-    why: "an organisation's slug and a replica's name, each 1 to 63 lower case letters, digits and -, starting with a letter or digit",
-    fix: from === "--replica" ? "name it as the service lists it: --replica acme/shop" : `set ${REPLICA_ENV}=<org>/<name> (acme/shop), or unset it and pass --replica`,
-    ...(from === "--replica" ? { usage: DEPLOY.usage } : {}) };
-}
 
 /** A file as it is sent: its path (relative to the project folder, `/` between its parts), size in bytes, sha256 of its
  *  bytes (lower case hex), and its text. */
@@ -329,7 +307,6 @@ const PHASES_OF: Partial<Record<Status, readonly Phase[]>> = { applying: ["check
 export interface DeployState { id: string; status: Status; phase: Phase | null; createdAt: string; finishedAt: string | null; failure: Failure | null }
 
 const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const isTime = (v: unknown): v is string => typeof v === "string" && v.length <= 64 && /^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)$/.test(v) && !Number.isNaN(Date.parse(v));
 
 /**
  * `{ deploy: { … } }` held to its shape, the id this command asked for (or, for the POST's answer, one in `DEPLOY_ID`'s
@@ -349,7 +326,7 @@ export function deployStateOf(json: unknown, id: string | null, secrets: readonl
     if (typeof d.phase !== "string" || !(PHASES_OF[status] ?? []).includes(d.phase as Phase)) return null;
     phase = d.phase as Phase;
   }
-  if (!isTime(d.createdAt) || (d.finishedAt !== undefined && d.finishedAt !== null && !isTime(d.finishedAt))) return null;
+  if (!isServiceTime(d.createdAt) || (d.finishedAt !== undefined && d.finishedAt !== null && !isServiceTime(d.finishedAt))) return null;
   // a refusal or a failure carries the failure shape (its code, message, why, fix and next in one object), and nothing else does
   let failure: Failure | null = null;
   if (status === "refused" || status === "failed") {
@@ -374,18 +351,6 @@ const STATUS_WORDS: Record<Status, string> = {
 const NEXT_AGAIN = (r: Replica): NextStep[] => [[`mason deploy --replica ${replicaText(r)}`, "deploy again, after the next edit"]];
 const stateLine = (s: DeployState): string => `${STATUS_WORDS[s.status]}${s.phase ? ` (${PHASES[s.phase]})` : ""}`;
 
-/** The token a deploy is sent with: MASON_TOKEN, else this machine's login to the service; a Failure naming mason login. */
-function tokenFor(service: Service): string | Failure {
-  const env = environmentToken();
-  if (env !== null) return env;
-  const read = readLogins();
-  if (isFailure(read)) return read;
-  const saved = read.logins.logins[service.base];
-  if (saved !== undefined) return saved.token;
-  return { message: `this machine is not signed in to ${service.base}`, code: "refused", why: `a deploy is sent as a person signed in (mason login), or with a token in ${TOKEN_ENV} (CI)`,
-    fix: `run mason login, then mason deploy again; in CI, set ${TOKEN_ENV} to a CI token`, next: [["mason login", `sign this machine in to ${service.base}`]] };
-}
-
 export async function deploy(argv: string[]): Promise<number> {
   const f = parseCommand(DEPLOY, argv);
   if (typeof f === "number") return f;
@@ -395,7 +360,7 @@ export async function deploy(argv: string[]): Promise<number> {
   const timeoutText = typeof f.values.timeout === "string" ? f.values.timeout : DEFAULT_TIMEOUT;
   const timeout = parseDuration(timeoutText);
   if ("problem" in timeout) return fail({ message: `--timeout ${timeout.problem}`, code: "usage", usage: DEPLOY.usage }, { json });
-  const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined);
+  const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, DEPLOY.usage);
   if (replica !== null && isFailure(replica)) return fail(replica, { json });
   if (replica === null && !dryRun) {
     return fail({ message: "no replica named", code: "usage", why: "a deploy goes to one replica of the service",
@@ -436,7 +401,7 @@ export async function deploy(argv: string[]): Promise<number> {
     return 0;
   }
   const r = replica!;
-  const token = tokenFor(service);
+  const token = tokenFor(service, { asked: "a deploy is sent", again: "mason deploy" });
   if (isFailure(token)) return fail(token, { json });
   const secrets = [token];
   const where = `/v1/replicas/${r.org}/${r.name}/deploys`;
