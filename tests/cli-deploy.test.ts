@@ -14,7 +14,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
-import { bodyCovered, bodyShown, echoForms, echoToken, runForms, runToken, seen, showsRun } from "./hosted-fake.ts";
+import { bodyCovered, bodyShown, echoForms, echoToken, measureGate, runForms, runToken, seen, showsRun } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
 const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${randomBytes(32).toString("base64url")}`;
@@ -881,6 +881,64 @@ test("mason deploy: an answer nested deeper than any documented shape — 32,000
     assert.ok((json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr).includes(` answered ${where}`), `${what}: said by its status:\n${said}`);
     assert.doesNotMatch(said, /call stack|RangeError|bug in mason/, what);
   })));
+});
+
+test("mason deploy: every byte written passes the output's gate — an id of 10 of the token's body, which every per-value test takes, followed in what is written by the CLI's own word that is the body's 11th character, is refused at the write: what was written shows 10 in a row at most, the refusal is the CLI's, exit 1, for a person and in --json (PR 645's class round)", { timeout: 120_000 }, async () => {
+  const { root } = project();
+  // the id is the body's first 10; the body's 11th is the first letter the CLI writes next: "Queued" on stderr for a
+  // person, "status" in --json (written in parts, so no line here is shaped as a token)
+  for (const [json, eleventh] of [[false, "Q"], [true, "s"]] as const) {
+    const token = ["masondata", "ci", `Ab3d5F7h9J${eleventh}Xk2Lm7Np4Rt8Vw3Ys6Hb1Cd5Fg0Jk-Ue`].join("_"); SECRETS.push(token);
+    const id = "Ab3d5F7h9J";
+    const script: Script = { post: { status: 201, headers: { "retry-after": "1" }, body: { deploy: { id, status: "queued", createdAt: CREATED } } },
+      get: () => ({ status: 200, body: { deploy: { id, status: "running", createdAt: CREATED, finishedAt: CREATED } } }) };
+    // the fake answers GET for ID alone: this id's polls are answered here by a fake of its own
+    const server = await idFake(id, script);
+    try {
+      const h = temp("mason-home-");
+      const a = await mason(root, ["deploy", "--replica", "acme/shop", ...(json ? ["--json"] : [])], envFor(h, server.url, { MASON_TOKEN: token }));
+      const all = `${a.stdout}\n${a.stderr}`;
+      assert.equal(a.code, 1, all);
+      const said = json ? (JSON.parse(a.stdout) as { error: { code: string; message: string } }).error : null;
+      if (said) assert.deepEqual([said.code, said.message], ["refused", "the service's answer would print a secret this command holds, so nothing more of it is printed"]);
+      else assert.match(a.stderr, /^✗ mason deploy: the service's answer would print a secret this command holds, so nothing more of it is printed$/m);
+      assert.ok(!showsRun(all, token), `nothing of 11 in a row is written:\n${all}`);
+      if (!json) assert.match(a.stderr, /: deploy Ab3d5F7h9J\n/, "what was written before it stays: 10 in a row");
+      assert.doesNotMatch(a.stdout, json ? /"deploy"/ : /Deployed to/, "the answer is not written");
+    } finally { await server.close(); }
+  }
+});
+
+/** A fake whose deploy is `id` (cli-deploy's own fake answers GET for ID alone). */
+async function idFake(id: string, script: Script): Promise<{ url: string; close: () => Promise<void> }> {
+  let gets = 0;
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      const p = new URL(req.url ?? "/", "http://x").pathname;
+      const reply = (req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? script.post : p === `/v1/replicas/acme/shop/deploys/${id}` ? script.get!(gets++) : { status: 404, body: {} }) as Exclude<Reply, "drop">;
+      res.writeHead(reply.status, { "content-type": "application/json", ...reply.headers });
+      res.end(JSON.stringify(reply.body));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }) };
+}
+
+test("mason deploy: the output's gate refuses no honest deploy by chance — its output as written, a person's and --json, against 2,000 random tokens from a fixed seed, none refused at ECHO_RUN, and a run of 5 met by chance within its bound (the model the bound is derived from, seen)", { timeout: 120_000 }, async (t) => {
+  const { root } = project();
+  const texts: string[] = [];
+  for (const json of [false, true]) {
+    const steps = [at("applying", { phase: "checking" }), at("starting", { phase: "syncing" }), at("running")];
+    const { a } = await deployWith({ get: (n) => steps[Math.min(n, steps.length - 1)]! }, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])]);
+    assert.equal(a.code, 0, a.stderr);
+    texts.push(a.stdout, a.stderr, a.stdout + a.stderr);
+  }
+  const m = await measureGate(texts, "mason-645-gate-deploy", 2000);
+  t.diagnostic(`measured: ${JSON.stringify(m)}`);
+  assert.equal(m.refused, 0, `${m.refused} of 2000 honest deploys refused`);
+  assert.ok(m.bound < 1e-6, `the bound at ECHO_RUN: ${m.bound}`);
+  assert.ok(m.shortRefused > 0 && m.shortRefused <= m.shortBound, `a run of 5: ${m.shortRefused}, its bound ${m.shortBound}`);
 });
 
 test("no run of mason deploy printed a token, nor anything shaped as one", () => {

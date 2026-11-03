@@ -66,8 +66,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (email, name, an organisation's slug, name or role) holding the token whole, its body in any case, or 11 of its
   characters in a row, makes the answer one outside the contract, said by its status alone (exit 1; login revokes the
   new token and saves nothing). Before, a value its format took was printed as it came: a deploy id equal to the token
-  printed the token whole, on stderr, in the report and in `--json`. An honest answer is refused with a probability under
-  one in a million.
+  printed the token whole, on stderr, in the report and in `--json`. What these commands and `mason user --replica`
+  write is checked again as it is written, on stdout and stderr: when it would show 11 characters of the token in a
+  row, it is not written, and the command says it refused instead (exit 1). An honest answer is refused with a
+  probability under one in a million.
 - **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
   ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
   beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy

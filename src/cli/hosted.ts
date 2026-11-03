@@ -18,7 +18,10 @@
  * any value of an answer is held to its grammar or printed, every string of it, each key included, is put to the exact
  * test (`carriesNoSecret`), and an answer that carries a secret is refused whole — a device code's answer (`deviceOf`),
  * who signed in (`meOf`), a deploy's state (src/cli/deploy.ts), a replica's users (src/cli/user-hosted.ts); a failure's
- * code too (`failureShape`, `oauthFailure`), its words masked.
+ * code too (`failureShape`, `oauthFailure`), its words masked. THESE ARE THE FIRST LINE; THE LAST IS THE BYTES WRITTEN
+ * (PR 645's class round: what was tested was not what was printed): every hosted command holds its secrets in the
+ * output's gate (src/cli/output-gate.ts `holdOutput`), which puts each write to stdout and stderr, as written, to the
+ * same exact test, and writes the command's refusal in place of what would carry one.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (the decision of PR 481's class round: a
  * service forged a block of next steps with a newline in an email, and offered `mason destroy` as a next step). Two
@@ -134,6 +137,9 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
   // C0 (newline, return and tab with it), DEL and C1 (NEL with it); the zero-width and directional marks; the line and
   // paragraph separators; the bidi embeddings, overrides and isolates; the byte-order mark
   t = t.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, "?");
+  // and a lone surrogate, which is no character: --json would write it as an escape (`\udc00`), whose letters and
+  // digits a reader reads (PR 645's review, round 2)
+  t = t.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "?");
   // and no run of spaces: a value padded to a terminal's width aligns nothing, and leaves no gap to break at a column of
   // its choosing (src/cli/command.ts breaks every line that holds it: serviceStyle)
   t = t.replace(/\s+/g, " ").trim();
@@ -252,22 +258,28 @@ function heldRuns(t: string, secrets: readonly string[]): Map<string, { spans: A
  */
 export const ECHO_RUN = 11;
 const echoGrams = new Map<string, Array<{ keep: boolean; n: number; grams: Set<string> }>>();
+/** A held secret's runs of `run` (each of its body's windows, read once keeping `-` and `_` and once skipping them):
+ *  what an echo is matched against, here and by the output's gate (src/cli/output-gate.ts). */
+export function echoViews(secret: string, run: number = ECHO_RUN): Array<{ keep: boolean; n: number; grams: Set<string> }> {
+  const key = `${run}\u0000${secret}`;
+  let views = echoGrams.get(key);
+  if (views === undefined) {
+    const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
+    views = [true, false].map((keep) => {
+      const body = bodyChars(raw, keep, false).map((u) => u.c).join("");
+      const n = Math.min(run, body.length), grams = new Set<string>();
+      for (let j = 0; n > 0 && j + n <= body.length; j++) grams.add(body.slice(j, j + n));
+      return { keep, n, grams };
+    });
+    echoGrams.set(key, views);
+  }
+  return views;
+}
 export function echoesSecret(s: string, secrets: readonly string[], run: number = ECHO_RUN): boolean {
   for (const secret of secrets) {
     if (!secret) continue;
     if (s.includes(secret)) return true;
-    const key = `${run}\u0000${secret}`;
-    let views = echoGrams.get(key);
-    if (views === undefined) {
-      const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
-      views = [true, false].map((keep) => {
-        const body = bodyChars(raw, keep, false).map((u) => u.c).join("");
-        const n = Math.min(run, body.length), grams = new Set<string>();
-        for (let j = 0; n > 0 && j + n <= body.length; j++) grams.add(body.slice(j, j + n));
-        return { keep, n, grams };
-      });
-      echoGrams.set(key, views);
-    }
+    const views = echoViews(secret, run);
     for (const { keep, n, grams } of views) {
       if (n === 0) continue;
       const read = bodyChars(s, keep, true).map((u) => u.c).join("");
@@ -284,8 +296,17 @@ export function echoesSecret(s: string, secrets: readonly string[], run: number 
  * alone is no mask: src/cli/user-hosted.ts `carriesNoSecret`, and a failure's code, `failureShape`).
  */
 export function carriesSecret(s: string, secrets: readonly string[] = [], o: { passwords?: boolean } = {}): boolean {
-  return echoesSecret(s, secrets) || s.search(TOKEN_SHAPE) >= 0 || (o.passwords !== false && s.search(PASSWORD_SHAPE) >= 0);
+  return echoesSecret(s, secrets) || shapedSecret(s, o);
 }
+
+/** Whether `s` holds anything shaped as a documented token, or (unless `passwords` is false) a Mason user's password. */
+export function shapedSecret(s: string, o: { passwords?: boolean } = {}): boolean {
+  return s.search(TOKEN_SHAPE) >= 0 || (o.passwords !== false && s.search(PASSWORD_SHAPE) >= 0);
+}
+
+/** `t` as a held secret is compared by (`bodyChars`), as one string: re-cased, in its compatibility form, `-` and `_`
+ *  kept or not, a `%XX` escape read as what it encodes or (`percent` false) as the characters it is written with. */
+export const bodyRead = (t: string, keepMarks: boolean, percent: boolean): string => bodyChars(t, keepMarks, true, percent).map((u) => u.c).join("");
 
 /**
  * NO STRING OF AN ANSWER CARRIES A SECRET (PR 609's decision, the one point every hosted command's answer passes, issue
@@ -326,13 +347,13 @@ export function carriesNoSecret(json: unknown, secrets: readonly string[], own: 
 export const MAX_ANSWER_DEPTH = 32;
 
 /** The characters of `t` a held secret is compared by, each with the span of `t` it was read from (above). */
-function bodyChars(t: string, keepMarks: boolean, decode: boolean): Array<{ c: string; from: number; to: number }> {
+function bodyChars(t: string, keepMarks: boolean, decode: boolean, percent: boolean = decode): Array<{ c: string; from: number; to: number }> {
   const out: Array<{ c: string; from: number; to: number }> = [];
   const kept = keepMarks ? /[a-z0-9_-]/ : /[a-z0-9]/;
   for (let i = 0; i < t.length;) {
     const cp = t.codePointAt(i)!;
     let s = String.fromCodePoint(cp), to = i + s.length;
-    if (decode && s === "%" && /^[0-9a-f]{2}$/i.test(t.slice(i + 1, i + 3))) { s = String.fromCharCode(parseInt(t.slice(i + 1, i + 3), 16)); to = i + 3; }
+    if (percent && s === "%" && /^[0-9a-f]{2}$/i.test(t.slice(i + 1, i + 3))) { s = String.fromCharCode(parseInt(t.slice(i + 1, i + 3), 16)); to = i + 3; }
     // one reading for every spelling of a character: its compatibility decomposition, its combining marks dropped
     else if (decode && cp > 0x7f) s = s.normalize("NFKD").replace(/\p{M}/gu, "");
     for (const c of s.toLowerCase()) if (kept.test(c)) out.push({ c, from: i, to });
@@ -507,8 +528,12 @@ function pageUrl(service: Service, v: unknown, secrets: readonly string[]): { hr
   if (!str(v, 2048)) return null;
   let u: URL;
   try { u = new URL(v); } catch { return null; }
-  const shown = (printed: string, max: number): string | null =>
-    carriesSecret(printed, secrets) || maskSecrets(printed, secrets) !== printed ? null : serviceText(printed, max);
+  // and the line as it is printed, cut at `max` (PR 645's review, round 2: a cut inside a `%XX` escape left `%4…`, whose
+  // 4 the whole page's reading had decoded away)
+  const shown = (printed: string, max: number): string | null => {
+    const line = serviceText(printed, max);
+    return carriesSecret(printed, secrets) || carriesSecret(line, secrets) || maskSecrets(printed, secrets) !== printed ? null : line;
+  };
   if (u.origin !== service.base) {
     const at = shown(u.protocol === "https:" || u.protocol === "http:" ? u.origin : `${u.protocol}//`, 300);
     return at === null ? null : { elsewhere: at };

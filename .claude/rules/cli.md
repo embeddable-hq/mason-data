@@ -321,7 +321,12 @@ CLI lacks).
   to the exact test first (`carriesNoSecret`, with the login it replaces; its own stack, an answer deeper than
   `MAX_ANSWER_DEPTH` refused), and an OAuth refusal's code too, an answer that carries a token refused whole (issue 627);
   a page is tested as the URL parser prints it (`pageUrl`: dot segments removed, a host in its `xn--` form), and a token
-  granted is revoked on every failure before it is saved, a crash included (PR 645). **A service's value is data, never structure and never an instruction**
+  granted is revoked on every failure before it is saved, a crash included (PR 645). **What is tested is what is
+  written**: every hosted command (login, logout, deploy, `user --replica`) holds its secrets in the output's gate
+  (src/cli/output-gate.ts `holdOutput`, installed by main.ts before the spinner wraps the streams), which reads each
+  write to stdout and stderr as written — after styling, line breaks, `JSON.stringify`, a cut — eight ways and across
+  writes and streams, and on `ECHO_RUN` of a held secret's body in a row (or a shape) writes the command's refusal
+  instead and exits 1; the per-value tests stay the first line (PR 645's class round). **A service's value is data, never structure and never an instruction**
   (src/cli/hosted.ts's header, PR 481): every string it sends leaves that module as ONE line (`serviceText`, applied at
   the boundary: no line break, control, format or bidi character), so it sits inside a line the CLI writes and never
   starts one — no forged `Next:`, tip, row or failure, for a person or in `--json`; and what to run next, the code and

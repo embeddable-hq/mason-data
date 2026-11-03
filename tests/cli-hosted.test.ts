@@ -366,3 +366,66 @@ test("an answer nested deeper than any documented shape is refused, never a cras
   assert.ok(isFailure(deviceOf(SERVICE, answer(200, { ...(device({}) as object), ...deep }), [TOKEN])));
   assert.ok(isFailure(meOf(SERVICE, answer(200, { ...(me() as object), ...deep }, "GET /v1/me"), [TOKEN])));
 });
+
+// ------------------------------------------------------------------ the output's gate: the bytes written (PR 645's class round)
+
+/**
+ * EVERY TRANSFORMATION BETWEEN A SERVICE'S VALUE AND THE BYTES WRITTEN, each given a crafted value that passes the test
+ * of the value as it came, and whose bytes as written hold `ECHO_RUN` of the token's body in a row: the gate
+ * (src/cli/output-gate.ts `writes`) refuses each, reading what is written; the same bytes with the run one shorter pass.
+ */
+test("the output's gate reads the bytes written: a cut inside a %XX escape, a lone surrogate's or a line break's JSON escape, a colour code, the CLI's line breaks, a run split across writes or across the two streams, a token's shape split by a colour code — each refused; honest text and 10 in a row pass", async () => {
+  const { writes, nothingWritten } = await import("../src/cli/output-gate.ts");
+  const ten = BODY.slice(0, 10), next = BODY[10]!;
+  // each: what, the writes (stream, text) in order, and whether the gate must refuse
+  const cases: Array<[string, Array<["out" | "err", string]>]> = [
+    ["a cut inside a %XX escape (serviceText's bound)", [["err", `  page   https://svc.example/device/${ten}%${next}…\n`]]],
+    // (10 of the body before its `U`, and before its `N`: the escape's letter is the 11th)
+    ["a lone surrogate, as --json escapes it", [["out", JSON.stringify({ name: `${BODY.slice(24, 34)}\udc00` })]]],
+    ["a line break, as --json escapes it", [["out", JSON.stringify({ name: `${BODY.slice(15, 25)}\n` })]]],
+    ["a colour code after a value", [["err", `${ten}\x1b[${next}m\n`]]],
+    ["the CLI's own line break inside a value (serviceStyle)", [["err", `  name   ${BODY.slice(0, 5)}\n    ${BODY.slice(5, 11)}\n`]]],
+    ["a run split across two writes", [["err", `deploy ${BODY.slice(0, 6)}`], ["err", `${BODY.slice(6, 11)}\n`]]],
+    ["a run split across the two streams (a log of 2>&1)", [["out", BODY.slice(0, 6)], ["err", BODY.slice(6, 11)]]],
+    ["a run split by the CLI's own words, read past them", [["err", `${BODY.slice(0, 6)} — ${BODY.slice(6, 11)}`]]],
+    ["a token's shape split by a colour code", [["err", `masondata_ci_\x1b[1m${"Ab3-dE_fG7hIjK9lMnOpQ2rStUvWx8yZaBcDeFgHiJk"}\n`]]],
+    ["a token held, whole", [["out", `{"id":"${TOKEN}"}`]]],
+  ];
+  const run = (ws: Array<["out" | "err", string]>, secrets: string[]): boolean => {
+    const state = { out: nothingWritten(), err: nothingWritten(), both: nothingWritten() };
+    for (const [which, text] of ws) {
+      const own = writes(state[which], text, secrets), both = writes(state.both, text, secrets);
+      if (own.secret || both.secret) return true;
+      state[which] = own.after; state.both = both.after;
+    }
+    return false;
+  };
+  const problems: string[] = [];
+  for (const [what, ws] of cases) {
+    // the value as it came passes the per-value test (but for the shapes and the token whole, which every test refuses)
+    if (!run(ws, [TOKEN])) problems.push(`${what}: written`);
+  }
+  // honest: the CLI's words and an honest answer, and 10 of the body in a row, with or without escapes around them
+  for (const [what, ws] of [
+    ["10 of the body, then a separator", [["err", `deploy ${ten}\n  Queued: waiting\n`]]],
+    ["10 of the body in --json", [["out", JSON.stringify({ id: ten, status: "queued" }, null, 2)]]],
+    ["a report", [["out", "Deployed to acme/shop: the replica runs it\n  deploy    dep_01HZX\n  service   https://svc.example\n\nNext:\n  mason deploy --replica acme/shop   deploy again\n"]]],
+  ] as Array<[string, Array<["out" | "err", string]>]>) if (run(ws, [TOKEN])) problems.push(`${what}: refused`);
+  assert.deepEqual(problems, []);
+});
+
+test("the per-value tests read the value as printed too: a page cut inside a %XX escape at its bound is refused; a lone surrogate is made a ? by serviceText, as a control character is", () => {
+  // 10 of the body before a hex digit of it (its `4`): `%40` as it came is `@`, cut after `%4` it is the 11th
+  const head = `${SERVICE.base}/device/`, ten = BODY.slice(1, 11), next = BODY[11]!;
+  let page = "";
+  for (let n = 0; n < 400 && !page; n++) {
+    const pad = 2048 - (head.length + 6 * n + 12);
+    if (pad < 0) break;
+    const c = head + "é".repeat(n) + "~".repeat(pad) + `${ten}%${next}0`;
+    if (c.length <= 2048 && [...new URL(c).href].slice(0, 2048).join("").endsWith(`${ten}%${next}`)) page = c;
+  }
+  assert.ok(page !== "", "a page whose cut lands inside an escape");
+  assert.ok(carriesNoSecret({ page }, [TOKEN]), "as it came, 10 in a row: taken by the walk");
+  assert.equal(deviceRead(device({ verification_uri: page }), [TOKEN]), null, "as printed, cut: refused");
+  assert.equal(serviceText(`a\udc00b\ud800c😀d`, 100), "a?b?c😀d");
+});

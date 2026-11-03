@@ -59,6 +59,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { call, carriesNoSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
+import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
 import { folderPlace, theProject, type Project } from "./project.ts";
 import { commandPinProblem } from "./pin.ts";
@@ -415,6 +416,8 @@ export async function deploy(argv: string[]): Promise<number> {
   const r = replica!;
   const token = tokenFor(service, { asked: "a deploy is sent", again: "mason deploy" });
   if (isFailure(token)) return fail(token, { json });
+  // from here every byte written is put to the exact test against the token (src/cli/output-gate.ts)
+  holdOutput({ command: "deploy", json, secrets: [token] });
   const secrets = [token];
   const where = `/v1/replicas/${r.org}/${r.name}/deploys`;
   const started = Date.now(), deadline = started + timeout.seconds * 1000;

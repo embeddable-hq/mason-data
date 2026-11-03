@@ -13,7 +13,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { domainToASCII, domainToUnicode, fileURLToPath, pathToFileURL } from "node:url";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
@@ -71,6 +71,33 @@ export function punyLabels(body: string, most: number): string[] {
     }
   }
   return labels;
+}
+
+/**
+ * THE OUTPUT GATE'S FALSE-REFUSAL RATE ON HONEST OUTPUT, measured (PR 645's class round): each text as a command wrote
+ * it (a stream, and the two together), read once as the gate reads it, against `tokens` random tokens from a fixed
+ * seed (`passwords` false for a command that prints the password it made). How many the gate refuses at `ECHO_RUN` (none may be), and at a run of `short` (chance meets it, within the
+ * bound src/cli/hosted.ts derives: W × 43 × 2 × 31^-n for W characters read), so the measurement can see the model.
+ */
+export async function measureGate(texts: readonly string[], seed: string, tokens: number, o: { short?: number; passwords?: boolean } = {}): Promise<{ refused: number; shortRefused: number; shortBound: number; bound: number }> {
+  const { readingsOf, readingsCarry } = await import("../src/cli/output-gate.ts");
+  const { ECHO_RUN } = await import("../src/cli/hosted.ts");
+  const short = o.short ?? 5, passwords = o.passwords ?? true;
+  const reads = texts.map((t) => readingsOf(t));
+  const chars = reads.reduce((n, r) => n + r.reads.reduce((m, x) => m + x.length, 0), 0);
+  let counter = 0, pool = Buffer.alloc(0);
+  const bytes = (n: number): Buffer => {
+    while (pool.length < n) pool = Buffer.concat([pool, createHash("sha256").update(`${seed}:${counter++}`).digest()]);
+    const out = pool.subarray(0, n); pool = pool.subarray(n); return out;
+  };
+  let refused = 0, shortRefused = 0;
+  for (let i = 0; i < tokens; i++) {
+    const token = `masondata_ci_${bytes(32).toString("base64url")}`;
+    if (reads.some((r) => readingsCarry(r, [token], { passwords }))) refused++;
+    if (reads.some((r) => readingsCarry(r, [token], { run: short, passwords }))) shortRefused++;
+  }
+  const bound = (n: number): number => chars * 43 * 2 * 31 ** -n;
+  return { refused, shortRefused, shortBound: Math.ceil(bound(short) * tokens), bound: bound(ECHO_RUN) };
 }
 
 /**

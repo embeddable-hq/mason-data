@@ -54,6 +54,7 @@
 import { failed, jsonText, serviceStyle, type Failure, type NextStep } from "./command.ts";
 import { call, carriesNoSecret, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaText, tokenFor, type Replica } from "./replica.ts";
+import { holdOutput } from "./output-gate.ts";
 import { err as styleErr, out as styleOut } from "./style.ts";
 import { connectionUrl, psqlLine } from "./pg-url.ts";
 import { USER_NAME_RE } from "../duck/users.ts";
@@ -221,6 +222,9 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
   if (isFailure(service)) return fail(service);
   const token = tokenFor(service, { asked: "a replica's users are asked for", again: `mason user ${o.verb}` });
   if (isFailure(token)) return fail(token);
+  // from here every byte written is put to the exact test against the token (src/cli/output-gate.ts); add prints the
+  // password it made, so a password's shape is its answer's there
+  holdOutput({ command: "user", json: o.json, secrets: [token], passwords: o.verb !== "add" });
   const secrets = [token];
   const req = requestOf(r, o);
   const a = await call(service, req.method, req.path, { token, ...(req.json !== undefined ? { json: req.json } : {}), ...(o.verb === "list" ? { maxBytes: MAX_LIST_BYTES } : {}) });

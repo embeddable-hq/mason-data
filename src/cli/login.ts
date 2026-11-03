@@ -22,6 +22,7 @@ import { endText, failed, jsonText, parseCommand, reportText, serviceStyle, stri
 import { environmentToken, readLogins, TOKEN_ENV, writeLogins, type Login, type Logins } from "./credentials.ts";
 import { DEFAULT_SERVICE_URL, expired, isFailure, pollToken, revoke, serviceOf, serviceText, startDevice, whoAmI, type DeviceCode, type Me, type Service } from "./hosted.ts";
 import { err as styleErr, out as styleOut, stepRenderer, type Style } from "./style.ts";
+import { holdOutput } from "./output-gate.ts";
 import { openBrowser } from "./ui.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -110,10 +111,13 @@ export async function login(argv: string[]): Promise<number> {
   // what this command holds that the service may echo before it sends a token: the login it replaces (src/cli/hosted.ts
   // `carriesNoSecret`: an answer that carries it is refused whole)
   const held = before.logins.logins[service.base] ? [before.logins.logins[service.base]!.token] : [];
+  // and from here every byte written is put to the exact test against what it holds (src/cli/output-gate.ts)
+  holdOutput({ command: "login", json, secrets: held });
   const code = await startDevice(service, held);
   if (isFailure(code)) return fail("login", code, { json });
   const token = await approved(service, code, json, held);
   if (isFailure(token)) return fail("login", token, { json });
+  holdOutput({ command: "login", json, secrets: [token] });
 
   // FROM HERE THE SERVICE HAS GRANTED A TOKEN, which is kept only once it is saved: on every failure before that —
   // one said, or one thrown (PR 645's review: a crash left a granted token live) — it is revoked, and a revoke that
@@ -225,6 +229,8 @@ export async function logout(argv: string[]): Promise<number> {
   const read = readLogins();
   if (isFailure(read)) return fail("logout", read, { json });
   const entry = read.logins.logins[service.base];
+  const env = environmentToken();
+  if (entry !== undefined || env !== null) holdOutput({ command: "logout", json, secrets: [...(entry ? [entry.token] : []), ...(env !== null ? [env] : [])] });
   if (entry === undefined) {
     const next: NextStep[] = [["mason login", `sign this machine in to ${service.base}`]];
     if (json) { out(jsonText(LOGOUT, { service: service.base, signedOut: false, email: null, revoked: null, revokeError: null, environmentToken: fromEnv, file: read.file }, next)); return 0; }
