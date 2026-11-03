@@ -930,6 +930,16 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb: grouped cast to a number, a member the only key", "SELECT (j -> 'a')::float8 AS a, count(*) FROM jorder WHERE jsonb_typeof(j -> 'a') IN ('number', 'null') GROUP BY j -> 'a' ORDER BY 1 NULLS FIRST, 2");
   yield q("jsonb: grouped cast to a boolean", "SELECT id, j::boolean, NOT j::boolean FROM jorder WHERE id BETWEEN 1 AND 4 GROUP BY id, j ORDER BY id");
   yield q("jsonb: cast to a number through a derived table", "SELECT s.id, s.k::float8, s.k::int FROM (SELECT id, j AS k FROM jorder WHERE id BETWEEN 1 AND 22 AND id NOT IN (3, 4)) s ORDER BY s.id");
+  // (PR 582's review, round 2) a jsonb's cast to an unconstrained numeric keeps the number's every digit, as written
+  // (jorder's 5 to 25: 0, -0, 0.0, 1.00, 1e2, 1E+2, 0.001, 1e-3, a 31-digit number, 2.5e-30), in every reader
+  yield q("jsonb: cast to numeric, every digit", "SELECT id, j::numeric, (j::numeric)::text FROM jorder WHERE id BETWEEN 1 AND 25 AND id NOT IN (3, 4) ORDER BY id");
+  yield q("jsonb: cast to numeric, grouped", "SELECT id, j::numeric FROM jorder WHERE id BETWEEN 1 AND 25 AND id NOT IN (3, 4) GROUP BY id, j ORDER BY id");
+  yield q("jsonb: cast to numeric, a member grouped", "SELECT id, (j -> 'a')::numeric, (j -> 'a')::numeric(6,1) FROM jorder WHERE jsonb_typeof(j -> 'a') IN ('number', 'null') GROUP BY id, j -> 'a' ORDER BY id");
+  yield q("jsonb: cast to numeric, the only key", "SELECT j::numeric AS n, count(*) FROM jorder WHERE id IN (5, 8, 11, 12, 13, 14, 15, 16, 18, 21, 23, 24, 25) GROUP BY 1 ORDER BY 1");
+  yield q("jsonb: cast to numeric, sum and a quotient", "SELECT sum(j::numeric), max(j::numeric), min(j::numeric) FROM jorder WHERE id BETWEEN 5 AND 22");
+  yield q("jsonb: cast to numeric, a quotient each row", "SELECT id, j::numeric / 3, j::numeric + 1 FROM jorder WHERE id BETWEEN 5 AND 22 ORDER BY id");
+  yield q("jsonb: cast to numeric, through a derived table and a CTE", "WITH w AS (SELECT id, j::numeric AS n FROM jorder WHERE id BETWEEN 5 AND 25) SELECT s.id, s.n, w.n FROM (SELECT id, j::numeric AS n FROM jorder WHERE id BETWEEN 5 AND 25) s JOIN w USING (id) ORDER BY s.id");
+  yield q("jsonb: cast to numeric, beside a numeric arm", "SELECT j::numeric FROM jorder WHERE id IN (5, 8, 11, 12, 13, 14, 15, 16, 18, 21, 23, 24, 25) UNION ALL SELECT 1.50 ORDER BY 1");
   // an ORDER BY's bare name is the output it names first: `ORDER BY j` of `j::text` sorts the text, not the jsonb
   yield q("jsonb: grouped column, ORDER BY the output's name", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j, id");
   yield q("jsonb: grouped column, ORDER BY the output's name DESC", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j DESC NULLS LAST, id");

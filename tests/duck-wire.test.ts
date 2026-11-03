@@ -4005,6 +4005,37 @@ test("a grouped jsonb's cast to a number is NULL for a JSON null, and an ORDER B
   } finally { await open.end(); await a.close(); await c.end(); }
 });
 
+// PR 582's review, round 2 (a class round of jsonb-null-cast-to-number-engine-error): a jsonb cast to an unconstrained
+// numeric keeps every digit the JSON number was written with (jsonb_numeric), in every reader that prints it — read as a
+// text cast to numeric is, its stored text Postgres's numeric_in reads (the program's cell), never the engine's double
+test("a jsonb cast to numeric keeps the number's every digit, in every reader (PR 582 review r2)", async () => {
+  // (numeric(jsonb) is not verified: a listener that refuses nothing holds the route)
+  const { api: a, c: open } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    const big = `(VALUES (1, '9223372036854775807'::jsonb), (2, '1e30'), (3, '123456789012345678901234567890.5'), (4, '-0.0'), (5, '0.10'), (6, 'null'), (7, NULL), (8, '2.450')) v(i, x)`;
+    assert.deepEqual(await unlike(open, [
+      ["SELECT j.id, (j.j -> 'r')::numeric AS c FROM jnums j ORDER BY j.id", "ordered"],
+      ["SELECT j.id, (j.j #> '{r}')::numeric AS c FROM jnums j ORDER BY j.id", "ordered"],
+      ["SELECT j.id, ((j.j -> 'r')::numeric)::text AS c FROM jnums j ORDER BY j.id", "ordered"],
+      ["SELECT j.id, (j.j -> 'r')::numeric AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT j.id, (j.j -> 'r')::numeric AS c FROM jnums j GROUP BY j.id ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::numeric AS c, count(*) FROM jnums j GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT (j.j -> 'r')::numeric AS c, count(*) FROM jnums j GROUP BY j.j -> 'r' ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT sum((j.j -> 'r')::numeric), max((j.j -> 'r')::numeric), min((j.j -> 'r')::numeric) FROM jnums j", "ordered"],
+      ["SELECT j.id, (j.j -> 'r')::numeric / 3 AS q, (j.j -> 'r')::numeric + 1 AS p FROM jnums j ORDER BY j.id", "ordered"],
+      ["SELECT s.id, s.k::numeric FROM (SELECT j.id, j.j -> 'r' AS k FROM jnums j) s ORDER BY s.id", "ordered"],
+      ["WITH w AS (SELECT j.id, (j.j -> 'r')::numeric AS c FROM jnums j) SELECT id, c FROM w ORDER BY id", "ordered"],
+      ["SELECT (j.j -> 'r')::numeric AS c FROM jnums j UNION ALL SELECT 1.50 ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT x.id, (SELECT (y.j -> 'r')::numeric FROM jnums y WHERE y.id = x.id) FROM jnums x ORDER BY x.id", "ordered"],
+      ["SELECT DISTINCT (j.j -> 'r')::numeric AS c FROM jnums j ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT j.id FROM jnums j WHERE (j.j -> 'r')::numeric > 1 ORDER BY (j.j -> 'r')::numeric", "ordered"],
+      [`SELECT i, x::numeric, (x::numeric)::text FROM ${big} ORDER BY i`, "ordered"],
+      [`SELECT i, x::numeric / 3 FROM ${big} WHERE i <> 2 ORDER BY i`, "ordered"],
+      [`SELECT sum(x::numeric) FROM ${big} WHERE i > 2`, "ordered"],
+    ]), []);
+  } finally { await open.end(); await a.close(); }
+});
+
 test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exact text (PR 207's review)", async () => {
   const c = await client();
   const held = heldJson;

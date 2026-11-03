@@ -2990,7 +2990,7 @@ class Rewriter {
         const from = this.typeOf(arg);
         const inner: Built | null = from !== null && FLOATS.has(from) ? numeric(cell(arg, from === FLOAT4 ? "float4" : "float8"))
           // a text: the digits Postgres's numeric_in reads (`1.50` keeps its scale, `1_000.5` is 1000.5)
-          : from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(arg) === null ? numeric(cell(pgCall("text", "a1::numeric", [this.clone(arg)]), "parsed"))
+          : this.readAsNumeric(arg) !== null ? numeric(cell(this.readAsNumeric(arg)!, "parsed"))
           : sub(arg);
         if (inner === null) return null;
         const mods = ((b.typeName?.typmods ?? []) as AstNode[]).map((m) => constInt(m));
@@ -3254,13 +3254,41 @@ class Rewriter {
    * src/duck/sync.ts), an integer whole, a literal as written, a column of no declared scale at the decimals the copy
    * holds (`mixed-scale-numeric`). Null for anything else.
    */
+  /**
+   * A TEXT OR A JSONB READ AS AN UNCONSTRAINED NUMERIC, row by row by Postgres's own numeric_in (src/duck/pg-eval.ts):
+   * THE ONE WRITER of that value's digits, for its program's cell (`exactOf`) and a function's argument (`pgNumeric`).
+   * A text is read as it is (`1.50` keeps its scale, `1_000.5` is 1000.5); a jsonb as its stored text (its `::text`,
+   * `pgText`), its JSON null SQL NULL: jsonb_numeric's number is the numeric numeric_in reads back from the text
+   * numeric_out wrote for it, every digit kept (the class round of PR 582, jsonb-null-cast-to-number-engine-error: the
+   * engine's double of the text dropped `2.450`'s scale and a bigint's last digits). Null for anything else, and for a
+   * constant (its literal is the writer's, `numericCastWrite`).
+   */
+  private readAsNumeric(arg: AstNode): AstNode | null {
+    const from = this.typeOf(arg);
+    if (from === null || constString(arg) !== null) return null;
+    if (TEXTS.has(from) && from !== UNKNOWN) return pgCall("text", "a1::numeric", [this.clone(arg)]);
+    if (from === JSONB) return pgCall("text", "nullif(a1, 'null')::numeric", [this.asJsonbText(this.clone(arg))]);
+    return null;
+  }
+
+  /** `x::text` of a jsonb as Postgres analyses it (a COERCEVIAIO to text), which the cast's own rule writes (`typeCast` →
+   *  `pgText`'s `__mason_jsonb_text`): the stored text, written once. (Its collation is the jsonb's, none: the text is
+   *  only ever read by numeric_in, never compared or sorted.) */
+  private asJsonbText(x: AstNode): AstNode {
+    const to: AstNode = { TypeCast: { arg: x, typeName: { names: [S("pg_catalog"), S("text")], typemod: -1 }, location: -1 } };
+    const collation = this.typed(x)?.collation ?? 0;
+    this.synthetic.set(bodyOf(to), { node: "COERCEVIAIO", type: TEXT, typmod: -1, args: [{ type: JSONB, typmod: -1 }], oid: null, format: 2,
+      collation, inputCollation: collation, levelsUp: null, datum: null, qualifier: null, renamed: null });
+    this.original.add(bodyOf(to));
+    return to;
+  }
+
   private pgNumeric(n: AstNode): AstNode | null {
     const b = bodyOf(n);
     if (kindOf(n) === "TypeCast") {
       const target = lastName(b.typeName?.names);
       if ((target !== "numeric" && target !== "decimal") || ((b.typeName?.typmods ?? []) as AstNode[]).length > 0 || !isNode(b.arg)) return null;
-      const from = this.typeOf(b.arg);
-      return from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(b.arg) === null ? pgCall("text", "a1::numeric", [this.clone(b.arg)]) : null;
+      return this.readAsNumeric(b.arg);
     }
     // (`x ^ y` of numerics is Postgres's numeric_power, power(x, y)'s function: issue 242)
     const raised = kindOf(n) === "A_Expr" && b.kind === "AEXPR_OP" && lastName(b.name) === "^" && isNode(b.lexpr) && isNode(b.rexpr);
