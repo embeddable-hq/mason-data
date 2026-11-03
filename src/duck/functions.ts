@@ -20,7 +20,7 @@ import { floatAsNumeric } from "./types.ts";
 import { intervalText } from "./types.ts";
 import { jsonbText, parseJson, writeJson, quoteJson, type Json } from "./jsonb.ts";
 import { JSONB_KEY_FUNCTIONS, jsonbKey, jsonbStrings, STORED_SUFFIX } from "./jsonb-order.ts";
-import { compare, div, evaluateText, NumericError, numericOrderKey, numericText, numericToInteger, parseNumeric, parseProgram, type NumericProgram } from "../lib/pg-numeric.ts";
+import { compare, div, evaluateText, NumericError, numericOrderKey, numericText, numericToDouble, numericToInteger, parseNumeric, parseProgram, type NumericProgram } from "../lib/pg-numeric.ts";
 import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
 import { gapMark } from "./gaps.ts";
@@ -1005,8 +1005,12 @@ export function registerFunctions(conn: DuckDBConnection): void {
     try { return numericToInteger(String(t), Number(bits) as 16 | 32 | 64); }
     catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
   });
-  // a numeric's exact text cast to float8 (numeric_float8: strtod of numeric_out's text): the double nearest it
-  scalar(conn, "__mason_numeric_double", [VARCHAR], DOUBLE, ([t]) => { const s = String(t).trim(); return /^-inf/i.test(s) ? -Infinity : /inf/i.test(s) ? Infinity : Number(s); });
+  // a numeric's exact text cast to float8 (numeric_float8: strtod of numeric_out's text): the double nearest it, 22003
+  // where that is past a double's range or a non-zero value underflows to 0 (issue 217)
+  scalar(conn, "__mason_numeric_double", [VARCHAR], DOUBLE, ([t]) => {
+    try { return numericToDouble(String(t)); }
+    catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
+  });
   // the decimals of numeric_out's text: the value's display scale (`2.450` has 3)
   scalar(conn, "__mason_numeric_scale", [VARCHAR], INTEGER, ([t]) => { const at = String(t).indexOf("."); return at < 0 ? 0 : String(t).length - at - 1; });
   scalar(conn, "__mason_float_numeric_text", [DOUBLE, BOOLEAN], VARCHAR, ([x, four]) => floatNumericText(Number(x), four === true));

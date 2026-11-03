@@ -285,7 +285,8 @@ checkout on a branch without `scripts/hooks/` prints a hook error on each Bash c
   (`src/duck/`, `src/api/`, `src/cdc/`) runs only `IT_ORACLE_ONLY=<regex>` for the statements it touches, and of the
   other integration files those nearest the change; the rest is CI's. When what is answered moved, the allowlist
   (`src/duck/verified.ts`) and `tests/fixtures/oracle-duckdb-alone.json` come from that push's CI run, by
-  `node scripts/oracle-legs.ts --write <run-id>`, then read the diff and commit both: a whole local run held a shared
+  `node scripts/oracle-legs.ts --write <run-id>`, which renders README.md's counts and docs/SQL-SUPPORT.md from them
+  too; then read the diff and commit the four files: a whole local run held a shared
   slot for what the legs already measured. Detector: `integration (oracle)` red on the PR, naming the command.
 - **A heavy gate takes a slot.** `npm run check`, `npm run gate` and `npm run test:integration` queue for one of
   `MASON_GATE_SLOTS` machine-wide (`scripts/gate-slot.ts`) and say who they wait for, so a long wait is not a hang: start
