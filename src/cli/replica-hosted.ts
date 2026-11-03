@@ -358,8 +358,11 @@ async function list(org: string | null, json: boolean): Promise<number> {
 /** The URL's password as this command holds it (masked in every service text; from `ECHO_RUN` characters, refused by
  *  the exact test and the output's gate too). `gate`: the secrets for the tests that refuse; `masks`: for serviceText. */
 export function urlSecrets(url: string): { masks: string[]; gate: string[] } {
-  let password = "";
-  try { password = decodeURIComponent(new URL(url).password); } catch { password = ""; }
+  // the URL is parseSource's already (its one place for a password is its user part: a password= parameter is refused)
+  let raw = "";
+  try { raw = new URL(url).password; } catch { raw = ""; }   // not a URL: parseSource refused it before this
+  // decoded, as a mask reads text; a malformed escape held as it is written, never dropped
+  const password = ((): string => { try { return decodeURIComponent(raw); } catch { return raw; } })();
   const body = password.replace(/[^A-Za-z0-9_-]/g, "");
   // a password shorter than 4 is no secret a mask can keep apart from ordinary words; one shorter than ECHO_RUN would
   // refuse honest text that shares a run with it by chance, so it is masked, never refused (docs/HOSTED-API.md)

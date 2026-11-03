@@ -285,6 +285,7 @@ test("the pure pieces: a replica held to its grammars, the free text kept out of
   assert.deepEqual(urlSecrets("postgres://u:hunter2@h/d"), { masks: ["hunter2"], gate: [] });
   assert.deepEqual(urlSecrets("postgres://u:x@h/d"), { masks: [], gate: [] });
   assert.deepEqual(urlSecrets("postgres://u:p%40ss%21wd@h/d"), { masks: ["p@ss!wd"], gate: [] }, "decoded; its body (letters, digits, - and _) counts");
+  assert.deepEqual(urlSecrets("postgres://u:ab%zzcdefgh@h/d"), { masks: ["ab%zzcdefgh"], gate: [] }, "a malformed escape: held as written, never dropped");
   assert.deepEqual(checkLines([{ source: "app", outcome: "unknown", checks: [{ name: "a", status: "unknown", detail: "b", fix: null }], missing: [] }]), ["Mason's checks of the database app names: unknown", "  ?  a: b"]);
 });
 
