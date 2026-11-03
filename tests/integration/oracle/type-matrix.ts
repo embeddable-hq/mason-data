@@ -1026,6 +1026,11 @@ function* matrix(): Generator<Matrixed> {
   yield q("issue 217: exp past a double's range is 22003", "SELECT exp(n2 + 798.50)::float8 FROM typed WHERE id = 2");
   yield q("issue 217: a large power within range is answered", "SELECT (n2 ^ 30)::float8, power(n2, 30)::double precision FROM typed WHERE id = 5");
   yield q("issue 217: a subnormal is answered", "SELECT (n2 ^ 310)::float8 FROM typed WHERE id = 4");
+  // review r3 of PR 519 (refusal-at-the-call-not-the-reader): an ordered-set aggregate over an exact order key read only
+  // for its nullness is answered (the key is NULL exactly when the value is); its value stays refused (numeric-ordered-set)
+  yield q("issue 217: percentile_disc / mode() over an exact key read only for its nullness", "SELECT id % 3 AS g, percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 / 3) IS NULL, " +
+    "mode() WITHIN GROUP (ORDER BY nullif(n2 / 7, 0)) IS NOT NULL, CASE WHEN percentile_disc(0.5) WITHIN GROUP (ORDER BY n2 ^ 2) IS NULL THEN 'none' ELSE 'some' END " +
+    "FROM typed WHERE n2 BETWEEN -1000 AND 1000 OR n2 IS NULL GROUP BY 1 HAVING mode() WITHIN GROUP (ORDER BY n2 / 3) IS NOT NULL OR count(*) > 0 ORDER BY 1");
   // a UNION ALL whose arm reads a CTE, over an exact numeric: the trial of the arms' programs once wrote the real CTE,
   // leaving the arms of different widths, which the engine refused (PR 202 round 8); and its stored-column twin
   yield q("a CTE's sqrt read by one UNION ALL arm, beside the same sqrt", "WITH t AS (SELECT sqrt(abs(n2)) AS v FROM typed WHERE n2 BETWEEN -1000 AND 1000) " +
