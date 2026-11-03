@@ -846,6 +846,7 @@ function docsReadersLeftOut(files: Record<string, string>, listed: readonly stri
 /** Unit test files that name a doc and need not run in the docs job, each with why */
 const DOCS_READ_EXEMPT: ReadonlyMap<string, string> = new Map([
   ["tests/ci-shards.test.ts", "its docs paths are the classifier's inputs and git fixtures; it reads no doc"],
+  ["tests/cli-deploy.test.ts", "\"deploy\" is the mason command's name, never the deploy/ folder; it reads no doc"],
   ["tests/cli-package.test.ts", "README.md is the npm package's file list (cli/README.md, code)"],
   ["tests/duck-json-columns.test.ts", "\"docs\" is a synthetic table's name; it reads no doc"],
   ["tests/duck-extensions.test.ts", "README.md is a platform package's file list (written by cli/extensions.ts)"],

@@ -499,3 +499,18 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   decided from a list of element types (`TEXT_ARRAY`, `VARCHAR_ARRAY`) instead of from Postgres's analysis of the call
   (the float8[] overload, an array result type), so bpchar[] (1014) is read as one scalar and the engine's error
   escapes; `percentile-array-recognised-by-element-type-list` (PR 413).
+- A refusal placed where an aggregate or value is BUILT (an ordered-set aggregate over an exact quotient, a numeric
+  key), each reader of that value run at the head and the base over `t (a int, c numeric(10,2), d char(4))` with
+  NULLs and ties: the value only ORDERED BY (`SELECT d FROM t GROUP BY d ORDER BY percentile_disc(0.5) WITHIN GROUP
+  (ORDER BY c / 1.6), d`), under FETCH FIRST … WITH TIES, in DISTINCT ON, tested for NULL (`… HAVING
+  percentile_disc(0.5) WITHIN GROUP (ORDER BY c / 3) IS NOT NULL`), compared with a value of its own kind, grouped,
+  partitioned or joined on: a refusal keyed on the value's presence or its place in the statement refuses every
+  reader, including those the base answered right (a statement the base answered and the head refuses blocks). The
+  decision: refuse only where the value's bytes are read as a value, or answer it, decided by ONE reader, never a
+  list of places; `refusal-wider-than-the-wrong-answer` (PR 506).
+- A new entry in `src/duck/gaps.ts` (or a statement added under `tests/integration/oracle/`): run `node --test
+  --test-timeout=300000 --test-force-exit tests/oracle-legs.test.ts` and name, for each new entry, the statement in
+  `oracle/gap-cases.ts` that meets it; then check `tests/fixtures/oracle-duckdb-alone.json` and `src/duck/verified.ts`
+  came from the push's CI legs (`node scripts/oracle-legs.ts --write <run-id>`, then `UPDATE_FIXTURE=1` over
+  `tests/duck-gaps.test.ts`): a gap with no oracle statement meeting it, or a fixture not regenerated, keeps
+  `integration (oracle)` red on every push; `gap-added-without-its-oracle-fixture` (PR 506).

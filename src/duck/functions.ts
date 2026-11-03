@@ -995,6 +995,16 @@ export function registerFunctions(conn: DuckDBConnection): void {
     try { return numericToInteger(String(t), Number(bits) as 16 | 32 | 64); }
     catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
   });
+  // A NUMERIC WITH NO PROGRAM cast to an integer (issue 242), decided by the type the engine holds it in (`typeof`): a
+  // DECIMAL's or a text's digits are exact, rounded as numeric_int4 rounds them; a double's would round half to even
+  // where Postgres rounds the exact value half away from zero, and bytes are no number: each refused by name
+  scalar(conn, "__mason_numeric_int_of", [VARCHAR, VARCHAR, INTEGER], VARCHAR, ([type, t, bits]) => {
+    if (/^(DOUBLE|FLOAT|REAL|BLOB)$/i.test(String(type))) {
+      throw new PgEvalError("0A000", `a numeric the engine holds as a double, which Mason cannot compute exactly here, cast to an integer type is not supported by Mason (${gapMark("numeric-double-integer")}): Postgres rounds the exact value half away from zero, the double would round half to even; cast it to float8 first, (stddev(x)::float8)::int, which rounds the double as Postgres rounds a float8`);
+    }
+    try { return numericToInteger(String(t), Number(bits) as 16 | 32 | 64); }
+    catch (e) { if (e instanceof NumericError) throw numericEvalError(e); throw e; }
+  });
   // a numeric's exact text cast to float8 (numeric_float8: strtod of numeric_out's text): the double nearest it
   scalar(conn, "__mason_numeric_double", [VARCHAR], DOUBLE, ([t]) => { const s = String(t).trim(); return /^-inf/i.test(s) ? -Infinity : /inf/i.test(s) ? Infinity : Number(s); });
   // the decimals of numeric_out's text: the value's display scale (`2.450` has 3)

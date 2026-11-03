@@ -25,6 +25,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this
   machine). Nothing changes for a project, `mason start` or `mason serve`. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md)
   is the API they speak.
+- **`mason deploy` sends the project to a replica on a hosted Mason service** (`--replica <org>/<name>`, else
+  `MASON_REPLICA`), and waits until the replica runs it or Mason there refuses it. The project is checked first as
+  `mason start` checks it, without connecting to any database; only its YAML under `mason/` is sent, never `.env` or
+  `.mason/`, and a `url:` written with its password is refused. `--dry-run` lists what would be sent and sends nothing.
 - **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
   ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
   beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
@@ -249,6 +253,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (`3`, half away from zero). A `*` beside a division (`SELECT *, a / 7 AS q …`, `SELECT s.*, 1 …`) showed 15 digits; it
   shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
+- **A `NULLIF` of a numeric division cast to an integer rounds as Postgres does**: `nullif(x / 1.6, 0)::int` of 4.00
+  was `2` and is `3` (half away from zero), in a query and in a generated table, and `nullif(x / y, 0)` shows
+  Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. `percentile_disc` and `mode()` ordered by a
+  division answer the picked row's exact value, where they answered bytes (`\x3305…`) or the engine's error: printed,
+  cast, compared, tested for NULL, grouped or joined on, in a query and in a generated table. Two kinds are refused by
+  name: an array of fractions over a division (`numeric-ordered-set`: ask for each fraction alone), and a cast to an
+  integer of a double the engine computes, such as `stddev(x)::int` of a numeric without a precision
+  (`numeric-double-integer`: cast to float8 first); a generated table with one fails its build saying so. Nothing to do
+  on upgrade.
 - **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
   `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with
   "types cannot be matched", and an integer beside a `numeric(12,2)` showed `1.00` where Postgres shows `1`; each now

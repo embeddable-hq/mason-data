@@ -23,6 +23,7 @@ import { USAGE, usage } from "./usage.ts";
 import { CANCEL, cancel } from "./cancel.ts";
 import { SERVE, serve } from "./serve.ts";
 import { LOGIN, LOGOUT, login, logout } from "./login.ts";
+import { DEPLOY, deploy } from "./deploy.ts";
 import { PROJECT_LINE } from "./dev.ts";
 import { version } from "./version.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
@@ -163,7 +164,7 @@ export const STEPS: ReadonlyArray<[step: string, commands: readonly Command[]]> 
   ["Add your tables", [{ ...TABLES, run: tables }, { ...ADD, run: add }, { ...REMOVE, run: remove }, { ...WAIT, run: wait }]],
   ["Connect", [{ ...USER, run: user }, { ...MCP, run: mcp }, { ...SHARE, run: share }]],
   ["Run", [{ ...STATUS, run: status }, { ...UI, run: ui }, { ...SYNC, run: sync }, { ...LOGS, run: logs }, { ...CANCEL, run: cancel }, { ...USAGE, run: (argv) => usage(argv) }, { ...STOP, run: stop }, { ...DESTROY, run: (argv) => destroy(argv) }]],
-  ["Go to production", [{ ...SERVE, run: serve }, { ...LOGIN, run: login }, { ...LOGOUT, run: logout }]],
+  ["Go to production", [{ ...SERVE, run: serve }, { ...LOGIN, run: login }, { ...LOGOUT, run: logout }, { ...DEPLOY, run: deploy }]],
 ];
 
 /** Every command, in the order `mason --help` lists them. */
@@ -231,7 +232,7 @@ export function topUsage(s: Style = styleOut()): string {
     para("A command means the project of the folder it runs in (or above it)."),
     para("Every command but help and mcp (whose stdout is the MCP protocol's) takes --json: one JSON object for a program, always with next (what to run " +
       "next); a failure is { error: { code, message, why, fix }, next }. The exit code says how it went: 0 done, 1 failed " +
-      "with the reason, 2 a wrong command line, 124 mason wait timed out. Driving Mason from a coding agent: mason help agent."),
+      "with the reason, 2 a wrong command line, 124 a wait timed out (mason wait, mason deploy). Driving Mason from a coding agent: mason help agent."),
     "",
   ].join("\n");
 }
