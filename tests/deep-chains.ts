@@ -25,10 +25,44 @@ export function deepChains(bottom: string, depth = DEEP_DEPTH, op = "+"): Record
 /** the depths each `deepShapes` shape climbs, in order: a walk that grows with the expansion fails the bound at the first
  *  depth past it, by name, instead of hanging the file at the deepest (the workflows' deep variant form is at the last) */
 export const PLAN_TIME_DEPTHS = [4, 8, 12, 16, 24, 32];
-/** measured, min of 3 (issue 264's PR): on main every shape planned in 1–102 ms at depth 32 (laptop, Node 24); at
- *  a0ab4ef, the exponential walk of PR 202 round 14, `a + a - a` nested took 2.3 s at depth 12. 1000 ms is about 3x
- *  CI's likely worst (3x the laptop) and below that */
+/**
+ * THE PLANNER'S TIME, ONE BOUND PER COST CURVE (issue 569). Measured (laptop, Node 24, min of 5, `deepShapes` at 4..32):
+ * a shape's plan grows either linearly in the depth (x1.6–2.6 from 16 to 32; the worst 42 ms at 32) or with its square
+ * (x3.6–5.8; the worst, "mixed-scale union, a chain", 143 ms at 32), and which is not which `QUADRATIC_SQL` says (`left
+ * join` plans in quadratic time over a linear SQL, 106 ms; 344 in linear time over a quadratic one). CI's runner was
+ * 7.4x the laptop for one plan (issue 569's red run: that chain in 1059 ms, at 1000) where the whole test was 3.3–4.4x.
+ * Each bound is 2 x CI's slowdown x its curve's worst, rounded up: 2 x 7.4 x 42 = 622 under 1000, 2 x 7.4 x 143 = 2116
+ * under 2500. The stand-in test holds the bounds to these numbers (tests/duck-plan-time.test.ts).
+ *
+ * The bound alone does not keep the guard sharp: PR 202's 3^depth walk (at a0ab4ef, `a + a - a` nested) took 2.3 s at
+ * depth 12 on the laptop, under the quadratic bound, and its depth 16 is dead. So the growth check (`PLAN_GROWTH_*`).
+ */
+export const PLAN_TIME_MEASURED_MS = { linear: 42, quadratic: 143 } as const;
+export const CI_SLOWDOWN = 7.4;
+/** the bound of a shape whose plan grows linearly in the depth */
 export const PLAN_TIME_BOUND_MS = 1000;
+/** the bound of a shape whose plan grows with the square of the depth (`QUADRATIC_PLAN`) */
+export const QUADRATIC_PLAN_TIME_BOUND_MS = 2500;
+/** the shapes whose plan grows with the square of the depth, measured (x3.6–5.8 from 16 to 32; every other x1.6–2.6).
+ *  (a profile of the mixed-scale chain at 32: the largest part is `exactArms`' trial copy of each arm, src/duck/rewrite.ts,
+ *  the whole chain below it) */
+export const QUADRATIC_PLAN: ReadonlySet<string> = new Set(["nested", "where", "case", "left join", "text alone", "char(4) alone",
+  "all but c", "c + 1", "c passed through", "every column with c", "a quotient passed through", "q + 1", "numeric union chain",
+  "c + c - c", "q + q - q", "mixed-scale union, a chain", "q + q - q, a UNION ALL chain of scales"]);
+/** a shape's planning-time bound, by its cost curve: the one reader of the bounds */
+export const planTimeBound = (shape: string): number => QUADRATIC_PLAN.has(shape) ? QUADRATIC_PLAN_TIME_BOUND_MS : PLAN_TIME_BOUND_MS;
+/**
+ * THE GROWTH CHECK, shape-independent: between consecutive depths d1 < d2, a plan of `PLAN_GROWTH_FLOOR_MS` or more at
+ * d2 takes at most `PLAN_GROWTH_HEADROOM` x (d2 / d1)^2 its time at d1: a quadratic's ratio, with room for one sample 4x
+ * its neighbour. A 3^depth walk gains x81 every four levels against a limit of x7.1–9 (2^depth x16), so it fails at the
+ * first depth whose plan crosses the floor, whatever the runner's speed (a uniformly slower runner changes no ratio).
+ * Below the floor a GC pause is a large share of a plan, and no ratio is read.
+ */
+export const PLAN_GROWTH_HEADROOM = 4;
+export const PLAN_GROWTH_FLOOR_MS = 100;
+/** a plan past a check is planned again, this many in all, and the minimum held: the bound is the planner's cost, not a
+ *  shared runner's moment (a minimum is a cost's estimate); an exponential walk is slow on every plan */
+export const PLAN_TIME_TRIES = 3;
 
 /**
  * Issue 264: the planner's time, held to a bound over a synthetic table `t (id int PRIMARY KEY, a int, b text,
