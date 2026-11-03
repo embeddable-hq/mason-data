@@ -6856,8 +6856,10 @@ test("issue 406: upper, lower and initcap map case under their input collation, 
   // listed difference, Mason gap fromless-numeric-text-order)
   const catalog = (b: Uint8Array): Promise<Uint8Array> => truth.execProtocolRaw(b);
   const under = { searchPath: "public", timeZone: "UTC", dateStyle: "ISO, MDY" } as Parameters<NonNullable<typeof listener.ordersText>>[3];
-  for (const [sql, routed] of [["SELECT upper('ß')", true], ["SELECT initcap('a b'), lower('X')", true], ["SELECT 'a' = 'A', version() IS NOT NULL", false], ["SELECT upper('ß'), 1.5", false]] as const) {
-    assert.equal(mayOrderText((await parseSql(sql)).stmts![0]!.stmt) && await listener.ordersText!(catalog, sql, [], under, true), routed, sql);
+  for (const [sql, routed] of [["SELECT upper('ß')", true], ["SELECT initcap('a b'), lower('X')", true], ["SELECT 'a' = 'A', version() IS NOT NULL", false], ["SELECT upper('ß'), 1.5", false],
+    // the synced data refuses what the catalog answers: the catalog keeps it, as before (never a refusal of it)
+    ["SELECT current_user, upper(current_user::text)", false], ["SELECT lower('now')::timestamptz IS NOT NULL", false]] as const) {
+    assert.equal(mayOrderText((await parseSql(sql)).stmts![0]!.stmt) && await listener.ordersText!(catalog, sql, [], under, true, new Map()), routed, sql);
   }
 });
 

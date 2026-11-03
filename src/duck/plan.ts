@@ -292,47 +292,56 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  * is C, so `SELECT 'a' < 'B'` answered there is byte order where the source's libc or ICU says otherwise. Its analysis
  * (under the session's state) says where it orders a collatable value and under which collation (`textOrdering`); an
  * operator or a function counts as ordering by the catalog's own name of it (`<`, `max` …, never `=` or `count`), and
- * the resolver says whether that collation is byte order; and a call of upper, lower or initcap of text, under any
- * collation, maps case (issue 406), which the catalog does by its own rules. True: the statement is planned for the synced data, made and
- * refused like any other. A statement the analysis refuses stays the catalog's, which raises Postgres's own error.
+ * the resolver says whether that collation is byte order. "order": the statement is planned for the synced data, made
+ * and refused like any other. A statement the analysis refuses stays the catalog's, which raises Postgres's own error.
+ * "case" (issue 406): it calls upper, lower or initcap of text, under any collation (the catalog maps case by its own
+ * C.UTF-8's rules, never the source's ctype): the synced data's where it plans the statement, the caller decides
+ * (src/duck/store.ts `listener`), since what the catalog answered before is kept where the synced data refuses it.
  */
-export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<boolean> {
+export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<"order" | "case" | null> {
   const analysis = await analyze(o.catalog, o.text, o.paramOids, o.under);
-  if ("refused" in analysis) return false;
+  if ("refused" in analysis) return null;
   // the analysis as the session runs the statement: a simple Query binds no parameter, so one naming `$1` is Postgres's
   // 42P02, which the catalog answers (the analysis above is a Parse's, which would infer its type)
-  if (!o.bindable && analysis.params.length > 0) return false;
+  if (!o.bindable && analysis.params.length > 0) return null;
   const oids = collationOids(analysis.tree);
-  if (oids.size === 0) return false;
+  if (oids.size === 0) return null;
   let resolved: StatementCollations;
   // (a collation the source lacks, or one Mason cannot follow: the synced data's plan refuses it by name, never the
   // catalog's byte order; a nondeterministic one wherever it is named, equality and GROUP BY included)
   try { resolved = await o.collations.prepare((sql) => catalogRows(o.catalog, sql), oids); }
-  catch (e) { if (e instanceof Unrewritable) return true; throw e; }
+  catch (e) { if (e instanceof Unrewritable) return "order"; throw e; }
   // a statement of no table that holds a numeric (a literal such as 1.5 included) stays the catalog's, which computes it exactly, its text in byte
-  // order as before (Mason gap fromless-numeric-text-order): the synced data holds a VALUES list's numeric otherwise
-  // than Postgres (issue 342's class), and the catalog answered it right
-  if ([...analysis.types.values()].some((ts) => ts.some((t) => t.type === NUMERIC || t.type === NUMERIC_ARRAY))) return false;
+  // order and its case as before (Mason gap fromless-numeric-text-order): the synced data holds a VALUES list's numeric
+  // otherwise than Postgres (issue 342's class), and the catalog answered it right
+  if ([...analysis.types.values()].some((ts) => ts.some((t) => t.type === NUMERIC || t.type === NUMERIC_ARRAY))) return null;
   const ordering = (coll: number): boolean => {
     try { const c = resolved.resolve(coll); return c !== null && c.kind !== "bytes"; }
     catch (e) { if (e instanceof Unrewritable) return true; throw e; }
   };
   const { orders, operators, functions, calls } = textOrdering(analysis.tree);
-  if ([...orders].some(ordering)) return true;
+  if ([...orders].some(ordering)) return "order";
   const ops = [...operators].filter(([, cs]) => [...cs].some(ordering)).map(([oid]) => oid);
   const fns = [...functions].filter(([, cs]) => [...cs].some(ordering)).map(([oid]) => oid);
-  // upper / lower / initcap of text (issue 406): the synced data's under ANY collation, byte order's included, since
-  // the catalog maps case by its own rules, never the source's ctype (src/duck/collation.ts `caseOf` says the source's)
   const cased = [...calls.keys()];
-  if (ops.length + fns.length + cased.length === 0) return false;
-  const named = await catalogRows(o.catalog, [
-    ...(ops.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_operator WHERE oid IN (${ops.join(", ")}) AND oprname IN ('<', '>', '<=', '>=')`] : []),
-    ...(fns.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_proc WHERE oid IN (${fns.join(", ")}) AND proname IN ('min', 'max')`] : []),
-    ...(cased.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_proc WHERE oid IN (${cased.join(", ")}) AND proname IN ('upper', 'lower', 'initcap') AND pronamespace = 'pg_catalog'::regnamespace`] : [])].join(" UNION ALL "));
-  return named.length > 0;
+  if (ops.length + fns.length + cased.length === 0) return null;
+  const named = (await catalogRows(o.catalog, [
+    ...(ops.length > 0 ? [`SELECT 'order' FROM pg_catalog.pg_operator WHERE oid IN (${ops.join(", ")}) AND oprname IN ('<', '>', '<=', '>=')`] : []),
+    ...(fns.length > 0 ? [`SELECT 'order' FROM pg_catalog.pg_proc WHERE oid IN (${fns.join(", ")}) AND proname IN ('min', 'max')`] : []),
+    ...(cased.length > 0 ? [`SELECT 'case' FROM pg_catalog.pg_proc WHERE oid IN (${cased.join(", ")}) AND proname IN ('upper', 'lower', 'initcap') AND pronamespace = 'pg_catalog'::regnamespace`] : [])].join(" UNION ALL "))).map((r) => r[0]);
+  if (named.includes("order")) return "order";
+  // a case mapping alone moves only a statement of text (and the booleans and integers text answers: a comparison, a
+  // length), which the synced data computes as the catalog does but for the case; one that also holds a date, a time,
+  // a json or a session's value stays the catalog's, as before, which answers what the synced data may refuse
+  // (`lower('now')::timestamptz`, a relative time word; Mason gap fromless-numeric-text-order)
+  if (!named.includes("case")) return null;
+  return [...analysis.types.values()].every((ts) => ts.every((t) => CASE_ROUTED_TYPES.has(t.type))) ? "case" : null;
 }
 
 const NUMERIC = 1700, NUMERIC_ARRAY = 1231;
+/** the types a statement of no table that maps case may hold and still be the synced data's: text's, an unknown
+ *  literal's, a name's, a boolean's, an integer's and a text array's */
+const CASE_ROUTED_TYPES = new Set([25, 1043, 1042, 705, 19, 16, 21, 23, 20, 1009, 1015]);
 
 /** a rewrite's refusal as the statement's: a gap says its id (docs/SQL-SUPPORT.md); Postgres's own refusal is its
  *  SQLSTATE, and no gap */

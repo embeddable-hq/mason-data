@@ -219,9 +219,9 @@ export interface DuckOptions {
   /** a Bind's values as DuckDB must read them: each through Postgres's input function for the plan's parameter type
    *  (a StatementError with Postgres's own error for a value it refuses) */
   parameters(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, oids: readonly number[], values: readonly (string | null)[], under: SessionState): Promise<(string | null)[]>;
-  /** whether a statement of no table orders text under a collation that is not byte order (src/duck/plan.ts
+  /** whether a statement of no table orders text under a collation that is not byte order, or maps case (src/duck/plan.ts
    *  `ordersText`): then it is the synced data's, never the catalog's C database's. Absent: every such one is the catalog's */
-  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean): Promise<boolean>;
+  ordersText?(catalog: (bytes: Uint8Array) => Promise<Uint8Array>, text: string, paramOids: readonly number[], under: SessionState, bindable: boolean, userTypes: ReadonlyMap<string, number>): Promise<boolean>;
   /** moves when what a plan is made from moves outside the schema (a stored JSON path ready or gone, src/duck/kept.ts):
    *  the plans kept are made again */
   generation?(): number;
@@ -1536,7 +1536,7 @@ class Session {
   private async routed(t: AnyTranslation, text: string, paramOids: readonly number[], bindable: boolean): Promise<AnyTranslation> {
     const ask = this.server.options.duck.ordersText;
     if (t.kind !== "catalog" || t.fromless === undefined || ask === undefined) return t;
-    return await ask((b) => this.server.catalog.run(b), text, paramOids, this.sessionState(), bindable) ? { kind: "duckdb", sql: text, names: t.fromless.names } : t;
+    return await ask((b) => this.server.catalog.run(b), text, paramOids, this.sessionState(), bindable, this.server.userTypes()) ? { kind: "duckdb", sql: text, names: t.fromless.names } : t;
   }
 
   /** One statement of a simple query: the whole reply but the ReadyForQuery. */

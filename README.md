@@ -478,7 +478,7 @@ It answers 1% differently, each by a decision it lists, and it refuses 7% with a
 instead. None was answered with a wrong value.
 
 [docs/SQL-SUPPORT.md](docs/SQL-SUPPORT.md) is generated from the code. It lists the 1,145 verified pieces (types, functions,
-operators, aggregates, window functions, casts, constructs and their forms). It also lists the 59 refused shapes, the
+operators, aggregates, window functions, casts, constructs and their forms). It also lists the 60 refused shapes, the
 19 that are answered differently and the 8 limits, each with what to write instead.
 <!-- END GENERATED -->
 
