@@ -41,6 +41,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `MASON_REPLICA`), and waits until the replica runs it or Mason there refuses it. The project is checked first as
   `mason start` checks it, without connecting to any database; only its YAML under `mason/` is sent, never `.env` or
   `.mason/`, and a `url:` written with its password is refused. `--dry-run` lists what would be sent and sends nothing.
+- **`mason login`, `mason logout` and `mason deploy` print at most a quarter of the token they hold when a
+  service repeats it**: the token whole, and its body without its `masondata_…_` prefix, re-cased, split by spaces,
+  dashes or other characters, URL-encoded, or in pieces of 4 or more characters, are each shown as `****` once
+  everything the command prints would show more than 10 of its 43 characters together, on stdout, stderr and in
+  `--json`. Before, a service's message that repeated the token without its prefix printed it, into a CI log too.
 - **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
   ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
   beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
