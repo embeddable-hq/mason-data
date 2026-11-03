@@ -24,6 +24,12 @@
  * characters read, and the bound W × 43 × 2 × 31^-11 is under 10^-8. tests/cli-hosted.test.ts measures it with a fixed
  * seed over the honest outputs of deploy, login, logout and mason user --replica.
  *
+ * ONE VALUE MAY BE PRINTED ONCE (`holdOutput`'s `once`: the CI token `mason token create` made, the one answer that
+ * carries a token by design): its FIRST whole occurrence in a write (`onceAt`: as it is, or broken by the CLI's own
+ * line breaks on a terminal) is read as a separator, never as the secret it is, and is written; every other byte is read as before, the value held among the secrets, so a second
+ * occurrence, a piece of it elsewhere (11 of its body in a row) or anything else shaped as a token is refused as any
+ * secret is. What it allows is exactly that value, whole, one time, in one write.
+ *
  * INERT until a command holds a secret (`holdOutput`): every other command writes as it always did.
  */
 import { failed, serviceStyle, type Failure } from "./command.ts";
@@ -94,7 +100,19 @@ export function readingsCarry(read: Written, secrets: readonly string[], o: { pa
   return false;
 }
 
-interface Held { command: string; json: boolean; secrets: string[]; passwords: boolean }
+/**
+ * WHERE `value` IS WRITTEN WHOLE in `text`: as it is, or broken by the CLI's own line breaks on a terminal (white space
+ * and colour codes between its characters, src/cli/command.ts strictLines), its characters in order and nothing else
+ * between them; null when it is not. The span, from its first character to its last.
+ */
+export function onceAt(text: string, value: string): [number, number] | null {
+  const i = text.indexOf(value);
+  if (i >= 0) return [i, i + value.length];
+  const m = new RegExp([...value].map((c) => c.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("(?:\\s|\\x1b\\[[0-9;]*m)*")).exec(text);
+  return m === null ? null : [m.index, m.index + m[0].length];
+}
+
+interface Held { command: string; json: boolean; secrets: string[]; passwords: boolean; once: string | null }
 let held: Held | null = null;
 let refused = false;
 type Write = typeof process.stdout.write;
@@ -113,11 +131,11 @@ const REFUSAL: Failure = {
 /**
  * Hold `secrets` from here on, for `command`, whose answer is `--json` or not; again with more (login's new token)
  * adds them. `passwords` false: this command prints a password it made (its answer's), so a password's shape is no
- * secret in its output.
+ * secret in its output. `once`: a secret this command prints one time, whole (above), held as a secret beside it.
  */
-export function holdOutput(o: { command: string; json: boolean; secrets: readonly string[]; passwords?: boolean }): void {
-  const secrets = [...(held?.secrets ?? []), ...o.secrets.filter(Boolean)];
-  held = { command: o.command, json: o.json, secrets, passwords: o.passwords ?? held?.passwords ?? true };
+export function holdOutput(o: { command: string; json: boolean; secrets: readonly string[]; passwords?: boolean; once?: string }): void {
+  const secrets = [...(held?.secrets ?? []), ...o.secrets.filter(Boolean), ...(o.once ? [o.once] : [])];
+  held = { command: o.command, json: o.json, secrets, passwords: o.passwords ?? held?.passwords ?? true, once: o.once || (held?.once ?? null) };
 }
 
 /** Whether the gate held output back: the process then exits 1, whatever the command returned. */
@@ -136,9 +154,13 @@ export function installOutputGate(): void {
     if (text === "") return (original as (...a: unknown[]) => boolean)(chunk, ...rest);
     if (refused) { if (done) setImmediate(done); return true; }
     if (held === null) return (original as (...a: unknown[]) => boolean)(chunk, ...rest);
-    const [own, both] = writesAfter([state[which], state.both], readingsOf(text), held.secrets, { passwords: held.passwords }) as [{ secret: boolean; after: Written }, { secret: boolean; after: Written }];
+    // the one value printed once, whole, the first time it is written: read as a separator (above)
+    const once = held.once === null ? null : onceAt(text, held.once);
+    const tested = once === null ? text : `${text.slice(0, once[0])} ${text.slice(once[1])}`;
+    const [own, both] = writesAfter([state[which], state.both], readingsOf(tested), held.secrets, { passwords: held.passwords }) as [{ secret: boolean; after: Written }, { secret: boolean; after: Written }];
     if (!own.secret && !both.secret) {
       state[which] = own.after; state.both = both.after;
+      if (once !== null) held = { ...held, once: null };
       return (original as (...a: unknown[]) => boolean)(chunk, ...rest);
     }
     refused = true;

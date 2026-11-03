@@ -386,9 +386,10 @@ export const isServiceTime = (v: unknown): v is string => typeof v === "string" 
 /**
  * ONE REQUEST TO THE SERVICE: `form` as an urlencoded body or `json` as a JSON one, `token` as a Bearer header. The
  * answer, or a Failure when none came back whole: not reached, a redirect, larger than `maxBytes` (`MAX_BODY_BYTES`
- * unless the contract documents another bound for this request). A status is the caller's to read.
+ * unless the contract documents another bound for this request), no answer within `timeoutMs` (`REQUEST_MS` unless the
+ * contract documents a longer wait: a replica's creation). A status is the caller's to read.
  */
-export async function call(service: Service, method: "GET" | "POST" | "DELETE", path: string, o: { form?: Record<string, string>; json?: unknown; token?: string; maxBytes?: number } = {}): Promise<Answer | Failure> {
+export async function call(service: Service, method: "GET" | "POST" | "DELETE", path: string, o: { form?: Record<string, string>; json?: unknown; token?: string; maxBytes?: number; timeoutMs?: number } = {}): Promise<Answer | Failure> {
   const what = `${method} ${path}`;
   const secrets = o.token ? [o.token] : [];
   const headers: Record<string, string> = { "User-Agent": `mason-cli/${version()}`, Accept: "application/json" };
@@ -398,10 +399,10 @@ export async function call(service: Service, method: "GET" | "POST" | "DELETE", 
   if (o.token) headers.Authorization = `Bearer ${o.token}`;
   let res: Response;
   try {
-    res = await fetch(new URL(path, service.base), { method, headers, redirect: "manual", signal: AbortSignal.timeout(REQUEST_MS),
+    res = await fetch(new URL(path, service.base), { method, headers, redirect: "manual", signal: AbortSignal.timeout(o.timeoutMs ?? REQUEST_MS),
       ...(body !== undefined ? { body } : {}) });
   } catch (e) {
-    return { message: `could not reach ${service.base}`, code: "failed", why: serviceText(reachError(e), 300, secrets),
+    return { message: `could not reach ${service.base}`, code: "failed", why: serviceText(reachError(e, o.timeoutMs ?? REQUEST_MS), 300, secrets),
       fix: `check this machine is online, and that MASON_CLOUD_URL names the service (it is ${service.base})`, next: [] };
   }
   if (res.status >= 300 && res.status < 400) {
@@ -420,9 +421,9 @@ export async function call(service: Service, method: "GET" | "POST" | "DELETE", 
 }
 
 /** Why a fetch did not get an answer, in a line: the system's code, a certificate's reason, or the time limit. */
-function reachError(e: unknown): string {
+function reachError(e: unknown, ms: number): string {
   const err = e as { name?: string; message?: string; cause?: { code?: string; message?: string } };
-  if (err.name === "TimeoutError") return `no answer within ${REQUEST_MS / 1000} s`;
+  if (err.name === "TimeoutError") return `no answer within ${ms / 1000} s`;
   const cause = err.cause;
   if (cause?.code && /CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS/.test(cause.code)) return `its certificate could not be verified (${cause.code}): Mason sends a login only over a verified connection`;
   if (cause?.code) return `${cause.code}${cause.message ? `: ${cause.message}` : ""}`;

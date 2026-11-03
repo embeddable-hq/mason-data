@@ -6,7 +6,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { punyLabels } from "./hosted-fake.ts";
+import { spawnSync } from "node:child_process";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { bodyOf, newToken, punyLabels } from "./hosted-fake.ts";
+
+/** How many times `text` holds `value`, whole. */
+const times = (text: string, value: string): number => text.split(value).length - 1;
 import { carriesNoSecret, codeOfStatus, echoesSecret, DEFAULT_SERVICE_URL, deviceName, deviceOf, ECHO_RUN, isFailure, MAX_ANSWER_DEPTH, meOf, oauthFailure, serviceOf, serviceText, urlProblem, type Answer } from "../src/cli/hosted.ts";
 import { deployStateOf } from "../src/cli/deploy.ts";
 import { credentialsPath, environmentToken, parseLogins } from "../src/cli/credentials.ts";
@@ -428,4 +434,34 @@ test("the per-value tests read the value as printed too: a page cut inside a %XX
   assert.ok(carriesNoSecret({ page }, [TOKEN]), "as it came, 10 in a row: taken by the walk");
   assert.equal(deviceRead(device({ verification_uri: page }), [TOKEN]), null, "as printed, cut: refused");
   assert.equal(serviceText(`a\udc00b\ud800c😀d`, 100), "a?b?c😀d");
+});
+
+test("the output's gate lets the one value through ONCE (mason token create's CI token), whole, as written or broken by the CLI's line breaks: a second copy, a piece of it in another write, or another token's shape is refused at the write, the CLI's refusal in its place", () => {
+  const gate = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "output-gate.ts");
+  const value = newToken("ci"), login = newToken("pat");
+  const run = (writes: string[]): { stdout: string; stderr: string; code: number | null } => {
+    const script = `import { holdOutput, installOutputGate, gatedExit } from ${JSON.stringify(gate)};
+installOutputGate();
+holdOutput({ command: "token", json: false, secrets: [process.env.LOGIN] });
+holdOutput({ command: "token", json: false, secrets: [], once: process.env.VALUE });
+for (const w of JSON.parse(process.env.WRITES)) process.stdout.write(w);
+process.exitCode = gatedExit(0);
+`;
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, LOGIN: login, VALUE: value, WRITES: JSON.stringify(writes) }, encoding: "utf8" });
+    return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  };
+  const once = run([`  token     ${value}\n`, "  id        x\n"]);
+  assert.deepEqual([once.code, times(once.stdout, value)], [0, 1], once.stdout);
+  // broken by the CLI on a narrow terminal (its continuation at column 4): still the one value, whole
+  const broken = run([`  token\n    ${value.slice(0, 20)}\n    ${value.slice(20)}\n`]);
+  assert.deepEqual([broken.code, broken.stdout.includes(value.slice(20))], [0, true], broken.stdout + broken.stderr);
+  for (const [what, writes] of [["twice in one write", [`${value} ${value}\n`]], ["again in a later write", [`${value}\n`, `${value}\n`]],
+    ["11 of its body in a later write", [`${value}\n`, `id ${bodyOf(value).slice(5, 16)}\n`]], ["the login's body beside it", [`${value} ${bodyOf(login)}\n`]],
+    ["another token's shape", [`${value}\n`, `${newToken("ci")}\n`]]] as Array<[string, string[]]>) {
+    const r = run(writes);
+    assert.equal(r.code, 1, `${what}: ${r.stdout}`);
+    assert.ok(times(r.stdout, value) <= 1, what);
+    assert.match(r.stderr, /^✗ mason token: the service's answer would print a secret this command holds/m, what);
+    assert.ok(times(r.stderr, value) === 0, what);
+  }
 });
