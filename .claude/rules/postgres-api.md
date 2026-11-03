@@ -273,3 +273,10 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   statement of no table can take to the synced data (one that orders text, one under a collation): routed before
   Postgres could refuse it, so the engine's protocol error (08P01) replaces Postgres's SQLSTATE; a statement is routed
   only once the catalog's analysis of it succeeds; `fromless-routed-before-postgres-refuses` (PR 413).
+- A statement of no table that maps case over a value of the server, the catalog or the session (`SELECT
+  upper(version()) LIKE 'POSTGRES%'`, `SELECT upper(split_part(version(), ' ', 1))`, `SELECT count(*) FROM (SELECT
+  upper(version()) AS v) s WHERE v LIKE 'POSTGRES%'`, `SELECT upper(format_type(23, NULL))`, a `current_setting(…)`
+  in the same place), run through `scripts/duck-repro.ts`, never only the unit world, which answered it right while the
+  real run did not: routed to the synced data because a trial run SUCCEEDED, so the engine answered with its own
+  version or type name; a run's success is not the authority for the route, Postgres's analysis and the allowlist are,
+  and a server's or session's value stays the catalog's; `fromless-case-route-run-success-read-as-sameness` (PR 568).

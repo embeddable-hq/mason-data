@@ -29,3 +29,11 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   it turns into a refusal is a regression, and a difference both share is the base's (PR 120, 170, 197).
 - Each rules-file, DESIGN or release-note sentence the change touches, read against the code's branches: a sentence
   still stating what the change removed, or wider or narrower than the code (PR 146, 161, 163, 170).
+- A statement of no table that maps case (the route to the synced data) over a construct the rewrite passes through
+  untranslated: a `pg_catalog.`-qualified function (`SELECT pg_catalog.lower('ABC')`, `SELECT upper('abc'),
+  pg_catalog.length('abc')`), a typed literal of a type the engine lacks (`SELECT upper(char 'abc')`, `character`,
+  `bpchar`, `n'abc'`, `unknown 'abc'`, `'abc'::unknown`, the same in `FROM (VALUES (char 'abc')) v(x)`), an empty
+  SELECT list (`SELECT upper('abc') FROM (SELECT) s`), each with an ASCII and a non-ASCII value (`'ß'`, `'İ'`): the
+  route trusted a plan that succeeded, the run failed in the engine, and the engine's error replaced the catalog's
+  answer; the plan is not the run, so a route's probe is the run, or every untranslated construct is refused by name;
+  `fromless-case-route-plan-not-run` (PR 568).

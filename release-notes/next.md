@@ -339,6 +339,22 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `amount / 3`, a numeric read through a `UNION ALL` at every level, `c + c - c` at every level): deep nested numerics
   are planned, answered and stored in a generated table in bounded time. Before, eight such levels sent the synced data
   several megabytes of SQL and took about a second, and ten failed with an internal error or ran out of memory.
+- **A numeric column compared with a bound parameter matches the rows Postgres matches.** A filter an ORM, a driver's
+  prepared statement or a BI tool binds (`amount = $1`, `<`, `BETWEEN $1 AND $2`, `IN ($1, $2)`, `IS DISTINCT FROM`,
+  `NULLIF`, `CASE amount WHEN $1`) compared the value as a double, so past about 15 significant digits it matched rows
+  Postgres tells apart: `x = '1.00000000000000000001'` over a `numeric(30,20)` answered two rows where Postgres answers
+  one, and `<=` and `>` kept the wrong neighbours. The value is now compared in the column's own type wherever that type
+  holds it exactly, still the synced data's own filter, and otherwise (more decimals than the column, more digits,
+  `NaN`, `Infinity`) by its exact value. Nothing to do on upgrade.
+- **`upper`, `lower` and `initcap` change case as the source's collation does, under the database's collation, a
+  column's own and a `COLLATE`.** Each followed the database's collation whatever the call's, and read it from the
+  collation's sort order: under an ICU collation `initcap('o''hara')` was `O'Hara` where Postgres answers `O'hara`
+  (ICU title-cases a whole word), `upper('ß' COLLATE "und-x-icu")` was `ß` where it is `SS`, and under `COLLATE "C"`
+  `upper('é')` was `É` where C leaves it. A `SELECT` of no table, `SELECT upper('ß')`, answered `ẞ` where glibc's en_US
+  keeps `ß`. Now glibc's locales, C and POSIX, ICU's locales (Turkish's dotted and dotless i, Dutch's IJ, Greek's final
+  sigma), and the builtin `pg_c_utf8` and `pg_unicode_fast` are each followed. A libc collation of Turkish or Azeri
+  (`tr_TR`, `az_AZ`), whose i maps otherwise, is refused by name (`case-mapping-unknown`): write `COLLATE "tr-x-icu"`.
+  Nothing to do on upgrade.
 
 ## Known
 
