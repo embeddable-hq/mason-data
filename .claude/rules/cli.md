@@ -354,6 +354,12 @@ file and the key, says what is wrong in their words, and gives the way out, on O
   is *sync* — the first sync, the synced table, the synced data — never "copy" (CLAUDE.md "Vocabulary";
   `tests/conventions.test.ts` reads every literal in src/ for it).
 
+**A source's URL is shown only through `shownUrl` (src/cli/preflight.ts), which fails closed**: a value that reads whole
+as a postgres:// URL is shown with its password masked, and any other value is never shown. Its refusal names the
+variable and what the value looks like, and never quotes it (issue 541: a mask that recognised one shape returned the
+others whole). Detectors: `tests/cli-security.test.ts` feeds every command a value in each such shape;
+`tests/conventions.test.ts` refuses a mask written anywhere else.
+
 A new refusal a developer can meet gets a test asserted on its whole text (`tests/cli-project.test.ts`, `tests/cli-commands.test.ts`).
 
 ## What review probes

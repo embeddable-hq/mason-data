@@ -66,7 +66,7 @@ export function demoSettings(env: NodeJS.ProcessEnv): { changeMs: number } {
 export function demoPort(url: string, from: string): { port: number } | { problem: string } {
   const wayOut = "mason destroy and mason init demo again in a new folder, or put the URL back";
   const parsed = parseSource(url);
-  if ("problem" in parsed) return { problem: `${from} was changed: ${parsed.problem}. The demo database is postgres://${DEMO_USER}@127.0.0.1:<port>/${DEMO_DATABASE}; ${wayOut}` };
+  if ("problem" in parsed) return { problem: `${from} was changed: ${parsed.problem.replace(/\.$/, "")}. The demo database is postgres://${DEMO_USER}@127.0.0.1:<port>/${DEMO_DATABASE}; ${wayOut}` };
   const s = parsed.source;
   // loopback alone: the demo database listens on nothing else (0.0.0.0 or a container's host name is not it)
   if (!isLocalHost(s.host) || s.host === "0.0.0.0" || s.host === "host.docker.internal") {

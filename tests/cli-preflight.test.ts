@@ -6,7 +6,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as os from "node:os";
 import { PgError } from "../src/cdc/pg-wire.ts";
-import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, serverlessHost, sourceWarnings, unpickableReason,
+import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, serverlessHost, shownUrl, sourceWarnings, unpickableReason,
   type SourceFacts, type SourceTable } from "../src/cli/preflight.ts";
 import { unassignedPort } from "./test-ports.ts";
 import { PGlite } from "@electric-sql/pglite";
@@ -33,18 +33,57 @@ test("the URL: the user defaults to the OS user, the database never defaults, a 
   assert.equal(source("postgres://me:p%40ss@localhost/app").password, "p@ss");
 });
 
-test("a URL that cannot be read is said with its password masked, whatever the password holds", () => {
-  // the problem is printed, and under mason mcp kept in the MCP client's log file
+test("a source's URL is shown only when it reads whole as a postgres:// URL, its password masked; any other shape is never shown, and its refusal says the shape, never the value (issue 541)", () => {
+  // shown: the password masked, whatever it holds (an unencoded @ or : is the password's: the host is after the LAST @)
   for (const [url, shown] of [
-    ["postgres://claude:s3cret@127.0.0.1:99999/shop", '"postgres://claude:****@127.0.0.1:99999/shop" is not a URL'],
-    ["postgres://claude:s3cret@[::1/shop", '"postgres://claude:****@[::1/shop" is not a URL'],
-    ["postgres://claude:s3/cr@et@local host/shop", '"postgres://claude:****@local host/shop" is not a URL'],
-  ] as const) {
-    const r = parseSource(url);
-    assert.ok("problem" in r, url);
-    assert.ok(r.problem.startsWith(shown), r.problem);
-    assert.doesNotMatch(r.problem, /s3cret|s3\/cr|cr@et/, "never the password");
+    ["postgres://me:Pw541@localhost:5432/app", "postgres://me:****@localhost:5432/app"],
+    ["postgres://me:p@Pw541@db.example.com/app?sslmode=require", "postgres://me:****@db.example.com/app?sslmode=require"],
+    ["postgres://me:p:Pw541@localhost/app", "postgres://me:****@localhost/app"],
+    ["postgres://me:p%2FPw541%3F%23@localhost/app", "postgres://me:****@localhost/app"],
+    ["postgresql://me:Pw541@[::1]:5433/app", "postgresql://me:****@[::1]:5433/app"],
+    ["postgres://me@localhost/app", "postgres://me@localhost/app"],
+  ] as const) assert.equal(shownUrl(url), shown, url);
+  // never shown: each a shape a mask that recognises shapes let through, or a parse that half-works would show part of
+  const never: Array<[string, RegExp]> = [
+    ["host=db user=me password=Pw541 dbname=app", /: it looks like a keyword\/value connection string \(host=… user=… password=…\)\. Write it as postgres:\/\/user:password@host:5432\/your_app/],
+    ["  password = Pw541 host=db", /keyword\/value connection string/],
+    ["Pw541", /: it is not a URL\./],
+    ["Pw541:x", /: it is not a URL\./],
+    ["", /: it is empty\./],
+    ["jdbc:postgresql://db/app?user=me&password=Pw541", /: it looks like a JDBC URL: drop jdbc:/],
+    ["mysql://me:Pw541@db/app", /: its scheme is mysql, not postgres:\/\/ or postgresql:\/\//],
+    ["Pw541://me@db/app", /: its scheme is not postgres:\/\/ or postgresql:\/\//],
+    // a password holding / ? or # unencoded: the URL splits there, the password's tail a path, a parameter, a fragment
+    ["postgres://me:12/Pw541@db/app", /: it does not read as one URL/],
+    ["postgres://me:12?Pw541@db/app", /: it does not read as one URL/],
+    ["postgres://me:12#Pw541@db/app", /: it does not read as one URL/],
+    ["postgres://me:ab/Pw541@db/app", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app#frag", /: it does not read as one URL/],
+    // a space or a control character, which a parse encodes or drops: never shown rewritten
+    ["postgres://me:Pw 541@db/app", /: it does not read as one URL/],
+    ["postgres://me:Pw\t541@db/app", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app\n", /: it does not read as one URL/],
+    ["postgres://me:Pw541@127.0.0.1:99999/app", /: it does not read as one URL .*the port is not a number up to 65535/],
+    ["postgres://me:Pw541@[::1/app", /: it does not read as one URL/],
+    ["postgres://me:Pw541@local host/app", /: it does not read as one URL/],
+    ["postgres:///app?password=Pw541", /: it does not read as one URL/],
+  ];
+  for (const [value, said] of never) {
+    assert.equal(shownUrl(value), null, JSON.stringify(value));
+    assert.equal(maskedUrl(value), "a value that is not a postgres:// URL (not shown)", JSON.stringify(value));
+    const r = parseSource(value, "DATABASE_URL in .env");
+    assert.ok("problem" in r, JSON.stringify(value));
+    assert.ok(r.problem.startsWith("DATABASE_URL in .env is not a postgres:// URL: "), r.problem);
+    assert.match(r.problem, said);
+    assert.match(r.problem, /a password holding @ : \/ # \? % or a space is URL-encoded \(encodeURIComponent; @ is %40, \/ is %2F, # is %23\)$/);
+    assert.doesNotMatch(r.problem, /Pw|541|frag|99999/, "never a part of the value");
   }
+  // a %-escape that is none: refused naming where, never a crash or the value
+  const pct = parseSource("postgres://me:Pw%zz541@localhost/app", "MASON_URL");
+  assert.ok("problem" in pct);
+  assert.match(pct.problem, /^MASON_URL holds a % that starts no %-escape: a % in the user or the password is written %25\./);
+  const user = parseSource("postgres://m%zz@localhost", "DATABASE_URL");
+  assert.ok("problem" in user && /^DATABASE_URL holds a % that starts no %-escape/.test(user.problem), "the user's name too, where no database is named");
 });
 
 test("a database elsewhere is remote, and read over TLS unless the URL says otherwise", () => {

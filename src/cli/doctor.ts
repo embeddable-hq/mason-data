@@ -135,8 +135,8 @@ function portOf(url: string): number | null {
 }
 
 /** The database a URL names: reachable, its version, what this user can read. */
-export async function databaseCheck(url: string, o: ConnectContext = {}): Promise<Check> {
-  const parsed = parseSource(url);
+export async function databaseCheck(url: string, o: ConnectContext & { name?: string } = {}): Promise<Check> {
+  const parsed = parseSource(url, o.name);
   if ("problem" in parsed) return { name: "database", ok: false, detail: parsed.problem };
   const connected = await connectSource(parsed.source, o);
   if ("failure" in connected) return { name: "database", ok: false, detail: `${maskedUrl(parsed.source.url)}: ${connected.failure.message}${connected.failure.hints.map((h) => `\n    - ${h}`).join("")}` };
@@ -230,7 +230,7 @@ export async function doctor(argv: string[], deps: { which?: (cwd: string) => Re
       // the database the project's sources file names (src/cli/sources.ts): a file that cannot be read is the failing line
       const src = projectSource(project);
       checks.push("message" in src ? { name: "database", ok: false, detail: `${src.message}${src.why ? `: ${src.why.replace(/\n/g, "; ")}` : ""}. ${src.fix?.split("\n")[0] ?? ""}`.trim() }
-        : await databaseCheck(src.resolved, { demo: project.config.demo === true }));
+        : await databaseCheck(src.resolved, { demo: project.config.demo === true, name: src.from }));
     }
     // a project here whose config cannot be read: init would refuse, so "Ready: mason init" would send a person nowhere
     if ("code" in which && which.code === "bad_config") checks.push({ name: "project", ok: false, detail: `${which.problem}. ${(which.fix ?? "").replace(/^./, (c) => c.toUpperCase())}`.trim() });

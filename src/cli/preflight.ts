@@ -23,44 +23,74 @@ export function isLocalHost(host: string): boolean {
   return h === "localhost" || h === "::1" || h === "0.0.0.0" || /^127\./.test(h) || h === "host.docker.internal" || h.endsWith(".localhost");
 }
 
-/** The URL with its password masked: what is printed and shown, never the secret. */
-export function maskedUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    if (u.password) u.password = "****";
-    return u.toString();
-  } catch {
-    // not a URL: everything from the user's colon to the LAST @ is the password, whatever it holds (a / or an @ that
-    // was not encoded) — a host never holds an @
-    return url.replace(/:\/\/([^:@/]*):.*@/, "://$1:****@");
-  }
+/**
+ * THE ONE WAY A VALUE OF THE SOURCE'S URL SETTING IS SHOWN (issue 541), wherever Mason prints, logs or answers it: the URL
+ * with its password replaced by `****`, or null — never shown. It fails closed, so a secret masked by recognising its
+ * shape cannot leak in another shape: shown only when the value parses WHOLE as a postgres:// URL with a host, nothing
+ * dropped or rewritten by the parse (no space or control character, which a parse strips or encodes), and no `@` or
+ * `#` after the host (a password holding `/`, `?` or `#` unencoded splits the authority there, and its tail would be
+ * shown as a path, a parameter or a fragment). A keyword/value string, a bare password, any other URL: null.
+ */
+export function shownUrl(value: string): string | null {
+  if (/[\s\x00-\x1f\x7f]/.test(value)) return null;
+  let u: URL;
+  try { u = new URL(value); } catch { return null; }
+  if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") return null;
+  if (!u.hostname || u.hash !== "" || /[@#]/.test(u.pathname + u.search)) return null;
+  if (u.password) u.password = "****";
+  return u.toString();
+}
+
+/** A value of the source's URL setting in a sentence: `shownUrl`'s, or words that say it is not shown, never the value. */
+export function maskedUrl(value: string): string {
+  return shownUrl(value) ?? "a value that is not a postgres:// URL (not shown)";
+}
+
+const URL_FORM = "postgres://user:password@host:5432/your_app";
+/** The schemes a wrong URL is named by: Mason's own list, so a scheme said is never a part of the value Mason did not know. */
+const KNOWN_SCHEMES = new Set(["mysql", "mariadb", "mssql", "sqlserver", "oracle", "mongodb", "mongodb+srv", "redis", "rediss", "sqlite", "clickhouse",
+  "http", "https", "file", "pg", "pgsql", "psql", "postgis", "postgre", "postgress", "postgresq"]);
+const ENCODE = "a password holding @ : / # ? % or a space is URL-encoded (encodeURIComponent; @ is %40, / is %2F, # is %23)";
+
+/**
+ * Why a value `shownUrl` will not show is not a URL Mason reads, told from its SHAPE alone (`name` says where it is):
+ * what it looks like and how to write it, never a part of it, so a coding agent fixes it from the message alone.
+ */
+function notShownProblem(value: string, name: string): string {
+  const t = value.trim();
+  const why = t === "" ? "it is empty"
+    : /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(t) ? "it looks like a keyword/value connection string (host=… user=… password=…)"
+    : /^jdbc:/i.test(t) ? "it looks like a JDBC URL: drop jdbc:, and give the user and password before the host"
+    : !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(t) ? "it is not a URL"
+    : !/^postgres(ql)?:\/\//i.test(t) ? `its scheme is ${KNOWN_SCHEMES.has(t.slice(0, t.indexOf(":")).toLowerCase()) ? `${t.slice(0, t.indexOf(":")).toLowerCase()}, not` : "not"} postgres:// or postgresql://`
+    : "it does not read as one URL (a character in the password that is not URL-encoded splits it, or the port is not a number up to 65535)";
+  return `${name} is not a postgres:// URL: ${why}. Write it as ${URL_FORM}, where ${ENCODE}`;
 }
 
 /**
- * Parse the URL `mason start` was given. The user defaults to the OS user (libpq's default, and Homebrew's and
- * Postgres.app's superuser); the database never defaults — guessing it would read the wrong one.
+ * Parse the URL `mason start` was given (`name` says where it is, `DATABASE_URL in .env`: a problem names it, never the
+ * value). The user defaults to the OS user (libpq's default, and Homebrew's and Postgres.app's superuser); the database
+ * never defaults — guessing it would read the wrong one. Only a value `shownUrl` shows is read, so every URL a run
+ * connects with is one its messages can show.
  */
-export function parseSource(url: string): { source: Source } | { problem: string } {
-  let u: URL;
-  try { u = new URL(url); } catch {
-    // its password masked: the problem is printed (and, under mason mcp, kept in the MCP client's log)
-    return { problem: `${JSON.stringify(maskedUrl(url))} is not a URL. The form is postgres://user:password@localhost:5432/your_app — a password ` +
-      `containing @ : / # ? or % must be URL-encoded (encodeURIComponent; @ is %40).` };
-  }
-  if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") return { problem: `the URL's scheme is ${u.protocol.replace(/:$/, "")}; it must be postgres:// or postgresql://` };
+export function parseSource(url: string, name = "the URL"): { source: Source } | { problem: string } {
+  if (shownUrl(url) === null) return { problem: notShownProblem(url, name) };
+  const u = new URL(url);
   if (!u.username) u.username = encodeURIComponent(os.userInfo().username);
-  if (!u.pathname.replace(/^\//, "")) {
-    return { problem: `the URL names no database. Add it after the port: postgres://${decodeURIComponent(u.username)}@${u.host || "localhost:5432"}/your_app ` +
-      `(the one your app uses — its DATABASE_URL usually says).` };
-  }
   try {
+    // inside the try: a user name with a malformed %-escape is refused (decodeURIComponent throws), never a crash
+    if (!u.pathname.replace(/^\//, "")) {
+      return { problem: `${name} names no database. Add it after the port: postgres://${decodeURIComponent(u.username)}@${u.host || "localhost:5432"}/your_app ` +
+        `(the one your app uses — its DATABASE_URL usually says).` };
+    }
     const parts = parseDatabaseUrl(u.toString());
     const remote = !isLocalHost(parts.host);
     // a database elsewhere is read over the network: never in the clear unless the URL says so outright
     if (remote && !u.searchParams.has("sslmode")) parts.sslmode = "require";
     return { source: { ...parts, url: u.toString(), remote } };
   } catch (e) {
-    return { problem: (e as Error).message.replace(/^DATABASE_URL/, "the URL") };
+    if (e instanceof URIError) return { problem: `${name} holds a % that starts no %-escape: a % in the user or the password is written %25. Write it as ${URL_FORM}, where ${ENCODE}` };
+    return { problem: (e as Error).message.replace(/^DATABASE_URL/, name) };
   }
 }
 
@@ -444,8 +474,8 @@ export interface NeedsRemote { needsRemote: CheckedSource }
  * lacks the confirmation is answered as `NeedsRemote`: the caller says the confirmation, in its own command's words,
  * after the check's facts.
  */
-export async function checkSource(url: string, o: { remote: boolean; cmd: string; say: (m: string) => void; progress?: (m: string) => void }): Promise<CheckedSource | NeedsRemote | { exit: number }> {
-  const parsed = parseSource(url);
+export async function checkSource(url: string, o: { remote: boolean; cmd: string; say: (m: string) => void; progress?: (m: string) => void; name?: string }): Promise<CheckedSource | NeedsRemote | { exit: number }> {
+  const parsed = parseSource(url, o.name);
   if ("problem" in parsed) { o.say(`${o.cmd}: ${parsed.problem}`); return { exit: 2 }; }
   const source = parsed.source;
   // progress, not a finding: a caller with a checklist of its own (mason start) says it there

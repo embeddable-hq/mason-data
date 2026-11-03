@@ -80,7 +80,7 @@ export async function removeProject(p: Project, o: { isAlive?: (pid: number) => 
     // what the start that made them recorded (madeReplication); a project with no record names them by its one sources file
     const own = madeReplication(p.config, "message" in src ? (sourceFileNames(p.folder)[0] ?? "app.yml").replace(/\.ya?ml$/, "") : src.name);
     if (!own.owned) objects = "replication slot";
-    const parsed = "message" in src ? { problem: `the database's URL cannot be read: ${src.message}` } : parseSource(src.resolved);
+    const parsed = "message" in src ? { problem: `the database's URL cannot be read: ${src.message}` } : parseSource(src.resolved, src.from);
     try {
       if ("problem" in parsed) throw new Error(parsed.problem);
       // the slot is on the database the copy came from: a url: edited since names another, where dropping finds nothing

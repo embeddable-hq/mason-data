@@ -456,6 +456,25 @@ test("the endings guard catches the real thing", () => {
   assert.deepEqual(ownEndings('out(`Ready.${nextBlock(steps)}`)'), [".${nextBlock("]);
 });
 
+/** A URL's password masked by hand: a `.password =` assignment, or a `.replace(` that writes `****@` (issue 541). */
+export function ownUrlMasks(text: string): string[] {
+  return [...text.matchAll(/\.password\s*=(?!=)[^;\n]*|\.replace\([^\n]*\*\*\*\*@[^\n]*/g)].map((m) => m[0].trim());
+}
+
+test("a source's URL is shown by ONE function, which fails closed: src/cli/preflight.ts shownUrl, and nothing else masks a URL's password", () => {
+  // issue 541: the mask recognised one shape (scheme://user:password@) and returned anything else whole, so a keyword/value
+  // string or a bare password was printed in its refusal; a second mask is a second shape to get wrong
+  const offenders = scannedFiles(["src"]).filter((f) => f.name !== "src/cli/preflight.ts")
+    .flatMap((f) => ownUrlMasks(f.src).map((m) => `${f.name}: ${m}`));
+  assert.deepEqual(offenders, [], "show a source's URL with shownUrl or maskedUrl (src/cli/preflight.ts), never a mask of its own");
+});
+
+test("the URL-mask guard catches the real thing", () => {
+  assert.deepEqual(ownUrlMasks('if (u.password) u.password = "****";'), ['.password = "****"']);
+  assert.deepEqual(ownUrlMasks('return url.replace(/:\\/\\/([^:@/]*):.*@/, "://$1:****@");'), ['.replace(/:\\/\\/([^:@/]*):.*@/, "://$1:****@");']);
+  assert.deepEqual(ownUrlMasks("if (u.password === '') return null; const p = s.password;"), []);
+});
+
 /** A colour code written outside src/cli/style.ts (cursor movement — `\x1b[2K`, `\x1b[3F` — is not colour). */
 export function ownColours(text: string): string[] {
   return [...text.matchAll(/\\(?:x1b|u001b|033)\[[0-9;]*m/g)].map((m) => m[0]);
