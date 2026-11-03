@@ -24,6 +24,7 @@ A drop-in replacement for your Postgres read replica. Same SQL. Same answers. Se
   - [When to use Mason](#when-to-use-mason)
   - [Why it's fast](#why-its-fast)
   - [Making Mason faster](#making-mason-faster)
+  - [Generated tables](#generated-tables)
 - [Postgres compatibility](#postgres-compatibility)
   - [How a query is answered](#how-a-query-is-answered)
   - [How compatibility is tested](#how-compatibility-is-tested)
