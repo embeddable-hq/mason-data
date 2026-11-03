@@ -214,7 +214,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A JSON value cast to a number or a boolean answers as Postgres does**: `(meta -> 'n')::float8`, `::int`, `::bigint`
   or `::boolean` of a JSON `null` is now SQL NULL instead of an error, grouped or not, and a JSON `2.5` cast to an integer
   is `3`, rounded as Postgres rounds it. `::numeric` keeps every digit the JSON number was written with (`2.450`, never
-  `2.45`; `9223372036854775807`, never `9223372036854780000`), in a sum, a division, a `GROUP BY` and a subquery too. Under a `GROUP BY` of a JSON column, `ORDER BY` the name of an output
+  `2.45`; `9223372036854775807`, never `9223372036854780000`), in a sum, a division, a `GROUP BY` and a subquery too. A
+  JSON string, boolean, array or object cast to a number (or a number cast to a boolean) fails as Postgres fails, `cannot
+  cast jsonb string to type integer` (22023), and `ARRAY[meta -> 'n']::int[]` or `::float8[]` casts each element the same
+  way; `::numeric[]` of a JSON array is refused with what to write instead. Under a `GROUP BY` of a JSON column, `ORDER BY` the name of an output
   (`SELECT meta::text … GROUP BY meta ORDER BY meta`) sorts by that output's text, as Postgres does, instead of by the
   JSON value.
 - **A numeric division or average is compared by its exact value**: `DISTINCT`, `GROUP BY`, `PARTITION BY`,

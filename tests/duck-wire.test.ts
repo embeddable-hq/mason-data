@@ -403,7 +403,7 @@ async function answer(c: pg.Client, text: string, values?: unknown[]): Promise<{
   return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows as unknown[][] };
 }
 async function postgres(text: string, values?: unknown[]): Promise<{ fields: Array<[string, number]>; rows: unknown[][] }> {
-  const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1009, 1014, 1015, 1022, 1082, 1114, 1184, 1186, 1700, 3802].map((o) => [o, (v: string) => v])) });
+  const r = await truth.query<unknown[]>(text, values, { rowMode: "array", parsers: Object.fromEntries([16, 20, 21, 23, 25, 114, 700, 701, 1000, 1005, 1007, 1009, 1014, 1015, 1016, 1021, 1022, 1082, 1114, 1184, 1186, 1231, 1700, 3802].map((o) => [o, (v: string) => v])) });
   return { fields: r.fields.map((f) => [f.name, f.dataTypeID]), rows: r.rows };
 }
 
@@ -4042,6 +4042,86 @@ test("a jsonb cast to numeric keeps the number's every digit, in every reader (P
       ]), []);
     } finally { await c.end(); }
   } finally { await open.end(); await a.close(); }
+});
+
+// PR 582's review, round 4 (the class round of jsonb-null-cast-to-number-engine-error, met a third time, and
+// jsonb-cast-of-wrong-kind-sqlstate): EVERY way a jsonb reaches a cast to a number or a boolean goes through the one route
+// (`jsonbScalar`), which reads the JSON kind first, as Postgres's cannotCastJsonbValue does: a JSON null is SQL NULL, the
+// target's kind is converted, any other kind is Postgres's 22023 in its words. jnat's `b -> 'a'`: 9 to 17 numbers (1,
+// 1.0, 1.50, 1e2, 1e20, 1.0000000000000000001, the int64 edges, past uint64), 18 a string, 20 a JSON null, 21 / 22
+// booleans, 23 an array, 24 an object, 2 a missing key, 1 an SQL NULL; the whole `b`: 2 an object, 3 an array, 4 a
+// string, 5 a number, 6 a boolean, 7 a JSON null
+test("every way a jsonb reaches a cast to a number or a boolean (PR 582 review r4)", async () => {
+  // (the array casts' pieces are verified only by this push's oracle legs: a listener that refuses nothing holds the route)
+  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    const good: Record<string, string> = {
+      smallint: "1, 2, 9, 10, 11, 12, 20", integer: "1, 2, 9, 10, 11, 12, 20", bigint: "1, 2, 9, 10, 11, 12, 15, 20",
+      real: "1, 2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20", "double precision": "1, 2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20",
+      numeric: "1, 2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20", "numeric(10,2)": "1, 2, 9, 10, 11, 12, 20", boolean: "1, 2, 20, 21, 22",
+    };
+    const statements: Array<[string, "ordered" | "bag"]> = [];
+    for (const [ty, ids] of Object.entries(good)) {
+      // (1) a plain cast, of a member and of the whole value; (2) CAST's spelling
+      statements.push([`SELECT id, (b -> 'a')::${ty} FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"]);
+      statements.push([`SELECT id, CAST(b -> 'a' AS ${ty}) FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"]);
+      statements.push([`SELECT id, b::${ty} FROM jnat WHERE id IN (1, 7, ${ty === "boolean" ? 6 : 5}) ORDER BY id`, "ordered"]);
+      // every other kind: Postgres's 22023, naming the kind and the type
+      for (const wrong of ty === "boolean" ? [9, 18, 23, 24] : [18, 21, 23, 24]) statements.push([`SELECT id, (b -> 'a')::${ty} FROM jnat WHERE id = ${wrong}`, "ordered"]);
+      for (const wrong of ty === "boolean" ? [2, 3, 4, 5] : [2, 3, 4, 6]) statements.push([`SELECT id, b::${ty} FROM jnat WHERE id = ${wrong}`, "ordered"]);
+    }
+    for (const ty of ["integer", "numeric", "double precision", "boolean"]) {
+      // (1 and 1.0 are one numeric, whose text a group or a sort's tie may print either way: 1.0 left out)
+      const ids = ty === "numeric" ? "1, 2, 9, 11, 12, 14, 15, 20" : good[ty]!, bad = ty === "boolean" ? 9 : 18;
+      statements.push(
+        // (4) a CASE and a COALESCE arm
+        [`SELECT id, (CASE WHEN id > 0 THEN b -> 'a' END)::${ty} FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"],
+        [`SELECT id, coalesce(b -> 'x', b -> 'a')::${ty} FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"],
+        [`SELECT id, coalesce(b -> 'x', b -> 'a')::${ty} FROM jnat WHERE id = ${bad}`, "ordered"],
+        // (5) a derived table's, a CTE's and a scalar subquery's output
+        [`SELECT s.id, s.v::${ty} FROM (SELECT id, b -> 'a' AS v FROM jnat WHERE id IN (${ids})) s ORDER BY s.id`, "ordered"],
+        [`WITH w AS (SELECT id, b -> 'a' AS v FROM jnat) SELECT id, v::${ty} FROM w WHERE id = ${bad}`, "ordered"],
+        [`SELECT x.id, (SELECT y.b -> 'a' FROM jnat y WHERE y.id = x.id)::${ty} FROM jnat x WHERE x.id IN (${ids}) ORDER BY x.id`, "ordered"],
+        // (6) grouped, read per group by the key; (7) the cast repeated in GROUP BY and ORDER BY
+        [`SELECT id, (b -> 'a')::${ty} FROM jnat WHERE id IN (${ids}) GROUP BY id, b -> 'a' ORDER BY id`, "ordered"],
+        [`SELECT id, (b -> 'a')::${ty} FROM jnat WHERE id = ${bad} GROUP BY id, b -> 'a'`, "ordered"],
+        [`SELECT (b -> 'a')::${ty} AS v, count(*) FROM jnat WHERE id IN (${ids}) GROUP BY (b -> 'a')::${ty} ORDER BY (b -> 'a')::${ty} NULLS FIRST`, "ordered"],
+        [`SELECT (b -> 'a')::${ty} AS v FROM jnat WHERE id = ${bad} GROUP BY (b -> 'a')::${ty} ORDER BY (b -> 'a')::${ty}`, "ordered"],
+        // (8) a set operation's arm; (9) a function returning jsonb
+        [`SELECT (b -> 'a')::${ty} FROM jnat WHERE id IN (${ids}) UNION ALL SELECT NULL ORDER BY 1 NULLS FIRST`, "ordered"],
+        [`SELECT e::${ty} FROM jsonb_array_elements('[null, ${ty === "boolean" ? "true" : "2.50"}]'::jsonb) e ORDER BY 1 NULLS FIRST`, "ordered"],
+        [`SELECT j.id, e::${ty} FROM jnat j, jsonb_array_elements(CASE WHEN j.id = 23 THEN j.b -> 'a' END) e ORDER BY 1, 2`, "ordered"],
+        [`SELECT j.id, e::${ty} FROM jnat j, jsonb_array_elements(CASE WHEN j.id = 8 THEN j.b END) e`, "ordered"],
+        // (10) an array of it cast to an array of the type (the unconstrained numeric[] is refused by name: below)
+        ...ty === "numeric" ? [] : [
+          [`SELECT id, (ARRAY[b -> 'a'])::${ty}[] FROM jnat WHERE id IN (${ids}) ORDER BY id`, "ordered"] as [string, "ordered"],
+          [`SELECT id, (ARRAY[b -> 'a', b -> 'x'])::${ty}[] FROM jnat WHERE id = ${bad}`, "ordered"] as [string, "ordered"],
+          [`SELECT (array_agg(b -> 'a' ORDER BY id))::${ty}[] FROM jnat WHERE id IN (${ids})`, "ordered"] as [string, "ordered"],
+        ],
+      );
+    }
+    statements.push(
+      // (3) a cast spelt as a function; (10) numeric(p,s)[] and the other array types; (11) the numeric program's cell
+      ["SELECT id, numeric(b -> 'a') FROM jnat WHERE id IN (1, 2, 9, 11, 14, 20) ORDER BY id", "ordered"],
+      ["SELECT id, numeric(b -> 'a') FROM jnat WHERE id = 21", "ordered"],
+      ["SELECT id, (ARRAY[b -> 'a'])::numeric(10,2)[], (ARRAY[b -> 'a'])::smallint[], (ARRAY[b -> 'a'])::bigint[], (ARRAY[b -> 'a'])::real[] FROM jnat WHERE id IN (1, 9, 11, 20) ORDER BY id", "ordered"],
+      ["SELECT id, (ARRAY[b -> 'a'])::real[] FROM jnat WHERE id = 24", "ordered"],
+      // (an element of the array read back: the list the route makes subscripted as Postgres's array is)
+      ["SELECT id, ((ARRAY[b -> 'a'])::int[])[1], ((ARRAY[b -> 'a'])::float8[])[1], ((ARRAY[b -> 'a'])::numeric(10,3)[])[1] FROM jnat WHERE id IN (1, 9, 11, 20) ORDER BY id", "ordered"],
+      ["SELECT id, ((ARRAY[b -> 'a'])::boolean[])[1] FROM jnat WHERE id IN (1, 20, 21) ORDER BY id", "ordered"],
+      ["SELECT id, (b -> 'a')::numeric / 3, ln((b -> 'a')::numeric), sum((b -> 'a')::numeric) OVER () FROM jnat WHERE id IN (9, 11, 12, 14) ORDER BY id", "ordered"],
+      ["SELECT id, (b -> 'a')::numeric / 3 FROM jnat WHERE id = 18", "ordered"],
+      ["SELECT ln((b -> 'a')::numeric) FROM jnat WHERE id = 24", "ordered"],
+      ["SELECT sum((b -> 'a')::numeric) FROM jnat WHERE id IN (9, 23)", "ordered"],
+    );
+    assert.deepEqual(await unlike(c, statements), []);
+    // an unconstrained numeric[] of a jsonb array: the engine's list cannot keep a number's written digits, so refused by
+    // name, as array_agg of a numeric program is
+    for (const sql of ["SELECT id, (ARRAY[b -> 'a'])::numeric[] FROM jnat WHERE id IN (9, 11) ORDER BY id", "SELECT (array_agg(b -> 'a'))::numeric[] FROM jnat WHERE id = 11",
+      "SELECT id, (ARRAY[b -> 'a'])::numeric(40,1)[] FROM jnat WHERE id IN (9, 11) ORDER BY id"]) {
+      await assert.rejects(answer(c, sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap array-subquery-element\b/.test(`${e.detail ?? ""} ${e.hint ?? ""} ${e.message}`), sql);
+    }
+  } finally { await c.end(); await a.close(); }
 });
 
 test("a numeric quotient under a DISTINCT ON or a DISTINCT shows Postgres's exact text (PR 207's review)", async () => {

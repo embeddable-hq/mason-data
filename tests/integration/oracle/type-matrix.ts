@@ -940,6 +940,20 @@ function* matrix(): Generator<Matrixed> {
   yield q("jsonb: cast to numeric, a quotient each row", "SELECT id, j::numeric / 3, j::numeric + 1 FROM jorder WHERE id BETWEEN 5 AND 22 ORDER BY id");
   yield q("jsonb: cast to numeric, through a derived table and a CTE", "WITH w AS (SELECT id, j::numeric AS n FROM jorder WHERE id BETWEEN 5 AND 25) SELECT s.id, s.n, w.n FROM (SELECT id, j::numeric AS n FROM jorder WHERE id BETWEEN 5 AND 25) s JOIN w USING (id) ORDER BY s.id");
   yield q("jsonb: cast to numeric, beside a numeric arm", "SELECT j::numeric FROM jorder WHERE id IN (5, 8, 11, 12, 13, 14, 15, 16, 18, 21, 23, 24, 25) UNION ALL SELECT 1.50 ORDER BY 1");
+  // (PR 582's review, round 4) every way a jsonb reaches a cast to a number or a boolean, one route: the JSON kind read
+  // first, a wrong kind Postgres's 22023 in its words (jorder's 3 / 4 booleans, 8 a number, 26 a string, 54 an array, 71
+  // an object), and an array of jsonb cast to an array of numbers element by element
+  for (const [ty, wrong] of [["int", [3, 26, 54, 71]], ["numeric", [3, 26, 54, 71]], ["numeric(10,2)", [26, 71]], ["float8", [4, 26, 54, 71]], ["boolean", [8, 26, 54, 71]]] as const) {
+    for (const id of wrong) yield q(`jsonb: every way to a number, ${ty} of a wrong kind (${id})`, `SELECT id, j::${ty} FROM jorder WHERE id = ${id}`);
+  }
+  yield q("jsonb: every way to a number, a wrong kind grouped and through a CTE", "WITH w AS (SELECT id, j -> 'a' AS v FROM jorder) SELECT id, v::int FROM w WHERE id = 83 GROUP BY id, v");
+  yield q("jsonb: every way to a number, CASE and COALESCE arms", "SELECT id, coalesce(j -> 'x', j)::int, (CASE WHEN id > 1 THEN j END)::float8 FROM jorder WHERE id = 1 OR id = 2 OR id BETWEEN 5 AND 22 ORDER BY id");
+  yield q("jsonb: every way to a number, arrays of numbers", "SELECT id, (ARRAY[j])::int[], (ARRAY[j, j])::float8[], (ARRAY[j])::numeric(10,3)[], (ARRAY[j])::bigint[] FROM jorder WHERE id = 1 OR id = 2 OR id BETWEEN 5 AND 22 ORDER BY id");
+  yield q("jsonb: every way to a number, arrays of booleans", "SELECT id, (ARRAY[j])::boolean[] FROM jorder WHERE id BETWEEN 1 AND 4 ORDER BY id");
+  yield q("jsonb: every way to a number, an aggregated array", "SELECT (array_agg(j ORDER BY id))::bigint[], (array_agg(j ORDER BY id))::real[] FROM jorder WHERE id BETWEEN 5 AND 22");
+  yield q("jsonb: every way to a number, an array of a wrong kind", "SELECT id, (ARRAY[j])::int[] FROM jorder WHERE id = 26");
+  yield q("jsonb: every way to a number, an element read back", "SELECT id, ((ARRAY[j])::int[])[1], ((ARRAY[j])::float8[])[1], ((ARRAY[j])::numeric(10,3)[])[1] FROM jorder WHERE id = 1 OR id = 2 OR id BETWEEN 5 AND 22 ORDER BY id");
+  yield q("jsonb: every way to a number, an unconstrained numeric[] (refused)", "SELECT id, (ARRAY[j])::numeric[] FROM jorder WHERE id BETWEEN 5 AND 10 ORDER BY id");
   // an ORDER BY's bare name is the output it names first: `ORDER BY j` of `j::text` sorts the text, not the jsonb
   yield q("jsonb: grouped column, ORDER BY the output's name", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j, id");
   yield q("jsonb: grouped column, ORDER BY the output's name DESC", "SELECT j::text FROM jorder GROUP BY id, j ORDER BY j DESC NULLS LAST, id");
