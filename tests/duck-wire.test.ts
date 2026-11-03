@@ -6186,6 +6186,36 @@ test("exact path: percentile_disc or mode() ordered by a numeric Mason computes 
   } finally { await c.end(); }
 });
 
+test("exact path: issue 217 review r3: percentile_disc or mode() over an exact order key read only for its nullness is answered, its value refused", async () => {
+  const c = await client();
+  try {
+    // (class refusal-at-the-call-not-the-reader: the engine's answer is the order key's bytes, whose nullness is the
+    // value's, so a reader of nullness alone is answered as at the base; a reader of the value is refused)
+    const keys = ["b.x / b.y", "b.x ^ 2", "nullif(b.x / b.y, 0)", "coalesce(b.x / b.y, 0)", "exp(ln(2.5)) * sign(b.x)", "b.x / b.y + 1",
+      "round(b.x / b.y, 2)", "-(b.x / b.y)", "(b.x / b.y)::numeric(40,4)"];
+    assert.deepEqual(await unlike(c, keys.flatMap((k): Array<[string, "ordered"]> => [
+      [`SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY ${k}) IS NOT NULL ORDER BY 1`, "ordered"],
+      [`SELECT b.id % 3 AS g, percentile_disc(0.5) WITHIN GROUP (ORDER BY ${k}) IS NULL, mode() WITHIN GROUP (ORDER BY ${k}) IS NOT NULL FROM bigdec b GROUP BY 1 ORDER BY 1`, "ordered"],
+    ]).concat([
+      ["SELECT CASE WHEN percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL THEN 'none' ELSE 'some' END FROM bigdec b", "ordered"],
+      ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING NOT (mode() WITHIN GROUP (ORDER BY b.x / b.y) IS NULL) ORDER BY 1", "ordered"],
+      ["SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL FROM bigdec b", "ordered"],
+      ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL FROM bigdec b WHERE false", "ordered"],
+      ["SELECT o.id, (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NOT NULL FROM bigdec b WHERE b.id > o.id) FROM orders o ORDER BY 1", "ordered"],
+      ["SELECT b.id % 3 AS g FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY nullif(b.x / b.y, 2.5)) IS NULL ORDER BY 1", "ordered"],
+      // a group whose every key is NULL: IS NULL true, as Postgres answers it
+      ["SELECT b.id % 3 AS g, percentile_disc(0.5) WITHIN GROUP (ORDER BY nullif(b.x / b.y, b.x / b.y)) IS NULL, mode() WITHIN GROUP (ORDER BY CASE WHEN b.id > 3 THEN b.x / b.y END) IS NULL FROM bigdec b GROUP BY 1 ORDER BY 1", "ordered"],
+    ])), []);
+    // a reader of the value beside it is still refused, the nullness reader notwithstanding
+    for (const sql of ["SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) IS NULL, percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) FROM bigdec b",
+      "SELECT coalesce(percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y), 0) IS NULL FROM bigdec b",
+      "SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y))::text IS NULL FROM bigdec b",
+      "SELECT b.id % 3 FROM bigdec b GROUP BY 1 HAVING percentile_disc(0.5) WITHIN GROUP (ORDER BY b.x / b.y) + 1 IS NOT NULL"]) {
+      await assert.rejects(c.query(sql), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap numeric-ordered-set/.test(e.detail ?? ""), sql);
+    }
+  } finally { await c.end(); }
+});
+
 test("exact path: the PRINT reader prints a program beside a *, through s.* and a.* … JOIN (issue 218)", async () => {
   const c = await client();
   try {

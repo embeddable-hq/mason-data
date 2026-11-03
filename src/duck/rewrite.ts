@@ -743,7 +743,11 @@ class Rewriter {
       case "CollateClause": return this.collateClause(b);
       case "MinMaxExpr": return this.minMax(b);
       case "SQLValueFunction": return this.sqlValueFunction(b);
-      case "NullTest": return this.jsonNullTest(b);
+      case "NullTest": {
+        // (an ordered-set aggregate picked by an exact order key, read here for its nullness alone: `withinGroup` keeps it)
+        if (isNode(b.arg) && kindOf(b.arg) === "FuncCall" && this.picksByExactKey(bodyOf(b.arg))) this.onlyNullness.add(bodyOf(b.arg));
+        return this.jsonNullTest(b);
+      }
       // CASE x WHEN v …: each WHEN is x = v, jsonb's equality for a jsonb (its keys compared)
       case "CaseExpr": {
         if (!isNode(b.arg) || (this.typeOf(b.arg) !== JSONB && this.typeOf(b.arg) !== JSONB_ARRAY)) return null;
@@ -3452,6 +3456,10 @@ class Rewriter {
   /** each percentile_disc or mode() picked by an exact order key (`picksByExactKey`) that is an ORDER BY key itself
    *  (`sortBy`, the one place a sort key is read): the only place its value is not read, so the one place it is kept */
   private readonly onlyOrders = new WeakSet<Body>();
+  /** each percentile_disc or mode() picked by an exact order key that is a NullTest's argument (`IS [NOT] NULL`): its
+   *  nullness is the only thing read, and the order key's nullness is the value's, so it is kept (issue 217 review r3,
+   *  class refusal-at-the-call-not-the-reader) */
+  private readonly onlyNullness = new WeakSet<Body>();
 
   /** whether a value is a NUMERIC's text (`x::text`, `(x / 3)::text`, under a COLLATE, a subquery's column carrying
    *  one) or a NULL: what a "text" cell may hold, its program parsing it as a numeric */
@@ -4998,7 +5006,8 @@ class Rewriter {
     // A NUMERIC THE RULES SORT BY ITS EXACT ORDER KEY (a quotient, a NULLIF, a power, …): the engine's percentile_disc and
     // mode() return what they sort by, so they would answer the key's bytes for the row's value (issue 486, review r3 of
     // PR 506): refused by name wherever its value is read, kept where it is an ORDER BY key and nothing more (`sortBy`)
-    if (this.picksByExactKey(b) && !this.onlyOrders.has(b)) {
+    // or a NullTest's argument (its nullness is the value's: issue 217 review r3)
+    if (this.picksByExactKey(b) && !this.onlyOrders.has(b) && !this.onlyNullness.has(b)) {
       throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY a numeric Mason computes exactly, such as a quotient) is not supported by Mason (Postgres answers the picked row's exact value)`,
         `order by the value as a float8, ${name}(${name === "mode" ? "" : "0.5"}) WITHIN GROUP (ORDER BY (a / b)::float8), which picks and answers the double, or as an integer, ORDER BY (a / b)::int`, "numeric-ordered-set");
     }
