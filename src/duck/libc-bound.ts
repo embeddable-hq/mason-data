@@ -66,7 +66,11 @@ const str = (s: string): AstNode => ({ A_Const: { sval: { sval: s } } });
 const int = (n: number): AstNode => ({ A_Const: { ival: n === 0 ? {} : { ival: n } } });
 const call = (name: string, args: AstNode[]): AstNode => ({ FuncCall: { funcname: [S(name)], args, funcformat: "COERCE_EXPLICIT_CALL" } });
 const op = (name: string, l: AstNode, r: AstNode): AstNode => ({ A_Expr: { kind: "AEXPR_OP", name: [S(name)], lexpr: l, rexpr: r } });
-const and = (args: AstNode[]): AstNode => args.length === 1 ? args[0]! : { BoolExpr: { boolop: "AND_EXPR", args } };
+/** an AND of `args`, one AND's own arguments in place, as Postgres's grammar reads `(a AND b) AND c` back */
+const and = (args: AstNode[]): AstNode => {
+  const flat = args.flatMap((a) => isNodeOf(a, "BoolExpr") && bodyOf(a).boolop === "AND_EXPR" ? bodyOf(a).args as AstNode[] : [a]);
+  return flat.length === 1 ? flat[0]! : { BoolExpr: { boolop: "AND_EXPR", args: flat } };
+};
 const nullTest = (arg: AstNode, type: "IS_NULL" | "IS_NOT_NULL"): AstNode => ({ NullTest: { arg, nulltesttype: type } });
 const chr = (code: number): AstNode => call("chr", [int(code)]);
 

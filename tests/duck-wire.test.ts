@@ -7344,9 +7344,16 @@ test("libc top N: a top N and an ungrouped min / max are bounded natively, the d
       ["SELECT min(d), max(d) FROM colls WHERE id < 0", [[null, null]]],
     ];
     for (const [sql, rows] of bounded) {
-      assert.match(await sent(sql), /regexp_extract\(.*\(SELECT (min|max)\(__mason_bounds\.__mason_bound\)/, sql);
+      assert.match(await sent(sql), /regexp_extract\(.*\(SELECT (CASE WHEN count\(\*\) >= \d+ THEN )?(min|max)\(__mason_bounds\.__mason_bound\)/, sql);
       assert.deepEqual((await answer(c, sql)).rows, rows, sql);
     }
+    // a parameter in the WHERE the threshold reads too: bound once, read in both, and again after the session moved
+    const bound = "SELECT id FROM colls WHERE id > $1 ORDER BY d, id LIMIT 3";
+    const after = ids(ordered(false, (id) => id > 4).slice(0, 3));
+    assert.deepEqual((await answer(c, bound, [4])).rows, after, bound);
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    assert.deepEqual((await answer(c, bound, [4])).rows, after, `${bound}, after SET TimeZone`);
+    await c.query("RESET TimeZone");
     for (const sql of ["SELECT d FROM colls GROUP BY d ORDER BY d LIMIT 3", "SELECT DISTINCT d FROM colls ORDER BY 1 LIMIT 3", "SELECT id, d FROM colls ORDER BY d FETCH FIRST 2 ROWS WITH TIES",
       "SELECT id % 2, min(d) FROM colls GROUP BY 1", "SELECT min(d) FILTER (WHERE id > 3) FROM colls", "SELECT id, d FROM colls WHERE random() < 2 ORDER BY d LIMIT 3",
       "SELECT a.id FROM colls a JOIN colls b ON b.id = a.id ORDER BY a.d LIMIT 3", "SELECT id FROM colls ORDER BY d", "SELECT id FROM colls ORDER BY c LIMIT 3",
