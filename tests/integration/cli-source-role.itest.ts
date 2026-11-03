@@ -7,6 +7,12 @@
  * group's privileges nor may SET ROLE to it, are not. All are warnings that leave the doctor's exit 0; and the way out the doctor prints, run as it
  * is, makes a role the doctor then says only reads. Every privilege is asked of Postgres, never tried.
  *
+ * THE CLASS (PR 572's review: every way Postgres lets a role change a synced table's rows without a privilege on it),
+ * each confirmed by a write that lands: a foreign key's ON DELETE and ON UPDATE CASCADE (and a chain of two), an
+ * INHERITS grandparent, a SECURITY DEFINER function it may call, a trigger calling one on a table it may write, an event
+ * trigger calling one, an aggregate calling one, a foreign table back to this database, ADMIN OPTION on a writer; and
+ * a server role, shown reaching the server's files. TRUNCATE … CASCADE is no route: Postgres refuses it.
+ *
  * Needs IT_POSTGRES_URL (a superuser: it creates roles), psql on PATH. It writes only inside a database it creates,
  * `it_role_<random>`, and roles named after it, and drops them all at the end.
  */
@@ -29,7 +35,10 @@ const urlAs = (user: string | null, password = "pw"): string => {
 };
 const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "it-role-")));
 const root = path.join(dir, "app"), home = path.join(dir, "home");
-const ROLES = ["reader", "owner", "writers", "member", "super", "viewer", "unset", "shadow"].map((r) => `${tag}_${r}`);
+const ROLES = ["reader", "owner", "writers", "member", "super", "viewer", "unset", "shadow",
+  "fkdel", "fkupd", "fktrunc", "fkchain", "parent", "definer", "trigger", "fdw", "admin", "server"].map((r) => `${tag}_${r}`);
+/** a role of THE CLASS's tests, by its short name */
+const rv = (name: string): string => `${tag}_${name}`;
 const made: string[] = [];   // the roles the way out made
 
 function psql(url: string, sql: string): string {
@@ -77,8 +86,21 @@ before(() => {
     "CREATE VIEW public.orders_v AS SELECT id, amount FROM public.orders; CREATE VIEW public.orders_vv AS SELECT id, amount FROM public.orders_v; " +
     "CREATE VIEW public.orders_sum AS SELECT sum(amount) AS total FROM public.orders; " +
     "INSERT INTO public.orders VALUES (1, 10), (2, 20); " +
+    // a foreign key whose actions write a synced table, through a chain of two
+    "CREATE TABLE public.orgs (id int PRIMARY KEY); CREATE TABLE public.accounts (id int PRIMARY KEY, org_id int REFERENCES public.orgs ON DELETE CASCADE); " +
+    "CREATE TABLE public.entries (id int PRIMARY KEY, account_id int REFERENCES public.accounts ON DELETE CASCADE ON UPDATE CASCADE); " +
+    "INSERT INTO public.orgs VALUES (1), (2); INSERT INTO public.accounts VALUES (1, 1), (2, 1), (3, 2); INSERT INTO public.entries VALUES (1, 1), (2, 2), (3, 3); " +
+    // a synced INHERITS child two levels under the table a role may UPDATE
+    "CREATE TABLE public.notes_root (id int, body text); CREATE TABLE public.notes_base () INHERITS (public.notes_root); " +
+    "CREATE TABLE public.notes (PRIMARY KEY (id)) INHERITS (public.notes_base); INSERT INTO public.notes VALUES (1, 'kept'); " +
+    // SECURITY DEFINER code owned by the test's superuser: a function, and a trigger on a table no synced one is
+    "CREATE FUNCTION public.bump_orders() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'UPDATE public.orders SET amount = amount + 1000 WHERE id = 2'; " +
+    "REVOKE EXECUTE ON FUNCTION public.bump_orders() FROM PUBLIC; " +
+    "CREATE TABLE public.inbox (id int, amount int); " +
+    "CREATE FUNCTION public.inbox_to_ledger() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS 'BEGIN INSERT INTO public.ledger VALUES (NEW.id, NEW.amount); RETURN NEW; END'; " +
+    "CREATE TRIGGER inbox_to_ledger AFTER INSERT ON public.inbox FOR EACH ROW EXECUTE FUNCTION public.inbox_to_ledger(); " +
     "REVOKE CREATE ON SCHEMA public FROM PUBLIC");   // Postgres 15's default, on any server the test meets
-  const readAll = (r: string) => `GRANT USAGE ON SCHEMA billing TO "${r}"; GRANT SELECT ON public.orders, billing."Line Items", public.events, public.ledger TO "${r}"`;
+  const readAll = (r: string) => `GRANT USAGE ON SCHEMA billing TO "${r}"; GRANT SELECT ON public.orders, billing."Line Items", public.events, public.ledger, public.entries, public.notes TO "${r}"`;
   psql(db, `CREATE ROLE "${reader}" LOGIN PASSWORD 'pw'; ${readAll(reader)}; ` +
     `CREATE ROLE "${owner}" LOGIN PASSWORD 'pw'; ${readAll(owner)}; ALTER TABLE billing."Line Items" OWNER TO "${owner}"; ` +
     `CREATE ROLE "${writers}" NOLOGIN; GRANT UPDATE ON public.orders TO "${writers}"; ` +
@@ -92,6 +114,13 @@ before(() => {
     `CREATE ROLE "${shadow}" LOGIN PASSWORD 'pw'; ${readAll(shadow)}; GRANT UPDATE ON public.ledger TO "${shadow}"; CREATE SCHEMA shadowing; GRANT USAGE ON SCHEMA shadowing TO "${shadow}"; ` +
     "CREATE FUNCTION shadowing.has_any_column_privilege(name, oid, text) RETURNS boolean LANGUAGE sql AS 'SELECT false'; " +
     `ALTER ROLE "${shadow}" IN DATABASE ${tag} SET search_path = shadowing, pg_catalog`);
+  // THE CLASS's roles: each holds SELECT on the synced tables and one route
+  const routes: Record<string, string> = {
+    fkdel: "GRANT SELECT, DELETE ON public.accounts TO %", fkupd: "GRANT SELECT, UPDATE ON public.accounts TO %", fktrunc: "GRANT TRUNCATE ON public.accounts TO %",
+    fkchain: "GRANT SELECT, DELETE ON public.orgs TO %", parent: "GRANT UPDATE ON public.notes_root TO %", definer: "GRANT EXECUTE ON FUNCTION public.bump_orders() TO %",
+    trigger: "GRANT INSERT ON public.inbox TO %", fdw: "SELECT 1", admin: "SELECT 1", server: "GRANT pg_read_server_files TO %",
+  };
+  psql(db, Object.entries(routes).map(([name, grant]) => `CREATE ROLE "${rv(name)}" LOGIN PASSWORD 'pw'; ${readAll(rv(name))}; ${grant.replace("%", `"${rv(name)}"`)}`).join("; "));
   // Postgres 16's membership options: one that neither gives the group's privileges nor may SET ROLE to it holds nothing
   v16 = Number(psql(db, "SHOW server_version_num")) >= 160000;
   if (v16) psql(db, `GRANT "${writers}" TO "${unset}" WITH INHERIT FALSE, SET FALSE`);
@@ -102,7 +131,7 @@ before(() => {
   const init = spawnSync(process.execPath, [MAIN, "init", urlAs(reader), "--name", "roles"], { cwd: root, env: { PATH: process.env.PATH ?? "", HOME: home }, encoding: "utf8", timeout: 120_000 });
   assert.equal(init.status, 0, `mason init:\n${init.stdout}${init.stderr}`);
   const file = path.join(root, "mason", "sources", `${tag}.yml`);
-  fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\nsync: off\ntables:\n  orders: {}\n  billing.Line Items: {}\n  ledger: {}\n  events:\n    sync: replication\n");
+  fs.writeFileSync(file, "kind: postgres\nurl: ${DATABASE_URL}\nsync: off\ntables:\n  orders: {}\n  billing.Line Items: {}\n  ledger: {}\n  entries: {}\n  notes: {}\n  events:\n    sync: replication\n");
 });
 
 test("mason doctor says whether the user Mason connects as could write: a reader, an owner, UPDATE through a group, a partition, a column, a superuser; each a warning, exit 0",
@@ -110,8 +139,9 @@ test("mason doctor says whether the user Mason connects as could write: a reader
     // a role that only reads: said so, exit 0
     const read = doctor(reader);
     assert.equal(read.status, 0, read.stdout);
-    assert.deepEqual(roleLines(read), [{ name: "role", ok: true, detail: `${reader} only reads: not a superuser, no BYPASSRLS, and it neither owns nor may write to the 4 synced table(s) — ` +
-      "their partitions, inheritance children and the views and rules that write them included — nor CREATE in their schemas (what a function it may call writes is not asked)" }]);
+    assert.deepEqual(roleLines(read), [{ name: "role", ok: true, detail: `${reader} only reads: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, ` +
+      "no SECURITY DEFINER code it reaches whose owner may write, and it neither owns nor may write to the 6 synced table(s) — nor to their partitions, inheritance children or parents, " +
+      "the tables their foreign keys act on, or the views and rules that write them — nor CREATE in their schemas" }]);
     // the owner of a synced table
     const owns = doctor(owner);
     assert.equal(owns.status, 0, `a warning leaves the exit 0:\n${owns.stdout}`);
@@ -164,6 +194,100 @@ test("Postgres 16's membership options: one with neither INHERIT nor SET gives t
     if (!v16) { t.skip("the server is older than Postgres 16, where every membership may SET ROLE"); return; }
     assert.deepEqual(roleLines(doctor(unset)).map((c) => [c.ok, c.code]), [[true, undefined]], "a membership with neither INHERIT nor SET gives nothing");
   });
+
+// THE CLASS: every way Postgres lets a role change a synced table's rows without a privilege on it, each said by the
+// doctor and then done by Postgres (in this test's own database), or refused by both
+const said = (name: string): DoctorCheck[] => roleLines(doctor(rv(name)));
+const head = (c: DoctorCheck | undefined): string => (c?.detail ?? "").split(". Mason only reads")[0]!;
+const skipNoDb = { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 300_000 };
+
+test("THE CLASS: a foreign key's ON DELETE and ON UPDATE CASCADE write the synced rows, through a chain of two; TRUNCATE … CASCADE is refused, and no route", skipNoDb, () => {
+  const trunc = said("fktrunc");
+  assert.deepEqual(trunc.map((c) => [c.ok, c.code]), [[true, undefined]], JSON.stringify(trunc));
+  assert.throws(() => psql(urlAs(rv("fktrunc")), "TRUNCATE public.accounts CASCADE"), /permission denied for table entries/, "Postgres asks TRUNCATE on every table it cascades to");
+  assert.equal(head(said("fkupd")[0]), `${rv("fkupd")} may UPDATE on public.accounts (a foreign key's ON DELETE or ON UPDATE action carries its changes to public.entries, as its owner)`);
+  psql(urlAs(rv("fkupd")), "UPDATE public.accounts SET id = 10 WHERE id = 1");
+  assert.equal(psql(db, "SELECT account_id FROM public.entries WHERE id = 1"), "10", "the synced column rewritten");
+  assert.equal(head(said("fkdel")[0]), `${rv("fkdel")} may DELETE on public.accounts (a foreign key's ON DELETE or ON UPDATE action carries its changes to public.entries, as its owner)`);
+  psql(urlAs(rv("fkdel")), "DELETE FROM public.accounts WHERE id = 2");
+  assert.equal(psql(db, "SELECT count(*) FROM public.entries WHERE id = 2"), "0", "the synced row deleted");
+  // orgs → accounts → entries: a DELETE on orgs reaches entries
+  assert.equal(head(said("fkchain")[0]), `${rv("fkchain")} may DELETE on public.orgs (a foreign key's ON DELETE or ON UPDATE action carries its changes to public.entries, as its owner)`);
+  psql(urlAs(rv("fkchain")), "DELETE FROM public.orgs WHERE id = 2");
+  assert.equal(psql(db, "SELECT count(*) FROM public.entries WHERE id = 3"), "0", "deleted two foreign keys away");
+});
+
+test("THE CLASS: an UPDATE of an INHERITS grandparent writes the synced child's rows", skipNoDb, () => {
+  assert.equal(head(said("parent")[0]), `${rv("parent")} may UPDATE on public.notes_root (an INHERITS parent of public.notes: an UPDATE, DELETE or TRUNCATE of it reaches public.notes's rows)`);
+  psql(urlAs(rv("parent")), "UPDATE public.notes_root SET body = 'changed'");
+  assert.equal(psql(db, "SELECT body FROM public.notes WHERE id = 1"), "changed");
+});
+
+test("THE CLASS: SECURITY DEFINER code whose owner may write: a function it may call, a trigger on a table it may write", skipNoDb, () => {
+  const definer = said("definer");
+  assert.deepEqual(definer.map((c) => c.code), ["role_runs_definer_code"], JSON.stringify(definer));
+  assert.match(head(definer[0]), /public\.bump_orders\(\) runs as \S+, a superuser \(SECURITY DEFINER\), and it may call it$/);
+  psql(urlAs(rv("definer")), "SELECT public.bump_orders()");
+  assert.equal(psql(db, "SELECT amount FROM public.orders WHERE id = 2"), "1020");
+  const trigger = said("trigger");
+  assert.deepEqual(trigger.map((c) => c.code), ["role_runs_definer_code"], JSON.stringify(trigger));
+  assert.match(head(trigger[0]), /public\.inbox_to_ledger\(\) runs as \S+, a superuser \(SECURITY DEFINER\), and a trigger on public\.inbox, which it may write, calls it$/);
+  psql(urlAs(rv("trigger")), "INSERT INTO public.inbox VALUES (900, 9)");
+  assert.equal(psql(db, "SELECT amount FROM public.ledger WHERE id = 900"), "9");
+});
+
+test("THE CLASS: an event trigger's and an aggregate's SECURITY DEFINER function reach every role, a reader too", skipNoDb, () => {
+  psql(db, "CREATE FUNCTION public.on_ddl() RETURNS event_trigger LANGUAGE plpgsql SECURITY DEFINER AS 'BEGIN INSERT INTO public.ledger VALUES (901, 1) ON CONFLICT DO NOTHING; END'; " +
+    "CREATE EVENT TRIGGER on_ddl ON ddl_command_start EXECUTE FUNCTION public.on_ddl()");
+  try {
+    const event = roleLines(doctor(reader));
+    assert.deepEqual(event.map((c) => c.code), ["role_runs_definer_code"], JSON.stringify(event));
+    assert.match(head(event[0]), /public\.on_ddl\(\) runs as \S+, a superuser \(SECURITY DEFINER\), and an event trigger calls it on any DDL it runs, even one refused$/);
+    assert.match(event[0]!.fix!, /^-- public\.on_ddl\(\) runs as \S+ for any role \(an event trigger calls it\)/m);
+    psql(urlAs(reader), "CREATE TEMP TABLE scratch (x int)");
+    assert.equal(psql(db, "SELECT count(*) FROM public.ledger WHERE id = 901"), "1", "a reader's own temporary table wrote a synced row");
+  } finally { psql(db, "DROP EVENT TRIGGER on_ddl; DROP FUNCTION public.on_ddl()"); }
+  psql(db, "CREATE FUNCTION public.sneaky_step(int, int) RETURNS int LANGUAGE plpgsql SECURITY DEFINER AS 'BEGIN INSERT INTO public.ledger VALUES (902, 2) ON CONFLICT DO NOTHING; RETURN $1 + $2; END'; " +
+    "REVOKE EXECUTE ON FUNCTION public.sneaky_step(int, int) FROM PUBLIC; CREATE AGGREGATE public.sneaky(int) (SFUNC = public.sneaky_step, STYPE = int, INITCOND = '0')");
+  try {
+    const agg = roleLines(doctor(reader));
+    assert.deepEqual(agg.map((c) => c.code), ["role_runs_definer_code"], JSON.stringify(agg));
+    assert.match(head(agg[0]), /public\.sneaky_step\(integer, integer\) runs as \S+, a superuser \(SECURITY DEFINER\), and another object of the database calls it/);
+    psql(urlAs(reader), "SELECT public.sneaky(x) FROM (VALUES (1)) AS v(x)");
+    assert.equal(psql(db, "SELECT count(*) FROM public.ledger WHERE id = 902"), "1", "an aggregate anyone may call ran it as its owner, EXECUTE revoked");
+  } finally { psql(db, "DROP AGGREGATE public.sneaky(int); DROP FUNCTION public.sneaky_step(int, int)"); }
+});
+
+test("THE CLASS: a foreign table back to this database writes the synced rows as the mapping's user", skipNoDb, (t) => {
+  if (psql(db, "SELECT count(*) FROM pg_available_extensions WHERE name = 'postgres_fdw'") !== "1") { t.skip("postgres_fdw is not installed on this server"); return; }
+  const admin = new URL(adminUrl!);
+  psql(db, `CREATE EXTENSION postgres_fdw; CREATE SERVER loopback FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host '127.0.0.1', port '${psql(db, "SHOW port")}', dbname '${tag}'); ` +
+    `CREATE USER MAPPING FOR "${rv("fdw")}" SERVER loopback OPTIONS (user '${decodeURIComponent(admin.username)}', password '${decodeURIComponent(admin.password).replace(/'/g, "''")}'); ` +
+    `CREATE FOREIGN TABLE public.remote_ledger (id int, amount int) SERVER loopback OPTIONS (schema_name 'public', table_name 'ledger'); GRANT INSERT ON public.remote_ledger TO "${rv("fdw")}"`);
+  const fdw = said("fdw");
+  assert.deepEqual(fdw.map((c) => c.code), ["role_reaches_foreign_server"], JSON.stringify(fdw));
+  assert.equal(head(fdw[0]), `${rv("fdw")} may write the foreign table(s) public.remote_ledger: what it sends there runs as the mapping's user, and the server may be this very database`);
+  psql(urlAs(rv("fdw")), "INSERT INTO public.remote_ledger VALUES (903, 3)");
+  assert.equal(psql(db, "SELECT amount FROM public.ledger WHERE id = 903"), "3");
+});
+
+test("THE CLASS: ADMIN OPTION on a writer lets the role grant itself the writer's privileges; a server role reaches the server's files", skipNoDb, (t) => {
+  const server = said("server");
+  assert.deepEqual(server.map((c) => c.code), ["role_may_become_another"], JSON.stringify(server));
+  assert.equal(head(server[0]), `${rv("server")} holds pg_read_server_files: the server's programs or files, as its operating-system user`);
+  assert.match(psql(urlAs(rv("server")), "CREATE TEMP TABLE seen (line text); COPY seen FROM 'PG_VERSION'; SELECT line FROM seen"), /^\d+$/, "it reads the server's own files");
+  if (!v16) { t.skip("the server is older than Postgres 16, where ADMIN OPTION cannot be held without the membership's privileges"); return; }
+  psql(db, `GRANT "${writers}" TO "${rv("admin")}" WITH ADMIN OPTION, INHERIT FALSE, SET FALSE`);
+  const admin = said("admin");
+  assert.deepEqual(admin.map((c) => c.code), ["role_may_become_another"], JSON.stringify(admin));
+  assert.equal(head(admin[0]), `${rv("admin")} has ADMIN OPTION on ${writers}: it may grant itself that role and its privileges`);
+  // the writer's UPDATE of a synced table without row-level security, for the write to land (no WHERE: it may not SELECT)
+  psql(db, `GRANT UPDATE ON public.ledger TO "${writers}"`);
+  try {
+    psql(urlAs(rv("admin")), `GRANT "${writers}" TO "${rv("admin")}" WITH SET TRUE; SET ROLE "${writers}"; UPDATE public.ledger SET amount = 6`);
+    assert.equal(psql(db, "SELECT amount FROM public.ledger WHERE id = 900"), "6");
+  } finally { psql(db, `REVOKE "${writers}" FROM "${rv("admin")}" CASCADE; REVOKE UPDATE ON public.ledger FROM "${writers}"`); }
+});
 
 test("the way out the doctor prints, run as it is, makes a role the doctor then says only reads, and that reads every row",
   { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 300_000 }, () => {

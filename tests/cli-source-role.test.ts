@@ -21,6 +21,7 @@ const facts = (o: Partial<RoleFacts> = {}): RoleFacts => ({
   relations: [rel("public.orders"), rel("billing.Invoices")],
   schemas: [{ name: "billing", sql: "billing", owner: "admin", owned: false, create: [], publicCreate: false },
     { name: "public", sql: "public", owner: "admin", owned: false, create: [], publicCreate: false }],
+  definers: [], foreignTables: [], mappedServers: [], adminOf: [], createRole: false, serverRoles: [],
   missing: [], taken: [], rdsReplication: false, ...o,
 });
 const ask = (o: Partial<RoleAsk> = {}): RoleAsk => ({
@@ -31,12 +32,13 @@ const ask = (o: Partial<RoleAsk> = {}): RoleAsk => ({
 test("a role that only reads: one line, ok, no code and no way out", async () => {
   const { roleChecks } = await roleModule();
   assert.deepEqual(roleChecks(facts(), ask()), [{ name: "role", ok: true,
-    detail: "app only reads: not a superuser, no BYPASSRLS, and it neither owns nor may write to the 2 synced table(s) — their partitions, inheritance children " +
-      "and the views and rules that write them included — nor CREATE in their schemas (what a function it may call writes is not asked)" }]);
+    detail: "app only reads: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, no SECURITY DEFINER code it reaches whose owner may write, " +
+      "and it neither owns nor may write to the 2 synced table(s) — nor to their partitions, inheritance children or parents, the tables their foreign keys act on, " +
+      "or the views and rules that write them — nor CREATE in their schemas" }]);
   const none = roleChecks(facts({ relations: [], schemas: [], missing: ["public.gone"] }), ask());
   assert.equal(none.length, 1);
   assert.equal(none[0]!.ok, true);
-  assert.match(none[0]!.detail, /^app only reads: not a superuser, no BYPASSRLS, and no table is added yet \(the tables are asked once one is\) \(not asked of public\.gone, which the database does not have: mason start says so\)$/);
+  assert.match(none[0]!.detail, /^app only reads: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, no SECURITY DEFINER code it reaches whose owner may write, and no table is added yet \(the tables are asked once one is\) \(not asked of public\.gone, which the database does not have: mason start says so\)$/);
 });
 
 test("a superuser, itself or by a membership it may SET ROLE to: ONE warning, role_superuser, whatever else follows from it", async () => {
@@ -100,6 +102,49 @@ test("a write through another relation is named by its route: a partition, an IN
   assert.match(fix, /^REVOKE INSERT ON public\.orders_log FROM PUBLIC;/m, "PUBLIC's write through a route is revoked too");
 });
 
+test("THE CLASS: an INHERITS parent and a table a foreign key acts on are routes, named in their words", async () => {
+  const { roleChecks } = await roleModule();
+  const f = facts({ relations: [rel("public.orders"), rel("billing.Invoices"),
+    rel("public.base", { kind: "parent", entry: "public.orders", privileges: [{ role: "app", privileges: ["UPDATE", "TRUNCATE"] }] }),
+    rel("public.accounts", { kind: "referenced", entry: "billing.Invoices", privileges: [{ role: "app", privileges: ["DELETE"] }] })] });
+  const [writes] = roleChecks(f, ask());
+  assert.equal(writes!.code, "role_writes_table");
+  assert.equal(writes!.detail.split(". Mason only reads")[0], "app may UPDATE, TRUNCATE on public.base (an INHERITS parent of public.orders: an UPDATE, DELETE or TRUNCATE of it reaches public.orders's rows); " +
+    "DELETE on public.accounts (a foreign key's ON DELETE or ON UPDATE action carries its changes to billing.Invoices, as its owner)");
+});
+
+test("THE CLASS: SECURITY DEFINER code it reaches whose owner may write, a foreign server, and a role it may become: a warning each; the way out revokes what PUBLIC reaches", async () => {
+  const { roleChecks, readOnlyFix } = await roleModule();
+  const definer = { owner: "admin", ownerSuperuser: true, callable: false, publicCallable: false, triggers: [] as string[], eventTrigger: false, used: false };
+  const f = facts({
+    definers: [{ ...definer, name: "public.bump(integer)", callable: true, publicCallable: true },
+      { ...definer, name: "public.copy_in()", ownerSuperuser: false, owner: "writers", triggers: ["public.inbox"] },
+      { ...definer, name: "public.on_ddl()", eventTrigger: true }, { ...definer, name: "public.sum_in(integer, integer)", used: true }],
+    foreignTables: ["public.remote_orders"], mappedServers: ["loopback"],
+    adminOf: ["writers"], createRole: true, serverRoles: ["pg_execute_server_program"],
+  });
+  const checks = roleChecks(f, ask());
+  assert.deepEqual(checks.map((c) => c.code), ["role_runs_definer_code", "role_reaches_foreign_server", "role_may_become_another"]);
+  const said = (code: string) => checks.find((c) => c.code === code)!.detail.split(". Mason only reads")[0];
+  assert.equal(said("role_runs_definer_code"), "app reaches code that runs as another role: " +
+    "public.bump(integer) runs as admin, a superuser (SECURITY DEFINER), and it may call it; " +
+    "public.copy_in() runs as writers, which may write a synced table's rows (SECURITY DEFINER), and a trigger on public.inbox, which it may write, calls it; " +
+    "public.on_ddl() runs as admin, a superuser (SECURITY DEFINER), and an event trigger calls it on any DDL it runs, even one refused; " +
+    "public.sum_in(integer, integer) runs as admin, a superuser (SECURITY DEFINER), and another object of the database calls it (an aggregate, a type, an operator or the like), never asking EXECUTE");
+  assert.equal(said("role_reaches_foreign_server"), "app may write the foreign table(s) public.remote_orders, and has a user mapping (its own or PUBLIC's) on loopback, which it may use: " +
+    "what it sends there runs as the mapping's user, and the server may be this very database");
+  assert.equal(said("role_may_become_another"), "app has ADMIN OPTION on writers: it may grant itself that role and its privileges; " +
+    "has CREATEROLE, which before Postgres 16 lets it grant itself any role but a superuser; holds pg_execute_server_program: the server's programs or files, as its operating-system user");
+  const fix = readOnlyFix(f, ask());
+  assert.match(fix, /^REVOKE EXECUTE ON FUNCTION public\.bump\(integer\) FROM PUBLIC;   -- runs as admin: GRANT it to the roles that call it$/m, "what PUBLIC may call, the new role may too");
+  assert.doesNotMatch(fix, /REVOKE EXECUTE ON FUNCTION public\.copy_in/, "a trigger's function: the new role writes no table");
+  assert.match(fix, /^-- public\.on_ddl\(\) runs as admin for any role \(an event trigger calls it\): ALTER FUNCTION public\.on_ddl\(\) SECURITY INVOKER, if it may$/m);
+  assert.match(fix, /^-- public\.sum_in\(integer, integer\) runs as admin for any role \(another object calls it\)/m);
+  assert.match(fix, /^-- a user mapping FOR PUBLIC on loopback would serve it too/m);
+  // a superuser's line stands alone
+  assert.deepEqual(roleChecks({ ...f, roles: [{ name: "app", self: true, superuser: true, bypassrls: false }] }, ask()).map((c) => c.code), ["role_superuser"]);
+});
+
 test("the way out: a role that may LOGIN and SELECT the synced tables alone, its URL in a variable of Mason's own", async () => {
   const { readOnlyFix } = await roleModule();
   assert.equal(readOnlyFix(facts({ relations: [rel("public.orders", { rowSecurity: true }), rel("billing.Invoices"), rel("public.orders_1", { kind: "partition", entry: "public.orders" }), rel("public.orders_v", { kind: "view", entry: "public.orders" })] }), ask()), [
@@ -152,7 +197,9 @@ test("the catalog read is ONE statement that reads, under the catalog's search_p
   assert.doesNotMatch(sql, /;/, "one statement after the guard");
   assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|SET)\s+(INTO|ON|TABLE|ROLE|SCHEMA|PUBLICATION|LOCAL|\w+\s*\()/i, "no write or setting, only privilege names asked of has_*_privilege");
   assert.ok(sql.includes(`'[{"schema":"public","table":"o''brien"},{"schema":"My Schema","table":"Orders"}]'::json`), sql.slice(0, 400));
-  for (const fn of ["has_table_privilege", "has_any_column_privilege", "has_schema_privilege", "pg_has_role", "pg_inherits", "pg_rewrite", "pg_depend", "pg_relation_is_updatable"]) assert.ok(sql.includes(fn), fn);
+  for (const fn of ["has_table_privilege", "has_any_column_privilege", "has_schema_privilege", "pg_has_role", "pg_inherits", "pg_rewrite", "pg_depend", "pg_relation_is_updatable",
+    "confdeltype", "confupdtype", "prosecdef", "has_function_privilege", "pg_trigger", "pg_event_trigger", "pg_user_mappings", "has_server_privilege", "MEMBER WITH ADMIN OPTION",
+    "pg_execute_server_program", "pg_write_server_files", "pg_read_server_files"]) assert.ok(sql.includes(fn), fn);
   // a membership counts where it gives the privileges or SET ROLE (Postgres 16's options), never merely by being one
   assert.match(sql, /THEN pg_has_role\(me\.oid, p\.oid, 'USAGE'\) OR pg_has_role\(me\.oid, p\.oid, 'SET'\) ELSE pg_has_role\(me\.oid, p\.oid, 'MEMBER'\) END/);
   assert.doesNotMatch(sql, /relacl|nspacl|aclexplode/, "Postgres decides each privilege, never an ACL read by hand");

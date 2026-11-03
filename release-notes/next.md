@@ -17,8 +17,11 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 - **`mason doctor` warns when the user Mason connects as could write to your database**: a superuser or `BYPASSRLS`, the
   owner of a synced table, or one holding `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` on a
-  synced table or `CREATE` on its schema — or a write to its rows through a partition, an inheritance child, an updatable
-  view or a rule — directly, through a role it is a member of, or granted to `PUBLIC`. Mason only
+  synced table or `CREATE` on its schema — or a write that reaches its rows through a partition, an inheritance child or
+  parent, a foreign key's `ON DELETE` / `ON UPDATE` action, an updatable view or a rule; `SECURITY DEFINER` code it
+  reaches (a function, a trigger, an event trigger, an aggregate) whose owner may write; a foreign table or user
+  mapping; `ADMIN OPTION` on a role, or a server role — directly, through a role it is a member of, or granted to
+  `PUBLIC`. Mason only
   reads, so such a user lets a Mason bug or a stolen URL change the database. Each is a warning (`!`, the exit status
   unchanged) with the statements that make a role that only reads (`REPLICATION` and a publication where a table's
   `sync:` is replication), and in `--json` a stable `code` and the `fix`. It is asked of the catalog in one read, never
