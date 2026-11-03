@@ -24,22 +24,28 @@
  * characters read, and the bound W × 43 × 2 × 31^-11 is under 10^-8. tests/cli-hosted.test.ts measures it with a fixed
  * seed over the honest outputs of deploy, login, logout and mason user --replica.
  *
+ * ONE VALUE MAY BE PRINTED ONCE (`holdOutput`'s `once`: the CI token `mason token create` made, the one answer that
+ * carries a token by design): its FIRST whole occurrence in a write (`onceAt`: exactly as it is; the CLI writes it on a
+ * line of its own, never broken) is read as a separator, never as the secret it is, and is written; every other byte is read as before, the value held among the secrets, so a second
+ * occurrence, a piece of it elsewhere (11 of its body in a row) or anything else shaped as a token is refused as any
+ * secret is. What it allows is exactly that value, whole, one time, in one write.
+ *
  * INERT until a command holds a secret (`holdOutput`): every other command writes as it always did.
  */
 import { failed, serviceStyle, type Failure } from "./command.ts";
-import { bodyRead, ECHO_RUN, echoViews, shapedSecret } from "./hosted.ts";
+import { bodyRead, canonicalTexts, ECHO_RUN, echoViews, ESCAPES, shapedSecret, wholeInCanonical } from "./hosted.ts";
 import { err as styleErr } from "./style.ts";
 
-/** A terminal's control sequences (CSI, OSC), as a person never sees them. */
-const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g;
 /** The eight readings: [with escapes, without] × [keeping `-` and `_`, not] × [a `%XX` decoded, not]. */
 const READINGS = [true, false].flatMap((escapes) => [true, false].flatMap((keep) => [true, false].map((percent) => ({ escapes, keep, percent }))));
 const TAIL = ECHO_RUN - 1;
-/** The raw tail kept for the shapes: longer than any shape (a token is 56 characters, a password 55). */
+/** The raw tail kept for the shapes and the secrets read whole: longer than any shape (a token is 56 characters, a
+ *  password 55), and than any held secret written `%XX`-encoded (`rawTail`). */
 const RAW_TAIL = 80;
+const rawTail = (secrets: readonly string[]): number => Math.max(RAW_TAIL, ...secrets.map((x) => 3 * x.length));
 
 /** What a stream has written, as the gate reads it: the last characters of each reading, and of the text. */
-export interface Written { reads: string[]; raw: string }
+export interface Written { reads: string[]; raw: string; /** `raw` in the one reading, made once when it is first asked for */ canonical?: string[] }
 export const nothingWritten = (): Written => ({ reads: READINGS.map(() => ""), raw: "" });
 
 /**
@@ -57,9 +63,10 @@ export function writes(before: Written, text: string, secrets: readonly string[]
  */
 function writesAfter(befores: readonly Written[], fresh: Written, secrets: readonly string[], o: { passwords?: boolean }): Array<{ secret: boolean; after: Written }> {
   const inside = readingsCarry(fresh, secrets, o);
+  const tail = rawTail(secrets);
   return befores.map((before) => {
-    const meet: Written = { reads: before.reads.map((r, i) => r + fresh.reads[i]!.slice(0, TAIL)), raw: before.raw + fresh.raw.slice(0, RAW_TAIL) };
-    const after: Written = { reads: before.reads.map((r, i) => (r + fresh.reads[i]!).slice(-TAIL)), raw: (before.raw + fresh.raw).slice(-RAW_TAIL) };
+    const meet: Written = { reads: before.reads.map((r, i) => r + fresh.reads[i]!.slice(0, TAIL)), raw: before.raw + fresh.raw.slice(0, tail) };
+    const after: Written = { reads: before.reads.map((r, i) => (r + fresh.reads[i]!).slice(-TAIL)), raw: (before.raw + fresh.raw).slice(-tail) };
     return { secret: inside || readingsCarry(meet, secrets, o), after };
   });
 }
@@ -83,7 +90,9 @@ export function readingsCarry(read: Written, secrets: readonly string[], o: { pa
   if (shapedSecret(read.raw, o) || shapedSecret(read.raw.replace(ESCAPES, ""), o)) return true;
   for (const secret of secrets) {
     if (!secret) continue;
-    if (read.raw.includes(secret)) return true;
+    // whole, in the one reading, with its terminal escapes and without them (src/cli/hosted.ts wholeIn)
+    read.canonical ??= canonicalTexts(read.raw);
+    if (read.canonical.some((t) => wholeInCanonical(t, secret))) return true;
     for (const { keep, n, grams } of echoViews(secret, o.run ?? ECHO_RUN)) {
       if (n === 0) continue;
       // a text with no escape and no `%` reads the same in several ways: each distinct reading is scanned once
@@ -94,7 +103,14 @@ export function readingsCarry(read: Written, secrets: readonly string[], o: { pa
   return false;
 }
 
-interface Held { command: string; json: boolean; secrets: string[]; passwords: boolean }
+/** WHERE `value` IS WRITTEN WHOLE in `text`, exactly as it is (the CLI writes it alone, never broken: src/cli/token-hosted.ts);
+ *  null when it is not. The span, from its first character to its last. */
+export function onceAt(text: string, value: string): [number, number] | null {
+  const i = text.indexOf(value);
+  return i < 0 ? null : [i, i + value.length];
+}
+
+interface Held { command: string; json: boolean; secrets: string[]; passwords: boolean; once: string | null }
 let held: Held | null = null;
 let refused = false;
 type Write = typeof process.stdout.write;
@@ -105,7 +121,7 @@ const state = { out: nothingWritten(), err: nothingWritten(), both: nothingWritt
 const REFUSAL: Failure = {
   message: "the service's answer would print a secret this command holds, so nothing more of it is printed",
   code: "refused",
-  why: "what was about to be written held 11 or more characters of a token this command holds in a row, or something shaped as a token or a password: a hosted service's text is printed only when it carries none",
+  why: "what was about to be written held a secret this command holds (11 or more characters of a token's body in a row, or the database's password it sent), or something shaped as a token or a password: a hosted service's text is printed only when it carries none",
   fix: "a service that repeats the token it was sent is answering outside its documented API: sign in again (mason login), so this token is replaced, and revoke it in the service's web app if it was shared",
   next: [["mason login", "sign in again"]],
 };
@@ -113,11 +129,11 @@ const REFUSAL: Failure = {
 /**
  * Hold `secrets` from here on, for `command`, whose answer is `--json` or not; again with more (login's new token)
  * adds them. `passwords` false: this command prints a password it made (its answer's), so a password's shape is no
- * secret in its output.
+ * secret in its output. `once`: a secret this command prints one time, whole (above), held as a secret beside it.
  */
-export function holdOutput(o: { command: string; json: boolean; secrets: readonly string[]; passwords?: boolean }): void {
-  const secrets = [...(held?.secrets ?? []), ...o.secrets.filter(Boolean)];
-  held = { command: o.command, json: o.json, secrets, passwords: o.passwords ?? held?.passwords ?? true };
+export function holdOutput(o: { command: string; json: boolean; secrets: readonly string[]; passwords?: boolean; once?: string }): void {
+  const secrets = [...(held?.secrets ?? []), ...o.secrets.filter(Boolean), ...(o.once ? [o.once] : [])];
+  held = { command: o.command, json: o.json, secrets, passwords: o.passwords ?? held?.passwords ?? true, once: o.once || (held?.once ?? null) };
 }
 
 /** Whether the gate held output back: the process then exits 1, whatever the command returned. */
@@ -136,9 +152,13 @@ export function installOutputGate(): void {
     if (text === "") return (original as (...a: unknown[]) => boolean)(chunk, ...rest);
     if (refused) { if (done) setImmediate(done); return true; }
     if (held === null) return (original as (...a: unknown[]) => boolean)(chunk, ...rest);
-    const [own, both] = writesAfter([state[which], state.both], readingsOf(text), held.secrets, { passwords: held.passwords }) as [{ secret: boolean; after: Written }, { secret: boolean; after: Written }];
+    // the one value printed once, whole, the first time it is written: read as a separator (above)
+    const once = held.once === null ? null : onceAt(text, held.once);
+    const tested = once === null ? text : `${text.slice(0, once[0])} ${text.slice(once[1])}`;
+    const [own, both] = writesAfter([state[which], state.both], readingsOf(tested), held.secrets, { passwords: held.passwords }) as [{ secret: boolean; after: Written }, { secret: boolean; after: Written }];
     if (!own.secret && !both.secret) {
       state[which] = own.after; state.both = both.after;
+      if (once !== null) held = { ...held, once: null };
       return (original as (...a: unknown[]) => boolean)(chunk, ...rest);
     }
     refused = true;
