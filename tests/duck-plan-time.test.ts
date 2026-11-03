@@ -75,7 +75,7 @@ async function climb(plan: Planner): Promise<Map<string, Map<number, number>>> {
  *  that scripts/fails-without.ts loads the file at main, where the bound fails first) */
 const programText = (p: unknown): string => ((numeric as { programJson?: (p: unknown) => string }).programJson ?? JSON.stringify)(p);
 
-test("planning time (issue 264): every deep shape over a table plans within the bound at every depth to 32", async () => {
+test("planning time (issue 264): every deep shape over a table plans within the bound at every depth to 32", async (t) => {
   const catalogDb = new PGlite();
   try {
     const ddl = catalogDdl({ database: "app", tables: [{ name: "t", schema: "public", primaryKey: ["id"], joins: [], columns: [
@@ -89,7 +89,7 @@ test("planning time (issue 264): every deep shape over a table plans within the 
     await plan("SELECT a + a - a AS a, coalesce(b, b, b) AS b, coalesce(d, d, d) AS d FROM t ORDER BY 1");
     // each numeric shape's record and SQL at 16 and 32 (#484)
     const sizes = new Map<string, Map<number, { record: number; sql: number }>>();
-    await climb(async (shape, sql, depth) => {
+    const held = await climb(async (shape, sql, depth) => {
       const started = performance.now();
       // planned, not refused: a refusal exits before the rewrite and would bound nothing
       const planned = await plan(sql).catch((e: Error) => assert.fail(`${shape} at depth ${depth} is refused: ${e.message}`));
@@ -102,6 +102,13 @@ test("planning time (issue 264): every deep shape over a table plans within the 
       }
       return { ms, detail: `the rewrite ${planned.timing?.rewriteMs.toFixed(0) ?? "?"} ms` };
     });
+    // how near its bound each curve came, so a CI log says the room left before a red run does
+    for (const curve of ["linear", "quadratic"]) {
+      const near = [...held].filter(([shape]) => quadratic.has(shape) === (curve === "quadratic"))
+        .flatMap(([shape, times]) => [...times].map(([depth, ms]) => ({ shape, depth, ms, share: ms / boundOf(shape) })))
+        .sort((x, y) => y.share - x.share)[0];
+      if (near !== undefined) t.diagnostic(`${curve}: nearest its bound, ${near.shape} at depth ${near.depth}, ${near.ms.toFixed(0)} ms of ${boundOf(near.shape)} ms`);
+    }
     // LINEAR IN THE DEPTH: twice the levels, at most 2.5 times the size (on main, x9 every two levels); a quadratic SQL
     // (`QUADRATIC_SQL`) at most 4.5 times
     for (const shape of NUMERIC_SHAPES) {
