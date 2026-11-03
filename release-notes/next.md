@@ -208,8 +208,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   of a `DISTINCT ON` or a `SELECT DISTINCT` (`amount / 3`) shows Postgres's exact digits instead of a rounded number, also when the `DISTINCT` is outside a subquery
   that computes it.
 - **A JSON value a `GROUP BY` names, such as `GROUP BY o.id, o.meta -> 'n'`, now reads as Postgres writes it wherever it
-  is read**: its `::text`, `concat`, `format`, `jsonb_build_object`, `->>`, a `HAVING` or `ORDER BY` of its text, and a
-  subquery or `WITH` around it. It lost the digits written (`2.450` read `2.45`, `0.10` read `0.1`) and an object's
+  is read**: its `::text`, `concat`, `format`, `jsonb_build_object`, `->>`, a `HAVING`, an `ORDER BY` or a window's `ORDER BY`
+  or `PARTITION BY` of its text (sorted as text), and a subquery or `WITH` around it. It lost the digits written (`2.450` read `2.45`, `0.10` read `0.1`) and an object's
   spacing (`{"a":1}` for `{"a": 1}`), and a `#>` path so grouped failed with a syntax error. Under a `GROUP BY` of a
   JSON column, `ORDER BY` the name of an output (`SELECT meta::text … GROUP BY meta ORDER BY meta`) sorts by that
   output's text, as Postgres does, instead of by the JSON value.

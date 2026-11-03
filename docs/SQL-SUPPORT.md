@@ -18,7 +18,7 @@ each). The copy is read-only.
 |---|---|
 | A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 87 forms of them verified |
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
-| Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 127 casts verified; "What is verified" below names each |
+| Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
 | Anything else: 62 shapes known not to answer as Postgres does ("Refused" below), and any function, operator or cast the oracle has not verified | refused by name (SQLSTATE 0A000), the error saying what to write instead; never answered differently |
 
@@ -165,7 +165,7 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (1148)
+## What is verified (1147)
 
 ### Types (93)
 
@@ -1073,7 +1073,7 @@ Not about one statement: what the prototype cannot do yet.
 - the window function sum(smallint)
 - the window function var_pop(numeric)
 
-### Casts (127)
+### Casts (126)
 
 - a cast from a table's row type to text
 - a cast from a type the source made to text
@@ -1129,7 +1129,6 @@ Not about one statement: what the prototype cannot do yet.
 - a cast from json to character varying
 - a cast from json to jsonb
 - a cast from json to text
-- a cast from jsonb to character
 - a cast from jsonb to character varying
 - a cast from jsonb to json
 - a cast from jsonb to text

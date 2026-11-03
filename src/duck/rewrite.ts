@@ -1133,12 +1133,8 @@ class Rewriter {
         const as = sb.node;
         // (a key bound by equality has no analysed node of its own where Postgres's tree reads it as the entry: it is
         // typed as the output it is, so a jsonb's, a citext's or a collation's key is built for it)
-        // A cast with no node of its own is otherwise typed by its argument ("a cast to the type the value already has"),
-        // which a rule may have made another value: a grouped jsonb read per group, `any_value(j.j -> 'r')`, under
-        // `::text` sorted by jsonb's key (issue 212). Bound by equality, it is the output, of the output's type
-        const outTyped = bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(as) && kindOf(as as AstNode) === "TypeCast" && this.allAt(bodyOf(as as AstNode), ANALYSED.TypeCast!).length === 0 ? this.typed(out.value) : null;
-        if (outTyped !== null) this.synthetic.set(bodyOf(as as AstNode), outTyped);
-        else if (bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(as) && this.typeOf(as as AstNode) === null && this.typeOf(out.value) !== null) this.typedLike.set(bodyOf(as as AstNode), out.value);
+        // (a cast of a grouped expression read per group is typed by its result where `decidedByKey` reads it)
+        if (bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(as) && this.typeOf(as as AstNode) === null && this.typeOf(out.value) !== null) this.typedLike.set(bodyOf(as as AstNode), out.value);
         const built = this.sortBy(sb, targets, b, bound[i]!.equal ? null : out);
         // a key bound to a computed output by EQUALITY, written as it is, is that output: its ordinal, so DuckDB reads
         // the one value the list shows (`ORDER BY random()` beside `random() AS r` is r, never a second random()). A
@@ -1563,6 +1559,17 @@ class Rewriter {
       const as = this.groupedAs(v, b);
       if (as === "engine") return v;
       if (as === "keyed" && (depth === 0 || ofThisQuery(v, depth))) return perGroup(v);
+      // A CAST OF AN EXPRESSION READ PER GROUP IS TYPED BY ITS RESULT (PR 582 review r9, the class
+      // grouped-jsonb-cast-typed-by-its-argument): a cast with no analysed node at its own place (a key that repeats a
+      // target, Postgres's entry being the target's; a key a rule folded or copied) is otherwise typed by its argument,
+      // and its argument is about to become the group's any_value, typed as the jsonb (`perGroup`), so `(j -> 'r')::text`
+      // was sorted, ranked and compared by jsonb's key. Its type is pinned HERE, the one place a grouped expression is
+      // replaced, from Postgres's analysis of the same cast (`byShape`), before the argument is: every key built from it
+      // after (an ORDER BY, its folded NULLS key, a window's ORDER BY or PARTITION BY, HAVING, WITH TIES) is the text's
+      if (k === "TypeCast" && isNode(n.arg) && this.groupedAs(n.arg as AstNode, b) === "keyed" && this.allAt(n, ANALYSED.TypeCast!).length === 0) {
+        const result = this.byShape.get(shapeOf(v)) ?? this.typed(v);
+        if (result !== null) this.synthetic.set(n, result);
+      }
       if (k === "SubLink") { for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth + 1); return v; }
       if (k === "FuncCall" && n.over === undefined && this.typed(v)?.node === "AGGREF") return v;
       if (k === "ColumnRef" && hasStar(v)) {
