@@ -13,6 +13,8 @@ import { Buffer } from "node:buffer";
 import pg from "pg";
 import { assignedCodePoints, decodeLibcOrder, encodeLibcOrder, isPlainTable, libcKey, readLibcOrder } from "../../src/duck/libc-order.ts";
 import { isLibcCollation } from "../../src/duck/rewrite.ts";
+import { boundOf, BOUND_CHARS } from "../../src/duck/libc-bound.ts";
+import { holdBounds, randomStrings } from "../libc-order-fixture.ts";
 
 const adminUrl = process.env.IT_POSTGRES_URL;
 const tag = `it_libc_${process.pid}`;
@@ -81,6 +83,36 @@ test("the order read compares as the source does, over random strings of each sc
       assert.deepEqual(differ.slice(0, 10), [], `${name}: ${differ.length} of ${pairs.length}`);
     }
   } finally { await c.end(); }
+});
+
+// THE BOUNDS OF THE ORDER READ (src/duck/libc-bound.ts, issue 666): the order a top N and a min or max are bounded by is
+// the source's, so the proof obligation is held over it, the bounds the engine's own: random strings of ASCII, glibc's
+// `l·` contraction, the case of U+212A and U+0130, an accent spelled and composed, ß, Hangul, an emoji and its selector,
+// code points no table lists, and strings longer than the run sharing their first characters
+test("the bounds of the order read: hi(a) < lo(b) orders the keys at the first level, over random strings", { skip: adminUrl ? false : "IT_POSTGRES_URL is not set", timeout: 600_000 }, async (t) => {
+  const own = `${tag}_bound`;
+  psql(adminUrl!, `CREATE DATABASE "${own}"`);
+  try {
+    const url = (() => { const u = new URL(adminUrl!); u.pathname = `/${own}`; return u.toString(); })();
+    const [provider, collate] = psql(url, "SELECT datlocprovider::text || '|' || datcollate FROM pg_database WHERE datname = current_database()").split("|") as [string, string];
+    if (!isLibcCollation(provider, collate)) { t.skip(`the database's collation is ${collate}, not a libc locale's`); return; }
+    const c = new pg.Client(url);
+    await c.connect();
+    let o;
+    try { o = decodeLibcOrder(encodeLibcOrder(await readLibcOrder(async (sql) => (await c.query({ text: sql, rowMode: "array" })).rows as Array<Array<string | null>>, collate, null))); }
+    finally { await c.end(); }
+    if (isPlainTable(collate)) assert.notEqual(boundOf(o), null, `${collate} has bounds`);
+    if (boundOf(o) === null) { t.skip(`${collate}'s order has no bounds`); return; }
+    const ascii = range(0x20, 0x7e).map((g) => String.fromCodePoint(g));
+    const pool = [...ascii, ..."abcAB01$ -.", "l·", "L·", "K", "İ", "é", "é", "ß", "가", "❤️", "", "͸"];
+    const long = "httpsexamplecomitem".repeat(4);
+    const strings = [...randomStrings(pool, 20_000, 8, 666),
+      "cel·la", "cella", "celLa", "cel·La", "", "k", "K", "K", "Kb", "istanbul", "İstanbul", "$5", "5", "-5",
+      long, `${long}a`, `${long}·`, `${long}l·`, long.slice(0, BOUND_CHARS), long.slice(0, BOUND_CHARS + 1), `${long.slice(0, BOUND_CHARS)}é`];
+    const { failures, ruledOut } = await holdBounds(o, strings);
+    assert.deepEqual(failures, []);
+    assert.ok(ruledOut > strings.length / 2, `a top 1 rules out ${ruledOut} of ${strings.length}`);
+  } finally { psql(adminUrl!, `DROP DATABASE "${own}" WITH (FORCE)`); }
 });
 
 // A LIBC COLLATION OTHER THAN THE DATABASE'S (issue 253, decision B): on a C database, "en_US" read under its own name

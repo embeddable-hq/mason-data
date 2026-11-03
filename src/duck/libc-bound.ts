@@ -67,7 +67,6 @@ const int = (n: number): AstNode => ({ A_Const: { ival: n === 0 ? {} : { ival: n
 const call = (name: string, args: AstNode[]): AstNode => ({ FuncCall: { funcname: [S(name)], args, funcformat: "COERCE_EXPLICIT_CALL" } });
 const op = (name: string, l: AstNode, r: AstNode): AstNode => ({ A_Expr: { kind: "AEXPR_OP", name: [S(name)], lexpr: l, rexpr: r } });
 const and = (args: AstNode[]): AstNode => args.length === 1 ? args[0]! : { BoolExpr: { boolop: "AND_EXPR", args } };
-const or = (args: AstNode[]): AstNode => ({ BoolExpr: { boolop: "OR_EXPR", args } });
 const nullTest = (arg: AstNode, type: "IS_NULL" | "IS_NOT_NULL"): AstNode => ({ NullTest: { arg, nulltesttype: type } });
 const chr = (code: number): AstNode => call("chr", [int(code)]);
 
@@ -252,8 +251,9 @@ function windowed(v: unknown): boolean {
 }
 
 /** the threshold's subquery over the SELECT's own rows: `SELECT <aggregate> FROM (SELECT <value> AS __mason_bound FROM
- *  <its FROM item> WHERE <its WHERE> AND x IS NOT NULL [ORDER BY 1 [DESC] LIMIT n]) AS __mason_bounds` */
-function threshold(s: Body, item: AstNode, x: AstNode, value: AstNode, aggregate: "min" | "max", top: { desc: boolean; n: number } | null): AstNode {
+ *  <its FROM item> WHERE <its WHERE> AND x IS NOT NULL [ORDER BY 1 [DESC] LIMIT n]) AS __mason_bounds`; a top N's is its
+ *  `everyRow` where fewer than n rows have a value (`CASE WHEN count(*) >= n THEN … ELSE <everyRow> END`) */
+function threshold(s: Body, item: AstNode, x: AstNode, value: AstNode, aggregate: "min" | "max", top: { desc: boolean; n: number; everyRow: AstNode } | null): AstNode {
   const where = and([...(s.whereClause !== undefined ? [structuredClone(s.whereClause as AstNode)] : []), nullTest(structuredClone(x), "IS_NOT_NULL")]);
   const inner: Body = {
     targetList: [{ ResTarget: { name: "__mason_bound", val: value } }],
@@ -265,7 +265,9 @@ function threshold(s: Body, item: AstNode, x: AstNode, value: AstNode, aggregate
     op: "SETOP_NONE",
   };
   const outer: Body = {
-    targetList: [{ ResTarget: { val: call(aggregate, [{ ColumnRef: { fields: [S("__mason_bounds"), S("__mason_bound")] } }]) } }],
+    targetList: [{ ResTarget: { val: ((v: AstNode): AstNode => top === null ? v : { CaseExpr: {
+      args: [{ CaseWhen: { expr: op(">=", { FuncCall: { funcname: [S("count")], agg_star: true, funcformat: "COERCE_EXPLICIT_CALL" } }, int(top.n)), result: v } }], defresult: top.everyRow } })(
+      call(aggregate, [{ ColumnRef: { fields: [S("__mason_bounds"), S("__mason_bound")] } }])) } }],
     fromClause: [{ RangeSubselect: { subquery: { SelectStmt: inner }, alias: { aliasname: "__mason_bounds" } } }],
     op: "SETOP_NONE",
   };
@@ -292,7 +294,7 @@ const wallsIn = (v: unknown, alias: string): number => selectsIn(v).filter((s) =
  * Postgres's of the statement it was written from.
  */
 export async function libcBounded(tree: AstNode, analysis: TreeValue, context: BoundContext): Promise<AstNode | null> {
-  type Top = { s: Body; x: AstNode; bound: Bound; desc: boolean; n: number };
+  type Top = { s: Body; x: AstNode; bound: Bound; desc: boolean; nullsFirst: boolean; n: number };
   type Pick = { case: Body; x: AstNode; bound: Bound; min: boolean };
   const tops: Top[] = [], picks: Array<{ s: Body; each: Pick[] }> = [];
   const ctes = withQueries(tree);
@@ -307,7 +309,10 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
     if (key !== null && count !== null && count > 0 && offset !== null && offset >= 0 && count + offset <= 2_147_483_647 && (s.limitOption === undefined || s.limitOption === "LIMIT_OPTION_COUNT" || s.limitOption === "LIMIT_OPTION_DEFAULT")
       && !present(s.distinctClause) && !present(s.groupClause) && !present(s.havingClause)) {
       const bound = boundFor(key.collate);
-      if (bound !== null) tops.push({ s, x: key.x, bound, desc: first!.sortby_dir === "SORTBY_DESC", n: count + offset });
+      // (where NULL sorts: the engine's default_null_order is Postgres's, last ascending and first descending)
+      const desc = first!.sortby_dir === "SORTBY_DESC";
+      const nullsFirst = first!.sortby_nulls === "SORTBY_NULLS_FIRST" || (desc && first!.sortby_nulls !== "SORTBY_NULLS_LAST");
+      if (bound !== null) tops.push({ s, x: key.x, bound, desc, nullsFirst, n: count + offset });
       continue;
     }
     // A MIN OR A MAX: arg_min / arg_max over the libc key's CASE (src/duck/rewrite.ts textMinMax), ungrouped, no FILTER
@@ -344,9 +349,13 @@ export async function libcBounded(tree: AstNode, analysis: TreeValue, context: B
   const counted = (n: AstNode): AstNode => { if (context.wall !== null) context.wall.added += wallsIn(n, context.wall.alias); return n; };
   for (const t of chosen.tops) {
     const item = oneItem(t.s, ctes)!;
-    // ASC: the n-th smallest hi, rows of lo <= it; DESC: the n-th largest lo, rows of hi >= it
-    const limit = counted(threshold(t.s, item, t.x, (t.desc ? lowBound : highBound)(t.bound, t.x), t.desc ? "min" : "max", { desc: t.desc, n: t.n }));
-    const kept = or([nullTest(structuredClone(t.x), "IS_NULL"), op(t.desc ? ">=" : "<=", (t.desc ? highBound : lowBound)(t.bound, t.x), limit)]);
+    // ASC: the n-th smallest hi, rows of lo <= it; DESC: the n-th largest lo, rows of hi >= it. Fewer than n values,
+    // a threshold every bound passes: `H` above every lo, '' below every hi. A NULL row's bound is one every threshold
+    // passes where NULL sorts first, and else the one only that threshold passes
+    const [everyRow, beforeEvery] = t.desc ? [str(""), chr(H)] : [chr(H), str("")];
+    const limit = counted(threshold(t.s, item, t.x, (t.desc ? lowBound : highBound)(t.bound, t.x), t.desc ? "min" : "max", { desc: t.desc, n: t.n, everyRow }));
+    const own = { CoalesceExpr: { args: [(t.desc ? highBound : lowBound)(t.bound, t.x), t.nullsFirst ? beforeEvery : structuredClone(everyRow)] } };
+    const kept = op(t.desc ? ">=" : "<=", own, limit);
     t.s.whereClause = t.s.whereClause === undefined ? kept : and([t.s.whereClause as AstNode, kept]);
   }
   for (const { s, each } of chosen.picks) {
