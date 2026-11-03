@@ -26,6 +26,15 @@ export const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kin
 export const bodyOf = (token: string): string => token.replace(/^masondata_(pat|ci)_/, "");
 
 /**
+ * THE TOKEN AN ECHO TEST SENDS: one fixed body, so the verdict of `bodyShown` on what a run printed is the same on every
+ * run (a random one shared a run of 4 with the CLI's own words now and then: the review of PR 591, F1); each echo test
+ * holds it to sharing none with its command's output when nothing is echoed (`bodyCovered` 0). Written in two parts, so
+ * no line of this file is shaped as a token.
+ */
+const ECHO_BODY = "Qz7Vw2Xk9Pj4Ry8Tm3Lq6Hb1Ns5Gc0Fd-Ue_YoZi7Ka";
+export const echoToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${ECHO_BODY}`;
+
+/**
  * The forms a service may echo a token it was sent in, besides the token whole (issue 540; the review of PR 591): each
  * by what it is, the text each of a failure's message, why and fix carries, and whether the words printed are exact
  * (else a mask may take in a letter beside it that is the body's next, by chance, or one field is shown).
@@ -48,13 +57,15 @@ export function echoForms(token: string): Array<{ what: string; fields: [string,
 }
 
 /**
- * Whether `text` shows more of a token's body than a quarter of it, in every run of 4 or more of its characters
- * together (the rule src/cli/hosted.ts `heldRuns` keeps, decided here apart from it: by brute force over every common
- * substring). The text is read case-blind, every percent escape decoded, every character as its compatibility
- * decomposition without its combining marks, and every separator skipped — once keeping `-` and `_` and once skipping
- * them too. Run over all a command printed, its streams together: a quarter is what the command may show in all.
+ * How many of a token's body characters `text` shows, in every run of 4 or more of them together (the rule
+ * src/cli/hosted.ts `heldRuns` keeps, decided here apart from it: by brute force over every common substring). The
+ * text is read case-blind, every percent escape decoded, every character as its compatibility decomposition without
+ * its combining marks, and every separator skipped — once keeping `-` and `_` and once skipping them too. `known` are
+ * the parts of a run's output that differ from run to run and are not the service's (its folders, the service's
+ * address and port), read as a separator, so a count over all a command printed is the same on every run.
  */
-export function bodyShown(text: string, token: string): boolean {
+export function bodyCovered(text: string, token: string, known: ReadonlyArray<string | undefined> = []): number {
+  for (const k of [...known].filter((x): x is string => !!x).sort((a, b) => b.length - a.length)) text = text.split(k).join(" ");
   const read = [...text.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))).normalize("NFKD")]
     .filter((c) => !/\p{M}/u.test(c)).join("").toLowerCase();
   const raw = bodyOf(token).toLowerCase(), covered = new Set<number>();
@@ -66,7 +77,13 @@ export function bodyShown(text: string, token: string): boolean {
       for (let n = least; i + n <= body.length && seen.includes(body.slice(i, i + n)); n++) for (let d = 0; d < n; d++) covered.add(at[i + d]![1]);
     }
   }
-  return covered.size > Math.floor([...raw].filter((c) => /[a-z0-9_-]/.test(c)).length / 4);
+  return covered.size;
+}
+
+/** Whether `text` shows more than a quarter of a token's body (`bodyCovered`): what a command may show in all, so it is
+ *  run over all a command printed, its streams together. */
+export function bodyShown(text: string, token: string, known: ReadonlyArray<string | undefined> = []): boolean {
+  return bodyCovered(text, token, known) > Math.floor([...bodyOf(token)].filter((c) => /[A-Za-z0-9_-]/.test(c)).length / 4);
 }
 
 /** Every secret any run may have seen, and every answer: the last test holds them apart. */
@@ -246,7 +263,7 @@ export async function mason(h: string, argv: string[], env: Record<string, strin
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);
     assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `${line} printed a secret's body`);
-    assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, s), `${line} printed more than a quarter of a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
+    assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, s, [h, env.HOME, env.MASON_CLOUD_URL]), `${line} printed more than a quarter of a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
   }
   return a;
 }

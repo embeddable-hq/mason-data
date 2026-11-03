@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { BASE, DEVICE, SECRETS, bodyShown, credentials, echoForms, envFor, fakeService, granted, home, mason, newToken, noTokenLeaked, saved, writeSaved, type Reply, type Script } from "./hosted-fake.ts";
+import { BASE, DEVICE, SECRETS, bodyCovered, bodyShown, credentials, echoForms, echoToken, envFor, fakeService, granted, home, mason, newToken, noTokenLeaked, saved, writeSaved, type Reply, type Script } from "./hosted-fake.ts";
 
 test("mason login: an answer outside the contract is a failure said by its status, never followed (a redirect) nor repeated (its body), never retried", async () => {
   const echoed = newToken(); SECRETS.push(echoed);
@@ -236,7 +236,17 @@ const echoing = (status: number, [m, w, f]: [string, string, string]): Reply => 
   why: `it was sent as ${w}`, fix: `sign in again, not as ${f}` }, next: [] } });
 
 test("mason login: a service that echoes the token it was sent in another form — its body, split, re-cased, URL-encoded, a slice, pieces, a piece in each field — shows no more than a quarter of it in all, on stdout, stderr or in --json", { timeout: 300_000 }, async () => {
-  const token = newToken(); SECRETS.push(token);
+  // one fixed token, so the verdict is the same on every run (tests/hosted-fake.ts echoToken)
+  const token = echoToken(); SECRETS.push(token);
+  // the CLI's own words share no run of the body: what is counted below is the echo's alone
+  const quiet = await fakeService({ token: () => granted(token), me: echoing(401, ["it", "it", "it"]) });
+  try {
+    for (const json of [false, true]) {
+      const h = home();
+      const a = await mason(h, ["login", ...(json ? ["--json"] : [])], envFor(h, quiet.url));
+      assert.equal(bodyCovered(`${a.stdout}\n${a.stderr}`, token, [h, quiet.url]), 0, `nothing echoed${json ? ", --json" : ""}: the fixed token shares a run with the CLI's own words:\n${a.stdout}${a.stderr}`);
+    }
+  } finally { await quiet.close(); }
   for (const { what, fields, exact } of echoForms(token)) {
     const fake = await fakeService({ token: () => granted(token), me: echoing(401, fields) });
     try {
@@ -245,7 +255,7 @@ test("mason login: a service that echoes the token it was sent in another form �
         const a = await mason(h, ["login", ...(json ? ["--json"] : [])], envFor(h, fake.url));
         const at = `${what}${json ? ", --json" : ""}`;
         assert.equal(a.code, 1, `${at}: ${a.stdout}${a.stderr}`);
-        assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token), `${at}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
+        assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token, [h, fake.url]), `${at}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
         // the service's words, the echo masked: never dropped, never re-worded (where a mask may take in a letter beside
         // it that is the body's next, by chance, or one field is shown, the words are not held exact)
         if (!exact) assert.match(a.stdout + a.stderr, /\*{4}/, at);
@@ -259,7 +269,17 @@ test("mason login: a service that echoes the token it was sent in another form �
 });
 
 test("mason logout: a login whose saved email, and a revoke refusal, echo its token in another form — its body, split, re-cased, URL-encoded, a slice, pieces — shows no more than a quarter of it in all, on stdout, stderr or in --json", { timeout: 300_000 }, async () => {
-  const token = newToken(); SECRETS.push(token);
+  const token = echoToken(); SECRETS.push(token);
+  // the CLI's own words share no run of the body: what is counted below is the echo's alone
+  const quiet = await fakeService({ revoke: echoing(401, ["it", "it", "it"]) });
+  try {
+    for (const json of [false, true]) {
+      const h = home();
+      writeSaved(h, { [quiet.url]: { token, email: "ada@example.com", savedAt: "2026-11-01T00:00:00.000Z" } });
+      const a = await mason(h, ["logout", ...(json ? ["--json"] : [])], envFor(h, quiet.url));
+      assert.equal(bodyCovered(`${a.stdout}\n${a.stderr}`, token, [h, quiet.url]), 0, `nothing echoed${json ? ", --json" : ""}: the fixed token shares a run with the CLI's own words:\n${a.stdout}${a.stderr}`);
+    }
+  } finally { await quiet.close(); }
   for (const { what, fields, exact } of echoForms(token)) {
     // the email is one field: an echo in pieces across fields is all of them in it
     const form = [...new Set(fields)].join(".");
@@ -272,7 +292,7 @@ test("mason logout: a login whose saved email, and a revoke refusal, echo its to
         const a = await mason(h, ["logout", ...(json ? ["--json"] : [])], envFor(h, fake.url));
         const at = `${what}${json ? ", --json" : ""}`;
         assert.equal(a.code, 0, `${at}: ${a.stdout}${a.stderr}`);
-        assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token), `${at}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
+        assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token, [h, fake.url]), `${at}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
         // (where a mask may take in a letter beside it that is the body's next, by chance, the words are not held exact)
         if (!exact) assert.match(a.stdout, /\*{4}/, at);
         else if (json) assert.equal((JSON.parse(a.stdout) as { email: string }).email, "ada+****@example.com", at);

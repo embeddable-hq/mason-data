@@ -14,7 +14,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
 import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
-import { bodyShown, echoForms, seen } from "./hosted-fake.ts";
+import { bodyCovered, bodyShown, echoForms, echoToken, seen } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
 const newToken = (kind: "pat" | "ci" = "pat"): string => `masondata_${kind}_${randomBytes(32).toString("base64url")}`;
@@ -199,18 +199,21 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
   for (const s of SECRETS) {
     assert.ok(!a.stdout.includes(s) && !a.stderr.includes(s), `${line} printed a secret:\n${a.stdout}\n${a.stderr}`);
     assert.ok(!a.stdout.includes(s.slice(-43)) && !a.stderr.includes(s.slice(-43)), `${line} printed a secret's body`);
-    assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, s), `${line} printed more than a quarter of a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
+    assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, s, [cwd, env.HOME, env.MASON_CLOUD_URL]), `${line} printed more than a quarter of a secret's body, in some form:\n${a.stdout}\n${a.stderr}`);
   }
   return a;
 }
 
 /** A run against a fresh fake, signed in by MASON_TOKEN; the fake's requests with it. */
-async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number } = {}): Promise<{ a: Answer; requests: Req[]; url: string; token: string }> {
-  const token = newToken("ci"); SECRETS.push(token);
+async function deployWith(script: Script, cwd: string, argv: string[], extra: Record<string, string> = {}, o: { terminal?: number } = {}): Promise<{ a: Answer; requests: Req[]; url: string; token: string; home: string }> {
+  // a token the caller gives is its own to record
+  const token = extra.MASON_TOKEN ?? newToken("ci");
+  if (extra.MASON_TOKEN === undefined) SECRETS.push(token);
   const fake = await fakeService(script);
   try {
-    const a = await mason(cwd, ["deploy", ...argv], envFor(temp("mason-home-"), fake.url, { MASON_TOKEN: token, ...extra }), o);
-    return { a, requests: fake.requests, url: fake.url, token };
+    const h = temp("mason-home-");
+    const a = await mason(cwd, ["deploy", ...argv], envFor(h, fake.url, { MASON_TOKEN: token, ...extra }), o);
+    return { a, requests: fake.requests, url: fake.url, token, home: h };
   } finally { await fake.close(); }
 }
 
@@ -791,29 +794,35 @@ test("mason deploy: needs a project — none here is the state's answer, nothing
 
 test("mason deploy: a service that echoes the token it was sent in another form — its body, split, re-cased, URL-encoded, a slice, pieces, a piece in each field — shows no more than a quarter of it in all, on stdout, stderr or in --json", { timeout: 300_000 }, async () => {
   const { root } = project();
-  const token = newToken("ci"); SECRETS.push(token);
+  // one fixed token, so the verdict is the same on every run (tests/hosted-fake.ts echoToken)
+  const token = echoToken("ci"); SECRETS.push(token);
   const words = ([m, w, f]: [string, string, string]) => ({ message: `the token ${m} is not known`, why: `it was sent as ${w}`, fix: `sign in again, not as ${f}` });
+  // a refusal of the deploy sent, and a deploy Mason on the replica refused: the two failures the service words; a
+  // person's stderr for the POST's, the refused deploy's in --json alone, its stderr read there too (each run of a
+  // refused deploy waits out a poll, and its words go through the same failureShape)
+  const runs = (fields: [string, string, string]): Array<[string, Script, boolean]> => [
+    ["the POST's 401", { post: { status: 401, body: { error: { code: "unauthenticated", ...words(fields) }, next: [] } } }, false],
+    ["the POST's 401", { post: { status: 401, body: { error: { code: "unauthenticated", ...words(fields) }, next: [] } } }, true],
+    ["a refused deploy", { get: () => at("refused", { failure: { code: "bad_source", ...words(fields) } }) }, true],
+  ];
+  const deploy = (script: Script, json: boolean) => deployWith(script, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])], { MASON_TOKEN: token });
+  // the CLI's own words share no run of the body: what is counted below is the echo's alone
+  for (const [where, script, json] of runs(["it", "it", "it"])) {
+    const { a, url, home } = await deploy(script, json);
+    assert.equal(bodyCovered(`${a.stdout}\n${a.stderr}`, token, [root, url, home]), 0, `nothing echoed, in ${where}${json ? ", --json" : ""}: the fixed token shares a run with the CLI's own words:\n${a.stdout}${a.stderr}`);
+  }
   for (const { what, fields, exact } of echoForms(token)) {
-    // a refusal of the deploy sent, and a deploy Mason on the replica refused: the two failures the service words
-    const scripts: Array<[string, Script]> = [
-      ["the POST's 401", { post: { status: 401, body: { error: { code: "unauthenticated", ...words(fields) }, next: [] } } }],
-      ["a refused deploy", { get: () => at("refused", { failure: { code: "bad_source", ...words(fields) } }) }],
-    ];
-    for (const [where, script] of scripts) {
-      // a person's stderr for the POST's; the refused deploy's in --json alone, its stderr read there too (each run of
-      // a refused deploy waits out a poll, and its words go through the same failureShape)
-      for (const json of where === "a refused deploy" ? [true] : [false, true]) {
-        const { a } = await deployWith(script, root, ["--replica", "acme/shop", ...(json ? ["--json"] : [])], { MASON_TOKEN: token });
-        const at_ = `${what}, in ${where}${json ? ", --json" : ""}`;
-        assert.equal(a.code, 1, `${at_}: ${a.stdout}${a.stderr}`);
-        assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token), `${at_}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
-        // what is printed is the service's words, the echo masked: never dropped, never re-worded (where a mask may take
-        // in a letter beside it that is the body's next, by chance, or one field is shown, the words are not held exact)
-        const said = json ? (JSON.parse(a.stdout) as { error: { message: string; fix: string } }).error : null;
-        if (!exact) assert.match(a.stdout + a.stderr, /\*{4}/, at_);
-        else if (said) assert.deepEqual([said.message, said.fix], ["the token **** is not known", "sign in again, not as ****"], at_);
-        else assert.match(a.stderr, /✗ mason deploy: the token \*\*\*\* is not known\n {2}why {3}it was sent as \*\*\*\* \(/, at_);
-      }
+    for (const [where, script, json] of runs(fields)) {
+      const { a, url, home } = await deploy(script, json);
+      const at_ = `${what}, in ${where}${json ? ", --json" : ""}`;
+      assert.equal(a.code, 1, `${at_}: ${a.stdout}${a.stderr}`);
+      assert.ok(!bodyShown(`${a.stdout}\n${a.stderr}`, token, [root, url, home]), `${at_}: more than a quarter of the body is shown:\n${a.stdout}${a.stderr}`);
+      // what is printed is the service's words, the echo masked: never dropped, never re-worded (where a mask may take
+      // in a letter beside it that is the body's next, by chance, or one field is shown, the words are not held exact)
+      const said = json ? (JSON.parse(a.stdout) as { error: { message: string; fix: string } }).error : null;
+      if (!exact) assert.match(a.stdout + a.stderr, /\*{4}/, at_);
+      else if (said) assert.deepEqual([said.message, said.fix], ["the token **** is not known", "sign in again, not as ****"], at_);
+      else assert.match(a.stderr, /✗ mason deploy: the token \*\*\*\* is not known\n {2}why {3}it was sent as \*\*\*\* \(/, at_);
     }
   }
 });
