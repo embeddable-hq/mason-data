@@ -92,7 +92,11 @@ const CASE_CASES: Array<{ name: string; sql: string }> = [
   { name: "no table, the builtin collations", sql: "SELECT upper('ß' COLLATE pg_unicode_fast), upper('ß' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_unicode_fast), upper('é' COLLATE ucs_basic)" },
   { name: "no table, ASCII", sql: "SELECT upper('abc'), lower('ABC'), initcap('abc def')" },
   // no table, what the synced data does not run as written: the catalog's, never the engine's error (review r1 of PR 568)
-  { name: "no table, a pg_catalog-qualified name", sql: "SELECT pg_catalog.lower('ABC'), pg_catalog.upper('abc'), pg_catalog.length('abc'), pg_catalog.initcap('o''hara')" },
+  // (no initcap of a word with an apostrophe: the catalog's own mapping makes O'Hara where ICU's makes O'hara, the listed
+  // fromless-numeric-text-order; ASCII words whose case every mapping agrees on)
+  { name: "no table, a pg_catalog-qualified name", sql: "SELECT pg_catalog.lower('ABC'), pg_catalog.upper('abc'), pg_catalog.length('abc'), pg_catalog.initcap('abc def')" },
+  // a value of the server, which the synced data would answer with its own: the catalog's (review r2 of PR 568)
+  { name: "no table, a value of the server", sql: "SELECT upper(version()) LIKE 'POSTGRES%', upper(substr(version(), 1, 10)), upper(split_part(version(), ' ', 1)), upper(format_type(23, NULL)), (SELECT count(*) FROM (SELECT upper(version()) AS v) s WHERE v LIKE 'POSTGRES%')" },
   { name: "no table, a typed literal", sql: "SELECT upper(char 'abc'), upper(character 'abc'), initcap(char 'abc'), upper(n'abc'), upper('abc'::unknown)" },
   { name: "no table, a char VALUES list", sql: "SELECT upper(x) FROM (VALUES (char 'abc')) v(x)" },
   { name: "no table, an empty select list", sql: "SELECT upper('abc') FROM (SELECT) s" },

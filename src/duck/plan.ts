@@ -9,7 +9,7 @@ import { deparseSync, QuoteUtils } from "pgsql-deparser";
 import type { Node } from "libpg-query";
 import { HELD_ROW_INPUT, HELD_TYPE_INPUT } from "../api/postgres/schema.ts";
 import { heldName, heldType, isHeldArray } from "./held-types.ts";
-import { collationOids, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
+import { collationOids, functionsCalled, outputExpressions, textOrdering, type TreeValue } from "./pgtree.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "./statement.ts";
 import { parseSql } from "../api/postgres/parser.ts";
 import { analyze, catalogRows, readParameters } from "./analyze.ts";
@@ -336,7 +336,17 @@ export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Ui
   // a json or a session's value stays the catalog's, as before, which answers what the synced data may refuse
   // (`lower('now')::timestamptz`, a relative time word; Mason gap fromless-numeric-text-order)
   if (!named.includes("case")) return null;
-  return [...analysis.types.values()].every((ts) => ts.every((t) => CASE_ROUTED_TYPES.has(t.type))) ? "case" : null;
+  if (![...analysis.types.values()].every((ts) => ts.every((t) => CASE_ROUTED_TYPES.has(t.type)))) return null;
+  // and only one whose every value is its own arguments' (review r2 of PR 568, fromless-case-route-run-success-read-as-
+  // sameness): a value of the server or the session (`version()`, `format_type(…)`, `current_database()`,
+  // `current_user`) the synced data answers with ITS OWN, so a run that succeeds says nothing of it. Postgres's analysis
+  // says which: a session keyword or sequence (`functionsCalled`), and a function it does not call immutable
+  // (pg_proc.provolatile: pg_catalog.version() and format_type() are stable); such a statement stays the
+  // catalog's, which answers it as this session's, as before (Mason gap fromless-numeric-text-order)
+  const called = functionsCalled(analysis.tree);
+  if (called.session || called.oids.has(0)) return null;
+  const unpure = await catalogRows(o.catalog, `SELECT 1 FROM pg_catalog.pg_proc WHERE oid IN (${[...called.oids].join(", ")}) AND provolatile <> 'i' LIMIT 1`);
+  return unpure.length === 0 ? "case" : null;
 }
 
 const NUMERIC = 1700, NUMERIC_ARRAY = 1231;

@@ -7041,7 +7041,16 @@ test("issue 406: upper, lower and initcap map case under their input collation, 
   const catalog = (b: Uint8Array): Promise<Uint8Array> => truth.execProtocolRaw(b);
   const under = { searchPath: "public", timeZone: "UTC", dateStyle: "ISO, MDY" } as Parameters<NonNullable<typeof listener.ordersText>>[3];
   for (const [sql, verdict] of [["SELECT upper('ß')", "case"], ["SELECT initcap('a b'), lower('X')", "case"], ["SELECT 'a' = 'A', version() IS NOT NULL", null],
-    ["SELECT upper('ß'), 1.5", null], ["SELECT lower('now')::timestamptz IS NOT NULL", null], ["SELECT upper(x) FROM (VALUES ('ß'), ('b')) v(x) ORDER BY 1", "case"]] as const) {
+    ["SELECT upper('ß'), 1.5", null], ["SELECT lower('now')::timestamptz IS NOT NULL", null], ["SELECT upper(x) FROM (VALUES ('ß'), ('b')) v(x) ORDER BY 1", "case"],
+    // a value of the server or the session, which the synced data answers with ITS OWN, whatever its allowlist says (a run
+    // that succeeds says nothing of it: review r2 of PR 568, fromless-case-route-run-success-read-as-sameness): a session
+    // keyword, and a function Postgres does not call immutable (version() and format_type() are stable, the analysis
+    // resolving pg_catalog's), keep it the catalog's; an immutable function and an operator move
+    ["SELECT upper(version()) LIKE 'POSTGRES%'", null], ["SELECT lower(version()) LIKE 'postgresql %'", null], ["SELECT initcap(version()) LIKE 'Postgresql%'", null],
+    ["SELECT position('postgres' IN lower(version())) > 0", null], ["SELECT upper(substr(version(), 1, 10))", null], ["SELECT upper(split_part(version(), ' ', 1))", null],
+    ["SELECT count(*) FROM (SELECT upper(version()) AS v) s WHERE v LIKE 'POSTGRES%'", null], ["SELECT upper(format_type(23, NULL))", null],
+    ["SELECT lower(current_user)", null], ["SELECT upper(user), lower(session_user)", null], ["SELECT lower(current_catalog)", null], ["SELECT lower(current_database())", null],
+    ["SELECT upper(current_setting('TimeZone'))", null], ["SELECT upper(md5('a')), lower('A' || 'ß')", "case"], ["SELECT upper(substr('abc', 1, 2))", "case"]] as const) {
     assert.equal(mayOrderText((await parseSql(sql)).stmts![0]!.stmt) ? await listener.ordersText!(catalog, sql, [], under, true) : null, verdict, sql);
   }
   // ...and is the synced data's only where the synced data's RUN answers it, never its plan alone (review r1 of PR 568,

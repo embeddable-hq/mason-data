@@ -522,6 +522,27 @@ export function textOrdering(tree: TreeValue): { orders: Set<number>; operators:
   return { orders, operators, functions, calls };
 }
 
+/**
+ * WHAT A STATEMENT'S ANALYSIS CALLS: every function, by OID, however it is called (a function's `funcid`, an operator's,
+ * NULLIF's or IS DISTINCT FROM's `opfuncid`, an aggregate's `aggfnoid`, a window function's `winfnoid`; 0 where the
+ * analysis left one unset), and whether it reads its session by a keyword or a sequence (`current_user`, `user`,
+ * `current_catalog`, CURRENT_DATE: a SQLVALUEFUNCTION; nextval's NEXTVALUEEXPR). The caller asks the catalog's pg_proc
+ * whether each depends on its arguments alone (`provolatile`), Postgres's own word for it (issue 406).
+ */
+export function functionsCalled(tree: TreeValue): { oids: Set<number>; session: boolean } {
+  const oids = new Set<number>();
+  let session = false;
+  const visit = (v: TreeValue | undefined): void => {
+    if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+    if (v === undefined || !isNode(v)) return;
+    if (v._node === "SQLVALUEFUNCTION" || v._node === "NEXTVALUEEXPR" || v._node === "CURRENTOFEXPR") session = true;
+    for (const k of ["funcid", "opfuncid", "aggfnoid", "winfnoid"]) if (k in v) oids.add(num(v[k] ?? null) ?? 0);
+    for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
+  };
+  visit(tree);
+  return { oids, session };
+}
+
 /** EVERY COLLATION A STATEMENT'S ANALYSIS NAMES (an expression's, an operator's input, a row comparison's per column, a
  *  FROM item's columns'), by OID: what src/duck/collation.ts resolves before the rewrite reads any */
 export function collationOids(tree: TreeValue): Set<number> {
