@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runnable } from "../lib/runnable.ts";
+import { LogReader, logPath } from "../lib/log-read.ts";
 import { READY, STEP_MARK } from "./dev.ts";
 import { liveRun } from "./runs.ts";
 import { projectSource, startSettingRefusal, theProject } from "./project.ts";
@@ -104,7 +105,7 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   if ("problem" in listen) return failed("start", listen, { json: o.json });
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   // the run's terminal: its setup URL carries the run's token and it prints the API key, so only the developer reads it
-  const logFile = path.join(home, "dev.log");
+  const logFile = logPath(home, "start");
   const fd = fs.openSync(logFile, "a", 0o600);
   fs.chmodSync(logFile, 0o600);
   const from = fs.fstatSync(fd).size;
@@ -127,20 +128,15 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
   line(st.bold(`Starting Mason for ${t.project.config.name}`));
   const steps = stepRenderer({ line, live: !o.json && process.stdout.isTTY ? { write: (x) => { process.stdout.write(x); } } : null, style: st });
   let begun = false;
-  let offset = from;
-  let partial = "";
+  // the run's terminal from this start on, through the one reader: a line is had whole, masked (src/lib/log-read.ts)
+  const reader = new LogReader(logFile, { from });
   let postgres: PostgresLink | null = null;
   const since: string[] = [];   // the run's lines after its last step: a failure's reasons
   try {
     for (;;) {
-      const size = fs.statSync(logFile).size;
-      if (size > offset) {
-        const buf = Buffer.alloc(size - offset);
-        const r = fs.openSync(logFile, "r");
-        try { fs.readSync(r, buf, 0, buf.length, offset); } finally { fs.closeSync(r); }
-        offset = size;
-        const lines = (partial + buf.toString()).split("\n");
-        partial = lines.pop() ?? "";
+      for (let text = reader.read(); text !== null; text = reader.read()) {
+        const lines = text.split("\n");
+        lines.pop();   // every line read ends in its newline
         for (const l of lines) {
           if (l.startsWith("--- mason start ")) continue;
           if (l === "" && steps.open() === null && !begun) continue;   // the log's spacing before the first step
@@ -171,7 +167,8 @@ export async function devInBackground(args: readonly string[], o: { json: boolea
       }
       if (exited !== null) {
         if (steps.open() !== null) steps.fail();
-        if (partial) since.push(partial.trim());
+        const partial = reader.rest();   // the line it was writing, unended
+        if (partial.trim()) since.push(partial.trim());
         // the run's own last words are the reason (a wrong password), already shown line by line to a person
         return failed("start", { message: `the run stopped before it was ready (exit ${exited})`, code: "failed", why: o.json && since.length ? since.join("\n") : undefined,
           fix: `the whole log: ${logFile}`, exit: exited === 0 ? 1 : exited }, { json: o.json });

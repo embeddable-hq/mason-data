@@ -34,6 +34,11 @@ CLI lacks).
   up says so and exits 0. The run's terminal is `dev.log` in the project's `.mason/` (`mason logs --start`); `mason logs`
   is the run's log, `mason.log`. The run is kept up by a supervisor (src/cli/supervise.ts) that starts it again after a
   crash and records each restart (`mason status` `engine.restarts`).
+  **A log file has ONE reader, which masks as it reads** (src/lib/log-read.ts `LogReader`; issue 621: an older Mason's lines held the source's password in a `password=` value): `mason logs` in
+  every form, `mason start`'s watch of `dev.log` and the supervisor's scan read through it, and the files are named only
+  there (`logPath`); it releases a line only whole, whatever its chunks. The mask is #620's (`PasswordLineMask`, the
+  `password=` value alone, never a substring of the password). `/api/logs`' buffer is masked by it as an entry is kept.
+  `tests/conventions.test.ts` refuses a log file named or read anywhere else.
 - **Every command's output has one shape**, the same format for every command so it is easy to scan. A command that
   changes something prints `reportText` (src/cli/command.ts): one line saying what happened, its facts as aligned
   `label  value` rows, then its tips (`Tip: …`, a line each), then a blank line and `Next:` with each command and what

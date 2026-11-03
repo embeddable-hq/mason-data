@@ -27,6 +27,7 @@ import * as path from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { exitWhenWritten } from "../lib/exit-when-written.ts";
+import { LogReader } from "../lib/log-read.ts";
 
 export const READY_LINE = "mason start: ready";
 export const RESTARTS_FILE = "restarts.json";
@@ -131,27 +132,21 @@ function stillRunning(home: string, note: (line: string) => void): Running | nul
 }
 
 /** What the run wrote to the log from `from` on: whether it said it was ready, and V8's fatal line if it printed one.
- *  Read after it exits, in chunks: a run's log with every statement traced (MASON_PG_TRACE) runs to hundreds of MB. */
+ *  Read after it exits, in chunks, through the one reader (src/lib/log-read.ts: each line whole, masked): a run's log
+ *  with every statement traced (MASON_PG_TRACE) runs to hundreds of MB. */
 export function scanLog(file: string, from: number): { ready: boolean; fatal: string | null } {
   let ready = false;
   let fatal: string | null = null;
-  const fd = fs.openSync(file, "r");
-  try {
-    const buf = Buffer.alloc(1 << 20);
-    let partial = "";
-    for (let at = from; ;) {
-      const n = fs.readSync(fd, buf, 0, buf.length, at);
-      const lines = (partial + buf.toString("utf8", 0, n)).split("\n");
-      partial = n === 0 ? "" : lines.pop() ?? "";
-      for (const l of lines) {
-        if (l === READY_LINE) ready = true;
-        const f = /^FATAL ERROR: (.*)$/.exec(l.trim());
-        if (f) fatal = f[1]!;
-      }
-      if (n === 0) break;
-      at += n;
+  const reader = new LogReader(file, { from });
+  const scan = (text: string): void => {
+    for (const l of text.split("\n")) {
+      if (l === READY_LINE) ready = true;
+      const f = /^FATAL ERROR: (.*)$/.exec(l.trim());
+      if (f) fatal = f[1]!;
     }
-  } finally { fs.closeSync(fd); }
+  };
+  for (let text = reader.read(); text !== null; text = reader.read()) scan(text);
+  scan(reader.rest());
   return { ready, fatal };
 }
 

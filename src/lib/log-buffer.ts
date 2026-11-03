@@ -9,8 +9,10 @@
  *
  * `LogBuffer` is fed by the one place the run writes its log (src/cli/dev.ts `logLine`: mason.log under `mason start`,
  * stdout under `mason serve`), so both modes have it; the command server serves it (`GET /api/logs`). `mason logs` reads
- * the FILE with `logEntries`, the same parser, so a line is the same `{ at, text }` from either.
+ * the FILE with `logEntries`, the same parser, so a line is the same `{ at, text }` from either. Both are masked by one
+ * mask (`PasswordLineMask`): the file as it is read (src/lib/log-read.ts), the buffer as an entry is kept.
  */
+import { PasswordLineMask } from "./secret-mask.ts";
 
 /** One log entry: when (null when its line carries no time) and what, a multi-line message's further lines indented. */
 export interface LogLine { at: string | null; text: string }
@@ -54,9 +56,11 @@ export class LogBuffer {
 
   constructor(capacity = LOG_KEPT) { this.capacity = capacity; }
 
-  /** An entry as `textEntry` wrote it (one head line, the rest indented): kept as ONE entry. */
+  /** An entry as `textEntry` wrote it (one head line, the rest indented): kept as ONE entry, each of its lines masked
+   *  as a log file's are read (src/lib/log-read.ts, issue 621), so `/api/logs` shows a line as `mason logs` does. */
   push(entry: string): void {
-    for (const l of logEntries(entry)) {
+    const mask = new PasswordLineMask();
+    for (const l of logEntries(entry.split("\n").map((line) => mask.line(line)).join("\n"))) {
       this.kept.push(l);
       if (this.kept.length > this.capacity) this.kept.shift();
     }

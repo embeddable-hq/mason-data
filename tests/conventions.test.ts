@@ -1756,3 +1756,79 @@ test("a socket's remoteAddress is read in src/api only as an argument of clientA
     /\bremoteAddress\b/.test(line) && !/clientAddress\([^)]*\bremoteAddress\b/.test(line) && !/^\s*(\*|\/\/|\/\*)/.test(line) ? [`${name}:${i + 1}: ${line.trim()}`] : []));
   assert.deepEqual(stray, []);
 });
+
+/**
+ * A LOG FILE HAS ONE READER (src/lib/log-read.ts `LogReader`; issue 621): `mason logs` read `.mason/mason.log` and
+ * `dev.log` as they were, and an older Mason's lines held the source's password in a `password=` value. The reader masks
+ * each line as it reads it, so a log file read any other way is a line the mask never saw. So in src/ a log file is
+ * NAMED only in that module (`RUN_LOG`, `START_LOG`, `logPath`), and no file opens one to read but through it: a read
+ * call (`readFileSync`, `readFile`, `createReadStream`, `open`/`openSync` to read) whose path mentions a log — its name,
+ * `RUN_LOG` / `START_LOG` / `logPath`, a `logFile` (a parameter or a property), or a variable set from any of these, as
+ * far as the file's own declarations carry it. What it cannot follow: a log's path handed to a function as a parameter
+ * of another name; the module's header says so, and the review reads for it.
+ */
+export function rawLogReads(src: string): string[] {
+  const file = ts.createSourceFile("x.ts", src, ts.ScriptTarget.Latest, true);
+  const line = (n: ts.Node): number => file.getLineAndCharacterOfPosition(n.getStart(file)).line + 1;
+  const LOG_NAME = /^[\w./-]*\.log$/;
+  const isLogLiteral = (n: ts.Node): boolean => (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateTail(n)) && LOG_NAME.test(n.text);
+  const names = new Set(["RUN_LOG", "START_LOG"]);
+  const mentions = (n: ts.Node): boolean => {
+    if (isLogLiteral(n)) return true;
+    if (ts.isIdentifier(n) && (names.has(n.text) || /log(?:file|path)/i.test(n.text))) return true;
+    return ts.forEachChild(n, mentions) === true;
+  };
+  // a variable set from a log's path holds it, and so does one set from that variable: to a fixpoint
+  const declarations: ts.VariableDeclaration[] = [];
+  const collect = (n: ts.Node): void => { if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) declarations.push(n); ts.forEachChild(n, collect); };
+  collect(file);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const d of declarations) {
+      const name = (d.name as ts.Identifier).text;
+      if (!names.has(name) && mentions(d.initializer!)) { names.add(name); grew = true; }
+    }
+  }
+  const READS = new Set(["readFileSync", "readFile", "createReadStream", "openSync", "open"]);
+  const out: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (isLogLiteral(n)) out.push(`${line(n)}: a log file named here: ${n.getText(file)}`);
+    if (ts.isCallExpression(n)) {
+      const callee = ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : null;
+      const [target, flags] = n.arguments;
+      // an open to append or write is the writer's (the run's log, the supervisor's terminal); one with no flag reads
+      const writes = (callee === "openSync" || callee === "open") && flags !== undefined && (ts.isStringLiteral(flags) || ts.isNoSubstitutionTemplateLiteral(flags)) && !flags.text.startsWith("r");
+      if (callee !== null && READS.has(callee) && target !== undefined && !writes && mentions(target)) out.push(`${line(n)}: read without the reader: ${n.getText(file)}`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(file);
+  return out;
+}
+
+test("a log file is named only in src/lib/log-read.ts and read in src/ only through its reader (issue 621)", () => {
+  // the detector's own cases: a raw read found by the name, the path, a variable or a parameter holding it
+  assert.deepEqual(rawLogReads(`const t = fs.readFileSync(path.join(home, "mason.log"), "utf8");`),
+    [`1: read without the reader: fs.readFileSync(path.join(home, "mason.log"), "utf8")`, `1: a log file named here: "mason.log"`]);
+  assert.deepEqual(rawLogReads(`const file = logPath(dir, "run");\nconst copy = file;\nconst fd = fs.openSync(copy, "r");`), [`3: read without the reader: fs.openSync(copy, "r")`]);
+  assert.deepEqual(rawLogReads(`const fd = fs.openSync(logPath(dir, "start"));`), [`1: read without the reader: fs.openSync(logPath(dir, "start"))`], "no flag is a read");
+  assert.deepEqual(rawLogReads(`function f(o: { logFile: string }) { return fs.createReadStream(o.logFile); }`), [`1: read without the reader: fs.createReadStream(o.logFile)`]);
+  assert.deepEqual(rawLogReads(`const s = readFileSync(join(home, RUN_LOG));`), [`1: read without the reader: readFileSync(join(home, RUN_LOG))`]);
+  assert.deepEqual(rawLogReads(`const s = await fs.promises.readFile(path.join(home, START_LOG), "utf8");`), [`1: read without the reader: fs.promises.readFile(path.join(home, START_LOG), "utf8")`]);
+  assert.deepEqual(rawLogReads("const t = fs.readFileSync(`${home}/dev.log`);"), ["1: read without the reader: fs.readFileSync(`${home}/dev.log`)", "1: a log file named here: }/dev.log`"], "a template's tail");
+  // and what is no raw read: the reader itself, a log opened to append or written, another file read, a log's name in a comment or in words
+  assert.deepEqual(rawLogReads([
+    `const r = new LogReader(logPath(home, "start"), { from });`,
+    `const fd = fs.openSync(logFile, "a", 0o600); // dev.log`,
+    `const c = fs.readFileSync(path.join(home, "config.json"), "utf8");`,
+    `const usage = "usage: supervise.ts <.mason dir> <dev.log> <the run's command…>";`,
+    `const w = fs.createWriteStream(logFile, { flags: "a" });`,
+  ].join("\n")), []);
+  const files = scannedFiles(["src"]).filter((f) => /\.(ts|js|cjs)$/.test(f.name) && f.name !== "src/lib/log-read.ts" && !f.name.startsWith("src/web/vendor/"));
+  for (const reader of ["src/cli/commands.ts", "src/cli/background.ts", "src/cli/supervise.ts"]) {
+    const f = files.find((x) => x.name === reader);
+    assert.ok(f && /\bLogReader\b/.test(f.src), `${reader} is scanned, and reads its log through LogReader`);
+  }
+  assert.deepEqual(files.flatMap((f) => rawLogReads(f.src).map((hit) => `${f.name}:${hit}`)), [],
+    "name a log file through src/lib/log-read.ts (logPath) and read it with its LogReader, which masks each line as it reads it");
+});

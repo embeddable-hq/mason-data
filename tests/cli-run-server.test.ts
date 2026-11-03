@@ -982,6 +982,25 @@ test("GET /api/logs: the run's last entries from memory, { at, text } oldest fir
   assert.deepEqual((await get("?since=1h")).body.lines, [], "an hour ago is after every entry of 2026-10-24");
 });
 
+test("GET /api/logs, the web page's source: an older Mason's password= line is masked as mason logs masks it, with every filter it takes; a name holding the password whole", async () => {
+  // issue 621: the run's memory of its log is masked as an entry is kept (src/lib/log-buffer.ts), by the mask the file's reader uses
+  const conn = (pw: string): string => `host='db.internal' user='reader' password=${pw} sslmode='prefer'`;
+  const old: Array<[string, string, string]> = [
+    ["2026-10-30T10:00:01.000Z", `[sync] public.orders2024_archive: its first sync failed: Unable to connect to Postgres at "${conn("'orders\\'2024\\\\x'")}"\n    password = orders2024`,
+      `[sync] public.orders2024_archive: its first sync failed: Unable to connect to Postgres at "${conn("****")}"\n    password = ****`],
+    ["2026-10-30T10:00:02.000Z", "[cdc] stream failed: password=orders2024 host=db.internal", "[cdc] stream failed: password=**** host=db.internal"],
+    ["2026-10-30T10:00:03.000Z", "[sync] retry: PASSWORD = 'orders 2024' for user \"orders2024\"", "[sync] retry: PASSWORD = **** for user \"orders2024\""],
+  ];
+  for (const [t, text] of old) runLog.push(`${t} ${text}\n`);
+  const get = async (q: string) => { const r = await call("GET", `/api/logs${q}`); assert.equal(r.status, 200, r.text); return { raw: r.text, lines: (JSON.parse(r.text) as { lines: Array<{ at: string; text: string }> }).lines }; };
+  const want = old.map(([at, , text]) => ({ at, text }));
+  for (const [q, expect] of [["", want], ["?lines=3", want], ["?lines=1", want.slice(2)], ["?since=2026-10-30T10:00:01.000Z", want.slice(1)], ["?since=2026-10-30T10:00:02Z&lines=1", want.slice(2)], ["?since=7000d", want]] as const) {
+    const r = await get(q);
+    assert.deepEqual(r.lines, expect, q);
+    for (const shown of ["'orders", "orders\\'2024", "password=orders2024", "= orders2024", "'orders 2024'"]) assert.ok(!r.raw.includes(shown), `${q}: ${shown} is shown`);
+  }
+});
+
 test("the request log's filters and pages: each reaches the ledger as read by the one parser, a malformed one is refused in the Failure shape", async () => {
   const get = async (p: string) => { const r = await call("GET", p); return { status: r.status, body: JSON.parse(r.text) as Record<string, unknown> }; };
   asks.length = 0;
