@@ -37,11 +37,17 @@ it repeats: the credentials go through the extension's secret manager (a tempora
 and dropped right after it), and the path says only the sslmode. Measured on the pinned extension: its error then quotes
 that path, `duckdb_secrets()` redacts, the attachment keeps what it merged (new pool connections and reconnects work with
 the secret gone), and it quotes each value for libpq itself. PGPASSWORD was the other way and was not taken: the process's
-environment is every child's, and setting it races the engine's threads reading it. Behind it, one mask
-(src/lib/secret-mask.ts) at every exit of the sync, so a dependency that repeats a secret one day repeats `****`; it masks
-any `password=` value whatever it is, so rows an earlier Mason wrote are scrubbed at open. Old log files are not
-rewritten (a log a person or a collector already read cannot be unread): the release note says to rotate the password
-and delete them. The trade: a password that is also a word of Mason's messages masks that word there.
+environment is every child's, and setting it races the engine's threads reading it. Behind it, one function,
+`errorText` (src/lib/secret-mask.ts), through which the sync turns a caught engine or driver error into its own words
+where it enters, so a dependency that repeats a secret one day repeats `****`; it masks any `password=` value whatever
+it is, so rows an earlier Mason wrote are scrubbed at open. **Structure is never masked**: the first round walked a mask
+over whole answers (`state()`, `mason sync`'s, the stream's), and the review found that under the password `dev` the
+table `public.devices` read `public.****ices` — `mason wait` never matched the table to its synced data, and the answer
+showed where the password sat in a known name. So only a
+dependency's free text is masked, once, where it enters; and a password under 6 characters or of letters alone, which
+cannot be told from the words around it, has an error holding it withheld whole, its code kept and why said. Old log
+files are not rewritten (a log a person or a collector already read cannot be unread): the release note says to rotate
+the password and delete them.
 
 **The public boundary.** The repository is public, so the same day the owner ruled that no private service's code,
 infrastructure, hostnames or plans land here. A change such a service needs is made here as a generic feature, in

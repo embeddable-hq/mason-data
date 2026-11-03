@@ -6,7 +6,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   restart, a failover, a password change, the network): the error each failed sync wrote held that password, whole, in
   `.mason/mason.log` and `.mason/dev.log` (and `mason serve`'s stdout, so any log collector it feeds), in the record
   of the sync, and so in `mason status`, `mason logs --events`, `mason wait`, `mason sync` and the web page. Mason now
-  hands the password to its engine apart from what an error repeats, and masks it in everything the sync says. On its
+  hands the password to its engine apart from what an error repeats, and masks it in every error the sync repeats (with
+  a password under 6 characters or of letters alone, an error whose words hold it is shown by its code alone). On its
   first start it removes the password from its own record of the sync, and says how many rows it scrubbed; it does not
   rewrite log files. So: change the user's password (`ALTER ROLE … PASSWORD`) and its URL in `.env` (or `DATABASE_URL`),
   then delete the old log files (`rm .mason/mason.log .mason/dev.log` with Mason stopped), and purge what a log

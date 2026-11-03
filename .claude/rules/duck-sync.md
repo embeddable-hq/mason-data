@@ -150,15 +150,21 @@ paths:
 
 ## What the sync records
 
-- **The source's password is in no string the engine repeats, and in nothing the sync says** (issue 599: the
+- **The source's password is in no string the engine repeats, and in no error's words the sync repeats** (issue 599: the
   extension's `Unable to connect to Postgres at "<path>"` repeated `password='…'` into the log, the ledger, `mason
   status` and the web page when a source restarted under a run). The ONE `ATTACH … (TYPE postgres)` (`attach`) takes
-  `attachPath` (the sslmode alone) and the credentials as a TEMPORARY secret (`sourceSecretSql`), dropped right after
-  the ATTACH; never a keyword string, a PGPASSWORD or a new attach site. Every exit of the sync passes the one mask
-  (src/lib/secret-mask.ts): `log`, `event`, `record`, `state()`, `streamStatus()`, `pollNow()` and its error, and an
-  event read back; `open` scrubs ledger rows an earlier Mason wrote (`scrubLedger`). DETECTOR:
-  `tests/integration/duck-secret.itest.ts` (the engine alone, the mask alone, and `mason start` searched whole),
-  `tests/secret-mask.test.ts`. ("Security comes first")
+  `attachPath` (`sslmode` and `application_name`, nothing else) and the credentials as a TEMPORARY secret
+  (`sourceSecretSql`), dropped right after the ATTACH; never a keyword string, a PGPASSWORD or a new attach site. A
+  caught engine or driver error becomes words ONCE, where it enters, through `this.errorText` (src/lib/secret-mask.ts
+  `errorText`; the stream is handed it): the log line, event, table `error` or answer is built from that. **Structure is
+  never masked** — table names, sources, phases, timestamps, slot names, states, codes, counts — and no answer is walked
+  by a mask (the review of PR 620: under the password `dev`, `public.devices` read `public.****ices`, and `mason wait`
+  never found its synced data). A password under 6 characters or of letters alone cannot be masked inside words: an
+  error whose words hold it is withheld, its code kept, said why. `open` scrubs the `password=` keyword's value from the
+  ledger's `error` and `message` fields an earlier Mason wrote (`scrubLedger`, bound parameters, never a substring of the
+  password now). DETECTOR: `tests/integration/duck-secret.itest.ts` (the engine alone, the mask alone through
+  `attachSeamForTest`, a short password's structure, `mason start` searched whole), `tests/secret-mask.test.ts` (the
+  forms, and sync.ts / stream.ts making an error's words only through `errorText`). ("Security comes first")
 - **Every sync failure is a row of `_mason.sync_events`, kept as the request log is** (src/duck/events.ts: a failure
   was kept only as a table's CURRENT error, wiped by the next success, and earlier ones only in the log file): the sync
   says each where it logs it (`Sync.event`: copy, poll, catch-up and stream failures, the database out of reach, a copy

@@ -4,13 +4,17 @@
  * closing, never the test server's own stop. Three tests:
  * - the engine alone, no mask: the secret path's ATTACH failing (a wrong password, nothing listening) says no
  *   credential, as the extension words it (src/duck/sync.ts `attachPath`, `sourceSecretSql`);
- * - the mask alone, the secret path disabled (`attachSqlForTest`: the old keyword string, password inside): every exit
+ * - the mask alone, the secret path disabled (`attachSeamForTest`: the old keyword string, password inside): every exit
  *   of the sync — its log, its events, its ledger rows, its state, mason sync's answer — holds no password, and a store
  *   an earlier Mason left with `password='…'` in its ledger is scrubbed at open;
+ * - a password too short or plain to mask (`e`, `dev`): the sync's structure — table names, phases, times, the slot's
+ *   name — is never rewritten (mason wait ready, mason sync naming the table whole), and an error whose words hold it is
+ *   withheld with its code (the review of PR 620: a mask over whole answers left `public.devices` waiting for ever);
  * - the whole run (`mason start`): a table polled every 2 s, one streamed, one added while the database is away; the
  *   password changed under the run, then the relay closed; every log file, the ledger, mason status / logs / wait /
  *   sync in each form and the command server's /api/state, /api/events and /api/logs searched for the password in
- *   every form it could be written in.
+ *   every form it could be written in. The store itself (`duck.db`) is read by SQL, never searched byte for byte: the
+ *   engine compresses its strings, so a search of the file finds nothing either way.
  *
  * What it needs: IT_POSTGRES_URL (its user may CREATE DATABASE and CREATE ROLE; wal_level = logical for the stream,
  * else that part is left out), psql on PATH. It writes only inside a database and a role it creates, and drops both.
@@ -31,8 +35,9 @@ import { loadPostgresSql } from "../../src/duck/extensions.ts";
 import { parseSource } from "../../src/cli/preflight.ts";
 
 // read from the module, not imported by name: the file loads at a commit without them (scripts/fails-without.ts)
-const { attachPath, sourceSecretSql, SRC } = syncModule as unknown as {
+const { attachPath, sourceSecretSql, attachSeamForTest, SRC } = syncModule as unknown as {
   attachPath?: (s: { sslmode: string }) => string;
+  attachSeamForTest?: { set(f: (() => string) | null): void };
   sourceSecretSql?: (s: { host: string; port: number; database: string; user: string; password: string }) => string;
   SRC: string;
 };
@@ -112,6 +117,7 @@ after(() => {
       psql(dbAdmin, `SELECT pg_drop_replication_slot('${s}')`);
     }
     psql(adminUrl, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
+    psql(adminUrl, `DROP ROLE IF EXISTS ${role}_dev`);
     psql(adminUrl, `DROP ROLE IF EXISTS ${role}`);
   }
   fs.rmSync(dir, { recursive: true, force: true });
@@ -180,8 +186,9 @@ test("the mask alone, the secret path disabled: no exit of the sync holds the pa
   const logged: string[] = [];
   const events: string[] = [];
   const store = await DuckStore.open(file, (l) => logged.push(l));
-  const sync = new Sync(store, source, tag, (l) => logged.push(l), 3_600_000, "poll", null,
-    { onEvent: (e) => events.push(JSON.stringify(e)), attachSqlForTest: legacyAttach } as ConstructorParameters<typeof Sync>[7]);
+  // the test's seam, never a run's: at a commit without it, that commit's own ATTACH is the old string anyway
+  attachSeamForTest?.set(() => legacyAttach);
+  const sync = new Sync(store, source, tag, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => events.push(JSON.stringify(e)) });
   try {
     await sync.open();
     const ledger = async (): Promise<string> => JSON.stringify([
@@ -208,7 +215,106 @@ test("the mask alone, the secret path disabled: no exit of the sync holds the pa
     assert.match(exits.log, /Connection refused|could not connect|ECONNREFUSED/, "the database away was met");
     assert.match(exits.log, /password=\*\*\*\*/, "the engine repeated the string, and the mask fired");
     for (const [what, text] of Object.entries(exits)) noLeak(text, `the sync's ${what}`);
-  } finally { await sync.stop(); await store.close(); setPassword(PASSWORD); }
+  } finally { attachSeamForTest?.set(null); await sync.stop(); await store.close(); setPassword(PASSWORD); }
+});
+
+test("a password too short or plain to mask: the sync's structure is never rewritten, and an error whose words hold it is withheld with its code", { skip, timeout: 300_000 }, async () => {
+  await makeDatabase();
+  const r = await relay(admin!.hostname, Number(admin!.port || 5432));
+  // `e`: in every phase's name (copied), the table's (polled), and the words of most errors
+  setPassword("e");
+  const parsed = parseSource(`postgres://${role}:e@127.0.0.1:${r.port}/${tag}?sslmode=disable`);
+  if ("problem" in parsed) throw new Error(parsed.problem);
+  const logged: string[] = [];
+  const events: string[] = [];
+  const store = await DuckStore.open(path.join(dir, "short.db"), (l) => logged.push(l));
+  const sync = new Sync(store, parsed.source, tag, (l) => logged.push(l), 3_600_000, "poll", null, { onEvent: (e) => events.push(JSON.stringify(e)) });
+  try {
+    await sync.open();
+    sync.setTables([POLLED]);
+    await sync.once();
+    const [st] = sync.state();
+    const ledger = (await store.writer.runAndReadAll("SELECT source, phase, epoch_ms(copied_at) FROM _mason.copy_state")).getRowsJS() as [string, string, number | bigint][];
+    assert.deepEqual([st?.source, st?.phase, st?.copiedAt], [ledger[0]![0], ledger[0]![1], new Date(Number(ledger[0]![2])).toISOString()], "the state as the ledger holds it, nothing rewritten");
+    assert.deepEqual([st?.source, st?.phase, st?.kept?.by], ["public.polled", "copied", "poll"]);
+    assert.ok(!Number.isNaN(Date.parse(st!.copiedAt!)));
+    const polled = await sync.pollNow(["public.polled"]);
+    assert.deepEqual(polled.tables.map((t) => t.table), ["public.polled"], "mason sync names the table whole");
+    // THE PASSWORD CHANGED: the engine's error says the user's name and the database's, which hold `e`
+    setPassword(NEW_PASSWORD);
+    psql(adminUrl!, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${role}'`);
+    await sync.once();
+    let refused = "";
+    try { await sync.pollNow(["public.polled"]); } catch (e) { refused = (e as Error).message; }
+    const failures = events.filter((e) => /"kind":"(source_unreachable|poll_failed)"/.test(e)).join("\n");
+    assert.match(failures, /an error( \([^)]+\))? whose words are not shown: they hold the database user's password, or a word equal to it/, failures);
+    assert.match(refused, /an error( \([^)]+\))? whose words are not shown/, refused);
+    assert.doesNotMatch(`${failures}\n${refused}\n${logged.join("\n")}`, /\*\*\*\*/, "nothing masked inside words: withheld whole");
+    assert.deepEqual(sync.state().map((s) => [s.source, s.phase]), [["public.polled", "copied"]], "the table as it was, its name whole");
+  } finally { await sync.stop(); await store.close(); await r.close(); setPassword(PASSWORD); }
+});
+
+test("mason start under the password `dev` beside a table named devices: mason wait ready, mason sync and status name it whole, the slot's name unchanged, and an error holding it withheld", { skip, timeout: 900_000 }, async () => {
+  await makeDatabase();
+  const devRole = `${role}_dev`;
+  psql(adminUrl!, `CREATE ROLE ${devRole} LOGIN REPLICATION PASSWORD 'dev'`);
+  psql(adminUrl!, `GRANT CONNECT, CREATE ON DATABASE ${tag} TO ${devRole}`);
+  psql(dbAdmin, `CREATE TABLE devices (id int PRIMARY KEY, v text); INSERT INTO devices SELECT g, 'device ' || g FROM generate_series(1, 100) g; ` +
+    `CREATE TABLE devlog (id int PRIMARY KEY, v text); INSERT INTO devlog SELECT g, 'd' || g FROM generate_series(1, 10) g; ` +
+    `ALTER TABLE devices OWNER TO ${devRole}; ALTER TABLE devlog OWNER TO ${devRole}; ANALYZE devices; ANALYZE devlog`);
+  const r = await relay(admin!.hostname, Number(admin!.port || 5432));
+  const root = path.join(dir, "devapp"), home = path.join(dir, "devhome");
+  fs.mkdirSync(root);
+  fs.mkdirSync(home);
+  const machineExtensions = path.join(os.homedir(), ".duckdb");
+  if (fs.existsSync(machineExtensions)) fs.cpSync(machineExtensions, path.join(home, ".duckdb"), { recursive: true });
+  const env = { PATH: process.env.PATH ?? "", HOME: home, MASON_PG_PORT: String(await freePort()) };
+  const mason = (...args: string[]): Promise<{ status: number | null; out: string }> => new Promise((resolve) => {
+    const child = spawn(process.execPath, [MAIN, ...args], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => { out += String(d); });
+    child.stderr.on("data", (d) => { out += String(d); });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 300_000);
+    child.once("close", (status) => { clearTimeout(timer); resolve({ status, out }); });
+  });
+  const ok = (x: { status: number | null; out: string }, what: string): string => { assert.equal(x.status, 0, `${what}:\n${x.out}`); return x.out; };
+  try {
+    ok(await mason("init", `postgres://${devRole}:dev@127.0.0.1:${r.port}/${tag}?sslmode=disable`, "--name", "devsecret", "--json"), "mason init");
+    const file = fs.readdirSync(path.join(root, "mason", "sources")).map((f) => path.join(root, "mason", "sources", f))[0]!;
+    fs.writeFileSync(file, `kind: postgres\nurl: \${DATABASE_URL}\ntables:\n  devices: { sync: poll 2s }\n${logical ? "  devlog: { sync: replication }\n" : ""}`);
+    ok(await mason("start", "--json"), "mason start");
+    const waited = JSON.parse(ok(await mason("wait", "--timeout", "120", "--json"), "mason wait")) as { ready: boolean; tables: { table: string }[] };
+    assert.equal(waited.ready, true);
+    assert.deepEqual(waited.tables.map((t) => t.table).sort(), logical ? ["public.devices", "public.devlog"] : ["public.devices"]);
+    const synced = ok(await mason("sync", "devices", "--json"), "mason sync");
+    assert.match(synced, /"table": ?"public\.devices"/, synced);
+    const status = JSON.parse(ok(await mason("status", "--json"), "mason status")) as Record<string, unknown>;
+    const text = JSON.stringify(status);
+    assert.match(text, /"public\.devices"/);
+    // the source's URL is shown with its password masked (src/cli/preflight.ts maskedUrl): nothing else is
+    assert.doesNotMatch(text, /\*\*\*\*(?!@)/, "nothing in the status is masked but the URL's password");
+    if (logical) {
+      const slot = psql(dbAdmin, `SELECT slot_name FROM pg_replication_slots WHERE database = '${tag}' AND slot_name LIKE '%devsecret%'`);
+      assert.match(slot, /dev/, "the slot's name holds the password's letters (else this proves nothing)");
+      assert.ok(text.includes(`"${slot}"`), `the status names the slot ${slot} whole`);
+    }
+    // THE PASSWORD CHANGED UNDER THE RUN: the error's words name the user (dev…), so they are withheld, its code kept
+    psql(adminUrl!, `ALTER ROLE ${devRole} PASSWORD ${lit(NEW_PASSWORD)}`);
+    psql(adminUrl!, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${devRole}'`);
+    const until = Date.now() + 180_000;
+    let events = "";
+    while (!/whose words are not shown/.test(events)) {
+      if (Date.now() > until) assert.fail(`no failure seen in 180 s:\n${events.slice(-3000)}`);
+      await new Promise((res) => setTimeout(res, 1000));
+      events = ok(await mason("logs", "--events", "--json"), "mason logs --events");
+    }
+    for (const [what, out] of [["events", events], ["logs", (await mason("logs", "-n", "1000")).out], ["status", (await mason("status", "--json")).out]] as const) {
+      assert.doesNotMatch(out, /password='?dev'?\b|:dev@|public\.\*\*\*\*ices/, `${what} holds the password or a masked name:\n${out.slice(-3000)}`);
+    }
+  } finally {
+    await mason("stop", "--json");
+    await r.close();
+  }
 });
 
 test("mason start: the password changed under the run, then the database away — no log file, ledger row, mason output or command-server answer holds it", { skip, timeout: 900_000 }, async () => {
@@ -280,12 +386,13 @@ test("mason start: the password changed under the run, then the database away �
     await r.close();
     setPassword(PASSWORD);
   }
-  // EVERY FILE THE RUN WROTE, byte for byte (the logs, the store and its write-ahead log, the config), and the ledger read
+  // EVERY FILE THE RUN WROTE, byte for byte (the logs, the config), but the store: the engine compresses its strings, so
+  // the ledger is read by SQL below
   const files: string[] = [];
   const walk = (d: string): void => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else files.push(p); } };
   walk(mhome);
   assert.ok(files.some((f) => f.endsWith("mason.log")) && files.some((f) => f.endsWith("dev.log")), files.join("\n"));
-  for (const f of files) noLeak(fs.readFileSync(f).toString("latin1") + fs.readFileSync(f, "utf8"), f);
+  for (const f of files.filter((f) => !/duck\.db(\.wal)?$/.test(f))) noLeak(fs.readFileSync(f).toString("latin1") + fs.readFileSync(f, "utf8"), f);
   const inst = await DuckDBInstance.create(path.join(mhome, "duck.db"), { access_mode: "READ_ONLY" });
   const c = await inst.connect();
   try {
