@@ -6,7 +6,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as os from "node:os";
 import { PgError } from "../src/cdc/pg-wire.ts";
-import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, serverlessHost, shownUrl, sourceWarnings, unpickableReason,
+import { checkSource, explainConnectError, isLocalHost, maskedUrl, parseSource, serverlessHost, sourceWarnings, unpickableReason,
   type SourceFacts, type SourceTable } from "../src/cli/preflight.ts";
 import { unassignedPort } from "./test-ports.ts";
 import { PGlite } from "@electric-sql/pglite";
@@ -45,7 +45,7 @@ test("a source's URL is shown only when it reads whole as a postgres:// URL, its
     // a secret file's last newline, or a space pasted at either end: trimmed, as the parse trims it
     ["postgres://me:Pw541@localhost/app\n", "postgres://me:****@localhost/app"],
     [" postgres://me:Pw541@localhost/app\r\n", "postgres://me:****@localhost/app"],
-  ] as const) assert.equal(shownUrl(url), shown, JSON.stringify(url));
+  ] as const) assert.equal(maskedUrl(url), shown, JSON.stringify(url));
   assert.equal((parseSource("postgres://me:Pw541@localhost/app\n") as { source: { url: string } }).source.url, "postgres://me:Pw541@localhost/app");
   // never shown: each a shape a mask that recognises shapes let through, or a parse that half-works would show part of
   const never: Array<[string, RegExp]> = [
@@ -74,7 +74,7 @@ test("a source's URL is shown only when it reads whole as a postgres:// URL, its
     ["postgres:///app?password=Pw541", /: it does not read as one URL/],
   ];
   for (const [value, said] of never) {
-    assert.equal(shownUrl(value), null, JSON.stringify(value));
+    // maskedUrl is shownUrl's null in a sentence (src/cli/preflight.ts)
     assert.equal(maskedUrl(value), "a value that is not a postgres:// URL (not shown)", JSON.stringify(value));
     const r = parseSource(value, "DATABASE_URL in .env");
     assert.ok("problem" in r, JSON.stringify(value));
