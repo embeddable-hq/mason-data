@@ -22,10 +22,14 @@
  *     DEFAULT), whose action runs as the referencing table's owner. TRUNCATE … CASCADE is no route: Postgres asks
  *     TRUNCATE on every table it cascades to (measured on 16).
  *   - CODE THAT RUNS AS ANOTHER ROLE: a SECURITY DEFINER function whose owner may write a route (a superuser, or one
- *     holding a route's privilege), not the role's own, that it may reach — it may EXECUTE it, a trigger calls it on a
- *     relation it may write, an event trigger calls it (on any DDL, even one refused), or any other catalog object
- *     calls it (an aggregate, a type, an operator, …: Postgres calls those without asking EXECUTE). Code of invoker's
- *     rights runs with the role's own privileges, which the rest asks.
+ *     holding a route's privilege), not the role's own, that it reaches as Postgres decides (measured on 16, PR 572's
+ *     third review): by EXECUTE, wherever it is called from (a view, a policy, a default, a CHECK, an index, a cast, an
+ *     operator); by a trigger on a relation it may write; and with no EXECUTE asked, by an event trigger (any DDL, even
+ *     one refused), an aggregate it may call (its support functions), a type (its I/O), an operator's estimators, an
+ *     operator class's, a range's or a conversion's function. Volatility bounds nothing (a STABLE definer calling a
+ *     VOLATILE writer writes). What such a function writes is in its body, which the catalog does not read: it is its own
+ *     finding (`role_may_run_definer_code`), LISTED for a person to review, and the role is never said to "only read"
+ *     while one is reached. Code of invoker's rights runs with the role's own privileges, which the rest asks.
  *   - ANOTHER IDENTITY BY CONNECTION: a foreign table it may write, or a user mapping on a server it may use (postgres_fdw,
  *     dblink): what it sends runs as the mapping's user, maybe on this very database.
  *   - BECOMING ANOTHER ROLE: ADMIN OPTION on a role (it may grant itself that role), CREATEROLE before Postgres 16 (any
@@ -46,7 +50,7 @@ export const WRITE_PRIVILEGES = ["INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFE
 
 /** Each warning's code, stable for an agent: one per thing the role should not have (`role_unknown`: could not tell). */
 export const ROLE_CODES = ["role_superuser", "role_bypassrls", "role_owns_table", "role_writes_table", "role_creates_in_schema",
-  "role_runs_definer_code", "role_reaches_foreign_server", "role_may_become_another", "role_unknown"] as const;
+  "role_may_run_definer_code", "role_reaches_foreign_server", "role_may_become_another", "role_unknown"] as const;
 export type RoleCode = typeof ROLE_CODES[number];
 
 /** The name the way out gives the role that only reads, or the first of `mason_reader2`, … not taken. */
@@ -103,8 +107,8 @@ export interface DefinerFact {
   triggers: string[];
   /** an enabled event trigger calls it */
   eventTrigger: boolean;
-  /** another catalog object calls it (an aggregate, a type, an operator, …), never asking EXECUTE */
-  used: boolean;
+  /** Postgres calls it without asking EXECUTE, for another object (an aggregate it may call, a type, an operator, …) */
+  unchecked: boolean;
 }
 
 export interface RoleFacts {
@@ -167,12 +171,29 @@ route AS (SELECT x.entry, x.oid, min(position(x.mode IN 'SRAFV')) AS rank,
 -- each privilege that reaches a synced table's rows through a route
 asks AS (SELECT x.entry, x.oid, u.p, u.o FROM route x CROSS JOIN unnest(ARRAY[${writes}]) WITH ORDINALITY AS u(p, o) WHERE x.mask & (1 << (u.o::int - 1)) <> 0),
 who AS (SELECT rolname AS role, CASE WHEN self THEN 0 ELSE 1 END AS ord FROM r UNION ALL SELECT 'public', 2),
--- SECURITY DEFINER code whose owner (not the role's own) may write a synced table's rows
-definer AS (SELECT f.oid, f.prorettype NOT IN ('trigger'::regtype, 'event_trigger'::regtype) AS direct, quote_ident(n.nspname) || '.' || quote_ident(f.proname) || '(' || pg_get_function_identity_arguments(f.oid) || ')' AS name,
-    o.rolname AS owner, o.rolsuper AS owner_super
-  FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace JOIN pg_roles o ON o.oid = f.proowner, su
-  WHERE f.prosecdef AND NOT su.any AND f.proowner NOT IN (SELECT oid FROM r)
-    AND (o.rolsuper OR EXISTS (SELECT FROM asks a WHERE ${holds("o.rolname", "a.oid", "a.p")})))
+-- SECURITY DEFINER code (not the role's own) whose owner may write a synced table's rows: each owner asked once
+sd AS (SELECT f.oid, f.proowner, f.prorettype NOT IN ('trigger'::regtype, 'event_trigger'::regtype) AS direct FROM pg_proc f, su
+  WHERE f.prosecdef AND NOT su.any AND f.proowner NOT IN (SELECT oid FROM r)),
+writer AS (SELECT o.oid, o.rolname, o.rolsuper FROM pg_roles o WHERE o.oid IN (SELECT proowner FROM sd)
+  AND (o.rolsuper OR EXISTS (SELECT FROM asks a WHERE ${holds("o.rolname", "a.oid", "a.p")}))),
+definer AS (SELECT sd.oid, sd.direct, w.rolname AS owner, w.rolsuper AS owner_super FROM sd JOIN writer w ON w.oid = sd.proowner),
+-- the relations it may write whose enabled trigger calls one (pg_trigger read once, joined: never once per function)
+dtrig AS (SELECT DISTINCT t.tgfoid, tn.nspname || '.' || tc.relname AS rel FROM pg_trigger t JOIN definer d ON d.oid = t.tgfoid
+    JOIN pg_class tc ON tc.oid = t.tgrelid JOIN pg_namespace tn ON tn.oid = tc.relnamespace
+  WHERE NOT t.tgisinternal AND t.tgenabled <> 'D'
+    AND EXISTS (SELECT FROM who w, unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS u(p) WHERE ${holds("w.role::name", "t.tgrelid", "u.p")})),
+-- what Postgres calls without asking the caller's EXECUTE: an event trigger's function, an aggregate's support
+-- functions (when it may call the aggregate), a type's input, output, receive, send, typmod and analyze functions, an
+-- operator's estimators, an operator class's support functions, a range's, a conversion's
+unchecked AS (SELECT evtfoid AS fn FROM pg_event_trigger WHERE evtenabled <> 'D'
+  UNION SELECT a.fn FROM (SELECT aggfnoid, unnest(ARRAY[aggtransfn::oid, aggfinalfn::oid, aggcombinefn::oid, aggserialfn::oid, aggdeserialfn::oid,
+      aggmtransfn::oid, aggminvtransfn::oid, aggmfinalfn::oid]) AS fn FROM pg_aggregate) a
+    WHERE a.fn IN (SELECT oid FROM definer) AND EXISTS (SELECT FROM who w WHERE has_function_privilege(w.role::name, a.aggfnoid, 'EXECUTE'))
+  UNION SELECT unnest(ARRAY[typinput::oid, typoutput::oid, typreceive::oid, typsend::oid, typmodin::oid, typmodout::oid, typanalyze::oid]) FROM pg_type
+  UNION SELECT unnest(ARRAY[oprrest::oid, oprjoin::oid]) FROM pg_operator
+  UNION SELECT amproc::oid FROM pg_amproc
+  UNION SELECT unnest(ARRAY[rngcanonical::oid, rngsubdiff::oid]) FROM pg_range
+  UNION SELECT conproc::oid FROM pg_conversion)
 SELECT json_build_object(
   'user', me.rolname, 'user_sql', quote_ident(me.rolname), 'database_sql', quote_ident(current_database()),
   'roles', (SELECT json_agg(json_build_object('name', rolname, 'self', self, 'superuser', rolsuper, 'bypassrls', rolbypassrls) ORDER BY NOT self, rolname) FROM r),
@@ -191,17 +212,16 @@ SELECT json_build_object(
       'public_create', has_schema_privilege('public'::name, n.oid, 'CREATE')) ORDER BY n.nspname), '[]'::json)
     FROM pg_namespace n WHERE n.oid IN (SELECT c.relnamespace FROM route x JOIN pg_class c ON c.oid = x.oid WHERE x.rank <= 2)),
   'definers', (SELECT coalesce(json_agg(d ORDER BY d.name), '[]'::json) FROM (
-      SELECT df.name, df.owner, df.owner_super,
-        -- a trigger's function is called only by its trigger, whatever EXECUTE says
-        df.direct AND EXISTS (SELECT FROM who w WHERE has_function_privilege(w.role::name, df.oid, 'EXECUTE')) AS callable,
-        df.direct AND has_function_privilege('public'::name, df.oid, 'EXECUTE') AS public_callable,
-        (SELECT coalesce(json_agg(DISTINCT tn.nspname || '.' || tc.relname), '[]'::json) FROM pg_trigger t JOIN pg_class tc ON tc.oid = t.tgrelid JOIN pg_namespace tn ON tn.oid = tc.relnamespace
-          WHERE t.tgfoid = df.oid AND NOT t.tgisinternal AND t.tgenabled <> 'D'
-            AND EXISTS (SELECT FROM who w, unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS u(p) WHERE ${holds("w.role::name", "t.tgrelid", "u.p")})) AS triggers,
-        EXISTS (SELECT FROM pg_event_trigger e WHERE e.evtfoid = df.oid AND e.evtenabled <> 'D') AS event_trigger,
-        EXISTS (SELECT FROM pg_depend dd WHERE dd.refclassid = 'pg_proc'::regclass AND dd.refobjid = df.oid
-          AND dd.classid NOT IN ('pg_trigger'::regclass, 'pg_event_trigger'::regclass)) AS used
-      FROM definer df) d WHERE d.callable OR json_array_length(d.triggers) > 0 OR d.event_trigger OR d.used),
+      SELECT quote_ident(n.nspname) || '.' || quote_ident(f.proname) || '(' || pg_get_function_identity_arguments(f.oid) || ')' AS name, x.owner, x.owner_super,
+        -- reached through a view, a policy, a default, a CHECK, an index, a cast or an operator only by EXECUTE, a
+        -- trigger's function only by its trigger
+        x.direct AND EXISTS (SELECT FROM who w WHERE has_function_privilege(w.role::name, x.oid, 'EXECUTE')) AS callable,
+        x.direct AND has_function_privilege('public'::name, x.oid, 'EXECUTE') AS public_callable,
+        (SELECT coalesce(json_agg(t.rel ORDER BY t.rel), '[]'::json) FROM dtrig t WHERE t.tgfoid = x.oid) AS triggers,
+        EXISTS (SELECT FROM pg_event_trigger e WHERE e.evtfoid = x.oid AND e.evtenabled <> 'D') AS event_trigger,
+        x.oid IN (SELECT fn FROM unchecked) AS unchecked
+      FROM definer x JOIN pg_proc f ON f.oid = x.oid JOIN pg_namespace n ON n.oid = f.pronamespace) d
+    WHERE d.callable OR json_array_length(d.triggers) > 0 OR d.unchecked),
   'foreign_tables', CASE WHEN su.any THEN '[]'::json ELSE (SELECT coalesce(json_agg(n.nspname || '.' || c.relname ORDER BY n.nspname, c.relname), '[]'::json)
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'f'
       AND EXISTS (SELECT FROM who w, unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS u(p) WHERE ${holds("w.role::name", "c.oid", "u.p")})) END,
@@ -222,7 +242,7 @@ interface FactsRow {
   roles: Array<{ name: string; self: boolean; superuser: boolean; bypassrls: boolean }>;
   relations: Array<{ name: string; sql: string; kind: RelationKind; entry: string; schema_sql: string; owner: string; owned: boolean; row_security: boolean; privileges: Array<{ role: string; privileges: string[] }> }>;
   schemas: Array<{ name: string; sql: string; owner: string; owned: boolean; create: string[]; public_create: boolean }>;
-  definers: Array<{ name: string; owner: string; owner_super: boolean; callable: boolean; public_callable: boolean; triggers: string[]; event_trigger: boolean; used: boolean }>;
+  definers: Array<{ name: string; owner: string; owner_super: boolean; callable: boolean; public_callable: boolean; triggers: string[]; event_trigger: boolean; unchecked: boolean }>;
   foreign_tables: string[]; mapped_servers: string[]; admin_of: string[]; create_role: boolean; server_roles: string[];
   missing: string[]; taken: string[]; rds_replication: boolean;
 }
@@ -238,7 +258,7 @@ export async function readRoleFacts(pg: Pick<PgConnection, "query">, tables: Rol
       rowSecurity: x.row_security, privileges: x.privileges })),
     schemas: row.schemas.map((s) => ({ name: s.name, sql: s.sql, owner: s.owner, owned: s.owned, create: s.create, publicCreate: s.public_create })),
     definers: row.definers.map((d) => ({ name: d.name, owner: d.owner, ownerSuperuser: d.owner_super, callable: d.callable, publicCallable: d.public_callable,
-      triggers: d.triggers, eventTrigger: d.event_trigger, used: d.used })),
+      triggers: d.triggers, eventTrigger: d.event_trigger, unchecked: d.unchecked && !d.event_trigger })),
     foreignTables: row.foreign_tables, mappedServers: row.mapped_servers, adminOf: row.admin_of, createRole: row.create_role, serverRoles: row.server_roles,
     missing: row.missing, taken: row.taken, rdsReplication: row.rds_replication,
   };
@@ -302,16 +322,6 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
     const held = creates.map((s) => `CREATE in schema ${s.name}${s.owned ? ` (${s.owner === f.user ? "it owns the schema" : `${s.owner}, which owns the schema`}: it may drop what is in it too)` : route([...s.create.filter((r) => r !== f.user), ...(s.publicCreate ? ["PUBLIC"] : [])])}`);
     out.push(warn("role_creates_in_schema", `${f.user} may ${held.join("; ")}: it may make tables and functions beside the synced ones`));
   }
-  // code that runs as another role, whose owner may write the synced rows
-  if (f.definers.length) {
-    const held = f.definers.map((d) => {
-      const how = [...(d.callable ? ["it may call it"] : []), ...(d.triggers.length ? [`a trigger on ${list(d.triggers)}, which it may write, calls it`] : []),
-        ...(d.eventTrigger ? ["an event trigger calls it on any DDL it runs, even one refused"] : []),
-        ...(d.used ? ["another object of the database calls it (an aggregate, a type, an operator or the like), never asking EXECUTE"] : [])];
-      return `${d.name} runs as ${d.owner}${d.ownerSuperuser ? ", a superuser" : ", which may write a synced table's rows"} (SECURITY DEFINER), and ${how.join("; ")}`;
-    });
-    out.push(warn("role_runs_definer_code", `${f.user} reaches code that runs as another role: ${held.join("; ")}`));
-  }
   if (f.foreignTables.length || f.mappedServers.length) {
     const held = [...(f.foreignTables.length ? [`may write the foreign table(s) ${list(f.foreignTables)}`] : []),
       ...(f.mappedServers.length ? [`has a user mapping (its own or PUBLIC's) on ${list(f.mappedServers)}, which it may use`] : [])];
@@ -323,13 +333,31 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
       ...(f.serverRoles.length ? [`holds ${list(f.serverRoles)}: the server's programs or files, as its operating-system user`] : [])];
     out.push(warn("role_may_become_another", `${f.user} ${held.join("; ")}`));
   }
-  if (out.length) return out;
+  // SECURITY DEFINER code: what it writes is in its body, which the catalog does not say, so it is LISTED for a person
+  // to review, never "fixed" by a statement that changes another role's privileges, and never taken for "only reads"
+  const definers = definerLine(f);
+  if (out.length) return definers === null ? out : [...out, { name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} ${definers}` }];
   const unread = f.missing.length ? ` (not asked of ${list(f.missing)}, which the database does not have: mason start says so)` : "";
   const synced = f.relations.filter((x) => x.kind === "table").length;
-  return [{ name: "role", ok: true, detail: `${f.user} only reads: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, ` +
-    "no SECURITY DEFINER code it reaches whose owner may write" + (synced ? `, and it neither owns nor may write to the ${synced} synced table(s) — ` +
-      "nor to their partitions, inheritance children or parents, the tables their foreign keys act on, or the views and rules that write them — " +
-      "nor CREATE in their schemas" : ", and no table is added yet (the tables are asked once one is)") + unread }];
+  const itself = "not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server" + (synced ? `, and it neither owns nor may write to the ${synced} synced table(s) — ` +
+    "nor to their partitions, inheritance children or parents, the tables their foreign keys act on, or the views and rules that write them — " +
+    "nor CREATE in their schemas" : ", and no table is added yet (the tables are asked once one is)");
+  if (definers !== null) return [{ name: "role", ok: true, warn: true, code: "role_may_run_definer_code", detail: `${f.user} may not write the synced tables itself: ${itself}. But it ${definers}${unread}` }];
+  return [{ name: "role", ok: true, detail: `${f.user} only reads: ${itself}, and it reaches no SECURITY DEFINER code whose owner may write${unread}` }];
+}
+
+/** "may run 2 SECURITY DEFINER function(s) of roles that may write the synced tables: …; what they write is not known", or null */
+function definerLine(f: RoleFacts): string | null {
+  if (!f.definers.length) return null;
+  const each = f.definers.map((d) => {
+    const how = [...(d.callable ? [d.publicCallable ? "every role may call it (PUBLIC's EXECUTE)" : "it may call it"] : []),
+      ...(d.triggers.length ? [`a trigger on ${list(d.triggers)}, which it may write, calls it`] : []),
+      ...(d.eventTrigger ? ["an event trigger calls it on any DDL, even one refused, never asking EXECUTE"] : []),
+      ...(d.unchecked ? ["Postgres calls it for an aggregate, a type, an operator or the like, never asking EXECUTE"] : [])];
+    return `${d.name} runs as ${d.owner}${d.ownerSuperuser ? ", a superuser" : ", which may write the synced tables"}: ${how.join("; ")}`;
+  });
+  return `may run ${f.definers.length} SECURITY DEFINER function(s) of roles that may write the synced tables — ${each.join("; ")}. ` +
+    "What they write is not known (it is in their bodies, which the catalog does not read): review each, whether it writes a synced table and who may reach it";
 }
 
 /** The line a check is when the role could not be asked: said, never taken for "only reads". */
@@ -350,9 +378,11 @@ export function readerUrl(url: string, role: string): string {
 /**
  * THE WAY OUT, as the statements the database's owner runs, then the line of the project to change: a role that may
  * LOGIN and SELECT the synced tables and nothing else — REPLICATION where a table streams, and the publication made by
- * the owner when Mason would make its own (CREATE PUBLICATION … FOR TABLE needs the tables' owner); a policy where a
- * table has row-level security (the new role would read no row of it); PUBLIC's write privileges revoked, which every
- * role holds, the new one too.
+ * the owner when Mason would make its own (CREATE PUBLICATION … FOR TABLE needs the tables' owner); a policy for it where
+ * a table has row-level security (the new role would read no row of it). It NEVER prints a statement that changes any
+ * role's privileges but the new one's (PR 572's review: a REVOKE … FROM PUBLIC of a policy's function, run as printed,
+ * broke the application's own reads): what PUBLIC holds, and the SECURITY DEFINER code every role reaches, the new role
+ * holds and reaches too, and is SAID in a comment, for the database's owner to decide.
  */
 export function readOnlyFix(f: RoleFacts, ask: RoleAsk): string {
   let role: string = READER_ROLE;
@@ -371,11 +401,12 @@ export function readOnlyFix(f: RoleFacts, ask: RoleAsk): string {
     lines.push(`-- and GRANT USAGE ON SCHEMA <schema>, SELECT ON <table> TO ${role}, for each table you add`);
   }
   for (const x of tables.filter((t) => t.rowSecurity)) lines.push(`CREATE POLICY ${role}_reads ON ${x.sql} FOR SELECT TO ${role} USING (true);   -- row-level security: else it reads no row`);
+  // PUBLIC's privileges are every role's, the new one's too: said for the database's owner to decide, never revoked here
   const publicCreate = f.schemas.filter((s) => s.publicCreate);
-  if (publicCreate.length) lines.push(`REVOKE CREATE ON SCHEMA ${publicCreate.map((s) => s.sql).join(", ")} FROM PUBLIC;   -- PUBLIC's, which every role holds (the default before Postgres 15)`);
+  if (publicCreate.length) lines.push(`-- PUBLIC may CREATE in schema ${list(publicCreate.map((s) => s.name))} (the default before Postgres 15), so the new role may too: whether PUBLIC should is the owner's to decide, for every role`);
   for (const x of f.relations) {
     const pub = x.privileges.find((g) => g.role === "PUBLIC");
-    if (pub) lines.push(`REVOKE ${pub.privileges.join(", ")} ON ${x.sql} FROM PUBLIC;   -- PUBLIC's, which every role holds`);
+    if (pub) lines.push(`-- PUBLIC holds ${pub.privileges.join(", ")} on ${x.name}, so the new role does too: whether PUBLIC should is the owner's to decide, for every role`);
   }
   // what Mason's own would carry (src/duck/sync.ts ensurePublication): the replicated tables, every change
   const published = tables.filter((x) => ask.replicated.includes(x.entry));
@@ -383,11 +414,10 @@ export function readOnlyFix(f: RoleFacts, ask: RoleAsk): string {
   if (ownPublication) {
     lines.push(`CREATE PUBLICATION ${role} FOR TABLE ${published.map((x) => x.sql).join(", ")} WITH (publish = 'insert, update, delete, truncate');   -- Mason's own needs the tables' owner`);
   }
-  // what every role reaches, the new one too: PUBLIC's EXECUTE is revoked; what no grant decides is said
-  for (const d of f.definers.filter((x) => x.publicCallable)) lines.push(`REVOKE EXECUTE ON FUNCTION ${d.name} FROM PUBLIC;   -- runs as ${d.owner}: GRANT it to the roles that call it`);
-  for (const d of f.definers.filter((x) => x.eventTrigger || x.used)) {
-    lines.push(`-- ${d.name} runs as ${d.owner} for any role (${d.eventTrigger ? "an event trigger calls it" : "another object calls it"}): ALTER FUNCTION ${d.name} SECURITY INVOKER, if it may`);
-  }
+  // what every role reaches, the new one too, is SAID, never changed: a statement that changed PUBLIC's would change
+  // every role's, the application's included (PR 572's review: a REVOKE of a policy's function broke the app's reads)
+  const everyone = f.definers.filter((d) => d.publicCallable || d.eventTrigger || d.unchecked);
+  if (everyone.length) lines.push(`-- the new role may still run ${list(everyone.map((d) => d.name))}, as every role may (SECURITY DEFINER): mason doctor lists them to review`);
   if (f.mappedServers.length) lines.push(`-- a user mapping FOR PUBLIC on ${list(f.mappedServers)} would serve it too: map the roles that need it by name`);
   lines.push("-- and GRANT SELECT ON each view Mason should serve: it serves the views the role it connects as may read");
   // the app's own DATABASE_URL stays the app's: Mason's gets a variable of its own

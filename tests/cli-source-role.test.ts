@@ -32,13 +32,13 @@ const ask = (o: Partial<RoleAsk> = {}): RoleAsk => ({
 test("a role that only reads: one line, ok, no code and no way out", async () => {
   const { roleChecks } = await roleModule();
   assert.deepEqual(roleChecks(facts(), ask()), [{ name: "role", ok: true,
-    detail: "app only reads: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, no SECURITY DEFINER code it reaches whose owner may write, " +
+    detail: "app only reads: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, " +
       "and it neither owns nor may write to the 2 synced table(s) — nor to their partitions, inheritance children or parents, the tables their foreign keys act on, " +
-      "or the views and rules that write them — nor CREATE in their schemas" }]);
+      "or the views and rules that write them — nor CREATE in their schemas, and it reaches no SECURITY DEFINER code whose owner may write" }]);
   const none = roleChecks(facts({ relations: [], schemas: [], missing: ["public.gone"] }), ask());
   assert.equal(none.length, 1);
   assert.equal(none[0]!.ok, true);
-  assert.match(none[0]!.detail, /^app only reads: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, no SECURITY DEFINER code it reaches whose owner may write, and no table is added yet \(the tables are asked once one is\) \(not asked of public\.gone, which the database does not have: mason start says so\)$/);
+  assert.match(none[0]!.detail, /^app only reads: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, and no table is added yet \(the tables are asked once one is\), and it reaches no SECURITY DEFINER code whose owner may write \(not asked of public\.gone, which the database does not have: mason start says so\)$/);
 });
 
 test("a superuser, itself or by a membership it may SET ROLE to: ONE warning, role_superuser, whatever else follows from it", async () => {
@@ -82,8 +82,10 @@ test("BYPASSRLS, an owner, a write privilege and CREATE: a warning each, with it
     "CREATE in schema public (granted to PUBLIC, which every role is): it may make tables and functions beside the synced ones");
   // PUBLIC's privileges are every role's, the new one's too: the way out revokes them
   const fix = checks[0]!.fix!;
-  assert.match(fix, /^REVOKE CREATE ON SCHEMA public FROM PUBLIC;/m);
-  assert.match(fix, /^REVOKE TRIGGER ON public\.events_2026 FROM PUBLIC;/m);
+  // PUBLIC's are every role's, the application's too: said for the owner to decide, never revoked by the way out
+  assert.match(fix, /^-- PUBLIC may CREATE in schema public \(the default before Postgres 15\), so the new role may too: whether PUBLIC should is the owner's to decide, for every role$/m);
+  assert.match(fix, /^-- PUBLIC holds TRIGGER on public\.events_2026, so the new role does too/m);
+  assert.doesNotMatch(fix, /REVOKE|ALTER FUNCTION/, "no statement that changes another role's privileges");
   assert.equal(new Set(checks.map((c) => c.fix)).size, 1, "one way out, shared");
 });
 
@@ -99,7 +101,7 @@ test("a write through another relation is named by its route: a partition, an IN
   assert.match(checks[1]!.detail, /^app may UPDATE on public\.orders_v \(a view that writes public\.orders\); INSERT on public\.orders_log \(its rules write public\.orders\) \(granted to PUBLIC, which every role is\)\. /);
   const fix = readOnlyFix(f, ask());
   assert.match(fix, /^GRANT SELECT ON public\.orders, billing\."Invoices" TO mason_reader;$/m, "SELECT on the synced tables, never on a route");
-  assert.match(fix, /^REVOKE INSERT ON public\.orders_log FROM PUBLIC;/m, "PUBLIC's write through a route is revoked too");
+  assert.match(fix, /^-- PUBLIC holds INSERT on public\.orders_log, so the new role does too/m, "PUBLIC's write through a route is said too");
 });
 
 test("THE CLASS: an INHERITS parent and a table a foreign key acts on are routes, named in their words", async () => {
@@ -113,33 +115,40 @@ test("THE CLASS: an INHERITS parent and a table a foreign key acts on are routes
     "DELETE on public.accounts (a foreign key's ON DELETE or ON UPDATE action carries its changes to billing.Invoices, as its owner)");
 });
 
-test("THE CLASS: SECURITY DEFINER code it reaches whose owner may write, a foreign server, and a role it may become: a warning each; the way out revokes what PUBLIC reaches", async () => {
+test("THE CLASS: SECURITY DEFINER code it reaches whose owner may write is LISTED to review, never fixed; a foreign server and a role it may become are warnings", async () => {
   const { roleChecks, readOnlyFix } = await roleModule();
-  const definer = { owner: "admin", ownerSuperuser: true, callable: false, publicCallable: false, triggers: [] as string[], eventTrigger: false, used: false };
-  const f = facts({
-    definers: [{ ...definer, name: "public.bump(integer)", callable: true, publicCallable: true },
-      { ...definer, name: "public.copy_in()", ownerSuperuser: false, owner: "writers", triggers: ["public.inbox"] },
-      { ...definer, name: "public.on_ddl()", eventTrigger: true }, { ...definer, name: "public.sum_in(integer, integer)", used: true }],
-    foreignTables: ["public.remote_orders"], mappedServers: ["loopback"],
-    adminOf: ["writers"], createRole: true, serverRoles: ["pg_execute_server_program"],
-  });
+  const definer = { owner: "admin", ownerSuperuser: true, callable: false, publicCallable: false, triggers: [] as string[], eventTrigger: false, unchecked: false };
+  const definers = [{ ...definer, name: "public.bump(integer)", callable: true, publicCallable: true },
+    { ...definer, name: "public.copy_in()", ownerSuperuser: false, owner: "writers", triggers: ["public.inbox"] },
+    { ...definer, name: "public.on_ddl()", eventTrigger: true }, { ...definer, name: "public.sum_in(integer, integer)", unchecked: true },
+    { ...definer, name: "public.mine()", callable: true }];
+  const LISTING = "may run 5 SECURITY DEFINER function(s) of roles that may write the synced tables — " +
+    "public.bump(integer) runs as admin, a superuser: every role may call it (PUBLIC's EXECUTE); " +
+    "public.copy_in() runs as writers, which may write the synced tables: a trigger on public.inbox, which it may write, calls it; " +
+    "public.on_ddl() runs as admin, a superuser: an event trigger calls it on any DDL, even one refused, never asking EXECUTE; " +
+    "public.sum_in(integer, integer) runs as admin, a superuser: Postgres calls it for an aggregate, a type, an operator or the like, never asking EXECUTE; " +
+    "public.mine() runs as admin, a superuser: it may call it. " +
+    "What they write is not known (it is in their bodies, which the catalog does not read): review each, whether it writes a synced table and who may reach it";
+  // alone: never "only reads", and no way out, since no statement for this role alone decides it
+  const alone = roleChecks(facts({ definers }), ask());
+  assert.deepEqual(alone.map((c) => [c.code, c.ok, c.warn, c.fix]), [["role_may_run_definer_code", true, true, undefined]]);
+  assert.equal(alone[0]!.detail, "app may not write the synced tables itself: not a superuser, no BYPASSRLS, no ADMIN OPTION, no server roles, no foreign server, " +
+    "and it neither owns nor may write to the 2 synced table(s) — nor to their partitions, inheritance children or parents, the tables their foreign keys act on, " +
+    `or the views and rules that write them — nor CREATE in their schemas. But it ${LISTING}`);
+  // beside the other warnings: listed after them
+  const f = facts({ definers, foreignTables: ["public.remote_orders"], mappedServers: ["loopback"], adminOf: ["writers"], createRole: true, serverRoles: ["pg_execute_server_program"] });
   const checks = roleChecks(f, ask());
-  assert.deepEqual(checks.map((c) => c.code), ["role_runs_definer_code", "role_reaches_foreign_server", "role_may_become_another"]);
+  assert.deepEqual(checks.map((c) => c.code), ["role_reaches_foreign_server", "role_may_become_another", "role_may_run_definer_code"]);
   const said = (code: string) => checks.find((c) => c.code === code)!.detail.split(". Mason only reads")[0];
-  assert.equal(said("role_runs_definer_code"), "app reaches code that runs as another role: " +
-    "public.bump(integer) runs as admin, a superuser (SECURITY DEFINER), and it may call it; " +
-    "public.copy_in() runs as writers, which may write a synced table's rows (SECURITY DEFINER), and a trigger on public.inbox, which it may write, calls it; " +
-    "public.on_ddl() runs as admin, a superuser (SECURITY DEFINER), and an event trigger calls it on any DDL it runs, even one refused; " +
-    "public.sum_in(integer, integer) runs as admin, a superuser (SECURITY DEFINER), and another object of the database calls it (an aggregate, a type, an operator or the like), never asking EXECUTE");
+  assert.equal(said("role_may_run_definer_code"), `app ${LISTING}`);
   assert.equal(said("role_reaches_foreign_server"), "app may write the foreign table(s) public.remote_orders, and has a user mapping (its own or PUBLIC's) on loopback, which it may use: " +
     "what it sends there runs as the mapping's user, and the server may be this very database");
   assert.equal(said("role_may_become_another"), "app has ADMIN OPTION on writers: it may grant itself that role and its privileges; " +
     "has CREATEROLE, which before Postgres 16 lets it grant itself any role but a superuser; holds pg_execute_server_program: the server's programs or files, as its operating-system user");
+  // the way out changes no role's privileges but the new one's: what every role reaches is said, never revoked
   const fix = readOnlyFix(f, ask());
-  assert.match(fix, /^REVOKE EXECUTE ON FUNCTION public\.bump\(integer\) FROM PUBLIC;   -- runs as admin: GRANT it to the roles that call it$/m, "what PUBLIC may call, the new role may too");
-  assert.doesNotMatch(fix, /REVOKE EXECUTE ON FUNCTION public\.copy_in/, "a trigger's function: the new role writes no table");
-  assert.match(fix, /^-- public\.on_ddl\(\) runs as admin for any role \(an event trigger calls it\): ALTER FUNCTION public\.on_ddl\(\) SECURITY INVOKER, if it may$/m);
-  assert.match(fix, /^-- public\.sum_in\(integer, integer\) runs as admin for any role \(another object calls it\)/m);
+  assert.doesNotMatch(fix, /REVOKE|ALTER FUNCTION/);
+  assert.match(fix, /^-- the new role may still run public\.bump\(integer\), public\.on_ddl\(\) and public\.sum_in\(integer, integer\), as every role may \(SECURITY DEFINER\): mason doctor lists them to review$/m);
   assert.match(fix, /^-- a user mapping FOR PUBLIC on loopback would serve it too/m);
   // a superuser's line stands alone
   assert.deepEqual(roleChecks({ ...f, roles: [{ name: "app", self: true, superuser: true, bypassrls: false }] }, ask()).map((c) => c.code), ["role_superuser"]);
@@ -198,7 +207,7 @@ test("the catalog read is ONE statement that reads, under the catalog's search_p
   assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE|CREATE|ALTER|DROP|GRANT|REVOKE|SET)\s+(INTO|ON|TABLE|ROLE|SCHEMA|PUBLICATION|LOCAL|\w+\s*\()/i, "no write or setting, only privilege names asked of has_*_privilege");
   assert.ok(sql.includes(`'[{"schema":"public","table":"o''brien"},{"schema":"My Schema","table":"Orders"}]'::json`), sql.slice(0, 400));
   for (const fn of ["has_table_privilege", "has_any_column_privilege", "has_schema_privilege", "pg_has_role", "pg_inherits", "pg_rewrite", "pg_depend", "pg_relation_is_updatable",
-    "confdeltype", "confupdtype", "prosecdef", "has_function_privilege", "pg_trigger", "pg_event_trigger", "pg_user_mappings", "has_server_privilege", "MEMBER WITH ADMIN OPTION",
+    "confdeltype", "confupdtype", "prosecdef", "has_function_privilege", "pg_trigger", "pg_event_trigger", "pg_aggregate", "typinput", "oprrest", "pg_amproc", "rngcanonical", "conproc", "pg_user_mappings", "has_server_privilege", "MEMBER WITH ADMIN OPTION",
     "pg_execute_server_program", "pg_write_server_files", "pg_read_server_files"]) assert.ok(sql.includes(fn), fn);
   // a membership counts where it gives the privileges or SET ROLE (Postgres 16's options), never merely by being one
   assert.match(sql, /THEN pg_has_role\(me\.oid, p\.oid, 'USAGE'\) OR pg_has_role\(me\.oid, p\.oid, 'SET'\) ELSE pg_has_role\(me\.oid, p\.oid, 'MEMBER'\) END/);
