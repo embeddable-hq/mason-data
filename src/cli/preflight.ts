@@ -27,14 +27,16 @@ export function isLocalHost(host: string): boolean {
  * THE ONE WAY A VALUE OF THE SOURCE'S URL SETTING IS SHOWN (issue 541), wherever Mason prints, logs or answers it: the URL
  * with its password replaced by `****`, or null — never shown. It fails closed, so a secret masked by recognising its
  * shape cannot leak in another shape: shown only when the value parses WHOLE as a postgres:// URL with a host, nothing
- * dropped or rewritten by the parse (no space or control character, which a parse strips or encodes), and no `@` or
+ * dropped or rewritten by the parse (no space or control character inside it, which a parse strips or encodes; one at
+ * either end, a secret file's last newline, is trimmed as the parse trims it), and no `@` or
  * `#` after the host (a password holding `/`, `?` or `#` unencoded splits the authority there, and its tail would be
  * shown as a path, a parameter or a fragment). A keyword/value string, a bare password, any other URL: null.
  */
 export function shownUrl(value: string): string | null {
-  if (/[\s\x00-\x1f\x7f]/.test(value)) return null;
+  const v = value.trim();
+  if (/[\s\x00-\x1f\x7f]/.test(v)) return null;
   let u: URL;
-  try { u = new URL(value); } catch { return null; }
+  try { u = new URL(v); } catch { return null; }
   if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") return null;
   if (!u.hostname || u.hash !== "" || /[@#]/.test(u.pathname + u.search)) return null;
   if (u.password) u.password = "****";
@@ -63,7 +65,8 @@ function notShownProblem(value: string, name: string): string {
     : /^jdbc:/i.test(t) ? "it looks like a JDBC URL: drop jdbc:, and give the user and password before the host"
     : !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(t) ? "it is not a URL"
     : !/^postgres(ql)?:\/\//i.test(t) ? `its scheme is ${KNOWN_SCHEMES.has(t.slice(0, t.indexOf(":")).toLowerCase()) ? `${t.slice(0, t.indexOf(":")).toLowerCase()}, not` : "not"} postgres:// or postgresql://`
-    : "it does not read as one URL (a character in the password that is not URL-encoded splits it, or the port is not a number up to 65535)";
+    : "it does not read as one URL (a character that is not URL-encoded splits it: an @ : / ? # % or a space in the password, an @ or # in the database " +
+      "or a parameter; or the port is not a number up to 65535)";
   return `${name} is not a postgres:// URL: ${why}. Write it as ${URL_FORM}, where ${ENCODE}`;
 }
 
@@ -75,7 +78,7 @@ function notShownProblem(value: string, name: string): string {
  */
 export function parseSource(url: string, name = "the URL"): { source: Source } | { problem: string } {
   if (shownUrl(url) === null) return { problem: notShownProblem(url, name) };
-  const u = new URL(url);
+  const u = new URL(url.trim());
   if (!u.username) u.username = encodeURIComponent(os.userInfo().username);
   try {
     // inside the try: a user name with a malformed %-escape is refused (decodeURIComponent throws), never a crash

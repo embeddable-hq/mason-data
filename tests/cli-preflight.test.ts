@@ -42,7 +42,11 @@ test("a source's URL is shown only when it reads whole as a postgres:// URL, its
     ["postgres://me:p%2FPw541%3F%23@localhost/app", "postgres://me:****@localhost/app"],
     ["postgresql://me:Pw541@[::1]:5433/app", "postgresql://me:****@[::1]:5433/app"],
     ["postgres://me@localhost/app", "postgres://me@localhost/app"],
-  ] as const) assert.equal(shownUrl(url), shown, url);
+    // a secret file's last newline, or a space pasted at either end: trimmed, as the parse trims it
+    ["postgres://me:Pw541@localhost/app\n", "postgres://me:****@localhost/app"],
+    [" postgres://me:Pw541@localhost/app\r\n", "postgres://me:****@localhost/app"],
+  ] as const) assert.equal(shownUrl(url), shown, JSON.stringify(url));
+  assert.equal((parseSource("postgres://me:Pw541@localhost/app\n") as { source: { url: string } }).source.url, "postgres://me:Pw541@localhost/app");
   // never shown: each a shape a mask that recognises shapes let through, or a parse that half-works would show part of
   const never: Array<[string, RegExp]> = [
     ["host=db user=me password=Pw541 dbname=app", /: it looks like a keyword\/value connection string \(host=… user=… password=…\)\. Write it as postgres:\/\/user:password@host:5432\/your_app/],
@@ -62,7 +66,8 @@ test("a source's URL is shown only when it reads whole as a postgres:// URL, its
     // a space or a control character, which a parse encodes or drops: never shown rewritten
     ["postgres://me:Pw 541@db/app", /: it does not read as one URL/],
     ["postgres://me:Pw\t541@db/app", /: it does not read as one URL/],
-    ["postgres://me:Pw541@db/app\n", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app\nPw541", /: it does not read as one URL/],
+    ["postgres://me:Pw541@db/app?application_name=a@b", /: it does not read as one URL/],
     ["postgres://me:Pw541@127.0.0.1:99999/app", /: it does not read as one URL .*the port is not a number up to 65535/],
     ["postgres://me:Pw541@[::1/app", /: it does not read as one URL/],
     ["postgres://me:Pw541@local host/app", /: it does not read as one URL/],

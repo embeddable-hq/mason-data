@@ -577,7 +577,7 @@ test("no URL, a bad one, nothing listening, a refused password: the failure shap
   // a URL that cannot be read is never repeated, its password or any part (issue 541): stderr is the MCP client's log file
   const unreadable = await runMason(dir, ["mcp"], { ...env, MASON_URL: "postgres://claude:s3cret@127.0.0.1:99999/shop" });
   assert.equal(unreadable.code, 2);
-  assert.match(unreadable.stderr, /^✗ mason mcp: MASON_URL is not a postgres:\/\/ URL: it does not read as one URL \(a character in the password that is not URL-encoded splits it, or the port is not a number up to 65535\)\. Write it as postgres:\/\/user:password@host:5432\/your_app/);
+  assert.match(unreadable.stderr, /^✗ mason mcp: MASON_URL is not a postgres:\/\/ URL: it does not read as one URL \(a character that is not URL-encoded splits it: .*; or the port is not a number up to 65535\)\. Write it as postgres:\/\/user:password@host:5432\/your_app/);
   assert.doesNotMatch(unreadable.stderr, /s3cret|99999/);
   const away = await runMason(dir, ["mcp"], { ...env, MASON_URL: "postgres://claude:x@127.0.0.1:1/shop" });
   assert.deepEqual([away.code, away.stdout], [1, ""]);
