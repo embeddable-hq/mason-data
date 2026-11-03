@@ -155,3 +155,82 @@ test("each numeric form whose scale the types fix is stored with Postgres's digi
     assert.deepEqual((await typed(w, "SELECT * FROM aggregates")).rows, [["-2.50", "4.00", "2.60", "2.60000", "12345678901234567890.1235"]]);
   });
 });
+
+// issue 242: an integer column converted from a numeric holds the plan's SQL's value, which the rewrite's CAST reader
+// computes exactly (rounded half away from zero, as numeric_int4) or refuses by name, never the engine's double's half to even
+const scheduledH = (sql: string, orderBy?: string): string => `kind: scheduled\ntarget_lag: 1h\nsql: ${sql}\n${orderBy === undefined ? "" : `order_by: ${orderBy}\n`}`;
+const ROUNDED = scheduledH("SELECT id, (amount / 1.6)::int AS q4, (amount / 1.6)::int8 AS q8, CAST(amount / 1.6 AS integer) AS c4, CAST(amount / 1.6 AS bigint) AS c8, " +
+  "(amount / 1)::int AS half, sqrt(abs(amount) * 1.5625)::int AS sq, (n / 4.0)::int AS n4, nullif(amount / 1.6, 0)::int AS nz, nullif(amount / 1.6, 0)::int8 AS nz8, " +
+  "nullif(amount / 1.6, 2.5)::int AS ne, (exp(ln(2.5)) * sign(amount))::int AS ex, sign(amount)::int AS sg, nullif(amount, 0)::int AS nd, (amount * 2)::int AS tw, " +
+  "trunc(amount / 1.6)::int AS tr, round(amount / 1.6)::int AS ro, ((amount / 1.6)::float8)::int AS fl, (amount::float8 / 1.6)::int8 AS fd, " +
+  "(lag(amount / 1.6) OVER (ORDER BY id))::int AS lg FROM ledger", "id");
+const ROUNDED_TOTALS = scheduledH("SELECT (avg(amount) * 3 / 1.04)::int AS a, (max(amount / 1.6))::int AS mx, (min(amount / 1.6))::int AS mn, " +
+  "(sum(amount) / nullif(count(*), 0))::int AS pc, round(100.0 * sum(amount) / nullif(sum(n), 0))::int AS r FROM ledger");
+const ROUNDED_READS = {
+  derived: scheduledH("SELECT id, x::int AS x FROM (SELECT id, amount / 1.6 AS x FROM ledger) s", "id"),
+  ctes: scheduledH("WITH s AS (SELECT id, amount / 1.6 AS q FROM ledger) SELECT id, q::int AS x FROM s", "id"),
+  unioned: scheduledH("SELECT id, (amount / 1.6)::int AS x FROM ledger UNION ALL SELECT id, (amount / 1)::int FROM ledger"),
+  grouped: scheduledH("SELECT (amount / 1.6)::int AS x, count(*) AS c FROM ledger GROUP BY 1"),
+  scalar: scheduledH("SELECT id, (SELECT nullif(l2.amount / 1.6, 0)::int FROM ledger l2 WHERE l2.id = ledger.id) AS x FROM ledger", "id"),
+};
+
+test("issue 242: an integer cast of a numeric the engine holds as a double is stored rounded half away from zero, or refused by name", async () => {
+  await overLedger({ rounded: ROUNDED, roundedtotals: ROUNDED_TOTALS, ...ROUNDED_READS }, async (w, restarted) => {
+    const r = await typed(w, "SELECT * FROM rounded ORDER BY id");
+    assert.deepEqual(r.fields.map(([n, oid]) => [n, oid]).slice(1, 5), [["q4", 23], ["q8", 20], ["c4", 23], ["c8", 20]]);
+    const text = (v: unknown): unknown => v === null ? null : String(v);
+    const byColumn = (name: string): unknown[] => r.rows.map((x) => text(x[r.fields.findIndex(([n]) => n === name)]));
+    const want: Record<string, unknown[]> = {
+      q4: ["1", null, "-2", "3"], q8: ["1", null, "-2", "3"], c4: ["1", null, "-2", "3"], c8: ["1", null, "-2", "3"],
+      half: ["1", null, "-3", "4"], sq: ["1", null, "2", "3"], n4: ["3", null, "536870912", "536870912"],
+      nz: ["1", null, "-2", "3"], nz8: ["1", null, "-2", "3"], ne: ["1", null, "-2", null], ex: ["3", null, "-3", "3"],
+      sg: ["1", null, "-1", "1"], nd: ["1", null, "-3", "4"], tw: ["2", null, "-5", "8"], tr: ["0", null, "-1", "2"], ro: ["1", null, "-2", "3"],
+      fl: ["1", null, "-2", "2"], fd: ["1", null, "-2", "2"], lg: [null, "1", null, "-2"],
+    };
+    for (const [name, values] of Object.entries(want)) assert.deepEqual(byColumn(name), values, `${name}${restarted ? ", after the restart" : ""}`);
+    assert.deepEqual((await typed(w, "SELECT * FROM roundedtotals")).rows.map((x) => x.map(text)), [["3", "3", "-2", "1", "0"]]);
+    for (const name of ["derived", "ctes", "scalar"]) assert.deepEqual((await typed(w, `SELECT id, x FROM ${name} ORDER BY id`)).rows.map((x) => text(x[1])), ["1", null, "-2", "3"], name);
+    assert.deepEqual((await typed(w, "SELECT id, x FROM unioned ORDER BY id, x")).rows.map((x) => text(x[1])), ["1", "1", null, null, "-3", "-2", "3", "4"]);
+    assert.deepEqual((await typed(w, "SELECT x, c FROM grouped ORDER BY x NULLS FIRST")).rows.map((x) => x.map(text)), [[null, "1"], ["-2", "1"], ["1", "1"], ["3", "1"]]);
+    if (restarted) return;
+    // percentile_disc / mode() of a quotient pick the row by its exact order and answer its exact value (PR 506's class
+    // round): stored as Postgres rounds it, half away from zero (0.6875 is 1; mode's -1.5625 * 2 = -3.125 is -3); a double
+    // the engine computes (a stddev of an unconstrained numeric) is known only with the rows: its build fails naming the
+    // gap; neither is ever stored from the double
+    w.write("pdisc", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount / 1.6))::int AS x FROM ledger"));
+    w.write("moded", scheduledH("SELECT (mode() WITHIN GROUP (ORDER BY amount / 1.6) * 2)::int AS x FROM ledger"));
+    w.write("spreadint", scheduledH("SELECT stddev(big)::int AS x FROM ledger"));
+    // a NULLIF's numeric, printed, is a division's column still
+    w.write("nulled", scheduledH("SELECT id, nullif(amount / 1.6, 0) AS x FROM ledger"));
+    // percentile_disc of a DECIMAL column is the column's own value, cast as Postgres casts it
+    w.write("pdiscol", scheduledH("SELECT (percentile_disc(0.5) WITHIN GROUP (ORDER BY amount))::int AS p, (percentile_disc(0.1) WITHIN GROUP (ORDER BY amount))::int8 AS m FROM ledger"));
+    await w.until((s) => s.state === "refused", "public.nulled");
+    for (const [name, want] of [["pdisc", "1"], ["moded", "-3"]] as const) {
+      await w.until(served(w.logged), `public.${name}`);
+      assert.deepEqual((await typed(w, `SELECT x FROM ${name}`)).rows.map((x) => x.map(text)), [[want]], name);
+    }
+    await w.until((s) => s.state === "failed", "public.spreadint");
+    assert.match(w.status("public.spreadint").error ?? "", /cast to an integer type is not supported by Mason \(Mason gap numeric-double-integer\)/, JSON.stringify(w.status("public.spreadint")));
+    refusedAt(w.status("public.nulled").refusals, "sql", /^column x divides a numeric, which the engine computes as a double$/);
+    await w.until(served(w.logged), "public.pdiscol");
+    assert.deepEqual((await typed(w, "SELECT p, m FROM pdiscol")).rows.map((x) => x.map(text)), [["1", "-3"]]);
+    // its way out is stored
+    w.write("pdiscint", scheduledH("SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY (amount / 1.6)::int) AS x FROM ledger"));
+    await w.until(served(w.logged), "public.pdiscint");
+    assert.deepEqual((await typed(w, "SELECT x FROM pdiscint")).rows.map((x) => x.map(text)), [["1"]]);
+    // through PR 520's SHARED programs (#484): a NULLIF, a sign and a picked value each read three times a level, over a
+    // quotient chain, stored half away from zero (0.6875 is 1, -1.5625 is -2, 2.5 is 3)
+    const chain = (read: string, bottom: string): string => [1, 2, 3].reduce((s, k) => `SELECT id, ${read} AS q FROM (${s}) s${k}`, bottom);
+    w.write("nzchain", scheduledH(`SELECT id, q::int AS x FROM (${chain("nullif(q, 0) + nullif(q, 0) - nullif(q, 0)", "SELECT id, amount / 1.6 AS q FROM ledger")}) s ORDER BY id`));
+    w.write("sgchain", scheduledH(`SELECT id, (q * 2.5)::int AS x FROM (${chain("sign(q) + sign(q) - sign(q)", "SELECT id, amount / 1.6 AS q FROM ledger")}) s ORDER BY id`));
+    w.write("pdchain", scheduledH("SELECT (x + x - x)::int AS x, (x + x - x * 2)::int8 AS y FROM (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY amount / 1.6) AS x FROM ledger) s"));
+    for (const [name, sql, want] of [
+      ["nzchain", "SELECT id, x FROM nzchain ORDER BY id", [["1", "1"], ["3", null], ["9223372036854775806", "-2"], ["9223372036854775807", "3"]]],
+      ["sgchain", "SELECT id, x FROM sgchain ORDER BY id", [["1", "3"], ["3", null], ["9223372036854775806", "-3"], ["9223372036854775807", "3"]]],
+      ["pdchain", "SELECT x, y FROM pdchain", [["1", "0"]]],
+    ] as const) {
+      await w.until(served(w.logged), `public.${name}`);
+      assert.deepEqual((await typed(w, sql)).rows.map((x) => x.map(text)), want, name);
+    }
+  });
+});
