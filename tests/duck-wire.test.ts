@@ -7075,6 +7075,13 @@ test("issue 406: upper, lower and initcap map case under their input collation, 
     }
     // a parameter has no value before its Bind: the catalog's, as before (the listed difference)
     assert.deepEqual((await answer(wire, "SELECT upper($1::text)", ["abc"])).rows, [["ABC"]]);
+    // the statement's timeout during that run is its answer, never a reason to run it again on the catalog
+    await wire.query("SET statement_timeout = 300");
+    const t = Date.now();
+    await assert.rejects(wire.query("SELECT count(upper(x::text)) FROM generate_series(1, 2000000000) x"),
+      (e: pg.DatabaseError) => e.code === "57014" && e.message === "canceling statement due to statement timeout");
+    assert.ok(Date.now() - t < 5000, `stopped after ${Date.now() - t} ms`);
+    await wire.query("SET statement_timeout = 0");
   } finally { await wire.end(); }
 });
 

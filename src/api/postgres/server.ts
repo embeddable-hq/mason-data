@@ -1568,7 +1568,8 @@ class Session {
     } catch (e) {
       // the statement's own failure (Postgres's analysis, the rewrite's refusal, the engine's error at the run): said in
       // the log and answered by the catalog, as before this route existed
-      if (!(e instanceof StatementError || e instanceof PgError || e instanceof EncodeError || e instanceof NumericError)) throw e;
+      // (a cancel or the statement's timeout is the statement's answer, never a reason to run it again on the catalog)
+      if (controller.signal.aborted || !(e instanceof StatementError || e instanceof PgError || e instanceof EncodeError || e instanceof NumericError)) throw e;
       this.server.log(`session ${this.id}: a statement of no table that maps case is answered by the catalog: the synced data's run failed (${e instanceof StatementError || e instanceof PgError ? `${e.fields.code} ` : ""}${e.message})`);
       return false;
     } finally { disarm(); }
