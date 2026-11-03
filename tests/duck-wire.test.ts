@@ -131,6 +131,10 @@ const DDL = [
   // quotients equal to a double's 17 digits that Postgres tells apart (PR 207's class round)
   "CREATE TABLE public.bigdec (id INTEGER PRIMARY KEY, x DECIMAL(30,20), y DECIMAL(30,20))",
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
+  // issue 214: an unconstrained numeric and a numeric(65,30), held as the copy holds them, DECIMAL(38, the scale their
+  // values use) (src/duck/sync.ts "A NUMERIC THE EXTENSION WOULD READ AS A DOUBLE"), a w of 30 integer digits
+  "CREATE TABLE public.pnum (id INTEGER PRIMARY KEY, u DECIMAL(38,4), w DECIMAL(38,2))",
+  "INSERT INTO public.pnum VALUES (1, 1.2345, 19.99), (2, 7, 123456789012345678901234567890.25), (3, -0.5, 5), (4, NULL, NULL)",
   // issue 244's deep chains executed (#484): `deepShapes`' table, ten rows of NULLs, duplicates, ties, a padded char(4)
   "CREATE TABLE public.deep_t (id INTEGER PRIMARY KEY, a INTEGER, b VARCHAR, c DECIMAL(10,2), d VARCHAR)",
   "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab  '), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a   '), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz  '), " +
@@ -211,6 +215,8 @@ const PG_DDL = [
   "CREATE TABLE public.big AS SELECT g AS id, 'v' || g AS v FROM generate_series(0, 149999) g",
   "CREATE TABLE public.bigdec (id integer PRIMARY KEY, x numeric(30,20), y numeric(30,20))",
   "INSERT INTO public.bigdec VALUES (1, 1.00000000000000000001, 1), (2, 1.00000000000000000002, 1), (3, 2.5, 2), (4, 5, 2), (5, 2.5, 1)",
+  "CREATE TABLE public.pnum (id integer PRIMARY KEY, u numeric, w numeric(65,30))",
+  "INSERT INTO public.pnum VALUES (1, 1.2345, 19.99), (2, 7, 123456789012345678901234567890.25), (3, -0.5, 5), (4, NULL, NULL)",
   "CREATE TABLE public.deep_t (id integer PRIMARY KEY, a integer, b text, c numeric(10,2), d char(4))",
   "INSERT INTO public.deep_t VALUES (1, 5, 'x', 10.00, 'ab'), (2, -3, 'y', 0.00, 'abcd'), (3, NULL, 'x', -7.25, 'a'), (4, 7, NULL, 10.00, NULL), (5, 0, 'z', 99999999.99, 'zz'), " +
     "(6, 2, 'y', NULL, 'b'), (7, 9, 'x', 1.01, 'ab'), (8, -1, 'w', 3.33, 'c'), (9, 4, NULL, 2.50, 'd'), (10, 1, 'v', -0.01, 'e')",
@@ -289,6 +295,8 @@ const schema: PgSchema = {
     { name: "big", primaryKey: ["id"], joins: [], columns: [{ name: "id", type: "int4" }, { name: "v", type: "text" }] },
     { name: "bigdec", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "x", type: "numeric", spelled: "numeric(30,20)" }, { name: "y", type: "numeric", spelled: "numeric(30,20)" }] },
+    { name: "pnum", primaryKey: ["id"], joins: [],
+      columns: [{ name: "id", type: "int4" }, { name: "u", type: "numeric", spelled: "numeric" }, { name: "w", type: "numeric", spelled: "numeric(65,30)" }] },
     { name: "deep_t", primaryKey: ["id"], joins: [],
       columns: [{ name: "id", type: "int4" }, { name: "a", type: "int4" }, { name: "b", type: "text" }, { name: "c", type: "numeric", spelled: "numeric(10,2)" }, { name: "d", type: "text", spelled: "character(4)" }] },
     { name: "ratios", primaryKey: ["id"], joins: [],
@@ -496,7 +504,7 @@ test("what reads no table is the catalog Postgres's; a schema'd table is in the 
     // machine as Postgres names it
     assert.match(String((await answer(c, "SELECT version()")).rows[0]![0]), /^PostgreSQL 18\.6 \(mason-data 0\.6\.1\) on (aarch64|x86_64)-(linux|darwin)$/);
     const tables = await answer(c, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema IN ('public', 'sales') ORDER BY 1, 2");
-    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
+    assert.deepEqual(tables.rows, [["public", "accounts"], ["public", "big"], ["public", "big_paid"], ["public", "bigdec"], ["public", "chars"], ["public", "clock_times"], ["public", "deep_t"], ["public", "ga"], ["public", "instants"], ["public", "invoices"], ["public", "jcase"], ["public", "jdocs"], ["public", "jnat"], ["public", "jnums"], ["public", "jq"], ["public", "jq_on"], ["public", "late"], ["public", "late_c"], ["public", "late_counts"], ["public", "late_d"], ["public", "late_joined"], ["public", "late_joined_again"], ["public", "late_n"], ["public", "late_p"], ["public", "late_read"], ["public", "late_read_again"], ["public", "moods"], ["public", "nullish"], ["public", "orders"], ["public", "paid_orders"], ["public", "pnum"], ["public", "ratios"], ["public", "rowid_cased"], ["public", "serials"], ["public", "texts"], ["public", "ua"], ["public", "uchild"], ["public", "uparent"], ["sales", "accounts"], ["sales", "invoices"]]);
     const cols = await answer(c, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sales' AND table_name = 'invoices' ORDER BY ordinal_position");
     assert.deepEqual(cols.rows, [["id", "integer"], ["total", "numeric"]]);
   } finally { await c.end(); }
@@ -3919,6 +3927,80 @@ test("a numeric quotient passed through a DISTINCT shows Postgres's exact text (
       "SELECT DISTINCT s.q FROM (SELECT b.x / b.y AS q FROM bigdec b) s ORDER BY 1 LIMIT 3"]) {
       assert.deepEqual(rowSet(await answer(c, sql)), rowSet(await postgres(sql)), sql);
     }
+  } finally { await c.end(); }
+});
+
+test("issue 214: a numeric parameter beside a value the engine holds exactly is compared exactly, natively where its type holds it", async () => {
+  const c = await client();
+  try {
+    const x = "SELECT b.id FROM bigdec b WHERE";
+    const shapes: Array<[string, Array<Array<string | null>>]> = [
+      [`${x} b.x = $1 ORDER BY 1`, [["1.00000000000000000001"], ["1.00000000000000000002"], ["1.000000000000000000015"], ["1.000000000000000000014"], ["-1.000000000000000000015"],
+        ["0.000000000000000000001"], ["2.5"], ["2.50000000000000000000000"], ["12345678901.5"], ["99999999999999999999999999999999999999999.5"], ["NaN"], ["Infinity"], ["-Infinity"], [null]]],
+      ["SELECT b.id, b.x = $1, b.x <> $1, b.x IS DISTINCT FROM $1, b.x IS NOT DISTINCT FROM $1, nullif(b.x, $1), CASE b.x WHEN $1 THEN 'hit' ELSE 'miss' END FROM bigdec b ORDER BY 1",
+        [["1.00000000000000000001"], ["1.000000000000000000015"], [null], ["NaN"]]],
+      [`${x} $1 = b.x ORDER BY 1`, [["1.00000000000000000001"]]],
+      [`${x} $1 < b.x ORDER BY 1`, [["1.000000000000000000015"]]],
+      [`${x} b.x < $1 ORDER BY 1`, [["1.000000000000000000015"], ["1.00000000000000000002"], ["NaN"], ["Infinity"], ["-Infinity"], ["-99999999999999999999999999999999999999999"], ["99999999999999999999999999999999999999999"]]],
+      [`${x} b.x <= $1 ORDER BY 1`, [["1.000000000000000000015"], ["1.00000000000000000002"], ["1.000000000000000000019"]]],
+      [`${x} b.x > $1 ORDER BY 1`, [["1.000000000000000000015"], ["1.00000000000000000001"], ["NaN"], ["-Infinity"]]],
+      [`${x} b.x >= $1 ORDER BY 1`, [["1.000000000000000000011"], ["2.5"]]],
+      [`${x} b.x BETWEEN $1 AND $2 ORDER BY 1`, [["1.000000000000000000005", "1.000000000000000000015"], ["1.00000000000000000001", "1.00000000000000000002"], ["1", null]]],
+      [`${x} b.x NOT BETWEEN $1 AND $2 ORDER BY 1`, [["1.000000000000000000005", "1.000000000000000000015"]]],
+      [`${x} b.x IN ($1, $2) ORDER BY 1`, [["1.00000000000000000001", "5"], ["1.000000000000000000015", "2.5"], [null, "5"]]],
+      [`${x} b.x NOT IN ($1, $2) ORDER BY 1`, [["1.00000000000000000001", "5"], ["1.000000000000000000015", "2.5"]]],
+      [`${x} b.x IN ($1, 5) ORDER BY 1`, [["1.00000000000000000001"]]],
+      [`${x} b.x = $1::numeric(30,20) ORDER BY 1`, [["1.000000000000000000015"]]],
+      [`${x} b.x < $1::numeric(30,20) ORDER BY 1`, [["1.000000000000000000015"]]],
+      [`${x} b.x = $1::numeric ORDER BY 1`, [["1.000000000000000000015"], ["1.00000000000000000001"]]],
+      [`${x} b.x * 2 = $1 ORDER BY 1`, [["2.00000000000000000002"]]],
+      [`${x} b.x + b.y > $1 ORDER BY 1`, [["2.000000000000000000015"]]],
+      ["SELECT b.y, sum(b.x) FROM bigdec b GROUP BY b.y HAVING sum(b.x) = $1 ORDER BY 1", [["4.50000000000000000003"], ["4.50000000000000000002"]]],
+      [`${x} b.id = $1::numeric ORDER BY 1`, [["1.00000000000000000001"], ["1"]]],
+      [`${x} b.id < $1::numeric ORDER BY 1`, [["2.99999999999999999999"], ["3"], ["99999999999999999999"]]],
+      [`${x} b.x / 1 = $1 ORDER BY 1`, [["1.00000000000000000001"]]],
+      ["SELECT o.id FROM orders o WHERE o.amount = $1 ORDER BY 1", [["42.001"], ["42.00"], ["42"]]],
+      ["SELECT o.id FROM orders o WHERE o.amount BETWEEN $1 AND $2 ORDER BY 1", [["41.995", "42.005"]]],
+      ["SELECT p.id FROM pnum p WHERE p.u = $1 ORDER BY 1", [["1.2345"], ["1.23450000000000000001"], ["7"]]],
+      ["SELECT p.id FROM pnum p WHERE p.w = $1 ORDER BY 1", [["19.99"], ["19.990000000000000000000000000001"], ["123456789012345678901234567890.25"]]],
+      ["SELECT p.id FROM pnum p WHERE p.w < $1 ORDER BY 1", [["19.995"], ["123456789012345678901234567890.251"]]],
+      ["SELECT p.id, p.w > $1, p.u >= $1 FROM pnum p ORDER BY 1", [["5"], ["5.000000000000000000000000000001"]]],
+    ];
+    for (const [sql, bindings] of shapes) {
+      for (const values of bindings) assert.deepEqual(await answer(c, sql, values), await postgres(sql, values), `${sql} bound ${JSON.stringify(values)}`);
+    }
+    // the issue's own: Postgres's rows, never the double's
+    const ids = async (sql: string, values: Array<string | null>): Promise<unknown[]> => (await answer(c, sql, values)).rows.map((r) => r[0]);
+    assert.deepEqual(await ids(`${x} b.x = $1 ORDER BY 1`, ["1.00000000000000000001"]), ["1"]);
+    assert.deepEqual(await ids(`${x} b.x <= $1 ORDER BY 1`, ["1.000000000000000000015"]), ["1"]);
+    assert.deepEqual(await ids(`${x} b.x = $1::numeric(30,20) ORDER BY 1`, ["1.000000000000000000015"]), ["2"]);
+    // = ANY of a numeric[] parameter: Postgres's rows, or an error — never the double's [1, 2, 4] (its element type is
+    // issue 576's: unchanged here)
+    const any = `${x} b.x = ANY($1::numeric[]) ORDER BY 1`;
+    const anyAnswer = await answer(c, any, ["{1.00000000000000000001,5}"]).catch((e: unknown) => e as Error);
+    if (!(anyAnswer instanceof Error)) assert.deepEqual(anyAnswer, await postgres(any, ["{1.00000000000000000001,5}"]), any);
+    // one Parse's plan, several values (a prepared statement executed again)
+    const prepared = `${x} b.x = $1 ORDER BY 1`;
+    for (const [value, rows] of [["2.5", ["3", "5"]], ["1.000000000000000000015", []], ["1.00000000000000000001", ["1"]], [null, []]] as Array<[string | null, string[]]>) {
+      const r = await c.query({ name: "issue214", text: prepared, values: [value], rowMode: "array", types: raw } as pg.QueryConfig);
+      assert.deepEqual(r.rows.map((row) => (row as unknown[])[0]), rows, `prepared, bound ${String(value)}`);
+    }
+    // the native case: the engine's own comparison, no exact key computed per row — each Mason call over constants only,
+    // folded by DuckDB once (the guard, and the keyed branch's parameter key it drops); a value the type does not hold is
+    // keyed row by row (150,000 rows: dozens of vectors)
+    const counts = async (): Promise<Map<string, number>> => new Map(await store.functionCalls());
+    const calledFor = async (sql: string, values: string[]): Promise<Array<[string, number]>> => {
+      const before = await counts();
+      assert.deepEqual(await answer(c, sql, values), await postgres(sql, values), `${sql} bound ${JSON.stringify(values)}`);
+      return [...await counts()].map(([k, v]): [string, number] => [k, v - (before.get(k) ?? 0)]).filter(([, n]) => n > 0);
+    };
+    for (const [sql, values] of [["SELECT count(*) FROM big WHERE id < $1::numeric", ["100"]], ["SELECT count(*) FROM big WHERE id::numeric = $1", ["99999"]],
+      [`${x} b.x = $1 ORDER BY 1`, ["2.5"]], [`${x} b.x BETWEEN $1 AND $2 ORDER BY 1`, ["1", "2.5"]]] as Array<[string, string[]]>) {
+      const called = await calledFor(sql, values);
+      assert.ok(called.some(([k]) => k === "__mason_numeric_fits") && called.every(([, n]) => n <= values.length), `${sql}: ${JSON.stringify(called)}`);
+    }
+    const keyed = await calledFor("SELECT count(*) FROM big WHERE id < $1::numeric", ["100.5"]);
+    assert.ok(keyed.some(([k, n]) => k === "__mason_numeric_order" && n > 10), `a value an integer does not hold is keyed row by row: ${JSON.stringify(keyed)}`);
   } finally { await c.end(); }
 });
 

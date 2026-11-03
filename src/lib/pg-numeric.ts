@@ -111,6 +111,46 @@ export function numericText(n: PgNumeric): string {
 }
 
 /**
+ * WHETHER A NUMERIC'S TEXT IS WIDER THAN DuckDB's DECIMAL(width, scale): THE ONE RULE of what a DECIMAL holds exactly,
+ * for the copy (src/duck/sync.ts: a value the stream brings past its synced column's scale re-copies the table) and for
+ * a parameter compared with a value the engine holds exactly (`fitsEngineType`). NaN and ±Infinity are wider than every
+ * DECIMAL; `significant`: only the decimals a value USES must fit (a declared scale's text has its trailing zeros,
+ * 19.990000…), else every decimal written. The 0 of 0.5 counts as an integer digit (conservative: a value said wider
+ * is only ever compared by its exact key, never rounded).
+ */
+export function numericWiderThan(text: string, scale: number, significant: boolean, width = 38): boolean {
+  if (text === "NaN" || text === "Infinity" || text === "-Infinity") return true;
+  const m = /^-?(\d*)(?:\.(\d+))?$/.exec(text);
+  if (m === null) return true;
+  const decimals = significant ? (m[2] ?? "").replace(/0+$/, "") : m[2] ?? "";
+  return decimals.length > scale || m[1]!.length > width - scale;
+}
+
+/** each integer type DuckDB names (`typeof`), by its range */
+const ENGINE_INTEGERS: Readonly<Record<string, readonly [bigint, bigint]>> = {
+  TINYINT: [-(2n ** 7n), 2n ** 7n - 1n], SMALLINT: [-(2n ** 15n), 2n ** 15n - 1n], INTEGER: [-(2n ** 31n), 2n ** 31n - 1n],
+  BIGINT: [-(2n ** 63n), 2n ** 63n - 1n], HUGEINT: [-(2n ** 127n), 2n ** 127n - 1n],
+  UTINYINT: [0n, 2n ** 8n - 1n], USMALLINT: [0n, 2n ** 16n - 1n], UINTEGER: [0n, 2n ** 32n - 1n], UBIGINT: [0n, 2n ** 64n - 1n], UHUGEINT: [0n, 2n ** 128n - 1n],
+};
+
+/**
+ * WHETHER THE ENGINE'S TYPE HOLDS A NUMERIC EXACTLY (issue 214): `type` is DuckDB's own name of it (`typeof`, folded
+ * by DuckDB to a constant), `text` Postgres's numeric_out of a bound parameter (src/duck/analyze.ts readParameters). A
+ * DECIMAL(w, s) holds what is no wider (`numericWiderThan`, its trailing zeros dropped); an integer type a whole number
+ * within its range; anything else (a DOUBLE, a text) nothing. A value held exactly is cast into the type by DuckDB
+ * without rounding, so a comparison in it is Postgres's; any other is compared by its exact key (src/duck/rewrite.ts
+ * `numericParamComparison`).
+ */
+export function fitsEngineType(type: string, text: string): boolean {
+  const decimal = /^DECIMAL\((\d+),(\d+)\)$/.exec(type);
+  if (decimal !== null) return !numericWiderThan(text, Number(decimal[2]), true, Number(decimal[1]));
+  const range = ENGINE_INTEGERS[type];
+  if (range === undefined || numericWiderThan(text, 0, true, 40)) return false;
+  const whole = BigInt(text.replace(/\.0*$/, ""));
+  return whole >= range[0] && whole <= range[1];
+}
+
+/**
  * A numeric's ORDER KEY (issue 252): bytes whose order is numeric_cmp's, for numeric_out's text (or `NaN`, `Infinity`,
  * `-Infinity`): -Infinity < the negatives < 0 < the positives < Infinity < NaN, as Postgres sorts them; equal values
  * (`2.5`, `2.50`) are one key. A finite value is its sign, its decimal exponent and its significant digits; a negative

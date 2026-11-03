@@ -74,6 +74,7 @@ import { createSlot, currentLsn, dropSlot, readSlot, type SlotState } from "../c
 import { holdOf } from "./held-types.ts";
 import { addCounts, countsText, duckValue, foldInto, noChanges, noCounts, ReplicationStream, type ChangeCounts, type StreamedTable, type TableChanges } from "./stream.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
+import { numericWiderThan } from "../lib/pg-numeric.ts";
 import { gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
@@ -850,14 +851,9 @@ function fitsDecimal(column: string, scale: number, source: string, significant:
     `OR ${v} IN ('NaN', 'Infinity', '-Infinity') THEN error(${literal(`${WIDER} [${source}]`)}) ELSE ${v} END AS ${v}`;
 }
 
-/** a numeric's text that does not fit DECIMAL(38, scale): `fitsDecimal`'s rule, for a value the stream brings */
-function widerThan(text: string, scale: number, significant: boolean): boolean {
-  if (text === "NaN" || text === "Infinity" || text === "-Infinity") return true;
-  const m = /^-?(\d*)(?:\.(\d+))?$/.exec(text);
-  if (m === null) return true;
-  const decimals = significant ? (m[2] ?? "").replace(/0+$/, "") : m[2] ?? "";
-  return decimals.length > scale || m[1]!.length > 38 - scale;
-}
+/** a numeric's text that does not fit DECIMAL(38, scale): `fitsDecimal`'s rule, for a value the stream brings (the one
+ *  rule, src/lib/pg-numeric.ts `numericWiderThan`) */
+const widerThan = (text: string, scale: number, significant: boolean): boolean => numericWiderThan(text, scale, significant);
 
 /** The DuckDB type a copied column is stored as: the extension's own, but a JSON for a json / jsonb (it reads them as text). */
 /** a char(n) column (format_type's `character(n)`): the extension reads its values with the padding trimmed */
