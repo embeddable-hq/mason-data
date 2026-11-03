@@ -8,6 +8,30 @@ This is the decision record, by subsystem in the order of the code: each decisio
 the operative rules are `.claude/rules/`. "The test server" is an m7g.xlarge (4 cores, 15 GiB, EBS at ~125 MB/s) reading
 an RDS read replica; "a laptop" an Apple M5 (10 cores, 32 GiB) under other sessions' load: ranges of runs, not benchmarks.
 
+## Security comes first (Tom, 2026-11-02)
+
+**Decision.** Security is the first design principle of everything Mason does. The owner stated it as a priority
+above all others. When it pulls against convenience, speed or a smaller change, security wins, and the change says
+what it traded.
+
+**Why.** Mason sits between a production Postgres and whatever queries it. It holds the source's URL, it holds a copy
+of the data, and it answers on a network port. A flaw anywhere in that chain is a flaw in someone's access control
+over their production data.
+
+**What it means in a review.** A security hole was already a blocking finding. Under this decision, the review also
+asks of every change what it exposes and to whom, even when the diff does not look like security code.
+
+**What it built on.** Several existing pieces already followed this rule:
+
+- the local servers' guard (`src/cli/security.ts`);
+- TLS required off loopback (`src/api/postgres/listener.ts`);
+- users whose password is a MAC and whose list holds no secret (`src/duck/users.ts`);
+- a tunnel token kept off the command line (`src/cli/tunnel.ts`).
+
+**The public boundary.** The repository is public, so the same day the owner ruled that no private service's code,
+infrastructure, hostnames or plans land here. A change such a service needs is made here as a generic feature, in
+generic words, which keeps this repo useful to every operator and reveals nothing that is not ours to publish.
+
 ## The copy
 
 ### Heap order, no index
