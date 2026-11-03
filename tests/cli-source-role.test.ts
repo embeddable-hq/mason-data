@@ -31,11 +31,11 @@ const ask = (o: Partial<RoleAsk> = {}): RoleAsk => ({
 test("a role that only reads: one line, ok, no code and no way out", async () => {
   const { roleChecks } = await roleModule();
   assert.deepEqual(roleChecks(facts(), ask()), [{ name: "role", ok: true,
-    detail: "app only reads: no superuser or BYPASSRLS, and owns, may write to or CREATE beside the 2 synced table(s)" }]);
+    detail: "app only reads: not a superuser, no BYPASSRLS, and it neither owns nor may write to the 2 synced table(s), nor CREATE in their schemas" }]);
   const none = roleChecks(facts({ relations: [], schemas: [], missing: ["public.gone"] }), ask());
   assert.equal(none.length, 1);
   assert.equal(none[0]!.ok, true);
-  assert.match(none[0]!.detail, /none added yet: asked again once one is.*not asked of public\.gone, which the database does not have/);
+  assert.match(none[0]!.detail, /^app only reads: not a superuser, no BYPASSRLS, and no table is added yet \(the tables are asked once one is\) \(not asked of public\.gone, which the database does not have: mason start says so\)$/);
 });
 
 test("a superuser, itself or by a membership it may SET ROLE to: ONE warning, role_superuser, whatever else follows from it", async () => {

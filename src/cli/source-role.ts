@@ -185,8 +185,9 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
   }
   if (out.length) return out;
   const unread = f.missing.length ? ` (not asked of ${list(f.missing)}, which the database does not have: mason start says so)` : "";
-  const what = f.relations.some((x) => !x.partition) ? `the ${f.relations.filter((x) => !x.partition).length} synced table(s)` : "no synced table yet";
-  return [{ name: "role", ok: true, detail: `${f.user} only reads: no superuser or BYPASSRLS, and owns, may write to or CREATE beside ${what === "no synced table yet" ? "none of the synced tables (none added yet: asked again once one is)" : what}${unread}` }];
+  const synced = f.relations.filter((x) => !x.partition).length;
+  return [{ name: "role", ok: true, detail: `${f.user} only reads: not a superuser, no BYPASSRLS, ` +
+    (synced ? `and it neither owns nor may write to the ${synced} synced table(s), nor CREATE in their schemas` : "and no table is added yet (the tables are asked once one is)") + unread }];
 }
 
 /** The line a check is when the role could not be asked: said, never taken for "only reads". */

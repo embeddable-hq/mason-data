@@ -88,7 +88,7 @@ test("mason doctor says whether the user Mason connects as could write: a reader
     // a role that only reads: said so, exit 0
     const read = doctor(reader);
     assert.equal(read.status, 0, read.stdout);
-    assert.deepEqual(roleLines(read), [{ name: "role", ok: true, detail: `${reader} only reads: no superuser or BYPASSRLS, and owns, may write to or CREATE beside the 3 synced table(s)` }]);
+    assert.deepEqual(roleLines(read), [{ name: "role", ok: true, detail: `${reader} only reads: not a superuser, no BYPASSRLS, and it neither owns nor may write to the 3 synced table(s), nor CREATE in their schemas` }]);
 
     // the owner of a synced table
     const owns = doctor(owner);
