@@ -129,7 +129,7 @@ function psql(url: string, sql: string): string {
 }
 
 /** every table the oracle copies: the shop's, `one`, and the type matrix's (oracle/type-matrix.ts TYPED) */
-const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "jcontain", "coll", "colls", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
+const COPIED = [...TABLES, "one", "dup", "dup2", "typed", "mapped", "grouped", "typed_arrays", "castable", "cased", "jcased", "jpath", "jcontain", "coll", "colls", "colls_case", "moods", "defaults", "late", "late_c", ...MERGE_COPIED, "top_a", "top_b", "top_c", "top_n", "top_r", "top_rc", "pnums", "star_o", "star_b", "instants", "docs", "nullish", "jorder", "keyed", "pairs", "vkeys", "moodlog", ...LATEST_TABLES];
 
 /** the one-row table every dialect case reads, so DuckDB (not the catalog Postgres) answers it */
 const ONE = "CREATE TABLE public.one (id int PRIMARY KEY); INSERT INTO public.one VALUES (1);";
@@ -255,8 +255,6 @@ const KNOWN: Decided[] = [
   shapesDecided(VALUES_ARMS, { sql: /sum\(s::numeric\) (AS s )?FROM castable WHERE id IN \(71, 7[46]\)/, kind: "value", issue: 402, why: "a VALUES row's numeric NaN or Infinity in a set operation prints as the engine's double (`nan`, `inf`)" }),
   // min / max of a set operation's column where equal values have two scales: the listed min-max-scale-tie
   { shape: ["numeric-aggregate"], sql: /UNION ALL SELECT o\.id FROM star_o o ORDER BY 1 FETCH FIRST 3 ROWS WITH TIES/, kind: "text", gap: "min-max-scale-tie", why: "max of 1 and 1.00000000000000000000: Postgres keeps the last it reads, Mason the greatest operands" },
-  // (main answers a set operation's 1e30 arm since PR 231; a CTE's sum still overflows: #214)
-  shapesDecided(NUMERIC_READERS, { sql: /sum\(s::numeric\)/, kind: "refused", issue: 214, why: "a numeric sum past the engine's 38 digits, in a CTE: 22003" }),
   // a cast to a Postgres type in a VALUES list reaches the engine unmapped (citext, jsonb[], arrays, composites, time(n)[])
   shapesDecided(VALUES_ARMS, { sql: ANY, kind: "refused", issue: 266, why: "a VALUES list's cast to a mapped type is refused with the engine's error" }),
   // a set operation's inet, jsonb or array output beside a VALUES arm loses Postgres's text
@@ -290,6 +288,7 @@ const KNOWN: Decided[] = [
   // Mason gap fromless-numeric-text-order)
   { sql: /^SELECT 'a6ß' > E'a\\u03086ß' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-mark-run-form", why: "a mark's skipped run compares ß's third level with a digit's: glibc's one scale, Mason's per letter" },
   { sql: /^SELECT 1\.5 AS n, 'a' < 'B' AS lt$/, collation: "not-c", kind: "value", gap: "fromless-numeric-text-order", why: "a statement of no table that computes a numeric is the catalog's, whose text order is byte order" },
+  { sql: /^SELECT upper\('ß'\) AS u, 1\.5 AS n$/, kind: "value", gap: "fromless-numeric-text-order", why: "a statement of no table that computes a numeric is the catalog's, whose case mapping is its own: ẞ where glibc keeps ß (issue 406)" },
   { sql: /^SELECT E'\\uA79A' < E'\\u00C4' FROM public\.one$/, collation: "libc", kind: "value", gap: "libc-rare-letter", why: "a rare letter's weight no spelling of it says" },
   { sql: /sqrt\(abs\((i2|f4)\)\)/, kind: "text", gap: "float-last-digit", why: "log10's last digit: libm's against DuckDB's", machineFloat: true },
   { sql: /sqrt\(abs\((i4|i8|f8)\)\)/, kind: "answered", gap: "float-overflow", why: "exp past a double's range: Postgres's error, DuckDB's Infinity (or 0 below it)" },

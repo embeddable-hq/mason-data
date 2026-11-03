@@ -12,6 +12,7 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "libc-mark-run-form", sql: "SELECT 'a6ß' > E'a\\u03086ß' FROM public.one" },
   { gap: "libc-rare-letter", sql: "SELECT E'\\uA79A' < E'\\u00C4' FROM public.one" },
   { gap: "fromless-numeric-text-order", sql: "SELECT 1.5 AS n, 'a' < 'B' AS lt" },
+  { gap: "fromless-numeric-text-order", sql: "SELECT upper('ß') AS u, 1.5 AS n" },
   { gap: "explain-option", sql: "EXPLAIN (FORMAT XML) SELECT id FROM typed" },
   { gap: "latest-order", sql: "SELECT latest(b) FROM latest_t" },
   { gap: "latest-quotient", sql: "SELECT g, latest(n / 3 ORDER BY a, id) FROM latest_t GROUP BY g ORDER BY g" },
@@ -40,7 +41,13 @@ export const GAP_CASES: Array<{ gap: GapId; sql: string }> = [
   { gap: "relative-time-literal", sql: "SELECT id FROM typed WHERE ts < 'today 12:00' ORDER BY id" },
   { gap: "bytea-forms", sql: "SELECT id, convert_to(t, 'LATIN1') FROM typed WHERE id < 3 ORDER BY id" },
   { gap: "infinite-interval", sql: "SELECT id, s::interval FROM castable WHERE id = 32" },
-  { gap: "numeric-math", sql: "SELECT id, ln(n2 ^ 2) FROM typed WHERE n2 > 0 ORDER BY id" },
+  // (`n2 ^ 2` is Postgres's power since issue 242, so ln of it is answered: an unconstrained numeric's stddev has no program)
+  { gap: "numeric-math", sql: "SELECT ln(stddev(n)) FROM typed" },
+  // (a double the engine computes, read with the rows: percentile_disc and mode() of a quotient are answered since PR 506's
+  // class round, so the gap's case is the stddev of an unconstrained numeric)
+  { gap: "numeric-double-integer", sql: "SELECT stddev(n)::int FROM typed" },
+  // (an array of fractions over a quotient: one fraction at a time is answered, by the picked row's exact value)
+  { gap: "numeric-ordered-set", sql: "SELECT percentile_disc(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY n2 / 3) FROM typed" },
   { gap: "view-forms", sql: "SELECT happy FROM happy" },
   { gap: "enum-forms", sql: "SELECT id, t::text::mood[] FROM moods WHERE false" },
   { gap: "numeric-exact-sum", sql: "SELECT sum(s::numeric) FROM castable WHERE id IN (71, 79)" },

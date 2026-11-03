@@ -209,8 +209,8 @@ test("collation: a column's own collation and the source's collations are read w
         ["v", { schema: "pg_catalog", name: "und-x-icu" }]]);
     const collations = await readCollations(pg as unknown as Parameters<typeof readCollations>[0], 170000);
     const own = (name: string) => collations.find((c) => c.name === name);
-    assert.deepEqual(own("mason_num"), { schema: "public", name: "mason_num", provider: "i", collate: null, locale: "und-u-kn", deterministic: true, version: own("mason_num")!.version });
+    assert.deepEqual(own("mason_num"), { schema: "public", name: "mason_num", provider: "i", collate: null, ctype: null, locale: "und-u-kn", deterministic: true, version: own("mason_num")!.version });
     assert.equal(own("mason_ci")?.deterministic, false);
-    assert.deepEqual([own("C")?.provider, own("C")?.collate, own("und-x-icu")?.provider, own("und-x-icu")?.locale], ["c", "C", "i", "und"]);
+    assert.deepEqual([own("C")?.provider, own("C")?.collate, own("C")?.ctype, own("und-x-icu")?.provider, own("und-x-icu")?.locale], ["c", "C", "C", "i", "und"]);
   } finally { await db.close(); }
 });

@@ -152,6 +152,56 @@ test("merge-head: a merge pinned to its head, and other gh commands, are allowed
   assertAllowed("merge-head", "gh pr merge 12 --disable-auto");
 });
 
+// issue 588: a coordinator merged a PR itself. A hook fired inside a sub-agent carries `agent_id` (a non-empty string);
+// the main session's carries none, and a `--agent` main session agent_type alone (code.claude.com/docs/en/hooks).
+const SUB = { agent_id: "a1b2c3", agent_type: "general-purpose" };
+const as = (who: Record<string, unknown>, command: string): unknown => ({ ...(bash(command) as object), ...who });
+const SUB_AGENT_SAYS = /^a sub-agent never merges nor queues a merge \(CLAUDE\.md "Who merges what"\): report PR (\d+|<n>) and the head you read to the session that started you; the top session reads the diff and merges it \(\.claude\/skills\/up-next\/SKILL\.md\)$/;
+
+test("merge-head: a sub-agent's gh pr merge is blocked, pinned or not, queued or not, in every shape a session types", () => {
+  for (const command of [
+    "gh pr merge 577 --merge --match-head-commit d66508cb45b9",
+    "gh pr merge 12 --auto --merge --match-head-commit 36c6ea8f",
+    "cd /tmp/w && gh pr merge 7 --squash --match-head-commit=abc123 && echo done",
+    "gh pr merge 12 --auto --merge",
+    "sh -c 'gh pr merge 5 --merge --match-head-commit a'",
+    "GH_PAGER= /opt/homebrew/bin/gh pr merge 5 --merge --match-head-commit a",
+    "gh pr merge --squash",
+  ]) {
+    for (const who of [SUB, { agent_id: "a1" }]) {
+      const r = run("merge-head", as(who, command));
+      assert.equal(r.code, 2, `blocked from a sub-agent: ${command}\n${r.stderr}`);
+      // who merges is decided first: an unpinned merge from a sub-agent gets this message, not the pin's
+      assert.match(r.stderr.trimEnd(), SUB_AGENT_SAYS, command);
+      assert.equal(r.stderr.trimEnd().split("\n").length, 1, `one line: ${r.stderr}`);
+    }
+  }
+  assert.match(run("merge-head", as(SUB, "gh pr merge 577 --merge --match-head-commit d66508cb45b9")).stderr, /report PR 577 and the head/);
+});
+
+test("merge-head: a sub-agent may withdraw a queued merge, merge its base into its branch, push and read PRs", () => {
+  for (const command of ["gh pr merge 12 --disable-auto", "git merge origin/main",
+    'node scripts/merge-base.ts origin/main "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"',
+    "git push origin HEAD:upnext-588", "gh pr view 12 --json mergeable,mergeStateStatus", "gh pr create --base main --head upnext-588"]) {
+    const r = run("merge-head", as(SUB, command));
+    assert.deepEqual([r.code, r.stderr, r.stdout], [0, "", ""], command);
+  }
+  const read = run("merge-head", { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: "/x" }, ...SUB });
+  assert.deepEqual([read.code, read.stderr], [0, ""], "another tool from a sub-agent");
+});
+
+test("merge-head: the top session keeps its rules, and only a non-empty string agent_id is a sub-agent", () => {
+  const pinned = "gh pr merge 12 --merge --match-head-commit a";
+  for (const who of [{}, { agent_type: "up-next" }, { agent_id: "" }, { agent_id: 7 }, { agent_id: null }]) {
+    const r = run("merge-head", as(who, pinned));
+    assert.deepEqual([r.code, r.stderr], [0, ""], `read as the main session: ${JSON.stringify(who)}`);
+  }
+  assertAllowed("merge-head", "gh pr merge 12 --auto --merge --match-head-commit 36c6ea8f");
+  const r = run("merge-head", as({ agent_type: "up-next" }, "gh pr merge 12 --auto --merge"));
+  assert.equal(r.code, 2);
+  assert.equal(r.stderr.trimEnd(), "gh pr merge needs --match-head-commit, so a push after your read is not merged unread: gh pr merge 12 --auto --merge --match-head-commit $(gh pr view 12 --json headRefOid --jq .headRefOid), once that head has been read");
+});
+
 // ------------------------------------------------------------------ no re-run of an unchanged tree
 
 test("no-rerun: gh run rerun is blocked, with or without --failed or --job", () => {

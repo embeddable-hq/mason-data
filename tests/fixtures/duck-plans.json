@@ -1204,6 +1204,42 @@
       "full_sort": false
     },
     {
+      "name": "a numeric column = a bound parameter: the scan's filter",
+      "sql": "SELECT o.id FROM orders o WHERE o.amount = $1",
+      "values": [
+        "19.99"
+      ],
+      "plan": [
+        "TABLE_SCAN public.orders [zone-map filter: amount = constant]"
+      ],
+      "calls": [
+        "__mason_numeric_fits",
+        "__mason_numeric_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
+      "name": "a numeric column BETWEEN two bound parameters: the scan's filter",
+      "sql": "SELECT count(*) FROM orders o WHERE o.amount BETWEEN $1 AND $2",
+      "values": [
+        "10",
+        "20"
+      ],
+      "plan": [
+        "UNGROUPED_AGGREGATE",
+        "  TABLE_SCAN public.orders [zone-map filter: amount >= constant; amount <= constant]"
+      ],
+      "calls": [
+        "__mason_numeric_fits",
+        "__mason_numeric_order"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": false
+    },
+    {
       "name": "count distinct key: count(DISTINCT id) over the table alone",
       "sql": "SELECT count(DISTINCT o.id) FROM orders o",
       "plan": [

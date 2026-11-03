@@ -31,15 +31,15 @@ import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
-import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
-import { evaluateText, numericLiteral, type NumericProgram } from "../lib/pg-numeric.ts";
+import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type JsonKind, type PgKind } from "./functions.ts";
+import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type NumericProgram } from "../lib/pg-numeric.ts";
 import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
-import type { DuckCollation, StatementCollations } from "./collation.ts";
+import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -269,9 +269,6 @@ class Rewriter {
   /** a LEFT lateral of a list left DuckDB's join that a row count on the wire would stream (leftLateral): the
    *  listener plans the statement again for an Execute that sets one (PlannedSql.unboundedLateral) */
   unboundedLateral = false;
-  /** how the database changes a letter's case */
-  private readonly caseMode: CaseMode;
-
   /** the ANY / ALL comparisons already guarded against a NULL array (the guard holds the comparison, walked again) */
   private readonly nullArrayTested = new WeakSet<Body>();
   /** the catalog's enums: each one's labels in their declared order, and its array type's element */
@@ -298,9 +295,6 @@ class Rewriter {
     this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collations = collations; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
     this.enums = enums; this.kept = kept;
     for (const at of keyCounts) this.keyCounts.add(at + base);
-    // (the case mapping reads the database's collation, where Postgres reads the call's: a gap of its own)
-    const db = collations.database;
-    this.caseMode = db.kind === "icu" ? "icu" : db.kind === "bytes" && db.ascii === true ? "ascii" : "libc";
     this.twins = caseTwins(analysis.tree);
     this.analysisTree = analysis.tree;
   }
@@ -468,10 +462,29 @@ class Rewriter {
 
   private isCitext(oid: number | null): boolean { return oid !== null && this.userTypes.get(oid) === "citext"; }
 
-  /** a text lower-cased by the database's case rules (what Postgres's citext compares, sorts and groups: str_tolower
+  /** a text lower-cased by the database's case mapping (what Postgres's citext compares, sorts and groups: str_tolower
    *  under the default collation) */
   private lowerOf(n: AstNode): AstNode {
-    return this.caseMode === "libc" ? fn("lower", [n]) : fn("__mason_case", [n, boolConst(false), strConst(this.caseMode)]);
+    return this.caseCall("lower", n, this.collations.caseOf(DEFAULT_COLLATION_OID));
+  }
+
+  /** upper / lower / initcap of a text under a case mapping: glibc's upper and lower the engine's own (its upper with
+   *  `ß` kept, which glibc's towupper keeps: an exhaustive comparison over every code point differed only in letters
+   *  newer than the server's glibc), every other mapping src/duck/functions.ts's */
+  private caseCall(name: "upper" | "lower" | "initcap", arg: AstNode, m: CaseMapping): AstNode {
+    if (name === "initcap") return fn("__mason_initcap", [arg, strConst(m)]);
+    if (m !== "libc") return fn("__mason_case", [arg, boolConst(name === "upper"), strConst(m)]);
+    return name === "lower" ? fn("lower", [arg]) : fn("replace", [fn("upper", [fn("replace", [arg, strConst("ß"), strConst("﷐")])]), strConst("﷐"), strConst("ß")]);
+  }
+
+  /** THE CASE MAPPING an upper / lower / initcap call maps under: its input collation, as Postgres's analysis resolved
+   *  it (`Typed.inputCollation`: a COLLATE, a column's, a concatenation's, never the database's by default), and what
+   *  that collation means for case (src/duck/collation.ts `caseOf`). Postgres's 42P22 where the analysis could
+   *  determine none (two implicit collations in conflict) */
+  private caseMapping(t: Typed | null, name: string): CaseMapping {
+    const coll = t === null ? DEFAULT_COLLATION_OID : t.inputCollation;
+    if (coll === 0) throw new Unrewritable(`could not determine which collation to use for ${name}() function`, "Use the COLLATE clause to set the collation explicitly.", { postgres: "42P22" });
+    return this.collations.caseOf(coll);
   }
 
   /** a citext value as the text citext compares: lower-cased, typed as text under the database's collation, so the
@@ -746,6 +759,7 @@ class Rewriter {
       case "NullTest": return this.jsonNullTest(b);
       // CASE x WHEN v …: each WHEN is x = v, jsonb's equality for a jsonb (its keys compared)
       case "CaseExpr": {
+        this.caseOfNumericParam(b);
         if (!isNode(b.arg) || (this.typeOf(b.arg) !== JSONB && this.typeOf(b.arg) !== JSONB_ARRAY)) return null;
         b.arg = this.equated(b.arg, "CASE … WHEN of");
         for (const w of (b.args ?? []) as AstNode[]) if (isNode(bodyOf(w).expr)) bodyOf(w).expr = this.equalKey(bodyOf(w).expr as AstNode);
@@ -1001,6 +1015,18 @@ class Rewriter {
         for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) keys(x);
       };
       keys([b.targetList, b.windowClause, b.sortClause]);
+      // each cast read per group: outside an aggregate's or a window's argument, whose rows are each its own, and outside
+      // a group key (`GROUP BY 1` of the cast itself is grouped as it is written)
+      const keyShapes = new Set(((b.groupClause ?? []) as AstNode[]).filter((g) => kindOf(g) !== "GroupingSet").map((g) => shapeOf(this.groupedExpression(g, b))));
+      const casts = (v: unknown): void => {
+        if (Array.isArray(v)) { for (const x of v) casts(x); return; }
+        if (v === null || typeof v !== "object") return;
+        if (isNode(v) && (kindOf(v) === "SelectStmt" || kindOf(v) === "SubLink" || keyShapes.has(shapeOf(v)))) return;
+        if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || bodyOf(v).agg_within_group === true)) return;
+        if (isNode(v) && kindOf(v) === "TypeCast") this.groupedCasts.set(bodyOf(v), b);
+        for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) casts(x);
+      };
+      casts([b.targetList, b.sortClause, b.havingClause]);
     }
     // a DISTINCT ON's sort holds its ON expressions (distinctOnSorted): before any key is built, so each is built as one
     this.distinctOnSorted(b);
@@ -2134,13 +2160,39 @@ class Rewriter {
     return this.fromItemOf(stack.slice(0, stack.length - t.levelsUp), t.column.owner, t.column.name);
   }
 
-  /** a carried column's program over the cells `cell` makes of its item's hidden columns, each read as it rode */
+  /**
+   * A carried column's program over the cells `cell` makes of its item's hidden columns, each read as it rode. SHARED,
+   * NEVER COPIED (issue 244, #484): every reference to one (FROM item, column) within one program's build (one `cell`)
+   * is given the SAME node, so a level reading the column below k times holds one program of it, not k copies (k^depth
+   * through a chain of levels). The cells it reads are made once, by the first reference, as the build's `cell` makes
+   * them (deduplicated by shape, or one a call): every later reference reads those. A mapping that throws (a cell not
+   * exact) is not kept, and throws again at the next reference. Sound because a program is never changed once made
+   * (src/lib/pg-numeric.ts).
+   */
   private carried(ref: AstNode, cell: (n: AstNode, conv?: CellConv) => NumericProgram): NumericProgram | "uncarried" | null {
     const c = this.carry(ref);
     if (c === null || c === "uncarried") return c;
-    return mapCells(c.program, (key) => key.startsWith("$") ? { op: "cell", key }
-      : cell({ ColumnRef: { fields: [S(c.owner), S(`${this.cellPrefix}${key}`)] } }, c.convs[Number(key)]));
+    let built = this.carriedBy.get(cell);
+    if (built === undefined) { built = new Map(); this.carriedBy.set(cell, built); }
+    let byOwner = built.get(c.program);
+    if (byOwner === undefined) { byOwner = new Map(); built.set(c.program, byOwner); }
+    const known = byOwner.get(c.owner);
+    if (known !== undefined) return known;
+    const cells = new Map<string, NumericProgram>();
+    const program = mapCells(c.program, (k) => {
+      let at = cells.get(k);
+      if (at === undefined) {
+        at = k.startsWith("$") ? { op: "cell", key: k } : cell({ ColumnRef: { fields: [S(c.owner), S(`${this.cellPrefix}${k}`)] } }, c.convs[Number(k)]);
+        cells.set(k, at);
+      }
+      return at;
+    });
+    byOwner.set(c.owner, program);
+    return program;
   }
+  /** each program build's carried programs (`carried`), by its `cell`: by the item's record's program (the one object
+   *  `derived` holds for the column) and the item's name */
+  private readonly carriedBy = new WeakMap<object, Map<NumericProgram, Map<string, NumericProgram>>>();
 
   /** the FROM item of a query (`frames`' last) a column is read from, by the name Postgres resolved it to: the item's
    *  query, the column's place in its outputs, and every query that reads the item (a WITH query's every reader) */
@@ -2283,6 +2335,43 @@ class Rewriter {
   /** the values a query's i-th output can be: each arm's of a set operation, each row's of a VALUES list, through a
    *  `*` pass-through; a `*` beside other columns by the output Postgres's analysis puts there. Null where the output
    *  is a column a `*` lists (decided where it is read), or none is found */
+  /** whether a call is percentile_disc or mode() WITHIN GROUP whose ORDER BY is a numeric the rewrite sorts by its exact
+   *  order key (`exactOrderKey`, the one decider): it picks a row by that key and answers the row's value
+   *  (`pickedByExactKey`), never the key (issue 486; PR 506's class round) */
+  private picksByExactKey(b: Body): boolean {
+    if (b.agg_within_group !== true || !["percentile_disc", "mode"].includes(lastName(b.funcname))) return false;
+    const by = ((b.agg_order ?? []) as AstNode[])[0];
+    const key = by === undefined ? undefined : bodyOf(by).node;
+    return isNode(key) && this.typeOf(key) === NUMERIC && this.exactOrderKey(key, null) !== null;
+  }
+
+  /**
+   * PERCENTILE_DISC OR MODE() PICKED BY AN EXACT ORDER KEY (`picksByExactKey`), answering the picked row's `value(key)`:
+   * the engine's own value of the key under the raw reader (`withinGroup`, a double as any quotient), the program's text
+   * under a program's cell (`exactOf`), so every reader of the aggregate (its print, a cast, a comparison, a sort, a
+   * GROUP BY, a nullness test) reads it as it reads any numeric Mason computes exactly, never the key's bytes (PR 506's
+   * class round, refusal-wider-than-the-wrong-answer; issue 538). Each row rides as row(key, value), NULL where the key
+   * is: percentile_disc takes the position in the key's order; mode() the most frequent key in that order (Postgres's
+   * tie: the first, `mode(k ORDER BY k)`) and then that key's row, so equal values of two scales count as one.
+   * `b` is placed here (a caller with the original places its clone)
+   */
+  private pickedByExactKey(name: string, b: Body, value: (key: AstNode) => AstNode | null): AstNode | null {
+    const sort = bodyOf(((b.agg_order ?? []) as AstNode[])[0]!);
+    const key = sort.node as AstNode;
+    const v = value(this.clone(key));
+    if (v === null) return null;
+    const k = (): AstNode => this.exactOrderKey(this.clone(key), null)!;
+    const pair = caseWhen([[isNotNull(k()), row([k(), v])]], null);
+    const second = (x: AstNode): AstNode => fn("struct_extract", [x, intConst(2)]);
+    // (each aggregate made here is typed as the call it answers: an aggregate, which a GROUP BY's any_value leaves be)
+    const aggregate = (x: AstNode): AstNode => { this.typedLike.set(bodyOf(x), { FuncCall: b }); return x; };
+    if (name === "percentile_disc") return second(aggregate({ FuncCall: { ...b, agg_order: [{ SortBy: { ...sort, node: pair } }] } }));
+    const each = (): AstNode => ({ ColumnRef: { fields: [S("__mason_e")] } });
+    const listed = aggregate(fn("list", [pair], b.agg_filter === undefined ? {} : { agg_filter: this.clone(b.agg_filter as AstNode) }));
+    const modal = aggregate({ FuncCall: { ...b, args: [k()], agg_order: [{ SortBy: { ...sort, node: k() } }], agg_within_group: undefined } });
+    return second(fn("list_extract", [fn("list_filter", [listed, op("->", each(), op("=", fn("struct_extract", [each(), intConst(1)]), modal))]), intConst(1)]));
+  }
+
   private valuesAt(query: AstNode, index: number): AstNode[] | null {
     // (an arm `exactArms` wrapped: the arm it reads)
     const b = this.armWrapped.get(bodyOf(query)) ?? bodyOf(query);
@@ -2508,8 +2597,10 @@ class Rewriter {
     // column is each arm's own too, the row's text Postgres's (`valuesText`), so the engine's double is never printed
     const inexact = new Set(fields.flatMap((f, i) => f.oid === NUMERIC && arms.some((a) => Array.isArray(bodyOf(a).valuesLists)
       && (this.valuesAt(a, i) ?? []).some((v) => !isNullValue(v) && !this.duckExact(v))) ? [i] : []));
-    const first = JSON.stringify(trial[0]!.made);
-    if (scaled.size === 0 && inexact.size === 0 && trial[0]!.made.length > 0 && trial.every((t) => JSON.stringify(t.made) === first)) return arms.map((a) => this.exactThrough(a, fields))[0]!;
+    // (each arm's record compared as TREES, by the one text of a program, whatever its sharing: `programJson`)
+    const recordText = (made: readonly ExactColumn[]): string => JSON.stringify(made.map((e) => [e.column, e.text, e.cells, programJson(e.program)]));
+    const first = recordText(trial[0]!.made);
+    if (scaled.size === 0 && inexact.size === 0 && trial[0]!.made.length > 0 && trial.every((t) => recordText(t.made) === first)) return arms.map((a) => this.exactThrough(a, fields))[0]!;
     // the columns some arm computes, or whose arms' scales differ; every other arm's value there must be DuckDB's exact one
     // A NUMERIC'S TEXT some arm computes (`(x / 3)::text`) is a column of the record too: an arm that computes none
     // there is its own text, as the engine writes it (a cell read as text)
@@ -2656,7 +2747,7 @@ class Rewriter {
     let cells = 0;
     const built = this.programOf(item, (_m, conv = "exact") => ({ op: "cell", key: `${conv}:${cells++}` }));
     if (built === null) return null;
-    if (cells === 0 && !JSON.stringify(built.p).includes("\"cell\"")) {
+    if (cells === 0 && cellsOf(built.p).length === 0) {
       const text = evaluateText(built.p, {});
       return text === null ? cast(nullConst(), ["varchar"]) : strConst(text);
     }
@@ -2733,6 +2824,10 @@ class Rewriter {
   /** the query a `SELECT * FROM (q) s` passes through whole, or null: its output names and types are q's (a BI tool's
    *  `SELECT "sql".* FROM (…) AS "sql"` inside a query that names a column of it) */
   private starOf(b: Body): AstNode | null {
+    // (only a lone `*` passes a query through whole: any other list is none, asked before `passThrough` maps its
+    // columns, which reads the inner query's names, and so every level's below, at every call: #484's chains)
+    const targets = (b.targetList ?? []) as AstNode[];
+    if (targets.length !== 1 || !hasStar(bodyOf(targets[0]!).val)) return null;
     const through = this.passThrough(b);
     return through !== null && through.columns === "star" ? through.query : null;
   }
@@ -2791,6 +2886,10 @@ class Rewriter {
     if (k === "ColumnRef") { const t = this.typed(n); return (t?.node === "VAR" && t.levelsUp === 0) || isCellRef(n, this.cellPrefix); }
     if (k === "SubLink") return false;
     if (k === "FuncCall" && (bodyOf(n).over !== undefined || this.typed(n)?.node === "AGGREF")) return true;
+    // a lambda the rewrite wrote (`pickedByExactKey`'s mode()): its parameter is no column of the query
+    if (k === "A_Expr" && lastName(bodyOf(n).name) === "->" && isNode(bodyOf(n).lexpr) && isNode(bodyOf(n).rexpr)) {
+      return this.validGrouped(bodyOf(n).rexpr as AstNode, new Set([...groupShapes, shapeOf(bodyOf(n).lexpr as AstNode)]));
+    }
     const children = Object.values(bodyOf(n)).flatMap((x) => Array.isArray(x) ? x : [x]).filter(isNode);
     return children.every((c) => this.validGrouped(c, groupShapes));
   }
@@ -2829,6 +2928,20 @@ class Rewriter {
       }
       case "A_Expr": {
         const name = lastName(b.name);
+        // NULLIF(a, b) of a numeric the engine holds as a double (issue 242): a's program where the row's a is not equal
+        // to b by the one comparison of a quotient (`exactEquality`: both exact keys), else NULL (the index past the arm)
+        if (b.kind === "AEXPR_NULLIF" && type === NUMERIC && isNode(b.lexpr) && isNode(b.rexpr) && !this.duckExact(b.lexpr)) {
+          const l = sub(b.lexpr);
+          const sides = l === null ? null : this.exactEquality(this.clone(b.lexpr), this.clone(b.rexpr));
+          if (l === null || sides === null) return asCell();
+          // (its NULL is ONE representation, a NULL index on EVERY row whose value is NULL — equal, or the operand NULL —
+          // so a reader that regroups the carried cells, any_value of each, never meets a row's 0 beside another's
+          // operand: review r1 of PR 506, nullif-pick-null-lost-outside-subquery)
+          const keyL = this.clone(sides[0]);
+          return numeric({ op: "pick", index: cell(caseWhen([[or([op("=", sides[0], sides[1]), isNull(keyL)]), nullConst()]], intConst(0))), args: [l.p] });
+        }
+        // x ^ y: Postgres's own power, as power(x, y) is (`pgNumeric`)
+        if (b.kind === "AEXPR_OP" && name === "^" && type === NUMERIC) { const text = this.pgNumeric(n); return text === null ? asCell() : numeric(cell(text, "text")); }
         if (b.kind !== "AEXPR_OP" || !["+", "-", "*", "/", "%"].includes(name)) return asCell();
         if (type !== NUMERIC) return asCell();
         if (b.lexpr === undefined) { const r = sub(b.rexpr); return r === null ? null : name === "-" ? numeric({ op: "neg", arg: r.p }) : r; }
@@ -2880,6 +2993,11 @@ class Rewriter {
         const args = (b.args ?? []) as AstNode[];
         const plain = b.over === undefined && b.agg_within_group !== true;
         if (type !== NUMERIC) return asCell();
+        // percentile_disc or mode() picked by an exact order key: the picked row's exact text (`pickedByExactKey`)
+        if (this.picksByExactKey(b)) {
+          const text = this.pickedByExactKey(name, bodyOf(this.clone(n)), (key) => this.exactText(key));
+          return text === null ? asCell() : numeric(cell(text, "text"));
+        }
         switch (name) {
           case "round": case "trunc": {
             if (!plain || args.length < 1 || args.length > 2) return asCell();
@@ -2962,7 +3080,7 @@ class Rewriter {
             const operands: AstNode[] = [];
             const probe = this.exactOf(args[0]!, (m) => { operands.push(m); return { op: "cell", key: String(operands.length - 1) }; });
             // a column's own min is DuckDB's exact decimal, padded to its scale
-            if (probe === null || probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell") || (this.duckExact(args[0]!) && !worthComputing(probe.p))) return asCell();
+            if (probe === null || ((probe.p.op === "cell" || (probe.p.op === "pad" && probe.p.arg.op === "cell")) && this.duckExact(args[0]!)) || (this.duckExact(args[0]!) && !worthComputing(probe.p))) return asCell();
             // picked by its exact value's order key (`exactOrderKey`, issue 252), its operands breaking a tie of scales;
             // an aggregate's argument is read per row, so its key is no group's (null)
             const key = caseWhen([[isNotNull(this.clone(args[0]!)), row([this.exactOrderKey(args[0]!, null) ??this.clone(args[0]!), ...operands.map((m) => this.clone(m))])]], null);
@@ -3111,8 +3229,10 @@ class Rewriter {
       const from = this.typeOf(b.arg);
       return from !== null && TEXTS.has(from) && from !== UNKNOWN && constString(b.arg) === null ? pgCall("text", "a1::numeric", [this.clone(b.arg)]) : null;
     }
-    const name = kindOf(n) === "FuncCall" ? lastName(b.funcname) : "";
-    const args = (b.args ?? []) as AstNode[];
+    // (`x ^ y` of numerics is Postgres's numeric_power, power(x, y)'s function: issue 242)
+    const raised = kindOf(n) === "A_Expr" && b.kind === "AEXPR_OP" && lastName(b.name) === "^" && isNode(b.lexpr) && isNode(b.rexpr);
+    const name = kindOf(n) === "FuncCall" ? lastName(b.funcname) : raised ? "power" : "";
+    const args = (raised ? [b.lexpr, b.rexpr] : b.args ?? []) as AstNode[];
     if (!["ln", "log", "log10", "exp", "sqrt", "power", "pow"].includes(name) || this.typeOf(n) !== NUMERIC || b.over !== undefined || args.length < 1 || args.length > 2) return null;
     // an argument computed here (a quotient): its exact value, the program DuckDB evaluates row by row
     const read = args.map((a): [string, AstNode] | null => {
@@ -3126,6 +3246,9 @@ class Rewriter {
       return exact === null ? null : ["numeric", exact];
     });
     if (read.some((x) => x === null)) {
+      // (an operator's operand with no program stays the engine's double, as before issue 242: refused only where
+      // something needs it exact, the CAST reader's integer)
+      if (raised) return null;
       throw new Unrewritable(`${name}() of a numeric Mason cannot compute exactly is not supported by Mason`, `cast the argument to numeric(p, s): ${name}(x::numeric(20, 4))`, "numeric-math");
     }
     return pgCall("text", `${name}(${read.map((x, i) => `a${i + 1}::${x![0]}`).join(", ")})`, read.map((x) => x![1]));
@@ -3192,7 +3315,8 @@ class Rewriter {
    * `numericCastWrite`); an operator, a function or an aggregate by what DuckDB computes from exact operands (+ - * a
    * DECIMAL, a sum / min / max / a window's or arg_min's pick the value's own type, a count an integer); the rewrite's
    * own integer casts (a variance's split squares) are integers. Anything else is not called exact: a quotient, `^`,
-   * `%`, an avg (DuckDB's doubles), a parameter (written as a double), a column a FROM item computes as a double
+   * `%`, an avg (DuckDB's doubles), a parameter (written as a double where it is read; COMPARED with a value this calls
+   * exact it is that value's own type or its exact key, `numericParamComparison`), a column a FROM item computes as a double
    * (`carry`), a function this does not know — whose value then has its program, or is the engine's everywhere.
    */
   private duckExact(n: AstNode): boolean {
@@ -3240,6 +3364,14 @@ class Rewriter {
         const name = lastName(b.funcname);
         // a count (an avg's, made from the avg's node, carries the avg's type), and what the walk writes as a DECIMAL
         if (WRITTEN_EXACT.has(name)) return true;
+        // the engine's sign is a TINYINT (-1, 0, 1), whatever its argument: Postgres's numeric_sign is the same value
+        // (issue 242: `sign(x)::int` stays the engine's, and `exp(…) * sign(x)` has a program)
+        if (name === "sign" && b.over === undefined && args.length === 1) return true;
+        // percentile_disc and mode() pick one row's value of their ORDER BY, in its own type (review r1 of PR 506)
+        if ((name === "percentile_disc" || name === "mode") && b.agg_within_group === true && t !== null && t.type === NUMERIC) {
+          const by = ((b.agg_order ?? []) as AstNode[])[0];
+          return by !== undefined && exact(bodyOf(by).node);
+        }
         // a value picked or summed, in its own type: an aggregate, a window's row, min / max's picked operand
         if (VALUE_KEEPING.has(name) && args.length >= 1) return exact(args[0]) && ((name !== "lag" && name !== "lead") || args.length < 3 || exact(args[2]));
         return false;
@@ -3280,14 +3412,16 @@ class Rewriter {
    */
   private programText(p: NumericProgram, given: ReadonlyArray<{ node: AstNode; conv: CellConv }>): AstNode {
     const cells = [...given];
-    const program = mapCells(p, (key) => {
+    // (a parameter's cell made once a node, as before; every other cell itself, so a program reading none is as given)
+    const program = cellsOf(p).some((key) => key.startsWith("$")) ? mapCells(p, (key) => {
       if (!key.startsWith("$")) return { op: "cell", key };
       cells.push({ node: cast({ ParamRef: { number: Number(key.slice(1)) } }, ["varchar"]), conv: "text" });
       return { op: "cell", key: String(cells.length - 1) };
-    });
+    }) : p;
     const texts = cells.map((c) => c.conv === "text" || c.conv === "parsed" ? c.node : c.conv === "exact" ? cast(c.node, ["varchar"])
       : fn("__mason_float_numeric_text", [cast(c.node, ["double"]), boolConst(c.conv === "float4")]));
-    return fn("__mason_numeric_program", [strConst(JSON.stringify(program)), ...texts]);
+    // the program's one text (src/lib/pg-numeric.ts `programJson`): each distinct node once, however many read it
+    return fn("__mason_numeric_program", [strConst(programJson(program)), ...texts]);
   }
 
   /** a query's exact column as its text, read from the cells its rows carry (`cellRef` names each): its record's program
@@ -3379,6 +3513,9 @@ class Rewriter {
 
   /** each window ORDER BY key of a grouped SELECT, by the SELECT (`select`): its exact order key is read per group */
   private readonly groupedWindowKeys = new WeakMap<Body, Body>();
+  /** each cast in a grouped SELECT, by the SELECT: a program's text the CAST reader builds there is read per group
+   *  (`overGroups`), never over cells the group does not decide (review r1 of PR 506: the engine's 42803) */
+  private readonly groupedCasts = new WeakMap<Body, Body>();
 
   /** whether a value is a NUMERIC's text (`x::text`, `(x / 3)::text`, under a COLLATE, a subquery's column carrying
    *  one) or a NULL: what a "text" cell may hold, its program parsing it as a numeric */
@@ -3401,6 +3538,110 @@ class Rewriter {
     const c = this.carry(e);
     if (c === "uncarried") return this.refuseUncarried(e);
     return c === null || !c.text ? null : this.exactText(e);
+  }
+
+  /**
+   * TWO NUMERICS COMPARED FOR EQUALITY, each by its exact key (`exactKey`; a value the engine holds exactly by its own
+   * text's key), or null where neither is decided exactly: the one comparison of a quotient, `=` and `<>`'s and
+   * NULLIF's (issue 242). A parameter alone is keyed only beside a value decided exactly (its bound text); beside a
+   * value the ENGINE holds exactly it is never its double: `numericParamComparison`, asked first (issue 214)
+   */
+  private exactEquality(l: AstNode, r: AstNode): [AstNode, AstNode] | null {
+    const kl = this.exactKey(l), kr = this.exactKey(r);
+    const side = (x: AstNode, k: AstNode | null): AstNode | null => k ?? (this.duckExact(x) ? fn("__mason_numeric_key", [cast(x, ["varchar"])]) : null);
+    const decided = (x: AstNode, k: AstNode | null): boolean => k !== null && kindOf(stripCasts(x)) !== "ParamRef";
+    const sl = !decided(l, kl) && !decided(r, kr) ? null : side(l, kl), sr = sl === null ? null : side(r, kr);
+    return sl !== null && sr !== null ? [sl, sr] : null;
+  }
+
+  /** a parameter of type numeric as it was bound, cast to nothing but numeric without a typmod (`$1`, `$1::numeric`):
+   *  its number, whose bound text is the value (Postgres's numeric_out, src/duck/analyze.ts readParameters); else null */
+  private plainNumericParam(x: AstNode): number | null {
+    let n = x;
+    while (kindOf(n) === "TypeCast" && isNode(bodyOf(n).arg)) {
+      const t = bodyOf(n).typeName;
+      if (!["numeric", "decimal"].includes(lastName(t?.names)) || ((t?.typmods ?? []) as unknown[]).length > 0 || Array.isArray(t?.arrayBounds)) return null;
+      n = bodyOf(n).arg as AstNode;
+    }
+    if (kindOf(n) !== "ParamRef") return null;
+    const number = Number(bodyOf(n).number);
+    return this.params[number - 1] === NUMERIC ? number : null;
+  }
+
+  /**
+   * A NUMERIC PARAMETER COMPARED WITH VALUES THE ENGINE HOLDS EXACTLY (issue 214, the class numeric-parameter-as-double):
+   * `x = $1`, `<>`, `<`, `<=`, `>`, `>=`, IS [NOT] DISTINCT FROM, NULLIF, IN a list and [NOT] BETWEEN, every
+   * other operand one `duckExact` calls exact (a DECIMAL column, an integer, + - * and sum / min / max of them) — never
+   * the parameter's double, which equates and orders values Postgres tells apart past 15 digits.
+   *
+   * NATIVE where the engine's own type of the compared value holds the bound value exactly: `CASE WHEN
+   * __mason_numeric_fits(typeof(x), $1::text) THEN x = $1 ELSE <keyed> END`. DuckDB casts the parameter into x's type
+   * (its prepared statement types the parameter by the comparison), which rounds a value past its scale and fails past
+   * its digits: so the guard decides, from DuckDB's own name of the type (`typeof`, never Postgres's typmod: a numeric(65,
+   * 30) is held as DECIMAL(38, the scale its values use), nor a type this module derives for an expression) and the bound
+   * text alone (src/lib/pg-numeric.ts `fitsEngineType`, the copy's own rule of what a DECIMAL holds). Both are constants,
+   * so DuckDB folds the guard at Execute: one call, and the comparison it keeps is the scan's own filter. A NULL fits.
+   *
+   * KEYED otherwise (a value past the scale or the digits, NaN, ±Infinity; a parameter under a cast with a typmod, which
+   * Postgres rounds first; more than one exact operand): each operand by its exact key, `__mason_numeric_key` for an
+   * equality, `__mason_numeric_order` for an order (numeric_cmp's: NaN above every number, ±Infinity outside them),
+   * the parameter by its bound text or its program's (`exactText`), a value the engine holds exactly by its own text.
+   * null: no numeric parameter here, or an operand with no exact value (a quotient: `exactEquality`; a value past 38
+   * digits: `numeric-over-38-digits`), left as it was.
+   */
+  private numericParamComparison(b: Body, operatorResolved = false): AstNode | null {
+    const kind = String(b.kind), name = lastName(b.name);
+    const equating = (kind === "AEXPR_OP" && ["=", "<>", "!="].includes(name)) || ["AEXPR_DISTINCT", "AEXPR_NOT_DISTINCT", "AEXPR_NULLIF", "AEXPR_IN"].includes(kind);
+    const ordering = (kind === "AEXPR_OP" && ["<", "<=", ">", ">="].includes(name)) || ["AEXPR_BETWEEN", "AEXPR_NOT_BETWEEN"].includes(kind);
+    const l = b.lexpr, r = b.rexpr;
+    if ((!equating && !ordering) || !isNode(l) || !isNode(r)) return null;
+    const listed = kind === "AEXPR_IN" || kind.includes("BETWEEN");
+    if (listed && kindOf(r) !== "List") return null;
+    const operands = [l, ...(listed ? (bodyOf(r).items ?? []) as AstNode[] : [r])];
+    // compared as numerics, by Postgres's own operator where it names one
+    if (!operands.every((x) => { const t = this.typeOf(x); return t === NUMERIC || (t !== null && INTEGERS.has(t)); })) return null;
+    if (kind === "AEXPR_OP" && !operatorResolved) { const t = this.typed({ A_Expr: b }); if (t?.args[0]?.type !== NUMERIC || t?.args[1]?.type !== NUMERIC) return null; }
+    const plain = operands.map((x) => this.plainNumericParam(x));
+    // a parameter under a cast with a typmod (`$1::numeric(30,20)`): its program's value, Postgres's rounding first
+    const ofParam = operands.map((x, i) => plain[i] !== null || (!this.duckExact(x) && kindOf(stripCasts(x)) === "ParamRef"
+      && this.params[Number(bodyOf(stripCasts(x)).number) - 1] === NUMERIC && this.exactText(x) !== null));
+    if (!ofParam.some(Boolean) || operands.some((x, i) => !ofParam[i] && !this.duckExact(x))) return null;
+    // NULLIF answers its first operand: a parameter there is printed, not compared (left as it was)
+    if (kind === "AEXPR_NULLIF" && ofParam[0]) return null;
+    const exactAt = operands.flatMap((_, i) => ofParam[i] ? [] : [i]);
+    // the native form: ONE value the engine holds exactly (first, or either side of an operator), every other operand a
+    // plain parameter, so each parameter is cast into that value's own type
+    const at = exactAt.length === 1 && exactAt[0] !== undefined && (exactAt[0] === 0 || kind === "AEXPR_OP") && plain.every((p, i) => i === exactAt[0] || p !== null) ? exactAt[0] : null;
+    const param = (n: number): AstNode => ({ ParamRef: { number: n } });
+    const f = equating ? "__mason_numeric_key" : "__mason_numeric_order";
+    const keys = operands.map((x, i) => fn(f, [plain[i] !== null ? cast(param(plain[i]!), ["varchar"]) : ofParam[i] ? this.exactText(x)! : cast(at === null ? x : this.clone(x), ["varchar"])]));
+    const rebuilt = (ops: AstNode[]): Body => ({ ...b, lexpr: ops[0]!, rexpr: listed ? { List: { items: ops.slice(1) } } : ops[1]! });
+    const keyed: AstNode = kind === "AEXPR_NULLIF" ? caseWhen([[op("=", keys[0]!, keys[1]!), nullConst()]], this.clone(l)) : { A_Expr: { ...rebuilt(keys), name: this.clone(b.name) } };
+    if (at === null) return keyed;
+    const exact = operands[at]!;
+    const guards = plain.flatMap((p, i) => i === at || p === null ? [] : [fn("__mason_numeric_fits", [fn("typeof", [this.clone(exact)]), cast(param(p), ["varchar"])])]);
+    // (the comparison as written, its parameters bare: this node, its exact operand walked as everywhere)
+    Object.assign(b, rebuilt(operands.map((x, i) => i === at ? x : param(plain[i]!))));
+    return caseWhen([[guards.length === 1 ? guards[0]! : and(guards), { A_Expr: b }]], keyed);
+  }
+
+  /** CASE x WHEN $1 …, x a value the engine holds exactly and a WHEN a numeric parameter (issue 214): each WHEN written
+   *  as the comparison it is, x = v, the parameter's by `numericParamComparison` (Postgres resolved each WHEN's `=` as
+   *  numeric's: every operand is a numeric or an integer, one a numeric parameter); x read once a WHEN, as CASE reads it */
+  private caseOfNumericParam(b: Body): void {
+    const arg = b.arg, whens = (b.args ?? []) as AstNode[];
+    if (!isNode(arg) || !this.duckExact(arg) || !whens.some((w) => isNode(bodyOf(w).expr) && kindOf(stripCasts(bodyOf(w).expr as AstNode)) === "ParamRef")) return;
+    let changed = false;
+    const compared = whens.map((w, i) => {
+      const x = i === 0 ? arg : this.clone(arg), v = bodyOf(w).expr as AstNode;
+      const viaParameter = this.numericParamComparison({ kind: "AEXPR_OP", name: [S("=")], lexpr: x, rexpr: v }, true);
+      if (viaParameter !== null) changed = true;
+      return viaParameter ?? op("=", x, v);
+    });
+    // (nothing changed where no WHEN is such a parameter: the clones are dropped unplaced)
+    if (!changed) return;
+    whens.forEach((w, i) => { bodyOf(w).expr = compared[i]!; });
+    delete b.arg;
   }
 
   /** null where a value is no numeric decided exactly; a refusal where it is one whose program cannot be read here (a
@@ -4056,15 +4297,14 @@ class Rewriter {
     // (an operand of a jsonb operator is a jsonb, a literal included: each is keyed, whatever its own analysis says)
     const lType = l === undefined ? null : this.typeOf(l);
     const comparing = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name);
+    // a numeric parameter compared with values the engine holds exactly: natively in their own type where it holds the
+    // bound value, else by exact keys — never the parameter's double (issue 214)
+    const viaParameter = this.numericParamComparison(b);
+    if (viaParameter !== null) return viaParameter;
     // a numeric decided exactly, compared for equality: by its exact key, the other side by its own (exactKey)
     if (b.kind === "AEXPR_OP" && (name === "=" || name === "<>" || name === "!=") && a0 === NUMERIC && a1 === NUMERIC && l !== undefined && r !== undefined) {
-      const kl = this.exactKey(l), kr = this.exactKey(r);
-      const side = (x: AstNode, k: AstNode | null): AstNode | null => k ?? (this.duckExact(x) ? fn("__mason_numeric_key", [cast(x, ["varchar"])]) : null);
-      // a parameter alone is keyed only beside a value decided exactly (its bound text; DuckDB compares a column with it
-      // natively elsewhere)
-      const decided = (x: AstNode, k: AstNode | null): boolean => k !== null && kindOf(stripCasts(x)) !== "ParamRef";
-      const sl = !decided(l, kl) && !decided(r, kr) ? null : side(l, kl), sr = sl === null ? null : side(r, kr);
-      if (sl !== null && sr !== null) { b.lexpr = sl; b.rexpr = sr; return null; }
+      const sides = this.exactEquality(l, r);
+      if (sides !== null) { [b.lexpr, b.rexpr] = sides; return null; }
     }
     // and IN a list of values (issue 350: each item an equality, Postgres's `=` of each): every side by its exact key
     if (b.kind === "AEXPR_IN" && l !== undefined && r !== undefined && kindOf(r) === "List" && this.typeOf(l) === NUMERIC) {
@@ -4536,12 +4776,11 @@ class Rewriter {
       case "every": b.funcname = [S("bool_and")]; return null;
       case "upper": case "lower": {
         if (args.length !== 1 || argType(0) === null || !TEXTS.has(argType(0)!)) return null;
-        // glibc's upper keeps ß (DuckDB's gives ẞ); its every other letter is DuckDB's (an exhaustive comparison over
-        // every code point differed only in letters newer than the server's glibc)
-        if (this.caseMode === "libc") return name === "lower" ? null : fn("replace", [fn("upper", [fn("replace", [args[0]!, strConst("ß"), strConst("\ufdd0")])]), strConst("\ufdd0"), strConst("ß")]);
-        return fn("__mason_case", [args[0]!, boolConst(name === "upper"), strConst(this.caseMode)]);
+        const m = this.caseMapping(t, name);
+        // (glibc's lower is the engine's own: the call left as it is)
+        return m === "libc" && name === "lower" ? null : this.caseCall(name, args[0]!, m);
       }
-      case "initcap": return args.length === 1 ? fn("__mason_initcap", [args[0]!, strConst(this.caseMode)]) : null;
+      case "initcap": return args.length === 1 ? this.caseCall("initcap", args[0]!, this.caseMapping(t, name)) : null;
       case "btrim": b.funcname = [S("trim")]; b.funcformat = "COERCE_EXPLICIT_CALL"; return null;
       case "to_hex":
         // an integer's two's complement in its own width, in lower case
@@ -4905,6 +5144,15 @@ class Rewriter {
     if (key !== undefined && (this.typeOf(key) === JSONB || this.typeOf(key) === JSONB_ARRAY)) {
       throw new Unrewritable(`${name}() WITHIN GROUP (ORDER BY a jsonb) is not supported by Mason (Postgres orders jsonb by its own rules)`, "ORDER BY the value … LIMIT 1 OFFSET n in a subquery", "jsonb-compare");
     }
+    // A NUMERIC THE RULES SORT BY ITS EXACT ORDER KEY (a quotient, a NULLIF, a power, …): picked by that key, answering
+    // the row's value (`pickedByExactKey`). An array of fractions would answer the doubles of a numeric[]: refused
+    if (this.picksByExactKey(b)) {
+      if (this.typed({ FuncCall: b })?.directArgs?.[0]?.type === FLOAT8_ARRAY) {
+        throw new Unrewritable(`${name}() WITHIN GROUP of an array of fractions, ordered by a numeric Mason computes exactly (such as a quotient), is not supported by Mason (Postgres answers the picked rows' exact values)`,
+          `ask for each fraction alone: ${name}(0.25) WITHIN GROUP (ORDER BY a / b), ${name}(0.75) WITHIN GROUP (ORDER BY a / b)`, "numeric-ordered-set");
+      }
+      return this.pickedByExactKey(name, b, (key) => key);
+    }
     // a key the analysis put a Const (the class, issue 134; src/duck/constant-key.ts) is the value aggregated, and written
     // as the bare literal the engine's WITHIN GROUP refuses it (42804): every row holds it, so mode() and percentile_disc
     // take it as an argument, which the engine evaluates (NULL where no row is aggregated, as Postgres's)
@@ -5203,7 +5451,9 @@ class Rewriter {
     // never the double's — its text, its nearest double (numeric_float8 reads numeric_out's text) and its integer
     // rounded half away from zero (numeric_int4), as Postgres computes each
     if (t !== null && from === NUMERIC && [TEXT, VARCHAR, BPCHAR, INT2, INT4, INT8, FLOAT8].includes(t.type) && !this.duckExact(arg)) {
-      const exact = this.exactText(arg);
+      const text = this.exactText(arg);
+      // (in a grouped SELECT, read once per group, as one row's whole text: `overGroups`)
+      const exact = text === null ? null : this.overGroups(text, this.groupedCasts.get(b) ?? null);
       if (exact !== null) {
         if (t.type === FLOAT8) return fn("__mason_numeric_double", [exact]);
         if (INTEGERS.has(t.type)) {
@@ -5212,6 +5462,19 @@ class Rewriter {
         }
         if (t.type === BPCHAR) { if (t.typmod > 4) return fn("rpad", [fn("left", [exact, intConst(t.typmod - 4)]), intConst(t.typmod - 4), strConst(" ")]); }
         else return t.type === VARCHAR && t.typmod > 4 ? fn("left", [exact, intConst(t.typmod - 4)]) : exact;
+      }
+      // (issue 242) an integer is never the engine's double's, which rounds half to even (2.5 is 2) where Postgres's
+      // numeric_int4 rounds the exact value half away from zero (3). Where no program computes it, what the engine holds
+      // decides, by ITS type (review r1 of PR 506: the complement of `duckExact`'s forms is no authority on a double):
+      // a DECIMAL's or a text's exact digits rounded as numeric_int4 rounds them, a double or bytes refused by name
+      // (`__mason_numeric_int_of`, src/duck/functions.ts)
+      else if (INTEGERS.has(t.type)) {
+        const [bits, name] = t.type === INT2 ? [16, "smallint"] : t.type === INT4 ? [32, "integer"] : [64, "bigint"];
+        // what the REWRITE itself makes bytes, it knows before the engine runs (review r2 of PR 506, the class
+        // runtime-refusal-preempted-by-engine-error): percentile_disc or mode() ordered by an exact order key answer
+        // that key's bytes, so a cast of them, or of anything over them, is refused here by name, never left to the
+        // engine's own error over bytes; the run's `typeof` decides only what the rewrite cannot type
+        return cast(fn("__mason_numeric_int_of", [fn("typeof", [this.clone(arg)]), cast(arg, ["varchar"]), intConst(bits as number)]), [name as string]);
       }
     }
     // to char(n): the text cut and padded to n
@@ -5330,7 +5593,9 @@ class Rewriter {
   }
 
   private param(b: Body): AstNode | null {
-    // a parameter is bound as its text; Postgres decided its type, and DuckDB is told it
+    // a parameter is bound as its text; Postgres decided its type, and DuckDB is told it. A numeric one READ is the
+    // engine's double (a program over its `$n` cell where its digits are printed, `exactOf`); one COMPARED with a value
+    // the engine holds exactly never reaches here (`numericParamComparison`, issue 214)
     const oid = this.params[Number(b.number) - 1];
     // a text array is bound as the JSON Postgres read it to (src/duck/analyze.ts readParameters)
     if (oid === TEXT_ARRAY || oid === VARCHAR_ARRAY) return fn("from_json", [cast({ ParamRef: b }, ["varchar"]), strConst('["VARCHAR"]')]);
@@ -5948,22 +6213,36 @@ function literalFits(text: string, precision: number, scale: number): boolean {
   return decimals.length <= scale && whole.length <= precision - scale;
 }
 
+/** whether a program computes digits the engine's own arithmetic would not: once per DISTINCT node (a program is never
+ *  changed once made, and a node several parents share is asked once: src/lib/pg-numeric.ts) */
 function worthComputing(p: NumericProgram): boolean {
+  const known = WORTH.get(p);
+  if (known !== undefined) return known;
+  let v: boolean;
   switch (p.op) {
     // a parameter's cell is its text: DuckDB computes with it as a double
-    case "cell": return p.key.startsWith("$");
-    case "literal": return false;
+    case "cell": v = p.key.startsWith("$"); break;
+    case "literal": v = false; break;
     // DuckDB's decimals may be fewer than Postgres's (src/duck/sync.ts copies a numeric(65,30) at its values' scale)
-    case "pad": return true;
-    case "add": case "sub": case "mul": return worthComputing(p.args[0]) || worthComputing(p.args[1]);
-    case "neg": case "abs": return worthComputing(p.arg);
-    default: return true;
+    case "pad": v = true; break;
+    case "add": case "sub": case "mul": v = worthComputing(p.args[0]) || worthComputing(p.args[1]); break;
+    case "neg": case "abs": v = worthComputing(p.arg); break;
+    default: v = true;
   }
+  WORTH.set(p, v);
+  return v;
 }
+const WORTH = new WeakMap<NumericProgram, boolean>();
 
-/** the program with each cell's key moved by `by` (the cells of the columns before it) */
+/** the program with each cell's key moved by `by` (the cells of the columns before it), its sharing kept (`mapCells`) */
 function offsetCells(p: NumericProgram, by: number): NumericProgram {
-  return mapCells(p, (key) => key.startsWith("$") ? { op: "cell", key } : { op: "cell", key: String(Number(key) + by) });
+  if (by === 0) return p;
+  const cells = new Map<string, NumericProgram>();
+  return mapCells(p, (key) => {
+    let c = cells.get(key);
+    if (c === undefined) { c = key.startsWith("$") ? { op: "cell", key } : { op: "cell", key: String(Number(key) + by) }; cells.set(key, c); }
+    return c;
+  });
 }
 
 /** an expression without the casts around it */
@@ -6036,23 +6315,6 @@ function fromJoins(from: unknown): AstNode[] {
   if (!Array.isArray(from)) return [];
   return (from as AstNode[]).flatMap((f): AstNode[] => !isNode(f) || kindOf(f) !== "JoinExpr" ? []
     : [f, ...fromJoins([bodyOf(f).larg]), ...fromJoins([bodyOf(f).rarg])]);
-}
-
-/** a program with each cell replaced (a parameter's `$n` too) */
-function mapCells(p: NumericProgram, f: (key: string) => NumericProgram): NumericProgram {
-  const m = (x: NumericProgram): NumericProgram => mapCells(x, f);
-  switch (p.op) {
-    case "cell": return f(p.key);
-    case "literal": return p;
-    case "add": case "sub": case "mul": case "div": case "mod": return { op: p.op, args: [m(p.args[0]), m(p.args[1])] };
-    case "neg": case "abs": case "floor": case "ceil": return { op: p.op, arg: m(p.arg) };
-    case "round": case "trunc": case "pad": return { op: p.op, arg: m(p.arg), scale: p.scale };
-    case "typmod": return { op: "typmod", arg: m(p.arg), precision: p.precision, scale: p.scale };
-    case "greatest": case "least": case "coalesce": return { op: p.op, args: p.args.map(m) };
-    case "stddev": return { ...p, args: [m(p.args[0]), m(p.args[1]), m(p.args[2])] };
-    case "pick": return { op: "pick", index: m(p.index), args: p.args.map(m) };
-    case "rescale": return { op: "rescale", arg: m(p.arg), scale: m(p.scale) };
-  }
 }
 
 /** an expression's shape: its tree without offsets */

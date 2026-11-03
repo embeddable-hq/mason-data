@@ -69,7 +69,7 @@ function collect(n: unknown, kind: string, out: Node[] = []): Node[] {
 /**
  * Whether a statement of no table has a construct that can order text, read off the raw tree: a sort (ORDER BY, a
  * window's, an aggregate's or WITHIN GROUP's), <, >, <=, >= (BETWEEN, ANY / ALL and a subquery's among them),
- * GREATEST / LEAST, min / max, and a COLLATE (`'a' = 'A' COLLATE mason_ci`). One without (`SELECT 1`, `SELECT version()`, `current_setting(…)`, `'a' = 'A'`) is the
+ * GREATEST / LEAST, min / max, upper / lower / initcap (which map case, issue 406), and a COLLATE (`'a' = 'A' COLLATE mason_ci`). One without (`SELECT 1`, `SELECT version()`, `current_setting(…)`, `'a' = 'A'`) is the
  * catalog's without asking its analysis, which costs a statement several milliseconds (`ordersText`, issue 122): a
  * statement it says may order is asked, so a false "may" costs time, never an answer.
  */
@@ -88,13 +88,14 @@ export function mayOrderText(n: unknown): boolean {
       if (typeof b.kind === "string" && b.kind.includes("BETWEEN")) return true;
       if (named(b.name ?? b.operName).some((o) => ORDERING_OPERATORS.has(o))) return true;
     }
-    if (k === "FuncCall" && v !== null && typeof v === "object" && ORDERING_AGGREGATES.has((named((v as Any).funcname).at(-1) ?? "").toLowerCase())) return true;
+    // min / max order text; upper / lower / initcap map its case, which the catalog does by its own rules (issue 406)
+    if (k === "FuncCall" && v !== null && typeof v === "object" && COLLATED_CALLS.has((named((v as Any).funcname).at(-1) ?? "").toLowerCase())) return true;
     if (mayOrderText(v)) return true;
   }
   return false;
 }
 const ORDERING_OPERATORS = new Set(["<", ">", "<=", ">="]);
-const ORDERING_AGGREGATES = new Set(["min", "max"]);
+const COLLATED_CALLS = new Set(["min", "max", "upper", "lower", "initcap"]);
 
 const INFORMATION_SCHEMA = "information_schema";
 const PG_CATALOG = "pg_catalog";

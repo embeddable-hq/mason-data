@@ -805,19 +805,27 @@ function unfenced(text: string): Array<[number, string]> {
   });
 }
 
-/** GitHub's anchor for each heading: its text without markup, lower case, punctuation dropped, each space a hyphen; a repeat gets -1, -2 */
-export function markdownAnchors(text: string): Set<string> {
-  const seen = new Map<string, number>(), out = new Set<string>();
-  for (const [, l] of unfenced(text)) {
-    const h = /^#{1,6}\s+(.*?)\s*#*\s*$/.exec(l);
+/** a heading of a markdown text outside code fences: its level (the number of `#`), line, text without links or HTML, and GitHub's anchor */
+export interface MarkdownHeading { level: number; line: number; text: string; anchor: string }
+
+/** each heading in order, with GitHub's anchor: its text without markup, lower case, punctuation dropped, each space a hyphen; a repeat, at any level, gets -1, -2 */
+export function markdownHeadings(text: string): MarkdownHeading[] {
+  const seen = new Map<string, number>(), out: MarkdownHeading[] = [];
+  for (const [line, l] of unfenced(text)) {
+    const h = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(l);
     if (h === null) continue;
-    const base = h[1]!.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]+>/g, "").toLowerCase()
-      .replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, "").replace(/ /g, "-");
+    const plain = h[2]!.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]+>/g, "");
+    const base = plain.toLowerCase().replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, "").replace(/ /g, "-");
     const n = seen.get(base) ?? 0;
     seen.set(base, n + 1);
-    out.add(n === 0 ? base : `${base}-${n}`);
+    out.push({ level: h[1]!.length, line, text: plain, anchor: n === 0 ? base : `${base}-${n}` });
   }
   return out;
+}
+
+/** GitHub's anchor for each heading (`markdownHeadings`'s) */
+export function markdownAnchors(text: string): Set<string> {
+  return new Set(markdownHeadings(text).map((h) => h.anchor));
 }
 
 /** the links in `text` (the file at `file`, relative to ROOT) that name nothing: `read` gives a file's text, or undefined when there is none */
@@ -863,6 +871,158 @@ test("the link guard would catch the real thing", () => {
     "guide/A.md:4 #what-of-postgres-is-answered: guide/A.md has no heading #what-of-postgres-is-answered",
   ]);
   assert.deepEqual(brokenLinks("README.md", "```\n[x](nothing.md)\n```", read), [], "a link in a code fence is code");
+});
+
+/**
+ * THE README'S CONTENTS LISTS ITS HEADINGS (issue 554): `### Generated tables`, added in 4586cbb, had no line in the
+ * README's **Contents**, which is written by hand beside what it lists, and nothing compared the two (the link guard
+ * above checks only that each link resolves). The Contents is held equal to the headings: the (level, anchor) of every
+ * `##` and `###` heading outside a code fence, in the README's order, equals the (level, anchor) of the Contents'
+ * links, a list line with no indent being level 2 and one indented two spaces level 3, and every `[text](#anchor)` of
+ * a line counting in order at its level (the ` · `-joined last line is four). The anchors are `markdownHeadings`'s, the
+ * one rule, so a `# comment` in a fence is no heading and a repeat's -1 counts every level. An absent or empty Contents
+ * is a problem, never a pass.
+ */
+interface ContentsEntry { level: number; line: number; text: string; anchor: string }
+
+/** what is wrong with the **Contents** of `text` (the file `file`) as an index of its ## and ### headings; [] when nothing */
+export function contentsProblems(file: string, text: string): string[] {
+  const problems: string[] = [];
+  const lines = unfenced(text);
+  const start = lines.findIndex(([, l]) => l.trim() === "**Contents**");
+  if (start < 0) return [`${file}: no **Contents** line: put a "**Contents**" line, then a list of the file's ## and ### headings`];
+  let i = start + 1;
+  while (i < lines.length && lines[i]![1].trim() === "") i++;
+  const entries: ContentsEntry[] = [];
+  let listLines = 0;
+  for (let prev = -1; i < lines.length; i++) {
+    const [line, l] = lines[i]!;
+    const item = /^( *)[-*+] /.exec(l);
+    if (item === null || (prev >= 0 && line !== prev + 1)) break;
+    prev = line;
+    listLines++;
+    const indent = item[1]!.length;
+    if (indent !== 0 && indent !== 2) {
+      problems.push(`${file}:${line} a Contents line indented ${indent} spaces: indent a ## heading's line 0 spaces and a ### heading's 2`);
+      continue;
+    }
+    const links = [...l.matchAll(/\[([^\]]*)\]\(([^)\s]*)\)/g)];
+    if (!links.some((m) => m[2]!.startsWith("#"))) {
+      problems.push(`${file}:${line} a Contents line with no [text](#anchor) link: link it to its heading, or take it out of the list`);
+      continue;
+    }
+    for (const m of links) {
+      if (!m[2]!.startsWith("#")) {
+        problems.push(`${file}:${line} [${m[1]}](${m[2]}) in the Contents is not a #anchor: the Contents links only this file's headings`);
+        continue;
+      }
+      entries.push({ level: indent === 0 ? 2 : 3, line, text: m[1]!, anchor: m[2]!.slice(1) });
+    }
+  }
+  if (listLines === 0) {
+    return [`${file}:${lines[start]![0]} **Contents** is followed by no list: list the file's ## headings as "- [text](#anchor)" and each ### under its ## as "  - [text](#anchor)"`];
+  }
+
+  const headings = markdownHeadings(text).filter((h) => h.level === 2 || h.level === 3);
+  const byAnchor = new Map(headings.map((h) => [h.anchor, h]));
+  const marks = (level: number): string => "#".repeat(level);
+  const listed = new Map<string, ContentsEntry>();
+  for (const e of entries) {
+    const h = byAnchor.get(e.anchor);
+    if (h === undefined) {
+      problems.push(`${file}:${e.line} [${e.text}](#${e.anchor}) in the Contents is no ## or ### heading's anchor: point it at the heading's anchor, or take it out`);
+      continue;
+    }
+    const first = listed.get(e.anchor);
+    if (first !== undefined) {
+      problems.push(`${file}:${e.line} [${e.text}](#${e.anchor}) is in the Contents twice (first at line ${first.line}): take one out`);
+      continue;
+    }
+    listed.set(e.anchor, e);
+    if (e.level !== h.level) {
+      problems.push(`${file}:${e.line} [${e.text}](#${e.anchor}) is listed as a ${marks(e.level)} heading, and ${marks(h.level)} ${h.text} (line ${h.line}) is a ${marks(h.level)}: indent its line ${h.level === 2 ? 0 : 2} spaces`);
+    }
+  }
+  headings.forEach((h, k) => {
+    if (listed.has(h.anchor)) return;
+    const prev = headings.slice(0, k).reverse().find((p) => listed.has(p.anchor));
+    const where = prev === undefined ? "at the top of the list" : `after "[${listed.get(prev.anchor)!.text}](#${prev.anchor})"`;
+    problems.push(`${file}:${h.line} ${marks(h.level)} ${h.text} is not in the Contents: add "${h.level === 2 ? "" : "  "}- [${h.text}](#${h.anchor})" ${where}`);
+  });
+  const inReadme = headings.filter((h) => listed.has(h.anchor)).map((h) => h.anchor), inContents = [...listed.keys()];
+  const k = inReadme.findIndex((a, j) => a !== inContents[j]);
+  if (k >= 0) {
+    const e = listed.get(inContents[k]!)!, h = byAnchor.get(inReadme[k]!)!;
+    problems.push(`${file}:${e.line} [${e.text}](#${e.anchor}) is listed where the next heading is ${marks(h.level)} ${h.text} (line ${h.line}): list the headings in the file's order`);
+  }
+  // the decision itself, should a case above miss one: the two sequences of (level, anchor) are equal
+  const want = headings.map((h) => `${marks(h.level)} #${h.anchor}`), got = entries.map((e) => `${marks(e.level)} #${e.anchor}`);
+  const d = want.findIndex((w, j) => w !== got[j]);
+  if (problems.length === 0 && (d >= 0 || want.length !== got.length)) {
+    const at = d >= 0 ? d : want.length;
+    problems.push(`${file}: the Contents differs from the headings at entry ${at + 1}: the headings have ${want[at] ?? "nothing"}, the Contents ${got[at] ?? "nothing"}`);
+  }
+  return problems;
+}
+
+test("the README's Contents lists every ## and ### heading at its level and in order, and each of its links is a heading's anchor", () => {
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  assert.deepEqual(contentsProblems("README.md", readme), [], "the README's Contents is its index: list each heading where the README has it");
+  assert.ok(markdownHeadings(readme).filter((h) => h.level === 2 || h.level === 3).length >= 27, "the README's ## and ### headings were read");
+});
+
+test("the Contents guard would catch the real thing", () => {
+  const doc = (contents: string, body: string): string => `**Contents**\n\n${contents}\n\n${body}\n`;
+  const ok = doc("- [A](#a)\n  - [B](#b)\n- [C](#c) · [D](#d)", "# Title\n\n## A\n\n### B\n\n## C\n\n## D");
+  assert.deepEqual(contentsProblems("R.md", ok), [], "a ' · '-joined line is several level-2 entries; the # h1 is not listed");
+
+  const missing3 = doc("- [A](#a)\n  - [B](#b)", "## A\n\n### B\n\n### E");
+  assert.deepEqual(contentsProblems("R.md", missing3), ['R.md:10 ### E is not in the Contents: add "  - [E](#e)" after "[B](#b)"']);
+  const missing2 = doc("- [C](#c) · [D](#d)", "## C\n\n## D\n\n## F");
+  assert.deepEqual(contentsProblems("R.md", missing2), ['R.md:9 ## F is not in the Contents: add "- [F](#f)" after "[D](#d)"']);
+
+  const gone = contentsProblems("R.md", doc("- [A](#a)\n  - [Gone](#gone)", "## A"));
+  assert.equal(gone.length, 1);
+  assert.match(gone[0]!, /^R\.md:4 \[Gone\]\(#gone\) in the Contents is no ## or ### heading's anchor/);
+  const brokenJoined = contentsProblems("R.md", doc("- [C](#c) · [X](#x)", "## C"));
+  assert.equal(brokenJoined.length, 1);
+  assert.match(brokenJoined[0]!, /^R\.md:3 \[X\]\(#x\) in the Contents is no ## or ### heading's anchor/);
+
+  const level3AsTwo = contentsProblems("R.md", doc("- [A](#a)\n- [B](#b)", "## A\n\n### B"));
+  assert.equal(level3AsTwo.length, 1);
+  assert.match(level3AsTwo[0]!, /^R\.md:4 \[B\]\(#b\) is listed as a ## heading, and ### B \(line 8\) is a ###: indent its line 2 spaces/);
+  const level2AsThree = contentsProblems("R.md", doc("- [A](#a)\n  - [C](#c)", "## A\n\n## C"));
+  assert.equal(level2AsThree.length, 1);
+  assert.match(level2AsThree[0]!, /^R\.md:4 \[C\]\(#c\) is listed as a ### heading, and ## C \(line 8\) is a ##: indent its line 0 spaces/);
+
+  const order = contentsProblems("R.md", doc("- [C](#c)\n- [A](#a)", "## A\n\n## C"));
+  assert.deepEqual(order, ["R.md:3 [C](#c) is listed where the next heading is ## A (line 6): list the headings in the file's order"]);
+
+  const fenced = "## A\n\n```bash\n# comment\n## In a fence\n```\n\n```yaml\n### Also fenced\n# a comment\n```";
+  assert.deepEqual(contentsProblems("R.md", doc("- [A](#a)", fenced)), [], "a heading in a code fence is code");
+  const toFenced = contentsProblems("R.md", doc("- [A](#a)\n  - [Also fenced](#also-fenced)", fenced));
+  assert.equal(toFenced.length, 1);
+  assert.match(toFenced[0]!, /^R\.md:4 \[Also fenced\]\(#also-fenced\) in the Contents is no ## or ### heading's anchor/);
+
+  assert.deepEqual(contentsProblems("R.md", doc("- [Why](#why)\n  - [Why](#why-1)", "## Why\n\n### Why")), [], "a repeat's -1 counts every level");
+  const repeatWrong = contentsProblems("R.md", doc("- [Why](#why)\n  - [Why](#why)", "## Why\n\n### Why"));
+  assert.ok(repeatWrong.some((p) => p.includes("[Why](#why) is in the Contents twice")), repeatWrong.join("\n"));
+  assert.ok(repeatWrong.some((p) => p.includes('### Why is not in the Contents: add "  - [Why](#why-1)"')), repeatWrong.join("\n"));
+
+  const marked = doc("- [A doc](#a-doc-the-first-one)\n  - [Why it's fast](#why-its-fast)", "## A `doc`: the [first](x.md) one\n\n### Why it's fast");
+  assert.deepEqual(contentsProblems("R.md", marked), [], "anchors as GitHub makes them, punctuation and markup dropped");
+  assert.deepEqual([...markdownAnchors("## A `doc`: the [first](x.md) one\n### Why it's fast\n")], ["a-doc-the-first-one", "why-its-fast"]);
+
+  assert.deepEqual(contentsProblems("R.md", "# R\n\n## A\n"), ['R.md: no **Contents** line: put a "**Contents**" line, then a list of the file\'s ## and ### headings']);
+  const noList = contentsProblems("R.md", "**Contents**\n\n## A\n");
+  assert.equal(noList.length, 1);
+  assert.match(noList[0]!, /^R\.md:1 \*\*Contents\*\* is followed by no list/);
+  const deep = contentsProblems("R.md", doc("- [A](#a)\n    - [B](#b)", "## A\n\n### B"));
+  assert.ok(deep.some((p) => p.startsWith("R.md:4 a Contents line indented 4 spaces")), deep.join("\n"));
+  const noLink = contentsProblems("R.md", doc("- [A](#a)\n- just words", "## A"));
+  assert.deepEqual(noLink, ["R.md:4 a Contents line with no [text](#anchor) link: link it to its heading, or take it out of the list"]);
+  const outward = contentsProblems("R.md", doc("- [A](#a) · [Docs](guide/X.md)", "## A"));
+  assert.deepEqual(outward, ["R.md:3 [Docs](guide/X.md) in the Contents is not a #anchor: the Contents links only this file's headings"]);
 });
 
 /**

@@ -398,23 +398,9 @@ const tooManySources = (root: string, dir: string, names: readonly string[]): Fa
  * Mason made (its tables listed in another folder, which nothing reads) that mason init writes it.
  */
 export function readSource(folder: string, root: string, env: NodeJS.ProcessEnv = process.env, o: { shellFirst?: boolean } = {}): ProjectSource | Failure {
-  const names = sourceFileNames(folder);
-  const dir = sourcesDir(folder);
-  if (names.length === 0) {
-    const old = path.join(folder, OLD_TABLES_DIR);
-    if (fs.existsSync(old)) {
-      // no backwards compatibility before v1.0 (CLAUDE.md): nothing is migrated, the way out is said
-      return { message: `this project names no database: ${shownPath(root, dir)}/ has no source file, and ${shownPath(root, old)}/ is an older Mason's, which this one does not read`, code: "bad_source",
-        fix: `mason init writes ${shownPath(root, dir)}/ (then mason add each table again); remove ${shownPath(root, old)}/ afterwards`, next: [["mason init", `write ${shownPath(root, dir)}/<database>.yml`]] };
-    }
-    const file = path.join(dir, "app.yml");
-    return { message: `this project names no database: ${shownPath(root, dir)}/ has no source file`, code: "bad_source",
-      fix: `write ${shownPath(root, file)}, with the database's URL in .env as DATABASE_URL:\n${newSourceText().trimEnd()}` };
-  }
-  if (names.length > 1) return tooManySources(root, dir, names);
-  const file = path.join(dir, names[0]!);
-  const parsed = parseSourceText(fs.readFileSync(file, "utf8"), names[0]!.replace(/\.ya?ml$/, ""), file);
-  if ("problems" in parsed) return sourceFailure(file, root, parsed.problems);
+  const parsed = readSourceFile(folder, root);
+  if ("message" in parsed) return parsed;
+  const file = parsed.file;
   const where = o.shellFirst ? "the environment, .env.local or .env" : ".env.local, .env or the shell";
   // the publication's name, read as url: is: ${NAME} from the same places, in the same order
   let publicationName: string | null = null;
@@ -436,6 +422,31 @@ export function readSource(folder: string, root: string, env: NodeJS.ProcessEnv 
       fix: `put ${v}=postgres://user:password@host:5432/your_app in ${shownPath(root, path.join(root, ENV_FILE))} (or export it), or write the URL in url:` };
   }
   return { ...parsed, resolved: found.value, from: `${parsed.url.env} in ${found.from}`, publicationName };
+}
+
+/**
+ * THE PROJECT'S SOURCES FILE, ITS TEXT ALONE (the first step of `readSource`, which resolves its URL after): the one file
+ * in `sources/`, parsed, or what is wrong with it. What `mason deploy` checks before it sends a project (src/cli/deploy.ts):
+ * there the URL is the replica's environment's, never this machine's .env.
+ */
+export function readSourceFile(folder: string, root: string): SourceFile | Failure {
+  const names = sourceFileNames(folder);
+  const dir = sourcesDir(folder);
+  if (names.length === 0) {
+    const old = path.join(folder, OLD_TABLES_DIR);
+    if (fs.existsSync(old)) {
+      // no backwards compatibility before v1.0 (CLAUDE.md): nothing is migrated, the way out is said
+      return { message: `this project names no database: ${shownPath(root, dir)}/ has no source file, and ${shownPath(root, old)}/ is an older Mason's, which this one does not read`, code: "bad_source",
+        fix: `mason init writes ${shownPath(root, dir)}/ (then mason add each table again); remove ${shownPath(root, old)}/ afterwards`, next: [["mason init", `write ${shownPath(root, dir)}/<database>.yml`]] };
+    }
+    const file = path.join(dir, "app.yml");
+    return { message: `this project names no database: ${shownPath(root, dir)}/ has no source file`, code: "bad_source",
+      fix: `write ${shownPath(root, file)}, with the database's URL in .env as DATABASE_URL:\n${newSourceText().trimEnd()}` };
+  }
+  if (names.length > 1) return tooManySources(root, dir, names);
+  const file = path.join(dir, names[0]!);
+  const parsed = parseSourceText(fs.readFileSync(file, "utf8"), names[0]!.replace(/\.ya?ml$/, ""), file);
+  return "problems" in parsed ? sourceFailure(file, root, parsed.problems) : parsed;
 }
 
 /** The columns a table's copy keeps, in the source's order: the entry's, its key always among them. */

@@ -6,8 +6,8 @@
  * deferred as non-blocking (filed, not fixed) under `deferred`, its CI fixes and its status. This
  * reads every such block from the repository's PR comments and prints the number to watch, over the PRs whose run
  * reached a review:
- *   - passed the first review: Fable's round 1 found nothing BLOCKING of the PR's (a later re-check of a CI fix does not
- *     undo it); a finding the run deferred as non-blocking (a refusal's wording, an over-refusal, docs, quality: filed,
+ *   - passed the first review: the review's round 1 found nothing BLOCKING of the PR's (a later re-check of a CI fix
+ *     does not undo it); a finding the run deferred as non-blocking (a refusal's wording, an over-refusal, docs, quality: filed,
  *     never fixed in the PR, CLAUDE.md "The loop" step 4) does not count against it;
  *   - passed by the second: round 1 found nothing blocking, or a round 2 ran and found nothing blocking;
  *   - the mean review and probe rounds, and the classes met most;

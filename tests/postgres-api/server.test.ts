@@ -903,5 +903,15 @@ test("no table: a statement that orders text under a collation is the synced dat
     await rows("SELECT count(*) FROM orders");
     for (const sql of ["SELECT 1 AS one", "SELECT version() IS NOT NULL", "SELECT current_setting('TimeZone'), 'a' = 'A', 'x' || 'y'"]) await rows(sql);
     assert.deepEqual(asked.filter((a) => a.includes("orders") || /^SELECT (1 AS|version|current_setting)/.test(a)), [], asked.join("\n"));
+    // one that maps case beside a value of the server or the session is the catalog's, never planned for the synced data,
+    // which would answer it with its own (review r2 of PR 568): version() and format_type(), which Postgres
+    // calls stable, never immutable; one of its arguments alone moves
+    const cased = planned.length;
+    assert.deepEqual(await rows("SELECT upper(substr(version(), 1, 10)) AS v"), [["POSTGRESQL"]]);
+    assert.deepEqual(await rows("SELECT upper(format_type(23, NULL)) AS t"), [["INTEGER"]]);
+    assert.deepEqual(await rows("SELECT lower(current_user) = current_user::text AS same"), [[true]]);
+    assert.equal(planned.length, cased, planned.slice(cased).join("\n"));
+    assert.deepEqual(await rows("SELECT upper(substr('abc', 1, 2)) AS u"), [["AB"]]);
+    assert.equal(planned.length, cased + 1, planned.slice(cased).join("\n"));
   } finally { await c.end(); await s.close(); }
 });

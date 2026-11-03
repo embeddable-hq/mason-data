@@ -15,6 +15,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason doctor` warns when the user Mason connects as could write to your database**: a superuser or `BYPASSRLS`, the
+  owner of a synced table, or one holding `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` on a
+  synced table or `CREATE` on its schema — or a write that reaches its rows through a partition, an inheritance child or
+  parent, a foreign key's `ON DELETE` / `ON UPDATE` action, an updatable view or a rule; a foreign table or user
+  mapping; `ADMIN OPTION` on a role, or a server role — directly, through a role it is a member of, or granted to
+  `PUBLIC`. Mason only reads, so such a user lets a Mason bug or a stolen URL change the database. Each is a warning
+  (`!`, the exit status unchanged) with the statements that make a role that only reads (`REPLICATION` and a
+  publication where a table's `sync:` is replication), and in `--json` a stable `code` and the `fix`. The statements
+  change no role's privileges but the new one's: what `PUBLIC` holds is said for you to decide. **`SECURITY DEFINER`
+  code** the user reaches (by `EXECUTE`, a trigger on a table it may write, an event trigger, an aggregate) whose owner
+  may write the synced tables is listed for you to review, since what it writes is in its body, and the user is never
+  said to only read while it can run one. It is all asked of the catalog in one read, never tried.
 - **Behind a TCP load balancer or proxy, the request log can name each real client**: set `MASON_PG_PROXY_FROM` to the
   proxy's own addresses (CIDRs, comma-separated) and turn on its PROXY protocol v2 (an NLB's target group, HAProxy's
   `send-proxy-v2`). A connection from those addresses must then begin with the header, and one from any other address
@@ -25,6 +37,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   every project; logout revokes it and removes it. `MASON_CLOUD_URL` names another service (https, or http on this
   machine). Nothing changes for a project, `mason start` or `mason serve`. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md)
   is the API they speak.
+- **`mason deploy` sends the project to a replica on a hosted Mason service** (`--replica <org>/<name>`, else
+  `MASON_REPLICA`), and waits until the replica runs it or Mason there refuses it. The project is checked first as
+  `mason start` checks it, without connecting to any database; only its YAML under `mason/` is sent, never `.env` or
+  `.mason/`, and a `url:` written with its password is refused. `--dry-run` lists what would be sent and sends nothing.
+- **`mason login`, `mason logout` and `mason deploy` print at most a quarter of the token they hold when a
+  service repeats it**: the token whole, and its body without its `masondata_…_` prefix, re-cased, split by spaces,
+  dashes or other characters, URL-encoded, or in pieces of 4 or more characters, are each shown as `****` once
+  everything the command prints would show more than 10 of its 43 characters together, on stdout, stderr and in
+  `--json`. Before, a service's message that repeated the token without its prefix printed it, into a CI log too.
 - **`MASON_PROJECT_READONLY=1` makes a deployed project's files read-only where Mason runs**, for a deployment that
   ships its committed project folder (CI, GitOps, an image that carries it): `mason add`, `mason remove` and `mason init`
   beside the server, with Mason up or down, and the web page's Add and Remove, are refused with "edit the files and deploy
@@ -249,6 +270,19 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   (`3`, half away from zero). A `*` beside a division (`SELECT *, a / 7 AS q …`, `SELECT s.*, 1 …`) showed 15 digits; it
   shows Postgres's, and a comparison of such a subquery's division, refused before, is answered. A subquery column named
   like `__mason_cell_0` is the query's own. Nothing to do on upgrade.
+- **A `NULLIF` of a numeric division cast to an integer rounds as Postgres does**: `nullif(x / 1.6, 0)::int` of 4.00
+  was `2` and is `3` (half away from zero), in a query and in a generated table, and `nullif(x / y, 0)` shows
+  Postgres's digits. `(exp(…) * sign(x))::int` rounds as Postgres does too. `percentile_disc` and `mode()` ordered by a
+  division answer the picked row's exact value, where they answered bytes (`\x3305…`) or the engine's error: printed,
+  cast, compared, tested for NULL, grouped or joined on, in a query and in a generated table. Two kinds are refused by
+  name: an array of fractions over a division (`numeric-ordered-set`: ask for each fraction alone), and a cast to an
+  integer of a double the engine computes, such as `stddev(x)::int` of a numeric without a precision
+  (`numeric-double-integer`: cast to float8 first); a generated table with one fails its build saying so. Nothing to do
+  on upgrade.
+- **A numeric `power`, `^` or `exp` past a double's range, cast to `double precision`, now raises Postgres's error.**
+  `power(x, 400)::double precision` answered `Infinity`, and a value too small for a double (`(0.01 ^ 170)::float8`)
+  answered `0`; each now fails as Postgres does, 22003 `"<the value>" is out of range for type double precision`. A
+  value a double holds, however small (`1e-310`), is answered as before. Nothing to do on upgrade.
 - **A numeric division keeps Postgres's exact value in a `UNION ALL`, a scalar subquery and a window too.** A
   `UNION ALL` sorted, limited and tied by a division's rounded number, a `VALUES` arm beside a division failed with
   "types cannot be matched", and an integer beside a `numeric(12,2)` showed `1.00` where Postgres shows `1`; each now
@@ -309,7 +343,26 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A statement that reads a numeric through many levels of subqueries or WITH queries plans in milliseconds.** Each
   level that read the level below more than once (`a + a + a` over a derived table, a chain of WITH queries) multiplied
   the work: eight levels took about a second to plan and twelve took over a minute, during which every other session's
-  statements waited. A numeric read through a UNION ALL at every level is not yet covered.
+  statements waited. This now holds too for a numeric whose exact digits Mason works out itself (a quotient such as
+  `amount / 3`, a numeric read through a `UNION ALL` at every level, `c + c - c` at every level): deep nested numerics
+  are planned, answered and stored in a generated table in bounded time. Before, eight such levels sent the synced data
+  several megabytes of SQL and took about a second, and ten failed with an internal error or ran out of memory.
+- **A numeric column compared with a bound parameter matches the rows Postgres matches.** A filter an ORM, a driver's
+  prepared statement or a BI tool binds (`amount = $1`, `<`, `BETWEEN $1 AND $2`, `IN ($1, $2)`, `IS DISTINCT FROM`,
+  `NULLIF`, `CASE amount WHEN $1`) compared the value as a double, so past about 15 significant digits it matched rows
+  Postgres tells apart: `x = '1.00000000000000000001'` over a `numeric(30,20)` answered two rows where Postgres answers
+  one, and `<=` and `>` kept the wrong neighbours. The value is now compared in the column's own type wherever that type
+  holds it exactly, still the synced data's own filter, and otherwise (more decimals than the column, more digits,
+  `NaN`, `Infinity`) by its exact value. Nothing to do on upgrade.
+- **`upper`, `lower` and `initcap` change case as the source's collation does, under the database's collation, a
+  column's own and a `COLLATE`.** Each followed the database's collation whatever the call's, and read it from the
+  collation's sort order: under an ICU collation `initcap('o''hara')` was `O'Hara` where Postgres answers `O'hara`
+  (ICU title-cases a whole word), `upper('ß' COLLATE "und-x-icu")` was `ß` where it is `SS`, and under `COLLATE "C"`
+  `upper('é')` was `É` where C leaves it. A `SELECT` of no table, `SELECT upper('ß')`, answered `ẞ` where glibc's en_US
+  keeps `ß`. Now glibc's locales, C and POSIX, ICU's locales (Turkish's dotted and dotless i, Dutch's IJ, Greek's final
+  sigma), and the builtin `pg_c_utf8` and `pg_unicode_fast` are each followed. A libc collation of Turkish or Azeri
+  (`tr_TR`, `az_AZ`), whose i maps otherwise, is refused by name (`case-mapping-unknown`): write `COLLATE "tr-x-icu"`.
+  Nothing to do on upgrade.
 - **A database URL that is not a `postgres://` URL is no longer repeated in its refusal, password and all.** Given a
   keyword/value string (`host=… user=… password=…`), a password on its own, a URL whose password holds an unencoded
   `/`, `?` or `#`, or a URL carrying its password as a parameter (`?password=…`, `?sslpassword=…`), `mason start`, `mason serve`, `mason doctor`, `mason init`, `mason add`, `mason tables`, `mason

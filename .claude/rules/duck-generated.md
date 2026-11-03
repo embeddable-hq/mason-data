@@ -43,7 +43,9 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
   a double's, so an integer is cast to DECIMAL(38,0) first. **Every path a numeric reaches storage by is held to its
   engine type** (`storedColumns`): a program's cells, and a numeric the engine answers itself (no program, a passthrough
   among them: a DECIMAL stored, an integer as HUGEINT, a double refused, never stored as a double under a numeric's
-  name). **Before its engine type, its FORM: the analysis is the one authority on what is stored.** A column whose
+  name). An integer column converted from a numeric holds the value the plan's SQL computes, which the rewrite's CAST
+  reader makes exact (`__mason_numeric_int`, half away from zero; percentile_disc / mode() of a division included, the picked row's exact value), and by the engine's own type at the run casts a decimal or refuses a double (`numeric-double-integer`, a failed build), so it needs no
+  form walk (issue 242). **Before its engine type, its FORM: the analysis is the one authority on what is stored.** A column whose
   analysed form the engine computes as a double (a variance, sqrt and its kin, avg or `/`, a cast from a double:
   `ENGINE_DOUBLES`) is refused by that form, whether or not the rewrite made a program for it; whether a program exists
   (src/duck/rewrite.ts `programNeeded`) is the wire's rule, and its silence stored `stddev(x)::numeric(p,s)` from the
@@ -192,3 +194,13 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   without `::double precision`), and an unmapped engine error (`chr(2147483647)`): Postgres's DETAIL on one path only,
   the engine's words in the record (PR 202).
 - `stop()` while a run plans or a review checks: a spurious `generated_failed` at shutdown (PR 156).
+- A stored definition whose shared node sits only under a condition no row takes, the node raising in the engine:
+  `SELECT id, CASE WHEN id > 0 THEN amount ELSE x + x END AS v FROM (SELECT id, amount, amount * 1e30 * 1e30 AS x
+  FROM events) s` (`amount numeric(12,2)`), and the same under a COALESCE's later argument and with `round`, `trunc`,
+  a typmod cast or `mod` as the node: the table builds as Postgres answers, never `numeric field overflow` from a
+  layer column computed for every row (`shared-node-hoisted-out-of-its-condition`, PR 520).
+- A stored definition nested n levels deep, each level bounded so Postgres keeps it (`SELECT id, CASE WHEN id > 0 THEN
+  v + v - v ELSE v - v + v END AS v FROM (<level below>) s ORDER BY id LIMIT 100`, the bottom `SELECT id, amount AS v
+  FROM events`), at n = 7, 8 and 16 at the head and the base: the layers stay the shared nodes' count, and no depth the
+  base built meets the engine's expression-depth limit or a stack overflow at the head
+  (`guard-layers-multiply-the-nesting`, PR 520).

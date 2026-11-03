@@ -30,7 +30,7 @@ import { cliPinProblem, ensurePin } from "./pin.ts";
 import { version } from "./version.ts";
 import { parseVersion, PIN_FILE } from "../lib/project-version.ts";
 import { appDatabaseUrl, appEnvValue, appendEnvLine, ENV_FILE } from "../lib/dotenv.ts";
-import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, ignoresStateDir, nameFromFolder, newConfig, projectWriteRefusal, writeConfig } from "./project.ts";
+import { DEMO_DIR, NAME_RE, STATE_DIR, brokenProblem, findProject, folderPlace, ignoresStateDir, nameFromFolder, newConfig, projectWriteRefusal, writeConfig } from "./project.ts";
 import { DEMO_ADDED_TABLES, DEMO_ARG, DEMO_GENERATED, DEMO_PORT, DEMO_SYNC, DEMO_TABLE_TO_ADD, demoUrl } from "./demo.ts";
 import { GENERATED_DIR, generatedDir } from "./generated-files.ts";
 import { freePort } from "./ports.ts";
@@ -203,7 +203,15 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const name = sourceless?.config.name ?? (f.values.name as string | undefined) ?? nameFromFolder(root);
   const folderArg = (f.values.folder as string | undefined) ?? "mason";
   const folder = sourceless?.folder ?? path.resolve(root, folderArg);
-  if (path.relative(root, folder).startsWith("..")) return usage(`--folder ${folderArg} is outside this folder`, "the project's files go in this folder or below it");
+  // the one authority on where the files go (src/cli/project.ts folderPlace): outside this folder, or a place it cannot
+  // resolve (a loop, a file as a folder, unreadable, too long), which can never become a project's folder, is refused
+  const place = folderPlace(root, folder);
+  const shownArg = folderArg.length > 200 ? `${folderArg.slice(0, 200)}…` : folderArg;
+  if (place.place === "outside") return usage(`--folder ${shownArg} is outside this folder`, "the project's files go in this folder or below it");
+  if (place.place === "unknown") {
+    return failed("init", { message: `--folder ${shownArg} cannot be resolved to a folder`, code: "usage", why: place.why,
+      fix: "name a folder of its own inside this one with --folder (the default, mason, is one), or fix the path" }, { json, io });
+  }
   if (fs.existsSync(folder) && !fs.statSync(folder).isDirectory()) return usage(`${folder} is a file, not a folder`, "--folder <dir> chooses another");
   const named = nameProblem(name);
   if (named) return usage(named);

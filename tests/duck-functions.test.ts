@@ -8,6 +8,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { arrayText, floatNumericText, initcap, jsonArrayLength, jsonBuild, jsonbContains, jsonbExists, jsonElements, jsonGet, jsonMembers, jsonValue, pgCase, stringToArray } from "../src/duck/functions.ts";
 import { toCharNumber, toCharTime } from "../src/duck/to-char.ts";
+import { caseMappingOf, type CaseMapping } from "../src/duck/collation.ts";
 import { giveTurns, masonCalls, similarToRe2 } from "../src/duck/rewrite.ts";
 import { parseSql, stopParser } from "../src/api/postgres/parser.ts";
 import { deparseSync } from "pgsql-deparser";
@@ -44,12 +45,327 @@ test("json writes: json_build_object's spacing, a timestamp in ISO 8601, NULL as
   assert.throws(() => jsonBuild("o:ss", [null, "x"]), /key must not be null/);
 });
 
-test("case: glibc keeps ß, ICU's full mapping makes it SS, the C locale changes ASCII only; initcap after a letter or digit", () => {
-  assert.equal(pgCase("straße", true, "libc"), "STRAßE");
-  assert.equal(pgCase("straße", true, "icu"), "STRASSE");
-  assert.equal(pgCase("éa", true, "ascii"), "éA");
-  assert.equal(initcap("hello wORLD-x2y straße", "libc"), "Hello World-X2y Straße");
-  assert.equal(initcap("éa b", "ascii"), "éA B");
+/**
+ * UPPER, LOWER AND INITCAP UNDER EACH CASE MAPPING (issue 406), as Postgres 18 answered them under the collation named
+ * (postgres:18, glibc 2.41's en_US.utf8 and C.utf8, ICU 76, its builtin pg_c_utf8 and pg_unicode_fast): each row the
+ * input, then upper, lower and initcap. The same strings, over every code point of the BMP and the SMP but the CJK and
+ * Hangul blocks, differed only in letters added in Unicode 17 (Mason gap unicode-16-case).
+ */
+const POSTGRES_18_CASE: Record<string, { mapping: CaseMapping; rows: Array<[string, string, string, string]> }> = {
+  "C": { mapping: "ascii", rows: [
+    ["straße", "STRAßE", "straße", "StraßE"],
+    ["İstanbul", "İSTANBUL", "İstanbul", "İStanbul"],
+    ["ıi Iİ", "ıI Iİ", "ıi iİ", "ıI Iİ"],
+    ["ǅemal ǆ Ǆ", "ǅEMAL ǆ Ǆ", "ǅemal ǆ Ǆ", "ǅEmal ǆ Ǆ"],
+    ["o'hara", "O'HARA", "o'hara", "O'Hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'Neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ σοφός", "ΟΔΟΣ σοφός", "ΟΔΟΣ σοφός"],
+    ["ﬁne ŉ", "ﬁNE ŉ", "ﬁne ŉ", "ﬁNe ŉ"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.World A_B X2y 1st"],
+    ["élan ÉCOLE", "éLAN ÉCOLE", "élan École", "éLan ÉCole"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǉUBLJANA", "ǉubljana", "ǉUbljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "ǈ ǋ ǲ", "ǈ ǋ ǲ", "ǈ ǋ ǲ"],
+    ["ßtraße", "ßTRAßE", "ßtraße", "ßTraßE"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "Ijs Ijsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ΑΣ b", "ΑΣ B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can'T Won’T"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.B.C 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ ⅻ ⓐⓑ", "Ⅻ ⅻ ⓐⓑ", "Ⅻ ⅻ ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "ǰA ﬀO ᾳB", "ǰa ﬀo ᾳb", "ǰA ﬀO ᾳB"],
+    ["ⴀa ა ᲐᲑ", "ⴀA ა ᲐᲑ", "ⴀa ა ᲐᲑ", "ⴀA ა ᲐᲑ"],
+    ["i\u0307stanbul I\u0307x", "I\u0307STANBUL I\u0307X", "i\u0307stanbul i\u0307x", "I\u0307Stanbul I\u0307X"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "en_US": { mapping: "libc", rows: [
+    ["straße", "STRAßE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "istanbul", "İstanbul"],
+    ["ıi Iİ", "II Iİ", "ıi ii", "Ii Ii"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "Ǆemal Ǆ Ǆ"],
+    ["o'hara", "O'HARA", "o'hara", "O'Hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'Neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΌΣ", "οδοσ σοφός", "Οδοσ Σοφός"],
+    ["ﬁne ŉ", "ﬁNE ŉ", "ﬁne ŉ", "ﬁne ŉ"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.World A_B X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "Ǉubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "Ǉ Ǌ Ǳ"],
+    ["ßtraße", "ßTRAßE", "ßtraße", "ßtraße"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "Ijs Ijsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ασ b", "Ασ B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can'T Won’T"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.B.C 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "ǰA ﬀO ᾼB", "ǰa ﬀo ᾳb", "ǰa ﬀo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa Ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "I\u0307STANBUL I\u0307X", "i\u0307stanbul i\u0307x", "I\u0307Stanbul I\u0307X"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σασ", "Σασ.Σασ"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "C.utf8": { mapping: "libc", rows: [
+    ["straße", "STRAßE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "istanbul", "İstanbul"],
+    ["ıi Iİ", "II Iİ", "ıi ii", "Ii Ii"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "Ǆemal Ǆ Ǆ"],
+    ["o'hara", "O'HARA", "o'hara", "O'Hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'Neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΌΣ", "οδοσ σοφός", "Οδοσ Σοφός"],
+    ["ﬁne ŉ", "ﬁNE ŉ", "ﬁne ŉ", "ﬁne ŉ"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.World A_B X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "Ǉubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "Ǉ Ǌ Ǳ"],
+    ["ßtraße", "ßTRAßE", "ßtraße", "ßtraße"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "Ijs Ijsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ασ b", "Ασ B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can'T Won’T"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.B.C 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "ǰA ﬀO ᾼB", "ǰa ﬀo ᾳb", "ǰa ﬀo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa Ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "I\u0307STANBUL I\u0307X", "i\u0307stanbul i\u0307x", "I\u0307Stanbul I\u0307X"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σασ", "Σασ.Σασ"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "pg_c_utf8": { mapping: "simple", rows: [
+    ["straße", "STRAßE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "istanbul", "İstanbul"],
+    ["ıi Iİ", "II Iİ", "ıi ii", "Ii Ii"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "Ǆemal Ǆ Ǆ"],
+    ["o'hara", "O'HARA", "o'hara", "O'Hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'Neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΌΣ", "οδοσ σοφός", "Οδοσ Σοφός"],
+    ["ﬁne ŉ", "ﬁNE ŉ", "ﬁne ŉ", "ﬁne ŉ"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.World A_B X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "Ǉubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "Ǉ Ǌ Ǳ"],
+    ["ßtraße", "ßTRAßE", "ßtraße", "ßtraße"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "Ijs Ijsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ασ b", "Ασ B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can'T Won’T"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.B.C 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "ǰA ﬀO ᾼB", "ǰa ﬀo ᾳb", "ǰa ﬀo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa Ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "I\u0307STANBUL I\u0307X", "i\u0307stanbul i\u0307x", "I\u0307Stanbul I\u0307X"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σασ", "Σασ.Σασ"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "pg_unicode_fast": { mapping: "full", rows: [
+    ["straße", "STRASSE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "i\u0307stanbul", "İstanbul"],
+    ["ıi Iİ", "II Iİ", "ıi ii\u0307", "Ii Ii\u0307"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "ǅemal ǅ ǅ"],
+    ["o'hara", "O'HARA", "o'hara", "O'Hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'Neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΌΣ", "οδος σοφός", "Οδος Σοφός"],
+    ["ﬁne ŉ", "FINE ʼN", "ﬁne ŉ", "Fine ʼN"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.World A_B X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "ǈubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "ǈ ǋ ǲ"],
+    ["ßtraße", "SSTRASSE", "ßtraße", "Sstraße"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "Ijs Ijsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ας b", "Ας B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can'T Won’T"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.B.C 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "J\u030cA FFO ΑΙB", "ǰa ﬀo ᾳb", "J\u030ca Ffo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "I\u0307STANBUL I\u0307X", "i\u0307stanbul i\u0307x", "I\u0307Stanbul I\u0307X"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σας", "Σασ.Σας"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "und-x-icu": { mapping: "icu:und", rows: [
+    ["straße", "STRASSE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "i\u0307stanbul", "İstanbul"],
+    ["ıi Iİ", "II Iİ", "ıi ii\u0307", "Ii Ii\u0307"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "ǅemal ǅ ǅ"],
+    ["o'hara", "O'HARA", "o'hara", "O'hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΌΣ", "οδος σοφός", "Οδος Σοφός"],
+    ["ﬁne ŉ", "FINE ʼN", "ﬁne ŉ", "Fine ʼN"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.world A_b X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "ǈubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "ǈ ǋ ǲ"],
+    ["ßtraße", "SSTRASSE", "ßtraße", "Sstraße"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "Ijs Ijsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ας b", "Ας B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can't Won’t"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.b.c 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "J\u030cA FFO ΑΙB", "ǰa ﬀo ᾳb", "J\u030ca Ffo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "I\u0307STANBUL I\u0307X", "i\u0307stanbul i\u0307x", "I\u0307stanbul I\u0307x"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σας", "Σασ.σας"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "tr-x-icu": { mapping: "icu:tr", rows: [
+    ["straße", "STRASSE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "istanbul", "İstanbul"],
+    ["ıi Iİ", "Iİ Iİ", "ıi ıi", "Ii Ii"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "ǅemal ǅ ǅ"],
+    ["o'hara", "O'HARA", "o'hara", "O'hara"],
+    ["o'neil mcDONALD-smith", "O'NEİL MCDONALD-SMİTH", "o'neil mcdonald-smith", "O'neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΌΣ", "οδος σοφός", "Οδος Σοφός"],
+    ["ﬁne ŉ", "FINE ʼN", "ﬁne ŉ", "Fine ʼN"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.world A_b X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "ǈubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "ǈ ǋ ǲ"],
+    ["ßtraße", "SSTRASSE", "ßtraße", "Sstraße"],
+    ["ijs ijsland IJmuiden", "İJS İJSLAND IJMUİDEN", "ijs ijsland ıjmuiden", "İjs İjsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ας b", "Ας B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can't Won’t"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.b.c 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "J\u030cA FFO ΑΙB", "ǰa ﬀo ᾳb", "J\u030ca Ffo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "İ\u0307STANBUL I\u0307X", "i\u0307stanbul ix", "İ\u0307stanbul Ix"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σας", "Σασ.σας"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "nl-x-icu": { mapping: "icu:nl", rows: [
+    ["straße", "STRASSE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "i\u0307stanbul", "İstanbul"],
+    ["ıi Iİ", "II Iİ", "ıi ii\u0307", "Ii Ii\u0307"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "ǅemal ǅ ǅ"],
+    ["o'hara", "O'HARA", "o'hara", "O'hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΌΣ", "οδος σοφός", "Οδος Σοφός"],
+    ["ﬁne ŉ", "FINE ʼN", "ﬁne ŉ", "Fine ʼN"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.world A_b X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "ǈubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "ǈ ǋ ǲ"],
+    ["ßtraße", "SSTRASSE", "ßtraße", "Sstraße"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "IJs IJsland IJmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ας b", "Ας B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can't Won’t"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.b.c 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "J\u030cA FFO ΑΙB", "ǰa ﬀo ᾳb", "J\u030ca Ffo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "I\u0307STANBUL I\u0307X", "i\u0307stanbul i\u0307x", "I\u0307stanbul I\u0307x"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σας", "Σασ.σας"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "lt-x-icu": { mapping: "icu:lt", rows: [
+    ["straße", "STRASSE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "i\u0307stanbul", "İstanbul"],
+    ["ıi Iİ", "II Iİ", "ıi ii\u0307", "Ii Ii\u0307"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "ǅemal ǅ ǅ"],
+    ["o'hara", "O'HARA", "o'hara", "O'hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΌΣ", "οδος σοφός", "Οδος Σοφός"],
+    ["ﬁne ŉ", "FINE ʼN", "ﬁne ŉ", "Fine ʼN"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.world A_b X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "ǈubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "ǈ ǋ ǲ"],
+    ["ßtraße", "SSTRASSE", "ßtraße", "Sstraße"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "Ijs Ijsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ας b", "Ας B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can't Won’t"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.b.c 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "J\u030cA FFO ΑΙB", "ǰa ﬀo ᾳb", "J\u030ca Ffo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "ISTANBUL I\u0307X", "i\u0307stanbul i\u0307\u0307x", "I\u0307stanbul I\u0307x"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σας", "Σασ.σας"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+  "el-x-icu": { mapping: "icu:el", rows: [
+    ["straße", "STRASSE", "straße", "Straße"],
+    ["İstanbul", "İSTANBUL", "i\u0307stanbul", "İstanbul"],
+    ["ıi Iİ", "II Iİ", "ıi ii\u0307", "Ii Ii\u0307"],
+    ["ǅemal ǆ Ǆ", "ǄEMAL Ǆ Ǆ", "ǆemal ǆ ǆ", "ǅemal ǅ ǅ"],
+    ["o'hara", "O'HARA", "o'hara", "O'hara"],
+    ["o'neil mcDONALD-smith", "O'NEIL MCDONALD-SMITH", "o'neil mcdonald-smith", "O'neil Mcdonald-Smith"],
+    ["ΟΔΟΣ σοφός", "ΟΔΟΣ ΣΟΦΟΣ", "οδος σοφός", "Οδος Σοφός"],
+    ["ﬁne ŉ", "FINE ʼN", "ﬁne ŉ", "Fine ʼN"],
+    ["hello.world a_b x2y 1st", "HELLO.WORLD A_B X2Y 1ST", "hello.world a_b x2y 1st", "Hello.world A_b X2y 1st"],
+    ["élan ÉCOLE", "ÉLAN ÉCOLE", "élan école", "Élan École"],
+    ["", "", "", ""],
+    ["ǉubljana", "ǇUBLJANA", "ǉubljana", "ǈubljana"],
+    ["'quoted' (paren) -dash", "'QUOTED' (PAREN) -DASH", "'quoted' (paren) -dash", "'Quoted' (Paren) -Dash"],
+    ["ǈ ǋ ǲ", "Ǉ Ǌ Ǳ", "ǉ ǌ ǳ", "ǈ ǋ ǲ"],
+    ["ßtraße", "SSTRASSE", "ßtraße", "Sstraße"],
+    ["ijs ijsland IJmuiden", "IJS IJSLAND IJMUIDEN", "ijs ijsland ijmuiden", "Ijs Ijsland Ijmuiden"],
+    ["ΑΣ b", "ΑΣ B", "ας b", "Ας B"],
+    ["can't won’t", "CAN'T WON’T", "can't won’t", "Can't Won’t"],
+    ["a.b.c 1.5 x:y", "A.B.C 1.5 X:Y", "a.b.c 1.5 x:y", "A.b.c 1.5 X:Y"],
+    ["Ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ ⒶⒷ", "ⅻ ⅻ ⓐⓑ", "Ⅻ Ⅻ Ⓐⓑ"],
+    ["ǰa ﬀo ᾳb", "J\u030cA FFO ΑΙB", "ǰa ﬀo ᾳb", "J\u030ca Ffo ᾼb"],
+    ["ⴀa ა ᲐᲑ", "ႠA Ა ᲐᲑ", "ⴀa ა აბ", "Ⴀa ა Აბ"],
+    ["i\u0307stanbul I\u0307x", "I\u0307STANBUL I\u0307X", "i\u0307stanbul i\u0307x", "I\u0307stanbul I\u0307x"],
+    ["ΣΑΣ.ΣΑΣ", "ΣΑΣ.ΣΑΣ", "σασ.σας", "Σασ.σας"],
+    ["²ab", "²AB", "²ab", "²Ab"],
+  ] },
+};
+
+test("case: upper, lower and initcap are Postgres 18's under each case mapping, the input collation's (issue 406)", () => {
+  for (const [collation, { mapping, rows }] of Object.entries(POSTGRES_18_CASE)) {
+    for (const [s, upper, lower, title] of rows) {
+      assert.equal(pgCase(s, true, mapping), upper, `upper(${JSON.stringify(s)} COLLATE "${collation}")`);
+      assert.equal(pgCase(s, false, mapping), lower, `lower(${JSON.stringify(s)} COLLATE "${collation}")`);
+      assert.equal(initcap(s, mapping), title, `initcap(${JSON.stringify(s)} COLLATE "${collation}")`);
+    }
+  }
+});
+
+test("case: ICU's per language casing and word break, as Postgres 18 answered them (Swedish's colon, POSIX's full stop, Armenian's ligature, Dutch's IJ)", () => {
+  assert.equal(initcap("o'hara x:y a.b", "icu:sv"), "O'hara X:y A.b");
+  assert.equal(initcap("o'hara x:y a.b", "icu:fi-FI"), "O'hara X:y A.b");
+  assert.equal(initcap("o'hara x:y a.b", "icu:en-US-u-va-posix"), "O'hara X:Y A.B");
+  assert.equal(initcap("o'hara x:y a.b", "icu:und"), "O'hara X:Y A.b");
+  assert.equal(pgCase("և ﬓ", true, "icu:hy-AM"), "ԵՎ ՄՆ");
+  assert.equal(initcap("և ﬓ", "icu:hy"), "Եվ Մն");
+  assert.equal(initcap("ijs IJS ĳs Íjs ÍJ́s", "icu:nl-BE"), "IJs IJs Ĳs Íjs ÍJ́s");
+  assert.equal(pgCase("istanbul ISTANBUL İı", true, "icu:az-Cyrl-AZ"), "İSTANBUL ISTANBUL İI");
+  assert.equal(pgCase("istanbul ISTANBUL İı", false, "icu:tr"), "istanbul ıstanbul iı");
+  assert.equal(pgCase("ΐ Ά ΆΣ όλα ΌΛΑ άι", true, "icu:el-CY"), "Ϊ Α ΑΣ ΟΛΑ ΟΛΑ ΑΪ");
+  assert.equal(pgCase("i̇̀ Ì Í Ĩ Į J ìi̇", false, "icu:lt-LT"), "i̇̀ i̇̀ i̇́ i̇̃ į j ìi̇");
+});
+
+test("case: a collation's case mapping is its CTYPE's, never its order's (issue 406)", () => {
+  assert.equal(caseMappingOf("c", "en_US.UTF-8", null), "libc");
+  assert.equal(caseMappingOf("c", "C", null), "ascii");
+  assert.equal(caseMappingOf("c", "POSIX", null), "ascii");
+  // glibc's C.UTF-8 maps every letter, as en_US does (Postgres's lc_ctype_is_c is C and POSIX alone)
+  assert.equal(caseMappingOf("c", "C.utf8", null), "libc");
+  assert.equal(caseMappingOf("c", "tr_TR.UTF-8", null), null);
+  assert.equal(caseMappingOf("c", "az_AZ", null), null);
+  assert.equal(caseMappingOf("b", null, "C"), "ascii");
+  assert.equal(caseMappingOf("b", null, "C.UTF-8"), "simple");
+  assert.equal(caseMappingOf("b", null, "PG_UNICODE_FAST"), "full");
+  assert.equal(caseMappingOf("b", null, "SOMETHING"), null);
+  assert.equal(caseMappingOf("i", null, "und"), "icu:und");
+  assert.equal(caseMappingOf("i", null, "und-u-kn"), "icu:und-u-kn");
+  assert.equal(caseMappingOf("i", null, "tr-TR"), "icu:tr-TR");
+  assert.equal(caseMappingOf("i", "de_AT", "de_AT@collation=phonebook"), "icu:de-AT");
+  assert.equal(caseMappingOf("i", null, "root"), "icu:und");
+  assert.equal(pgCase("ß", true, caseMappingOf("i", null, "und-u-kn")!), "SS");
 });
 
 test("an array's text is array_out's: NULL's word, an element quoted where it must be", () => {

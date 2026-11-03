@@ -53,6 +53,9 @@ export const MATRIX_ARGS: Readonly<Record<string, readonly string[]>> = {
   login: [],
   // nothing saved for that service in the matrix's HOME: said, exit 0, nothing sent
   logout: [],
+  // a dry run: the project checked and its files listed, nothing sent and no login needed (the matrix's projects name
+  // a database by a literal URL with a password: refused with the way out where one is)
+  deploy: ["--replica", "acme/shop", "--dry-run"],
 };
 
 /**
