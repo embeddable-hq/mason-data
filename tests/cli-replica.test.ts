@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ANSWERS, envFor, fakeService, home, mason, newToken, runForms, runToken, SECRETS, showsRun, type Lines, type Reply, type Req } from "./hosted-fake.ts";
 import { runMason, type Answer } from "./cli-matrix.ts";
-import { checkLines, heldReplica, urlSecrets, wordless } from "../src/cli/replica-hosted.ts";
+import { checkLines, heldReplica, MIN_PASSWORD, urlPassword, wordless } from "../src/cli/replica-hosted.ts";
 import { carriesNoSecret } from "../src/cli/hosted.ts";
 
 const AT = "2026-11-02T10:00:00.000Z";
@@ -273,7 +273,7 @@ test("mason replica, on a terminal of every width from 20 to 80: every line one 
   }
 });
 
-test("the pure pieces: a replica held to its grammars, the free text kept out of the exact test, the URL's password held from 4 characters and refused from 11, the checks one line each", () => {
+test("the pure pieces: a replica held to its grammars, the free text kept out of the exact test, the URL's password decoded and held whatever its alphabet, one under MIN_PASSWORD not sent, the checks one line each", () => {
   assert.equal(heldReplica(replicaOf(), { org: "acme", name: "shop" }, [])?.hostId, "brisk-otter-4821");
   assert.equal(heldReplica(replicaOf({ pending: [{ change: "create", state: "pending", attempts: -1 }] }), { org: "acme" }, []), null);
   assert.equal(heldReplica(replicaOf({ createdAt: "yesterday" }), { org: "acme" }, []), null);
@@ -281,12 +281,83 @@ test("the pure pieces: a replica held to its grammars, the free text kept out of
   const j = { replica: replicaOf({ pending: [{ change: "create", state: "failed", attempts: 1, failure: `x ${PASSWORD}` }] }), checks: [{ source: "app", outcome: "passed", checks: [{ name: PASSWORD, status: "ok", detail: PASSWORD }], missing: [PASSWORD] }] };
   assert.equal(carriesNoSecret(wordless(j), [PASSWORD]), true);
   assert.equal(carriesNoSecret(wordless({ ...j, replica: replicaOf({ hostId: PASSWORD }) }), [PASSWORD]), false);
-  assert.deepEqual(urlSecrets(`postgres://u:${PASSWORD}@h/d`), { masks: [PASSWORD], gate: [PASSWORD] });
-  assert.deepEqual(urlSecrets("postgres://u:hunter2@h/d"), { masks: ["hunter2"], gate: [] });
-  assert.deepEqual(urlSecrets("postgres://u:x@h/d"), { masks: [], gate: [] });
-  assert.deepEqual(urlSecrets("postgres://u:p%40ss%21wd@h/d"), { masks: ["p@ss!wd"], gate: [] }, "decoded; its body (letters, digits, - and _) counts");
-  assert.deepEqual(urlSecrets("postgres://u:ab%zzcdefgh@h/d"), { masks: ["ab%zzcdefgh"], gate: [] }, "a malformed escape: held as written, never dropped");
+  assert.equal(MIN_PASSWORD, 8);
+  assert.deepEqual(urlPassword(`postgres://u:${PASSWORD}@h/d`), { password: PASSWORD });
+  assert.deepEqual(urlPassword("postgres://u:hunter2@h/d"), { short: 7 });
+  assert.deepEqual(urlPassword("postgres://u:x@h/d"), { short: 1 });
+  assert.deepEqual(urlPassword("postgres://u@h/d"), { password: null }, "no password: nothing to hold");
+  assert.deepEqual(urlPassword("postgres://u:p%40ss%21wd%2A%2A@h/d"), { password: "p@ss!wd**" }, "decoded, every character counted");
+  assert.deepEqual(urlPassword("postgres://u:ab%zzcdefgh@h/d"), { password: "ab%zzcdefgh" }, "a malformed escape: held as written, never dropped");
   assert.deepEqual(checkLines([{ source: "app", outcome: "unknown", checks: [{ name: "a", status: "unknown", detail: "b", fix: null }], missing: [] }]), ["Mason's checks of the database app names: unknown", "  ?  a: b"]);
+});
+
+/** Whether `text` shows `password` whole: as written, in any case, or %-encoded (as a URL writes it), or decoded from that. */
+const showsPassword = (text: string, password: string): boolean => {
+  const t = text.toLowerCase(), decoded = text.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))).toLowerCase();
+  return [password, encodeURIComponent(password)].some((p) => t.includes(p.toLowerCase()) || decoded.includes(p.toLowerCase()));
+};
+
+test("the database's password is held by ONE rule at every boundary, whatever its length from 8 and its alphabet: echoed in a value held to a grammar (hostId, region, an allowlist entry, a key), in a check's words, a refusal's words or a pending change's failure — as written, re-cased or %-encoded — it is never printed whole; one under 8 is not sent (PR 660's review, B1)", { timeout: 600_000 }, async () => {
+  const passwords = ["abcdefgh", "ab3def6hjk", "Zq8vLm2Xr7Tp", "!*!*!*!*!*!*!*!*!*!*!*a1", "!!!!!!!!!!!!!!!!ab", "pass word 1", "pässwörd99", "deadbeefcafe"];
+  const forms = [(p: string) => p, (p: string) => p.toUpperCase(), (p: string) => encodeURIComponent(p)];
+  const slots: Array<[string, (e: string) => Reply]> = [
+    ["hostId", (e) => created({ hostId: e })],
+    ["region", (e) => created({ region: e })],
+    ["an allowlist entry", (e) => created({ allowlist: [`${e}/1`] })],
+    ["a key", (e) => ({ status: 201, body: { replica: { ...replicaOf(), [e]: 1 }, checks: CHECKS } })],
+    ["a check's detail", (e) => ({ status: 201, body: { replica: replicaOf(), checks: [{ ...CHECKS[0], checks: [{ name: "connects", status: "ok", detail: `connected with ${e}` }] }] } })],
+    ["a check's name and missing", (e) => ({ status: 201, body: { replica: replicaOf(), checks: [{ ...CHECKS[0], checks: [{ name: e, status: "ok", detail: "x" }], missing: [e] }] } })],
+    ["a refusal's words", (e) => ({ status: 403, body: { error: { code: "refused", message: `refused ${e}`, why: e, fix: `x${e}x` } } })],
+    ["a pending change's failure", (e) => created({ pending: [{ change: "allowlist", state: "failed", attempts: 1, failure: `could not ${e}` }] })],
+  ];
+  let runs = 0;
+  for (const [i, password] of passwords.entries()) {
+    const root = project({ url: `postgres://app:${encodeURIComponent(password)}@db.example:5432/app` });
+    for (const [j, [what, reply]] of slots.entries()) {
+      const form = forms[(i + j) % forms.length]!;
+      const json = (i + j) % 2 === 0 ? ["--json"] : [];
+      const { a, requests } = await hosted(() => reply(form(password)), ["create", "acme/shop", "--region", "eu", "--size", "50", ...json], { cwd: root });
+      runs++;
+      assert.equal(JSON.parse(requests[0]!.body).sources[0].url, `postgres://app:${encodeURIComponent(password)}@db.example:5432/app`, "the URL is sent as it was read");
+      assert.ok(!showsPassword(a.stdout + a.stderr, password), `${JSON.stringify(password)} in ${what} (${form("x") === "x" ? "as written" : form("x") === "X" ? "re-cased" : "encoded"}) was printed:\n${a.stdout}${a.stderr}`);
+    }
+  }
+  assert.equal(runs, passwords.length * slots.length);
+  // under 8 characters, whatever they are: refused before a byte is sent, its length said, never it
+  for (const short of ["x", "ab3d", "!*!*a1", "hunter2"]) {
+    const fake = await fakeService({ v1: () => created() });
+    try {
+      const a = await runMason(project({ url: `postgres://app:${encodeURIComponent(short)}@db.example:5432/app` }), ["replica", "create", "acme/shop", "--region", "eu", "--size", "50", "--json"], envFor(home(), fake.url, { MASON_TOKEN: newToken() }));
+      const e = (JSON.parse(a.stdout) as { error: { code: string; message: string } }).error;
+      assert.deepEqual([a.code, e.code], [1, "refused"], short);
+      assert.equal(e.message, `the password in DATABASE_URL (DATABASE_URL in .env) is ${[...short].length} character${short.length === 1 ? "" : "s"} long, under the 8 this command sends`);
+      assert.ok(!a.stdout.includes(short) || short === "x", short);
+      assert.deepEqual(fake.requests, [], `${short}: nothing sent`);
+    } finally { await fake.close(); }
+  }
+});
+
+test("a replica's state answer carrying the token in a value its grammar takes — status, and a poll of create's wait — is refused whole by the exact test, said by its status (never left to the output's gate)", async () => {
+  const token = runToken("pat");
+  const carrying = runForms(token)[3]!.value;   // 11 of its body in a row, lower case: HOST_ID takes it
+  const st = await hosted(() => ok({ replica: replicaOf({ hostId: carrying }) }), ["status", "acme/shop", "--json"], { token });
+  assert.equal(st.a.code, 1, st.a.stdout);
+  assert.equal((JSON.parse(st.a.stdout) as { error: { message: string } }).error.message.replace(/^http:\/\/127\.0\.0\.1:\d+/, "SERVICE"), "SERVICE answered GET /v1/replicas/acme/shop with 200, where a replica's state was asked for");
+  const root = project();
+  const poll = await hosted((r) => r.method === "POST" ? created({ state: "creating" }) : ok({ replica: replicaOf({ hostId: carrying }) }), ["create", "acme/shop", "--region", "eu", "--size", "50", "--json"], { cwd: root, token });
+  assert.equal(poll.a.code, 1, poll.a.stdout);
+  assert.match((JSON.parse(poll.a.stdout) as { error: { message: string } }).error.message, / answered GET \/v1\/replicas\/acme\/shop with 200, where a replica's state was asked for$/);
+  assert.ok(!showsRun(st.a.stdout + st.a.stderr + poll.a.stdout + poll.a.stderr, token));
+});
+
+test("mason replica create allows the creation's POST more than another request's 15 s: an answer after 16 s is the answer, never a lost one", { timeout: 120_000 }, async () => {
+  const root = project();
+  const r = await hosted(async (q) => {
+    if (q.method === "POST") { await new Promise((resolve) => setTimeout(resolve, 16_500)); return created(); }
+    return { status: 404, body: { error: { code: "not_found", message: "no such replica" } } };
+  }, ["create", "acme/shop", "--region", "eu", "--size", "50", "--json"], { cwd: root });
+  assert.equal(r.a.code, 0, r.a.stdout);
+  assert.deepEqual(r.requests.map((q) => q.method), ["POST"], "the POST's own answer, no GET after a lost one");
 });
 
 test("no run of mason replica printed a token or the database's password, nor put either on its command line", () => {

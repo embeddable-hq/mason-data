@@ -375,9 +375,10 @@ CLI lacks).
   text, masked), the code by status, the next step the CLI's (naming the role that may), the output's gate held from
   the login on. **The database's URL is read by the variable the sources file names, by `readSource` alone**, never
   from argv; a `url:` written in the file is refused; it is sent once, in the creation's body, and its password held
-  as a secret of the command (`urlSecrets`: masked from 4 characters, refused from `ECHO_RUN`). **A CI token made is
-  printed ONCE**: its one row, or `token.value` under `--json`; the gate's `once` lets that value through one time,
-  whole, holding it as a secret beside the login. An account's first replica is the web app's (a person is asked
+  as a secret of the command in the ONE list every boundary reads (`urlPassword`; the exact test, the masks, the gate,
+  each reading it whole whatever its alphabet, `wholeIn`); one under `MIN_PASSWORD` is not sent. **A CI token made is
+  printed ONCE**: alone on the first line, never broken by the CLI (a value to copy), or `token.value` under `--json`;
+  the gate's `once` lets that exact value through one time, holding it as a secret beside the login. An account's first replica is the web app's (a person is asked
   there), said by the help and by a 403's next step. `create` waits for `ready` within `--timeout` (124 past it). No
   `mason replica delete` yet: the service has no deletion endpoint (tests/cli-replica.test.ts, tests/cli-token.test.ts).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the

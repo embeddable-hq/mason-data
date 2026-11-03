@@ -25,15 +25,15 @@
  * seed over the honest outputs of deploy, login, logout and mason user --replica.
  *
  * ONE VALUE MAY BE PRINTED ONCE (`holdOutput`'s `once`: the CI token `mason token create` made, the one answer that
- * carries a token by design): its FIRST whole occurrence in a write (`onceAt`: as it is, or broken by the CLI's own
- * line breaks on a terminal) is read as a separator, never as the secret it is, and is written; every other byte is read as before, the value held among the secrets, so a second
+ * carries a token by design): its FIRST whole occurrence in a write (`onceAt`: exactly as it is; the CLI writes it on a
+ * line of its own, never broken) is read as a separator, never as the secret it is, and is written; every other byte is read as before, the value held among the secrets, so a second
  * occurrence, a piece of it elsewhere (11 of its body in a row) or anything else shaped as a token is refused as any
  * secret is. What it allows is exactly that value, whole, one time, in one write.
  *
  * INERT until a command holds a secret (`holdOutput`): every other command writes as it always did.
  */
 import { failed, serviceStyle, type Failure } from "./command.ts";
-import { bodyRead, ECHO_RUN, echoViews, shapedSecret } from "./hosted.ts";
+import { bodyRead, ECHO_RUN, echoViews, shapedSecret, wholeIn } from "./hosted.ts";
 import { err as styleErr } from "./style.ts";
 
 /** A terminal's control sequences (CSI, OSC), as a person never sees them. */
@@ -41,8 +41,10 @@ const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[
 /** The eight readings: [with escapes, without] × [keeping `-` and `_`, not] × [a `%XX` decoded, not]. */
 const READINGS = [true, false].flatMap((escapes) => [true, false].flatMap((keep) => [true, false].map((percent) => ({ escapes, keep, percent }))));
 const TAIL = ECHO_RUN - 1;
-/** The raw tail kept for the shapes: longer than any shape (a token is 56 characters, a password 55). */
+/** The raw tail kept for the shapes and the secrets read whole: longer than any shape (a token is 56 characters, a
+ *  password 55), and than any held secret written `%XX`-encoded (`rawTail`). */
 const RAW_TAIL = 80;
+const rawTail = (secrets: readonly string[]): number => Math.max(RAW_TAIL, ...secrets.map((x) => 3 * x.length));
 
 /** What a stream has written, as the gate reads it: the last characters of each reading, and of the text. */
 export interface Written { reads: string[]; raw: string }
@@ -63,9 +65,10 @@ export function writes(before: Written, text: string, secrets: readonly string[]
  */
 function writesAfter(befores: readonly Written[], fresh: Written, secrets: readonly string[], o: { passwords?: boolean }): Array<{ secret: boolean; after: Written }> {
   const inside = readingsCarry(fresh, secrets, o);
+  const tail = rawTail(secrets);
   return befores.map((before) => {
-    const meet: Written = { reads: before.reads.map((r, i) => r + fresh.reads[i]!.slice(0, TAIL)), raw: before.raw + fresh.raw.slice(0, RAW_TAIL) };
-    const after: Written = { reads: before.reads.map((r, i) => (r + fresh.reads[i]!).slice(-TAIL)), raw: (before.raw + fresh.raw).slice(-RAW_TAIL) };
+    const meet: Written = { reads: before.reads.map((r, i) => r + fresh.reads[i]!.slice(0, TAIL)), raw: before.raw + fresh.raw.slice(0, tail) };
+    const after: Written = { reads: before.reads.map((r, i) => (r + fresh.reads[i]!).slice(-TAIL)), raw: (before.raw + fresh.raw).slice(-tail) };
     return { secret: inside || readingsCarry(meet, secrets, o), after };
   });
 }
@@ -89,7 +92,8 @@ export function readingsCarry(read: Written, secrets: readonly string[], o: { pa
   if (shapedSecret(read.raw, o) || shapedSecret(read.raw.replace(ESCAPES, ""), o)) return true;
   for (const secret of secrets) {
     if (!secret) continue;
-    if (read.raw.includes(secret)) return true;
+    // whole, as written, in any case or `%XX`-decoded, with its terminal escapes or without (src/cli/hosted.ts wholeIn)
+    if (wholeIn(read.raw, secret) || wholeIn(read.raw.replace(ESCAPES, ""), secret)) return true;
     for (const { keep, n, grams } of echoViews(secret, o.run ?? ECHO_RUN)) {
       if (n === 0) continue;
       // a text with no escape and no `%` reads the same in several ways: each distinct reading is scanned once
@@ -100,16 +104,11 @@ export function readingsCarry(read: Written, secrets: readonly string[], o: { pa
   return false;
 }
 
-/**
- * WHERE `value` IS WRITTEN WHOLE in `text`: as it is, or broken by the CLI's own line breaks on a terminal (white space
- * and colour codes between its characters, src/cli/command.ts strictLines), its characters in order and nothing else
- * between them; null when it is not. The span, from its first character to its last.
- */
+/** WHERE `value` IS WRITTEN WHOLE in `text`, exactly as it is (the CLI writes it alone, never broken: src/cli/token-hosted.ts);
+ *  null when it is not. The span, from its first character to its last. */
 export function onceAt(text: string, value: string): [number, number] | null {
   const i = text.indexOf(value);
-  if (i >= 0) return [i, i + value.length];
-  const m = new RegExp([...value].map((c) => c.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")).join("(?:\\s|\\x1b\\[[0-9;]*m)*")).exec(text);
-  return m === null ? null : [m.index, m.index + m[0].length];
+  return i < 0 ? null : [i, i + value.length];
 }
 
 interface Held { command: string; json: boolean; secrets: string[]; passwords: boolean; once: string | null }
@@ -123,7 +122,7 @@ const state = { out: nothingWritten(), err: nothingWritten(), both: nothingWritt
 const REFUSAL: Failure = {
   message: "the service's answer would print a secret this command holds, so nothing more of it is printed",
   code: "refused",
-  why: "what was about to be written held 11 or more characters of a token this command holds in a row, or something shaped as a token or a password: a hosted service's text is printed only when it carries none",
+  why: "what was about to be written held a secret this command holds (11 or more characters of a token's body in a row, or the database's password it sent), or something shaped as a token or a password: a hosted service's text is printed only when it carries none",
   fix: "a service that repeats the token it was sent is answering outside its documented API: sign in again (mason login), so this token is replaced, and revoke it in the service's web app if it was shared",
   next: [["mason login", "sign in again"]],
 };

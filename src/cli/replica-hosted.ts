@@ -12,8 +12,9 @@
  * reaches a command line, a log, the output or --json. It is sent once, in the creation's body, for Mason's checks of
  * the source on the replica's side, and the variable's NAME beside it, which the replica reads it by. A `url:` written
  * in the file is refused: the replica has no variable to read it from, and a literal would be kept in the project's files.
- * Its password is held as a secret of this command beside the token (`urlSecrets`): masked wherever the service's text
- * is printed, and, from `ECHO_RUN` characters, refused by the exact test and the output's gate as the token is.
+ * Its password is held as a secret of this command beside the token, in the one list every boundary reads
+ * (`urlPassword`): masked in free text, refused in any other value and by the output's gate, read whole whatever its
+ * alphabet; one under `MIN_PASSWORD` characters is not sent, since none of them could tell it from ordinary words.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (#481's decision, src/cli/hosted.ts), and A GRAMMAR
  * IS NO MASK (issue 627): before any value is held to its grammar, every string of each answer, keys included, is put to
@@ -39,9 +40,9 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { endText, errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { call, carriesNoSecret, ECHO_RUN, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer, type Service } from "./hosted.ts";
+import { call, carriesNoSecret, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer, type Service } from "./hosted.ts";
 import { loginOrgs, orgNamed, REPLICA_PART, replicaNamed, replicaText, tokenFor, type Replica } from "./replica.ts";
-import { holdOutput } from "./output-gate.ts";
+import { holdOutput, outputRefused } from "./output-gate.ts";
 import { theProject } from "./project.ts";
 import { readSource, shownPath } from "./sources.ts";
 import { parseSource } from "./preflight.ts";
@@ -50,7 +51,7 @@ import { sayAgain } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { err as styleErr, out as styleOut, type Style } from "./style.ts";
 
-/** How long the creation's POST may take: the service checks the source before it answers (up to 45 s, the contract). */
+/** How long the creation's POST may take: the service answers once Mason's checks of the source are done. */
 export const CREATE_MS = 60_000;
 /** How often a creation's state is asked for while its region makes it, when the service asks no other. */
 export const REPLICA_POLL_MS = 5_000;
@@ -113,7 +114,7 @@ export const REPLICA: CommandSpec = {
   The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default.
   Progress goes to stderr; the answer is printed when it ends.
 
-    mason replica create acme/shop --region eu --size 50
+    mason replica create acme/shop --region <region> --size 50
     mason replica list
     mason replica status acme/shop --json
 
@@ -300,10 +301,10 @@ function signedIn(asked: string, again: string, json: boolean, more: readonly st
   return { service, token };
 }
 
-/** One replica's answer (`GET …/{name}`), its strings put to the exact test first (`exact`), its words masked (`masks`). */
-function replicaAnswer(a: Answer, asked: Replica, exact: readonly string[], masks: readonly string[] = exact): HostedReplica | null {
-  if (!obj(a.json) || !carriesNoSecret(wordless(a.json), exact)) return null;
-  return heldReplica(a.json.replica, asked, masks);
+/** One replica's answer (`GET …/{name}`): its strings put to the exact test first, its words masked, by the one list. */
+function replicaAnswer(a: Answer, asked: Replica, secrets: readonly string[]): HostedReplica | null {
+  if (!obj(a.json) || !carriesNoSecret(wordless(a.json), secrets)) return null;
+  return heldReplica(a.json.replica, asked, secrets);
 }
 
 async function status(r: Replica, json: boolean): Promise<number> {
@@ -355,18 +356,24 @@ async function list(org: string | null, json: boolean): Promise<number> {
   return 0;
 }
 
-/** The URL's password as this command holds it (masked in every service text; from `ECHO_RUN` characters, refused by
- *  the exact test and the output's gate too). `gate`: the secrets for the tests that refuse; `masks`: for serviceText. */
-export function urlSecrets(url: string): { masks: string[]; gate: string[] } {
-  // the URL is parseSource's already (its one place for a password is its user part: a password= parameter is refused)
+/** A password shorter than this is not sent: no boundary can tell it apart from ordinary words in what is printed. */
+export const MIN_PASSWORD = 8;
+
+/**
+ * THE URL'S PASSWORD, AS THIS COMMAND HOLDS IT (PR 660's review, B1: one rule for every boundary): decoded (a malformed
+ * escape as written), held beside the token in the ONE list of secrets every boundary reads — the exact test of every
+ * value (`carriesNoSecret`), the masks of free text (`serviceText`) and the output's gate — each reading it whole (as
+ * written, in any case, `%XX`-decoded: src/cli/hosted.ts `wholeIn`) and, when its body is long enough, by its runs
+ * (`MIN_BODY_RUN`). None for a URL without one; `short` for one under `MIN_PASSWORD` characters, which is not sent.
+ */
+export function urlPassword(url: string): { password: string | null } | { short: number } {
   let raw = "";
   try { raw = new URL(url).password; } catch { raw = ""; }   // not a URL: parseSource refused it before this
   // decoded, as a mask reads text; a malformed escape held as it is written, never dropped
   const password = ((): string => { try { return decodeURIComponent(raw); } catch { return raw; } })();
-  const body = password.replace(/[^A-Za-z0-9_-]/g, "");
-  // a password shorter than 4 is no secret a mask can keep apart from ordinary words; one shorter than ECHO_RUN would
-  // refuse honest text that shares a run with it by chance, so it is masked, never refused (docs/HOSTED-API.md)
-  return { masks: body.length >= 4 ? [password] : [], gate: body.length >= ECHO_RUN ? [password] : [] };
+  if (password === "") return { password: null };
+  const length = [...password].length;
+  return length < MIN_PASSWORD ? { short: length } : { password };
 }
 
 async function create(r: Replica, o: { region: string; sizeGb: number; timeout: { every: string; seconds: number } }, json: boolean): Promise<number> {
@@ -392,11 +399,18 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
       fix: `set ${variable} to the database's URL, postgres://user:password@host:5432/your_app` }, json);
   }
   const url = src.resolved;
-  const held = urlSecrets(url);
-  const s = signedIn("a replica is created", `mason replica create ${replicaText(r)}`, json, held.gate);
+  const pw = urlPassword(url);
+  if ("short" in pw) {
+    return fail({ message: `the password in ${variable} (${src.from}) is ${pw.short} character${pw.short === 1 ? "" : "s"} long, under the ${MIN_PASSWORD} this command sends`, code: "refused",
+      why: "a password this short cannot be told apart from ordinary words in what the service answers, so nothing could keep it out of what is printed; it is not sent",
+      fix: "name a database user with a longer password in the URL, or create the replica in the service's web app" }, json);
+  }
+  const held = pw.password === null ? [] : [pw.password];
+  const s = signedIn("a replica is created", `mason replica create ${replicaText(r)}`, json, held);
   if (isFailure(s)) return fail(s, json);
   const { service, token } = s;
-  const secrets = [token, ...held.masks], exact = [token, ...held.gate];
+  // ONE list of what this command holds, read by every boundary: the exact test, the masks and the output's gate
+  const secrets = [token, ...held];
   const where = `/v1/replicas/${r.org}`;
   // a 403 says who may, and where an account's first replica is made (the API refuses it: a person is asked there)
   const refusedOf = (a: Answer, step: string): Failure => serviceFailure(a, secrets, (st) => st === 403
@@ -404,6 +418,8 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
     : refusedNext(st, r.org, "an admin or an owner", again)) ?? unexpected(service, a, step);
   if (!json) say(`Creating ${replicaText(r)} on ${service.base}: Mason checks the database ${variable} names (${src.from}) from the replica's side, up to a minute`);
 
+  // what the gate has refused already (the CLI's own words holding the password whole) sends nothing: its refusal stands
+  if (outputRefused()) return 1;
   // THE CREATION: the service checks the source, then answers 201, or why it was not made (with the checks, said)
   const sent = await call(service, "POST", where, { token, timeoutMs: CREATE_MS,
     json: { name: r.name, region: o.region, sizeGb: o.sizeGb, sources: [{ name: src.name, variable, url }] } });
@@ -413,7 +429,7 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
   if (isFailure(sent)) {
     // a POST that got no answer may have made the replica: its state says so (the contract)
     const a = await call(service, "GET", `${where}/${r.name}`, { token });
-    const found = !isFailure(a) && a.status === 200 ? replicaAnswer(a, r, exact, secrets) : null;
+    const found = !isFailure(a) && a.status === 200 ? replicaAnswer(a, r, secrets) : null;
     if (found === null) {
       const known = !isFailure(a) && a.status === 404 ? "asked since, the service has no such replica: it was not made" : "whether it was made is not known";
       return fail({ ...sent, why: `${sent.why ?? "no answer"}; ${known}`, fix: `mason replica status ${replicaText(r)} says whether it was; if not, create it again`, next: [statusStep(r), again] }, json);
@@ -422,7 +438,7 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
     state = found;
     if (!isFailure(a) && a.retryAfter !== null) waitMs = a.retryAfter * 1000;
   } else {
-    if (obj(sent.json) && sent.status !== 201 && "checks" in sent.json && carriesNoSecret(wordless({ checks: sent.json.checks }), exact)) checks = heldChecks(sent.json.checks, src.name, secrets);
+    if (obj(sent.json) && sent.status !== 201 && "checks" in sent.json && carriesNoSecret(wordless({ checks: sent.json.checks }), secrets)) checks = heldChecks(sent.json.checks, src.name, secrets);
     if (sent.status !== 201) {
       const f = refusedOf(sent, "a replica was created");
       if (!json && checks !== null) for (const l of checkLines(checks)) say(l);
@@ -433,7 +449,7 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
       return fail(failure, false);
     }
     const j = sent.json;
-    const made = obj(j) && carriesNoSecret(wordless(j), exact) ? heldReplica(j.replica, r, secrets) : null;
+    const made = obj(j) && carriesNoSecret(wordless(j), secrets) ? heldReplica(j.replica, r, secrets) : null;
     checks = obj(j) ? heldChecks(j.checks, src.name, secrets) : null;
     if (made === null || checks === null) return fail(unexpected(service, sent, "a replica was created"), json);
     if (!json) for (const l of checkLines(checks)) say(l);
@@ -484,7 +500,7 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
         fix: `mason replica list ${r.org} says the organisation's replicas`, next: [[`mason replica list ${r.org}`, "the organisation's replicas"]] });
     }
     if (a.status !== 200) return ended(refusedOf(a, "a replica's state was asked for"));
-    const now = replicaAnswer(a, r, exact, secrets);
+    const now = replicaAnswer(a, r, secrets);
     if (now === null) return ended(unexpected(service, a, "a replica's state was asked for"));
     state = now;
   }

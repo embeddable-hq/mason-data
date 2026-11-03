@@ -436,7 +436,7 @@ test("the per-value tests read the value as printed too: a page cut inside a %XX
   assert.equal(serviceText(`a\udc00b\ud800c😀d`, 100), "a?b?c😀d");
 });
 
-test("the output's gate lets the one value through ONCE (mason token create's CI token), whole, as written or broken by the CLI's line breaks: a second copy, a piece of it in another write, or another token's shape is refused at the write, the CLI's refusal in its place", () => {
+test("the output's gate lets the one value through ONCE (mason token create's CI token), exactly as it is, never broken by a line break: a second copy, a piece of it in another write, or another token's shape is refused at the write, the CLI's refusal in its place", () => {
   const gate = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "output-gate.ts");
   const value = newToken("ci"), login = newToken("pat");
   const run = (writes: string[]): { stdout: string; stderr: string; code: number | null } => {
@@ -452,9 +452,10 @@ process.exitCode = gatedExit(0);
   };
   const once = run([`  token     ${value}\n`, "  id        x\n"]);
   assert.deepEqual([once.code, times(once.stdout, value)], [0, 1], once.stdout);
-  // broken by the CLI on a narrow terminal (its continuation at column 4): still the one value, whole
+  // the exact value alone: broken by a line break, it is no copy of the token, and is refused as any piece of it is
   const broken = run([`  token\n    ${value.slice(0, 20)}\n    ${value.slice(20)}\n`]);
-  assert.deepEqual([broken.code, broken.stdout.includes(value.slice(20))], [0, true], broken.stdout + broken.stderr);
+  assert.equal(broken.code, 1, broken.stdout + broken.stderr);
+  assert.ok(!broken.stdout.includes(value.slice(20)), "nothing of the broken value written");
   for (const [what, writes] of [["twice in one write", [`${value} ${value}\n`]], ["again in a later write", [`${value}\n`, `${value}\n`]],
     ["11 of its body in a later write", [`${value}\n`, `id ${bodyOf(value).slice(5, 16)}\n`]], ["the login's body beside it", [`${value} ${bodyOf(login)}\n`]],
     ["another token's shape", [`${value}\n`, `${newToken("ci")}\n`]]] as Array<[string, string[]]>) {

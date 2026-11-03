@@ -251,11 +251,13 @@ const cols = (ch: string): number => ch.codePointAt(0)! <= 0x7e ? 1 : 2;
  * `\r` redraws keep their last), its cursor and colour codes gone, and a line longer than the width broken by the
  * terminal at the width, each piece a line of its own. Without a width, the logical lines (a pipe).
  */
-export function seen(text: string, width: number | null): Array<{ line: string; byTerminal: boolean }> {
+export function seen(text: string, width: number | null, unbroken?: (line: string) => boolean): Array<{ line: string; byTerminal: boolean }> {
   const out: Array<{ line: string; byTerminal: boolean }> = [];
   for (const logical of text.split("\n")) {
     const drawn = logical.split("\r").pop()!.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    if (width === null) { out.push({ line: drawn, byTerminal: false }); continue; }
+    // a value to copy, which the CLI writes alone and never breaks (`Lines.unbroken`): the terminal's soft wrap, which a
+    // copy joins, is its line's, and is read as one
+    if (width === null || unbroken?.(drawn) === true) { out.push({ line: drawn, byTerminal: false }); continue; }
     let line = "", w = 0, piece = 0;
     for (const ch of drawn) {
       if (w + cols(ch) > width) { out.push({ line, byTerminal: piece++ > 0 }); line = ""; w = 0; }
@@ -271,13 +273,16 @@ export function seen(text: string, width: number | null): Array<{ line: string; 
  *  `failed`: the run failed and this is its stderr, which then holds exactly one failure. */
 /** The lines a command begins, for a command other than login and logout (`mason(…, { lines })`): its heads, the steps
  *  under its Next:, and a test of a line of its own data (a list's row, begun by a name the test gave). */
-export interface Lines { heads: readonly string[]; steps: readonly string[]; ownStep: RegExp; row?: (line: string) => boolean }
+export interface Lines { heads: readonly string[]; steps: readonly string[]; ownStep: RegExp; row?: (line: string) => boolean;
+  /** a logical line the CLI writes alone, to be copied, which only the terminal may wrap (the CI token mason token create
+   *  prints: held to a grammar with no space, colon or control, so no piece of it can begin a line of the CLI's) */
+  unbroken?: (line: string) => boolean }
 
 export function seenProblems(text: string, width: number | null, failed: boolean | null = null, lines?: Lines): string[] {
   const heads = lines?.heads ?? HEADS, steps = lines?.steps ?? STEP_HEADS;
   const p: string[] = [];
   let afterNext = false, nexts = 0, failures = 0;
-  for (const { line, byTerminal } of seen(text, width)) {
+  for (const { line, byTerminal } of seen(text, width, lines?.unbroken)) {
     if (byTerminal) p.push(`the terminal broke a line, so a line begins where a value chose: ${JSON.stringify(line)}`);
     if (line === "") continue;
     if (line === "Next:") { nexts++; afterNext = true; continue; }

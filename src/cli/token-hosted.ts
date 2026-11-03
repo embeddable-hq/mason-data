@@ -7,8 +7,8 @@
  *   list [<org>]                    GET  /v1/tokens/{org}  { tokens, more } — each organisation the login may list in, when none is named
  *   revoke <id> [--org <org>]       POST /v1/tokens/{org}/{id}/revoke (no body)  { revoked: { id, name } }
  *
- * THE TOKEN MADE IS PRINTED ONCE, by create, on the one line (`token`) or in the one field (`token.value` under --json)
- * that carries it, and nowhere else: its value is held to the documented form (`masondata_ci_` and 43 base64url
+ * THE TOKEN MADE IS PRINTED ONCE, by create, alone on the first line (never broken by the CLI) or in the one field
+ * (`token.value` under --json) that carries it, and nowhere else: its value is held to the documented form (`masondata_ci_` and 43 base64url
  * characters), never the login's own, and the rest of the answer is put to the exact test against both. The output's
  * gate lets that one value through ONCE, whole (src/cli/output-gate.ts `once`), and holds it as a secret beside the
  * login: a second copy, 11 of its body in a row elsewhere, or anything else shaped as a token is refused at the write.
@@ -67,9 +67,9 @@ export const TOKEN: CommandSpec = {
   makes none.
 
   create makes one and prints it ONCE: the service does not keep it, and nothing shows it again, so store it at once
-  (as MASON_TOKEN in CI's secrets). It is on the one token line, or, with --json, in the one field token.value of
-  the document, so a setup step can pipe it straight into a secret store. Nothing else this command prints ever
-  holds it.
+  (as MASON_TOKEN in CI's secrets). It is alone on the first line printed, never broken, or, with --json, in the
+  one field token.value of the document, so a setup step can pipe it straight into a secret store. Nothing else
+  this command prints ever holds it.
 
   list says the CI tokens of <org> that still act (never a token itself), or of every organisation this login is
   an admin or an owner of when none is named; revoke ends one at once, by its id (list says it), in --org, else in
@@ -227,8 +227,13 @@ async function create(r: { org: string; name: string }, o: { label: string; scop
     out(jsonText(TOKEN, { token: { id: t.id, value: made.value, name: t.name, replica: t.replica, scopes: t.scopes, createdAt: t.createdAt, expiresAt: t.expiresAt } }, next));
     return 0;
   }
-  out(reportText({ headline: `Made a CI token for ${t.replica}: it is printed this once`,
-    details: [["token", made.value], ["id", t.id], ["name", t.name], ["scopes", t.scopes.join(", ")], ["expires", t.expiresAt]],
+  // THE TOKEN ON A LINE OF ITS OWN, FIRST, written alone and never broken by the CLI (PR 660's review, B2: a value to copy
+  // is no service text to break at the width — a line break inside it would be copied with it). A terminal narrower
+  // than it wraps it softly, which a copy joins. It cannot begin a line of anyone's making: held to `CI_TOKEN`, it has
+  // no space, no colon and no control character, so no piece of it is a step, a heading or a failure.
+  process.stdout.write(`${made.value}\n`);
+  out(reportText({ headline: `Made a CI token for ${t.replica}: the line above is the token, printed this once`,
+    details: [["id", t.id], ["name", t.name], ["scopes", t.scopes.join(", ")], ["expires", t.expiresAt]],
     tips: ["Store it now, as MASON_TOKEN in your CI's secrets: the service does not keep it, and nothing shows it again.",
       `It acts on ${t.replica} alone, for ${t.scopes.join(" and ")}, until it expires or is revoked.`], next }, outStyle()));
   return 0;

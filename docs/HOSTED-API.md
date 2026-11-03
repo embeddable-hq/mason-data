@@ -140,7 +140,7 @@ each one's list. `more` is `true` when the organisation has more replicas than t
 `Content-Type: application/json`, at most 64 KiB:
 
 ```json
-{ "name": "shop", "region": "eu", "sizeGb": 50, "sources": [{ "name": "app", "variable": "DATABASE_URL", "url": "postgres://…" }] }
+{ "name": "shop", "region": "<region>", "sizeGb": 50, "sources": [{ "name": "app", "variable": "DATABASE_URL", "url": "postgres://…" }] }
 ```
 
 - `name` is the replica's (the service may hold it to a stricter rule of its own, and refuses another with `400`).
@@ -157,13 +157,16 @@ reader `mason start` uses), and from nowhere else: no flag takes it, so it never
 with a `url:` written in it is refused before anything is sent: the replica reads its database's URL from a variable of
 its own environment, and a literal would be kept with the project's files. A value Mason could not connect by is
 refused too, and never repeated. The URL is sent this once, for Mason's checks of the database from the replica's side;
-a service keeps no copy of it in what it answers, and never repeats it. The CLI holds its password as a secret of the
-command beside the token: masked wherever the service's text is printed, and, from 11 characters (`ECHO_RUN`), refused
-by the exact test and the output's gate as the token is. A shorter password is masked, never refused: a run of fewer
-than 11 characters is met by honest text by chance; under 4 characters it is not held at all.
+a service never repeats it. The CLI holds its password as a secret of the command beside the token, in the ONE list
+every boundary reads: the exact test of every value (an answer that carries it in a value held to a grammar, or in a
+key, is refused whole), the masks of free text (a check's words, a refusal's), and the output's gate. Each reads it
+WHOLE, whatever its alphabet (as written, in any case, or `%XX`-decoded), and, when it has 8 or more letters, digits,
+`-` and `_`, by those runs too (11 in a row, or all of them when fewer). A password under 8 characters is not sent:
+nothing could tell it apart from ordinary words in what is printed, so the creation is refused before a byte is sent,
+naming its length, never it.
 
-**The wait.** The service answers once it has run Mason's checks of the database, up to 45 s, so the CLI allows 60 s
-for this one request. A POST that gets no answer may have made the replica: the CLI then asks `GET
+**The wait.** The service answers once it has run Mason's checks of the database, within the 60 s the CLI allows this
+one request. A POST that gets no answer may have made the replica: the CLI then asks `GET
 /v1/replicas/{org}/{name}` once, and goes on waiting when it is there (state `checking` while the checks run), or says
 it was not made (`404`), or that it cannot tell. After `201` the CLI asks `GET /v1/replicas/{org}/{name}` every 5 s (or
 after the seconds a `Retry-After` asks for) until the state is `ready` (exit 0) or `failed` (exit 1), and stops at
@@ -256,16 +259,17 @@ takes a login of an admin or an owner of the organisation (a CI token makes, lis
 
 **`value` is the token itself**: `masondata_ci_` and 43 base64url characters. The service answers it once, by the POST
 that made it (`Cache-Control: no-store`), and never again: not by the list nor by any other request. So the CLI prints
-it ONCE, on the one `token` line, or with `--json` in the one field `token.value` (so a CI setup step can pipe it into
-a secret store), and nowhere else:
+it ONCE, alone on the first line it prints (never broken by the CLI: a terminal narrower than it wraps it, which a
+copy joins), or with `--json` in the one field `token.value` (so a CI setup step can pipe it into a secret store), and
+nowhere else:
 
 - the value is held to that form, and is not the login's own token nor an echo of it;
 - every other string of the answer, each key included, is put to the exact test against the login AND the value, so an
   answer that carries the value a second time (in its name, its id, a key), or the login, is refused whole, and nothing
   of it is printed: the CLI says a token may have been made all the same, and `mason token list` says which act;
-- the output's gate (src/cli/output-gate.ts) lets that one value through once, whole (as it is, or broken by the CLI's
-  own line breaks on a narrow terminal), and holds it as a secret beside the login from the start: a second copy, 11 of
-  its body in a row elsewhere, or anything else shaped as a token, is refused at the write.
+- the output's gate (src/cli/output-gate.ts) lets that one value through once, exactly as it is, and holds it as a
+  secret beside the login from the start: a second copy, 11 of its body in a row elsewhere, or anything else shaped as
+  a token, is refused at the write.
 
 Refusals: `400` a key, type or bound; `403` a CI token or a viewer; `404` no such organisation or not a member, no such
 replica in it (POST), or no live CI token by that id (revoke: revoked already, expired, or another organisation's);

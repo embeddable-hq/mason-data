@@ -160,7 +160,8 @@ export function serviceText(s: string, max: number, secrets: readonly string[] =
  */
 export function maskSecrets(s: string, secrets: readonly string[] = [], shown: Map<string, Set<number>> = SHOWN, o: { passwords?: boolean } = {}): string {
   let t = s;
-  for (const secret of secrets) if (secret) t = t.split(secret).join("****");
+  // each held secret whole, in any case (`wholeIn`'s reading; an encoded one the exact test and the gate refuse)
+  for (const secret of secrets) if (secret) t = t.replace(new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "****");
   // a held secret by its value (`heldRuns`): a mask leaves `****`, a separator, so what lay either side of it is read
   // again as one run; read MASK_PASSES + 1 times and still holding a run to mask, the value is masked whole
   for (let pass = 0; ; pass++) {
@@ -205,7 +206,8 @@ function heldRuns(t: string, secrets: readonly string[]): Map<string, { spans: A
   for (const secret of secrets) {
     const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
     const length = bodyChars(raw, true, false).length;
-    if (length === 0) continue;
+    // a body shorter than a run is masked whole alone (above), never by runs of ordinary words
+    if (length < HELD_RUN) continue;
     const n = Math.min(HELD_RUN, length), spans: Array<[number, number]> = [], covered = new Set<number>();
     for (const { keep, units, read } of views) {
       const body = bodyChars(raw, keep, false), text = body.map((u) => u.c).join("");
@@ -257,6 +259,23 @@ function heldRuns(t: string, secrets: readonly string[]): Map<string, { spans: A
  * is an encoding, out of reach of any mask (the note of PR 591).
  */
 export const ECHO_RUN = 11;
+/**
+ * A HELD SECRET THAT IS NOT A TOKEN (the database's password `mason replica create` sends, src/cli/replica-hosted.ts):
+ * its body may be short, or made of characters a body reading skips (`!*!*…a1`), so it is read by its runs only when its
+ * body is at least `MIN_BODY_RUN` characters (a run of fewer is met by ordinary words), and WHOLE always (`wholeIn`): as
+ * written, in any case, or with its `%XX` escapes decoded. Every held secret is read both ways at every boundary —
+ * the exact test of a value (`echoesSecret`), the masks of free text (`maskSecrets`) and the output's gate
+ * (src/cli/output-gate.ts `readingsCarry`) — so no boundary holds it by another rule (PR 660's review, B1).
+ */
+export const MIN_BODY_RUN = 8;
+/** `%XX` escapes decoded, one byte each: how a value is read for a secret written encoded. */
+const percentDecoded = (s: string): string => s.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+/** Whether `s` holds `secret` whole: as written, in any case, or with its `%XX` escapes decoded. */
+export function wholeIn(s: string, secret: string): boolean {
+  if (!secret) return false;
+  const want = secret.toLowerCase();
+  return s.toLowerCase().includes(want) || (s.includes("%") && percentDecoded(s).toLowerCase().includes(want));
+}
 const echoGrams = new Map<string, Array<{ keep: boolean; n: number; grams: Set<string> }>>();
 /** A held secret's runs of `run` (each of its body's windows, read once keeping `-` and `_` and once skipping them):
  *  what an echo is matched against, here and by the output's gate (src/cli/output-gate.ts). */
@@ -267,7 +286,8 @@ export function echoViews(secret: string, run: number = ECHO_RUN): Array<{ keep:
     const raw = /^masondata_(?:pat|ci)_(.+)$/s.exec(secret)?.[1] ?? secret;
     views = [true, false].map((keep) => {
       const body = bodyChars(raw, keep, false).map((u) => u.c).join("");
-      const n = Math.min(run, body.length), grams = new Set<string>();
+      // a body too short to be told apart from words by its runs is read whole alone (`wholeIn`)
+      const n = body.length < MIN_BODY_RUN ? 0 : Math.min(run, body.length), grams = new Set<string>();
       for (let j = 0; n > 0 && j + n <= body.length; j++) grams.add(body.slice(j, j + n));
       return { keep, n, grams };
     });
@@ -278,7 +298,7 @@ export function echoViews(secret: string, run: number = ECHO_RUN): Array<{ keep:
 export function echoesSecret(s: string, secrets: readonly string[], run: number = ECHO_RUN): boolean {
   for (const secret of secrets) {
     if (!secret) continue;
-    if (s.includes(secret)) return true;
+    if (wholeIn(s, secret)) return true;
     const views = echoViews(secret, run);
     for (const { keep, n, grams } of views) {
       if (n === 0) continue;
