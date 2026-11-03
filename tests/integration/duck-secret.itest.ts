@@ -7,9 +7,10 @@
  * - the mask alone, the secret path disabled (`attachSeamForTest`: the old keyword string, password inside): every exit
  *   of the sync — its log, its events, its ledger rows, its state, mason sync's answer — holds no password, and a store
  *   an earlier Mason left with `password='…'` in its ledger is scrubbed at open;
- * - a password too short or plain to mask (`e`, `dev`): the sync's structure — table names, phases, times, the slot's
- *   name — is never rewritten (mason wait ready, mason sync naming the table whole), and an error whose words hold it is
- *   withheld with its code (the review of PR 620: a mask over whole answers left `public.devices` waiting for ever);
+ * - a password that is part of a name (`e`, `dev`, one equal to its user's name and inside a table's): the sync's
+ *   structure — table names, phases, times, the slot's name — is never rewritten (mason wait ready, mason sync naming
+ *   the table whole), and an error's words name each whole (the reviews of PR 620: a mask over whole answers left
+ *   `public.devices` waiting for ever, and one inside an error's words showed `public.****_archive`, `for user "****"`);
  * - the whole run (`mason start`): a table polled every 2 s, one streamed, one added while the database is away; the
  *   password changed under the run, then the relay closed; every log file, the ledger, mason status / logs / wait /
  *   sync in each form and the command server's /api/state, /api/events and /api/logs searched for the password in
@@ -118,6 +119,7 @@ after(() => {
     }
     psql(adminUrl, `DROP DATABASE IF EXISTS ${tag} WITH (FORCE)`);
     psql(adminUrl, `DROP ROLE IF EXISTS ${role}_dev`);
+    psql(adminUrl, `DROP ROLE IF EXISTS ${role}_u2024`);
     psql(adminUrl, `DROP ROLE IF EXISTS ${role}`);
   }
   fs.rmSync(dir, { recursive: true, force: true });
@@ -218,7 +220,7 @@ test("the mask alone, the secret path disabled: no exit of the sync holds the pa
   } finally { attachSeamForTest?.set(null); await sync.stop(); await store.close(); setPassword(PASSWORD); }
 });
 
-test("a password too short or plain to mask: the sync's structure is never rewritten, and an error whose words hold it is withheld with its code", { skip, timeout: 300_000 }, async () => {
+test("a password that is part of a name: the sync's structure is never rewritten, and its errors name the table and the user whole", { skip, timeout: 300_000 }, async () => {
   await makeDatabase();
   const r = await relay(admin!.hostname, Number(admin!.port || 5432));
   // `e`: in every phase's name (copied), the table's (polled), and the words of most errors
@@ -240,21 +242,53 @@ test("a password too short or plain to mask: the sync's structure is never rewri
     assert.ok(!Number.isNaN(Date.parse(st!.copiedAt!)));
     const polled = await sync.pollNow(["public.polled"]);
     assert.deepEqual(polled.tables.map((t) => t.table), ["public.polled"], "mason sync names the table whole");
-    // THE PASSWORD CHANGED: the engine's error says the user's name and the database's, which hold `e`
+    // THE PASSWORD CHANGED: the error names the user, whose name holds `e`, whole
     setPassword(NEW_PASSWORD);
     psql(adminUrl!, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${role}'`);
     await sync.once();
     let refused = "";
     try { await sync.pollNow(["public.polled"]); } catch (e) { refused = (e as Error).message; }
     const failures = events.filter((e) => /"kind":"(source_unreachable|poll_failed)"/.test(e)).join("\n");
-    assert.match(failures, /an error( \([^)]+\))? whose words are not shown: they hold the database user's password, or a word equal to it/, failures);
-    assert.match(refused, /an error( \([^)]+\))? whose words are not shown/, refused);
-    assert.doesNotMatch(`${failures}\n${refused}\n${logged.join("\n")}`, /\*\*\*\*/, "nothing masked inside words: withheld whole");
+    assert.match(failures, new RegExp(`password authentication failed for user \\\\"${role}\\\\"`), failures);
+    assert.match(refused, new RegExp(`password authentication failed for user "${role}"`), refused);
+    assert.doesNotMatch(`${failures}\n${refused}\n${logged.join("\n")}`, /\*\*\*\*/, "nothing masked: no error the sync meets holds the password");
     assert.deepEqual(sync.state().map((s) => [s.source, s.phase]), [["public.polled", "copied"]], "the table as it was, its name whole");
   } finally { await sync.stop(); await store.close(); await r.close(); setPassword(PASSWORD); }
+  // A PASSWORD EQUAL TO ITS USER'S NAME, AND INSIDE A TABLE'S (round 2's `public.****_archive`, `for user "****"`)
+  const same = `${role}_u2024`;
+  psql(adminUrl!, `CREATE ROLE ${same} LOGIN PASSWORD ${lit(same)}`);
+  psql(adminUrl!, `GRANT CONNECT ON DATABASE ${tag} TO ${same}`);
+  psql(dbAdmin, `CREATE TABLE ${same}_archive (id int PRIMARY KEY, v text); INSERT INTO ${same}_archive SELECT g, 'a' || g FROM generate_series(1, 30) g; ALTER TABLE ${same}_archive OWNER TO ${same}; ANALYZE ${same}_archive`);
+  const r2 = await relay(admin!.hostname, Number(admin!.port || 5432));
+  const p2 = parseSource(`postgres://${same}:${same}@127.0.0.1:${r2.port}/${tag}?sslmode=disable`);
+  if ("problem" in p2) throw new Error(p2.problem);
+  const archive: AddedTable = { ...POLLED, source: `public.${same}_archive`, table: `${same}_archive` };
+  const logged2: string[] = [];
+  const events2: string[] = [];
+  const store2 = await DuckStore.open(path.join(dir, "same.db"), (l) => logged2.push(l));
+  const sync2 = new Sync(store2, p2.source, tag, (l) => logged2.push(l), 3_600_000, "poll", null, { onEvent: (e) => events2.push(JSON.stringify(e)) });
+  try {
+    await sync2.open();
+    sync2.setTables([archive]);
+    await sync2.once();
+    assert.deepEqual(sync2.state().map((s) => [s.source, s.phase]), [[archive.source, "copied"]], logged2.slice(-5).join("\n"));
+    // the table renamed under the run and back: the poll's error names it
+    psql(dbAdmin, `ALTER TABLE ${same}_archive RENAME TO ${same}_gone`);
+    await sync2.once();
+    psql(dbAdmin, `ALTER TABLE ${same}_gone RENAME TO ${same}_archive`);
+    // the password changed: the error names the user, whose name is the password
+    psql(adminUrl!, `ALTER ROLE ${same} PASSWORD ${lit(NEW_PASSWORD)}`);
+    psql(adminUrl!, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${same}'`);
+    await sync2.once();
+    const said = `${events2.join("\n")}\n${logged2.join("\n")}`;
+    assert.match(said, /"kind":"poll_failed"/, said);
+    assert.ok(said.includes(`public.${same}_archive`), `the table named whole:\n${said}`);
+    assert.ok(said.includes(`password authentication failed for user \\"${same}\\"`) || said.includes(`password authentication failed for user "${same}"`), `the user named whole:\n${said}`);
+    assert.doesNotMatch(said, /\*\*\*\*/, "no identifier cut: nothing shows where the password sits");
+  } finally { await sync2.stop(); await store2.close(); await r2.close(); }
 });
 
-test("mason start under the password `dev` beside a table named devices: mason wait ready, mason sync and status name it whole, the slot's name unchanged, and an error holding it withheld", { skip, timeout: 900_000 }, async () => {
+test("mason start under the password `dev` beside a table named devices: mason wait ready, mason sync and status name it whole, the slot's name unchanged, and an error names the user whole", { skip, timeout: 900_000 }, async () => {
   await makeDatabase();
   const devRole = `${role}_dev`;
   psql(adminUrl!, `CREATE ROLE ${devRole} LOGIN REPLICATION PASSWORD 'dev'`);
@@ -298,18 +332,18 @@ test("mason start under the password `dev` beside a table named devices: mason w
       assert.match(slot, /dev/, "the slot's name holds the password's letters (else this proves nothing)");
       assert.ok(text.includes(`"${slot}"`), `the status names the slot ${slot} whole`);
     }
-    // THE PASSWORD CHANGED UNDER THE RUN: the error's words name the user (dev…), so they are withheld, its code kept
+    // THE PASSWORD CHANGED UNDER THE RUN: the error's words name the user (dev…) whole
     psql(adminUrl!, `ALTER ROLE ${devRole} PASSWORD ${lit(NEW_PASSWORD)}`);
     psql(adminUrl!, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${devRole}'`);
     const until = Date.now() + 180_000;
     let events = "";
-    while (!/whose words are not shown/.test(events)) {
+    while (!events.includes(`password authentication failed for user \\"${devRole}\\"`)) {
       if (Date.now() > until) assert.fail(`no failure seen in 180 s:\n${events.slice(-3000)}`);
       await new Promise((res) => setTimeout(res, 1000));
       events = ok(await mason("logs", "--events", "--json"), "mason logs --events");
     }
     for (const [what, out] of [["events", events], ["logs", (await mason("logs", "-n", "1000")).out], ["status", (await mason("status", "--json")).out]] as const) {
-      assert.doesNotMatch(out, /password='?dev'?\b|:dev@|public\.\*\*\*\*ices/, `${what} holds the password or a masked name:\n${out.slice(-3000)}`);
+      assert.doesNotMatch(out, /password='?dev'?\b|:dev@|\*\*\*\*(?!@)/, `${what} holds the password or a masked name:\n${out.slice(-3000)}`);
     }
   } finally {
     await mason("stop", "--json");

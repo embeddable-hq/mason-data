@@ -78,7 +78,7 @@ import { numericWiderThan } from "../lib/pg-numeric.ts";
 import { gapLine, namedPublicationVerdict, readNamedPublication } from "./publication.ts";
 import type { SyncEventInput } from "./events.ts";
 import { extensionFailure, loadPostgresSql } from "./extensions.ts";
-import { errorText, maskPasswordKeyword } from "../lib/secret-mask.ts";
+import { errorCode, errorText, maskPasswordKeyword, messageOf } from "../lib/secret-mask.ts";
 import { BIG_TABLE_ROWS, intervalOf, msText, syncedText, syncText, syncWords, type PolledSync, type TableSync } from "../lib/table-sync.ts";
 
 /** how a run keeps its copies current: each table as its `sync:` says (`poll`; a table with none — a test's — polled at
@@ -868,6 +868,18 @@ const pq = (sql: string): string => `postgres_query(${literal(SRC)}, ${literal(s
 const NUMERIC_TYPE = /^numeric(?:\((\d+)(?:,\s*(\d+))?\))?$/;
 const WIDER = "mason: a numeric value wider than its synced column";
 
+/** Whether a ROLLBACK's `e` says the engine had ended the transaction itself ("cannot rollback - no transaction is
+ *  active", after a COMMIT or a read out of memory): a decision, so it reads the raw words (`messageOf`) */
+export function endedTransaction(e: unknown): boolean {
+  return /no transaction is active/.test(messageOf(e));
+}
+
+/** Whether `e` is a numeric of `source` wider than its synced column (`WIDER`): a decision, so it reads the error's raw
+ *  words (`messageOf`), never the words Mason repeats (`errorText`) — the stream's, the catch-up's and the poll's alike */
+export function widerIn(e: unknown, source: string): boolean {
+  return messageOf(e).includes(`${WIDER} [${source}]`);
+}
+
 /** a source numeric the extension reads as a DOUBLE: no precision, or more than DuckDB's 38 digits */
 function readsAsDouble(type: string): boolean {
   const m = NUMERIC_TYPE.exec(type);
@@ -1177,9 +1189,10 @@ export class Sync {
 
   /** A CAUGHT ERROR'S WORDS, AS THE SYNC REPEATS THEM (src/lib/secret-mask.ts `errorText`): every engine or driver
    *  error becomes text here, once, where it enters — a log line, an event, a table's `error`, an answer is built from
-   *  it — so none holds the source's password; structure (names, phases, times) is never masked.
-   *  tests/secret-mask.test.ts holds src/duck/sync.ts and stream.ts to it */
-  private errorText(e: unknown, o: { stack?: boolean } = {}): string { return errorText(e, this.source.password, o); }
+   *  it — a `password=` value masked, nothing else changed (no error the sync meets holds the password: it travels in
+   *  the temporary secret alone, whose own error is never repeated). A decision never reads these words: it reads
+   *  `messageOf`, the raw ones. tests/secret-mask.test.ts holds src/duck/sync.ts and stream.ts to both */
+  private errorText(e: unknown, o: { stack?: boolean } = {}): string { return errorText(e, o); }
 
   /** a whole-sync failure (`wholeFailure`) is over: said once, as a `recovered` event of no table */
   private recovered(what: keyof Sync["wholeFailure"], words: string): void {
@@ -2099,7 +2112,7 @@ export class Sync {
       // a numeric wider than its copy's DECIMAL: that table leaves the stream and is copied again, wider, and the stream
       // goes on at once without it (it joins again caught up from its new copy) — at most three times a run, past which
       // a value the stream keeps replaying is wider than any copy of now
-      const wider = [...this.tables.values()].find((t) => e.message.includes(`${WIDER} [${t.source}]`));
+      const wider = [...this.tables.values()].find((t) => widerIn(e, t.source));
       const n = wider === undefined ? 0 : (this.widened.get(wider.source) ?? 0) + 1;
       if (wider !== undefined && n <= 3) {
         this.widened.set(wider.source, n);
@@ -2617,7 +2630,9 @@ export class Sync {
       const w = this.store.writer;
       // the engine's own words are never repeated here: its statement held the password (`sourceSecretSql`)
       try { await w.run(sourceSecretSql(this.source)); }
-      catch (e) { throw new Error(`the database's credentials could not be set up for the sync (Mason bug: report it): ${this.errorText(e)}`); }
+      // ITS OWN WORDS ARE NEVER REPEATED: the statement held the password, and an error may quote its statement — its
+      // code alone is said (src/lib/secret-mask.ts errorCode)
+      catch (e) { throw new Error(`the database's credentials could not be set up for the sync (Mason bug: report it, with this code; the error's own words are not shown, as its statement held the password): ${errorCode(e) ?? "no code"}`); }
       // the engine's failure to connect, in Mason's words (`errorText`) where it enters
       try { await w.run(attachSqlOf(this.source)); }
       catch (e) { throw new Error(this.errorText(e)); }
@@ -2692,7 +2707,7 @@ export class Sync {
         // may not replicate) says the line that keeps the tables polled meanwhile — never a bare SQLSTATE's text
         const said = this.errorText(e);
         const names = this.replicatedTables().map((t) => t.source);
-        const m = `replication: ${said}${/sync: poll/.test(said) ? "" : ` — ${names.join(", ")} ${names.length === 1 ? "is" : "are"} NOT kept current until it is fixed: ` +
+        const m = `replication: ${said}${/sync: poll/.test(messageOf(e)) ? "" : ` — ${names.join(", ")} ${names.length === 1 ? "is" : "are"} NOT kept current until it is fixed: ` +
           `give ${names.length === 1 ? "its entry" : "their entries"} sync: poll <interval> (poll 5m) in the sources file to poll ${names.length === 1 ? "it" : "them"} instead`}`;
         this.event({ kind: "stream_failed", table: null, message: m });
         this.wholeFailure.prepare = m;
@@ -2919,7 +2934,7 @@ export class Sync {
           const m = this.errorText(e);
           this.refreshStreamed();
           // a numeric wider than its copy: copied again (`needsCopy`), and caught up after that copy
-          if (m.includes(`${WIDER} [${t.source}]`)) {
+          if (widerIn(e, t.source)) {
             this.snapshots.delete(t.source);
             this.log(`${t.source}: the changes the stream held during its catch-up could not be applied: it is read again whole, wider (${m})`);
             return "copy again";
@@ -3118,7 +3133,7 @@ export class Sync {
       pieced.length = 0;
       // a numeric wider than its copy: that table is copied again (wider) at the next pass, the others polled
       // matched against the tables' own names (a name may hold a space)
-      const wider = e instanceof Error ? tables.find((t) => e.message.includes(`${WIDER} [${t.source}]`))?.source : undefined;
+      const wider = e instanceof Error ? tables.find((t) => widerIn(e, t.source))?.source : undefined;
       if (wider !== undefined && this.snapshots.delete(wider)) {
         this.log(`poll: ${wider} has a numeric value wider than its synced DECIMAL column: it is read again whole at the next pass`);
         return [];
@@ -3508,7 +3523,7 @@ export class Sync {
                 const said = this.errorText(r);
                 // the engine ended the transaction itself (measured: "cannot rollback - no transaction is active" after a
                 // COMMIT, or a read, out of memory): nothing of the chunk is left to roll back
-                if (/no transaction is active/.test(said)) { rolledBack = true; break; }
+                if (endedTransaction(r)) { rolledBack = true; break; }
                 if (attempt < 20 && pgErrorOf(r, "").fields.code === "53200") { await new Promise((ok) => setTimeout(ok, 100)); continue; }
                 this.log(`a chunk of ${t.source}'s sync could not be rolled back after it failed (its connection is closed with the sync): ${said}`);
                 break;

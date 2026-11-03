@@ -45,7 +45,7 @@
  * unchanged-TOAST update) whose earlier row went in an earlier piece is applied as an UPDATE of the columns it carries,
  * as one whose row the copy holds always is.
  */
-import { errorText } from "../lib/secret-mask.ts";
+import { errorText, messageOf } from "../lib/secret-mask.ts";
 import { decode, type RelationColumn, type TupleValue } from "../cdc/pgoutput.ts";
 import { PgConnection, formatLsn, pgIdent, pgLiteral } from "../cdc/pg-wire.ts";
 
@@ -304,7 +304,7 @@ export class ReplicationStream {
      *  `errorText`, the sync's); a test's stream may leave it out */
     errorText?: (e: unknown) => string }) {
     this.connect = o.connect; this.slot = o.slot; this.publication = o.publication; this.target = o.target; this.log = o.log;
-    this.errorText = o.errorText ?? ((e) => errorText(e, null));
+    this.errorText = o.errorText ?? ((e) => errorText(e));
     this.flushMs = o.flushMs ?? 500; this.flushRows = o.flushRows ?? PIECE_CHANGES;
     this.acked = this.target.applied();
     this.done = this.run();
@@ -489,6 +489,7 @@ export function pgTime(us: bigint): Date {
 
 /** the source being away — closed, refused, reset, a shutdown — which a reconnect outlasts; anything else is the stream's */
 function away(e: unknown): boolean {
-  const m = e instanceof Error ? e.message : String(e);
+  // a decision: the raw words (src/lib/secret-mask.ts messageOf), never the ones Mason repeats
+  const m = messageOf(e);
   return /connection closed|ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|timed out|terminating connection|the database system is (shutting down|starting up)|server closed|is active for PID/i.test(m);
 }

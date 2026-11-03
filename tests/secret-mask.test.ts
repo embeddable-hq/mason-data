@@ -1,7 +1,8 @@
 /**
- * A caught error's words as Mason repeats them (src/lib/secret-mask.ts `errorText`, issue 599), alone: every form a
- * message can carry a password in, the `password=` keyword whatever its value, a short or plain password's error
- * withheld with its code, and the rule that the sync and the stream turn an error into text only through it. And the
+ * A caught error's words as Mason repeats them (src/lib/secret-mask.ts `errorText`, issue 599), alone: the one form a
+ * connection string carries a password in (`password=`) masked whatever the password, nothing else ever changed — no
+ * identifier cut, so none shows where a password sits — and the two rules the sync and the stream are held to: an
+ * error's words are made only through `errorText`, and no branch reads those words (it reads `messageOf`). And the
  * ATTACH's path, which holds no credential (src/duck/sync.ts `attachPath`, `sourceSecretSql`). Each module is imported
  * inside its test, so the file loads at a commit without them and the test fails by name there
  * (scripts/fails-without.ts).
@@ -13,89 +14,85 @@ import * as fs from "node:fs";
 type MaskModule = typeof import("../src/lib/secret-mask.ts");
 const mod = (): Promise<MaskModule> => import("../src/lib/secret-mask.ts");
 
-/** passwords that can be masked inside words: libpq's specials, a URL's, SQL's and JSON's, and non-ASCII */
-const PASSWORDS = [`s3cr3t-Pw`, `a b'c\\d=e@f%g:h"i`, `ünï cødé/?#&+`, `x'1234`, `\\\\\\\\\\\\`, ` lead9 `, `tab\there`];
-
-test("an error's words: a maskable password in every form a message carries it — raw, URL-encoded, libpq-, SQL- and JSON-quoted — is never left", async () => {
-  const { errorText, maskable, MASKED } = await mod();
-  for (const pw of PASSWORDS) {
-    assert.ok(maskable(pw), JSON.stringify(pw));
-    const libpq = pw.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    const forms = [
-      pw,
-      encodeURIComponent(pw),
-      // the URL's own encoding of a userinfo password, which is not encodeURIComponent's
-      new URL(`postgres://u:${encodeURIComponent(pw)}@h/db`).href,
-      `IO Error: Unable to connect to Postgres at "host='h' port='5432' dbname='d' user='u' password='${libpq}' sslmode='prefer'": FATAL`,
-      `SELECT '${pw.replace(/'/g, "''")}'`,
-      JSON.stringify({ error: `failed: ${pw}` }),
-    ];
-    for (const text of forms) {
-      const masked = errorText(new Error(text), pw);
-      for (const leak of [pw, encodeURIComponent(pw), libpq, pw.replace(/'/g, "''"), JSON.stringify(pw).slice(1, -1)]) {
-        assert.ok(!masked.includes(leak), `${JSON.stringify(text)} masked to ${JSON.stringify(masked)} still holds ${JSON.stringify(leak)}`);
-      }
-      assert.ok(masked.includes(MASKED), `${JSON.stringify(masked)} says it masked something`);
-    }
-    // a stack, when asked for, the same way
-    const e = new Error(`the poll failed: ${pw}`);
-    assert.ok(!errorText(e, pw, { stack: true }).includes(pw));
-    assert.match(errorText(e, pw, { stack: true }), /^Error: the poll failed: \*\*\*\*\n\s+at /);
-  }
-});
-
-test("an error's words: any password= keyword's value is masked whatever it is (a password since rotated), and the rest of the words stand", async () => {
+test("an error's words: any password= keyword's value is masked whatever it is — quoted with libpq's escapes, bare, any case — and the rest of the words stand", async () => {
   const { errorText, maskPasswordKeyword } = await mod();
-  const old = `Unable to connect to Postgres at "host='db.internal' port='5432' dbname='app' user='reader' password='old\\'pw\\\\x' sslmode='prefer' application_name='mason-data'": connection to server at "10.0.0.1", port 5432 failed: Connection refused`;
-  const want = `Unable to connect to Postgres at "host='db.internal' port='5432' dbname='app' user='reader' password=**** sslmode='prefer' application_name='mason-data'": connection to server at "10.0.0.1", port 5432 failed: Connection refused`;
-  assert.equal(errorText(new Error(old), "a-new-one9"), want);
+  const old = `IO Error: Unable to connect to Postgres at "host='db.internal' port='5432' dbname='app' user='reader' password='old\\'pw\\\\x' sslmode='prefer' application_name='mason-data'": connection to server at "10.0.0.1", port 5432 failed: Connection refused`;
+  const want = `IO Error: Unable to connect to Postgres at "host='db.internal' port='5432' dbname='app' user='reader' password=**** sslmode='prefer' application_name='mason-data'": connection to server at "10.0.0.1", port 5432 failed: Connection refused`;
+  assert.equal(errorText(new Error(old)), want);
   assert.equal(maskPasswordKeyword(old), want);
-  // a password the reader knows nothing of: no secret given
-  assert.equal(errorText(new Error("password=bare123 host=h"), null), "password=**** host=h");
-  assert.equal(errorText("PASSWORD = 'Quoted Value' x", ""), "PASSWORD = **** x");
-  // a quote never closed: to the text's end
+  for (const pw of [`s3cr3t-Pw`, `a b'c\\d=e@f%g:h"i`, `ünï cødé/?#&+`, "dev", "e", "orders2024"]) {
+    const libpq = pw.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const said = errorText(new Error(`Unable to connect to Postgres at "user='u' password='${libpq}' sslmode='prefer'": FATAL`));
+    assert.equal(said, `Unable to connect to Postgres at "user='u' password=**** sslmode='prefer'": FATAL`, JSON.stringify(pw));
+  }
+  assert.equal(errorText(new Error("password=bare123 host=h")), "password=**** host=h");
+  assert.equal(errorText("PASSWORD = 'Quoted Value' x"), "PASSWORD = **** x");
   assert.equal(maskPasswordKeyword("password='cut off"), "password=****");
-  // nothing to mask: the words as they were, a table's name in them included
-  const plain = `Unable to connect to Postgres at "sslmode='prefer' application_name='mason-data'": password authentication failed for user "reader" reading public.devices`;
-  assert.equal(errorText(new Error(plain), "s3cr3t-Pw"), plain);
-  assert.equal(errorText(new Error(plain), ""), plain);
+  // a stack, when asked for, the same way
+  assert.match(errorText(new Error("failed: password='p9x!q'"), { stack: true }), /^Error: failed: password=\*\*\*\*\n\s+at /);
 });
 
-test("a password under 6 characters or of letters alone: an error whose words hold it is withheld, its code kept; one that does not is shown whole", async () => {
-  const { errorText, maskable, errorCode } = await mod();
-  for (const pw of ["dev", "secret", "Passwort", "ünïcødé", "ab1", "12345"]) assert.equal(maskable(pw), false, JSON.stringify(pw));
-  for (const pw of ["s3cr3t", "dev-12", "123456", "a b c!"]) assert.equal(maskable(pw), true, JSON.stringify(pw));
-  // a table's name holds the password: the words are withheld, never `public.****ices`, which shows where it sits
-  const named = new Error(`Catalog Error: Table public.devices does not exist`);
-  const said = errorText(named, "dev");
-  assert.match(said, /^an error \(Catalog Error\) whose words are not shown: they hold the database user's password, or a word equal to it, and a password under 6 characters or of letters alone/);
-  assert.ok(!said.includes("dev"), said);
-  assert.ok(!said.includes("****"), said);
-  // the leaked form, the password inside: withheld too
-  assert.ok(!errorText(new Error("IO Error: Unable to connect to Postgres at \"password='dev' x\""), "dev").includes("dev"));
-  // its code: a SQLSTATE or a system error's, else the engine's kind
-  const pg = Object.assign(new Error("FATAL: password authentication failed for user \"dev_user\""), { code: "28P01" });
-  assert.match(errorText(pg, "dev"), /^an error \(28P01\) whose words are not shown/);
-  const sys = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432 (dev)"), { code: "ECONNREFUSED" });
-  assert.equal(errorCode(sys), "ECONNREFUSED");
-  assert.match(errorText("dev failed", "dev"), /^an error whose words are not shown/);
-  // words that do not hold it: shown as they are
-  assert.equal(errorText(new Error("IO Error: connection to server at \"127.0.0.1\", port 5432 failed: Connection refused"), "dev"),
-    "IO Error: connection to server at \"127.0.0.1\", port 5432 failed: Connection refused");
+test("an error's words never cut an identifier: a table, a user or Mason's own words holding a password's letters read whole, so none shows where it sits", async () => {
+  const { errorText } = await mod();
+  // the review of PR 620 round 2: each was masked to `public.****_archive`, `for user "****"`, `[public.****ices]`
+  for (const words of [
+    "public.orders2024_archive: reading its changed rows from the source into the poll's stage: Binder Error: Referenced column \"v\" not found",
+    "FATAL: password authentication failed for user \"reporting2024\"",
+    "mason: a numeric value wider than its synced column [public.devices]: amount = 12345.678",
+    "cannot rollback - no transaction is active",
+    "IO Error: Unable to connect to Postgres at \"sslmode='prefer' application_name='mason-data'\": could not translate host name \"db.internal\"",
+  ]) assert.equal(errorText(new Error(words)), words);
 });
 
-test("the sync and the stream turn a caught error into words only through errorText: where it enters, once", () => {
-  // a dependency's message made text any other way (`e instanceof Error ? e.message : String(e)`, `(e as Error).message`,
-  // a stack) is text no mask saw. A use of the message that is not text (matching a kind of failure) is the stream's
-  // `away`, read whole and left out here
-  const offenders: string[] = [];
+test("the sync and the stream make a caught error's words only through errorText, and decide only on messageOf: no branch reads the words Mason repeats", () => {
+  // (1) a dependency's message made text any other way (`e instanceof Error ? e.message : String(e)`, `(e as Error).message`,
+  // a stack) is text the mask never saw
+  const made: string[] = [];
+  // (2) the words errorText made, read by a branch: a match, a test, a comparison of them (the review of PR 620 round 2:
+  // a catch-up's wider numeric and a ROLLBACK's `no transaction is active` were matched on them)
+  const decided: string[] = [];
+  const READS = (v: string): RegExp => new RegExp(`\\b${v}\\s*\\.(includes|match|startsWith|endsWith|search|indexOf)\\(|\\.(test|exec)\\(\\s*${v}\\s*\\)|\\b${v}\\s*[!=]==|[!=]==\\s*${v}\\b`);
   for (const file of ["src/duck/sync.ts", "src/duck/stream.ts"]) {
-    const src = fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8").replace(/\nfunction away\([\s\S]*?\n\}\n/, "\n");
-    src.split("\n").forEach((line, i) => {
-      if (/instanceof Error \? \w+\.(message|stack)|\(\w+ as Error\)\.(message|stack)|\.stack\b/.test(line)) offenders.push(`${file}:${i + 1}: ${line.trim()}`);
+    const lines = fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8").split("\n");
+    lines.forEach((line, i) => {
+      if (/instanceof Error \? \w+\.(message|stack)|\(\w+ as Error\)\.(message|stack)|\.stack\b/.test(line)) made.push(`${file}:${i + 1}: ${line.trim()}`);
+      if (/errorText\(/.test(line) && /\.(includes|match|startsWith|endsWith|search|test|exec)\(\s*[^)]*errorText\(|errorText\([^)]*\)\s*\.(includes|match|startsWith|endsWith|search|indexOf)\(/.test(line)) decided.push(`${file}:${i + 1}: ${line.trim()}`);
+      // a name bound to its words: every line after it, to the end of its method (a line closing at two spaces' indent)
+      const bound = /\b(?:const|let)\s+(\w+)\s*=\s*(?:this\.)?errorText\(/.exec(line);
+      if (bound === null) return;
+      for (let j = i; j < lines.length && !(j > i && /^ {2}\}/.test(lines[j]!)); j++) {
+        if (READS(bound[1]!).test(lines[j]!)) decided.push(`${file}:${j + 1}: ${lines[j]!.trim()} (${bound[1]} is errorText's, line ${i + 1})`);
+      }
     });
   }
-  assert.deepEqual(offenders, [], "make a caught error's words with errorText (src/lib/secret-mask.ts), the sync's this.errorText");
+  assert.deepEqual(made, [], "make a caught error's words with errorText (src/lib/secret-mask.ts), the sync's this.errorText");
+  assert.deepEqual(decided, [], "decide on an error's raw words, messageOf (src/lib/secret-mask.ts), never on errorText's");
+});
+
+test("the guard catches the real thing: a branch on errorText's words, bound or inline", () => {
+  // the shapes round 2 met, as the guard above reads them
+  const READS = (v: string): RegExp => new RegExp(`\\b${v}\\s*\\.(includes|match|startsWith|endsWith|search|indexOf)\\(|\\.(test|exec)\\(\\s*${v}\\s*\\)|\\b${v}\\s*[!=]==|[!=]==\\s*${v}\\b`);
+  assert.ok(READS("m").test("          if (m.includes(`${WIDER} [${t.source}]`)) {"));
+  assert.ok(READS("said").test("                if (/no transaction is active/.test(said)) { rolledBack = true; break; }"));
+  assert.ok(!READS("m").test("            this.log(`${t.source}: … (${m})`);"));
+});
+
+test("a decision on a wider numeric reads the raw words, whatever the password: widerIn", async () => {
+  const sync = await import("../src/duck/sync.ts") as unknown as { widerIn?: (e: unknown, source: string) => boolean };
+  assert.equal(typeof sync.widerIn, "function", "src/duck/sync.ts widerIn");
+  // the review's inputs: dev and public.devices, public, mason, orders2024 and public.orders2024_archive — the decision
+  // takes no password at all, so none of them can change it
+  for (const source of ["public.devices", "public.orders", "public.orders2024_archive", "mason_internal.t"]) {
+    assert.equal(sync.widerIn!(new Error(`mason: a numeric value wider than its synced column [${source}]: amount = 12345.678`), source), true, source);
+    assert.equal(sync.widerIn!(new Error(`mason: a numeric value wider than its synced column [${source}x]: amount = 1`), source), false, source);
+  }
+});
+
+test("a ROLLBACK the engine had ended itself reads as rolled back, whatever the password (`active` among them): endedTransaction", async () => {
+  const sync = await import("../src/duck/sync.ts") as unknown as { endedTransaction?: (e: unknown) => boolean };
+  assert.equal(typeof sync.endedTransaction, "function", "src/duck/sync.ts endedTransaction");
+  assert.equal(sync.endedTransaction!(new Error("TransactionContext Error: cannot rollback - no transaction is active")), true);
+  assert.equal(sync.endedTransaction!(new Error("IO Error: could not write the chunk")), false);
 });
 
 test("the ATTACH's path holds no credential: the engine is given them only as a temporary secret", async () => {
