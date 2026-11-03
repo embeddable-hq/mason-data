@@ -162,6 +162,29 @@ export function readProject(root: string): Project | BrokenProject | null {
   return { root, dir, folder: path.resolve(root, config.folder), config };
 }
 
+/**
+ * WHERE A PROJECT'S FILES ARE, against its root (the folder `.mason/` is in): strictly `inside` it (a folder of their own,
+ * `mason/`), the `root` itself (`mason init --folder .`), or `outside` it (`..`, `../app`, an absolute path elsewhere, a
+ * link that leaves it). Read from the real paths — a folder not made yet by its nearest folder that is — so every
+ * spelling of one place is one answer. The one authority: `mason init` refuses outside, `mason deploy` sends only from
+ * inside (src/cli/deploy.ts: a root's or an outside folder's YAML is the application's, or anyone's).
+ */
+export function folderPlace(root: string, folder: string): "inside" | "root" | "outside" {
+  const real = (p: string): string => {
+    const rest: string[] = [];
+    for (let d = path.resolve(p); ; d = path.dirname(d)) {
+      try { return path.join(fs.realpathSync(d), ...rest.reverse()); }
+      catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT" || path.dirname(d) === d) throw e;
+        rest.push(path.basename(d));
+      }
+    }
+  };
+  const rel = path.relative(real(root), real(folder));
+  if (rel === "") return "root";
+  return rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel) ? "outside" : "inside";
+}
+
 /** Whether a lookup found a project it could read. */
 export const isProject = (p: Project | BrokenProject | null): p is Project => p !== null && !("broken" in p);
 

@@ -396,6 +396,74 @@ test("mason deploy: the bounds — a file over 256 KiB, the files over 1 MiB, a 
   assert.deepEqual(r.requests, []);
 });
 
+test("mason deploy: the project's files must be a folder strictly inside its root — every spelling of the root itself or a place outside it is refused, nothing read or sent", async () => {
+  // an application root inside a parent that holds YAML of its own (a CI file, a sibling's), with a project folder named
+  // by config.json's "folder" — written by hand, as mason init refuses every outside spelling and writes "mason" itself
+  const layout = (folder: (dirs: { app: string; parent: string; away: string }) => string): { app: string } => {
+    const parent = temp("mason-parent-"), app = path.join(parent, "app"), away = temp("mason-away-");
+    fs.mkdirSync(path.join(app, ".mason"), { recursive: true });
+    fs.writeFileSync(path.join(app, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: folder({ app, parent, away }), remote: false, apiKey: "k".repeat(48) }), { mode: 0o600 });
+    // a valid project everywhere it might be read from: the refusal is the folder's, never a mistake of the files
+    for (const at of [parent, app, path.join(app, "mason"), away, path.join(parent, "sibling", "mason")]) {
+      fs.mkdirSync(path.join(at, "sources"), { recursive: true });
+      fs.writeFileSync(path.join(at, "sources", "shop.yml"), SOURCE);
+      fs.writeFileSync(path.join(at, "mason.yml"), "version: 0.7.0\n");
+    }
+    fs.writeFileSync(path.join(parent, "ci.yml"), "token: from-the-parent\n");
+    fs.mkdirSync(path.join(parent, "sibling"), { recursive: true });
+    fs.writeFileSync(path.join(parent, "sibling", "k8s.yml"), "secret: from-a-sibling\n");
+    fs.writeFileSync(path.join(app, "docker-compose.yml"), "password: from-the-app\n");
+    fs.writeFileSync(path.join(away, "elsewhere.yml"), "secret: from-elsewhere\n");
+    return { app };
+  };
+  const outside: Array<[string, (d: { app: string; parent: string; away: string }) => string]> = [
+    ["..", () => ".."], ["../", () => "../"], ["../sibling/mason", () => "../sibling/mason"], ["mason/../..", () => "mason/../.."],
+    ["the parent, absolute", (d) => d.parent], ["another folder, absolute", (d) => d.away], ["../app/../..", () => "../app/../.."],
+  ];
+  const atRoot: Array<[string, (d: { app: string; parent: string; away: string }) => string]> = [
+    [".", () => "."], ["./", () => "./"], ["", () => ""], ["mason/..", () => "mason/.."], ["the root, absolute", (d) => d.app], ["../app", () => "../app"],
+  ];
+  for (const [kind, cases] of [["outside", outside], ["root", atRoot]] as const) {
+    for (const [what, folder] of cases) {
+      const { app } = layout(folder);
+      for (const argv of [["--replica", "acme/shop"], ["--replica", "acme/shop", "--dry-run"], ["--replica", "acme/shop", "--json"]]) {
+        const { a, requests } = await deployWith({}, app, argv);
+        assert.equal(a.code, 1, `${what} ${argv.join(" ")}: ${a.stdout}${a.stderr}`);
+        assert.deepEqual(requests, [], `${what}: nothing sent`);
+        assert.doesNotMatch(a.stdout + a.stderr, /from-the-parent|from-a-sibling|from-the-app|from-elsewhere|ci\.yml|k8s\.yml|docker-compose/, `${what}: nothing of those files said`);
+        const said = argv.includes("--json") ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr;
+        assert.match(said, kind === "root" ? /this project's files are its folder's own/ : /this project's files are outside its folder/, `${what}: ${said}`);
+      }
+    }
+  }
+  // a project folder that is a link out of the root is outside, by its real path
+  {
+    const { app } = layout(() => "mason");
+    fs.rmSync(path.join(app, "mason"), { recursive: true });
+    const away = temp("mason-linked-");
+    fs.mkdirSync(path.join(away, "sources"));
+    fs.writeFileSync(path.join(away, "sources", "shop.yml"), SOURCE);
+    fs.symlinkSync(away, path.join(app, "mason"));
+    const { a, requests } = await deployWith({}, app, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 1, a.stderr);
+    assert.match(a.stderr, /this project's files are outside its folder/);
+    assert.deepEqual(requests, []);
+  }
+  // every spelling of a folder strictly inside is the project's own, and sends that folder's files alone
+  for (const folder of ["mason", "./mason", "mason/", "./mason/../mason"]) {
+    const { app } = layout(() => folder);
+    const { a, requests } = await deployWith({}, app, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 0, `${folder}: ${a.stderr}`);
+    const body = JSON.parse(requests.find((r) => r.method === "POST")!.body) as { files: Array<{ path: string }> };
+    assert.deepEqual(body.files.map((f) => f.path), ["mason.yml", "sources/shop.yml"], folder);
+  }
+  {
+    const { app } = layout((d) => path.join(d.app, "mason"));
+    const { a } = await deployWith({}, app, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 0, `absolute, inside: ${a.stderr}`);
+  }
+});
+
 test("mason deploy: the replica is --replica, else MASON_REPLICA, each part held to its grammar; neither names both ways", async () => {
   const { root } = project();
   let r = await deployWith({}, root, []);

@@ -55,7 +55,7 @@ import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceS
 import { environmentToken, readLogins, TOKEN_ENV } from "./credentials.ts";
 import { call, failureShape, isFailure, serviceFailure, serviceOf, serviceText, unexpected, type Service } from "./hosted.ts";
 import { maskedUrl } from "./preflight.ts";
-import { theProject, type Project } from "./project.ts";
+import { folderPlace, theProject, type Project } from "./project.ts";
 import { commandPinProblem } from "./pin.ts";
 import { readPin } from "../lib/project-version.ts";
 import { projectFiles } from "../lib/project-files.ts";
@@ -233,18 +233,33 @@ const bytes = (n: number): string => `${n.toLocaleString("en-US")} bytes`;
 const refuse = (message: string, why: string, fix: string): Failure => ({ message, code: "refused", why, fix });
 
 /**
+ * THE PROJECT'S OWN FOLDER, or why a deploy sends nothing from it: its files must be a folder strictly inside the
+ * project's root (`folderPlace`, src/cli/project.ts, the one authority, which `mason init` asks too). Its root itself
+ * (`"folder": "."`, mason init --folder .) is the application's folder, and anything outside the root (`..`, `../app`,
+ * an absolute path, a link that leaves it) is anyone's: a deploy would send every .yml and .yaml there. Fail closed:
+ * asked before any of those files is read.
+ */
+export function ownFolderRefusal(p: Project): Failure | null {
+  const place = folderPlace(p.root, p.folder);
+  if (place === "inside") return null;
+  const config = shownPath(p.root, path.join(p.dir, "config.json"));
+  const fix = `move mason.yml, roles.yml, sources/ and generated_tables/ into a folder of their own inside ${p.root} (mason/), and set "folder": "mason" in ${config}`;
+  return place === "root"
+    ? refuse("this project's files are its folder's own (mason init --folder .), beside the application's",
+      "a deploy sends every .yml and .yaml under the project's files, and here that is every one of the application's", fix)
+    : refuse(`this project's files are outside its folder (${config} names ${JSON.stringify(p.config.folder)}, which is ${p.folder})`,
+      `a deploy sends every .yml and .yaml under the project's files, and outside ${p.root} that is anyone's`, fix);
+}
+
+/**
  * THE FILES A DEPLOY SENDS: `projectFiles` of the project folder, each read and held to the contract's bounds, and
  * every file the check read among them. A Failure naming the file and the bound otherwise.
  */
 export function deployFiles(p: Project, read: readonly string[]): DeployFile[] | Failure {
   const folder = p.folder, shownFolder = `${shownPath(p.root, folder)}/`;
-  // a project whose files are the application's own folder (mason init --folder .) would send every YAML file of the
-  // application — its compose files, its CI, its config — to the service: refused, fail closed
-  if (path.resolve(folder) === path.resolve(p.root)) {
-    return refuse("this project's files are its folder's own (mason init --folder .), beside the application's",
-      "a deploy sends every .yml and .yaml under the project's files, and here that is every one of the application's",
-      `move mason.yml, roles.yml, sources/ and generated_tables/ into a folder of their own (mason/), and set "folder": "mason" in ${shownPath(p.root, path.join(p.dir, "config.json"))}`);
-  }
+  // never a file of a folder that is not the project's own, whoever calls this (deploy() asks first, before the check)
+  const own = ownFolderRefusal(p);
+  if (own !== null) return own;
   let list: string[], realFolder: string;
   try { list = projectFiles(folder); realFolder = fs.realpathSync(folder); }
   catch (e) { return { message: `the project's files in ${shownFolder} cannot be listed`, code: "failed", why: (e as Error).message, fix: "make the folder readable, then mason deploy again" }; }
@@ -386,6 +401,9 @@ export async function deploy(argv: string[]): Promise<number> {
   const t = theProject(process.cwd());
   if ("problem" in t) return fail(t, { json });
   const project = t.project;
+  // the project's own folder first: nothing of a folder that is not one is read, let alone sent
+  const own = ownFolderRefusal(project);
+  if (own !== null) return fail(own, { json });
   const checked = checkProject(project);
   if (isFailure(checked)) return fail(checked, { json });
   const files = deployFiles(project, checked.read);
