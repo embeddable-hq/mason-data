@@ -196,6 +196,8 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["cast:3802>1043", "a cast from jsonb to character varying"],
   ["cast:3802>114", "a cast from jsonb to json"],
   ["cast:3802>25", "a cast from jsonb to text"],
+  ["cast:3807>1016", "a cast from jsonb[] to bigint[]"],
+  ["cast:3807>1021", "a cast from jsonb[] to real[]"],
   ["cast:3904>25", "a cast from int4range to text"],
   ["cast:3905>25", "a cast from int4range[] to text"],
   ["cast:3906>25", "a cast from numrange to text"],
