@@ -656,6 +656,30 @@ share of reviewed PRs whose first review found nothing blocking, before and afte
 no fall in what CI's oracle and the merged PRs later show wrong would say the reviews got easier to pass, not the PRs
 better.
 
+**A PR's scope stops growing by itself (Tom, 2026-11-03; issue 649).** PR 582 (issue 212) took eight review rounds and
+did not finish. The reviews were accurate: every blocking finding was a real wrong answer or regression, run at the
+head and at main. The loop around them let the PR's scope grow. Three things did it, and each got a decision.
+- **The bound was overridden.** The four-round bound fired after round 4, and the top session overrode it four times,
+  each round fixing the last one's findings and meeting new ones. Now a run that reaches the bound stops with a status
+  that begins `shrink:` (`pr-loop-slim.js`, as a conflict's begins `conflict:`). It names the last head a review found
+  clean, read from the script's own history, and its default next step is to narrow the PR to its safe subset: refuse
+  by name what the base refused, revert what has no clean review, and file the rest as one new issue. The top session
+  starts that as a new run of the issue at once (`shrinkOf`, `.claude/skills/up-next/SKILL.md`). Another round past
+  the bound is the owner's word only.
+- **A regeneration admitted what nobody reviewed.** Round 3 was clean. The next CI fix regenerated the allowlist
+  (`node scripts/oracle-legs.ts --write`) and admitted a function main refused by name, for every shape, because the
+  oracle's few shapes matched; rounds 4 to 8 were that admission's forms. Now a stage that may regenerate returns
+  `admitted`, every piece its push adds to `src/duck/verified.ts`, each judged against the issue's scope: kept refused
+  by name with an issue filed, or left for the next review to sweep in the variant forms at the head and the base. Every
+  review reads the file's diff itself, since an author's report is never evidence.
+- **A class round decided by form.** The slim loop had no design review. Two class rounds then decided by a list of
+  spellings, and one named an authority (the engine's prepared types) that does not exist where the rewrite decides.
+  Now a class round's decision and its authority are written in the PR's `## Design` first, and a fresh Opus at high
+  effort checks against the code that the authority exists at the decision point and covers every form, running the
+  cases, before any code; two design reviews at most, which never count toward the bound.
+
+**Detector:** `tests/workflows.test.ts` (the tests named for issue 649) runs the script and the render through each.
+
 ### Who may give an agent words (Tom, 2026-11-02)
 
 **Decision.** The agents that work this repository (the up-next session, its coordinators, and the Opus

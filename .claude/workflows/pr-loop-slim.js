@@ -8,7 +8,8 @@ export const meta = {
     { title: 'Implement', detail: 'Opus, a worktree of its own: the design note before any code, the push, the note in the PR body, the Handoff comment', model: 'opus' },
     { title: 'Link', detail: "GitHub itself says the PR closes its sub-issue, or the body is fixed and asked again", model: 'sonnet' },
     { title: 'Review', detail: 'Opus at high effort, a fresh agent in a fresh context, never the implementer: findings with their class, their severity and whether the base has them', model: 'opus' },
-    { title: 'Fix', detail: "reads the Handoff first and appends to it; this PR's blocking failures and classes and CI's, never the edit; a repeated class makes a class round", model: 'opus' },
+    { title: 'Fix', detail: "reads the Handoff first and appends to it; this PR's blocking failures and classes and CI's, never the edit; a repeated class makes a class round, whose decision and authority the author writes in the PR's ## Design first; a regeneration's allowlist pieces returned as admitted", model: 'opus' },
+    { title: 'Design review', detail: "before a class round only: a fresh Opus at high effort, never the author, reads the round's decision and its authority in the PR's ## Design against the code at the head and runs its cases; two at most, then the round goes on carrying what is open", model: 'opus' },
     { title: 'Learn', detail: "each class met becomes a review probe in its rules file, one docs-only commit", model: 'opus' },
     { title: 'CI', detail: 'bounded wait on gh pr checks, with mergeable read first on every pass (GitHub runs no CI on a conflicting PR, so a conflict is its own verdict), beside each review and after the last; a CI fix gets a narrow re-check', model: 'sonnet' },
     { title: 'Merge', detail: 'when CI reads the PR as conflicting, a fresh agent merges the base into the branch in a worktree of its own by scripts/merge-base.ts (release-notes/next.md alone, an insertion on both sides, keeps both), pushes, and CI runs again on the new head; any other conflict stops the run naming its files', model: 'sonnet' },
@@ -22,8 +23,10 @@ export const meta = {
 // stage, against the results recorded so far, and sends every fix round to the ONE implementer it keeps alive. Run by the
 // Workflow tool, it is the same loop with a fresh fixer each round, since a Workflow agent() is one-shot: it hands the
 // context on instead. It began as .claude/workflows/pr-loop.js (retired) with three changes:
-//   1. No design stage, no design review and no probe: the implementer writes the design note itself, before any code,
-//      into the PR body under `## Design`.
+//   1. No design stage and no probe: the implementer writes the design note itself, before any code, into the PR body
+//      under `## Design`. A class round's design review is the one design review there is (issue 649): the author
+//      writes the round's decision and its authority in `## Design`, and a fresh Opus reads them against the code
+//      before any code is written for it.
 //   2. A HANDOFF: the implementer posts ONE PR comment headed `## Handoff` (the design decisions and why, what was tried
 //      and rejected, the files and functions that matter, the open risks); every fix agent reads it first, beside every
 //      earlier round, reads its rejected list before it changes a design decision, and appends what it changed and why.
@@ -32,7 +35,7 @@ export const meta = {
 //      fixed before the push, the counts returned. On issue 192 every correctness bug was found by running statements.
 // The review, the re-check and the CI read are the retired pr-loop's word for word, but for one sentence the review adds
 // (the Handoff is the author's account, never read); so are the args, the result's shape and the Review record's block,
-// whose designRounds and probeRounds are 0. tests/workflows.test.ts holds it so.
+// whose probeRounds is 0 and designRounds counts the class rounds' design reviews. tests/workflows.test.ts holds it so.
 // A SPLIT (issue 386): the Brief may find the issue too big for one PR and return `split`, its pieces in order. The run
 // then makes a sub-issue per piece, posts the plan on the issue and stops before Implement, with the pieces in its
 // status; the top session (.claude/skills/up-next/SKILL.md) starts each piece as a run of its own. This took the place
@@ -53,7 +56,13 @@ export const meta = {
 //   it, each starts a throwaway postgres:18 container of its own (wal_level=logical, a random password, a free loopback
 //   port) and removes it when done. No prompt prints the URL.
 // Every exit returns one shape, result(status), the split's included (pr and head null):
-//   { status, pr, head, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds }, the last two always [].
+//   { status, pr, head, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds }: designRounds the class
+//   rounds' design reviews ({ round, label, sound, findings }), probeRounds always [].
+// The ROUND BOUND (issue 649): a run that reaches MAX_ROUNDS with a blocking finding open, or with a head no review
+// re-checked, stops with a status that begins `shrink:`, as a conflict's begins `conflict:`, so a skill branches on its
+// first word: its default next step is to narrow the PR to its safe subset, never another round, which only the owner's
+// word gives. PR 582 (issue 212) took eight review rounds, the bound overridden four times, each round fixing the last
+// one's findings and meeting new ones.
 const A = args
 const PROCESSES = ['pr-loop-slim', 'pr-persistent']
 const PROCESS = A.process === undefined ? 'pr-loop-slim' : A.process
@@ -77,6 +86,9 @@ const BOARD = (status) => `node ${REPO}/scripts/board.ts status ${A.issue} "${st
 // one bound per PR, on the one counter (`round`) the stop's status and rounds[] read: the review rounds of a CI fix's
 // re-check count toward it too
 const MAX_ROUNDS = 4
+// a class round's design reviews: after the second the round goes on, carrying what is still open (CLAUDE.md "The
+// loop" step 1's bound on a design review); they never count toward MAX_ROUNDS
+const MAX_DESIGN_REVIEWS = 2
 // the CI fixes a PR gets; the last one's CI is waited on too
 const MAX_CI_FIXES = 3
 // the merges of the base a PR gets when CI reads it conflicting, counted apart from the CI fixes: main can move again
@@ -95,6 +107,9 @@ const ON = {
   // CLAUDE.md "The loop" step 3); a reviewer writes nothing, so no worktree
   review: { model: 'opus', effort: 'high' },
   fix: { model: 'opus', effort: 'high', isolation: 'worktree' },
+  // a class round's design, written in the PR body before any code: it writes no code, so no worktree; under
+  // pr-persistent it goes to the kept implementer by SendMessage. Its review is a fresh agent on ON.review's value.
+  classDesign: { model: 'opus', effort: 'high' },
   learn: { model: 'opus', effort: 'medium', isolation: 'worktree' },
   ci: { model: 'sonnet', effort: 'low' },
   // a merge of the base is mechanical, so a fresh agent, never the implementer; it writes a commit, so a worktree
@@ -292,9 +307,42 @@ const STAMPS = {
   endedAt: { type: 'string', description: 'the output of `date -u +%FT%TZ`, run as your last command' },
 }
 const LEARNED = { ...PUSHED, required: [...PUSHED.required, 'startedAt', 'endedAt'], properties: { ...PUSHED.properties, ...STAMPS } }
+// The allowlist pieces a push adds (issue 649). A PIECE is one entry of src/duck/verified.ts's VERIFIED map, `["<kind>:<oid>",
+// "<what it names>"]`, and a push's added pieces are the `+` entries of its `git diff <head before> HEAD --
+// src/duck/verified.ts`: that diff is the authority, never the CI log nor the agent's account. PR 582's round-3 review
+// was clean; the next CI fix regenerated the allowlist and admitted a function main refused by name, for every shape,
+// because the oracle's few shapes matched, and rounds 4 to 8 were that admission's forms. So a fix round says what its
+// push admitted, and the review after it sweeps each piece beyond the issue before it may stay admitted.
+const SCOPES = ['issue', 'beyond-review', 'beyond-refused']
+const PIECE_ADMITTED = { type: 'object', required: ['key', 'names', 'scope'], properties: {
+  key: { type: 'string', description: "the entry's key in src/duck/verified.ts, `<kind>:<oid>`" },
+  names: { type: 'string', description: 'what the entry names, as the file says it' },
+  scope: { type: 'string', enum: SCOPES, description: 'issue: the issue names it; beyond-review: the issue does not, and it is left admitted for the review to sweep; beyond-refused: the issue does not, and it is kept refused by name, an issue filed for admitting it' },
+  issue: { type: 'number', description: 'for beyond-refused, the issue filed for admitting it' },
+} }
+const ADMITTED = { type: 'array', items: PIECE_ADMITTED, description: 'every piece your push adds to src/duck/verified.ts (the `+` entries of its diff), each with its scope; [] when it adds none' }
+// a fix round's push: CHECKED, and what it admitted to the allowlist; the implementer's is CHECKED unchanged
+const FIXED = { ...CHECKED, required: [...CHECKED.required, 'admitted'], properties: { ...CHECKED.properties, admitted: ADMITTED } }
 // a CI fix may push nothing: a flake is the coordinator's to quarantine on main
-const CI_FIXED = { ...CHECKED, required: [...CHECKED.required, 'flake'], properties: { ...CHECKED.properties,
+const CI_FIXED = { ...FIXED, required: [...FIXED.required, 'flake'], properties: { ...FIXED.properties,
   flake: { type: 'boolean', description: 'true when the failure is a flake and nothing was pushed; head is then the unchanged head' },
+} }
+// A class round's design (issue 649): the author writes the round's decision and its authority in the PR's `## Design`
+// before any code, and a fresh Opus reads them against the code. PR 582's two class rounds decided by form (a list of
+// spellings), and one named an authority that does not exist where the rewrite decides.
+const CLASS_DESIGN = { type: 'object', required: ['decision', 'authority', 'cases'], properties: {
+  decision: { type: 'string', description: 'the decision that makes the class impossible, as the PR body now says it' },
+  authority: { type: 'string', description: 'the module that holds the fact, and the function where the code decides that reads it there' },
+  cases: { type: 'array', items: { type: 'string' }, description: 'every case of the class this PR reaches, each a concrete input over a synthetic table' },
+} }
+const DESIGN_REVIEW = { type: 'object', required: ['sound', 'findings', 'judgedCorrect'], properties: {
+  sound: { type: 'boolean', description: 'true only when the authority exists at the decision point, for every input that reaches it, and the decision covers every form of the class' },
+  findings: { type: 'array', items: { type: 'object', required: ['what', 'why', 'where'], properties: {
+    what: { type: 'string', description: 'what is wrong with the design' },
+    why: { type: 'string', description: 'why, with what you ran or read at the head' },
+    where: { type: 'string', description: 'file:line' },
+  } } },
+  judgedCorrect: { type: 'array', items: { type: 'string' } },
 } }
 const LINKED = { type: 'object', required: ['linked', 'bodyFixed', 'detail'], properties: {
   linked: { type: 'boolean', description: "true only when GitHub's closedByPullRequestsReferences lists the PR; for a stacked PR, whose link GitHub makes only once it targets the default branch, when its body says Closes #<issue>" },
@@ -379,8 +427,9 @@ let last = null // the PR's last pushed head: { pr, head }
 const authored = [] // { label, statementsRun?, statementsMatched?, checksRun? }: the author's own check before each push
 let handoff = null // the HANDOFF object, as the last agent that wrote code returned it
 let learnTime = null // { startedAt, endedAt }: the Learn step's own time, for the run log
-// the retired pr-loop's shape, kept so every reader of a result reads one: this script has no design or probe round
-const result = (status) => ({ status, pr: last ? last.pr : null, head: last ? last.head : null, rounds, fromBase, deferred, filed, classes, designRounds: [], probeRounds: [] })
+const designRounds = [] // the class rounds' design reviews: { round, label, sound, findings }
+// the retired pr-loop's shape, kept so every reader of a result reads one: this script has no probe round
+const result = (status) => ({ status, pr: last ? last.pr : null, head: last ? last.head : null, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds: [] })
 
 // The note is the implementer's, in the PR body. The HANDOFF object goes from agent to agent through this script, and
 // its copy for people is the PR's `## Handoff` comment, as nothing of an agent's context outlives its call.
@@ -410,6 +459,43 @@ const historyText = (hs) => hs.length
   ? hs.map((h) => `### ${h.label} (head ${h.head.slice(0, 7)})\nFindings of this PR:\n${h.findings.length ? asFailures(h.findings) : '(none)'}\nJudged correct: ${h.judgedCorrect.join('; ') || '(none listed)'}`).join('\n\n')
   : '(none: this is the first)'
 
+// ---------------------------------------------------------------- What a push admitted to the allowlist (issue 649)
+const VERIFIED_FILE = 'src/duck/verified.ts'
+// an `admitted` that is not a list of whole pieces is "couldn't tell": the review is told so, and reads the diff itself
+const isAdmitted = (a) => Array.isArray(a) && a.every((p) => !!p && typeof p === 'object' && typeof p.key === 'string' && p.key !== '' && typeof p.names === 'string' && SCOPES.includes(p.scope))
+const pieceText = (p) => `\`${p.key}\` (${p.names}${Number.isInteger(p.issue) ? `; issue #${p.issue}` : ''})`
+// how a piece beyond the issue is swept, whether its push reported it or the review found it in the diff
+const SWEEP = 'every VARIANT FORM above spelt with that piece, over a synthetic table holding a column of each type the piece takes as input, beside the tables t and e, at the head and at the base; a form the base refused by name that the head answers differently from Postgres is blocking: severity wrong-answer, origin this-pr'
+// What a stage that may regenerate the allowlist is told (the CI fix, and a fix round carrying a CI failure)
+const ADMIT_RULE = (from) => `If your push regenerates the allowlist, read the pieces it adds to ${VERIFIED_FILE}: the \`+\` entries of \`git diff ${from} HEAD -- ${VERIFIED_FILE}\` (each \`["<kind>:<oid>", "<what it names>"]\`), that diff and never the CI log being what was added. Judge each against the issue's scope, which is the brief's: ${brief.brief}
+A piece the issue does not name you EITHER keep refused by name (the base's refusal kept: its entry left out of ${VERIFIED_FILE}, as the base has it, and an issue filed for admitting it, as CLAUDE.md "What a session finds" says), OR leave admitted for the review after you to sweep before it may stay. Return every piece your push adds in \`admitted\`, each { key, names, scope: 'issue' | 'beyond-review' | 'beyond-refused', issue (for beyond-refused, the issue filed) }; [] when it adds none.`
+// what a fix round with no CI failure returns of it: it regenerates nothing, but says so
+const ADMIT_NONE = `Return \`admitted\`: every piece your push adds to ${VERIFIED_FILE}, the \`+\` entries of its diff, as { key, names, scope }; [] when it adds none, as a fix with no CI failure regenerates nothing.`
+// (c) every review reads the allowlist's diff itself, since the author's report is never evidence
+const ALLOWLIST_READ = (base) => `Read \`git diff ${base} ${last.head} -- ${VERIFIED_FILE}\` yourself: each \`+\` entry is an allowlist piece the diff admits. The issue's scope is the brief's: ${brief.brief}
+Any added piece the brief does not name, reported by the author or not, is SWEPT before it may stay admitted: ${SWEEP}.`
+// (b) what the push before this review said it admitted: { label, list } of the fix that pushed, or null
+function admittedText(a) {
+  if (!a) return ''
+  if (!isAdmitted(a.list)) return `\n${a.label}'s push did not say what it admitted to ${VERIFIED_FILE} (no valid \`admitted\`), so that is not known: read the file's diff yourself, as above, and sweep every added piece the brief does not name.`
+  const of = (scope) => a.list.filter((p) => p.scope === scope)
+  const parts = []
+  if (of('beyond-review').length) parts.push(`${a.label} left these allowlist pieces admitted beyond the issue's scope, for this review to SWEEP before they may stay admitted: ${of('beyond-review').map(pieceText).join('; ')}. Sweep each: ${SWEEP}.`)
+  if (of('beyond-refused').length) parts.push(`${a.label} kept these pieces refused by name, beyond the issue's scope: ${of('beyond-refused').map(pieceText).join('; ')}. Check each is refused by name at the head, as at the base.`)
+  if (of('issue').length) parts.push(`${a.label} admitted these pieces within the issue's scope: ${of('issue').map(pieceText).join('; ')}.`)
+  if (!a.list.length) parts.push(`${a.label} said its push admitted no allowlist piece; the diff above decides.`)
+  return `\n${parts.join(' ')}`
+}
+
+// ---------------------------------------------------------------- The round bound: shrink, never another round
+// The last head a review found clean is read from history[] (an entry with no blocking finding of this PR's, and not
+// unrun), never recomputed by a skill; the shrink run starts from it.
+const lastClean = () => [...history].reverse().find((h) => !h.unrun && h.findings.length === 0) || null
+function shrinkStatus(open) {
+  const c = lastClean()
+  return `shrink: PR ${last.pr} stopped at the round bound (${MAX_ROUNDS} review rounds): ${open}. Its default next step is to narrow it to its safe subset, never another round: refuse by name what the base refused, revert what has no clean review, and file the rest as ONE new issue. Another round past the bound needs the owner's word (Needs Tom). ${c ? `The last head a review found clean is ${c.head.slice(0, 7)} (${c.label})` : 'No review was clean, so the safe subset is what the base already does'}`
+}
+
 // A finding the base has joins fromBase (one input is one finding, whatever slug a later round gives it); this PR's
 // (ofThisPr: every other origin, or none) that do not block join deferred, the same way; this PR's blocking ones are
 // `mine`, and only they drive a fix and count toward the class rule. So each finding is in exactly one of the three. A
@@ -432,7 +518,7 @@ function tally(findings, at) {
 // One fix prompt for a review's findings and a CI failure met beside a review: the handoff first, verbatim, where to
 // start in the code, where the note is, every earlier round of this PR, then this round's failures, never the edit; it
 // returns the handoff updated.
-function fixPrompt(title, on, now, repeated, ciFailure) {
+function fixPrompt(title, on, now, repeated, ciFailure, design) {
   const earlier = history.slice(0, history.indexOf(now))
   return `${WHERE}${title} on PR ${last.pr} (branch ${A.branch}) of the Mason repo. ${HANDOFF_READ(last.pr)}
 ${WORKTREE(`origin/${A.branch}`)} Run \`${BOARD('Fixing')}\` first. ${FROM_THE_CODE}
@@ -443,9 +529,12 @@ Every earlier round of this PR, oldest first: do not undo what one fixed, and do
 ${historyText(earlier)}
 
 ${now.findings.length ? `Now, ${now.label} found these FAILURES, each one this PR's (the base answered right). Each comes with its class; the fix is yours to work out, and none is given:\n${asFailures(now.findings)}` : ''}
-${ciFailure ? `CI failed at head ${now.head.slice(0, 7)} too; fix it in the same push. Read it as CLAUDE.md "Local gates" says: if it is a flake (a test the change cannot have touched, failing on timing or load), change nothing for it and say so in your summary, as the coordinator quarantines it on main; if the oracle's allowlist or fixture is stale, regenerate it from that run (\`node scripts/oracle-legs.ts --write <run-id>\`) and read the diff. The failure:\n${ciFailure}` : ''}
+${ciFailure ? `CI failed at head ${now.head.slice(0, 7)} too; fix it in the same push. Read it as CLAUDE.md "Local gates" says: if it is a flake (a test the change cannot have touched, failing on timing or load), change nothing for it and say so in your summary, as the coordinator quarantines it on main; if the oracle's allowlist or fixture is stale, regenerate it from that run (\`node scripts/oracle-legs.ts --write <run-id>\`) and read the diff. The failure:\n${ciFailure}\n${ADMIT_RULE(now.head)}` : ADMIT_NONE}
 ${repeated.length
-  ? `This is a CLASS round (CLAUDE.md "The loop" step 4): ${repeated.join(', ')} has now been met more than once. Before ANY code, write in the PR body every case of each such class that THIS PR's change reaches: every spelling, depth and kind of input, under each statement form. Name the DECISION that makes the class impossible and the module that is its AUTHORITY (the one that already holds the fact: Postgres's analysis via src/duck/pgtree.ts, store.ts's pgErrorOf, the engine's prepared types, …), and check it against the design note and CLAUDE.md's named classes ("Fix the class, not the symptom") before code: a decision that derives again a fact a module already holds, or guesses from syntax what Postgres's analysis decides, is the class again. Give each case a test against Postgres and watch it fail where it fails today. Then fix the decision, not the cases. A case the base already answers wrong is not this PR's: list it in the PR body under "On the base, filed separately" and leave it. About 60 tool calls.`
+  ? `This is a CLASS round (CLAUDE.md "The loop" step 4): ${repeated.join(', ')} has now been met more than once. Its DECISION and the decision's AUTHORITY are written in the PR body's \`## Design\`, its part \`### Class round r${now.round}\` (\`${GH_TEXT(`body ${last.pr}`)}\`), and a fresh Opus reviewed them against the code before this round: implement that decision, not the cases. ${design && design.open.length
+    ? `After ${design.reviews} design review(s) it is still not found sound, and the round goes on carrying what is open: weigh each before you code, and say in the handoff how you met it:\n${design.open.map((d, i) => `${i + 1}. ${d.what}\n   why: ${d.why}\n   at: ${d.where}`).join('\n')}`
+    : 'The design review found it sound.'}
+Give each case that part lists a test against Postgres and watch it fail where it fails today. Then fix the decision, at the point the part names, reading the fact from its authority there. A case the base already answers wrong is not this PR's: it stays under "On the base, filed separately". A departure from the part goes in it, with why. About 60 tool calls.`
   : 'About 30 tool calls.'}
 Each finding becomes a test (tests/duck-wire.test.ts for the engine) and, for the engine, an oracle statement. What this round judged correct, do not re-check: ${now.judgedCorrect.join('; ') || '(nothing listed)'}.
 ${FIX_GATES}
@@ -498,7 +587,7 @@ const sumOf = (k) => rounds.reduce((s, e) => s + (e[k] || 0), 0)
 // reviewRounds counts only the rounds that showed their evidence: an unrun round is no review, so review-stats never reads it
 // as a clean one (a run whose first review was unrun is counted as never reviewed); its findings keep their round
 const recordOf = (status) => ({
-  pr: last.pr, designRounds: 0, probeRounds: 0, reviewRounds: rounds.filter((r) => !r.unrun).length,
+  pr: last.pr, designRounds: designRounds.length, probeRounds: 0, reviewRounds: rounds.filter((r) => !r.unrun).length,
   findings: rounds.flatMap((r) => r.findings.map((f) => ({ round: r.round, stage: 'review', classKey: f.classKey, ...sev(f) }))),
   deferred: deferred.map((f) => ({ round: f.round, stage: f.stage, classKey: f.classKey, severity: f.severity })),
   ciFixes, status,
@@ -512,7 +601,7 @@ const recordBody = (status) => `${signed(ON.record)}
 
 PR ${last.pr}: ${status}
 
-${PROCESS === 'pr-persistent' ? "pr-persistent (pr-loop-slim's prompts, with ONE implementer kept alive across the fix rounds)" : 'pr-loop-slim'} (no design review and no probe; the context handed on in the PR's \`## Handoff\` comment): ${rounds.length} review round(s), ${ciFixes} CI fix(es); ${sumOf('statementsRun')} statement(s) run at the head by the reviews, ${sumOf('statementsMatched')} matching Postgres; ${sumOf('checksRun')} check(s) run on other paths.
+${PROCESS === 'pr-persistent' ? "pr-persistent (pr-loop-slim's prompts, with ONE implementer kept alive across the fix rounds)" : 'pr-loop-slim'} (no probe, and a design review only before a class round; the context handed on in the PR's \`## Handoff\` comment): ${rounds.length} review round(s), ${designRounds.length} design review(s), ${ciFixes} CI fix(es); ${sumOf('statementsRun')} statement(s) run at the head by the reviews, ${sumOf('statementsMatched')} matching Postgres; ${sumOf('checksRun')} check(s) run on other paths.
 Learn: ${learnTime ? `${learnTime.startedAt || '?'} to ${learnTime.endedAt || '?'}, the learn check included` : 'not run'}.
 The author's own check at scale before each push: ${authored.map((a) => `${a.label}: ${a.statementsRun ?? '?'} statement(s) run, ${a.statementsMatched ?? '?'} matched, ${a.checksRun ?? '?'} check(s)`).join('; ') || 'none reported'}.
 ${rounds.map((r) => roundLine('review', r.round, r.findings.map((f) => f.classKey), laterOf('review', r.round), r)).join('\n')}
@@ -583,10 +672,63 @@ END`,
 // for a re-check of the commits since `base`, `what` saying what they were meant to fix. CI is read beside each review, so a red CI goes back in the review's fix round when there is one (PR 202 was
 // red from its first push, and rounds 1 and 2 never heard of it); beside a clean review the CI stage reads it again.
 let round = 0
+
+// ---------------------------------------------------------------- A class round's design, reviewed before any code
+// (issue 649; CLAUDE.md "The loop" step 4). The author writes the round's part of `## Design` (every case, the
+// decision, its authority at the decision point), with no code and no push; a fresh Opus reads it against the code at
+// the head and runs its cases. Not sound: the author revises, and it is read again; after MAX_DESIGN_REVIEWS the round
+// goes on carrying what is open. Returns { open, reviews }, or { stop } naming the stage that failed.
+const CLASS_PART = (n) => `\`### Class round r${n}\``
+function classDesignPrompt(now, repeated, open, n) {
+  const earlier = history.slice(0, history.indexOf(now))
+  return `${WHERE}Class round ${now.round} on PR ${last.pr} (branch ${A.branch}) of the Mason repo: its DESIGN, written before any code and reviewed before any code is written for it. ${HANDOFF_READ(last.pr)}
+${NOTE_AT(last.pr)}
+
+Every earlier round of this PR, oldest first:
+${historyText(earlier)}
+
+Now, ${now.label} found these FAILURES, each one this PR's. ${repeated.join(', ')} has now been met more than once, so the next fix is a CLASS round (CLAUDE.md "The loop" step 4):
+${asFailures(now.findings)}
+
+Write, in the PR body under \`## Design\`, a part headed ${CLASS_PART(now.round)}${n > 1 ? ', in place of the one you wrote before, revised' : ''}:
+- every case of each such class that THIS PR's change reaches: every spelling, depth and kind of input, under each statement form, each a concrete input over a synthetic table;
+- the DECISION that makes the class impossible;
+- its AUTHORITY: the module that already holds the fact (Postgres's analysis via src/duck/pgtree.ts, store.ts's pgErrorOf, the engine's prepared types, …), named at the point where the code decides: the function that decides, and how it reads that fact there, for every input that reaches it.
+Check it against the design note and CLAUDE.md's named classes ("Fix the class, not the symptom"): a decision that derives again a fact a module already holds, or guesses from syntax what Postgres's analysis decides, or lists spellings in place of a rule, is the class again. A case the base already answers wrong is not this PR's: list it under "On the base, filed separately".${open.length ? `
+The design review read your last version and did not find it sound. Its findings, each to answer in the revision:
+${open.map((d, i) => `${i + 1}. ${d.what}\n   why: ${d.why}\n   at: ${d.where}`).join('\n')}` : ''}
+Read the body with \`${GH_TEXT(`body ${last.pr}`)}\`, keep the rest of it, and write it back with \`gh pr edit ${last.pr} --body-file <file>\`. Write no code, commit nothing and push nothing. About 20 tool calls. Return the decision, its authority and the cases, as the part says them.`
+}
+function designReviewPrompt(now, repeated) {
+  return `${WHERE}Review the DESIGN of class round ${now.round} of PR ${last.pr} of embeddable-hq/mason-data, at head ${last.head}, before any code is written for it. You are a fresh reader, never its author. Run \`git fetch origin ${A.branch} ${A.base}\`, and read the PR body's \`## Design\` (\`${GH_TEXT(`body ${last.pr}`)}\`), its part ${CLASS_PART(now.round)}: every case of the class, the DECISION that makes it impossible, and its AUTHORITY. Never take the author's report as evidence.${NOT_THE_HANDOFF} Read the code the part names at that head with \`git show ${last.head}:<path>\`.
+The class: ${repeated.join(', ')}. ${now.label} met it in these failures:
+${asFailures(now.findings)}
+Check that the authority EXISTS AT THE DECISION POINT: the function that decides can read that fact there, for every input that reaches it; and that the decision covers every form of the class (every spelling, depth and kind of input, under each statement form), by a rule and not a list of spellings. A decision that derives again a fact a module already holds, or guesses from syntax what Postgres's analysis decides, is the class again: not sound. RUN what you can rather than judge by reading alone: each case of the part through scripts/duck-repro.ts at the head, in a worktree of your own under the system temp dir (\`mktemp -d\` alone, then \`git worktree add --detach <that path>/head ${last.head}\` from your own working directory, removed afterwards with \`git worktree remove <that path>/head\`), over a DDL of synthetic tables (${REPRO_TABLES}, and a table holding each input type a case needs): \`node --env-file=<env file> <tree>/scripts/duck-repro.ts <ddl.sql> <statements.sql> > <out> 2>&1\`, reading only \`grep -c '^DIFFER' <out>\` and \`grep -A2 '^DIFFER' <out> | head -150\`. ${PSQL}. ${PG_ACCESS}
+Do not edit or push. Return sound (true only when the authority exists where the code decides, for every input that reaches it, and the decision covers every case), your findings ({ what, why, where }: what is wrong with the design, why, and file:line), and what you judged correct. About 30 tool calls, never more than 45 tool calls.`
+}
+async function classDesign(now, repeated) {
+  let open = []
+  for (let n = 1; n <= MAX_DESIGN_REVIEWS; n++) {
+    const sfx = n === 1 ? '' : ` #${n}`
+    phase('Fix')
+    const written = await agent(classDesignPrompt(now, repeated, open, n), { label: `class design r${now.round}${sfx}`, phase: 'Fix', ...ON.classDesign, schema: CLASS_DESIGN })
+    if (!written) return { stop: `class design r${now.round}${sfx} failed` }
+    phase('Design review')
+    const read = await agent(designReviewPrompt(now, repeated), { label: `design review r${now.round}${sfx}`, phase: 'Design review', ...ON.review, schema: DESIGN_REVIEW })
+    if (!read) return { stop: `design review r${now.round}${sfx} failed` }
+    const sound = read.sound === true
+    designRounds.push({ round: now.round, label: `design review r${now.round}${sfx}`, sound, findings: read.findings })
+    log(`design review r${now.round}${sfx}: ${sound ? 'sound' : `not sound, ${read.findings.length} finding(s)`}`)
+    if (sound) return { open: [], reviews: n }
+    open = read.findings
+  }
+  return { open, reviews: MAX_DESIGN_REVIEWS }
+}
+
 async function reviewAndFix(start) {
-  let { kind, base, what } = start
+  let { kind, base, what, admitted } = start
   for (;;) {
-    if (round >= MAX_ROUNDS) return `${round} review rounds reached; head ${last.head.slice(0, 7)} is not re-checked: the coordinator decides`
+    if (round >= MAX_ROUNDS) return shrinkStatus(`head ${last.head.slice(0, 7)} is not re-checked, as it was pushed after the last review`)
     round++
     phase('Review')
     const judged = history.flatMap((x) => x.judgedCorrect)
@@ -595,6 +737,7 @@ async function reviewAndFix(start) {
         `${WHERE}First run \`${BOARD('In review')}\`. ${kind === 'full' ? 'Review' : 'Narrowly re-check the latest fix of'} PR ${last.pr} of embeddable-hq/mason-data at head ${last.head}, for wrong answers. Run \`git fetch origin ${A.branch} ${A.base}\` and \`git diff ${base} ${last.head}\`, and read the whole touched files at that head with \`git show\`. Read the .claude/rules/ file of the subsystem. Never take the author's report as evidence.${NOT_THE_HANDOFF} Run what you check ${PROBE_TREES}.${EVIDENCE(kind === 'full'
   ? "hundreds of statements (300 or more): the brief's shapes, each in every variant form, and the regression sweep of every path the diff touches"
   : "a narrower set: the fix's statements in the variant forms that reach the code it changed, and the regression sweep of that code; dozens, not a full review's count")}
+${ALLOWLIST_READ(base)}${admittedText(admitted)}
 Do not edit or push.
 ${kind === 'full' ? `The shapes the brief named:\n${brief.shapes.map((s) => '- ' + s).join('\n')}\nLook beyond them too. About 80 tool calls, never more than 120 tool calls.` : `${what}\nLook for what the fix broke, in the code it changed only. Its REGRESSION SWEEP covers the fix's own code only, the code \`git diff ${base} ${last.head}\` changed: what earlier rounds judged correct outside that code is not re-checked, and inside it the sweep runs it again. Already judged correct, so do NOT re-check: ${judged.join('; ') || '(nothing yet)'}. About 30 tool calls, never more than 45 tool calls.`}
 For each confirmed finding give the failing input, Postgres's answer, Mason's answer at the head, and Mason's answer at the base (RUN it there), where, and its CLASS: the kind of mistake and the decision that would make it impossible (CLAUDE.md "Fix the class, not the symptom"). origin is 'base' when the base gives the same wrong answer, else 'this-pr'. ${SEVERITY_RULE}${alreadyDeferred()} Known classes, to REUSE by slug when it is the same class:
@@ -623,12 +766,19 @@ Give no fix and no patch. Also list what you judged correct.`,
     // nothing blocking of this PR's is a clean round, whatever was deferred. A clean review with a red CI: the CI stage
     // reads that failure next and sends it to a CI fix
     if (mine.length === 0) return null
-    if (round >= MAX_ROUNDS) return `still ${mine.length} finding(s) after ${round} rounds: the coordinator decides`
+    if (round >= MAX_ROUNDS) return shrinkStatus(`${mine.length} blocking finding(s) of its own are open (${[...new Set(mine.map((f) => f.classKey))].join(', ')})`)
 
+    // a class round's decision and authority are written and reviewed before its code
+    let design = null
+    if (classRound) {
+      design = await classDesign(entry, repeated)
+      if (design.stop) return design.stop
+    }
     phase('Fix')
     if (ciFailure) ciFixes++
-    const fixed = await agent(fixPrompt(`Fix round ${round}`, ON.fix, entry, repeated, ciFailure),
-      { label: `fix r${round}${classRound ? ' (class)' : ''}`, phase: 'Fix', ...ON.fix, schema: CHECKED })
+    const fixLabel = `fix r${round}${classRound ? ' (class)' : ''}`
+    const fixed = await agent(fixPrompt(`Fix round ${round}`, ON.fix, entry, repeated, ciFailure, design),
+      { label: fixLabel, phase: 'Fix', ...ON.fix, schema: FIXED })
     if (!fixed) return `fix round ${round} failed`
     if (fixed.head === last.head) return `fix round ${round} pushed nothing: the coordinator decides`
     authored.push({ label: `fix r${round}`, ...countsOf(fixed) })
@@ -636,6 +786,7 @@ Give no fix and no patch. Also list what you judged correct.`,
     base = last.head
     last = fixed
     kind = 'narrow'
+    admitted = { label: fixLabel, list: fixed.admitted }
     what = `The previous round's findings were:\n${asFailures(mine)}\nCheck each is fixed.${ciFailure ? `\nCI's failure, fixed in the same push:\n${ciFailure}` : ''}`
   }
 }
@@ -838,6 +989,7 @@ ${NOTE_AT(last.pr)}
 Every round of this PR so far, oldest first: do not undo what one fixed.
 ${historyText(history)}
 Read the failure (CLAUDE.md "Local gates"). If it is this change's, fix it, with a test. If it is a flake (a test the change cannot have touched, failing on timing or load), say so with flake: true, change nothing and return the head unchanged: the coordinator quarantines it on main. If the oracle's allowlist or fixture is stale, regenerate it from this run (\`node scripts/oracle-legs.ts --write <run-id>\`) and read the diff. If ${A.base} has the fix, merge \`origin/${A.base}\` into the branch (never the PR: the top session merges it). ${FIX_GATES}
+${ADMIT_RULE(last.head)}
 ${SELF_CHECK(FIX_SCALE)}
 ONE push, whose commit ends with \`${coAuthor(ON.fix)}\`. ${HANDOFF_RETURN(last.pr, `CI fix ${ciFixesHere}`)} Return the new head.`,
     { label: `CI fix ${ciFixesHere}`, phase: 'Fix', ...ON.fix, schema: CI_FIXED })
@@ -850,7 +1002,7 @@ ONE push, whose commit ends with \`${coAuthor(ON.fix)}\`. ${HANDOFF_RETURN(last.
   carry(fixed.handoff, `CI fix ${ciFixesHere}`)
   const prev = last.head
   last = fixed
-  const again = await reviewAndFix({ kind: 'narrow', base: prev, what: `The commits since ${prev.slice(0, 7)} fix this CI failure:\n${ci.detail}\nCheck they fix it and change no answer Postgres would give.` })
+  const again = await reviewAndFix({ kind: 'narrow', base: prev, what: `The commits since ${prev.slice(0, 7)} fix this CI failure:\n${ci.detail}\nCheck they fix it and change no answer Postgres would give.`, admitted: { label: `CI fix ${ciFixesHere}`, list: fixed.admitted } })
   if (again) return await finish(again)
 }
 return await finish('CI loop ended without a verdict: the coordinator looks')

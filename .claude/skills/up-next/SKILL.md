@@ -74,19 +74,27 @@ collaborators and names what it left out (CLAUDE.md "The loop").
    the run below's `result.json`) from the run below. The split issue stays **In progress** until its last piece
    merges.
 3. **A conflict** (`conflict: …`): the run's reviews were clean, and its PR conflicts with its base in the files the
-   status names, which the run's own merge could not resolve. Handle it as step 6's CONFLICTING: have the branch
+   status names, which the run's own merge could not resolve. Handle it as step 7's CONFLICTING: have the branch
    merged with its base (origin/main, or for a stacked piece the branch below) in a worktree of its own, keeping both
    sides of `release-notes/next.md` and resolving the files the status names, and pushed. You write no code yourself:
    a fresh agent does it. Then read the merge (`git show <new head>`), wait on its CI with one bounded background job
-   (`node <repo>/scripts/ci-wait.ts <n> 540`, again until it exits 0, 3 or 4), and once green, go on from step 4 at the
+   (`node <repo>/scripts/ci-wait.ts <n> 540`, again until it exits 0, 3 or 4), and once green, go on from step 5 at the
    new head: its diff read in full, and the merge queued pinned to it (`--match-head-commit`).
-4. **Any other DONE**: read its diff in full (`gh pr diff <n>`), never only the report; the report and a green CI are
+4. **A shrink** (`shrink: …`): the run stopped at the round bound (issue 649). Start the shrink run AT ONCE, without
+   asking, after the next run (step 1): a coordinator as in "Starting a run", its sentence also naming `shrinkOf` (the
+   stopped PR) and the stopped run's folder, `<runs>/issue-<n>`, whose `result.json` holds its status and classes; the
+   shrink's own folder is `<runs>/issue-<n>-shrink`. The stopped PR stays open until the shrink's PR merges, then is
+   closed unmerged (`gh pr close <stopped PR> --comment-file <file>`, the comment headed as CLAUDE.md "Git workflow"
+   says and naming the shrink's PR). Another round on the stopped PR, or any override of the bound, is the owner's
+   word only, never yours: put the options on the issue with their numbers (the rounds run, the findings open, the
+   last clean head), and move its card to **Needs Tom**.
+5. **Any other DONE**: read its diff in full (`gh pr diff <n>`), never only the report; the report and a green CI are
    claims, not evidence.
-5. **Merge under CLAUDE.md "Who merges what"** (Tom, 2026-10-31): every PR, `src/` included, merges without the owner's
+6. **Merge under CLAUDE.md "Who merges what"** (Tom, 2026-10-31): every PR, `src/` included, merges without the owner's
    word once its review has no open finding, CI is green at its head, you have read the diff in full, and a
    product change has its line in `release-notes/next.md`. A release and a deploy merge on the owner's word only.
    Queue it pinned to the head you read: `gh pr merge <n> --auto --merge --match-head-commit <sha>`.
-6. **Watch it land**: leave one bounded background job that exits when `gh pr view <n> --json state,mergeable` says
+7. **Watch it land**: leave one bounded background job that exits when `gh pr view <n> --json state,mergeable` says
    MERGED, or CONFLICTING (a queued auto-merge on a conflicting PR never lands), or its bound passes. Confirm the merge,
    never assume it; then `node <repo>/scripts/board.ts status <n> "Done"`, and the queue file's row says
    `merged <sha>`. On CONFLICTING: withdraw the queued merge (`gh pr merge <n> --disable-auto`), have the branch merged with

@@ -155,10 +155,25 @@ const DEFAULTS: Array<[RegExp, unknown]> = [
   [/^CI read r\d+$/, green],
   [/^learn$/, pushed("f")],
   [/^learn check$/, { files: [".claude/rules/duck-rewrite.md"] }],
+  // a class round's design and its review (issue 649), answered as a sound design's
+  [/^class design r\d+( #\d+)?$/, { decision: "the decision", authority: "src/duck/pgtree.ts, read where src/duck/plan.ts decides", cases: ["SELECT a FROM t"] }],
+  [/^design review r\d+( #\d+)?$/, { sound: true, findings: [], judgedCorrect: [] }],
   [/^record$/, { url: "https://github.com/embeddable-hq/mason-data/pull/900#issuecomment-1" }],
 ];
 /** The labels of the stages the older tests were written for: brief, implement, review, fix, CI and file. */
-const core = (labels: string[]) => labels.filter((l) => !/^(design|link|probe|CI read|learn|record)/.test(l));
+const core = (labels: string[]) => labels.filter((l) => !/^(design|class design|link|probe|CI read|learn|record)/.test(l));
+/** A run whose fix is a class round (issue 649): its design is not found sound once, revised and found sound, then a CI
+ * fix admits an allowlist piece beyond the issue. Its class designs and the second design review are DEFAULTS'. */
+const NOT_SOUND = { sound: false, findings: [{ what: "the authority is not read where the rewrite decides", why: "plan.ts decides the arm's type before the analysis is read", where: "src/duck/plan.ts:1" }], judgedCorrect: [] };
+const PIECE_9001 = { key: "function:9001", names: "the function numeric(jsonb)", scope: "beyond-review" };
+const CLASS_RUN: Answers = { ...SLIM,
+  "review r1": { findings: [finding({ classKey: "k", input: "SELECT k1 FROM t" }), finding({ classKey: "k", input: "SELECT k2 FROM t" })], judgedCorrect: [] },
+  "design review r1": NOT_SOUND, "fix r1 (class)": { ...pushed("b"), handoff: H1, admitted: [] }, "review r2": clean, "CI 1": { state: "failed", detail: "a test failed" },
+  "CI fix 1": { ...pushed("c"), flake: false, handoff: H1, admitted: [PIECE_9001] }, "review r3": clean, "CI 2": green };
+/** A run that stops at the round bound: four reviews with a finding each, three fixes, then a `shrink:` status. */
+const BOUND_RUN: Answers = { ...SLIM,
+  ...Object.fromEntries([1, 2, 3, 4].map((i) => [`review r${i}`, { findings: [finding({ classKey: `c${i}`, input: `q${i}` })], judgedCorrect: [] }])),
+  ...Object.fromEntries([1, 2, 3].map((i) => [`fix r${i}`, { ...pushed(String(i)), handoff: H1, admitted: [] }])) };
 
 test("every script parses as the harness loads it, with a pure-literal meta naming them, and none of the calls the harness forbids", () => {
   assert.deepEqual(execFileSync("git", ["ls-files", ".claude/workflows"], { cwd: ROOT, encoding: "utf8" }).trim().split("\n"), [".claude/workflows/pr-loop-slim.js"],
@@ -268,7 +283,7 @@ test("pr-loop-slim: every exit returns one shape, and the base's findings are fi
   for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [base] : [])], judgedCorrect: [] };
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
   let r = await run("pr-loop-slim", { ...PR }, many);
-  assert.match(String(r.result["status"]), /^still 1 finding\(s\) after 4 rounds/);
+  assert.match(String(r.result["status"]), /^shrink: PR 900 stopped at the round bound \(4 review rounds\): 1 blocking finding\(s\) of its own are open \(c4\)/);
   assert.deepEqual(r.labels.slice(-2), ["file", "record"], "the MAX_ROUNDS exit files the base's findings, then posts its record");
   assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
 
@@ -305,7 +320,10 @@ test("pr-loop-slim: the round bound is the PR's, counted through a CI fix's re-c
     ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false },
     "review r3": f("b"), "fix r3": pushed("d"), "review r4": f("c"),
   });
-  assert.match(String(r.result["status"]), /^still 1 finding\(s\) after 4 rounds/);
+  // a bound stop is a shrink (issue 649), never the old "the coordinator decides"
+  assert.match(String(r.result["status"]), /^shrink: PR 900 stopped at the round bound \(4 review rounds\): 1 blocking finding\(s\) of its own are open \(c-c\)/);
+  assert.doesNotMatch(String(r.result["status"]), /^still \d+ finding|review rounds reached; .* the coordinator decides/);
+  assert.match(String(r.result["status"]), /The last head a review found clean is bbbbbbb \(review r2\)/, "review r2, at the first fix's head, was clean");
   assert.equal((r.result["rounds"] as unknown[]).length, 4);
   assert.ok(!r.labels.includes("review r5"));
   // the bound already reached when a CI fix lands: no fifth review, and the status says the head was not re-checked
@@ -313,8 +331,167 @@ test("pr-loop-slim: the round bound is the PR's, counted through a CI fix's re-c
     ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": f("b"), "fix r2": pushed("c"), "review r3": f("c"), "fix r3": pushed("d"),
     "review r4": clean, "CI 1": red, "CI fix 1": { ...pushed("e"), flake: false },
   });
-  assert.match(String(r.result["status"]), /^4 review rounds reached; head eeeeeee is not re-checked/);
+  assert.match(String(r.result["status"]), /^shrink: PR 900 stopped at the round bound \(4 review rounds\): head eeeeeee is not re-checked/);
+  assert.doesNotMatch(String(r.result["status"]), /^still \d+ finding|review rounds reached; .* the coordinator decides/);
   assert.equal(r.result["head"], sha("e"));
+});
+
+// ---------------------------------------------------------------- issue 649: after PR 582 took eight review rounds
+// The round bound's stop is a SHRINK: its status begins `shrink:`, names the safe subset and the last clean head, read
+// from the script's own history, and says another round is the owner's word.
+test("pr-loop-slim: the round bound stops with a `shrink:` status: the safe subset, the last clean head, the owner's word (issue 649)", async () => {
+  const many: Answers = { ...SLIM };
+  for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` })], judgedCorrect: [] };
+  for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
+  let r = await run("pr-loop-slim", { ...PR }, many);
+  const status = String(r.result["status"]);
+  assert.match(status, /^shrink: /, "a skill branches on its first word, as on a conflict's");
+  for (const s of ["PR 900", "safe subset", "refuse by name what the base refused", "revert what has no clean review", "file the rest as ONE new issue", "owner's word", "Needs Tom"]) {
+    assert.ok(status.includes(s), `the shrink status says ${s}: ${status}`);
+  }
+  assert.match(status, /No review was clean, so the safe subset is what the base already does/);
+  assert.match(status, /1 blocking finding\(s\) of its own are open \(c4\)/);
+  assert.equal(r.labels.at(-1), "record", "the bound's exit still records");
+  assert.ok(!r.labels.includes("review r5") && !r.labels.includes("fix r4"), "never a round past the bound");
+  assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
+
+  // the bound reached as a CI fix lands: its head is not re-checked, and the last clean head is review r4's
+  r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": f("a"), "fix r1": pushed("b"), "review r2": f("b"), "fix r2": pushed("c"), "review r3": f("c"), "fix r3": pushed("d"),
+    "review r4": clean, "CI 1": red, "CI fix 1": { ...pushed("e"), flake: false, admitted: [] },
+  });
+  assert.match(String(r.result["status"]), /^shrink: PR 900 stopped at the round bound \(4 review rounds\): head eeeeeee is not re-checked/);
+  assert.match(String(r.result["status"]), /The last head a review found clean is ddddddd \(review r4\)/, "read from history[], never recomputed");
+  assert.equal(r.result["head"], sha("e"));
+  assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
+});
+
+// What a regeneration admits to the allowlist is the push's to say and the next review's to sweep
+const REVERIFY = (admitted: unknown): Answers => ({ ...SLIM, "review r1": clean, "CI 1": red,
+  "CI fix 1": { ...pushed("c"), flake: false, handoff: H1, ...(admitted === undefined ? {} : { admitted }) }, "review r2": clean, "CI 2": green });
+test("pr-loop-slim: an allowlist piece a CI fix admits beyond the issue is named to the next review, to sweep before it stays (issue 649)", async () => {
+  let r = await run("pr-loop-slim", { ...PR }, REVERIFY([PIECE_9001]));
+  let p = r.prompt("review r2");
+  for (const s of ["`function:9001` (the function numeric(jsonb))", "beyond the issue's scope", "SWEEP",
+    "every VARIANT FORM above spelt with that piece, over a synthetic table holding a column of each type the piece takes as input, beside the tables t and e, at the head and at the base",
+    "a form the base refused by name that the head answers differently from Postgres is blocking: severity wrong-answer, origin this-pr"]) {
+    assert.ok(p.includes(s), `the CI fix's re-check says ${s}`);
+  }
+  assert.match(String(r.result["status"]), /^reviewed/);
+  // in scope: named, never as beyond the issue
+  r = await run("pr-loop-slim", { ...PR }, REVERIFY([{ ...PIECE_9001, scope: "issue" }]));
+  p = r.prompt("review r2");
+  assert.ok(p.includes("`function:9001`") && p.includes("within the issue's scope"));
+  assert.doesNotMatch(p, /beyond the issue/, "a piece the issue names is not beyond it");
+  // kept refused: checked refused by name at the head, as at the base
+  r = await run("pr-loop-slim", { ...PR }, REVERIFY([{ ...PIECE_9001, scope: "beyond-refused", issue: 977 }]));
+  p = r.prompt("review r2");
+  assert.ok(p.includes("`function:9001` (the function numeric(jsonb); issue #977)") && p.includes("Check each is refused by name at the head, as at the base"));
+  // no admitted, or not a list of pieces: "couldn't tell", said to the review; the run goes on
+  for (const bad of [undefined, "function:9001", [{ key: "function:9001" }]]) {
+    r = await run("pr-loop-slim", { ...PR }, REVERIFY(bad));
+    assert.ok(r.prompt("review r2").includes("CI fix 1's push did not say what it admitted to src/duck/verified.ts"), `admitted ${JSON.stringify(bad)}`);
+    assert.match(String(r.result["status"]), /^reviewed/, "a missing admitted never stops the run");
+  }
+  // a fix round that carries a CI failure: its admitted pieces reach the next review too
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "CI read r1": red,
+    "fix r1": { ...pushed("b"), handoff: H1, admitted: [{ key: "cast:9002", names: "the cast from jsonb to numeric", scope: "beyond-review" }] }, "review r2": clean, "CI 1": green });
+  assert.ok(r.prompt("review r2").includes("`cast:9002` (the cast from jsonb to numeric)"));
+  assert.ok(r.prompt("fix r1").includes(`\`git diff ${sha("a")} HEAD -- src/duck/verified.ts\``), "the fix with a CI failure reads what its push adds");
+  assert.ok(r.prompt("fix r1").includes("build it"), "and judges it against the brief");
+});
+
+test("pr-loop-slim: every review reads the allowlist's diff itself, and a stage that may regenerate it returns `admitted` (issue 649)", async () => {
+  const r = await run("pr-loop-slim", { ...PR }, CLASS_RUN);
+  const reviews = r.calls.filter((c) => /^review r\d+$/.test(c.opts.label));
+  assert.deepEqual(reviews.map((c) => c.opts.label), ["review r1", "review r2", "review r3"]);
+  for (const c of reviews) {
+    assert.ok(c.prompt.includes("-- src/duck/verified.ts`"), `"${c.opts.label}" reads verified.ts's diff`);
+    assert.ok(c.prompt.includes("Any added piece the brief does not name, reported by the author or not, is SWEPT"), `"${c.opts.label}" sweeps any piece the brief does not name`);
+    assert.ok(c.prompt.includes("build it"), `"${c.opts.label}" is given the brief`);
+  }
+  assert.ok(r.prompt("review r1").includes(`git diff origin/main ${sha("a")} -- src/duck/verified.ts`), "the full review reads it from the base");
+  assert.ok(r.prompt("review r3").includes(`git diff ${sha("f")} ${sha("c")} -- src/duck/verified.ts`), "the CI fix's re-check reads its push");
+  // the CI fix is given the brief and the rule; a fix with no CI failure returns admitted too, as []
+  const ci = r.prompt("CI fix 1");
+  assert.ok(ci.includes("build it") && ci.includes(`\`git diff ${sha("f")} HEAD -- src/duck/verified.ts\``) && ci.includes("in `admitted`"));
+  assert.match(ci, /EITHER keep refused by name[^]*OR leave admitted for the review after you to sweep/);
+  assert.ok(r.prompt("fix r1 (class)").includes("Return `admitted`"), "a fix with no CI failure says what it admitted, [] when nothing");
+  const required = (l: string) => (r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[] }).required;
+  assert.ok(required("fix r1 (class)").includes("admitted") && required("CI fix 1").includes("admitted") && required("CI fix 1").includes("flake"));
+  assert.ok(!required("implement").includes("admitted"), "the implementer's schema is unchanged");
+});
+
+// A class round's decision and authority are written in `## Design` and read by a fresh Opus before any code
+test("pr-loop-slim: a class round gets a design review first, by a fresh Opus at high effort, never the author (issue 649)", async () => {
+  const k = (o: Partial<Record<string, string>> = {}) => finding({ classKey: "k", ...o });
+  const design = { decision: "the arm's type is read from the analysis", authority: "src/duck/pgtree.ts in plan.ts", cases: ["SELECT a FROM t"] };
+  let r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [k({ input: "a" }), k({ input: "b" })], judgedCorrect: [] },
+    "class design r1": design, "design review r1": { sound: true, findings: [], judgedCorrect: [] },
+    "fix r1 (class)": pushed("b"), "review r2": clean, "CI 1": green,
+  });
+  assert.deepEqual(r.labels, ["brief", "implement", "link", "review r1", "CI read r1", "class design r1", "design review r1", "fix r1 (class)",
+    "review r2", "CI read r2", "learn", "learn check", "CI 1", "record"]);
+  const opts = (l: string) => r.calls.find((c) => c.opts.label === l)!.opts;
+  assert.deepEqual(reviewOn(opts("design review r1")), ON_REVIEW, "the design review is ON.review's value: Opus, high effort, no worktree");
+  assert.equal(opts("design review r1").phase, "Design review");
+  assert.deepEqual([opts("class design r1").model, opts("class design r1").effort, opts("class design r1").isolation], ["opus", "high", undefined], "the class design writes no code: no worktree");
+  assert.equal((r.result["designRounds"] as unknown[]).length, 1);
+  assert.equal(parseRecords(r.prompt("record"))[0]!.designRounds, 1, "the record counts the design reviews");
+  assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
+  const cd = r.prompt("class design r1");
+  for (const s of ["`### Class round r1`", "DECISION", "AUTHORITY", "named at the point where the code decides", "`gh pr edit 900 --body-file <file>`", "Write no code, commit nothing and push nothing"]) assert.ok(cd.includes(s), `the class design says ${s}`);
+  const dr = r.prompt("design review r1");
+  for (const s of ["EXISTS AT THE DECISION POINT", "for every input that reaches it", "not a list of spellings", "scripts/duck-repro.ts", "Never take the author's report as evidence.", NOT_THE_HANDOFF, "Do not edit or push"]) assert.ok(dr.includes(s), `the design review says ${s}`);
+  const fx = r.prompt("fix r1 (class)");
+  assert.ok(fx.includes("`## Design`, its part `### Class round r1`") && fx.includes("implement that decision") && fx.includes("The design review found it sound"));
+  assert.doesNotMatch(fx, /Before ANY code, write in the PR body/, "the fixer no longer writes the decision itself");
+
+  // across rounds, and carried from the stack: the design and its review come right before each class fix
+  for (const [args, answers] of [
+    [{ ...PR }, { ...SLIM, "review r1": { findings: [k({ input: "a" })], judgedCorrect: [] }, "fix r1": pushed("b"),
+      "review r2": { findings: [k({ input: "b" })], judgedCorrect: [] }, "fix r2 (class)": pushed("c"),
+      "review r3": { findings: [k({ input: "c" })], judgedCorrect: [] }, "fix r3 (class)": pushed("d"), "review r4": clean, "CI 1": green }],
+    [{ ...PR, knownClasses: { k: { count: 1, why: "met on the PR below" } } }, { ...SLIM, "review r1": { findings: [k()], judgedCorrect: [] }, "fix r1 (class)": pushed("b"), "review r2": clean, "CI 1": green }],
+  ] as const) {
+    r = await run("pr-loop-slim", args, answers as Answers);
+    const fixes = r.labels.filter((l) => / \(class\)$/.test(l));
+    assert.ok(fixes.length > 0);
+    for (const fix of fixes) {
+      const n = /^fix r(\d+)/.exec(fix)![1];
+      const i = r.labels.indexOf(fix);
+      assert.deepEqual(r.labels.slice(i - 2, i), [`class design r${n}`, `design review r${n}`], `${fix}: its design and design review right before it`);
+    }
+    assert.equal(r.labels.filter((l) => /design/.test(l)).length, fixes.length * 2, "a design and one review per class round, none for another fix");
+  }
+
+  // not sound twice: revised and read again once, then the round goes on carrying what is open; never a third
+  r = await run("pr-loop-slim", { ...PR }, {
+    ...SLIM, "review r1": { findings: [k({ input: "a" }), k({ input: "b" })], judgedCorrect: [] },
+    "design review r1": NOT_SOUND, "design review r1 #2": NOT_SOUND, "fix r1 (class)": pushed("b"), "review r2": clean, "CI 1": green,
+  });
+  assert.deepEqual(r.labels.slice(5, 10), ["class design r1", "design review r1", "class design r1 #2", "design review r1 #2", "fix r1 (class)"]);
+  assert.ok(!r.labels.includes("design review r1 #3"));
+  assert.ok(r.prompt("class design r1 #2").includes("the authority is not read where the rewrite decides"), "the revision is given the review's findings");
+  assert.ok(r.prompt("fix r1 (class)").includes("the authority is not read where the rewrite decides"), "the fix carries what is still open");
+  assert.equal((r.result["designRounds"] as Array<{ sound: boolean }>).length, 2);
+  assert.ok((r.result["designRounds"] as Array<{ sound: boolean }>).every((d) => d.sound === false));
+  assert.equal((r.result["rounds"] as unknown[]).length, 2, "design reviews never count toward the round bound");
+
+  // a fix of one finding, and a base finding of a class, never make a design stage
+  r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { findings: [k({ origin: "base", input: "x" }), k({ origin: "base", input: "y" }), finding({ classKey: "j", input: "a" })], judgedCorrect: [] },
+    "fix r1": pushed("b"), "review r2": clean, "CI 1": green, file: { issues: [] } });
+  assert.ok(!r.labels.some((l) => /design/.test(l)), "no design stage outside a class round");
+
+  // a null class design or design review stops the run, naming the stage, with the record posted
+  for (const [label, stop] of [["class design r1", /^class design r1 failed/], ["design review r1", /^design review r1 failed/]] as const) {
+    r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { findings: [k({ input: "a" }), k({ input: "b" })], judgedCorrect: [] }, [label]: null });
+    assert.match(String(r.result["status"]), stop);
+    assert.ok(!r.labels.includes("fix r1 (class)"));
+    assert.equal(r.labels.at(-1), "record");
+    assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
+  }
 });
 
 test("pr-loop-slim: the head, not the flag, says whether a CI fix pushed; the last CI fix's CI is read", async () => {
@@ -1286,7 +1463,7 @@ test("pr-loop-slim: a run that stops still files its deferred findings", async (
   for (let i = 1; i <= 4; i++) many[`review r${i}`] = { findings: [finding({ classKey: `c${i}`, input: `q${i}` }), ...(i === 1 ? [w] : [])], judgedCorrect: [] };
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
   const exits: Array<[string, Answers, RegExp]> = [
-    ["MAX_ROUNDS", many, /^still 1 finding\(s\) after 4 rounds/],
+    ["MAX_ROUNDS", many, /^shrink: /],
     ["a review that fails", { ...SLIM, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("b"), "review r2": null, file: { issues: [] } }, /^review r2 failed/],
     ["a fix that pushes nothing", { ...SLIM, "review r1": { findings: [finding({ classKey: "j", input: "j" }), w], judgedCorrect: [] }, "fix r1": pushed("a"), file: { issues: [] } }, /pushed nothing/],
     ["CI that never finishes", { ...SLIM, "review r1": { findings: [w], judgedCorrect: [] }, "CI 1": { state: "timeout", detail: "" }, file: { issues: [] } }, /^CI not finished/],
@@ -1700,11 +1877,14 @@ test("evidence-owed: a shared path is decided by its hunks through the checker; 
   }
 });
 
-test("pr-loop-slim: no design stage, no design review and no probe; the author's note and check at scale take their place", async () => {
-  const titles = meta("pr-loop-slim").phases.map((p) => p.title);
-  for (const t of ["Design", "Design review", "Probe"]) assert.ok(!titles.includes(t), `meta declares no ${t} phase`);
+test("pr-loop-slim: no design stage and no probe, and a design review runs only before a class round; the author's note and check at scale take their place", async () => {
+  const phases = meta("pr-loop-slim").phases as Array<{ title: string; model: string }>;
+  const titles = phases.map((p) => p.title);
+  for (const t of ["Design", "Probe"]) assert.ok(!titles.includes(t), `meta declares no ${t} phase`);
+  assert.equal(phases.find((p) => p.title === "Design review")?.model, "opus", "a class round's design review is the one design review there is (issue 649), on Opus");
   const src = source("pr-loop-slim");
-  assert.doesNotMatch(src, /label: `(design|probe)/, "no design, design review or probe agent is called");
+  assert.doesNotMatch(src, /label: `(design(?! review)|probe)/, "no design stage and no probe agent is called");
+  assert.doesNotMatch(src, /No design stage, no design review and no probe|\(no design review and no probe/, "the header and the record no longer say there is no design review");
 
   const base = finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t", atBase: "2" });
   const mine = finding({ classKey: "new-class", input: "SELECT mine FROM t" });
@@ -1725,7 +1905,8 @@ test("pr-loop-slim: no design stage, no design review and no probe; the author's
   ]);
   assert.match(String(result["status"]), /^reviewed, no open blocking finding/);
   assert.deepEqual(shapeOf(result), RESULT_KEYS, "one shape at every exit, which every reader of a result reads");
-  assert.deepEqual([(result["designRounds"] as unknown[]).length, (result["probeRounds"] as unknown[]).length], [0, 0]);
+  assert.deepEqual([(result["designRounds"] as unknown[]).length, (result["probeRounds"] as unknown[]).length], [0, 0], "no class round, so no design review");
+  assert.ok(!labels.some((l) => /design/.test(l)), "a run with no class round has no design stage nor design review");
   assert.deepEqual(Object.keys(result["classes"] as object), ["new-class"], "only this PR's classes, never the base's");
   assert.equal(prompt("file").split(base.input).length - 1, 1, "the base's finding is filed once");
   for (const c of calls.filter((c) => /^(fix|CI fix|learn|record)/.test(c.opts.label))) assert.ok(!c.prompt.includes(base.input), `"${c.opts.label}" was handed the base's finding`);
@@ -1755,12 +1936,12 @@ test("pr-loop-slim: no design stage, no design review and no probe; the author's
   });
   assert.ok(!r.labels.some((l) => l.startsWith("fix")), "a non-blocking finding is never fixed");
   assert.ok(r.prompt("file").includes("SELECT later FROM t"));
-  // MAX_ROUNDS
+  // MAX_ROUNDS: a shrink (issue 649)
   const many: Answers = { ...SLIM };
   for (let i = 1; i <= 4; i++) many[`review r${i}`] = f(`q${i}`);
   for (let i = 1; i <= 3; i++) many[`fix r${i}`] = pushed(String(i));
   r = await run("pr-loop-slim", { ...PR }, many);
-  assert.match(String(r.result["status"]), /^still 1 finding\(s\) after 4 rounds/);
+  assert.match(String(r.result["status"]), /^shrink: /);
   // a review that ran nothing is no review
   r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": { ...clean, statementsRun: 0, statementsMatched: 0 } });
   assert.match(String(r.result["status"]), /^unreviewed: review r1 ran no statement/);
@@ -2051,7 +2232,9 @@ test("both skills: no machine path, agent id or run state, and no sentence of a 
   const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green });
   const split = await run("pr-loop-slim", { ...PR }, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } });
   const merge = await run("pr-loop-slim", { ...PR }, MERGE_RUN);
-  const sentences = [...new Set([...r.calls, ...split.calls, ...merge.calls, { prompt: String(merge.result["status"]) }].flatMap((c) => c.prompt.split(/(?<=[.:;])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50))];
+  const cls = await run("pr-loop-slim", { ...PR }, CLASS_RUN);
+  const bound = await run("pr-loop-slim", { ...PR }, BOUND_RUN);
+  const sentences = [...new Set([...r.calls, ...split.calls, ...merge.calls, ...cls.calls, { prompt: String(merge.result["status"]) }, { prompt: String(bound.result["status"]) }].flatMap((c) => c.prompt.split(/(?<=[.:;])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50))];
   for (const [name, text] of [["pr-persistent", skillText()], ["up-next", upNextText()]] as const) {
     assert.doesNotMatch(text, MACHINE, `${name}: a machine path, a scratch folder or an agent id`);
     assert.deepEqual(sentences.filter((x) => text.includes(x)), [], `${name} restates a prompt of pr-loop-slim.js: render it instead`);
@@ -2086,7 +2269,9 @@ test("the skills and the render restate no sentence of a prompt pr-loop-slim.js 
   const text = skillText() + "\n" + upNextText() + "\n" + fs.readFileSync(RENDER, "utf8");
   const r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "fix r1": { ...pushed("b"), handoff: H1 }, "review r2": clean, "CI 1": red, "CI fix 1": { ...pushed("c"), flake: false, handoff: H1 }, "review r3": clean, "CI 2": green });
   const merge = await run("pr-loop-slim", { ...PR }, MERGE_RUN);
-  const sentences = new Set([...r.calls, ...merge.calls].flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50));
+  const cls = await run("pr-loop-slim", { ...PR }, CLASS_RUN);
+  const bound = await run("pr-loop-slim", { ...PR }, BOUND_RUN);
+  const sentences = new Set([...r.calls, ...merge.calls, ...cls.calls, { prompt: String(bound.result["status"]) }].flatMap((c) => c.prompt.split(/(?<=[.:])\s+|\n/)).map((x) => x.trim()).filter((x) => x.length >= 50));
   assert.ok(sentences.size > 100);
   const restated = [...sentences].filter((x) => text.includes(x));
   assert.deepEqual(restated, [], "the skill restates a prompt of pr-loop-slim.js: render it instead");
@@ -2104,16 +2289,18 @@ const RACE_ANSWERS: Answers = {
   link: { linked: true, bodyFixed: false, detail: "listed 900" },
   "review r1": ran({ findings: [finding({ classKey: "k", input: "SELECT r1 FROM t" }), finding({ origin: "base", classKey: "base-class", input: "SELECT base_only FROM t" })], judgedCorrect: ["the cast"] }),
   "CI read r1": { state: "failed", detail: "tests/duck-wire.test.ts: a test failed" },
-  "fix r1": { ...pushed("b"), statementsRun: 40, statementsMatched: 40, checksRun: 0, handoff: { ...H1, risks: ["after fix r1"] } },
+  "fix r1": { ...pushed("b"), statementsRun: 40, statementsMatched: 40, checksRun: 0, handoff: { ...H1, risks: ["after fix r1"] }, admitted: [] },
   "review r2": ran({ findings: [finding({ classKey: "k", input: "SELECT r2 FROM t" })], judgedCorrect: [] }),
   "CI read r2": green,
-  "fix r2 (class)": { ...pushed("c"), statementsRun: 60, statementsMatched: 60, checksRun: 0, handoff: H1 },
+  "class design r2": { decision: "the arm's type is read from Postgres's analysis", authority: "src/duck/pgtree.ts, read in src/duck/plan.ts where the arm is rewritten", cases: ["SELECT r1 FROM t", "SELECT r2 FROM t"] },
+  "design review r2": { sound: true, findings: [], judgedCorrect: ["the authority is read where the rewrite decides"] },
+  "fix r2 (class)": { ...pushed("c"), statementsRun: 60, statementsMatched: 60, checksRun: 0, handoff: H1, admitted: [] },
   "review r3": ran({ findings: [], judgedCorrect: ["the class"] }),
   "CI read r3": green,
   learn: { ...pushed("d"), startedAt: "2026-11-01T10:00:00Z", endedAt: "2026-11-01T10:03:00Z" },
   "learn check": { files: [".claude/rules/duck-rewrite.md"], endedAt: "2026-11-01T10:04:00Z" },
   "CI 1": red,
-  "CI fix 1": { ...pushed("e"), flake: false, statementsRun: 12, statementsMatched: 12, checksRun: 0, handoff: H1 },
+  "CI fix 1": { ...pushed("e"), flake: false, statementsRun: 12, statementsMatched: 12, checksRun: 0, handoff: H1, admitted: [] },
   "review r4": ran({ findings: [], judgedCorrect: [] }),
   "CI read r4": green,
   "CI 2": green,
@@ -2340,15 +2527,57 @@ test("the skills: a conflict DONE is the coordinator's ONE report at once, and t
   assert.match(prose, /\*\*A conflict\*\* \(`DONE: conflict: …`\)[^]*?the files the status names[^]*?your ONE report AT ONCE[^]*?naming the files from the status[^]*?Never wait on it, watch it, or leave a background job for it/);
   const waits = (/## Waits\n([^]*?)(?=\n## )/.exec(text)?.[1] ?? "").replace(/\s+/g, " ");
   assert.ok(waits.includes("A DONE ends the run") && waits.includes("No wait, watch or background job follows a DONE"), `## Waits: ${waits}`);
-  // up-next: the conflict DONE is step 6's CONFLICTING, merged with both sides of next.md kept, read, CI waited on, queued pinned
+  // up-next: the conflict DONE is step 7's CONFLICTING, merged with both sides of next.md kept, read, CI waited on, queued pinned
   const up = upNextText().replace(/\s+/g, " ");
-  assert.match(up, /\*\*A conflict\*\* \(`conflict: …`\)[^]*?step 6's CONFLICTING[^]*?keeping both sides of `release-notes\/next\.md` and resolving the files the status names, and pushed[^]*?You write no code yourself[^]*?read the merge[^]*?one bounded background job \(`node <repo>\/scripts\/ci-wait\.ts <n> 540`[^]*?its diff read in full, and the merge queued pinned to it \(`--match-head-commit`\)/);
-  assert.match(up, /6\. \*\*Watch it land\*\*[^]*?On CONFLICTING/, "the step a conflict DONE refers to is the one that handles CONFLICTING");
+  assert.match(up, /\*\*A conflict\*\* \(`conflict: …`\)[^]*?step 7's CONFLICTING[^]*?keeping both sides of `release-notes\/next\.md` and resolving the files the status names, and pushed[^]*?You write no code yourself[^]*?read the merge[^]*?one bounded background job \(`node <repo>\/scripts\/ci-wait\.ts <n> 540`[^]*?its diff read in full, and the merge queued pinned to it \(`--match-head-commit`\)/);
+  assert.match(up, /7\. \*\*Watch it land\*\*[^]*?On CONFLICTING/, "the step a conflict DONE refers to is the one that handles CONFLICTING");
+});
+
+// Issue 649: a class round's design and its review are stages the render dispatches like any other, each alone, and a
+// bound stop is a `shrink:` DONE, which the coordinator reports at once and the top session turns into a new run.
+test("the pr-persistent render: a class round renders its design, then its design review, each alone, before the fix; a bound stop is `DONE: shrink:` (issue 649)", async () => {
+  const without = (label: string): Answers => { const { [label]: _gone, ...rest } = upTo(label, null); return rest; };
+  for (const [label, line] of [
+    ["class design r2", `STAGE "class design r2" (Fix) {"model":"opus","effort":"high"}`],
+    ["design review r2", `STAGE "design review r2" (Design review) {"model":"opus","effort":"high"}`],
+    ["fix r2 (class)", `STAGE "fix r2 (class)" (Fix) {"model":"opus","effort":"high","isolation":"worktree"}`],
+  ] as const) {
+    const r = renderStage(RACE_ARGS, without(label));
+    assert.equal(r.out, `${line}: ${path.join(r.dir, "next", fileOf(label))}\n`, `${label}: rendered alone`);
+    await sameNext(r, without(label), `${label}: slim's whole prompt`);
+  }
+  // the bound: four reviews with a finding each, then DONE with slim's own `shrink:` status
+  const bound: Answers = { implement: RACE_ANSWERS["implement"], link: RACE_ANSWERS["link"], record: RACE_ANSWERS["record"] };
+  for (const [i, c] of [[1, "b"], [2, "c"], [3, "d"], [4, ""]] as const) {
+    bound[`review r${i}`] = ran({ findings: [finding({ classKey: `c${i}`, input: `SELECT q${i} FROM t` })], judgedCorrect: [] });
+    bound[`CI read r${i}`] = green;
+    if (c) bound[`fix r${i}`] = { ...pushed(c), statementsRun: 1, statementsMatched: 1, checksRun: 0, handoff: H1, admitted: [] };
+  }
+  const out = await sameNext(bound, bound, "a bound stop");
+  assert.match(out, /^DONE: shrink: PR 900 stopped at the round bound \(4 review rounds\)/);
+});
+
+test("the skills: a `shrink:` DONE is the coordinator's ONE report at once, and the top session starts the shrink run (issue 649)", () => {
+  const text = skillText(), prose = text.replace(/\s+/g, " ");
+  for (const s of ["`shrinkOf`", '`"upnext-<n>-shrink"`', "the `classes` of the stopped run's `result.json`", "quotes its `shrink:` status", "ships that PR's safe subset"]) {
+    assert.ok(prose.includes(s), `pr-persistent says ${s}`);
+  }
+  assert.match(prose, /\*\*A shrink\*\* \(`DONE: shrink: …`\)[^]*?never send the implementer a round past the bound[^]*?Post the run log[^]*?your ONE report AT ONCE/);
+  assert.match(prose, /## Never[^]*?send the implementer a round the render did not print, a round past the bound above all/);
+  // a class round's design goes to the kept implementer; its review to a fresh Opus
+  const bullets = text.split(/\n(?=- \*\*)/);
+  const resumed = (bullets.find((b) => b.startsWith("- **`fix r<n>`")) ?? "").replace(/\s+/g, " ");
+  assert.match(resumed, /^- \*\*[^*]*`class design r<n>`[^*]*\*\*/, "the SendMessage bullet lists class design r<n>");
+  const fresh = (bullets.find((b) => b.startsWith("- **Every other stage**")) ?? "").replace(/\s+/g, " ");
+  assert.ok(fresh.includes("`design review r<n>`") && fresh.includes("a fresh Opus at high effort, never the implementer"), `the fresh-agent bullet lists design review r<n>: ${fresh}`);
+  // up-next: the shrink run starts at once, the stopped PR closes after the shrink's merges, an override is the owner's
+  const up = upNextText().replace(/\s+/g, " ");
+  assert.match(up, /\*\*A shrink\*\* \(`shrink: …`\)[^]*?Start the shrink run AT ONCE, without asking[^]*?`shrinkOf`[^]*?until the shrink's PR merges, then is closed unmerged[^]*?naming the shrink's PR[^]*?Another round on the stopped PR, or any override of the bound, is the owner's word only[^]*?\*\*Needs Tom\*\*/);
 });
 
 test("pr-loop-slim: args.process names the arm in the record's text, and an unknown one stops the run", async () => {
   let r = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": clean, "CI 1": green });
-  assert.match(r.prompt("record"), /\npr-loop-slim \(no design review/);
+  assert.match(r.prompt("record"), /\npr-loop-slim \(no probe, and a design review only before a class round/);
   r = await run("pr-loop-slim", { ...PR, process: "pr-persistent" }, { ...SLIM, "review r1": clean, "CI 1": green });
   assert.match(r.prompt("record"), /\npr-persistent \(pr-loop-slim's prompts/);
   r = await run("pr-loop-slim", { ...PR, process: "persistent" }, {});
@@ -2796,7 +3025,7 @@ test("plain: no command a harness prompt or a skill tells an agent to run is one
       for (const itEnv of [undefined, "/srv/it.env"]) {
         const args: Record<string, unknown> = { ...PR, ...(repo ? { repo } : {}), ...(itEnv ? { itEnv } : {}) };
         // a full run, and a run that reaches the split stage (issue 386), so the split prompt's commands are read too, and one that merges its base (issue 452)
-        for (const answers of [SLIM_FULL, MERGE_RUN, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
+        for (const answers of [SLIM_FULL, MERGE_RUN, CLASS_RUN, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
           const r = await run(name, args, answers);
           for (const c of r.calls) {
             labels.add(`${name}: ${c.opts.label.replace(/\d+/g, "n")}`);
@@ -2811,7 +3040,7 @@ test("plain: no command a harness prompt or a skill tells an agent to run is one
   assert.deepEqual([...bad].map(([k, w]) => `${k} in ${[...w].slice(0, 3).join(", ")}${w.size > 3 ? ` and ${w.size - 3} more` : ""}`), [],
     "a command an agent is told to run that Claude Code's worktree guard refuses in an isolated agent: make it one program with literal arguments, its logic in a script under scripts/");
   // every stage was rendered, and the commands the decision names are read, so the check is not vacuous
-  for (const l of ["brief", "split", "implement", "link", "review rn", "fix rn", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "merge n", "file", "record"]) {
+  for (const l of ["brief", "split", "implement", "link", "review rn", "fix rn", "class design rn", "design review rn", "class design rn #n", "design review rn #n", "fix rn (class)", "CI read rn", "learn", "learn check", "CI n", "CI fix n", "merge n", "file", "record"]) {
     assert.ok(labels.has(`pr-loop-slim: ${l}`), `pr-loop-slim's ${l} was rendered`);
   }
   for (const cmd of ["node <repo>/scripts/ci-wait.ts 900 540", "mktemp -d", "git worktree add --detach <that path>/head <sha>", "git worktree remove <that path>/head",
@@ -3160,7 +3389,7 @@ test("github text: no prompt or skill reads an issue's or a PR's text except thr
     for (const itEnv of [undefined, "/srv/it.env"]) {
       for (const stackedOn of ["", "899"]) {
         const args: Record<string, unknown> = { ...PR, stackedOn, ...(repo ? { repo } : {}), ...(itEnv ? { itEnv } : {}) };
-        for (const answers of [FULL, NO_HANDOFF, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
+        for (const answers of [FULL, NO_HANDOFF, CLASS_RUN, { brief: SPLIT_BRIEF, split: { subIssues: [401, 402] } }]) {
           const r = await run("pr-loop-slim", args, answers);
           for (const c of r.calls) {
             const key = `${c.opts.label}${repo ? " repo" : ""}${stackedOn ? " stacked" : ""}${answers === NO_HANDOFF ? " no-handoff" : ""}`;
@@ -3188,6 +3417,8 @@ test("github text: no prompt or skill reads an issue's or a PR's text except thr
   for (const l of ["link", "link stacked", "learn"]) has(l, "node <repo>/scripts/gh-text.ts body 900");
   has("file", 'node <repo>/scripts/gh-text.ts search "<words>"');
   has("file", "node <repo>/scripts/gh-text.ts issue <n>");
+  // a class round's design reads and writes the PR body, and its review reads it, through gh-text (issue 649)
+  for (const l of ["class design r1", "class design r1 #2", "design review r1", "design review r1 #2"]) has(l, "node <repo>/scripts/gh-text.ts body 900");
   // every prompt carries the rule, so an agent that would read more of GitHub reads it the same way
   for (const [key, ps] of prompts) for (const p of ps) assert.ok(p.includes("scripts/gh-text.ts` (issue, pr, body, comment-id, search, author)"), `"${key}" carries the rule`);
   for (const [name, text] of [["pr-persistent", skillText()], ["up-next", upNextText()]] as const) {
