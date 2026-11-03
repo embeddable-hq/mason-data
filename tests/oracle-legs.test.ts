@@ -393,11 +393,14 @@ function staleRoot(t: { after: (fn: () => void) => void }, readme?: string) {
   const root = path.join(tmp, "repo"), dir = path.join(tmp, "download");
   const repoReadme = fs.readFileSync(path.join(ROOT, README_FILE), "utf8");
   const a = repoReadme.indexOf(README_START), z = repoReadme.indexOf(README_END, a);
-  assert.ok(a >= 0 && z > a && repoReadme.slice(a, z).includes("6,976"), "the repo's README block says the fixture's 6,976 statements: the stale one says another");
+  // the count the committed fixture holds, as the block says it, never a number spelt here: the fixture moves with main
+  const { statements } = JSON.parse(fs.readFileSync(path.join(ROOT, FIXTURE_FILE), "utf8")) as { statements: number };
+  const count = statements.toLocaleString("en-US"), other = (statements - 97).toLocaleString("en-US");
+  assert.ok(a >= 0 && z > a && repoReadme.slice(a, z).includes(count), `the repo's README block says the fixture's ${count} statements: the stale one says ${other}`);
   const seeded: Record<string, string> = {
     [VERIFIED_FILE]: fs.readFileSync(path.join(ROOT, VERIFIED_FILE), "utf8").replace(/^ {2}\["aggregate:2050".*\n/m, ""),
     [FIXTURE_FILE]: "{}\n",
-    [README_FILE]: readme ?? repoReadme.slice(0, a) + repoReadme.slice(a, z).replace("6,976", "6,879") + repoReadme.slice(z),
+    [README_FILE]: readme ?? repoReadme.slice(0, a) + repoReadme.slice(a, z).replaceAll(count, other) + repoReadme.slice(z),
     [SUPPORT_FILE]: "# an old SQL-SUPPORT.md\n",
   };
   const seed = (): void => { for (const [f, text] of Object.entries(seeded)) { fs.mkdirSync(path.dirname(path.join(root, f)), { recursive: true }); fs.writeFileSync(path.join(root, f), text); } };
