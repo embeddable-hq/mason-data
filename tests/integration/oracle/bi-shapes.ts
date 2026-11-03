@@ -299,6 +299,9 @@ export const BI_SHAPES: Array<{ name: string; sql: string }> = [
   { name: "issue 665: equal values of different scales are one group", sql: "SELECT v.x / 2 AS q, count(*) FROM public.one CROSS JOIN (VALUES (1.0::numeric), (1.00), (2), (2.000)) AS v(x) GROUP BY 1 ORDER BY 1" },
   { name: "issue 665: a division by zero in the grouped key", sql: "SELECT floor(o.amount / (o.id % 3)) AS b, count(*) FROM orders o GROUP BY 1" },
   { name: "issue 665: the integer division stays the engine's", sql: "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7), count(*) FROM orders o GROUP BY 1 ORDER BY 1" },
+  // (GROUPING in HAVING: in a list read through the shapes' derived table it meets #681, the base's)
+  { name: "issue 665: GROUPING of a grouped quotient in HAVING", sql: "SELECT floor(o.amount / 12.5) AS b, o.status, count(*) FROM orders o GROUP BY 1, 2 HAVING grouping(floor(o.amount / 12.5), o.status) = 0 AND grouping(floor(o.amount / 12.5)) = 0 ORDER BY 1, 2" },
+  { name: "issue 665: a grouped quotient tested IN a subquery, in HAVING and the list", sql: "SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, ceil(cast(extract(doy from o.created_at) as integer) / 7.0) IN (SELECT p.id / 7.0 FROM orders p WHERE p.id < 60) AS listed, count(*) FROM orders o GROUP BY 1 HAVING ceil(cast(extract(doy from o.created_at) as integer) / 7.0) = ANY (SELECT p.id / 1.0 FROM orders p WHERE p.id < 30) ORDER BY 1" },
   // a dashboard's top N that keeps the rows tied with the last (until the cut, only the generated queries of the
   // ClickHouse stack's Query API asked these two, so they are asked here); ordered outside, since the order among tied rows is Postgres's choice
   { name: "a top N with its ties: FETCH FIRST n ROWS WITH TIES", sql: "SELECT * FROM (SELECT o.tenant_id, o.status, count(*) AS n FROM orders o GROUP BY 1, 2 ORDER BY n DESC FETCH FIRST 3 ROWS WITH TIES) t ORDER BY n DESC, tenant_id, status" },

@@ -6397,6 +6397,20 @@ test("issue 665: a quotient grouped by its exact key alone is read per group by 
       ["SELECT count(*) FROM orders o CROSS JOIN (VALUES (7.00, NULL::numeric(10,2)), (NULL, 7.00), (14.00, NULL)) AS v(x, y) WHERE o.id = 1 GROUP BY (coalesce(v.x, 0) + coalesce(v.y, 0)) / 7 ORDER BY (coalesce(v.x, 0) + coalesce(v.y, 0)) / 7", "ordered"],
       // the same program over a cell seen again (the key's cache) and over NULL cells
       ["SELECT ceil(d.a / 7.0) AS w, count(*), sum(d.c) FROM deep_t d GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      // GROUPING of an expression grouped by a key in its place reads the engine's own GROUP BY entry, the key (review
+      // r1 of PR 674): in the list, beside a second key, in HAVING; a jsonb grouped by its key alike
+      ["SELECT d.c / 3 AS q, grouping(d.c / 3), count(*) FROM deep_t d GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, d.a, grouping(d.c / 3, d.a), count(*) FROM deep_t d GROUP BY 1, 2 ORDER BY 1, 2", "ordered"],
+      ["SELECT count(*) FROM deep_t d GROUP BY d.c / 3 HAVING grouping(d.c / 3) = 0 ORDER BY 1", "ordered"],
+      ["SELECT t.b::text, grouping(t.b), count(*) FROM jdocs t GROUP BY t.b", "bag"],
+      // a SubLink's test expression is this query's (review r1 of PR 674): a grouped quotient's column there is read
+      // per group, in HAVING, the list and the ORDER BY, IN, = ANY and NOT IN; and a column the group's key decides
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 HAVING d.c / 3 IN (SELECT e.c / 5 FROM deep_t e) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 HAVING d.c / 3 = ANY (SELECT e.c / 5 FROM deep_t e) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 HAVING d.c / 3 NOT IN (SELECT e.c / 5 FROM deep_t e WHERE e.c IS NOT NULL) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, d.c / 3 IN (SELECT e.c / 5 FROM deep_t e) AS listed, count(*) FROM deep_t d GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 ORDER BY d.c / 3 IN (SELECT e.c / 5 FROM deep_t e), 1", "ordered"],
+      ["SELECT o.id, o.status FROM orders o GROUP BY o.id HAVING o.status IN (SELECT 'shipped') ORDER BY 1 LIMIT 3", "ordered"],
     ]), []);
   } finally { await c.end(); }
 });

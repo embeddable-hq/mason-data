@@ -1577,6 +1577,8 @@ class Rewriter {
       // GROUP entry), and is the column. Never inside an expression grouped by its key (`cells`): a name in an expression
       // is the FROM's column, whatever output bears it (Metabase's bin `… AS amount` of `amount`; issue 665)
       if (sorted && !cells && k === "ColumnRef" && depth === 0 && this.outputNamed(v, targets)) return v;
+      // (a GROUPING's arguments are the engine's own GROUP BY entries, `groupingArguments`: never read per group)
+      if (k === "GroupingFunc") return v;
       const as = this.groupedAs(v, b);
       if (as === "engine") return v;
       if (as === "keyed" && (depth === 0 || ofThisQuery(v, depth))) return perGroup(v);
@@ -1598,7 +1600,10 @@ class Rewriter {
         const result = this.byShape.get(shapeOf(v)) ?? this.typed(v);
         if (result !== null) this.synthetic.set(n, result);
       }
-      if (k === "SubLink") { for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth + 1, false, inCells); return v; }
+      // A SUBLINK's TEST EXPRESSION (`x IN (…)`, `x = ANY (…)`, `x > ALL (…)`) is this query's, walked at this depth;
+      // only its subselect is one deeper (review r1 of PR 674, the class sublink-testexpr-walked-at-inner-depth: a
+      // column of this query there, at depth + 1, was taken for an outer one and left a bare column, the engine's 42803)
+      if (k === "SubLink") { for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, key === "testexpr" ? depth : depth + 1, false, inCells); return v; }
       if (k === "FuncCall" && n.over === undefined && this.typed(v)?.node === "AGGREF") return v;
       if (k === "ColumnRef" && hasStar(v)) {
         if (depth > 0) return v;
@@ -3593,11 +3598,15 @@ class Rewriter {
    *  (`overGroups`), never over cells the group does not decide (review r1 of PR 506: the engine's 42803) */
   private readonly groupedCasts = new WeakMap<Body, Body>();
   /** each column of an expression the engine groups by its key alone (`cells`, issue 665) where a SELECT's list, HAVING
-   *  or ORDER BY reads it (decidedByKey): read through any_value when the walk reaches it, so that the expression is
+   *  or ORDER BY reads it (decidedByKey): read through first() when the walk reaches it, so that the expression is
    *  computed once per group, never once per row. Marked, never wrapped there: every rule above the column (a
    *  division's, a cast's, a program built over it) reads the expression as written, typed by Postgres's analysis of
    *  its shape, which an any_value inside it would change. A copy of one is marked too (`clone`) */
   private readonly readPerGroup = new WeakSet<Body>();
+  /** THE ENGINE'S GROUP BY ENTRY OF AN EXPRESSION GROUPED BY A KEY IN ITS PLACE (`keyed`, `cells`; `keyedGroups`), by the
+   *  SELECT and the expression's shape, as placed (before the walk): what the engine groups the expression AS, the one
+   *  answer GROUPING(e) reads (`groupingArguments`; review r1 of PR 674) */
+  private readonly groupKeys = new WeakMap<Body, Map<string, AstNode>>();
 
   /** whether a value is a NUMERIC's text (`x::text`, `(x / 3)::text`, under a COLLATE, a subquery's column carrying
    *  one) or a NULL: what a "text" cell may hold, its program parsing it as a numeric */
@@ -4241,13 +4250,47 @@ class Rewriter {
       const exact = this.exactKey(e, true);
       if (exact !== null) {
         this.grouping(b).set(shapeOf(grouped), "cells");
-        return [exact];
+        return [this.placedKey(b, grouped, exact)];
       }
       if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return [g]; }
       // (the engine groups it by its key alone: every reader of the expression reads it per group, `groupedAs`)
       this.grouping(b).set(shapeOf(grouped), "keyed");
-      return [this.equalKey(e === g ? g : this.clone(e))];
+      return [this.placedKey(b, grouped, this.equalKey(e === g ? g : this.clone(e)))];
     });
+    this.groupingArguments(b);
+  }
+
+  /** a key `keyedGroups` places in the engine's GROUP BY for `grouped`, recorded as placed (`groupKeys`) */
+  private placedKey(b: Body, grouped: AstNode, key: AstNode): AstNode {
+    let keys = this.groupKeys.get(b);
+    if (keys === undefined) this.groupKeys.set(b, keys = new Map());
+    keys.set(shapeOf(grouped), this.clone(key));
+    return key;
+  }
+
+  /**
+   * GROUPING(e) OF AN EXPRESSION THE ENGINE GROUPS BY A KEY IN ITS PLACE (review r1 of PR 674, the class
+   * grouping-of-keyed-expression-reads-value): the engine's GROUPING takes only its own GROUP BY entries, so an argument
+   * grouped by a key (`keyed`, `cells`) is written as THAT key (`groupKeys`, as `keyedGroups` placed it), never as a
+   * reader's value (the expression over its columns read per group, or its any_value), which is no grouping column of
+   * the engine's (42804). Every argument of this SELECT's own GROUPING, in its list, HAVING and ORDER BY; a subquery's
+   * GROUPING is its own SELECT's. `decidedByKey` leaves a GROUPING's arguments as they are
+   */
+  private groupingArguments(b: Body): void {
+    const keys = this.groupKeys.get(b);
+    if (keys === undefined) return;
+    const visit = (v: unknown): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x); return; }
+      if (v === null || typeof v !== "object") return;
+      if (isNode(v) && (kindOf(v) === "SubLink" || kindOf(v) === "SelectStmt")) return;
+      if (isNode(v) && kindOf(v) === "GroupingFunc") {
+        const n = bodyOf(v);
+        if (Array.isArray(n.args)) n.args = (n.args as unknown[]).map((a) => { const key = isNode(a) ? keys.get(shapeOf(a)) : undefined; return key === undefined ? a : this.clone(key); });
+        return;
+      }
+      for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) visit(x);
+    };
+    visit([b.targetList, b.havingClause, b.sortClause]);
   }
 
   /** the SELECT list's column (a `*`'s, as Postgres expanded it: `outputs`) a column reference names by the same
