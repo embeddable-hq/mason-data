@@ -192,6 +192,7 @@ export const VERIFIED: ReadonlyMap<string, string> = new Map([
   ["cast:3614>25", "a cast from tsvector to text"],
   ["cast:3615>25", "a cast from tsquery to text"],
   ["cast:3643>25", "a cast from tsvector[] to text"],
+  ["cast:3802>1042", "a cast from jsonb to character"],
   ["cast:3802>1043", "a cast from jsonb to character varying"],
   ["cast:3802>114", "a cast from jsonb to json"],
   ["cast:3802>25", "a cast from jsonb to text"],

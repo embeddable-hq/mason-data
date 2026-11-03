@@ -3906,6 +3906,7 @@ test("a jsonb expression's text under a GROUP BY of it is its stored text (issue
       ["SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY j.j -> 'r' ORDER BY 1 NULLS FIRST", "ordered"],
       ["SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY j.g, j.j -> 'r' ORDER BY 1 NULLS FIRST", "ordered"],
       ["SELECT concat(j.j -> 'r', '|') AS a, format('%s', j.j -> 'r') AS b, (j.j -> 'r')::text || '' AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
+      ["SELECT (j.j -> 'r')::varchar(3) AS k, (j.j -> 'r')::char(6) AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
       ["SELECT jsonb_build_object('x', j.j -> 'r')::text AS a, (j.j -> 'r') ->> 0 AS b, jsonb_typeof(j.j -> 'r') AS d FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id", "ordered"],
       ["SELECT (j.j -> 'r')::text AS k FROM jnums j GROUP BY j.id, j.j -> 'r' HAVING (j.j -> 'r')::text <> 'x' ORDER BY (j.j -> 'r')::text NULLS FIRST, j.id", "ordered"],
       ["SELECT (j.j -> 'r')::text AS k FROM jnums j GROUP BY j.id, j.j -> 'r' HAVING count(*) > 0 ORDER BY j.id", "ordered"],
@@ -3938,12 +3939,9 @@ test("a jsonb expression's text under a GROUP BY of it is its stored text (issue
       ["SELECT t.s COLLATE \"und-x-icu\" AS x, count(*) FROM texts t GROUP BY 1 ORDER BY 1", "ordered"],
     ];
     assert.deepEqual(await unlike(c, grouped), []);
-    // a cast to char(n) or varchar(n) of a jsonb, and jsonb's numeric: Postgres's answer, or refused by the allowlist
-    // until the oracle's legs verify the piece (the oracle's "jsonb: grouped expression's text" statements)
-    for (const sql of ["SELECT (j.j -> 'r')::varchar(3) AS k, (j.j -> 'r')::char(6) AS c FROM jnums j GROUP BY j.id, j.j -> 'r' ORDER BY j.id",
-      "SELECT (j.j -> 'r')::numeric::text AS c FROM jnums j WHERE j.id <> 4 GROUP BY j.id, j.j -> 'r' ORDER BY j.id"]) {
-      assert.deepEqual(await answeredOrRefused(c, sql, "unverified"), [], sql);
-    }
+    // jsonb's numeric: Postgres's answer, or refused by the allowlist, which has not verified the cast
+    const numeric = "SELECT (j.j -> 'r')::numeric::text AS c FROM jnums j WHERE j.id <> 4 GROUP BY j.id, j.j -> 'r' ORDER BY j.id";
+    assert.deepEqual(await answeredOrRefused(c, numeric, "unverified"), [], numeric);
     // a grouping set of a jsonb stays refused, by name
     await assert.rejects(c.query("SELECT (j.j -> 'r')::text AS k, count(*) FROM jnums j GROUP BY ROLLUP (j.id, j.j -> 'r') ORDER BY j.id, 1"), (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap jsonb-compare\b/.test(`${e.detail ?? ""} ${e.hint ?? ""}`));
     // the text is read by the jsonb text route over ONE any_value of the whole expression, never the column's

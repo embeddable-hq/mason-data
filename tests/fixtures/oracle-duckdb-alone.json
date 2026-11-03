@@ -1,18 +1,18 @@
 {
-  "statements": 7016,
+  "statements": 7039,
   "mason": {
-    "exact": 6501,
+    "exact": 6524,
     "decided": 47,
     "refused": 468,
     "differs": 0
   },
   "duckdb": {
     "exact": 1823,
-    "name": 1288,
-    "refused": 1570,
-    "value": 907,
-    "rows": 593,
-    "text": 223,
+    "name": 1292,
+    "refused": 1575,
+    "value": 921,
+    "rows": 592,
+    "text": 224,
     "other": 612
   },
   "gaps": {
@@ -95,13 +95,13 @@
       }
     },
     "everyAsk": {
-      "asked": 96124,
+      "asked": 96480,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
         "array-subquery-element": { "planted": 0, "natural": 27 },
         "bytea-forms": { "planted": 3, "natural": 0 },
-        "citext-forms": { "planted": 0, "natural": 93 },
+        "citext-forms": { "planted": 0, "natural": 95 },
         "collation-unknown": { "planted": 3, "natural": 15 },
         "div-numeric": { "planted": 3, "natural": 0 },
         "enum-forms": { "planted": 3, "natural": 0 },
@@ -119,7 +119,7 @@
         "json-of-type": { "planted": 3, "natural": 3 },
         "json-path-type": { "planted": 0, "natural": 48 },
         "json-rows-in-select": { "planted": 3, "natural": 0 },
-        "jsonb-compare": { "planted": 3, "natural": 215 },
+        "jsonb-compare": { "planted": 3, "natural": 219 },
         "jsonb-set": { "planted": 0, "natural": 3 },
         "latest-order": { "planted": 6, "natural": 0 },
         "latest-quotient": { "planted": 3, "natural": 0 },
