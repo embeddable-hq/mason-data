@@ -59,7 +59,8 @@ Make the run folder, `<runs>/issue-<n>`. In it, write `args.json`, pr-loop-slim'
   first sentence is instead: "This is a piece of #<parent>'s split, whose plan is on #<parent>: its one PR closes
   #<n>."
 - NO `brief`: the Brief stage runs on Opus, and its verdict may be a split.
-- For a **shrink** (`shrinkOf` given): `branch` is `"upnext-<n>-shrink"`, since the stopped run's `upnext-<n>` still
+- For a **shrink** (`shrinkOf` given): `shrinkOf` is the stopped PR, as a string, so the script knows this run is a
+  shrink and its own bound ends `bound:`, never a second `shrink:`; `branch` is `"upnext-<n>-shrink"`, since the stopped run's `upnext-<n>` still
   exists; `knownClasses` is the `classes` of the stopped run's `result.json`, so a class it met counts here; and the
   context line's first sentence names the stopped PR, quotes its `shrink:` status as that run's `result.json` holds it,
   and says this run ships that PR's safe subset and closes #<n>, in place of the "not split yet" sentence.
@@ -157,6 +158,9 @@ stop, CI, Learn, filing and the record.
   session starts; another round past the bound is the owner's word only. So never send the implementer a round past
   the bound. Post the run log (next bullet) first, then send your ONE report AT ONCE, quoting the status whole: it
   names the last clean head. Nothing of the run is waited on after it.
+- **A bound** (`DONE: bound: …`): a shrink run reached its own round bound. A shrink counts against the bound it
+  enforces, so nothing restarts by itself: report it as a shrink DONE is reported, run log first, ONE report at once,
+  saying that it is the owner's to decide.
 - **Any other DONE**: post the run log as ONE comment on the PR, headed `### From Claude (<your model>)` and
   `## Run log`. Give each stage's wall time, Learn's own time on its own row, each agent's tokens, and your own on the
   last row. The Review record is the `record` stage's comment, as rendered, so do not add the log to it. Then tell the

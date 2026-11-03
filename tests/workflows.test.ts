@@ -364,6 +364,22 @@ test("pr-loop-slim: the round bound stops with a `shrink:` status: the safe subs
   assert.match(String(r.result["status"]), /The last head a review found clean is ddddddd \(review r4\)/, "read from history[], never recomputed");
   assert.equal(r.result["head"], sha("e"));
   assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
+
+  // a shrink counts against the bound it enforces (PR 652 review r1): a run that is itself a shrink stops at its own
+  // bound with `bound:`, which no skill restarts, never a second `shrink:`
+  for (const shrinkOf of [899, "899"]) {
+    r = await run("pr-loop-slim", { ...PR, shrinkOf }, BOUND_RUN);
+    const s = String(r.result["status"]);
+    assert.match(s, /^bound: PR 900, itself the shrink of PR 899, stopped at the round bound \(4 review rounds\): 1 blocking finding\(s\) of its own are open \(c4\)/);
+    assert.ok(s.includes("starts no second shrink") && s.includes("owner's word only (Needs Tom)"), s);
+    assert.doesNotMatch(s, /^shrink:/);
+    assert.equal(r.labels.at(-1), "record");
+    assert.deepEqual(shapeOf(r.result), RESULT_KEYS);
+  }
+  for (const shrinkOf of [undefined, null, ""]) {
+    r = await run("pr-loop-slim", { ...PR, shrinkOf }, BOUND_RUN);
+    assert.match(String(r.result["status"]), /^shrink: /, `shrinkOf ${JSON.stringify(shrinkOf)} is no shrink`);
+  }
 });
 
 // What a regeneration admits to the allowlist is the push's to say and the next review's to sweep
@@ -416,6 +432,19 @@ test("pr-loop-slim: every review reads the allowlist's diff itself, and a stage 
   const ci = r.prompt("CI fix 1");
   assert.ok(ci.includes("build it") && ci.includes(`\`git diff ${sha("f")} HEAD -- src/duck/verified.ts\``) && ci.includes("in `admitted`"));
   assert.match(ci, /EITHER keep refused by name[^]*OR leave admitted for the review after you to sweep/);
+  // kept refused through what the generator reads, never by editing the generated file (PR 652 review r1): CI's oracle
+  // holds verified.ts equal to what it answered alike, and a regeneration adds back an entry taken out by hand
+  for (const l of ["CI fix 1"]) {
+    const t = r.prompt(l);
+    assert.doesNotMatch(t, /entry left out of src\/duck\/verified\.ts|left out of `?src\/duck\/verified\.ts/, `"${l}" tells no agent to take an entry out of the generated file`);
+    for (const s of ["src/duck/verified.ts is GENERATED: never edit it by hand", "a `refused` entry of src/duck/gaps.ts", "regenerated from that push's CI run", "When neither is within this PR's reach, leave it admitted for the review"]) {
+      assert.ok(t.includes(s), `"${l}" says ${s}`);
+    }
+  }
+  const withCi = await run("pr-loop-slim", { ...PR }, { ...SLIM, "review r1": f("a"), "CI read r1": red, "fix r1": { ...pushed("b"), handoff: H1, admitted: [] }, "review r2": clean, "CI 1": green });
+  assert.ok(withCi.prompt("fix r1").includes("src/duck/verified.ts is GENERATED: never edit it by hand"), "a fix round carrying a CI failure is told the same");
+  const design = fs.readFileSync(path.join(ROOT, "docs", "DESIGN.md"), "utf8").replace(/\s+/g, " ");
+  assert.match(design, /a piece is kept refused only through what the generator reads[^]*?never by an entry taken out by hand/, "docs/DESIGN.md says the same");
   assert.ok(r.prompt("fix r1 (class)").includes("Return `admitted`"), "a fix with no CI failure says what it admitted, [] when nothing");
   const required = (l: string) => (r.calls.find((c) => c.opts.label === l)!.opts.schema as { required: string[] }).required;
   assert.ok(required("fix r1 (class)").includes("admitted") && required("CI fix 1").includes("admitted") && required("CI fix 1").includes("flake"));
@@ -2555,6 +2584,13 @@ test("the pr-persistent render: a class round renders its design, then its desig
   }
   const out = await sameNext(bound, bound, "a bound stop");
   assert.match(out, /^DONE: shrink: PR 900 stopped at the round bound \(4 review rounds\)/);
+  // a shrink run, its args.json naming shrinkOf as the skill writes it: its own bound is `DONE: bound:`
+  const dir = runFolder({ ...RACE_ARGS, shrinkOf: "899" });
+  const recorded: Record<string, string> = {};
+  for (const [label, a] of Object.entries(bound)) { fs.writeFileSync(resultPath(dir, label), JSON.stringify(a)); recorded[label] = resultPath(dir, label); }
+  const shrunk = renderRaw(dir, recorded);
+  assert.equal(shrunk.status, 0, shrunk.err);
+  assert.match(shrunk.out, /^DONE: bound: PR 900, itself the shrink of PR 899, stopped at the round bound/);
 });
 
 test("the skills: a `shrink:` DONE is the coordinator's ONE report at once, and the top session starts the shrink run (issue 649)", () => {
@@ -2573,6 +2609,11 @@ test("the skills: a `shrink:` DONE is the coordinator's ONE report at once, and 
   // up-next: the shrink run starts at once, the stopped PR closes after the shrink's merges, an override is the owner's
   const up = upNextText().replace(/\s+/g, " ");
   assert.match(up, /\*\*A shrink\*\* \(`shrink: …`\)[^]*?Start the shrink run AT ONCE, without asking[^]*?`shrinkOf`[^]*?until the shrink's PR merges, then is closed unmerged[^]*?naming the shrink's PR[^]*?Another round on the stopped PR, or any override of the bound, is the owner's word only[^]*?\*\*Needs Tom\*\*/);
+  // a shrink counts against the bound it enforces (PR 652 review r1): its own bound, `bound:`, restarts nothing
+  assert.match(prose, /`shrinkOf` is the stopped PR, as a string, so the script knows this run is a shrink and its own bound ends `bound:`, never a second `shrink:`/);
+  assert.match(prose, /\*\*A bound\*\* \(`DONE: bound: …`\)[^]*?nothing restarts by itself[^]*?ONE report at once/);
+  assert.match(up, /\*\*A bound\*\* \(`bound: …`\)[^]*?it starts NO run, never a second shrink[^]*?\*\*Needs Tom\*\*/);
+  assert.ok(upNextText().includes("`gh pr close <stopped PR>`"), "the stopped PR is closed by a command gh has");
 });
 
 test("pr-loop-slim: args.process names the arm in the record's text, and an unknown one stops the run", async () => {

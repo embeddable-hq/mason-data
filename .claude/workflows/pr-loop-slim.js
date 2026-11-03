@@ -40,7 +40,7 @@ export const meta = {
 // then makes a sub-issue per piece, posts the plan on the issue and stops before Implement, with the pieces in its
 // status; the top session (.claude/skills/up-next/SKILL.md) starts each piece as a run of its own. This took the place
 // of issue-loop.js (retired), whose Plan is the split and whose Setup is the Split stage.
-// args: { issue, parent, title, base, branch, stackedOn, context, readFirst?, brief?, process?, knownClasses?, repo?, itEnv? }
+// args: { issue, parent, title, base, branch, stackedOn, context, readFirst?, brief?, process?, knownClasses?, shrinkOf?, repo?, itEnv? }
 //   repo: the main checkout's path. Without it each agent finds the repository itself (WHERE), so the script runs for
 //   anyone on the team, from any checkout: no path of one machine is written here.
 //   brief: { brief, shapes, tests, split? }, the Brief stage's shape: given, that stage is skipped (a coordinator that
@@ -51,6 +51,8 @@ export const meta = {
 //   knownClasses: { slug: { count, why } } carried from the PRs this one is stacked on (or the issue's earlier PRs), so
 //   a class met on PR 170 counts on PR 207 too. The run returns its classes in the same shape, for the next run: only
 //   the classes of blocking findings a PR made, never the base's nor a non-blocking one, which are filed instead.
+//   shrinkOf: the PR an earlier run of this issue stopped with a `shrink:` status, when this run ships its safe subset;
+//   this run's own bound then stops with `bound:`, never a second `shrink:`.
 //   itEnv: a path to a file that holds IT_POSTGRES_URL (`export IT_POSTGRES_URL=…` or `IT_POSTGRES_URL=…`, both read by Node's --env-file), the Postgres the reviews and the author's own checks run
 //   their statements against through scripts/duck-repro.ts (a database of its own is made there and dropped). Without
 //   it, each starts a throwaway postgres:18 container of its own (wal_level=logical, a random password, a free loopback
@@ -468,7 +470,7 @@ const pieceText = (p) => `\`${p.key}\` (${p.names}${Number.isInteger(p.issue) ? 
 const SWEEP = 'every VARIANT FORM above spelt with that piece, over a synthetic table holding a column of each type the piece takes as input, beside the tables t and e, at the head and at the base; a form the base refused by name that the head answers differently from Postgres is blocking: severity wrong-answer, origin this-pr'
 // What a stage that may regenerate the allowlist is told (the CI fix, and a fix round carrying a CI failure)
 const ADMIT_RULE = (from) => `If your push regenerates the allowlist, read the pieces it adds to ${VERIFIED_FILE}: the \`+\` entries of \`git diff ${from} HEAD -- ${VERIFIED_FILE}\` (each \`["<kind>:<oid>", "<what it names>"]\`), that diff and never the CI log being what was added. Judge each against the issue's scope, which is the brief's: ${brief.brief}
-A piece the issue does not name you EITHER keep refused by name (the base's refusal kept: its entry left out of ${VERIFIED_FILE}, as the base has it, and an issue filed for admitting it, as CLAUDE.md "What a session finds" says), OR leave admitted for the review after you to sweep before it may stay. Return every piece your push adds in \`admitted\`, each { key, names, scope: 'issue' | 'beyond-review' | 'beyond-refused', issue (for beyond-refused, the issue filed) }; [] when it adds none.`
+A piece the issue does not name you EITHER keep refused by name, OR leave admitted for the review after you to sweep before it may stay. ${VERIFIED_FILE} is GENERATED: never edit it by hand, since CI's oracle holds it equal to exactly what the oracle answered alike, and the next regeneration adds back an entry taken out. So a piece is kept refused only through what the generator reads: the rewrite refuses its shape by name, with a \`refused\` entry of src/duck/gaps.ts, so the oracle meets it refused (the base's refusal kept), or the oracle statement that verified it is not one this PR adds; then the allowlist is regenerated from that push's CI run, and the piece is not among its \`+\` entries. File an issue for admitting it, as CLAUDE.md "What a session finds" says. When neither is within this PR's reach, leave it admitted for the review. Return every piece your push adds in \`admitted\`, each { key, names, scope: 'issue' | 'beyond-review' | 'beyond-refused', issue (for beyond-refused, the issue filed) }; [] when it adds none.`
 // what a fix round with no CI failure returns of it: it regenerates nothing, but says so
 const ADMIT_NONE = `Return \`admitted\`: every piece your push adds to ${VERIFIED_FILE}, the \`+\` entries of its diff, as { key, names, scope }; [] when it adds none, as a fix with no CI failure regenerates nothing.`
 // (c) every review reads the allowlist's diff itself, since the author's report is never evidence
@@ -490,10 +492,16 @@ function admittedText(a) {
 // ---------------------------------------------------------------- The round bound: shrink, never another round
 // The last head a review found clean is read from history[] (an entry with no blocking finding of this PR's, and not
 // unrun), never recomputed by a skill; the shrink run starts from it.
+// A shrink is an automatic restart, so it counts against the bound it enforces: a run that is itself a shrink
+// (args.shrinkOf) stops at its own bound with a status that begins `bound:`, which no skill restarts by itself; the
+// owner decides (review r1 of PR 652: a shrink of a shrink restarted without bound, onto the same branch and folder).
 const lastClean = () => [...history].reverse().find((h) => !h.unrun && h.findings.length === 0) || null
+const IS_SHRINK = A.shrinkOf !== undefined && A.shrinkOf !== null && A.shrinkOf !== ''
 function shrinkStatus(open) {
   const c = lastClean()
-  return `shrink: PR ${last.pr} stopped at the round bound (${MAX_ROUNDS} review rounds): ${open}. Its default next step is to narrow it to its safe subset, never another round: refuse by name what the base refused, revert what has no clean review, and file the rest as ONE new issue. Another round past the bound needs the owner's word (Needs Tom). ${c ? `The last head a review found clean is ${c.head.slice(0, 7)} (${c.label})` : 'No review was clean, so the safe subset is what the base already does'}`
+  const clean = c ? `The last head a review found clean is ${c.head.slice(0, 7)} (${c.label})` : 'No review was clean, so the safe subset is what the base already does'
+  if (IS_SHRINK) return `bound: PR ${last.pr}, itself the shrink of PR ${A.shrinkOf}, stopped at the round bound (${MAX_ROUNDS} review rounds): ${open}. A shrink's own bound starts no second shrink: another round, another shrink or closing both PRs is the owner's word only (Needs Tom). ${clean}`
+  return `shrink: PR ${last.pr} stopped at the round bound (${MAX_ROUNDS} review rounds): ${open}. Its default next step is to narrow it to its safe subset, never another round: refuse by name what the base refused, revert what has no clean review, and file the rest as ONE new issue. Another round past the bound needs the owner's word (Needs Tom). ${clean}`
 }
 
 // A finding the base has joins fromBase (one input is one finding, whatever slug a later round gives it); this PR's

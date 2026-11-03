@@ -665,12 +665,16 @@ head and at main. The loop around them let the PR's scope grow. Three things did
   clean, read from the script's own history, and its default next step is to narrow the PR to its safe subset: refuse
   by name what the base refused, revert what has no clean review, and file the rest as one new issue. The top session
   starts that as a new run of the issue at once (`shrinkOf`, `.claude/skills/up-next/SKILL.md`). Another round past
-  the bound is the owner's word only.
+  the bound is the owner's word only. The shrink counts against the bound it enforces: a shrink run that reaches its
+  own bound stops with `bound:`, which starts nothing by itself and goes to the owner.
 - **A regeneration admitted what nobody reviewed.** Round 3 was clean. The next CI fix regenerated the allowlist
   (`node scripts/oracle-legs.ts --write`) and admitted a function main refused by name, for every shape, because the
   oracle's few shapes matched; rounds 4 to 8 were that admission's forms. Now a stage that may regenerate returns
   `admitted`, every piece its push adds to `src/duck/verified.ts`, each judged against the issue's scope: kept refused
-  by name with an issue filed, or left for the next review to sweep in the variant forms at the head and the base. Every
+  by name with an issue filed, or left for the next review to sweep in the variant forms at the head and the base. The
+  file is generated and CI holds it equal to what the oracle answers alike, so a piece is kept refused only through
+  what the generator reads (a `refused` entry of `src/duck/gaps.ts` that the rewrite raises, or no oracle statement of
+  the PR's verifying it), never by an entry taken out by hand, which the next regeneration adds back. Every
   review reads the file's diff itself, since an author's report is never evidence.
 - **A class round decided by form.** The slim loop had no design review. Two class rounds then decided by a list of
   spellings, and one named an authority (the engine's prepared types) that does not exist where the rewrite decides.

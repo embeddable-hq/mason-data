@@ -84,10 +84,12 @@ collaborators and names what it left out (CLAUDE.md "The loop").
    asking, after the next run (step 1): a coordinator as in "Starting a run", its sentence also naming `shrinkOf` (the
    stopped PR) and the stopped run's folder, `<runs>/issue-<n>`, whose `result.json` holds its status and classes; the
    shrink's own folder is `<runs>/issue-<n>-shrink`. The stopped PR stays open until the shrink's PR merges, then is
-   closed unmerged (`gh pr close <stopped PR> --comment-file <file>`, the comment headed as CLAUDE.md "Git workflow"
-   says and naming the shrink's PR). Another round on the stopped PR, or any override of the bound, is the owner's
-   word only, never yours: put the options on the issue with their numbers (the rounds run, the findings open, the
-   last clean head), and move its card to **Needs Tom**.
+   closed unmerged: a comment naming the shrink's PR, headed as CLAUDE.md "Git workflow" says
+   (`gh pr comment <stopped PR> --body-file <file>`), then `gh pr close <stopped PR>`. Another round on the stopped PR,
+   or any override of the bound, is the owner's word only, never yours: put the options on the issue with their
+   numbers (the rounds run, the findings open, the last clean head), and move its card to **Needs Tom**.
+   **A bound** (`bound: …`) is a shrink run's own stop at the bound: a shrink counts against the bound it enforces, so
+   it starts NO run, never a second shrink; it goes to **Needs Tom** as an override does, its options on the issue.
 5. **Any other DONE**: read its diff in full (`gh pr diff <n>`), never only the report; the report and a green CI are
    claims, not evidence.
 6. **Merge under CLAUDE.md "Who merges what"** (Tom, 2026-10-31): every PR, `src/` included, merges without the owner's
