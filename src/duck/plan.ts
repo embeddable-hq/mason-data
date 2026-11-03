@@ -292,7 +292,8 @@ async function madeTypeRefusal(catalog: Parameters<typeof catalogRows>[0], code:
  * is C, so `SELECT 'a' < 'B'` answered there is byte order where the source's libc or ICU says otherwise. Its analysis
  * (under the session's state) says where it orders a collatable value and under which collation (`textOrdering`); an
  * operator or a function counts as ordering by the catalog's own name of it (`<`, `max` …, never `=` or `count`), and
- * the resolver says whether that collation is byte order. True: the statement is planned for the synced data, made and
+ * the resolver says whether that collation is byte order; and a call of upper, lower or initcap of text, under any
+ * collation, maps case (issue 406), which the catalog does by its own rules. True: the statement is planned for the synced data, made and
  * refused like any other. A statement the analysis refuses stays the catalog's, which raises Postgres's own error.
  */
 export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Uint8Array>; text: string; paramOids: readonly number[]; under: SessionState; collations: CollationResolver; bindable: boolean }): Promise<boolean> {
@@ -316,14 +317,18 @@ export async function ordersText(o: { catalog: (bytes: Uint8Array) => Promise<Ui
     try { const c = resolved.resolve(coll); return c !== null && c.kind !== "bytes"; }
     catch (e) { if (e instanceof Unrewritable) return true; throw e; }
   };
-  const { orders, operators, functions } = textOrdering(analysis.tree);
+  const { orders, operators, functions, calls } = textOrdering(analysis.tree);
   if ([...orders].some(ordering)) return true;
   const ops = [...operators].filter(([, cs]) => [...cs].some(ordering)).map(([oid]) => oid);
   const fns = [...functions].filter(([, cs]) => [...cs].some(ordering)).map(([oid]) => oid);
-  if (ops.length + fns.length === 0) return false;
+  // upper / lower / initcap of text (issue 406): the synced data's under ANY collation, byte order's included, since
+  // the catalog maps case by its own rules, never the source's ctype (src/duck/collation.ts `caseOf` says the source's)
+  const cased = [...calls.keys()];
+  if (ops.length + fns.length + cased.length === 0) return false;
   const named = await catalogRows(o.catalog, [
     ...(ops.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_operator WHERE oid IN (${ops.join(", ")}) AND oprname IN ('<', '>', '<=', '>=')`] : []),
-    ...(fns.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_proc WHERE oid IN (${fns.join(", ")}) AND proname IN ('min', 'max')`] : [])].join(" UNION ALL "));
+    ...(fns.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_proc WHERE oid IN (${fns.join(", ")}) AND proname IN ('min', 'max')`] : []),
+    ...(cased.length > 0 ? [`SELECT oid::text FROM pg_catalog.pg_proc WHERE oid IN (${cased.join(", ")}) AND proname IN ('upper', 'lower', 'initcap') AND pronamespace = 'pg_catalog'::regnamespace`] : [])].join(" UNION ALL "));
   return named.length > 0;
 }
 

@@ -27,7 +27,7 @@ import type { KeptRoutes } from "./kept-route.ts";
 import type { CopyState } from "./sync.ts";
 import { VERIFIED } from "./verified.ts";
 import { registerFunctions, SESSION_VARIABLE, SETTINGS_VARIABLE } from "./functions.ts";
-import { CollationResolver, duckCollation, isLibcCollation, type DuckCollation, type SourceCollation } from "./collation.ts";
+import { caseMappingOf, CollationResolver, duckCollation, isLibcCollation, type DuckCollation, type SourceCollation } from "./collation.ts";
 
 /** the source's collations as the listener resolves them (src/duck/collation.ts): its pg_collation rows, the libc
  *  orders read at the start (a synced column's), by collcollate, and how one named first by a statement is read */
@@ -375,7 +375,7 @@ export class DuckStore {
    *  its text sorted as the SOURCE sorts it (`collation`, pg_database's; absent, by bytes; a libc one by `libc`, its
    *  order as `libcOrder` read it), refusing what is not `verified` (null: nothing is refused for it, the oracle's
    *  recording run alone). */
-  async listener(collation: { provider: string; collate: string; locale: string | null } | undefined,
+  async listener(collation: { provider: string; collate: string; ctype?: string | null; locale: string | null } | undefined,
     verified: ReadonlyMap<string, string> | null = VERIFIED, libc?: LibcOrder, copies: () => readonly CopyState[] = () => [], kept?: KeptRoutes,
     more: ListenerCollations = {}): Promise<DuckOptions & { collation: DuckCollation; collations: CollationResolver }> {
     const known = new Set((await this.writer.runAndReadAll("SELECT collname FROM pragma_collations()")).getRowsJson().map((r) => String(r[0])));
@@ -392,7 +392,10 @@ export class DuckStore {
     // a libc collation named first by a statement: read from the source on its first use, kept in the copy, then the
     // engine told its order before the plan that needs it is made (src/duck/collation.ts)
     const readLibc = more.readLibc;
+    // the database's case mapping is its CTYPE's (datctype; ICU's or builtin's locale), never its order's
+    const ctype = collation === undefined ? null : collation.provider === "c" ? collation.ctype ?? collation.collate : collation.locale ?? collation.collate;
     const resolver = new CollationResolver({ database: c, databaseCollate: collation !== undefined && isLibcCollation(collation.provider, collation.collate) ? collation.collate : null,
+      ...(collation === undefined ? {} : { databaseCase: { mapping: caseMappingOf(collation.provider, ctype, collation.locale), ctype: ctype ?? "" } }),
       source: more.collations ?? null, known, libc: more.libcOrders ?? new Map(),
       readLibc: readLibc === undefined ? null : async (sc) => {
         const r = await this.libcOrder(sc.collate ?? "C", sc.version ?? null, () => readLibc(sc));

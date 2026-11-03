@@ -38,6 +38,7 @@ import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
+import { mayOrderText } from "../src/api/postgres/translate.ts";
 import { DEEP_DEPTHS, PLAN_TIME_BOUND_MS, deepChains, deepShapes, numericShapes } from "./deep-chains.ts";
 
 const API_KEY = "k".repeat(48);
@@ -6772,6 +6773,92 @@ test("collation resolver: refuses what it cannot follow by name, and a collation
     // unused for an order, an ICU keyword is no refusal: equality is the C key
     assert.deepEqual(await answer(c, "SELECT id FROM colls WHERE d = 'b' COLLATE mason_num"), { fields: [["id", 23]], rows: [["6"]] });
   } finally { await c.end(); await a.close(); }
+});
+
+// ISSUE 406: upper, lower and initcap map case under THEIR input collation (Postgres's analysis says which), as that
+// collation's ctype says (src/duck/collation.ts caseOf), never the database's by default; a statement of no table that
+// calls one is the synced data's, never the catalog's own mapping. Every answer here is Postgres 18's (postgres:18), never
+// the unit world's PGlite, whose mapping is its own
+const CASE_COLLATIONS = [
+  { schema: "pg_catalog", name: "tr-x-icu", provider: "i", collate: null, locale: "tr", deterministic: true },
+  { schema: "pg_catalog", name: "en_US", provider: "c", collate: "en_US.utf8", ctype: "en_US.utf8", locale: null, deterministic: true },
+  { schema: "pg_catalog", name: "tr_TR", provider: "c", collate: "tr_TR.utf8", ctype: "tr_TR.utf8", locale: null, deterministic: true },
+  { schema: "pg_catalog", name: "pg_c_utf8", provider: "b", collate: null, locale: "C.UTF-8", deterministic: true },
+  { schema: "pg_catalog", name: "pg_unicode_fast", provider: "b", collate: null, locale: "PG_UNICODE_FAST", deterministic: true },
+  { schema: "public", name: "mason_num", provider: "i", collate: null, locale: "und-u-kn", deterministic: true },
+];
+test("issue 406: upper, lower and initcap map case under their input collation, and a statement of no table calling one is the synced data's", async () => {
+  // no table, the database's en_US: glibc keeps ß, the catalog's own mapping made it ẞ
+  const plain = await client();
+  try {
+    assert.deepEqual((await answer(plain, "SELECT initcap('o''neil mcDONALD-smith'), upper('ß'), lower('İ')")).rows, [["O'Neil Mcdonald-Smith", "ß", "i"]]);
+    assert.deepEqual((await answer(plain, "SELECT upper('abc'), lower('ABC'), initcap('abc def')")).rows, [["ABC", "abc", "Abc Def"]]);
+    assert.deepEqual((await answer(plain, "SELECT initcap(x), upper(x), lower(x) FROM (VALUES ('ǆemal'), ('o''hara'), ('ΟΔΟΣ'), ('ß'), (NULL)) AS v(x)")).rows,
+      [["Ǆemal", "ǄEMAL", "ǆemal"], ["O'Hara", "O'HARA", "o'hara"], ["Οδοσ", "ΟΔΟΣ", "οδοσ"], ["ß", "ß", "ß"], [null, null, null]]);
+  } finally { await plain.end(); }
+  const listener = await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] });
+  const { api: a, c } = await collsApi(listener, CASE_COLLATIONS);
+  try {
+    for (const [sql, rows] of [
+      // a column's own collation: ICU's full mapping and titlecasing, C's ASCII letters, the database's glibc
+      ["SELECT upper(i || 'ß'), lower(i || 'İ'), initcap(i || 'o''hara ǆemal') FROM colls WHERE id = 1", [["SS", "i̇", "O'hara ǅemal"]]],
+      ["SELECT upper(c || 'é'), lower(c || 'É'), initcap(c || 'élan x2y') FROM colls WHERE id = 1", [["é", "É", "éLan X2y"]]],
+      ["SELECT upper(d || 'ß'), lower(d || 'İ'), initcap(d || 'o''hara ǆemal') FROM colls WHERE id = 1", [["ß", "i", "O'Hara Ǆemal"]]],
+      // a COLLATE on the argument, never on the result
+      ["SELECT upper(d COLLATE \"tr-x-icu\" || 'i'), lower('I' COLLATE \"tr-x-icu\"), initcap('istanbul' COLLATE \"tr-x-icu\") FROM colls WHERE id = 1", [["İ", "ı", "İstanbul"]]],
+      ["SELECT upper(d || 'é') COLLATE \"C\", upper((d || 'é') COLLATE \"C\") FROM colls WHERE id = 1", [["É", "é"]]],
+      ["SELECT upper('ß' COLLATE pg_unicode_fast), upper('ß' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_c_utf8), initcap('ǆa ßb' COLLATE pg_unicode_fast) FROM colls WHERE id = 1", [["SS", "ß", "Ǆa ßb", "ǅa Ssb"]]],
+      // an ICU keyword Mason cannot ORDER by maps case as its language does
+      ["SELECT upper(d COLLATE mason_num || 'ß') FROM colls WHERE id = 1", [["SS"]]],
+      // no table, under a COLLATE
+      ["SELECT upper('ß' COLLATE \"und-x-icu\"), lower('İ' COLLATE \"und-x-icu\"), initcap('o''hara' COLLATE \"und-x-icu\"), upper('é' COLLATE \"C\")", [["SS", "i̇", "O'hara", "é"]]],
+    ] as const) assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+    // two implicit collations: Postgres's 42P22, for the function
+    await assert.rejects(c.query("SELECT upper(CASE WHEN id > 3 THEN i ELSE c END) FROM colls"),
+      (e: pg.DatabaseError) => e.code === "42P22" && e.message === "could not determine which collation to use for upper() function");
+    // a Turkish libc ctype: refused by name, its equality still answered
+    await assert.rejects(c.query("SELECT upper(d COLLATE \"tr_TR\") FROM colls"),
+      (e: pg.DatabaseError) => e.code === "0A000" && /Mason gap case-mapping-unknown/.test(e.detail ?? "") && /tr_TR/.test(e.message) && /COLLATE "C"/.test(e.hint ?? ""));
+    assert.deepEqual((await answer(c, "SELECT id FROM colls WHERE d = 'b' COLLATE \"tr_TR\"")).rows, [["6"]]);
+    // the ORDER refusal of an ICU keyword stays
+    await assert.rejects(c.query("SELECT id FROM colls ORDER BY upper(d COLLATE mason_num)"), (e: pg.DatabaseError) => e.code === "0A000" && /mason_num/.test(e.message));
+  } finally { await c.end(); await a.close(); }
+
+  // THE SQL SENT: the database's glibc maps by the engine's own upper (ß kept) and lower, never a function a row; another
+  // collation's mapping is the function's, told its mapping
+  const catalogDb = new PGlite({ extensions: { citext } });
+  try {
+    for (const s of catalogDdl({ ...schema, tables: [...schema.tables, collsTable], collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] })) await catalogDb.exec(s);
+    const catalog = (b: Uint8Array): Promise<Uint8Array> => catalogDb.execProtocolRaw(b);
+    const sent = async (sql: string, collations = listener.collations) => (await planDuck({ catalog, text: sql, stmt: (await parseSql(sql)).stmts![0]!.stmt as Parameters<typeof planDuck>[0]["stmt"],
+      base: 0, paramOids: [], searchPath: "public", timeZone: "UTC", collations, verified: null })).sql.text;
+    const native = await sent("SELECT upper(d), lower(d) FROM colls");
+    assert.match(native, /replace\(upper\(replace\(/, native);
+    assert.match(native, /lower\(/, native);
+    assert.doesNotMatch(native, /__mason_/, native);
+    assert.match(await sent("SELECT upper(i) FROM colls"), /__mason_case\(.*, true, 'icu:und'\)/);
+    assert.match(await sent("SELECT upper(d COLLATE \"C\") FROM colls"), /__mason_case\(.*'ascii'\)/);
+    assert.match(await sent("SELECT lower(d COLLATE \"tr-x-icu\") FROM colls"), /__mason_case\(.*false, 'icu:tr'\)/);
+    assert.match(await sent("SELECT initcap(d) FROM colls"), /__mason_initcap\(.*'libc'\)/);
+    assert.match(await sent("SELECT initcap(i) FROM colls"), /__mason_initcap\(.*'icu:und'\)/);
+    // the database's case mapping is its CTYPE's: datcollate C with datctype en_US maps as en_US, en_US with C ASCII only
+    const cOrder = await store.listener({ provider: "c", collate: "C", ctype: "en_US.UTF-8", locale: null }, undefined, undefined, () => copies, undefined, { collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] });
+    assert.doesNotMatch(await sent("SELECT upper(d) FROM colls", cOrder.collations), /__mason_/);
+    const cCtype = await store.listener({ provider: "c", collate: "en_US.utf8", ctype: "C", locale: null }, undefined,
+      handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({})], [" "], { collate: "en_US.utf8" }), () => copies, undefined, { collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] });
+    assert.match(await sent("SELECT upper(d) FROM colls", cCtype.collations), /__mason_case\(.*'ascii'\)/);
+    // an ICU database: its locale's
+    const icu = await store.listener({ provider: "i", collate: "und", ctype: "und", locale: "und" }, undefined, undefined, () => copies, undefined, { collations: [...PG_COLLATIONS, ...CASE_COLLATIONS] });
+    assert.match(await sent("SELECT upper(d) FROM colls", icu.collations), /__mason_case\(.*'icu:und'\)/);
+  } finally { await catalogDb.close(); }
+
+  // NO TABLE: the raw tree may hold a case function, and the analysis says it does; a numeric keeps it the catalog's (a
+  // listed difference, Mason gap fromless-numeric-text-order)
+  const catalog = (b: Uint8Array): Promise<Uint8Array> => truth.execProtocolRaw(b);
+  const under = { searchPath: "public", timeZone: "UTC", dateStyle: "ISO, MDY" } as Parameters<NonNullable<typeof listener.ordersText>>[3];
+  for (const [sql, routed] of [["SELECT upper('ß')", true], ["SELECT initcap('a b'), lower('X')", true], ["SELECT 'a' = 'A', version() IS NOT NULL", false], ["SELECT upper('ß'), 1.5", false]] as const) {
+    assert.equal(mayOrderText((await parseSql(sql)).stmts![0]!.stmt) && await listener.ordersText!(catalog, sql, [], under, true), routed, sql);
+  }
 });
 
 test("collation resolver: two libc collations in one session, each by its own order, the second read once on its first use", async () => {

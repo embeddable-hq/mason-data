@@ -487,10 +487,11 @@ export function collationOf(v: TreeNode): number {
  * WHERE A STATEMENT'S ANALYSIS ORDERS A COLLATABLE VALUE, by the collation it orders under: a sort key of any query
  * (its ORDER BY, a window's ORDER BY, an aggregate's ORDER BY or WITHIN GROUP), a GREATEST / LEAST, a row comparison,
  * and — as candidates whose operator or function the caller names from the catalog — an operator's and an aggregate's
- * or window function's input collation (`<` orders, `=` does not; `max` orders, `count` does not).
+ * or window function's input collation (`<` orders, `=` does not; `max` orders, `count` does not), and a plain
+ * function's (`calls`: `upper` maps case under it, issue 406; `length` reads none of it).
  */
-export function textOrdering(tree: TreeValue): { orders: Set<number>; operators: Map<number, Set<number>>; functions: Map<number, Set<number>> } {
-  const orders = new Set<number>(), operators = new Map<number, Set<number>>(), functions = new Map<number, Set<number>>();
+export function textOrdering(tree: TreeValue): { orders: Set<number>; operators: Map<number, Set<number>>; functions: Map<number, Set<number>>; calls: Map<number, Set<number>> } {
+  const orders = new Set<number>(), operators = new Map<number, Set<number>>(), functions = new Map<number, Set<number>>(), calls = new Map<number, Set<number>>();
   const add = (m: Map<number, Set<number>>, oid: number | null, coll: number): void => { if (oid === null || coll === 0) return; const s = m.get(oid) ?? new Set(); s.add(coll); m.set(oid, s); };
   const sorted = (clauses: TreeValue | undefined, targets: TreeValue | undefined): void => {
     if (!Array.isArray(clauses) || !Array.isArray(targets)) return;
@@ -512,12 +513,13 @@ export function textOrdering(tree: TreeValue): { orders: Set<number>; operators:
     if (v._node === "AGGREF") { sorted(v.aggorder, v.args); add(functions, num(v.aggfnoid ?? null), num(v.inputcollid ?? null) ?? 0); }
     if (v._node === "WINDOWFUNC") add(functions, num(v.winfnoid ?? null), num(v.inputcollid ?? null) ?? 0);
     if (v._node === "OPEXPR") add(operators, num(v.opno ?? null), num(v.inputcollid ?? null) ?? 0);
+    if (v._node === "FUNCEXPR") add(calls, num(v.funcid ?? null), num(v.inputcollid ?? null) ?? 0);
     if (v._node === "MINMAXEXPR") { const coll = num(v.inputcollid ?? null) ?? 0; if (coll !== 0) orders.add(coll); }
     if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.inputcollids)) for (const x of v.inputcollids) { const coll = typeof x === "string" ? num(x) ?? 0 : 0; if (coll !== 0) orders.add(coll); }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };
   visit(tree);
-  return { orders, operators, functions };
+  return { orders, operators, functions, calls };
 }
 
 /** EVERY COLLATION A STATEMENT'S ANALYSIS NAMES (an expression's, an operator's input, a row comparison's per column, a
