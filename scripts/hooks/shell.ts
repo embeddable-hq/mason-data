@@ -20,6 +20,9 @@ export interface HookInput {
   stop_hook_active?: unknown;
   background_tasks?: unknown;
   session_crons?: unknown;
+  /** Set only inside a sub-agent (the Agent tool's, a Workflow's); a main session's input has none, a `--agent` one only agent_type. */
+  agent_id?: unknown;
+  agent_type?: unknown;
 }
 
 /**
@@ -39,6 +42,16 @@ export function readInput(): HookInput {
 /** The Bash command of a PreToolUse input, or undefined for any other tool. */
 export function bashCommand(input: HookInput): string | undefined {
   return input.tool_name === "Bash" && typeof input.tool_input?.command === "string" ? input.tool_input.command : undefined;
+}
+
+/**
+ * Whether the call comes from a sub-agent rather than the main session: the input's `agent_id`, a non-empty string,
+ * which Claude Code sets on a hook fired inside a sub-agent and never on the main session's
+ * (https://code.claude.com/docs/en/hooks, "Common input fields"; seen on 2.1.312). Anything else (absent, empty, not a
+ * string) reads as the main session, so a malformed input never blocks the top session.
+ */
+export function subAgent(input: HookInput): boolean {
+  return typeof input.agent_id === "string" && input.agent_id.length > 0;
 }
 
 export interface SimpleCommand {
