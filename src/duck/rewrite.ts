@@ -670,6 +670,10 @@ class Rewriter {
     // and its columns' decisions (`decided`), so a copy reads the decision its original took, never takes it again
     const decisions = this.decisions.get(v as object);
     if (decisions !== undefined) this.decisions.set(out, new Map(decisions));
+    // and its GROUP BY as Postgres analysed it (`grouping`), recorded before a rule wrote its clause for the engine: a
+    // copy of a SELECT whose clause holds a jsonb's key in its place still groups the expression
+    const grouping = this.groupings.get(v as object);
+    if (grouping !== undefined) this.groupings.set(out, new Map(grouping));
     // and an arm `exactArms` wrapped is still the arm it reads
     if (this.armWrapped.has(v as object)) {
       const subquery = ((out.fromClause as AstNode[] | undefined)?.[0] !== undefined ? bodyOf((out.fromClause as AstNode[])[0]!).subquery : undefined) as AstNode | undefined;
@@ -1001,18 +1005,6 @@ class Rewriter {
         for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) keys(x);
       };
       keys([b.targetList, b.windowClause, b.sortClause]);
-      // each cast read per group: outside an aggregate's or a window's argument, whose rows are each its own, and outside
-      // a group key (`GROUP BY 1` of the cast itself is grouped as it is written)
-      const keyShapes = new Set(((b.groupClause ?? []) as AstNode[]).filter((g) => kindOf(g) !== "GroupingSet").map((g) => shapeOf(this.groupedExpression(g, b))));
-      const casts = (v: unknown): void => {
-        if (Array.isArray(v)) { for (const x of v) casts(x); return; }
-        if (v === null || typeof v !== "object") return;
-        if (isNode(v) && (kindOf(v) === "SelectStmt" || kindOf(v) === "SubLink" || keyShapes.has(shapeOf(v)))) return;
-        if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || bodyOf(v).agg_within_group === true)) return;
-        if (isNode(v) && kindOf(v) === "TypeCast") this.groupedCasts.set(bodyOf(v), b);
-        for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) casts(x);
-      };
-      casts([b.targetList, b.sortClause, b.havingClause]);
     }
     // a DISTINCT ON's sort holds its ON expressions (distinctOnSorted): before any key is built, so each is built as one
     this.distinctOnSorted(b);
@@ -1029,6 +1021,22 @@ class Rewriter {
     this.refuseMergedExact(b);
     this.namedThroughStar(b);
     this.starWrittenOut(b);
+    // THE GROUP BY AS POSTGRES ANALYSED IT (`grouping`), recorded here: over the list as the engine reads it (a `*`
+    // written out, so a key's shape is its written column's), before any rule below writes the clause for the engine
+    this.grouping(b);
+    if ((Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || ((b.targetList ?? []) as AstNode[]).some((t) => this.hasAggregate(bodyOf(t).val))) {
+      // each cast read per group: outside an aggregate's or a window's argument, whose rows are each its own, and outside
+      // a grouped expression (`GROUP BY 1` of the cast itself is grouped as it is written)
+      const casts = (v: unknown): void => {
+        if (Array.isArray(v)) { for (const x of v) casts(x); return; }
+        if (v === null || typeof v !== "object") return;
+        if (isNode(v) && (kindOf(v) === "SelectStmt" || kindOf(v) === "SubLink" || this.groupedAs(v, b) !== null)) return;
+        if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || bodyOf(v).agg_within_group === true)) return;
+        if (isNode(v) && kindOf(v) === "TypeCast") this.groupedCasts.set(bodyOf(v), b);
+        for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) casts(x);
+      };
+      casts([b.targetList, b.sortClause, b.havingClause]);
+    }
     this.rowValues(b);
     for (const w of (b.windowClause ?? []) as AstNode[]) if (isNode(w)) this.keyedPartition(bodyOf(w));
     // a GROUP BY of an output name is grouped by its ordinal: DuckDB binds a name without regard to case, so `"Name"`
@@ -1111,7 +1119,12 @@ class Rewriter {
         const as = sb.node;
         // (a key bound by equality has no analysed node of its own where Postgres's tree reads it as the entry: it is
         // typed as the output it is, so a jsonb's, a citext's or a collation's key is built for it)
-        if (bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(as) && this.typeOf(as as AstNode) === null && this.typeOf(out.value) !== null) this.typedLike.set(bodyOf(as as AstNode), out.value);
+        // A cast with no node of its own is otherwise typed by its argument ("a cast to the type the value already has"),
+        // which a rule may have made another value: a grouped jsonb read per group, `any_value(j.j -> 'r')`, under
+        // `::text` sorted by jsonb's key (issue 212). Bound by equality, it is the output, of the output's type
+        const outTyped = bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(as) && kindOf(as as AstNode) === "TypeCast" && this.allAt(bodyOf(as as AstNode), ANALYSED.TypeCast!).length === 0 ? this.typed(out.value) : null;
+        if (outTyped !== null) this.synthetic.set(bodyOf(as as AstNode), outTyped);
+        else if (bound[i]!.equal && out !== null && kindOf(s) === "SortBy" && isNode(as) && this.typeOf(as as AstNode) === null && this.typeOf(out.value) !== null) this.typedLike.set(bodyOf(as as AstNode), out.value);
         const built = this.sortBy(sb, targets, b, bound[i]!.equal ? null : out);
         // a key bound to a computed output by EQUALITY, written as it is, is that output: its ordinal, so DuckDB reads
         // the one value the list shows (`ORDER BY random()` beside `random() AS r` is r, never a second random()). A
@@ -1500,14 +1513,25 @@ class Rewriter {
     const groups = (b.groupClause ?? []) as AstNode[];
     if (groups.length === 0 || groups.some((g) => kindOf(g) === "GroupingSet")) return;
     const targets = (b.targetList ?? []) as AstNode[];
-    // a target the GROUP BY names by its ordinal or its output name is a key itself, and DuckDB reads it there: untouched
-    const keyTargets = new Set<number>();
-    // (by the one resolver's GROUP BY reading: a number, or a bare name that is no input column)
-    for (const g of groups) {
-      const out = this.groupOutput(g, targets);
-      if (out !== null) keyTargets.add(out.target);
-    }
-    const grouped = new Set([...groups.map(shapeOf), ...[...keyTargets].map((i) => shapeOf(bodyOf(targets[i]!).val as AstNode))]);
+    // WHAT IS GROUPED IS THE GROUP BY AS POSTGRES ANALYSED IT (`groupedAs`, issue 212), a target it names by its number
+    // or its output name included: a grouped expression the engine's clause holds as written is untouched; one it groups
+    // by a key in its place (a jsonb) is read through ONE any_value of the WHOLE expression, the group's value, typed
+    // as it, so every reader (a cast's text, a `#>` path, a function) reads it as the expression it is
+    const perGroup = (v: AstNode): AstNode => {
+      const call = fn("any_value", [v]);
+      this.done.add(bodyOf(call));
+      this.typedLike.set(bodyOf(call), v);
+      return call;
+    };
+    // (inside a subquery, only an expression of this query's columns alone: the engine computes an aggregate of outer
+    // columns in the outer query, and a shape alike over the subquery's own columns is no grouped expression of this one)
+    const ofThisQuery = (v: unknown, depth: number): boolean => {
+      if (Array.isArray(v)) return v.every((x) => ofThisQuery(x, depth));
+      if (v === null || typeof v !== "object") return true;
+      if (isNode(v) && kindOf(v) === "SubLink") return false;
+      if (isNode(v) && kindOf(v) === "ColumnRef") { const t = this.typed(v); return t?.node === "VAR" && t.levelsUp === depth; }
+      return Object.values(isNode(v) ? bodyOf(v) : v as Body).every((x) => ofThisQuery(x, depth));
+    };
     // `depth`: the subqueries between here and this query (a correlated subquery's column of this query is levelsUp 1)
     const wrap = (v: unknown, depth: number): unknown => {
       if (Array.isArray(v)) return v.map((x) => wrap(x, depth));
@@ -1515,7 +1539,9 @@ class Rewriter {
       // a plain body (a window's OVER, a SubLink's select): its parts
       if (!isNode(v)) { for (const [key, x] of Object.entries(v as Body)) if (key !== "location") (v as Body)[key] = wrap(x, depth); return v; }
       const k = kindOf(v), n = bodyOf(v);
-      if (grouped.has(shapeOf(v))) return v;
+      const as = this.groupedAs(v, b);
+      if (as === "engine") return v;
+      if (as === "keyed" && (depth === 0 || ofThisQuery(v, depth))) return perGroup(v);
       if (k === "SubLink") { for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth + 1); return v; }
       if (k === "FuncCall" && n.over === undefined && this.typed(v)?.node === "AGGREF") return v;
       if (k === "ColumnRef" && hasStar(v)) {
@@ -1542,7 +1568,7 @@ class Rewriter {
       for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth);
       return v;
     };
-    targets.forEach((t, i) => { if (!keyTargets.has(i)) { const tb = bodyOf(t); tb.val = wrap(tb.val, 0); } });
+    for (const t of targets) { const tb = bodyOf(t); tb.val = wrap(tb.val, 0); }
     if (b.havingClause !== undefined) b.havingClause = wrap(b.havingClause, 0);
     if (Array.isArray(b.sortClause)) for (const s of b.sortClause as AstNode[]) { const sb = bodyOf(s); sb.node = wrap(sb.node, 0); }
   }
@@ -1924,10 +1950,8 @@ class Rewriter {
     }
     if (targets.length !== fields.length) return [];
     const grouped = (Array.isArray(b.groupClause) && b.groupClause.length > 0) || b.havingClause !== undefined || targets.some((t) => this.hasAggregate(bodyOf(t).val));
-    const groupShapes = new Set(((b.groupClause ?? []) as AstNode[]).map((g) => {
-      const n = constInt(g);
-      return shapeOf(n !== null && n >= 1 && n <= targets.length ? bodyOf(targets[n - 1]!).val as AstNode : g);
-    }));
+    // (what the GROUP BY groups, as Postgres analysed it: `grouping`, an ordinal beside a `*` read by the one resolver)
+    const groupShapes = new Set(this.grouping(b).keys());
     const cells: Array<{ node: AstNode; conv: CellConv; shape: string }> = [];
     const out: ExactColumn[] = [];
     targets.forEach((target, i) => {
@@ -3813,9 +3837,9 @@ class Rewriter {
     if (select === null || groups.length === 0 || groups.some((g) => kindOf(g) === "GroupingSet")) return e;
     const collated = kindOf(e) === "CollateClause" && isNode(bodyOf(e).arg);
     const value = collated ? bodyOf(e).arg as AstNode : e;
-    // (DuckDB groups `t.s COLLATE …` as that expression: the bare t.s under it is not grouped)
-    const grouped = new Set(groups.map((g) => shapeOf(this.groupedExpression(g, select))));
-    if (grouped.has(shapeOf(value)) || kindOf(value) === "A_Const") return e;
+    // (DuckDB groups `t.s COLLATE …` as that expression: the bare t.s under it is not grouped; a jsonb the engine groups
+    // by its key is read per group too, as one value: `groupedAs`)
+    if (this.groupedAs(value, select) === "engine" || kindOf(value) === "A_Const") return e;
     const aggregated = (v: unknown): boolean => {
       if (Array.isArray(v)) return v.some(aggregated);
       if (v === null || typeof v !== "object") return false;
@@ -3866,6 +3890,35 @@ class Rewriter {
   /** a GROUP BY item as the expression it groups: an ordinal or an output name is that target's */
   private groupedExpression(g: AstNode, b: Body): AstNode {
     return this.groupOutput(g, (b.targetList ?? []) as AstNode[])?.value ?? g;
+  }
+
+  /**
+   * THE GROUP BY AS POSTGRES ANALYSED IT (issue 212; the class "a fact derived in several places"): the shape of each
+   * expression a SELECT's GROUP BY groups, outside a grouping set, each item resolved by the one resolver
+   * (`groupedExpression`: an ordinal or an output name is its target's), RECORDED ONCE per SELECT before any rule writes
+   * the clause for the engine (`select` asks first; `exactColumns`, before the walk, may). What the record says of each
+   * is how the ENGINE's GROUP BY holds it: `engine`, as written; `keyed`, by a key a rule put in its place
+   * (`keyedGroups`: a jsonb by its equality key, so the engine groups 1.0 with 1.00 as Postgres does). A grouped
+   * expression is grouped whatever the clause became: whether one is, and how, is read here alone (`groupedAs`), never
+   * from the clause as a later rule left it — the clause read after `keyedGroups` lost the jsonb expression, so its
+   * every reader took it for ungrouped and read its column through any_value (`any_value(j.j) -> 'r'`: 2.45 for 2.450).
+   */
+  private readonly groupings = new WeakMap<object, Map<string, "engine" | "keyed">>();
+
+  private grouping(b: Body): Map<string, "engine" | "keyed"> {
+    let record = this.groupings.get(b);
+    if (record === undefined) {
+      record = new Map();
+      for (const g of (b.groupClause ?? []) as AstNode[]) if (isNode(g) && kindOf(g) !== "GroupingSet") record.set(shapeOf(this.groupedExpression(g, b)), "engine");
+      this.groupings.set(b, record);
+    }
+    return record;
+  }
+
+  /** how SELECT `b`'s GROUP BY groups `e` (`grouping`): as written in the engine's clause, by a key in its place, or
+   *  not at all (null) */
+  private groupedAs(e: AstNode, b: Body | null): "engine" | "keyed" | null {
+    return b === null ? null : this.grouping(b).get(shapeOf(e)) ?? null;
   }
 
   /** a value Mason cannot sort, group or compare as Postgres does: a jsonb where it is not keyed (`compared` keys it),
@@ -3984,9 +4037,10 @@ class Rewriter {
 
   /**
    * GROUP BY A JSONB (Postgres groups by jsonb's equality: `1.0` and `1.00` are one group): grouped by its order key,
-   * an ordinal or an output name by its target's. The value itself is then no group key, so `decidedByKey` reads it
-   * through any_value — the group's value, which is one of the texts Postgres's group holds, as Postgres's answer is
-   * the one its plan meets first (gap jsonb-equal-text). Anything else Mason cannot group as Postgres does is refused,
+   * an ordinal or an output name by its target's. The value itself is then no group key of the engine's, so it is
+   * recorded `keyed` (`grouping`) and `decidedByKey` reads the whole expression through ONE any_value — the group's
+   * value, which is one of the texts Postgres's group holds, as Postgres's answer is the one its plan meets first (gap
+   * jsonb-equal-text). Anything else Mason cannot group as Postgres does is refused,
    * in a grouping set too.
    */
   private keyedGroups(b: Body): void {
@@ -4009,6 +4063,8 @@ class Rewriter {
       const exact = this.exactKey(e);
       if (exact !== null) return [g, exact];
       if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return [g]; }
+      // (the engine groups it by its key alone: every reader of the expression reads it per group, `groupedAs`)
+      this.grouping(b).set(shapeOf(grouped), "keyed");
       return [this.equalKey(e === g ? g : this.clone(e))];
     });
   }
