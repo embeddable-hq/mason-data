@@ -391,7 +391,7 @@ jobs:
       - name: the collation statements under ${{ matrix.collation }}
         env:
           IT_ORACLE_COLLATION: ${{ matrix.collation }}
-          IT_ORACLE_ONLY: '^collation: |^the table colls,|^gap case: (collation-unknown|hypothetical-set)$'
+          IT_ORACLE_ONLY: '^collation: |^the table colls(_case)?,|^gap case: (collation-unknown|hypothetical-set)$'
           TMPDIR: ${{ runner.temp }}/collation
         run: |
           mkdir -p "$TMPDIR"

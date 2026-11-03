@@ -31,7 +31,7 @@ import { pgEvalSync } from "./pg-eval.ts";
 import type { GapId, PostgresRefuses } from "./gaps.ts";
 import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
-import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type CaseMode, type JsonKind, type PgKind } from "./functions.ts";
+import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type NumericProgram } from "../lib/pg-numeric.ts";
 import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
@@ -39,7 +39,7 @@ import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUN
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
 import { jsonbText, parseJson, storedPairs, type Json } from "./jsonb.ts";
 import { atTimeZoneOf, isUtc, UTC_NAMES } from "../lib/timezone.ts";
-import type { DuckCollation, StatementCollations } from "./collation.ts";
+import type { CaseMapping, DuckCollation, StatementCollations } from "./collation.ts";
 
 /** A parse-tree node (`{ Kind: body }`) and a body, as libpg-query's JSON has them. */
 type Body = Record<string, any>;
@@ -269,9 +269,6 @@ class Rewriter {
   /** a LEFT lateral of a list left DuckDB's join that a row count on the wire would stream (leftLateral): the
    *  listener plans the statement again for an Execute that sets one (PlannedSql.unboundedLateral) */
   unboundedLateral = false;
-  /** how the database changes a letter's case */
-  private readonly caseMode: CaseMode;
-
   /** the ANY / ALL comparisons already guarded against a NULL array (the guard holds the comparison, walked again) */
   private readonly nullArrayTested = new WeakSet<Body>();
   /** the catalog's enums: each one's labels in their declared order, and its array type's element */
@@ -298,9 +295,6 @@ class Rewriter {
     this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collations = collations; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
     this.enums = enums; this.kept = kept;
     for (const at of keyCounts) this.keyCounts.add(at + base);
-    // (the case mapping reads the database's collation, where Postgres reads the call's: a gap of its own)
-    const db = collations.database;
-    this.caseMode = db.kind === "icu" ? "icu" : db.kind === "bytes" && db.ascii === true ? "ascii" : "libc";
     this.twins = caseTwins(analysis.tree);
     this.analysisTree = analysis.tree;
   }
@@ -468,10 +462,29 @@ class Rewriter {
 
   private isCitext(oid: number | null): boolean { return oid !== null && this.userTypes.get(oid) === "citext"; }
 
-  /** a text lower-cased by the database's case rules (what Postgres's citext compares, sorts and groups: str_tolower
+  /** a text lower-cased by the database's case mapping (what Postgres's citext compares, sorts and groups: str_tolower
    *  under the default collation) */
   private lowerOf(n: AstNode): AstNode {
-    return this.caseMode === "libc" ? fn("lower", [n]) : fn("__mason_case", [n, boolConst(false), strConst(this.caseMode)]);
+    return this.caseCall("lower", n, this.collations.caseOf(DEFAULT_COLLATION_OID));
+  }
+
+  /** upper / lower / initcap of a text under a case mapping: glibc's upper and lower the engine's own (its upper with
+   *  `ß` kept, which glibc's towupper keeps: an exhaustive comparison over every code point differed only in letters
+   *  newer than the server's glibc), every other mapping src/duck/functions.ts's */
+  private caseCall(name: "upper" | "lower" | "initcap", arg: AstNode, m: CaseMapping): AstNode {
+    if (name === "initcap") return fn("__mason_initcap", [arg, strConst(m)]);
+    if (m !== "libc") return fn("__mason_case", [arg, boolConst(name === "upper"), strConst(m)]);
+    return name === "lower" ? fn("lower", [arg]) : fn("replace", [fn("upper", [fn("replace", [arg, strConst("ß"), strConst("﷐")])]), strConst("﷐"), strConst("ß")]);
+  }
+
+  /** THE CASE MAPPING an upper / lower / initcap call maps under: its input collation, as Postgres's analysis resolved
+   *  it (`Typed.inputCollation`: a COLLATE, a column's, a concatenation's, never the database's by default), and what
+   *  that collation means for case (src/duck/collation.ts `caseOf`). Postgres's 42P22 where the analysis could
+   *  determine none (two implicit collations in conflict) */
+  private caseMapping(t: Typed | null, name: string): CaseMapping {
+    const coll = t === null ? DEFAULT_COLLATION_OID : t.inputCollation;
+    if (coll === 0) throw new Unrewritable(`could not determine which collation to use for ${name}() function`, "Use the COLLATE clause to set the collation explicitly.", { postgres: "42P22" });
+    return this.collations.caseOf(coll);
   }
 
   /** a citext value as the text citext compares: lower-cased, typed as text under the database's collation, so the
@@ -4763,12 +4776,11 @@ class Rewriter {
       case "every": b.funcname = [S("bool_and")]; return null;
       case "upper": case "lower": {
         if (args.length !== 1 || argType(0) === null || !TEXTS.has(argType(0)!)) return null;
-        // glibc's upper keeps ß (DuckDB's gives ẞ); its every other letter is DuckDB's (an exhaustive comparison over
-        // every code point differed only in letters newer than the server's glibc)
-        if (this.caseMode === "libc") return name === "lower" ? null : fn("replace", [fn("upper", [fn("replace", [args[0]!, strConst("ß"), strConst("\ufdd0")])]), strConst("\ufdd0"), strConst("ß")]);
-        return fn("__mason_case", [args[0]!, boolConst(name === "upper"), strConst(this.caseMode)]);
+        const m = this.caseMapping(t, name);
+        // (glibc's lower is the engine's own: the call left as it is)
+        return m === "libc" && name === "lower" ? null : this.caseCall(name, args[0]!, m);
       }
-      case "initcap": return args.length === 1 ? fn("__mason_initcap", [args[0]!, strConst(this.caseMode)]) : null;
+      case "initcap": return args.length === 1 ? this.caseCall("initcap", args[0]!, this.caseMapping(t, name)) : null;
       case "btrim": b.funcname = [S("trim")]; b.funcformat = "COERCE_EXPLICIT_CALL"; return null;
       case "to_hex":
         // an integer's two's complement in its own width, in lower case

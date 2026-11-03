@@ -25,40 +25,172 @@ import { toCharNumber, toCharTime } from "./to-char.ts";
 import { atTimeZoneOf } from "../lib/timezone.ts";
 import { gapMark } from "./gaps.ts";
 import { beat, cancelTable, isCancelled, slotOf } from "./cancel.ts";
-
-/** How the source database changes a letter's case: glibc's (towupper per character), ICU's (full mappings: `ß` is
- *  `SS`), or the C locale's (ASCII letters only). */
-export type CaseMode = "libc" | "icu" | "ascii";
+import type { CaseMapping } from "./collation.ts";
 
 // ------------------------------------------------------------------------------------------------- case mapping
+//
+// upper(), lower() and initcap() as Postgres computes them under a collation's case mapping (issue 406). WHICH mapping
+// a call uses is src/duck/collation.ts's `caseOf` (the call's input collation, Postgres's analysis says which); this
+// is only what each one does. Every detail was measured on Postgres 18 (glibc 2.41, ICU 76: Unicode 16) over every
+// code point of the BMP and the SMP but the CJK and Hangul blocks, and held there by tests/duck-functions.test.ts.
 
-/** one character's simple mapping, as towupper / towlower give it: a character whose full mapping is several (`ß`,
- *  `ŉ`) keeps itself */
+/** Letters this runtime's tables map that the source's do not: added in Unicode 17, after Postgres 18's own tables,
+ *  glibc's and ICU's (Unicode 16). Kept as they are, as Postgres keeps them. */
+const NEWER = /[꟎꟏꟒-ꟕ\u{16EA0}-\u{16EB8}\u{16EBB}-\u{16ED3}]/u;
+const NEWER_RUNS = /([꟎꟏꟒-ꟕ\u{16EA0}-\u{16EB8}\u{16EBB}-\u{16ED3}]+)/u;
+
+/** Unicode's simple uppercase where its full one is several characters and the simple one is not the letter itself:
+ *  the Greek letters with a iota subscript (`ᾳ` is `ᾼ`, where the full mapping is `ΑΙ`) */
+const SIMPLE_UPPER = new Map<string, string>([
+  ...[0x1f80, 0x1f90, 0x1fa0].flatMap((b) => Array.from({ length: 8 }, (_, i) => [String.fromCodePoint(b + i), String.fromCodePoint(b + 8 + i)] as [string, string])),
+  ["ᾳ", "ᾼ"], ["ῃ", "ῌ"], ["ῳ", "ῼ"],
+]);
+
+/** Unicode's titlecase where it is not the uppercase (UnicodeData's titlecase field and SpecialCasing's): the digraphs
+ *  (`ǆ` is `ǅ`), the ligatures (`ﬁ` is `Fi`, `ß` is `Ss`), the Greek letters with a iota subscript, and the Georgian
+ *  Mkhedruli letters, whose titlecase is themselves (their uppercase is Mtavruli) */
+const TITLE = new Map<string, string>([
+  ["ß", "Ss"], ["և", "Եւ"], ["ﬀ", "Ff"], ["ﬁ", "Fi"], ["ﬂ", "Fl"], ["ﬃ", "Ffi"], ["ﬄ", "Ffl"], ["ﬅ", "St"], ["ﬆ", "St"],
+  ["ﬓ", "Մն"], ["ﬔ", "Մե"], ["ﬕ", "Մի"], ["ﬖ", "Վն"], ["ﬗ", "Մխ"],
+  ...[[0x01c4, 0x01c5], [0x01c5, 0x01c5], [0x01c6, 0x01c5], [0x01c7, 0x01c8], [0x01c8, 0x01c8], [0x01c9, 0x01c8], [0x01ca, 0x01cb], [0x01cb, 0x01cb], [0x01cc, 0x01cb],
+    [0x01f1, 0x01f2], [0x01f2, 0x01f2], [0x01f3, 0x01f2]].map(([a, b]) => [String.fromCodePoint(a!), String.fromCodePoint(b!)] as [string, string]),
+  ...[...SIMPLE_UPPER].flatMap(([lower, title]) => [[lower, title], [title, title]] as Array<[string, string]>),
+  ["ᾲ", "Ὰͅ"], ["ᾴ", "Άͅ"], ["ᾷ", "ᾼ͂"], ["ῂ", "Ὴͅ"], ["ῄ", "Ήͅ"],
+  ["ῇ", "ῌ͂"], ["ῲ", "Ὼͅ"], ["ῴ", "Ώͅ"], ["ῷ", "ῼ͂"],
+  ...[...Array.from({ length: 0x2b }, (_, i) => 0x10d0 + i), 0x10fd, 0x10fe, 0x10ff].map((c) => [String.fromCodePoint(c), String.fromCodePoint(c)] as [string, string]),
+]);
+
+/** one character's simple mapping (towupper / towlower, Postgres's builtin C.UTF-8): its full mapping where that is one
+ *  character, else Unicode's simple one where it has one (`İ` lowers to `i`), else itself (`ß`, `ŉ`) */
 function simple(ch: string, upper: boolean): string {
+  if (NEWER.test(ch)) return ch;
+  if (upper) { const s = SIMPLE_UPPER.get(ch); if (s !== undefined) return s; }
+  else if (ch === "İ") return "i";
   const m = upper ? ch.toUpperCase() : ch.toLowerCase();
   return [...m].length === 1 ? m : ch;
 }
 
-const ASCII_ALNUM = /^[A-Za-z0-9]$/;
-const ALNUM = /^[\p{L}\p{N}]$/u;
+/** a whole string's full mapping, under an ICU language (`und` for the root's), the letters NEWER kept. ICU's Armenian
+ *  uppercases the ligature `և` to `ԵՎ`, which the runtime's leaves to the root's `ԵՒ` */
+function full(s: string, upper: boolean, language: string): string {
+  const map = (x: string): string => upper ? (language === "hy" ? x.replaceAll("և", "ԵՎ") : x).toLocaleUpperCase(language) : x.toLocaleLowerCase(language);
+  if (!NEWER.test(s)) return map(s);
+  return s.split(NEWER_RUNS).map((x, i) => i % 2 === 1 ? x : map(x)).join("");
+}
 
-/** upper() / lower() as Postgres computes them under that mode (libc's upper is the rewrite's SQL, not this) */
-export function pgCase(s: string, upper: boolean, mode: CaseMode): string {
-  if (mode === "icu") return upper ? s.toUpperCase() : s.toLowerCase();
-  if (mode === "ascii") return s.replace(upper ? /[a-z]+/g : /[A-Z]+/g, (x) => upper ? x.toUpperCase() : x.toLowerCase());
+/** one character's full titlecase under an ICU language (`tr`'s `i` is `İ`, Armenian's `և` is `Եվ`); ICU's Greek
+ *  uppercasing (accents dropped) is its uppercase's alone */
+function title(ch: string, language: string): string {
+  if (NEWER.test(ch)) return ch;
+  if (language === "hy" && ch === "և") return "Եվ";
+  return TITLE.get(ch) ?? ch.toLocaleUpperCase(language === "el" ? "und" : language);
+}
+
+/** what a word is made of, for initcap's per character mappings: a letter or a digit as each locale's ctype says */
+const ALNUM: Record<"ascii" | "libc" | "simple" | "full", RegExp> = {
+  ascii: /^[A-Za-z0-9]$/,
+  libc: /^[\p{Alphabetic}\p{Nd}]$/u,
+  simple: /^[\p{Alphabetic}0-9]$/u,
+  full: /^[\p{Alphabetic}\p{Nd}]$/u,
+};
+
+/** upper() / lower() as Postgres computes them under that case mapping (libc's upper is the rewrite's SQL, not this) */
+export function pgCase(s: string, upper: boolean, mapping: CaseMapping): string {
+  if (mapping === "ascii") return s.replace(upper ? /[a-z]+/g : /[A-Z]+/g, (x) => upper ? x.toUpperCase() : x.toLowerCase());
+  if (mapping === "libc" || mapping === "simple") { let out = ""; for (const ch of s) out += simple(ch, upper); return out; }
+  if (mapping === "full") return full(s, upper, "und");
+  return full(s, upper, icuOf(mapping).language);
+}
+
+/** an ICU mapping's tag (src/duck/collation.ts icuLocale) and the language its casing reads */
+function icuOf(mapping: CaseMapping): { tag: string; language: string } {
+  if (!mapping.startsWith("icu:")) throw new Error(`the case mapping ${JSON.stringify(mapping)} is not one Mason knows (Mason bug: report it)`);
+  const tag = mapping.slice(4);
+  return { tag, language: tag.split("-")[0]!.toLowerCase() };
+}
+
+/**
+ * initcap() as Postgres computes it under that case mapping:
+ *  - libc (glibc's towupper / towlower), C's ASCII letters, and the builtin C.UTF-8: per character, a letter or digit
+ *    after a letter or digit lowered, every other raised (str_initcap; C.UTF-8 raises to the uppercase, never the
+ *    titlecase: `ǆ` is `Ǆ`);
+ *  - the builtin PG_UNICODE_FAST: a word is a run of letters and digits, its first character in its full TITLECASE
+ *    (`ǆ` is `ǅ`, `ß` is `Ss`), the rest lowered;
+ *  - ICU: u_strToTitle's, a word as ICU's word break says (`o'hara`, `hello.world` and `a_b` are one word each), its
+ *    first letter, digit, symbol or private use character in its titlecase under the locale's language (Dutch's `ij` is
+ *    `IJ`), the characters before it kept, the rest lowered.
+ */
+export function initcap(s: string, mapping: CaseMapping): string {
+  if (mapping.startsWith("icu:")) return icuTitle(s, icuOf(mapping));
   let out = "";
-  for (const ch of s) out += simple(ch, upper);
+  if (mapping === "full") {
+    // a run of word characters: its first titlecased, the rest lowered in the string's context (a final sigma's)
+    let end = 0;
+    for (const run of s.match(/[\p{Alphabetic}\p{Nd}]+|[^\p{Alphabetic}\p{Nd}]+/gu) ?? []) {
+      end += run.length;
+      const first = String.fromCodePoint(run.codePointAt(0)!);
+      out += title(first, "und") + lowerRest(first, run.slice(first.length), s.slice(end), "und");
+    }
+    return out;
+  }
+  const word = ALNUM[mapping as keyof typeof ALNUM];
+  let was = false;
+  for (const ch of s) {
+    if (mapping === "ascii") out += was ? ch.replace(/[A-Z]/, (c) => c.toLowerCase()) : ch.replace(/[a-z]/, (c) => c.toUpperCase());
+    else out += simple(ch, !was);
+    was = word.test(ch);
+  }
   return out;
 }
 
-/** initcap(): a letter after a letter or a digit is lowered, every other is raised (Postgres's str_initcap) */
-export function initcap(s: string, mode: CaseMode): string {
-  let out = "", was = false;
-  for (const ch of s) {
-    if (mode === "ascii") out += was ? ch.replace(/[A-Z]/, (c) => c.toLowerCase()) : ch.replace(/[a-z]/, (c) => c.toUpperCase());
-    else if (mode === "icu") out += was ? ch.toLowerCase() : ch.toUpperCase();
-    else out += simple(ch, !was);
-    was = (mode === "ascii" ? ASCII_ALNUM : ALNUM).test(ch);
+/** the rest of a word lowered in the string's context: after its titlecased first character (`first`, as the source
+ *  had it) and before `after`, the string's text past the word. The context Unicode's conditional mappings read: a
+ *  final sigma (a cased letter before it, none after its case-ignorable characters), and Turkish's and Azeri's dot
+ *  above after a capital I (dropped, as `I` + U+0307 lowers to `i`) */
+function lowerRest(first: string, rest: string, after: string, language: string): string {
+  if (rest === "") return "";
+  let r = rest;
+  if ((language === "tr" || language === "az") && first === "I" && r.startsWith("̇")) r = r.slice(1);
+  // (a cased letter that lowers to itself stands for the first character, which is before every one of the rest)
+  const lead = /^\p{Cased}$/u.test(first) ? "a" : "";
+  let out = full(lead + r, false, language).slice(lead.length);
+  if (out.endsWith("ς") && r.endsWith("Σ") && /^\p{Case_Ignorable}*\p{Cased}/u.test(after)) out = `${out.slice(0, -1)}σ`;
+  return out;
+}
+
+/** a character u_strToTitle titlecases a word at: a letter (a modifier letter only where it is cased), a number, a
+ *  symbol or a private use character (ustrcase_isLNS) */
+const LNS = /^(?:[\p{Lu}\p{Ll}\p{Lt}\p{Lo}\p{N}\p{S}\p{Co}]|(?=\p{Lm})\p{Cased})$/u;
+
+/** where the source's ICU (76) breaks a word and this runtime's (78) does not: a colon (CLDR's root tailoring leaves
+ *  it out of MidLetter; Swedish's and Finnish's keep it in) and a cedilla. Split again, which changes nothing where the
+ *  runtime breaks there itself */
+const ICU_WORD_BREAK = /([:﹕：¸])/, ICU_WORD_BREAK_SV = /([¸])/;
+
+const segmenters = new Map<string, Intl.Segmenter>();
+
+/** ICU's initcap: u_strToTitle with its word break iterator of the locale, its casing under the locale's language */
+function icuTitle(s: string, { tag, language }: { tag: string; language: string }): string {
+  let seg = segmenters.get(tag);
+  if (seg === undefined) { seg = new Intl.Segmenter(tag, { granularity: "word" }); segmenters.set(tag, seg); }
+  const breaks = language === "sv" || language === "fi" ? ICU_WORD_BREAK_SV : ICU_WORD_BREAK;
+  let out = "", end = 0;
+  for (const { segment } of seg.segment(s)) {
+    for (const word of segment.split(breaks)) {
+      if (word === "") continue;
+      end += word.length;
+      const chars = [...word];
+      const at = chars.findIndex((c) => LNS.test(c));
+      if (at < 0) { out += word; continue; }
+      const first = chars[at]!;
+      let t = title(first, language), next = at + 1;
+      // Dutch: a word's `ij` is `IJ`, its `íj́` `ÍJ́` (ICU's maybeTitleDutchIJ)
+      if (language === "nl" && (chars[next] === "j" || chars[next] === "J")) {
+        if (t === "I" && chars[next + 1] !== "́") { t += "J"; next++; }
+        else if (t === "Í" && chars[next + 1] === "́") { t += "J́"; next += 2; }
+      }
+      out += chars.slice(0, at).join("") + t + lowerRest(first, chars.slice(next).join(""), s.slice(end), language);
+    }
   }
   return out;
 }
@@ -731,8 +863,8 @@ function registerTurn(conn: DuckDBConnection): void {
 export function registerFunctions(conn: DuckDBConnection): void {
   registerTurn(conn);
   for (const kind of Object.keys(PG_KINDS) as PgKind[]) viaPostgres(conn, kind);
-  scalar(conn, "__mason_case", [VARCHAR, BOOLEAN, VARCHAR], VARCHAR, ([s, up, mode]) => pgCase(String(s), up === true, String(mode) as CaseMode));
-  scalar(conn, "__mason_initcap", [VARCHAR, VARCHAR], VARCHAR, ([s, mode]) => initcap(String(s), String(mode) as CaseMode));
+  scalar(conn, "__mason_case", [VARCHAR, BOOLEAN, VARCHAR], VARCHAR, ([s, up, mode]) => pgCase(String(s), up === true, String(mode) as CaseMapping));
+  scalar(conn, "__mason_initcap", [VARCHAR, VARCHAR], VARCHAR, ([s, mode]) => initcap(String(s), String(mode) as CaseMapping));
   // (json, steps as a JSON array, a #> path's, jsonb's canonical text, ->>'s text)
   scalar(conn, "__mason_json_get", [VARCHAR, VARCHAR, BOOLEAN, BOOLEAN, BOOLEAN], VARCHAR,
     ([j, s, either, canonical, asText]) => {

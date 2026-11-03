@@ -337,6 +337,15 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   one, and `<=` and `>` kept the wrong neighbours. The value is now compared in the column's own type wherever that type
   holds it exactly, still the synced data's own filter, and otherwise (more decimals than the column, more digits,
   `NaN`, `Infinity`) by its exact value. Nothing to do on upgrade.
+- **`upper`, `lower` and `initcap` change case as the source's collation does, under the database's collation, a
+  column's own and a `COLLATE`.** Each followed the database's collation whatever the call's, and read it from the
+  collation's sort order: under an ICU collation `initcap('o''hara')` was `O'Hara` where Postgres answers `O'hara`
+  (ICU title-cases a whole word), `upper('ß' COLLATE "und-x-icu")` was `ß` where it is `SS`, and under `COLLATE "C"`
+  `upper('é')` was `É` where C leaves it. A `SELECT` of no table, `SELECT upper('ß')`, answered `ẞ` where glibc's en_US
+  keeps `ß`. Now glibc's locales, C and POSIX, ICU's locales (Turkish's dotted and dotless i, Dutch's IJ, Greek's final
+  sigma), and the builtin `pg_c_utf8` and `pg_unicode_fast` are each followed. A libc collation of Turkish or Azeri
+  (`tr_TR`, `az_AZ`), whose i maps otherwise, is refused by name (`case-mapping-unknown`): write `COLLATE "tr-x-icu"`.
+  Nothing to do on upgrade.
 
 ## Known
 
