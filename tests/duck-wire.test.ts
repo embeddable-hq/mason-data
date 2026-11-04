@@ -6433,6 +6433,12 @@ test("issue 665 class round r2: GROUPING reads the GROUP BY entry Postgres match
       ["SELECT d.c / 3 AS q, grouping(t.c / 3) AS g FROM deep_t d, LATERAL (SELECT d.c) t(c) GROUP BY 1, t.c / 3 ORDER BY 1, 2", "ordered"],
       ["SELECT DISTINCT ON (grouping(d.c / 3)) d.c / 3 AS q FROM deep_t d WHERE false GROUP BY 1 ORDER BY grouping(d.c / 3), 1", "ordered"],
       ["SELECT t.b::text AS k, grouping(t.b) AS g FROM jdocs t GROUP BY t.b ORDER BY grouping(t.b), 1", "ordered"],
+      // a GROUPING of this query inside a subquery (its agglevelsup), of a grouped quotient and of a grouped jsonb
+      ["SELECT q, (SELECT grouping(s.q)) AS g FROM (SELECT d.c / 3 AS q FROM deep_t d) s GROUP BY q ORDER BY 1", "ordered"],
+      ["SELECT q FROM (SELECT d.c / 3 AS q FROM deep_t d) s GROUP BY q HAVING EXISTS (SELECT 1 WHERE grouping(s.q) = 0) ORDER BY 1", "ordered"],
+      ["SELECT q, (SELECT grouping(s.q) FROM deep_t LIMIT 0) AS g FROM (SELECT d.c / 3 AS q FROM deep_t d) s GROUP BY q ORDER BY 1", "ordered"],
+      ["SELECT t.b::text AS k, (SELECT grouping(t.b)) AS g FROM jdocs t GROUP BY t.b ORDER BY 1", "ordered"],
+      ["SELECT t.b::text AS k FROM jdocs t GROUP BY t.b HAVING EXISTS (SELECT 1 WHERE grouping(t.b) = 0) ORDER BY 1", "ordered"],
       // a grouped quotient in a named WINDOW's PARTITION BY and ORDER BY is read per group
       ["SELECT d.c / 3 AS q, count(*) OVER w FROM deep_t d GROUP BY 1 WINDOW w AS (PARTITION BY d.c / 3) ORDER BY 1", "ordered"],
       ["SELECT d.c / 3 AS q, count(*) OVER (w ORDER BY d.c / 3) FROM deep_t d GROUP BY 1 WINDOW w AS (PARTITION BY d.c / 3) ORDER BY 1", "ordered"],
@@ -6456,6 +6462,10 @@ test("issue 665 class round r2: GROUPING reads the GROUP BY entry Postgres match
       ["SELECT id, d = ANY (SELECT 'a' UNION ALL SELECT 'zz') AS m FROM deep_t ORDER BY 1", "ordered"],
       ["SELECT d, count(*) FROM deep_t GROUP BY d HAVING d IN (SELECT 'ab') ORDER BY 1", "ordered"],
       ["SELECT id, b IN (SELECT s.d FROM deep_t s) AS m FROM deep_t ORDER BY 1", "ordered"],
+      // a char(n) against a char(n): bpchareq and bpcharlt ignore the padding on both sides, in a SubLink and outside
+      ["SELECT id, d IN (SELECT s.d::char(9) FROM deep_t s WHERE s.id = deep_t.id) AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, 'ab'::char(2) = ANY (SELECT s.d FROM deep_t s WHERE s.id = deep_t.id) AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, d = 'ab'::char(9) AS e, d <> 'ab '::char(3) AS n, d IN ('ab'::char(6), 'cd') AS i FROM deep_t ORDER BY 1", "ordered"],
     ]), []);
   } finally { await c.end(); }
 });
