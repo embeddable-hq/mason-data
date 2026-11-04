@@ -12,8 +12,10 @@
  * A DELETION'S SQL IS MASON'S OWN (docs/HOSTED-API.md, `DELETE /v1/replicas/{org}/{name}` and `DeletionSource`): for a source whose replication slot was not
  * verified gone, the statement a person runs by hand is rendered here, by `dropStatements` (src/cli/replication-mode.ts,
  * the one authority), from the slot's and the publication's names the service gives, each held to Postgres's name
- * grammar (`PG_NAME`); a name it does not know is `listSlotsStatement`'s query. The service's own `byHand` is never
- * printed: it must be exactly that rendering, else the answer is outside the contract and refused whole.
+ * grammar (`PG_NAME`); a name it does not know is `listSlotsStatement`'s query. The service's own `byHand` is advisory:
+ * put to the exact test with the rest of the answer, never compared, never printed (#687's review, B1). EVERY statement a
+ * person pastes is written by `pasteLines` alone, on a line of its own, never broken by the CLI and never inside a
+ * failure's words (N1).
  *
  * THE DATABASE'S URL (create) is read here alone, by the variable the project's sources file names (`url: ${NAME}`,
  * src/cli/sources.ts `readSource`, the one reader: `.env.local`, `.env`, then the shell), never from a flag: it never
@@ -47,7 +49,7 @@
  *   a step's what, a source's why,          rows, stderr's lines, --json              one line each, bounded, masked (`serviceText`)
  *     the handover's failure
  *   a source's slot, publication            rows, the SQL's line, --json              `PG_NAME`; Mason's own publication `OWN_PUBLICATION`
- *   a source's byHand                       nowhere: Mason's own rendering is         equal to `byHandOf`'s, else refused whole
+ *   a source's byHand                       nowhere: Mason's own rendering is         a string or nothing, the exact test; never read
  *
  * What to run next, the code and the exit are the CLI's own: 0 once the replica is ready (create), said (list,
  * status) or deleted with every slot dropped or none (delete); 1 refused (its words as they came), not made, failed, a
@@ -140,8 +142,8 @@ export const REPLICA: CommandSpec = {
   login; a CI token deletes none). It waits until the deletion is finished (--timeout bounds that wait; it goes
   on all the same), saying each step as the service words it, then what it did to each database's replication
   slot: dropped and verified gone, none there, or NOT verified gone, with why and the statement to run on that
-  database by hand. That statement is Mason's own, for the slot the service names; a service's answer that says
-  another is refused.
+  database by hand. That statement is Mason's own, rendered from the slot's name the service gives; whatever
+  statement the service sends beside it is never printed.
 
   The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default.
   Progress goes to stderr; the answer is printed when it ends.
@@ -164,7 +166,7 @@ export const REPLICA: CommandSpec = {
                            [{ step, what, doneAt }], sources: [{ ordinal, outcome (dropped, no_slot,
                            not_verified), reason (unreachable, refused, in_use, still_there, another_server,
                            record_unreadable, failed, unprobed), why, slot, publication, publicationOwned,
-                           byHand (not_verified: the statement to run by hand), reportedAt }] }), checks (create:
+                           byHand (not_verified: Mason's statement to run by hand), reportedAt }] }), checks (create:
                            [{ source, outcome (passed, failed, unknown), checks: [{ name, status (ok, warn, failed,
                            unknown), detail, fix }], missing }], null when the service's answer was lost), replicas
                            (list: each as replica is), more (list: true when an organisation has more than the
@@ -200,7 +202,8 @@ const whole = (v: unknown, least: number, most: number): v is number => Number.i
  */
 export function wordless(json: unknown): unknown {
   if (!obj(json)) return json;
-  // a deletion's words: each step's what, each source's why, the handover's failure (its byHand is no free text: tested)
+  // a deletion's words: each step's what, each source's why, the handover's failure (its byHand is no free text: tested,
+  // then never read)
   const deletion = (d: unknown): unknown => !obj(d) ? d : { ...d,
     ...(obj(d.handover) ? { handover: { ...d.handover, failure: null } } : {}),
     ...(Array.isArray(d.steps) ? { steps: d.steps.map((x: unknown) => obj(x) ? { ...x, what: null } : x) } : {}),
@@ -307,8 +310,8 @@ export function byHandOf(s: Pick<DeletionSource, "slot" | "publication" | "publi
 const absent = (v: unknown): boolean => v === undefined || v === null;
 const timeOrNull = (v: unknown): v is string | null | undefined => absent(v) || isServiceTime(v);
 
-/** One source's outcome, held: its ordinal its place, every name to `PG_NAME`, its byHand Mason's own; null when any
- *  does not hold. */
+/** One source's outcome, held: its ordinal its place, every name to `PG_NAME`, its byHand Mason's own rendering (the
+ *  service's is advisory: never compared, never printed); null when any does not hold. */
 function heldSource(v: unknown, at: number, secrets: readonly string[]): DeletionSource | null {
   if (!obj(v) || v.ordinal !== at || typeof v.outcome !== "string" || !(SOURCE_OUTCOMES as readonly string[]).includes(v.outcome) || !isServiceTime(v.reportedAt)) return null;
   const outcome = v.outcome as DeletionSource["outcome"];
@@ -330,10 +333,11 @@ function heldSource(v: unknown, at: number, secrets: readonly string[]): Deletio
     if (typeof v.reason !== "string" || !(REASONS as readonly string[]).includes(v.reason) || (!absent(v.why) && typeof v.why !== "string")) return null;
     reason = v.reason as Reason;
     why = typeof v.why === "string" ? serviceText(v.why, 500, secrets) : null;
-    // the service's SQL is never printed: it must be exactly what Mason renders from the names it gave
+    // the statement by hand is Mason's own, from the names held above (#687's review, B1: a service's text compared
+    // with it was a fact derived in two places): the service's, a string or nothing, is read for no word of it
     byHand = byHandOf({ slot, publication, publicationOwned: owned });
-    if (v.byHand !== byHand) return null;
-  } else if (!absent(v.reason) || !absent(v.why) || !absent(v.byHand)) return null;
+  } else if (!absent(v.reason) || !absent(v.why)) return null;
+  if (!absent(v.byHand) && typeof v.byHand !== "string") return null;
   return { ordinal: at, outcome, reason, why, slot, publication, publicationOwned: owned, byHand, reportedAt: v.reportedAt };
 }
 
@@ -448,25 +452,34 @@ export function deletionRows(d: Deletion): Array<[string, string]> {
 }
 
 /**
- * THE STATEMENTS A PERSON RUNS BY HAND, for each source whose slot is not verified gone: a line of the CLI's saying where,
- * then the statement (Mason's own, `byHandOf`) on a line of its own, indented, WRITTEN UNBROKEN: a statement to paste is
- * no service text to break at a width (a break inside a name would be pasted with it); a terminal narrower than it wraps
- * it softly. Its characters are the CLI's own words and names held to `PG_NAME`, so no piece of it begins a line of
- * anyone's making. `[said, sql]` pairs; none when every slot was dropped or there was none.
+ * THE STATEMENTS A PERSON RUNS BY HAND, for each source whose slot is not verified gone: what the CLI says of where, and
+ * the statement (Mason's own, `byHandOf`). `[said, sql]` pairs, printed by `pasteLines`; none when every slot was dropped
+ * or there was none. The CLI's words hold no piece of SQL: only the statement is pasted.
  */
 export function byHandLines(d: Deletion): Array<[said: string, sql: string]> {
   return d.sources.filter((x) => x.outcome === "not_verified").map((x): [string, string] => [x.slot === null
-    ? `by hand, for source ${x.ordinal}: this lists Mason's replication slots on its database; drop this replica's with pg_drop_replication_slot('<its name>'), as a user that may`
-    : `by hand, for source ${x.ordinal}: run this on its database, as a user that may drop a replication slot (its owner, or one with REPLICATION)`, `    ${byHandOf(x)}`]);
+    ? `by hand, for source ${x.ordinal}: this lists Mason's replication slots on its database; drop this replica's slot from them, as a user that may drop a replication slot`
+    : `by hand, for source ${x.ordinal}: run this on its database, as a user that may drop a replication slot (its owner, or one with REPLICATION)`, byHandOf(x)]);
 }
 
-/** A replica's report with its deletion: the rows, the statements by hand (unbroken), then the tips and next steps. */
+/**
+ * THE ONE WRITER OF A STATEMENT A PERSON PASTES (#687's review, N1: a statement inside a failure's words was broken at the
+ * width, mid-word on a narrow terminal; PR 660's B2 met the class with a CI token): for each, the CLI's line saying where,
+ * broken as every line holding a service's value is, then the statement alone on a line of its own, indented, WRITTEN
+ * UNBROKEN: a break inside a name would be pasted with it, and a terminal narrower than it wraps it softly. Its characters
+ * are Mason's own SQL and names held to `PG_NAME`, so no piece of it begins a line of anyone's making.
+ */
+export function pasteLines(pairs: ReadonlyArray<readonly [said: string, sql: string]>, st: Style): string[] {
+  return pairs.flatMap(([said, sql], i) => [...(i ? [""] : []), strict(`  ${said}:`, st), `    ${sql}`]);
+}
+
+/** A replica's report with its deletion: the rows, the statements by hand (`pasteLines`), then the tips and next steps. */
 function deletionReport(r: { headline: string; details: Array<[string, string]>; deletion: Deletion | null; tips?: readonly string[]; next: readonly NextStep[] }, st: Style): string {
   const hand = r.deletion === null ? [] : byHandLines(r.deletion);
   const report = reportText({ headline: r.headline, details: r.details, ...(hand.length ? {} : { tips: r.tips, next: r.next }) }, st);
   if (!hand.length) return report;
   const end = endText({ tips: r.tips, next: r.next }, st);
-  return [report, ...hand.flatMap(([said, sql]) => ["", strict(`  ${said}:`, st), sql]), ...(end ? [end] : [])].join("\n");
+  return [report, "", ...pasteLines(hand, st), ...(end ? [end] : [])].join("\n");
 }
 
 /**
@@ -905,9 +918,13 @@ export function deleteWords(r: Replica, base: string, every: string) {
     },
     timedOut: (d: Deletion): Failure => ({ message: `${name}'s deletion did not finish within ${every}`, code: "timeout", why: `it was last ${stageLine(d)}`,
       fix: `nothing was stopped, and its deletion goes on: mason replica status ${name} says how it goes; a longer wait is --timeout 30m`, next: [status] }),
-    gone: (): Failure => ({ message: `the service has no ${name} now`, code: "not_found",
+    /** gone midway: the statement that lists Mason's slots, pasted (`pasteLines`) — under --json, where nothing is
+     *  broken, in the fix too */
+    gone: (json: boolean): Failure => ({ message: `the service has no ${name} now`, code: "not_found",
       why: "it was being deleted, and the service has no record of it now: what its deletion did to each replication slot is not known",
-      fix: `look for Mason's slots on each database it synced: ${listSlotsStatement()}`, next: [listStep(r.org)] }),
+      fix: json ? `look for Mason's slots on each database it synced, and drop this replica's: ${listSlotsStatement()}` : "look for Mason's slots on each database it synced with the statement printed above, and drop this replica's",
+      next: [listStep(r.org)] }),
+    goneSaid: "by hand, on each database it synced: this lists Mason's replication slots; drop this replica's slot from them, as a user that may drop a replication slot",
   };
 }
 
@@ -981,7 +998,10 @@ async function remove(r: Replica, o: { timeout: { every: string; seconds: number
       continue;
     }
     if (a.retryAfter !== null) waitMs = a.retryAfter * 1000;
-    if (a.status === 404) return ended(w.gone());
+    if (a.status === 404) {
+      if (!json) out(pasteLines([[w.goneSaid, listSlotsStatement()]], outStyle()).join("\n"));
+      return ended(w.gone(json));
+    }
     if (a.status !== 200) return ended(serviceFailure(a, secrets, (st) => refusedNext(st, r.org, "a member", w.status)) ?? unexpected(service, a, step));
     const now = replicaAnswer(a, r, secrets);
     // a deletion does not end otherwise than finished: a replica in none now is outside the contract

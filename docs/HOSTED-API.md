@@ -318,14 +318,15 @@ deletion under way, or finished, the same way, and exits 0.
 | `slot` | the slot's name, or `null` when it is not known; `dropped` names it. Postgres's name grammar: `^[a-z0-9_]{1,63}$` |
 | `publication` | the publication's name, or `null`; the same grammar |
 | `publicationOwned` | absent for `no_slot`; else `true` (the publication is Mason's own, named `mason_…`), `false` (the database owner's) or `null` (not said) |
-| `byHand` | `not_verified` alone: the statement to run by hand, exactly as the CLI renders it (below) |
+| `byHand` | optional, advisory: the service's own statement to run by hand. A string; a client renders its own from the names (below), and the CLI never prints this one nor compares it |
 | `reportedAt` | ISO 8601 |
 
-**What to run by hand is the CLI's own.** For a slot not verified gone the CLI prints the statement Mason itself gives
-for dropping its slot (`dropStatements` in src/cli/replication-mode.ts, which `mason start` and `mason destroy` print
-too), rendered from the names the service sent, each held to the grammar first. A service's `byHand` is never printed:
-it must be exactly that rendering, or the whole answer is outside the contract and refused, said by its status. For a
-slot named `<slot>`:
+**What to run by hand is the CLI's own.** Mason is the one authority for the SQL that drops or lists its own slots. For a
+slot not verified gone the CLI prints the statement Mason itself gives for dropping its slot (`dropStatements` in
+src/cli/replication-mode.ts, which `mason start` and `mason destroy` print too), rendered from the names the service
+sent, each held to the grammar first: an answer with a name outside it is refused whole. A service's `byHand` is
+advisory: the CLI reads it only as a string that carries no secret, and never prints it, compares it or depends on its
+text, so any client renders its own from `slot`, `publication` and `publicationOwned`. For a slot named `<slot>`:
 
 ```sql
 SELECT pg_drop_replication_slot('<slot>') FROM pg_replication_slots WHERE slot_name = '<slot>' AND NOT active;
@@ -340,7 +341,8 @@ SELECT slot_name, database, active FROM pg_replication_slots WHERE left(slot_nam
 
 The CLI prints each statement alone on a line of its own, indented, never broken at the terminal's width (a break
 inside a name would be pasted with it), after a line saying which source it is for; under `--json` it is
-`deletion.sources[].byHand`.
+`deletion.sources[].byHand`, the CLI's rendering. The same holds wherever the CLI prints a statement: a replica gone
+midway prints the statement that lists Mason's slots that way too, never inside a failure's words.
 
 **What is tested first.** As for every replica's answer, every string of it, each key included, is put to the exact
 test before any value is held to its grammar, but the service's words alone: a step's `what`, a source's `why`, the

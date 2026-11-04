@@ -388,9 +388,11 @@ CLI lacks).
   once in the service's words, then each source's slot: dropped and verified gone, none there (exit 0), or NOT verified
   gone (exit 1). **The statement a person runs by hand is Mason's own** (`byHandOf`: `dropStatements`,
   src/cli/replication-mode.ts, the one authority; `listSlotsStatement` when the slot's name is not known), rendered from the
-  names the service gives, each held to `PG_NAME` first; a service's `byHand` is never printed, and one that is not
-  exactly that rendering puts the answer outside the contract, refused whole. It is written alone on its line,
-  indented, never broken by the CLI (a value to paste, as a CI token is). A deletion is held present exactly while the
+  names the service gives, each held to `PG_NAME` first (a name outside it refuses the answer); a service's `byHand` is
+  advisory, a string put to the exact test and never printed, compared or depended on (PR 687's review, B1: a text
+  compared on two sides was a fact derived twice). Every statement a person pastes is written by `pasteLines` alone, on
+  its own line, indented, never broken by the CLI and never inside a failure's words (a value to paste, as a CI token
+  is: PR 687's N1, PR 660's B2). A deletion is held present exactly while the
   state is `deleting` or `deleted`, its stage the state's (`heldDeletion`); `status` shows it the same way
   (`deletionReport`), exit 0 (tests/cli-replica-delete.test.ts).
 - **The road to production is commands too** (the journey from running it locally to deploying it in production; the

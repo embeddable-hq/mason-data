@@ -23,23 +23,44 @@ const LATER = "2026-11-02T10:05:00.000Z";
 /** The lines mason replica delete begins, beside mason replica's own; its statements by hand, written unbroken. */
 const OWN_STEP = /^ {2}(mason login|mason replica (list|status|delete)( \S+)*)(\s|$)/;
 const DELETE_LINES: Lines = {
-  heads: [...LINES.heads, "Deleted ", "Deleting ", "> ", "  done: ", "  requested: ", "  under way: ", "  The deletion's answer was lost ", "  by hand, for source ",
+  heads: [...LINES.heads, "Deleted ", "Deleting ", "> ", "  done: ", "  requested: ", "  under way: ", "  The deletion's answer was lost ", "  by hand, ",
     ...["deletion", "last heard", "finished", "step", "source 0", "source 1", "source 2"].map((l) => `  ${l} `)],
   steps: ["  mason login", "  mason replica "], ownStep: OWN_STEP, row: LINES.row!,
   unbroken: (line) => /^ {4}SELECT /.test(line),
 };
-const run = (v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: Parameters<typeof hosted>[2] = {}) => hosted(v1, ["delete", "acme/shop", ...argv], { lines: DELETE_LINES, ...o });
+/**
+ * EVERY STATEMENT A PERSON PASTES IS WHOLE, ON A LINE OF ITS OWN (#687's review, N1: one inside a failure's words was broken
+ * at the width): in what a person reads, any line holding SQL is a statement Mason renders, alone and unbroken, and no
+ * line holds a piece of one. Held for every run of this file that a person reads.
+ */
+function pastedWhole(a: { argv: string[]; stdout: string; stderr: string }): void {
+  if (a.argv.includes("--json")) return;
+  for (const line of `${a.stdout}\n${a.stderr}`.split("\n")) {
+    if (!/pg_|replication_slots|\bSELECT\b|DROP PUBLICATION/.test(line)) continue;
+    assert.match(line, /^ {4}SELECT [^\n]*;$/, `mason ${a.argv.join(" ")}: a line holding a piece of a statement, not the statement whole on its own:\n${line}`);
+  }
+}
+const run = async (v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: Parameters<typeof hosted>[2] = {}) => {
+  const r = await hosted(v1, ["delete", "acme/shop", ...argv], { lines: DELETE_LINES, ...o });
+  pastedWhole(r.a);
+  return r;
+};
 
 /** A deletion's steps, generic: what the fake says it did, each done by `done` (how many). */
 const STEPS = ["nobody may query it", "Mason's replication slots are dropped", "its synced data is removed"];
 const steps = (done: number) => STEPS.map((what, i) => ({ step: `step_${i + 1}`, what, doneAt: i < done ? AT : null }));
 const dropped = (ordinal = 0) => ({ ordinal, outcome: "dropped", slot: "mason_shop_app", publication: "mason_shop_app", publicationOwned: true, reportedAt: AT });
 const noSlot = (ordinal = 0) => ({ ordinal, outcome: "no_slot", slot: null, publication: null, reportedAt: AT });
-/** A slot not verified gone, its byHand Mason's own (`dropStatements`, the authority), unless `byHand` says otherwise. */
-function notVerified(o: { ordinal?: number; reason?: string; why?: string; slot?: string | null; publication?: string | null; owned?: boolean | null; byHand?: string } = {}): Record<string, unknown> {
+/**
+ * THE SERVICE'S OWN STATEMENT, as the fake sends it: never the CLI's text (#687's review, B1: a fake that rendered it with
+ * the CLI's own function hid a service whose text differed). The CLI renders its own and prints none of this.
+ */
+const SERVICE_BY_HAND = "SELECT 'the service''s own statement, advisory';";
+/** A slot not verified gone, as the service says it: its byHand the service's own, unless `byHand` says otherwise. */
+function notVerified(o: { ordinal?: number; reason?: string; why?: string; slot?: string | null; publication?: string | null; owned?: boolean | null; byHand?: unknown } = {}): Record<string, unknown> {
   const slot = o.slot === undefined ? "mason_shop_app" : o.slot, publication = o.publication === undefined ? "mason_shop_app" : o.publication, owned = o.owned === undefined ? true : o.owned;
-  const byHand = o.byHand ?? (slot === null ? listSlotsStatement() : dropStatements({ slot, publication: publication ?? "", owned: owned === true }));
-  return { ordinal: o.ordinal ?? 0, outcome: "not_verified", reason: o.reason ?? "unreachable", why: o.why ?? "the connection timed out", slot, publication, publicationOwned: owned, byHand, reportedAt: AT };
+  return { ordinal: o.ordinal ?? 0, outcome: "not_verified", reason: o.reason ?? "unreachable", why: o.why ?? "the connection timed out", slot, publication, publicationOwned: owned,
+    ...("byHand" in o ? { byHand: o.byHand } : { byHand: SERVICE_BY_HAND }), reportedAt: AT };
 }
 /** A replica in a deletion's stage, with what else the deletion says. */
 function deleting(stage: "requested" | "in_region" | "finished", more: Record<string, unknown> = {}, replica: Record<string, unknown> = {}): Record<string, unknown> {
@@ -114,6 +135,7 @@ test("mason replica delete: a slot not verified gone, for every reason, is said 
     assert.equal(v.deletion.sources[0]!.byHand, reason === "record_unreadable" ? listSlotsStatement() : dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true }), reason);
     assert.equal(v.deletion.sources[0]!.reason, reason);
     assert.deepEqual(v.next.map((n) => n.command), ["mason replica status acme/shop"]);
+    assert.ok(!a.stdout.includes("advisory"), `${reason}: the service's statement is never printed`);
   }
   // a person: each source's outcome, then each statement alone on its line, then the failure on stderr
   const sources = [notVerified({ ordinal: 0, reason: "in_use", why: "a reader holds it" }), notVerified({ ordinal: 1, reason: "refused", slot: "mason_other", publication: "orders_pub", owned: false }),
@@ -133,12 +155,13 @@ test("mason replica delete: a slot not verified gone, for every reason, is said 
     "    SELECT slot_name, database, active FROM pg_replication_slots WHERE left(slot_name, 6) = 'mason_';",
   ]);
   assert.match(a.stdout, /^ {2}by hand, for source 1: run this on its database, as a user that may drop a replication slot \(its owner, or one with REPLICATION\):\n {4}SELECT /m);
-  assert.match(a.stdout, /^ {2}by hand, for source 2: this lists Mason's replication slots on its database; drop this replica's with pg_drop_replication_slot\('<its name>'\), as a user that may:\n {4}SELECT slot_name/m);
+  assert.match(a.stdout, /^ {2}by hand, for source 2: this lists Mason's replication slots on its database; drop this replica's slot from them, as a user that may drop a replication slot:\n {4}SELECT slot_name/m);
   assert.doesNotMatch(a.stdout, /^Next:/m, "the failure carries the next step");
+  assert.ok(!(a.stdout + a.stderr).includes("advisory"), "the service's statement is never printed");
   assert.match(a.stderr, /^✗ mason replica: acme\/shop is deleted, and the replication slots of 3 sources are NOT verified gone$/m);
 });
 
-test("the statement by hand is dropStatements' for every name Postgres's grammar takes, the publication only when it is Mason's own; any other name, or a byHand that is not exactly Mason's, holds no deletion", () => {
+test("the statement by hand is dropStatements' for every name Postgres's grammar takes, the publication only when it is Mason's own, whatever the service's byHand says; a name outside the grammar holds no deletion, refused by the grammar alone", () => {
   // names the grammar takes: the shortest, the longest, digits first, underscores alone, and 300 more from a fixed seed
   let n = 0;
   const rand = (): number => createHash("sha256").update(`mason-683:${n++}`).digest().readUInt32BE(0) / 2 ** 32;
@@ -151,26 +174,39 @@ test("the statement by hand is dropStatements' for every name Postgres's grammar
     for (const [publication, owned] of [[own, true], [slot, false], [slot, null], [null, null], [null, false]] as Array<[string | null, boolean | null]>) {
       const want = dropStatements({ slot, publication: publication ?? "", owned: owned === true });
       assert.equal(byHandOf({ slot, publication, publicationOwned: owned }), want);
-      const d = heldDeletion(finished([notVerified({ slot, publication, owned, byHand: want })]), "deleted", []);
-      assert.ok(d, `${slot} ${publication} ${owned}`);
-      assert.equal(d.sources[0]!.byHand, want);
-      // the service's statement otherwise: the whole deletion does not hold
-      for (const other of [`${want} DROP TABLE orders;`, want.replace("AND NOT active", ""), owned === true ? dropStatements({ slot, publication: own, owned: false }) : `${want} DROP PUBLICATION IF EXISTS ${slot};`, ` ${want}`, want.toUpperCase()]) {
-        if (other === want) continue;
-        assert.equal(heldDeletion(finished([notVerified({ slot, publication, owned, byHand: other })]), "deleted", []), null, other);
+      // the service's byHand, whatever it says or if it says nothing, changes nothing of the statement (#687's review, B1)
+      for (const theirs of [SERVICE_BY_HAND, want, `${want} DROP TABLE orders;`, "", null, undefined]) {
+        const d = heldDeletion(finished([notVerified({ slot, publication, owned, byHand: theirs })]), "deleted", []);
+        assert.ok(d, `${slot} ${publication} ${owned} ${theirs}`);
+        assert.equal(d.sources[0]!.byHand, want);
       }
     }
   }
   assert.equal(byHandOf({ slot: null, publication: null, publicationOwned: null }), listSlotsStatement());
-  // a name outside the grammar, in the slot or the publication
+  assert.equal(heldDeletion(finished([notVerified({ slot: null, publication: null, owned: null, reason: "record_unreadable" })]), "deleted", [])?.sources[0]!.byHand, listSlotsStatement());
+  // the statements' text is the public contract (docs/HOSTED-API.md prints both)
+  assert.equal(dropStatements({ slot: "mason_a", publication: "mason_a", owned: true }), "SELECT pg_drop_replication_slot('mason_a') FROM pg_replication_slots WHERE slot_name = 'mason_a' AND NOT active; DROP PUBLICATION IF EXISTS mason_a;");
+  assert.equal(listSlotsStatement(), "SELECT slot_name, database, active FROM pg_replication_slots WHERE left(slot_name, 6) = 'mason_';");
+  // a byHand that is not a string is no answer of the contract's
+  for (const theirs of [1, true, {}, ["SELECT 1;"]]) assert.equal(heldDeletion(finished([notVerified({ byHand: theirs })]), "deleted", []), null, JSON.stringify(theirs));
+  // A NAME OUTSIDE THE GRAMMAR, refused by the grammar ALONE (#687's review, N2: every name tested was refused for another
+  // reason too): a quote or a semicolon in a name otherwise lower case, short and spaceless, where nothing else is checked
+  for (const bad of ["a'", "a;", "a'b", "a;b", "'", ";", "mason_shop'", "mason_shop;"]) {
+    assert.equal(PG_NAME.test(bad), false, bad);
+    assert.equal(heldDeletion(finished([{ ...dropped(), slot: bad }]), "deleted", []), null, `a dropped slot ${bad}`);
+    assert.equal(heldDeletion(finished([notVerified({ slot: bad })]), "deleted", []), null, `a slot not verified ${bad}`);
+    assert.equal(heldDeletion(finished([notVerified({ publication: bad, owned: false })]), "deleted", []), null, `a publication ${bad}`);
+    assert.equal(heldDeletion(finished([{ ...noSlot(), slot: bad }]), "deleted", []), null, `no slot ${bad}`);
+  }
+  // and the other ways out of it
   for (const bad of ["", "Mason_shop", "mason-shop", "a".repeat(64), "x'; DROP TABLE orders; --", "mason shop", "maßon", "mason_shop\n", "\"mason\""]) {
     assert.equal(PG_NAME.test(bad), false, bad);
-    assert.equal(heldDeletion(finished([notVerified({ slot: bad, byHand: dropStatements({ slot: bad, publication: "mason_shop", owned: true }) })]), "deleted", []), null, `slot ${bad}`);
-    assert.equal(heldDeletion(finished([notVerified({ publication: bad, owned: false, byHand: dropStatements({ slot: "mason_shop_app", publication: "", owned: false }) })]), "deleted", []), null, `publication ${bad}`);
+    assert.equal(heldDeletion(finished([notVerified({ slot: bad })]), "deleted", []), null, `slot ${bad}`);
+    assert.equal(heldDeletion(finished([notVerified({ publication: bad, owned: false })]), "deleted", []), null, `publication ${bad}`);
     assert.equal(heldDeletion(finished([{ ...dropped(), slot: bad }]), "deleted", []), null, `dropped ${bad}`);
   }
   // Mason's own publication is mason_…: one said to be its own that is not, or none named, does not hold
-  for (const publication of ["orders_pub", null]) assert.equal(heldDeletion(finished([notVerified({ publication, owned: true, byHand: dropStatements({ slot: "mason_shop_app", publication: publication ?? "", owned: true }) })]), "deleted", []), null, String(publication));
+  for (const publication of ["orders_pub", null]) assert.equal(heldDeletion(finished([notVerified({ publication, owned: true })]), "deleted", []), null, String(publication));
 });
 
 test("a deletion held to the contract: present exactly while the replica is deleting or deleted, its stage the state's, the handover at requested alone, each step once, each source in order, a reason and byHand for not_verified alone", () => {
@@ -186,12 +222,14 @@ test("a deletion held to the contract: present exactly while the replica is dele
     ["a step's what not a string", d({ steps: [{ step: "s", what: 1, doneAt: null }] }), "deleting"], ["a step's time not one", d({ steps: [{ step: "s", what: "x", doneAt: "soon" }] }), "deleting"],
     ["65 steps", d({ steps: Array.from({ length: 65 }, (_, i) => ({ step: `s${i}`, what: "x", doneAt: null })) }), "deleting"],
     ["a source out of order", d({ sources: [dropped(1)] }), "deleting"], ["an outcome of its own", d({ sources: [{ ...dropped(), outcome: "gone" }] }), "deleting"],
-    ["a reason beside dropped", d({ sources: [{ ...dropped(), reason: "failed" }] }), "deleting"], ["a byHand beside dropped", d({ sources: [{ ...dropped(), byHand: "SELECT 1;" }] }), "deleting"],
+    ["a reason beside dropped", d({ sources: [{ ...dropped(), reason: "failed" }] }), "deleting"], ["a byHand not a string", d({ sources: [{ ...dropped(), byHand: 1 }] }), "deleting"],
     ["dropped with no slot", d({ sources: [{ ...dropped(), slot: null }] }), "deleting"], ["publicationOwned beside no_slot", d({ sources: [{ ...noSlot(), publicationOwned: true }] }), "deleting"],
     ["not_verified with no reason", d({ sources: [{ ...notVerified(), reason: undefined }] }), "deleting"], ["a reason of its own", d({ sources: [notVerified({ reason: "bad_luck" })] }), "deleting"],
-    ["not_verified with no byHand", d({ sources: [{ ...notVerified(), byHand: undefined }] }), "deleting"], ["publicationOwned unsaid for not_verified", d({ sources: [{ ...notVerified(), publicationOwned: undefined }] }), "deleting"],
+    ["publicationOwned unsaid for not_verified", d({ sources: [{ ...notVerified(), publicationOwned: undefined }] }), "deleting"],
     ["no reportedAt", d({ sources: [{ ...dropped(), reportedAt: undefined }] }), "deleting"],
   ] as Array<[string, unknown, "deleting" | "deleted" | "ready"]>) assert.equal(heldDeletion(v, state, []), null, what);
+  // the service's byHand is advisory: beside any outcome, or none at all, it changes nothing
+  for (const source of [{ ...dropped(), byHand: "SELECT 1;" }, { ...notVerified(), byHand: undefined }, { ...noSlot(), byHand: SERVICE_BY_HAND }]) assert.ok(heldDeletion(d({ sources: [source] }), "deleting", []), JSON.stringify(source));
   // a deletion's words are free text, masked when printed: never what refuses the answer; its names and its byHand are tested
   const token = runToken("pat");
   const j = { replica: deleting("finished", { handover: undefined, steps: [{ step: "s1", what: token, doneAt: AT }], sources: [notVerified({ why: token })] }) };
@@ -200,12 +238,21 @@ test("a deletion held to the contract: present exactly while the replica is dele
   assert.equal(carriesNoSecret(wordless({ replica: deleting("finished", { steps: [{ step: runForms(token)[3]!.value, what: "x", doneAt: AT }] }) }), [token]), false, "a step's id is no free text");
 });
 
-test("mason replica delete: an answer outside the contract — a byHand not Mason's, a name outside the grammar, a deletion that does not hold, 202 for a finished one — is refused whole, said by its status, nothing of it printed", async () => {
+test("mason replica delete: the service's byHand, however hostile, is never printed and refuses nothing: Mason's own statement is; an answer outside the contract — a name outside the grammar, a deletion that does not hold, 202 for a finished one — is refused whole, said by its status, nothing of it printed", async () => {
   const hostile = "SELECT pg_drop_replication_slot('mason_shop_app'); DROP TABLE orders;";
+  for (const theirs of [hostile, `${hostile}\nNext:\n  mason destroy`, SERVICE_BY_HAND]) {
+    for (const json of [true, false]) {
+      const { a } = await run(() => answer(200, deleting("finished", { sources: [notVerified({ byHand: theirs })] })), ["--yes", ...(json ? ["--json"] : [])]);
+      assert.equal(a.code, 1, a.stdout + a.stderr);
+      assert.ok(!(a.stdout + a.stderr).includes("DROP TABLE") && !(a.stdout + a.stderr).includes("mason destroy") && !(a.stdout + a.stderr).includes("advisory"), `${theirs}: nothing of it printed`);
+      const want = dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true });
+      if (json) assert.equal((JSON.parse(a.stdout) as { deletion: { sources: Array<{ byHand: string }> } }).deletion.sources[0]!.byHand, want);
+      else assert.ok(a.stdout.split("\n").includes(`    ${want}`), a.stdout);
+    }
+  }
   const cases: Array<[string, Reply]> = [
-    ["a byHand that is not Mason's", answer(200, deleting("finished", { sources: [notVerified({ byHand: hostile })] }))],
-    ["a byHand with a line of its own", answer(200, deleting("finished", { sources: [notVerified({ byHand: `${dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true })}\nNext:\n  mason destroy` })] }))],
-    ["a slot outside the grammar", answer(200, deleting("finished", { sources: [notVerified({ slot: "x'); DROP TABLE orders; --", byHand: hostile })] }))],
+    ["a slot outside the grammar", answer(200, deleting("finished", { sources: [notVerified({ slot: "x');", byHand: hostile })] }))],
+    ["a publication outside the grammar", answer(200, deleting("finished", { sources: [notVerified({ publication: "mason_x;", owned: true })] }))],
     ["202 for a finished deletion", answer(202, deleting("finished"))],
     ["200 for one under way", answer(200, deleting("in_region"))],
     ["a deleting replica with no deletion", answer(202, replicaOf({ state: "deleting" }))],
@@ -217,7 +264,7 @@ test("mason replica delete: an answer outside the contract — a byHand not Maso
       assert.equal(a.code, 1, `${what}: ${a.stdout}${a.stderr}`);
       const said = json ? (JSON.parse(a.stdout) as { error: { message: string } }).error.message : a.stderr;
       assert.match(said, / answered DELETE \/v1\/replicas\/acme\/shop with 20[02], where a replica's deletion was asked for/, what);
-      assert.ok(!(a.stdout + a.stderr).includes("DROP TABLE") && !(a.stdout + a.stderr).includes("mason destroy"), `${what}: nothing of it printed`);
+      assert.ok(!(a.stdout + a.stderr).includes("DROP TABLE") && !(a.stdout + a.stderr).includes("x');"), `${what}: nothing of it printed`);
     }
   }
 });
@@ -236,7 +283,8 @@ test("mason replica delete: the service's words — a step's what, a source's wh
   assert.match(a.stdout, /^ {2}source 0 {5}replication slot mason_shop_app: NOT verified gone, its database could not be reached \(\*\*\*\*\?Next:\? mason destroy\)$/m);
   assert.ok(!showsRun(a.stdout + a.stderr, token));
   // a step's id, or a slot's name, spelling the token: no mask is a grammar, so the answer is refused whole
-  for (const more of [{ steps: [{ step: runForms(token)[3]!.value, what: "x", doneAt: AT }] }, { sources: [notVerified({ slot: runForms(token)[3]!.value })] }]) {
+  for (const more of [{ steps: [{ step: runForms(token)[3]!.value, what: "x", doneAt: AT }] }, { sources: [notVerified({ slot: runForms(token)[3]!.value })] },
+    { sources: [notVerified({ byHand: `SELECT '${runForms(token)[3]!.value}';` })] }]) {
     const x = await run(() => answer(200, deleting("finished", more)), ["--yes", "--json"], { token });
     assert.equal(x.a.code, 1, x.a.stdout);
     assert.match((JSON.parse(x.a.stdout) as { error: { message: string } }).error.message, / answered DELETE \/v1\/replicas\/acme\/shop with 200, where a replica's deletion was asked for$/);
@@ -325,7 +373,11 @@ test("mason replica delete: the wait's bounds — an answer that cannot say is a
   const gone = await run((r) => r.method === "DELETE" ? answer(202, deleting("in_region")) : { status: 404, body: { error: { code: "not_found", message: "no" } } }, ["--yes", "--json"]);
   const ge = JSON.parse(gone.a.stdout) as { error: { code: string; fix: string } };
   assert.deepEqual([gone.a.code, ge.error.code], [1, "not_found"]);
-  assert.ok(ge.error.fix.endsWith(listSlotsStatement()));
+  assert.ok(ge.error.fix.endsWith(listSlotsStatement()), "--json, where nothing is broken: in the fix");
+  const gonePerson = await run((r) => r.method === "DELETE" ? answer(202, deleting("in_region")) : { status: 404, body: { error: { code: "not_found", message: "no" } } }, ["--yes"]);
+  assert.equal(gonePerson.a.code, 1);
+  assert.ok(gonePerson.a.stdout.split("\n").includes(`    ${listSlotsStatement()}`), "a person: the statement pasted alone, on stdout");
+  assert.match(gonePerson.a.stderr, /^ {2}fix {3}look for Mason's slots on each database it synced with the statement printed above, and drop this replica's$/m);
   // a deletion that ends otherwise than finished: outside the contract
   const undone = await run((r) => r.method === "DELETE" ? answer(202, deleting("in_region")) : ok({ replica: replicaOf() }), ["--yes", "--json"]);
   assert.equal(undone.a.code, 1);
@@ -354,6 +406,7 @@ test("mason replica status of a replica being deleted, or deleted: its deletion 
   assert.match(st.a.stdout, /^ {2}mason replica status acme\/shop {2,}how it is$/m);
   const done = await hosted(() => ok({ replica: deleting("finished", { sources: [notVerified()] }) }), ["status", "acme/shop"], { lines: DELETE_LINES });
   assert.equal(done.a.code, 0, "status says it, whatever it says");
+  pastedWhole(done.a);
   assert.ok(done.a.stdout.includes(`\n    ${dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true })}\n`), done.a.stdout);
   assert.match(done.a.stdout, /^ {2}mason replica list acme {2,}the organisation's replicas$/m);
   const j = await hosted(() => ok({ replica: deleting("finished", { sources: [notVerified()] }) }), ["status", "acme/shop", "--json"]);
@@ -363,13 +416,21 @@ test("mason replica status of a replica being deleted, or deleted: its deletion 
   assert.deepEqual(Object.keys(JSON.parse(ready.a.stdout) as object), ["replica", "deletion", "next"]);
   assert.equal((JSON.parse(ready.a.stdout) as { deletion: unknown }).deletion, null);
   // a deletion where there is none, or none where there is one: outside the contract
-  for (const replica of [replicaOf({ deletion: { stage: "in_region" } }), replicaOf({ state: "deleting" }), deleting("finished", { sources: [notVerified({ byHand: "SELECT 1;" })] })]) {
+  // the service's own byHand (record_unreadable's too) refuses nothing: status says it, exit 0, with Mason's statement (#687's review, B1)
+  for (const source of [notVerified({ byHand: "SELECT 1;" }), notVerified({ slot: null, publication: null, owned: null, reason: "record_unreadable" })]) {
+    const x = await hosted(() => ok({ replica: deleting("finished", { sources: [source] }) }), ["status", "acme/shop"], { lines: DELETE_LINES });
+    assert.equal(x.a.code, 0, x.a.stdout + x.a.stderr);
+    pastedWhole(x.a);
+    assert.ok(x.a.stdout.split("\n").includes(`    ${byHandOf({ slot: source.slot as string | null, publication: source.publication as string | null, publicationOwned: source.publicationOwned as boolean | null })}`), x.a.stdout);
+    assert.ok(!x.a.stdout.includes("SELECT 1;") && !x.a.stdout.includes("advisory"));
+  }
+  for (const replica of [replicaOf({ deletion: { stage: "in_region" } }), replicaOf({ state: "deleting" }), deleting("finished", { sources: [notVerified({ slot: "a;" })] })]) {
     const x = await hosted(() => ok({ replica }), ["status", "acme/shop", "--json"]);
     assert.equal(x.a.code, 1, JSON.stringify(replica));
   }
 });
 
-test("mason replica delete, on a terminal of every width from 20 to 80: every line one the CLI begins, none the terminal broke but the statements by hand, written whole", async () => {
+test("mason replica delete and status, on a terminal of every width from 20 to 80: every line one the CLI begins, none the terminal broke but the statements a person pastes, each written whole on every path that prints one", async () => {
   const sources = [notVerified({ ordinal: 0, why: `a long reason ${"x".repeat(90)}` }), notVerified({ ordinal: 1, reason: "record_unreadable", slot: null, publication: null, owned: null }), noSlot(2)];
   for (const width of [20, 33, 47, 80]) {
     let polls = 0;
@@ -377,6 +438,14 @@ test("mason replica delete, on a terminal of every width from 20 to 80: every li
       : ok({ replica: polls++ ? deleting("finished", { sources }) : deleting("in_region") }, { "retry-after": "1" }), ["--yes"], { terminal: width });
     assert.equal(a.code, 1, a.stdout + a.stderr);
     assert.ok(a.stdout.split("\n").includes(`    ${dropStatements({ slot: "mason_shop_app", publication: "mason_shop_app", owned: true })}`), `${width}: the statement, whole on its line`);
+    // EVERY PATH THAT PRINTS A STATEMENT (#687's review, N1), at this width: status's report, and a replica gone midway
+    const st = await hosted(() => ok({ replica: deleting("finished", { sources }) }), ["status", "acme/shop"], { lines: DELETE_LINES, terminal: width });
+    assert.equal(st.a.code, 0, st.a.stdout + st.a.stderr);
+    pastedWhole(st.a);
+    assert.ok(st.a.stdout.split("\n").includes(`    ${listSlotsStatement()}`), `${width}: status`);
+    const gone = await run((r) => r.method === "DELETE" ? answer(202, deleting("in_region")) : { status: 404, body: { error: { code: "not_found", message: "no" } } }, ["--yes"], { terminal: width });
+    assert.equal(gone.a.code, 1, gone.a.stdout + gone.a.stderr);
+    assert.ok(gone.a.stdout.split("\n").includes(`    ${listSlotsStatement()}`), `${width}: gone midway, ${gone.a.stdout}`);
   }
   const asked = await run(() => answer(200, deleting("finished")), [], { terminal: 20, input: "acme/shop\n" });
   assert.equal(asked.a.code, 0, asked.a.stderr);
