@@ -16,7 +16,7 @@ each). The copy is read-only.
 
 | Postgres | Mason |
 |---|---|
-| A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 43 constructs and 87 forms of them verified |
+| A `SELECT` over the copied tables (and the source's views over them): joins, subqueries, WITH queries, UNION / INTERSECT / EXCEPT, GROUP BY and grouping sets, HAVING, DISTINCT, ORDER BY under the database's collation, LIMIT / OFFSET / FETCH FIRST, window functions, CASE, COALESCE / NULLIF / GREATEST / LEAST, IN and ANY / ALL, parameters, EXPLAIN | answered exactly as Postgres answers it: 44 constructs and 92 forms of them verified |
 | The types: "char", a type the source made, bigint, bit, bit varying, boolean, box, bytea, character, character varying, cid, cidr, circle, date, daterange, double precision, inet, int4multirange, int4range, int8range, integer, interval, json, jsonb, jsonpath, line, lseg, macaddr, macaddr8, money, name, numeric, numrange, oid, path, pg_lsn, point, polygon, real, regclass, regtype, smallint, text, tid, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsquery, tsrange, tstzmultirange, tstzrange, tsvector, uuid, xid, xid8, xml; arrays of bigint, bit, boolean, character, character varying, cidr, date, double precision, inet, int4range, integer, interval, json, jsonb, macaddr, money, numeric, oid, point, real, smallint, text, time with time zone, time without time zone, timestamp with time zone, timestamp without time zone, tsvector, uuid; the source's enums and citext; a table's row | answered (93 types verified) |
 | Functions, operators, aggregates, window functions and casts | answered exactly: 255 functions, 388 operators, 97 aggregates, 58 window functions and 126 casts verified; "What is verified" below names each |
 | Transactions, SET, SHOW, the catalog (`pg_catalog`, `information_schema`) and the protocol a tool uses | answered: what a BI tool asks at connection and before a query |
@@ -24,16 +24,16 @@ each). The copy is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,181 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,219 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,181 statements | Mason | DuckDB alone |
+| Of 7,219 statements | Mason | DuckDB alone |
 |---|---|---|
 | answered exactly as Postgres: the rows, their text, the column names | 93% | 25% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
-| refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 7% | — |
+| refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 6% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 18% |
-| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 23% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 22% |
 | a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 14% |
 | wrong rows, or the rows in another order | — | 8% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 3% |
@@ -108,7 +108,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `inet-order` | ORDER BY, <, >, min or max over an inet | orders addresses by network, then host | refused (equality, IS NULL and the value itself are answered) | sort or compare another column |
 | `held-type-compare` | what needs the type's own value of a column Mason holds as its text (money, bit, macaddr, cidr, a geometric type, a range, a tsvector, xml, a composite, an extension's type): ORDER BY, <, >, min, max, sum; a function, an operator, a cast to another type, a subscript or a field; GROUP BY or DISTINCT of a numrange, a tsquery or a tstzrange; = of a money | orders and computes by the type's own rules | refused (the value, x::text, IS NULL, count, and = and GROUP BY where equal values have one text are answered: docs/SQL-SUPPORT.md) | x::text, which sorts, groups and compares as text; or another column |
 | `binary-held-type` | a column of a type Mason holds as its text, in binary format, but a point or a box | the type's binary form | refused | ask for the column in text format |
-| `citext-forms` | GROUP BY, DISTINCT, min, max, a set operation, or = ANY (an array) over a citext | groups and sorts without regard to case, answering one spelling | refused (=, <>, <, >, IN (…), LIKE and ORDER BY are answered, case-insensitively) | GROUP BY lower(x), or x::text where case matters |
+| `citext-forms` | GROUP BY, DISTINCT, min, max, a set operation, = ANY (an array), ALL of a subquery (`ci < ALL (SELECT …)`), a row ordered by <, <=, > or >= (`(ci, id) < ('ab', 3)`), or a row compared by <, <=, >, >= or <> with ANY of a subquery, over a citext | groups and sorts without regard to case, answering one spelling | refused (=, <>, <, >, IN (…), LIKE and ORDER BY are answered, case-insensitively) | GROUP BY lower(x), or x::text where case matters |
 | `bytea-forms` | encode / decode to a format other than hex, base64 or escape, or one not written as a literal; convert_to / convert_from of an encoding other than UTF8 | answers | refused | encode(x, 'hex'), 'base64' or 'escape'; the UTF8 encoding |
 | `row-value` | a row as a value outside the SELECT list, a cast to text and the json functions (compared, tested with IS NULL, grouped, sorted, a row output sorted by its number or name included); a row of a row; a row of a table Mason synced in part; a row holding a numeric quotient or average, anywhere | compares, tests and groups a row by its columns | refused | compare, test or sort its columns |
 | `zone-abbreviation` | a time zone written as an abbreviation or a POSIX zone (`CST`, `IST`, `UTC+3`, `+05`) in AT TIME ZONE or date_trunc | a fixed offset (`CST` is -06 all year; `UTC+3` is three hours WEST) | refused, written or held by a row (DuckDB reads several as another zone: `CST` as Chicago's, `IST` as India's, `UTC+3` as east) | an IANA zone name (America/Chicago, Asia/Kolkata), in any case; UT, Z and UTC are UTC |
@@ -165,7 +165,7 @@ Not about one statement: what the prototype cannot do yet.
 | `spill-limit` | a statement that spills more to disk than Mason keeps for statements: a sort, a join or an aggregate past the memory limit | spills up to temp_file_limit, or until the disk is full | fails alone with 53400 past half of the disk's room, what is free and what statements have spilled (or MASON_SPILL_LIMIT), so the sync keeps room to write; a disk that is really full is 53100 | ask for less at once (a filter, a LIMIT, fewer or narrower columns), free disk, or raise MASON_SPILL_LIMIT |
 | `log-literals` | .mason/mason.log's statement lines | - | each statement DuckDB ran, whole, literals included | keep the log private |
 
-## What is verified (1147)
+## What is verified (1153)
 
 ### Types (93)
 
@@ -1202,7 +1202,7 @@ Not about one statement: what the prototype cannot do yet.
 - a cast from xid to text
 - a cast from xid8 to text
 
-### Constructs (43)
+### Constructs (44)
 
 - AND / OR / NOT
 - ARRAY[…]
@@ -1236,6 +1236,7 @@ Not about one statement: what the prototype cannot do yet.
 - a named argument (name => value)
 - a parameter ($n)
 - a query
+- a row comparison
 - a subquery
 - a subscript (a[i], a[i:j])
 - a table read
@@ -1248,7 +1249,7 @@ Not about one statement: what the prototype cannot do yet.
 - an item of the SELECT list
 - an operator
 
-### Forms of a construct (87)
+### Forms of a construct (92)
 
 - AND
 - ARRAY(subquery)
@@ -1288,6 +1289,10 @@ Not about one statement: what the prototype cannot do yet.
 - OR
 - RIGHT JOIN
 - ROLLUP
+- ROWCOMPAREEXPR.cmptype = 1
+- ROWCOMPAREEXPR.cmptype = 2
+- ROWCOMPAREEXPR.cmptype = 4
+- ROWCOMPAREEXPR.cmptype = 5
 - SELECT DISTINCT
 - UNION
 - UNION / INTERSECT / EXCEPT
@@ -1336,4 +1341,5 @@ Not about one statement: what the prototype cannot do yet.
 - an ordered-set aggregate (WITHIN GROUP)
 - an ordered-set aggregate's direct argument
 - op ALL (array)
+- op ALL (subquery)
 - op ANY (array) / IN (list)

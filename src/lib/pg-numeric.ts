@@ -57,7 +57,10 @@ const NUMERIC_MAX_DISPLAY_SCALE = 1000;
 /** the decimal digits in one base-10000 group (numeric.c's DEC_DIGITS, NBASE = 10^DEC_DIGITS) */
 const DEC_DIGITS = 4;
 
-const pow10 = (n: number): bigint => 10n ** BigInt(n);
+/** 10^n for the scales a value meets most, computed once (issue 665: a GROUP BY's key evaluates a program for every
+ *  row, and each division asks for several) */
+const POW10: readonly bigint[] = Array.from({ length: 64 }, (_, i) => 10n ** BigInt(i));
+const pow10 = (n: number): bigint => POW10[n] ?? 10n ** BigInt(n);
 const abs = (x: bigint): bigint => x < 0n ? -x : x;
 
 /** `x / d` rounded half away from zero (d > 0): how numeric.c's `round_var` and `div_var(…, round = true)` round */
@@ -71,6 +74,8 @@ function divRound(x: bigint, d: bigint): bigint {
 /** digits, an underscore allowed between two of them (Postgres 16: `1_000`) */
 const DIGITS = String.raw`\d+(?:_\d+)*`;
 const NUMERIC_TEXT = new RegExp(String.raw`^\s*([+-])?(${DIGITS})?(?:\.(${DIGITS})?)?(?:[eE]([+-]?${DIGITS}))?\s*$`);
+/** a sign, digits and decimals, nothing else: what `NUMERIC_TEXT` reads as the same value and scale */
+const PLAIN = /^([+-])?(\d+)(?:\.(\d+))?$/;
 /** Postgres 16's non-decimal integers: `0x1F`, `0o17`, `0b101`, an underscore before any digit (`0x_1F`) */
 const NON_DECIMAL = /^\s*([+-])?0(?:[xX]((?:_?[0-9a-fA-F])+)|[oO]((?:_?[0-7])+)|[bB]((?:_?[01])+))\s*$/;
 
@@ -78,6 +83,12 @@ const NON_DECIMAL = /^\s*([+-])?0(?:[xX]((?:_?[0-9a-fA-F])+)|[oO]((?:_?[0-7])+)|
  *  decimals written, less the exponent (never below 0): `1.50` has scale 2, `1.5e3` is 1500 with scale 0, `1e-3` is
  *  0.001 with scale 3; `1_000` is 1000 and `0x1F` is 31 (scale 0). NaN and Infinity are no PgNumeric: refused here. */
 export function parseNumeric(text: string): PgNumeric {
+  // (the plain text DuckDB writes of a DECIMAL or an integer, `-12.50`: read without the general grammar below)
+  const plain = PLAIN.exec(text);
+  if (plain !== null) {
+    const unscaled = BigInt(plain[3] === undefined ? plain[2]! : plain[2]! + plain[3]);
+    return { unscaled: plain[1] === "-" ? -unscaled : unscaled, scale: plain[3]?.length ?? 0 };
+  }
   const x = NON_DECIMAL.exec(text);
   if (x !== null) {
     const [prefix, digits] = x[2] !== undefined ? ["0x", x[2]] : x[3] !== undefined ? ["0o", x[3]] : ["0b", x[4]!];
@@ -241,15 +252,26 @@ function groups(n: PgNumeric): { digits: number[]; weight: number } {
   return { digits, weight: lsFirst.length - 1 - fracGroups };
 }
 
+/** the weight and the value of a value's FIRST base-10000 group (`groups`' weight and digits[0]; 0 and 0 for zero), read
+ *  off its decimal digits: the most significant digit's place is 10^(digits - 1 - scale), its group the one holding
+ *  that place, and the group's value the digits down to the group's last place. All `select_div_scale` reads of a value */
+function leadGroup(n: PgNumeric): readonly [number, number] {
+  if (n.unscaled === 0n) return [0, 0];
+  const digits = abs(n.unscaled).toString();
+  const place = digits.length - 1 - n.scale;
+  const weight = Math.floor(place / DEC_DIGITS);
+  const width = place - weight * DEC_DIGITS + 1;
+  // (a group past the last digit is padded with its zeros: 0.1 is the group 1000 at weight -1)
+  return [weight, Number(digits.slice(0, width).padEnd(width, "0"))];
+}
+
 /**
  * `select_div_scale` (numeric.c), faithfully: a quotient keeps at least NUMERIC_MIN_SIG_DIGITS significant digits —
  * the scale is read from the WEIGHTS and FIRST GROUPS of the two values, so it depends on the values, not only their
  * types — and never fewer decimals than either input shows, between 0 and NUMERIC_MAX_DISPLAY_SCALE.
  */
 export function divScale(a: PgNumeric, b: PgNumeric): number {
-  const ga = groups(a), gb = groups(b);
-  const weight1 = ga.digits.length ? ga.weight : 0, first1 = ga.digits[0] ?? 0;
-  const weight2 = gb.digits.length ? gb.weight : 0, first2 = gb.digits[0] ?? 0;
+  const [weight1, first1] = leadGroup(a), [weight2, first2] = leadGroup(b);
   // the quotient's weight; when the first groups are equal it may be either, and the smaller is assumed
   let qweight = weight1 - weight2;
   if (first1 <= first2) qweight--;
@@ -513,6 +535,8 @@ function childrenOf(p: NumericProgram): readonly NumericProgram[] {
   }
 }
 
+/** each literal node's value, parsed once (a program is never changed once made, and no value is ever changed) */
+const LITERALS = new WeakMap<NumericProgram, PgNumeric>();
 /** The value of a program over one row, or null; throws NumericError where Postgres raises (a division by zero). Each
  *  node several parents share is computed AT MOST ONCE for the row (`memo`, one a row), and only where Postgres
  *  computes it: a CASE's untaken arm and a COALESCE's arguments after the first that is not NULL never are. */
@@ -530,7 +554,12 @@ function evaluateNode(p: NumericProgram, row: Readonly<Record<string, unknown>>,
       const v = row[p.key];
       return v === null || v === undefined ? null : numericOf(v);
     }
-    case "literal": return parseNumeric(p.text);
+    case "literal": {
+      // (a literal is the same on every row: read once, `LITERALS`)
+      let v = LITERALS.get(p);
+      if (v === undefined) { v = parseNumeric(p.text); LITERALS.set(p, v); }
+      return v;
+    }
     case "neg": { const a = ev(p.arg); return a === null ? null : { unscaled: -a.unscaled, scale: a.scale }; }
     case "round": { const a = ev(p.arg); return a === null ? null : round(a, p.scale); }
     case "typmod": { const a = ev(p.arg); return a === null ? null : withTypmod(a, p.precision, p.scale); }

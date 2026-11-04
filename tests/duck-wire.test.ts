@@ -6455,6 +6455,289 @@ test("exact path: FETCH … WITH TIES keys a grouped query's quotient per group,
   } finally { await c.end(); }
 });
 
+// ISSUE 665: a numeric quotient grouped by its exact key ALONE (one call a row), every reader of it — the list's value,
+// its text, a cast, HAVING, the ORDER BY's exact key, a window, WITH TIES, a DISTINCT ON, the printed cells — computed
+// per group over the group's columns (src/duck/rewrite.ts keyedGroups, `readPerGroup`): each answer as Postgres's
+test("issue 665: a quotient grouped by its exact key alone is read per group by every reader, as Postgres answers", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // Metabase's week of year and its numeric auto-bin, as it writes them, and the week by ordinal, by name, unordered
+      ["SELECT ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) AS created_at, count(*) AS count FROM orders o GROUP BY ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) ORDER BY ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) ASC", "ordered"],
+      ["SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0), count(*) FROM orders o GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY w ORDER BY w DESC LIMIT 2", "ordered"],
+      ["SELECT ceil(cast(extract(doy from o.created_at) as integer) / 7.0) AS w, count(*) FROM orders o GROUP BY 1", "bag"],
+      ["SELECT (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) AS amount, count(*) AS count FROM orders o GROUP BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ORDER BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ASC", "ordered"],
+      ["SELECT floor(p.u / 2.5) * 2.5 AS b, count(*), sum(p.w) FROM pnum p GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT floor(o.qty / 3.0) * 3.0 AS b, count(*) FROM orders o GROUP BY 1 ORDER BY 1", "ordered"],
+      // a NULL group, and NULLs placed first
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      // quotients equal to a double's 17 digits: two groups, printed, cast, read as text, ordered, by two columns' cells
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY 1 DESC", "ordered"],
+      ["SELECT (b.x / 1)::text AS t, (b.x / 1)::numeric(30,20) AS c, (b.x / 1)::float8 AS f, count(*) FROM bigdec b GROUP BY b.x / 1 ORDER BY b.x / 1", "ordered"],
+      ["SELECT b.x / b.y AS q, count(*), min(b.id) FROM bigdec b GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 HAVING b.x / 1 > 2 ORDER BY (b.x / 1) * 2 DESC, 2", "ordered"],
+      ["SELECT b.x / 1 AS q, rank() OVER (ORDER BY b.x / 1 DESC) FROM bigdec b GROUP BY 1 ORDER BY 2, 1", "ordered"],
+      ["SELECT DISTINCT ON (b.x / 1) b.x / 1 AS q, count(*) FROM bigdec b GROUP BY 1 ORDER BY b.x / 1, 2", "ordered"],
+      ["SELECT b.y, round(b.x / 3, 21) AS q, count(*) FROM bigdec b GROUP BY b.y, round(b.x / 3, 21) ORDER BY q DESC, 1", "ordered"],
+      // grouped inside a derived table and a scalar subquery, read outside
+      ["SELECT s.q, s.n FROM (SELECT b.x / 1 AS q, count(*) AS n FROM bigdec b GROUP BY 1) s ORDER BY s.q DESC LIMIT 2", "ordered"],
+      ["SELECT (SELECT max(s.n) FROM (SELECT count(*) AS n FROM bigdec b GROUP BY b.x / 1) s) AS biggest", "ordered"],
+      // equal values of different scales are one group
+      ["SELECT v.x / 2 AS q, count(*) FROM orders o CROSS JOIN (VALUES (1.0::numeric), (1.00), (2), (2.000)) AS v(x) WHERE o.id = 1 GROUP BY 1 ORDER BY 1", "ordered"],
+      // an empty input
+      ["SELECT b.x / 3 AS q, count(*) FROM bigdec b WHERE false GROUP BY 1 ORDER BY 1", "ordered"],
+      // a division by zero in the key: Postgres's 22012, raised by the key's one call
+      ["SELECT floor(o.amount / (o.qty - o.qty)) AS b, count(*) FROM orders o GROUP BY 1", "bag"],
+      // one row's columns compute a group's value, never two rows' (a NULL skipped): the order key and WITH TIES read
+      // first() of each column, so (7, NULL) and (NULL, 7) are the group 1, never (7, 7)'s 2
+      ["SELECT (coalesce(v.x, 0) + coalesce(v.y, 0)) / 7 AS q, count(*) FROM orders o CROSS JOIN (VALUES (7.00, NULL::numeric(10,2)), (NULL, 7.00), (14.00, NULL)) AS v(x, y) WHERE o.id = 1 GROUP BY 1 ORDER BY 1 DESC FETCH FIRST 1 ROWS WITH TIES", "ordered"],
+      ["SELECT count(*) FROM orders o CROSS JOIN (VALUES (7.00, NULL::numeric(10,2)), (NULL, 7.00), (14.00, NULL)) AS v(x, y) WHERE o.id = 1 GROUP BY (coalesce(v.x, 0) + coalesce(v.y, 0)) / 7 ORDER BY (coalesce(v.x, 0) + coalesce(v.y, 0)) / 7", "ordered"],
+      // the same program over a cell seen again (the key's cache) and over NULL cells
+      ["SELECT ceil(d.a / 7.0) AS w, count(*), sum(d.c) FROM deep_t d GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      // GROUPING of an expression grouped by a key in its place reads the engine's own GROUP BY entry, the key (review
+      // r1 of PR 674): in the list, beside a second key, in HAVING; a jsonb grouped by its key alike
+      ["SELECT d.c / 3 AS q, grouping(d.c / 3), count(*) FROM deep_t d GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, d.a, grouping(d.c / 3, d.a), count(*) FROM deep_t d GROUP BY 1, 2 ORDER BY 1, 2", "ordered"],
+      ["SELECT count(*) FROM deep_t d GROUP BY d.c / 3 HAVING grouping(d.c / 3) = 0 ORDER BY 1", "ordered"],
+      ["SELECT t.b::text, grouping(t.b), count(*) FROM jdocs t GROUP BY t.b", "bag"],
+      // a SubLink's test expression is this query's (review r1 of PR 674): a grouped quotient's column there is read
+      // per group, in HAVING, the list and the ORDER BY, IN, = ANY and NOT IN; and a column the group's key decides
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 HAVING d.c / 3 IN (SELECT e.c / 5 FROM deep_t e) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 HAVING d.c / 3 = ANY (SELECT e.c / 5 FROM deep_t e) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 HAVING d.c / 3 NOT IN (SELECT e.c / 5 FROM deep_t e WHERE e.c IS NOT NULL) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, d.c / 3 IN (SELECT e.c / 5 FROM deep_t e) AS listed, count(*) FROM deep_t d GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 ORDER BY d.c / 3 IN (SELECT e.c / 5 FROM deep_t e), 1", "ordered"],
+      ["SELECT o.id, o.status FROM orders o GROUP BY o.id HAVING o.status IN (SELECT 'shipped') ORDER BY 1 LIMIT 3", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("issue 665 class round r2: GROUPING reads the GROUP BY entry Postgres matched, every clause after grouping is read per group, a SubLink compares as Postgres resolved it", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // GROUPING of a grouped quotient in every clause that holds one: DISTINCT ON, a named WINDOW's ORDER BY and
+      // PARTITION BY, and each where Postgres bound the key by equality to an earlier entry (no node at its offset)
+      ["SELECT DISTINCT ON (grouping(d.c / 3)) d.c / 3 AS q FROM deep_t d GROUP BY 1 ORDER BY grouping(d.c / 3), 1", "ordered"],
+      ["SELECT DISTINCT ON (grouping(ceil(d.c / 7.0))) ceil(d.c / 7.0) AS w FROM deep_t d GROUP BY 1 ORDER BY grouping(ceil(d.c / 7.0)), 1", "ordered"],
+      ["SELECT DISTINCT ON (grouping(d.c / 3), d.c / 3) d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 ORDER BY grouping(d.c / 3), d.c / 3", "ordered"],
+      ["SELECT DISTINCT ON (grouping(d.c / 3) + 1) d.c / 3 AS q FROM deep_t d GROUP BY 1 ORDER BY grouping(d.c / 3) + 1, 1", "ordered"],
+      ["SELECT d.c / 3 AS q, rank() OVER w FROM deep_t d GROUP BY 1 WINDOW w AS (ORDER BY grouping(d.c / 3), d.c / 3) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, rank() OVER w FROM deep_t d GROUP BY 1 WINDOW w AS (ORDER BY grouping(d.c / 3), d.c / 3) ORDER BY grouping(d.c / 3), 1", "ordered"],
+      ["SELECT d.c / 3 AS q, rank() OVER (w ORDER BY d.c / 3) FROM deep_t d GROUP BY 1 WINDOW w AS (PARTITION BY grouping(d.c / 3)) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, grouping(d.c / 3) AS g, rank() OVER (PARTITION BY grouping(d.c / 3) ORDER BY d.c / 3) FROM deep_t d GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, grouping(d.c / 3) AS g FROM deep_t d GROUP BY 1 ORDER BY grouping(d.c / 3), 1", "ordered"],
+      ["SELECT d.c / 3 AS q, grouping(t.c / 3) AS g FROM deep_t d, LATERAL (SELECT d.c) t(c) GROUP BY 1, t.c / 3 ORDER BY 1, 2", "ordered"],
+      ["SELECT DISTINCT ON (grouping(d.c / 3)) d.c / 3 AS q FROM deep_t d WHERE false GROUP BY 1 ORDER BY grouping(d.c / 3), 1", "ordered"],
+      ["SELECT t.b::text AS k, grouping(t.b) AS g FROM jdocs t GROUP BY t.b ORDER BY grouping(t.b), 1", "ordered"],
+      // a GROUPING of this query inside a subquery (its agglevelsup), of a grouped quotient and of a grouped jsonb
+      ["SELECT q, (SELECT grouping(s.q)) AS g FROM (SELECT d.c / 3 AS q FROM deep_t d) s GROUP BY q ORDER BY 1", "ordered"],
+      ["SELECT q FROM (SELECT d.c / 3 AS q FROM deep_t d) s GROUP BY q HAVING EXISTS (SELECT 1 WHERE grouping(s.q) = 0) ORDER BY 1", "ordered"],
+      ["SELECT q, (SELECT grouping(s.q) FROM deep_t LIMIT 0) AS g FROM (SELECT d.c / 3 AS q FROM deep_t d) s GROUP BY q ORDER BY 1", "ordered"],
+      ["SELECT t.b::text AS k, (SELECT grouping(t.b)) AS g FROM jdocs t GROUP BY t.b ORDER BY 1", "ordered"],
+      ["SELECT t.b::text AS k FROM jdocs t GROUP BY t.b HAVING EXISTS (SELECT 1 WHERE grouping(t.b) = 0) ORDER BY 1", "ordered"],
+      // a grouped quotient in a named WINDOW's PARTITION BY and ORDER BY is read per group
+      ["SELECT d.c / 3 AS q, count(*) OVER w FROM deep_t d GROUP BY 1 WINDOW w AS (PARTITION BY d.c / 3) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, count(*) OVER (w ORDER BY d.c / 3) FROM deep_t d GROUP BY 1 WINDOW w AS (PARTITION BY d.c / 3) ORDER BY 1", "ordered"],
+      ["SELECT ceil(d.c / 7.0) AS w, sum(count(*)) OVER x FROM deep_t d GROUP BY 1 WINDOW x AS (PARTITION BY ceil(d.c / 7.0)) ORDER BY 1 NULLS FIRST", "ordered"],
+      // a WINDOW's bare name is the FROM's column (SQL99), never an output of that name; ORDER BY and DISTINCT ON's is the output
+      ["SELECT d.id, max(d.a) AS b, rank() OVER w AS r FROM deep_t d GROUP BY d.id WINDOW w AS (ORDER BY b, d.id) ORDER BY d.id", "ordered"],
+      ["SELECT d.id, d.b AS x, max(d.a) AS b, rank() OVER w AS r FROM deep_t d GROUP BY d.id WINDOW w AS (PARTITION BY b ORDER BY d.id) ORDER BY d.id", "ordered"],
+      ["SELECT d.id, max(d.a) AS b, rank() OVER w AS r FROM deep_t d GROUP BY d.id WINDOW w AS (ORDER BY 2) ORDER BY d.id", "ordered"],
+      ["SELECT DISTINCT ON (b) b, id FROM deep_t GROUP BY id ORDER BY b, id", "ordered"],
+      ["SELECT max(a) AS b FROM deep_t GROUP BY id ORDER BY b NULLS FIRST", "ordered"],
+      // a char(n) in a SubLink is compared as Postgres resolved the comparison: without its padding
+      ["SELECT id, d IN (SELECT 'ab') AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, d IN (SELECT 'ab') AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t GROUP BY id HAVING (b, d) IN (SELECT 'x', 'ab') ORDER BY 1", "ordered"],
+      ["SELECT id, d = ANY (SELECT 'ab') AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, (a, d) = ANY (SELECT 5, 'ab') AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, (SELECT d IN (SELECT 'ab')) AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, d IN (SELECT 'ab'::char(6)) AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, 'ab' IN (SELECT s.d FROM deep_t s WHERE s.id = deep_t.id) AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, d NOT IN (SELECT 'ab') AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, d = ANY (SELECT 'a' UNION ALL SELECT 'zz') AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT d, count(*) FROM deep_t GROUP BY d HAVING d IN (SELECT 'ab') ORDER BY 1", "ordered"],
+      ["SELECT id, b IN (SELECT s.d FROM deep_t s) AS m FROM deep_t ORDER BY 1", "ordered"],
+      // a char(n) against a char(n): bpchareq and bpcharlt ignore the padding on both sides, in a SubLink and outside
+      ["SELECT id, d IN (SELECT s.d::char(9) FROM deep_t s WHERE s.id = deep_t.id) AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, 'ab'::char(2) = ANY (SELECT s.d FROM deep_t s WHERE s.id = deep_t.id) AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, d = 'ab'::char(9) AS e, d <> 'ab '::char(3) AS n, d IN ('ab'::char(6), 'cd') AS i FROM deep_t ORDER BY 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
+test("issue 665 class round r3: every coercion Postgres placed on a char(n) is written, and a subquery's output is compared as Postgres resolved it whatever its form", async () => {
+  const c = await client();
+  try {
+    const forms = [
+      // VALUES, a star, TABLE, a CTE and every set operation, as the subquery of a char(n) comparison
+      "d IN (VALUES ('ab'::char(4)))", "d NOT IN (VALUES ('ab'::char(4)))", "d IN (VALUES ('ab'::char(4)), ('zz'::char(4)))",
+      "d IN (SELECT s.* FROM (SELECT d FROM deep_t WHERE id = 1) s)",
+      "(a, d) IN (SELECT s.* FROM (SELECT a, d FROM deep_t WHERE id = 1) s)",
+      "d IN (TABLE chars)", "d IN (WITH w AS (SELECT d FROM deep_t WHERE id = 1) SELECT * FROM w)", "d IN (WITH w AS (SELECT d FROM deep_t WHERE id = 1) TABLE w)",
+      "d IN (SELECT d FROM deep_t WHERE id = 1 UNION SELECT d FROM deep_t WHERE id = 6)", "d IN (SELECT d FROM deep_t WHERE id = 1 UNION ALL SELECT d FROM deep_t WHERE id = 6)",
+      "d IN (SELECT d FROM deep_t INTERSECT SELECT d FROM deep_t WHERE id = 1)", "d IN (SELECT 'ab'::char(4) EXCEPT SELECT 'b'::char(4))",
+      "d = ANY (SELECT u.d FROM deep_t u WHERE u.id = deep_t.id UNION ALL SELECT 'zz'::char(4))",
+      "d IN (SELECT d FROM deep_t WHERE id = 1 UNION SELECT 'zz')", "d IN (SELECT d FROM deep_t WHERE id = 1 UNION ALL SELECT 'zz'::text)",
+      "(d, d) IN (SELECT d, d FROM deep_t WHERE id = 1 UNION SELECT 'b', 'b')",
+      // a char(n) row or arm Postgres coerced to text inside the subquery: VALUES (a CTE's, a correlated row), CASE, NULLIF
+      "d IN (VALUES ('zz'::text), ('ab'::char(4)))", "d IN (SELECT x FROM (VALUES ('zz'::text), ('ab'::char(4))) v(x))",
+      "d IN (WITH w(x) AS (VALUES ('zz'::text), ('ab'::char(4))) SELECT x FROM w)", "d IN (SELECT x FROM (VALUES ('zz'::text), (deep_t.d)) v(x))",
+      "b IN (VALUES ('x'::char(4)), ('zz'::text))", "b IN (SELECT 'x'::char(4) UNION ALL SELECT 'zz'::text)",
+      "d IN (SELECT CASE WHEN u.id = 1 THEN u.d ELSE 'zz'::text END FROM deep_t u)", "d IN (SELECT nullif(u.d, 'qq'::text) FROM deep_t u WHERE u.id = 1)",
+      "d IN (SELECT nullif(u.d, 'qq'::text) FROM deep_t u WHERE u.id = 1 UNION ALL SELECT 'qq'::text)",
+    ];
+    // ALL, and a row under an ordering operator, each pair as Postgres compares it, a NULL member NULL (on a listener
+    // that refuses nothing, so the answer is held whatever the allowlist the oracle's legs regenerate)
+    const ordered = [
+      "d <> ALL (SELECT * FROM (SELECT d FROM deep_t WHERE id = 1) s)", "d < ALL (SELECT d FROM deep_t WHERE id = 6 UNION SELECT d FROM deep_t WHERE id = 5)",
+      "(a, d) < ANY (SELECT a, d FROM deep_t WHERE id = 6 UNION SELECT a, d FROM deep_t WHERE id = 5)", "(a, d) >= ANY (VALUES (2, 'b'::char(4)))",
+      "(a, d) < ANY (VALUES (2, 'b'::char(4)), (2, 'zz'::char(4)))", "(a, b) < ANY (SELECT 3, d FROM deep_t WHERE id = 1)",
+      "(a, d) <= ALL (SELECT a, d FROM deep_t WHERE id IN (1, 6))", "(a, d) > ANY (SELECT a, d FROM deep_t WHERE false)",
+      "(a, d) > ALL (WITH w AS (SELECT a, d FROM deep_t WHERE id = 1) SELECT * FROM w)",
+    ];
+    // (a correlated VALUES row beside a GROUP BY is refused at the base too, 42803: its plain form only)
+    const ungrouped = new Set(["d IN (SELECT x FROM (VALUES ('zz'::text), (deep_t.d)) v(x))"]);
+    const each = (fs: string[]): Array<[string, "ordered"]> => fs.flatMap((f) => [
+      [`SELECT id, ${f} AS m FROM deep_t ORDER BY 1`, "ordered"] as [string, "ordered"],
+      ...(ungrouped.has(f) ? [] : [[`SELECT id, ${f} AS m FROM deep_t GROUP BY id ORDER BY 1`, "ordered"] as [string, "ordered"]]),
+    ]);
+    const statements = each(forms);
+    // the coercion outside a subquery, and its GROUP BY twin
+    statements.push(
+      ["SELECT id, CASE WHEN id = 1 THEN d ELSE 'zz'::text END AS x, nullif(d, 'qq'::text) AS n, upper(d) AS u FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT CASE WHEN a > 0 THEN d ELSE 'zz'::text END AS x, count(*) FROM deep_t GROUP BY CASE WHEN a > 0 THEN d ELSE 'zz'::text END ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT d || '|' AS x, string_agg(d, ',' ORDER BY id) OVER () AS s FROM deep_t ORDER BY id", "ordered"],
+    );
+    assert.deepEqual(await unlike(c, statements), []);
+    const { api: a, c: all } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+    // the test's columns grouped themselves, or a grouped key first: read by the outer query, never inside the subquery
+    const grouped: Array<[string, "ordered"]> = [
+      ["SELECT a, d, (a, d) < ANY (SELECT a, d FROM deep_t WHERE id = 6) AS m FROM deep_t GROUP BY a, d ORDER BY 1, 2", "ordered"],
+      ["SELECT a, (a, 1) < ANY (SELECT a, 1 FROM deep_t WHERE id = 6) AS m FROM deep_t GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT id, (id, a) < ANY (SELECT 5, NULL::int) AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t GROUP BY id HAVING (id, a) >= ALL (SELECT 3, a FROM deep_t WHERE id = 1) ORDER BY 1", "ordered"],
+      // a row's <> ANY filtering: a NULL member NULL, never true
+      ["SELECT id FROM deep_t WHERE (a, d) <> ANY (SELECT a, d FROM deep_t WHERE id IN (1, 4)) ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t GROUP BY id HAVING (a, d) <> ANY (SELECT 1, NULL::char(4)) ORDER BY 1", "ordered"],
+      ["SELECT id, (a, d) <> ANY (SELECT NULL::int, 'ab'::char(4) UNION ALL SELECT 2, 'cd') AS m FROM deep_t ORDER BY 1", "ordered"],
+    ];
+    try { assert.deepEqual(await unlike(all, [...each(ordered), ...grouped]), []); } finally { await all.end(); await a.close(); }
+  } finally { await c.end(); }
+});
+
+// (on a listener that refuses nothing, so the answer is held whatever the allowlist the oracle's legs regenerate)
+test("issue 665 CI fix 1 (#284): two rows ordered pair by pair as Postgres orders them, a NULL member NULL, every operand read once", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT id, (a, d) < (2, 'cd') AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, (a, b) <= (2, 'y') AS m, (a, c) > (2, 3.00) AS n, (a, b) >= (NULL::int, 'x') AS o FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, ROW(a, b) < ROW(c::int, b) AS m, (a, b) < (1, b) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t WHERE (a, id) > (2, 3) ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t WHERE NOT ((a, id) < (2, 3)) ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t ORDER BY (a, id) < (2, 3) NULLS FIRST, id", "ordered"],
+      ["SELECT id, (d, id) < (NULL, 3) AS m, ('b'::char(4), 1) < (NULL, 2) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT (a, b) < (3, 'x') AS m, count(*) FROM deep_t GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      // a volatile member read once: the comparison is of the one value the row holds
+      ["SELECT count(*) FILTER (WHERE (x, 1) <= (x, 1)) AS n FROM (SELECT random() AS x FROM deep_t) s", "ordered"],
+      // a constant beside a column of another type is cast to it, as any comparison's is
+      ["SELECT id, (a, b) < ($$2$$::int, 'y'::varchar) AS m, (b, id) >= ('x', 1) AS n FROM deep_t ORDER BY 1", "ordered"],
+    ]), []);
+    // a citext member is refused by name: Postgres orders it without regard to case
+    await assert.rejects(c.query("SELECT id FROM accounts WHERE (status, id) < ('B'::citext, 2)"),(e: Error & { code?: string; detail?: string }) => e.code === "0A000" && /citext-forms/.test(e.detail ?? ""));
+  } finally { await c.end(); await a.close(); }
+});
+
+// (on the listener production runs, its allowlist the one CI's legs verified: ALL of a subquery and a row comparison
+// admitted, so a citext reaching them is answered unless the rewrite refuses it)
+test("issue 665 shrink 1: a citext compared by ALL of a subquery, or in a row compared with each of its rows, is refused by name; the rest answered", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    // `status` is a citext of 'finalized', 'FINALIZED', 'Finalized' and 'draft': compared by its bytes, each answer differs
+    const citext = [
+      "SELECT id FROM accounts WHERE status < ALL (SELECT status FROM accounts WHERE id > 1) ORDER BY 1",
+      "SELECT id FROM accounts WHERE status >= ALL (SELECT status FROM accounts WHERE id <> 4) ORDER BY 1",
+      "SELECT id FROM accounts WHERE status = ALL (SELECT status FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id FROM accounts WHERE status <> ALL (SELECT status FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id, status <= ALL (SELECT status FROM accounts WHERE id IN (2, 3)) AS m FROM accounts ORDER BY 1",
+      "SELECT id FROM accounts WHERE (status, id) < ANY (SELECT status, id FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (status, id) >= ALL (SELECT status, id FROM accounts WHERE id IN (1, 2)) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (id, status) > ANY (SELECT id, status FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (id, status) <= ALL (SELECT 1, status FROM accounts WHERE id = 2) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (status, id) <> ALL (SELECT status, 1 FROM accounts WHERE id = 2) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (status, 1) <> ANY (SELECT status, 1 FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id FROM accounts GROUP BY id HAVING (status, id) >= ALL (SELECT status, id FROM accounts WHERE id IN (1, 2)) ORDER BY 1",
+    ];
+    const answered: string[] = [];
+    for (const s of citext) {
+      try { await c.query(s); answered.push(`answered: ${s}`); } catch (e) {
+        const err = e as Error & { code?: string; detail?: string };
+        if (err.code !== "0A000" || !/citext-forms/.test(err.detail ?? "")) answered.push(`${err.code} ${err.message}: ${s}`);
+      }
+    }
+    assert.deepEqual(answered, []);
+    // text, char(n), numeric and NULL under ANY and ALL, a row without a citext, and a citext beside a text (text's
+    // operator), answered as Postgres answers them
+    assert.deepEqual(await unlike(c, [
+      ["SELECT id, b < ALL (SELECT b FROM deep_t WHERE id IN (1, 3)) AS m, b >= ANY (SELECT b FROM deep_t WHERE id IN (1, 3)) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, d > ALL (SELECT d FROM deep_t WHERE id IN (1, 3)) AS m, d = ALL (SELECT d FROM deep_t WHERE id = 1) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, c <= ALL (SELECT c FROM deep_t WHERE id IN (1, 3)) AS m, a <> ALL (SELECT a FROM deep_t WHERE id IN (1, 4)) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, (a, b) < ALL (SELECT a, b FROM deep_t WHERE id IN (1, 3)) AS m, (d, a) >= ANY (SELECT d, a FROM deep_t WHERE id = 3) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, (a, d) <> ANY (SELECT a, d FROM deep_t WHERE id = 1) AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, status::text < ALL (SELECT team FROM accounts WHERE id > 2) AS m FROM accounts ORDER BY 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); await a.close(); }
+});
+
+// (on the listener production runs; a domain over a citext is synced as the citext it holds, so the catalog never
+// holds a domain, and a composite holding one is held as its text, refused before any comparison: both are held
+// by CITEXT_HELD run on Postgres below)
+test("issue 665 shrink 2: a citext reached through an array, a nested array or a row's array is refused by name under ALL or a row's comparison; CITEXT_HELD names every type holding one", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    // `status` is a citext of 'finalized', 'FINALIZED', 'Finalized' and 'draft': compared by its bytes, each answer differs
+    const held = [
+      "SELECT id, ARRAY[status] = ALL (SELECT ARRAY[status] FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id FROM accounts WHERE ARRAY[status] = ALL (SELECT ARRAY[status] FROM accounts WHERE id IN (1, 2)) ORDER BY 1",
+      "SELECT id, ARRAY[ARRAY[status]] = ALL (SELECT ARRAY[ARRAY[status]] FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id, ARRAY[status, 'x'] = ALL (SELECT ARRAY[status, 'X'] FROM accounts WHERE id = 2) AS m FROM accounts ORDER BY 1",
+      "SELECT id, (ARRAY[status], id) = ALL (SELECT ARRAY[status], 2 FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id, (ARRAY[status], id) <> ALL (SELECT ARRAY[status], 2 FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id, (ARRAY[status], 1) <> ANY (SELECT ARRAY[status], 1 FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id, (id, ARRAY[status]) < ANY (SELECT 2, ARRAY[status] FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+    ];
+    const answered: string[] = [];
+    for (const s of held) {
+      try { await c.query(s); answered.push(`answered: ${s}`); } catch (e) {
+        const err = e as Error & { code?: string; detail?: string };
+        if (err.code !== "0A000" || !/citext-forms/.test(err.detail ?? "")) answered.push(`${err.code} ${err.message} [${err.detail}]: ${s}`);
+      }
+    }
+    assert.deepEqual(answered, []);
+    // an array of a text or an int, under ANY and ALL, answered as Postgres answers it
+    assert.deepEqual(await unlike(c, [
+      ["SELECT id, ARRAY[team] = ALL (SELECT ARRAY[team] FROM accounts WHERE id = 1) AS m, ARRAY[id] = ALL (SELECT ARRAY[id] FROM accounts WHERE id = 3) AS n FROM accounts ORDER BY 1", "ordered"],
+      ["SELECT id, ARRAY[team] = ANY (SELECT ARRAY[team] FROM accounts WHERE id < 3) AS m, (ARRAY[id], team) = ALL (SELECT ARRAY[id], team FROM accounts WHERE id = 1) AS n FROM accounts ORDER BY 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); await a.close(); }
+  // the catalog's structure, to any depth: an array, a domain (of a domain), an array domain, a composite (of an array of
+  // one), a range and its multirange; never a type without a citext (imported here, so the file loads at a commit
+  // without it and the refusals above are what fails there)
+  const { CITEXT_HELD } = await import("../src/duck/plan.ts");
+  assert.equal(typeof CITEXT_HELD, "string");
+  await truth.exec("BEGIN");
+  try {
+    await truth.exec("CREATE DOMAIN h_d1 AS citext; CREATE DOMAIN h_d2 AS h_d1; CREATE DOMAIN h_da AS citext[]; CREATE TYPE h_c AS (x int, y h_d2); " +
+      "CREATE TYPE h_cc AS (z h_c[]); CREATE TYPE h_r AS RANGE (subtype = citext); CREATE TYPE h_plain AS (x int, y text); CREATE DOMAIN h_t AS text");
+    const r = await truth.query<{ t: string }>(`SELECT format_type(oid, NULL) AS t FROM pg_type WHERE oid IN (SELECT oid::oid FROM (${CITEXT_HELD}) s(oid)) ORDER BY 1`);
+    // (the table `accounts` too: its row type holds its citext column)
+    assert.deepEqual(r.rows.map((x) => x.t), ["accounts", "accounts[]", "citext", "citext[]", "h_c", "h_c[]", "h_cc", "h_cc[]", "h_d1", "h_d1[]", "h_d2", "h_d2[]", "h_da", "h_da[]", "h_r", "h_r[]", "h_r_multirange", "h_r_multirange[]"]);
+  } finally { await truth.exec("ROLLBACK"); }
+});
+
 test("exact path: the AGGREGATE reader sums and averages a program exactly, through a derived table or a CTE (issue 278)", async () => {
   const c = await client();
   try {

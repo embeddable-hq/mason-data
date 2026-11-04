@@ -113,6 +113,18 @@ export interface PlannedSql {
 }
 
 /**
+ * EVERY TYPE THAT HOLDS A CITEXT, to any depth, by the catalog's structure: citext itself; an array by its element
+ * (`typelem`, a nested array is the same type); a domain by its base (`typbasetype`); a composite by its attributes; a
+ * range by its subtype and a multirange by its range (PR 674 shrink 2: an array of citext compared by bytes in a
+ * quantified subquery). One recursive term, since Postgres takes the recursive reference once.
+ */
+export const CITEXT_HELD = "WITH RECURSIVE held(oid) AS (SELECT oid FROM pg_type WHERE typname = 'citext' UNION " +
+  "SELECT t.oid FROM pg_type t, held h WHERE t.typelem = h.oid OR t.typbasetype = h.oid " +
+  "OR (t.typrelid <> 0 AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped AND a.atttypid = h.oid)) " +
+  "OR EXISTS (SELECT 1 FROM pg_range r WHERE (r.rngtypid = t.oid AND r.rngsubtype = h.oid) OR (r.rngmultitypid = t.oid AND r.rngtypid = h.oid))) " +
+  "SELECT oid::text FROM held";
+
+/**
  * `verified`: what the oracle has held to Postgres (src/duck/verified.ts). A statement using anything else is REFUSED,
  * by name — never answered by a rewrite nobody checked. null only for the oracle itself, which records what it verifies.
  */
@@ -457,6 +469,9 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   // the SOURCE's OID for them (`userTypes`, from the copy), never the catalog's
   let resolved = resolvedKeys(analysis.tree);
   const catalogTypes = new Map<number, string>();
+  // every type that holds a citext anywhere in its structure (`CITEXT_HELD`): the rewrite refuses one where it would
+  // compare it by bytes (rewrite.ts `holdsCitext`)
+  const citextHeld = new Set<number>();
   const enumLabels = new Map<number, string[]>(), enumArrays = new Map<number, number>();
   const enums: EnumTypes = { labels: enumLabels, arrays: enumArrays };
   const fields = analysis.fields === null ? null : analysis.fields.map((f) => ({ ...f }));
@@ -466,6 +481,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const used = new Set([...analysis.types.values()].flat().map((t) => t.type).filter((o) => o >= 16384));
   if ([...resolved].some((k) => /\bu\d+/.test(k)) || fields?.some((f) => f.oid >= 16384) || used.size > 0) {
     for (const [oid, name] of await catalogRows(catalog, "SELECT oid::text, typname FROM pg_type WHERE oid >= 16384 AND typtype IN ('b', 'd', 'e')")) catalogTypes.set(Number(oid), name!);
+    for (const [oid] of await catalogRows(catalog, CITEXT_HELD)) citextHeld.add(Number(oid));
     // an enum's labels in their declared order, by its OID and its array type's: DuckDB is handed each value as its ENUM
     for (const [oid, array, label] of await catalogRows(catalog, "SELECT t.oid::text, t.typarray::text, e.enumlabel FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid ORDER BY t.oid, e.enumsortorder")) {
       const labels = enumLabels.get(Number(oid)) ?? [];
@@ -505,7 +521,7 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   try { collations = await resolver.prepare((sql) => catalogRows(catalog, sql), collationOids(analysis.tree)); }
   catch (e) { throw e instanceof Unrewritable ? unrewritableError(e, text) : e; }
   const analysed = performance.now();
-  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
+  const rewritten = (l = lookup): ReturnType<typeof rewrite> => rewrite({ stmt: stmt as unknown as Record<string, Record<string, unknown>>, base, analysis, collations, userTypes: catalogTypes, citextHeld, rowTypes: sourceRows, timeZone, dateStyle, enums, kept: l, wireBound, keyCounts });
   try {
     ({ tree, withTies, exact, clock, jsonReads, unboundedLateral } = rewritten());
     // the oracle's (`eager`): every read stored before the plan is made, and the plan made again over them

@@ -263,6 +263,10 @@ const HELD_BI = [
   "GROUP BY a primary key: a decided numeric divided, computed exactly",
   "Metabase's sum where: sum(CASE … ELSE 0.0 END), the arms the rows took",
   "Grafana's $__timeGroup: floor(epoch / n) * n",
+  "issue 665: Metabase's week of year, the expression repeated",
+  "issue 665: Metabase's numeric auto-bin",
+  "issue 665: the auto-bin of a bare column named as its output",
+  "issue 665: the grouped quotient read as text and as a cast",
   "a top N with its ties: FETCH FIRST n ROWS WITH TIES",
   "a relative window: make_interval with named arguments",
 ];
@@ -815,6 +819,25 @@ test("a native json filter or read hands no row to any Mason function", async (t
     const rows = [...(await rowsOf(sqlOf(name))).values()].reduce((a, b) => a + b, 0);
     t.diagnostic(`${name}: ${rows} rows handed to Mason functions`);
     assert.equal(rows, 0, `${name}: ${rows} rows handed to Mason functions`);
+  }
+});
+
+// A NUMERIC QUOTIENT GROUPED (issue 665): grouped by its exact key ALONE, computed for every row in ONE call
+// (`__mason_numeric_program_key`), and everything that reads the value — the list's double, the ORDER BY's exact order
+// key, the printed cells — computed once per GROUP over the group's columns (src/duck/rewrite.ts keyedGroups,
+// `readPerGroup`). Grouped beside its key as well (4861a5b), the week of year handed the functions three rows a row (the
+// double, the program, the key) and a fourth for the ORDER BY's program inside any_value: 3x the time of 09204fa's one.
+// The bound: the rows, plus a few calls a group (the week of year has 53 groups over the orders' 694 days, the bins 80;
+// each thread's partial groups may evaluate a projection again), never a second call a row. The turn
+// (`__mason_turn`, a vector's hop) is no row's call: left out
+const GROUPED_QUOTIENTS = ["issue 665: Metabase's week of year, the expression repeated", "issue 665: Metabase's numeric auto-bin", "issue 665: the auto-bin of a bare column named as its output"];
+test("issue 665: a grouped numeric quotient hands the Mason functions one row a row, the rest per group", async (t) => {
+  for (const name of GROUPED_QUOTIENTS) {
+    const rows = [...(await rowsOf(sqlOf(`BI shape: ${name}`)))].filter(([k, n]) => k !== "__mason_turn" && n > 0);
+    const total = rows.reduce((a, [, n]) => a + n, 0);
+    t.diagnostic(`${name}: ${rows.map(([k, n]) => `${k} ${n}`).join(", ")}; ${total} rows of ${ORDERS}`);
+    assert.ok(total >= ORDERS, `${name}: the Mason functions were handed ${total} rows of the ${ORDERS} orders: no key a row — a native plan? Read it, and tighten this invariant`);
+    assert.ok(total <= ORDERS + 10_000, `${name}: the Mason functions were handed ${total} rows for the ${ORDERS} orders (${rows.map(([k, n]) => `${k} ${n}`).join(", ")}): more than one call a row`);
   }
 });
 

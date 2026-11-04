@@ -71,6 +71,29 @@ test("addition, subtraction and multiplication keep every digit at Postgres's sc
   }
 });
 
+// issue 665: a GROUP BY's key evaluates a program for every row, so its reads take shortcuts — a plain text parsed
+// without the general grammar, a quotient's scale read off the digits instead of the base-10000 groups. Each is held to
+// the slow path it replaces, over values at every group boundary and scale: the groups numeric_send writes
+// (`numericBinary`: its weight and its first group) and the value the grammar reads of the same text, spaced
+test("issue 665: the plain parse and the quotient's first-group read agree with the general paths at every boundary", () => {
+  const texts = [...VALUES, ...VALUES.map((v) => `-${v.replace(/^-/, "")}`)];
+  for (let d = 0; d < 24; d++) for (const lead of ["1", "9", "12", "999", "1000", "10001", "9999"]) {
+    texts.push(`${lead}${"0".repeat(d)}`, `0.${"0".repeat(d)}${lead}`, `${lead}.${"0".repeat(d)}5`, `${lead}.${"0".repeat(d)}`);
+  }
+  for (const t of texts.filter((x) => /^[+-]?\d+(\.\d+)?$/.test(x))) {
+    const plain = parseNumeric(t), general = parseNumeric(` ${t} `);
+    assert.deepEqual(plain, general, `${t}: the plain parse is not the grammar's`);
+    const one = parseNumeric("1");
+    const b = numericBinary(plain);
+    const weight = plain.unscaled === 0n ? 0 : b.readInt16BE(2), first = plain.unscaled === 0n ? 0 : b.readInt16BE(8);
+    // select_div_scale of x / 1 and of 1 / x, from numeric_send's groups (numeric.c), against divScale's own read
+    const scale = (w1: number, f1: number, w2: number, f2: number, s1: number, s2: number): number =>
+      Math.min(Math.max(16 - (w1 - w2 - (f1 <= f2 ? 1 : 0)) * 4, s1, s2, 0), 1000);
+    assert.equal(divScale(plain, one), scale(weight, first, 0, 1, plain.scale, 0), `${t} / 1`);
+    if (plain.unscaled !== 0n) assert.equal(divScale(one, plain), scale(0, 1, weight, first, 0, plain.scale), `1 / ${t}`);
+  }
+});
+
 test("division: select_div_scale's scale, rounded half away from zero; a zero divisor is 22012", async () => {
   const pairs = VALUES.flatMap((a) => VALUES.filter((b) => Number(b) !== 0).map((b) => [a, b] as const));
   const want = await pg(pairs.map(([a, b]) => `${lit(a)} / ${lit(b)}`));

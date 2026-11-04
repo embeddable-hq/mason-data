@@ -33,7 +33,7 @@ import type { PgAnalysis } from "./analyze.ts";
 import type { CellConv } from "./types.ts";
 import { pathIndex, PG_SESSION_SEPARATOR, SESSION_VARIABLE, SETTINGS_VARIABLE, TURN_FUNCTION, type JsonKind, type PgKind } from "./functions.ts";
 import { cellsOf, evaluateText, mapCells, numericLiteral, programJson, type NumericProgram } from "../lib/pg-numeric.ts";
-import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
+import { analysedQueries, caseTwins, FIRST_USER_OID, implicitTimetzCasts, joinsUsing, setOperationOutputs, type Grouping, type Keys, type QueryOutputs, type TreeValue, type Typed } from "./pgtree.ts";
 import { evaluated, keysBound, type Unbound } from "./constant-key.ts";
 import { canonicalRead, EQUAL_STEPS, KEY_NULL_HEX, KEY_RECOMPUTE_HEX, MARKED_FUNCTIONS, markedError, ORDER_STEPS, readKey, type JsonRead, type KeptLookup } from "./kept-route.ts";
 import { JSONB_KEY_FUNCTIONS } from "./jsonb-order.ts";
@@ -67,6 +67,11 @@ export interface ExactColumn {
 
 /** a query's output columns' types, as `exactThrough` reads them */
 type Fields = ReadonlyArray<{ oid: number; typmod?: number }>;
+
+/** how the ENGINE's GROUP BY holds an expression Postgres groups (`grouping`): as written, by a key in its place whose
+ *  readers read the WHOLE expression per group (`keyed`), or by a key in its place whose readers read its COLUMNS per
+ *  group (`cells`) */
+type GroupedAs = "engine" | "keyed" | "cells";
 
 /** a column of a table's row type, as the catalog has it (its collation pg_attribute's attcollation) */
 export interface RowColumn { name: string; type: number; typmod: number; collation: number }
@@ -195,6 +200,12 @@ const isNode = (v: unknown): v is AstNode => v !== null && typeof v === "object"
 const names = (list: unknown): string[] => Array.isArray(list) ? list.map((x) => isNode(x) && kindOf(x) === "String" ? String(bodyOf(x).sval ?? "") : "") : [];
 /** a function's or type's name without its `pg_catalog.` */
 const lastName = (list: unknown): string => { const n = names(list); return (n[n.length - 1] ?? "").toLowerCase(); };
+/** a literal, a parameter, or a cast of one: a value fixed for the statement's run */
+const isConstant = (n: AstNode): boolean => {
+  const k = kindOf(n);
+  if (k === "A_Const" || k === "ParamRef") return true;
+  return k === "TypeCast" && isNode(bodyOf(n).arg) && isConstant(bodyOf(n).arg as AstNode);
+};
 const constString = (n: AstNode | undefined): string | null => n !== undefined && kindOf(n) === "A_Const" && bodyOf(n).sval !== undefined ? String(bodyOf(n).sval.sval ?? "") : null;
 const constInt = (n: AstNode | undefined): number | null => {
   if (n === undefined || kindOf(n) !== "A_Const") return null;
@@ -213,7 +224,7 @@ const ANALYSED: Record<string, readonly string[]> = {
   A_Expr: ["OPEXPR", "DISTINCTEXPR", "NULLIFEXPR", "SCALARARRAYOPEXPR", "BOOLEXPR", "FUNCEXPR"],
   TypeCast: ["FUNCEXPR", "COERCEVIAIO", "RELABELTYPE", "CONST", "ARRAYCOERCEEXPR", "COERCETODOMAIN"],
   CaseExpr: ["CASEEXPR"], CoalesceExpr: ["COALESCEEXPR"], MinMaxExpr: ["MINMAXEXPR"], SubLink: ["SUBLINK"], NullTest: ["NULLTEST"],
-  BoolExpr: ["BOOLEXPR"], A_ArrayExpr: ["ARRAYEXPR"], RowExpr: ["ROWEXPR"], SQLValueFunction: ["SQLVALUEFUNCTION"],
+  BoolExpr: ["BOOLEXPR"], A_ArrayExpr: ["ARRAYEXPR"], GroupingFunc: ["GROUPINGFUNC"], RowExpr: ["ROWEXPR"], SQLValueFunction: ["SQLVALUEFUNCTION"],
   A_Indirection: ["SUBSCRIPTINGREF", "FIELDSELECT", "FUNCEXPR"], CollateClause: ["COLLATEEXPR"], BooleanTest: ["BOOLEANTEST"],
 };
 
@@ -279,6 +290,8 @@ class Rewriter {
   cellPrefix = "__mason_cell_";
   /** the catalog's user types by OID (`citext`), for the few the rewrite knows (src/duck/plan.ts reads pg_type) */
   private readonly userTypes: ReadonlyMap<number, string>;
+  /** every type holding a citext anywhere in its structure, by the catalog's OID (src/duck/plan.ts `CITEXT_HELD`) */
+  private readonly citextHeld: ReadonlySet<number>;
   /** a copied table's row type: its columns, by the catalog's OID (src/duck/plan.ts) */
   private readonly rowTypes: ReadonlyMap<number, readonly RowColumn[]>;
   /** the session's TimeZone the statement was analysed under (a relative literal's day is its) */
@@ -291,9 +304,9 @@ class Rewriter {
    *  `json_reads`, which the keeper's policy reads (src/duck/kept.ts `review`) */
   readonly jsonReads = new Map<string, JsonRead>();
   constructor(analysis: PgAnalysis, base: number, collations: StatementCollations, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY",
-    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set()) {
+    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set(), citextHeld: ReadonlySet<number> = new Set()) {
     this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collations = collations; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
-    this.enums = enums; this.kept = kept;
+    this.enums = enums; this.kept = kept; this.citextHeld = citextHeld;
     for (const at of keyCounts) this.keyCounts.add(at + base);
     this.twins = caseTwins(analysis.tree);
     this.analysisTree = analysis.tree;
@@ -461,6 +474,11 @@ class Rewriter {
   }
 
   private isCitext(oid: number | null): boolean { return oid !== null && this.userTypes.get(oid) === "citext"; }
+  /** A CITEXT ANYWHERE IN THE TYPE'S STRUCTURE (PR 674 shrink 2, the class citext compared by bytes in a quantified
+   *  subquery): the type itself, an array's element, a domain's base, a composite's attributes, a range's subtype, to
+   *  any depth, as the catalog says (`citextHeld`). Every refusal of a comparison that would read a citext by its bytes
+   *  asks this, never the top-level type alone: an array of citext, or of a domain over one, compared by ALL */
+  private holdsCitext(oid: number | null | undefined): boolean { return oid !== null && oid !== undefined && (this.isCitext(oid) || this.citextHeld.has(oid)); }
 
   /** a text lower-cased by the database's case mapping (what Postgres's citext compares, sorts and groups: str_tolower
    *  under the default collation) */
@@ -667,6 +685,7 @@ class Rewriter {
     if (isNode(v) && this.original.has(bodyOf(v))) this.original.add(bodyOf(out as AstNode));
     if (isNode(v) && this.elementsUnread.has(bodyOf(v))) this.elementsUnread.add(bodyOf(out as AstNode));
     if (isNode(v) && this.writtenKeys.has(bodyOf(v))) this.writtenKeys.add(bodyOf(out as AstNode));
+    if (isNode(v) && this.readPerGroup.has(bodyOf(v))) this.readPerGroup.add(bodyOf(out as AstNode));
     // a node the rewrite typed itself stays typed (a picked operand of min / max, exactOf)
     const own = isNode(v) ? this.synthetic.get(bodyOf(v)) : undefined;
     if (own !== undefined) this.synthetic.set(bodyOf(out as AstNode), own);
@@ -709,6 +728,20 @@ class Rewriter {
     if (isNode(v)) {
       const k = kindOf(v);
       const b = bodyOf(v);
+      // A COLUMN OF AN EXPRESSION GROUPED BY ITS KEY ALONE, READ PER GROUP (`readPerGroup`, decidedByKey; issue 665):
+      // wrapped here, after every rule above it has read the expression as Postgres analysed it; its own rule runs on it
+      // as the aggregate's argument, as on any column (a cell a carried program reads is the rewrite's own: no rule).
+      // ALL FROM ONE ROW: `first`, never any_value, which skips a NULL, so two columns of the expression could come from
+      // two rows (`(coalesce(x, 0) + coalesce(y, 0)) / 7` of (7, NULL) and (NULL, 7) is 1; of the one's 7 and the
+      // other's 7 it is 2). Every row of the group holds the one exact value, so one row's columns compute it; the
+      // engine's first() of a group's aggregates is one row for each (their states are made and merged together)
+      if (k === "ColumnRef" && this.readPerGroup.has(b)) {
+        this.readPerGroup.delete(b);
+        const call: AstNode = { FuncCall: { funcname: [S("first")], args: [v], funcformat: "COERCE_EXPLICIT_CALL" } };
+        this.done.add(bodyOf(call));
+        this.typedLike.set(bodyOf(call), v);
+        return this.walk(call);
+      }
       if (this.original.has(b)) {
         // ONE PLACE PER NODE: a body met again, outside its own rule's answer, is a node a rule placed twice — and the
         // second place would skip its rule (qualified or renamed in its first place alone; a review finding).
@@ -775,7 +808,7 @@ class Rewriter {
         if (!isNode(b.testexpr) || !["ANY_SUBLINK", "ALL_SUBLINK", "ROWCOMPARE_SUBLINK"].includes(String(b.subLinkType))) return null;
         const type = this.typeOf(b.testexpr);
         if (type === JSONB || type === JSONB_ARRAY || this.rowHoldsJsonb(b.testexpr)) throw new Unrewritable("a jsonb compared with a subquery's values (IN (SELECT …), = ANY (SELECT …)) is not supported by Mason (Postgres equates jsonb by its own rules)", "join the subquery instead: … JOIN (SELECT …) s ON s.v = t.j", "jsonb-compare");
-        return null;
+        return this.sublinkCompared(b);
       }
       // a row as a value anywhere but the SELECT list, a cast to text and the json functions (rowValues) is a struct
       // to DuckDB, compared, tested and grouped by its rules
@@ -1364,7 +1397,7 @@ class Rewriter {
    * key bound by equality and written as it is, the output itself (`equal`: its ordinal), never a second evaluation of a
    * volatile one. `constant` as `keysConstant`. With no analysis, the number or name alone binds.
    */
-  private keysBound(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<{ output: Output | null; constant: boolean | null; equal: boolean }> {
+  private keysBound(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<{ output: Output | null; constant: boolean | null; equal: boolean; entry: number | null }> {
     const bound = this.keysBoundAs(nodes, keys, clause, targets);
     for (const k of bound) this.rowKey(k.output);
     return bound;
@@ -1380,10 +1413,10 @@ class Rewriter {
     if (out?.row === true) throw new Unrewritable("a row used as a value here (compared, tested, grouped or sorted) is not supported by Mason", "sort by its columns", "row-value");
   }
 
-  private keysBoundAs(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<{ output: Output | null; constant: boolean | null; equal: boolean }> {
+  private keysBoundAs(nodes: ReadonlyArray<AstNode | undefined>, keys: Keys | undefined, clause: "sorted" | "distinct", targets?: readonly AstNode[]): Array<{ output: Output | null; constant: boolean | null; equal: boolean; entry: number | null }> {
     const outputs = targets === undefined ? [] : this.outputs(targets);
     const named = (n: AstNode | undefined): Output | null => n === undefined || !isNode(n) ? null : outputs[this.outputIndex(n, outputs)] ?? null;
-    if (keys === undefined) return nodes.map((n) => ({ output: named(n), constant: null, equal: false }));
+    if (keys === undefined) return nodes.map((n) => ({ output: named(n), constant: null, equal: false, entry: null }));
     const offsets = (n: AstNode): number[] => {
       const b = bodyOf(n);
       const own = typeof b.location === "number" && b.location >= 0 ? [b.location - this.base] : [];
@@ -1402,16 +1435,16 @@ class Rewriter {
       // same text was analysed elsewhere (`typed`'s shape)
       const text = JSON.stringify(n);
       const t = this.typed(n);
-      return { reads: text.includes("\"SubLink\"") ? null : text.includes("\"ColumnRef\""), constant: t === null ? null : t.constant === true } satisfies Unbound;
+      return { reads: text.includes("\"SubLink\"") ? null : text.includes("\"ColumnRef\""), constant: t === null ? null : t.constant === true, ...(text.includes("\"SubLink\"") ? {} : { groupings: text.split("\"GroupingFunc\"").length - 1 }) } satisfies Unbound;
     });
     // (a key no entry can be told for leaves the clause's reading to each key's own)
-    if (known.includes(-1)) return nodes.map((n) => ({ output: named(n), constant: null, equal: false }));
+    if (known.includes(-1)) return nodes.map((n) => ({ output: named(n), constant: null, equal: false, entry: null }));
     return keysBound(keys, clause, known).map((k, i) => {
       const by = named(nodes[i]);
-      if (by !== null) return { output: by, constant: k.constant, equal: false };
+      if (by !== null) return { output: by, constant: k.constant, equal: false, entry: k.entry };
       // (an entry Postgres made an output is the output at its place: it lists the outputs first, a *'s columns each one)
       const output = k.entry !== null && keys.entries[k.entry]?.output === true ? outputs[k.entry] ?? null : null;
-      return { output, constant: k.constant, equal: output !== null };
+      return { output, constant: k.constant, equal: output !== null, entry: k.entry };
     });
   }
 
@@ -1544,21 +1577,33 @@ class Rewriter {
     };
     // `depth`: the subqueries between here and this query (a correlated subquery's column of this query is levelsUp 1)
     // `sorted`: an ORDER BY key, where a bare name is first an output's (findTargetlistEntrySQL92)
-    const wrap = (v: unknown, depth: number, sorted = false): unknown => {
-      if (Array.isArray(v)) return v.map((x) => wrap(x, depth, sorted));
+    // `windowed`: a WINDOW's PARTITION BY or ORDER BY key, where a bare name is an input column, never an output
+    // (findTargetlistEntrySQL99; PR 674 class round r2)
+    const wrap = (v: unknown, depth: number, sorted = false, cells = false, windowed = false): unknown => {
+      if (Array.isArray(v)) return v.map((x) => wrap(x, depth, sorted, cells, windowed));
       if (v === null || typeof v !== "object") return v;
       // a plain body (a window's OVER, a SubLink's select): its parts
-      if (!isNode(v)) { for (const [key, x] of Object.entries(v as Body)) if (key !== "location") (v as Body)[key] = wrap(x, depth, sorted); return v; }
+      if (!isNode(v)) { for (const [key, x] of Object.entries(v as Body)) if (key !== "location") (v as Body)[key] = wrap(x, depth, sorted, cells, windowed); return v; }
       const k = kindOf(v), n = bodyOf(v);
       // AN ORDER BY's OUTPUT NAME (`ORDER BY v` of `v::text`, Postgres's output column `v`) is the target, no column,
       // whatever the column of that name is grouped as (fix round 1 of PR 582: `… GROUP BY v ORDER BY v` read the jsonb
       // column through any_value and sorted by jsonb's key, where Postgres sorts by the output, its text). Only in the
       // ORDER BY: in the list, a column grouped by its key has no analysed node at its own offset either (a VAR of the
-      // GROUP entry), and is the column
-      if (sorted && k === "ColumnRef" && depth === 0 && this.outputNamed(v, targets)) return v;
+      // GROUP entry), and is the column. Never inside an expression grouped by its key (`cells`): a name in an expression
+      // is the FROM's column, whatever output bears it (Metabase's bin `… AS amount` of `amount`; issue 665)
+      if (sorted && !cells && k === "ColumnRef" && depth === 0 && this.outputNamed(v, targets)) return v;
+      // (a GROUPING's arguments are the engine's own GROUP BY entries, `groupingArguments`: never read per group)
+      if (k === "GroupingFunc") return v;
       const as = this.groupedAs(v, b);
       if (as === "engine") return v;
       if (as === "keyed" && (depth === 0 || ofThisQuery(v, depth))) return perGroup(v);
+      // AN EXPRESSION THE ENGINE GROUPS BY ITS KEY ALONE, READ THROUGH ITS COLUMNS (`cells`: a numeric decided exactly,
+      // issue 665): every column of this query in it is marked to be read per group (`readPerGroup`), so the
+      // expression, its double, its cast, its text and the programs built over it are computed once per group
+      const inCells = cells || as === "cells";
+      // (a column that is itself the expression grouped so: Postgres bound it to the column, whatever output shares its
+      // name; an ORDER BY's output name was returned above)
+      if (as === "cells" && k === "ColumnRef") { this.readPerGroup.add(n); return v; }
       // A CAST OF AN EXPRESSION READ PER GROUP IS TYPED BY ITS RESULT (PR 582 review r9, the class
       // grouped-jsonb-cast-typed-by-its-argument): a cast with no analysed node at its own place (a key that repeats a
       // target, Postgres's entry being the target's; a key a rule folded or copied) is otherwise typed by its argument,
@@ -1570,7 +1615,19 @@ class Rewriter {
         const result = this.byShape.get(shapeOf(v)) ?? this.typed(v);
         if (result !== null) this.synthetic.set(n, result);
       }
-      if (k === "SubLink") { for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth + 1); return v; }
+      // A SUBLINK's TEST EXPRESSION (`x IN (…)`, `x = ANY (…)`, `x > ALL (…)`) is this query's, walked at this depth;
+      // only its subselect is one deeper (review r1 of PR 674, the class sublink-testexpr-walked-at-inner-depth: a
+      // column of this query there, at depth + 1, was taken for an outer one and left a bare column, the engine's 42803)
+      if (k === "SubLink") { for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, key === "testexpr" ? depth : depth + 1, false, inCells, key === "testexpr" && windowed); return v; }
+      // A WINDOW's keys (a named one, an OVER's own): read per group as every clause after grouping is, each name an
+      // input column (SQL99)
+      if (k === "WindowDef") { for (const key of ["partitionClause", "orderClause"]) if (n[key] !== undefined) n[key] = wrap(n[key], depth, false, inCells, true); return v; }
+      if (k === "FuncCall" && n.over !== null && typeof n.over === "object" && !isNode(n.over)) {
+        const over = n.over as Body;
+        for (const key of ["partitionClause", "orderClause"]) if (over[key] !== undefined) over[key] = wrap(over[key], depth, false, inCells, true);
+        for (const [key, x] of Object.entries(n)) if (key !== "location" && key !== "over") n[key] = wrap(x, depth, sorted, inCells, windowed);
+        return v;
+      }
       if (k === "FuncCall" && n.over === undefined && this.typed(v)?.node === "AGGREF") return v;
       if (k === "ColumnRef" && hasStar(v)) {
         if (depth > 0) return v;
@@ -1582,22 +1639,31 @@ class Rewriter {
       if (k === "ColumnRef") {
         // an output name (`ORDER BY p` of `max(x) AS p`) is the target, no column: its shape may be another query's
         // column (the corpus run of fbbf8f08: `… GROUP BY p` outside read it as one, and any_value(p) nested aggregates)
-        if (depth === 0 && this.outputNamed(v, targets)) return v;
+        if (!cells && !windowed && depth === 0 && this.outputNamed(v, targets)) return v;
         const t = this.typed(v);
+        // (a WINDOW's name Postgres bound by equality to an entry has no node at its offset: an input column all the same)
+        const column = t?.node === "VAR" ? t.levelsUp === depth : windowed && depth === 0 && t === null;
         // a cell riding beside a FROM item's column the group decides (carry): its value is the group's too
-        if (!(depth === 0 && isCellRef(v, this.cellPrefix)) && (t?.node !== "VAR" || t.levelsUp !== depth)) return v;
+        if (!(depth === 0 && isCellRef(v, this.cellPrefix)) && !column) return v;
+        if (inCells) { this.readPerGroup.add(n); return v; }
         const call: AstNode = { FuncCall: { funcname: [S("any_value")], args: [v], funcformat: "COERCE_EXPLICIT_CALL" } };
         this.done.add(bodyOf(call));
         // typed as the column it reads: a sort's collation, a cast's source type
         this.typedLike.set(bodyOf(call), v);
         return call;
       }
-      for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth, sorted);
+      for (const [key, x] of Object.entries(n)) if (key !== "location") n[key] = wrap(x, depth, sorted, inCells, windowed);
       return v;
     };
+    // EVERY CLAUSE POSTGRES EVALUATES AFTER GROUPING (PR 674 class round r2, the class post-grouping-clause-not-read-
+    // per-group): the list, HAVING, ORDER BY, DISTINCT ON and the WINDOW clauses, each an expression of the Query's
+    // targetList or havingQual in Postgres's analysis; the join tree (FROM, WHERE) and the GROUP BY are read per row
     for (const t of targets) { const tb = bodyOf(t); tb.val = wrap(tb.val, 0); }
     if (b.havingClause !== undefined) b.havingClause = wrap(b.havingClause, 0);
     if (Array.isArray(b.sortClause)) for (const s of b.sortClause as AstNode[]) { const sb = bodyOf(s); sb.node = wrap(sb.node, 0, true); }
+    // (DISTINCT ON binds an output name first, as ORDER BY does: findTargetlistEntrySQL92)
+    if (Array.isArray(b.distinctClause)) b.distinctClause = (b.distinctClause as unknown[]).map((d) => isNode(d) ? wrap(d, 0, true) : d);
+    for (const w of (b.windowClause ?? []) as AstNode[]) if (isNode(w)) wrap(w, 0);
   }
 
   /**
@@ -1884,6 +1950,17 @@ class Rewriter {
     return to;
   }
 
+  /** `x`, a char(n), AS POSTGRES'S IMPLICIT CAST TO A TEXT OR A VARCHAR (text(bpchar), function 401, COERCE_IMPLICIT_CAST):
+   *  a cast node typed as that FUNCEXPR, which the cast's own rule writes (its value without the trailing blanks), as
+   *  castArms writes a char(n) arm of a text column */
+  private asImplicitText(x: AstNode, own: Typed, to: number): AstNode {
+    const cast: AstNode = { TypeCast: { arg: x, typeName: { names: [S("pg_catalog"), S(to === VARCHAR ? "varchar" : "text")], typemod: -1 }, location: -1 } };
+    this.synthetic.set(bodyOf(cast), { node: "FUNCEXPR", type: to, typmod: -1, args: [{ type: own.type, typmod: own.typmod }], oid: 401, format: 2,
+      collation: own.collation, inputCollation: own.collation, levelsUp: null, datum: null, qualifier: null, renamed: null });
+    this.original.add(bodyOf(cast));
+    return cast;
+  }
+
   /**
    * EACH IMPLICIT time→timetz CAST POSTGRES ADDED, WRITTEN WHERE IT IS (the class "a coercion Postgres adds that the raw
    * tree lacks: the analysed node unread", issue 167). Postgres casts a time beside a timetz (an operator's operand, IN,
@@ -1897,14 +1974,23 @@ class Rewriter {
    * another). A set operation's arm is castArms's (Postgres leaves it as written). Every cast of the analysis must be
    * written: one that is not, an operand cast in one copy and not the other (BETWEEN a time and a timetz), or a bare
    * literal, is refused by name (time-timetz-coerced).
+   *
+   * EACH IMPLICIT CAST OF A char(n) TO A TEXT OR A VARCHAR, THE SAME WAY (PR 674 class round r3, the class
+   * char-padding-in-sublink-test): Postgres casts a char(n) beside a text (an operator's or a function's argument, a
+   * CASE or NULLIF arm, a VALUES row of a text column, a subquery's output compared with a text …) with text(bpchar),
+   * which drops its trailing blanks: its argument's entry says so (`Typed.implicitText`), and the node is wrapped in the
+   * cast (`asImplicitText`), so every place Postgres trimmed the value, the engine trims it, and a comparison's two
+   * sides are never trimmed one alone. One it cannot write (a copy left a char(n), a bare literal) is left as written,
+   * as before this rule: never refused.
    */
   coerceImplicit(root: unknown): void {
     const expected = implicitTimetzCasts(this.analysisTree);
-    if (expected === 0) return;
     const listed = new Set<Typed>();
-    for (const list of this.types.values()) for (const t of list) if (t.implicitTimetz === true) listed.add(t);
+    let texts = 0;
+    for (const list of this.types.values()) for (const t of list) { if (t.implicitTimetz === true) listed.add(t); if (t.implicitText !== undefined) texts++; }
+    if (expected === 0 && texts === 0) return;
     if (listed.size !== expected) refuseTimetz();
-    type Slot = { holder: AstNode; path: ReadonlyArray<string | number>; node: AstNode };
+    type Slot = { holder: AstNode; path: ReadonlyArray<string | number>; node: AstNode; text: Typed | null };
     const wraps: Slot[] = [], unanalysed: Slot[] = [];
     const claimed = new Set<Typed>();
     const byHolder = new Map<string, Set<string>>();
@@ -1914,18 +2000,34 @@ class Rewriter {
       if (!isNode(v)) { for (const [k, x] of Object.entries(v as Body)) visit(x, holder, [...path, k]); return; }
       const own = this.ownEntries(v);
       const cast = own.filter((t) => t.implicitTimetz === true);
+      const text = own.filter((t) => t.implicitText !== undefined);
       // (an entry an outer node of it took: a cast's literal)
       if (cast.length > 0 && !claimed.has(cast[0]!)) {
         // a copy of it left a time (BETWEEN a time and a timetz bound): one node cannot be written both ways. (Another
         // entry at its offset of another type is another node's: a set operation's output, at its first arm's)
         if (own.some((t) => t.implicitTimetz !== true && t.node === cast[0]!.node && t.type === cast[0]!.type) || holder === null || kindOf(v) === "A_Const") refuseTimetz();
         for (const t of cast) claimed.add(t);
-        wraps.push({ holder: holder!, path, node: v });
+        wraps.push({ holder: holder!, path, node: v, text: null });
         const key = shapeOf(holder!);
         const at = byHolder.get(key) ?? new Set<string>();
         at.add(JSON.stringify(path));
         byHolder.set(key, at);
-      } else if (own.length === 0 && holder !== null) unanalysed.push({ holder, path, node: v });
+      } else if (text.length > 0 && !claimed.has(text[0]!)) {
+        for (const t of text) claimed.add(t);
+        // (a copy of it left a char(n), or nothing holds it, or a bare literal: left as written, as before)
+        const left = own.some((t) => t.implicitText === undefined && t.node === text[0]!.node && t.type === text[0]!.type);
+        if (!left && holder !== null && kindOf(v) !== "A_Const") {
+          wraps.push({ holder, path, node: v, text: text[0]! });
+          const key = shapeOf(holder);
+          const at = byHolder.get(key) ?? new Set<string>();
+          at.add(JSON.stringify(path));
+          byHolder.set(key, at);
+        }
+        const key = shapeOf(holder!);
+        const at = byHolder.get(key) ?? new Set<string>();
+        at.add(JSON.stringify(path));
+        byHolder.set(key, at);
+      } else if (own.length === 0 && holder !== null) unanalysed.push({ holder, path, node: v, text: null });
       for (const [k, x] of Object.entries(bodyOf(v))) { const arm = armOf(k, x); if (arm !== null) visit(arm, null, []); else visit(x, v, [k]); }
     };
     visit(root, null, []);
@@ -1933,14 +2035,17 @@ class Rewriter {
     // a twin's (the shapes read before any node is wrapped)
     const shapes = new Map<AstNode, string>();
     const shaped = (h: AstNode): string => { let k = shapes.get(h); if (k === undefined) { k = shapeOf(h); shapes.set(h, k); } return k; };
-    const twins = unanalysed.filter((u) => byHolder.get(shaped(u.holder))?.has(JSON.stringify(u.path)) === true);
-    for (const { holder, path, node } of [...wraps, ...twins]) {
+    const kindAt = new Map<string, Typed | null>();
+    for (const w of wraps) kindAt.set(`${shaped(w.holder)}|${JSON.stringify(w.path)}`, w.text);
+    const twins = unanalysed.filter((u) => byHolder.get(shaped(u.holder))?.has(JSON.stringify(u.path)) === true)
+      .map((u) => ({ ...u, text: kindAt.get(`${shaped(u.holder)}|${JSON.stringify(u.path)}`) ?? null }));
+    for (const { holder, path, node, text } of [...wraps, ...twins]) {
       let at: unknown = bodyOf(holder);
       for (const step of path.slice(0, -1)) at = (at as Record<string | number, unknown>)[step];
       const slot = at as Record<string | number, unknown>;
       const last = path.at(-1)!;
-      if (slot[last] !== node) throw new Error("a time cast to a timetz was not where its analysis was read: report it, with the statement");
-      slot[last] = this.asImplicitTimetz(node);
+      if (slot[last] !== node) throw new Error("an implicit cast was not where its analysis was read: report it, with the statement");
+      slot[last] = text !== null ? this.asImplicitText(node, text, text.implicitText!) : this.asImplicitTimetz(node);
     }
     // the wrapped expressions' shapes, for an ORDER BY or GROUP BY that repeats one (`typed`)
     if (wraps.length > 0) this.indexShapes(root);
@@ -2213,18 +2318,23 @@ class Rewriter {
     if (built === undefined) { built = new Map(); this.carriedBy.set(cell, built); }
     let byOwner = built.get(c.program);
     if (byOwner === undefined) { byOwner = new Map(); built.set(c.program, byOwner); }
-    const known = byOwner.get(c.owner);
+    // (a column read per group, `readPerGroup`: its cells are read per group too, issue 665; a build reads them apart)
+    const perGroup = this.readPerGroup.has(bodyOf(ref));
+    const owner = perGroup ? `${c.owner}\u0000per group` : c.owner;
+    const known = byOwner.get(owner);
     if (known !== undefined) return known;
     const cells = new Map<string, NumericProgram>();
     const program = mapCells(c.program, (k) => {
       let at = cells.get(k);
       if (at === undefined) {
-        at = k.startsWith("$") ? { op: "cell", key: k } : cell({ ColumnRef: { fields: [S(c.owner), S(`${this.cellPrefix}${k}`)] } }, c.convs[Number(k)]);
+        const read: AstNode = { ColumnRef: { fields: [S(c.owner), S(`${this.cellPrefix}${k}`)] } };
+        if (perGroup) this.readPerGroup.add(bodyOf(read));
+        at = k.startsWith("$") ? { op: "cell", key: k } : cell(read, c.convs[Number(k)]);
         cells.set(k, at);
       }
       return at;
     });
-    byOwner.set(c.owner, program);
+    byOwner.set(owner, program);
     return program;
   }
   /** each program build's carried programs (`carried`), by its `cell`: by the item's record's program (the one object
@@ -3516,14 +3626,19 @@ class Rewriter {
    * (`numeric-quotient-equality`). null: no such value (one DuckDB holds exactly, or one with no program, which is the
    * engine's value everywhere).
    */
-  private exactKey(e: AstNode): AstNode | null {
+  private exactKey(e: AstNode, oneCall = false): AstNode | null {
     const type = this.typeOf(e);
     // a numeric's text: the program's text, which text's equality compares as it is
     if (type !== null && TEXTS.has(type)) return this.exactNumericText(e);
     if (type !== NUMERIC || this.duckExact(e)) return null;
     // (a scalar subquery, cast or not, is its program's one text cell: `exactOf`, issue 350)
     const exact = this.exactText(e);
-    return exact === null ? this.refuseUncarried(e) : fn("__mason_numeric_key", [exact]);
+    if (exact === null) return this.refuseUncarried(e);
+    // `oneCall` (a GROUP BY's key, computed for every row: issue 665): the program and its key in one call, the same
+    // program text and cells (`programText`, the one builder), the key of what `__mason_numeric_program` answers (its
+    // arguments after the session, which `fn` writes again)
+    if (oneCall && kindOf(exact) === "FuncCall" && lastName(bodyOf(exact).funcname) === "__mason_numeric_program") return fn("__mason_numeric_program_key", (bodyOf(exact).args as AstNode[]).slice(1));
+    return fn("__mason_numeric_key", [exact]);
   }
 
   /**
@@ -3553,6 +3668,16 @@ class Rewriter {
   /** each cast in a grouped SELECT, by the SELECT: a program's text the CAST reader builds there is read per group
    *  (`overGroups`), never over cells the group does not decide (review r1 of PR 506: the engine's 42803) */
   private readonly groupedCasts = new WeakMap<Body, Body>();
+  /** each column of an expression the engine groups by its key alone (`cells`, issue 665) where a SELECT's list, HAVING
+   *  or ORDER BY reads it (decidedByKey): read through first() when the walk reaches it, so that the expression is
+   *  computed once per group, never once per row. Marked, never wrapped there: every rule above the column (a
+   *  division's, a cast's, a program built over it) reads the expression as written, typed by Postgres's analysis of
+   *  its shape, which an any_value inside it would change. A copy of one is marked too (`clone`) */
+  private readonly readPerGroup = new WeakSet<Body>();
+  /** THE ENGINE'S GROUP BY ENTRY OF AN EXPRESSION GROUPED BY A KEY IN ITS PLACE (`keyed`, `cells`; `keyedGroups`), by the
+   *  SELECT and the expression's shape, as placed (before the walk): what the engine groups the expression AS, the one
+   *  answer GROUPING(e) reads (`groupingArguments`; review r1 of PR 674) */
+  private readonly groupKeys = new WeakMap<Body, Map<string, AstNode>>();
 
   /** whether a value is a NUMERIC's text (`x::text`, `(x / 3)::text`, under a COLLATE, a subquery's column carrying
    *  one) or a NULL: what a "text" cell may hold, its program parsing it as a numeric */
@@ -3961,8 +4086,10 @@ class Rewriter {
     const aggregated = (v: unknown): boolean => {
       if (Array.isArray(v)) return v.some(aggregated);
       if (v === null || typeof v !== "object") return false;
-      if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || ["any_value", "count"].includes(lastName(bodyOf(v).funcname)))) return true;
+      if (isNode(v) && kindOf(v) === "FuncCall" && (bodyOf(v).over !== undefined || this.typed(v)?.node === "AGGREF" || ["any_value", "first", "count"].includes(lastName(bodyOf(v).funcname)))) return true;
       if (isNode(v) && kindOf(v) === "SubLink") return true;
+      // (a column decidedByKey marked to be read per group: the value is computed per group over it, issue 665)
+      if (isNode(v) && kindOf(v) === "ColumnRef" && this.readPerGroup.has(bodyOf(v))) return true;
       return Object.values(isNode(v) ? bodyOf(v) : v as Body).some(aggregated);
     };
     if (aggregated(value)) return e;
@@ -4016,14 +4143,16 @@ class Rewriter {
    * (`groupedExpression`: an ordinal or an output name is its target's), RECORDED ONCE per SELECT before any rule writes
    * the clause for the engine (`select` asks first; `exactColumns`, before the walk, may). What the record says of each
    * is how the ENGINE's GROUP BY holds it: `engine`, as written; `keyed`, by a key a rule put in its place
-   * (`keyedGroups`: a jsonb by its equality key, so the engine groups 1.0 with 1.00 as Postgres does). A grouped
+   * (`keyedGroups`: a jsonb by its equality key, so the engine groups 1.0 with 1.00 as Postgres does), the expression
+   * read per group through one any_value of it; `cells`, by a key in its place too (a numeric decided exactly, by its
+   * exact key: issue 665), the expression computed per group over its columns, each read per group. A grouped
    * expression is grouped whatever the clause became: whether one is, and how, is read here alone (`groupedAs`), never
    * from the clause as a later rule left it — the clause read after `keyedGroups` lost the jsonb expression, so its
    * every reader took it for ungrouped and read its column through any_value (`any_value(j.j) -> 'r'`: 2.45 for 2.450).
    */
-  private readonly groupings = new WeakMap<object, Map<string, "engine" | "keyed">>();
+  private readonly groupings = new WeakMap<object, Map<string, GroupedAs>>();
 
-  private grouping(b: Body): Map<string, "engine" | "keyed"> {
+  private grouping(b: Body): Map<string, GroupedAs> {
     let record = this.groupings.get(b);
     if (record === undefined) {
       record = new Map();
@@ -4042,7 +4171,7 @@ class Rewriter {
 
   /** how SELECT `b`'s GROUP BY groups `e` (`grouping`): as written in the engine's clause, by a key in its place, or
    *  not at all (null) */
-  private groupedAs(e: AstNode, b: Body | null): "engine" | "keyed" | null {
+  private groupedAs(e: AstNode, b: Body | null): GroupedAs | null {
     return b === null ? null : this.grouping(b).get(shapeOf(e)) ?? null;
   }
 
@@ -4176,6 +4305,7 @@ class Rewriter {
       if (kindOf(v) === "GroupingSet") refuseIn(bodyOf(v).content);
       else { const e = this.groupedExpression(v, b); this.refuseExactEquality(e, "GROUP BY a grouping set of"); this.comparable(e, "GROUP BY a grouping set of"); }
     };
+    const items = [...b.groupClause as AstNode[]];
     b.groupClause = (b.groupClause as AstNode[]).flatMap((g): AstNode[] => {
       if (!isNode(g)) return [g];
       if (kindOf(g) === "GroupingSet") { refuseIn(bodyOf(g).content); return [g]; }
@@ -4183,15 +4313,131 @@ class Rewriter {
       // (a column a `*` of the list expanded to, grouped by name, is analysed as that entry, at no offset of its own:
       // typed as the list's column it is, so its exact key is built — issue 252)
       const e = this.typed(grouped) === null && kindOf(grouped) === "ColumnRef" ? this.listedColumn(grouped, b) ?? grouped : grouped;
-      // a numeric decided exactly: grouped by its exact key too, the value kept a key so the list still reads it
-      // (its double is a function of the exact value, so the groups are the key's: exactKey)
-      const exact = this.exactKey(e);
-      if (exact !== null) return [g, exact];
+      // A NUMERIC DECIDED EXACTLY IS GROUPED BY ITS EXACT KEY ALONE (exactKey; issue 665): the key is the one thing
+      // computed for every row, in ONE call (`__mason_numeric_program_key`), and everything that reads the value (the
+      // list's double, a cast, its text, HAVING, the ORDER BY's exact order key, WITH TIES, the record's cells) is
+      // computed per group over its columns, each read per group (`cells`: decidedByKey, overGroups). Every row of a
+      // group holds one exact value, so any row's columns compute it. Grouped beside its key as well (4861a5b), the
+      // value's double, its program and its key were three calls a row, and the ORDER BY's program a fourth
+      const exact = this.exactKey(e, true);
+      if (exact !== null) {
+        this.grouping(b).set(shapeOf(grouped), "cells");
+        return [this.placedKey(b, grouped, exact)];
+      }
       if (this.typeOf(e) !== JSONB) { this.comparable(e, "GROUP BY"); return [g]; }
       // (the engine groups it by its key alone: every reader of the expression reads it per group, `groupedAs`)
       this.grouping(b).set(shapeOf(grouped), "keyed");
-      return [this.equalKey(e === g ? g : this.clone(e))];
+      return [this.placedKey(b, grouped, this.equalKey(e === g ? g : this.clone(e)))];
     });
+    this.groupingArguments(b, items);
+  }
+
+  /** a key `keyedGroups` places in the engine's GROUP BY for `grouped`, recorded as placed (`groupKeys`) */
+  private placedKey(b: Body, grouped: AstNode, key: AstNode): AstNode {
+    let keys = this.groupKeys.get(b);
+    if (keys === undefined) this.groupKeys.set(b, keys = new Map());
+    keys.set(shapeOf(grouped), this.clone(key));
+    return key;
+  }
+
+  /**
+   * GROUPING(e) OF AN EXPRESSION THE ENGINE GROUPS BY A KEY IN ITS PLACE (PR 674, the class
+   * grouping-of-keyed-expression-reads-value, its class round r2): the engine's GROUPING takes only its own GROUP BY
+   * entries, so an argument grouped by a key (`keyed`, `cells`) is written as THAT key, as `keyedGroups` placed it
+   * (`groupKeys`), never as a reader's value (the expression over its columns read per group), which is no grouping
+   * column of the engine's (42804).
+   *
+   * WHICH GROUPING IS THIS SELECT'S, AND WHICH ENTRY EACH ARGUMENT READS, IS POSTGRES'S ANALYSIS (`Grouping`): the
+   * GROUPINGFUNC at the GroupingFunc's offset gives its query level (`levelsUp`, its arguments' Var level: one inside a
+   * subquery reading this query's column is this query's) and the GROUP BY entry each argument matched (`refs`, by
+   * Postgres's equality). A GROUPING Postgres left no node for is one inside a key it bound by equality to an earlier
+   * entry (an ORDER BY's, DISTINCT ON's or WINDOW's key repeating one: findTargetlistEntrySQL92/99 discards the
+   * transform): it is read through that key's binding, the entry the key's SortGroupClause names (`keysBound` for an
+   * ORDER BY or DISTINCT ON key; a WINDOW clause's own lists, the clause found by its name or by its window function's
+   * `winref`), whose expression's GROUPINGFUNCs, in order, are the key's. The whole body is walked, no list of clauses;
+   * a subquery one level deeper. An entry's placed key is found by the entry's offset (a target's expression or the
+   * GROUP BY item's), then the record. Only where there is no analysed query is an argument matched by its spelling,
+   * as before. `decidedByKey` leaves a GROUPING's arguments as they are.
+   */
+  private groupingArguments(b: Body, items: readonly AstNode[]): void {
+    const placed = this.groupKeys.get(b);
+    if (placed === undefined) return;
+    const targets = (b.targetList ?? []) as AstNode[];
+    const keys = this.analysedQuery(targets)?.keys;
+    // (an analysed entry's raw expression, by its offset: a target's, or a GROUP BY item's, as it stood)
+    const raws = [...targets.map((t) => bodyOf(t).val), ...items, ...items.filter(isNode).map((g) => this.groupedExpression(g, b))].filter(isNode);
+    const keyOfEntry = (entry: number): AstNode | undefined => {
+      const at = keys?.entries[entry]?.at;
+      if (at === null || at === undefined) return undefined;
+      const raw = raws.find((r) => this.nodeOffsets(r).includes(at));
+      return raw === undefined ? undefined : placed.get(shapeOf(raw));
+    };
+    const entryOf = (ref: number): number => keys?.entries.findIndex((e) => e.ref === ref) ?? -1;
+    // each key Postgres bound by equality to an earlier entry, with that entry's GROUPINGs in order
+    const bound = new Map<Body, Grouping[]>();
+    const bind = (node: unknown, entry: number | null | undefined): void => {
+      if (!isNode(node) || entry === null || entry === undefined || keys === undefined) return;
+      const groupings = keys.entries[entry]?.groupings ?? [];
+      if (groupings.length > 0) bound.set(bodyOf(node), groupings);
+    };
+    if (keys !== undefined) {
+      const sorts = Array.isArray(b.sortClause) ? (b.sortClause as AstNode[]).map((s) => bodyOf(s).node as AstNode) : [];
+      if (sorts.length > 0) this.keysBound(sorts, keys, "sorted", targets).forEach((k, i) => bind(sorts[i], k.entry));
+      const ons = Array.isArray(b.distinctClause) ? (b.distinctClause as unknown[]).filter(isNode) : [];
+      if (ons.length > 0) this.keysBound(ons, keys, "distinct", targets).forEach((k, i) => bind(ons[i], k.entry));
+      const windowed = (def: Body, clause: Keys["windows"][number] | undefined): void => {
+        if (clause === undefined) return;
+        const partition = (def.partitionClause ?? []) as AstNode[], order = ((def.orderClause ?? []) as AstNode[]).map((s) => bodyOf(s).node as AstNode);
+        if (partition.length === clause.partition.length) partition.forEach((p, i) => bind(p, clause.partition[i]));
+        if (order.length === clause.order.length) order.forEach((o, i) => bind(o, clause.order[i]));
+      };
+      for (const w of (b.windowClause ?? []) as AstNode[]) if (isNode(w)) windowed(bodyOf(w), keys.windows.find((c) => c.name === bodyOf(w).name));
+      const overs = (v: unknown): void => {
+        if (Array.isArray(v)) { for (const x of v) overs(x); return; }
+        if (v === null || typeof v !== "object" || (isNode(v) && (kindOf(v) === "SubLink" || kindOf(v) === "SelectStmt"))) return;
+        // (an OVER's own window is a plain body, a WindowDef unwrapped)
+        const over = isNode(v) && kindOf(v) === "FuncCall" ? bodyOf(v).over : undefined;
+        if (over !== null && typeof over === "object") {
+          const winref = this.allAt(bodyOf(v as AstNode), ["WINDOWFUNC"])[0]?.winref;
+          windowed(over as Body, winref === null || winref === undefined ? undefined : keys.windows.find((c) => c.winref === winref));
+        }
+        for (const x of Object.values(isNode(v) ? bodyOf(v) : v as Body)) overs(x);
+      };
+      overs([b.targetList, b.sortClause]);
+    }
+    const visit = (v: unknown, depth: number, inherited: Grouping[] | undefined): void => {
+      if (Array.isArray(v)) { for (const x of v) visit(x, depth, inherited); return; }
+      if (v === null || typeof v !== "object") return;
+      if (!isNode(v)) { for (const x of Object.values(v as Body)) visit(x, depth, inherited); return; }
+      const k = kindOf(v), n = bodyOf(v);
+      // (another query: one level deeper, its own keys its own)
+      if (k === "SelectStmt") { for (const x of Object.values(n)) visit(x, depth + 1, undefined); return; }
+      const queue = bound.has(n) ? [...bound.get(n)!] : inherited;
+      if (k === "GroupingFunc") {
+        const own = this.allAt(n, ["GROUPINGFUNC"])[0]?.grouping;
+        const g = own ?? queue?.shift();
+        const args = Array.isArray(n.args) ? n.args as unknown[] : [];
+        if (g !== undefined && keys !== undefined) {
+          if (g.levelsUp === depth) n.args = args.map((a, i) => { const ref = g.refs[i]; const key = ref === undefined ? undefined : keyOfEntry(entryOf(ref)); return key === undefined ? a : this.clone(key); });
+        } else if (keys === undefined && depth === 0) {
+          // (no analysed query to read: the argument by its spelling, the record's own key)
+          n.args = args.map((a) => { const key = isNode(a) ? placed.get(shapeOf(a)) : undefined; return key === undefined ? a : this.clone(key); });
+        }
+        return;
+      }
+      for (const [key, x] of Object.entries(n)) if (key !== "location") visit(x, depth, queue);
+    };
+    // (the GROUP BY holds the keys themselves, and a set operation's arms and WITH queries are SELECTs of their own)
+    for (const [key, x] of Object.entries(b)) if (key !== "groupClause" && key !== "withClause" && key !== "larg" && key !== "rarg") visit(x, 0, undefined);
+  }
+
+  /** the offsets a raw expression is analysed at: its own, and a cast's or a COLLATE's argument's (an analysed node
+   *  Postgres folded away leaves its argument's) */
+  private nodeOffsets(n: AstNode): number[] {
+    const b = bodyOf(n);
+    const own = typeof b.location === "number" && b.location >= 0 ? [b.location - this.base] : [];
+    const k = kindOf(n);
+    return (k === "TypeCast" || k === "CollateClause") && isNode(b.arg) ? [...own, ...this.nodeOffsets(b.arg as AstNode)] : own;
   }
 
   /** the SELECT list's column (a `*`'s, as Postgres expanded it: `outputs`) a column reference names by the same
@@ -4267,16 +4513,22 @@ class Rewriter {
 
   /** A ROW COMPARISON (`(c, id) < ('b', 3)`): each column under its own collation, the one Postgres compared it under
    *  (RowCompareExpr's inputcollids, found at its first left column's offset); a text column of a collation that is not
-   *  byte order compared by its key, which ends in the value's bytes (so equal keys are equal values) */
+   *  byte order compared by its key, which ends in the value's bytes (so equal keys are equal values); and the row
+   *  compared PAIR BY PAIR as Postgres compares it (`rowOrdered`), never as the engine's struct */
   private rowCompared(name: string, l: AstNode, r: AstNode): AstNode | null {
     const ls = (bodyOf(l).args ?? []) as AstNode[], rs = (bodyOf(r).args ?? []) as AstNode[];
+    if (ls.length !== rs.length || ls.length === 0) return null;
     const textual = [...ls, ...rs].some((x) => TEXTS.has(this.typeOf(x) ?? -1));
     const first = ls[0];
     const compared = first === undefined ? null : this.rowCompareAt(first);
+    // a citext member: Postgres orders it without regard to case (citext_cmp), which the pair's own ordering is not
+    if ([...ls, ...rs].some((x) => this.holdsCitext(this.typeOf(x))) || compared?.inputTypes?.some((t) => this.holdsCitext(t)) === true) {
+      throw new Unrewritable("a row holding a citext compared by <, <=, > or >= is not supported by Mason (Postgres compares the citext without regard to case)", "compare its members one by one: lower(x) < lower(y)", "citext-forms");
+    }
     const collations = compared?.inputCollations;
-    if (collations === undefined || collations.length !== ls.length || rs.length !== ls.length) {
+    if (collations === undefined || collations.length !== ls.length) {
       if (textual) throw new Unrewritable(`Mason could not read the collations of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
-      return null;
+      return this.rowOrdered(name, ls, rs);
     }
     if (collations.some((o, i) => o === 0 && [ls[i], rs[i]].some((x) => x !== undefined && COLLATED_TEXTS.has(this.typeOf(x) ?? -1)))) throw indeterminate();
     const each = collations.map((o) => this.collations.resolve(o));
@@ -4285,19 +4537,186 @@ class Rewriter {
     const types = compared?.inputTypes;
     if (types === undefined || types.length !== ls.length) {
       if (textual) throw new Unrewritable(`Mason could not read the types of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
-      return null;
+      return this.rowOrdered(name, ls, rs);
     }
     const plain = (i: number): boolean => { const c = each[i]; return c === null || c === undefined || c.kind === "bytes"; };
-    if (types.every((t, i) => t !== BPCHAR && plain(i)) && ![...ls, ...rs].some((x) => this.typeOf(x) === BPCHAR)) return null;
+    if (types.every((t, i) => t !== BPCHAR && plain(i)) && ![...ls, ...rs].some((x) => this.typeOf(x) === BPCHAR)) return this.rowOrdered(name, ls, rs);
     const keyed = (xs: AstNode[]): AstNode[] => xs.map((x, i) => {
       const c = each[i], t = types[i]!, v = this.widen(x, t);
       if (c === null || c === undefined || c.kind === "bytes") return t === BPCHAR ? fn("rtrim", [strip(v)]) : v;
       return this.textKey(v, c, t === BPCHAR, null);
     });
-    return op(name, { RowExpr: { ...bodyOf(l), args: keyed(ls) } }, { RowExpr: { ...bodyOf(r), args: keyed(rs) } });
+    return this.rowOrdered(name, keyed(ls), keyed(rs));
+  }
+
+  /**
+   * TWO ROWS ORDERED AS POSTGRES ORDERS THEM (PR 674 CI fix 1, the class of `rowQuantified`): the pairs read left to
+   * right, the first pair holding a NULL making the comparison NULL and the first unequal pair deciding it, all equal
+   * true for <= and >=. The engine compares a row as a struct, a NULL member ordered rather than NULL. Each operand is
+   * evaluated once: the pairs are one ROW, read by a lambda over a list of it
+   */
+  private rowOrdered(name: string, ls: AstNode[], rs: AstNode[]): AstNode {
+    const less = name === "<" || name === "<=" ? "<" : ">";
+    const param = `__mason_r${this.sublinkOutputs++}`;
+    // each operand read once through the ROW, but a constant (a literal, a cast of one, a parameter), placed where it is
+    // compared so the engine casts it to the other side's type as it does any comparison's (`(u, id) > ('…', 0)`)
+    const read: AstNode[] = [];
+    const operand = (x: AstNode): (() => AstNode) => {
+      if (isConstant(x)) return () => this.clone(x);
+      read.push(x);
+      const k = read.length;
+      return () => fn("struct_extract", [{ ColumnRef: { fields: [S(param)] } }, intConst(k)]);
+    };
+    const arms: Array<[AstNode, AstNode]> = [];
+    const sides = ls.map((x, i) => [operand(x), operand(rs[i]!)] as const);
+    sides.forEach(([left, right]) => {
+      arms.push([or([isNull(left()), isNull(right())]), nullConst()]);
+      arms.push([op("<>", left(), right()), op(less, left(), right())]);
+    });
+    const pairs = row(read);
+    const each = fn("list_transform", [{ A_ArrayExpr: { elements: [pairs] } }, op("->", { ColumnRef: { fields: [S(param)] } }, caseWhen(arms, boolConst(name === "<=" || name === ">=")))]);
+    return fn("list_extract", [each, intConst(1)]);
   }
 
   /** the row comparison Postgres made of a raw `ROW(…) < ROW(…)`, by its first left column (src/duck/pgtree.ts) */
+  /**
+   * ONE OPERAND OF A COMPARISON AS POSTGRES RESOLVED IT (PR 674 class round r2, the class char-padding-in-sublink-test):
+   * `own` and `other` the types of the operator's two arguments, read from Postgres's analysis of the comparison by the
+   * caller. Widened to its own (`widen`: a char(n) read as a text is its rtrim, Postgres's bpchar-to-text cast); and,
+   * where the comparison is between two char(n) (bpchareq, bpcharlt …, no cast on either side), without its padding.
+   * Every comparison writes its operands through here: an operator's (`AEXPR_OP`), IN over a list's, a SubLink's.
+   */
+  private compared(n: AstNode, own: number | null | undefined, other: number | null | undefined, comparison: boolean): AstNode {
+    if (comparison && own === BPCHAR && other === BPCHAR) { const r = fn("rtrim", [n]); this.typedLike.set(bodyOf(r), n); return r; }
+    return this.widen(n, own) as AstNode;
+  }
+
+  /**
+   * A SUBLINK's COMPARISON (`x IN (SELECT …)`, `x = ANY / ALL (SELECT …)`, a row's) AS POSTGRES RESOLVED IT, column by
+   * column (PR 674 class rounds r2 and r3, the class char-padding-in-sublink-test): each pair's argument types read from
+   * the analysed operator at the SubLink (an OPEXPR a column) or, for a row compared by an ordering operator, the
+   * ROWCOMPAREEXPR placed at the SubLink's offset (pgtree.ts `typesByLocation`; a grouped column's Var has none of its
+   * own) or at its first left column's (`rowCompareAt`); each output column's own type from the subquery's
+   * output the operator reads (`Typed.params`, its PARAM_SUBLINK), whatever the subquery's form. The test operands are
+   * written through `compared`, and the outputs through it FROM OUTSIDE the subquery, over its columns (`SELECT <each
+   * written> FROM (<the subquery>) AS <alias>(c1 … cn)`), so a set operation, VALUES, a *, TABLE or a CTE is written as
+   * a plain list is, and a pair's two operands are written together. A row under an ordering operator in ANY / ALL is
+   * Postgres's row comparison of each output row (`rowQuantified`): the engine compares a row as a struct.
+   */
+  private sublinkCompared(b: Body): AstNode | null {
+    const test = b.testexpr as AstNode;
+    const row = kindOf(test) === "RowExpr";
+    const lefts = row ? ((bodyOf(test).args ?? []) as AstNode[]) : [test];
+    const ops = this.allAt(b, ["OPEXPR"]);
+    // (a row's ROWCOMPAREEXPR is placed at the SubLink's offset, where a grouped first column's Var has none)
+    const compare = row && lefts[0] !== undefined && ops.length !== lefts.length ? this.at(b, ["ROWCOMPAREEXPR"]) ?? this.rowCompareAt(lefts[0]) : null;
+    let types: Array<[number | null, number | null]> | null = null;
+    let outputs: Array<{ type: number; typmod: number } | null> = [];
+    if (ops.length === lefts.length) {
+      types = ops.map((t) => [t.args[0]?.type ?? null, t.args[1]?.type ?? null]);
+      outputs = ops.map((t) => t.params?.[1] ?? null);
+    } else if (compare?.inputTypes !== undefined && compare.inputTypes.length === lefts.length) {
+      types = compare.inputTypes.map((t) => [t, t]);
+      outputs = lefts.map((_, i) => compare.params?.[i] ?? null);
+    }
+    if (types === null || !isNode(b.subselect)) return null;
+    const pairs = types;
+    const alias = `${this.cellPrefix}o${this.sublinkOutputs++}`;
+    const column = (i: number): AstNode => ({ ColumnRef: { fields: [S(alias), S(`c${i + 1}`)] } });
+    const refs = outputs.map((p, i) => {
+      if (p === null) return null;
+      const ref = column(i);
+      this.synthetic.set(bodyOf(ref), { node: "VAR", type: p.type, typmod: p.typmod, args: [], oid: null, format: null, collation: 0, inputCollation: 0, levelsUp: 0, datum: null, qualifier: null, renamed: null });
+      this.original.add(bodyOf(ref));
+      return ref;
+    });
+    const wrap = (targets: AstNode[]): AstNode => ({ SelectStmt: {
+      targetList: targets.map((v) => ({ ResTarget: { val: v } })),
+      fromClause: [{ RangeSubselect: { subquery: b.subselect, alias: { aliasname: alias, colnames: lefts.map((_, i) => S(`c${i + 1}`)) } } }],
+      limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
+    } });
+    const name = names(b.operName ?? []).at(-1) ?? "=";
+    const sorts = ["<", "<=", ">", ">="].includes(name);
+    // (a row's <> ANY too, which the engine, filtering by it, answers true for a NULL member: `<> ALL` is NOT IN, and
+    // `=` IN, each a join the engine answers as Postgres does)
+    const ordering = compare !== null && sorts && (b.subLinkType === "ANY_SUBLINK" || b.subLinkType === "ALL_SUBLINK");
+    const rowWise = ordering || (row && name === "<>" && b.subLinkType === "ANY_SUBLINK");
+    // A CITEXT PAIR IN A COMPARISON THIS REWRITE WRITES PAIR BY PAIR (PR 674 shrink 1, the class citext compared by bytes
+    // in a quantified subquery): Postgres compares a citext without regard to case (citext_eq, citext_cmp), and the
+    // pairs here are written by `orderedOperand` and `rowQuantified`, which compare its bytes. Decided here, where every
+    // pair's argument types are read (the OPEXPRs, the ROWCOMPAREEXPR), so every path below sees it: ALL of a subquery,
+    // whatever its operator, and a row compared with each output row; refused by name, as a plain row's is (`rowCompared`)
+    if ((b.subLinkType === "ALL_SUBLINK" || rowWise) && pairs.some(([l, r]) => this.holdsCitext(l) || this.holdsCitext(r))) {
+      const what = `${row ? "a row holding a citext" : pairs.some(([l, r]) => this.isCitext(l) || this.isCitext(r)) ? "a citext" : "a value holding a citext (an array of one, or of a domain over one)"} compared by ${name} ${b.subLinkType === "ALL_SUBLINK" ? "ALL" : "ANY"} of a subquery`;
+      throw new Unrewritable(`${what} is not supported by Mason (Postgres compares the citext without regard to case)`, "compare lower() of each side: lower(x) < ALL (SELECT lower(y) …)", "citext-forms");
+    }
+    // AN ORDERING OF TEXT UNDER ITS COLLATION (PR 674 CI fix 1): each pair's collation the one Postgres compared it under
+    // (the OPEXPR's inputcollid, the ROWCOMPAREEXPR's inputcollids); both operands of a text pair under one that is not
+    // byte order written as its key (`orderedOperand`), as a plain comparison's are (`compareText`, `rowCompared`)
+    const colls: Array<DuckCollation | null> = !sorts ? lefts.map(() => null) : ops.length === lefts.length
+      ? ops.map((t) => this.inputCollationOf(t))
+      : lefts.map((_, i) => { const o = compare?.inputCollations?.[i] ?? 0; return o === 0 ? null : this.collations.resolve(o); });
+    if (sorts && compare !== null && compare.inputCollations === undefined && pairs.some(([t]) => TEXTS.has(t ?? -1))) {
+      throw new Unrewritable(`Mason could not read the collations of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
+    }
+    const side = (n: AstNode, i: number, own: 0 | 1): AstNode => this.orderedOperand(n, pairs[i]![own], pairs[i]![own === 0 ? 1 : 0], colls[i] ?? null);
+    if (rowWise) {
+      if (refs.some((r) => r === null)) return null;
+      return this.rowQuantified(name, b.subLinkType === "ALL_SUBLINK", lefts, refs as AstNode[], side, wrap);
+    }
+    // each pair written together: an output that cannot be typed leaves its pair as written
+    const rights = refs.map((r, i) => r === null ? null : side(r, i, 1));
+    const written = lefts.map((x, i) => rights[i] === null ? x : side(x, i, 0));
+    if (row) bodyOf(test).args = written; else b.testexpr = written[0];
+    if (rights.some((r, i) => r !== null && r !== refs[i])) b.subselect = wrap(rights.map((r, i) => r ?? column(i)));
+    return null;
+  }
+  private sublinkOutputs = 0;
+
+  /** one operand of an ordering comparison as Postgres resolved it: `compared`, and under a collation that is not byte
+   *  order a text pair's key (`textKey`, its char(n) without its padding), so the engine's byte order is the collation's
+   *  and equal keys are equal values; `own` and `other` the pair's argument types, `c` the comparison's collation */
+  private orderedOperand(n: AstNode, own: number | null, other: number | null, c: DuckCollation | null): AstNode {
+    if (c === null || c.kind === "bytes" || !TEXTS.has(own ?? -1)) return this.compared(n, own, other, true);
+    const padded = own === BPCHAR && other === BPCHAR;
+    return this.textKey(padded ? n : this.widen(n, own), c, padded, null);
+  }
+
+  /**
+   * A ROW COMPARED BY AN ORDERING OPERATOR WITH ANY / ALL OF A SUBQUERY, OR BY <> WITH ANY, AS POSTGRES COMPARES IT (PR
+   * 674 class round r3): each output row's comparison is Postgres's row comparison, its pairs read left to right, the
+   * first pair holding a NULL making it NULL and the first unequal pair deciding it (all equal: true for <= and >=);
+   * for <>, any pair unequal and neither NULL is true, else a NULL is NULL. The engine compares a
+   * row as a struct, a NULL member ordered rather than NULL. The subquery's rows are read as ONE list of their written
+   * outputs (`list(ROW(…))`), and each is compared OUTSIDE the subquery, by a lambda over the list, with the test as the
+   * outer query reads it: a test column read inside the subquery is an outer reference, which the engine binds to the
+   * select list's alias of a grouped column and refuses (42803). Each row's answer is 2 (true), 1 (NULL) or 0 (false),
+   * and ANY is the greatest of them (none, a NULL list: false), ALL the least (none: true); each pair's operands
+   * written by `compared`, the test's copied for each use.
+   */
+  private rowQuantified(name: string, all: boolean, lefts: AstNode[], refs: AstNode[], side: (n: AstNode, i: number, own: 0 | 1) => AstNode, wrap: (targets: AstNode[]) => AstNode): AstNode {
+    // (all pairs equal: true for <= and >=, false for <, > and <>)
+    const strict = name === "<" || name === ">" || name === "<>";
+    const less = name === "<" || name === "<=" ? "<" : ">";
+    const listed = { SubLink: { subLinkType: "EXPR_SUBLINK", subselect: wrap([fn("list", [row(refs.map((r, i) => side(r, i, 1)))])]) } };
+    // (a lambda's parameter, the rewrite's own name: never the cells' prefix, which a GROUP BY reads per group)
+    const param = `__mason_r${this.sublinkOutputs++}`;
+    const arms: Array<[AstNode, AstNode]> = [];
+    const left = (i: number): AstNode => side(this.clone(lefts[i]!), i, 0);
+    const right = (i: number): AstNode => fn("struct_extract", [{ ColumnRef: { fields: [S(param)] } }, intConst(i + 1)]);
+    if (name === "<>") {
+      // Postgres's row <>: any pair unequal (neither NULL) is true, else any NULL is NULL, else false
+      lefts.forEach((_, i) => arms.push([op("<>", left(i), right(i)), intConst(2)]));
+      arms.push([or(lefts.flatMap((_, i) => [isNull(left(i)), isNull(right(i))])), intConst(1)]);
+    } else lefts.forEach((_, i) => {
+      arms.push([or([isNull(left(i)), isNull(right(i))]), intConst(1)]);
+      arms.push([op("<>", left(i), right(i)), caseWhen([[op(less, left(i), right(i)), intConst(2)]], intConst(0))]);
+    });
+    const each = fn("list_transform", [listed, op("->", { ColumnRef: { fields: [S(param)] } }, caseWhen(arms, intConst(strict ? 0 : 2)))]);
+    const answers: Array<[number, AstNode]> = all ? [[0, boolConst(false)], [1, nullConst()]] : [[2, boolConst(true)], [1, nullConst()]];
+    return { CaseExpr: { arg: fn(all ? "list_min" : "list_max", [each]), args: answers.map(([v, r]) => ({ CaseWhen: { expr: intConst(v), result: r } })), defresult: boolConst(all) } };
+  }
+
   private rowCompareAt(first: AstNode): Typed | null {
     const own = bodyOf(first);
     const at = typeof own.location === "number" ? own.location : kindOf(first) === "TypeCast" && isNode(own.arg) ? bodyOf(own.arg as AstNode).location : undefined;
@@ -4529,8 +4948,8 @@ class Rewriter {
         }
         if (l !== undefined) this.comparable(l, "IN");
         if (want === BPCHAR && l !== undefined && r !== undefined && kindOf(r) === "List") {
-          b.lexpr = fn("rtrim", [l]);
-          bodyOf(r).items = ((bodyOf(r).items ?? []) as AstNode[]).map((x) => fn("rtrim", [x]));
+          b.lexpr = this.compared(l, BPCHAR, BPCHAR, true);
+          bodyOf(r).items = ((bodyOf(r).items ?? []) as AstNode[]).map((x) => this.compared(x, BPCHAR, BPCHAR, true));
           return null;
         }
         if (l !== undefined) b.lexpr = this.widen(l, want);
@@ -4549,13 +4968,11 @@ class Rewriter {
     }
     // each operand as the type of the operator Postgres chose (`real / smallint` is float8's division, `real = 0.1`
     // float8's comparison): DuckDB would compute in its own common type (single precision, for those)
-    if (l !== undefined) b.lexpr = this.widen(l, a0);
-    if (r !== undefined) b.rexpr = this.widen(r, l === undefined ? a0 : a1);
-    // char(n) beside char(n): compared without the padding (bpchareq, bpcharlt …)
-    if (a0 === BPCHAR && a1 === BPCHAR && ["=", "<>", "!=", "<", "<=", ">", ">="].includes(name) && l !== undefined && r !== undefined) {
-      b.lexpr = fn("rtrim", [l]); b.rexpr = fn("rtrim", [r]);
-      this.typedLike.set(bodyOf(b.lexpr as AstNode), l); this.typedLike.set(bodyOf(b.rexpr as AstNode), r);
-    }
+    // (the one writer of a comparison's operands as Postgres resolved it, `compared`: a SubLink's too)
+    // (rtrim of both decided by the argument types alone: every operator over two char(n) ignores their trailing blanks)
+    const both = l !== undefined && r !== undefined;
+    if (l !== undefined) b.lexpr = this.compared(l, a0, a1, both);
+    if (r !== undefined) b.rexpr = this.compared(r, l === undefined ? a0 : a1, a0, both);
     if (comparison && b.lexpr !== undefined) this.comparable(b.lexpr as AstNode, `comparing (${name})`);
     switch (name) {
       case "/": {
@@ -6240,7 +6657,7 @@ const NOT_EXACT = new Error("not exact");
 /** the engine's integer types, as the rewrite casts to them (`duckExact`: an integer is exact) */
 const DUCK_INTEGER_NAMES = new Set(["tinyint", "smallint", "integer", "int", "bigint", "hugeint", "int2", "int4", "int8"]);
 /** the functions whose value is one of their first argument's (or its sum), in its own type (`duckExact`) */
-const VALUE_KEEPING = new Set(["sum", "min", "max", "latest", "any_value", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
+const VALUE_KEEPING = new Set(["sum", "min", "max", "latest", "any_value", "first", "arg_min_null", "arg_max_null", "lag", "lead", "first_value", "last_value", "nth_value"]);
 /** the numeric functions the walk writes as an exact DECIMAL or integer (`duckExact`): count, extract (`extract`: as
  *  the exact numeric Postgres returns), div of integers */
 const WRITTEN_EXACT = new Set(["count", "extract", "div"]);
@@ -7202,6 +7619,8 @@ export interface RewriteOptions {
   /** the statement's collations, resolved (src/duck/collation.ts `CollationResolver.prepare`) */
   collations: StatementCollations;
   userTypes?: ReadonlyMap<number, string>;
+  /** every type holding a citext anywhere in its structure (src/duck/plan.ts `CITEXT_HELD`) */
+  citextHeld?: ReadonlySet<number>;
   rowTypes?: ReadonlyMap<number, readonly RowColumn[]>;
   timeZone?: string;
   /** the session's DateStyle (src/api/postgres/catalog.ts SessionState) */
@@ -7212,10 +7631,10 @@ export interface RewriteOptions {
   keyCounts?: ReadonlySet<number>;
 }
 
-export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
+export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
   wireBound = false, keyCounts = new Set() }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
-  const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts);
+  const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }

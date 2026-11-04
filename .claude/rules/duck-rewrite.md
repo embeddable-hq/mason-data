@@ -304,8 +304,14 @@ paths:
 
 - **A numeric the plan decides exactly is compared by its EXACT KEY, never its double** (`exactKey`, src/duck/rewrite.ts;
   PR 207's class round): a quotient or an avg the engine holds as a double equates values Postgres tells apart past 17
-  digits, so DISTINCT, DISTINCT ON, GROUP BY (beside the value), PARTITION BY, count(DISTINCT), `=` and `<>` read the
-  program's value without trailing zeros (`__mason_numeric_key`); a form where no key can be placed (a grouping set,
+  digits, so DISTINCT, DISTINCT ON, GROUP BY, PARTITION BY, count(DISTINCT), `=` and `<>` read the
+  program's value without trailing zeros (`__mason_numeric_key`). **A GROUP BY groups by the key ALONE, computed in ONE
+  call a row** (`__mason_numeric_program_key`, issue 665: beside the value, the double, the program and the key were
+  three calls a row, 3x the time): the expression is recorded `cells` (`grouping`), and decidedByKey marks its columns
+  (`readPerGroup`) so the walk reads each through any_value once every rule above it has read the expression as
+  Postgres's analysis typed its shape — the list's double, a cast, its text, HAVING, the ORDER BY's exact order key,
+  WITH TIES and a carried program's cells are each computed per GROUP, never inside any_value per row
+  (`tests/duck-plans.test.ts` "issue 665", FUNCTION_ROWS); a form where no key can be placed (a grouping set,
   another aggregate's DISTINCT, a set operation without ALL, a JOIN … USING or NATURAL JOIN on a subquery's quotient,
   `refuseMergedExact`) is refused, `numeric-quotient-equality`; IN a list keys every item (issue 358); = ANY, IS
   DISTINCT FROM, NULLIF, CASE x WHEN, < and > are the listed difference `numeric-quotient-compare`. A new context that
@@ -602,3 +608,30 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   in-band sentinel; the end of a value is known from the value itself (the run's length against the text's, or an
   anchored pattern), and the property test's strings are drawn from a pool holding every byte the bounds use;
   `sentinel-byte-the-data-can-hold` (PR 675).
+- GROUPING() of an expression the engine groups by a key in its place (an exact quotient), in every clause that can
+  hold one, at the head and the base over `t (id int primary key, a int, b text, c numeric(10,2), d char(4))` with
+  NULLs, duplicates and ties: `SELECT c / 3 AS q, grouping(c / 3), count(*) FROM t GROUP BY 1 ORDER BY 1`, by `GROUP BY
+  c / 3`, two arguments `grouping(c / 3, a)`, in HAVING (`HAVING grouping(c / 3) = 0`), in ORDER BY, in DISTINCT ON
+  (`SELECT DISTINCT ON (grouping(c / 3)) c / 3 AS q FROM t GROUP BY 1 ORDER BY grouping(c / 3), 1`), in a named WINDOW
+  (`WINDOW w AS (ORDER BY grouping(c / 3), c / 3)`), the same over `ceil(c / 7.0)` and a jsonb keyed column: the
+  argument written as the expression's value, which is no engine group column, or rewritten in a list of clauses that
+  misses one, 42804 "GROUPING child … must be a grouping column". The decision: every GroupingFunc of the SELECT, found
+  by walking its whole body (not a list of clauses), reads its arguments' engine GROUP BY entries from the one record
+  keyedGroups placed; `grouping-of-keyed-expression-reads-value` (PR 674).
+- A SubLink's test expression over a grouped expression, at the head and the base over the same `t`: `SELECT c / 3 AS
+  q, count(*) FROM t GROUP BY 1 HAVING c / 3 IN (SELECT c / 5 FROM t) ORDER BY 1`, `= ANY (…)`, `NOT IN (…)`, `(c / 3)
+  > ALL (…)`, in the list (`c / 3 IN (SELECT c / 5 FROM t) AS listed`), in the ORDER BY, correlated (`… HAVING c / 3 IN
+  (SELECT e.c / 3 FROM e WHERE e.a = t.a)`): the test expression walked at the subselect's depth, so its column of this
+  query is left unmarked and sent bare, 42803 where Postgres answers. The decision: a SubLink's test expression belongs
+  to the query holding the SubLink and is walked at that query's depth, only the subselect one deeper;
+  `sublink-testexpr-walked-at-inner-depth` (PR 674).
+- A char(n) compared through a SubLink (IN, = ANY, < ALL, a row IN) with a subselect of every form, at the head and the
+  base over the same `t` with `d` 'ab' in some rows, 'cd' and NULL in others, ungrouped and under `GROUP BY id`: `SELECT
+  id, d IN (SELECT 'ab') AS m FROM t ORDER BY 1`, `(b, d) IN (SELECT 'x', 'ab')`, `d = ANY (SELECT 'ab')`, `d IN (VALUES
+  ('ab'::char(4)))`, `d IN (SELECT s.* FROM (SELECT d FROM t WHERE id = 1) s)`, `(id, a, b, c, d) IN (TABLE t)`, `d IN
+  (SELECT d … UNION / UNION ALL / INTERSECT / EXCEPT SELECT d …)`, `d IN (SELECT d … UNION SELECT 'zz')`, `d < ALL
+  (SELECT d … UNION SELECT d …)`: the char(n) side trimmed (or kept padded) on one operand only, because the subselect's
+  side is written only when its plain target list is reachable, so equal values never compare equal, a silent wrong
+  answer. The decision: the two operands are compared under the one type Postgres's analysis of the SubLink's operator
+  resolved, written together or not at all, the subselect's side over its output columns whatever its form;
+  `char-padding-in-sublink-test` (PR 674).

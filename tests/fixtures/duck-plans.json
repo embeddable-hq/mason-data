@@ -2280,20 +2280,113 @@
       "plan": [
         "ORDER_BY",
         "  PROJECTION calls __mason_numeric_order, __mason_numeric_program, __mason_turn",
-        "    HASH_GROUP_BY",
-        "      PROJECTION calls __mason_numeric_key, __mason_numeric_program, __mason_turn",
-        "        PROJECTION",
-        "          TABLE_SCAN public.orders"
+        "    PROJECTION",
+        "      HASH_GROUP_BY",
+        "        PROJECTION calls __mason_numeric_program_key, __mason_turn",
+        "          PROJECTION",
+        "            TABLE_SCAN public.orders"
       ],
       "calls": [
         "__mason_numeric_div",
-        "__mason_numeric_key",
         "__mason_numeric_order",
-        "__mason_numeric_program"
+        "__mason_numeric_program",
+        "__mason_numeric_program_key"
       ],
       "sends": [
         "epoch_us"
       ],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "BI shape: issue 665: Metabase's week of year, the expression repeated",
+      "sql": "SELECT ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) AS created_at, count(*) AS count FROM orders o GROUP BY ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) ORDER BY ceil((CAST(extract(doy from o.created_at) AS integer) / 7.0)) ASC",
+      "plan": [
+        "ORDER_BY",
+        "  PROJECTION calls __mason_numeric_order, __mason_numeric_program",
+        "    PROJECTION calls __mason_turn",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION calls __mason_numeric_program_key, __mason_turn",
+        "            PROJECTION",
+        "              TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_numeric_div",
+        "__mason_numeric_order",
+        "__mason_numeric_program",
+        "__mason_numeric_program_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "BI shape: issue 665: Metabase's numeric auto-bin",
+      "sql": "SELECT (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) AS amount, count(*) AS count FROM orders o GROUP BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ORDER BY (floor(((o.amount - 0.0) / 12.5)) * 12.5 + 0.0) ASC",
+      "plan": [
+        "ORDER_BY",
+        "  PROJECTION calls __mason_numeric_order, __mason_numeric_program, __mason_turn",
+        "    PROJECTION",
+        "      HASH_GROUP_BY",
+        "        PROJECTION calls __mason_numeric_program_key, __mason_turn",
+        "          PROJECTION",
+        "            TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_numeric_div",
+        "__mason_numeric_order",
+        "__mason_numeric_program",
+        "__mason_numeric_program_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "BI shape: issue 665: the auto-bin of a bare column named as its output",
+      "sql": "SELECT floor(amount / 12.5) * 12.5 AS amount, count(*) FROM orders GROUP BY floor(amount / 12.5) * 12.5 ORDER BY floor(amount / 12.5) * 12.5 DESC",
+      "plan": [
+        "ORDER_BY",
+        "  PROJECTION calls __mason_numeric_order, __mason_numeric_program",
+        "    PROJECTION calls __mason_turn",
+        "      PROJECTION",
+        "        HASH_GROUP_BY",
+        "          PROJECTION calls __mason_numeric_program_key, __mason_turn",
+        "            PROJECTION",
+        "              TABLE_SCAN public.orders"
+      ],
+      "calls": [
+        "__mason_numeric_div",
+        "__mason_numeric_order",
+        "__mason_numeric_program",
+        "__mason_numeric_program_key"
+      ],
+      "sends": [],
+      "delim_join": false,
+      "full_sort": true
+    },
+    {
+      "name": "BI shape: issue 665: the grouped quotient read as text and as a cast",
+      "sql": "SELECT (o.amount / 7)::text AS t, (o.amount / 7)::numeric(12,4) AS c, count(*) FROM orders o WHERE o.id < 500 GROUP BY o.amount / 7 ORDER BY o.amount / 7",
+      "plan": [
+        "ORDER_BY",
+        "  PROJECTION calls __mason_numeric_order",
+        "    PROJECTION",
+        "      PROJECTION calls __mason_turn",
+        "        PROJECTION",
+        "          HASH_GROUP_BY",
+        "            PROJECTION calls __mason_numeric_program_key, __mason_turn",
+        "              PROJECTION",
+        "                TABLE_SCAN public.orders [zone-map filter: id < constant]"
+      ],
+      "calls": [
+        "__mason_numeric_div",
+        "__mason_numeric_order",
+        "__mason_numeric_program",
+        "__mason_numeric_program_key"
+      ],
+      "sends": [],
       "delim_join": false,
       "full_sort": true
     },
