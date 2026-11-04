@@ -61,6 +61,41 @@ const problem = (v, s, at) => {
   }
 };
 
+// The result's shape as a reader takes it in (issue 693): one line a key at every depth, rendered from the schema
+// object the agent() call carries and from the keywords problem() reads (type, properties, required, items, enum,
+// minimum), so what the agent is told and what rejects its file are one object. Never a shape written by hand.
+const PLURAL = { object: "objects", array: "arrays", string: "strings", number: "numbers", integer: "integers", boolean: "booleans" };
+const typeOf = (s) => {
+  if (s.enum) return `one of: ${s.enum.join(" | ")}`;
+  const min = s.minimum !== undefined ? ` >= ${s.minimum}` : "";
+  if (s.type !== "array") return s.type ? `${s.type}${min}` : "any value";
+  const it = s.items;
+  if (!it) return "array";
+  if (it.type && PLURAL[it.type] && !it.enum && it.minimum === undefined) return `array of ${PLURAL[it.type]}`;
+  return `array, each item ${typeOf(it)}`;
+};
+const shapeOf = (s, at = "") => {
+  const lines = [];
+  const children = (s, at) => {
+    if (s.type === "object") {
+      const req = s.required ?? [];
+      // a required key the schema gives no properties entry is still a key the file must hold: shown, of any value
+      const props = { ...(s.properties ?? {}), ...Object.fromEntries(req.filter((k) => !Object.hasOwn(s.properties ?? {}, k)).map((k) => [k, {}])) };
+      for (const [k, p] of Object.entries(props)) {
+        const key = at ? `${at}.${k}` : k;
+        const desc = p.description ? `: ${String(p.description).replace(/\s+/g, " ")}` : "";
+        lines.push(`- ${key}: ${typeOf(p)}, ${req.includes(k) ? "required" : "optional"}${desc}`);
+        children(p, key);
+      }
+    } else if (s.type === "array" && s.items) {
+      children(s.items, `${at}[]`);
+    }
+  };
+  if (s.type !== "object") lines.push(`- (the whole value): ${typeOf(s)}${s.description ? `: ${String(s.description).replace(/\s+/g, " ")}` : ""}`);
+  children(s, at);
+  return lines.join("\n");
+};
+
 /** The answer recorded for `label`, read from the file its agent wrote: null when the agent failed, wrote no file, or
  * wrote one that is not JSON or fails the stage's schema, each said on a NULL line. */
 function answerOf(label, schema, recorded) {
@@ -125,7 +160,7 @@ async function main() {
     for (const { prompt, opts } of next) {
       const { label, phase, schema, ...on } = opts;
       const file = path.join(RUN, "next", `${name(label)}.md`);
-      fs.writeFileSync(file, `${prompt}\n\nBefore you end your turn, write your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(label)}, and end your report with that path. The schema: ${JSON.stringify(schema)}`);
+      fs.writeFileSync(file, `${prompt}\n\nBefore you end your turn, write your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(label)}, and end your report with that path. Its shape, one line a key (\`a.b\` a key of the object at a, \`a[].b\` a key of each item of the array at a), rendered from the schema below, which wins over any word of the prompt above:\n${shapeOf(schema)}\nThe schema: ${JSON.stringify(schema)}`);
       console.log(`STAGE ${JSON.stringify(label)} (${phase}) ${JSON.stringify(on)}: ${file}`);
     }
   }
