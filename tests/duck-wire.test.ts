@@ -6589,8 +6589,8 @@ test("issue 665 class round r3: every coercion Postgres placed on a char(n) is w
       "d IN (SELECT CASE WHEN u.id = 1 THEN u.d ELSE 'zz'::text END FROM deep_t u)", "d IN (SELECT nullif(u.d, 'qq'::text) FROM deep_t u WHERE u.id = 1)",
       "d IN (SELECT nullif(u.d, 'qq'::text) FROM deep_t u WHERE u.id = 1 UNION ALL SELECT 'qq'::text)",
     ];
-    // ALL, and a row under an ordering operator, each pair as Postgres compares it, a NULL member NULL (neither is
-    // verified, issue 284, so the listener for these refuses nothing: what the oracle's legs admit is what it answers)
+    // ALL, and a row under an ordering operator, each pair as Postgres compares it, a NULL member NULL (on a listener
+    // that refuses nothing, so the answer is held whatever the allowlist the oracle's legs regenerate)
     const ordered = [
       "d <> ALL (SELECT * FROM (SELECT d FROM deep_t WHERE id = 1) s)", "d < ALL (SELECT d FROM deep_t WHERE id = 6 UNION SELECT d FROM deep_t WHERE id = 5)",
       "(a, d) < ANY (SELECT a, d FROM deep_t WHERE id = 6 UNION SELECT a, d FROM deep_t WHERE id = 5)", "(a, d) >= ANY (VALUES (2, 'b'::char(4)))",
@@ -6626,6 +6626,29 @@ test("issue 665 class round r3: every coercion Postgres placed on a char(n) is w
     ];
     try { assert.deepEqual(await unlike(all, [...each(ordered), ...grouped]), []); } finally { await all.end(); await a.close(); }
   } finally { await c.end(); }
+});
+
+// (on a listener that refuses nothing, so the answer is held whatever the allowlist the oracle's legs regenerate)
+test("issue 665 CI fix 1 (#284): two rows ordered pair by pair as Postgres orders them, a NULL member NULL, every operand read once", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    assert.deepEqual(await unlike(c, [
+      ["SELECT id, (a, d) < (2, 'cd') AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, (a, b) <= (2, 'y') AS m, (a, c) > (2, 3.00) AS n, (a, b) >= (NULL::int, 'x') AS o FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, ROW(a, b) < ROW(c::int, b) AS m, (a, b) < (1, b) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t WHERE (a, id) > (2, 3) ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t WHERE NOT ((a, id) < (2, 3)) ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t ORDER BY (a, id) < (2, 3) NULLS FIRST, id", "ordered"],
+      ["SELECT id, (d, id) < (NULL, 3) AS m, ('b'::char(4), 1) < (NULL, 2) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT (a, b) < (3, 'x') AS m, count(*) FROM deep_t GROUP BY 1 ORDER BY 1 NULLS FIRST", "ordered"],
+      // a volatile member read once: the comparison is of the one value the row holds
+      ["SELECT count(*) FILTER (WHERE (x, 1) <= (x, 1)) AS n FROM (SELECT random() AS x FROM deep_t) s", "ordered"],
+      // a constant beside a column of another type is cast to it, as any comparison's is
+      ["SELECT id, (a, b) < ($$2$$::int, 'y'::varchar) AS m, (b, id) >= ('x', 1) AS n FROM deep_t ORDER BY 1", "ordered"],
+    ]), []);
+    // a citext member is refused by name: Postgres orders it without regard to case
+    await assert.rejects(c.query("SELECT id FROM accounts WHERE (status, id) < ('B'::citext, 2)"),(e: Error & { code?: string; detail?: string }) => e.code === "0A000" && /citext-forms/.test(e.detail ?? ""));
+  } finally { await c.end(); await a.close(); }
 });
 
 test("exact path: the AGGREGATE reader sums and averages a program exactly, through a derived table or a CTE (issue 278)", async () => {

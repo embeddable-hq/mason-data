@@ -200,6 +200,12 @@ const isNode = (v: unknown): v is AstNode => v !== null && typeof v === "object"
 const names = (list: unknown): string[] => Array.isArray(list) ? list.map((x) => isNode(x) && kindOf(x) === "String" ? String(bodyOf(x).sval ?? "") : "") : [];
 /** a function's or type's name without its `pg_catalog.` */
 const lastName = (list: unknown): string => { const n = names(list); return (n[n.length - 1] ?? "").toLowerCase(); };
+/** a literal, a parameter, or a cast of one: a value fixed for the statement's run */
+const isConstant = (n: AstNode): boolean => {
+  const k = kindOf(n);
+  if (k === "A_Const" || k === "ParamRef") return true;
+  return k === "TypeCast" && isNode(bodyOf(n).arg) && isConstant(bodyOf(n).arg as AstNode);
+};
 const constString = (n: AstNode | undefined): string | null => n !== undefined && kindOf(n) === "A_Const" && bodyOf(n).sval !== undefined ? String(bodyOf(n).sval.sval ?? "") : null;
 const constInt = (n: AstNode | undefined): number | null => {
   if (n === undefined || kindOf(n) !== "A_Const") return null;
@@ -4500,16 +4506,22 @@ class Rewriter {
 
   /** A ROW COMPARISON (`(c, id) < ('b', 3)`): each column under its own collation, the one Postgres compared it under
    *  (RowCompareExpr's inputcollids, found at its first left column's offset); a text column of a collation that is not
-   *  byte order compared by its key, which ends in the value's bytes (so equal keys are equal values) */
+   *  byte order compared by its key, which ends in the value's bytes (so equal keys are equal values); and the row
+   *  compared PAIR BY PAIR as Postgres compares it (`rowOrdered`), never as the engine's struct */
   private rowCompared(name: string, l: AstNode, r: AstNode): AstNode | null {
     const ls = (bodyOf(l).args ?? []) as AstNode[], rs = (bodyOf(r).args ?? []) as AstNode[];
+    if (ls.length !== rs.length || ls.length === 0) return null;
     const textual = [...ls, ...rs].some((x) => TEXTS.has(this.typeOf(x) ?? -1));
     const first = ls[0];
     const compared = first === undefined ? null : this.rowCompareAt(first);
+    // a citext member: Postgres orders it without regard to case (citext_cmp), which the pair's own ordering is not
+    if ([...ls, ...rs].some((x) => this.isCitext(this.typeOf(x))) || compared?.inputTypes?.some((t) => this.isCitext(t)) === true) {
+      throw new Unrewritable("a row holding a citext compared by <, <=, > or >= is not supported by Mason (Postgres compares the citext without regard to case)", "compare its members one by one: lower(x) < lower(y)", "citext-forms");
+    }
     const collations = compared?.inputCollations;
-    if (collations === undefined || collations.length !== ls.length || rs.length !== ls.length) {
+    if (collations === undefined || collations.length !== ls.length) {
       if (textual) throw new Unrewritable(`Mason could not read the collations of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
-      return null;
+      return this.rowOrdered(name, ls, rs);
     }
     if (collations.some((o, i) => o === 0 && [ls[i], rs[i]].some((x) => x !== undefined && COLLATED_TEXTS.has(this.typeOf(x) ?? -1)))) throw indeterminate();
     const each = collations.map((o) => this.collations.resolve(o));
@@ -4518,16 +4530,45 @@ class Rewriter {
     const types = compared?.inputTypes;
     if (types === undefined || types.length !== ls.length) {
       if (textual) throw new Unrewritable(`Mason could not read the types of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
-      return null;
+      return this.rowOrdered(name, ls, rs);
     }
     const plain = (i: number): boolean => { const c = each[i]; return c === null || c === undefined || c.kind === "bytes"; };
-    if (types.every((t, i) => t !== BPCHAR && plain(i)) && ![...ls, ...rs].some((x) => this.typeOf(x) === BPCHAR)) return null;
+    if (types.every((t, i) => t !== BPCHAR && plain(i)) && ![...ls, ...rs].some((x) => this.typeOf(x) === BPCHAR)) return this.rowOrdered(name, ls, rs);
     const keyed = (xs: AstNode[]): AstNode[] => xs.map((x, i) => {
       const c = each[i], t = types[i]!, v = this.widen(x, t);
       if (c === null || c === undefined || c.kind === "bytes") return t === BPCHAR ? fn("rtrim", [strip(v)]) : v;
       return this.textKey(v, c, t === BPCHAR, null);
     });
-    return op(name, { RowExpr: { ...bodyOf(l), args: keyed(ls) } }, { RowExpr: { ...bodyOf(r), args: keyed(rs) } });
+    return this.rowOrdered(name, keyed(ls), keyed(rs));
+  }
+
+  /**
+   * TWO ROWS ORDERED AS POSTGRES ORDERS THEM (PR 674 CI fix 1, the class of `rowQuantified`): the pairs read left to
+   * right, the first pair holding a NULL making the comparison NULL and the first unequal pair deciding it, all equal
+   * true for <= and >=. The engine compares a row as a struct, a NULL member ordered rather than NULL. Each operand is
+   * evaluated once: the pairs are one ROW, read by a lambda over a list of it
+   */
+  private rowOrdered(name: string, ls: AstNode[], rs: AstNode[]): AstNode {
+    const less = name === "<" || name === "<=" ? "<" : ">";
+    const param = `__mason_r${this.sublinkOutputs++}`;
+    // each operand read once through the ROW, but a constant (a literal, a cast of one, a parameter), placed where it is
+    // compared so the engine casts it to the other side's type as it does any comparison's (`(u, id) > ('…', 0)`)
+    const read: AstNode[] = [];
+    const operand = (x: AstNode): (() => AstNode) => {
+      if (isConstant(x)) return () => this.clone(x);
+      read.push(x);
+      const k = read.length;
+      return () => fn("struct_extract", [{ ColumnRef: { fields: [S(param)] } }, intConst(k)]);
+    };
+    const arms: Array<[AstNode, AstNode]> = [];
+    const sides = ls.map((x, i) => [operand(x), operand(rs[i]!)] as const);
+    sides.forEach(([left, right]) => {
+      arms.push([or([isNull(left()), isNull(right())]), nullConst()]);
+      arms.push([op("<>", left(), right()), op(less, left(), right())]);
+    });
+    const pairs = row(read);
+    const each = fn("list_transform", [{ A_ArrayExpr: { elements: [pairs] } }, op("->", { ColumnRef: { fields: [S(param)] } }, caseWhen(arms, boolConst(name === "<=" || name === ">=")))]);
+    return fn("list_extract", [each, intConst(1)]);
   }
 
   /** the row comparison Postgres made of a raw `ROW(…) < ROW(…)`, by its first left column (src/duck/pgtree.ts) */
@@ -4588,21 +4629,41 @@ class Rewriter {
       limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
     } });
     const name = names(b.operName ?? []).at(-1) ?? "=";
+    // AN ORDERING OF TEXT UNDER ITS COLLATION (PR 674 CI fix 1): each pair's collation the one Postgres compared it under
+    // (the OPEXPR's inputcollid, the ROWCOMPAREEXPR's inputcollids); both operands of a text pair under one that is not
+    // byte order written as its key (`orderedOperand`), as a plain comparison's are (`compareText`, `rowCompared`)
+    const sorts = ["<", "<=", ">", ">="].includes(name);
+    const colls: Array<DuckCollation | null> = !sorts ? lefts.map(() => null) : ops.length === lefts.length
+      ? ops.map((t) => this.inputCollationOf(t))
+      : lefts.map((_, i) => { const o = compare?.inputCollations?.[i] ?? 0; return o === 0 ? null : this.collations.resolve(o); });
+    if (sorts && compare !== null && compare.inputCollations === undefined && pairs.some(([t]) => TEXTS.has(t ?? -1))) {
+      throw new Unrewritable(`Mason could not read the collations of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
+    }
+    const side = (n: AstNode, i: number, own: 0 | 1): AstNode => this.orderedOperand(n, pairs[i]![own], pairs[i]![own === 0 ? 1 : 0], colls[i] ?? null);
     // (and a row's <> ANY, which the engine, filtering by it, answers true for a NULL member: `<> ALL` is NOT IN, and
     // `=` IN, each a join the engine answers as Postgres does)
-    const ordering = compare !== null && ["<", "<=", ">", ">="].includes(name) && (b.subLinkType === "ANY_SUBLINK" || b.subLinkType === "ALL_SUBLINK");
+    const ordering = compare !== null && sorts && (b.subLinkType === "ANY_SUBLINK" || b.subLinkType === "ALL_SUBLINK");
     if (ordering || (row && name === "<>" && b.subLinkType === "ANY_SUBLINK")) {
       if (refs.some((r) => r === null)) return null;
-      return this.rowQuantified(name, b.subLinkType === "ALL_SUBLINK", lefts, refs as AstNode[], pairs, wrap);
+      return this.rowQuantified(name, b.subLinkType === "ALL_SUBLINK", lefts, refs as AstNode[], side, wrap);
     }
     // each pair written together: an output that cannot be typed leaves its pair as written
-    const rights = refs.map((r, i) => r === null ? null : this.compared(r, pairs[i]![1], pairs[i]![0], true));
-    const written = lefts.map((x, i) => rights[i] === null ? x : this.compared(x, pairs[i]![0], pairs[i]![1], true));
+    const rights = refs.map((r, i) => r === null ? null : side(r, i, 1));
+    const written = lefts.map((x, i) => rights[i] === null ? x : side(x, i, 0));
     if (row) bodyOf(test).args = written; else b.testexpr = written[0];
     if (rights.some((r, i) => r !== null && r !== refs[i])) b.subselect = wrap(rights.map((r, i) => r ?? column(i)));
     return null;
   }
   private sublinkOutputs = 0;
+
+  /** one operand of an ordering comparison as Postgres resolved it: `compared`, and under a collation that is not byte
+   *  order a text pair's key (`textKey`, its char(n) without its padding), so the engine's byte order is the collation's
+   *  and equal keys are equal values; `own` and `other` the pair's argument types, `c` the comparison's collation */
+  private orderedOperand(n: AstNode, own: number | null, other: number | null, c: DuckCollation | null): AstNode {
+    if (c === null || c.kind === "bytes" || !TEXTS.has(own ?? -1)) return this.compared(n, own, other, true);
+    const padded = own === BPCHAR && other === BPCHAR;
+    return this.textKey(padded ? n : this.widen(n, own), c, padded, null);
+  }
 
   /**
    * A ROW COMPARED BY AN ORDERING OPERATOR WITH ANY / ALL OF A SUBQUERY, OR BY <> WITH ANY, AS POSTGRES COMPARES IT (PR
@@ -4616,15 +4677,15 @@ class Rewriter {
    * and ANY is the greatest of them (none, a NULL list: false), ALL the least (none: true); each pair's operands
    * written by `compared`, the test's copied for each use.
    */
-  private rowQuantified(name: string, all: boolean, lefts: AstNode[], refs: AstNode[], pairs: Array<[number | null, number | null]>, wrap: (targets: AstNode[]) => AstNode): AstNode {
+  private rowQuantified(name: string, all: boolean, lefts: AstNode[], refs: AstNode[], side: (n: AstNode, i: number, own: 0 | 1) => AstNode, wrap: (targets: AstNode[]) => AstNode): AstNode {
     // (all pairs equal: true for <= and >=, false for <, > and <>)
     const strict = name === "<" || name === ">" || name === "<>";
     const less = name === "<" || name === "<=" ? "<" : ">";
-    const listed = { SubLink: { subLinkType: "EXPR_SUBLINK", subselect: wrap([fn("list", [row(refs.map((r, i) => this.compared(r, pairs[i]![1], pairs[i]![0], true)))])]) } };
+    const listed = { SubLink: { subLinkType: "EXPR_SUBLINK", subselect: wrap([fn("list", [row(refs.map((r, i) => side(r, i, 1)))])]) } };
     // (a lambda's parameter, the rewrite's own name: never the cells' prefix, which a GROUP BY reads per group)
     const param = `__mason_r${this.sublinkOutputs++}`;
     const arms: Array<[AstNode, AstNode]> = [];
-    const left = (i: number): AstNode => this.compared(this.clone(lefts[i]!), pairs[i]![0], pairs[i]![1], true);
+    const left = (i: number): AstNode => side(this.clone(lefts[i]!), i, 0);
     const right = (i: number): AstNode => fn("struct_extract", [{ ColumnRef: { fields: [S(param)] } }, intConst(i + 1)]);
     if (name === "<>") {
       // Postgres's row <>: any pair unequal (neither NULL) is true, else any NULL is NULL, else false
