@@ -2302,9 +2302,20 @@ function renderStage(args: Record<string, unknown>, answers: Answers, slimSrc = 
   assert.equal(r.err, "", "the render prints nothing on stderr when nothing is wrong");
   return r;
 }
-/** What the render appends to slim's prompt of `label`, up to its schema: where the agent writes its result. */
+/** What the render appends to slim's prompt of `label`, up to the result's shape: where the agent writes its result. */
 const RESULT_TRAILER = (dir: string, label: string) =>
-  `\n\nBefore you end your turn, write your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(dir, label)}, and end your report with that path. The schema: `;
+  `\n\nBefore you end your turn, write your result, ONE JSON value matching this schema (the Workflow tool enforces it on pr-loop-slim's agents), to ${resultPath(dir, label)}, and end your report with that path. Its shape, one line a key (\`a.b\` a key of the object at a, \`a[].b\` a key of each item of the array at a), rendered from the schema below, which wins over any word of the prompt above:\n`;
+/** A rendered prompt file, held whole (issue 693): slim's prompt, the trailer, the result's shape (one line a key, held
+ * to the schema by the shape test), then the JSON schema. Returns the shape's lines. */
+function assertWhole(file: string | undefined, prompt: string, dir: string, label: string, schema: unknown, what: string): string[] {
+  const head = prompt + RESULT_TRAILER(dir, label), tail = `\nThe schema: ${JSON.stringify(schema)}`;
+  assert.ok(file !== undefined && file.startsWith(head), `${what}: the rendered prompt is slim's, whole, then the trailer`);
+  assert.ok(file.endsWith(tail), `${what}: the JSON schema ends the file`);
+  const lines = file.slice(head.length, file.length - tail.length).split("\n");
+  assert.ok(lines.length > 0, `${what}: a shape is rendered`);
+  for (const l of lines) assert.match(l, /^- \S+: [^,]+(, each item [^,]+)?, (required|optional)(: .+)?$/, `${what}: a shape line is one key, its type and whether it is required`);
+  return lines;
+}
 /** The coordinator reads stdout, so it holds control lines only, and no sentence of any prompt it rendered. */
 function onlyControlLines(r: Rendered, what: string): void {
   for (const line of r.out.split("\n").filter(Boolean)) assert.match(line, /^(STAGE |DONE: |NULL )/, `${what}: a stdout line that is not a control line: ${line}`);
@@ -2476,7 +2487,7 @@ test("the pr-persistent skill: every stage's prompt and options, rendered by the
     assert.match(out, new RegExp(`^STAGE ${JSON.stringify(label).replace(/[()]/g, "\\$&")} \\(${phase}\\) `), `${label}: the render's next stage`);
     assert.ok(out.split("\n")[0]!.includes(JSON.stringify(on)), `${label}: the options slim gives it (${JSON.stringify(on)})`);
     assert.ok(out.split("\n")[0]!.endsWith(`: ${path.join(dir, "next", fileOf(label))}`), `${label}: the STAGE line names its prompt's file`);
-    assert.equal(files[fileOf(label)], call.prompt + RESULT_TRAILER(dir, label) + JSON.stringify(schema), `${label}: the rendered prompt is slim's, whole`);
+    assertWhole(files[fileOf(label)], call.prompt, dir, label, schema, label);
     // the trailer sends the result to a file, by an absolute path the render reads back, and never into the report
     const trailer = files[fileOf(label)]!.slice(call.prompt.length);
     assert.ok(path.isAbsolute(resultPath(dir, label)) && trailer.includes(resultPath(dir, label)), `${label}: the trailer names its results file`);
@@ -2532,7 +2543,7 @@ async function sameNext(answers: Answers | Rendered, expect: Answers, what: stri
   } else {
     const { label, phase, schema } = want.opts;
     assert.match(got.out, new RegExp(`^STAGE ${JSON.stringify(label).replace(/[()]/g, "\\$&")} \\(${phase}\\) `, "m"), `${what}: the next stage is ${label}`);
-    assert.equal(got.files[fileOf(label)], want.prompt + RESULT_TRAILER(got.dir, label) + JSON.stringify(schema), `${what}: ${label}'s prompt, whole`);
+    assertWhole(got.files[fileOf(label)], want.prompt, got.dir, label, schema, `${what}: ${label}'s prompt`);
   }
   return got.out;
 }
@@ -2583,6 +2594,106 @@ test("the pr-persistent skill's render reads an answer that fails its stage's sc
   assert.ok(seen.size >= 9, `every schema the run uses (${seen.size})`);
   // and a valid answer is never read as null
   assert.doesNotMatch(renderStage(RACE_ARGS, RACE_ANSWERS).out, /^NULL /m);
+});
+
+// Issue 693: an implementer returned checksRun as a list and the handoff's decisions as "what: why" strings, because
+// the prompt's prose said "the checks you ran" and the comment's `- <what>: <why>` lines, while the schema said an
+// integer and objects. The schema is the one authority: the render writes the result's shape from it, one line a key
+// at every depth, and slim's prose names a key without restating its type.
+type Schema = { type?: string; enum?: unknown[]; minimum?: number; required?: string[]; properties?: Record<string, Schema>; items?: Schema; description?: string };
+/** Every key of `schema` at every depth, with the line the shape must give it: `- <path>: <type>, required|optional`. */
+function shapeWant(schema: Schema): Array<{ path: string; line: string }> {
+  const plural: Record<string, string> = { object: "objects", array: "arrays", string: "strings", number: "numbers", integer: "integers", boolean: "booleans" };
+  const typeWant = (s: Schema): string => {
+    if (s.enum) return `one of: ${s.enum.join(" | ")}`;
+    if (s.type === "array") return s.items?.type && !s.items.enum && s.items.minimum === undefined ? `array of ${plural[s.items.type]}` : `array, each item ${typeWant(s.items!)}`;
+    return `${s.type}${s.minimum !== undefined ? ` >= ${s.minimum}` : ""}`;
+  };
+  const out: Array<{ path: string; line: string }> = [];
+  const walk = (s: Schema, at: string): void => {
+    if (s.type === "array" && s.items) return walk(s.items, `${at}[]`);
+    for (const [k, p] of Object.entries(s.properties ?? {})) {
+      const key = at ? `${at}.${k}` : k;
+      out.push({ path: key, line: `- ${key}: ${typeWant(p)}, ${(s.required ?? []).includes(k) ? "required" : "optional"}${p.description ? `: ${p.description.replace(/\s+/g, " ")}` : ""}` });
+      walk(p, key);
+    }
+  };
+  walk(schema, "");
+  return out;
+}
+test("the pr-persistent render: every result file's shape is rendered from its stage's schema, every required key and type (issue 693)", async () => {
+  // every stage of the full run, then the brief and split stages, then a merge stage
+  const slim = await run("pr-loop-slim", RACE_ARGS, RACE_ANSWERS);
+  const { brief: _brief, ...noBrief } = RACE_ARGS;
+  const stages: Array<{ args: Record<string, unknown>; before: Answers; label: string; prompt: string; schema: Schema }> = slim.calls.map((c, i) => ({
+    args: RACE_ARGS, before: Object.fromEntries(slim.labels.slice(0, i).map((l) => [l, RACE_ANSWERS[l]])), label: c.opts.label, prompt: c.prompt, schema: c.opts.schema as Schema,
+  }));
+  for (const [args, before] of [[noBrief, {}], [noBrief, { brief: SPLIT_BRIEF }], [RACE_ARGS, upTo("CI 1", conflictCI)]] as Array<[Record<string, unknown>, Answers]>) {
+    const c = await slimNext(args, before) as Call;
+    stages.push({ args, before, label: c.opts.label, prompt: c.prompt, schema: c.opts.schema as Schema });
+  }
+  assert.deepEqual(stages.slice(-3).map((s) => s.label), ["brief", "split", "merge 1"]);
+  const shapes: Record<string, string[]> = {};
+  for (const st of stages) {
+    const r = renderStage(st.args, st.before);
+    onlyControlLines(r, st.label);
+    const lines = assertWhole(r.files[fileOf(st.label)], st.prompt, r.dir, st.label, st.schema, st.label);
+    shapes[st.label] = lines;
+    const want = shapeWant(st.schema);
+    assert.ok(want.length > 0, `${st.label}: its schema has keys`);
+    // every key at every depth, required or optional, its path and its type as the schema says it, and nothing else
+    assert.deepEqual(lines, want.map((w) => w.line), `${st.label}: the shape is the schema's, key for key`);
+  }
+  const has = (label: string, line: string) => assert.ok(shapes[label]!.some((l) => l === line || l.startsWith(`${line}: `)), `${label}'s shape has \`${line}\`:\n${shapes[label]!.join("\n")}`);
+  // the implementer's counts are counts, and its handoff's items are objects of what and why
+  for (const k of ["statementsRun", "statementsMatched", "checksRun"]) has("implement", `- ${k}: integer >= 0, required`);
+  for (const k of ["decisions", "rejected"]) {
+    has("implement", `- handoff.${k}: array of objects, required`);
+    for (const f of ["what", "why"]) has("implement", `- handoff.${k}[].${f}: string, required`);
+  }
+  // an optional key is shown optional
+  for (const [label, line] of [["implement", "- failsWithout: string, optional"], ["implement", "- checksOnly: array of strings, optional"],
+    ["board", "- issues[].severityExit: integer, optional"], ["board", "- issues[].printed: string, optional"],
+    ["fix r1", "- admitted[].issue: number, optional"], ["brief", "- split: array of objects, optional"]]) has(label!, line!);
+  // an enum with its values
+  const severities = (slim.calls.find((c) => c.opts.label === "review r1")!.opts.schema as Schema).properties!["findings"]!.items!.properties!["severity"]!.enum!;
+  assert.ok(severities.includes("wrong-answer") && severities.includes("quality"), "the BLOCKING and DEFERRED severities");
+  for (const [label, line] of [["review r1", "- findings[].origin: one of: this-pr | base, required"], ["review r1", `- findings[].severity: one of: ${severities.join(" | ")}, required`],
+    ["CI 1", "- state: one of: green | failed | timeout | conflict, required"], ["fix r1", "- admitted[].scope: one of: issue | beyond-review | beyond-refused, required"],
+    ["file", "- issues[].source: one of: base | deferred, required"], ["file", "- issues[].action: one of: filed | commented, required"],
+    ["file", "- issues[].kind: one of: bug | enhancement, required"], ["file", "- issues[].severity: one of: Critical | High | Medium | Low | none, required"],
+    ["merge 1", "- state: one of: merged | conflict | up-to-date, required"]]) has(label!, line!);
+  // the shape comes before the JSON schema, and every checksRun says it is a count
+  const impl = renderStage(RACE_ARGS, {}).files["implement.md"]!;
+  assert.ok(impl.indexOf("- checksRun: integer >= 0, required") < impl.indexOf("\nThe schema: {"), "the shape, then the schema");
+  for (const c of slim.calls) {
+    const d = (c.opts.schema as Schema).properties?.["checksRun"]?.description;
+    if (d !== undefined) assert.match(d, /^how many checks [^]*: a count, never their list$/, `${c.opts.label}: checksRun is a count`);
+  }
+
+  // rendered from the schema object, never by hand: a pinned slim whose schema is edited renders the edit
+  const edited = source("pr-loop-slim")
+    .replace("checksRun: { type: 'integer', minimum: 0, description: 'how many checks you ran at the head on changed paths", "checksRun: { type: 'string', description: 'how many checks you ran at the head on changed paths")
+    .replace("const HANDOFF = { type: 'object', required: ['decisions', 'rejected', 'keyFiles', 'risks'], properties: {", "const HANDOFF = { type: 'object', required: ['decisions', 'rejected', 'keyFiles', 'risks', 'zzz'], properties: {\n  zzz: { type: 'boolean', description: 'an edit' },");
+  assert.notEqual(edited, source("pr-loop-slim"));
+  const e = renderStage(RACE_ARGS, {}, edited).files["implement.md"]!;
+  assert.match(e, /^- checksRun: string, required: how many checks/m, "the edited type");
+  assert.match(e, /^- handoff\.zzz: boolean, required: an edit$/m, "the new required key");
+
+  // the prose restates no result type
+  for (const c of slim.calls) {
+    for (const old of ["Report checksRun: the checks you ran at the head, each once (a command, a script, a test file)", "decisions (each design decision and why), rejected (each approach tried and rejected, and why)", "{ key, names, scope", "({ what, why, where }"]) {
+      assert.ok(!c.prompt.includes(old), `${c.opts.label}: the prose restates a result's shape: ${old}`);
+    }
+  }
+  assert.match(slim.prompt("implement"), /The handoff you return follows the result's shape, never the comment's `- <what>: <why>` lines\./);
+  assert.match(slim.prompt("fix r1"), /The handoff you return follows the result's shape, never the comment's `- <what>: <why>` lines\./);
+
+  // a file that fails the schema is still read as null, naming the path and the type (problem() unchanged)
+  let out = renderStage(RACE_ARGS, { implement: { ...(RACE_ANSWERS["implement"] as object), checksRun: ["tests/workflows.test.ts"] } }).out;
+  assert.match(out, /^NULL "implement": answer\.checksRun is not an integer; read as null/m);
+  out = renderStage(RACE_ARGS, upTo("fix r1", { ...(RACE_ANSWERS["fix r1"] as object), handoff: { ...H1, decisions: ["kept the poll: it is cheaper"] } })).out;
+  assert.match(out, /^NULL "fix r1": answer\.handoff\.decisions\[0\] is not an object; read as null/m);
 });
 
 test("the pr-persistent skill's render reads only the run folder's pinned pr-loop-slim.js, never the checkout's", () => {
