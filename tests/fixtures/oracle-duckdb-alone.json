@@ -1,19 +1,19 @@
 {
-  "statements": 7181,
+  "statements": 7208,
   "mason": {
-    "exact": 6665,
+    "exact": 6692,
     "decided": 48,
     "refused": 468,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1831,
-    "name": 1300,
-    "refused": 1617,
-    "value": 991,
-    "rows": 600,
-    "text": 224,
-    "other": 618
+    "exact": 1836,
+    "name": 1306,
+    "refused": 1619,
+    "value": 994,
+    "rows": 601,
+    "text": 232,
+    "other": 620
   },
   "gaps": {
     "copyPhase": {
@@ -95,7 +95,7 @@
       }
     },
     "everyAsk": {
-      "asked": 98738,
+      "asked": 99298,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -129,7 +129,7 @@
         "numeric-exact-sum": { "planted": 3, "natural": 8 },
         "numeric-math": { "planted": 3, "natural": 0 },
         "numeric-ordered-set": { "planted": 3, "natural": 0 },
-        "numeric-quotient-equality": { "planted": 9, "natural": 40 },
+        "numeric-quotient-equality": { "planted": 9, "natural": 44 },
         "numeric-special": { "planted": 0, "natural": 6 },
         "quote-ident": { "planted": 0, "natural": 9 },
         "regexp-flags": { "planted": 3, "natural": 0 },
