@@ -290,6 +290,8 @@ class Rewriter {
   cellPrefix = "__mason_cell_";
   /** the catalog's user types by OID (`citext`), for the few the rewrite knows (src/duck/plan.ts reads pg_type) */
   private readonly userTypes: ReadonlyMap<number, string>;
+  /** every type holding a citext anywhere in its structure, by the catalog's OID (src/duck/plan.ts `CITEXT_HELD`) */
+  private readonly citextHeld: ReadonlySet<number>;
   /** a copied table's row type: its columns, by the catalog's OID (src/duck/plan.ts) */
   private readonly rowTypes: ReadonlyMap<number, readonly RowColumn[]>;
   /** the session's TimeZone the statement was analysed under (a relative literal's day is its) */
@@ -302,9 +304,9 @@ class Rewriter {
    *  `json_reads`, which the keeper's policy reads (src/duck/kept.ts `review`) */
   readonly jsonReads = new Map<string, JsonRead>();
   constructor(analysis: PgAnalysis, base: number, collations: StatementCollations, userTypes: ReadonlyMap<number, string> = new Map(), rowTypes: ReadonlyMap<number, readonly RowColumn[]> = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY",
-    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set()) {
+    enums: EnumTypes = { labels: new Map(), arrays: new Map() }, kept: KeptLookup | null = null, keyCounts: ReadonlySet<number> = new Set(), citextHeld: ReadonlySet<number> = new Set()) {
     this.types = analysis.types; this.analysed = analysis.outputs; this.base = base; this.collations = collations; this.params = analysis.params; this.userTypes = userTypes; this.rowTypes = rowTypes; this.timeZone = timeZone; this.dateStyle = dateStyle;
-    this.enums = enums; this.kept = kept;
+    this.enums = enums; this.kept = kept; this.citextHeld = citextHeld;
     for (const at of keyCounts) this.keyCounts.add(at + base);
     this.twins = caseTwins(analysis.tree);
     this.analysisTree = analysis.tree;
@@ -472,6 +474,11 @@ class Rewriter {
   }
 
   private isCitext(oid: number | null): boolean { return oid !== null && this.userTypes.get(oid) === "citext"; }
+  /** A CITEXT ANYWHERE IN THE TYPE'S STRUCTURE (PR 674 shrink 2, the class citext compared by bytes in a quantified
+   *  subquery): the type itself, an array's element, a domain's base, a composite's attributes, a range's subtype, to
+   *  any depth, as the catalog says (`citextHeld`). Every refusal of a comparison that would read a citext by its bytes
+   *  asks this, never the top-level type alone: an array of citext, or of a domain over one, compared by ALL */
+  private holdsCitext(oid: number | null | undefined): boolean { return oid !== null && oid !== undefined && (this.isCitext(oid) || this.citextHeld.has(oid)); }
 
   /** a text lower-cased by the database's case mapping (what Postgres's citext compares, sorts and groups: str_tolower
    *  under the default collation) */
@@ -4515,7 +4522,7 @@ class Rewriter {
     const first = ls[0];
     const compared = first === undefined ? null : this.rowCompareAt(first);
     // a citext member: Postgres orders it without regard to case (citext_cmp), which the pair's own ordering is not
-    if ([...ls, ...rs].some((x) => this.isCitext(this.typeOf(x))) || compared?.inputTypes?.some((t) => this.isCitext(t)) === true) {
+    if ([...ls, ...rs].some((x) => this.holdsCitext(this.typeOf(x))) || compared?.inputTypes?.some((t) => this.holdsCitext(t)) === true) {
       throw new Unrewritable("a row holding a citext compared by <, <=, > or >= is not supported by Mason (Postgres compares the citext without regard to case)", "compare its members one by one: lower(x) < lower(y)", "citext-forms");
     }
     const collations = compared?.inputCollations;
@@ -4639,8 +4646,8 @@ class Rewriter {
     // pairs here are written by `orderedOperand` and `rowQuantified`, which compare its bytes. Decided here, where every
     // pair's argument types are read (the OPEXPRs, the ROWCOMPAREEXPR), so every path below sees it: ALL of a subquery,
     // whatever its operator, and a row compared with each output row; refused by name, as a plain row's is (`rowCompared`)
-    if ((b.subLinkType === "ALL_SUBLINK" || rowWise) && pairs.some(([l, r]) => this.isCitext(l) || this.isCitext(r))) {
-      const what = `${row ? "a row holding a citext" : "a citext"} compared by ${name} ${b.subLinkType === "ALL_SUBLINK" ? "ALL" : "ANY"} of a subquery`;
+    if ((b.subLinkType === "ALL_SUBLINK" || rowWise) && pairs.some(([l, r]) => this.holdsCitext(l) || this.holdsCitext(r))) {
+      const what = `${row ? "a row holding a citext" : pairs.some(([l, r]) => this.isCitext(l) || this.isCitext(r)) ? "a citext" : "a value holding a citext (an array of one, or of a domain over one)"} compared by ${name} ${b.subLinkType === "ALL_SUBLINK" ? "ALL" : "ANY"} of a subquery`;
       throw new Unrewritable(`${what} is not supported by Mason (Postgres compares the citext without regard to case)`, "compare lower() of each side: lower(x) < ALL (SELECT lower(y) …)", "citext-forms");
     }
     // AN ORDERING OF TEXT UNDER ITS COLLATION (PR 674 CI fix 1): each pair's collation the one Postgres compared it under
@@ -7612,6 +7619,8 @@ export interface RewriteOptions {
   /** the statement's collations, resolved (src/duck/collation.ts `CollationResolver.prepare`) */
   collations: StatementCollations;
   userTypes?: ReadonlyMap<number, string>;
+  /** every type holding a citext anywhere in its structure (src/duck/plan.ts `CITEXT_HELD`) */
+  citextHeld?: ReadonlySet<number>;
   rowTypes?: ReadonlyMap<number, readonly RowColumn[]>;
   timeZone?: string;
   /** the session's DateStyle (src/api/postgres/catalog.ts SessionState) */
@@ -7622,10 +7631,10 @@ export interface RewriteOptions {
   keyCounts?: ReadonlySet<number>;
 }
 
-export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
+export function rewrite({ stmt, base, analysis, collations, userTypes = new Map(), citextHeld = new Set(), rowTypes = new Map(), timeZone = "UTC", dateStyle = "ISO, MDY", enums = { labels: new Map(), arrays: new Map() }, kept = null,
   wireBound = false, keyCounts = new Set() }: RewriteOptions):
   { tree: AstNode; withTies: boolean; exact: ExactColumn[]; clock: { parse?: number; exec?: number }; jsonReads: JsonRead[]; unboundedLateral: boolean } {
-  const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts);
+  const r = new Rewriter(analysis, base, collations, userTypes, rowTypes, timeZone, dateStyle, enums, kept, keyCounts, citextHeld);
   if (joinsUsing(analysis.tree, new Set([JSONB, JSONB_ARRAY]))) {
     throw new Unrewritable("a JOIN … USING or a NATURAL JOIN on a jsonb column is not supported by Mason (Postgres equates jsonb by its own rules)", "JOIN … ON a.j = b.j", "jsonb-compare");
   }

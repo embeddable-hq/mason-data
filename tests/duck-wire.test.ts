@@ -6692,6 +6692,52 @@ test("issue 665 shrink 1: a citext compared by ALL of a subquery, or in a row co
   } finally { await c.end(); await a.close(); }
 });
 
+// (on the listener production runs; a domain over a citext is synced as the citext it holds, so the catalog never
+// holds a domain, and a composite holding one is held as its text, refused before any comparison: both are held
+// by CITEXT_HELD run on Postgres below)
+test("issue 665 shrink 2: a citext reached through an array, a nested array or a row's array is refused by name under ALL or a row's comparison; CITEXT_HELD names every type holding one", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    // `status` is a citext of 'finalized', 'FINALIZED', 'Finalized' and 'draft': compared by its bytes, each answer differs
+    const held = [
+      "SELECT id, ARRAY[status] = ALL (SELECT ARRAY[status] FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id FROM accounts WHERE ARRAY[status] = ALL (SELECT ARRAY[status] FROM accounts WHERE id IN (1, 2)) ORDER BY 1",
+      "SELECT id, ARRAY[ARRAY[status]] = ALL (SELECT ARRAY[ARRAY[status]] FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id, ARRAY[status, 'x'] = ALL (SELECT ARRAY[status, 'X'] FROM accounts WHERE id = 2) AS m FROM accounts ORDER BY 1",
+      "SELECT id, (ARRAY[status], id) = ALL (SELECT ARRAY[status], 2 FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id, (ARRAY[status], id) <> ALL (SELECT ARRAY[status], 2 FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id, (ARRAY[status], 1) <> ANY (SELECT ARRAY[status], 1 FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+      "SELECT id, (id, ARRAY[status]) < ANY (SELECT 2, ARRAY[status] FROM accounts WHERE id = 1) AS m FROM accounts ORDER BY 1",
+    ];
+    const answered: string[] = [];
+    for (const s of held) {
+      try { await c.query(s); answered.push(`answered: ${s}`); } catch (e) {
+        const err = e as Error & { code?: string; detail?: string };
+        if (err.code !== "0A000" || !/citext-forms/.test(err.detail ?? "")) answered.push(`${err.code} ${err.message} [${err.detail}]: ${s}`);
+      }
+    }
+    assert.deepEqual(answered, []);
+    // an array of a text or an int, under ANY and ALL, answered as Postgres answers it
+    assert.deepEqual(await unlike(c, [
+      ["SELECT id, ARRAY[team] = ALL (SELECT ARRAY[team] FROM accounts WHERE id = 1) AS m, ARRAY[id] = ALL (SELECT ARRAY[id] FROM accounts WHERE id = 3) AS n FROM accounts ORDER BY 1", "ordered"],
+      ["SELECT id, ARRAY[team] = ANY (SELECT ARRAY[team] FROM accounts WHERE id < 3) AS m, (ARRAY[id], team) = ALL (SELECT ARRAY[id], team FROM accounts WHERE id = 1) AS n FROM accounts ORDER BY 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); await a.close(); }
+  // the catalog's structure, to any depth: an array, a domain (of a domain), an array domain, a composite (of an array of
+  // one), a range and its multirange; never a type without a citext (imported here, so the file loads at a commit
+  // without it and the refusals above are what fails there)
+  const { CITEXT_HELD } = await import("../src/duck/plan.ts");
+  assert.equal(typeof CITEXT_HELD, "string");
+  await truth.exec("BEGIN");
+  try {
+    await truth.exec("CREATE DOMAIN h_d1 AS citext; CREATE DOMAIN h_d2 AS h_d1; CREATE DOMAIN h_da AS citext[]; CREATE TYPE h_c AS (x int, y h_d2); " +
+      "CREATE TYPE h_cc AS (z h_c[]); CREATE TYPE h_r AS RANGE (subtype = citext); CREATE TYPE h_plain AS (x int, y text); CREATE DOMAIN h_t AS text");
+    const r = await truth.query<{ t: string }>(`SELECT format_type(oid, NULL) AS t FROM pg_type WHERE oid IN (SELECT oid::oid FROM (${CITEXT_HELD}) s(oid)) ORDER BY 1`);
+    // (the table `accounts` too: its row type holds its citext column)
+    assert.deepEqual(r.rows.map((x) => x.t), ["accounts", "accounts[]", "citext", "citext[]", "h_c", "h_c[]", "h_cc", "h_cc[]", "h_d1", "h_d1[]", "h_d2", "h_d2[]", "h_da", "h_da[]", "h_r", "h_r[]", "h_r_multirange", "h_r_multirange[]"]);
+  } finally { await truth.exec("ROLLBACK"); }
+});
+
 test("exact path: the AGGREGATE reader sums and averages a program exactly, through a derived table or a CTE (issue 278)", async () => {
   const c = await client();
   try {
