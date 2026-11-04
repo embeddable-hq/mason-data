@@ -122,6 +122,10 @@ export interface Typed {
   directArgs?: Array<{ type: number; typmod: number }>;
   /** a VAR's query level: 0 this query's own column, 1 the query around it (a correlated subquery's) */
   levelsUp: number | null;
+  /** a GROUPINGFUNC's query level and the GROUP BY entries it reads (`Grouping`) */
+  grouping?: Grouping;
+  /** a WINDOWFUNC's WINDOW clause (`Keys.windows`' winref) */
+  winref?: number | null;
   /** a CONST's value as Postgres parsed it, its bytes (`constvalue`: `8 [ 0 -48 70 … ]`); null when NULL or not a CONST */
   datum: number[] | null;
   /** a text or varchar CONST's value as Postgres read it, null for its NULL; absent on anything else (`constText`) */
@@ -175,15 +179,34 @@ export interface Keys {
    *  expression (null for none), the first entry whose analysed expression is equal (the one a key binds to), and
    *  whether it reads a column of its own query (a VAR outside a subquery), and whether it is an OUTPUT (no junk entry:
    *  the rewrite may add targets of its own after them, so its list's length cannot tell) */
-  entries: Array<{ constant: boolean; at: number | null; first: number; reads: boolean; output: boolean }>;
+  entries: Array<{ constant: boolean; at: number | null; first: number; reads: boolean; output: boolean; ref: number | null; groupings: Grouping[] }>;
   /** the entries the ORDER BY sorts by, in order: Postgres drops a key whose entry an earlier key sorts by */
   sorted: number[];
   /** the entries a DISTINCT ON (an aggregate's DISTINCT) compares, a set: ORDER BY's first, then the rest */
   distinct: number[];
+  /** each WINDOW clause of the query (a named one by its name; an OVER's own by its `winref`, which its WINDOWFUNC
+   *  carries), the entries its PARTITION BY and its ORDER BY read, in order */
+  windows: Array<{ name: string | null; winref: number | null; partition: number[]; order: number[] }>;
+}
+
+/** A GROUPING(…) as Postgres analysed it (GROUPINGFUNC): the query it belongs to, `levelsUp` queries out from the one
+ *  holding it (its arguments' Var level), and the GROUP BY entries each argument reads, by their `ressortgroupref`
+ *  (`refs`, matched by Postgres's equality: finalize_grouping_exprs) */
+export interface Grouping { levelsUp: number; refs: number[] }
+
+/** the integers of an integer list (`(i 2 3)`) */
+const ints = (v: TreeValue | undefined): number[] => Array.isArray(v) ? v.map((x) => typeof x === "string" ? num(x) : null).filter((x): x is number => x !== null) : [];
+
+/** each GROUPINGFUNC of an analysed expression, in the order a walk of it meets them, outside its subqueries */
+function groupingsIn(v: TreeValue | undefined): Grouping[] {
+  if (Array.isArray(v)) return v.flatMap(groupingsIn);
+  if (v === undefined || !isNode(v) || v._node === "QUERY") return [];
+  const own = v._node === "GROUPINGFUNC" ? [{ levelsUp: num(v.agglevelsup ?? null) ?? 0, refs: ints(v.refs) }] : [];
+  return [...own, ...Object.entries(v).flatMap(([k, x]) => k === "_node" ? [] : groupingsIn(x))];
 }
 
 /** Keys: `targets` a TARGETENTRY list, `sort` and `distinct` SORTGROUPCLAUSE lists over it */
-function keysOf(targets: TreeValue | undefined, sort: TreeValue | undefined, distinct: TreeValue | undefined, rtable: TreeNode[]): Keys {
+function keysOf(targets: TreeValue | undefined, sort: TreeValue | undefined, distinct: TreeValue | undefined, rtable: TreeNode[], windows?: TreeValue): Keys {
   const list = Array.isArray(targets) ? targets.filter(isNode) : [];
   // (a grouped key's entry is a VAR of the GROUP entry by the time the tree is printed; it was bound as what it groups)
   const exprs = list.map((t) => ungrouped(t.expr ?? null, rtable));
@@ -193,12 +216,18 @@ function keysOf(targets: TreeValue | undefined, sort: TreeValue | undefined, dis
     first: exprs.findIndex((o, j) => j <= i && sameExpression(o, e)),
     reads: readsVar(e),
     output: list[i]!.resjunk !== "true",
+    ref: num(list[i]!.ressortgroupref ?? null),
+    groupings: groupingsIn(list[i]!.expr ?? null),
   }));
   const refs = (v: TreeValue | undefined): number[] => (Array.isArray(v) ? v.filter(isNode) : []).map((c) => {
     const ref = num(c.tleSortGroupRef ?? null);
     return list.findIndex((t) => ref !== null && ref !== 0 && num(t.ressortgroupref ?? null) === ref);
   });
-  return { entries, sorted: refs(sort), distinct: refs(distinct) };
+  const clauses = Array.isArray(windows) ? windows.filter(isNode) : [];
+  return {
+    entries, sorted: refs(sort), distinct: refs(distinct),
+    windows: clauses.map((w) => ({ name: typeof w.name === "string" ? w.name : null, winref: num(w.winref ?? null), partition: refs(w.partitionClause), order: refs(w.orderClause) })),
+  };
 }
 
 /** whether an analysed expression reads a column: a VAR outside a subquery's own QUERY */
@@ -307,6 +336,7 @@ export function exprType(n: TreeNode): { type: number; typmod: number } | null {
     case "PARAM": return t("paramtype", "paramtypmod");
     case "AGGREF": return t("aggtype");
     case "WINDOWFUNC": return t("wintype");
+    case "GROUPINGFUNC": return { type: 23, typmod: -1 };
     case "FUNCEXPR": {
       const r = t("funcresulttype");
       // a length coercion (numeric(p, s), varchar(n)) carries its typmod as its second argument's constant
@@ -453,6 +483,9 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
   if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.largs)) typed.inputTypes = v.largs.filter(isNode).map((a) => exprType(a)?.type ?? 0);
   if (v._node === "AGGREF" && Array.isArray(v.aggdirectargs)) typed.directArgs = v.aggdirectargs.filter(isNode).map((a) => exprType(a) ?? { type: 0, typmod: -1 });
   if (v._node === "AGGREF") typed.keys = keysOf(v.args, v.aggorder, v.aggdistinct, []);
+  // a GROUPING(…): its query level and the GROUP BY entries its arguments read; a window function: its WINDOW clause
+  if (v._node === "GROUPINGFUNC") typed.grouping = groupingsIn(v)[0]!;
+  if (v._node === "WINDOWFUNC") typed.winref = num(v.winref ?? null);
   const text = constText(v);
   if (text !== undefined) typed.text = text;
   const textArray = constTextArray(v);
@@ -616,7 +649,7 @@ export function analysedQueries(tree: TreeValue): { byOffset: Map<number, QueryO
         columns: exprs.map((e) => { const t = isNode(e) && e._node === "VAR" ? exprType(e) : null; return t === null ? null : typedOf(e as TreeNode, t, [rtable]); }),
         widths,
         joins,
-        keys: keysOf(v.targetList, v.sortClause, v.distinctClause, rtable),
+        keys: keysOf(v.targetList, v.sortClause, v.distinctClause, rtable, v.windowClause),
       };
       let placed = false;
       const offsets = (x: TreeValue): void => {

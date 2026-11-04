@@ -6415,6 +6415,51 @@ test("issue 665: a quotient grouped by its exact key alone is read per group by 
   } finally { await c.end(); }
 });
 
+test("issue 665 class round r2: GROUPING reads the GROUP BY entry Postgres matched, every clause after grouping is read per group, a SubLink compares as Postgres resolved it", async () => {
+  const c = await client();
+  try {
+    assert.deepEqual(await unlike(c, [
+      // GROUPING of a grouped quotient in every clause that holds one: DISTINCT ON, a named WINDOW's ORDER BY and
+      // PARTITION BY, and each where Postgres bound the key by equality to an earlier entry (no node at its offset)
+      ["SELECT DISTINCT ON (grouping(d.c / 3)) d.c / 3 AS q FROM deep_t d GROUP BY 1 ORDER BY grouping(d.c / 3), 1", "ordered"],
+      ["SELECT DISTINCT ON (grouping(ceil(d.c / 7.0))) ceil(d.c / 7.0) AS w FROM deep_t d GROUP BY 1 ORDER BY grouping(ceil(d.c / 7.0)), 1", "ordered"],
+      ["SELECT DISTINCT ON (grouping(d.c / 3), d.c / 3) d.c / 3 AS q, count(*) FROM deep_t d GROUP BY 1 ORDER BY grouping(d.c / 3), d.c / 3", "ordered"],
+      ["SELECT DISTINCT ON (grouping(d.c / 3) + 1) d.c / 3 AS q FROM deep_t d GROUP BY 1 ORDER BY grouping(d.c / 3) + 1, 1", "ordered"],
+      ["SELECT d.c / 3 AS q, rank() OVER w FROM deep_t d GROUP BY 1 WINDOW w AS (ORDER BY grouping(d.c / 3), d.c / 3) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, rank() OVER w FROM deep_t d GROUP BY 1 WINDOW w AS (ORDER BY grouping(d.c / 3), d.c / 3) ORDER BY grouping(d.c / 3), 1", "ordered"],
+      ["SELECT d.c / 3 AS q, rank() OVER (w ORDER BY d.c / 3) FROM deep_t d GROUP BY 1 WINDOW w AS (PARTITION BY grouping(d.c / 3)) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, grouping(d.c / 3) AS g, rank() OVER (PARTITION BY grouping(d.c / 3) ORDER BY d.c / 3) FROM deep_t d GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, grouping(d.c / 3) AS g FROM deep_t d GROUP BY 1 ORDER BY grouping(d.c / 3), 1", "ordered"],
+      ["SELECT d.c / 3 AS q, grouping(t.c / 3) AS g FROM deep_t d, LATERAL (SELECT d.c) t(c) GROUP BY 1, t.c / 3 ORDER BY 1, 2", "ordered"],
+      ["SELECT DISTINCT ON (grouping(d.c / 3)) d.c / 3 AS q FROM deep_t d WHERE false GROUP BY 1 ORDER BY grouping(d.c / 3), 1", "ordered"],
+      ["SELECT t.b::text AS k, grouping(t.b) AS g FROM jdocs t GROUP BY t.b ORDER BY grouping(t.b), 1", "ordered"],
+      // a grouped quotient in a named WINDOW's PARTITION BY and ORDER BY is read per group
+      ["SELECT d.c / 3 AS q, count(*) OVER w FROM deep_t d GROUP BY 1 WINDOW w AS (PARTITION BY d.c / 3) ORDER BY 1", "ordered"],
+      ["SELECT d.c / 3 AS q, count(*) OVER (w ORDER BY d.c / 3) FROM deep_t d GROUP BY 1 WINDOW w AS (PARTITION BY d.c / 3) ORDER BY 1", "ordered"],
+      ["SELECT ceil(d.c / 7.0) AS w, sum(count(*)) OVER x FROM deep_t d GROUP BY 1 WINDOW x AS (PARTITION BY ceil(d.c / 7.0)) ORDER BY 1 NULLS FIRST", "ordered"],
+      // a WINDOW's bare name is the FROM's column (SQL99), never an output of that name; ORDER BY and DISTINCT ON's is the output
+      ["SELECT d.id, max(d.a) AS b, rank() OVER w AS r FROM deep_t d GROUP BY d.id WINDOW w AS (ORDER BY b, d.id) ORDER BY d.id", "ordered"],
+      ["SELECT d.id, d.b AS x, max(d.a) AS b, rank() OVER w AS r FROM deep_t d GROUP BY d.id WINDOW w AS (PARTITION BY b ORDER BY d.id) ORDER BY d.id", "ordered"],
+      ["SELECT d.id, max(d.a) AS b, rank() OVER w AS r FROM deep_t d GROUP BY d.id WINDOW w AS (ORDER BY 2) ORDER BY d.id", "ordered"],
+      ["SELECT DISTINCT ON (b) b, id FROM deep_t GROUP BY id ORDER BY b, id", "ordered"],
+      ["SELECT max(a) AS b FROM deep_t GROUP BY id ORDER BY b NULLS FIRST", "ordered"],
+      // a char(n) in a SubLink is compared as Postgres resolved the comparison: without its padding
+      ["SELECT id, d IN (SELECT 'ab') AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, d IN (SELECT 'ab') AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t GROUP BY id HAVING (b, d) IN (SELECT 'x', 'ab') ORDER BY 1", "ordered"],
+      ["SELECT id, d = ANY (SELECT 'ab') AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, (a, d) = ANY (SELECT 5, 'ab') AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, (SELECT d IN (SELECT 'ab')) AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id, d IN (SELECT 'ab'::char(6)) AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, 'ab' IN (SELECT s.d FROM deep_t s WHERE s.id = deep_t.id) AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, d NOT IN (SELECT 'ab') AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, d = ANY (SELECT 'a' UNION ALL SELECT 'zz') AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT d, count(*) FROM deep_t GROUP BY d HAVING d IN (SELECT 'ab') ORDER BY 1", "ordered"],
+      ["SELECT id, b IN (SELECT s.d FROM deep_t s) AS m FROM deep_t ORDER BY 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); }
+});
+
 test("exact path: the AGGREGATE reader sums and averages a program exactly, through a derived table or a CTE (issue 278)", async () => {
   const c = await client();
   try {
