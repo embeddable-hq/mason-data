@@ -1,19 +1,19 @@
 {
-  "statements": 7039,
+  "statements": 7181,
   "mason": {
-    "exact": 6524,
-    "decided": 47,
+    "exact": 6665,
+    "decided": 48,
     "refused": 468,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1823,
-    "name": 1292,
-    "refused": 1575,
-    "value": 921,
-    "rows": 592,
+    "exact": 1831,
+    "name": 1300,
+    "refused": 1617,
+    "value": 991,
+    "rows": 600,
     "text": 224,
-    "other": 612
+    "other": 618
   },
   "gaps": {
     "copyPhase": {
@@ -77,7 +77,7 @@
         "domain-column": { "planted": 1, "natural": 8 },
         "float-last-digit": { "planted": 0, "natural": 2 },
         "float-overflow": { "planted": 0, "natural": 3 },
-        "fromless-numeric-text-order": { "planted": 1, "natural": 0 },
+        "fromless-numeric-text-order": { "planted": 2, "natural": 0 },
         "libc-mark-run-form": { "planted": 1, "natural": 0 },
         "libc-rare-letter": { "planted": 1, "natural": 0 },
         "limit-errors": { "planted": 5, "natural": 2 },
@@ -95,7 +95,7 @@
       }
     },
     "everyAsk": {
-      "asked": 96480,
+      "asked": 98738,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -142,7 +142,7 @@
         "similar-to-forms": { "planted": 3, "natural": 0 },
         "star-join-twin": { "planted": 3, "natural": 0 },
         "sum-real": { "planted": 0, "natural": 9 },
-        "text-array-order": { "planted": 0, "natural": 48 },
+        "text-array-order": { "planted": 0, "natural": 50 },
         "time-date-trunc": { "planted": 0, "natural": 36 },
         "time-timetz-coerced": { "planted": 9, "natural": 0 },
         "to-char-patterns": { "planted": 0, "natural": 6 },
@@ -157,7 +157,7 @@
         "domain-column": { "planted": 3, "natural": 24 },
         "float-last-digit": { "planted": 0, "natural": 3 },
         "float-overflow": { "planted": 0, "natural": 9 },
-        "fromless-numeric-text-order": { "planted": 3, "natural": 0 },
+        "fromless-numeric-text-order": { "planted": 6, "natural": 0 },
         "libc-mark-run-form": { "planted": 3, "natural": 0 },
         "libc-rare-letter": { "planted": 3, "natural": 0 },
         "limit-errors": { "planted": 15, "natural": 6 },

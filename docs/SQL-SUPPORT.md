@@ -24,17 +24,17 @@ each). The copy is read-only.
 
 ## Why not DuckDB by itself
 
-DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,039 statements,
+DuckDB reads most of Postgres's SQL, but does not answer it as Postgres does. The oracle's 7,181 statements,
 each sent as written to Mason and to a plain DuckDB connection over the same copied tables (tests/integration/duck-oracle.itest.ts):
 
-| Of 7,039 statements | Mason | DuckDB alone |
+| Of 7,181 statements | Mason | DuckDB alone |
 |---|---|---|
-| answered exactly as Postgres: the rows, their text, the column names | 93% | 26% |
+| answered exactly as Postgres: the rows, their text, the column names | 93% | 25% |
 | answered differently by a decision the registry lists ("Answered differently" below) | 1% | — |
 | refused, naming what to write instead (SQLSTATE 0A000, `Mason gap <id>`) | 7% | — |
 | the right rows under DuckDB's own column names (`count_star()` for `count`, the expression's text for an unnamed column) | — | 18% |
-| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 22% |
-| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 13% |
+| refused with DuckDB's own error (a function it lacks, syntax it does not read) | — | 23% |
+| a wrong value (`7 / 2` is 3.5, LIKE's backslash escape, a float4 beside a literal, a numeric's rounding) | 0% | 14% |
 | wrong rows, or the rows in another order | — | 8% |
 | the same value in other text (`1.0` for `1`, a numeric's scale, a timestamptz without its offset) | — | 3% |
 | another error than Postgres's, or answered where Postgres refuses | — | 9% |
@@ -88,7 +88,7 @@ A statement using one of these is refused with SQLSTATE 0A000, where Postgres wo
 | `format-specifiers` | format() with a specifier other than %s (%I, %L, widths, positions) | answers | refused | concatenate with \|\|, or %s only |
 | `to-char-patterns` | to_char of an interval or a time; its TZ, SP, EEEE, RN, V, B, L patterns; a day or month name padded to 9 characters in a parse | answers | refused | the patterns listed in the hint; extract(… FROM interval) for an interval's parts |
 | `to-timestamp-format` | to_timestamp / to_date with a format that is not a literal | answers | refused | write the format as a string literal |
-| `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a character whose order under a libc collation Mason could not read: under a locale other than English's (`en_*`, where it never is, nor is anything refused), a symbol with a first-level weight of its own (`㏩`, `㊿`) or any rare character the read was held to and differed on | answers, in the collation's order | refused when a value holding one is ordered (the order is read from the database, every character held to it, and glibc's every other character is followed) | ORDER BY x COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the character out |
+| `libc-uncovered` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) holding a character whose order under a libc collation Mason could not read: under a locale other than English's (`en_*`, where it never is, nor is anything refused), a symbol with a first-level weight of its own (`㏩`, `㊿`) or any rare character the read was held to and differed on | answers, in the collation's order | refused when a value holding one is ordered (the order is read from the database, every character held to it, and glibc's every other character is followed); a top N or a min / max orders only the values that may be among its answers (src/duck/libc-bound.ts), so one outside them is not refused | ORDER BY x COLLATE "C" for byte order, or normalize(x, NFKC) where it spells the character out |
 | `libc-locale-unread` | ORDER BY, <, >, min / max of text (or of a jsonb, by its strings) under a database whose libc collation Mason's read does not follow: a locale that tailors ASCII or Latin (tr_TR, sv_SE, cs_CZ) or another C library's. An `en_*` locale never is; the read says which at the start and mason status repeats it | answers, in the collation's order | refused whenever text is ordered; everything else is answered, equality, GROUP BY and DISTINCT of text included | add COLLATE "C" or an ICU collation (COLLATE "und-x-icu") to the comparison or the sort |
 | `hypothetical-set` | a hypothetical-set aggregate: rank, dense_rank, percent_rank or cume_dist(…) WITHIN GROUP (ORDER BY …) | the rank the value would have among the rows | refused | count the rows below the value in a subquery |
 | `infinite-extract` | extract(year, decade, century, millennium, isoyear or epoch FROM) an infinite date or timestamp | Infinity (a numeric) | refused when a row holds one (DuckDB's DECIMAL has no Infinity) | filter the infinite values out (isfinite(x)), or date_part(…), which is a double |

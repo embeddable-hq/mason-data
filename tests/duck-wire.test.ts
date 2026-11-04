@@ -35,6 +35,7 @@ import type { BackendMessage } from "../src/api/postgres/protocol.ts";
 import * as wire from "./postgres-api/wire.ts";
 import { withinDuckDBRounding } from "./memory-text.ts";
 import { handLibcOrder, lettersOf } from "./libc-order-fixture.ts";
+import { libcKey } from "../src/duck/libc-order.ts";
 import { catalogDdl } from "../src/api/postgres/catalog.ts";
 import { planDuck } from "../src/duck/plan.ts";
 import { parseSql } from "../src/api/postgres/parser.ts";
@@ -7407,6 +7408,83 @@ test("issue 406: upper, lower and initcap map case under their input collation, 
     assert.ok(Date.now() - t < 5000, `stopped after ${Date.now() - t} ms`);
     await wire.query("SET statement_timeout = 0");
   } finally { await wire.end(); }
+});
+
+// ISSUE 666: a top N and an ungrouped min / max under a libc order key their candidates alone (src/duck/libc-bound.ts):
+// the rows a native bound of the key cannot rule out. The SQL sent says so (the bounds' regexp_extract, the threshold's
+// subquery), under the database's order and a column's own; every form the bound is not proved for is sent as written
+test("libc top N: a top N and an ungrouped min / max are bounded natively, the database's order and a column's own; every other form as written", async () => {
+  const letters = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_US.utf8" });
+  const british = handLibcOrder(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ...lettersOf({ e: "é" })], [" ", "-\u0001\u0002\u007f"], { collate: "en_GB.utf8" });
+  const gb = { schema: "public", name: "mason_gb", provider: "c", collate: "en_GB.utf8", locale: null, deterministic: true };
+  const { api: a, c } = await collsApi(await store.listener({ provider: "c", collate: "en_US.utf8", locale: null }, undefined, letters, () => copies, undefined,
+    { collations: [...PG_COLLATIONS, gb], readLibc: async () => british }), [gb]);
+  try {
+    const sent = async (sql: string): Promise<string> => String((await answer(c, `EXPLAIN ${sql}`)).rows.map((r) => String(r[0])).find((l) => l.includes("Sent to the engine")) ?? "");
+    // the answer by the order itself: the key, then the bytes; NULL last ascending, first descending
+    const values = new Map<number, string | null>([[1, ""], [2, " alpha"], [3, "10"], [4, "Beta"], [5, "alpha"], [6, "b"], [7, "A"], [8, "a"], [9, "é"], [10, "e"], [11, "-x"], [12, "w"], [13, null]]);
+    const ordered = (desc: boolean, where: (id: number) => boolean = () => true): number[] => [...values].filter(([id]) => where(id)).sort(([i, x], [j, y]) => {
+      if (x === null || y === null) return x === y ? i - j : (x === null) === desc ? -1 : 1;
+      const [k, l] = [libcKey(letters, x), libcKey(letters, y)];
+      const by = k !== l ? (k < l ? -1 : 1) : Buffer.compare(Buffer.from(x), Buffer.from(y));
+      return by !== 0 ? (desc ? -by : by) : i - j;
+    }).map(([id]) => id);
+    const ids = (xs: number[]): string[][] => xs.map((id) => [String(id)]);
+    const bounded: Array<[string, unknown[][]]> = [
+      ["SELECT id FROM colls ORDER BY d, id LIMIT 3", ids(ordered(false).slice(0, 3))],
+      ["SELECT id FROM colls ORDER BY d DESC, id LIMIT 3 OFFSET 1", ids(ordered(true).slice(1, 4))],
+      ["SELECT id FROM colls WHERE id > 2 ORDER BY d NULLS FIRST, id LIMIT 4", ids([13, ...ordered(false, (id) => id > 2 && id !== 13)].slice(0, 4))],
+      ["SELECT id, upper(d) IS NULL FROM colls ORDER BY d, id LIMIT 2", ordered(false).slice(0, 2).map((id) => [String(id), "f"])],
+      ["SELECT id FROM colls ORDER BY d COLLATE mason_gb, id LIMIT 4", ids(ordered(false).slice(0, 4))],
+      ["SELECT min(d), max(d) FROM colls", [[values.get(ordered(false)[0]!), values.get(ordered(true)[1]!)]]],
+      ["SELECT min(d COLLATE mason_gb), max(d::text) FROM colls WHERE id > 2", [[values.get(ordered(false, (id) => id > 2)[0]!), values.get(ordered(true, (id) => id > 2)[1]!)]]],
+      ["SELECT min(d), max(d) FROM colls WHERE id < 0", [[null, null]]],
+    ];
+    for (const [sql, rows] of bounded) {
+      assert.match(await sent(sql), /regexp_extract\(.*\(SELECT (CASE WHEN count\(\*\) >= \d+ THEN )?(min|max)\(__mason_bounds\.__mason_bound\)/, sql);
+      assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+    }
+    // a parameter in the WHERE the threshold reads too: bound once, read in both, and again after the session moved
+    const bound = "SELECT id FROM colls WHERE id > $1 ORDER BY d, id LIMIT 3";
+    const after = ids(ordered(false, (id) => id > 4).slice(0, 3));
+    assert.deepEqual((await answer(c, bound, [4])).rows, after, bound);
+    await c.query("SET TimeZone = 'Asia/Kolkata'");
+    assert.deepEqual((await answer(c, bound, [4])).rows, after, `${bound}, after SET TimeZone`);
+    await c.query("RESET TimeZone");
+    for (const sql of ["SELECT d FROM colls GROUP BY d ORDER BY d LIMIT 3", "SELECT DISTINCT d FROM colls ORDER BY 1 LIMIT 3", "SELECT id, d FROM colls ORDER BY d FETCH FIRST 2 ROWS WITH TIES",
+      "SELECT id % 2, min(d) FROM colls GROUP BY 1", "SELECT min(d) FILTER (WHERE id > 3) FROM colls", "SELECT id, d FROM colls WHERE random() < 2 ORDER BY d LIMIT 3",
+      "SELECT a.id FROM colls a JOIN colls b ON b.id = a.id ORDER BY a.d LIMIT 3", "SELECT id FROM colls ORDER BY d", "SELECT id FROM colls ORDER BY c LIMIT 3",
+      "SELECT max(d) OVER () FROM colls LIMIT 1", "SELECT id FROM colls ORDER BY d LIMIT 3 + 0", "SELECT d FROM colls UNION ALL SELECT d FROM colls ORDER BY 1 LIMIT 3",
+      "SELECT count(*) FROM (SELECT id FROM colls ORDER BY d LIMIT 3) s", "SELECT min(d) FROM (SELECT d FROM colls LIMIT 5) s"]) {
+      const text = await sent(sql);
+      assert.ok(text.length > 0 && !text.includes("regexp_extract("), `${sql}: ${text}`);
+    }
+    // a value holding a control character the order ignores (review r1 of PR 675): U+0002 inside it is not the end of the
+    // text, so 'ab' U+0002 'cd' sorts as 'abcd', after 'abc', and U+0002 'zz' as 'zz'
+    const control = new Map<number, string>([[100, "abc"], [101, "ab\u0002cd"], [102, "aa"], [103, "a\u0002z"], [104, "aaz"], [105, "\u0002zz"], [106, "b"], [107, "ab\u007f"], [108, "ab\u0001c"]]);
+    await store.writer.run(`INSERT INTO public.colls SELECT id, x, x, x FROM (VALUES ${[...control].map(([id, x]) => `(${id}, '${x}')`).join(", ")}) AS s(id, x)`);
+    try {
+      const sorted = (ids: number[], desc: boolean): number[] => [...ids].sort((i, j) => {
+        const [x, y] = [control.get(i)!, control.get(j)!], [k, l] = [libcKey(letters, x), libcKey(letters, y)];
+        const by = k !== l ? (k < l ? -1 : 1) : Buffer.compare(Buffer.from(x), Buffer.from(y));
+        return by !== 0 ? (desc ? -by : by) : i - j;
+      });
+      const all = [...control.keys()];
+      for (const [sql, rows] of [
+        ["SELECT id FROM colls WHERE id >= 100 ORDER BY d, id LIMIT 3", ids(sorted(all, false).slice(0, 3))],
+        ["SELECT id FROM colls WHERE id >= 100 ORDER BY d DESC, id LIMIT 2", ids(sorted(all, true).slice(0, 2))],
+        ["SELECT id FROM colls WHERE id IN (100, 101) ORDER BY d, id LIMIT 1", ids(sorted([100, 101], false).slice(0, 1))],
+        ["SELECT id FROM colls WHERE id IN (103, 104) ORDER BY d, id LIMIT 1", ids(sorted([103, 104], false).slice(0, 1))],
+        ["SELECT id FROM colls WHERE id IN (105, 106) ORDER BY d DESC, id LIMIT 1", ids(sorted([105, 106], true).slice(0, 1))],
+        ["SELECT min(d), max(d) FROM colls WHERE id IN (100, 101)", [[control.get(sorted([100, 101], false)[0]!), control.get(sorted([100, 101], true)[0]!)]]],
+        ["SELECT min(d), max(d) FROM colls WHERE id >= 100", [[control.get(sorted(all, false)[0]!), control.get(sorted(all, true)[0]!)]]],
+      ] as Array<[string, unknown[][]]>) {
+        assert.match(await sent(sql), /regexp_extract\(/, sql);
+        assert.deepEqual((await answer(c, sql)).rows, rows, sql);
+      }
+      assert.deepEqual(sorted([100, 101], false), [100, 101], "the order itself: 'abc' before 'ab' U+0002 'cd'");
+    } finally { await store.writer.run("DELETE FROM public.colls WHERE id >= 100"); }
+  } finally { await c.end(); await a.close(); }
 });
 
 test("collation resolver: two libc collations in one session, each by its own order, the second read once on its first use", async () => {
