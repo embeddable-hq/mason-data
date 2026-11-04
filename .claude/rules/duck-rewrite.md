@@ -592,3 +592,13 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   answers the picked row's numeric (OID 1700, `16.000000000000000`, `0.75625000000000000000`). The decision: order by
   the exact key, answer the picked row's value, never the key, while the readers that only order or test nullness stay
   answered (`refusal-wider-than-the-wrong-answer` above); `order-key-bytes-as-result` (PR 506; issues 486, 538).
+- A value holding the very byte a bound, key or run uses to mark its own end, at the head and the base over a synthetic
+  `t (id int PRIMARY KEY, a int, b text)` under a libc collation, with rows `'abc'`, `'ab' || chr(2) || 'cd'`,
+  `chr(2) || 'zz'`, `'a' || chr(2) || 'z'` beside `'aa'`, `'aaz'`, `'b'`, `'zzz'`: `SELECT id, b FROM t ORDER BY b, id
+  LIMIT 2`, `ORDER BY b DESC, id LIMIT 5`, `ORDER BY b DESC NULLS LAST`, `ORDER BY b || 'x'`, an alias, a CTE, `b IN
+  (SELECT b … ORDER BY b DESC LIMIT 5)`, `SELECT min(b), max(b) FROM t`, a correlated `(SELECT min(b) …)`; and the same
+  with chr(1) and chr(127): a control character glibc ignores at the first levels is read as the end-of-text mark, so
+  the row sorts by its prefix alone, is dropped from a DESC top N, or swaps min and max, silently. The decision: no
+  in-band sentinel; the end of a value is known from the value itself (the run's length against the text's, or an
+  anchored pattern), and the property test's strings are drawn from a pool holding every byte the bounds use;
+  `sentinel-byte-the-data-can-hold` (PR 675).
