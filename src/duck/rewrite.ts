@@ -4629,10 +4629,23 @@ class Rewriter {
       limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
     } });
     const name = names(b.operName ?? []).at(-1) ?? "=";
+    const sorts = ["<", "<=", ">", ">="].includes(name);
+    // (a row's <> ANY too, which the engine, filtering by it, answers true for a NULL member: `<> ALL` is NOT IN, and
+    // `=` IN, each a join the engine answers as Postgres does)
+    const ordering = compare !== null && sorts && (b.subLinkType === "ANY_SUBLINK" || b.subLinkType === "ALL_SUBLINK");
+    const rowWise = ordering || (row && name === "<>" && b.subLinkType === "ANY_SUBLINK");
+    // A CITEXT PAIR IN A COMPARISON THIS REWRITE WRITES PAIR BY PAIR (PR 674 shrink 1, the class citext compared by bytes
+    // in a quantified subquery): Postgres compares a citext without regard to case (citext_eq, citext_cmp), and the
+    // pairs here are written by `orderedOperand` and `rowQuantified`, which compare its bytes. Decided here, where every
+    // pair's argument types are read (the OPEXPRs, the ROWCOMPAREEXPR), so every path below sees it: ALL of a subquery,
+    // whatever its operator, and a row compared with each output row; refused by name, as a plain row's is (`rowCompared`)
+    if ((b.subLinkType === "ALL_SUBLINK" || rowWise) && pairs.some(([l, r]) => this.isCitext(l) || this.isCitext(r))) {
+      const what = `${row ? "a row holding a citext" : "a citext"} compared by ${name} ${b.subLinkType === "ALL_SUBLINK" ? "ALL" : "ANY"} of a subquery`;
+      throw new Unrewritable(`${what} is not supported by Mason (Postgres compares the citext without regard to case)`, "compare lower() of each side: lower(x) < ALL (SELECT lower(y) …)", "citext-forms");
+    }
     // AN ORDERING OF TEXT UNDER ITS COLLATION (PR 674 CI fix 1): each pair's collation the one Postgres compared it under
     // (the OPEXPR's inputcollid, the ROWCOMPAREEXPR's inputcollids); both operands of a text pair under one that is not
     // byte order written as its key (`orderedOperand`), as a plain comparison's are (`compareText`, `rowCompared`)
-    const sorts = ["<", "<=", ">", ">="].includes(name);
     const colls: Array<DuckCollation | null> = !sorts ? lefts.map(() => null) : ops.length === lefts.length
       ? ops.map((t) => this.inputCollationOf(t))
       : lefts.map((_, i) => { const o = compare?.inputCollations?.[i] ?? 0; return o === 0 ? null : this.collations.resolve(o); });
@@ -4640,10 +4653,7 @@ class Rewriter {
       throw new Unrewritable(`Mason could not read the collations of this row comparison (${name})`, "compare the columns one by one", "collation-unknown");
     }
     const side = (n: AstNode, i: number, own: 0 | 1): AstNode => this.orderedOperand(n, pairs[i]![own], pairs[i]![own === 0 ? 1 : 0], colls[i] ?? null);
-    // (and a row's <> ANY, which the engine, filtering by it, answers true for a NULL member: `<> ALL` is NOT IN, and
-    // `=` IN, each a join the engine answers as Postgres does)
-    const ordering = compare !== null && sorts && (b.subLinkType === "ANY_SUBLINK" || b.subLinkType === "ALL_SUBLINK");
-    if (ordering || (row && name === "<>" && b.subLinkType === "ANY_SUBLINK")) {
+    if (rowWise) {
       if (refs.some((r) => r === null)) return null;
       return this.rowQuantified(name, b.subLinkType === "ALL_SUBLINK", lefts, refs as AstNode[], side, wrap);
     }

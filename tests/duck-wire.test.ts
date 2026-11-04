@@ -6651,6 +6651,47 @@ test("issue 665 CI fix 1 (#284): two rows ordered pair by pair as Postgres order
   } finally { await c.end(); await a.close(); }
 });
 
+// (on the listener production runs, its allowlist the one CI's legs verified: ALL of a subquery and a row comparison
+// admitted, so a citext reaching them is answered unless the rewrite refuses it)
+test("issue 665 shrink 1: a citext compared by ALL of a subquery, or in a row compared with each of its rows, is refused by name; the rest answered", async () => {
+  const { api: a, c } = await collsApi(await store.listener(undefined, undefined, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+  try {
+    // `status` is a citext of 'finalized', 'FINALIZED', 'Finalized' and 'draft': compared by its bytes, each answer differs
+    const citext = [
+      "SELECT id FROM accounts WHERE status < ALL (SELECT status FROM accounts WHERE id > 1) ORDER BY 1",
+      "SELECT id FROM accounts WHERE status >= ALL (SELECT status FROM accounts WHERE id <> 4) ORDER BY 1",
+      "SELECT id FROM accounts WHERE status = ALL (SELECT status FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id FROM accounts WHERE status <> ALL (SELECT status FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id, status <= ALL (SELECT status FROM accounts WHERE id IN (2, 3)) AS m FROM accounts ORDER BY 1",
+      "SELECT id FROM accounts WHERE (status, id) < ANY (SELECT status, id FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (status, id) >= ALL (SELECT status, id FROM accounts WHERE id IN (1, 2)) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (id, status) > ANY (SELECT id, status FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (id, status) <= ALL (SELECT 1, status FROM accounts WHERE id = 2) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (status, id) <> ALL (SELECT status, 1 FROM accounts WHERE id = 2) ORDER BY 1",
+      "SELECT id FROM accounts WHERE (status, 1) <> ANY (SELECT status, 1 FROM accounts WHERE id = 1) ORDER BY 1",
+      "SELECT id FROM accounts GROUP BY id HAVING (status, id) >= ALL (SELECT status, id FROM accounts WHERE id IN (1, 2)) ORDER BY 1",
+    ];
+    const answered: string[] = [];
+    for (const s of citext) {
+      try { await c.query(s); answered.push(`answered: ${s}`); } catch (e) {
+        const err = e as Error & { code?: string; detail?: string };
+        if (err.code !== "0A000" || !/citext-forms/.test(err.detail ?? "")) answered.push(`${err.code} ${err.message}: ${s}`);
+      }
+    }
+    assert.deepEqual(answered, []);
+    // text, char(n), numeric and NULL under ANY and ALL, a row without a citext, and a citext beside a text (text's
+    // operator), answered as Postgres answers them
+    assert.deepEqual(await unlike(c, [
+      ["SELECT id, b < ALL (SELECT b FROM deep_t WHERE id IN (1, 3)) AS m, b >= ANY (SELECT b FROM deep_t WHERE id IN (1, 3)) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, d > ALL (SELECT d FROM deep_t WHERE id IN (1, 3)) AS m, d = ALL (SELECT d FROM deep_t WHERE id = 1) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, c <= ALL (SELECT c FROM deep_t WHERE id IN (1, 3)) AS m, a <> ALL (SELECT a FROM deep_t WHERE id IN (1, 4)) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, (a, b) < ALL (SELECT a, b FROM deep_t WHERE id IN (1, 3)) AS m, (d, a) >= ANY (SELECT d, a FROM deep_t WHERE id = 3) AS n FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, (a, d) <> ANY (SELECT a, d FROM deep_t WHERE id = 1) AS m FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT id, status::text < ALL (SELECT team FROM accounts WHERE id > 2) AS m FROM accounts ORDER BY 1", "ordered"],
+    ]), []);
+  } finally { await c.end(); await a.close(); }
+});
+
 test("exact path: the AGGREGATE reader sums and averages a program exactly, through a derived table or a CTE (issue 278)", async () => {
   const c = await client();
   try {
