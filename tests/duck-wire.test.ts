@@ -6568,6 +6568,66 @@ test("issue 665 class round r2: GROUPING reads the GROUP BY entry Postgres match
   } finally { await c.end(); }
 });
 
+test("issue 665 class round r3: every coercion Postgres placed on a char(n) is written, and a subquery's output is compared as Postgres resolved it whatever its form", async () => {
+  const c = await client();
+  try {
+    const forms = [
+      // VALUES, a star, TABLE, a CTE and every set operation, as the subquery of a char(n) comparison
+      "d IN (VALUES ('ab'::char(4)))", "d NOT IN (VALUES ('ab'::char(4)))", "d IN (VALUES ('ab'::char(4)), ('zz'::char(4)))",
+      "d IN (SELECT s.* FROM (SELECT d FROM deep_t WHERE id = 1) s)",
+      "(a, d) IN (SELECT s.* FROM (SELECT a, d FROM deep_t WHERE id = 1) s)",
+      "d IN (TABLE chars)", "d IN (WITH w AS (SELECT d FROM deep_t WHERE id = 1) SELECT * FROM w)", "d IN (WITH w AS (SELECT d FROM deep_t WHERE id = 1) TABLE w)",
+      "d IN (SELECT d FROM deep_t WHERE id = 1 UNION SELECT d FROM deep_t WHERE id = 6)", "d IN (SELECT d FROM deep_t WHERE id = 1 UNION ALL SELECT d FROM deep_t WHERE id = 6)",
+      "d IN (SELECT d FROM deep_t INTERSECT SELECT d FROM deep_t WHERE id = 1)", "d IN (SELECT 'ab'::char(4) EXCEPT SELECT 'b'::char(4))",
+      "d = ANY (SELECT u.d FROM deep_t u WHERE u.id = deep_t.id UNION ALL SELECT 'zz'::char(4))",
+      "d IN (SELECT d FROM deep_t WHERE id = 1 UNION SELECT 'zz')", "d IN (SELECT d FROM deep_t WHERE id = 1 UNION ALL SELECT 'zz'::text)",
+      "(d, d) IN (SELECT d, d FROM deep_t WHERE id = 1 UNION SELECT 'b', 'b')",
+      // a char(n) row or arm Postgres coerced to text inside the subquery: VALUES (a CTE's, a correlated row), CASE, NULLIF
+      "d IN (VALUES ('zz'::text), ('ab'::char(4)))", "d IN (SELECT x FROM (VALUES ('zz'::text), ('ab'::char(4))) v(x))",
+      "d IN (WITH w(x) AS (VALUES ('zz'::text), ('ab'::char(4))) SELECT x FROM w)", "d IN (SELECT x FROM (VALUES ('zz'::text), (deep_t.d)) v(x))",
+      "b IN (VALUES ('x'::char(4)), ('zz'::text))", "b IN (SELECT 'x'::char(4) UNION ALL SELECT 'zz'::text)",
+      "d IN (SELECT CASE WHEN u.id = 1 THEN u.d ELSE 'zz'::text END FROM deep_t u)", "d IN (SELECT nullif(u.d, 'qq'::text) FROM deep_t u WHERE u.id = 1)",
+      "d IN (SELECT nullif(u.d, 'qq'::text) FROM deep_t u WHERE u.id = 1 UNION ALL SELECT 'qq'::text)",
+    ];
+    // ALL, and a row under an ordering operator, each pair as Postgres compares it, a NULL member NULL (neither is
+    // verified, issue 284, so the listener for these refuses nothing: what the oracle's legs admit is what it answers)
+    const ordered = [
+      "d <> ALL (SELECT * FROM (SELECT d FROM deep_t WHERE id = 1) s)", "d < ALL (SELECT d FROM deep_t WHERE id = 6 UNION SELECT d FROM deep_t WHERE id = 5)",
+      "(a, d) < ANY (SELECT a, d FROM deep_t WHERE id = 6 UNION SELECT a, d FROM deep_t WHERE id = 5)", "(a, d) >= ANY (VALUES (2, 'b'::char(4)))",
+      "(a, d) < ANY (VALUES (2, 'b'::char(4)), (2, 'zz'::char(4)))", "(a, b) < ANY (SELECT 3, d FROM deep_t WHERE id = 1)",
+      "(a, d) <= ALL (SELECT a, d FROM deep_t WHERE id IN (1, 6))", "(a, d) > ANY (SELECT a, d FROM deep_t WHERE false)",
+      "(a, d) > ALL (WITH w AS (SELECT a, d FROM deep_t WHERE id = 1) SELECT * FROM w)",
+    ];
+    // (a correlated VALUES row beside a GROUP BY is refused at the base too, 42803: its plain form only)
+    const ungrouped = new Set(["d IN (SELECT x FROM (VALUES ('zz'::text), (deep_t.d)) v(x))"]);
+    const each = (fs: string[]): Array<[string, "ordered"]> => fs.flatMap((f) => [
+      [`SELECT id, ${f} AS m FROM deep_t ORDER BY 1`, "ordered"] as [string, "ordered"],
+      ...(ungrouped.has(f) ? [] : [[`SELECT id, ${f} AS m FROM deep_t GROUP BY id ORDER BY 1`, "ordered"] as [string, "ordered"]]),
+    ]);
+    const statements = each(forms);
+    // the coercion outside a subquery, and its GROUP BY twin
+    statements.push(
+      ["SELECT id, CASE WHEN id = 1 THEN d ELSE 'zz'::text END AS x, nullif(d, 'qq'::text) AS n, upper(d) AS u FROM deep_t ORDER BY 1", "ordered"],
+      ["SELECT CASE WHEN a > 0 THEN d ELSE 'zz'::text END AS x, count(*) FROM deep_t GROUP BY CASE WHEN a > 0 THEN d ELSE 'zz'::text END ORDER BY 1 NULLS FIRST", "ordered"],
+      ["SELECT d || '|' AS x, string_agg(d, ',' ORDER BY id) OVER () AS s FROM deep_t ORDER BY id", "ordered"],
+    );
+    assert.deepEqual(await unlike(c, statements), []);
+    const { api: a, c: all } = await collsApi(await store.listener(undefined, null, undefined, () => copies, undefined, { collations: PG_COLLATIONS }));
+    // the test's columns grouped themselves, or a grouped key first: read by the outer query, never inside the subquery
+    const grouped: Array<[string, "ordered"]> = [
+      ["SELECT a, d, (a, d) < ANY (SELECT a, d FROM deep_t WHERE id = 6) AS m FROM deep_t GROUP BY a, d ORDER BY 1, 2", "ordered"],
+      ["SELECT a, (a, 1) < ANY (SELECT a, 1 FROM deep_t WHERE id = 6) AS m FROM deep_t GROUP BY 1 ORDER BY 1", "ordered"],
+      ["SELECT id, (id, a) < ANY (SELECT 5, NULL::int) AS m FROM deep_t GROUP BY id ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t GROUP BY id HAVING (id, a) >= ALL (SELECT 3, a FROM deep_t WHERE id = 1) ORDER BY 1", "ordered"],
+      // a row's <> ANY filtering: a NULL member NULL, never true
+      ["SELECT id FROM deep_t WHERE (a, d) <> ANY (SELECT a, d FROM deep_t WHERE id IN (1, 4)) ORDER BY 1", "ordered"],
+      ["SELECT id FROM deep_t GROUP BY id HAVING (a, d) <> ANY (SELECT 1, NULL::char(4)) ORDER BY 1", "ordered"],
+      ["SELECT id, (a, d) <> ANY (SELECT NULL::int, 'ab'::char(4) UNION ALL SELECT 2, 'cd') AS m FROM deep_t ORDER BY 1", "ordered"],
+    ];
+    try { assert.deepEqual(await unlike(all, [...each(ordered), ...grouped]), []); } finally { await all.end(); await a.close(); }
+  } finally { await c.end(); }
+});
+
 test("exact path: the AGGREGATE reader sums and averages a program exactly, through a derived table or a CTE (issue 278)", async () => {
   const c = await client();
   try {

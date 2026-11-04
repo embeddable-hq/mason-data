@@ -795,8 +795,7 @@ class Rewriter {
         if (!isNode(b.testexpr) || !["ANY_SUBLINK", "ALL_SUBLINK", "ROWCOMPARE_SUBLINK"].includes(String(b.subLinkType))) return null;
         const type = this.typeOf(b.testexpr);
         if (type === JSONB || type === JSONB_ARRAY || this.rowHoldsJsonb(b.testexpr)) throw new Unrewritable("a jsonb compared with a subquery's values (IN (SELECT …), = ANY (SELECT …)) is not supported by Mason (Postgres equates jsonb by its own rules)", "join the subquery instead: … JOIN (SELECT …) s ON s.v = t.j", "jsonb-compare");
-        this.sublinkCompared(b);
-        return null;
+        return this.sublinkCompared(b);
       }
       // a row as a value anywhere but the SELECT list, a cast to text and the json functions (rowValues) is a struct
       // to DuckDB, compared, tested and grouped by its rules
@@ -1938,6 +1937,17 @@ class Rewriter {
     return to;
   }
 
+  /** `x`, a char(n), AS POSTGRES'S IMPLICIT CAST TO A TEXT OR A VARCHAR (text(bpchar), function 401, COERCE_IMPLICIT_CAST):
+   *  a cast node typed as that FUNCEXPR, which the cast's own rule writes (its value without the trailing blanks), as
+   *  castArms writes a char(n) arm of a text column */
+  private asImplicitText(x: AstNode, own: Typed, to: number): AstNode {
+    const cast: AstNode = { TypeCast: { arg: x, typeName: { names: [S("pg_catalog"), S(to === VARCHAR ? "varchar" : "text")], typemod: -1 }, location: -1 } };
+    this.synthetic.set(bodyOf(cast), { node: "FUNCEXPR", type: to, typmod: -1, args: [{ type: own.type, typmod: own.typmod }], oid: 401, format: 2,
+      collation: own.collation, inputCollation: own.collation, levelsUp: null, datum: null, qualifier: null, renamed: null });
+    this.original.add(bodyOf(cast));
+    return cast;
+  }
+
   /**
    * EACH IMPLICIT time→timetz CAST POSTGRES ADDED, WRITTEN WHERE IT IS (the class "a coercion Postgres adds that the raw
    * tree lacks: the analysed node unread", issue 167). Postgres casts a time beside a timetz (an operator's operand, IN,
@@ -1951,14 +1961,23 @@ class Rewriter {
    * another). A set operation's arm is castArms's (Postgres leaves it as written). Every cast of the analysis must be
    * written: one that is not, an operand cast in one copy and not the other (BETWEEN a time and a timetz), or a bare
    * literal, is refused by name (time-timetz-coerced).
+   *
+   * EACH IMPLICIT CAST OF A char(n) TO A TEXT OR A VARCHAR, THE SAME WAY (PR 674 class round r3, the class
+   * char-padding-in-sublink-test): Postgres casts a char(n) beside a text (an operator's or a function's argument, a
+   * CASE or NULLIF arm, a VALUES row of a text column, a subquery's output compared with a text …) with text(bpchar),
+   * which drops its trailing blanks: its argument's entry says so (`Typed.implicitText`), and the node is wrapped in the
+   * cast (`asImplicitText`), so every place Postgres trimmed the value, the engine trims it, and a comparison's two
+   * sides are never trimmed one alone. One it cannot write (a copy left a char(n), a bare literal) is left as written,
+   * as before this rule: never refused.
    */
   coerceImplicit(root: unknown): void {
     const expected = implicitTimetzCasts(this.analysisTree);
-    if (expected === 0) return;
     const listed = new Set<Typed>();
-    for (const list of this.types.values()) for (const t of list) if (t.implicitTimetz === true) listed.add(t);
+    let texts = 0;
+    for (const list of this.types.values()) for (const t of list) { if (t.implicitTimetz === true) listed.add(t); if (t.implicitText !== undefined) texts++; }
+    if (expected === 0 && texts === 0) return;
     if (listed.size !== expected) refuseTimetz();
-    type Slot = { holder: AstNode; path: ReadonlyArray<string | number>; node: AstNode };
+    type Slot = { holder: AstNode; path: ReadonlyArray<string | number>; node: AstNode; text: Typed | null };
     const wraps: Slot[] = [], unanalysed: Slot[] = [];
     const claimed = new Set<Typed>();
     const byHolder = new Map<string, Set<string>>();
@@ -1968,18 +1987,34 @@ class Rewriter {
       if (!isNode(v)) { for (const [k, x] of Object.entries(v as Body)) visit(x, holder, [...path, k]); return; }
       const own = this.ownEntries(v);
       const cast = own.filter((t) => t.implicitTimetz === true);
+      const text = own.filter((t) => t.implicitText !== undefined);
       // (an entry an outer node of it took: a cast's literal)
       if (cast.length > 0 && !claimed.has(cast[0]!)) {
         // a copy of it left a time (BETWEEN a time and a timetz bound): one node cannot be written both ways. (Another
         // entry at its offset of another type is another node's: a set operation's output, at its first arm's)
         if (own.some((t) => t.implicitTimetz !== true && t.node === cast[0]!.node && t.type === cast[0]!.type) || holder === null || kindOf(v) === "A_Const") refuseTimetz();
         for (const t of cast) claimed.add(t);
-        wraps.push({ holder: holder!, path, node: v });
+        wraps.push({ holder: holder!, path, node: v, text: null });
         const key = shapeOf(holder!);
         const at = byHolder.get(key) ?? new Set<string>();
         at.add(JSON.stringify(path));
         byHolder.set(key, at);
-      } else if (own.length === 0 && holder !== null) unanalysed.push({ holder, path, node: v });
+      } else if (text.length > 0 && !claimed.has(text[0]!)) {
+        for (const t of text) claimed.add(t);
+        // (a copy of it left a char(n), or nothing holds it, or a bare literal: left as written, as before)
+        const left = own.some((t) => t.implicitText === undefined && t.node === text[0]!.node && t.type === text[0]!.type);
+        if (!left && holder !== null && kindOf(v) !== "A_Const") {
+          wraps.push({ holder, path, node: v, text: text[0]! });
+          const key = shapeOf(holder);
+          const at = byHolder.get(key) ?? new Set<string>();
+          at.add(JSON.stringify(path));
+          byHolder.set(key, at);
+        }
+        const key = shapeOf(holder!);
+        const at = byHolder.get(key) ?? new Set<string>();
+        at.add(JSON.stringify(path));
+        byHolder.set(key, at);
+      } else if (own.length === 0 && holder !== null) unanalysed.push({ holder, path, node: v, text: null });
       for (const [k, x] of Object.entries(bodyOf(v))) { const arm = armOf(k, x); if (arm !== null) visit(arm, null, []); else visit(x, v, [k]); }
     };
     visit(root, null, []);
@@ -1987,14 +2022,17 @@ class Rewriter {
     // a twin's (the shapes read before any node is wrapped)
     const shapes = new Map<AstNode, string>();
     const shaped = (h: AstNode): string => { let k = shapes.get(h); if (k === undefined) { k = shapeOf(h); shapes.set(h, k); } return k; };
-    const twins = unanalysed.filter((u) => byHolder.get(shaped(u.holder))?.has(JSON.stringify(u.path)) === true);
-    for (const { holder, path, node } of [...wraps, ...twins]) {
+    const kindAt = new Map<string, Typed | null>();
+    for (const w of wraps) kindAt.set(`${shaped(w.holder)}|${JSON.stringify(w.path)}`, w.text);
+    const twins = unanalysed.filter((u) => byHolder.get(shaped(u.holder))?.has(JSON.stringify(u.path)) === true)
+      .map((u) => ({ ...u, text: kindAt.get(`${shaped(u.holder)}|${JSON.stringify(u.path)}`) ?? null }));
+    for (const { holder, path, node, text } of [...wraps, ...twins]) {
       let at: unknown = bodyOf(holder);
       for (const step of path.slice(0, -1)) at = (at as Record<string | number, unknown>)[step];
       const slot = at as Record<string | number, unknown>;
       const last = path.at(-1)!;
-      if (slot[last] !== node) throw new Error("a time cast to a timetz was not where its analysis was read: report it, with the statement");
-      slot[last] = this.asImplicitTimetz(node);
+      if (slot[last] !== node) throw new Error("an implicit cast was not where its analysis was read: report it, with the statement");
+      slot[last] = text !== null ? this.asImplicitText(node, text, text.implicitText!) : this.asImplicitTimetz(node);
     }
     // the wrapped expressions' shapes, for an ORDER BY or GROUP BY that repeats one (`typed`)
     if (wraps.length > 0) this.indexShapes(root);
@@ -4507,31 +4545,98 @@ class Rewriter {
 
   /**
    * A SUBLINK's COMPARISON (`x IN (SELECT …)`, `x = ANY / ALL (SELECT …)`, a row's) AS POSTGRES RESOLVED IT, column by
-   * column: the operator's argument types at the SubLink (an OPEXPR a column, at the SubLink's offset) or, for a row
-   * compared by an ordering operator, the ROWCOMPAREEXPR at its first left column's (`rowCompareAt`); its test
-   * expression's columns and the subselect's outputs written through `compared`, as any comparison's operands are. A
-   * subselect whose outputs are not its own list (a set operation, VALUES, a `*`) keeps its side as it is.
+   * column (PR 674 class rounds r2 and r3, the class char-padding-in-sublink-test): each pair's argument types read from
+   * the analysed operator at the SubLink (an OPEXPR a column) or, for a row compared by an ordering operator, the
+   * ROWCOMPAREEXPR placed at the SubLink's offset (pgtree.ts `typesByLocation`; a grouped column's Var has none of its
+   * own) or at its first left column's (`rowCompareAt`); each output column's own type from the subquery's
+   * output the operator reads (`Typed.params`, its PARAM_SUBLINK), whatever the subquery's form. The test operands are
+   * written through `compared`, and the outputs through it FROM OUTSIDE the subquery, over its columns (`SELECT <each
+   * written> FROM (<the subquery>) AS <alias>(c1 … cn)`), so a set operation, VALUES, a *, TABLE or a CTE is written as
+   * a plain list is, and a pair's two operands are written together. A row under an ordering operator in ANY / ALL is
+   * Postgres's row comparison of each output row (`rowQuantified`): the engine compares a row as a struct.
    */
-  private sublinkCompared(b: Body): void {
+  private sublinkCompared(b: Body): AstNode | null {
     const test = b.testexpr as AstNode;
     const row = kindOf(test) === "RowExpr";
     const lefts = row ? ((bodyOf(test).args ?? []) as AstNode[]) : [test];
-    const op = names(b.operName ?? []).at(-1) ?? "=";
-    const comparison = ["=", "<>", "!=", "<", "<=", ">", ">="].includes(op);
     const ops = this.allAt(b, ["OPEXPR"]);
+    // (a row's ROWCOMPAREEXPR is placed at the SubLink's offset, where a grouped first column's Var has none)
+    const compare = row && lefts[0] !== undefined && ops.length !== lefts.length ? this.at(b, ["ROWCOMPAREEXPR"]) ?? this.rowCompareAt(lefts[0]) : null;
     let types: Array<[number | null, number | null]> | null = null;
-    if (ops.length === lefts.length) types = ops.map((t) => [t.args[0]?.type ?? null, t.args[1]?.type ?? null]);
-    else if (row && lefts[0] !== undefined) {
-      const compare = this.rowCompareAt(lefts[0]);
-      if (compare?.inputTypes !== undefined && compare.inputTypes.length === lefts.length) types = compare.inputTypes.map((t) => [t, t]);
+    let outputs: Array<{ type: number; typmod: number } | null> = [];
+    if (ops.length === lefts.length) {
+      types = ops.map((t) => [t.args[0]?.type ?? null, t.args[1]?.type ?? null]);
+      outputs = ops.map((t) => t.params?.[1] ?? null);
+    } else if (compare?.inputTypes !== undefined && compare.inputTypes.length === lefts.length) {
+      types = compare.inputTypes.map((t) => [t, t]);
+      outputs = lefts.map((_, i) => compare.params?.[i] ?? null);
     }
-    if (types === null) return;
-    const sub = isNode(b.subselect) ? bodyOf(b.subselect as AstNode) : undefined;
-    const outs = sub !== undefined && (sub.op === undefined || sub.op === "SETOP_NONE") && Array.isArray(sub.targetList) ? sub.targetList as AstNode[] : [];
-    const rights = outs.length === lefts.length && !outs.some((t) => hasStar(bodyOf(t).val)) ? outs : [];
-    const written = lefts.map((x, i) => this.compared(x, types![i]![0], types![i]![1], comparison));
+    if (types === null || !isNode(b.subselect)) return null;
+    const pairs = types;
+    const alias = `${this.cellPrefix}o${this.sublinkOutputs++}`;
+    const column = (i: number): AstNode => ({ ColumnRef: { fields: [S(alias), S(`c${i + 1}`)] } });
+    const refs = outputs.map((p, i) => {
+      if (p === null) return null;
+      const ref = column(i);
+      this.synthetic.set(bodyOf(ref), { node: "VAR", type: p.type, typmod: p.typmod, args: [], oid: null, format: null, collation: 0, inputCollation: 0, levelsUp: 0, datum: null, qualifier: null, renamed: null });
+      this.original.add(bodyOf(ref));
+      return ref;
+    });
+    const wrap = (targets: AstNode[]): AstNode => ({ SelectStmt: {
+      targetList: targets.map((v) => ({ ResTarget: { val: v } })),
+      fromClause: [{ RangeSubselect: { subquery: b.subselect, alias: { aliasname: alias, colnames: lefts.map((_, i) => S(`c${i + 1}`)) } } }],
+      limitOption: "LIMIT_OPTION_DEFAULT", op: "SETOP_NONE",
+    } });
+    const name = names(b.operName ?? []).at(-1) ?? "=";
+    // (and a row's <> ANY, which the engine, filtering by it, answers true for a NULL member: `<> ALL` is NOT IN, and
+    // `=` IN, each a join the engine answers as Postgres does)
+    const ordering = compare !== null && ["<", "<=", ">", ">="].includes(name) && (b.subLinkType === "ANY_SUBLINK" || b.subLinkType === "ALL_SUBLINK");
+    if (ordering || (row && name === "<>" && b.subLinkType === "ANY_SUBLINK")) {
+      if (refs.some((r) => r === null)) return null;
+      return this.rowQuantified(name, b.subLinkType === "ALL_SUBLINK", lefts, refs as AstNode[], pairs, wrap);
+    }
+    // each pair written together: an output that cannot be typed leaves its pair as written
+    const rights = refs.map((r, i) => r === null ? null : this.compared(r, pairs[i]![1], pairs[i]![0], true));
+    const written = lefts.map((x, i) => rights[i] === null ? x : this.compared(x, pairs[i]![0], pairs[i]![1], true));
     if (row) bodyOf(test).args = written; else b.testexpr = written[0];
-    rights.forEach((t, i) => { const tb = bodyOf(t); if (isNode(tb.val)) tb.val = this.compared(tb.val as AstNode, types![i]![1], types![i]![0], comparison); });
+    if (rights.some((r, i) => r !== null && r !== refs[i])) b.subselect = wrap(rights.map((r, i) => r ?? column(i)));
+    return null;
+  }
+  private sublinkOutputs = 0;
+
+  /**
+   * A ROW COMPARED BY AN ORDERING OPERATOR WITH ANY / ALL OF A SUBQUERY, OR BY <> WITH ANY, AS POSTGRES COMPARES IT (PR
+   * 674 class round r3): each output row's comparison is Postgres's row comparison, its pairs read left to right, the
+   * first pair holding a NULL making it NULL and the first unequal pair deciding it (all equal: true for <= and >=);
+   * for <>, any pair unequal and neither NULL is true, else a NULL is NULL. The engine compares a
+   * row as a struct, a NULL member ordered rather than NULL. The subquery's rows are read as ONE list of their written
+   * outputs (`list(ROW(…))`), and each is compared OUTSIDE the subquery, by a lambda over the list, with the test as the
+   * outer query reads it: a test column read inside the subquery is an outer reference, which the engine binds to the
+   * select list's alias of a grouped column and refuses (42803). Each row's answer is 2 (true), 1 (NULL) or 0 (false),
+   * and ANY is the greatest of them (none, a NULL list: false), ALL the least (none: true); each pair's operands
+   * written by `compared`, the test's copied for each use.
+   */
+  private rowQuantified(name: string, all: boolean, lefts: AstNode[], refs: AstNode[], pairs: Array<[number | null, number | null]>, wrap: (targets: AstNode[]) => AstNode): AstNode {
+    // (all pairs equal: true for <= and >=, false for <, > and <>)
+    const strict = name === "<" || name === ">" || name === "<>";
+    const less = name === "<" || name === "<=" ? "<" : ">";
+    const listed = { SubLink: { subLinkType: "EXPR_SUBLINK", subselect: wrap([fn("list", [row(refs.map((r, i) => this.compared(r, pairs[i]![1], pairs[i]![0], true)))])]) } };
+    // (a lambda's parameter, the rewrite's own name: never the cells' prefix, which a GROUP BY reads per group)
+    const param = `__mason_r${this.sublinkOutputs++}`;
+    const arms: Array<[AstNode, AstNode]> = [];
+    const left = (i: number): AstNode => this.compared(this.clone(lefts[i]!), pairs[i]![0], pairs[i]![1], true);
+    const right = (i: number): AstNode => fn("struct_extract", [{ ColumnRef: { fields: [S(param)] } }, intConst(i + 1)]);
+    if (name === "<>") {
+      // Postgres's row <>: any pair unequal (neither NULL) is true, else any NULL is NULL, else false
+      lefts.forEach((_, i) => arms.push([op("<>", left(i), right(i)), intConst(2)]));
+      arms.push([or(lefts.flatMap((_, i) => [isNull(left(i)), isNull(right(i))])), intConst(1)]);
+    } else lefts.forEach((_, i) => {
+      arms.push([or([isNull(left(i)), isNull(right(i))]), intConst(1)]);
+      arms.push([op("<>", left(i), right(i)), caseWhen([[op(less, left(i), right(i)), intConst(2)]], intConst(0))]);
+    });
+    const each = fn("list_transform", [listed, op("->", { ColumnRef: { fields: [S(param)] } }, caseWhen(arms, intConst(strict ? 0 : 2)))]);
+    const answers: Array<[number, AstNode]> = all ? [[0, boolConst(false)], [1, nullConst()]] : [[2, boolConst(true)], [1, nullConst()]];
+    return { CaseExpr: { arg: fn(all ? "list_min" : "list_max", [each]), args: answers.map(([v, r]) => ({ CaseWhen: { expr: intConst(v), result: r } })), defresult: boolConst(all) } };
   }
 
   private rowCompareAt(first: AstNode): Typed | null {
@@ -4786,7 +4891,8 @@ class Rewriter {
     // each operand as the type of the operator Postgres chose (`real / smallint` is float8's division, `real = 0.1`
     // float8's comparison): DuckDB would compute in its own common type (single precision, for those)
     // (the one writer of a comparison's operands as Postgres resolved it, `compared`: a SubLink's too)
-    const both = comparison && l !== undefined && r !== undefined;
+    // (rtrim of both decided by the argument types alone: every operator over two char(n) ignores their trailing blanks)
+    const both = l !== undefined && r !== undefined;
     if (l !== undefined) b.lexpr = this.compared(l, a0, a1, both);
     if (r !== undefined) b.rexpr = this.compared(r, l === undefined ? a0 : a1, a0, both);
     if (comparison && b.lexpr !== undefined) this.comparable(b.lexpr as AstNode, `comparing (${name})`);

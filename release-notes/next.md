@@ -203,6 +203,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   week of year (`ceil(… / 7.0)`), its numeric bins (`floor(x / 12.5) * 12.5`) and Grafana's `$__timeGroup` had become
   about 3x slower when their answers were made exact, and the largest tables ran past the statement timeout (57014).
   The answers stay exact. Nothing to do on upgrade.
+- **A `char(n)` compared with a subquery answers as Postgres does.** `d IN (SELECT …)`, `= ANY` and `<> ALL` ignored
+  no trailing blanks when the subquery was a `VALUES`, a `UNION`, a `*`, `TABLE` or a `WITH` query, or mixed a
+  `char(n)` with a `text` (`CASE`, `NULLIF`, a `VALUES` with a text row), so `'ab'` did not match `'ab  '`; a `CASE`
+  or `NULLIF` of a `char(n)` and a `text` kept the padding outside a subquery too. A row compared by `<`, `<=`, `>`,
+  `>=` with `ANY` or `ALL` of a subquery, and by `<>` with `ANY`, answered true or false where a member was NULL and
+  Postgres answers NULL; beside a `GROUP BY` these were refused (42803). Nothing to do on upgrade.
 - **A small statement no longer waits tens of seconds beside a heavy one**: a statement that computes something per row
   (`to_char`, a numeric bin, jsonb `@>`) held every other session, up to 57 s on one deployment. A small statement now
   answers in under about a second or two.

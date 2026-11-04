@@ -166,6 +166,16 @@ export interface Typed {
    *  <timetz>` whose every WHEN casts it …), the ONE fact src/duck/rewrite.ts `coerceImplicit` reads (issue 167). Absent
    *  on everything else */
   implicitTimetz?: true;
+  /** Postgres wrapped THIS char(n) expression in its implicit cast to text or varchar (a FUNCEXPR of text(bpchar),
+   *  funcformat COERCE_IMPLICIT_CAST: the value without its trailing blanks), which has no offset of its own: a char(n)
+   *  beside a text (an operator's or a function's argument, a CASE or NULLIF arm, a VALUES row of a text column …),
+   *  the type it was cast to; src/duck/rewrite.ts `coerceImplicit` writes it (PR 674 class round r3). Absent on
+   *  everything else */
+  implicitText?: number;
+  /** an OPEXPR's arguments' and a ROWCOMPAREEXPR's right arguments' subquery outputs (PARAM_SUBLINK, beneath any
+   *  coercion), in order, each its own type as the subquery's analysis gave it; null where the argument holds none. The
+   *  type of a SubLink's output column whatever the subquery's form (a set operation, VALUES, a *, TABLE) */
+  params?: Array<{ type: number; typmod: number } | null>;
 }
 
 /**
@@ -389,6 +399,8 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
   const out = new Map<number, Typed[]>();
   // the arguments Postgres wrapped in its implicit time→timetz cast (`Typed.implicitTimetz`)
   const asTimetz = new WeakSet<TreeNode>();
+  // the char(n) arguments Postgres wrapped in its implicit cast to text or varchar (`Typed.implicitText`)
+  const asText = new WeakMap<TreeNode, number>();
   // the range tables of the queries around the node being visited, innermost last
   const rtables: TreeNode[][] = [];
   const visit = (v: TreeValue): void => {
@@ -410,16 +422,52 @@ export function typesByLocation(tree: TreeValue): Map<number, Typed[]> {
     const t = exprType(v);
     const wrapped = implicitTimetzArg(v);
     if (wrapped !== null) asTimetz.add(wrapped);
+    const trimmed = implicitTextArg(v);
+    if (trimmed !== null) asText.set(trimmed, exprType(v)!.type);
     if (loc !== null && loc >= 0 && t !== null) {
       const typed = typedOf(v, t, rtables);
       if (asTimetz.has(v)) typed.implicitTimetz = true;
+      const text = asText.get(v);
+      if (text !== undefined) typed.implicitText = text;
       const list = out.get(loc);
       if (list) list.push(typed); else out.set(loc, [typed]);
+    }
+    // a row compared with a subquery's rows is found at its SubLink's offset too: a grouped column's Var has none
+    // (PR 674 class round r3: `(id, a) < ANY (…) … GROUP BY id` placed nothing at its first column)
+    const test = v._node === "SUBLINK" && isNode(v.testexpr ?? null) ? v.testexpr as TreeNode : null;
+    const at = num(v.location);
+    if (test !== null && test._node === "ROWCOMPAREEXPR" && at !== null && at >= 0) {
+      const typed = typedOf(test, { type: BOOL, typmod: -1 }, rtables);
+      const list = out.get(at);
+      if (list) list.push(typed); else out.set(at, [typed]);
     }
     for (const [k, x] of Object.entries(v)) if (k !== "_node") visit(x);
   };
   visit(tree);
   return out;
+}
+
+/** the argument of Postgres's IMPLICIT cast of a char(n) to a text or a varchar (a FUNCEXPR whose one argument is a
+ *  bpchar and whose result a text or a varchar, COERCE_IMPLICIT_CAST: text(bpchar), which drops the trailing blanks),
+ *  or null for any other node */
+function implicitTextArg(v: TreeNode): TreeNode | null {
+  if (v._node !== "FUNCEXPR" || num(v.funcformat ?? null) !== 2) return null;
+  const to = num(v.funcresulttype ?? null);
+  if (to !== 25 && to !== 1043) return null;
+  const args = argsOf(v).filter(isNode);
+  const a = args[0];
+  return args.length === 1 && a !== undefined && a._node !== "CASETESTEXPR" && exprType(a)?.type === 1042 ? a : null;
+}
+
+/** a SubLink's output column (PARAM_SUBLINK) an argument holds, beneath any coercion, its type as the subquery gave it */
+function sublinkParamOf(v: TreeValue): { type: number; typmod: number } | null {
+  if (!isNode(v)) return null;
+  if (v._node === "PARAM") return num(v.paramkind ?? null) === 2 ? exprType(v) : null;
+  if (v._node === "FUNCEXPR" || v._node === "RELABELTYPE" || v._node === "COERCEVIAIO") {
+    const args = v._node === "FUNCEXPR" ? argsOf(v).filter(isNode) : isNode(v.arg ?? null) ? [v.arg as TreeNode] : [];
+    return args.length >= 1 ? sublinkParamOf(args[0]!) : null;
+  }
+  return null;
 }
 
 /** the argument of Postgres's IMPLICIT time→timetz cast (FUNCEXPR of time_timetz, function 2047, COERCE_IMPLICIT_CAST),
@@ -481,6 +529,9 @@ function typedOf(v: TreeNode, t: { type: number; typmod: number }, rtables: Tree
   // a row comparison compares each column under its own collation (RowCompareExpr's inputcollids)
   if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.inputcollids)) typed.inputCollations = v.inputcollids.filter((x) => x !== "o").map((x) => typeof x === "string" ? num(x) ?? 0 : 0);
   if (v._node === "ROWCOMPAREEXPR" && Array.isArray(v.largs)) typed.inputTypes = v.largs.filter(isNode).map((a) => exprType(a)?.type ?? 0);
+  // a SubLink's output columns, as the operator reads them (PR 674 class round r3)
+  const outputs = v._node === "OPEXPR" ? argsOf(v) : v._node === "ROWCOMPAREEXPR" && Array.isArray(v.rargs) ? v.rargs : [];
+  if (outputs.some((a) => sublinkParamOf(a) !== null)) typed.params = outputs.map(sublinkParamOf);
   if (v._node === "AGGREF" && Array.isArray(v.aggdirectargs)) typed.directArgs = v.aggdirectargs.filter(isNode).map((a) => exprType(a) ?? { type: 0, typmod: -1 });
   if (v._node === "AGGREF") typed.keys = keysOf(v.args, v.aggorder, v.aggdistinct, []);
   // a GROUPING(…): its query level and the GROUP BY entries its arguments read; a window function: its WINDOW clause
