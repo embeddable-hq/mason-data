@@ -630,6 +630,39 @@ test("mason user --replica, in every state without a run, as a person and with -
   assert.deepEqual(problems, []);
 });
 
+test("mason replica and mason token, in every state without a run, as a person and with --json: nothing is sent and nothing of the project written — create says the state, the url: written in the file or the login, every other line the login", { timeout: 300_000 }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "mason-matrix-home-"));
+  made.push(home);
+  const env = matrixEnv({ HOME: home, PATH: path.dirname(process.execPath) });
+  const lines: Array<[string, readonly string[]]> = ["replica", "token"].flatMap((cmd) => [MATRIX_ARGS[cmd]!, ...(MATRIX_EXTRA_ARGS[cmd] ?? [])].map((l): [string, readonly string[]] => [cmd, l]));
+  const jobs: Array<() => Promise<{ state: (typeof STATES)[number]; cmd: string; line: readonly string[]; json: boolean; a: Answer; changed: boolean }>> = [];
+  for (const state of STATES) for (const [cmd, line] of lines) for (const json of [false, true]) {
+    jobs.push(async () => {
+      const root = folderIn(state);
+      const snapshot = (): string => fs.existsSync(path.join(root, "mason")) ? fs.readdirSync(root, { recursive: true }).map(String).sort().join("\n") : "";
+      const before = snapshot();
+      const a = await runMason(root, [cmd, ...line, ...(json ? ["--json"] : [])], env, 30_000);
+      return { state, cmd, line, json, a, changed: snapshot() !== before };
+    });
+  }
+  const answers = await pool(jobs, Math.max(2, Math.min(8, os.availableParallelism())));
+  assert.equal(answers.length, STATES.length * lines.length * 2);
+  const problems = answers.flatMap(({ state, cmd, line, json, a, changed }) => {
+    const said = json ? a.stdout : a.stderr;
+    const create = cmd === "replica" && line[0] === "create";
+    // what create meets first: the state's own refusal, else the sources file's literal url (every state's but the demo's), else the login
+    const want = !create ? "this machine is not signed in to http://127.0.0.1:1" : state === "no_project" ? "no Mason project here or above"
+      : state === "broken" ? ".mason/config.json" : state === "demo" ? "this machine is not signed in to http://127.0.0.1:1" : "mason/sources/shop.yml: url: is written in the file";
+    const p = answerProblems(cmd, a, json, create && state === "no_project" ? ["no_project"] : create && state === "broken" ? ["bad_config"] : ["refused"]);
+    if (a.code !== 1) p.push(`mason ${a.argv.join(" ")}: exit ${a.code}, where 1 is owed`);
+    if (!said.includes(want)) p.push(`mason ${a.argv.join(" ")}: not ${JSON.stringify(want)}:\n${a.stdout}${a.stderr}`);
+    if (/postgres:\/\/mason:secret@/.test(a.stdout + a.stderr)) p.push(`mason ${a.argv.join(" ")}: printed the sources file's URL`);
+    if (changed) p.push(`mason ${a.argv.join(" ")}: changed the project's folder`);
+    return p.map((x) => `[${state}] ${x}`);
+  });
+  assert.deepEqual(problems, []);
+});
+
 test("the matrix's own check: a source key holding a table, or a file's path, is caught; the database's object is not", () => {
   assert.deepEqual(sourcesNotADatabase(JSON.stringify({ tables: [{ source: "public.orders" }], project: { source: "/p/mason/sources/shop.yml" } })),
     ['tables[0].source = "public.orders"', 'project.source = "/p/mason/sources/shop.yml"']);

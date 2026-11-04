@@ -327,6 +327,12 @@ const JSONB_SHAPES: Shape[] = [
   { name: "jsonb under libc: GROUP BY a jsonb, the C key stored", sql: JSONB.grouped, on: "libc, the key stored" },
   { name: "jsonb under libc: SELECT DISTINCT a jsonb, the C key stored", sql: JSONB.distinct, on: "libc, the key stored" },
   { name: "jsonb under libc: WHERE jsonb = a document, the C key stored", sql: JSONB.equal, on: "libc, the key stored" },
+  // issue 666: a text's top N and its min / max under a libc order key their candidates alone (src/duck/libc-bound.ts):
+  // the libc key's function under the bounds' filter or CASE, beside the threshold's own scan and top N, which call
+  // nothing; a plan that calls it over the whole scan again changes the entry
+  { name: "text under libc: a table's page, ORDER BY a text LIMIT 50, the key for the candidates alone", sql: "SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", on: "libc" },
+  { name: "text under libc: SELECT * ORDER BY a text DESC LIMIT 50, the key for the candidates alone", sql: "SELECT * FROM orders ORDER BY status DESC LIMIT 50", on: "libc" },
+  { name: "text under libc: min and max of a text, the key for the candidates alone", sql: "SELECT min(status), max(status) FROM orders", on: "libc" },
 ];
 
 /**
@@ -832,6 +838,20 @@ test("issue 665: a grouped numeric quotient hands the Mason functions one row a 
     t.diagnostic(`${name}: ${rows.map(([k, n]) => `${k} ${n}`).join(", ")}; ${total} rows of ${ORDERS}`);
     assert.ok(total >= ORDERS, `${name}: the Mason functions were handed ${total} rows of the ${ORDERS} orders: no key a row — a native plan? Read it, and tighten this invariant`);
     assert.ok(total <= ORDERS + 10_000, `${name}: the Mason functions were handed ${total} rows for the ${ORDERS} orders (${rows.map(([k, n]) => `${k} ${n}`).join(", ")}): more than one call a row`);
+  }
+});
+
+// issue 666: a text's top N and min / max under a libc order hand the libc key the rows its native bounds cannot rule
+// out, never every row. The notes are 50,000 values over the 750,000 rows that hold one: a page and a min or max are a
+// value's few rows each. The statuses are six values: a sixth of the rows tie on the least (all of them candidates, as
+// a tie is broken by the key), never the million
+test("a text's top N and min / max under a libc order hand the libc key their candidates, never every row", async (t) => {
+  for (const [sql, most] of [["SELECT id, notes FROM orders ORDER BY notes LIMIT 50", 1_000], ["SELECT id FROM orders ORDER BY notes DESC NULLS LAST, id LIMIT 2000", 40_000],
+    ["SELECT min(notes), max(notes) FROM orders", 1_000], ["SELECT min(status), max(status) FROM orders", ORDERS / 3], ["SELECT o.id, o.status, o.amount FROM orders o ORDER BY o.status LIMIT 50", ORDERS / 5]] as const) {
+    const keyed = (await rowsOf(sql, "libc")).get("__mason_libc_key") ?? 0;
+    t.diagnostic(`${sql}: __mason_libc_key handed ${keyed} rows of ${ORDERS}`);
+    assert.ok(keyed > 0, `${sql}: the libc key was handed no row — the function counter or the statement changed`);
+    assert.ok(keyed <= most, `${sql}: the libc key was handed ${keyed} rows, more than ${most}: keyed per row, not for its candidates`);
   }
 });
 

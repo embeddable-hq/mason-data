@@ -9,6 +9,7 @@ paths:
   - "src/duck/jsonb-order.ts"
   - "src/duck/jsonb.ts"
   - "src/duck/late.ts"
+  - "src/duck/libc-bound.ts"
   - "src/duck/libc-order.ts"
   - "src/duck/pg-eval-worker.ts"
   - "src/duck/pg-eval.ts"
@@ -414,6 +415,20 @@ paths:
   `libc-locale-unread` where ASCII or Latin does. No ICU in it: a new case the read does not follow is a refusal by
   name, a decided difference, or a read of it. `tests/duck-libc-order.test.ts` holds the key's mechanics,
   `tests/integration/duck-libc-read.itest.ts` the order against the source, the oracle's `every value` the statements.
+- **A libc key is computed for a top N's and a min / max's candidates alone** (`src/duck/libc-bound.ts`, issue 666: the
+  JavaScript key on every row was 10-15 s over 5 M rows, past the timeout at 93 M). Each value's two NATIVE bounds
+  (`regexp_extract`, `lower`, `regexp_replace`) are written from the `LibcOrder` read for that collcollate, never a
+  table by hand: an order whose printable ASCII's folded bytes do not order its weights has none. Their marks (the
+  text's end, below and above every weight) are written after the weights and never read from the value: whether it
+  ended in the run is decided from the value itself, since a value may hold any control character (PR 675). The proof obligation,
+  hi(a) < lo(b) implies libcKey(a) < libcKey(b) at the first level, lo <= hi, equal strings equal bounds, is held over the
+  ENGINE's expressions by `holdBounds` (tests/libc-order-fixture.ts): the hand order's `l·`, U+212A, U+0130 and marks in
+  `libc bound:`, the source's order in the read test's `bound`. The threshold's subquery clones the SELECT's one FROM
+  item and WHERE, so it holds only where they read the same rows twice: nothing volatile, no window or set-returning
+  list, no aggregate but the min / max's own, no LIMIT, DISTINCT ON or sample inside but a role's barrier; a cloned
+  walled read is counted as a wall. Anything else is sent as written (a join, GROUP BY, DISTINCT, WITH TIES, a set
+  operation, a window, FILTER). Detector: `libc top N:` (tests/duck-wire.test.ts) and the `text under libc:` plan
+  entries and rows test (tests/duck-plans.test.ts), the oracle's `text top N:` and `text min/max:`.
 - **A tie under ICU is two strings, ordered by their bytes** (U+FE0F is ignorable there): every order under ICU ends in
   the bytes, `sortKeys`, `icuKey`, `textMinMax`.
 - **A refusal raised at a row never quotes the row** (issue 128): it reaches any user, in a tool's error box and the
@@ -583,3 +598,13 @@ again at every round. Its Learn step adds to this list; each bullet names the PR
   answers the picked row's numeric (OID 1700, `16.000000000000000`, `0.75625000000000000000`). The decision: order by
   the exact key, answer the picked row's value, never the key, while the readers that only order or test nullness stay
   answered (`refusal-wider-than-the-wrong-answer` above); `order-key-bytes-as-result` (PR 506; issues 486, 538).
+- A value holding the very byte a bound, key or run uses to mark its own end, at the head and the base over a synthetic
+  `t (id int PRIMARY KEY, a int, b text)` under a libc collation, with rows `'abc'`, `'ab' || chr(2) || 'cd'`,
+  `chr(2) || 'zz'`, `'a' || chr(2) || 'z'` beside `'aa'`, `'aaz'`, `'b'`, `'zzz'`: `SELECT id, b FROM t ORDER BY b, id
+  LIMIT 2`, `ORDER BY b DESC, id LIMIT 5`, `ORDER BY b DESC NULLS LAST`, `ORDER BY b || 'x'`, an alias, a CTE, `b IN
+  (SELECT b … ORDER BY b DESC LIMIT 5)`, `SELECT min(b), max(b) FROM t`, a correlated `(SELECT min(b) …)`; and the same
+  with chr(1) and chr(127): a control character glibc ignores at the first levels is read as the end-of-text mark, so
+  the row sorts by its prefix alone, is dropped from a DESC top N, or swaps min and max, silently. The decision: no
+  in-band sentinel; the end of a value is known from the value itself (the run's length against the text's, or an
+  anchored pattern), and the property test's strings are drawn from a pool holding every byte the bounds use;
+  `sentinel-byte-the-data-can-hold` (PR 675).

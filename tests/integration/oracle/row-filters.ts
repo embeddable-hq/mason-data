@@ -153,6 +153,11 @@ export const ROW_SHAPES: ReadonlyArray<{ name: string; sql: string; values?: str
   { name: "a join of three, items through orders", sql: "SELECT o.status, count(i.id), sum(i.quantity) FROM shop.order_items i JOIN shop.orders o ON o.id = i.order_id GROUP BY o.status ORDER BY o.status NULLS FIRST" },
   { name: "a * sorted by the number of a text column, filtered", sql: "SELECT * FROM shop.customers ORDER BY 4 NULLS FIRST, 1" },
   { name: "a * sorted by the bare name of a text column, filtered, under a LIMIT", sql: "SELECT * FROM shop.customers ORDER BY name NULLS FIRST, id LIMIT 3" },
+  // issue 666: a text's top N and min / max keyed for their candidates alone (src/duck/libc-bound.ts), the threshold read
+  // through the same filter: one read of the hidden rows ('customer 1' the least, 'customer 9' the greatest) drops rows
+  { name: "a top N of a text column, filtered", sql: "SELECT id, name FROM shop.customers ORDER BY name LIMIT 5" },
+  { name: "a top N of a text column, filtered, descending", sql: "SELECT id, name FROM shop.customers WHERE id > 2 ORDER BY name DESC LIMIT 5" },
+  { name: "min and max of a text column, filtered", sql: "SELECT min(name), max(name) FROM shop.customers" },
   { name: "a top N over a join of two filtered tables", sql: "SELECT o.*, c.* FROM shop.orders o LEFT JOIN shop.customers c ON c.id = o.customer_id ORDER BY o.id DESC LIMIT 5 OFFSET 1" },
   { name: "a top N over joins, items through orders", sql: "SELECT o.id, i.id, i.quantity FROM shop.orders o JOIN shop.order_items i ON i.order_id = o.id ORDER BY i.id DESC LIMIT 3" },
   { name: "IN a subquery", sql: "SELECT id FROM shop.customers WHERE id IN (SELECT customer_id FROM shop.orders WHERE status = 'paid') ORDER BY id" },

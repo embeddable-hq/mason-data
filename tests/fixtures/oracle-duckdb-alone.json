@@ -1,19 +1,19 @@
 {
-  "statements": 7128,
+  "statements": 7181,
   "mason": {
-    "exact": 6612,
+    "exact": 6665,
     "decided": 48,
     "refused": 468,
     "differs": 0
   },
   "duckdb": {
-    "exact": 1827,
-    "name": 1301,
-    "refused": 1614,
-    "value": 937,
-    "rows": 599,
-    "text": 231,
-    "other": 619
+    "exact": 1831,
+    "name": 1300,
+    "refused": 1617,
+    "value": 991,
+    "rows": 600,
+    "text": 224,
+    "other": 618
   },
   "gaps": {
     "copyPhase": {
@@ -95,7 +95,7 @@
       }
     },
     "everyAsk": {
-      "asked": 97823,
+      "asked": 98738,
       "refused": {
         "array-lower-bound": { "planted": 0, "natural": 2 },
         "array-remove-type": { "planted": 3, "natural": 0 },
@@ -129,7 +129,7 @@
         "numeric-exact-sum": { "planted": 3, "natural": 8 },
         "numeric-math": { "planted": 3, "natural": 0 },
         "numeric-ordered-set": { "planted": 3, "natural": 0 },
-        "numeric-quotient-equality": { "planted": 9, "natural": 44 },
+        "numeric-quotient-equality": { "planted": 9, "natural": 40 },
         "numeric-special": { "planted": 0, "natural": 6 },
         "quote-ident": { "planted": 0, "natural": 9 },
         "regexp-flags": { "planted": 3, "natural": 0 },
@@ -142,7 +142,7 @@
         "similar-to-forms": { "planted": 3, "natural": 0 },
         "star-join-twin": { "planted": 3, "natural": 0 },
         "sum-real": { "planted": 0, "natural": 9 },
-        "text-array-order": { "planted": 0, "natural": 49 },
+        "text-array-order": { "planted": 0, "natural": 50 },
         "time-date-trunc": { "planted": 0, "natural": 36 },
         "time-timetz-coerced": { "planted": 9, "natural": 0 },
         "to-char-patterns": { "planted": 0, "natural": 6 },

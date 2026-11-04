@@ -754,6 +754,11 @@ Medium, 2 Low, none Critical) and 29 features.
 Severity shows at the bottom. An issue with neither label is seen only by reading the list. There is no automatic
 check. A script that lists an open issue with neither label, or a bug with no Severity, would be one; it is not built.
 
+**Where a filed issue goes (Tom, 2026-11-03, issue 667).** "Only critical ones should go straight to up next": a run's
+File stage labels each new issue and judges a bug's Severity, and pr-loop-slim.js alone decides its column (a Critical
+bug to Up next, every other new issue to Backlog) and renders the `board` stage's commands; the column a run reports is
+read from what that stage says it ran, so a move that failed is said with the command to run, never assumed done.
+
 ### The plan fixture (2026-10-28)
 
 **Decision.** The plans DuckDB runs for the shapes BI tools send are a golden fixture, like `docs/SQL-SUPPORT.md`:
@@ -2753,6 +2758,69 @@ placed among them by the same binary search, but through a shifted string for ea
 
 ICU had the same class in another place: U+FE0F is ignorable there, so `x` and `x` + U+FE0F tied, and a tie is two
 strings Postgres orders by their bytes. A sort under ICU now ends in the bytes, and `<`, GREATEST, min and max compare ICU's key and the bytes.
+
+### The libc key for the candidates alone (2026-11-03, issue 666)
+
+The key above is one JavaScript call a row, on the executor's one thread: `min(s), max(s)` of a text under en_US.utf8
+took 13.7 s over 0.9 M rows of a real database where Postgres took 0.33 s, and a table preview (`ORDER BY s LIMIT 50`)
+over 93 M rows hit the 300 s timeout. A top N and a min or max need the key for a few rows, so each row first gets two
+native bounds of its key, `lo(s)` and `hi(s)`, texts the engine compares by their bytes, and the key is computed only for
+the rows the bounds cannot rule out (Postgres's abbreviated keys, made exact by bounds). How they are built from the
+order read from the source, why `hi(a) < lo(b)` orders `a` before `b`, and which statements are bounded, is the header
+of `src/duck/libc-bound.ts`; the property is held over the engine's own expressions, on a hand order with contractions,
+expansions and ignorables (`tests/duck-libc-order.test.ts`) and on the real en_US.utf8 order read from Postgres 18
+(`tests/integration/duck-libc-read.itest.ts`).
+
+The decisions, each measured or tested:
+- **The bounds are native and cheap, or nothing is gained.** The first form wrote each weight by `translate` and matched
+  the run with a counted regular expression: 1 µs a row, and min/max over 5 M rows took 18.5 s, slower than main's 11.9.
+  `left`, one plain `regexp_extract`, `lower` and one `regexp_replace` cost 0.05 µs a row (271 ms over 5 M, against
+  `translate`'s 4,785 ms). That needs the order's folded characters' bytes to order as their weights do, which en_US's
+  printable ASCII does (`$` < digits < letters, `A` = `a`); an order whose do not gets no bounds (`boundOf` is null), and
+  its statements run as written.
+- **The run is 48 characters** (`BOUND_CHARS`). Shorter than the prefix a column's values share, it tells no row apart:
+  over 5 M URLs of one 25-character prefix (`https://example.com/item/<n>`), a run of 16 or 24 left all 5 M rows
+  candidates of `min` and of a `LIMIT 50`, and 32, 48 or 96 left 1 and 50. The bounds' time hardly moves with it (both
+  bounds over the 5 M rows: 1.9 to 2.5 s at every length, measured beside other gates at a load of 60 on ten cores, so
+  within noise); 48 leaves room for a longer shared prefix.
+- **The threshold reads the statement's own rows**: its FROM item and WHERE cloned, a role's walled read included and
+  counted as one more wall (tests/duck-roles-barrier-wire.test.ts), and only where reading them twice reads the same
+  rows (nothing volatile, no window or set-returning select list, no LIMIT or sample inside). Everything else, a join,
+  a set operation, GROUP BY, DISTINCT, WITH TIES, a grouped or FILTER'd min, runs as written and as fast as before.
+- **NULL rows are never candidates** unless the sort puts them first: a sentinel in the threshold's `count(*) >= n`
+  case and the row's `coalesce` keep them out (61,490 NULL rows were keyed for a `LIMIT 50` before it).
+
+Measured on a laptop, Postgres 18 in a container, a table of `(id bigint, s text, u text)` where `s` is two words and a
+number (`Kilo apple, 4711`, a NULL in a thousand) and `u` a URL of one shared prefix; Mason's time is the best of three
+over the wire, the source's beside it:
+
+| statement | 5 M rows, main | 5 M rows, this change | 5 M, Postgres |
+|---|---|---|---|
+| `min(s), max(s)` | 11.9 s | 1.16 s | 0.16 s |
+| `* ORDER BY s LIMIT 50` | 11.7 s | 0.60 s | 0.11 s |
+| Metabase's preview, `ORDER BY s ASC LIMIT 2000` | 10.2 s | 0.62 s | 0.18 s |
+| the same, `DESC` | 10.4 s | 0.66 s | 0.17 s |
+| `ORDER BY s, id LIMIT 50 OFFSET 1000` | 10.2 s | 0.63 s | 0.17 s |
+| `min(u), max(u)`, the shared prefix | 15.1 s | 1.86 s | 0.65 s |
+| `* ORDER BY u LIMIT 50` | 13.9 s | 0.88 s | 0.39 s |
+| `ORDER BY u DESC LIMIT 2000` | 13.7 s | 0.97 s | 1.91 s |
+
+Over 20 M rows of the same shape, with the laptop shared by other sessions' gates (load 7 at the start of the head's
+run and 35 at its end; main's ran at 90 and 10 to 30):
+
+| statement | 20 M rows, main | 20 M rows, this change | 20 M, Postgres |
+|---|---|---|---|
+| `min(s), max(s)` | past the 300 s timeout | 5.2 s | 0.54 s |
+| `id, s ORDER BY s LIMIT 50` | 153 s (past 300 s at load 90) | 2.4 s | 0.57 s |
+| Metabase's preview, `ASC LIMIT 2000` | past the 300 s timeout | 2.7 s | 0.61 s |
+| the same, `DESC` | 115 s | 2.3 s | 0.44 s |
+| `* ORDER BY u LIMIT 50` | 124 s | 5.3 s | 1.80 s |
+| `min(u), max(u)` | not run | 7.2 s | 2.90 s |
+
+93 M rows were not measured. Extrapolated linearly from 20 M, the change's statements take 10 to 34 s there, under the
+300 s timeout that main's met. What is left is the bounds, one native pass over every row: the key itself is computed
+for 1 to 81,920 rows of 1 M (tests/duck-plans.test.ts), never for every row. A `DESC` sort whose NULLs come first keys
+every NULL row, as they are all candidates.
 
 ## Measurements
 

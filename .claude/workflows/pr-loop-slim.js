@@ -13,7 +13,7 @@ export const meta = {
     { title: 'Learn', detail: "each class met becomes a review probe in its rules file, one docs-only commit", model: 'opus' },
     { title: 'CI', detail: 'bounded wait on gh pr checks, with mergeable read first on every pass (GitHub runs no CI on a conflicting PR, so a conflict is its own verdict), beside each review and after the last; a CI fix gets a narrow re-check', model: 'sonnet' },
     { title: 'Merge', detail: 'when CI reads the PR as conflicting, a fresh agent merges the base into the branch in a worktree of its own by scripts/merge-base.ts (release-notes/next.md alone, an insertion on both sides, keeps both), pushes, and CI runs again on the new head; any other conflict stops the run naming its files', model: 'sonnet' },
-    { title: 'File', detail: "the base's findings and this PR's non-blocking ones, one issue per class, at every exit", model: 'sonnet' },
+    { title: 'File', detail: "the base's findings and this PR's non-blocking ones, one issue per class, at every exit, each labelled bug or enhancement and a bug's Severity judged; then a board stage puts a Critical bug in Up next and every other filed issue in Backlog, the column read from its return", model: 'sonnet' },
     { title: 'Record', detail: 'the Review record comment, with its machine-readable block, at every exit with a PR', model: 'sonnet' },
   ],
 }
@@ -59,7 +59,9 @@ export const meta = {
 //   port) and removes it when done. No prompt prints the URL.
 // Every exit returns one shape, result(status), the split's included (pr and head null):
 //   { status, pr, head, rounds, fromBase, deferred, filed, classes, designRounds, probeRounds }: designRounds the class
-//   rounds' design reviews ({ round, label, sound, findings }), probeRounds always [].
+//   rounds' design reviews ({ round, label, sound, findings }), probeRounds always []; each filed entry is the File
+//   stage's { classKey, source, issue, action, kind, severity } with its column ('Up next', 'Backlog' or null), read
+//   from the board stage's return (issue 667).
 // The ROUND BOUND (issue 649): a run that reaches MAX_ROUNDS with a blocking finding open, or with a head no review
 // re-checked, stops with a status that begins `shrink:`, as a conflict's begins `conflict:`, so a skill branches on its
 // first word: its default next step is to narrow the PR to its safe subset, never another round, which only the owner's
@@ -117,6 +119,8 @@ const ON = {
   // a merge of the base is mechanical, so a fresh agent, never the implementer; it writes a commit, so a worktree
   merge: { model: 'sonnet', effort: 'low', isolation: 'worktree' },
   file: { model: 'sonnet', effort: 'medium' },
+  // runs the board commands rendered for the issues the File stage filed: mechanical, so Sonnet at low effort
+  board: { model: 'sonnet', effort: 'low' },
   record: { model: 'sonnet', effort: 'low' },
   learnCheck: { model: 'sonnet', effort: 'low' },
 }
@@ -382,11 +386,27 @@ const FINDINGS = { type: 'object', required: ['findings', 'judgedCorrect', 'stat
   changedPaths: { type: 'array', items: { type: 'string' }, description: 'every path git diff --no-renames --name-only printed for the diff read, exactly' },
   checksOnly: { type: 'array', items: { type: 'string' }, description: 'the changed SHARED paths scripts/evidence-owed.ts marked checks and that you judged reach no engine code: each owes checks, not statements; [] when none (a path left out owes statements)' },
 } }
+// A filed issue's board Severity is the File agent's judgement, by CLAUDE.md "What a session finds": only it read the
+// evidence the issue names. The review's severities (wrong-answer, message, ...) are not the board's and never map to it.
+const BOARD_SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
 const FILED = { type: 'object', required: ['issues'], properties: {
-  issues: { type: 'array', items: { type: 'object', required: ['classKey', 'source', 'issue', 'action'], properties: {
+  issues: { type: 'array', items: { type: 'object', required: ['classKey', 'source', 'issue', 'action', 'kind', 'severity'], properties: {
     classKey: { type: 'string' },
     source: { type: 'string', enum: ['base', 'deferred'], description: "'base' for a class the base already has; 'deferred' for this PR's non-blocking findings" },
     issue: { type: 'number' }, action: { type: 'string', enum: ['filed', 'commented'] },
+    kind: { type: 'string', enum: ['bug', 'enhancement'], description: 'the label the issue carries, bug or enhancement, by CLAUDE.md "What a session finds"' },
+    severity: { type: 'string', enum: [...BOARD_SEVERITIES, 'none'], description: 'a bug\'s board Severity by CLAUDE.md "What a session finds" (Critical: a silent wrong answer, data loss or corruption, or a security hole, in a COMMON shape, COMMON only on the evidence the issue names; when unsure between two, the higher); none for an enhancement' },
+  } } },
+} }
+// What the board stage returns: for each issue it was given, the column its status command named and each command's
+// exit code. The column a run reports is read from here, never from the stage returning (issue 667).
+const BOARDED = { type: 'object', required: ['issues'], properties: {
+  issues: { type: 'array', items: { type: 'object', required: ['issue', 'column', 'statusExit'], properties: {
+    issue: { type: 'number' },
+    column: { type: 'string', enum: ['Up next', 'Backlog'], description: 'the column its `board.ts status` command names' },
+    statusExit: { type: 'integer', description: 'the exit code of its `board.ts status` command' },
+    severityExit: { type: 'integer', description: 'the exit code of its `board.ts severity` command; omitted when it was given none' },
+    printed: { type: 'string', description: 'what each command that exited non-zero printed; empty when every one exited 0' },
   } } },
 } }
 const CI = { type: 'object', required: ['state', 'detail'], properties: {
@@ -631,11 +651,50 @@ const byClass = (fs) => {
 const isIssue = (i, source, k) => i.source === source && i.classKey === k && Number.isInteger(i.issue) && i.issue > 0
 const unfiled = (source, fs) => [...new Set(fs.map((f) => f.classKey))].filter((k) => !filed.some((i) => isIssue(i, source, k)))
 const issuesOf = (source, fs) => [...new Set(filed.filter((i) => fs.some((f) => isIssue(i, source, f.classKey))).map((i) => `#${i.issue}`))].join(', ')
+
+// THE COLUMN of an issue the File stage returns (issue 667; Tom, 2026-11-03: "only critical ones should go straight to up
+// next"), decided here and nowhere else: a NEW issue that is a bug of Severity Critical goes to Up next, every other new
+// one (a High, Medium or Low bug, a bug with no Severity, an enhancement whatever its severity) to Backlog; a comment on
+// an existing issue moves nothing, its column staying the owner's (null). It never blocks the PR that found it.
+const columnOf = (i) => (i.action !== 'filed' || !Number.isInteger(i.issue) || i.issue <= 0 ? null
+  : i.kind === 'bug' && i.severity === 'Critical' ? 'Up next' : 'Backlog')
+// a bug's Severity is set on the board only when the File stage judged one of the board's four
+const severityOf = (i) => (i.kind === 'bug' && BOARD_SEVERITIES.includes(i.severity) ? i.severity : null)
+const STATUS_CMD = (n, col) => `node ${REPO}/scripts/board.ts status ${n} "${col}"`
+const SEVERITY_CMD = (n, level) => `node ${REPO}/scripts/board.ts severity ${n} ${level}`
+// the issues to move, one entry an issue number (the first returned wins), each with its column and its severity
+const movesOf = (issues) => {
+  const out = []
+  for (const i of issues) if (columnOf(i) && !out.some((m) => m.issue === i.issue)) out.push({ issue: i.issue, column: columnOf(i), severity: severityOf(i), bug: i.kind === 'bug' })
+  return out
+}
+const boardPrompt = (moves) => `${WHERE}PR ${last ? last.pr : 'none'}'s run filed the issues below. Put each on the Mason work board by running its commands, each ONE plain command, exactly as written, in this order, from any directory, every one even after another fails. Run board.ts from that file, never through \`node <(git show …)\`, which exits 0 having run nothing. Change nothing else: no other card${last ? ` (PR ${last.pr}'s card is moved by its own stages)` : ''}, no issue's text and no label.
+${moves.map((m) => `#${m.issue}:\n${m.severity ? `\`${SEVERITY_CMD(m.issue, m.severity)}\`\n` : ''}\`${STATUS_CMD(m.issue, m.column)}\``).join('\n')}
+Return, for each issue above, the column its status command names, that command's exit code (statusExit), its severity command's exit code (severityExit) when it was given one, and what each command that exited non-zero printed.`
+// The board stage, and each filed issue's column READ from its return: a move it did not report done (the stage
+// failed, the issue missing, another column, a non-zero exit) leaves the column null and says the command to run.
+async function board(issues) {
+  const moves = movesOf(issues)
+  const said = []
+  for (const m of moves) if (m.bug && !m.severity) said.push(`#${m.issue} filed as a bug with no Severity: judge it by CLAUDE.md "What a session finds" and run \`node ${REPO}/scripts/board.ts severity ${m.issue} <Critical|High|Medium|Low>\``)
+  if (!moves.length) return said
+  const b = await agent(boardPrompt(moves), { label: 'board', phase: 'File', ...ON.board, schema: BOARDED })
+  const reported = (n) => (b && Array.isArray(b.issues) ? b.issues.find((x) => x && x.issue === n) : undefined)
+  for (const m of moves) {
+    const rep = reported(m.issue)
+    const moved = !!rep && rep.column === m.column && rep.statusExit === 0
+    for (const i of filed) if (i.issue === m.issue && i.action === 'filed') i.column = moved ? m.column : null
+    if (!moved) said.push(`#${m.issue} NOT moved to ${m.column}: run \`${STATUS_CMD(m.issue, m.column)}\``)
+    else if (m.column === 'Up next') said.push(`#${m.issue} (Critical) moved to Up next`)
+    if (m.severity && !(rep && rep.severityExit === 0)) said.push(`#${m.issue}'s Severity NOT set: run \`${SEVERITY_CMD(m.issue, m.severity)}\``)
+  }
+  return said
+}
 async function finish(status) {
   if (fromBase.length || deferred.length) {
     phase('File')
     const r = await agent(
-      `${WHERE}PR ${last.pr}'s review met findings that are not that PR's to fix. File them as CLAUDE.md "What a session finds" says: ONE issue per class, each first looked for (\`${GH_TEXT('search "<words>"')}\`, an issue it lists read with \`${GH_TEXT('issue <n>')}\`) and, when one already names the class, a comment on it instead. Each issue and comment begins \`${signed(ON.file)}\`, says what was seen (every input with Postgres's answer and Mason's), what is not known, the class and the decision that would make it impossible, and what done looks like. Synthetic tables only. Move no card on the board: PR ${last.pr}'s card is moved by its own stages. There are two kinds, kept apart: never one issue for a class of both, and return each issue with its source.${fromBase.length ? `
+      `${WHERE}PR ${last.pr}'s review met findings that are not that PR's to fix. File them as CLAUDE.md "What a session finds" says: ONE issue per class, each first looked for (\`${GH_TEXT('search "<words>"')}\`, an issue it lists read with \`${GH_TEXT('issue <n>')}\`) and, when one already names the class, a comment on it instead. Each issue and comment begins \`${signed(ON.file)}\`, says what was seen (every input with Postgres's answer and Mason's), what is not known, the class and the decision that would make it impossible, and what done looks like. Synthetic tables only. Label each NEW issue \`bug\` or \`enhancement\`, and judge a bug's board Severity, both by CLAUDE.md "What a session finds": a bug is something Mason does wrong against what it promises or what Postgres does (a broken harness, test or tooling included); a feature is everything else, and an over-refusal of a shape Mason never answered is one. Critical: a silent wrong answer, data loss or corruption, or a security hole, in a COMMON shape; High: a silent wrong answer in a RARE shape, a crash, a hang or a stuck state, or data served staler than Mason reports; Medium: a loud failure instead of an answer, a misleading error, a flaky test, broken tooling or CI; Low: cosmetic. A shape is COMMON only on the evidence the issue names (the recorded corpus or the oracle's BI shapes, a named BI tool, ORM or AI agent that writes it by default, a real deployment that met it); anything else is RARE. When unsure between two, the higher. The severities below (wrong-answer, message, and the rest) are the review's, not the board's, and do not map to it. Return each issue's kind (its label) and severity (none for an enhancement); for a comment on an existing issue, that issue's label and Severity as you read them. Set no Severity and move no card on the board: the stage after you does, from what you return, and PR ${last.pr}'s card is moved by its own stages. There are two kinds, kept apart: never one issue for a class of both, and return each issue with its source.${fromBase.length ? `
 
 ## source 'base': wrong answers origin/${A.base} already gives
 Each issue says it was met in the review of PR ${last.pr} and that the base already gives it.
@@ -646,7 +705,8 @@ Each issue says it was met in PR ${last.pr}'s review (the round named in each), 
 ${byClass(deferred.map((f) => ({ ...f, classWhy: `${f.classWhy} (met in ${f.label})` })))}` : ''}`,
       { label: 'file', phase: 'File', ...ON.file, schema: FILED })
     if (r) {
-      filed.push(...r.issues)
+      // each entry's column is null until the board stage reports its move done (board, below)
+      filed.push(...r.issues.map((i) => ({ ...i, column: null })))
       // "filed" is read from the issues returned, class by class and source by source, never from the call returning:
       // a class with no issue of its own source is said not filed, whatever the agent returned beside it
       const onBase = unfiled('base', fromBase)
@@ -655,8 +715,9 @@ ${byClass(deferred.map((f) => ({ ...f, classWhy: `${f.classWhy} (met in ${f.labe
       if (filedLater.length) status = `${status}; ${filedLater.length} non-blocking finding(s) of this PR filed (${issuesOf('deferred', filedLater)}), not fixed: in deferred`
       if (mineLater.length) status = `${status}; non-blocking class(es) of this PR NOT filed: ${mineLater.join(', ')}: in deferred`
       if (onBase.length) status = `${status}; the base's class(es) NOT filed: ${onBase.join(', ')}: in fromBase`
+      for (const s of await board(filed)) status = `${status}; ${s}`
     } else status = `${status}; filing failed: the findings are in fromBase and deferred`
-    log(`filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.source}, ${i.action})`).join(', ') || 'nothing'}`)
+    log(`filed: ${filed.map((i) => `#${i.issue} (${i.classKey}, ${i.source}, ${i.action}, ${i.column || (columnOf(i) ? `NOT moved to ${columnOf(i)}` : 'its column the owner\'s')})`).join(', ') || 'nothing'}`)
   }
   if (notes.length) status = `${status}; ${notes.join('; ')}`
   if (last) {

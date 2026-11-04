@@ -251,11 +251,13 @@ const cols = (ch: string): number => ch.codePointAt(0)! <= 0x7e ? 1 : 2;
  * `\r` redraws keep their last), its cursor and colour codes gone, and a line longer than the width broken by the
  * terminal at the width, each piece a line of its own. Without a width, the logical lines (a pipe).
  */
-export function seen(text: string, width: number | null): Array<{ line: string; byTerminal: boolean }> {
+export function seen(text: string, width: number | null, unbroken?: (line: string) => boolean): Array<{ line: string; byTerminal: boolean }> {
   const out: Array<{ line: string; byTerminal: boolean }> = [];
   for (const logical of text.split("\n")) {
     const drawn = logical.split("\r").pop()!.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    if (width === null) { out.push({ line: drawn, byTerminal: false }); continue; }
+    // a value to copy, which the CLI writes alone and never breaks (`Lines.unbroken`): the terminal's soft wrap, which a
+    // copy joins, is its line's, and is read as one
+    if (width === null || unbroken?.(drawn) === true) { out.push({ line: drawn, byTerminal: false }); continue; }
     let line = "", w = 0, piece = 0;
     for (const ch of drawn) {
       if (w + cols(ch) > width) { out.push({ line, byTerminal: piece++ > 0 }); line = ""; w = 0; }
@@ -271,13 +273,16 @@ export function seen(text: string, width: number | null): Array<{ line: string; 
  *  `failed`: the run failed and this is its stderr, which then holds exactly one failure. */
 /** The lines a command begins, for a command other than login and logout (`mason(…, { lines })`): its heads, the steps
  *  under its Next:, and a test of a line of its own data (a list's row, begun by a name the test gave). */
-export interface Lines { heads: readonly string[]; steps: readonly string[]; ownStep: RegExp; row?: (line: string) => boolean }
+export interface Lines { heads: readonly string[]; steps: readonly string[]; ownStep: RegExp; row?: (line: string) => boolean;
+  /** a logical line the CLI writes alone, to be copied, which only the terminal may wrap (the CI token mason token create
+   *  prints: held to a grammar with no space, colon or control, so no piece of it can begin a line of the CLI's) */
+  unbroken?: (line: string) => boolean }
 
 export function seenProblems(text: string, width: number | null, failed: boolean | null = null, lines?: Lines): string[] {
   const heads = lines?.heads ?? HEADS, steps = lines?.steps ?? STEP_HEADS;
   const p: string[] = [];
   let afterNext = false, nexts = 0, failures = 0;
-  for (const { line, byTerminal } of seen(text, width)) {
+  for (const { line, byTerminal } of seen(text, width, lines?.unbroken)) {
     if (byTerminal) p.push(`the terminal broke a line, so a line begins where a value chose: ${JSON.stringify(line)}`);
     if (line === "") continue;
     if (line === "Next:") { nexts++; afterNext = true; continue; }
@@ -362,3 +367,43 @@ export function writeSaved(h: string, logins: Record<string, { token: string; em
   fs.chmodSync(path.dirname(credentials(h)), 0o700);
   fs.writeFileSync(credentials(h), JSON.stringify({ version: 1, logins }), { mode: 0o600 });
 }
+
+/**
+ * EVERY FORM A SERVICE MAY ECHO A PASSWORD IN (PR 660's class round, R2-B1), each by what it is: what a test holds every
+ * boundary to. Each is read by a person, or a terminal, or a log, as the password: its case, its `%XX` escapes, each
+ * Unicode normal form, its accents dropped, its full-width letters, a zero-width or control character or a terminal
+ * escape between its characters, its white space another. What no reading reaches (a homoglyph, base64, a reversal)
+ * is out of this list, and said in docs/HOSTED-API.md.
+ */
+export const ECHO_FORMS: ReadonlyArray<readonly [what: string, form: (p: string) => string]> = [
+  ["as written", (p) => p],
+  ["upper case", (p) => p.toUpperCase()],
+  ["lower case", (p) => p.toLowerCase()],
+  ["URL-encoded", (p) => encodeURIComponent(p)],
+  ["every byte %XX", (p) => [...new TextEncoder().encode(p)].map((b) => `%${b.toString(16).padStart(2, "0").toUpperCase()}`).join("")],
+  ["NFC", (p) => p.normalize("NFC")],
+  ["NFD", (p) => p.normalize("NFD")],
+  ["NFKC", (p) => p.normalize("NFKC")],
+  ["NFKD", (p) => p.normalize("NFKD")],
+  ["NFD, every byte %XX", (p) => [...new TextEncoder().encode(p.normalize("NFD"))].map((b) => `%${b.toString(16).padStart(2, "0")}`).join("")],
+  ["its accents dropped", (p) => p.normalize("NFD").replace(/\p{M}/gu, "")],
+  ["full-width", (p) => [...p].map((c) => /[!-~]/.test(c) ? String.fromCodePoint(c.codePointAt(0)! + 0xfee0) : c).join("")],
+  ["a zero-width mark between its characters", (p) => [...p].join("​")],
+  ["a control character between its characters", (p) => [...p].join("\u0007")],
+  ["a terminal escape between its characters", (p) => [...p].join("\u001b[1m")],
+  ["its spaces no-break spaces", (p) => p.replace(/ /g, " ")],
+];
+
+/**
+ * WHAT A PERSON READS OF A TEXT, as this test reads it (its own reading, apart from src/'s): terminal escapes, controls
+ * and format characters gone, `%XX` runs decoded, every compatibility form decomposed, marks gone, case folded, white
+ * space one space. A password is printed whole when what a person reads of the output holds what a person reads of it.
+ */
+export function personReads(text: string): string {
+  let t = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g, "");
+  t = t.replace(/(?:%[0-9a-f]{2})+/gi, (run) => { try { return decodeURIComponent(run); } catch { return run; } });
+  t = t.normalize("NFKD").replace(/[\p{M}\p{Cf}]/gu, "").toUpperCase().toLowerCase().normalize("NFKD").replace(/[\p{M}\p{Cf}]/gu, "");
+  return t.replace(/[^\S\n]| /g, " ").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").replace(/ +/g, " ");
+}
+/** Whether a person reads `password` whole in `text` (`personReads`). */
+export const printsWhole = (text: string, password: string): boolean => personReads(text).includes(personReads(password).trim());

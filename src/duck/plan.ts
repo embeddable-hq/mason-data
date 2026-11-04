@@ -17,6 +17,7 @@ import type { SessionState } from "../api/postgres/catalog.ts";
 import { argumentTypes, describeKeys, nameUserKeys, heldUses, nullTested, resolvedKeys } from "./resolved.ts";
 import { expandViews, MAX_VIEW_DEPTH, viewRefused } from "./views.ts";
 import { selectListAfterLimit } from "./late.ts";
+import { libcBounded } from "./libc-bound.ts";
 import { pgTyplen } from "./types.ts";
 import type { CopyState } from "./sync.ts";
 import { giveTurns, datumText, masonCalls, rewrite, treeDifference, Unrewritable, type EnumTypes, type RowColumn } from "./rewrite.ts";
@@ -528,6 +529,10 @@ export async function planDuck(options: PlanOptions): Promise<DuckPlan> {
   const lateWall = walls !== null ? { alias: walls.alias, added: 0 } : null;
   tree = await selectListAfterLimit(tree as Record<string, unknown>, analysis.tree, () => joinKeys(catalog, analysis.tree),
     { volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall }) ?? tree;
+  // a top N and a min or max under a libc order keyed for their candidates alone (src/duck/libc-bound.ts): after the
+  // late select list, whose inner query holds the sort and the limit; a walled read it reads again is one more wall
+  tree = await libcBounded(tree as Record<string, unknown>, analysis.tree, { order: (collate) => resolver.libcOrder(collate),
+    volatile: (functions) => volatileFunctions(catalog, functions), wall: lateWall }) ?? tree;
   // ONLY WHAT THE ORACLE VERIFIED: after the rewrite, so a construct the rewrite refuses by name (with its own way out)
   // says so first
   const keys = [...resolved].sort();

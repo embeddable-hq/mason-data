@@ -27,6 +27,22 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **Sorting text and its `min` / `max` under a glibc locale (en_US.UTF-8 and the like) are 10-20 times faster on a big
+  table**: `ORDER BY name LIMIT 50`, a BI tool's table preview (`ORDER BY name ASC LIMIT 2000`, either direction), and
+  `min(name), max(name)` (Metabase's look at a text column). Over 5 M rows they took 10-15 s and now take 0.6-1.9 s;
+  over 20 M rows, where they took 2 minutes or hit the 300 s timeout, they now take 2-7 s. Mason now works out each value's place in the database's order
+  only for the rows that can be among the answers, not for every row. A grouped `min` / `max`, `SELECT DISTINCT`, a
+  `GROUP BY` of the text, `FETCH … WITH TIES` and a sort over a join are as fast as before. One more statement now
+  answers: under a locale other than English's, where a value holding a character Mason cannot order used to refuse
+  every sort of its column, a top N or a `min` / `max` that the value is not part of now answers; one it is part of
+  still refuses as before.
+- **`mason replica` and `mason token` set up a hosted replica from the command line**, after `mason login`: `mason
+  replica create <org>/<name> --region <region> --size <gb>` makes one for this project's database (its URL read from
+  `.env` by the variable the sources file names, never from the command line, and never printed), says Mason's checks
+  of the database one line each, and waits until the replica is ready; `mason replica list` and `mason replica status`
+  say them. `mason token create --replica <org>/<name>` makes a CI token for it and prints it once (in `token.value`
+  with `--json`, for a secret store); `mason token list` and `mason token revoke <id>` manage them. An account's first
+  replica is still made in the service's web app.
 - **`mason doctor` warns when the user Mason connects as could write to your database**: a superuser or `BYPASSRLS`, the
   owner of a synced table, or one holding `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER` on a
   synced table or `CREATE` on its schema — or a write that reaches its rows through a partition, an inheritance child or

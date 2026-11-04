@@ -139,6 +139,13 @@ export const JPATH: Array<string | null> = [
   null,
 ];
 
+/** coll_top's first rows, each value as written (the rest are numbered, src/duck/libc-bound.ts's cases): its one NULL */
+const COLL_TOP_FIRST: Array<string | null> = ["", " ", "cel·la", "cella", "celLa", "cel·La", "K", "k", "K", "İstanbul", "istanbul", "Istanbul", "$5", "5", "-5",
+  "item1", "Item 1", "item-1", "ITEM_1", "a", "A", null, "zz", "ZZ", "z z",
+  // a control character glibc ignores at the first three levels, inside a value (review r1 of PR 675: U+0002 was read as
+  // the bounds' end of the text)
+  "abc", "ab\u0002cd", "a\u0002z", "aaz", "\u0002zz", "ab\u0001c", "ab\u007f", "\u0002", "b\u0002"];
+
 export const COLL: Array<[number, string | null]> = [
   [1, "대지"], [2, "Animal"], [3, "zebra"], [4, "Dob"], [5, "Do\uFFFDa"], [6, "$x"], [7, "€x"], [8, "@x"], [9, "~x"], [10, "ab"],
   [11, "a-b"], [12, "a b"], [13, "가나"], [14, "나"], [15, "가가"], [16, "-"], [17, "--"], [18, "-@"], [19, "@"], [20, "三"],
@@ -273,6 +280,22 @@ export const TYPED = `${MAPPED_TABLE} CREATE EXTENSION IF NOT EXISTS citext; CRE
   // letters), ß = ss, CJK (no last-level weight), punctuation runs, case; from 50 issue 128's (COLL says each); 99 a
   // ligature of a CJK weight, sorted in place under en_US (libc-rare-letter), and on from it each class of symbol
   `CREATE TABLE public.coll (id int PRIMARY KEY, s text); INSERT INTO public.coll VALUES ${COLL.map(([id, v]) => `(${id}, ${v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`})`).join(", ")};` +
+  // A TOP N AND A MIN / MAX OF TEXT IN THE DATABASE'S ORDER (issue 666, src/duck/libc-bound.ts): 3,000 values, each its
+  // own (so a page that shows its ids has no tie to order otherwise) but one NULL: COLL's (but the libc-rare-letter one)
+  // each with its number, a name in four spellings of case and punctuation, a URL's long shared prefix, values that tie
+  // past the bounds' run, glibc's `l·`, U+212A beside k and K, U+0130 beside i and I, '$5' / '5' / '-5', '' and spaces
+  `CREATE TABLE public.coll_top (id int PRIMARY KEY, s text, v varchar(40), n int); INSERT INTO public.coll_top SELECT id, s, left(s, 40), id % 97 FROM (SELECT g AS id, CASE ` +
+  `WHEN g <= ${COLL_TOP_FIRST.length} THEN (ARRAY[${COLL_TOP_FIRST.map((v) => v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`).join(", ")}]::text[])[g] ` +
+  `WHEN g % 10 = 0 THEN (ARRAY[${COLL.filter(([id, v]) => v !== null && id !== 99).map(([, v]) => `'${v!.replace(/'/g, "''")}'`).join(", ")}])[1 + (g / 10) % ${COLL.filter(([id, v]) => v !== null && id !== 99).length}] || ' ' || g ` +
+  "WHEN g % 10 = 1 THEN (ARRAY['Item ', 'item-', 'ITEM_', 'item'])[1 + (g / 10) % 4] || g " +
+  "WHEN g % 10 = 2 THEN 'https://example.com/item/' || g " +
+  "WHEN g % 10 = 3 THEN repeat('mnop', 13) || (ARRAY['a', 'B', 'é', '-', '·', '€', '', '❤️'])[1 + (g / 10) % 8] || g " +
+  "WHEN g % 10 = 4 THEN (ARRAY['cel·la', 'cella', 'celLa', 'cel·La', 'cel·', 'cell'])[1 + (g / 10) % 6] || ' ' || g " +
+  "WHEN g % 10 = 5 THEN (ARRAY[chr(8490), 'k', 'K'])[1 + (g / 10) % 3] || 'elvin ' || g " +
+  "WHEN g % 10 = 6 THEN (ARRAY['İstanbul ', 'istanbul ', 'Istanbul ', 'ıstanbul '])[1 + (g / 10) % 4] || g " +
+  "WHEN g % 10 = 7 THEN (ARRAY['$', '', '-', ' ', '+'])[1 + (g / 10) % 5] || g " +
+  "WHEN g % 10 = 8 THEN (ARRAY[upper(md5(g::text)), md5(g::text), initcap(translate(md5(g::text), '0123', ' ,.-'))])[1 + (g / 10) % 3] " +
+  "ELSE (ARRAY['e' || chr(769), 'é', 'E'])[1 + (g / 10) % 3] || g END AS s FROM generate_series(1, 3000) g) AS x;" +
   // ENUMS IN THEIR DECLARED ORDER (the BI-tools test of #517): a label with a quote, an enum of another schema, an
   // array of one, NULL and empty arrays, and a text column read as the enum
   "CREATE TYPE public.mood AS ENUM ('sad', 'ok', 'happy', 'it''s'); CREATE SCHEMA IF NOT EXISTS other; CREATE TYPE other.level AS ENUM ('low', 'high'); " +
@@ -1180,6 +1203,82 @@ function* matrix(): Generator<Matrixed> {
   yield q("every value's nulls idiom", "SELECT s FROM coll GROUP BY s ORDER BY s IS NULL, s");
   yield q("a statement over a * ordered by every value", "SELECT * FROM coll ORDER BY 2, 1");
   yield q("a run of marks, of digits and of punctuation", "SELECT s FROM coll WHERE id IN (50, 51, 78, 79, 80, 81, 82, 83, 84, 85, 93, 94, 95, 96) ORDER BY s");
+  // ---- issue 666: a top N and a min / max keyed for their candidates alone (src/duck/libc-bound.ts), and every form
+  // the bound is not proved for, as written ------------------------------------------------------------------------
+  for (const [name, sql] of [
+    ["a table's page", "SELECT * FROM coll_top ORDER BY s LIMIT 50"],
+    ["two columns", "SELECT id, s FROM coll_top ORDER BY s LIMIT 50"],
+    ["Metabase's table, ascending", 'SELECT "public"."coll_top"."id" AS "id", "public"."coll_top"."s" AS "s", "public"."coll_top"."n" AS "n" FROM "public"."coll_top" ORDER BY "public"."coll_top"."s" ASC LIMIT 2000'],
+    ["Metabase's table, descending", 'SELECT "public"."coll_top"."id" AS "id", "public"."coll_top"."s" AS "s" FROM "public"."coll_top" ORDER BY "public"."coll_top"."s" DESC LIMIT 2000'],
+    ["descending, NULLs last", "SELECT id, s FROM coll_top ORDER BY s DESC NULLS LAST, id LIMIT 7"],
+    ["NULLs first", "SELECT id, s FROM coll_top ORDER BY s NULLS FIRST, id LIMIT 7"],
+    ["a page", "SELECT id, s FROM coll_top ORDER BY s ASC NULLS LAST, id LIMIT 7 OFFSET 40"],
+    ["an offset past the end", "SELECT id, s FROM coll_top ORDER BY s, id LIMIT 5 OFFSET 100000"],
+    ["LIMIT 0", "SELECT id, s FROM coll_top ORDER BY s LIMIT 0"],
+    ["LIMIT 1", "SELECT s FROM coll_top ORDER BY s LIMIT 1"],
+    ["a LIMIT past the rows", "SELECT s FROM coll_top ORDER BY s LIMIT 100000"],
+    ["WITH TIES", "SELECT id, s FROM coll_top ORDER BY s FETCH FIRST 3 ROWS WITH TIES"],
+    ["WITH TIES, descending", "SELECT id, s FROM coll_top ORDER BY s DESC FETCH FIRST 3 ROWS WITH TIES"],
+    ["a * beside it, by number", "SELECT *, s FROM coll_top ORDER BY 2, 1 LIMIT 10"],
+    ["an output name", "SELECT id, s AS x FROM coll_top ORDER BY x LIMIT 10"],
+    ["an output name shadowing a column", "SELECT id, s AS n FROM coll_top ORDER BY n LIMIT 10"],
+    ["an alias", "SELECT c.id, c.s FROM coll_top c ORDER BY c.s ASC LIMIT 10"],
+    ["the nulls idiom", "SELECT id, s FROM coll_top ORDER BY s IS NULL, s LIMIT 10"],
+    ["the nulls idiom, descending", "SELECT id, s FROM coll_top ORDER BY s IS NULL DESC, s DESC LIMIT 10"],
+    ["a WHERE", "SELECT id, s FROM coll_top WHERE n % 3 = 0 ORDER BY s LIMIT 10"],
+    ["a WHERE of no row", "SELECT id, s FROM coll_top WHERE n < 0 ORDER BY s LIMIT 5"],
+    ["NULLs alone", "SELECT id, s FROM coll_top WHERE s IS NULL ORDER BY s LIMIT 5"],
+    ["a varchar", "SELECT id, v FROM coll_top ORDER BY v LIMIT 10"],
+    ["a varchar as text, descending", "SELECT id, v FROM coll_top ORDER BY v::text DESC LIMIT 10"],
+    ["lower()", "SELECT id FROM coll_top ORDER BY lower(s), id LIMIT 10"],
+    ["a concatenation", "SELECT id FROM coll_top ORDER BY s || 'x', id LIMIT 10"],
+    ["more keys", "SELECT id, s FROM coll_top ORDER BY s, n DESC, id LIMIT 10"],
+    ["a derived table", "SELECT * FROM (SELECT id, s FROM coll_top WHERE n > 5) q ORDER BY s LIMIT 5"],
+    ["Metabase's wrapper", 'SELECT "source"."s" AS "s" FROM (SELECT "public"."coll_top"."id" AS "id", "public"."coll_top"."s" AS "s" FROM "public"."coll_top") AS "source" ORDER BY "source"."s" ASC LIMIT 2000'],
+    ["a WITH query", "WITH q AS (SELECT id, s FROM coll_top WHERE n <> 3) SELECT id, s FROM q ORDER BY s LIMIT 5"],
+    ["in a subquery and an ARRAY", "SELECT (SELECT s FROM coll_top ORDER BY s LIMIT 1), ARRAY(SELECT s FROM coll_top ORDER BY s DESC LIMIT 3)"],
+    ["in IN", "SELECT id FROM coll_top WHERE s IN (SELECT s FROM coll_top ORDER BY s LIMIT 5) ORDER BY id"],
+    ["every value", "SELECT id, s FROM coll ORDER BY s, id LIMIT 30"],
+    ["every value, descending", "SELECT id, s FROM coll ORDER BY s DESC, id LIMIT 30"],
+    ["every value, a page", "SELECT id, s FROM coll ORDER BY s, id LIMIT 30 OFFSET 60"],
+    ["grouped (as written)", "SELECT s FROM coll_top GROUP BY s ORDER BY s ASC LIMIT 12"],
+    ["DISTINCT (as written)", "SELECT DISTINCT s FROM coll_top ORDER BY 1 LIMIT 12"],
+    ["DISTINCT ON (as written)", "SELECT DISTINCT ON (s) s, id FROM coll_top ORDER BY s, id LIMIT 5"],
+    ["a set operation (as written)", "SELECT s FROM coll_top UNION ALL SELECT s FROM coll ORDER BY 1 LIMIT 5"],
+    ["a join (as written)", "SELECT a.id, a.s FROM coll_top a JOIN coll_top b ON b.id = a.id ORDER BY a.s LIMIT 5"],
+    ["a volatile WHERE (as written)", "SELECT id, s FROM coll_top WHERE random() < 2 ORDER BY s LIMIT 5"],
+    ["a volatile key (as written)", "SELECT id, s FROM coll_top ORDER BY s || CASE WHEN random() < 2 THEN '' END, id LIMIT 5"],
+    ["no LIMIT (as written)", "SELECT id, s FROM coll_top ORDER BY s"],
+    ["no ORDER BY (as written)", "SELECT count(*) FROM (SELECT id, s FROM coll_top LIMIT 5) q"],
+    ["bytes (as written)", 'SELECT id FROM coll_top ORDER BY s COLLATE "C" LIMIT 5'],
+    ["ICU (as written)", 'SELECT id FROM coll_top ORDER BY s COLLATE "und-x-icu" LIMIT 5'],
+    ["equality (as written)", "SELECT count(*) FROM coll_top WHERE s = 'item1'"],
+    ["a control character inside a value", "SELECT id, s FROM coll_top WHERE s IN ('abc', 'ab' || chr(2) || 'cd', 'aaz') ORDER BY s, id LIMIT 2"],
+    ["a control character inside a value, descending", "SELECT id, s FROM coll_top WHERE s IN ('abc', 'ab' || chr(2) || 'cd') ORDER BY s DESC, id LIMIT 1"],
+    ["a control character after the first letter", "SELECT id, s FROM coll_top WHERE s IN ('a' || chr(2) || 'z', 'aaz') ORDER BY s, id LIMIT 1"],
+    ["a control character first, descending", "SELECT id, s FROM coll_top WHERE s IN (chr(2) || 'zz', 'z z', 'item1') ORDER BY s DESC, id LIMIT 1"],
+    ["control characters among every value", "SELECT id, s FROM coll_top WHERE s LIKE '%' || chr(2) || '%' OR s LIKE 'ab%' OR s = chr(2) ORDER BY s, id LIMIT 6"],
+    ["control characters among every value, descending", "SELECT id, s FROM coll_top WHERE s LIKE '%' || chr(2) || '%' OR s LIKE 'ab%' OR s LIKE 'z%' ORDER BY s DESC, id LIMIT 4"],
+  ] as Array<[string, string]>) yield q(`text top N: ${name}`, sql);
+  for (const [name, sql] of [
+    ["min and max", "SELECT min(s), max(s) FROM coll_top"],
+    ["as text", "SELECT min(s::text), max(s::text) FROM coll_top"],
+    ["a varchar as text", "SELECT min(v::text), max(v::text) FROM coll_top"],
+    ["beside a count", "SELECT count(*), min(s), max(s), count(DISTINCT s) FROM coll_top"],
+    ["a WHERE", "SELECT min(s) FROM coll_top WHERE n % 7 = 3"],
+    ["a WHERE on the value", "SELECT max(s) FROM coll_top WHERE s < 'm'"],
+    ["no row", "SELECT min(s), max(s) FROM coll_top WHERE n < 0"],
+    ["NULLs alone", "SELECT min(s), max(s) FROM coll_top WHERE s IS NULL"],
+    ["every value", "SELECT min(s), max(s) FROM coll"],
+    ["of an expression", "SELECT min(lower(s)), max(s || 'x') FROM coll_top"],
+    ["a derived table", "SELECT min(s), max(s) FROM (SELECT s FROM coll_top WHERE n > 10) q"],
+    ["grouped (as written)", "SELECT n % 5, min(s), max(s) FROM coll_top GROUP BY 1 ORDER BY 1"],
+    ["FILTER (as written)", "SELECT min(s) FILTER (WHERE n > 5), max(s) FROM coll_top"],
+    ["a window (as written)", "SELECT id, max(s) OVER (PARTITION BY n % 3) FROM coll_top ORDER BY id LIMIT 5"],
+    ["a control character inside a value", "SELECT min(s), max(s) FROM coll_top WHERE s IN ('abc', 'ab' || chr(2) || 'cd')"],
+    ["a control character first", "SELECT min(s), max(s) FROM coll_top WHERE s IN (chr(2) || 'zz', 'z z')"],
+    ["control characters beside letters", "SELECT min(s), max(s) FROM coll_top WHERE s LIKE 'a%' OR s LIKE '%' || chr(2) || '%'"],
+  ] as Array<[string, string]>) yield q(`text min/max: ${name}`, sql);
   // ---- the corpus rerun of fbbf8f08: what reached DuckDB and failed, and the pieces still unverified -------------------
   // a name another table has in another case: qualified with the table Postgres resolved it to
   yield q("a name in another case, joined", `SELECT id, "T", t, "Tz" FROM typed JOIN cased USING (id) ORDER BY id`);
