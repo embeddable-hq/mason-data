@@ -232,20 +232,19 @@ test("the run going away ends the tunnel: said, not silent", { timeout: 60_000 }
 
 /**
  * `mason ui --bridge` as ssh starts it, its stdin a pipe this test holds. `blocked`: a preload busy-waits on the main
- * thread from just after the hello, as a wedged call would, so nothing on the main event loop runs again.
+ * thread once the test, having read the hello, writes the file it watches: as a wedged call would, nothing on the main
+ * event loop runs again.
  */
 async function bridgeProcess(root: string, blocked: boolean): Promise<{ child: ChildProcess; err: () => string; done: Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }> }> {
   const args = [MAIN, "ui", "--bridge", "--local-port", "40999"];
+  const dir = temp("bridge-hook"), block = path.join(dir, "block-now");
   if (blocked) {
-    const hook = path.join(temp("bridge-hook"), "block.mjs");
-    fs.writeFileSync(hook, `import { isMainThread } from "node:worker_threads";
+    const hook = path.join(dir, "block.mjs");
+    fs.writeFileSync(hook, `import * as fs from "node:fs";
+import { isMainThread } from "node:worker_threads";
 if (isMainThread) {
-  const write = process.stdout.write.bind(process.stdout);
-  process.stdout.write = (chunk, ...rest) => {
-    const r = write(chunk, ...rest);
-    if (String(chunk).startsWith("MASON-UI-BRIDGE ")) setTimeout(() => { for (;;) { /* the main loop, wedged */ } }, 100);
-    return r;
-  };
+  const look = setInterval(() => { if (fs.existsSync(${JSON.stringify(block)})) { clearInterval(look); for (;;) { /* the main loop, wedged */ } } }, 20);
+  look.unref();
 }
 `);
     args.unshift("--import", pathToFileURL(hook).href);
@@ -261,6 +260,7 @@ if (isMainThread) {
     setTimeout(() => reject(new Error(`no hello in 20 s: ${out}${err}`)), 20_000).unref();
   });
   assert.match(out, /^MASON-UI-BRIDGE \{"protocol":1,.*"ticket":/, "the tunnel opened");
+  if (blocked) { fs.writeFileSync(block, "now"); await new Promise((r) => setTimeout(r, 200)); }
   return { child, err: () => err, done };
 }
 
