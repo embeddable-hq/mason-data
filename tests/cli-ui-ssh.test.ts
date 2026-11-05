@@ -302,6 +302,97 @@ test("a bridge whose main thread is blocked: never ended while its stdin is open
   } finally { s.close(); }
 });
 
+/** A process's resident memory, in bytes (`ps`, so macOS as Linux), or null once it is gone. */
+const rssOf = async (pid: number): Promise<number | null> => {
+  const r = await new Promise<string>((resolve) => {
+    const ps = spawn("ps", ["-o", "rss=", "-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    ps.stdout.on("data", (b: Buffer) => { out += b.toString(); });
+    ps.on("close", () => resolve(out.trim()));
+  });
+  return /^\d+$/.test(r) ? Number(r) * 1024 : null;
+};
+
+test("a laptop that floods a blocked bridge: the bridge holds a bounded window of it, then drops what follows, and still ends when stdin closes", { timeout: 120_000 }, async (t) => {
+  const s = await server();
+  try {
+    const b = await bridgeProcess(s.root, true);
+    const pid = b.child.pid!;
+    const before = (await rssOf(pid))!;
+    let peak = before;
+    const sampling = setInterval(() => { void rssOf(pid).then((r) => { if (r !== null && r > peak) peak = r; }); }, 100);
+    // one connection opened, then 1 GiB of its data, in frames as the laptop's end writes them; a byte counts once the
+    // pipe took it (the write's callback), never while it waits in this process
+    const FRAME = 64 * 1024, TOTAL = 1024 * 1024 * 1024;
+    const head = (type: number, length: number): Buffer => { const h = Buffer.alloc(9); h.writeUInt8(type, 0); h.writeUInt32BE(1, 1); h.writeUInt32BE(length, 5); return h; };
+    const payload = Buffer.alloc(FRAME, 0x61);
+    let accepted = 0;
+    const started = Date.now();
+    const atStart: number[] = [];
+    const stdin = b.child.stdin!;
+    stdin.write(head(1, 0));
+    const flood = (async () => {
+      for (let sent = 0; sent < TOTAL; sent += FRAME) {
+        const chunk = Buffer.concat([head(2, FRAME), payload]);
+        if (!stdin.write(chunk, () => { accepted += chunk.length; })) await new Promise((r) => stdin.once("drain", r));
+        if (Date.now() - started > 60_000) break;
+      }
+      // the callbacks come in order: this one's is the last
+      await new Promise((r) => stdin.write(Buffer.alloc(0), r));
+    })();
+    // before the bound: the window and the pipe, no more
+    await new Promise((r) => setTimeout(r, BRIDGE_EXIT_MS - 2_000));
+    atStart.push(accepted);
+    await within(flood, 40_000, `the laptop's writes still waiting 40 s on, so a stuck bridge is never read past its window and its end is never heard`).catch((e: unknown) => { clearInterval(sampling); throw e; });
+    clearInterval(sampling);
+    t.diagnostic(`taken before the bound: ${atStart[0]} bytes; in all: ${accepted}; resident memory ${Math.round(before / 1048576)} MiB before, ${Math.round(peak / 1048576)} MiB at its peak`);
+    assert.ok(atStart[0]! < 8 * 1024 * 1024, `${atStart[0]} bytes taken before the main thread was taken for stuck: past the window`);
+    assert.ok(accepted >= TOTAL, `the laptop's writes waited for ever once the main thread was stuck: ${accepted} bytes taken`);
+    assert.ok(!isGone(pid), "ended with stdin open");
+    // the window is 1 MiB; the rest is read buffers the reader dropped and has not yet collected (about 60 MiB measured)
+    assert.ok(peak - before < 128 * 1024 * 1024, `resident memory grew ${Math.round((peak - before) / 1024 / 1024)} MiB under the flood`);
+    const closed = Date.now();
+    stdin.end();
+    const d = await within(b.done, BRIDGE_EXIT_MS + 3_000, `a flooded, blocked bridge was still running ${BRIDGE_EXIT_MS + 3_000} ms after its stdin closed: ${b.err()}`);
+    assert.equal(d.signal, "SIGKILL", `${JSON.stringify(d)} ${b.err()}`);
+    assert.ok(d.at - closed >= BRIDGE_EXIT_MS - 200, `ended ${d.at - closed} ms after stdin closed: before its bound`);
+    assert.match(b.err(), /its stdin closed 5 s ago and it had not ended/);
+  } finally { s.close(); }
+});
+
+test("a main thread that is alive but takes nothing (a page that reads nothing): the reader holds its window and waits with it, never drops, and, the pipe paused, does not hear stdin's end", { timeout: 60_000 }, async () => {
+  // the stdin thread on its own, its main thread played by a script that beats as the bridge's does and acknowledges
+  // nothing, as FrameLink paused by a page's full socket does
+  const dir = temp("bridge-reader");
+  const main = path.join(dir, "main.mjs");
+  const reader = path.resolve(path.dirname(MAIN), "bridge-stdin.ts");
+  fs.writeFileSync(main, `import { Worker } from "node:worker_threads";
+const w = new Worker(${JSON.stringify(reader)}, { workerData: { exitMs: 1000, windowBytes: 65536 }, execArgv: [] });
+w.on("message", (m) => { if (!("data" in m)) process.stderr.write(JSON.stringify(m) + "\\n"); });
+setInterval(() => { w.postMessage({ beat: true }); }, 200);
+`);
+  const child = spawn(process.execPath, [main], { stdio: ["pipe", "ignore", "pipe"] });
+  held.add(child);
+  let said = "";
+  child.stderr!.on("data", (b: Buffer) => { said += b.toString(); });
+  const done = new Promise<void>((r) => child.on("close", () => { held.delete(child); r(); }));
+  let accepted = 0;
+  let open = true;
+  const chunk = Buffer.alloc(64 * 1024, 0x61);
+  void (async () => { while (open) { if (!child.stdin!.write(chunk, () => { accepted += chunk.length; })) await new Promise((r) => child.stdin!.once("drain", r)); } })();
+  // three times the stuck bound with the window full
+  await new Promise((r) => setTimeout(r, 3_000));
+  open = false;
+  assert.ok(accepted < 1024 * 1024, `${accepted} bytes taken: the reader read past its window`);
+  assert.doesNotMatch(said, /dropped/, "a main thread that beats is waiting, not stuck: nothing it is owed is dropped");
+  child.stdin!.destroy();
+  await new Promise((r) => setTimeout(r, 2_000));
+  assert.doesNotMatch(said, /"end"/, "the pipe paused, its end is not heard: the bridge waits on the page, as it always did");
+  assert.ok(!isGone(child.pid!));
+  child.kill("SIGKILL");
+  await done;
+});
+
 const refused = async (bin: string, root: string, extra: Record<string, string>, args: string[] = ["--timeout", "20"]): Promise<{ code: number | null; error: { code: string; message: string; why?: string; fix?: string }; next: Array<{ command: string }> }> => {
   const a = await runMason(temp("laptop"), ["ui", "--ssh", "deploy@mason.example", "--mason", remote(root), "--json", ...args], env(bin, extra));
   return { code: a.code, ...JSON.parse(a.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> } };
