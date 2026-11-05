@@ -431,6 +431,16 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   is refused the same way rather than read in part: URL-encode the password (`@` is `%40`, `/` is `%2F`), and put it
   before the host. A refusal names a parameter only when it is one of libpq's own, and a missing database's refusal no
   longer repeats its name (the databases there are listed). If such a value was ever passed to Mason, its password may be in a log or a CI run's output: change it.
+- **The server's end of `mason ui --ssh` no longer outlives the connection that started it when it is stuck.** `mason
+  ui --bridge` ends when its stdin does (the laptop's ssh gone); a bridge stuck in a call that never returned never
+  noticed, and kept the run's tunnel open until someone killed it on the server. Its stdin is now read on a thread of
+  its own: 5 s after stdin closes, a bridge still running says so on stderr (`its stdin closed 5 s ago and it had not
+  ended`) and is ended (SIGKILL, so a shell sees exit 137), taking the tunnel with it. It holds at most 1 MiB of what
+  the laptop sent and it has not passed on; a bridge stuck for 5 s with that much waiting drops what follows, so that
+  it still hears the end, and the tunnel is then broken (run `mason ui --ssh` again). One case is as before: a bridge
+  that is not stuck but waits for the run's page to take what was sent hears the end only once the page takes it, or
+  ends when the run ends the tunnel. An ordinary end is unchanged: at once, exit 0. Nothing to set and nothing to do
+  on upgrade; it is the server's Mason that carries it.
 - **The sync's events and the usage samples are kept exactly `MASON_HISTORY_DAYS` × 24 hours.** On a machine whose time
   zone has daylight saving, the week after a clock change used to keep an hour more (or less). Under UTC, the image's
   default, nothing changes. Nothing to do on upgrade.

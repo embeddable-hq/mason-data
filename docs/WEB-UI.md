@@ -253,6 +253,12 @@ listens, and every browser connection crosses that one ssh connection as frames 
 - **Another page's cookie crosses too.** A browser keeps cookies by host, not port, so a local `mason start`'s cookie for
   127.0.0.1 is sent through the tunnel in the Cookie header. Each cookie is named for its port, and the server reads
   only the one for the Host it was asked by, so that one is ignored, though it does reach the server.
+- **The bridge ends with your ssh, even when it is stuck.** It ends when its stdin does, and reads stdin on a thread
+  of its own (`src/cli/bridge-stdin.ts`): a bridge still running 5 s after its stdin closed, stuck in a call that never
+  returned, says so on stderr and is ended (SIGKILL), closing the run's tunnel with it. That thread hands on at most 1
+  MiB it has not been told was taken; a bridge stuck 5 s with that much waiting has what follows dropped, so its end is
+  still heard, and the tunnel is broken. A bridge that is not stuck but waits for the run's page to take what was sent
+  hears the end once the page takes it, or ends with the tunnel when the run ends it.
 - **Your access is your SSH access**, then the guard below. There is no new password or login, and ssh carries the
   encryption, so the page needs no TLS of its own.
 

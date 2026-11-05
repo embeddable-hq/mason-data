@@ -20,11 +20,19 @@
  * with it (`POST /api/ui/tunnel`, its connection IS the tunnel) and sends the laptop a ticket (src/cli/security.ts). The
  * hello line is what crosses: nothing secret is on a command line, in the laptop's output or in a log.
  *
+ * THE BRIDGE ENDS A BOUND AFTER ITS STDIN DOES, WHATEVER ITS MAIN THREAD IS DOING: stdin is read on a worker thread
+ * (src/cli/bridge-stdin.ts), whose own event loop hears the end and ends the process `BRIDGE_EXIT_MS` later if it is
+ * still there, so a blocked main loop cannot keep the run's tunnel open once the laptop's ssh is gone.
+ *
  * WHAT `ssh` PRINTS IS NOT OURS: stdout is scanned for the hello line, as a server's shell may print before it; stderr
  * is passed on as it comes, because a person may be asked for a passphrase or a touch there.
  */
 import { spawn } from "node:child_process";
 import * as net from "node:net";
+import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
+import { runnable } from "../lib/runnable.ts";
+import type { FromStdin, ToStdin } from "./bridge-stdin.ts";
 import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
 import { holdRun, RunUnreachable } from "./control.ts";
 import { whereIs } from "./state.ts";
@@ -151,10 +159,105 @@ export class FrameLink {
 // ------------------------------------------------------------------ the server's end: mason ui --bridge
 
 /**
+ * How long the bridge may take to end by itself once its stdin has ended, before its watchdog ends it (SIGKILL), and
+ * how long its main thread may be silent with stdin's window full before it is taken for stuck. An ordinary end takes
+ * milliseconds: the tunnel's hold closed, its sockets destroyed, the output flushed or found gone.
+ */
+export const BRIDGE_EXIT_MS = 5_000;
+/**
+ * What the stdin thread hands the main thread before it is acknowledged: the most of the laptop's bytes the bridge
+ * holds between the pipe and FrameLink, whatever its main thread does. Past it the pipe fills and the laptop waits.
+ */
+export const STDIN_WINDOW_BYTES = 1024 * 1024;
+/** How often the main thread tells the stdin thread it is alive: well inside BRIDGE_EXIT_MS. */
+const BEAT_MS = 1_000;
+
+/**
+ * The bridge's stdin, as its thread forwards it (src/cli/bridge-stdin.ts), by credit: each chunk is acknowledged once
+ * FrameLink has read it and is not paused, so the thread's window is what has not reached a page's socket yet. Started
+ * first, so the watchdog bounds the whole bridge, the run's lookup included; what arrives before `attach` is kept for
+ * it, unacknowledged, so that too is inside the window.
+ */
+class StdinByWorker {
+  private readonly worker: Worker;
+  private kept: Buffer[] = [];
+  private end: { code: number; why: string | null } | null = null;
+  private read: ((b: Buffer) => void) | null = null;
+  private ended: ((code: number) => void) | null = null;
+  private paused = false;
+  /** Bytes read while paused: acknowledged on resume. */
+  private unacked = 0;
+  private broken = false;
+
+  constructor() {
+    // execArgv [] as the other workers here: the main thread's flags (a test's --import) are not the reader's
+    this.worker = new Worker(runnable(fileURLToPath(new URL("./bridge-stdin.ts", import.meta.url))),
+      { workerData: { exitMs: BRIDGE_EXIT_MS, windowBytes: STDIN_WINDOW_BYTES }, execArgv: [], argv: [] });
+    // the process ends when the bridge does: the thread never holds it, and dies with it
+    this.worker.unref();
+    this.worker.on("message", (m: FromStdin) => {
+      if ("data" in m) {
+        if (this.broken) return;
+        const b = Buffer.from(m.data.buffer, m.data.byteOffset, m.data.byteLength);
+        if (this.read === null) this.kept.push(b); else this.consume(b);
+        return;
+      }
+      if ("dropped" in m) {
+        // the thread took this one for stuck and read on past what it handed over: the stream has a hole, never read on
+        this.broken = true;
+        this.over(1, `its main thread was stuck for ${BRIDGE_EXIT_MS / 1000} s with ${m.dropped} bytes unread, and what the laptop sent since was dropped: the tunnel is broken, run mason ui --ssh again`);
+        return;
+      }
+      this.over(m.failed ? 1 : 0, m.failed ? m.end : null);
+    });
+    // a stdin nobody reads is a bridge that cannot work: said, and the bridge ends, never left without its end
+    this.worker.on("error", (e: Error) => { this.over(1, `its stdin cannot be read: ${e.message}`); });
+    this.worker.on("exit", (code: number) => { this.over(1, `its stdin's reader stopped (exit ${code})`); });
+    // a main thread that is waiting, not stuck, says so; one that is stuck cannot
+    setInterval(() => { this.worker.postMessage({ beat: true } satisfies ToStdin); }, BEAT_MS).unref();
+  }
+
+  /** From now on, bytes to `read` and the end to `ended`: what came before first. */
+  attach(read: (b: Buffer) => void, ended: (code: number) => void): void {
+    this.read = read;
+    for (const b of this.kept) this.consume(b);
+    this.kept = [];
+    this.ended = ended;
+    if (this.end !== null) this.say(this.end);
+  }
+
+  /** FrameLink's backpressure: a page's socket is full, so what is read now is acknowledged only when it drains. */
+  pause(): void { this.paused = true; }
+  resume(): void {
+    this.paused = false;
+    if (this.unacked > 0) { this.worker.postMessage({ ack: this.unacked } satisfies ToStdin); this.unacked = 0; }
+  }
+
+  private consume(b: Buffer): void {
+    this.read?.(b);
+    if (this.paused) this.unacked += b.length;
+    else this.worker.postMessage({ ack: b.length } satisfies ToStdin);
+  }
+
+  private over(code: number, why: string | null): void {
+    if (this.end !== null) return;
+    this.end = { code, why };
+    if (this.ended !== null) this.say(this.end);
+  }
+
+  private say(e: { code: number; why: string | null }): void {
+    if (e.why !== null) process.stderr.write(`mason ui --bridge: ${e.why}\n`);
+    this.ended?.(e.code);
+  }
+}
+
+
+/**
  * `mason ui --bridge`: the hello line, then the frames, until the laptop's end goes (stdin closes), or the run ends the
  * tunnel. A failure is the hello, in the shape the laptop says; what it prints on stderr reaches the laptop through ssh.
  */
 export async function bridge(localPort: number): Promise<number> {
+  const stdin = new StdinByWorker();
   const hello = (h: Hello): void => { process.stdout.write(`${HELLO} ${JSON.stringify(h)}\n`); };
   const refuse = (f: Failure): number => { hello({ protocol: BRIDGE_PROTOCOL, version: version(), error: errorJson(f), next: nextJson(f.next) }); return 1; };
   const w = await whereIs();
@@ -180,10 +283,9 @@ export async function bridge(localPort: number): Promise<number> {
   return await new Promise<number>((resolve) => {
     let over = false;
     const done = (code: number): void => { over = true; close(); link.end(); resolve(code); };
-    const link = new FrameLink({ input: process.stdin, output: process.stdout, connect: () => net.connect(Number(page.port), "127.0.0.1"),
+    const link = new FrameLink({ input: stdin, output: process.stdout, connect: () => net.connect(Number(page.port), "127.0.0.1"),
       broken: (why) => { process.stderr.write(`mason ui --bridge: ${why}\n`); done(1); } });
-    process.stdin.on("data", (b: Buffer) => { link.read(b); });
-    process.stdin.once("end", () => { done(0); });
+    stdin.attach((b) => { link.read(b); }, (code) => { done(code); });
     // the laptop's end gone with bytes still to write: the same end as stdin's, which says it
     process.stdout.on("error", () => { done(0); });
     // settles on this end's own close too, which is no news
