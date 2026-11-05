@@ -431,6 +431,12 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   is refused the same way rather than read in part: URL-encode the password (`@` is `%40`, `/` is `%2F`), and put it
   before the host. A refusal names a parameter only when it is one of libpq's own, and a missing database's refusal no
   longer repeats its name (the databases there are listed). If such a value was ever passed to Mason, its password may be in a log or a CI run's output: change it.
+- **The server's end of `mason ui --ssh` can no longer outlive the connection that started it.** `mason ui --bridge`
+  ends when its stdin does (the laptop's ssh gone); a bridge stuck in a call that never returned never noticed, and
+  kept the run's tunnel open until someone killed it on the server. Its stdin is now watched on a thread of its own: 5
+  s after stdin closes, a bridge still running says so on stderr (`its stdin closed 5 s ago and it had not ended`) and
+  is ended (SIGKILL, so a shell sees exit 137), taking the tunnel with it. An ordinary end is unchanged: at once, exit
+  0. Nothing to set and nothing to do on upgrade; it is the server's Mason that carries it.
 
 ## Known
 

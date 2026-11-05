@@ -13,12 +13,16 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRunServer, listenOnLoopback, runState, type RunContext } from "../src/cli/run-server.ts";
 import { parseSource } from "../src/cli/preflight.ts";
 import { serveSettings } from "../src/cli/serve.ts";
+import * as uiSsh from "../src/cli/ui-ssh.ts";
 import { exitFailure, FrameLink, sshArgs, targetProblem } from "../src/cli/ui-ssh.ts";
 import { matrixEnv, runMason } from "./cli-matrix.ts";
+
+// src/cli/ui-ssh.ts BRIDGE_EXIT_MS (held equal below), by value so the file loads against a tree without it (scripts/fails-without.ts)
+const BRIDGE_EXIT_MS = 5_000;
 
 const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const made: string[] = [];
@@ -223,6 +227,76 @@ test("the run going away ends the tunnel: said, not silent", { timeout: 60_000 }
     assert.equal(await h.done, 1);
     assert.match(h.err(), /Mason for shop ended the tunnel: it stopped or restarted/);
     assert.match(h.err(), /the tunnel to deploy@mason\.example dropped/);
+  } finally { s.close(); }
+});
+
+/**
+ * `mason ui --bridge` as ssh starts it, its stdin a pipe this test holds. `blocked`: a preload busy-waits on the main
+ * thread from just after the hello, as a wedged call would, so nothing on the main event loop runs again.
+ */
+async function bridgeProcess(root: string, blocked: boolean): Promise<{ child: ChildProcess; err: () => string; done: Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }> }> {
+  const args = [MAIN, "ui", "--bridge", "--local-port", "40999"];
+  if (blocked) {
+    const hook = path.join(temp("bridge-hook"), "block.mjs");
+    fs.writeFileSync(hook, `import { isMainThread } from "node:worker_threads";
+if (isMainThread) {
+  const write = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => {
+    const r = write(chunk, ...rest);
+    if (String(chunk).startsWith("MASON-UI-BRIDGE ")) setTimeout(() => { for (;;) { /* the main loop, wedged */ } }, 100);
+    return r;
+  };
+}
+`);
+    args.unshift("--import", pathToFileURL(hook).href);
+  }
+  const child = spawn(process.execPath, args, { cwd: root, env: matrixEnv(), stdio: ["pipe", "pipe", "pipe"] });
+  held.add(child);
+  let out = "", err = "";
+  child.stderr!.on("data", (b: Buffer) => { err += b.toString(); });
+  const done = new Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }>((r) => child.on("close", (code, signal) => { held.delete(child); r({ code, signal, at: Date.now() }); }));
+  await new Promise<void>((resolve, reject) => {
+    child.stdout!.on("data", (b: Buffer) => { out += b.toString(); if (out.includes("\n")) resolve(); });
+    void done.then((d) => reject(new Error(`the bridge ended (${d.code ?? d.signal}) before its hello: ${out}${err}`)));
+    setTimeout(() => reject(new Error(`no hello in 20 s: ${out}${err}`)), 20_000).unref();
+  });
+  assert.match(out, /^MASON-UI-BRIDGE \{"protocol":1,.*"ticket":/, "the tunnel opened");
+  return { child, err: () => err, done };
+}
+
+const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> => Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(what)), ms).unref())]);
+
+test("the bridge ends at once, exit 0, when its stdin ends: the laptop's ssh gone", { timeout: 60_000 }, async () => {
+  const s = await server();
+  try {
+    const b = await bridgeProcess(s.root, false);
+    const closed = Date.now();
+    b.child.stdin!.end();
+    const d = await within(b.done, BRIDGE_EXIT_MS, `the bridge was still running ${BRIDGE_EXIT_MS} ms after its stdin closed: ${b.err()}`);
+    assert.deepEqual({ code: d.code, signal: d.signal }, { code: 0, signal: null }, b.err());
+    assert.ok(d.at - closed < 2_000, `it took ${d.at - closed} ms`);
+    assert.doesNotMatch(b.err(), /ended now/, "the watchdog is not how an ordinary bridge ends");
+  } finally { s.close(); }
+});
+
+test("a bridge whose main thread is blocked: never ended while its stdin is open, ended within the bound once it closes, and said", { timeout: 60_000 }, async () => {
+  const s = await server();
+  try {
+    assert.equal((uiSsh as Record<string, unknown>).BRIDGE_EXIT_MS, BRIDGE_EXIT_MS, "the bound this test holds is the bridge's");
+    const b = await bridgeProcess(s.root, true);
+    // past the bound with stdin open: the watchdog waits on stdin's end, never on time alone
+    await new Promise((r) => setTimeout(r, BRIDGE_EXIT_MS + 1_500));
+    assert.ok(!isGone(b.child.pid!), `the bridge was ended with its stdin open: ${b.err()}`);
+    assert.equal(b.err(), "", "nothing said while it runs");
+    const closed = Date.now();
+    b.child.stdin!.end();
+    const d = await within(b.done, BRIDGE_EXIT_MS + 3_000, `a blocked bridge was still running ${BRIDGE_EXIT_MS + 3_000} ms after its stdin closed: ${b.err()}`);
+    assert.equal(d.signal, "SIGKILL", `ended by its watchdog: ${JSON.stringify(d)} ${b.err()}`);
+    assert.ok(d.at - closed >= BRIDGE_EXIT_MS - 200, `ended ${d.at - closed} ms after stdin closed: before its bound`);
+    assert.equal(b.err(), `mason ui --bridge: its stdin closed ${BRIDGE_EXIT_MS / 1000} s ago and it had not ended (its main thread is blocked): ended now, and the tunnel with it\n`);
+    // the run hears its tunnel end with the process
+    for (let i = 0; i < 100 && !s.logs.some((l) => /closed/.test(l)); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(s.logs.some((l) => /closed/.test(l)), `the run's log: ${s.logs.join("\n")}`);
   } finally { s.close(); }
 });
 
