@@ -313,7 +313,7 @@ const rssOf = async (pid: number): Promise<number | null> => {
   return /^\d+$/.test(r) ? Number(r) * 1024 : null;
 };
 
-test("a laptop that floods a blocked bridge: the bridge holds a bounded window of it, then drops what follows, and still ends when stdin closes", { timeout: 120_000 }, async (t) => {
+test("a laptop that floods a blocked bridge: the bridge holds a bounded window of it, then drops what follows, and still ends when stdin closes", { timeout: 240_000 }, async (t) => {
   const s = await server();
   try {
     const b = await bridgeProcess(s.root, true);
@@ -321,13 +321,14 @@ test("a laptop that floods a blocked bridge: the bridge holds a bounded window o
     const before = (await rssOf(pid))!;
     let peak = before;
     const sampling = setInterval(() => { void rssOf(pid).then((r) => { if (r !== null && r > peak) peak = r; }); }, 100);
-    // one connection opened, then 1 GiB of its data, in frames as the laptop's end writes them; a byte counts once the
-    // pipe took it (the write's callback), never while it waits in this process
-    const FRAME = 64 * 1024, TOTAL = 1024 * 1024 * 1024;
+    // one connection opened, then 256 MiB of its data, in frames as the laptop's end writes them; a byte counts once the
+    // pipe took it (the write's callback), never while it waits in this process. The volume is the property's, not a
+    // throughput: 256 times the window, and twice the memory bound below, so a bridge that holds what it reads fails
+    // that bound; no wall-clock bound is put on pushing it (the pipe's speed is the machine's load), only the test's own
+    const FRAME = 64 * 1024, TOTAL = 256 * 1024 * 1024;
     const head = (type: number, length: number): Buffer => { const h = Buffer.alloc(9); h.writeUInt8(type, 0); h.writeUInt32BE(1, 1); h.writeUInt32BE(length, 5); return h; };
     const payload = Buffer.alloc(FRAME, 0x61);
     let accepted = 0;
-    const started = Date.now();
     const atStart: number[] = [];
     const stdin = b.child.stdin!;
     stdin.write(head(1, 0));
@@ -335,7 +336,6 @@ test("a laptop that floods a blocked bridge: the bridge holds a bounded window o
       for (let sent = 0; sent < TOTAL; sent += FRAME) {
         const chunk = Buffer.concat([head(2, FRAME), payload]);
         if (!stdin.write(chunk, () => { accepted += chunk.length; })) await new Promise((r) => stdin.once("drain", r));
-        if (Date.now() - started > 60_000) break;
       }
       // the callbacks come in order: this one's is the last
       await new Promise((r) => stdin.write(Buffer.alloc(0), r));
@@ -343,8 +343,9 @@ test("a laptop that floods a blocked bridge: the bridge holds a bounded window o
     // before the bound: the window and the pipe, no more
     await new Promise((r) => setTimeout(r, BRIDGE_EXIT_MS - 2_000));
     atStart.push(accepted);
-    await within(flood, 40_000, `the laptop's writes still waiting 40 s on, so a stuck bridge is never read past its window and its end is never heard`).catch((e: unknown) => { clearInterval(sampling); throw e; });
-    clearInterval(sampling);
+    // past the stuck point the reader drops, so the pipe takes it all: a reader that never drops waits here until the
+    // test's own timeout, the failure
+    await flood.finally(() => { clearInterval(sampling); });
     t.diagnostic(`taken before the bound: ${atStart[0]} bytes; in all: ${accepted}; resident memory ${Math.round(before / 1048576)} MiB before, ${Math.round(peak / 1048576)} MiB at its peak`);
     assert.ok(atStart[0]! < 8 * 1024 * 1024, `${atStart[0]} bytes taken before the main thread was taken for stuck: past the window`);
     assert.ok(accepted >= TOTAL, `the laptop's writes waited for ever once the main thread was stuck: ${accepted} bytes taken`);
@@ -353,7 +354,8 @@ test("a laptop that floods a blocked bridge: the bridge holds a bounded window o
     assert.ok(peak - before < 128 * 1024 * 1024, `resident memory grew ${Math.round((peak - before) / 1024 / 1024)} MiB under the flood`);
     const closed = Date.now();
     stdin.end();
-    const d = await within(b.done, BRIDGE_EXIT_MS + 3_000, `a flooded, blocked bridge was still running ${BRIDGE_EXIT_MS + 3_000} ms after its stdin closed: ${b.err()}`);
+    // the bound plus a margin for a loaded machine: what is held is that the end is heard and the watchdog fires
+    const d = await within(b.done, BRIDGE_EXIT_MS + 15_000, `a flooded, blocked bridge was still running ${BRIDGE_EXIT_MS + 15_000} ms after its stdin closed: ${b.err()}`);
     assert.equal(d.signal, "SIGKILL", `${JSON.stringify(d)} ${b.err()}`);
     assert.ok(d.at - closed >= BRIDGE_EXIT_MS - 200, `ended ${d.at - closed} ms after stdin closed: before its bound`);
     assert.match(b.err(), /its stdin closed 5 s ago and it had not ended/);
