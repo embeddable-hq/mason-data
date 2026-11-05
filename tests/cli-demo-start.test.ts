@@ -273,14 +273,27 @@ describe("mason init demo, then the run as a person drives it", { timeout: 300_0
       assert.deepEqual(answered.rows, postgres.rows);
       // kept current: the writer's orders reach it once a wait that began after them returns
       const total = async (): Promise<number> => Number((await client.query<{ n: string }>("SELECT sum(orders) AS n FROM daily_orders")).rows[0]!.n);
-      const before = await total(), runBefore = (await generatedOf()).lastRun!.at;
+      // the run before, then the rows: a run that swaps in between is a run after `runBefore`, and its rows are in `before`
+      const runBefore = (await generatedOf()).lastRun!.at, before = await total();
       await new Promise((r) => setTimeout(r, 2_000));
       const synced = Number((await client.query<{ n: string }>("SELECT count(*) AS n FROM orders")).rows[0]!.n);
+      // what the wait promises: every change synced when it began is in the table, run or not (an idle base runs nothing)
       const again = await mason(["wait", "daily_orders", "--timeout", "60"]);
       assert.equal(again.code, 0, said(again));
       const later = await total();
-      assert.ok(later >= synced && later > before, `daily_orders holds the synced orders: ${before}, then ${later}; ${synced} synced before the wait`);
-      assert.ok(Date.parse((await generatedOf()).lastRun!.at) > Date.parse(runBefore), "it ran again");
+      assert.ok(later >= synced, `daily_orders holds the synced orders: ${later}; ${synced} synced before the wait`);
+      // and it is RE-RUN as the writer's orders keep coming, read on its own record and its rows within the wait's bound
+      // (issue 608): neither is promised inside a fixed span. The rows and the run were read by two commands, so a run
+      // between them moved the rows and was read as the run before, and the wait returns at once over a base with no
+      // change polled since; under load the poll stretches, and its passes, to four times their time
+      let ranAt = runBefore, grown = later;
+      for (const end = Date.now() + 60_000; !(Date.parse(ranAt) > Date.parse(runBefore) && grown > before) && Date.now() < end;) {
+        await new Promise((r) => setTimeout(r, 250));
+        ranAt = (await generatedOf()).lastRun!.at;
+        grown = await total();
+      }
+      assert.ok(Date.parse(ranAt) > Date.parse(runBefore), `it ran again: last run ${ranAt}, ${runBefore} before`);
+      assert.ok(grown > before, `its runs hold the writer's new orders: ${before}, then ${grown}`);
     } finally { await client.end(); await source.end(); }
   });
 
