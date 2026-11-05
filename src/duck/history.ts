@@ -20,6 +20,11 @@ import { MASON_SCHEMA, type DuckStore } from "./store.ts";
  *  sizes) unless MASON_HISTORY_DAYS says. */
 export const DEFAULT_HISTORY_DAYS = 7;
 
+/** The instant `days` days before `now` (ms since the epoch), ISO 8601 in UTC: what a history table's trim deletes
+ *  before. `now` is the module's own clock, the one that stamps its rows, never the engine's `now()`: a module reads
+ *  ONE clock, or a clock it is given (a test's, a run's) and the engine's disagree and the trim deletes what it keeps. */
+export function cutoff(now: number, days: number): string { return new Date(now - days * 86_400_000).toISOString(); }
+
 /** What is wrong with a history setting, a Failure's fields: what, why, and the line to write. */
 export type HistoryDaysWrong = { message: string; why: string; fix: string };
 

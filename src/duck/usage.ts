@@ -35,7 +35,7 @@
  */
 import type { DuckDBValue } from "@duckdb/node-api";
 import { MASON_SCHEMA, type DuckStore } from "./store.ts";
-import { History, Streak } from "./history.ts";
+import { History, Streak, cutoff } from "./history.ts";
 import { outcomeOf, type ApiLogRow, type Outcome } from "../api/request-log.ts";
 
 export const USAGE_TABLE = `${MASON_SCHEMA}.usage`;
@@ -409,10 +409,12 @@ export class UsageSampler {
     if (!this.sizedOnce) { this.sizedOnce = true; this.log(`usage: measured ${rows.length} synced tables' own size in ${Math.round(performance.now() - t0)} ms (every ${Math.round((this.options.sizeEveryMs ?? SIZE_EVERY_MS) / 60_000)} min)`); }
   }
 
-  /** Deletes the samples and sizes older than the retention. */
+  /** Deletes the samples and sizes older than the retention, counted back from the module's ONE clock (`now`, which
+   *  stamps each sample), never the engine's `now()` (src/duck/events.ts `trim` says why). */
   async trim(): Promise<void> {
-    await this.history.writer.run(`DELETE FROM ${USAGE_TABLE} WHERE sampled_at < now() - INTERVAL (${this.days}) DAY`);
-    await this.history.writer.run(`DELETE FROM ${SIZES_TABLE} WHERE sampled_at < now() - INTERVAL (${this.days}) DAY`);
+    const before = cutoff(this.now(), this.days);
+    await this.history.writer.run(`DELETE FROM ${USAGE_TABLE} WHERE sampled_at < $1::TIMESTAMPTZ`, [before]);
+    await this.history.writer.run(`DELETE FROM ${SIZES_TABLE} WHERE sampled_at < $1::TIMESTAMPTZ`, [before]);
   }
 
   /**
