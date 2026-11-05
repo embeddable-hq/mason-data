@@ -419,7 +419,7 @@ test("the guide lists every key the reader takes", async () => {
 
 test("the guide, the rules file and the release note name the numeric forms the plan stores and refuses, and no false reason", async () => {
   const docs = { guide: (await guideText("generated")).replace(/\s+/g, " "), rules: fs.readFileSync(".claude/rules/duck-generated.md", "utf8").replace(/\s+/g, " "),
-    notes: fs.readFileSync("release-notes/next.md", "utf8").replace(/\s+/g, " ") };
+    notes: fs.readFileSync("release-notes/v0.9.0.md", "utf8").replace(/\s+/g, " ") };
   for (const [doc, text] of Object.entries(docs)) {
     for (const said of [/trunc/, /mod/, /GREATEST/, /COALESCE/, /variance/i, /sqrt/, /18 decimals|past 18/, /double/, /read back from its text|survives every conversion/]) assert.match(text, said, `${doc}: ${said}`);
     assert.doesNotMatch(text, /CASE, GREATEST, COALESCE, mod or trunc over a numeric/, doc);
