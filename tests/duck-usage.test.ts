@@ -215,9 +215,12 @@ test("a sample that cannot be taken keeps its statements for the next; a write t
     `usage: writing a sample to ${USAGE_TABLE} failed: disk full; said once until one succeeds`,
     `usage: writing a sample to ${USAGE_TABLE} again; 3 time(s) it was not`,
   ]);
-  await store.writer.run(`INSERT INTO ${USAGE_TABLE} (sampled_at, seconds) VALUES (now() - INTERVAL 8 DAY, 60)`);
+  // the retention is counted back from the sampler's own clock (the one that stamped its samples), never the engine's
+  await store.writer.run(`INSERT INTO ${USAGE_TABLE} (sampled_at, seconds) VALUES ($1::TIMESTAMPTZ, 60)`, [new Date(clock - 8 * 86_400_000).toISOString()]);
+  const kept = Number((await store.writer.runAndReadAll(`SELECT count(*) FROM ${USAGE_TABLE}`)).getRowsJS()[0]![0]) - 1;
   await u.trim();
-  assert.equal(Number((await store.writer.runAndReadAll(`SELECT count(*) FROM ${USAGE_TABLE} WHERE sampled_at < now() - INTERVAL 7 DAY`)).getRowsJS()[0]![0]), 0);
+  assert.equal(Number((await store.writer.runAndReadAll(`SELECT count(*) FROM ${USAGE_TABLE} WHERE sampled_at < $1::TIMESTAMPTZ`, [new Date(clock - 7 * 86_400_000).toISOString()])).getRowsJS()[0]![0]), 0, "the sample past the retention, deleted");
+  assert.equal(Number((await store.writer.runAndReadAll(`SELECT count(*) FROM ${USAGE_TABLE}`)).getRowsJS()[0]![0]), kept, "the samples within it, kept, whatever today's date");
   await u.close();
   await store.writer.run(`DELETE FROM ${USAGE_TABLE}`);
 });

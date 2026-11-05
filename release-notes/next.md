@@ -441,6 +441,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   that is not stuck but waits for the run's page to take what was sent hears the end only once the page takes it, or
   ends when the run ends the tunnel. An ordinary end is unchanged: at once, exit 0. Nothing to set and nothing to do
   on upgrade; it is the server's Mason that carries it.
+- **The sync's events and the usage samples are kept exactly `MASON_HISTORY_DAYS` × 24 hours.** On a machine whose time
+  zone has daylight saving, the week after a clock change used to keep an hour more (or less). Under UTC, the image's
+  default, nothing changes. Nothing to do on upgrade.
 
 ## Known
 

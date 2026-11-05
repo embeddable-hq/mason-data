@@ -104,11 +104,34 @@ test("a failure over is said again when it recurs: a table's once it is copied a
   }
 });
 
+test("the retention is counted back from the clock the events were given, never the engine's: a year behind it or a year ahead", async () => {
+  const { SyncEvents, EVENTS_TABLE } = await events();
+  const YEAR = 365 * 86_400_000, DAY = 86_400_000;
+  for (const offset of [-YEAR, YEAR]) {
+    let clock = Date.now() + offset;
+    const said: string[] = [];
+    const log = await SyncEvents.open(store, (l) => said.push(l), { days: 7, now: () => clock });
+    log.record({ kind: "copied", table: "public.a", message: "eight days old" });
+    clock += DAY;
+    log.record({ kind: "copied", table: "public.b", message: "seven days old" });
+    clock += 7 * DAY;
+    log.record({ kind: "copied", table: "public.c", message: "today" });
+    await log.flush();
+    assert.equal(await log.trim(), 1, `offset ${offset}: only what is past the retention by the given clock`);
+    assert.deepEqual((await log.recent({ limit: 10 })).map((e) => e.message), ["seven days old", "today"], `offset ${offset}`);
+    assert.deepEqual(said, ["sync events: deleted 1 event(s) older than 7 days (MASON_HISTORY_DAYS)"]);
+    await log.close();
+    await store.writer.run(`DELETE FROM ${EVENTS_TABLE}`);
+  }
+});
+
 test("events older than the retention are deleted, said with their count; a write that fails is said once, never thrown", async () => {
   const { SyncEvents, EVENTS_TABLE } = await events();
   await store.writer.run(`CREATE SCHEMA IF NOT EXISTS _mason`);
   await store.writer.run(`CREATE TABLE IF NOT EXISTS ${EVENTS_TABLE} (happened_at TIMESTAMPTZ, seq BIGINT, kind VARCHAR, table_name VARCHAR, message VARCHAR)`);
-  await store.writer.run(`INSERT INTO ${EVENTS_TABLE} VALUES (now() - INTERVAL 10 DAY, 0, 'copied', 'public.a', 'old'), (now() - INTERVAL 1 DAY, 1, 'copied', 'public.a', 'recent')`);
+  // dated by the process's clock, the one the events read when given none (never the engine's now())
+  const ago = (days: number): string => new Date(Date.now() - days * 86_400_000).toISOString();
+  await store.writer.run(`INSERT INTO ${EVENTS_TABLE} VALUES ($1::TIMESTAMPTZ, 0, 'copied', 'public.a', 'old'), ($2::TIMESTAMPTZ, 1, 'copied', 'public.a', 'recent')`, [ago(10), ago(1)]);
   const said: string[] = [];
   const kept = await SyncEvents.open(store, (l) => said.push(l), { days: 7 });
   assert.deepEqual(said, ["sync events: deleted 1 event(s) older than 7 days (MASON_HISTORY_DAYS)"]);
