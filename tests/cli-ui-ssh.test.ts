@@ -270,6 +270,8 @@ test("the bridge ends at once, exit 0, when its stdin ends: the laptop's ssh gon
   const s = await server();
   try {
     const b = await bridgeProcess(s.root, false);
+    await new Promise((r) => setTimeout(r, 500));
+    assert.ok(!isGone(b.child.pid!), `the bridge ended with its stdin open: ${b.err()}`);
     const closed = Date.now();
     b.child.stdin!.end();
     const d = await within(b.done, BRIDGE_EXIT_MS, `the bridge was still running ${BRIDGE_EXIT_MS} ms after its stdin closed: ${b.err()}`);
