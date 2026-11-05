@@ -431,6 +431,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   is refused the same way rather than read in part: URL-encode the password (`@` is `%40`, `/` is `%2F`), and put it
   before the host. A refusal names a parameter only when it is one of libpq's own, and a missing database's refusal no
   longer repeats its name (the databases there are listed). If such a value was ever passed to Mason, its password may be in a log or a CI run's output: change it.
+- **The sync's events and the usage samples are kept exactly `MASON_HISTORY_DAYS` × 24 hours.** On a machine whose time
+  zone has daylight saving, the week after a clock change used to keep an hour more (or less). Under UTC, the image's
+  default, nothing changes. Nothing to do on upgrade.
 
 ## Known
 
