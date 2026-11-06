@@ -2,7 +2,7 @@
 /**
  * PreToolUse hook (Bash), two rules of CLAUDE.md "Who merges what":
  *
- * - Only the top session merges (.claude/skills/up-next/SKILL.md). A `gh pr merge` from a sub-agent (a coordinator, an
+ * - Only the top session merges (the coordinator, .claude/skills/coordinate/SKILL.md). A `gh pr merge` from a sub-agent (an
  *   implementer, any agent the Agent tool or a Workflow started: its input carries `agent_id`, scripts/hooks/shell.ts
  *   `subAgent`) is blocked, pinned or not, queued or not; it reports the PR and the head it read instead (issue 588).
  * - A merge lands the commit that was read. `gh pr merge` without `--match-head-commit <sha>` merges whatever the head
