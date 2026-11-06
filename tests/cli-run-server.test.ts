@@ -822,7 +822,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   // the list: removedAt null, last used from the request log, the URL to paste WITHOUT the password (the add's own builder);
   // roleFrom none: no roles file, every synced table (stage 1b)
   const listed = await list();
-  assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, disabledAt: null, live: true, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app", roleFrom: "none" }]);
+  assert.deepEqual(listed.users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: null, disabledAt: null, live: true, from: null, lastUsedAt: "2026-10-24T10:04:00.000Z", url: "postgres://metabase@127.0.0.1:5433/app", roleFrom: "none" }]);
   assert.deepEqual([listed.lastUsedNote, listed.urlNote, listed.requestLogDays], [null, null, 7]);
   assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: null }, "asked for the window the user was a user in");
   // the web page asks every 2 s and shows no last use: without ?lastUsed=1 the request log is never scanned
@@ -867,7 +867,7 @@ test("the users: /api/users lists, adds and removes through mason user's own fun
   assert.deepEqual(gone, { removed: { name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt },
     next: [{ command: "mason user list", what: "the users, removed ones included" }, { command: "mason user add <name>", what: "a new user, with a new password" }] });
   // kept, marked removed: no URL, does not connect, last used asked within [addedAt, removedAt]
-  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt, disabledAt: null, live: false, lastUsedAt: "2026-10-24T10:04:00.000Z", url: null, roleFrom: "none" }]);
+  assert.deepEqual((await list()).users, [{ name: "metabase", id: a.id, addedAt: a.addedAt, removedAt: gone.removed.removedAt, disabledAt: null, live: false, from: null, lastUsedAt: "2026-10-24T10:04:00.000Z", url: null, roleFrom: "none" }]);
   assert.deepEqual(lastUsedAsks.at(-1), { name: "metabase", since: a.addedAt, until: gone.removed.removedAt });
   // removing it again is not found; the name can be added again, as a new id, and the removed entry stays
   assert.equal((await call("DELETE", "/api/users/metabase")).status, 404);
@@ -915,6 +915,35 @@ test("the users: POST /api/users/<name>/disable and /enable through mason user's
   // a removed user is no user to disable
   await call("DELETE", "/api/users/grafana");
   assert.equal((await call("POST", "/api/users/grafana/disable")).status, 404);
+});
+
+test("the users' address ranges: POST /api/users takes from, POST /api/users/<name>/from replaces them (null: any address), through mason user's own functions — its shapes, a no-op said, a bad range 400 with nothing written", async () => {
+  fs.rmSync(usersFile, { force: true });
+  const bad = await call("POST", "/api/users", { body: { name: "looker", from: ["999.999.999.999/99"] } });
+  assert.equal(bad.status, 400, bad.text);
+  assert.match(JSON.parse(bad.text).failure.message, /^mason user add looker: "999\.999\.999\.999\/99" is not an address or a CIDR/);
+  assert.ok(!fs.existsSync(usersFile), "nothing written");
+  assert.equal((await call("POST", "/api/users", { body: { name: "looker", from: "10.0.0.0/8" } })).status, 400, "from is a list");
+  const added = await call("POST", "/api/users", { body: { name: "looker", from: ["203.0.113.0/24", "2001:DB8::/32"] } });
+  assert.equal(added.status, 200, added.text);
+  const a = JSON.parse(added.text) as { id: string; addedAt: string; from: string[] };
+  assert.deepEqual(a.from, ["203.0.113.0/24", "2001:db8::/32"]);
+  assert.deepEqual((JSON.parse((await call("GET", "/api/users")).text) as { users: Array<{ from: unknown }> }).users.map((u) => u.from), [["203.0.113.0/24", "2001:db8::/32"]]);
+  const set = await call("POST", "/api/users/looker/from", { body: { from: ["198.51.100.7"] } });
+  assert.equal(set.status, 200, set.text);
+  assert.deepEqual(JSON.parse(set.text), { changed: { name: "looker", id: a.id, addedAt: a.addedAt, from: ["198.51.100.7"] }, already: false,
+    next: [{ command: "mason user list", what: "the users and the addresses each connects from" }, { command: "mason user from looker --any", what: "it connects from any address again" }] });
+  assert.ok(logged.includes("user looker connects from 198.51.100.7"));
+  assert.equal(JSON.parse((await call("POST", "/api/users/looker/from", { body: { from: ["198.51.100.7"] } })).text).already, true);
+  const before = fs.readFileSync(usersFile, "utf8");
+  for (const body of [{ from: ["10.0.0.0/33"] }, { from: [] }, { from: 7 }, {}]) {
+    assert.equal((await call("POST", "/api/users/looker/from", { body })).status, 400, JSON.stringify(body));
+  }
+  assert.equal(fs.readFileSync(usersFile, "utf8"), before, "nothing written");
+  assert.equal((await call("POST", "/api/users/nobody/from", { body: { from: null } })).status, 404);
+  const any = JSON.parse((await call("POST", "/api/users/looker/from", { body: { from: null } })).text) as { changed: { from: unknown } };
+  assert.equal(any.changed.from, null);
+  assert.equal((readUsers(usersFile) as { users: Array<{ from?: string[] }> }).users[0]!.from, undefined, "no ranges: no key");
 });
 
 test("every error answer carries the Failure shape beside its sentence, the catch-all's wording kept", async () => {

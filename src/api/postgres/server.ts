@@ -68,7 +68,7 @@ import * as tls from "node:tls";
 import type { RawStmt } from "libpg-query";
 import { catalogRows } from "../../duck/analyze.ts";
 import type { Planner } from "../../duck/generated-plan.ts";
-import { ApiError, USER_DISABLED } from "../error.ts";
+import { ADDRESS_NOT_ALLOWED, ApiError, USER_DISABLED } from "../error.ts";
 import { hashCaller, outcomeOf, storedPayload, type ApiLogRow } from "../request-log.ts";
 import type { GapId } from "../../duck/gaps.ts";
 import { gapRefusal, StatementError, type DuckPlan } from "../../duck/statement.ts";
@@ -285,12 +285,13 @@ export interface PgApiOptions {
   product?: string;
   /** the password verified (src/duck/users.ts `listenerLogins`): throws an ApiError (401) for the API key, an invalid
    *  token or a removed user, and rejects when it could not tell. `user` is the startup packet's: a token's session may
-   *  send any, a `mason user`'s must send its own */
-  authenticate(password: string, user: string): PgToken | Promise<PgToken>;
+   *  send any, a `mason user`'s must send its own. `clientAddr` is the session's (`Session.clientAddr`, null when it
+   *  could not be read): a user limited to address ranges is refused from outside them, ADDRESS_NOT_ALLOWED */
+  authenticate(password: string, user: string, clientAddr?: string | null): PgToken | Promise<PgToken>;
   /** asked again of a `mason user`'s session before a statement, at most every `recheckMs`: throws as authenticate does
    *  when the user was removed (the session ends), an ApiError 503 when it could not tell (the statement is refused, the
    *  session kept); answers the token as the user is NOW (its role given or taken since), which the session keeps */
-  recheck?(token: PgToken): Promise<PgToken | void>;
+  recheck?(token: PgToken, clientAddr?: string | null): Promise<PgToken | void>;
   /** the roles (src/duck/grants.ts RolesLive; the project's roles file, src/cli/roles.ts), the SAME object until they
    *  change: a session with a role is held to its grants at every statement, its catalog reads run under the role,
    *  and the catalog is rebuilt with the roles when they move. Absent: no roles, every session reads every copied table */
@@ -696,6 +697,8 @@ const nameLength = (name: string | undefined): string | undefined => name === un
 
 /** The hint a refused login is told on the run's own listener. */
 const USER_LOGIN_HINT = "a tool that keeps one password connects as a user: mason user add <name> prints its password and URL";
+/** What a connection refused for its address is told (ADDRESS_NOT_ALLOWED): the same whether the user exists or not. */
+const ADDRESS_HINT = "a user limited to address ranges connects only from them: mason user list shows each user's ranges, mason user from <name> changes them";
 
 /**
  * WHAT A CONNECTION MAY DO IS ITS SOCKET'S (`ShareDoor`): how it starts and who logs in, read from here, so the run's
@@ -1140,9 +1143,23 @@ class Session {
     if (m.type !== "Password") { this.fatal("08P01", `expected a password message, got ${m.type}`); return; }
     let token: PgToken;
     try {
-      token = await this.door.authenticate(m.password, this.user);
+      token = await this.door.authenticate(m.password, this.user, this.clientAddr);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // an address outside the user's ranges, judged before its password: refused as Postgres refuses a connection no
+      // pg_hba.conf line takes (28000), in words made of the name and the address alone, so a missing user and a
+      // limited one read the same; which it was is the log's (the ApiError's message)
+      if (err instanceof ApiError && err.code === ADDRESS_NOT_ALLOWED) {
+        this.server.log(`session ${this.id} refused: ${message}`);
+        const refused = new PgError({ code: "28000", message: `no entry for ${this.clientAddr === null ? "an address that could not be read" : `host "${this.clientAddr}"`}, user "${this.user}"`,
+          hint: ADDRESS_HINT }, 401);
+        this.asked = { sql: "", method: "CONNECT", startedAt: Date.now(), sentAt: this.sentBytes };
+        const response = errorResponse({ ...refused.fields, severity: "FATAL" });
+        if (this.door.refused?.(this.user) !== false) this.recordRequest(refused, undefined, err.userName, [response]);
+        this.send(response);
+        this.end("authentication failed");
+        return;
+      }
       // a revocation record that could not be read is no wrong password: the server could not tell, said as such
       const unknown = err instanceof ApiError && err.status === 503;
       // a disabled user (`mason user disable`): its password was right, so it is no wrong password but a role that may
@@ -2618,7 +2635,7 @@ class Session {
     if (now - this.verifiedAt < this.door.recheckMs * 1000) return null;
     try {
       // the user as the file has it NOW: its role given or taken since applies to this statement
-      const fresh = await recheck(this.token!);
+      const fresh = await recheck(this.token!, this.clientAddr);
       if (fresh !== undefined && this.token !== null) this.token = fresh;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2627,6 +2644,7 @@ class Session {
       if (err instanceof ApiError) this.recordRefusal(asked.toUpperCase(), err);
       this.fatal("28000", `the session's user is no longer accepted: ${message}`, this.door.public ? this.door.loginHint : err instanceof ApiError && err.code === USER_DISABLED
         ? `a disabled user's sessions end at their next statement; mason user enable ${user} lets it connect again, with the same password`
+        : err instanceof ApiError && err.code === ADDRESS_NOT_ALLOWED ? `its address ranges changed: a session from outside them ends at its next statement (mason user list shows them; mason user from ${user} changes them)`
         : `a removed user's sessions end at their next statement; mason user add ${user} makes it again, with a new password`);
       return null;
     }

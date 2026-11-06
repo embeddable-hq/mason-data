@@ -4,7 +4,8 @@
  * server takes for it (src/cli/run-server.ts `/api/users`), sent to the service under `/v1/replicas/{org}/{name}/users`:
  *
  *   list      GET    …/users?lastUsed=1                     mason user list --json's shape, beside its next
- *   add       POST   …/users  { name, role?, set? }          mason user add --json's shape (the run is up: its url)
+ *   add       POST   …/users  { name, role?, set?, from? }   mason user add --json's shape (the run is up: its url)
+ *   from      POST   …/users/{user}/from  { from }           { changed, already }: its ranges replaced (null: any address)
  *   disable   POST   …/users/{user}/disable                  { disabled, already }
  *   enable    POST   …/users/{user}/enable                   { enabled, already }
  *   remove    DELETE …/users/{user}                          { removed }
@@ -36,6 +37,8 @@
  *   role, roleFrom, readsNothing,         rows, list's lines, --json                  `ROLE_NAME_RE`; closed sets; booleans; each consistent with the others
  *     roleKnown, live
  *   attributes, missingAttributes         rows, list's lines, --json                  `ATTRIBUTE_NAME_RE` names; each value one line (`serviceText`), bounded
+ *   from (a user's address ranges)        rows, list's lines, add's row, --json       null, or 1 to MAX_RANGES ranges each in the one form
+ *                                                                                     src/duck/users.ts `userRanges` writes back (`heldRanges`)
  *   lastUsedNote, urlNote                 list's tip "Last used: …", --json           one line (`serviceText`), bounded
  *   requestLogDays                        list's lines, --json                        a whole number, 1 to 36500
  *   already                               the headline chosen, --json                 a boolean
@@ -57,20 +60,20 @@ import { replicaText, tokenFor, type Replica } from "./replica.ts";
 import { holdOutput } from "./output-gate.ts";
 import { err as styleErr, out as styleOut } from "./style.ts";
 import { connectionUrl, psqlLine } from "./pg-url.ts";
-import { USER_NAME_RE } from "../duck/users.ts";
+import { MAX_RANGES, USER_NAME_RE, userRanges } from "../duck/users.ts";
 import { ROLE_NAME_RE, type RoleFrom } from "./roles.ts";
 import { ATTRIBUTE_NAME_RE } from "../duck/row-filter.ts";
 import { databaseNameProblem } from "../lib/database-name.ts";
 import { NO_ROLES } from "../duck/grants.ts";
-import { addedNext, addedReport, disabledNext, disabledReport, enabledNext, enabledReport, listNext, listText, REMOVED_NEXT, removedReport, USER,
-  type AddedUser, type Disabled, type Enabled, type Removed, type UserList, type UserRow } from "./user.ts";
+import { addedNext, addedReport, disabledNext, disabledReport, enabledNext, enabledReport, fromNext, fromReport, listNext, listText, REMOVED_NEXT, removedReport, USER,
+  type AddedUser, type Disabled, type Enabled, type FromChanged, type Removed, type UserList, type UserRow } from "./user.ts";
 
 /** The bound of a list's answer (a replica's users, a row each), and of the number of users in it; every other answer
  *  is `call`'s own 64 KiB. */
 export const MAX_LIST_BYTES = 1024 * 1024;
 export const MAX_USERS = 2000;
 
-export type Verb = "add" | "list" | "disable" | "enable" | "remove";
+export type Verb = "add" | "list" | "from" | "disable" | "enable" | "remove";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -88,12 +91,14 @@ export const failureNext = (status: number, r: Replica): NextStep[] =>
   status === 401 || status === 403 ? serviceNext(status) : [[`mason user list --replica ${replicaText(r)}`, "the replica's users"]];
 
 /** The request a subcommand is: the run's own `/api/users` request, under the replica's path. */
-export function requestOf(r: Replica, o: { verb: Verb; name?: string | undefined; role?: string | undefined; sets: readonly string[] }): { method: "GET" | "POST" | "DELETE"; path: string; json?: unknown } {
+export function requestOf(r: Replica, o: { verb: Verb; name?: string | undefined; role?: string | undefined; sets: readonly string[]; from?: readonly string[] | null | undefined }): { method: "GET" | "POST" | "DELETE"; path: string; json?: unknown } {
   const base = `/v1/replicas/${r.org}/${r.name}/users`;
   // a user's name is USER_NAME_RE's (checked before this): letters, digits, `_`, `.` and `-`, safe in a path as it is
   switch (o.verb) {
     case "list": return { method: "GET", path: `${base}?lastUsed=1` };
-    case "add": return { method: "POST", path: base, json: { name: o.name, ...(o.role !== undefined ? { role: o.role } : {}), ...(o.sets.length ? { set: [...o.sets] } : {}) } };
+    case "add": return { method: "POST", path: base, json: { name: o.name, ...(o.role !== undefined ? { role: o.role } : {}), ...(o.sets.length ? { set: [...o.sets] } : {}),
+      ...(o.from !== undefined && o.from !== null ? { from: [...o.from] } : {}) } };
+    case "from": return { method: "POST", path: `${base}/${o.name!}/from`, json: { from: o.from === undefined || o.from === null ? null : [...o.from] } };
     case "disable": case "enable": return { method: "POST", path: `${base}/${o.name!}/${o.verb}` };
     case "remove": return { method: "DELETE", path: `${base}/${o.name!}` };
   }
@@ -130,6 +135,15 @@ function attributesOf(v: unknown): Record<string, string | string[]> | null {
   return outv;
 }
 
+/** A user's address ranges as the service sends them: null (any address), or 1 to MAX_RANGES ranges, each in the one form
+ *  the one grammar writes back (src/duck/users.ts `userRanges`); undefined when they are not that. */
+export function heldRanges(v: unknown): string[] | null | undefined {
+  if (v === null) return null;
+  if (!Array.isArray(v) || v.length < 1 || v.length > MAX_RANGES || !v.every((x) => typeof x === "string" && x.length <= 64)) return undefined;
+  const r = userRanges(v as string[]);
+  return "problem" in r || r.from.length !== v.length || r.from.some((x, i) => x !== v[i]) ? undefined : r.from;
+}
+
 const names = (v: unknown): v is string[] => Array.isArray(v) && v.length >= 1 && v.length <= 64 && v.every((x) => typeof x === "string" && ATTRIBUTE_NAME_RE.test(x));
 const timeOrNull = (v: unknown): v is string | null => v === null || isServiceTime(v);
 
@@ -144,12 +158,15 @@ function rowOf(v: unknown): UserRow | null {
     && /^postgres:\/\/[a-z0-9_.-]+@(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\]):\d{1,5}\/[A-Za-z0-9%._~!*'()-]+(?:\?sslmode=require)?$/.test(u.url))) return null;
   const role = roleOf(u);
   if (role === null) return null;
+  // a replica's Mason before address ranges sends none: it has none, so any address
+  const from = u.from === undefined ? null : heldRanges(u.from);
+  if (from === undefined) return null;
   const attributes = u.attributes === undefined ? undefined : attributesOf(u.attributes);
   if (attributes === null) return null;
   if (u.missingAttributes !== undefined && !names(u.missingAttributes)) return null;
   if (u.roleKnown !== undefined && (typeof u.roleKnown !== "boolean" || role.roleFrom !== "file")) return null;
   return { name: u.name, id: u.id, addedAt: u.addedAt, removedAt: u.removedAt, disabledAt: u.disabledAt, live: u.live, lastUsedAt: u.lastUsedAt,
-    url: u.url as string | null, ...role, ...(attributes !== undefined ? { attributes } : {}),
+    url: u.url as string | null, from, ...role, ...(attributes !== undefined ? { attributes } : {}),
     ...(u.missingAttributes !== undefined ? { missingAttributes: u.missingAttributes as string[] } : {}),
     ...(typeof u.roleKnown === "boolean" ? { roleKnown: u.roleKnown } : {}) } as UserRow;
 }
@@ -181,10 +198,12 @@ export function heldAdded(json: unknown, asked: string, secrets: readonly string
   if (a.url !== url || a.psql !== psqlLine(url)) return null;
   const role = roleOf(a);
   if (role === null) return null;
+  const from = a.from === undefined ? undefined : heldRanges(a.from);
+  if (from === undefined && a.from !== undefined || from === null) return null;
   const attributes = a.attributes === undefined ? undefined : attributesOf(a.attributes);
   if (attributes === null) return null;
   return { user: asked, id: a.id, addedAt: a.addedAt, password: a.password, database: a.database, url, psql: psqlLine(url), host: a.host, port: a.port as number, sslmode: a.sslmode,
-    ...role, ...(attributes !== undefined ? { attributes } : {}) };
+    ...role, ...(attributes !== undefined ? { attributes } : {}), ...(from !== undefined ? { from } : {}) };
 }
 
 /** A user as disable, enable and remove name it: the name asked, its id, when it was added, and `more` times. */
@@ -203,6 +222,13 @@ export function heldEnabled(json: unknown, asked: string, secrets: readonly stri
   const e = userOf(json.enabled, asked, []);
   return e === null ? null : { enabled: e, already: json.already };
 }
+/** `POST …/users/{user}/from`'s answer: the user asked, its ranges now (null: any address), and `already`. */
+export function heldFrom(json: unknown, asked: string, secrets: readonly string[]): FromChanged | null {
+  if (!obj(json) || typeof json.already !== "boolean" || !carriesNoSecret(json, secrets)) return null;
+  const c = userOf(json.changed, asked, []);
+  const from = obj(json.changed) ? heldRanges(json.changed.from) : undefined;
+  return c === null || from === undefined ? null : { changed: { ...c, from }, already: json.already };
+}
 export function heldRemoved(json: unknown, asked: string, secrets: readonly string[]): Removed | null {
   if (!obj(json) || !carriesNoSecret(json, secrets)) return null;
   const r = userOf(json.removed, asked, ["removedAt"]);
@@ -212,10 +238,10 @@ export function heldRemoved(json: unknown, asked: string, secrets: readonly stri
 // ------------------------------------------------------------------ the command
 
 /** What each subcommand asked, in the words of a failure outside the contract (`unexpected`). */
-const STEP: Record<Verb, string> = { list: "the replica's users were asked for", add: "a user was added", disable: "a user was disabled", enable: "a user was enabled", remove: "a user was removed" };
+const STEP: Record<Verb, string> = { list: "the replica's users were asked for", add: "a user was added", from: "a user's address ranges were set", disable: "a user was disabled", enable: "a user was enabled", remove: "a user was removed" };
 
 /** `mason user <verb> … --replica <org>/<name>`: one request, its answer held and printed as the local command prints it. */
-export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | undefined; role?: string | undefined; sets: readonly string[]; json: boolean }): Promise<number> {
+export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | undefined; role?: string | undefined; sets: readonly string[]; from?: readonly string[] | null; json: boolean }): Promise<number> {
   const outStyle = serviceStyle(styleOut());
   const fail = (f: Failure): number => failed("user", f, { json: o.json, style: serviceStyle(styleErr()) });
   const service = serviceOf();
@@ -254,6 +280,12 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
       }
       const next = onReplica(addedNext(added.user, true), r);
       return print({ ...added }, next, () => addedReport(added, { roles: NO_ROLES, listener: null, next }, outStyle));
+    }
+    case "from": {
+      const c = heldFrom(a.json, o.name!, secrets);
+      if (c === null) return outside();
+      const next = onReplica(fromNext(c.changed.name, c.changed.from), r);
+      return print({ ...c }, next, () => fromReport(c, true, next, outStyle));
     }
     case "disable": {
       const d = heldDisabled(a.json, o.name!, secrets);

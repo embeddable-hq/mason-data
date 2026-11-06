@@ -30,6 +30,11 @@ paths:
 - **A disabled user is KEPT with `disabledAt` and its id** (`mason user disable`): `LiveUsers` still holds it, so its
   login is judged whole first — a wrong password stays 28P01 — and only then refused `user_disabled` (the listener's
   28000); its sessions end at their next statement; `enable` deletes the field, so the same password connects again.
+- **A user's address ranges are a field of its row** (`MasonUser.from`, `mason user add --from`, `mason user from`),
+  read by ONE grammar (src/lib/cidr.ts, `MASON_PG_PROXY_FROM`'s too) and judged BEFORE the password on the session's
+  `clientAddr` (`addressAllowed`), again before every statement: outside them is `ADDRESS_NOT_ALLOWED` (the listener's
+  28000 "no entry for host …"), a null address is outside every list, and while any user has ranges a name that is no
+  user is refused in the same words, so the answer never says who exists (tests/duck-users-address-wire.test.ts).
 
 ## What review probes
 

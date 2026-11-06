@@ -19,6 +19,8 @@ differently on a guess.
 ```bash
 mason user add metabase                             # the URL, the user and its password: paste them into the tool now
 mason user list                                     # metabase   id 81fcb84caead79b7 · added 2026-10-26 12:00 UTC
+mason user add looker --from 203.0.113.0/24         # connects from these addresses alone (--from again for more)
+mason user from looker 198.51.100.0/24 2001:db8::/32   # its address ranges replaced; --any removes them
 mason user disable metabase                         # kept: its logins refused (28000) until mason user enable metabase
 mason user enable metabase                          # it connects again, with the same password
 mason user remove metabase                          # its next connection is refused; its sessions end at their next statement
@@ -49,6 +51,19 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   user's does. A wrong password for it is a wrong password (28P01): the state is told only to the login's holder.
   `mason user enable` clears it: the same password connects again. Disabling one disabled already (or enabling one
   that is not) says so and changes nothing, exit 0.
+- **A user may be limited to the addresses it connects from** (`mason user add <name> --from <range>`, repeated;
+  `mason user from <name> <range>…` replaces the list, `mason user from <name> --any` removes it; `from` in the file and
+  in `mason user list --json`, `null` for any address): IPv4 and IPv6 ranges with their prefix length, or single
+  addresses, each read by one strict grammar (the prefix held to the family, no bits past it, no host name), the same
+  `MASON_PG_PROXY_FROM` is read by. A user with none connects from any address, as before, and a file written before
+  reads unchanged. A connection from outside a user's list is refused BEFORE its password is checked, as Postgres refuses
+  one no `pg_hba.conf` line takes: `28000`, `no entry for host "198.51.100.9", user "looker"`, HINT `a user limited to
+  address ranges connects only from them: …`. While any user has a list, a name that is no user is refused in the same
+  words (a wrong address and a missing user read the same from outside; a user with no list still answers a wrong
+  password 28P01). The log line says which, and the address. The address is the session's own (the socket's peer, or
+  behind a named proxy the client its PROXY header carries, "Behind a TCP proxy"); one that cannot be read (a public
+  share's socket) is refused for a user with a list. A session the user holds when its list changes is held to the new
+  list at its next statement, and ends FATAL (28000) when its address is outside it.
 - **Rotating the API key removes every user at once** (`apiKey` in `.mason/config.json`, `MASON_API_KEY` under
   `mason serve`): no password verifies under the new key, the refusal says the key was rotated, and `mason user list`
   marks each as not connecting. Remove and add each again for new passwords.
