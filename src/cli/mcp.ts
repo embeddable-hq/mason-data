@@ -45,17 +45,9 @@ export const MCP: CommandSpec = {
   the request log under application_name mason-mcp/<the client's name>. It serves until the client closes stdin.
   Its stdout is the protocol's: it takes no --json, and a failure to start is said on stderr.
 
-  Its tools: tables; describe (a table); query (one statement; max_rows default 200, at most 10000; timeout_ms
-  default 30000, at most 300000); explain (a statement). Its resources: mason://help/agent and mason://help/mcp.
-
   Claude Code (in the project's folder, with Mason running), the URL in the server's environment:
     mason user add claude                          the URL to paste, printed once
     claude mcp add mason --env MASON_URL="${EXAMPLE_URL}" -- mason mcp
-
-  Claude Desktop (claude_desktop_config.json). The app often starts servers without your shell's PATH, where neither
-  mason nor the node its first line asks for is found: name both by their absolute paths (which node, which mason):
-    { "mcpServers": { "mason": { "command": "/absolute/path/to/node", "args": ["/absolute/path/to/mason", "mcp"],
-        "env": { "MASON_URL": "${EXAMPLE_URL}" } } } }
 
   What the client runs:
     MASON_URL="${EXAMPLE_URL}" mason mcp
@@ -63,6 +55,14 @@ export const MCP: CommandSpec = {
   --url <url>   the Postgres API as a mason user: what mason user add printed (default MASON_URL); TLS as its sslmode
                 says (a host off this machine: require when it names none). A URL with a password here is taken,
                 with a warning on stderr: ps shows it to this machine's users, so MASON_URL is the safer place
+
+  Its tools: tables; describe (a table); query (one statement; max_rows default 200, at most 10000; timeout_ms
+  default 30000, at most 300000); explain (a statement). Its resources: mason://help/agent and mason://help/mcp.
+
+  Claude Desktop (claude_desktop_config.json). The app often starts servers without your shell's PATH, where neither
+  mason nor the node its first line asks for is found: name both by their absolute paths (which node, which mason):
+    { "mcpServers": { "mason": { "command": "/absolute/path/to/node", "args": ["/absolute/path/to/mason", "mcp"],
+        "env": { "MASON_URL": "${EXAMPLE_URL}" } } } }
 `,
   options: { url: { type: "string" } },
   stdout: "protocol",

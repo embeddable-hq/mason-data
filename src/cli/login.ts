@@ -44,18 +44,18 @@ export const LOGIN: CommandSpec = {
   ~/.config/mason/credentials.json ($XDG_CONFIG_HOME/mason/ when that is set), readable by you alone, never in a
   project. Signing in again replaces this machine's login to that service, and revokes the one it replaces.
 
+    mason login
+    MASON_CLOUD_URL=http://127.0.0.1:8080 mason login     a service on this machine
+
+  --json    as data, once signed in: { service (its address), email, name, orgs: [{ slug, name, role }], file (where
+            the login is kept), replaced (null, or the login it replaced: { email, revoked }), next }
+
   The page and the code are printed on stderr at once, as plain lines, so a coding agent can pass them on to you
   before the wait ends; the answer is printed when it ends.
 
   The service is ${DEFAULT_SERVICE_URL} unless MASON_CLOUD_URL names another (https://, or http:// for one on
   this machine). With MASON_TOKEN set (CI), every command uses that token before a saved login, so mason login is
   refused: run it without the variable (env -u MASON_TOKEN mason login) to sign in anyway.
-
-    mason login
-    MASON_CLOUD_URL=http://127.0.0.1:8080 mason login     a service on this machine
-
-  --json    as data, once signed in: { service (its address), email, name, orgs: [{ slug, name, role }], file (where
-            the login is kept), replaced (null, or the login it replaced: { email, revoked }), next }
 
   Exit status: 0 signed in; 1 refused or failed (said); 2 a wrong command line; 124 the code expired before it
   was approved (run mason login again).
@@ -74,15 +74,17 @@ export const LOGOUT: CommandSpec = {
   reached the login is still removed here, and it says the login was NOT revoked and how to revoke it: sign in to
   the service's web app and revoke it there. Logins to other services stay.
 
-  MASON_TOKEN in the environment is not a saved login: logout cannot remove it, and says so while it is set.
-
     mason logout
     MASON_CLOUD_URL=http://127.0.0.1:8080 mason logout    a service on this machine
 
-  --json    as data: { service, signedOut (a saved login was removed), email (its account, null when there was
-            none), loginRevoked (true, false when the service did not take it, null when there was nothing to
-            revoke), revoked (the same, kept until 1.0), revokeError (why not, else null), environmentToken
-            (MASON_TOKEN is set, and still used), file, next }
+  --json    as data: its shape is at the end
+
+  MASON_TOKEN in the environment is not a saved login: logout cannot remove it, and says so while it is set.
+
+  The --json answer: { service, signedOut (a saved login was removed), email (its account, null when there was
+    none), loginRevoked (true, false when the service did not take it, null when there was nothing to
+    revoke), revoked (the same, kept until 1.0), revokeError (why not, else null), environmentToken
+    (MASON_TOKEN is set, and still used), file, next }
 `,
   options: { json: { type: "boolean", default: false } },
   json: ["service", "signedOut", "email", "loginRevoked", "revoked", "revokeError", "environmentToken", "file", "next"],

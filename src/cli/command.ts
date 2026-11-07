@@ -7,6 +7,8 @@
  *
  *   - `mason <name> --help` and `mason help <name>` print its usage and exit 0;
  *   - the usage starts `usage: mason <name>`, and shows at least one example (an indented `mason <name> …` line);
+ *   - it reads in the order a person needs it: the usage line, a short description, the examples, the flags (one
+ *     entry each); then the long prose, and a long --json shape last (`The --json answer: …`, its entry saying so);
  *   - every option the parser takes is in the usage, by its `--name` (and `-x` when it has one);
  *   - `mason --help` lists it with its summary;
  *   - a wrong option prints what is wrong, then the usage, and exits 2.
@@ -146,7 +148,8 @@ export interface CommandSpec {
   name: string;
   /** one line: what `mason --help` says the command does */
   summary: string;
-  /** what `mason <name> --help` prints: `usage: mason <name> …`, what it does, an example, every option */
+  /** what `mason <name> --help` prints, in this order: `usage: mason <name> …`, what it does, examples, every option;
+   *  then the long prose, a long --json shape last */
   usage: string;
   /** what its parser accepts (`--help` / `-h` is added to every command) */
   options: Options;

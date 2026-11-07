@@ -49,6 +49,21 @@ export const INIT_USAGE = `usage: mason init [- | <postgres url> | demo] [--name
     mason/roles.yml           who may read what: one role, everything (tables: all), the default of a user added
                               without --role, so every user reads every synced table until you narrow it — commit it
     mason/mason.yml           the Mason version the project is written for — commit it: production runs that version
+
+    mason init                                          MASON_DATABASE_URL, else DATABASE_URL (.env or the shell)
+    mason init - < db-url.txt                           the URL on stdin, written to .env, never on the command line
+    mason init demo                                     a demo database Mason hosts itself: nothing to install
+    mason init --folder db/mason --name shop-admin      the project's files elsewhere; another name
+    mason init --remote                                 the database in .env is on another machine
+
+  --name <name>     the project's name, which its replication slot is named for (default: this folder's)
+  --database <name> the database name a tool connects with, written as database: in the source file (default: none
+                    written, so tools connect with ${DEFAULT_DATABASE}): your database's own, and a tool keeps the name it has
+  --folder <dir>    where sources/ goes, relative to this folder (default mason; . for this folder itself)
+  --remote          go ahead with a database on another machine (read the warnings mason init prints); not with demo
+  --skip-check      write the project without connecting (the database is not up yet); mason start checks it; not with demo
+  --json            as data: its shape is at the end
+
   With no URL it reads MASON_DATABASE_URL, else your app's DATABASE_URL, each from .env.local, then .env, then the
   shell. The source file names the variable read, url: \${DATABASE_URL} — \${MASON_DATABASE_URL} when that is the one
   read, or when a URL given here is another database than your app's DATABASE_URL: the URL itself is in .env (written
@@ -66,23 +81,11 @@ export const INIT_USAGE = `usage: mason init [- | <postgres url> | demo] [--name
   revenue per day and status, kept current: mason wait ${DEMO_GENERATED.table} once Mason is up; mason help generated); one
   already there is kept.
 
-    mason init                                          MASON_DATABASE_URL, else DATABASE_URL (.env or the shell)
-    mason init - < db-url.txt                           the URL on stdin, written to .env, never on the command line
-    mason init demo                                     a demo database Mason hosts itself: nothing to install
-    mason init --folder db/mason --name shop-admin      the project's files elsewhere; another name
-    mason init --remote                                 the database in .env is on another machine
-
-  --name <name>     the project's name, which its replication slot is named for (default: this folder's)
-  --database <name> the database name a tool connects with, written as database: in the source file (default: none
-                    written, so tools connect with ${DEFAULT_DATABASE}): your database's own, and a tool keeps the name it has
-  --folder <dir>    where sources/ goes, relative to this folder (default mason; . for this folder itself)
-  --remote          go ahead with a database on another machine (read the warnings mason init prints); not with demo
-  --skip-check      write the project without connecting (the database is not up yet); mason start checks it; not with demo
-  --json            as data: { name, root, folder, config, demo (true for the demo database's project, else false),
-                    source: { name (the source's: its file's), file, url (as the file writes it), database (the name
-                    a tool connects with, or null when the file has a mistake), env (the .env line written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
-                    generated: [{ table, file, written (false: one was here, and kept) }] (the demo's generated table; [] for
-                    any other project), database: { url (password masked), from, version, tables }, warnings, next }
+  The --json answer: { name, root, folder, config, demo (true for the demo database's project, else false),
+    source: { name (the source's: its file's), file, url (as the file writes it), database (the name
+    a tool connects with, or null when the file has a mistake), env (the .env line written, its value masked, or null) }, roles: { file, written (false: one was here, and kept) },
+    generated: [{ table, file, written (false: one was here, and kept) }] (the demo's generated table; [] for
+    any other project), database: { url (password masked), from, version, tables }, warnings, next }
 `;
 
 export const INIT: CommandSpec = {

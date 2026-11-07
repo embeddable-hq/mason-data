@@ -45,6 +45,16 @@ export const SHARE: CommandSpec & { needs: "run" } = {
   API, through a free tunnel service, and prints what to type into the tool. It stays in the foreground: Ctrl-C ends
   the share. Your local tools notice nothing: the share has a socket of its own, and no session is dropped.
 
+    mason share
+    mason share --role sales
+    mason share --via bore
+
+  --role <role>       what it reads: a role of mason/roles.yml
+  --via <tunnel>      pinggy (default) or bore
+  --timeout <duration>  how long the tunnel has to give its address (default ${DEFAULT_TIMEOUT_S}s; a bare number is
+                      seconds; 30s, 2m); past it, exit 124
+  --json              as data: its shape is at the end
+
   The socket requires TLS of every connection, so a service that forwards bytes cannot read them. The certificate is
   self-signed (the tool connects with sslmode=require, and checks no certificate), so a malicious service could sit in
   the middle of the handshake: this is for trying Mason, on data you may send that way. mason serve on a host is the
@@ -60,18 +70,10 @@ export const SHARE: CommandSpec & { needs: "run" } = {
   line is visible to every user of the machine), a paid Pinggy token, keeps the address, so a tunnel that drops is opened
   again by itself, the password unchanged. --via bore needs bore (cargo install bore-cli).
 
-    mason share
-    mason share --role sales
-    mason share --via bore
-
-  --role <role>       what it reads: a role of mason/roles.yml
-  --via <tunnel>      pinggy (default) or bore
-  --timeout <duration>  how long the tunnel has to give its address (default ${DEFAULT_TIMEOUT_S}s; a bare number is
-                      seconds; 30s, 2m); past it, exit 124
-  --json              as data, once the address is known: { share: { host, port, database, user, password, sslmode,
-                      fingerprint, role, reads, via, endsAt (ISO 8601, or null), verified (the address answered with this
-                      share's certificate; false: it could not be reached from this machine) }, next }; the command
-                      then holds the share: the end is on stderr, exit 0 for Ctrl-C or SIGTERM, 1 otherwise
+  The --json answer, once the address is known: { share: { host, port, database, user, password, sslmode,
+    fingerprint, role, reads, via, endsAt (ISO 8601, or null), verified (the address answered with this
+    share's certificate; false: it could not be reached from this machine) }, next }; the command
+    then holds the share: the end is on stderr, exit 0 for Ctrl-C or SIGTERM, 1 otherwise
 `,
   options: { role: { type: "string" }, via: { type: "string" }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
   json: ["share", "next"],

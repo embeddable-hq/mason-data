@@ -48,6 +48,28 @@ export const USER: CommandSpec & { needs: "project" } = {
   The user name a tool sends must be the user's own. A user disabled is kept with its password: its logins are
   refused (as Postgres refuses a role without LOGIN) and its sessions end at their next statement, until enable.
 
+    mason user add metabase                    a user for Metabase: its password and the URL to paste
+    mason user add looker --from 203.0.113.0/24 --from 2001:db8:7::/48    connects from these alone
+    mason user from looker 198.51.100.0/24     its ranges replaced
+    mason user from looker --any               it connects from any address again
+    mason user add agent --role agent          a user held to the role agent
+    mason user add acme --role tenant --set tenant=42      the rows of tenant 42
+    mason user add emea --role region --set regions=eu --set regions=uk
+    mason user list
+    mason user disable metabase                metabase connects no more, until mason user enable metabase
+    mason user enable metabase                 metabase connects again, with the same password
+    mason user remove metabase                 metabase connects no more
+    docker compose exec mason mason user add grafana   beside mason serve, in its data folder
+    mason user add metabase --replica acme/shop          a user of a replica on a hosted Mason service
+
+  <name>                      ${USER_NAME_RULE}
+  --role <role>               add: what the user reads, a role of mason/roles.yml (below)
+  --set <attribute>=<value>   add: its value of an attribute its role declares (below)
+  --from <range>              add: the addresses it connects from (below)
+  --any                       from: its ranges removed, so it connects from any address
+  --replica <org>/<name>      a replica's users on a hosted Mason service, not this project's (below)
+  --json                      as data: its shape is at the end
+
   The list is .mason/users.json (names and ids, no password), beside the running Mason, which reads it again by itself.
   A removed user stays in it, marked removed, so the list shows who was removed and when; its name can be added again.
   Rotating the API key (apiKey in .mason/config.json, MASON_API_KEY under mason serve) removes every user at once.
@@ -97,20 +119,6 @@ export const USER: CommandSpec & { needs: "project" } = {
   mason user from <name> <range> … replaces a user's ranges, and mason user from <name> --any removes them; the sessions
   it holds from an address outside its new ranges end at their next statement.
 
-    mason user add metabase                    a user for Metabase: its password and the URL to paste
-    mason user add looker --from 203.0.113.0/24 --from 2001:db8:7::/48    connects from these alone
-    mason user from looker 198.51.100.0/24     its ranges replaced
-    mason user from looker --any               it connects from any address again
-    mason user add agent --role agent          a user held to the role agent
-    mason user add acme --role tenant --set tenant=42      the rows of tenant 42
-    mason user add emea --role region --set regions=eu --set regions=uk
-    mason user list
-    mason user disable metabase                metabase connects no more, until mason user enable metabase
-    mason user enable metabase                 metabase connects again, with the same password
-    mason user remove metabase                 metabase connects no more
-    docker compose exec mason mason user add grafana   beside mason serve, in its data folder
-    mason user add metabase --replica acme/shop          a user of a replica on a hosted Mason service
-
   --replica <org>/<name> manages the users of a replica on a hosted Mason service instead of this project's (else
   MASON_REPLICA, said on stderr when it chose; each part lower case letters, digits and -): the same subcommands,
   --role, --set and --from, the same output and --json, which names the replica in its headline and its replica key,
@@ -119,23 +127,22 @@ export const USER: CommandSpec & { needs: "project" } = {
   the default. A refusal is the service's words, each one line, its code the CLI's own by the HTTP status (not_found,
   refused, failed: never usage), exit 1.
 
-  <name>    ${USER_NAME_RULE}
-  --json    as data: add { user (the name), id, addedAt, password, database, role (the role it reads as: its own
-            or the file's default; absent when none), attributes? ({ name: value, or [values] for a list }), roleFrom (file: its own --role; default: the file's default;
-            none), readsNothing (true: no role under a file with no default), from? (its address ranges, as given
-            to --from in their one form; absent: any address), and once Mason runs url, psql (the
-            psql line for url), host, port, sslmode }; list { users: [{ name, id, addedAt, removedAt (null for a user
-            not removed), disabledAt (null for a user not disabled), live (connects now), from (its address ranges;
-            null: any address), role?, attributes?,
-            missingAttributes? (the attributes its role's filters read that it lacks: refused until added again), roleFrom, readsNothing?,
-            roleKnown? (the roles file names its own role now), lastUsedAt (its newest statement, null when none within
-            requestLogDays), url (to paste, without the password; null for a removed user or when Mason is not running) }],
-            lastUsedNote (why lastUsedAt is unknown, else null), urlNote (why url is null, else null), requestLogDays
-            (null when unknown) }; disable { disabled: { name, id, addedAt, disabledAt }, already (it was disabled
-            before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; from { changed: { name, id,
-            addedAt, from (its ranges now; null: any address) }, already (they were these before) }; remove { removedUser: { name,
-            id, addedAt, removedAt }, removed (the same, kept until 1.0) }; next. With --replica (or MASON_REPLICA) every answer also has replica ("<org>/<name>":
-            the replica it acted on), and a project's never does
+  The --json answer: add { user (the name), id, addedAt, password, database, role (the role it reads as: its own
+    or the file's default; absent when none), attributes? ({ name: value, or [values] for a list }), roleFrom (file: its own --role; default: the file's default;
+    none), readsNothing (true: no role under a file with no default), from? (its address ranges, as given
+    to --from in their one form; absent: any address), and once Mason runs url, psql (the
+    psql line for url), host, port, sslmode }; list { users: [{ name, id, addedAt, removedAt (null for a user
+    not removed), disabledAt (null for a user not disabled), live (connects now), from (its address ranges;
+    null: any address), role?, attributes?,
+    missingAttributes? (the attributes its role's filters read that it lacks: refused until added again), roleFrom, readsNothing?,
+    roleKnown? (the roles file names its own role now), lastUsedAt (its newest statement, null when none within
+    requestLogDays), url (to paste, without the password; null for a removed user or when Mason is not running) }],
+    lastUsedNote (why lastUsedAt is unknown, else null), urlNote (why url is null, else null), requestLogDays
+    (null when unknown) }; disable { disabled: { name, id, addedAt, disabledAt }, already (it was disabled
+    before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; from { changed: { name, id,
+    addedAt, from (its ranges now; null: any address) }, already (they were these before) }; remove { removedUser: { name,
+    id, addedAt, removedAt }, removed (the same, kept until 1.0) }; next. With --replica (or MASON_REPLICA) every answer also has replica ("<org>/<name>":
+    the replica it acted on), and a project's never does
 `,
   options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true }, from: { type: "string", multiple: true }, any: { type: "boolean", default: false }, replica: { type: "string" } },
   json: ["replica", "user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removedUser", "removed", "from", "changed", "lastUsedNote", "urlNote", "requestLogDays", "next"],

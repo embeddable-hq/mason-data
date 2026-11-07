@@ -367,83 +367,20 @@ const STATUS_USAGE = `usage: mason status [--json]
 
   Status: running, not running, or hung — then this project's facts, one a line: its folder, its database and how
   its changes are read, the run and the synced data's file and the synced tables in all (synced, rows, the last sync), the Postgres API
-  and how it listens. Then each added table as mason wait shows it, with how it is kept current and when it was last synced
+  and how it listens.
+
+    mason status
+    mason status --json
+
+  --json   as data: its shape is at the end
+
+  Then each added table as mason wait shows it, with how it is kept current and when it was last synced
   (sync: off, last synced 3 days ago; polled every 30s, last 4 s ago); the sync's latest failures (mason logs --events
   lists every event) and the latest statements refused, failed or cancelled (mason logs --requests --failed); the Postgres API's statements of the last day and the last week (each outcome, the completed
   ones' average, p50 and p95 time, the rows and bytes sent); the ones it answered slowly in the last day; and the ones it refused or
   failed, each with the reason (mason logs --requests lists every one). With Mason stopped, the same rows say "not
   running", how the last run ended, and the tables are the ones the sources file names. Hung is a run that is alive and does
   not answer its commands (a statement may be holding its main thread): the same rows, and mason stop ends it (exit 1).
-
-    mason status
-    mason status --json
-
-  --json   as data: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), shown (the URL with
-           <user>:<password> in the credentials' place), psql (its psql line), listener:
-           { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
-           source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
-           replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
-           says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
-           bytes, key, added, addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
-           publication check keeping a synced table current; null otherwise), kept, sync: { state (synced, syncing,
-           behind: served and kept but older than its sync: promises, failed, waiting), syncedAt (when
-           it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
-           ageSeconds (how long ago that was), asOf (the time the synced data holds the database as of: kept's syncedAt),
-           promisedSeconds (the age its sync: promises not to pass; null: sync: off promises nothing), behindBySeconds
-           (how far past it, 0 when not; null when nothing is promised), behindWhy (why, while behind; else null) }, … }], totals: { added, copied, failed, rows (the synced tables' rows),
-           syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
-           uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
-           or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file),
-           projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
-           sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
-           application_name), open, running }] }, share: (null, or what mason share has open) { port, fingerprint, sessions,
-           refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
-           days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
-           failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
-           when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap
-           (its entry of docs/SQL-SUPPORT.md), title (what it is; null for an entry this Mason no longer has), runs
-           (the statements it refused in the last day), users, clients (application_name), last, example (the latest,
-           cut at 1,000 characters) }] (the most refused first: GET /api/unsupported) or { error },
-           recentErrors: { sync: [{ at, kind, failed, table, message }] (the latest failures of the sync and restarts,
-           newest last: mason logs --events), error (why they could not be read, or null), queries: [{ requestId,
-           startedAt, outcome, sqlstate, message, query, … }] (the latest statements refused, failed or cancelled, newest
-           last, as mason logs --requests --json shows each: mason logs --requests --failed), queriesError (or null) },
-           readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), served (this is
-           mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove — the
-           project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
-           server's sources file it cannot write — or null), next }.
-           Each table's kept is how it is kept current now (absent for a table the sync does not hold):
-           { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
-           else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
-           now), pending (only when it applies: why it is not kept current now, its phase included: it waits for
-           its first sync, it is being read whole, its first sync failed, it is read again whole, caught up first) }
-           or { by: recopy, copiedAt, syncedAt, pending (only when it applies, as the poll's) }
-           or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
-           notRunning (why the stream is not running, null when it is) }; each with promisedSeconds (the age of
-           its synced data past which it is behind: poll, its interval plus the larger of 60 s and twice its last poll;
-           replication, 120 s; off, null) and lateWhy (what would make it late now: the pass's or its own poll's
-           time, which Mason waits four times, the stream not running); with Mason stopped: { running: false, project, source: { name,
-           file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
-           { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
-           exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the
-           database), walStatus (reserved, extended, unreserved, lost), safeWalSizeBytes (the WAL left before Postgres
-           invalidates it; null: max_slot_wal_keep_size unset, nothing caps it), at } or { error }, publication, running, failure, position,
-           applied, database: { lsn, at } or { error }, lag: { bytes, seconds }, lastBatch: { appliedAt, committedAt },
-           tables: [{ table, state (streamed, catching-up, waiting, left-out), why, catchUp: { phase (queued, polling,
-           applying), from, startedAt, held, retryAt }, applied: { inserts, updates, deletes, truncates } }] }.
-           jsonPaths: [{ table, column, steps, either, canonical, asText (false: a path's -> and ->> share it), name,
-           state (waiting, backfilling, ready, dropped), rowsTotal, rowsDone, marked, statements, slowestMs, totalMs,
-           fill: { rows, bytesPerRow, seconds, basis (measured: from the last fill of its column; disk or text: modelled from
-           the column's bytes a row on disk, or its text's before it is on disk), rowsPerSecond } (the fill's estimate it
-           was decided on), filled: { rows, seconds } (what its own fill measured), queued (a backfill waiting for the fill
-           under way), keptAt, readyAt, why }]. generatedTables: [{ table, file, kind, method (whole: its SQL run again),
-           state (refused, waiting, building, failed, current, behind), targetLag, behindSeconds (across its chain: the
-           oldest base change below it not in it), behindSince (when that change was committed; null: none), missingTarget, serving,
-           lastRun: { at, seconds, rows }, error (the last run's, no value of a row in it), retryAt,
-           refusals: [{ key, message, why, options, text }], waitingFor, warnings }]. roles (a run with a roles file, mason/roles.yml: what a user added
-           with --role may read): { file, roles: [name], problem (what is wrong with the file now, every statement of a
-           user with a role refused while there is; null), default (the role of a user added without --role; null: the
-           file names none, and such a user reads nothing), all (the roles of tables: all) }
 
   In replication mode a Stream section says where the stream is: its position against the database's (bytes behind),
   when the newest change applied was committed and how long after it was applied, and each added table — streamed,
@@ -457,6 +394,73 @@ const STATUS_USAGE = `usage: mason status [--json]
   waiting (its fill's cost holds it back: the line says the estimate and what would store it), queued (its column
   added, its fill after the one under way), backfilling (its existing rows being filled, N %) or ready (read from its
   column). MASON_STORE_JSON_PATHS=off turns it off.
+
+  The --json answer: { running, pid, postgres: { url, host, port, database, sslmode (require when it is TLS), shown (the URL with
+    <user>:<password> in the credentials' place), psql (its psql line), listener:
+    { host (what it is bound to), tls (certificate, self-signed or null), fingerprint } }, source: { name (the
+    source's: its sources file's), file (the sources file), shownFile (it from the project's root), url, database, remote, version, standby, changes,
+    replication, demo (the demo database this run hosts), textOrder (what reading the database's text order left to say), sync: { default (every table's sync unless its entry
+    says its own: off, poll 30s), written (the file's top sync: says it; false: the default) } }, warnings, folder, project, tables: [{ table, rows,
+    bytes, key, added, addedColumns, copy, error (why its sync failed: its first sync, or the poll, catch-up, stream or
+    publication check keeping a synced table current; null otherwise), kept, sync: { state (synced, syncing,
+    behind: served and kept but older than its sync: promises, failed, waiting), syncedAt (when
+    it was last brought current), syncSeconds (how long that took), syncedBy (copy, poll, catch-up, stream),
+    ageSeconds (how long ago that was), asOf (the time the synced data holds the database as of: kept's syncedAt),
+    promisedSeconds (the age its sync: promises not to pass; null: sync: off promises nothing), behindBySeconds
+    (how far past it, 0 when not; null when nothing is promised), behindWhy (why, while behind; else null) }, … }], totals: { added, copied, failed, rows (the synced tables' rows),
+    syncedAt (the latest sync of any) }, engine: { file, bytes, keptDays (MASON_HISTORY_DAYS), version (the run's), startedAt,
+    uptimeSeconds, restarts (the times its supervisor started the run again: { count, last: { at, why, upSeconds }
+    or null }, or { error }) }, disk: { path (where the synced data's file is), freeBytes, copyBytes (the file),
+    projectedBytes (what the first syncs running are projected to add; null: none, or too early to say), error },
+    sessions: { open (the Postgres API's sessions logged in), byClient: [{ user ('' a token's), client (its
+    application_name), open, running }] }, share: (null, or what mason share has open) { port, fingerprint, sessions,
+    refusedLogins, droppedConnections, shares: [{ user, from (command: mason share; page: the web page), role, reads, openedAt, via, host, port, endsAt, state }] }, shareEnded: (null, or the last share that ended) { user, from, why, at }, queries: { keptDays, day, week } (the last day's and the last 7
+    days' statements, each { days, covered (the days of it the request log keeps), statements, completed, refused,
+    failed, cancelled, rows, bytesSent, durationMs: { avg, p50, p95 } (the completed ones') or null }; { error }
+    when it could not be read), slowQueries, refusedQueries, refusedTotal (how many in all), unsupported: [{ gap
+    (its entry of docs/SQL-SUPPORT.md), title (what it is; null for an entry this Mason no longer has), runs
+    (the statements it refused in the last day), users, clients (application_name), last, example (the latest,
+    cut at 1,000 characters) }] (the most refused first: GET /api/unsupported) or { error },
+    recentErrors: { sync: [{ at, kind, failed, table, message }] (the latest failures of the sync and restarts,
+    newest last: mason logs --events), error (why they could not be read, or null), queries: [{ requestId,
+    startedAt, outcome, sqlstate, message, query, … }] (the latest statements refused, failed or cancelled, newest
+    last, as mason logs --requests --json shows each: mason logs --requests --failed), queriesError (or null) },
+    readiness (what mason wait waits on), ui (whether this run serves the web page: mason ui), served (this is
+    mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove — the
+    project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
+    server's sources file it cannot write — or null), next }.
+    Each table's kept is how it is kept current now (absent for a table the sync does not hold):
+    { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
+    else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
+    now), pending (only when it applies: why it is not kept current now, its phase included: it waits for
+    its first sync, it is being read whole, its first sync failed, it is read again whole, caught up first) }
+    or { by: recopy, copiedAt, syncedAt, pending (only when it applies, as the poll's) }
+    or { by: replication, slot, state (streamed, catching-up, waiting, left-out), why, position, lastCommit,
+    notRunning (why the stream is not running, null when it is) }; each with promisedSeconds (the age of
+    its synced data past which it is behind: poll, its interval plus the larger of 60 s and twice its last poll;
+    replication, 120 s; off, null) and lateWhy (what would make it late now: the pass's or its own poll's
+    time, which Mason waits four times, the stream not running); with Mason stopped: { running: false, project, source: { name,
+    file, url, error (the sources file's problem, or null) }, engine, tables: [{ table }], lastRun, lastStop:
+    { at, how } or null, next }; hung: the same with hung: { pid, problem, why },
+    exit 1. In replication mode stream: { slot, slotWal: { walHeldBytes (the WAL the slot holds on the
+    database), walStatus (reserved, extended, unreserved, lost), safeWalSizeBytes (the WAL left before Postgres
+    invalidates it; null: max_slot_wal_keep_size unset, nothing caps it), at } or { error }, publication, running, failure, position,
+    applied, database: { lsn, at } or { error }, lag: { bytes, seconds }, lastBatch: { appliedAt, committedAt },
+    tables: [{ table, state (streamed, catching-up, waiting, left-out), why, catchUp: { phase (queued, polling,
+    applying), from, startedAt, held, retryAt }, applied: { inserts, updates, deletes, truncates } }] }.
+    jsonPaths: [{ table, column, steps, either, canonical, asText (false: a path's -> and ->> share it), name,
+    state (waiting, backfilling, ready, dropped), rowsTotal, rowsDone, marked, statements, slowestMs, totalMs,
+    fill: { rows, bytesPerRow, seconds, basis (measured: from the last fill of its column; disk or text: modelled from
+    the column's bytes a row on disk, or its text's before it is on disk), rowsPerSecond } (the fill's estimate it
+    was decided on), filled: { rows, seconds } (what its own fill measured), queued (a backfill waiting for the fill
+    under way), keptAt, readyAt, why }]. generatedTables: [{ table, file, kind, method (whole: its SQL run again),
+    state (refused, waiting, building, failed, current, behind), targetLag, behindSeconds (across its chain: the
+    oldest base change below it not in it), behindSince (when that change was committed; null: none), missingTarget, serving,
+    lastRun: { at, seconds, rows }, error (the last run's, no value of a row in it), retryAt,
+    refusals: [{ key, message, why, options, text }], waitingFor, warnings }]. roles (a run with a roles file, mason/roles.yml: what a user added
+    with --role may read): { file, roles: [name], problem (what is wrong with the file now, every statement of a
+    user with a role refused while there is; null), default (the role of a user added without --role; null: the
+    file names none, and such a user reads nothing), all (the roles of tables: all) }
 `;
 
 export const STATUS: CommandSpec & { needs: "project" } = {
@@ -884,10 +888,12 @@ const TABLES_USAGE = `usage: mason tables [<table>…] [--all] [--json]
     mason tables --all                       every table with its columns, at once (long)
 
   --all       every table with its columns, not only the named ones
-  --json      as data: { database, source: { name (the source's: its sources file's), file (the sources file) },
-              tables: [{ table, rows, bytes, primaryKey, comment, addable,
-              reason, added, addedColumns (the columns it syncs: null when not added), copyKey (the key: the sources
-              file keys it by, null: its primary key), columns: [{ name, type, nullable, comment, references }] }], next }
+  --json      as data: its shape is at the end
+
+  The --json answer: { database, source: { name (the source's: its sources file's), file (the sources file) },
+    tables: [{ table, rows, bytes, primaryKey, comment, addable,
+    reason, added, addedColumns (the columns it syncs: null when not added), copyKey (the key: the sources
+    file keys it by, null: its primary key), columns: [{ name, type, nullable, comment, references }] }], next }
 `;
 
 export const TABLES: CommandSpec & { needs: "project" } = {
@@ -1060,12 +1066,22 @@ async function viaRun<T>(run: DevRun, route: "/api/pick" | "/api/remove", body: 
 const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--include <column>,…] [--key <column>,…] [--sync <sync>] [--json]
 
   Syncs tables into Mason: each one is added to the project's sources file (mason/sources/<name>.yml), under tables:
+
     mason add orders                                    every column:            orders: {}
     mason add orders --columns id,status,total          those columns:           orders: { columns: [id, status, total] }
     mason add orders customers                          several tables, every column of each
     mason add users --include password_hash             every column, and one that looks like a secret
     mason add event_log --key tenant_id,id              a table with no primary key, keyed by those columns
     mason add orders --sync "poll 30s"                  polled every 30 seconds:  orders: { sync: poll 30s }
+
+  --columns <a,b,…>   only these columns (one table at a time: the list is that table's); a list flag takes a comma
+                      list or the flag repeated, the same: --columns id,status is --columns id --columns status
+  --include <a,b,…>   these columns as well as every other one — a column that looks like a secret, named on purpose
+  --key <a,b,…>       for a table with no primary key: the columns that tell its rows apart, which it is keyed by (one
+                      table at a time; polled or off: logical replication cannot apply a change by them)
+  --sync <sync>       how it is kept current after its first sync, written on its entry: off, "poll 30s" or replication
+  --json              as data: its shape is at the end
+
   A table is its name (orders) or schema.table (billing.invoices). Its primary key is always synced. The rest of the
   file — your comments, other tables — stays as it was.
 
@@ -1089,20 +1105,14 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   and the table is synced again whole with them. A project deployed as committed (MASON_PROJECT_READONLY=1 where Mason
   runs) is refused, its files left as they are: add the table where the project is committed, then deploy.
 
-  --columns <a,b,…>   only these columns (one table at a time: the list is that table's); a list flag takes a comma
-                      list or the flag repeated, the same: --columns id,status is --columns id --columns status
-  --include <a,b,…>   these columns as well as every other one — a column that looks like a secret, named on purpose
-  --key <a,b,…>       for a table with no primary key: the columns that tell its rows apart, which it is keyed by (one
-                      table at a time; polled or off: logical replication cannot apply a change by them)
-  --sync <sync>       how it is kept current after its first sync, written on its entry: off, "poll 30s" or replication
-  --json              as data: { added: [{ table, entry, columns (null: every one), exclude, key, addedKey (key columns
-                      added to --columns), skippedSecrets, already (the file said so already), sync: { value (off, poll
-                      30s), from (entry: its own sync:, file: the file's, default: off, as the file writes none) },
-                      bigOff (it is over ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows and its entry was written sync: off), notReplicated (why
-                      its entry was written sync: poll 5m under a file whose sync: is replication, or null), pollCost (an estimate of
-                      what a frequent poll of a big table costs your database, or null) } or { table, error }],
-                      file (the sources file), error (when a table was not added: { code, message, why }), next };
-                      exit 1 when a table could not be added
+  The --json answer: { added: [{ table, entry, columns (null: every one), exclude, key, addedKey (key columns
+    added to --columns), skippedSecrets, already (the file said so already), sync: { value (off, poll
+    30s), from (entry: its own sync:, file: the file's, default: off, as the file writes none) },
+    bigOff (it is over ${BIG_TABLE_ROWS.toLocaleString("en-US")} rows and its entry was written sync: off), notReplicated (why
+    its entry was written sync: poll 5m under a file whose sync: is replication, or null), pollCost (an estimate of
+    what a frequent poll of a big table costs your database, or null) } or { table, error }],
+    file (the sources file), error (when a table was not added: { code, message, why }), next };
+    exit 1 when a table could not be added
 `;
 
 export const ADD: CommandSpec & { needs: "project" } = {
@@ -1414,18 +1424,7 @@ const WAIT_USAGE = `usage: mason wait [<table>…] [--timeout <duration>] [--jso
 
   --timeout <duration>  how long to wait (default 600, seconds; 10m, 1h); the sync goes on after, and mason wait
                         again picks it up
-  --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
-                        kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the
-                        rate, the seconds left, while its chunks are read }; kept as mason status --json says it —
-                        { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its last whole read
-                        or poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why
-                        it is not kept current now, its phase included; sync as mason status --json says it: its state —
-                        synced, syncing, behind, failed, waiting — asOf, promisedSeconds, behindBySeconds, behindWhy),
-                        stream (replication mode: where the stream is, as mason status --json says it), error (on a
-                        failure or a timeout: { code, message, next }), next }
-                        Named, a generated table: the same ready, failed, waiting, timedOut, error and next, tables
-                        empty, and generatedTable (as mason status --json's generatedTables says it: its state,
-                        behindSeconds, behindSince — when the oldest change not in it was committed, null: none)
+  --json                as data: its shape is at the end
 
   Exit status: 0 ready (a table behind what its sync: promises is said on its line, and ready); 1 a first sync failed,
   or the sync keeping a synced table current failed (its poll, its catch-up, the stream, or a named publication that
@@ -1433,6 +1432,19 @@ const WAIT_USAGE = `usage: mason wait [<table>…] [--timeout <duration>] [--jso
   before it was built (printed, with what to do; Mason tries a failed one again by itself); 124 timed out.
   A generated table that serves and holds everything synced is ready (0) though its last run failed: after editing its
   file, read mason status for whether the new definition was refused or failed.
+
+  The --json answer, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
+    kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the
+    rate, the seconds left, while its chunks are read }; kept as mason status --json says it —
+    { by: poll, sync: { mode: off } or { mode: poll, every, seconds }, syncedAt (its last whole read
+    or poll), nextAt (its next poll; null: off) }; kept's pending, when it applies, says why
+    it is not kept current now, its phase included; sync as mason status --json says it: its state —
+    synced, syncing, behind, failed, waiting — asOf, promisedSeconds, behindBySeconds, behindWhy),
+    stream (replication mode: where the stream is, as mason status --json says it), error (on a
+    failure or a timeout: { code, message, next }), next }
+    Named, a generated table: the same ready, failed, waiting, timedOut, error and next, tables
+    empty, and generatedTable (as mason status --json's generatedTables says it: its state,
+    behindSeconds, behindSince — when the oldest change not in it was committed, null: none)
 `;
 
 /** how often a wait not drawn in place says its block again though nothing in it changed, so a long one never goes
@@ -1628,17 +1640,7 @@ export const EVENTS_LEAVE_OUT = "A scheduled poll that succeeds is not listed: t
 const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<filters>]] [--events [--failed]] [--running] [--json]
 
   The last lines of Mason's log: every sync, poll and statement it ran, warnings and errors with their reasons —
-  running or not. With --requests, the run's request log instead: every statement a tool sent the
-  Postgres API that Mason answered, and every one it refused, failed or cancelled, a line each, newest last — when, the
-  outcome and SQLSTATE, how long, the rows sent, the client's application_name (and the mason user's name), the
-  statement and the error's first line; the filters narrow it, and a page that has older rows ends with the line that
-  reads them (--before). With --events, the sync's events: each first sync that failed or finished, each poll, catch-up or
-  stream that failed, the database out of reach, a table current again, each sync asked by hand (mason sync, the
-  page's Sync now) and what it did, and each restart of the run — a line each, newest last (a failure repeated word for
-  word is said once an hour). A scheduled poll that succeeds is not listed: the last one's result is each table's last
-  sync (mason status, the Tables page's Last sync). Both are kept MASON_HISTORY_DAYS days
-  (default 7) in the run's synced data, and read through the running Mason. With --running, the statements running now
-  instead, one per session, each with its number (mason cancel <session> --statement <n> stops one).
+  running or not.
 
     mason logs
     mason logs -f                 keep printing new lines as Mason works, until Ctrl-C
@@ -1668,18 +1670,32 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --search <text>  with --requests: only the statements whose text has it, in any case (at most ${MAX_SEARCH} characters)
   --before <pos>   with --requests: the page before: the position a page answered with (its last Next line)
   --running        the statements running now (Mason must be running)
-  --json           as data: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no
-                   time); with --requests { requests: [{ requestId, startedAt, endedAt, session, applicationName,
-                   clientAddress (the client's address; behind a TCP proxy, the one its PROXY header carries),
-                   tokenName, user (the mason user), role, attributes (the user's values its role's row filters
-                   read, or null), method, outcome (ok, refused, failed, cancelled), status
-                   (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
-                   bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
-                   or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
-                   catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered, synced (a sync
-                   asked by hand), sync_changed (a table's sync: changed)), failed, table (null: the whole sync),
-                   message }], keptDays }; with --running { running: [{ session, user,
-                   applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
+  --json           as data: its shape is at the end
+
+  With --requests, the run's request log instead: every statement a tool sent the
+  Postgres API that Mason answered, and every one it refused, failed or cancelled, a line each, newest last — when, the
+  outcome and SQLSTATE, how long, the rows sent, the client's application_name (and the mason user's name), the
+  statement and the error's first line; the filters narrow it, and a page that has older rows ends with the line that
+  reads them (--before). With --events, the sync's events: each first sync that failed or finished, each poll, catch-up or
+  stream that failed, the database out of reach, a table current again, each sync asked by hand (mason sync, the
+  page's Sync now) and what it did, and each restart of the run — a line each, newest last (a failure repeated word for
+  word is said once an hour). A scheduled poll that succeeds is not listed: the last one's result is each table's last
+  sync (mason status, the Tables page's Last sync). Both are kept MASON_HISTORY_DAYS days
+  (default 7) in the run's synced data, and read through the running Mason. With --running, the statements running now
+  instead, one per session, each with its number (mason cancel <session> --statement <n> stops one).
+
+  The --json answer: { lines: [{ at, text }] } (the log's entries, oldest first; at is null for a line with no
+    time); with --requests { requests: [{ requestId, startedAt, endedAt, session, applicationName,
+    clientAddress (the client's address; behind a TCP proxy, the one its PROXY header carries),
+    tokenName, user (the mason user), role, attributes (the user's values its role's row filters
+    read, or null), method, outcome (ok, refused, failed, cancelled), status
+    (completed, failed, cancelled: what a reader shows), sqlstate, message, detail, hint, rows,
+    bytesSent, durationMs, query, queryTruncated }], keptDays, before (the position of the page before,
+    or null: none older) }; with --events { events: [{ at, kind (copy_failed, poll_failed,
+    catch_up_failed, stream_failed, source_unreachable, restart, copied, recovered, synced (a sync
+    asked by hand), sync_changed (a table's sync: changed)), failed, table (null: the whole sync),
+    message }], keptDays }; with --running { running: [{ session, user,
+    applicationName, method, startedAt, runningMs, rows (sent so far), query, queryTruncated }] }; next
 `;
 
 export const LOGS: CommandSpec & { needs: "project" } = {
@@ -1898,9 +1914,9 @@ const STOP_USAGE = `usage: mason stop [--json]
 
     mason stop
 
-  mason destroy removes the synced data and the state too (your files stay), to free the disk or begin again.
-
   --json    as data: { stopped: [name], killed (a run that did not answer and ignored SIGTERM), supervisor (its pid, when one was stopped), next }
+
+  mason destroy removes the synced data and the state too (your files stay), to free the disk or begin again.
 `;
 
 export const STOP: CommandSpec & { needs: "project" } = {
