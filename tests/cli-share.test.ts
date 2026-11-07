@@ -703,7 +703,7 @@ describe("mason share, against a real run and a stub tunnel", { timeout: 300_000
       const v = JSON.parse(refused.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> };
       assert.equal(v.error.code, "usage");
       assert.equal(v.error.message, "mason/roles.yml names 2 roles: mason share needs to know which one this address reads as");
-      assert.deepEqual(v.next.map((n) => n.command), ["mason share --role everything", "mason share --role buyers"]);
+      assert.deepEqual(v.next.map((n) => n.command), ["mason share --role everything", "mason share --role buyers", "mason share --help"]);
       const person = await mason(["share"]);
       assert.equal(person.code, 2, "no terminal, so no question: the same refusal");
       assert.match(person.stderr, /--role buyers: reads 1 synced table: public\.customers/);

@@ -73,11 +73,11 @@ test("the old names answer with the new ones; mason start takes no URL", () => {
   for (const [argv, said] of [
     [["purge"], /mason purge is now mason destroy/],
     [["poll", "orders"], /mason poll is now mason sync/],
-    [["rm"], /mason rm is gone: mason remove takes a table out of the project, mason destroy removes the project's synced data\n\nNext:\n {2}mason remove <table> {2}.*a table, and its synced data\n {2}mason destroy {2}.*this folder's project/],
-    [["dev"], /mason dev is now mason start\n\nNext:\n {2}mason init <postgres url> .*once, in your app's folder\n {2}mason start /],
+    [["rm"], /mason rm is gone: mason remove takes a table out of the project, mason destroy removes the project's synced data\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason remove <table> {2}.*a table, and its synced data\n {2}mason destroy {2}.*this folder's project/],
+    [["dev"], /mason dev is now mason start\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason init <postgres url> .*once, in your app's folder\n {2}mason start /],
     // mason connect and mason list are gone: mason user is enough, and a project is its folder
-    [["connect"], /mason connect is gone: mason user add <name> makes a user whose password does not expire, and prints the URL to paste\n\nNext:\n {2}mason user add <name> /],
-    [["list"], /mason list is gone: a project is its folder, and a command means the project of the folder it runs in\n\nNext:\n {2}mason status /],
+    [["connect"], /mason connect is gone: mason user add <name> makes a user whose password does not expire, and prints the URL to paste\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason user add <name> /],
+    [["list"], /mason list is gone: a project is its folder, and a command means the project of the folder it runs in\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason status /],
     [["destroy", "shop"], /✗ mason destroy: it takes no name \(shop\): a project is its folder\n {2}fix {3}cd into the project's folder, then mason destroy/],
   ] as const) {
     const r = spawnSync(process.execPath, [MAIN, ...argv], { encoding: "utf8" });
@@ -86,7 +86,7 @@ test("the old names answer with the new ones; mason start takes no URL", () => {
   }
   const start = spawnSync(process.execPath, [MAIN, "start", "postgres://u@localhost/app"], { encoding: "utf8" });
   assert.equal(start.status, 2);
-  assert.match(start.stderr, /✗ mason start: it takes no database URL: the project has one\n {2}why {3}mason init <url> made it; \.mason\/config\.json holds it\n\nusage: mason start/);
+  assert.match(start.stderr, /✗ mason start: it takes no database URL: the project has one\n {2}why {3}mason init <url> made it; \.mason\/config\.json holds it\n {2}fix {3}run mason start alone\n\nNext:\n {2}mason start --help {2,}its usage, with every option\n\nusage: mason start/);
 });
 
 test("a name from the folder; .gitignore gains .mason/ once; the URL from .env.local, .env, then the shell", () => {
@@ -267,13 +267,14 @@ test("mason init writes the project — config, the sources file, the URL in .en
       "\nNext:\n" +
       "  mason init - < db-url.txt                     its URL on stdin: written to .env\n" +
       "  mason init                                    again, once .env has MASON_DATABASE_URL or DATABASE_URL\n" +
-      "  mason init demo                               a demo database Mason makes itself: nothing to install\n");
+      "  mason init demo                               a demo database Mason makes itself: nothing to install\n" +
+      "  mason init --help                             its usage, with every option\n");
     const noneJson = await quiet((io) => init(["--json"], three, { io, env: {} }));
     assert.equal(noneJson.value, 2);
     const noneAnswer = JSON.parse(noneJson.out) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string; what: string }> };
     assert.deepEqual([noneAnswer.error.code, noneAnswer.error.message], ["usage", "which database? none is named, and this folder has no MASON_DATABASE_URL or DATABASE_URL"]);
     assert.match(noneAnswer.error.fix, /as DATABASE_URL=postgres:\/\/… \(your app's, usually\) or as MASON_DATABASE_URL=postgres:\/\/… \(read first/);
-    assert.deepEqual(noneAnswer.next.map((n) => n.command), ["mason init - < db-url.txt", "mason init", "mason init demo"]);
+    assert.deepEqual(noneAnswer.next.map((n) => n.command), ["mason init - < db-url.txt", "mason init", "mason init demo", "mason init --help"]);
     assert.equal(noneAnswer.next[1]!.what, "again, once .env has MASON_DATABASE_URL or DATABASE_URL");
     // a database elsewhere needs --remote, even unchecked
     const remote = await quiet((io) => init(["postgres://u@db.example.com/x", "--skip-check"], three, { io }));
@@ -651,7 +652,8 @@ test("mason init in a clone naming ${MASON_DATABASE_URL}: read from the shell an
       "  fix   put it in this folder's .env as MASON_DATABASE_URL=postgres://… (the variable mason/sources/app.yml names), or pipe its URL in (mason init - < db-url.txt): mason init writes it there\n" +
       "\nNext:\n" +
       "  mason init - < db-url.txt                     its URL on stdin: written to .env as MASON_DATABASE_URL\n" +
-      "  mason init                                    again, once .env has MASON_DATABASE_URL\n");
+      "  mason init                                    again, once .env has MASON_DATABASE_URL\n" +
+      "  mason init --help                             its usage, with every option\n");
     assert.equal(n.out, "");
     assert.ok(!fs.existsSync(path.join(none.dir, ".mason")), "no config written");
     assert.equal(fs.readFileSync(path.join(none.dir, ".env"), "utf8"), envText);
@@ -660,7 +662,7 @@ test("mason init in a clone naming ${MASON_DATABASE_URL}: read from the shell an
     const answer = JSON.parse(nj.out) as { error: { code: string; message: string; why: string; fix: string }; next: Array<{ command: string; what: string }> };
     assert.deepEqual([answer.error.code, answer.error.message], ["usage", "which database? mason/sources/app.yml names url: ${MASON_DATABASE_URL}, and this folder has no MASON_DATABASE_URL"]);
     assert.match(answer.error.fix, /^put it in this folder's \.env as MASON_DATABASE_URL=postgres:\/\/… \(the variable mason\/sources\/app\.yml names\)/);
-    assert.deepEqual(answer.next.map((x) => [x.command, x.what]), [["mason init - < db-url.txt", "its URL on stdin: written to .env as MASON_DATABASE_URL"], ["mason init", "again, once .env has MASON_DATABASE_URL"]]);
+    assert.deepEqual(answer.next.map((x) => [x.command, x.what]), [["mason init - < db-url.txt", "its URL on stdin: written to .env as MASON_DATABASE_URL"], ["mason init", "again, once .env has MASON_DATABASE_URL"], ["mason init --help", "its usage, with every option"]]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
