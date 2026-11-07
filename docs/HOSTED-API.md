@@ -458,6 +458,22 @@ are refused), and `from` with neither ranges nor `--any`, or with both. Nothing 
   password is checked. `from`'s body replaces them: `{ "from": [ranges…] }`, each in its one form, or `{ "from": null }`
   for `--any` (any address: its ranges removed). In every answer a user's `from` is `null` (any address) or 1 to 100
   ranges, each in its one form; a list's row with no `from` key is read as `null`.
+- **A limit sent must be confirmed.** When `add` sends `from`, or `from` sends a list or `null`, the `200` answer must
+  carry exactly what was sent, in its one form and order (`add`'s `from`, `from`'s `changed.from`). An answer without
+  it, with `null`, or with other ranges is refused whole and never printed (an `add`'s password included): the CLI says
+  the service did not confirm the address limit, exit 1, and its next steps are `mason user list --replica …` (what the
+  user has) and `mason user remove <user> --replica …` (if it was made without the limit). A service that does not take
+  `from` refuses it with a `400` naming the field, never ignores it: ignoring it would make a user that connects from
+  any address while the CLI reported a limit.
+- **A limit a service cannot enforce is a `400`**, its reason in the service's words (too many ranges, a family it
+  does not take, a range wider than it allows, such as a `/0`), which the CLI says as it came, nothing written. For such
+  a service, `from: null` (any address) means the user is limited by nothing beyond what the replica itself allows to
+  connect.
+- **The address judged is the client's.** Mason judges a user's ranges on the address the connection comes from; behind
+  a load balancer or proxy that is the proxy's own, unless the proxy sends the PROXY protocol v2 header and Mason is
+  told to believe it from the proxy's addresses (`MASON_PG_PROXY_FROM`, docs/POSTGRES-API.md "Behind a TCP proxy"). A
+  service that puts a proxy in front of a replica's Postgres API passes the client's address through that way, or a
+  user's ranges would be judged against the proxy's address.
 - `already` is `true` when nothing changed (disabled already; not disabled): exit 0, said.
 - A key beside those of the answer (a `next` included) is never read.
 
@@ -510,7 +526,8 @@ The CLI prints the answer as `mason user` prints the same answer for a project (
 names it too (`mason user list --replica acme/shop`).
 
 A refusal, Mason's on the replica or the service's own, is a `/v1/` failure (below), its status Mason's own for a
-refusal of Mason's: `400` a request Mason cannot take (a `--set` its role does not declare, an attribute missing), `404`
+refusal of Mason's: `400` a request Mason cannot take (a `--set` its role does not declare, an attribute missing, an
+address range it does not take) or the service cannot enforce (a `from` beyond its limits, above), `404`
 no such user or role (and no such replica), `409` refused (a name taken), `500` failed. Its words are said as they came,
 each as one line (a refusal's `fix` written over several lines, such as the lines to add to `roles.yml`, joined by
 spaces); its code the CLI's by the status, never `usage`; the CLI's next step `mason login` ("sign in again") for a

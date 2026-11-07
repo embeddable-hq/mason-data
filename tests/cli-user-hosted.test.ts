@@ -29,7 +29,14 @@ test("mason user --replica: each subcommand sends the run's own /api/users reque
     [`DELETE ${USERS}/acme`]: ok({ removed: { name: "acme", id: ID, addedAt: AT, removedAt: AT } }),
     [`POST ${USERS}/acme/from`]: ok({ changed: { name: "acme", id: ID, addedAt: AT, from: ["203.0.113.0/24"] }, already: false }),
   };
-  const v1 = (r: Req): Reply => { seen.push(r); return answers[`${r.method} ${r.path}`] ?? { status: 404, body: { error: { code: "not_found", message: "no" } } }; };
+  // a service that honours from: its answer carries the ranges it was sent
+  const echo = (reply: Reply, r: Req): Reply => {
+    const sent = r.body ? (JSON.parse(r.body) as { from?: unknown }).from : undefined;
+    if (sent === undefined || reply === "drop" || typeof reply.body !== "object" || reply.body === null) return reply;
+    const b = reply.body as Record<string, unknown>;
+    return { ...reply, body: "changed" in b ? { ...b, changed: { ...(b.changed as object), from: sent } } : { ...b, from: sent } };
+  };
+  const v1 = (r: Req): Reply => { seen.push(r); const a = answers[`${r.method} ${r.path}`]; return a === undefined ? { status: 404, body: { error: { code: "not_found", message: "no" } } } : echo(a, r); };
   // the --role and the --set as they were given, repeated --set in order: the run's /api/users body
   let r = await hosted(v1, ["add", "acme", "--role", "tenant", "--set", "tenant=42", "--set", "regions=eu", "--set", "regions=uk", "--replica", R, "--json"], { names: ["acme"] });
   assert.equal(r.a.code, 0, r.a.stdout + r.a.stderr);
@@ -74,6 +81,41 @@ test("mason user --replica: each subcommand sends the run's own /api/users reque
   r = await hosted(v1, ["add", "acme", "--replica", R], { cwd: project });
   assert.equal(r.a.code, 0, r.a.stderr);
   assert.deepEqual(fs.readdirSync(path.join(project, ".mason")), ["config.json"]);
+});
+
+test("mason user --replica: an address limit the service does not confirm is refused, the answer never printed — ranges missing, null or others on add, others on from; a service that does not support from is its own 400, said in its words", async () => {
+  const sent = ["203.0.113.0/24"];
+  for (const [what, answer] of [["missing", addedAnswer("acme")], ["null", addedAnswer("acme", { from: null })], ["others", addedAnswer("acme", { from: ["198.51.100.0/24"] })]] as const) {
+    for (const form of [[], ["--json"]]) {
+      const r = await hosted(() => ok(answer), ["add", "acme", "--from", sent[0]!, "--replica", R, ...form], { names: ["acme"] });
+      const said = r.a.stdout + r.a.stderr;
+      assert.equal(r.a.code, 1, `${what}: ${said}`);
+      assert.ok(!said.includes(PASSWORD), `${what}: the password of an unconfirmed user is never printed`);
+      assert.match(said, /the service did not confirm acme's address limit: its answer does not carry the ranges sent \(203\.0\.113\.0\/24\)/, what);
+      assert.match(said, /mason user remove acme --replica acme\/shop/, what);
+      if (form.length) {
+        const v = JSON.parse(r.a.stdout) as { error: { code: string }; next: Array<{ command: string }> };
+        assert.equal(v.error.code, "failed");
+        assert.deepEqual(v.next.map((n) => n.command), ["mason user list --replica acme/shop", "mason user remove acme --replica acme/shop"]);
+      }
+    }
+  }
+  // the same answer confirmed: printed, its from row
+  const good = await hosted(() => ok(addedAnswer("acme", { from: sent })), ["add", "acme", "--from", sent[0]!, "--replica", R], { names: ["acme"] });
+  assert.equal(good.a.code, 0, good.a.stderr);
+  assert.match(good.a.stdout, /^ {2}from +203\.0\.113\.0\/24 \(it connects from these alone\)$/m);
+  // from: the ranges now must be those sent, --any's null included
+  for (const [argv, back] of [[["from", "acme", "10.0.0.0/8"], ["198.51.100.0/24"]], [["from", "acme", "10.0.0.0/8"], null], [["from", "acme", "--any"], ["10.0.0.0/8"]]] as Array<[string[], string[] | null]>) {
+    const r = await hosted(() => ok({ changed: { name: "acme", id: ID, addedAt: AT, from: back }, already: false }), [...argv, "--replica", R], { names: ["acme"] });
+    assert.equal(r.a.code, 1, `${argv.join(" ")}: ${r.a.stdout}`);
+    assert.match(r.a.stderr, /the service did not confirm acme's address limit/);
+  }
+  // a service that does not support from refuses it 400: its words, as any refusal's
+  const no = await hosted(() => ({ status: 400, body: { error: { code: "invalid_request", message: "from: per-user address ranges are not supported yet" } } }),
+    ["add", "acme", "--from", sent[0]!, "--replica", R, "--json"], { names: ["acme"] });
+  assert.equal(no.a.code, 1);
+  const e = (JSON.parse(no.a.stdout) as { error: { code: string; message: string } }).error;
+  assert.deepEqual([e.code, e.message], ["refused", "from: per-user address ranges are not supported yet"]);
 });
 
 test("mason user --replica: a wrong line is refused here, exit 2, and nothing is sent — a verb, a name, a --role or a --set, a replica not <org>/<name>", async () => {

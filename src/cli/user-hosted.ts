@@ -38,7 +38,9 @@
  *     roleKnown, live
  *   attributes, missingAttributes         rows, list's lines, --json                  `ATTRIBUTE_NAME_RE` names; each value one line (`serviceText`), bounded
  *   from (a user's address ranges)        rows, list's lines, add's row, --json       null, or 1 to MAX_RANGES ranges each in the one form
- *                                                                                     src/duck/users.ts `userRanges` writes back (`heldRanges`)
+ *                                                                                     src/duck/users.ts `userRanges` writes back (`heldRanges`);
+ *                                                                                     on add and from, exactly the ranges sent, else the answer
+ *                                                                                     is refused whole (`sameRanges`, `unconfirmed`: fail closed)
  *   lastUsedNote, urlNote                 list's tip "Last used: …", --json           one line (`serviceText`), bounded
  *   requestLogDays                        list's lines, --json                        a whole number, 1 to 36500
  *   already                               the headline chosen, --json                 a boolean
@@ -199,11 +201,12 @@ export function heldAdded(json: unknown, asked: string, secrets: readonly string
   const role = roleOf(a);
   if (role === null) return null;
   const from = a.from === undefined ? undefined : heldRanges(a.from);
-  if (from === undefined && a.from !== undefined || from === null) return null;
+  // null (any address) is read as no ranges, as a list's row reads it: an add that sent ranges then refuses it unconfirmed
+  if (from === undefined && a.from !== undefined) return null;
   const attributes = a.attributes === undefined ? undefined : attributesOf(a.attributes);
   if (attributes === null) return null;
   return { user: asked, id: a.id, addedAt: a.addedAt, password: a.password, database: a.database, url, psql: psqlLine(url), host: a.host, port: a.port as number, sslmode: a.sslmode,
-    ...role, ...(attributes !== undefined ? { attributes } : {}), ...(from !== undefined ? { from } : {}) };
+    ...role, ...(attributes !== undefined ? { attributes } : {}), ...(from !== undefined && from !== null ? { from } : {}) };
 }
 
 /** A user as disable, enable and remove name it: the name asked, its id, when it was added, and `more` times. */
@@ -236,6 +239,26 @@ export function heldRemoved(json: unknown, asked: string, secrets: readonly stri
 }
 
 // ------------------------------------------------------------------ the command
+
+/** Whether the ranges an answer carries are exactly those sent (each in its one form, in order; null: any address). */
+export const sameRanges = (got: readonly string[] | null | undefined, sent: readonly string[] | null): boolean =>
+  got !== undefined && JSON.stringify(got) === JSON.stringify(sent);
+
+/**
+ * AN ADDRESS LIMIT THE SERVICE DID NOT CONFIRM: its 200 does not carry the ranges sent (none, null, or others). The
+ * answer is refused whole, never printed (an add's password included): the user may now connect from more addresses
+ * than asked, which only the replica's list can say, and the way out removes it or sets the ranges again.
+ */
+export function unconfirmed(r: Replica, name: string, sent: readonly string[] | null, verb: "add" | "from"): Failure {
+  const on = `--replica ${replicaText(r)}`;
+  const asked = sent === null ? "any address" : sent.join(", ");
+  return { message: `the service did not confirm ${name}'s address limit: its answer does not carry the ranges sent (${asked})`, code: "failed",
+    why: verb === "add" ? `the replica may have added ${name} with no limit, so it would connect from any address, and its password was not shown`
+      : `the replica may have kept ${name}'s ranges as they were, or set others`,
+    fix: verb === "add" ? `mason user list ${on} says what ${name} has; if it was made without the limit, mason user remove ${name} ${on}`
+      : `mason user list ${on} says what ${name} has now; mason user from ${name} ${sent === null ? "--any" : sent.join(" ")} ${on} sets it again, or mason user remove ${name} ${on}`,
+    next: [[`mason user list ${on}`, "the replica's users and the addresses each connects from"], [`mason user remove ${name} ${on}`, "if it was made without the limit"]] };
+}
 
 /** What each subcommand asked, in the words of a failure outside the contract (`unexpected`). */
 const STEP: Record<Verb, string> = { list: "the replica's users were asked for", add: "a user was added", from: "a user's address ranges were set", disable: "a user was disabled", enable: "a user was enabled", remove: "a user was removed" };
@@ -278,12 +301,16 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
           fix: `mason user list --replica ${replicaText(r)} says whether it did; if so, mason user remove ${o.name!} --replica ${replicaText(r)}, then add it again`,
           next: [[`mason user list --replica ${replicaText(r)}`, "the replica's users"]] });
       }
+      // FAIL CLOSED: ranges sent must come back as sent, or the user may have been made with none (a service that does
+      // not know `from` would make it connect from any address), and its password is not shown
+      if (o.from !== undefined && o.from !== null && !sameRanges(added.from, o.from)) return fail(unconfirmed(r, o.name!, o.from, "add"));
       const next = onReplica(addedNext(added.user, true), r);
       return print({ ...added }, next, () => addedReport(added, { roles: NO_ROLES, listener: null, next }, outStyle));
     }
     case "from": {
       const c = heldFrom(a.json, o.name!, secrets);
       if (c === null) return outside();
+      if (!sameRanges(c.changed.from, o.from ?? null)) return fail(unconfirmed(r, o.name!, o.from ?? null, "from"));
       const next = onReplica(fromNext(c.changed.name, c.changed.from), r);
       return print({ ...c }, next, () => fromReport(c, true, next, outStyle));
     }

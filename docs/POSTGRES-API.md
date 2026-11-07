@@ -62,7 +62,10 @@ to connect with; `mason user list` says the users (name, id, when added); `mason
   words (a wrong address and a missing user read the same from outside; a user with no list still answers a wrong
   password 28P01). The log line says which, and the address. The address is the session's own (the socket's peer, or
   behind a named proxy the client its PROXY header carries, "Behind a TCP proxy"); one that cannot be read (a public
-  share's socket) is refused for a user with a list. A session the user holds when its list changes is held to the new
+  share's socket) is refused for a user with a list. **Behind a load balancer or TCP proxy, set `MASON_PG_PROXY_FROM`**
+  to the proxy's own addresses and have the proxy send the PROXY protocol v2 header: without it every connection's
+  address is the proxy's, so a user's list would be judged against the proxy (refusing every client, or letting every
+  client in when the list names the proxy). A session the user holds when its list changes is held to the new
   list at its next statement, and ends FATAL (28000) when its address is outside it.
 - **Rotating the API key removes every user at once** (`apiKey` in `.mason/config.json`, `MASON_API_KEY` under
   `mason serve`): no password verifies under the new key, the refusal says the key was rotated, and `mason user list`
