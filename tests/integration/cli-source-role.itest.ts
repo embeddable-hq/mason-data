@@ -146,7 +146,7 @@ test("mason doctor says whether the user Mason connects as could write: a reader
     const owns = doctor(owner);
     assert.equal(owns.status, 0, `a warning leaves the exit 0:\n${owns.stdout}`);
     assert.deepEqual(roleLines(owns).map((c) => [c.code, c.ok, c.warn]), [["role_owns_table", true, true]]);
-    assert.match(roleLines(owns)[0]!.detail, new RegExp(`^${owner} owns billing\\.Line Items: an owner may write to, alter or drop a table whatever is granted\\. `));
+    assert.match(roleLines(owns)[0]!.detail, new RegExp(`^${owner} owns billing\\.Line Items\\. `));
 
     // UPDATE through a group (NOINHERIT), DELETE on a partition, INSERT on one column
     const member_ = doctor(member);
@@ -226,7 +226,7 @@ test("THE CLASS: an UPDATE of an INHERITS grandparent writes the synced child's 
 test("THE CLASS: SECURITY DEFINER code whose owner may write: a function it may call, a trigger on a table it may write", skipNoDb, () => {
   const definer = said("definer");
   assert.deepEqual(definer.map((c) => c.code), ["role_may_run_definer_code"], JSON.stringify(definer));
-  assert.match(head(definer[0]), / may not write the synced tables itself: .* But it may run 1 SECURITY DEFINER function\(s\) of roles that may write the synced tables — public\.bump_orders\(\) runs as \S+, a superuser: it may call it\. What they write is not known/);
+  assert.match(head(definer[0]), / may not write the synced tables itself: .* But it may run 1 SECURITY DEFINER function\(s\) of roles that may write the synced tables — public\.bump_orders\(\) runs as \S+, a superuser: it may call it\. We recommend reviewing each/);
   psql(urlAs(rv("definer")), "SELECT public.bump_orders()");
   assert.equal(psql(db, "SELECT amount FROM public.orders WHERE id = 2"), "1020");
   const trigger = said("trigger");
@@ -266,7 +266,7 @@ test("THE CLASS: a foreign table back to this database writes the synced rows as
     `CREATE FOREIGN TABLE public.remote_ledger (id int, amount int) SERVER loopback OPTIONS (schema_name 'public', table_name 'ledger'); GRANT INSERT ON public.remote_ledger TO "${rv("fdw")}"`);
   const fdw = said("fdw");
   assert.deepEqual(fdw.map((c) => c.code), ["role_reaches_foreign_server"], JSON.stringify(fdw));
-  assert.equal(head(fdw[0]), `${rv("fdw")} may write the foreign table(s) public.remote_ledger: what it sends there runs as the mapping's user, and the server may be this very database`);
+  assert.equal(head(fdw[0]), `${rv("fdw")} may write the foreign table(s) public.remote_ledger`);
   psql(urlAs(rv("fdw")), "INSERT INTO public.remote_ledger VALUES (903, 3)");
   assert.equal(psql(db, "SELECT amount FROM public.ledger WHERE id = 903"), "3");
 });
@@ -274,7 +274,7 @@ test("THE CLASS: a foreign table back to this database writes the synced rows as
 test("THE CLASS: ADMIN OPTION on a writer lets the role grant itself the writer's privileges; a server role reaches the server's files", skipNoDb, (t) => {
   const server = said("server");
   assert.deepEqual(server.map((c) => c.code), ["role_may_become_another"], JSON.stringify(server));
-  assert.equal(head(server[0]), `${rv("server")} holds pg_read_server_files: the server's programs or files, as its operating-system user`);
+  assert.equal(head(server[0]), `${rv("server")} holds pg_read_server_files`);
   assert.match(psql(urlAs(rv("server")), "CREATE TEMP TABLE seen (line text); COPY seen FROM 'PG_VERSION'; SELECT line FROM seen"), /^\d+$/, "it reads the server's own files");
   if (!v16) { t.skip("the server is older than Postgres 16, where ADMIN OPTION cannot be held without the membership's privileges"); return; }
   psql(db, `GRANT "${writers}" TO "${rv("admin")}" WITH ADMIN OPTION, INHERIT FALSE, SET FALSE`);
@@ -324,7 +324,7 @@ test("a typical application's SECURITY DEFINER code (a policy's, a view's, a seq
     assert.deepEqual(lines.map((c) => [c.code, c.fix]), [["role_may_run_definer_code", undefined]], `no write warning, only the listing:\n${JSON.stringify(lines)}`);
     assert.match(lines[0]!.detail, new RegExp(`^${role} may not write the synced tables itself: .* But it may run 3 SECURITY DEFINER function\\(s\\) of roles that may write the synced tables — ` +
       `public\\.current_tenant\\(\\) runs as ${appOwner}, which may write the synced tables: every role may call it \\(PUBLIC's EXECUTE\\); ` +
-      `public\\.fmt_money\\(integer\\) runs as ${appOwner}, .*; public\\.next_order_number\\(\\) runs as ${appOwner}, .*\\. What they write is not known`));
+      `public\\.fmt_money\\(integer\\) runs as ${appOwner}, .*; public\\.next_order_number\\(\\) runs as ${appOwner}, .*\\. We recommend reviewing each`));
     assert.doesNotMatch(lines[0]!.detail, /public\.audit\(\)/, "an audit trigger on a table it may not write never reaches it");
     // the application's own role works as before: its policy's function, its view's, its trigger's
     assert.equal(psql(urlAs(appWeb), "SET app.tenant = 't1'; SELECT count(*) FROM public.customers"), "1");
