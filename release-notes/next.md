@@ -2,6 +2,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **The web page's Users form offers a role** where `mason/roles.yml` names roles: the file's `default:` is chosen
+  first and marked, and any other role it names can be picked, as `mason user add --role` does. Before, every user
+  added from the page got the default role. A role the file no longer names is refused, saying why. With no roles
+  file, or one that cannot be read, the form is as before. `--set` attributes are still given with `mason user add`.
 - **The web page works behind a reverse proxy at any path**, such as `https://example.com/tools/mason/`, with no
   setting: it asks for every file and every answer relative to its own address, and the first visit's redirect (the
   token traded for the cookie) lands back on that address, never the proxy's root. Serve it at an address that ends

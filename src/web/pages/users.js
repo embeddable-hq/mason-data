@@ -113,13 +113,27 @@ export function renderUsersConnect(pg, served = false) {
 /**
  * THE ADD FORM, from `/api/state` (`state`: its body, undefined until it is read): Name and Add a user, as `mason user
  * add <name>` — none while the state is unread, and none under `pageReadOnly` (MASON_UI_READ_ONLY=1), where it could
- * only fail. Written the same while nothing changes, so a poll never rewrites it under a name being typed.
+ * only fail. Where the roles file names roles and reads as it is (`state.roles`, `mason status --json`'s), a Role
+ * choice too, as `--role`: the first option is what `mason user add <name>` gives with no `--role` — the file's
+ * `default:`, marked and sending no role, so the user follows the default as the CLI's does; or, with no default, no
+ * role — then each other role, sent as `role`. The server judges the role (src/cli/user.ts roleToAdd). Written the
+ * same while nothing changes, so a poll never rewrites it under a name being typed.
  */
 export function renderAddUser(state) {
   if (state === undefined || state === null || (state.pageReadOnly ?? null) !== null) return "";
   return `<form id="add-user" class="formcard" autocomplete="off"><label for="user-name">Name</label>` +
     `<input id="user-name" name="name" required placeholder="metabase" spellcheck="false" autocapitalize="off">` +
-    `<button type="submit" class="primary">Add a user</button></form>`;
+    roleChoice(state.roles) + `<button type="submit" class="primary">Add a user</button></form>`;
+}
+
+/** The add form's Role choice from `/api/state` `roles`: "" with no roles file, one naming none, or one that cannot be
+ *  read now (the roles it names are not known then) */
+function roleChoice(r) {
+  if (!r || r.file == null || r.problem != null || !Array.isArray(r.roles) || r.roles.length === 0) return "";
+  const dflt = r.default != null && r.roles.includes(r.default) ? r.default : null;
+  const first = dflt !== null ? `<option value="" selected>${esc(dflt)} (default)</option>` : `<option value="" selected>no role: its statements are refused</option>`;
+  return ` <span class="pair"><label for="user-role">Role</label> <select id="user-role" name="role">${first}` +
+    `${r.roles.filter((n) => n !== dflt).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select></span> `;
 }
 
 /** A user's statements: Observability › Queries filtered to it, over the last 24 hours (Now's 15 minutes would mostly be empty). */
@@ -156,9 +170,10 @@ export const page = {
     const m = { actionFailure: null, added: null, confirming: null, refused: null };
     const users = () => ctx.read(USERS)?.body ?? null;
     const actions = {
-      async addUser(name) {
+      /** `role`: the Role choice's, sent as mason user add --role; "" or none: no role, as with no --role */
+      async addUser(name, role = "") {
         m.actionFailure = null;
-        const r = await ctx.ask(USERS_POST, json("POST", { name }));
+        const r = await ctx.ask(USERS_POST, json("POST", { name, ...(role ? { role } : {}) }));
         if ("failure" in r) { m.actionFailure = r.failure; return false; }
         m.added = r.body;
         await ctx.refresh([USERS]);
@@ -217,7 +232,7 @@ export const page = {
       submit(form) {
         if (form.id !== "add-user") return null;
         const input = form.elements.name;
-        return actions.addUser(input.value.trim()).then((ok) => { if (ok) input.value = ""; });
+        return actions.addUser(input.value.trim(), form.elements.role?.value ?? "").then((ok) => { if (ok) input.value = ""; });
       },
       click(d, button, { doc, win }) {
         if (d.remove !== undefined) return actions.askRemove(d.remove) ?? true;

@@ -25,6 +25,7 @@ import { PLAIN } from "../src/cli/style.ts";
 import { EVENT_KINDS, type SyncEvent } from "../src/duck/events.ts";
 import { timeOf } from "../src/cli/request-filter.ts";
 import type { LedgerRequest } from "../src/duck/requests.ts";
+import type { RolesLive } from "../src/duck/grants.ts";
 
 const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "web");
 // imported when the tests run: at a commit without the page the file still loads, and each test fails by name
@@ -38,7 +39,7 @@ const fn = <A extends unknown[], R>(name: string): Fn<A, R> => {
 interface Failure { code: string; message: string; why?: string; fix?: string; next?: Array<{ command: string; what?: string }> }
 interface App {
   model: Record<string, unknown>;
-  show(page: string, env?: unknown): void; poll(): Promise<void>; addUser(name: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
+  show(page: string, env?: unknown): void; poll(): Promise<void>; addUser(name: string, role?: string): Promise<boolean>; askRemove(name: string): void; cancelRemove(): void;
   confirmRemove(name: string): Promise<boolean>; dismissAdded(): void; view(): Record<string, string>;
   addTable(table: string, columns?: string[], key?: string[]): Promise<boolean>; choose(table: string): Promise<boolean>; cancelChoose(): void;
   askRemoveTable(table: string): void; cancelRemoveTable(): void; confirmRemoveTable(table: string): Promise<boolean>; dismissOutcome(): void;
@@ -81,8 +82,9 @@ const sourceFile = parseSourceText("kind: postgres\nurl: x\ntables:\n  customers
 assert.ok(!("problems" in sourceFile));
 
 /** The state /api/state answers for these copies (src/cli/run-server.ts runState), as JSON travels. */
-function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: boolean; tables?: SourceTable[]; sources?: typeof sourceFile; demo?: boolean; now?: number; keptDays?: number } = {}): RunState {
+function stateOf(copies: CopyState[], o: { warnings?: string[]; replication?: boolean; tables?: SourceTable[]; sources?: typeof sourceFile; demo?: boolean; now?: number; keptDays?: number; roles?: RolesLive } = {}): RunState {
   const ctx = {
+    ...(o.roles ? { roles: () => o.roles } : {}),
     source: o.demo ? demoSource : source, ...(o.demo ? { demo: true } : {}),
     facts: () => ({ version: 160000, versionText: "16.4", standby: false, tables: o.tables ?? TABLES, systemIdentifier: null }),
     warnings: o.warnings ?? [], replication: () => o.replication ? { slot: "mason_dev_shop", publication: "app_pub", owned: false } : null,
@@ -846,6 +848,63 @@ test("the app: an added user's password is written once, gone once dismissed and
     failure: { code: "refused", message: "there is already a user \"grafana\"", why: "a name names one user", fix: "mason user remove grafana, then mason user add grafana", next: [{ command: "mason user list", what: "the users" }] } }), { status: 409 }));
   assert.equal(await app.addUser("grafana"), false);
   assert.equal(textOf(app.view().action!), "✗ there is already a user \"grafana\" why a name names one user fix mason user remove grafana, then mason user add grafana Next: mason user list the users");
+  assert.equal(app.view().added, "");
+});
+
+/** A roles file as the listener holds it (src/duck/grants.ts RolesLive): its roles by name (the tables each reads do not
+ *  matter to the add form), its default and what is wrong with it */
+const rolesLive = (names: string[], dflt: string | null, problem: string | null = null, file: string | null = "mason/roles.yml"): RolesLive =>
+  ({ file, problem, default: dflt, grants: new Map(names.map((name) => [name, { name, all: true }])) }) as unknown as RolesLive;
+
+test("the users' add form: a Role choice where the roles file names roles, its default first and marked; none without one, while it cannot be read, or read-only", () => {
+  const renderAddUser = fn<[unknown], string>("renderAddUser");
+  // /api/state's roles as the run says them (runState over a roles file): a hostile name escaped, as everything is
+  const state = stateOf([], { roles: rolesLive(["everything", "agent", "<b>x\"y</b>"], "everything") });
+  const form = renderAddUser(state);
+  assert.match(form, /<span class="pair"><label for="user-role">Role<\/label> <select id="user-role" name="role"><option value="" selected>everything \(default\)<\/option><option value="agent">agent<\/option><option value="&lt;b&gt;x&quot;y&lt;\/b&gt;">&lt;b&gt;x&quot;y&lt;\/b&gt;<\/option><\/select><\/span>/);
+  assert.ok(!form.includes("<b>"), "a role's name is text, never markup");
+  assert.equal((form.match(/ selected/g) ?? []).length, 1, "one choice preselected: the default");
+  assert.ok(form.indexOf('id="user-name"') < form.indexOf('id="user-role"') && form.indexOf('id="user-role"') < form.indexOf('type="submit"'), "Name, Role, Add a user");
+  // a file with no default: what mason user add gives with no --role first, no role
+  assert.match(renderAddUser(stateOf([], { roles: rolesLive(["agent"], null) })), /<select id="user-role" name="role"><option value="" selected>no role: its statements are refused<\/option><option value="agent">agent<\/option><\/select>/);
+  // none: no roles file (the run's state has no roles, or a file of none), a file that names none, one that cannot be read, a read-only page
+  const plain = renderAddUser(CATALOG_STATE);
+  assert.ok(!plain.includes("<select"), "no roles in the state: the form as before");
+  assert.equal(renderAddUser(stateOf([], { roles: rolesLive([], null, null, null) })), plain, "no roles file: as before");
+  assert.equal(renderAddUser(stateOf([], { roles: rolesLive([], null) })), plain, "a file naming no role: as before");
+  assert.equal(renderAddUser(stateOf([], { roles: rolesLive(["agent"], "agent", "mason/roles.yml: it is not YAML") })), plain, "while it cannot be read: no choice");
+  assert.equal(renderAddUser({ ...state, pageReadOnly: "the web page is read-only here (MASON_UI_READ_ONLY=1)" }), "", "read-only: no form, no choice");
+  // no --set: attributes stay the command's
+  assert.ok(!/name="set"|attribute/i.test(form));
+});
+
+test("the app: the add form's role is sent as role (none for the default, as mason user add with no --role); the run's refusal of it is shown", async () => {
+  const run = fakeRun();
+  run.answers.set("GET api/state", () => new Response(JSON.stringify(stateOf([], { roles: rolesLive(["everything", "agent"], "everything") })), { status: 200 }));
+  const app = fn<[unknown], App & { pages: Map<string, { submit(f: unknown): Promise<void> | null }> }>("createApp")(run.fetch);
+  app.show("users");
+  await app.poll();
+  assert.match(app.view()["add-user-box"]!, /<select id="user-role" name="role">/, "the page's form offers the roles of the run's state");
+  const password = `mason_0123456789abcdef_${"b".repeat(32)}`;
+  run.answers.set("POST api/users", () => new Response(JSON.stringify({ user: "grafana", id: "0123456789abcdef", addedAt: "2026-10-27T09:11:00.000Z", password, database: "shop",
+    url: `postgres://grafana:${password}@127.0.0.1:5433/shop`, role: "agent", roleFrom: "file", next: [] }), { status: 200 }));
+  // submitted as the browser's form: the name and the role chosen
+  const submitted = { id: "add-user", elements: { name: { value: " grafana " }, role: { value: "agent" } } };
+  await app.pages.get("users")!.submit(submitted);
+  assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "grafana", role: "agent" })}`), run.asked.join("\n"));
+  assert.equal(submitted.elements.name.value, "", "added: the name cleared");
+  app.dismissAdded();
+  // the default chosen: no role sent, so the user follows the file's default as one added with no --role does
+  run.asked.length = 0;
+  await app.pages.get("users")!.submit({ id: "add-user", elements: { name: { value: "metabase2" }, role: { value: "" } } });
+  assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "metabase2" })}`), run.asked.join("\n"));
+  app.dismissAdded();
+  // the run judges the role (src/cli/user.ts roleToAdd, as mason user add --role): its refusal, worded by the run, shown
+  run.answers.set("POST api/users", () => new Response(JSON.stringify({ error: "there is no role gone in mason/roles.yml",
+    failure: { code: "not_found", message: "there is no role gone in mason/roles.yml", why: "a role is a key of mason/roles.yml", fix: "mason user add grafana --role everything", next: [] } }), { status: 404 }));
+  assert.equal(await app.addUser("grafana", "gone"), false);
+  assert.ok(run.asked.includes(`POST api/users ${JSON.stringify({ name: "grafana", role: "gone" })}`));
+  assert.equal(textOf(app.view().action!), "✗ there is no role gone in mason/roles.yml why a role is a key of mason/roles.yml fix mason user add grafana --role everything");
   assert.equal(app.view().added, "");
 });
 
