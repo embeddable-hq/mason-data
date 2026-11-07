@@ -130,7 +130,9 @@ test("mason replica create: a creation not made says the service's words, its co
     assert.equal(j.a.code, exit, j.a.stdout);
     assert.equal(v.error.code, code);
     assert.equal(v.error.message, body.error.message, "the service's words, as they came");
-    assert.match(v.error.why, new RegExp(`(^|\\()the service said ${body.error.code}, HTTP ${(reply as { status: number }).status}\\)?$`));
+    // a 503 with Retry-After says when the service asks for another try (it is not waited for)
+    const retry = (reply as { status: number }).status === 503 ? "; the service asks for another try in 30 s: run the same command again then" : "";
+    assert.match(v.error.why, new RegExp(`(^|\\()the service said ${body.error.code}, HTTP ${(reply as { status: number }).status}\\)?${retry}$`));
     assert.deepEqual(v.next.map((n) => n.command), next, "the CLI's own steps, never the service's");
     assert.equal(j.requests.length, 1, "a refusal is never retried");
     if ((reply as { status: number }).status === 403) assert.match(v.next[0]!.what, /^sign in as an admin or an owner of acme; an account's first replica is made in the service's web app, http:\/\/127\.0\.0\.1:\d+$/);
