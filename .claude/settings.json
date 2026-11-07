@@ -6,7 +6,14 @@
         "hooks": [
           { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/test-timeout.ts\"" },
           { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/merge-head.ts\"" },
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/no-rerun.ts\"" }
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/no-rerun.ts\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/coordinator-writes.ts\"" }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|mcp__github__(push_files|create_or_update_file|delete_file)",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/scripts/hooks/coordinator-writes.ts\"" }
         ]
       }
     ],
