@@ -107,7 +107,7 @@ test("test-timeout: a run with the pair before the files, npm test alone, the ga
 });
 
 /**
- * Every test command the docs and the harness tell a session to run: a `node --test …` or `npm test …` that opens a
+ * Every test command the docs tell a session to run: a `node --test …` or `npm test …` that opens a
  * backtick span (a prompt's escaped one too) or a line (a code block's, after its VAR=value words), up to the span's
  * end, a comment or the line's end. `node --test` alone names the runner, not a command; `<ms>` is a placeholder.
  */
@@ -126,9 +126,8 @@ function instructedTestCommands(): { where: string; command: string }[] {
   return found;
 }
 
-test("test-timeout: every test command the docs and the harness instruct is one the hook lets through", () => {
+test("test-timeout: every test command the docs instruct is one the hook lets through", () => {
   const commands = instructedTestCommands();
-  assert.ok(commands.some((c) => c.where.startsWith(".claude/workflows/pr-loop-slim.js")), "the reader finds the harness's commands");
   assert.ok(commands.some((c) => c.where.startsWith("CLAUDE.md")), "the reader finds CLAUDE.md's commands");
   const blocked = commands.filter(({ command }) => run("test-timeout", bash(command)).code !== 0);
   assert.deepEqual(blocked, [], "each of these would be blocked by the hook: give it --test-timeout=<ms> --test-force-exit before its files");
@@ -156,7 +155,7 @@ test("merge-head: a merge pinned to its head, and other gh commands, are allowed
 // the main session's carries none, and a `--agent` main session agent_type alone (code.claude.com/docs/en/hooks).
 const SUB = { agent_id: "a1b2c3", agent_type: "general-purpose" };
 const as = (who: Record<string, unknown>, command: string): unknown => ({ ...(bash(command) as object), ...who });
-const SUB_AGENT_SAYS = /^a sub-agent never merges nor queues a merge \(CLAUDE\.md "Who merges what"\): report PR (\d+|<n>) and the head you read to the session that started you; the top session reads the diff and merges it \(\.claude\/skills\/up-next\/SKILL\.md\)$/;
+const SUB_AGENT_SAYS = /^a sub-agent never merges nor queues a merge \(CLAUDE\.md "Who merges what"\): report PR (\d+|<n>) and the head you read to the session that started you; the coordinator reads the diff and merges it \(\.claude\/skills\/coordinate\/SKILL\.md\)$/;
 
 test("merge-head: a sub-agent's gh pr merge is blocked, pinned or not, queued or not, in every shape a session types", () => {
   for (const command of [
@@ -181,7 +180,7 @@ test("merge-head: a sub-agent's gh pr merge is blocked, pinned or not, queued or
 
 test("merge-head: a sub-agent may withdraw a queued merge, merge its base into its branch, push and read PRs", () => {
   for (const command of ["gh pr merge 12 --disable-auto", "git merge origin/main",
-    'node scripts/merge-base.ts origin/main "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"',
+    "git merge --no-edit origin/main",
     "git push origin HEAD:upnext-588", "gh pr view 12 --json mergeable,mergeStateStatus", "gh pr create --base main --head upnext-588"]) {
     const r = run("merge-head", as(SUB, command));
     assert.deepEqual([r.code, r.stderr, r.stdout], [0, "", ""], command);
@@ -248,7 +247,7 @@ function stop(t: { after: (fn: () => void) => void }, entries: unknown[] | strin
   return run("wake-up", { hook_event_name: "Stop", transcript_path: file, stop_hook_active: false, ...extra });
 }
 
-const WARNS = /"systemMessage":".* and no background wait is running: leave a bounded wait \(CLAUDE.md \\"The loop\\", step 5\)"/;
+const WARNS = /"systemMessage":".* and no background wait is running: leave a bounded wait \(CLAUDE.md \\"Waiting\\"\)"/;
 
 test("wake-up: a queued merge or a message to a lead with no background wait after it warns, and never blocks", (t) => {
   const merge = stop(t, [assistant(MERGE)]);

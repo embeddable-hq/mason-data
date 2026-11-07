@@ -168,9 +168,11 @@ const HELP: Options = { help: { type: "boolean", short: "h" } };
 
 /**
  * A command line read by its spec: the values and positionals; or the exit code when it answered itself — 0 after
- * printing the usage for `--help`, 2 after saying what is wrong with the line, then the usage.
+ * printing the usage for `--help` (its spec as data for `--help --json`), 2 after saying what is wrong with the line,
+ * then the usage.
  */
 export function parseCommand(spec: CommandSpec, argv: string[]): { values: Record<string, string | boolean | string[] | boolean[] | undefined>; positionals: string[] } | number {
+  if (specAsked(spec, argv)) { process.stdout.write(`${specAnswer(spec)}\n`); return 0; }
   let parsed;
   try { parsed = parseArgs({ args: argv, options: { ...spec.options, ...HELP }, allowPositionals: true }); }
   catch (e) { return failed(spec.name, { ...parseProblem(spec, e as Error & { code?: string }), code: "usage", usage: synopsis(spec), next: [[`mason ${spec.name} --help`, "its usage, with every option"]] }, { json: wantsJson(argv, spec) }); }
@@ -192,6 +194,111 @@ export function noArguments(spec: Pick<CommandSpec, "name" | "usage">, positiona
   return failed(spec.name, { message: `it takes no argument (${positionals.join(" ")}): a project is its folder`, code: "usage",
     fix: `run it in the project's folder: cd <folder> && mason ${spec.name}, or mason -C <folder> ${spec.name}`, usage: synopsis(spec),
     next: [[`mason ${spec.name} --help`, "its usage, with every option"]] }, { json });
+}
+
+/** Whether a line asks for the command's spec as data: `--help` (or `-h`) and `--json` on a line that parses — every
+ *  command, whether or not it takes --json itself (mason help, mason mcp): the spec is what an agent reads first. A line
+ *  that does not parse is no such question: parseCommand's own parse says what is wrong with it. */
+function specAsked(spec: CommandSpec, argv: readonly string[]): boolean {
+  if (!argv.includes("--json") || !(argv.includes("--help") || argv.includes("-h"))) return false;
+  try {
+    const options: Options = { ...spec.options, ...HELP, json: { type: "boolean" } };
+    const p = parseArgs({ args: [...argv], options, allowPositionals: true });
+    return p.values["help"] === true && p.values["json"] === true;
+  } catch (e) {
+    // not swallowed: the same line goes on to parseCommand's own parse, which says this error in the CLI's words
+    if (!(e instanceof TypeError)) throw e;
+    return false;
+  }
+}
+
+/** The keys of a command's spec as data (`mason <name> --help --json`, `mason help <name> --json`). */
+export const SPEC_ANSWER_KEYS: readonly string[] = ["command", "next"];
+/** What follows a command's spec as data. */
+export const SPEC_NEXT: readonly NextStep[] = [["mason help --json", "every command's spec, the guides and the failure codes"]];
+/** A command's spec as its --json answer: `{ command: <spec>, next }`. */
+export const specAnswer = (spec: CommandSpec): string => jsonText({ ...spec, json: SPEC_ANSWER_KEYS }, { command: specJson(spec) }, SPEC_NEXT);
+
+/**
+ * THE EXIT CODES, a closed set (`mason help agent` lists them, and each command's spec as data names those it can
+ * exit with): 124 only for a command TIMEOUT_COMMANDS names.
+ */
+export const EXIT_CODES = {
+  0: "done",
+  1: "failed, with the reason",
+  2: "the command line is wrong (without --json the usage follows)",
+  124: "ran out of time (nothing stopped)",
+} as const;
+
+/** Whether a command can run out of time (exit 124): TIMEOUT_COMMANDS names it. */
+const timesOut = (name: string): boolean => new RegExp(`\\bmason ${name}\\b`).test(TIMEOUT_COMMANDS);
+
+/**
+ * A COMMAND'S SPEC AS DATA — the declared, stable shape `mason <name> --help --json` and `mason help --json` answer with
+ * (`mason help agent` documents it), read from the one `CommandSpec`, never restated:
+ *
+ *   name, summary, usage   the spec's own text (usage is what --help prints)
+ *   forms                  each form of its synopsis: { synopsis, positionals }, positionals the words that are no
+ *                          option, as the synopsis writes them (`<table>…`, `[<postgres url> | demo]`, `add`, `<name>`)
+ *   options                each option its parser takes, --help included: { name, short, type, multiple, default,
+ *                          value }: short and default null when it has none, value the synopsis' placeholder for a
+ *                          string option (`<column>,…`), else null
+ *   json                   the top-level keys of its --json answer, next included; null when it takes no --json
+ *   needs                  "project", "run" or null (what it needs to do its work)
+ *   stdout                 "protocol" when its stdout is a protocol's (mason mcp), else null
+ *   exitCodes              [{ code, meaning }]: 0, 1 and 2 for every command, 124 for one that can run out of time
+ */
+export interface SpecJson {
+  name: string;
+  summary: string;
+  usage: string;
+  forms: Array<{ synopsis: string; positionals: string[] }>;
+  options: Array<{ name: string; short: string | null; type: "string" | "boolean"; multiple: boolean; default: string | boolean | string[] | boolean[] | null; value: string | null }>;
+  json: string[] | null;
+  needs: "project" | "run" | null;
+  stdout: "protocol" | null;
+  exitCodes: Array<{ code: number; meaning: string }>;
+}
+
+export function specJson(spec: CommandSpec): SpecJson {
+  const lines = spec.usage.split("\n");
+  const end = lines.findIndex((l) => l.trim() === "");
+  const forms = lines.slice(0, end < 0 ? lines.length : end).map((l) => l.replace(/^usage:\s*/, "").trim());
+  const options = Object.entries({ ...spec.options, ...HELP }).map(([name, d]) => {
+    // the placeholder the synopsis writes after it, else the first the usage does
+    const placeholder = new RegExp(`--${name}[ =]([^\\s\\[\\]]+)`);
+    const value = d.type === "string" ? (forms.map((f) => placeholder.exec(f)?.[1]).find((v) => v !== undefined) ?? placeholder.exec(spec.usage)?.[1] ?? null) : null;
+    return { name: `--${name}`, short: d.short ? `-${d.short}` : null, type: d.type, multiple: d.multiple === true, default: d.default ?? null, value };
+  });
+  const exitCodes = Object.entries(EXIT_CODES).filter(([code]) => code !== "124" || timesOut(spec.name)).map(([code, meaning]) => ({ code: Number(code), meaning }));
+  return { name: spec.name, summary: spec.summary, usage: spec.usage, forms: forms.map((f) => ({ synopsis: f, positionals: positionalsOf(f, spec.name) })), options,
+    json: spec.json ? [...spec.json] : null, needs: spec.needs ?? null, stdout: spec.stdout ?? null, exitCodes };
+}
+
+/** The words of a synopsis form that are no option: split at the spaces outside brackets, `mason <name>` and every
+ *  option dropped — a bracketed group that starts with `-` (`[--json]`, `[-n <lines>]`), and a bare option with its
+ *  value (`--ssh <user@server>`). */
+function positionalsOf(form: string, name: string): string[] {
+  const words: string[] = [];
+  let word = "", depth = 0;
+  for (const ch of form) {
+    if (ch === "[" || ch === "<") depth++;
+    if (ch === "]" || ch === ">") depth = Math.max(0, depth - 1);
+    if (ch === " " && depth === 0) { if (word) words.push(word); word = ""; continue; }
+    word += ch;
+  }
+  if (word) words.push(word);
+  const rest = words[0] === "mason" && words[1] === name ? words.slice(2) : words;
+  const out: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const w = rest[i]!;
+    // an option is a dash and a letter (`[--json]`, `-n`); a lone `-` (`mason init -`, stdin) is a positional
+    if (/^\[--?[A-Za-z]/.test(w)) continue;
+    if (/^--?[A-Za-z]/.test(w)) { if (rest[i + 1]?.startsWith("<")) i++; continue; }
+    out.push(w);
+  }
+  // an alternative whose other side was an option (`<org>/<name> | --replica <org>/<name>`) leaves no `|` behind
+  return out.filter((w, i) => w !== "|" || (i > 0 && i < out.length - 1));
 }
 
 /** A command's synopsis: its usage's first lines, up to the first blank one (`usage: mason <name> …` and its other
@@ -432,10 +539,25 @@ export function failureJson(f: Failure): string {
  * data never has to read prose. tests/conventions.test.ts refuses a `mason <cmd>: …` written to stderr any other way.
  */
 export function failed(cmd: string, f: Failure | Problem, o: { json: boolean; io?: Io; style?: Style }): number {
-  const n = asFailure(f);
+  const n = usageWayOut(cmd, asFailure(f));
   const io = o.io ?? STDIO;
   if (o.json) io.out(failureJson(n)); else io.err(failureText(cmd, n, o.style ?? failureStyle(io)));
   return exitOf(n);
+}
+
+/**
+ * A WRONG COMMAND LINE ALWAYS SAYS WHERE ITS USAGE IS, whatever raised it (the parse, or a command's own check, many of
+ * which answered with `next: []`): its next steps end with `mason <cmd> --help` (`mason --help` for no command), and it
+ * carries a fix, its own, else the way to its usage. Decided here, where every failure is said, so a usage failure added
+ * later cannot leave it out.
+ */
+export function usageWayOut(cmd: string, f: Failure): Failure {
+  if (f.code !== "usage") return f;
+  const help = cmd ? `mason ${cmd} --help` : "mason --help";
+  // `mason help <cmd>` is the same page, so a failure that names it already says where the usage is
+  const said = (c: string): boolean => c === help || (cmd !== "" && c === `mason help ${cmd}`);
+  const next: readonly NextStep[] = f.next?.some(([c]) => said(c)) ? f.next : [...(f.next ?? []), [help, cmd ? "its usage, with every option" : "every command"]];
+  return { ...f, next, fix: f.fix ?? (cmd ? `write the line as its usage says (mason ${cmd} --help)` : "name a command mason --help lists") };
 }
 
 /** The style a failure is drawn in: stderr's own when it goes to stderr, plain for an io a test or a caller supplied.

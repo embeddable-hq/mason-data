@@ -168,8 +168,8 @@ scheduled` re-runs the whole SELECT, and may read another generated table (a cha
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
-again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - A chain of three (`bottom` reads `events`, `middle` reads `bottom`, `top` reads `middle`) where `top` fails after a
   base change: tried again after its back-off, and its lag dated from the base change, not the swap (PR 163, 171).

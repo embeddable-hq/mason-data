@@ -90,7 +90,7 @@ test("a URL on mason replica's command line — an argument, --url, --url=, anot
         const v = JSON.parse(a.stdout) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string }> };
         assert.deepEqual([v.error.code, v.error.message], ["usage", "a database URL is never taken on mason replica's command line"]);
         assert.ok(v.error.fix.startsWith(`give it on stdin: ${wanted} `), v.error.fix);
-        assert.deepEqual(v.next.map((n) => n.command), [wanted]);
+        assert.deepEqual(v.next.map((n) => n.command), [wanted, "mason replica --help"]);
       } else {
         assert.match(a.stderr, /^✗ mason replica: a database URL is never taken on mason replica's command line$/m);
         assert.ok(a.stderr.includes(wanted), a.stderr);

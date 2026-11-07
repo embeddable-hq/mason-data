@@ -117,10 +117,12 @@ again and remove `mason/models/`.
 | `mason serve` | Mason for a server or a container: `mason start --attach` configured by the environment alone, its state in one folder (a volume), its log on stdout, `GET /healthz`, `GET /metrics` (Prometheus, numbers only), a clean stop on SIGTERM. `mason serve --help` lists every setting with its default; `MASON_PROJECT_READONLY=1`, for a project folder deployed as committed, refuses every edit of its files there (`mason add`, `mason remove`, the page's Add and Remove), with "edit the files and deploy them". |
 | `mason login` | Signs this machine in to a hosted Mason service (`MASON_CLOUD_URL`, else `https://app.masondata.ai`): it prints a page and a code (on stderr, at once, so a coding agent can pass them on), opens the page in a browser on a terminal, waits until the code is approved, then says who is signed in and their organisations. The login is kept in `~/.config/mason/credentials.json` (0600), never in a project; refused while `MASON_TOKEN` is set, which every command uses first. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md) is the API. |
 | `mason logout` | Revokes this machine's login to that service and removes it. When the service cannot be reached, the login is still removed, and it says it was NOT revoked and how to revoke it. |
+| `mason replica create\|list\|status` | A hosted Mason service's replicas: `create <org>/<name> --region <region> --size <gb>` makes one for this project's database (its URL read by the variable the sources file names, never from the command line) and waits until it is ready; `list [<org>]` lists them; `status <org>/<name>` says how one is. [`docs/HOSTED-API.md`](../docs/HOSTED-API.md#replicas-mason-replica) is the API. |
+| `mason token create\|list\|revoke` | A hosted Mason service's CI tokens: `create --replica <org>/<name>` makes one for a replica, printed once, for a deploy from CI (`MASON_TOKEN`); `list [<org>]` lists them; `revoke <id>` revokes one. |
 | `mason deploy [--replica <org>/<name>] [--dry-run] [--timeout 10m]` | Sends this project's files (the YAML under `mason/`: never `.env` or `.mason/`) to a replica on the hosted service (`--replica`, else `MASON_REPLICA`), after checking the project as `mason start` does, without connecting to any database, then waits until the replica runs it (exit 0), Mason there refuses it (its failure printed as it came, exit 1), or the timeout (exit 124: the deploy goes on, its id said). `--dry-run` prints each file, its size and its sha256, and sends nothing. The login is `MASON_TOKEN`, else `mason login`'s. |
 
 Every command documents itself: `mason --help` lists them, and `mason <command> --help` (or `mason help <command>`) says
-how to use one, with examples. Every command but `help` and `mcp` (whose stdout is the MCP protocol's) takes `--json`. A command means the project of the folder it
+how to use one, with examples; `mason <command> --help --json` is its spec as data, and `mason help --json` every command's. Every command but `mcp` (whose stdout is the MCP protocol's) takes `--json`. A command means the project of the folder it
 runs in, or the nearest one above it.
 
 ## What `mason start` does
@@ -181,7 +183,7 @@ what changed is written. A different database is refused: `mason destroy`, then 
 `mason help agent` is the page an agent reads first, offline: the commands in the order a project takes them, every
 answer's shape, the exit codes and the failure codes. In short:
 
-- Every command but `help` and `mcp` takes `--json` and answers with **one JSON object on stdout**, always with
+- Every command but `mcp` takes `--json` and answers with **one JSON object on stdout**, always with
   `next: [{ command, what }]` — the commands to run next, the same a person reads under `Next:`. The other keys are the
   command's own; `mason help <command>` names them on its `--json` line. Lists are wrapped (`{ tables: […], next }`).
 - A failure is `{ "error": { "code", "message", "why", "fix" }, "next": […] }` on stdout, and the **exit code** says it:

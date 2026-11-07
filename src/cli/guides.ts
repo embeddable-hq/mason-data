@@ -114,18 +114,29 @@ ${keys}
 async function agentGuide(): Promise<string> {
   // imported here, not at the top: the registry imports this file for the HELP usage
   const { STEPS } = await import("./registry.ts");
-  const { FAILURE_CODES, TIMEOUT_COMMANDS } = await import("./command.ts");
+  const { EXIT_CODES, FAILURE_CODES, TIMEOUT_COMMANDS } = await import("./command.ts");
   const { GENERATED_DIR } = await import("./generated-files.ts");
   const w = Math.max(...STEPS.flatMap(([, cs]) => cs.map((c) => c.name.length))) + "mason  --json".length;
   const commands = STEPS.map(([step, cs]) => `  ${step}\n${cs.map((c) => `    ${`mason ${c.name}${Object.hasOwn(c.options, "json") ? " --json" : ""}`.padEnd(w)}  ${c.summary}`).join("\n")}`).join("\n");
   const codes = Object.entries(FAILURE_CODES).map(([code, what]) => `    ${code.padEnd(13)} ${what}`).join("\n");
   return `DRIVING MASON FROM A CODING AGENT — the same commands a person runs, answered as data
 
-  Every command prints for a person, or with --json one JSON object for a program. One prints text alone: mason help
-  (this reference); mason mcp's stdout is the MCP protocol's, so it takes no --json and says a failure to start on
-  stderr; mason logs --json is the log's entries ({ at, text }), or with --requests the request log, --events the sync's
-  events, --running the statements running now. Nothing a command prints
-  refers to a file this package does not ship.
+  Every command prints for a person, or with --json one JSON object for a program. mason mcp's stdout is the MCP
+  protocol's, so it takes no --json and says a failure to start on stderr; mason logs --json is the log's entries
+  ({ at, text }), or with --requests the request log, --events the sync's events, --running the statements running now.
+  mason version --json is { version, next }. Nothing a command prints refers to a file this package does not ship.
+
+  EVERY COMMAND'S SPEC, AS DATA: mason <command> --help --json (or mason help <command> --json) is { command: <spec>,
+  next }; mason help --json is { version, commands: [<spec>…], guides: [{ name, summary }], failureCodes: [{ code,
+  meaning }], next }. A <spec> is read from the same description --help prints, so the two cannot drift:
+    name, summary, usage   usage is the text --help prints
+    forms                  [{ synopsis, positionals }]: each form of the synopsis, and its words that are no option
+    options                [{ name, short, type, multiple, default, value }]: every option, --help too; type
+                           "string" or "boolean"; short, default and value (a string option's placeholder) null if none
+    json                   the top-level keys of its --json answer, next last; null when it takes no --json
+    needs                  "project", "run" or null
+    stdout                 "protocol" for mason mcp, else null
+    exitCodes              [{ code, meaning }]: the exit codes below it can exit with
 
   AN AGENT WITH MCP (Claude Code, Claude Desktop, any MCP client) adds Mason as an MCP server first, then asks with
   its tools rather than through a shell: tables (each synced table's rows and how current it is), describe, query (rows with
@@ -145,10 +156,8 @@ ${commands}
 
   A FAILURE is { "error": { "code", "message", "why", "fix" }, "next": […] } on stdout ("why" and "fix" where there is
   more to say than the message), and the exit code says it — the same code exits the same wherever it is found:
-    0  done
-    1  failed, with the reason
-    2  the command line is wrong (without --json the usage follows)
-    124  ran out of time: ${TIMEOUT_COMMANDS} (nothing stopped)
+${Object.entries(EXIT_CODES).map(([code, meaning]) => `    ${code}  ${code === "124" ? `${meaning}: ${TIMEOUT_COMMANDS}` : meaning}`).join("\n")}
+  A wrong command line's next steps end with mason <command> --help, and its fix says what to change.
   The codes:
 ${codes}
 

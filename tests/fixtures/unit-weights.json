@@ -115,9 +115,9 @@
     "tests/postgres-api/protocol.test.ts": 224,
     "tests/postgres-api/server.test.ts": 26444,
     "tests/postgres-api/tls.test.ts": 47224,
+    "tests/scripts.test.ts": 14000,
     "tests/serve.test.ts": 21815,
     "tests/test-ports.test.ts": 715,
-    "tests/web-page.test.ts": 2820,
-    "tests/workflows.test.ts": 31128
+    "tests/web-page.test.ts": 2820
   }
 }

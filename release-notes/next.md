@@ -69,6 +69,13 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   that replica's page too, said on stderr, unless `--ssh` names a server.
 - **`not_answering`** (a run that is alive and does not answer, the way out `mason stop`) is now listed among the
   failure codes `mason help agent` names, and a failure never carries a code outside that list.
+- **Every wrong command line says where its usage is**: its `next` ends with `mason <command> --help`, and it carries a
+  `fix`, where a command's own check (`mason wait`, `deploy`, `user`, `token`, …) answered with `next: []`.
+- **Every command's spec as data**: `mason <command> --help --json` (or `mason help <command> --json`) is
+  `{ command, next }`, the command's options with their types, defaults and short names, its forms and positionals,
+  its `--json` keys and its exit codes, read from the same description `--help` prints; `mason help --json` is every
+  command's, with the guides and the failure codes. `mason version --json` is `{ version, next }`. `mason help agent`
+  documents the shape.
 - **`mason destroy --dry-run` and `mason remove --dry-run` say what would go and change nothing**: destroy lists Mason
   stopped, the replication slot and Mason's own publication on your database (named from what Mason recorded: the dry
   run never connects to the database) and the synced data and state; remove lists the sources file's entries. Both
