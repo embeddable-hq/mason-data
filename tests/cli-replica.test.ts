@@ -22,7 +22,9 @@ test("mason replica create: the URL is read from stdin (never .env: its value th
   const { a, requests, token } = await hosted(v1, ["create", "acme/shop", "--region", "eu", "--size", "50"], { cwd: root });
   assert.equal(a.code, 0, a.stdout + a.stderr);
   assert.deepEqual(requests.map((q) => `${q.method} ${q.path}`), ["POST /v1/replicas/acme", "GET /v1/replicas/acme/shop", "GET /v1/replicas/acme/shop"]);
-  assert.deepEqual(JSON.parse(requests[0]!.body), { name: "shop", region: "eu", sizeGb: 50, sources: [{ name: "app", variable: "DATABASE_URL", url: URL_ }] });
+  const body = JSON.parse(requests[0]!.body) as { client: { version: unknown } };
+  assert.ok(typeof body.client.version === "string" && body.client.version.length > 0, "the CLI's version, as deploy sends it");
+  assert.deepEqual(body, { name: "shop", region: "eu", sizeGb: 50, sources: [{ name: "app", variable: "DATABASE_URL", url: URL_ }], client: { version: body.client.version } });
   assert.equal(requests[0]!.headers.authorization, `Bearer ${token}`);
   assert.equal(requests[0]!.headers["content-type"], "application/json");
   for (const q of requests.slice(1)) assert.equal(q.body, "", "only the creation carries the URL");

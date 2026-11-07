@@ -54,6 +54,7 @@ import { readHidden, readPiped, type SecretInput, type SecretRead } from "./secr
 import { parseSource } from "./preflight.ts";
 import { MAX_POLL_SECONDS, MIN_POLL_SECONDS, parseDuration } from "../lib/table-sync.ts";
 import { sayAgain } from "./commands.ts";
+import { version } from "./version.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { err as styleErr, out as styleOut, PLAIN, type Style } from "./style.ts";
 
@@ -465,6 +466,8 @@ export function createWords(c: CreateRun) {
     lost: (why: string, st: ReplicaState): string => `  The creation's answer was lost (${why}); the service has ${name}, ${STATE_WORDS[st]}`,
     wait: (st: ReplicaState, unsure: string | null): string => unsure === null ? STATE_WORDS[st] : `${STATE_WORDS[st]}; the service could not say more just now (${unsure}): asking again`,
     unsureOf: (what: string, statusCode: number): string => `${what} answered ${statusCode}`,
+    /** a 503 with Retry-After: when the service asks for another try (the CLI does not wait for it) */
+    retryIn: (why: string | undefined, seconds: number | string): string => `${why ? `${why}; ` : ""}the service asks for another try in ${seconds} s: run the same command again then`,
     /** a 403 says who may, and where an account's first replica is made (the API refuses it: a person is asked there) */
     refusedNext: (st: number): NextStep[] => st === 403
       ? [["mason login", `sign in as an admin or an owner of ${c.r.org}; an account's first replica is made in the service's web app, ${c.base}`]]
@@ -491,7 +494,7 @@ export function createWords(c: CreateRun) {
 
 /** The `/v1/` failures the contract documents for a creation and a state's answer, each status with its codes. */
 const DOCUMENTED: ReadonlyArray<[number, readonly string[]]> = [[400, ["bad_request"]], [401, ["unauthenticated"]], [403, ["refused"]], [404, ["not_found"]],
-  [409, ["refused", "busy"]], [413, ["too_large"]], [415, ["bad_request"]], [422, ["checks_failed"]], [429, ["slow_down"]], [500, ["failed"]],
+  [409, ["refused", "busy"]], [413, ["too_large"]], [415, ["bad_request"]], [422, ["checks_failed"]], [426, ["refused", "upgrade_required"]], [429, ["slow_down"]], [500, ["failed"]],
   [502, ["unavailable"]], [503, ["checks_unknown", "unavailable"]], [504, ["unavailable"]]];
 
 /**
@@ -515,9 +518,9 @@ export function printedCorpus(c: CreateRun, tail = 256): string[] {
     ...STATES.map((st) => w.timedOut(st)),
     ...[{ why: P }, { why: "no answer within 60 s" }, { why: "no answer within 15 s" }].flatMap((x) => [true, false].map((absent) =>
       w.lostFailure({ message: `could not reach ${c.base}`, code: "failed", why: x.why, fix: `check this machine is online, and that MASON_CLOUD_URL names the service (it is ${c.base})`, next: [] }, absent))),
-    ...DOCUMENTED.flatMap(([status, codes]) => codes.flatMap((code) => [P, undefined].map((why) => {
+    ...DOCUMENTED.flatMap(([status, codes]) => codes.flatMap((code) => [P, undefined].flatMap((why) => {
       const f = serviceFailure({ status, json: { error: { code, message: P, ...(why ? { why, fix: P } : {}) } }, what: `POST /v1/replicas/${c.r.org}`, retryAfter: null }, [], w.refusedNext)!;
-      return status === 422 ? { ...f, next: w.checksFailedNext } : f;
+      return status === 422 ? [{ ...f, next: w.checksFailedNext }] : status === 503 ? [f, { ...f, why: w.retryIn(f.why, P) }] : [f];
     }))),
     ...[200, 201, ...DOCUMENTED.map(([st]) => st)].flatMap((status) => [true, false].flatMap((isJson) => ["a replica was created", "a replica's state was asked for"].map((step) =>
       unexpected(service, { status, json: isJson ? {} : undefined, what: step === "a replica was created" ? `POST /v1/replicas/${c.r.org}` : `GET /v1/replicas/${c.r.org}/${c.r.name}`, retryAfter: null }, step))))];
@@ -561,6 +564,39 @@ const CORPUS = new Map<string, Written[]>();
 export const STDIN_MS = 60_000;
 /** The URL's own bound: what the contract takes (docs/HOSTED-API.md). */
 export const MAX_URL = 2048;
+/** The one variable a replica sets for its source (docs/HOSTED-API.md): a service refuses any other `variable`. */
+export const REPLICA_VARIABLE = "DATABASE_URL";
+/** The lowest port a replica connects to: below it, a service refuses the URL. */
+export const MIN_PORT = 1024;
+/** libpq's parameter names, said by name when a URL carries one; any other is "a parameter", never its text. */
+const LIBPQ_PARAMS = new Set(["host", "hostaddr", "port", "dbname", "user", "password", "passfile", "options", "application_name", "fallback_application_name",
+  "connect_timeout", "client_encoding", "keepalives", "target_session_attrs", "sslcert", "sslkey", "sslrootcert", "sslcrl", "sslpassword", "sslnegotiation",
+  "gssencmode", "krbsrvname", "service", "replication", "channel_binding", "require_auth", "load_balance_hosts"]);
+
+/**
+ * WHAT A SERVICE REFUSES OF A URL (docs/HOSTED-API.md "The URL"), checked here before anything is sent: more than one
+ * host, no host, no password, no database name, a query parameter other than `sslmode`, a port below `MIN_PORT`. Each
+ * is said by what is wrong, never by a part of the URL (a parameter by libpq's name alone). Null when none applies,
+ * or when it is not a URL at all (Mason's own grammar, `parseSource`, says so after).
+ */
+export function replicaUrlProblem(url: string): string | null {
+  const after = url.trim().replace(/^[a-z]+:\/\//i, "");
+  const authority = after.split(/[/?#]/, 1)[0] ?? "";
+  if (authority.slice(authority.lastIndexOf("@") + 1).includes(",")) return "it names more than one host: a replica connects to one host, postgres://user:password@host:5432/your_app";
+  let u: URL;
+  try { u = new URL(url.trim()); } catch { return null; }
+  if (u.hostname === "") return "it names no host: postgres://user:password@host:5432/your_app";
+  if (u.password === "") return "it has no password: a replica connects as a user with one, postgres://user:password@host:5432/your_app";
+  if (u.pathname.replace(/^\//, "") === "") return "it names no database: add it after the port, postgres://user:password@host:5432/your_app";
+  const others = [...new Set([...u.searchParams.keys()].filter((k) => k !== "sslmode"))];
+  if (others.length) {
+    const named = others.map((k) => k.toLowerCase()).filter((k) => LIBPQ_PARAMS.has(k));
+    const what = named.length === others.length ? `${named.length === 1 ? "the parameter" : "the parameters"} ${named.join(", ")}` : named.length ? `the parameters ${named.join(", ")} and another` : "a parameter";
+    return `it has ${what} after the ?: a replica takes sslmode alone; leave the rest out`;
+  }
+  if (u.port !== "" && Number(u.port) < MIN_PORT) return `its port is below ${MIN_PORT}: a replica connects to a database on port ${MIN_PORT} or above (Postgres's own is 5432)`;
+  return null;
+}
 
 /** Where the URL was read, in the words a refusal and the progress say it by. */
 export type UrlFrom = "typed at the prompt" | "read from stdin";
@@ -613,6 +649,13 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
       fix: `write url: \${DATABASE_URL} in ${file}, then ${again} again: it asks for the URL at a terminal, or reads it from stdin (${again} < url.txt)` }, json);
   }
   const variable = src.url.env;
+  // the one variable a replica sets for its database: a service refuses any other name (400), so it is refused here,
+  // before the URL is asked for
+  if (variable !== REPLICA_VARIABLE) {
+    return fail({ message: `${file}: url: \${${variable}} names a variable a replica does not set`, code: "refused",
+      why: `a replica sets one variable for its database, ${REPLICA_VARIABLE}, and reads the URL by that name; a service refuses any other`,
+      fix: `write url: \${${REPLICA_VARIABLE}} in ${file} (and ${REPLICA_VARIABLE}= in .env, for mason start), then ${again} again` }, json);
+  }
   const service = serviceOf();
   if (isFailure(service)) return fail(service, json);
   const s = signedIn("a replica is created", `mason replica create ${replicaText(r)}`, json);
@@ -624,10 +667,13 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
   const { url, from } = got;
   const named = `the URL given for ${variable} (${from})`;
   // the value is held to the grammar Mason connects by before it leaves this machine, never repeated (preflight's rule)
-  const parsed = parseSource(url, named);
-  if ("problem" in parsed || !/^postgres(?:ql)?:\/\//i.test(url.trim()) || url.length > MAX_URL) {
-    return fail({ message: `${named} is not a database URL a replica can be made for`, code: "refused",
-      why: "problem" in parsed ? parsed.problem : "it is sent as postgres://… or postgresql://…, at most 2 KiB",
+  // first its form, then what a service refuses (each said by what is wrong, never by a part of it), then the grammar
+  // Mason connects by
+  const form = !/^postgres(?:ql)?:\/\//i.test(url.trim()) || url.length > MAX_URL ? "it is sent as postgres://… or postgresql://…, at most 2 KiB" : replicaUrlProblem(url);
+  const parsed = form === null ? parseSource(url, named) : null;
+  const problem = form ?? (parsed !== null && "problem" in parsed ? parsed.problem : null);
+  if (problem !== null) {
+    return fail({ message: `${named} is not a database URL a replica can be made for`, code: "refused", why: problem,
       fix: `give the database's URL, postgres://user:password@host:5432/your_app: ${again} < url.txt, or at the prompt` }, json);
   }
   const run: CreateRun = { r, region: o.region, sizeGb: o.sizeGb, timeout: o.timeout, base: service.base, variable, from, source: src.name };
@@ -656,7 +702,7 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
 
   // THE CREATION: the service checks the source, then answers 201, or why it was not made (with the checks, said)
   const sent = await call(service, "POST", where, { token, timeoutMs: CREATE_MS,
-    json: { name: r.name, region: o.region, sizeGb: o.sizeGb, sources: [{ name: src.name, variable, url }] } });
+    json: { name: r.name, region: o.region, sizeGb: o.sizeGb, sources: [{ name: src.name, variable, url }], client: { version: version() } } });
   let checks: SourceChecks[] | null = null;
   let state: HostedReplica;
   let waitMs = REPLICA_POLL_MS;
@@ -673,7 +719,9 @@ async function create(r: Replica, o: { region: string; sizeGb: number; timeout: 
   } else {
     if (obj(sent.json) && sent.status !== 201 && "checks" in sent.json && carriesNoSecret(wordless({ checks: sent.json.checks }), secrets)) checks = heldChecks(sent.json.checks, src.name, secrets);
     if (sent.status !== 201) {
-      const f = refusedOf(sent, "a replica was created");
+      const refused = refusedOf(sent, "a replica was created");
+      // a launch the service could not start: its words, and when it asks to be tried again (the CLI does not wait)
+      const f = sent.status === 503 && sent.retryAfter !== null ? { ...refused, why: w.retryIn(refused.why, sent.retryAfter) } : refused;
       if (!json && checks !== null) for (const l of checkLines(checks)) say(l);
       const next: readonly NextStep[] = sent.status === 422 ? w.checksFailedNext : f.next ?? [];
       const failure = { ...f, next };

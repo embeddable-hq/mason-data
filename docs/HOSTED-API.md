@@ -142,7 +142,7 @@ argument, `--replica` or `MASON_REPLICA`), `Authorization: Bearer <token>`, `Con
 64 KiB:
 
 ```json
-{ "name": "shop", "region": "<region>", "sizeGb": 50, "sources": [{ "name": "app", "variable": "DATABASE_URL", "url": "postgres://…" }] }
+{ "name": "shop", "region": "<region>", "sizeGb": 50, "sources": [{ "name": "app", "variable": "DATABASE_URL", "url": "postgres://…" }], "client": { "version": "0.9.0" } }
 ```
 
 - `name` is the replica's (the service may hold it to a stricter rule of its own, and refuses another with `400`).
@@ -150,9 +150,23 @@ argument, `--replica` or `MASON_REPLICA`), `Authorization: Bearer <token>`, `Con
   holds, in GB. The CLI checks only their form (a region's name, `--size` a whole number); which ones exist is the
   service's to say, and it refuses another with `400`, naming the field.
 - `sources` holds exactly one source for now: `name` is the project's sources file's name without `.yml`; `variable`
-  the variable the replica reads the URL from (`url: ${DATABASE_URL}`); `url` the URL as the person typed it or stdin
+  the variable the replica reads the URL from, always `DATABASE_URL`; `url` the URL as the person typed it or stdin
   gave it (below), `postgres://` or `postgresql://`, at most 2 KiB. A service may take a `ca` too (PEM `CERTIFICATE` blocks); the CLI sends none yet.
+- `client.version` is the CLI's version (`dev` from a checkout), as a deploy sends it. A service may refuse a CLI too
+  old for this route (`400` or `426`, with its words), which the CLI says as they came.
 - Any other key is refused (`400`).
+
+**What a service refuses, and the CLI refuses first.** Each is refused before anything is sent, where the CLI can
+tell, saying what is wrong and never repeating the URL or its password:
+
+- **The variable.** A replica sets exactly one variable for its source, `DATABASE_URL`; a service refuses any other
+  `variable` (`400`). A sources file naming another (`url: ${MASON_DATABASE_URL}`) is refused before the URL is asked
+  for, with the line to write, `url: ${DATABASE_URL}`.
+- **The URL**, checked once it is read: it names one host (several hosts are refused) and a database, and carries a
+  password; its only query parameter is `sslmode` (any value Mason reads; a service may store `require`), and any other
+  (`host=`, `hostaddr=`, `application_name=`, …) is refused; a port, when given, is 1024 or above.
+- **What only the service can tell**: a host that does not resolve, or resolves to a private, loopback, link-local or
+  reserved address (`400`, below). The CLI says the service's words.
 
 **The URL.** The CLI never takes it from a flag, an argument, `.env.local`, `.env` or the shell. It reads it from the
 person or the pipe:
@@ -223,7 +237,9 @@ except when the service's own side failed, `checks`, which it says:
 
 | Status | `error.code` | When |
 |---|---|---|
-| `400` | `bad_request` | a key, a type or a bound of the body; a name taken in the organisation; a region or a size the service does not offer |
+| `400` | `bad_request` | a key, a type or a bound of the body; a name taken in the organisation; a region or a size the service does not offer; a `variable` other than `DATABASE_URL`; a CLI too old for this route |
+| `400` | `bad_request` | the URL's host does not resolve, or resolves to a private, loopback, link-local or reserved address |
+| `400` | `bad_request` | the URL's port is below 1024; the URL has no password or no database name; it has a query parameter other than `sslmode` |
 | `403` | `refused` | a CI token; a viewer; an email not verified yet; the account's limit of replicas reached; an account that has not made its first replica in the web app |
 | `404` | `not_found` | no such organisation, or the login is not a member: said the same way |
 | `409` | `refused` | the token was revoked, or its role lowered, while the checks ran: nothing was made |
@@ -231,11 +247,13 @@ except when the service's own side failed, `checks`, which it says:
 | `415` | `bad_request` | not `application/json` |
 | `422` | `checks_failed` | Mason's checks of the database failed: fix what `checks` says (`mason doctor` runs the same checks here), and create it again |
 | `429` | `slow_down` | too many replicas started this hour; `Retry-After` |
-| `503` | `checks_unknown`, `unavailable` | Mason could not tell whether the database is ready; or the service's side could not run the checks just now; `Retry-After` |
+| `426` | any | a CLI too old for this route: the service's words say what to do (upgrade it) |
+| `503` | `checks_unknown`, `unavailable` | Mason could not tell whether the database is ready; or the service's side could not run the checks, or could not start the replica's launch, just now; `Retry-After` |
 
 The CLI's code follows the HTTP status, as for every `/v1/` failure; its next step is its own: `mason login` (as an
 admin or an owner) for a `401` or `403`, `mason doctor` and the same `mason replica create` for a `422`, `mason replica
-list <org>` for a `404`, else the same `mason replica create`.
+list <org>` for a `404`, else the same `mason replica create`. A `503` with `Retry-After` is said with the seconds the
+service asks for (`the service asks for another try in 30 s`); the CLI does not wait for them, and exits 1.
 
 ### `Replica`
 

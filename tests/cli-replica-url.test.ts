@@ -119,3 +119,78 @@ test("the URL comes from stdin alone: a project with no .env creates, and one wh
     assert.ok(!requests[0]!.body.includes(ENV_MARK));
   }
 });
+
+test("a sources file naming a variable other than DATABASE_URL is refused before the URL is asked for (a replica sets that one alone), with the line to write", async () => {
+  for (const json of [false, true]) {
+    const t = terminalStdin();
+    const root = project({ file: "kind: postgres\nurl: ${MASON_DATABASE_URL}\ntables:\n  orders: {}\n" });
+    const { a, requests } = await hosted(() => created(), [...LINE, ...(json ? ["--json"] : [])], { cwd: root, stdin: `${URL_}\r`, env: t.env });
+    assert.equal(a.code, 1, a.stdout + a.stderr);
+    assert.deepEqual(requests, [], "nothing sent");
+    assert.equal(fs.readFileSync(t.log, "utf8"), "", "nothing asked: the terminal never went raw");
+    assert.ok(!a.stderr.includes(QUESTION));
+    const said = json ? (JSON.parse(a.stdout) as { error: { code: string; message: string; fix: string } }).error : null;
+    if (said) {
+      assert.deepEqual([said.code, said.message], ["refused", "mason/sources/app.yml: url: ${MASON_DATABASE_URL} names a variable a replica does not set"]);
+      assert.match(said.fix, /^write url: \$\{DATABASE_URL\} in mason\/sources\/app\.yml /);
+    } else assert.match(a.stderr, /^✗ mason replica: mason\/sources\/app\.yml: url: \$\{MASON_DATABASE_URL\} names a variable a replica does not set$/m);
+  }
+});
+
+test("a URL a service would refuse is refused after it is read and before anything is sent, saying what is wrong and never repeating it: no password, no database, a parameter other than sslmode, several hosts, a port below 1024; sslmode alone passes", async () => {
+  const host = `db-${URL_MARK}.example`;
+  const cases: Array<[string, RegExp]> = [
+    [`postgres://app_reader@${host}:5432/app`, /^it has no password: /],
+    [`postgres://app_reader:${PASSWORD}@${host}:5432`, /^it names no database: /],
+    [`postgres://app_reader:${PASSWORD}@${host}:5432/`, /^it names no database: /],
+    [`postgres://app_reader:${PASSWORD}@${host}:5432/app?host=/tmp`, /^it has the parameter host after the \?: a replica takes sslmode alone/],
+    [`postgres://app_reader:${PASSWORD}@${host}:5432/app?sslmode=require&hostaddr=10.0.0.1`, /^it has the parameter hostaddr after the \?/],
+    [`postgres://app_reader:${PASSWORD}@${host}:5432/app?application_name=x`, /^it has the parameter application_name after the \?/],
+    [`postgres://app_reader:${PASSWORD}@${host}:5432/app?${URL_MARK}=1`, /^it has a parameter after the \?/],
+    [`postgres://app_reader:${PASSWORD}@${host}:5432,other-${URL_MARK}:5432/app`, /^it names more than one host: /],
+    [`postgres://app_reader:${PASSWORD}@${host}:80/app`, /^its port is below 1024: /],
+    [`postgres://app_reader:${PASSWORD}@${host}:1023/app`, /^its port is below 1024: /],
+  ];
+  const root = project();
+  for (const [url, why] of cases) {
+    const { a, requests } = await hosted(() => created(), [...LINE, "--json"], { cwd: root, stdin: url });
+    const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why: string } }).error;
+    assert.equal(a.code, 1, `${url}: ${a.stdout}`);
+    assert.deepEqual([e.code, e.message], ["refused", "the URL given for DATABASE_URL (read from stdin) is not a database URL a replica can be made for"], url);
+    assert.match(e.why, why, url);
+    assert.deepEqual(requests, [], `${url}: nothing sent`);
+  }
+  for (const url of [`postgres://app_reader:${PASSWORD}@${host}:5432/app?sslmode=require`, `postgres://app_reader:${PASSWORD}@${host}:1024/app`, `postgres://app_reader:${PASSWORD}@${host}/app`]) {
+    const { a, requests } = await hosted(() => created(), [...LINE, "--json"], { cwd: root, stdin: url });
+    assert.equal(a.code, 0, `${url}: ${a.stdout}`);
+    assert.equal(JSON.parse(requests[0]!.body).sources[0].url, url);
+  }
+});
+
+test("what a service refuses after the URL is sent is said in its words, the code the CLI's, sent once: a host that does not resolve or resolves to a private address, a port, a URL without a password or database, a parameter (400); a CLI too old (400, 426); a launch it could not start (503 with Retry-After: said, never waited for)", async () => {
+  const root = project();
+  const refusal = (status: number, code: string, message: string, headers?: Record<string, string>): { status: number; body: unknown; headers?: Record<string, string> } =>
+    ({ status, body: { error: { code, message } }, ...(headers ? { headers } : {}) });
+  const cases: Array<[ReturnType<typeof refusal>, string]> = [
+    [refusal(400, "bad_request", "the database's host does not resolve"), "refused"],
+    [refusal(400, "bad_request", "the database's host resolves to a private address"), "refused"],
+    [refusal(400, "bad_request", "the database's port is below 1024"), "refused"],
+    [refusal(400, "bad_request", "the URL has no password or no database name"), "refused"],
+    [refusal(400, "bad_request", "the URL has a parameter other than sslmode"), "refused"],
+    [refusal(400, "bad_request", "this Mason is too old for this service: upgrade it"), "refused"],
+    [refusal(426, "upgrade_required", "this Mason is too old for this service: upgrade it"), "refused"],
+    [refusal(503, "unavailable", "the replica could not be launched just now", { "retry-after": "30" }), "failed"],
+  ];
+  for (const [reply, code] of cases) {
+    const message = (reply.body as { error: { message: string } }).error.message;
+    const j = await hosted(() => reply, [...LINE, "--json"], { cwd: root });
+    const e = (JSON.parse(j.a.stdout) as { error: { code: string; message: string; why: string } }).error;
+    assert.equal(j.a.code, 1, j.a.stdout);
+    assert.deepEqual([e.code, e.message], [code, message], "the service's words, as they came");
+    assert.equal(j.requests.length, 1, "sent once, never retried or waited for");
+    if (reply.status === 503) assert.match(e.why, /the service said unavailable, HTTP 503; the service asks for another try in 30 s: run the same command again then$/);
+    const p = await hosted(() => reply, LINE, { cwd: root });
+    assert.equal(p.a.code, 1);
+    assert.ok(p.a.stderr.includes(`✗ mason replica: ${message}`), p.a.stderr);
+  }
+});

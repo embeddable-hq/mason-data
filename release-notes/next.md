@@ -11,7 +11,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   `DATABASE_URL` being set pipes it instead: `printf '%s\n' "$DATABASE_URL" | mason replica create acme/shop --region
   <region> --size 50`, or `... < url.txt`, or from your secret store's command. With nothing on stdin it now stops,
   sending nothing. The sources file still names the variable (`url: ${DATABASE_URL}`): the replica reads the URL by
-  that name.
+  that name, and it must be `DATABASE_URL`, the one a replica sets: a sources file naming another is refused before the
+  URL is asked for. The URL must carry a password and a database name, take no query parameter but `sslmode`, name one
+  host, and use a port of 1024 or above; each is refused before anything is sent.
 
 ## What changes
 
