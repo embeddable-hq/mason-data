@@ -507,6 +507,91 @@ each as one line (a refusal's `fix` written over several lines, such as the line
 spaces); its code the CLI's by the status, never `usage`; the CLI's next step `mason login` ("sign in again") for a
 `401` or `403`, else `mason user list --replica <org>/<name>` ("the replica's users").
 
+## A replica's page: `mason ui --replica`
+
+`mason ui --replica <org>/<name>` (else `MASON_REPLICA`) opens the web page of a replica's Mason (the Overview, the
+Tables, the Users, Observability: what `mason ui` opens for a local run) in the browser of the organisation's owner.
+The CLI asks the service for a one-use, short-lived address of the page, and opens it, as `mason login` opens its
+sign-in page. How the service serves the page behind that address is the service's own; the CLI only opens it.
+
+### `POST /v1/replicas/{org}/{name}/ui`
+
+`Authorization: Bearer <token>`, no body. `{org}` and `{name}` follow the deploy's grammar (each
+`^[a-z0-9][a-z0-9-]{0,62}$`), checked before a byte is sent, so both are safe in the path unescaped.
+
+**Who may call it: a person's login (`masondata_pat_…`) whose role in the organisation is `owner`.** An `admin` or a
+`viewer` is refused, and so is every CI token (`masondata_ci_…`), whatever its scopes: `403`. The CLI cannot tell a
+login's role or a token's kind (a token is opaque to it), so the refusal is the service's alone.
+
+`200`, JSON:
+
+```json
+{ "url": "https://app.example.com/replicas/acme/shop/page?ticket=3q2-7Zk9", "expiresAt": "2026-11-07T10:05:00.000Z" }
+```
+
+| Key | Held to |
+|---|---|
+| `url` | the page's one-use address (below) |
+| `expiresAt` | when the address stops opening the page: ISO 8601 with its zone |
+
+Any other key (a `next` included) is never read.
+
+**The address.** It opens the replica's page once, for a few minutes (the service decides how long, and says it in
+`expiresAt`; five minutes or less is the intent), and after that first use, or once it expires, it opens nothing.
+It carries no token of the login it was asked with, and no secret that outlives it. The CLI holds it to all of this
+before it is opened or printed, and refuses an answer that breaks any of it:
+
+- an absolute URL, at most 2048 characters;
+- on the service's own origin: the base URL's scheme, host and port (`MASON_CLOUD_URL`'s, or the default). An address
+  on any other origin, or of another scheme (`javascript:`, `file:`, `data:`), is refused naming the origin it named,
+  code `refused`, exit 1: it would send the person to an address nobody chose;
+- no user or password in it;
+- as the URL parser writes it (dot segments removed, a host in its `xn--` form), only `https://` (or `http://` for a
+  service on this machine), then the host and port, then a path and an optional query of letters, digits and
+  `. _ ~ / ? = + -` alone: the same grammar as the sign-in page the CLI opens. So no shell or `cmd /c start` reads
+  anything in it, and a query holds at most one `name=value` (no `&`, no `%` escape, no `#`);
+- carrying no secret: every string of the answer, each key included, is put to the exact test first (the token the
+  CLI holds, whole or 11 of its body in a row in any reading, and anything shaped as a token or a Mason user's
+  password; "The users of a replica" says how), and the address as it is printed is put to the test again. An answer
+  that carries one anywhere is refused whole, and nothing of it is printed or opened.
+
+An answer that breaks any other of these is a failure naming the request and the status, never the body, exit 1.
+
+**What the CLI does with it.**
+
+- On a terminal or not, it opens the address in the browser (`open` on macOS, `start` on Windows, `xdg-open`
+  elsewhere), unless `--no-open` or `--json` is given. Opened, the address is NOT printed: the browser used it, and it
+  opens the page once. Not opened (`--no-open`, or a browser that would not start, which is said), it is printed once,
+  in the report's `url` row on stdout, for the person at the terminal, who is told to paste it nowhere else.
+- `--json` prints `{ url, replica: "<org>/<name>", expiresAt, next }` on stdout and opens nothing, so an agent can
+  hand the address on.
+- The address is never written to a log or to stderr, and never repeated in a failure.
+- `--replica` beside `--ssh`, `--bridge`, `--mason`, `--timeout` or `--local-port` is a wrong line (exit 2), and nothing
+  is sent. `MASON_REPLICA` is read only when neither `--ssh` nor `--bridge` names a target.
+
+**Refusals.** Each is a `/v1/` failure (below), said as the service worded it; the CLI's code is by the status, and its
+next step is its own, never the service's:
+
+| Status | When | The CLI's next step |
+|---|---|---|
+| `401` | no login, or one that expired or was revoked | `mason login`; with `MASON_TOKEN` set, `env -u MASON_TOKEN mason ui --replica <org>/<name>` |
+| `403` | a login that is not the organisation's owner (an admin, a viewer), or any CI token | `mason login`, "sign in as the organisation's owner"; with `MASON_TOKEN` set, `env -u MASON_TOKEN mason ui --replica <org>/<name>` |
+| `404` | no such organisation, the login is not a member, or no such replica in it | `mason replica list <org>` |
+| `409` | the replica is not `ready` (`checking`, `creating`, `failed`, `deleting`, `deleted`) | `mason replica status <org>/<name>`, then `mason ui --replica <org>/<name>` again |
+| `503` | the replica is `ready` but its machine is not connected to the service now | as for `409` |
+| `429` | too many pages asked for in a short time | `mason ui --replica <org>/<name>` again in a moment |
+
+A `409` or a `503` should carry `Retry-After` (delta-seconds, 1 to 3600): the CLI says it ("again in 30 s, as the
+service asks"), and adds a fix of its own ("try again in 30 s; mason replica status … says whether it is ready") when
+the service sent none. It never waits or retries by itself: one request, then the person runs the command again. A
+`409` or `503` without the failure shape (a proxy's page) is said in the CLI's words, never its body: "the replica
+<org>/<name> is not ready to open its page".
+
+**The audit row.** The service writes one row in its audit log for every address it answers with `200`, and for every
+first use of one: who (the login's account), when, from which address, which organisation and replica, and whether
+the address was answered or used. The row never holds the address, its one-use part, or any token. The CLI cannot
+write the row, and never says that it did.
+
 ## Failures of `/v1/`
 
 Every `/v1/` endpoint fails with an HTTP 4xx or 5xx and the CLI's own failure shape, the one `--json` prints:
