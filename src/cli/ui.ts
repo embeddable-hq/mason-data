@@ -2,7 +2,8 @@
  * `mason ui` — THE WEB PAGE OF THE RUNNING MASON, IN THE BROWSER (src/web/, docs/WEB-UI.md): the Overview (what `mason
  * status` says), the Tables (`mason tables`, `add`, `remove`, `sync`), the Users (`mason user`) and Observability (`mason
  * logs`, `mason usage`), refreshed while the tab is seen. It prints the page's URL WITH the run's token (src/cli/security.ts: the first request trades it for an HttpOnly cookie and is redirected to a URL without
- * it) and opens the browser. The reader is the person at this terminal, whom `mason user add` already shows a
+ * it) and opens the browser when its stdout is a terminal (as `mason login` does: a pipe, a file or an agent's shell has
+ * no one at a browser, so it gets the address alone). The reader is the person at this terminal, whom `mason user add` already shows a
  * password once; the token is never written anywhere else — not in `mason start`'s output (its log is a file), not in
  * `mason status`, which prints the URL without it.
  *
@@ -58,7 +59,7 @@ export const UI: CommandSpec & { needs: "run" } = {
     mason ui --ssh deploy@mason.example.com --mason "cd /var/lib/mason && mason" --timeout 120 --no-open
     mason ui --bridge --local-port 51000      what --ssh runs on the server; its stdout is a stream, not for reading
 
-  --no-open            print the URL only
+  --no-open            print the URL only (as when its output is not a terminal: a browser opens only for one)
   --ssh <target>       the server, as you give it to ssh: user@server, or a Host of your ssh config
   --mason <command>    how to run mason on the server (default mason); a shell's text, kept to ssh's command line
   --timeout <duration> how long ssh and the server have to answer (default ${DEFAULT_TIMEOUT_S}s; a bare number is seconds;
@@ -94,6 +95,10 @@ export function openBrowser(url: string): Promise<string | null> {
     child.once("spawn", () => { child.unref(); resolve(null); });
   });
 }
+
+/** Whether to open a browser: asked for (no --no-open) and stdout a terminal, a person in front of it (never a pipe,
+ *  a file or a coding agent's shell, which get the address alone). */
+const opens = (noOpen: boolean): boolean => !noOpen && process.stdout.isTTY === true;
 
 /** Whether the run serves the page: its `GET /` answered, with the token the commands send. */
 async function servesPage(run: DevRun): Promise<boolean> {
@@ -167,7 +172,7 @@ export async function ui(argv: string[]): Promise<number> {
     const read = parseDuration(v.timeout ?? String(DEFAULT_TIMEOUT_S));
     if ("problem" in read) return wrong(`--timeout ${read.problem}`);
     const seconds = read.seconds;
-    return overSsh(v.ssh, v.mason ?? "mason", seconds * 1000, !v["no-open"], json);
+    return overSsh(v.ssh, v.mason ?? "mason", seconds * 1000, opens(v["no-open"]), json);
   }
   const w = await reach(UI, json);
   if (w === null || w.state !== "up") return 1;
@@ -186,8 +191,9 @@ export async function ui(argv: string[]): Promise<number> {
   const url = `${run.control.url}/?token=${encodeURIComponent(run.control.token)}`;
   const port = Number(new URL(run.control.url).port);
   if (json) { out(jsonText(UI, { url, port }, NEXT)); return 0; }
-  const couldNot = f.values["no-open"] === true ? null : await openBrowser(url);
-  const opened = f.values["no-open"] !== true && couldNot === null;
+  const open = opens(v["no-open"]);
+  const couldNot = open ? await openBrowser(url) : null;
+  const opened = open && couldNot === null;
   out(reportText({
     headline: opened ? `Mason's web page, opened in your browser` : `Mason's web page`,
     details: [["url", url], ["project", run.name]],

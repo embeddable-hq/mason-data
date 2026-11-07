@@ -19,9 +19,38 @@ import { CommandFailed, failed, wantsJson } from "./command.ts";
 import { RunUnreachable } from "./control.ts";
 import { exitWhenWritten } from "../lib/exit-when-written.ts";
 import { gatedExit, installOutputGate } from "./output-gate.ts";
+import * as fs from "node:fs";
 
-async function main(argv: string[]): Promise<number> {
+/** `-C <folder>` before the command, as git's and make's (each one from the last): the folders, and the line after them. */
+function leadingFolders(argv: readonly string[]): { folders: Array<string | undefined>; rest: string[] } {
+  const folders: Array<string | undefined> = [];
+  let i = 0;
+  while (argv[i] === "-C") { folders.push(argv[i + 1]); i += 2; }
+  return { folders, rest: argv.slice(i) };
+}
+
+/** Runs in each `-C` folder in turn, so the command means the project there; a folder missing or unreadable is a wrong
+ *  line, said before anything runs. Null once moved. */
+function moveTo(folders: ReadonlyArray<string | undefined>, json: boolean): number | null {
+  for (const dir of folders) {
+    const wrong = (message: string): number => failed("", { message, code: "usage", fix: "mason -C <folder> <command>: the command runs as if started in that folder" }, { json });
+    if (dir === undefined || dir === "") return wrong("-C needs a folder: mason -C <folder> <command>");
+    let st: fs.Stats;
+    try { st = fs.statSync(dir); }
+    catch (e) { return wrong(`-C ${JSON.stringify(dir)}: ${(e as NodeJS.ErrnoException).code === "ENOENT" ? "there is no such folder" : "it cannot be read"}`); }
+    if (!st.isDirectory()) return wrong(`-C ${JSON.stringify(dir)}: it is not a folder`);
+    try { fs.accessSync(dir, fs.constants.R_OK | fs.constants.X_OK); process.chdir(dir); }
+    catch { return wrong(`-C ${JSON.stringify(dir)}: it cannot be read`); }
+  }
+  return null;
+}
+
+async function main(line: string[]): Promise<number> {
+  // -C <folder> first: everything after it, the project lookup included, is as if started there
+  const { folders, rest: argv } = leadingFolders(line);
   const [command, ...args] = argv;
+  const moved = moveTo(folders, wantsJson(args, COMMANDS.find((c) => c.name === command)));
+  if (moved !== null) return moved;
   // mason alone: where you are and the next command; mason help / --help: every command
   if (command === undefined) { process.stdout.write(await orientation(process.cwd())); return 0; }
   if (command === "--help" || command === "-h") { process.stdout.write(topUsage()); return 0; }
@@ -65,7 +94,7 @@ main(process.argv.slice(2)).then((code) => exitWhenWritten(gatedExit(code)), (e:
   // stack to be understood is a bug — mason query orders printed one when Mason's API was not up yet).
   // MASON_DEBUG=1 prints where it happened, for the bug report it deserves. The same shape as every failure, JSON under --json.
   const message = e instanceof Error ? e.message : String(e);
-  const [command, ...args] = process.argv.slice(2);
+  const [command, ...args] = leadingFolders(process.argv.slice(2)).rest;
   const code = failed(command ?? "", { message, code: "failed", fix: process.env.MASON_DEBUG ? undefined : "this is a bug in mason: MASON_DEBUG=1 prints where it happened, for the report" },
     { json: wantsJson(args, COMMANDS.find((c) => c.name === command)) });
   if (process.env.MASON_DEBUG) process.stderr.write(`${(e as Error).stack ?? ""}\n`);

@@ -5,9 +5,21 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **A script that reads the exit code of `mason share` or `mason ui --ssh` sees 124, not 1, when the tunnel gives no
   address or the server does not answer within `--timeout`** (as `mason wait`, `mason deploy`, `mason replica create`
   and `mason login` already exit when they run out of time). Every other failure of both still exits 1.
+- **`mason start --port <n>` is now `mason start --ui-port <n>`**: it was always the web page's and the commands' port
+  (`MASON_UI_PORT` on a server), never the Postgres API's. The old flag starts nothing: it answers with the line to run
+  and exit 2.
+- **`mason status`, `mason stop` and `mason logs` refuse an argument** (exit 2): `mason stop myproject` stopped the
+  project of the folder it ran in, whatever it named. Run them in the project's folder, or with `mason -C <folder>`.
+- **`mason ui` opens a browser only when its output is a terminal**, as `mason login` does; in a pipe or a coding
+  agent's shell it prints the address alone, as `--no-open` does.
 
 ## What changes
 
+- **`mason -C <folder> <command>`** runs any command as if started in that folder, as `git -C` and `make -C` do; a
+  folder that is missing or cannot be read is a wrong command line (exit 2).
+- **Every list flag takes a comma list or the flag repeated, meaning the same**: `mason add orders --columns id
+  --columns status` is `--columns id,status`, and so for `--include`, `--key`, `mason logs --outcome` and `mason token
+  create --scope` (`--scope deploy,users`). `mason user add --set` stays one value a flag: a value may hold a comma.
 - **Every `--timeout`, and `mason usage --step`, takes one form of duration**: a bare number is seconds, as before for
   `wait`, `share` and `ui --ssh`, and `30s`, `10m`, `1h` or `1d` (`5 minutes`, `2 days` too). So `mason wait --timeout 10m`
   and `mason deploy --timeout 600` now work; nothing that worked before stops working. `--since` and `--until` take the

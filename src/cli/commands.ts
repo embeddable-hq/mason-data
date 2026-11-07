@@ -14,7 +14,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { asFailure, endText, errorJson, failed, failureCode, jsonText, nextBlock, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
+import { asFailure, endText, errorJson, failed, failureCode, jsonText, listFlag, nextBlock, noArguments, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
@@ -472,6 +472,8 @@ export const STATUS: CommandSpec & { needs: "project" } = {
 export async function status(argv: string[]): Promise<number> {
   const f = parseCommand(STATUS, argv);
   if (typeof f === "number") return f;
+  const extra = noArguments(STATUS, f.positionals, f.values.json === true);
+  if (extra !== null) return extra;
   const r0 = await theRun(process.cwd());
   // the first line goes straight to the point (Status: running); when the service is not running, the same rows and
   // tables show, with "not running" for each service that is not
@@ -1086,7 +1088,8 @@ const ADD_USAGE = `usage: mason add <table>… [--columns <column>,…] [--inclu
   and the table is synced again whole with them. A project deployed as committed (MASON_PROJECT_READONLY=1 where Mason
   runs) is refused, its files left as they are: add the table where the project is committed, then deploy.
 
-  --columns <a,b,…>   only these columns (one table at a time: the list is that table's)
+  --columns <a,b,…>   only these columns (one table at a time: the list is that table's); a list flag takes a comma
+                      list or the flag repeated, the same: --columns id,status is --columns id --columns status
   --include <a,b,…>   these columns as well as every other one — a column that looks like a secret, named on purpose
   --key <a,b,…>       for a table with no primary key: the columns that tell its rows apart, which it is keyed by (one
                       table at a time; polled or off: logical replication cannot apply a change by them)
@@ -1107,7 +1110,7 @@ export const ADD: CommandSpec & { needs: "project" } = {
   name: "add",
   summary: "sync tables into Mason, adding them to the sources file: mason add orders (--columns id,status: those only)",
   usage: ADD_USAGE,
-  options: { json: { type: "boolean" }, columns: { type: "string" }, include: { type: "string" }, key: { type: "string" }, sync: { type: "string" } },
+  options: { json: { type: "boolean" }, columns: { type: "string", multiple: true }, include: { type: "string", multiple: true }, key: { type: "string", multiple: true }, sync: { type: "string" } },
   json: ["added", "file", "error", "next"],
 };
 
@@ -1144,7 +1147,7 @@ export async function add(argv: string[]): Promise<number> {
   const f = parseCommand(ADD, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
-  const specs = addSpecs(f.positionals, f.values.columns as string | undefined, f.values.include as string | undefined, f.values.key as string | undefined);
+  const specs = addSpecs(f.positionals, listFlag(f.values.columns), listFlag(f.values.include), listFlag(f.values.key));
   if (typeof specs === "string") return failed("add", { message: specs, code: "usage", usage: ADD_USAGE }, { json });
   const sync = addSync(f.values.sync as string | undefined);
   if (typeof sync === "string") return failed("add", { message: sync, code: "usage", usage: ADD_USAGE }, { json });
@@ -1558,7 +1561,8 @@ const LOGS_USAGE = `usage: mason logs [-n <lines>] [-f] [--start] [--requests [<
   --failed         with --requests: only the ones not answered (refused, failed or cancelled); with --events: only
                    the failures
   --outcome <o,…>  with --requests: only these outcomes — ok, refused (the statement's own fault), failed (Mason's or
-                   the machine's), cancelled (a cancel or a statement timeout, SQLSTATE 57014)
+                   the machine's), cancelled (a cancel or a statement timeout, SQLSTATE 57014); a comma list or
+                   the flag repeated, the same
   --since <time>   with --requests: started at or after it — an age (30m, 2h, 7d) or an ISO 8601 date or time with
                    its zone (2026-10-28, 2026-10-28T09:00:00Z)
   --until <time>   with --requests: started before it (as --since)
@@ -1588,7 +1592,7 @@ export const LOGS: CommandSpec & { needs: "project" } = {
   summary: "Mason's log (-f follows it); --requests: the Postgres API's statements; --events: the sync's; --running: running now",
   usage: LOGS_USAGE,
   options: { lines: { type: "string", short: "n" }, follow: { type: "boolean", short: "f" }, start: { type: "boolean" },
-    requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, outcome: { type: "string" }, since: { type: "string" },
+    requests: { type: "boolean" }, events: { type: "boolean" }, failed: { type: "boolean" }, outcome: { type: "string", multiple: true }, since: { type: "string" },
     until: { type: "string" }, user: { type: "string" }, client: { type: "string" }, slow: { type: "boolean" }, search: { type: "string" }, before: { type: "string" }, running: { type: "boolean" }, json: { type: "boolean" } },
   json: ["lines", "requests", "events", "keptDays", "before", "running", "next"],
 };
@@ -1718,6 +1722,8 @@ export function runFailure(reply: { status: number; body: Record<string, unknown
 export async function logs(argv: string[]): Promise<number> {
   const f = parseCommand(LOGS, argv);
   if (typeof f === "number") return f;
+  const extra = noArguments(LOGS, f.positionals, f.values.json === true);
+  if (extra !== null) return extra;
   const json = f.values.json === true;
   if (f.values.requests && f.values.events) return failed("logs", { message: "--requests and --events are two lists: ask for one", code: "usage", fix: "mason logs --requests, or mason logs --events" }, { json });
   if (f.values.failed && !f.values.requests && !f.values.events) return failed("logs", { message: "--failed is a filter of --requests or --events", code: "usage", fix: "mason logs --requests --failed, or mason logs --events --failed" }, { json });
@@ -1741,7 +1747,7 @@ export async function logs(argv: string[]): Promise<number> {
   if (f.values.requests) {
     // the filters, read as the run reads its query string (src/cli/request-filter.ts): a mistake is said here, exit 2
     const text = (v: unknown): string | undefined => typeof v === "string" ? v : undefined;
-    const q = requestFilter({ limit: text(f.values.lines), failed: f.values.failed === true, outcome: text(f.values.outcome), since: text(f.values.since),
+    const q = requestFilter({ limit: text(f.values.lines), failed: f.values.failed === true, outcome: listFlag(f.values.outcome), since: text(f.values.since),
       until: text(f.values.until), user: text(f.values.user), client: text(f.values.client),
       slow: f.values.slow === true, search: text(f.values.search), before: text(f.values.before) }, Date.now(), flagOf);
     if ("message" in q) return failed("logs", { ...q, usage: LOGS_USAGE }, { json });
@@ -1813,6 +1819,8 @@ export const STOP: CommandSpec & { needs: "project" } = {
 export async function stop(argv: string[]): Promise<number> {
   const f = parseCommand(STOP, argv);
   if (typeof f === "number") return f;
+  const extra = noArguments(STOP, f.positionals, f.values.json === true);
+  if (extra !== null) return extra;
   const json = f.values.json === true;
   const next: NextStep[] = [["mason start", "resume, in seconds (in the project's folder)"], ["mason destroy", "remove its synced data and its state; your files stay"]];
   const r = await theRun(process.cwd());
