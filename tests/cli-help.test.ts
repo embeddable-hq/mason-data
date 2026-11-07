@@ -65,7 +65,7 @@ test("every wrong command line, whatever check refused it, ends its next steps w
   // the usage failures raised inside commands (wait, deploy, user, token, …) answered with next: [] and no fix
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mason-usage-"));
   try {
-    const lines: string[][] = [["wait", "a", "b"], ["deploy", "stray"], ["user"], ["user", "frob"], ["token"], ["replica", "bogus"], ["sync"], ["logs", "-n", "x"],
+    const lines: string[][] = [["wait", "--timeout", "soon"], ["deploy", "stray"], ["user"], ["user", "frob"], ["token"], ["replica", "bogus"], ["sync"], ["logs", "-n", "x"],
       ["cancel"], ["init", "a", "b"], ["usage", "stray"], ["help", "a", "b"], ["status", "--jsn"]];
     for (const args of lines) {
       const r = spawnSync(process.execPath, [MAIN, ...args, "--json"], { cwd, encoding: "utf8", env: { ...process.env, HOME: "/nonexistent-home", MASON_REPLICA: "", MASON_TOKEN: "" } });
@@ -132,7 +132,7 @@ test("mason <cmd> --help --json, mason help <cmd> --json and mason help --json: 
   // the forms and their positionals, as the synopsis writes them
   const forms = (name: string) => (help.commands.find((s) => s.name === name)!.forms as Array<{ synopsis: string; positionals: string[] }>);
   assert.deepEqual(forms("add").map((f) => f.positionals), [["<table>…"]]);
-  assert.deepEqual(forms("init").map((f) => f.positionals), [["[<postgres url> | demo]"]]);
+  assert.deepEqual(forms("init").map((f) => f.positionals), [["[- | <postgres url> | demo]"]]);
   // each form of mason user is its verb, then its words (the verbs read from the synopsis, so a new one needs no edit here)
   for (const f of forms("user")) assert.equal(f.positionals[0], f.synopsis.split(" ")[2], f.synopsis);
   assert.deepEqual(forms("user").find((f) => f.positionals[0] === "add")?.positionals, ["add", "<name>"], "--role, --set and --replica are options");

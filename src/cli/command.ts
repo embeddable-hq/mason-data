@@ -276,8 +276,9 @@ function positionalsOf(form: string, name: string): string[] {
   const out: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const w = rest[i]!;
-    if (w.startsWith("[-")) continue;
-    if (w.startsWith("-")) { if (rest[i + 1]?.startsWith("<")) i++; continue; }
+    // an option is a dash and a letter (`[--json]`, `-n`); a lone `-` (`mason init -`, stdin) is a positional
+    if (/^\[--?[A-Za-z]/.test(w)) continue;
+    if (/^--?[A-Za-z]/.test(w)) { if (rest[i + 1]?.startsWith("<")) i++; continue; }
     out.push(w);
   }
   // an alternative whose other side was an option (`<org>/<name> | --replica <org>/<name>`) leaves no `|` behind
