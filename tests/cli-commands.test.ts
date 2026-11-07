@@ -1150,6 +1150,71 @@ test("mason user add --role with Mason stopped: the role must be one the roles f
     { role: undefined, roleKnown: false, roleFrom: "none", readsNothing: true }, JSON.stringify(plain));
 });
 
+test("mason user add --from and mason user from: a user's address ranges in their one form, replaced and removed, shown by list; an invalid range is a wrong line, exit 2, nothing written", async () => {
+  // src/cli/user.ts rangesToSet, setUserFrom; src/duck/users.ts userRanges (the one grammar, src/lib/cidr.ts)
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mason-user-from-")));
+  opened.push(async () => { fs.rmSync(root, { recursive: true, force: true }); });
+  const folder = path.join(root, "mason");
+  fs.mkdirSync(path.join(folder, "sources"), { recursive: true });
+  fs.mkdirSync(path.join(root, ".mason"), { mode: 0o700 });
+  fs.writeFileSync(path.join(root, ".mason", "config.json"), JSON.stringify({ name: "shop", folder: "mason", remote: false, apiKey: "k".repeat(48), sourceServer: null, running: null, lastRun: null }), { mode: 0o600 });
+  fs.writeFileSync(path.join(folder, "sources", "shop.yml"), "kind: postgres\nurl: postgres://mason:x@127.0.0.1:1/shop\ntables:\n  orders: {}\n");
+  const usersFile = path.join(root, ".mason", "users.json");
+  const run = (argv: string[]) => runMason(root, argv, matrixEnv());
+  const error = (a: Answer): { code: string; message: string; fix?: string } => (JSON.parse(a.stdout) as { error: { code: string; message: string; fix?: string } }).error;
+  // an invalid range: a wrong line, every bad entry said, nothing written
+  for (const [argv, want] of [
+    [["user", "add", "bi", "--from", "999.999.999.999/99"], /"999\.999\.999\.999\/99" is not an address or a CIDR/],
+    [["user", "add", "bi", "--from", "10.0.0.0/8", "--from", "10.0.0.0/33", "--from", "office"], /"10\.0\.0\.0\/33": an IPv4 prefix is at most \/32; "office" is not an address or a CIDR/],
+    [["user", "add", "bi", "--from", "10.0.1.5/24"], /has bits set past its prefix: did you mean 10\.0\.1\.0\/24\?/],
+    [["user", "add", "bi", "--from", "fe80::1%eth0"], /"fe80::1%eth0" is not an address or a CIDR/],
+  ] as Array<[string[], RegExp]>) {
+    const a = await run([...argv, "--json"]);
+    assert.equal(a.code, 2, `${argv.join(" ")}: ${a.stdout}${a.stderr}`);
+    assert.equal(error(a).code, "usage");
+    assert.match(error(a).message, want);
+    assert.ok(!fs.existsSync(usersFile), "nothing written");
+  }
+  // added with ranges: written in their one form, a duplicate once
+  const added = await run(["user", "add", "bi", "--from", "203.0.113.0/24", "--from", "2001:DB8:7:0::/48", "--from", "203.0.113.0/24", "--json"]);
+  assert.equal(added.code, 0, added.stdout + added.stderr);
+  assert.deepEqual((JSON.parse(added.stdout) as { from?: string[] }).from, ["203.0.113.0/24", "2001:db8:7::/48"]);
+  assert.deepEqual((JSON.parse(fs.readFileSync(usersFile, "utf8")) as { users: Array<{ from?: string[] }> }).users[0]!.from, ["203.0.113.0/24", "2001:db8:7::/48"]);
+  const person = await run(["user", "add", "office", "--from", "192.0.2.10"]);
+  assert.equal(person.code, 0, person.stderr);
+  assert.match(person.stdout, /^ {2}from +192\.0\.2\.10 \(it connects from these alone\)$/m);
+  assert.equal((await run(["user", "add", "open", "--json"])).code, 0);
+  // list: each user's ranges, null for any address
+  const list = async (): Promise<Array<[string, string[] | null]>> => (JSON.parse((await run(["user", "list", "--json"])).stdout) as { users: Array<{ name: string; from: string[] | null }> }).users.map((u) => [u.name, u.from]);
+  assert.deepEqual(await list(), [["bi", ["203.0.113.0/24", "2001:db8:7::/48"]], ["office", ["192.0.2.10"]], ["open", null]]);
+  const shown = await run(["user", "list"]);
+  assert.match(shown.stdout, /^ {2}bi +from 203\.0\.113\.0\/24, 2001:db8:7::\/48 +id [0-9a-f]{16}/m);
+  assert.match(shown.stdout, /^ {2}open +id [0-9a-f]{16}/m);
+  // mason user from: replaced, the same again said and nothing written, --any removes them
+  const before = fs.readFileSync(usersFile, "utf8");
+  const bad = await run(["user", "from", "bi", "10.0.0.0/8", "10.0.0.0/99", "--json"]);
+  assert.deepEqual([bad.code, error(bad).code], [2, "usage"]);
+  assert.equal(fs.readFileSync(usersFile, "utf8"), before, "nothing written");
+  for (const argv of [["user", "from", "bi"], ["user", "from", "bi", "10.0.0.0/8", "--any"], ["user", "list", "--from", "10.0.0.0/8"], ["user", "remove", "bi", "--any"], ["user", "from", "bi", "--from", "10.0.0.0/8"]]) {
+    const a = await run([...argv, "--json"]);
+    assert.deepEqual([a.code, error(a).code], [2, "usage"], argv.join(" "));
+  }
+  const changed = await run(["user", "from", "bi", "198.51.100.0/24", "--json"]);
+  assert.equal(changed.code, 0, changed.stdout + changed.stderr);
+  const c = JSON.parse(changed.stdout) as { changed: { name: string; from: string[] | null }; already: boolean; next: Array<{ command: string }> };
+  assert.deepEqual([c.changed.name, c.changed.from, c.already], ["bi", ["198.51.100.0/24"], false]);
+  assert.deepEqual(c.next.map((n) => n.command), ["mason user list", "mason user from bi --any"]);
+  const again = await run(["user", "from", "bi", "198.51.100.0/24"]);
+  assert.match(again.stdout, /^The user bi connects from 198\.51\.100\.0\/24 already: nothing changed$/m);
+  const any = await run(["user", "from", "bi", "--any"]);
+  assert.equal(any.code, 0, any.stderr);
+  assert.match(any.stdout, /^The user bi connects from any address now$/m);
+  assert.deepEqual(await list(), [["bi", null], ["office", ["192.0.2.10"]], ["open", null]]);
+  assert.ok(!("from" in (JSON.parse(fs.readFileSync(usersFile, "utf8")) as { users: Array<Record<string, unknown>> }).users[0]!), "no ranges: no key, as a file written before");
+  const missing = await run(["user", "from", "nobody", "10.0.0.0/8", "--json"]);
+  assert.deepEqual([missing.code, error(missing).code], [1, "not_found"]);
+});
+
 test("mason user add --set with Mason stopped: every attribute the role declares, none other, a scalar once, a list once per value and never empty; list says each user's values and the ones it lacks", async () => {
   // src/cli/user.ts attributesToAdd, src/cli/roles.ts (attributes:, where:, through:): refused before anything is
   // written, each at its key with the way out; with Mason up the same check reads the listener's roles (/api/state)

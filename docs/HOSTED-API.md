@@ -449,28 +449,52 @@ request and the status, never the body, exit 1.
 
 ## The users of a replica: `mason user … --replica`
 
-`mason user add | list | disable | enable | remove … --replica <org>/<name>` (else `MASON_REPLICA`) manages the users of
+`mason user add | list | from | disable | enable | remove … --replica <org>/<name>` (else `MASON_REPLICA`) manages the users of
 a replica's Postgres API, as `mason user` manages a project's own. Each subcommand is ONE request, and its body and its
 answer are what Mason's own command server takes and answers for it (`/api/users` of a running Mason): a service passes
-the request to Mason on the replica and its answer back unchanged, so Mason there checks the names, the role and the
-attributes with the functions it checks them with on a laptop. Every request carries `Authorization: Bearer <token>`.
+the request to Mason on the replica and its answer back unchanged, so Mason there checks the names, the role, the
+attributes and the address ranges with the functions it checks them with on a laptop. Every request carries `Authorization: Bearer <token>`.
 The replica's name is checked as for a deploy (each part `^[a-z0-9][a-z0-9-]{0,62}$`), and a user's name is
 `^[a-z0-9][a-z0-9_.-]{0,62}$`, checked before it is put in a path, so both are always safe there unescaped.
 
 What only the command line says is checked by the CLI first, and refused as a wrong line (exit 2) with nothing sent: a
 subcommand, a user's name, a role's name (`^[a-z0-9][a-z0-9_-]{0,62}$`), a `--set` that is not `<attribute>=<value>`,
-`--role` or `--set` beside a subcommand other than `add`. Nothing of a project on this machine is read or written.
+`--role`, `--set` or `--from` beside a subcommand other than `add`, an address range that is not one (an IPv4 or IPv6
+address, alone or with a prefix length its family takes, no bits set past it: `999.999.999.999/99` and `10.0.1.5/24`
+are refused), and `from` with neither ranges nor `--any`, or with both. Nothing of a project on this machine is read or written.
 
 | Subcommand | Request | Body | `200` |
 |---|---|---|---|
 | `list` | `GET /v1/replicas/{org}/{name}/users?lastUsed=1` | none | `{ users, lastUsedNote, urlNote, requestLogDays }` |
-| `add <user>` | `POST /v1/replicas/{org}/{name}/users` | `{ "name", "role"?, "set"? }` | the user added (below) |
+| `add <user>` | `POST /v1/replicas/{org}/{name}/users` | `{ "name", "role"?, "set"?, "from"? }` | the user added (below) |
+| `from <user> <range>… \| --any` | `POST /v1/replicas/{org}/{name}/users/{user}/from` | `{ "from" }` | `{ changed: { name, id, addedAt, from }, already }` |
 | `disable <user>` | `POST /v1/replicas/{org}/{name}/users/{user}/disable` | none | `{ disabled: { name, id, addedAt, disabledAt }, already }` |
 | `enable <user>` | `POST /v1/replicas/{org}/{name}/users/{user}/enable` | none | `{ enabled: { name, id, addedAt }, already }` |
 | `remove <user>` | `DELETE /v1/replicas/{org}/{name}/users/{user}` | none | `{ removed: { name, id, addedAt, removedAt } }` |
 
-- `add`'s body is `{ "name": "metabase" }`, with `"role": "<role>"` for `--role` and `"set": ["tenant=42", …]` for each
-  `--set`, in the order given, as they were written.
+- `add`'s body is `{ "name": "metabase" }`, with `"role": "<role>"` for `--role`, `"set": ["tenant=42", …]` for each
+  `--set`, in the order given, as they were written, and `"from": ["203.0.113.0/24", …]` for each `--from`, in the order
+  given, each in its one form (the network in lower case, IPv6 shortened, no prefix for one address: `192.0.2.10`).
+- A user's ADDRESS RANGES are where it may connect from: a connection from any other address is refused before its
+  password is checked. `from`'s body replaces them: `{ "from": [ranges…] }`, each in its one form, or `{ "from": null }`
+  for `--any` (any address: its ranges removed). In every answer a user's `from` is `null` (any address) or 1 to 100
+  ranges, each in its one form; a list's row with no `from` key is read as `null`.
+- **A limit sent must be confirmed.** When `add` sends `from`, or `from` sends a list or `null`, the `200` answer must
+  carry exactly what was sent, in its one form and order (`add`'s `from`, `from`'s `changed.from`). An answer without
+  it, with `null`, or with other ranges is refused whole and never printed (an `add`'s password included): the CLI says
+  the service did not confirm the address limit, exit 1, and its next steps are `mason user list --replica …` (what the
+  user has) and `mason user remove <user> --replica …` (if it was made without the limit). A service that does not take
+  `from` refuses it with a `400` naming the field, never ignores it: ignoring it would make a user that connects from
+  any address while the CLI reported a limit.
+- **A limit a service cannot enforce is a `400`**, its reason in the service's words (too many ranges, a family it
+  does not take, a range wider than it allows, such as a `/0`), which the CLI says as it came, nothing written. For such
+  a service, `from: null` (any address) means the user is limited by nothing beyond what the replica itself allows to
+  connect.
+- **The address judged is the client's.** Mason judges a user's ranges on the address the connection comes from; behind
+  a load balancer or proxy that is the proxy's own, unless the proxy sends the PROXY protocol v2 header and Mason is
+  told to believe it from the proxy's addresses (`MASON_PG_PROXY_FROM`, docs/POSTGRES-API.md "Behind a TCP proxy"). A
+  service that puts a proxy in front of a replica's Postgres API passes the client's address through that way, or a
+  user's ranges would be judged against the proxy's address.
 - `already` is `true` when nothing changed (disabled already; not disabled): exit 0, said.
 - A key beside those of the answer (a `next` included) is never read.
 
@@ -487,6 +511,7 @@ held to its own grammar:
 | `url`, `psql` (`add`) | exactly the URL and the psql line the CLI builds from `user`, `password`, `host`, `port`, `database` and `sslmode`: `postgres://<user>:<password>@<host>:<port>/<database>[?sslmode=require]`, `psql '<url>'` |
 | `url` (`list`) | `null`, or `postgres://<its name>@<host>:<port>/<database>[?sslmode=require]`, with no password |
 | `role`, `roleFrom`, `readsNothing`, `roleKnown` | a role's name; `file`, `default` or `none` (a role for the first two, none for `none`); `true` or absent (only with `none`); a boolean or absent (only with `file`) |
+| `from` | `null`, or 1 to 100 address ranges, each in its one form (absent on `add`: any address) |
 | `attributes`, `missingAttributes` | at most 64 attribute names (`^[a-z_][a-z0-9_]{0,62}$`), each a value or a list of 1 to 100; the names alone |
 | `live`, `already` | booleans |
 | `lastUsedNote`, `urlNote` | `null` or a string, said as one line |
@@ -522,11 +547,110 @@ The CLI prints the answer as `mason user` prints the same answer for a project (
 names it too (`mason user list --replica acme/shop`).
 
 A refusal, Mason's on the replica or the service's own, is a `/v1/` failure (below), its status Mason's own for a
-refusal of Mason's: `400` a request Mason cannot take (a `--set` its role does not declare, an attribute missing), `404`
+refusal of Mason's: `400` a request Mason cannot take (a `--set` its role does not declare, an attribute missing, an
+address range it does not take) or the service cannot enforce (a `from` beyond its limits, above), `404`
 no such user or role (and no such replica), `409` refused (a name taken), `500` failed. Its words are said as they came,
 each as one line (a refusal's `fix` written over several lines, such as the lines to add to `roles.yml`, joined by
 spaces); its code the CLI's by the status, never `usage`; the CLI's next step `mason login` ("sign in again") for a
 `401` or `403`, else `mason user list --replica <org>/<name>` ("the replica's users").
+
+## A replica's page: `mason ui --replica`
+
+`mason ui --replica <org>/<name>` (else `MASON_REPLICA`) opens the web page of a replica's Mason (the Overview, the
+Tables, the Users, Observability: what `mason ui` opens for a local run) in the browser of the organisation's owner.
+The CLI asks the service for a one-use, short-lived address of the page, and opens it, as `mason login` opens its
+sign-in page. How the service serves the page behind that address is the service's own; the CLI only opens it.
+
+**The page is read-only.** A page opened this way shows the replica; it changes nothing. The service passes the page
+and its reads (`GET`, such as `/api/state`, `/api/users`, `/api/requests`) to Mason on the replica, and refuses every
+request that would change the replica (every other method, such as `POST /api/users`, `POST /api/pick`, `POST
+/api/cancel`), because the service audits every change and a write through the page would skip that. A replica's users
+are changed with `mason user … --replica` ("The users of a replica", above), which the service audits.
+
+### `POST /v1/replicas/{org}/{name}/ui`
+
+`Authorization: Bearer <token>`, no body. `{org}` and `{name}` follow the deploy's grammar (each
+`^[a-z0-9][a-z0-9-]{0,62}$`), checked before a byte is sent, so both are safe in the path unescaped.
+
+**Who may call it: a person's login (`masondata_pat_…`) whose role in the organisation is `owner`.** An `admin` or a
+`viewer` is refused, and so is every CI token (`masondata_ci_…`), whatever its scopes: `403`. The CLI cannot tell a
+login's role or a token's kind (a token is opaque to it), so the refusal is the service's alone.
+
+`200`, JSON:
+
+```json
+{ "url": "https://r-7f3a.ui.app.example.com/?ticket=3q2-7Zk9", "expiresAt": "2026-11-07T10:05:00.000Z" }
+```
+
+| Key | Held to |
+|---|---|
+| `url` | the page's one-use address (below) |
+| `expiresAt` | when the address stops opening the page: ISO 8601 with its zone |
+
+Any other key (a `next` included) is never read.
+
+**The address.** It opens the replica's page once, for a few minutes (the service decides how long, and says it in
+`expiresAt`; five minutes or less is the intent), and after that first use, or once it expires, it opens nothing.
+It carries no token of the login it was asked with, and no secret that outlives it. The CLI holds it to all of this
+before it is opened or printed, and refuses an answer that breaks any of it:
+
+- an absolute URL, at most 2048 characters;
+- on one of two kinds of origin:
+  - the service's own: the base URL's scheme, host and port (`MASON_CLOUD_URL`'s, or the default); or
+  - a separate origin the service names, so that Mason's page shares neither the service's session cookie nor its
+    root-absolute paths (`/app.js`, `/api/state`): `https:`, on the base URL's port, and a host that is a subdomain of
+    the base URL's host, by its labels: `r-7f3a.ui.app.example.com` under `app.example.com`. Never another domain,
+    never a host that merely ends in the same letters (`evilapp.example.com`), never `http:`, never another port, and
+    none at all under a base URL whose host is an IP address.
+
+  An address on any other origin, or of another scheme (`javascript:`, `file:`, `data:`), is refused naming the origin
+  it named, code `refused`, exit 1: it would send the person to an address nobody chose;
+- no user or password in it;
+- as the URL parser writes it (dot segments removed, a host in its `xn--` form), only `https://` (or `http://` for a
+  service on this machine), then the host and port, then a path and an optional query of letters, digits and
+  `. _ ~ / ? = + -` alone: the same grammar as the sign-in page the CLI opens. So no shell or `cmd /c start` reads
+  anything in it, and a query holds at most one `name=value` (no `&`, no `%` escape, no `#`);
+- carrying no secret: every string of the answer, each key included, is put to the exact test first (the token the
+  CLI holds, whole or 11 of its body in a row in any reading, and anything shaped as a token or a Mason user's
+  password; "The users of a replica" says how), and the address as it is printed is put to the test again. An answer
+  that carries one anywhere is refused whole, and nothing of it is printed or opened.
+
+An answer that breaks any other of these is a failure naming the request and the status, never the body, exit 1.
+
+**What the CLI does with it.**
+
+- On a terminal or not, it opens the address in the browser (`open` on macOS, `start` on Windows, `xdg-open`
+  elsewhere), unless `--no-open` or `--json` is given. Opened, the address is NOT printed: the browser used it, and it
+  opens the page once. Not opened (`--no-open`, or a browser that would not start, which is said), it is printed once,
+  in the report's `url` row on stdout, for the person at the terminal, who is told to paste it nowhere else.
+- `--json` prints `{ url, replica: "<org>/<name>", expiresAt, next }` on stdout and opens nothing, so an agent can
+  hand the address on.
+- The address is never written to a log or to stderr, and never repeated in a failure.
+- `--replica` beside `--ssh`, `--bridge`, `--mason`, `--timeout` or `--local-port` is a wrong line (exit 2), and nothing
+  is sent. `MASON_REPLICA` is read only when neither `--ssh` nor `--bridge` names a target.
+
+**Refusals.** Each is a `/v1/` failure (below), said as the service worded it; the CLI's code is by the status, and its
+next step is its own, never the service's:
+
+| Status | When | The CLI's next step |
+|---|---|---|
+| `401` | no login, or one that expired or was revoked | `mason login`; with `MASON_TOKEN` set, `env -u MASON_TOKEN mason ui --replica <org>/<name>` |
+| `403` | a login that is not the organisation's owner (an admin, a viewer), or any CI token | `mason login`, "sign in as the organisation's owner"; with `MASON_TOKEN` set, `env -u MASON_TOKEN mason ui --replica <org>/<name>` |
+| `404` | no such organisation, the login is not a member, or no such replica in it | `mason replica list <org>` |
+| `409` | the replica is not `ready` (`checking`, `creating`, `failed`, `deleting`, `deleted`) | `mason replica status <org>/<name>`, then `mason ui --replica <org>/<name>` again |
+| `503` | the replica is `ready` but its machine is not connected to the service now | as for `409` |
+| `429` | too many pages asked for in a short time | `mason ui --replica <org>/<name>` again in a moment |
+
+A `409` or a `503` should carry `Retry-After` (delta-seconds, 1 to 3600): the CLI says it ("again in 30 s, as the
+service asks"), and adds a fix of its own ("try again in 30 s; mason replica status … says whether it is ready") when
+the service sent none. It never waits or retries by itself: one request, then the person runs the command again. A
+`409` or `503` without the failure shape (a proxy's page) is said in the CLI's words, never its body: "the replica
+<org>/<name> is not ready to open its page".
+
+**The audit row.** The service writes one row in its audit log for every address it answers with `200`, and for every
+first use of one: who (the login's account), when, from which address, which organisation and replica, and whether
+the address was answered or used. The row never holds the address, its one-use part, or any token. The CLI cannot
+write the row, and never says that it did.
 
 ## Failures of `/v1/`
 

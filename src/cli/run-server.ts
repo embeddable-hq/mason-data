@@ -34,7 +34,7 @@ import { phaseCounts, readiness, syncTotals, tableSync, type SyncFacts, type Syn
 import { restartsFact, type Restart } from "./supervise.ts";
 import { withRestarts, type SyncEvents } from "../duck/events.ts";
 import { NO_ROLES, type RolesLive } from "../duck/grants.ts";
-import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, listUsers, removeUser, REMOVED_NEXT, roleToAdd, withLastUsed } from "./user.ts";
+import { addedNext, addUser, attributesToAdd, disabledNext, disableUser, enabledNext, enableUser, fromNext, listUsers, rangesText, removeUser, REMOVED_NEXT, roleToAdd, setUserFrom, withLastUsed } from "./user.ts";
 import { userRole } from "./roles.ts";
 import type { RunState } from "./commands.ts";
 import { postgresFacts, postgresLink } from "./pg-url.ts";
@@ -774,10 +774,11 @@ export function createRunServer(ctx: RunContext): http.Server {
             : { users: r.users, lastUsedNote: LAST_USED_NOT_ASKED, requestLogDays: ctx.duck.requests.days };
           sendJson(res, 200, { ...used, urlNote: null, next: nextJson([["mason user add <name>", "a user for a tool: its password and URL, printed once"]]) });
         } else if (req.method === "POST" && url.pathname === "/api/users") {
-          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown; role?: unknown; set?: unknown };
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { name?: unknown; role?: unknown; set?: unknown; from?: unknown };
           if (typeof body.name !== "string") throw new Refusal(400, "send { name }: the user's name");
           if (body.role !== undefined && typeof body.role !== "string") throw new Refusal(400, "send { name, role }: the role's name, a string");
           if (body.set !== undefined && !(Array.isArray(body.set) && body.set.every((x) => typeof x === "string"))) throw new Refusal(400, "send { name, role, set }: set is a list of \"attribute=value\" strings, as mason user add --set takes them");
+          if (body.from !== undefined && !(Array.isArray(body.from) && body.from.every((x) => typeof x === "string"))) throw new Refusal(400, "send { name, from }: from is a list of address ranges (\"10.0.0.0/16\"), as mason user add --from takes them");
           // the role must be one the roles file names NOW (src/cli/user.ts roleToAdd): refused before anything is written
           const roleProblem = body.role === undefined ? null : roleToAdd(body.role, ctx.roles?.() ?? NO_ROLES);
           if (roleProblem !== null) { sendFailure(res, statusOf(roleProblem), roleProblem); return; }
@@ -787,11 +788,22 @@ export function createRunServer(ctx: RunContext): http.Server {
           if ("refused" in attributes) { sendFailure(res, statusOf(attributes.refused), attributes.refused); return; }
           // mason user add --json's shape: its password, once, and the URL to paste (this run is up, so it has one)
           const r = addUser(ctx.users.file, ctx.users.apiKey, body.name, { link: postgresLink(ctx.users.postgresUrl), database: ctx.users.database, roles: ctx.roles?.() ?? NO_ROLES,
-            ...(typeof body.role === "string" ? { role: body.role } : {}), attributes: attributes.values });
+            ...(typeof body.role === "string" ? { role: body.role } : {}), attributes: attributes.values, ...(Array.isArray(body.from) ? { from: body.from as string[] } : {}) });
           if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
           const { replaced, ...added } = r;
           ctx.log(`user ${added.user} added${replaced ? " (in place of one the API key's rotation had removed)" : ""}`);
           sendJson(res, 200, { ...added, next: nextJson(addedNext(added.user, true)) });
+        } else if (req.method === "POST" && /^\/api\/users\/[^/]+\/from$/.test(url.pathname)) {
+          // mason user from --json's shape, through its own function: the user's address ranges replaced (null: any address)
+          let name: string;
+          try { name = decodeURIComponent(url.pathname.split("/")[3]!); }
+          catch { throw new Refusal(400, `${url.pathname} does not name a user: POST /api/users/<name>/from`); }
+          const body = JSON.parse(await readBody(req, 64 * 1024)) as { from?: unknown };
+          if (!(body.from === null || (Array.isArray(body.from) && body.from.every((x) => typeof x === "string")))) throw new Refusal(400, "send { from }: a list of address ranges (\"10.0.0.0/16\"), or null for any address");
+          const r = setUserFrom(ctx.users.file, name, body.from as string[] | null);
+          if ("message" in r) { sendFailure(res, statusOf(r), r); return; }
+          if (!r.already) ctx.log(`user ${r.changed.name} connects from ${rangesText(r.changed.from)}`);
+          sendJson(res, 200, { ...r, next: nextJson(fromNext(r.changed.name, r.changed.from)) });
         } else if (req.method === "POST" && /^\/api\/users\/[^/]+\/(disable|enable)$/.test(url.pathname)) {
           // mason user disable|enable --json's shape, through its own functions: kept, its password unchanged
           const [, , , encoded, verb] = url.pathname.split("/") as [string, string, string, string, "disable" | "enable"];
