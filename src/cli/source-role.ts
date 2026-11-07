@@ -294,19 +294,18 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
   if (supers.length) {
     // a superuser may do everything: what else it holds follows from it, and is not said again
     const self = supers.some((r) => r.self);
-    out.push(warn("role_superuser", self ? `${f.user} is a superuser: it may write to, alter or drop anything on this database`
-      : `${f.user} is a member of ${list(supers.map((r) => r.name))}, a superuser: it may SET ROLE to it and write to, alter or drop anything on this database`));
+    out.push(warn("role_superuser", self ? `${f.user} is a superuser`
+      : `${f.user} is a member of ${list(supers.map((r) => r.name))}, a superuser`));
     return out;
   }
   const bypass = f.roles.filter((r) => r.bypassrls);
   if (bypass.length) {
-    out.push(warn("role_bypassrls", `${f.user} has BYPASSRLS${route(bypass.filter((r) => !r.self).map((r) => r.name))}: row-level security does not apply to it, on any table`));
+    out.push(warn("role_bypassrls", `${f.user} has BYPASSRLS${route(bypass.filter((r) => !r.self).map((r) => r.name))}`));
   }
   const owned = f.relations.filter((x) => x.owned);
   if (owned.length) {
     const others = [...new Set(owned.map((x) => x.owner).filter((o) => o !== f.user))];
-    out.push(warn("role_owns_table", `${f.user} owns ${list(owned.map((x) => `${x.name}${via(x)}`))}${route(others)}: ` +
-      "an owner may write to, alter or drop a table whatever is granted"));
+    out.push(warn("role_owns_table", `${f.user} owns ${list(owned.map((x) => `${x.name}${via(x)}`))}${route(others)}`));
   }
   // an owner holds every privilege on its table: the owner's line said it
   const writable = f.relations.filter((x) => !x.owned && x.privileges.length > 0);
@@ -320,18 +319,18 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
   }
   const creates = f.schemas.filter((s) => s.create.length > 0 || s.publicCreate);
   if (creates.length) {
-    const held = creates.map((s) => `CREATE in schema ${s.name}${s.owned ? ` (${s.owner === f.user ? "it owns the schema" : `${s.owner}, which owns the schema`}: it may drop what is in it too)` : route([...s.create.filter((r) => r !== f.user), ...(s.publicCreate ? ["PUBLIC"] : [])])}`);
-    out.push(warn("role_creates_in_schema", `${f.user} may ${held.join("; ")}: it may make tables and functions beside the synced ones`));
+    const held = creates.map((s) => `CREATE in schema ${s.name}${s.owned ? ` (${s.owner === f.user ? "it owns the schema" : `${s.owner}, which owns the schema`})` : route([...s.create.filter((r) => r !== f.user), ...(s.publicCreate ? ["PUBLIC"] : [])])}`);
+    out.push(warn("role_creates_in_schema", `${f.user} may ${held.join("; ")}`));
   }
   if (f.foreignTables.length || f.mappedServers.length) {
     const held = [...(f.foreignTables.length ? [`may write the foreign table(s) ${list(f.foreignTables)}`] : []),
-      ...(f.mappedServers.length ? [`has a user mapping (its own or PUBLIC's) on ${list(f.mappedServers)}, which it may use`] : [])];
-    out.push(warn("role_reaches_foreign_server", `${f.user} ${held.join(", and ")}: what it sends there runs as the mapping's user, and the server may be this very database`));
+      ...(f.mappedServers.length ? [`has a user mapping (its own or PUBLIC's) on ${list(f.mappedServers)}`] : [])];
+    out.push(warn("role_reaches_foreign_server", `${f.user} ${held.join(", and ")}`));
   }
   if (f.adminOf.length || f.createRole || f.serverRoles.length) {
     const held = [...(f.adminOf.length ? [`has ADMIN OPTION on ${list(f.adminOf)}`] : []),
-      ...(f.createRole ? ["has CREATEROLE, which before Postgres 16 lets it grant itself any role but a superuser"] : []),
-      ...(f.serverRoles.length ? [`holds ${list(f.serverRoles)}: the server's programs or files, as its operating-system user`] : [])];
+      ...(f.createRole ? ["has CREATEROLE"] : []),
+      ...(f.serverRoles.length ? [`holds ${list(f.serverRoles)}`] : [])];
     out.push(warn("role_may_become_another", `${f.user} ${held.join("; ")}`));
   }
   // SECURITY DEFINER code: what it writes is in its body, which the catalog does not say, so it is LISTED for a person
@@ -358,7 +357,7 @@ function definerLine(f: RoleFacts): string | null {
     return `${d.name} runs as ${d.owner}${d.ownerSuperuser ? ", a superuser" : ", which may write the synced tables"}: ${how.join("; ")}`;
   });
   return `may run ${f.definers.length} SECURITY DEFINER function(s) of roles that may write the synced tables — ${each.join("; ")}. ` +
-    "What they write is not known (it is in their bodies, which the catalog does not read): review each, whether it writes a synced table and who may reach it";
+    "We recommend reviewing each: whether it writes a synced table, and who may call it";
 }
 
 /** The line a check is when the role could not be asked: said, never taken for "only reads". */

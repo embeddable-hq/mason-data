@@ -45,11 +45,11 @@ test("a superuser, itself or by a membership it may SET ROLE to: ONE warning, ro
   const { roleChecks } = await roleModule();
   const self = roleChecks(facts({ roles: [{ name: "app", self: true, superuser: true, bypassrls: true }], relations: [rel("public.orders", { owned: true })] }), ask());
   assert.deepEqual(self.map((c) => [c.code, c.ok, c.warn]), [["role_superuser", true, true]]);
-  assert.equal(self[0]!.detail, "app is a superuser: it may write to, alter or drop anything on this database. " +
+  assert.equal(self[0]!.detail, "app is a superuser. " +
     "Mason only reads, but, for security reasons, we recommend using a role that only reads");
   const member = roleChecks(facts({ roles: [{ name: "app", self: true, superuser: false, bypassrls: false }, { name: "admins", self: false, superuser: true, bypassrls: false }] }), ask());
   assert.deepEqual(member.map((c) => c.code), ["role_superuser"]);
-  assert.match(member[0]!.detail, /^app is a member of admins, a superuser: it may SET ROLE to it/);
+  assert.match(member[0]!.detail, /^app is a member of admins, a superuser\. Mason only reads/);
 });
 
 test("BYPASSRLS, an owner, a write privilege and CREATE: a warning each, with its code and its route (a member role, PUBLIC, a partition)", async () => {
@@ -72,14 +72,14 @@ test("BYPASSRLS, an owner, a write privilege and CREATE: a warning each, with it
     assert.ok(c.fix?.includes("CREATE ROLE mason_reader LOGIN PASSWORD '<a new password>';"), "each gives the way out");
   }
   const detail = (code: string) => checks.find((c) => c.code === code)!.detail.split(". Mason only reads")[0];
-  assert.equal(detail("role_bypassrls"), "app has BYPASSRLS (through writers, which it is a member of): row-level security does not apply to it, on any table");
-  assert.equal(detail("role_owns_table"), "app owns public.orders and billing.Invoices (through writers, which it is a member of): an owner may write to, alter or drop a table whatever is granted");
+  assert.equal(detail("role_bypassrls"), "app has BYPASSRLS (through writers, which it is a member of)");
+  assert.equal(detail("role_owns_table"), "app owns public.orders and billing.Invoices (through writers, which it is a member of)");
   // billing.Invoices is owned: its owner's line says it, the privileges an owner holds are not said again
   assert.equal(detail("role_writes_table"), "app may TRIGGER on public.events_2026 (a partition of public.events) (granted to PUBLIC, which every role is)");
   const notOwned = roleChecks({ ...f, relations: f.relations.map((x) => ({ ...x, owned: false })) }, ask()).find((c) => c.code === "role_writes_table")!;
   assert.match(notOwned.detail, /^app may INSERT, UPDATE on billing\.Invoices \(through writers, which it is a member of\); TRIGGER on public\.events_2026/, "privileges in their one order");
-  assert.equal(detail("role_creates_in_schema"), "app may CREATE in schema billing (writers, which owns the schema: it may drop what is in it too); " +
-    "CREATE in schema public (granted to PUBLIC, which every role is): it may make tables and functions beside the synced ones");
+  assert.equal(detail("role_creates_in_schema"), "app may CREATE in schema billing (writers, which owns the schema); " +
+    "CREATE in schema public (granted to PUBLIC, which every role is)");
   // PUBLIC's privileges are every role's, the new one's too: the way out revokes them
   const fix = checks[0]!.fix!;
   // PUBLIC's are every role's, the application's too: said for the owner to decide, never revoked by the way out
@@ -97,7 +97,7 @@ test("a write through another relation is named by its route: a partition, an IN
     rel("public.orders_log", { kind: "rule", entry: "public.orders", privileges: [{ role: "PUBLIC", privileges: ["INSERT"] }] })] });
   const checks = roleChecks(f, ask());
   assert.deepEqual(checks.map((c) => c.code), ["role_owns_table", "role_writes_table"]);
-  assert.match(checks[0]!.detail, /^app owns public\.orders_2026 \(a child of public\.orders, by INHERITS: its rows are public\.orders's\): /);
+  assert.match(checks[0]!.detail, /^app owns public\.orders_2026 \(a child of public\.orders, by INHERITS: its rows are public\.orders's\)\. Mason only reads/);
   assert.match(checks[1]!.detail, /^app may UPDATE on public\.orders_v \(a view that writes public\.orders\); INSERT on public\.orders_log \(its rules write public\.orders\) \(granted to PUBLIC, which every role is\)\. /);
   const fix = readOnlyFix(f, ask());
   assert.match(fix, /^GRANT SELECT ON public\.orders, billing\."Invoices" TO mason_reader;$/m, "SELECT on the synced tables, never on a route");
@@ -128,7 +128,7 @@ test("THE CLASS: SECURITY DEFINER code it reaches whose owner may write is LISTE
     "public.on_ddl() runs as admin, a superuser: an event trigger calls it on any DDL, even one refused, never asking EXECUTE; " +
     "public.sum_in(integer, integer) runs as admin, a superuser: Postgres calls it for an aggregate, a type, an operator or the like, never asking EXECUTE; " +
     "public.mine() runs as admin, a superuser: it may call it. " +
-    "What they write is not known (it is in their bodies, which the catalog does not read): review each, whether it writes a synced table and who may reach it";
+    "We recommend reviewing each: whether it writes a synced table, and who may call it";
   // alone: never "only reads", and no way out, since no statement for this role alone decides it
   const alone = roleChecks(facts({ definers }), ask());
   assert.deepEqual(alone.map((c) => [c.code, c.ok, c.warn, c.fix]), [["role_may_run_definer_code", true, true, undefined]]);
@@ -141,10 +141,9 @@ test("THE CLASS: SECURITY DEFINER code it reaches whose owner may write is LISTE
   assert.deepEqual(checks.map((c) => c.code), ["role_reaches_foreign_server", "role_may_become_another", "role_may_run_definer_code"]);
   const said = (code: string) => checks.find((c) => c.code === code)!.detail.split(". Mason only reads")[0];
   assert.equal(said("role_may_run_definer_code"), `app ${LISTING}`);
-  assert.equal(said("role_reaches_foreign_server"), "app may write the foreign table(s) public.remote_orders, and has a user mapping (its own or PUBLIC's) on loopback, which it may use: " +
-    "what it sends there runs as the mapping's user, and the server may be this very database");
+  assert.equal(said("role_reaches_foreign_server"), "app may write the foreign table(s) public.remote_orders, and has a user mapping (its own or PUBLIC's) on loopback");
   assert.equal(said("role_may_become_another"), "app has ADMIN OPTION on writers; " +
-    "has CREATEROLE, which before Postgres 16 lets it grant itself any role but a superuser; holds pg_execute_server_program: the server's programs or files, as its operating-system user");
+    "has CREATEROLE; holds pg_execute_server_program");
   // the way out changes no role's privileges but the new one's: what every role reaches is said, never revoked
   const fix = readOnlyFix(f, ask());
   assert.doesNotMatch(fix, /REVOKE|ALTER FUNCTION/);

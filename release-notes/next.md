@@ -44,9 +44,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   statement to run on that database, and exits 1; run it, as a user that may drop a replication slot, then confirm on
   the replica's page in the service's web app, and the deletion finishes. `mason replica status` shows a deletion in
   progress the same way, and a replica deleted from the web app as being deleted.
-- **`mason doctor`'s warnings about a role that may write end in one plain sentence**: "Mason only reads, but, for
-  security reasons, we recommend using a role that only reads". The warning codes, and the statements that make such
-  a role, are unchanged.
+- **`mason doctor`'s warnings about a role that may write say what the role has, then one plain recommendation**:
+  "Mason only reads, but, for security reasons, we recommend using a role that only reads" (for SECURITY DEFINER
+  functions, to review each). They no longer spell out what the role could do. The warning codes, and the statements
+  that make such a role, are unchanged.
 - **Every list flag takes a comma list or the flag repeated, meaning the same**: `mason add orders --columns id
   --columns status` is `--columns id,status`, and so for `--include`, `--key`, `mason logs --outcome`, `mason user add
   --from` and `mason token create --scope` (`--scope deploy,users`). `mason user add --set` stays one value a flag: a value may hold a comma.

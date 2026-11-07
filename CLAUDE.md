@@ -109,7 +109,8 @@ the person the coordinator works with: whoever runs the session and has the say 
 and releases. In short:
 
 1. **Every piece is an issue**, small enough to merge alone. The owner orders the board's Up next; the coordinator takes from
-   the top, up to three pieces at once when they touch different files.
+   the top, up to three pieces at once when they touch different files. The cards move by themselves
+   (`.github/workflows/board.yml`, from each PR's `Closes #<issue>`): a session does not move one by hand.
 2. **An implementer** (an agent on Opus at medium effort, `model: "opus"`, `effort: "medium"`, in a worktree of its
    own) builds it on a branch and opens a draft PR whose body says `Closes #<issue>`, the decision in a few lines, how it
    was tested and what was left out. It marks the PR ready when done, and reports the PR and its head.
@@ -225,7 +226,7 @@ node cli/extensions.ts                # its platform packages (the copy's extens
 docker build -f docker/mason-data.Dockerfile -t mason-data:dev .   # the image; deploy/mason-data/compose.yml runs it
 scripts/fails-without.ts <commit> <test-file>   # proof a test guards a fix: it must fail with src/ as it was at <commit>
 scripts/gate-slot.ts <command>        # runs a command in one of the machine's slots, as the heavy gates do
-scripts/board.ts status <n> "<status>"   # moves an issue's card on the Mason work board (needs gh's project scope)
+scripts/board.ts status <n> "<status>"   # moves a card by hand (gh's project scope); .github/workflows/board.yml moves them on every issue and PR
 ```
 
 ### Checks and tests
