@@ -116,7 +116,7 @@ test("a removed user is KEPT with removedAt: the listener refuses it at login an
   assert.ok("problem" in bad && /users\[0\]\.removedAt is not a timestamp/.test(bad.problem), JSON.stringify(bad));
   fs.writeFileSync(file, JSON.stringify({ users: [{ name: "x", id: "0123456789abcdef", addedAt: "t" }] }));
   const bad2 = u.readUsers(file);
-  assert.ok("problem" in bad2 && /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?\[, removedAt\]\[, disabledAt\] \}/.test(bad2.problem), JSON.stringify(bad2));
+  assert.ok("problem" in bad2 && /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?, from\?\[, removedAt\]\[, disabledAt\] \}/.test(bad2.problem), JSON.stringify(bad2));
 });
 
 test("an attribute's value holding a NUL, written by hand, is the file's problem: it would end every statement it is bound into", async () => {
@@ -182,7 +182,7 @@ test("a file that cannot be read is a problem, never an empty list; a change ref
   const file = fileIn();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   for (const [text, why] of [["{\"users\": [", /is not valid JSON/], ["[]", /is not \{ "users": \[ … \] \}/],
-    ["{\"users\": [{\"name\": \"Metabase\", \"id\": \"0123456789abcdef\", \"addedAt\": \"x\", \"key\": \"y\"}]}", /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?\[, removedAt\]\[, disabledAt\] \}/]] as const) {
+    ["{\"users\": [{\"name\": \"Metabase\", \"id\": \"0123456789abcdef\", \"addedAt\": \"x\", \"key\": \"y\"}]}", /users\[0\] is not \{ name, id, addedAt, key, role\?, attributes\?, from\?\[, removedAt\]\[, disabledAt\] \}/]] as const) {
     fs.writeFileSync(file, text);
     const r = u.readUsers(file);
     assert.ok("problem" in r && why.test(r.problem), `${text}: ${JSON.stringify(r)}`);
@@ -274,4 +274,42 @@ test("the run's wiring: a user's password goes to the users file, anything else 
   assert.deepEqual(await logins.authenticate(mintToken(KEY, 600).token, "anyone"), { filters: [], subject: undefined }, "a token's session: any user name");
   await assert.rejects(async () => logins.authenticate(KEY, "metabase"), /the API key is not a password here: mason user add <name> makes a user whose password does not expire/);
   await assert.rejects(async () => logins.authenticate(m.password, "grafana"), /not a password of this project's users/);
+});
+
+test("a user's address ranges: one strict grammar, written back in one form; a file written before has none and reads unchanged; a bad range in the file is its problem, never no limit", async () => {
+  const u = await users();
+  const ok = (list: string[]): string[] => { const r = u.userRanges(list); assert.ok(!("problem" in r), `${list.join(",")}: ${"problem" in r ? r.problem : ""}`); return r.from; };
+  const wrong = (list: string[]): string => { const r = u.userRanges(list); assert.ok("problem" in r, list.join(",")); return r.problem; };
+  assert.deepEqual(ok(["10.0.0.0/16", "2001:DB8:0:0::/32", "192.0.2.10", "192.0.2.10/32", "::1", "0.0.0.0/0"]), ["10.0.0.0/16", "2001:db8::/32", "192.0.2.10", "::1", "0.0.0.0/0"]);
+  assert.match(wrong(["999.999.999.999/99"]), /"999\.999\.999\.999\/99" is not an address or a CIDR/);
+  assert.match(wrong(["10.0.0.0/33"]), /an IPv4 prefix is at most \/32/);
+  assert.match(wrong(["::/129"]), /an IPv6 prefix is at most \/128/);
+  assert.match(wrong(["10.0.1.5/24"]), /did you mean 10\.0\.1\.0\/24\?/);
+  assert.match(wrong(["01.2.3.4", "fe80::1%eth0", "db.example", "10.0.0.0/-1", "1.2.3"]), /^"01\.2\.3\.4" is not .*; "fe80::1%eth0" is not .*; "db\.example" is not .*; "10\.0\.0\.0\/-1" is not .*; "1\.2\.3" is not /);
+  assert.match(wrong(["::ffff:10.0.0.0/104"]), /IPv4 written as IPv6, which Mason reads as IPv4: did you mean 10\.0\.0\.0\/8\?/);
+  assert.match(wrong([]), /no address range/);
+  assert.match(wrong(Array.from({ length: u.MAX_RANGES + 1 }, (_, i) => `10.0.${i}.0/24`)), /at most 100/);
+  // who may connect from where: any address without ranges; inside them only, with; never an address not read
+  assert.equal(u.addressAllowed({}, null), true);
+  assert.equal(u.addressAllowed({ from: ["10.0.0.0/8", "2001:db8::/32"] }, "10.200.0.1"), true);
+  assert.equal(u.addressAllowed({ from: ["10.0.0.0/8", "2001:db8::/32"] }, "11.0.0.1"), false);
+  assert.equal(u.addressAllowed({ from: ["10.0.0.0/8", "2001:db8::/32"] }, "2001:db8:ffff::1"), true);
+  assert.equal(u.addressAllowed({ from: ["10.0.0.0/8", "2001:db8::/32"] }, "2001:db9::1"), false);
+  assert.equal(u.addressAllowed({ from: ["10.0.0.0/8"] }, "::ffff:10.0.0.1"), true, "a v4-mapped address is its IPv4 one");
+  assert.equal(u.addressAllowed({ from: ["10.0.0.0/8"] }, null), false, "fail closed");
+  assert.equal(u.addressAllowed({ from: ["10.0.0.0/8"] }, "not an address"), false);
+  // the file: written before, no key, read unchanged; with one, read; a bad one refuses the whole file (57P03 at the listener)
+  const file = fileIn();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const entry = { name: "bi", id: "0123456789abcdef", addedAt: "2026-10-26T12:00:00.000Z", key: u.keyFingerprint(KEY) };
+  fs.writeFileSync(file, JSON.stringify({ users: [entry] }));
+  assert.deepEqual(u.readUsers(file), { users: [entry] });
+  fs.writeFileSync(file, JSON.stringify({ users: [{ ...entry, from: ["203.0.113.0/24"] }] }));
+  assert.deepEqual(u.readUsers(file), { users: [{ ...entry, from: ["203.0.113.0/24"] }] });
+  for (const from of [["10.0.0.0/99"], "10.0.0.0/8", [], [7]]) {
+    fs.writeFileSync(file, JSON.stringify({ users: [{ ...entry, from }] }));
+    const r = u.readUsers(file);
+    assert.ok("problem" in r && /users\[0\]\.from is not a list of address ranges/.test(r.problem), `${JSON.stringify(from)}: ${JSON.stringify(r)}`);
+    refused(() => new u.LiveUsers(file, KEY).login("bi", u.userPassword(KEY, "bi", entry.id), "203.0.113.1"), 503, /cannot be read/, "bi");
+  }
 });

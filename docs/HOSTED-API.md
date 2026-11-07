@@ -449,28 +449,52 @@ request and the status, never the body, exit 1.
 
 ## The users of a replica: `mason user … --replica`
 
-`mason user add | list | disable | enable | remove … --replica <org>/<name>` (else `MASON_REPLICA`) manages the users of
+`mason user add | list | from | disable | enable | remove … --replica <org>/<name>` (else `MASON_REPLICA`) manages the users of
 a replica's Postgres API, as `mason user` manages a project's own. Each subcommand is ONE request, and its body and its
 answer are what Mason's own command server takes and answers for it (`/api/users` of a running Mason): a service passes
-the request to Mason on the replica and its answer back unchanged, so Mason there checks the names, the role and the
-attributes with the functions it checks them with on a laptop. Every request carries `Authorization: Bearer <token>`.
+the request to Mason on the replica and its answer back unchanged, so Mason there checks the names, the role, the
+attributes and the address ranges with the functions it checks them with on a laptop. Every request carries `Authorization: Bearer <token>`.
 The replica's name is checked as for a deploy (each part `^[a-z0-9][a-z0-9-]{0,62}$`), and a user's name is
 `^[a-z0-9][a-z0-9_.-]{0,62}$`, checked before it is put in a path, so both are always safe there unescaped.
 
 What only the command line says is checked by the CLI first, and refused as a wrong line (exit 2) with nothing sent: a
 subcommand, a user's name, a role's name (`^[a-z0-9][a-z0-9_-]{0,62}$`), a `--set` that is not `<attribute>=<value>`,
-`--role` or `--set` beside a subcommand other than `add`. Nothing of a project on this machine is read or written.
+`--role`, `--set` or `--from` beside a subcommand other than `add`, an address range that is not one (an IPv4 or IPv6
+address, alone or with a prefix length its family takes, no bits set past it: `999.999.999.999/99` and `10.0.1.5/24`
+are refused), and `from` with neither ranges nor `--any`, or with both. Nothing of a project on this machine is read or written.
 
 | Subcommand | Request | Body | `200` |
 |---|---|---|---|
 | `list` | `GET /v1/replicas/{org}/{name}/users?lastUsed=1` | none | `{ users, lastUsedNote, urlNote, requestLogDays }` |
-| `add <user>` | `POST /v1/replicas/{org}/{name}/users` | `{ "name", "role"?, "set"? }` | the user added (below) |
+| `add <user>` | `POST /v1/replicas/{org}/{name}/users` | `{ "name", "role"?, "set"?, "from"? }` | the user added (below) |
+| `from <user> <range>… \| --any` | `POST /v1/replicas/{org}/{name}/users/{user}/from` | `{ "from" }` | `{ changed: { name, id, addedAt, from }, already }` |
 | `disable <user>` | `POST /v1/replicas/{org}/{name}/users/{user}/disable` | none | `{ disabled: { name, id, addedAt, disabledAt }, already }` |
 | `enable <user>` | `POST /v1/replicas/{org}/{name}/users/{user}/enable` | none | `{ enabled: { name, id, addedAt }, already }` |
 | `remove <user>` | `DELETE /v1/replicas/{org}/{name}/users/{user}` | none | `{ removed: { name, id, addedAt, removedAt } }` |
 
-- `add`'s body is `{ "name": "metabase" }`, with `"role": "<role>"` for `--role` and `"set": ["tenant=42", …]` for each
-  `--set`, in the order given, as they were written.
+- `add`'s body is `{ "name": "metabase" }`, with `"role": "<role>"` for `--role`, `"set": ["tenant=42", …]` for each
+  `--set`, in the order given, as they were written, and `"from": ["203.0.113.0/24", …]` for each `--from`, in the order
+  given, each in its one form (the network in lower case, IPv6 shortened, no prefix for one address: `192.0.2.10`).
+- A user's ADDRESS RANGES are where it may connect from: a connection from any other address is refused before its
+  password is checked. `from`'s body replaces them: `{ "from": [ranges…] }`, each in its one form, or `{ "from": null }`
+  for `--any` (any address: its ranges removed). In every answer a user's `from` is `null` (any address) or 1 to 100
+  ranges, each in its one form; a list's row with no `from` key is read as `null`.
+- **A limit sent must be confirmed.** When `add` sends `from`, or `from` sends a list or `null`, the `200` answer must
+  carry exactly what was sent, in its one form and order (`add`'s `from`, `from`'s `changed.from`). An answer without
+  it, with `null`, or with other ranges is refused whole and never printed (an `add`'s password included): the CLI says
+  the service did not confirm the address limit, exit 1, and its next steps are `mason user list --replica …` (what the
+  user has) and `mason user remove <user> --replica …` (if it was made without the limit). A service that does not take
+  `from` refuses it with a `400` naming the field, never ignores it: ignoring it would make a user that connects from
+  any address while the CLI reported a limit.
+- **A limit a service cannot enforce is a `400`**, its reason in the service's words (too many ranges, a family it
+  does not take, a range wider than it allows, such as a `/0`), which the CLI says as it came, nothing written. For such
+  a service, `from: null` (any address) means the user is limited by nothing beyond what the replica itself allows to
+  connect.
+- **The address judged is the client's.** Mason judges a user's ranges on the address the connection comes from; behind
+  a load balancer or proxy that is the proxy's own, unless the proxy sends the PROXY protocol v2 header and Mason is
+  told to believe it from the proxy's addresses (`MASON_PG_PROXY_FROM`, docs/POSTGRES-API.md "Behind a TCP proxy"). A
+  service that puts a proxy in front of a replica's Postgres API passes the client's address through that way, or a
+  user's ranges would be judged against the proxy's address.
 - `already` is `true` when nothing changed (disabled already; not disabled): exit 0, said.
 - A key beside those of the answer (a `next` included) is never read.
 
@@ -487,6 +511,7 @@ held to its own grammar:
 | `url`, `psql` (`add`) | exactly the URL and the psql line the CLI builds from `user`, `password`, `host`, `port`, `database` and `sslmode`: `postgres://<user>:<password>@<host>:<port>/<database>[?sslmode=require]`, `psql '<url>'` |
 | `url` (`list`) | `null`, or `postgres://<its name>@<host>:<port>/<database>[?sslmode=require]`, with no password |
 | `role`, `roleFrom`, `readsNothing`, `roleKnown` | a role's name; `file`, `default` or `none` (a role for the first two, none for `none`); `true` or absent (only with `none`); a boolean or absent (only with `file`) |
+| `from` | `null`, or 1 to 100 address ranges, each in its one form (absent on `add`: any address) |
 | `attributes`, `missingAttributes` | at most 64 attribute names (`^[a-z_][a-z0-9_]{0,62}$`), each a value or a list of 1 to 100; the names alone |
 | `live`, `already` | booleans |
 | `lastUsedNote`, `urlNote` | `null` or a string, said as one line |
@@ -522,7 +547,8 @@ The CLI prints the answer as `mason user` prints the same answer for a project (
 names it too (`mason user list --replica acme/shop`).
 
 A refusal, Mason's on the replica or the service's own, is a `/v1/` failure (below), its status Mason's own for a
-refusal of Mason's: `400` a request Mason cannot take (a `--set` its role does not declare, an attribute missing), `404`
+refusal of Mason's: `400` a request Mason cannot take (a `--set` its role does not declare, an attribute missing, an
+address range it does not take) or the service cannot enforce (a `from` beyond its limits, above), `404`
 no such user or role (and no such replica), `409` refused (a name taken), `500` failed. Its words are said as they came,
 each as one line (a refusal's `fix` written over several lines, such as the lines to add to `roles.yml`, joined by
 spaces); its code the CLI's by the status, never `usage`; the CLI's next step `mason login` ("sign in again") for a
