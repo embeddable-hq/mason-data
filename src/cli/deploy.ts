@@ -30,7 +30,8 @@
  *    wait BEFORE a deploy is made: a POST answered `503` (the replica is being checked or created, or its machine is not
  *    connected) or `429` (too many deploys at once) made none, and is sent again after its `Retry-After` (else
  *    `RESEND_MS`), the replica's state and the time waited said meanwhile; no other answer is ever sent again. A `409`
- *    naming a replica that failed or is (being) deleted is refused, its next step `mason replica status`.
+ *    naming a replica that failed or is being deleted is refused, its next step `mason replica status`; a deleted
+ *    replica's name is freed, so the service answers it `404`, as a name that never existed.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (#481's decision, src/cli/hosted.ts). Every place a
  * value the service sent reaches what this command prints:
@@ -143,7 +144,7 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
 
   While the replica is being created (or the service asks for a wait: too many deploys at once), it waits as the
   service asks and sends the deploy again, within --timeout, saying the replica's state and how long it has waited.
-  A replica that failed, or is being deleted or was deleted, is refused: mason replica status says its state.
+  A replica that failed or is being deleted is refused: mason replica status says its state.
 
     mason deploy --replica acme/shop
     mason deploy --replica acme/shop --dry-run     what would be sent, sending nothing
@@ -382,8 +383,8 @@ const NEXT_AGAIN = (r: Replica): NextStep[] => [[`mason deploy --replica ${repli
  * THE REPLICA'S STATE, as a `503` or a `409` to the POST may carry it (`{ replica: { state } }`, docs/HOSTED-API.md):
  * one of a closed set, said in the CLI's words, never the service's text; null when it carries none, or another.
  * `503`: a replica being made (`checking`, `creating`), or `ready` with the machine it runs on not connected just now —
- * a wait, and the deploy is sent again. `409`: a replica that cannot take one (`failed`, `deleting`, `deleted`) —
- * refused, never sent again.
+ * a wait, and the deploy is sent again. `409`: a replica that cannot take one (`failed`, `deleting`) — refused,
+ * never sent again. A deleted replica is no state here: its name is freed, and the service answers it `404`.
  */
 export const WAITING_STATES = {
   checking: "is being checked (Mason checks its database)",
@@ -393,7 +394,6 @@ export const WAITING_STATES = {
 export const REFUSED_STATES = {
   failed: "failed: its creation did not finish",
   deleting: "is being deleted",
-  deleted: "was deleted",
 } as const;
 function replicaStateOf<K extends string>(json: unknown, states: Record<K, string>): K | null {
   if (!obj(json) || !obj(json.replica) || typeof json.replica.state !== "string") return null;
@@ -516,7 +516,7 @@ export async function deploy(argv: string[]): Promise<number> {
       fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)` }, { json });
   }
   if (sent.status !== 201) {
-    // a 409 that names the replica's state: it cannot take a deploy (failed, being deleted, deleted), never sent again;
+    // a 409 that names the replica's state: it cannot take a deploy (failed, being deleted), never sent again;
     // the next step is the replica's status, the CLI's own (never the generic "mason login")
     const refused = sent.status === 409 ? replicaStateOf(sent.json, REFUSED_STATES) : null;
     if (refused === null) return fail(serviceFailure(sent, secrets) ?? unexpected(service, sent, "a deploy was sent"), { json });

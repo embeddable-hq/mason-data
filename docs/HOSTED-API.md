@@ -359,9 +359,9 @@ CLI's own next step (`next` is never read), but for a `503` and a `429`, which a
 |---|---|---|
 | `401` | `unauthenticated` | no token, or one the service does not take (the CLI's next step: `mason login`) |
 | `403` | `refused` | the token may not deploy this replica (a viewer's, or a CI token made for another replica) |
-| `404` | `not_found` | no such replica in that organisation, or the token's account is not in the organisation: said the same way, so it never tells whether the name exists elsewhere |
+| `404` | `not_found` | no such replica in that organisation (a deleted replica's included: its name is freed), or the token's account is not in the organisation: said the same way, so it never tells whether the name exists elsewhere |
 | `409` | `busy` | another deploy to this replica has not finished; `why` names its id |
-| `409` | `not_ready` | the replica cannot take a deploy: it failed, or is being deleted or was deleted. The body carries its state beside the failure, `"replica": { "state": "failed" \| "deleting" \| "deleted" }` (as `Replica`'s `state`). The CLI says the state in its own words at the start of `why`, and its next step is `mason replica status <org>/<name>`; it never sends the deploy again |
+| `409` | `not_ready` | the replica cannot take a deploy: it failed, or is being deleted. The body carries its state beside the failure, `"replica": { "state": "failed" \| "deleting" }` (as `Replica`'s `state`). The CLI says the state in its own words at the start of `why`, and its next step is `mason replica status <org>/<name>`; it never sends the deploy again |
 | `413` | `too_large` | past a bound above; `why` names the file or the sizes |
 | `422` | `invalid` | the service's own check of the files: `message` names the file and what is wrong, `why` the rest |
 

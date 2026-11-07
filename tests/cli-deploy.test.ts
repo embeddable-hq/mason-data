@@ -732,9 +732,9 @@ test("mason deploy: a 503 or 429 with no Retry-After, or one the CLI does not re
   }
 });
 
-test("mason deploy: a 409 naming a replica that failed, is being deleted or was deleted is refused, never sent again — its next step the replica's status, never mason login", async () => {
+test("mason deploy: a 409 naming a replica that failed or is being deleted is refused, never sent again — its next step the replica's status, never mason login; deleted is no 409 state (its name is freed: a 404)", async () => {
   const { root } = project();
-  const words: Record<string, string> = { failed: "acme/shop failed: its creation did not finish", deleting: "acme/shop is being deleted", deleted: "acme/shop was deleted" };
+  const words: Record<string, string> = { failed: "acme/shop failed: its creation did not finish", deleting: "acme/shop is being deleted" };
   for (const [state, said] of Object.entries(words)) {
     const reply: Reply = { status: 409, body: { error: { code: "not_ready", message: "acme/shop cannot take a deploy", why: `it is ${state}` }, replica: { state }, next: [{ command: "mason destroy" }] } };
     const { a, requests } = await deployWith({ post: reply }, root, ["--replica", "acme/shop"]);
@@ -746,6 +746,19 @@ test("mason deploy: a 409 naming a replica that failed, is being deleted or was 
     assert.deepEqual(JSON.parse(j.a.stdout), { error: { code: "refused", message: "acme/shop cannot take a deploy", why: `${said}; it is ${state} (the service said not_ready, HTTP 409)`,
       fix: "a replica takes a deploy only once it is ready: mason replica status acme/shop says its state" }, next: [{ command: "mason replica status acme/shop", what: "the replica's state" }] });
   }
+  // a deleted replica's name is freed: the service answers 404, said as any not_found, never sent again; and a 409 that
+  // says "deleted" is no state the CLI names (it is said as any 409, the state not put in its words)
+  const gone = await deployWith({ post: { status: 404, body: { error: { code: "not_found", message: "no replica acme/shop" } } } }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(gone.a.code, 1);
+  assert.equal(posts(gone.requests).length, 1);
+  assert.equal((JSON.parse(gone.a.stdout) as { error: { code: string } }).error.code, "not_found");
+  const deleted = await deployWith({ post: { status: 409, body: { error: { code: "not_ready", message: "acme/shop cannot take a deploy" }, replica: { state: "deleted" } } } }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(deleted.a.code, 1);
+  assert.equal(posts(deleted.requests).length, 1);
+  const v = JSON.parse(deleted.a.stdout) as { error: { code: string; why: string }; next: Array<{ command: string }> };
+  assert.equal(v.error.code, "refused");
+  assert.equal(v.error.why, "the service said not_ready, HTTP 409");
+  assert.deepEqual(v.next.map((n) => n.command), ["mason login"]);
 });
 
 test("mason deploy: a 503 that carries the token outside a failure's words is refused whole, by its status, never waited on", async () => {

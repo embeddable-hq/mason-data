@@ -27,8 +27,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   checked or created, that the machine it runs on is not connected just now, or that too many deploys are being sent
   at once, `mason deploy` waits as the service asks and sends the deploy again, within `--timeout`, saying what it
   waits on and how long it has waited (on stderr; `--json` prints only the answer). Past `--timeout` it exits 124,
-  saying no deploy was made. A replica that failed, or is being deleted or was deleted, is refused, and the next step
-  is `mason replica status <org>/<name>`, no longer `mason login`.
+  saying no deploy was made. A replica that failed or is being deleted is refused, and the next step is
+  `mason replica status <org>/<name>`, no longer `mason login`; a deleted one is answered as a replica that does not
+  exist.
 
 ## What was wrong and is now right
 
