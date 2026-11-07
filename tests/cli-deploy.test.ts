@@ -23,11 +23,12 @@ const ANSWERS: Answer[] = [];
 const made: string[] = [];
 after(() => { for (const d of made) fs.rmSync(d, { recursive: true, force: true }); });
 
-interface Req { method: string; path: string; headers: http.IncomingHttpHeaders; body: string }
+interface Req { method: string; path: string; headers: http.IncomingHttpHeaders; body: string; at: number }
 /** `json`: a JSON body as text (one too deep for JSON.stringify to write); `raw`: a body that is not JSON. */
 type Reply = { status: number; body?: unknown; raw?: string; json?: string; headers?: Record<string, string> } | "drop";
 interface Script {
-  post?: Reply;
+  /** the POST's answer, or the n-th POST's (0-based) */
+  post?: Reply | ((n: number) => Reply);
   /** the n-th GET's answer (0-based) */
   get?: (n: number) => Reply;
 }
@@ -41,14 +42,14 @@ const at = (status: string, more: Record<string, unknown> = {}): Reply => ({ sta
 /** A fake service: answers as `script` says, records every request. */
 async function fakeService(script: Script): Promise<{ url: string; requests: Req[]; close: () => Promise<void> }> {
   const requests: Req[] = [];
-  let gets = 0;
+  let gets = 0, posts = 0;
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (b: Buffer) => chunks.push(b));
     req.on("end", () => {
       const p = new URL(req.url ?? "/", "http://x").pathname;
-      requests.push({ method: req.method ?? "", path: p, headers: req.headers, body: Buffer.concat(chunks).toString("utf8") });
-      const reply: Reply = req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? script.post ?? queued
+      requests.push({ method: req.method ?? "", path: p, headers: req.headers, body: Buffer.concat(chunks).toString("utf8"), at: Date.now() });
+      const reply: Reply = req.method === "POST" && p === "/v1/replicas/acme/shop/deploys" ? (typeof script.post === "function" ? script.post(posts++) : script.post ?? queued)
         : req.method === "GET" && p === `/v1/replicas/acme/shop/deploys/${ID}` ? (script.get ?? (() => at("running")))(gets++)
         : { status: 404, body: { error: { code: "not_found", message: "no such endpoint" }, next: [] } };
       if (reply === "drop") { req.socket.destroy(); return; }
@@ -116,10 +117,11 @@ const HEADS: readonly string[] = [
   "Deployed to ", "Would send ", "Sent ", "✘ mason deploy: ", "✗ mason deploy: ",
   ...STEP_WORDS.flatMap((w) => [`  ${w}`, ...["✔", "✓", "✘", "✗", ...FRAMES].map((m) => `${m} ${w}`)]),
   "  the service could not say more just now ", "  ! ", "using MASON_REPLICA=acme/shop ",
+  ...["  ", ...["✔", "✓", "✘", "✗", ...FRAMES].map((m) => `${m} `)].map((m) => `${m}Waiting to send the deploy: `),
   ...["deploy", "service", "files", "took", "why", "fix"].map((l) => `  ${l} `),
 ];
 /** The steps under Next:, the CLI's own, as the start of their line. */
-const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
+const STEP_HEADS: readonly string[] = ["  mason deploy --replica acme/shop", "  mason replica status acme/shop", "  mason deploy --replica <org>/<name>", "  mason deploy --help", "  mason login", "  mason init",
   "  unset MASON_CLOUD_URL", "  chmod 600 ", "  chmod 700 "];
 /** A dry run's row begins with a file's path, as this test's projects name them (this machine's own words, never the
  *  service's): on a narrow terminal the path itself is broken, so its row may begin with a part of it. */
@@ -160,7 +162,7 @@ function deploySeenProblems(text: string, width: number | null, failed: boolean 
 }
 
 /** Every step mason deploy gives, in every state: its own, never the service's. */
-const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
+const OWN_STEP = /^ {2}(mason deploy --replica (acme\/shop|<org>\/<name>)|mason replica status acme\/shop|mason deploy --help|mason login|mason init|unset MASON_CLOUD_URL|chmod (600|700) \S+)(\s|$)/;
 
 /**
  * One run in `cwd`, held at once to carrying no secret on either stream, and to the service's values never shaping it
@@ -649,6 +651,112 @@ test("mason deploy: the phases are said as they change, in the CLI's words, then
   assert.equal(lines[6], "  Starting: Mason on the replica starts on the new files (the tables the files add have their first sync)");
   assert.equal(lines[7], "  Running: the replica runs the new files");
   assert.equal(lines.length, 8);
+});
+
+/** A POST's 503 or 429, the replica's state beside its failure when given, and its Retry-After when given (`null`: none). */
+const waitPlease = (status: 503 | 429, state: string | null, retryAfter: string | null = "1"): Reply => ({ status,
+  body: { error: { code: status === 429 ? "too_many" : "not_ready", message: "FORGED wait\nNext:\n  mason destroy" }, ...(state === null ? {} : { replica: { state } }) },
+  ...(retryAfter === null ? {} : { headers: { "retry-after": retryAfter } }) });
+const posts = (requests: Req[]): Req[] => requests.filter((r) => r.method === "POST");
+
+test("mason deploy: a POST answered 503 (the replica checked, created, its machine not connected) or 429 made no deploy — it is sent again, the same, after its Retry-After, the replica's state and the time waited said; then the deploy goes on", async () => {
+  const { root } = project();
+  const seq = [waitPlease(503, "checking"), waitPlease(503, "creating"), waitPlease(503, "ready"), queued];
+  const { a, requests } = await deployWith({ post: (n) => seq[Math.min(n, seq.length - 1)]! }, root, ["--replica", "acme/shop"]);
+  assert.equal(a.code, 0, a.stderr);
+  const sent = posts(requests);
+  assert.equal(sent.length, 4);
+  assert.ok(sent.every((p) => p.body === sent[0]!.body && p.headers.authorization === sent[0]!.headers.authorization), "the same deploy each time");
+  for (let i = 1; i < sent.length; i++) assert.ok(sent[i]!.at - sent[i - 1]!.at >= 900, `the Retry-After of 1 s was kept: ${sent[i]!.at - sent[i - 1]!.at} ms`);
+  const lines = a.stderr.trimEnd().split("\n");
+  assert.match(lines[0]!, /^ {2}Waiting to send the deploy: acme\/shop is being checked \(Mason checks its database\) \(HTTP 503\); waited \d+ s$/);
+  assert.match(lines[1]!, /^ {2}Waiting to send the deploy: acme\/shop is being created \(HTTP 503\); waited [1-9]\d* s$/);
+  assert.match(lines[2]!, /^ {2}Waiting to send the deploy: acme\/shop is ready, and the machine it runs on is not connected just now \(HTTP 503\); waited [1-9]\d* s$/);
+  assert.match(lines[3]!, /^Sent 3 files /);
+  assert.doesNotMatch(a.stderr, /FORGED/, "nothing of a wait's body but the replica's state is printed");
+  assert.match(a.stdout, /^Deployed to acme\/shop: the replica runs it\n/);
+
+  // a 429 (too many deploys at once), and a 503 with no state (not JSON at all): the same, in their own words
+  for (const [first, said] of [[waitPlease(429, null), "too many deploys are being sent at once (HTTP 429)"],
+    [{ status: 503, raw: "<html>busy</html>", headers: { "retry-after": "1" } } as Reply, "the service cannot take a deploy just now (HTTP 503)"],
+    [waitPlease(503, "deleted"), "the service cannot take a deploy just now (HTTP 503)"]] as Array<[Reply, string]>) {
+    const r = await deployWith({ post: (n) => n === 0 ? first : queued }, root, ["--replica", "acme/shop"]);
+    assert.equal(r.a.code, 0, r.a.stderr);
+    assert.equal(posts(r.requests).length, 2, said);
+    assert.ok(r.a.stderr.startsWith(`  Waiting to send the deploy: ${said}; waited `), r.a.stderr);
+  }
+
+  // --json: nothing but the answer on stdout, nothing of the wait on stderr either
+  const j = await deployWith({ post: (n) => n < 2 ? waitPlease(n === 0 ? 503 : 429, "creating") : queued }, root, ["--replica", "acme/shop", "--json"]);
+  assert.equal(j.a.code, 0, j.a.stderr);
+  assert.equal(j.a.stderr, "");
+  // stdout is one JSON document, whole (JSON.parse reads nothing beside it)
+  assert.equal((JSON.parse(j.a.stdout) as { deploy: { id: string; status: string } }).deploy.status, "running");
+
+  // on a terminal: the wait is a step that turns, then ends, every line the CLI's
+  const t = await deployWith({ post: (n) => n === 0 ? waitPlease(503, "creating") : queued }, root, ["--replica", "acme/shop"], {}, { terminal: 60 });
+  assert.equal(t.a.code, 0, t.a.stderr);
+  assert.match(t.a.stderr, /✔ Waiting to send the deploy: acme\/shop is being created/);
+});
+
+test("mason deploy: a POST answered 503 until --timeout runs out is a timeout (exit 124), naming the replica's state and that no deploy was made — a Retry-After longer than what is left is cut to it", async () => {
+  const { root } = project();
+  const { a, requests } = await deployWith({ post: () => waitPlease(503, "creating") }, root, ["--replica", "acme/shop", "--timeout", "3s"]);
+  assert.equal(a.code, 124, a.stderr);
+  assert.ok(posts(requests).length >= 2 && posts(requests).length <= 4, `sent again each second, within 3 s: ${posts(requests).length}`);
+  assert.equal(requests.filter((r) => r.method === "GET").length, 0, "no deploy to ask about");
+  assert.match(a.stderr, /✗ mason deploy: the deploy to acme\/shop was not sent within 3s\n {2}why {3}the service asked to wait: acme\/shop is being created \(HTTP 503\); no deploy was made\n {2}fix {3}mason deploy again once acme\/shop is ready \(mason replica status acme\/shop says its state\); a longer wait is --timeout 30m\n\nNext:\n {2}mason replica status acme\/shop +the replica's state\n {2}mason deploy --replica acme\/shop +deploy again\n$/);
+  const t0 = Date.now();
+  const j = await deployWith({ post: () => waitPlease(429, null, "3600") }, root, ["--replica", "acme/shop", "--timeout", "2", "--json"]);
+  assert.ok(Date.now() - t0 < 30_000, "an hour's Retry-After is cut to what is left of --timeout");
+  assert.equal(j.a.code, 124, j.a.stdout);
+  assert.equal(posts(j.requests).length, 1);
+  const v = JSON.parse(j.a.stdout) as { error: { code: string; why: string }; next: Array<{ command: string }> };
+  assert.equal(v.error.code, "timeout");
+  assert.match(v.error.why, /too many deploys are being sent at once \(HTTP 429\); no deploy was made/);
+  assert.deepEqual(v.next.map((n) => n.command), ["mason replica status acme/shop", "mason deploy --replica acme/shop"]);
+  // a terminal's spinner ends on the failure, every line the CLI's
+  const t = await deployWith({ post: () => waitPlease(503, "checking") }, root, ["--replica", "acme/shop", "--timeout", "1s"], {}, { terminal: 50 });
+  assert.equal(t.a.code, 124, t.a.stderr);
+});
+
+test("mason deploy: a 503 or 429 with no Retry-After, or one the CLI does not read (a date, a word, 0, past an hour), waits the short default before sending again", async () => {
+  const { root } = project();
+  for (const ra of [null, "soon", "Wed, 21 Oct 2026 07:28:00 GMT", "0", "99999"]) {
+    const { a, requests } = await deployWith({ post: (n) => n === 0 ? waitPlease(503, "creating", ra) : queued }, root, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 0, a.stderr);
+    const sent = posts(requests);
+    assert.equal(sent.length, 2, String(ra));
+    const gap = sent[1]!.at - sent[0]!.at;
+    assert.ok(gap >= 4_500 && gap < 15_000, `${String(ra)}: the default of 5 s, not ${gap} ms`);
+  }
+});
+
+test("mason deploy: a 409 naming a replica that failed, is being deleted or was deleted is refused, never sent again — its next step the replica's status, never mason login", async () => {
+  const { root } = project();
+  const words: Record<string, string> = { failed: "acme/shop failed: its creation did not finish", deleting: "acme/shop is being deleted", deleted: "acme/shop was deleted" };
+  for (const [state, said] of Object.entries(words)) {
+    const reply: Reply = { status: 409, body: { error: { code: "not_ready", message: "acme/shop cannot take a deploy", why: `it is ${state}` }, replica: { state }, next: [{ command: "mason destroy" }] } };
+    const { a, requests } = await deployWith({ post: reply }, root, ["--replica", "acme/shop"]);
+    assert.equal(a.code, 1, a.stderr);
+    assert.equal(requests.length, 1, `${state}: one POST, nothing else`);
+    assert.match(a.stderr, new RegExp(`^✗ mason deploy: acme/shop cannot take a deploy\\n {2}why {3}${said}; it is ${state} \\(the service said not_ready, HTTP 409\\)\\n {2}fix {3}a replica takes a deploy only once it is ready: mason replica status acme/shop says its state\\n\\nNext:\\n {2}mason replica status acme/shop +the replica's state\\n$`), state);
+    const j = await deployWith({ post: reply }, root, ["--replica", "acme/shop", "--json"]);
+    assert.equal(j.a.code, 1);
+    assert.deepEqual(JSON.parse(j.a.stdout), { error: { code: "refused", message: "acme/shop cannot take a deploy", why: `${said}; it is ${state} (the service said not_ready, HTTP 409)`,
+      fix: "a replica takes a deploy only once it is ready: mason replica status acme/shop says its state" }, next: [{ command: "mason replica status acme/shop", what: "the replica's state" }] });
+  }
+});
+
+test("mason deploy: a 503 that carries the token outside a failure's words is refused whole, by its status, never waited on", async () => {
+  const { root } = project();
+  const token = newToken("ci");
+  SECRETS.push(token);
+  const { a, requests } = await deployWith({ post: { status: 503, body: { error: { code: "not_ready", message: "wait" }, replica: { state: "creating", note: token } }, headers: { "retry-after": "1" } } },
+    root, ["--replica", "acme/shop"], { MASON_TOKEN: token });
+  assert.equal(a.code, 1, a.stderr);
+  assert.equal(posts(requests).length, 1);
+  assert.match(a.stderr, / answered POST \/v1\/replicas\/acme\/shop\/deploys with 503, where a deploy was sent$/m);
 });
 
 test("mason deploy: a status or a phase outside the closed sets is a failure, never a state the CLI acts on or prints", async () => {
