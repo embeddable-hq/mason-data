@@ -23,7 +23,7 @@ or logical replication (`replication`, `src/duck/stream.ts`), mixed in one proje
 ## What review probes
 
 Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
-"How work is done here", steps 3 and 4). A new probe is proposed to Tom; each bullet names the PR or issue it was met in.
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - Each probe at the base as well as the head: a refusal the change turns into an answer must equal Postgres's, an answer
   it turns into a refusal is a regression, and a difference both share is the base's (PR 120, 170, 197).

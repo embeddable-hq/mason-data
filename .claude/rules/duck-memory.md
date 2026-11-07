@@ -62,7 +62,7 @@ paths:
 ## What review probes
 
 Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
-"How work is done here", steps 3 and 4). A new probe is proposed to Tom; each bullet names the PR or issue it was met in.
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - Many heavy statements at once (64 with the pool) under one `MASON_DUCKDB_MEMORY`: out-of-memory failures or spills
   where a queue used to make them wait (PR 148).

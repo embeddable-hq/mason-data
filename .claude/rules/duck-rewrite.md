@@ -444,7 +444,7 @@ paths:
 ## What review probes
 
 Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
-"How work is done here", steps 3 and 4). A new probe is proposed to Tom; each bullet names the PR or issue it was met in.
+"How work is done here", steps 3 and 4). A new probe is proposed to the owner; each bullet names the PR or issue it was met in.
 
 - A constant as a key in ORDER BY, DISTINCT ON, WITH TIES and a window, by name, by number and as itself (`1 AS one`,
   `1.5::numeric`, `'1.5'::numeric`, `2147483648::int`, `'abc'::text::int`, every key a constant): a literal the engine
