@@ -69,6 +69,18 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   that replica's page too, said on stderr, unless `--ssh` names a server.
 - **`not_answering`** (a run that is alive and does not answer, the way out `mason stop`) is now listed among the
   failure codes `mason help agent` names, and a failure never carries a code outside that list.
+- **`mason destroy --dry-run` and `mason remove --dry-run` say what would go and change nothing**: destroy lists Mason
+  stopped, the replication slot and Mason's own publication on your database (named from what Mason recorded: the dry
+  run never connects to the database) and the synced data and state; remove lists the sources file's entries. Both
+  prompt for nothing, and `--json` answers with `dryRun: true`.
+- **`mason init -` reads the database's URL from stdin**, so its password stays off the command line (`ps`, your
+  shell's history). A URL with a password given as the argument to `mason init`, or to `mason mcp --url`, still works,
+  with a warning on stderr naming the safer way.
+- **`mason wait orders customers` waits for those synced tables alone** (until each one's first sync is done); a
+  generated table is still waited for by its name alone. **`mason sync --all`** syncs every table the sources file names.
+- **`--json` keys that meant different things in different commands have names of their own beside the old ones**:
+  `removedTables` (`mason remove`), `destroyed` (`mason destroy`), `removedUser` (`mason user remove`), `revokedToken`
+  (`mason token revoke`) and `loginRevoked` (`mason logout`). The old keys (`removed`, `revoked`) stay until 1.0.
 - **`mason deploy` waits while its replica is being created**: when the service answers that the replica is being
   checked or created, that the machine it runs on is not connected just now, or that too many deploys are being sent
   at once, `mason deploy` waits as the service asks and sends the deploy again, within `--timeout`, saying what it

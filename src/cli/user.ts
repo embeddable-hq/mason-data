@@ -133,12 +133,12 @@ export const USER: CommandSpec & { needs: "project" } = {
             lastUsedNote (why lastUsedAt is unknown, else null), urlNote (why url is null, else null), requestLogDays
             (null when unknown) }; disable { disabled: { name, id, addedAt, disabledAt }, already (it was disabled
             before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; from { changed: { name, id,
-            addedAt, from (its ranges now; null: any address) }, already (they were these before) }; remove { removed: { name,
-            id, addedAt, removedAt } }; next. With --replica (or MASON_REPLICA) every answer also has replica ("<org>/<name>":
+            addedAt, from (its ranges now; null: any address) }, already (they were these before) }; remove { removedUser: { name,
+            id, addedAt, removedAt }, removed (the same, kept until 1.0) }; next. With --replica (or MASON_REPLICA) every answer also has replica ("<org>/<name>":
             the replica it acted on), and a project's never does
 `,
   options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true }, from: { type: "string", multiple: true }, any: { type: "boolean", default: false }, replica: { type: "string" } },
-  json: ["replica", "user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removed", "from", "changed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
+  json: ["replica", "user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removedUser", "removed", "from", "changed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
 };
 
 
@@ -803,7 +803,7 @@ export async function user(argv: string[]): Promise<number> {
     const r = removeUser(file, name!);
     if ("message" in r) return failed("user", r, { json });
     const next = REMOVED_NEXT;
-    if (json) { out(jsonText(USER, r, next)); return 0; }
+    if (json) { out(jsonText(USER, { removedUser: r.removed, ...r }, next)); return 0; }
     out(removedReport(r, w.state === "up", next));
     return 0;
   }

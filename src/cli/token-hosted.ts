@@ -91,14 +91,15 @@ export const TOKEN: CommandSpec = {
   --json                   as data: { token (create: { id, value (the token itself, this once), name,
                            replica, scopes, createdAt, expiresAt }), tokens (list: [{ id, name, replica, scopes,
                            madeBy, createdAt, lastUsedAt (null: never used), expiresAt }]), more (list: true when an
-                           organisation has more than the service lists), revoked (revoke: { org, id, name }), next }
+                           organisation has more than the service lists), revokedToken (revoke: { org, id,
+                           name }), revoked (revoke: the same, kept until 1.0), next }
 
   Exit status: 0 done; 1 not signed in, refused by the service (its words printed as they came, the code the
   CLI's own), or the service answered outside its contract; 2 a wrong command line.
 `,
   options: { replica: { type: "string" }, scope: { type: "string", multiple: true }, name: { type: "string" }, days: { type: "string" }, org: { type: "string" },
     json: { type: "boolean", default: false } },
-  json: ["token", "tokens", "more", "revoked", "next"],
+  json: ["token", "tokens", "more", "revokedToken", "revoked", "next"],
 };
 
 const outStyle = (): Style => serviceStyle(styleOut());
@@ -299,7 +300,7 @@ async function revoke(id: string, named: string | null, json: boolean): Promise<
   if (!obj(j) || !carriesNoSecret(j, secrets) || !obj(j.revoked) || j.revoked.id !== id || typeof j.revoked.name !== "string" || j.revoked.name.length > 200) return fail(unexpected(service, a, "a CI token was revoked"), json);
   const revoked = { org, id, name: serviceText(j.revoked.name, 64, secrets) };
   const next: NextStep[] = [listStep(org)];
-  if (json) { out(jsonText(TOKEN, { revoked }, next)); return 0; }
+  if (json) { out(jsonText(TOKEN, { revokedToken: revoked, revoked }, next)); return 0; }
   out(reportText({ headline: `Revoked the CI token ${id} of ${org}: it acts no more`, details: [["name", revoked.name]], next }, outStyle()));
   return 0;
 }
