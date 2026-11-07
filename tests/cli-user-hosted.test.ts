@@ -50,12 +50,26 @@ test("mason user --replica: each subcommand sends the run's own /api/users reque
     assert.deepEqual(r.requests.map((q) => [q.method, q.path, q.search, q.body]), [[method, p, search, ""]], argv.join(" "));
     assert.equal(r.requests[0]!.headers.authorization, `Bearer ${r.token}`);
   }
-  // MASON_REPLICA when there is no --replica; --replica before it
+  // MASON_REPLICA when there is no --replica, said on stderr (it turns mason user from this project's users to a
+  // replica's, and an agent may never read the environment it inherits); --replica before it, and nothing said
   r = await hosted(v1, ["list"], { extra: { MASON_REPLICA: R }, names: ["acme"] });
   assert.equal(r.a.code, 0, r.a.stderr);
   assert.deepEqual(r.requests.map((q) => q.path), [USERS]);
+  assert.equal(r.a.stderr, "using MASON_REPLICA=acme/shop (--replica names another; unset MASON_REPLICA for none)\n");
+  r = await hosted(v1, ["remove", "acme", "--json"], { extra: { MASON_REPLICA: R }, names: ["acme"] });
+  assert.equal(r.a.stderr, "using MASON_REPLICA=acme/shop (--replica names another; unset MASON_REPLICA for none)\n", "under --json too: stderr, so stdout stays one document");
+  assert.equal((JSON.parse(r.a.stdout) as { replica: string }).replica, R, "the answer names the replica it acted on");
   r = await hosted(v1, ["list", "--replica", R], { extra: { MASON_REPLICA: "other/one" }, names: ["acme"] });
   assert.deepEqual(r.requests.map((q) => q.path), [USERS]);
+  assert.equal(r.a.stderr, "");
+  // every answer names its target: replica in --json, the replica in the headline
+  for (const [argv, headline] of [[["add", "acme"], "The user acme of the replica acme/shop added: "], [["disable", "acme"], "The user acme of the replica acme/shop disabled: "],
+    [["enable", "acme"], "The user acme of the replica acme/shop enabled: "], [["remove", "acme"], "The user acme of the replica acme/shop removed: "], [["list"], "1 user of acme/shop"]] as Array<[string[], string]>) {
+    r = await hosted(v1, [...argv, "--replica", R], { names: ["acme"] });
+    assert.ok(r.a.stdout.startsWith(headline), `${argv.join(" ")}: ${r.a.stdout}`);
+    r = await hosted(v1, [...argv, "--replica", R, "--json"], { names: ["acme"] });
+    assert.equal((JSON.parse(r.a.stdout) as { replica: string }).replica, R, argv.join(" "));
+  }
   // nothing of a project: run in a project's folder, its users file is neither read nor written
   const project = home();
   fs.mkdirSync(path.join(project, ".mason"));
@@ -173,13 +187,15 @@ test("the same answer prints the same output: mason user --replica, whose servic
       if (argv.includes("--json")) {
         const lv = JSON.parse(norm(l.stdout)) as { next: Array<{ command: string; what: string }> }, rv = JSON.parse(norm(r.stdout)) as typeof lv;
         const { next: ln, ...lrest } = lv, { next: rn, ...rrest } = rv;
-        assert.deepEqual(rrest, lrest, line);
+        // the same, and the replica it acted on, which a project's answer never has
+        assert.deepEqual(rrest, { replica: R, ...lrest }, line);
+        assert.ok(!("replica" in lrest), line);
         assert.deepEqual(rn, ln.map((n) => ({ ...n, command: onReplica(n.command) })), `${line}: next`);
         continue;
       }
-      // a person's: every line above Next: the same (the list's headline names the replica), the steps the local ones
+      // a person's: every line above Next: the same (the headline names the replica), the steps the local ones
       const [lt, lnext = ""] = norm(l.stdout).split("\nNext:\n"), [rt, rnext = ""] = norm(r.stdout).split("\nNext:\n");
-      assert.equal(rt!.replace(/^(\d+ users? of )acme\/shop/, "$1shop"), lt, line);
+      assert.equal(rt!.replace(/^(\d+ users? of )acme\/shop/, "$1shop").replace(/^(The user \S+) of the replica acme\/shop /, "$1 "), lt, line);
       assert.deepEqual(steps(rnext), steps(lnext).map(([c, ...w]) => [onReplica(c!), ...w]), `${line}: next`);
       assert.equal(r.stderr, "", `${line}: nothing on stderr`);
     }
@@ -208,7 +224,7 @@ test("the password is printed once, by add, exactly as locally — in its url, p
   const answer = addedAnswer("metabase");
   const a = await hosted(() => ok(answer), ["add", "metabase", "--replica", R], { names: ["metabase"] });
   assert.equal(a.a.code, 0, a.a.stderr);
-  assert.equal(a.a.stdout, `The user metabase added: its password is printed this once
+  assert.equal(a.a.stdout, `The user metabase of the replica acme/shop added: its password is printed this once
   url        ${url}
   psql       ${psqlLine(url)}
   user       metabase
@@ -231,6 +247,7 @@ Next:
   const j = await hosted(() => ok(answer), ["add", "metabase", "--replica", R, "--json"]);
   const v = JSON.parse(j.a.stdout) as Record<string, unknown>;
   assert.deepEqual(Object.entries(v).filter(([, x]) => typeof x === "string" && x.includes(PASSWORD)).map(([k]) => k), ["password", "url", "psql"]);
+  assert.equal(v.replica, R);
   assert.equal(j.a.stderr, "");
   // a service that repeats it anywhere else: in a refusal's words, masked; in an answer, the answer refused whole —
   // nothing of it printed — whatever key carries it (PR 609's review: a grammar alone is no mask)

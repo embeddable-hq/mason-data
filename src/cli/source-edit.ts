@@ -13,7 +13,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Failure } from "./command.ts";
+import type { Failure, FailureCode } from "./command.ts";
 import type { SourceTable } from "./preflight.ts";
 import { addedTables, chooseColumns, effectiveSync, entryName, entryProblems, findEntry, parseSourceText, sourceFailure, sourceFileNames, sourcesDir, unaddableReason,
   withEntrySync, withoutTable, withTable, type ProjectSource, type SourceFile } from "./sources.ts";
@@ -29,7 +29,7 @@ export class Refusal extends Error {
 }
 
 /** The FAILURE_CODES code (src/cli/command.ts) of a refusal by its HTTP status. */
-const codeOf = (status: number): string => status === 400 ? "usage" : status === 404 ? "not_found" : status >= 500 ? "failed" : "refused";
+const codeOf = (status: number): FailureCode => status === 400 ? "usage" : status === 404 ? "not_found" : status >= 500 ? "failed" : "refused";
 
 /** The sources file to edit: where it is, its text, what it says, and the file read as the run reads it (its URL resolved). */
 export interface EditTarget { root: string; file: string; text: string; parsed: SourceFile; read: ProjectSource }

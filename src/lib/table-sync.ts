@@ -5,7 +5,7 @@
  * in the same words at both entrances:
  *
  *   off               nothing after the first copy until `mason sync <table>`, which polls it once, now (the default)
- *   poll <interval>   the xmin poll every <interval>: <n>s, <n>m or <n>h, a whole number, at least 1s, at most 24h
+ *   poll <interval>   the xmin poll every <interval>: <n>s, <n>m, <n>h or <n>d, a whole number, at least 1s, at most 24h
  *   replication       the database's change log, through the project's ONE slot and publication (src/duck/stream.ts):
  *                     the publication carries the replicated tables only, and the polled ones are polled beside it
  *
@@ -46,11 +46,11 @@ export const COSTLY_POLL_ROWS = 10_000_000;
 export const COSTLY_POLL_SECONDS = 60;
 
 const MODES = ["off", "poll", "replication"] as const;
-const UNIT_SECONDS = { s: 1, m: 60, h: 3600 } as const;
+const UNIT_SECONDS = { s: 1, m: 60, h: 3600, d: 86_400 } as const;
 /** the units a person may write for one of ours, said back as the one to write */
 const UNIT_WORDS: Record<string, keyof typeof UNIT_SECONDS> = {
   s: "s", sec: "s", secs: "s", second: "s", seconds: "s", m: "m", min: "m", mins: "m", minute: "m", minutes: "m",
-  h: "h", hr: "h", hrs: "h", hour: "h", hours: "h",
+  h: "h", hr: "h", hrs: "h", hour: "h", hours: "h", d: "d", day: "d", days: "d",
 };
 const EXAMPLES = "poll 5s, poll 5m or poll 1h";
 /** what a sync is, said where one is wrong */
@@ -67,21 +67,20 @@ export function intervalOf(seconds: number): string {
   return s % 3600 === 0 ? `${s / 3600}h` : s % 60 === 0 ? `${s / 60}m` : `${s}s`;
 }
 
-/** an interval (`<n>s|m|h`) read, or why it is not one, with the interval to write when there is one. ONE grammar with three
- *  entrances, each worded as it is written: a `sync:`'s `poll <interval>`, a generated table's `target_lag:`, and a
- *  command's wait (`parseDuration`) */
+/** an interval (`<n>s|m|h|d`) read, or why it is not one, with the interval to write when there is one. ONE grammar with
+ *  two entrances, each worded as it is written: a `sync:`'s `poll <interval>` and a generated table's `target_lag:`. Its
+ *  units are a command line's duration's too (`parseDuration`), which also takes a bare number of seconds: a file writes
+ *  the unit, one spelling of each interval. */
 function parseInterval(v: string, write = "poll "): { every: string; seconds: number } | { problem: string } {
   const m = /^(\d+(?:\.\d+)?)\s*([a-z]+)$/i.exec(v);
   const examples = write === "" ? "5s, 5m or 1h" : EXAMPLES;
-  const how = `an interval is <n>s, <n>m or <n>h, a whole number, at least ${MIN_POLL_SECONDS}s (${examples})`;
+  const how = `an interval is <n>s, <n>m, <n>h or <n>d, a whole number, at least ${MIN_POLL_SECONDS}s (${examples})`;
+  if (/^\d+$/.test(v)) return { problem: `${v} has no unit: write ${write}${Number(v)}s for seconds (or m, h, d)` };
   if (m === null) return { problem: `${JSON.stringify(v)} is not an interval: ${how}` };
   const n = Number(m[1]), word = m[2]!.toLowerCase();
   if (word === "ms") return { problem: `${v} is under the shortest interval, ${MIN_POLL_SECONDS}s${write === "" ? "" : " (a poll scans the table whole on your database)"}: write ${write}${MIN_POLL_SECONDS}s or longer` };
   const unit = UNIT_WORDS[word];
-  if (unit === undefined) {
-    const days = /^(d|day|days)$/.test(word) ? `: write ${write}${intervalOf(n * 86_400)}` : "";
-    return { problem: `${v}: ${word} is not a unit of an interval — ${days ? `days are hours${days}` : how}` };
-  }
+  if (unit === undefined) return { problem: `${v}: ${word} is not a unit of an interval — ${how}` };
   const seconds = n * UNIT_SECONDS[unit];
   if (!Number.isInteger(n)) return { problem: `${v}: an interval is a whole number — write ${write}${intervalOf(seconds)}` };
   if (seconds < MIN_POLL_SECONDS) return { problem: `${v} is under the shortest interval, ${MIN_POLL_SECONDS}s: write ${write}${MIN_POLL_SECONDS}s or longer` };
@@ -99,10 +98,34 @@ export function parseLag(v: unknown): { every: string; seconds: number } | { pro
   return parseInterval(v.trim(), "");
 }
 
-/** A command's own wait, as an interval (`mason deploy --timeout 10m`): the grammar and range a poll's and a `target_lag:`
- *  take, so a span of time is written one way at every entrance. */
-export function parseDuration(v: string): { every: string; seconds: number } | { problem: string } {
-  return parseInterval(v.trim(), "");
+/** A duration a command line takes: `every` as it is said back (`10m`, `90s`), and its seconds. */
+export interface Duration { every: string; seconds: number }
+
+/** How a duration on a command line is written: said where one is wrong, and `<duration>` in each usage. */
+export const DURATION_FORMS = "a number of seconds, or <n>s, <n>m, <n>h or <n>d (90, 30s, 10m, 1h, 7d)";
+
+/**
+ * A DURATION ON A COMMAND LINE, ONE GRAMMAR FOR EVERY FLAG THAT TAKES ONE (`--timeout` of mason wait, share, ui --ssh,
+ * deploy and replica create; mason usage's `--step`; the age `--since` / `--until` take, src/cli/request-filter.ts
+ * `timeOf`, which refuses a bare number as a time): a bare number is seconds, as wait, share and ui read it before; `<n>s|m|h|d`, and the words a sync's
+ * interval takes (`5 min`, `2 hours`, `7 days`), as a `sync:` interval and a `target_lag:` are written. A superset of
+ * every form each flag took before, so nothing that parsed stops parsing. The range is the flag's (`min`, `max` in
+ * seconds; over 0 always); the caller names the flag.
+ */
+export function parseDuration(v: string, o: { min?: number; max?: number } = {}): Duration | { problem: string } {
+  const t = v.trim();
+  let seconds: number, every: string;
+  if (t !== "" && Number.isFinite(Number(t))) { seconds = Number(t); every = `${seconds}s`; }
+  else {
+    const m = /^(\d+(?:\.\d+)?)\s*([a-z]+)$/i.exec(t);
+    const unit = m === null ? undefined : UNIT_WORDS[m[2]!.toLowerCase()];
+    if (m === null || unit === undefined) return { problem: `${JSON.stringify(v)} is not a duration: write ${DURATION_FORMS}` };
+    seconds = Number(m[1]) * UNIT_SECONDS[unit]; every = `${Number(m[1])}${unit}`;
+  }
+  if (!(seconds > 0)) return { problem: `${JSON.stringify(v)} is not a duration over 0: write ${DURATION_FORMS}` };
+  if (o.min !== undefined && seconds < o.min) return { problem: `${every} is under the shortest, ${intervalOf(o.min)}` };
+  if (o.max !== undefined && seconds > o.max) return { problem: `${every} is over the longest, ${intervalOf(o.max)}` };
+  return { every, seconds };
 }
 
 /**

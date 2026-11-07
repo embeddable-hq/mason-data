@@ -435,6 +435,7 @@ test("each failure is one report with its way out, in the failure shape, and no 
 
     const late = await refused(ssh.bin, s.root, { FAKE_SSH: "silent" }, ["--timeout", "1"]);
     assert.equal(late.error.message, "no answer from deploy@mason.example in 1 s");
+    assert.deepEqual([late.code, late.error.code], [124, "timeout"], "ran out of time: exit 124, as every timeout");
     assert.ok(isGone(Number(fs.readFileSync(ssh.pid, "utf8"))), "the ssh that said nothing is ended");
   } finally { s.close(); }
 

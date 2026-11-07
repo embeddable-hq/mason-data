@@ -25,6 +25,7 @@ import { alive, type DevRun } from "./runs.ts";
 import { appEnvValue } from "../lib/dotenv.ts";
 import { newSharePassword, shareSecret, type OpenedShare, type ShareChoice, type ShareTunnel } from "./share-run.ts";
 import { probeShare, startTunnel, sweepTunnelFiles, TOKEN_RE, TUNNELS, tunnelPlan, type OpenTunnel, type TunnelPlan, type Via } from "./tunnel.ts";
+import { parseDuration } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const say = (m: string): void => { process.stderr.write(`${m}\n`); };
@@ -38,7 +39,7 @@ export const SHARE: CommandSpec & { needs: "run" } = {
   needs: "run",
   name: "share",
   summary: "share the synced data with a tool outside this machine: a temporary address, TLS end to end, a password for this run",
-  usage: `usage: mason share [--role <role>] [--via pinggy|bore] [--timeout <seconds>] [--json]
+  usage: `usage: mason share [--role <role>] [--via pinggy|bore] [--timeout <duration>] [--json]
 
   For a BI tool in the cloud, which cannot reach 127.0.0.1: opens a temporary public address for this project's Postgres
   API, through a free tunnel service, and prints what to type into the tool. It stays in the foreground: Ctrl-C ends
@@ -65,7 +66,8 @@ export const SHARE: CommandSpec & { needs: "run" } = {
 
   --role <role>       what it reads: a role of mason/roles.yml
   --via <tunnel>      pinggy (default) or bore
-  --timeout <s>       how long the tunnel has to give its address (default ${DEFAULT_TIMEOUT_S})
+  --timeout <duration>  how long the tunnel has to give its address (default ${DEFAULT_TIMEOUT_S}s; a bare number is
+                      seconds; 30s, 2m); past it, exit 124
   --json              as data, once the address is known: { share: { host, port, database, user, password, sslmode,
                       fingerprint, role, reads, via, endsAt (ISO 8601, or null), verified (the address answered with this
                       share's certificate; false: it could not be reached from this machine) }, next }; the command
@@ -139,8 +141,9 @@ export async function share(argv: string[]): Promise<number> {
   if (f.positionals.length) return failed("share", { message: "it takes no argument: --role names what it reads", code: "usage", usage: SHARE.usage }, { json });
   const via = (v.via ?? "pinggy") as Via;
   if (!TUNNELS.includes(via)) return failed("share", { message: `--via must be ${TUNNELS.join(" or ")}, not ${JSON.stringify(v.via)}`, code: "usage", usage: SHARE.usage }, { json });
-  const timeoutS = v.timeout === undefined ? DEFAULT_TIMEOUT_S : Number(v.timeout);
-  if (!Number.isFinite(timeoutS) || timeoutS <= 0) return failed("share", { message: `--timeout is a number of seconds, not ${JSON.stringify(v.timeout)}`, code: "usage" }, { json });
+  const read = parseDuration(v.timeout ?? String(DEFAULT_TIMEOUT_S));
+  if ("problem" in read) return failed("share", { message: `--timeout ${read.problem}`, code: "usage", usage: SHARE.usage }, { json });
+  const timeoutS = read.seconds;
   const w = await reach(SHARE, json);
   if (w === null || !("run" in w)) return 1;
   const { run, project } = w;

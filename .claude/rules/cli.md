@@ -64,7 +64,7 @@ CLI lacks).
   what }]` from the SAME `NextStep` list the human output prints, and refuses a key the spec does not declare —
   `CommandSpec.json` names the answer's top-level keys, its usage's `--json` line names each (`tests/cli-help.test.ts`),
   so the help and the answer cannot drift. A list is wrapped (`{ tables: […], next }`), never printed bare. The EXIT CODE
-  is part of the contract: 0 done, 1 failed (said), 2 a wrong command line, 124 `mason wait`, `mason deploy` or `mason replica create` timed out. Human output goes
+  is part of the contract: 0 done, 1 failed (said), 2 a wrong command line, 124 a command ran out of time (`TIMEOUT_COMMANDS`: `wait`, `deploy`, `replica create`, `login`, `share`, `ui --ssh`). Every `--timeout` and `--step` is ONE duration grammar (`parseDuration`, src/lib/table-sync.ts: a bare number is seconds, `<n>s|m|h|d`), `<duration>` in each usage; a wrong option is answered with `did you mean` over the spec's options and the synopsis alone (`synopsis`). Human output goes
   to stdout, progress to stderr. **The answer reaches a pipe whole**: a pipe takes writes asynchronously and
   `process.exit` drops what is queued, so the process exits only through `exitWhenWritten` (src/cli/main.ts), once both
   streams are written (`tests/cli-pipe.test.ts`; `tests/conventions.test.ts` refuses another `process.exit` in src/cli).
@@ -360,7 +360,7 @@ CLI lacks).
   never its URL —, `roleProblems` against the tables the sources file names, `readGenerated`'s refusals said), connects
   to no database, and refuses what a start would refuse, sending nothing. The files are `projectFiles` alone, held to
   the contract's bounds (`deployFiles`), and every file the check read is among them. A literal `url:` with its password
-  is refused: the service keeps the files. The wait is bounded by `--timeout` (`parseDuration`, the interval grammar);
+  is refused: the service keeps the files. The wait is bounded by `--timeout` (`parseDuration`, the one duration grammar, 1s to 24h);
   an answer that cannot say is a wait, never an outcome; exit 0 only on `running`, a refusal is the replica's failure's
   words as they came, each one line, its code the CLI's (`failureShape`: `refused` / `failed`, the service's in `why`,
   its next step the CLI's: the service's `next` is never read), exit 1, a status or phase outside the closed sets a failure, the deploy's id held to its
@@ -370,7 +370,7 @@ CLI lacks).
   service on 127.0.0.1; every run's output held to carrying no token).
 - **`mason replica create | list | status` and `mason token create | list | revoke` are clients of the same service**
   (src/cli/replica-hosted.ts, src/cli/token-hosted.ts; docs/HOSTED-API.md "Replicas", "CI tokens"), with deploy's and
-  `user --replica`'s decisions, never new ones: `replicaNamed` / `orgNamed` / `tokenFor` (src/cli/replica.ts), every
+  `user --replica`'s decisions, never new ones: `replicaOf` (the argument, else `--replica`, else `MASON_REPLICA`, said on stderr when it chose) / `orgOf` (the argument or `--org`) / `tokenFor` (src/cli/replica.ts), every
   string of an answer to `carriesNoSecret` before its grammar (a check's and a pending change's words alone are free
   text, masked), the code by status, the next step the CLI's (naming the role that may), the output's gate held from
   the login on. **The database's URL is read by the variable the sources file names, by `readSource` alone**, never

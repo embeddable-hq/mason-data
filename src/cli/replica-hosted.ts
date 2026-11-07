@@ -41,12 +41,12 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { endText, errorJson, exitOf, failed, failureText, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { call, canonicalSecret, carriesNoSecret, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer, type Service } from "./hosted.ts";
-import { loginOrgs, orgNamed, REPLICA_PART, replicaNamed, replicaText, tokenFor, type Replica } from "./replica.ts";
+import { loginOrgs, orgOf, REPLICA_ENV, REPLICA_PART, replicaOf, replicaText, tokenFor, type Replica } from "./replica.ts";
 import { holdOutput, readingsCarry, readingsOf, type Written } from "./output-gate.ts";
 import { theProject } from "./project.ts";
 import { readSource, shownPath } from "./sources.ts";
 import { parseSource } from "./preflight.ts";
-import { parseDuration } from "../lib/table-sync.ts";
+import { MAX_POLL_SECONDS, MIN_POLL_SECONDS, parseDuration } from "../lib/table-sync.ts";
 import { sayAgain } from "./commands.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { err as styleErr, out as styleOut, PLAIN, type Style } from "./style.ts";
@@ -88,9 +88,13 @@ export interface SourceChecks {
 export const REPLICA: CommandSpec = {
   name: "replica",
   summary: "a hosted Mason service's replicas: create one for this project's database, list them, say how one is",
-  usage: `usage: mason replica create <org>/<name> --region <region> --size <gb> [--timeout <interval>] [--json]
-       mason replica list [<org>] [--json]
-       mason replica status <org>/<name> [--json]
+  usage: `usage: mason replica create <org>/<name> --region <region> --size <gb> [--timeout <duration>] [--json]
+       mason replica list [<org> | --org <org>] [--json]
+       mason replica status <org>/<name> | --replica <org>/<name> [--json]
+
+  The replica can also be named as every other command names one, --replica <org>/<name> (else MASON_REPLICA, said
+  on stderr when it chose): mason replica status --replica acme/shop. The organisation, as --org: mason replica
+  list --org acme.
 
   A replica is Mason run for you by a hosted Mason service, on a machine of its own, syncing this project's
   database. mason deploy then sends it the project's files, and mason token create a CI token for it.
@@ -120,9 +124,12 @@ export const REPLICA: CommandSpec = {
     mason replica list
     mason replica status acme/shop --json
 
+  --replica <org>/<name>   create, status: the replica, in place of the argument (else MASON_REPLICA)
+  --org <org>              list: the organisation, in place of the argument
   --region <region>        create: the region it runs in, one the service offers
   --size <gb>              create: the synced data it holds, in GB, one size the service offers (50)
-  --timeout <interval>     create: how long to wait for its region to make it (default ${DEFAULT_TIMEOUT}; 1s to 24h)
+  --timeout <duration>     create: how long to wait for its region to make it (default ${DEFAULT_TIMEOUT}; 1s to 24h; a
+                           bare number is seconds)
   --json                   as data, once it ends: { replica (create, status: { org, name, region, sizeGb, hostId,
                            state, createdAt, allowlist, pending: [{ change (create, allowlist), state (pending,
                            failed), attempts, failure, nextAttemptAt }] }), checks (create: [{ source, outcome
@@ -138,7 +145,8 @@ export const REPLICA: CommandSpec = {
   timed out (nothing stopped: mason replica status says how it goes). Whatever the service sends, it never
   makes the exit 0, 2 or 124.
 `,
-  options: { region: { type: "string" }, size: { type: "string" }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
+  options: { replica: { type: "string" }, org: { type: "string" }, region: { type: "string" }, size: { type: "string" }, timeout: { type: "string" },
+    json: { type: "boolean", default: false } },
   json: ["replica", "checks", "replicas", "more", "error", "next"],
 };
 
@@ -273,13 +281,17 @@ export async function replica(argv: string[]): Promise<number> {
   if (!VERBS.includes(verb)) return usage(`there is no mason replica ${verb}: create, list or status${didYouMean(verb, VERBS)}`);
   if (rest.length) return usage(`mason replica ${verb} takes ${verb === "list" ? "one organisation at most" : "one replica"}: ${rest.join(" ")} is too many`);
   for (const k of ["region", "size", "timeout"] as const) if (verb !== "create" && f.values[k] !== undefined) return usage(`--${k} goes with mason replica create`);
+  const flag = (k: "replica" | "org"): string | undefined => typeof f.values[k] === "string" ? f.values[k] : undefined;
   if (verb === "list") {
-    const org = arg === undefined ? null : orgNamed(arg, REPLICA.usage);
+    if (flag("replica") !== undefined) return usage("--replica goes with mason replica create and status", "name the organisation: mason replica list <org>, or --org <org>");
+    const org = orgOf(flag("org"), arg, REPLICA.usage);
     if (org !== null && isFailure(org)) return fail(org, json);
     return list(org, json);
   }
-  if (arg === undefined) return usage(`mason replica ${verb} names the replica: mason replica ${verb} <org>/<name>`);
-  const r = replicaNamed(arg, "argument", REPLICA.usage);
+  if (flag("org") !== undefined) return usage(`--org goes with mason replica list`, `mason replica ${verb} names the replica: <org>/<name>, or --replica <org>/<name>`);
+  // the one resolver of every command that names a replica: the argument, else --replica, else MASON_REPLICA (said)
+  const r = replicaOf(flag("replica"), REPLICA.usage, process.env, { argument: arg });
+  if (r === null) return usage(`mason replica ${verb} names the replica: mason replica ${verb} <org>/<name>`, `or --replica <org>/<name>, or ${REPLICA_ENV}=<org>/<name>`);
   if (isFailure(r)) return fail(r, json);
   if (verb === "status") return status(r, json);
   const region = typeof f.values.region === "string" ? f.values.region : undefined;
@@ -287,7 +299,7 @@ export async function replica(argv: string[]): Promise<number> {
   if (region === undefined || size === undefined) return usage(`mason replica create needs ${region === undefined ? "--region" : "--size"}`, "name both: mason replica create <org>/<name> --region <region> --size <gb> (the service's web app lists its regions and sizes)");
   if (!REGION.test(region)) return usage(`--region ${JSON.stringify(serviceText(region, 100))} is not a region's name`, "a region's name is lower case letters, digits and -, as the service lists it");
   if (!SIZE.test(size)) return usage(`--size ${JSON.stringify(serviceText(size, 100))} is not a size`, "a size is a whole number of GB, as the service lists it: --size 50");
-  const timeout = parseDuration(typeof f.values.timeout === "string" ? f.values.timeout : DEFAULT_TIMEOUT);
+  const timeout = parseDuration(typeof f.values.timeout === "string" ? f.values.timeout : DEFAULT_TIMEOUT, { min: MIN_POLL_SECONDS, max: MAX_POLL_SECONDS });
   if ("problem" in timeout) return usage(`--timeout ${timeout.problem}`);
   return create(r, { region, sizeGb: Number(size), timeout }, json);
 }

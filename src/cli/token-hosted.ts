@@ -30,7 +30,7 @@
  */
 import { endText, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { call, carriesNoSecret, echoesSecret, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected, type Answer, type Service } from "./hosted.ts";
-import { loginOrgs, orgNamed, REPLICA_PART, replicaOf, tokenFor } from "./replica.ts";
+import { loginOrgs, orgNamed, orgOf, REPLICA_PART, replicaOf, tokenFor } from "./replica.ts";
 import { refusedNext } from "./replica-hosted.ts";
 import { holdOutput } from "./output-gate.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
@@ -58,7 +58,7 @@ export const TOKEN: CommandSpec = {
   name: "token",
   summary: "a hosted Mason service's CI tokens: make one for a replica (printed once), list them, revoke one",
   usage: `usage: mason token create --replica <org>/<name> [--scope deploy|users …] [--name <name>] [--days <n>] [--json]
-       mason token list [<org>] [--json]
+       mason token list [<org> | --org <org>] [--json]
        mason token revoke <id> [--org <org>] [--json]
 
   A CI token lets CI act on ONE replica of a hosted Mason service, for the scopes it was made with (deploy: mason
@@ -86,7 +86,7 @@ export const TOKEN: CommandSpec = {
   --scope <scope>          create: what it may do, deploy or users; repeat it for both (default deploy)
   --name <name>            create: what the list calls it, 1 to 64 characters (default ${DEFAULT_NAME})
   --days <n>               create: the days it acts, 1 to ${MAX_DAYS} (default ${DEFAULT_DAYS})
-  --org <org>              revoke: the organisation it is of
+  --org <org>              list: the organisation, in place of the argument; revoke: the organisation it is of
   --json                   as data: { token (create: { id, value (the token itself, this once), name,
                            replica, scopes, createdAt, expiresAt }), tokens (list: [{ id, name, replica, scopes,
                            madeBy, createdAt, lastUsedAt (null: never used), expiresAt }]), more (list: true when an
@@ -170,9 +170,9 @@ export async function token(argv: string[]): Promise<number> {
   const extra = verb === "create" ? [arg, ...rest].filter((x) => x !== undefined) : rest;
   if (extra.length) return usage(`mason token ${verb} takes ${verb === "create" ? "no argument (the replica is --replica)" : verb === "list" ? "one organisation at most" : "one id"}: ${extra.join(" ")} is too many`);
   for (const k of ["replica", "scope", "name", "days"] as const) if (verb !== "create" && f.values[k] !== undefined) return usage(`--${k} goes with mason token create`);
-  if (verb !== "revoke" && f.values.org !== undefined) return usage("--org goes with mason token revoke", verb === "list" ? "name the organisation: mason token list <org>" : "create names it: --replica <org>/<name>");
+  if (verb === "create" && f.values.org !== undefined) return usage("--org goes with mason token list and revoke", "create names it: --replica <org>/<name>");
   if (verb === "list") {
-    const org = arg === undefined ? null : orgNamed(arg, TOKEN.usage);
+    const org = orgOf(typeof f.values.org === "string" ? f.values.org : undefined, arg, TOKEN.usage);
     if (org !== null && isFailure(org)) return fail(org, json);
     return list(org, json);
   }

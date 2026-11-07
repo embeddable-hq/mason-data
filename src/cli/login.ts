@@ -56,6 +56,9 @@ export const LOGIN: CommandSpec = {
 
   --json    as data, once signed in: { service (its address), email, name, orgs: [{ slug, name, role }], file (where
             the login is kept), replaced (null, or the login it replaced: { email, revoked }), next }
+
+  Exit status: 0 signed in; 1 refused or failed (said); 2 a wrong command line; 124 the code expired before it
+  was approved (run mason login again).
 `,
   options: { json: { type: "boolean", default: false } },
   json: ["service", "email", "name", "orgs", "file", "replaced", "next"],

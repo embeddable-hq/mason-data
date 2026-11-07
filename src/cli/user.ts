@@ -99,8 +99,9 @@ export const USER: CommandSpec & { needs: "project" } = {
     mason user add metabase --replica acme/shop          a user of a replica on a hosted Mason service
 
   --replica <org>/<name> manages the users of a replica on a hosted Mason service instead of this project's (else
-  MASON_REPLICA; each part lower case letters, digits and -): the same subcommands, --role and --set, the same
-  output and --json, the replica's Mason checking each as it does here. It needs no project here, and reads and writes
+  MASON_REPLICA, said on stderr when it chose; each part lower case letters, digits and -): the same subcommands,
+  --role and --set, the same output and --json, which names the replica in its headline and its replica key, the
+  replica's Mason checking each as it does here. It needs no project here, and reads and writes
   nothing of one. The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else
   the default. A refusal is the service's words, each one line, its code the CLI's own by the HTTP status (not_found,
   refused, failed: never usage), exit 1.
@@ -117,10 +118,11 @@ export const USER: CommandSpec & { needs: "project" } = {
             lastUsedNote (why lastUsedAt is unknown, else null), urlNote (why url is null, else null), requestLogDays
             (null when unknown) }; disable { disabled: { name, id, addedAt, disabledAt }, already (it was disabled
             before) }; enable { enabled: { name, id, addedAt }, already (it was not disabled) }; remove { removed: { name,
-            id, addedAt, removedAt } }; next
+            id, addedAt, removedAt } }; next. With --replica (or MASON_REPLICA) every answer also has replica ("<org>/<name>":
+            the replica it acted on), and a project's never does
 `,
   options: { json: { type: "boolean", default: false }, role: { type: "string" }, set: { type: "string", multiple: true }, replica: { type: "string" } },
-  json: ["user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
+  json: ["replica", "user", "id", "addedAt", "password", "url", "psql", "host", "port", "database", "sslmode", "role", "attributes", "roleFrom", "readsNothing", "users", "disabled", "enabled", "already", "removed", "lastUsedNote", "urlNote", "requestLogDays", "next"],
 };
 
 
@@ -549,30 +551,34 @@ export function listText(of: string, l: UserList, roles: RolesLive, next: readon
       ...(lastUsedNote !== null ? [`Last used: ${lastUsedNote}.`] : [])], next }, s), s);
 }
 
+/** A user in a headline: its name, and the replica it is a user of when the command acted on one (`on`), so the answer
+ *  says its target. */
+const userOn = (name: string, on: string | undefined): string => on === undefined ? name : `${name} of the replica ${on}`;
+
 /** What `mason user disable --json` answers, beside `next`; and enable's, and remove's. */
 export type Disabled = Exclude<ReturnType<typeof disableUser>, Failure>;
 export type Enabled = Exclude<ReturnType<typeof enableUser>, Failure>;
 export type Removed = Exclude<ReturnType<typeof removeUser>, Failure>;
 
 /** `mason user disable` for a person. `up`: Mason runs, so the sessions the user holds end at their next statement. */
-export const disabledReport = (r: Disabled, up: boolean, next: readonly NextStep[], s: Style = styleOut()): string => {
-  const d = r.disabled;
-  return reportText({ headline: r.already ? `The user ${d.name} is disabled already: nothing changed` : `The user ${d.name} disabled: it connects no more, until enabled`,
+export const disabledReport = (r: Disabled, up: boolean, next: readonly NextStep[], s: Style = styleOut(), on?: string): string => {
+  const d = r.disabled, who = userOn(d.name, on);
+  return reportText({ headline: r.already ? `The user ${who} is disabled already: nothing changed` : `The user ${who} disabled: it connects no more, until enabled`,
     details: [["user", d.name], ["disabled", d.disabledAt], ...(r.already ? [] : [["sessions", up ? "those it holds end at their next statement" : "none: Mason is not running"] as const])],
     tips: [disableEffect(d.name)], next }, s);
 };
 
 /** `mason user enable` for a person. */
-export const enabledReport = (r: Enabled, next: readonly NextStep[], s: Style = styleOut()): string => {
-  const e = r.enabled;
-  return reportText({ headline: r.already ? `The user ${e.name} is not disabled: nothing changed, it connects` : `The user ${e.name} enabled: it connects again, with the same password`,
+export const enabledReport = (r: Enabled, next: readonly NextStep[], s: Style = styleOut(), on?: string): string => {
+  const e = r.enabled, who = userOn(e.name, on);
+  return reportText({ headline: r.already ? `The user ${who} is not disabled: nothing changed, it connects` : `The user ${who} enabled: it connects again, with the same password`,
     details: [["user", e.name], ["added", e.addedAt]], next }, s);
 };
 
 /** `mason user remove` for a person. */
-export const removedReport = (r: Removed, up: boolean, next: readonly NextStep[], s: Style = styleOut()): string => {
+export const removedReport = (r: Removed, up: boolean, next: readonly NextStep[], s: Style = styleOut(), on?: string): string => {
   const gone = r.removed;
-  return reportText({ headline: `The user ${gone.name} removed: it connects no more`,
+  return reportText({ headline: `The user ${userOn(gone.name, on)} removed: it connects no more`,
     details: [["user", gone.name], ["added", gone.addedAt], ["sessions", up ? "those it holds end at their next statement" : "none: Mason is not running"]],
     tips: [`Adding ${gone.name} again makes a new password: the old one never connects again.`], next }, s);
 };
@@ -583,10 +589,10 @@ export const removedReport = (r: Removed, up: boolean, next: readonly NextStep[]
  * known). `roles`: the roles as a command beside them sees them (the file's name in the role row; NO_ROLES where none
  * can be read here); `listener`: how this run listens (its tips), null where it is not known here.
  */
-export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolean }, o: { roles: RolesLive; listener: PostgresListener | null; next: readonly NextStep[] }, s: Style = styleOut()): string {
+export function addedReport(r: Omit<AddedUser, "replaced"> & { replaced?: boolean }, o: { roles: RolesLive; listener: PostgresListener | null; next: readonly NextStep[]; on?: string }, s: Style = styleOut()): string {
   const { roles } = o;
   return reportText({
-    headline: `The user ${r.user} added${r.replaced === true ? " (in place of one the API key's rotation had removed)" : ""}: its password is printed this once`,
+    headline: `The user ${userOn(r.user, o.on)} added${r.replaced === true ? " (in place of one the API key's rotation had removed)" : ""}: its password is printed this once`,
     details: [
       ...(r.url !== undefined && r.psql !== undefined ? [["url", r.url] as const, ["psql", r.psql] as const] : []),
       ["user", r.user], ["password", r.password], ["database", r.database],

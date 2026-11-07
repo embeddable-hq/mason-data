@@ -9,6 +9,7 @@ import type { Failure } from "./command.ts";
 import { OUTCOMES, type Outcome } from "../api/request-log.ts";
 import { parseRequestCursor, requestCursor, type RequestQuery } from "../duck/requests.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
+import { parseDuration } from "../lib/table-sync.ts";
 
 /** How many requests a read returns unless it says. */
 export const DEFAULT_REQUEST_LIMIT = 40;
@@ -42,8 +43,6 @@ export interface RequestFilterText {
   before?: string | undefined;
 }
 
-const AGE = /^(\d+)(s|m|h|d)$/;
-const AGE_MS: Readonly<Record<string, number>> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
 /** a date, or a date and time with its zone (a time without one would be read in this machine's zone: refused) */
 const ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2}))?$/;
 
@@ -56,11 +55,13 @@ export const QUERY_NAMES = (k: FilterKey): string => k;
 /**
  * THE TIME GRAMMAR, ONE FOR EVERY ENTRANCE (`--since` / `--until` of mason logs and mason usage, and the run's `since` and
  * `until` of /api/requests, /api/events, /api/usage and /api/logs): an ISO 8601 date or time with its zone, or an age
- * before `now` (30s, 30m, 2h, 7d), as an ISO time; a time with no zone is refused, as is anything else.
+ * before `now` (30s, 30m, 2h, 7d, 2 hours), read by the command line's one duration grammar (src/lib/table-sync.ts
+ * `parseDuration`) with its unit written, as an ISO time; a time with no zone is refused, as is anything else. A bare
+ * number is refused here, as it always was: as a TIME it reads as well as a Unix timestamp as an age in seconds.
  */
 export function timeOf(name: string, text: string, now: number): string | Failure {
-  const age = AGE.exec(text.trim());
-  if (age !== null) return new Date(now - Number(age[1]) * AGE_MS[age[2]!]!).toISOString();
+  const age = Number.isFinite(Number(text.trim())) ? null : parseDuration(text);
+  if (age !== null && !("problem" in age)) return new Date(now - age.seconds * 1000).toISOString();
   const t = ISO.test(text.trim()) ? Date.parse(text.trim()) : NaN;
   if (Number.isNaN(t)) {
     return usage(`${name} ${JSON.stringify(text)} is not a time`, "an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)");

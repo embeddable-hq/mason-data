@@ -69,7 +69,7 @@ import { readSourceFile, shownPath } from "./sources.ts";
 import { readRoles, roleProblems, rolesFailure, rolesFile } from "./roles.ts";
 import { readGenerated } from "./generated-files.ts";
 import { refusalText } from "../duck/generated-plan.ts";
-import { parseDuration } from "../lib/table-sync.ts";
+import { MAX_POLL_SECONDS, MIN_POLL_SECONDS, parseDuration } from "../lib/table-sync.ts";
 import { textEntry } from "../lib/log.ts";
 import { sayAgain } from "./commands.ts";
 import { err as styleErr, out as styleOut, stepRenderer, type Style } from "./style.ts";
@@ -119,7 +119,7 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "deploy",
   summary: "send this project to a replica on a hosted Mason service, and wait until the replica runs it",
-  usage: `usage: mason deploy [--replica <org>/<name>] [--dry-run] [--timeout <interval>] [--json]
+  usage: `usage: mason deploy [--replica <org>/<name>] [--dry-run] [--timeout <duration>] [--json]
 
   Sends this project's files (what mason/ holds that Mason reads: the sources file, mason.yml, roles.yml, the
   generated tables — never .env, .mason/, a dotfile or a file that is not YAML) to a replica on a hosted Mason
@@ -139,7 +139,8 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   --replica <org>/<name>   the replica to deploy to (else MASON_REPLICA)
   --dry-run                print each file that would be sent, its size and its sha256, and send nothing (no
                            login needed)
-  --timeout <interval>     how long to wait for the outcome (default ${DEFAULT_TIMEOUT}; 1s to 24h); the deploy goes on after it
+  --timeout <duration>     how long to wait for the outcome (default ${DEFAULT_TIMEOUT}; 1s to 24h; a bare number is
+                           seconds); the deploy goes on after it
   --json                   as data, once it ends: { dryRun, replica (null when none is named on a dry run),
                            service, files: [{ path, size, sha256 }], totalBytes, warnings (the generated tables
                            refused, as mason start says them, each one line), deploy ({ id, status (queued,
@@ -371,7 +372,7 @@ export async function deploy(argv: string[]): Promise<number> {
   const dryRun = f.values["dry-run"] === true;
   if (f.positionals.length) return fail({ message: "it takes no argument", code: "usage", why: "the project is the folder's, the replica --replica's", usage: DEPLOY.usage }, { json });
   const timeoutText = typeof f.values.timeout === "string" ? f.values.timeout : DEFAULT_TIMEOUT;
-  const timeout = parseDuration(timeoutText);
+  const timeout = parseDuration(timeoutText, { min: MIN_POLL_SECONDS, max: MAX_POLL_SECONDS });
   if ("problem" in timeout) return fail({ message: `--timeout ${timeout.problem}`, code: "usage", usage: DEPLOY.usage }, { json });
   const replica = replicaOf(typeof f.values.replica === "string" ? f.values.replica : undefined, DEPLOY.usage);
   if (replica !== null && isFailure(replica)) return fail(replica, { json });
