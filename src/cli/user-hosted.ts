@@ -273,7 +273,7 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
       const x = heldRemoved(a.json, o.name!, secrets);
       if (x === null) return outside();
       const next = onReplica(REMOVED_NEXT, r);
-      return print({ ...x }, next, () => removedReport(x, true, next, outStyle, on));
+      return print({ removedUser: x.removed, ...x }, next, () => removedReport(x, true, next, outStyle, on));
     }
   }
 }

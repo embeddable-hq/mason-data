@@ -64,7 +64,8 @@ export const MCP: CommandSpec = {
     mason mcp --url "${EXAMPLE_URL}"
 
   --url <url>   the Postgres API as a mason user: what mason user add printed (default MASON_URL); TLS as its sslmode
-                says (a host off this machine: require when it names none)
+                says (a host off this machine: require when it names none). A URL with a password here is taken,
+                with a warning on stderr: ps shows it to this machine's users, so MASON_URL is the safer place
 `,
   options: { url: { type: "string" } },
   stdout: "protocol",
@@ -75,6 +76,8 @@ export const MCP: CommandSpec = {
 const log = (m: string): void => { process.stderr.write(`[mason mcp] ${m}\n`); };
 
 const NEED_URL = "mason mcp needs a mason user's URL: MASON_URL, or --url";
+/** What `--url` with a password is told on stderr: the safer form, never the password. */
+export const MCP_ARGV_PASSWORD_WARNING = "warning: --url holds the user's password, which ps shows to this machine's users: put the URL in the server's environment as MASON_URL instead (claude mcp add mason --env MASON_URL=… -- mason mcp)";
 const HELP_STEP: NextStep = ["mason help mcp", "how to add mason mcp to Claude Code or Claude Desktop"];
 const ADD_STEP: NextStep = ["mason user add claude", "a user for the agent: its password and URL, printed once"];
 
@@ -159,6 +162,8 @@ export async function mcp(argv: string[]): Promise<number> {
   if ("message" in u) return failed("mcp", u, { json });
   const source = theSource(u.url, u.from);
   if ("message" in source) return failed("mcp", source, { json });
+  // a password on the command line is taken (a client's config may hold it so), and said with the safer form; never repeated
+  if (u.from === "--url" && source.password !== "") log(MCP_ARGV_PASSWORD_WARNING);
   // the URL is checked once, before the protocol starts: a client that cannot connect is told now, in the failure shape
   try { (await connect(source, "mason-mcp")).close(); }
   catch (e) { return failed("mcp", connectFailure(e, source), { json }); }
