@@ -39,7 +39,7 @@ export const DEV: CommandSpec & { needs: "project" } = {
   needs: "project",
   name: "start",
   summary: "start Mason for this folder's project, in the background (mason init makes the project)",
-  usage: `usage: mason start [--attach] [--self-signed-tls] [--port <n>] [--json]
+  usage: `usage: mason start [--attach] [--self-signed-tls] [--ui-port <n>] [--json]
 
   Starts Mason for the project of this folder (mason init made it): one process, which syncs the tables you add
   (mason add) from the project's database into its own file, keeps them current as the sources file says, and answers
@@ -63,7 +63,8 @@ export const DEV: CommandSpec & { needs: "project" } = {
   created, altered or dropped — Mason makes only its slot. A read replica needs one (it takes no CREATE PUBLICATION).
 
   --replication, --poll and --publication are gone: each answers with the line to write at the top of the sources
-  file (sync: replication, sync: poll 5m, publication: <name>) and exit 2, and starts nothing.
+  file (sync: replication, sync: poll 5m, publication: <name>) and exit 2, and starts nothing. --port is now
+  --ui-port: it answers with the line to run and exit 2.
 
   The Postgres API's port is the project's: the first start takes 5433, or the next port free on every address when a
   second Postgres holds it, and records it; every later start listens on the same port, so a BI tool's saved connection
@@ -88,32 +89,38 @@ export const DEV: CommandSpec & { needs: "project" } = {
   --attach            stay in the foreground (Ctrl-C stops Mason)
   --self-signed-tls   the Postgres API requires TLS, from a certificate made for this project in .mason/ (kept and
                       served again by every later start with the flag); not with MASON_PG_TLS_CERT / _KEY
-  --port <n>          the port the mason commands reach it on (default ${DEFAULT_UI_PORT}, or the next free one)
+  --ui-port <n>       the port of its web page and of the mason commands, on 127.0.0.1 (default ${DEFAULT_UI_PORT}, or the
+                      next free one); MASON_UI_PORT on a server, never the Postgres API's (MASON_PG_PORT)
   --json              as data, once it is up: { running, pid, postgres: { url, host, port, database, sslmode }, next }
 `,
   options: {
-    port: { type: "string" }, attach: { type: "boolean", default: false }, json: { type: "boolean", default: false },
+    "ui-port": { type: "string" }, attach: { type: "boolean", default: false }, json: { type: "boolean", default: false },
     "self-signed-tls": { type: "boolean", default: false },
   },
   json: ["running", "pid", "postgres", "next"],
 };
 
 async function runDev(argv: string[]): Promise<number> {
-  // --replication, --poll and --publication are gone (issue 33): each answered with the edit to make in the sources
+  // --replication, --poll and --publication are gone (issue 33), and --port is --ui-port: each answered with the edit to make in the sources
   // file, exit 2, before the options are parsed (it would be an unknown option there) and before anything starts. The
   // file is read only when one is given. A decision: `mason start --replication --help` answers the refusal, not the
   // usage — the flag is wrong whatever else the line asks
   const removed = removedStartFlags(argv, () => startSourcesTop(process.cwd()));
-  if (removed !== null) return failed("start", { code: "usage", ...removed, next: [["mason start", "each table kept current as its sync: says"], ["mason help production", "sync: and publication:, and what each needs"]] }, { json: wantsJson(argv, DEV) });
+  if (removed !== null) {
+    const { start, sync, ...said } = removed;
+    const next: NextStep[] = sync ? [[start, "each table kept current as its sync: says"], ["mason help production", "sync: and publication:, and what each needs"]]
+      : [[start, "Mason, its web page and the commands on that port"]];
+    return failed("start", { code: "usage", ...said, next }, { json: wantsJson(argv, DEV) });
+  }
   const f = parseCommand(DEV, argv);
   if (typeof f === "number") return f;
-  const v = f.values as { port?: string; attach: boolean; json: boolean; "self-signed-tls": boolean };
+  const v = f.values as { "ui-port"?: string; attach: boolean; json: boolean; "self-signed-tls": boolean };
   if (f.positionals.length) {
     // the database is the project's now: a URL here is the old habit, answered with the new way
     return failed("start", { message: "it takes no database URL: the project has one", code: "usage", why: "mason init <url> made it; .mason/config.json holds it", fix: "run mason start alone", usage: DEV.usage }, { json: v.json });
   }
-  const port = v.port === undefined ? DEFAULT_UI_PORT : Number(v.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) return failed("start", { message: `--port must be a port number (1-65535), not ${JSON.stringify(v.port)}`, code: "usage" }, { json: v.json });
+  const port = v["ui-port"] === undefined ? DEFAULT_UI_PORT : Number(v["ui-port"]);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return failed("start", { message: `--ui-port must be a port number (1-65535), not ${JSON.stringify(v["ui-port"])}`, code: "usage" }, { json: v.json });
   if (!v.attach) return devInBackground(argv, { json: v.json, selfSignedTls: v["self-signed-tls"] });
   return dev({ port, version: version(), selfSignedTls: v["self-signed-tls"] });
 }
@@ -276,7 +283,7 @@ export function topUsage(s: Style = styleOut()): string {
     listed.map(([step, es]) => `  ${s.bold(step)}\n${block(es)}`).join("\n\n"),
     "",
     para("mason <command> --help (or mason help <command>) says how to use one, with examples; the guides are offline and short enough to read whole."),
-    para("A command means the project of the folder it runs in (or above it)."),
+    para("A command means the project of the folder it runs in (or above it); mason -C <folder> <command> runs it as if started in that folder."),
     para("Every command but help and mcp (whose stdout is the MCP protocol's) takes --json: one JSON object for a program, always with next (what to run " +
       "next); a failure is { error: { code, message, why, fix }, next }. The exit code says how it went: 0 done, 1 failed " +
       "with the reason, 2 a wrong command line, 124 a wait timed out (mason wait, mason deploy, mason replica create). Driving Mason from a coding agent: mason help agent."),

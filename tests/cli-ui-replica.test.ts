@@ -51,7 +51,7 @@ const refusal = (status: number, code: string, message: string, more: Record<str
  * One run of `mason ui …` against a fresh fake whose replica endpoint `v1` answers: signed in by MASON_TOKEN (a CI
  * token), or by a saved login (`saved`). Its requests, the fake's address and what the browser was handed.
  */
-async function run(v1: (r: Req) => Reply, argv: string[], o: { token?: string; saved?: boolean; extra?: Record<string, string>; checked?: boolean } = {}):
+async function run(v1: (r: Req) => Reply, argv: string[], o: { token?: string; saved?: boolean; extra?: Record<string, string>; checked?: boolean; terminal?: number } = {}):
   Promise<{ a: Answer; requests: Req[]; base: string; opened: string[] }> {
   const token = o.token ?? newToken(o.saved ? "pat" : "ci"); SECRETS.push(token);
   const fake = await fakeService({ v1 });
@@ -60,13 +60,14 @@ async function run(v1: (r: Req) => Reply, argv: string[], o: { token?: string; s
   try {
     if (o.saved) writeSaved(h, { [fake.url]: { token, email: "ada@example.com", savedAt: EXPIRES } });
     const env = envFor(h, fake.url, { ...(o.saved ? {} : { MASON_TOKEN: token }), PATH: `${b.dir}${path.delimiter}${path.dirname(process.execPath)}`, ...o.extra });
-    const a = o.checked === false ? await runMason(h, ["ui", ...argv], env, 60_000) : await mason(h, ["ui", ...argv], env, { lines: LINES });
+    const a = o.checked === false ? await runMason(h, ["ui", ...argv], env, 60_000) : await mason(h, ["ui", ...argv], env, { lines: LINES, ...(o.terminal ? { terminal: o.terminal } : {}) });
     return { a, requests: fake.requests.filter((r) => r.path.startsWith("/v1/")), base: fake.url, opened: b.opened() };
   } finally { await fake.close(); }
 }
 
 test("mason ui --replica: one POST to the replica's page endpoint with the login as Bearer, the address opened in the browser and not printed", async () => {
-  const r = await run(() => pageAnswer(), ["--replica", R], { saved: true });
+  // on a terminal: a browser opens only for one (src/cli/ui.ts opens)
+  const r = await run(() => pageAnswer(), ["--replica", R], { saved: true, terminal: 200 });
   assert.equal(r.a.code, 0, r.a.stdout + r.a.stderr);
   assert.deepEqual(r.requests.map((q) => [q.method, q.path, q.search, q.body]), [["POST", PAGE, "", ""]]);
   assert.match(String(r.requests[0]!.headers.authorization), /^Bearer masondata_pat_/);
@@ -88,13 +89,21 @@ test("mason ui --replica --no-open: the address printed in its row, for the pers
   assert.match(r.a.stdout, /Tip: The URL opens the page once, for you alone/);
 });
 
+test("mason ui --replica, its output not a terminal: the address printed, as --no-open, and no browser", async () => {
+  const r = await run(() => pageAnswer(), ["--replica", R], { saved: true });
+  assert.equal(r.a.code, 0, r.a.stderr);
+  assert.deepEqual(r.opened, []);
+  assert.ok(r.a.stdout.startsWith("The page of the replica acme/shop\n"), r.a.stdout);
+  assert.ok(r.a.stdout.includes(`\n  url       ${ADDRESS.replace("http://BASE", r.base)}\n`), r.a.stdout);
+});
+
 test("mason ui --replica, a browser that will not start: the address printed, and why", async () => {
   const fake = await fakeService({ v1: () => pageAnswer() });
   const h = home();
   try {
     const token = newToken("ci"); SECRETS.push(token);
     // a PATH with no xdg-open: the opener cannot start
-    const a = await mason(h, ["ui", "--replica", R], envFor(h, fake.url, { MASON_TOKEN: token }), { lines: LINES });
+    const a = await mason(h, ["ui", "--replica", R], envFor(h, fake.url, { MASON_TOKEN: token }), { lines: LINES, terminal: 200 });
     assert.equal(a.code, 0, a.stderr);
     assert.ok(a.stdout.startsWith("The page of the replica acme/shop\n"), a.stdout);
     assert.ok(a.stdout.includes(`/replicas/acme/shop/page?ticket=`), "the address the person must open themselves");
@@ -308,7 +317,7 @@ test("mason ui --replica: an address on https at a subdomain of the service's ho
   const b = browser();
   try {
     const service = fake.url.replace("127.0.0.1", "localhost");
-    const a = await mason(h, ["ui", "--replica", R], envFor(h, service, { MASON_TOKEN: token, PATH: `${b.dir}${path.delimiter}${path.dirname(process.execPath)}` }), { lines: LINES });
+    const a = await mason(h, ["ui", "--replica", R], envFor(h, service, { MASON_TOKEN: token, PATH: `${b.dir}${path.delimiter}${path.dirname(process.execPath)}` }), { lines: LINES, terminal: 200 });
     assert.equal(a.code, 0, a.stdout + a.stderr);
     assert.deepEqual(b.opened(), [`https://r-abc.ui.${new URL(service).host}/?ticket=t1`]);
   } finally { await fake.close(); }

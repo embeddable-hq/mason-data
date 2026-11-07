@@ -11,7 +11,7 @@
  * called by the run's command server; so are `disableUser` and `enableUser`.
  */
 import * as path from "node:path";
-import { failed, jsonText, parseCommand, reportText, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
+import { failed, jsonText, listFlag, parseCommand, reportText, strict, withEnd, type CommandSpec, type Failure, type NextStep } from "./command.ts";
 import { reach } from "./state.ts";
 import { callRun, RunUnreachable } from "./control.ts";
 import { connectionUrl, listenerTips, postgresLink, psqlLine, type PostgresLink } from "./pg-url.ts";
@@ -88,7 +88,7 @@ export const USER: CommandSpec & { needs: "project" } = {
   statement, never answered with no rows: add it again with the --set. Postgres refuses a where: it cannot read
   when the running Mason reads the file, at its key.
 
-  --from <range> limits the addresses the user connects from (repeat --from for each): an IPv4 or IPv6 range with its
+  --from <range> limits the addresses the user connects from (repeat --from for each, or a comma list): an IPv4 or IPv6 range with its
   prefix length (10.0.0.0/16, 2001:db8::/32) or one address (192.0.2.10). A connection from any other address is
   refused before its password is checked, as Postgres refuses one no pg_hba.conf line takes (28000, no entry for host
   …), and in the same words for a name that is no user while any user has ranges, so a user with ranges cannot be
@@ -707,7 +707,9 @@ export async function user(argv: string[]): Promise<number> {
   if (verb === "list" ? name !== undefined : verb !== "from" && rest.length) return usage(`mason user ${verb} takes ${verb === "list" ? "no name" : "one name"}: ${[name, ...rest].filter(Boolean).join(" ")} is too many`);
   // the address ranges: --from on add, the positionals of from (or its --any); each read by the one grammar, a wrong one a
   // wrong line before anything is read, written or sent
-  const fromFlags = Array.isArray(f.values.from) ? f.values.from.filter((x): x is string => typeof x === "string") : [];
+  // a comma list or the flag repeated, the same (src/cli/command.ts listFlag): a range holds no comma
+  const fromList = listFlag(f.values.from);
+  const fromFlags = fromList === undefined ? [] : fromList.split(",");
   if (fromFlags.length > 0 && verb !== "add") return usage(`--from goes with mason user add: mason user add <name> --from ${fromFlags[0]!}${verb === "from" ? `, or mason user from <name> ${fromFlags[0]!}` : ""}`);
   const any = f.values.any === true;
   if (any && verb !== "from") return usage("--any goes with mason user from: mason user from <name> --any removes its address ranges");

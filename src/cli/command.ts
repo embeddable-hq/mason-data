@@ -180,6 +180,22 @@ export function parseCommand(spec: CommandSpec, argv: string[]): { values: Recor
   return { values: parsed.values as Record<string, string | boolean | string[] | boolean[] | undefined>, positionals: parsed.positionals };
 }
 
+/** A LIST FLAG's value, one comma list however it was written (`multiple: true` in the spec): `--columns id,status`
+ *  and `--columns id --columns status` mean the same, `id,status`; undefined when it was not given. */
+export function listFlag(v: unknown): string | undefined {
+  if (typeof v === "string") return v;
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").join(",") : undefined;
+}
+
+/** A command that takes no argument, given one (`mason stop myproject` stopped this folder's project, not that one):
+ *  a wrong line, its usage's synopsis. Null when there is none. */
+export function noArguments(spec: Pick<CommandSpec, "name" | "usage">, positionals: readonly string[], json: boolean): number | null {
+  if (!positionals.length) return null;
+  return failed(spec.name, { message: `it takes no argument (${positionals.join(" ")}): a project is its folder`, code: "usage",
+    fix: `run it in the project's folder: cd <folder> && mason ${spec.name}, or mason -C <folder> ${spec.name}`, usage: synopsis(spec),
+    next: [[`mason ${spec.name} --help`, "its usage, with every option"]] }, { json });
+}
+
 /** Whether a line asks for the command's spec as data: `--help` (or `-h`) and `--json` on a line that parses — every
  *  command, whether or not it takes --json itself (mason help, mason mcp): the spec is what an agent reads first. A line
  *  that does not parse is no such question: parseCommand's own parse says what is wrong with it. */
