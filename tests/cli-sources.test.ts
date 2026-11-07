@@ -469,8 +469,11 @@ test("sync: every mistake on one report, at its key, with the line to write — 
   assert.equal(one("replication 5m"), "sync: replication takes no interval: write replication, or poll 5m");
   assert.equal(one("poll 5 minutes"), 'sync: "5 minutes": write poll 5m');
   assert.equal(one("poll 1.5h"), "sync: 1.5h: an interval is a whole number — write poll 90m");
-  assert.equal(one("poll 2d"), "sync: 2d: d is not a unit of an interval — days are hours: write poll 48h");
-  assert.equal(one("poll soon"), 'sync: "soon" is not an interval: an interval is <n>s, <n>m or <n>h, a whole number, at least 1s (poll 5s, poll 5m or poll 1h)');
+  // d is a unit, as on every command line (src/lib/table-sync.ts parseDuration); a bare number is said with its unit
+  assert.equal(one("poll 2d"), "sync: 2d is over the longest interval, 24h: write poll 24h, or off with mason sync <table> run by a scheduler");
+  assert.deepEqual((parse(`${head}sync: poll 1d\ntables: {}\n`) as Sources.SourceFile).sync, { mode: "poll", every: "1d", seconds: 86_400 });
+  assert.equal(one("poll 30"), "sync: 30 has no unit: write poll 30s for seconds (or m, h, d)");
+  assert.equal(one("poll soon"), 'sync: "soon" is not an interval: an interval is <n>s, <n>m, <n>h or <n>d, a whole number, at least 1s (poll 5s, poll 5m or poll 1h)');
   assert.equal(one("off 5m"), "sync: off takes no interval: write off, or poll 5m");
   // at most a day (a longer one is off and mason sync from a scheduler; a huge one was an instant past a Date's range and
   // broke every status line), and one spelling of each interval (05s and 5s would read as a change of sync)

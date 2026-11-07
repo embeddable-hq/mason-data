@@ -20,6 +20,7 @@ import { bridge, openSshTunnel, targetProblem } from "./ui-ssh.ts";
 import { version } from "./version.ts";
 import { RunUnreachable } from "./control.ts";
 import type { DevRun } from "./runs.ts";
+import { parseDuration } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const say = (m: string): void => { process.stderr.write(`${m}\n`); };
@@ -31,7 +32,7 @@ export const UI: CommandSpec & { needs: "run" } = {
   name: "ui",
   summary: "the status, tables, users and statements, in your browser",
   usage: `usage: mason ui [--no-open] [--json]
-       mason ui --ssh <user@server> [--mason <command>] [--timeout <seconds>] [--no-open] [--json]
+       mason ui --ssh <user@server> [--mason <command>] [--timeout <duration>] [--no-open] [--json]
 
   Opens the running Mason's web page in your browser, refreshed while the tab is open: the Overview (what mason status
   says: whether the synced data is ready, the database, the sync, the statements and the recent errors); the Tables (add,
@@ -60,7 +61,8 @@ export const UI: CommandSpec & { needs: "run" } = {
   --no-open            print the URL only
   --ssh <target>       the server, as you give it to ssh: user@server, or a Host of your ssh config
   --mason <command>    how to run mason on the server (default mason); a shell's text, kept to ssh's command line
-  --timeout <s>        how long ssh and the server have to answer (default ${DEFAULT_TIMEOUT_S}): a passphrase or a touch counts
+  --timeout <duration> how long ssh and the server have to answer (default ${DEFAULT_TIMEOUT_S}s; a bare number is seconds;
+                       2m): a passphrase or a touch counts; past it, exit 124
   --bridge             the server's end of --ssh, on stdin and stdout
   --local-port <n>     the port the browser names, for --bridge: the laptop's
   --json               as data: { url (with this run's token; with --ssh a ticket for one use; null when Ctrl-C came
@@ -162,8 +164,9 @@ export async function ui(argv: string[]): Promise<number> {
     const problem = targetProblem(v.ssh);
     if (problem !== null) return wrong(`--ssh: ${problem}`);
     if (v.mason !== undefined && (v.mason.trim() === "" || /[\r\n]/.test(v.mason))) return wrong("--mason is one line of shell that runs mason on the server");
-    const seconds = v.timeout === undefined ? DEFAULT_TIMEOUT_S : Number(v.timeout);
-    if (!Number.isFinite(seconds) || seconds <= 0) return wrong(`--timeout is a number of seconds, not ${JSON.stringify(v.timeout)}`);
+    const read = parseDuration(v.timeout ?? String(DEFAULT_TIMEOUT_S));
+    if ("problem" in read) return wrong(`--timeout ${read.problem}`);
+    const seconds = read.seconds;
     return overSsh(v.ssh, v.mason ?? "mason", seconds * 1000, !v["no-open"], json);
   }
   const w = await reach(UI, json);

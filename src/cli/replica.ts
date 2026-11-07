@@ -20,13 +20,47 @@ export const REPLICA_ENV = "MASON_REPLICA";
 export interface Replica { org: string; name: string; from: "--replica" | typeof REPLICA_ENV | "argument" }
 export const replicaText = (r: Replica): string => `${r.org}/${r.name}`;
 
-/** The replica the command means: `--replica`, else `MASON_REPLICA`; null when neither names one, a Failure when it is
- *  not `<org>/<name>` (never repeated beyond 200 characters, made printable). `usage`: the command's, said after a wrong
- *  `--replica`. */
-export function replicaOf(flag: string | undefined, usage: string, env: NodeJS.ProcessEnv = process.env): Replica | Failure | null {
+/**
+ * THE REPLICA THE COMMAND MEANS, ONE RESOLVER FOR EVERY COMMAND THAT NAMES ONE (`mason deploy`, `mason user …
+ * --replica`, `mason token create`, `mason replica create | status`): the command's own argument where it takes one
+ * (`mason replica status acme/shop`), else `--replica`, else `MASON_REPLICA`; null when none names one, a Failure when
+ * it is not `<org>/<name>` (never repeated beyond 200 characters, made printable), or when the argument and `--replica`
+ * name two replicas. `usage`: the command's, said after a wrong line.
+ *
+ * WHEN THE ENVIRONMENT CHOSE THE TARGET IT IS SAID, on stderr (`say`): an agent inherits an environment it may never
+ * read, and `MASON_REPLICA` exported turns `mason user add` from this project's users to a replica's.
+ */
+export function replicaOf(flag: string | undefined, usage: string, env: NodeJS.ProcessEnv = process.env,
+  o: { argument?: string | undefined; say?: (line: string) => void } = {}): Replica | Failure | null {
+  if (o.argument !== undefined) {
+    const r = replicaNamed(o.argument, "argument", usage);
+    if (flag === undefined || "message" in r) return r;
+    const f = replicaNamed(flag, "--replica", usage);
+    if ("message" in f) return f;
+    if (replicaText(f) === replicaText(r)) return r;
+    return { message: `the replica is named twice: ${replicaText(r)} and --replica ${replicaText(f)}`, code: "usage", fix: `name one: ${replicaText(r)}, or --replica ${replicaText(f)}`, usage };
+  }
   const from = flag !== undefined ? "--replica" : env[REPLICA_ENV] !== undefined ? REPLICA_ENV : null;
   if (from === null) return null;
-  return replicaNamed((from === "--replica" ? flag : env[REPLICA_ENV]) ?? "", from, usage);
+  const r = replicaNamed((from === "--replica" ? flag : env[REPLICA_ENV]) ?? "", from, usage);
+  if (!("message" in r) && r.from === REPLICA_ENV) (o.say ?? sayStderr)(envChoseText(r));
+  return r;
+}
+
+/** What is said on stderr when `MASON_REPLICA` chose the replica (a name `REPLICA_PART` holds: safe to print). */
+export const envChoseText = (r: Replica): string => `using ${REPLICA_ENV}=${replicaText(r)} (--replica names another; unset ${REPLICA_ENV} for none)`;
+const sayStderr = (line: string): void => { process.stderr.write(`${line}\n`); };
+
+/** The organisation the command means: its own argument (`mason replica list acme`), else `--org`; null when neither
+ *  names one, a wrong line's Failure when one is not a slug or the two differ. */
+export function orgOf(flag: string | undefined, argument: string | undefined, usage: string): string | Failure | null {
+  const named = [argument, flag].filter((x): x is string => x !== undefined).map((x) => orgNamed(x, usage));
+  const bad = named.find((x): x is Failure => typeof x !== "string");
+  if (bad !== undefined) return bad;
+  const [a, b] = named as string[];
+  if (a === undefined) return null;
+  if (b !== undefined && a !== b) return { message: `the organisation is named twice: ${a} and --org ${b}`, code: "usage", fix: `name one: ${a}, or --org ${b}`, usage };
+  return a;
 }
 
 /** `raw` as a replica's name, `<org>/<name>`, each part `REPLICA_PART`: the one grammar of `--replica`, `MASON_REPLICA`

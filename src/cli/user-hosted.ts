@@ -232,8 +232,10 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
   const refused = (x: Answer): Failure => serviceFailure(x, secrets, (status) => failureNext(status, r)) ?? unexpected(service, x, STEP[o.verb]);
   if (a.status !== 200) return fail(refused(a));
   const outside = (): number => fail(unexpected(service, a, STEP[o.verb]));
+  // the target in every answer: the replica's name in --json and in the headline
+  const on = replicaText(r);
   const print = (value: Record<string, unknown>, next: NextStep[], text: () => string): number => {
-    out(o.json ? jsonText(USER, value, next) : text());
+    out(o.json ? jsonText(USER, { replica: on, ...value }, next) : text());
     return 0;
   };
   switch (o.verb) {
@@ -241,7 +243,7 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
       const l = heldList(a.json, secrets);
       if (l === null) return outside();
       const next = onReplica(listNext(l.users), r);
-      return print({ ...l }, next, () => listText(replicaText(r), l, NO_ROLES, next, outStyle));
+      return print({ ...l }, next, () => listText(on, l, NO_ROLES, next, outStyle));
     }
     case "add": {
       const added = heldAdded(a.json, o.name!, secrets);
@@ -253,25 +255,25 @@ export async function hostedUser(r: Replica, o: { verb: Verb; name?: string | un
           next: [[`mason user list --replica ${replicaText(r)}`, "the replica's users"]] });
       }
       const next = onReplica(addedNext(added.user, true), r);
-      return print({ ...added }, next, () => addedReport(added, { roles: NO_ROLES, listener: null, next }, outStyle));
+      return print({ ...added }, next, () => addedReport(added, { roles: NO_ROLES, listener: null, next, on }, outStyle));
     }
     case "disable": {
       const d = heldDisabled(a.json, o.name!, secrets);
       if (d === null) return outside();
       const next = onReplica(disabledNext(d.disabled.name), r);
-      return print({ ...d }, next, () => disabledReport(d, true, next, outStyle));
+      return print({ ...d }, next, () => disabledReport(d, true, next, outStyle, on));
     }
     case "enable": {
       const e = heldEnabled(a.json, o.name!, secrets);
       if (e === null) return outside();
       const next = onReplica(enabledNext(e.enabled.name), r);
-      return print({ ...e }, next, () => enabledReport(e, next, outStyle));
+      return print({ ...e }, next, () => enabledReport(e, next, outStyle, on));
     }
     case "remove": {
       const x = heldRemoved(a.json, o.name!, secrets);
       if (x === null) return outside();
       const next = onReplica(REMOVED_NEXT, r);
-      return print({ ...x }, next, () => removedReport(x, true, next, outStyle));
+      return print({ ...x }, next, () => removedReport(x, true, next, outStyle, on));
     }
   }
 }

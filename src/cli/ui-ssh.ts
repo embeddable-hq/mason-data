@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { runnable } from "../lib/runnable.ts";
 import type { FromStdin, ToStdin } from "./bridge-stdin.ts";
-import { errorJson, nextJson, type Failure, type NextStep } from "./command.ts";
+import { errorJson, failureCode, nextJson, type Failure, type NextStep } from "./command.ts";
 import { holdRun, RunUnreachable } from "./control.ts";
 import { whereIs } from "./state.ts";
 import { lastLines } from "./tunnel.ts";
@@ -340,7 +340,7 @@ function refusal(h: Extract<Hello, { error: unknown }>, target: string): Failure
     : stopped ? `start mason serve on ${target}: its service or container` : h.error.fix;
   // these two say mason init and mason start, words for a person at that machine: run here they would do the wrong thing
   const next = lost || stopped ? [] : h.next.map((n): NextStep => n.what === undefined ? [n.command] : [n.command, n.what]);
-  return { message: `on ${target}: ${h.error.message}`, code: h.error.code, ...(h.error.why ? { why: h.error.why } : {}), ...(fix ? { fix } : {}), next };
+  return { message: `on ${target}: ${h.error.message}`, code: failureCode(h.error.code, "failed"), ...(h.error.why ? { why: h.error.why } : {}), ...(fix ? { fix } : {}), next };
 }
 
 /** Starts ssh and the bridge, with a free loopback port before them: the tunnel, or why not. */
@@ -381,7 +381,7 @@ export function openSshTunnel(o: { target: string; mason: string; timeoutMs: num
       };
       const timer = setTimeout(() => {
         const last = lastLines(said, null);
-        fail({ message: `no answer from ${o.target} in ${Math.round(o.timeoutMs / 1000)} s`, code: "failed", ...(last === "" ? {} : { why: `ssh printed: ${last}` }),
+        fail({ message: `no answer from ${o.target} in ${Math.round(o.timeoutMs / 1000)} s`, code: "timeout", ...(last === "" ? {} : { why: `ssh printed: ${last}` }),
           fix: `run ssh ${o.target} on its own to see where it waits; --timeout gives it longer`, next: [[`ssh ${o.target} true`, "whether ssh reaches it on its own"]] });
       }, o.timeoutMs);
       // Ctrl-C before an answer: ssh goes too, a process signalled alone included

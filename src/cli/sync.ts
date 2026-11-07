@@ -6,7 +6,7 @@
  * polled: its answer is where the stream is, beside the polled ones'. The run's `POST /api/sync` (src/cli/run-server.ts) answers it, through the sync's own
  * poll (`Sync.pollNow`).
  */
-import { failed, jsonText, parseCommand, reportText, type CommandSpec, type NextStep } from "./command.ts";
+import { failed, failureCode, jsonText, parseCommand, reportText, type CommandSpec, type NextStep } from "./command.ts";
 import { out as styleOut } from "./style.ts";
 import { callRun } from "./control.ts";
 import { reach } from "./state.ts";
@@ -97,7 +97,7 @@ export async function sync(argv: string[]): Promise<number> {
     // a sync scans each table whole on the database (and waits for a copy under way): minutes, not the commands' 30 s
     const r = await callRun(run, "POST", "/api/sync", { tables: picked }, 60 * 60_000);
     if (r.status !== 200) {
-      const code = typeof r.body.code === "string" ? r.body.code : r.status === 404 ? "not_found" : "failed";
+      const code = failureCode(r.body.code, r.status === 404 ? "not_found" : "failed");
       return failed("sync", { message: `${picked.join(", ")} ${picked.length === 1 ? "was" : "were"} not synced`, code, why: String(r.body.error),
         next: [["mason status", "each synced table"], ["mason logs", "the run's log"]] }, { json });
     }

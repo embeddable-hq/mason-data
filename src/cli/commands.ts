@@ -8,13 +8,13 @@
  *   mason tables [<table>…] [--json]      the database's tables, their columns, keys and foreign keys
  *   mason add <table>… [--columns …]      copy tables into Mason: every column, or the ones --columns names
  *   mason remove <table>…                 take tables out of the sources file; their copies are dropped
- *   mason wait [--timeout <s>] [--json]   until every added table is synced: 0 ready, 1 a copy failed (said), 124 timed out
+ *   mason wait [--timeout <duration>] [--json]   until every added table is synced: 0 ready, 1 a copy failed (said), 124 timed out
  *   mason logs [-n <lines>] [-f] [--start] [--requests] [--events]   the run's log; --start, the start's terminal; --requests, its request log; --events, the sync's events
  *   mason stop                            stop Mason for this folder's project (the copy stays)
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { asFailure, endText, errorJson, failed, jsonText, nextBlock, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
+import { asFailure, endText, errorJson, failed, failureCode, jsonText, nextBlock, parseCommand, reportText, withEnd, type CommandSpec, type Failure, type NextStep, type Problem } from "./command.ts";
 import { err as styleErr, out as styleOut, stepRenderer, wrap, type Style } from "./style.ts";
 import { alive, endRun, END_GRACE_MS, notAnswering, runState, theRun, type DevRun } from "./runs.ts";
 import { version } from "./version.ts";
@@ -41,7 +41,7 @@ import type { RunningStatement, SessionsOpen } from "../api/postgres/server.ts";
 import type { ShareEnded, ShareState } from "./share-run.ts";
 import { DEFAULT_REQUEST_LIMIT, eventLimit, MAX_SEARCH, SLOW_MS, requestFilter, requestFilterParams, type FilterKey } from "./request-filter.ts";
 import { countsText } from "../duck/stream.ts";
-import { agoText, BIG_TABLE_ROWS, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
+import { agoText, BIG_TABLE_ROWS, parseDuration, parseSync, syncText, type TableSync } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const err = (m: string): void => { process.stderr.write(`${m}\n`); };
@@ -1354,7 +1354,7 @@ export function waitTable(t: TableState): Pick<TableState, "table" | "copy" | "e
   return { table: t.table, copy: t.copy, error: t.error, ...(t.kept ? { kept: t.kept } : {}), ...(t.sync ? { sync: t.sync } : {}) };
 }
 
-const WAIT_USAGE = `usage: mason wait [<generated table>] [--timeout <seconds>] [--json]
+const WAIT_USAGE = `usage: mason wait [<generated table>] [--timeout <duration>] [--json]
 
   Waits until every added table is synced and served, showing every added table on a line of its own: 100% for the
   finished (in the order they finished), a bar for the ones still syncing, at the bottom. Run it after mason add.
@@ -1362,10 +1362,11 @@ const WAIT_USAGE = `usage: mason wait [<generated table>] [--timeout <seconds>] 
   chain (the tables it is generated from, and theirs), so what is read from it next includes them.
 
     mason add orders && mason wait
-    mason wait --timeout 3600     a large table: wait up to an hour
+    mason wait --timeout 1h       a large table: wait up to an hour
     mason wait daily_requests     a generated table: until it holds what is synced now
 
-  --timeout <seconds>   how long to wait (default 600); the sync goes on after, and mason wait again picks it up
+  --timeout <duration>  how long to wait (default 600, seconds; 10m, 1h); the sync goes on after, and mason wait
+                        again picks it up
   --json                as data, once it ends: { ready, failed, waiting, timedOut, tables: [{ table, copy, error,
                         kept }] (copy: { phase, rowsCopied, progress: the chunks done, reading and for how long, the
                         rate, the seconds left, while its chunks are read }; kept as mason status --json says it —
@@ -1410,8 +1411,9 @@ export async function wait(argv: string[]): Promise<number> {
   const f = parseCommand(WAIT, argv);
   if (typeof f === "number") return f;
   const json = f.values.json === true;
-  const timeout = f.values.timeout === undefined ? 600 : Number(f.values.timeout);
-  if (!Number.isFinite(timeout) || timeout <= 0) return failed("wait", { message: `--timeout is a number of seconds, not ${JSON.stringify(f.values.timeout)}`, code: "usage" }, { json });
+  const read = parseDuration(typeof f.values.timeout === "string" ? f.values.timeout : "600");
+  if ("problem" in read) return failed("wait", { message: `--timeout ${read.problem}`, code: "usage", usage: WAIT_USAGE }, { json });
+  const timeout = read.seconds;
   if (f.positionals.length > 1) return failed("wait", { message: `name one generated table, not ${f.positionals.length}`, code: "usage", usage: WAIT_USAGE }, { json });
   const named = f.positionals[0];
   const run = await runOr(WAIT, json);
@@ -1456,7 +1458,7 @@ export async function wait(argv: string[]): Promise<number> {
             next: [["mason logs", "the detail of each failure"], ["mason status", "the rest of the project"]] }
         : !done && Date.now() >= until
         ? { message: `not ready after ${timeout} s`, code: "timeout", why: r.waiting.join("\n"), fix: "nothing stopped: the syncs go on",
-            next: [["mason wait", "keep waiting (--timeout <seconds> for longer)"], ["mason status", "what Mason is doing"]] }
+            next: [["mason wait", "keep waiting (--timeout <duration> for longer)"], ["mason status", "what Mason is doing"]] }
         : null;
       if (json && (done || failure)) {
         out(jsonText(WAIT, { ...r, timedOut: !done, tables: picked.map(waitTable),
@@ -1499,7 +1501,7 @@ async function waitGenerated(run: DevRun, named: string, timeout: number, json: 
         ? { message: r.failed[0]!, code: "failed", fix: "Mason tries a failed run again by itself; mason logs says why it failed", next: [["mason logs", "the detail of the failure"], ...next] }
         : !r.ready && Date.now() >= until
         ? { message: `${g.table} does not hold what was synced ${timeout} s ago yet`, code: "timeout", why: r.waiting.join("\n"), fix: "nothing stopped: its runs go on",
-            next: [[`mason wait ${entryName(g.table)}`, "keep waiting (--timeout <seconds> for longer)"], ...next] }
+            next: [[`mason wait ${entryName(g.table)}`, "keep waiting (--timeout <duration> for longer)"], ...next] }
         : null;
       if (json && (r.ready || failure)) {
         out(jsonText(WAIT, { ...r, timedOut: !r.ready && failure?.code === "timeout", tables: [], generatedTable: g, ...(failure ? { error: errorJson(failure) } : {}) },
@@ -1708,7 +1710,7 @@ async function runningLogs(json: boolean): Promise<number> {
 /** A refusal the run answered, in the Failure shape it carries (`failure`, src/cli/run-server.ts sendFailure). */
 export function runFailure(reply: { status: number; body: Record<string, unknown> }, next: readonly NextStep[]): Failure {
   const f = reply.body.failure as { code?: unknown; message?: unknown; why?: unknown; fix?: unknown } | undefined;
-  const code = typeof f?.code === "string" ? f.code : reply.status === 400 ? "usage" : reply.status === 404 ? "not_found" : reply.status === 409 ? "refused" : "failed";
+  const code = failureCode(f?.code, reply.status === 400 ? "usage" : reply.status === 404 ? "not_found" : reply.status === 409 ? "refused" : "failed");
   return { message: typeof f?.message === "string" ? f.message : String(reply.body.error ?? `the run answered ${reply.status}`), code,
     ...(typeof f?.why === "string" ? { why: f.why } : {}), ...(typeof f?.fix === "string" ? { fix: f.fix } : {}), next };
 }

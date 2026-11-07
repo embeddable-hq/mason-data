@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
 import { projectFiles } from "../src/lib/project-files.ts";
-import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
+import { exitOf, FAILURE_CODES, type FailureCode } from "../src/cli/command.ts";
 import { bodyCovered, bodyShown, echoForms, echoToken, measureGate, runForms, runToken, seen, showsRun } from "./hosted-fake.ts";
 import { pathToFileURL } from "node:url";
 
@@ -115,7 +115,7 @@ const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "
 const HEADS: readonly string[] = [
   "Deployed to ", "Would send ", "Sent ", "✘ mason deploy: ", "✗ mason deploy: ",
   ...STEP_WORDS.flatMap((w) => [`  ${w}`, ...["✔", "✓", "✘", "✗", ...FRAMES].map((m) => `${m} ${w}`)]),
-  "  the service could not say more just now ", "  ! ",
+  "  the service could not say more just now ", "  ! ", "using MASON_REPLICA=acme/shop ",
   ...["deploy", "service", "files", "took", "why", "fix"].map((l) => `  ${l} `),
 ];
 /** The steps under Next:, the CLI's own, as the start of their line. */
@@ -175,7 +175,7 @@ async function mason(cwd: string, argv: string[], env: Record<string, string>, o
   if (argv.includes("--json") && a.code !== 0) {
     const e = (JSON.parse(a.stdout) as { error?: { code?: string } }).error;
     assert.ok(e?.code !== undefined && Object.hasOwn(FAILURE_CODES, e.code), `${line}: code ${e?.code} is not one of FAILURE_CODES`);
-    assert.equal(a.code, exitOf({ message: "", code: e.code }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
+    assert.equal(a.code, exitOf({ message: "", code: e.code as FailureCode }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code as FailureCode })}`);
   }
   // every line a person sees is one the CLI began: visual lines at the terminal's width for a run on a terminal, the
   // logical lines of a pipe otherwise; under --json, stderr alone (stdout is the data)
@@ -527,11 +527,13 @@ test("mason deploy: the replica is --replica, else MASON_REPLICA, each part held
   r = await deployWith({}, root, ["--json"], { MASON_REPLICA: "acme/Shop" });
   assert.equal(r.a.code, 1);
   assert.equal((JSON.parse(r.a.stdout) as { error: { code: string; message: string } }).error.message, 'MASON_REPLICA "acme/Shop" is not <org>/<name>');
-  // MASON_REPLICA when no flag; the flag before it
+  // MASON_REPLICA when no flag, said on stderr (an agent may never read the environment it inherits); the flag before it
   r = await deployWith({}, root, [], { MASON_REPLICA: "acme/shop" });
   assert.equal(r.a.code, 0, r.a.stderr);
+  assert.match(r.a.stderr, /^using MASON_REPLICA=acme\/shop \(--replica names another; unset MASON_REPLICA for none\)$/m);
   r = await deployWith({}, root, ["--replica", "acme/shop"], { MASON_REPLICA: "other/one" });
   assert.equal(r.a.code, 0, r.a.stderr);
+  assert.doesNotMatch(r.a.stderr, /using MASON_REPLICA/);
   assert.ok(r.requests.every((q) => q.path.startsWith("/v1/replicas/acme/shop/")));
 });
 
@@ -768,17 +770,17 @@ for (const WIDTH of WIDTHS) test(`on a terminal ${WIDTH} wide, no line a person 
   }
 });
 
-test("mason deploy --timeout: past it, exit 124 naming the deploy's id and that it may still finish; a timeout that is not an interval is a wrong line", async () => {
+test("mason deploy --timeout: past it, exit 124 naming the deploy's id and that it may still finish; a bare number is seconds; a timeout that is not a duration of 1s to 24h is a wrong line", async () => {
   const { root } = project();
   const { a } = await deployWith({ get: () => at("applying") }, root, ["--replica", "acme/shop", "--timeout", "1s"]);
   assert.equal(a.code, 124, a.stderr);
   assert.match(a.stderr, /^✗ mason deploy: deploy dep_01abc to acme\/shop did not finish within 1s\n {2}why {3}it was last: (Queued|Applying)[^\n]*\n {2}fix {3}nothing was stopped, and it may still finish: the service's web app shows deploy dep_01abc of acme\/shop, as GET \/v1\/replicas\/acme\/shop\/deploys\/dep_01abc does \(the hosted API\); a longer wait is --timeout 30m\n$/m);
-  const j = await deployWith({ get: () => at("applying") }, root, ["--replica", "acme/shop", "--timeout", "1s", "--json"]);
+  const j = await deployWith({ get: () => at("applying") }, root, ["--replica", "acme/shop", "--timeout", "1", "--json"]);
   assert.equal(j.a.code, 124);
   const v = JSON.parse(j.a.stdout) as { deploy: { id: string }; error: { code: string } };
   assert.equal(v.deploy.id, ID);
   assert.equal(v.error.code, "timeout");
-  for (const bad of ["0s", "abc", "10", "1.5m", "2d"]) {
+  for (const bad of ["0s", "0", "abc", "500ms", "25h", "2d"]) {
     const r = await deployWith({}, root, ["--replica", "acme/shop", "--timeout", bad]);
     assert.equal(r.a.code, 2, bad);
     assert.match(r.a.stderr, /^✗ mason deploy: --timeout /, bad);

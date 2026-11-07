@@ -16,7 +16,7 @@ import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { domainToASCII, domainToUnicode, fileURLToPath, pathToFileURL } from "node:url";
 import { matrixEnv, runMason, type Answer } from "./cli-matrix.ts";
-import { exitOf, FAILURE_CODES } from "../src/cli/command.ts";
+import { exitOf, FAILURE_CODES, type FailureCode } from "../src/cli/command.ts";
 
 export const MAIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 
@@ -279,7 +279,9 @@ export interface Lines { heads: readonly string[]; steps: readonly string[]; own
   unbroken?: (line: string) => boolean }
 
 export function seenProblems(text: string, width: number | null, failed: boolean | null = null, lines?: Lines): string[] {
-  const heads = lines?.heads ?? HEADS, steps = lines?.steps ?? STEP_HEADS;
+  // every hosted command that names a replica says on stderr when MASON_REPLICA chose it (src/cli/replica.ts envChoseText;
+  // these tests name acme/shop)
+  const heads = [...(lines?.heads ?? HEADS), "using MASON_REPLICA=acme/shop "], steps = lines?.steps ?? STEP_HEADS;
   const p: string[] = [];
   let afterNext = false, nexts = 0, failures = 0;
   for (const { line, byTerminal } of seen(text, width, lines?.unbroken)) {
@@ -326,7 +328,7 @@ export async function mason(h: string, argv: string[], env: Record<string, strin
   if (json && a.code !== 0) {
     const e = (JSON.parse(a.stdout) as { error?: { code?: string } }).error;
     assert.ok(e?.code !== undefined && Object.hasOwn(FAILURE_CODES, e.code), `${line}: code ${e?.code} is not one of FAILURE_CODES`);
-    assert.equal(a.code, exitOf({ message: "", code: e.code }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code })}`);
+    assert.equal(a.code, exitOf({ message: "", code: e.code as FailureCode }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code as FailureCode })}`);
   }
   for (const [stream, text] of json ? [["stderr", a.stderr]] as const : [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
     const p = seenProblems(text, o.terminal ?? null, stream === "stderr" && !json ? a.code !== 0 : null, o.lines);

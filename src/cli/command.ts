@@ -13,6 +13,7 @@
  */
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { err as styleErr, out as styleOut, PLAIN, wrap, type Style } from "./style.ts";
+import { closest } from "../lib/did-you-mean.ts";
 
 /**
  * A LINE THAT HOLDS A HOSTED SERVICE'S TEXT IS BROKEN BY THE CLI, NEVER BY THE TERMINAL, AT EVERY WIDTH (PR 481's
@@ -172,9 +173,41 @@ const HELP: Options = { help: { type: "boolean", short: "h" } };
 export function parseCommand(spec: CommandSpec, argv: string[]): { values: Record<string, string | boolean | string[] | boolean[] | undefined>; positionals: string[] } | number {
   let parsed;
   try { parsed = parseArgs({ args: argv, options: { ...spec.options, ...HELP }, allowPositionals: true }); }
-  catch (e) { return failed(spec.name, { message: (e as Error).message, code: "usage", usage: spec.usage, next: [[`mason ${spec.name} --help`, "its usage, with every option"]] }, { json: wantsJson(argv, spec) }); }
+  catch (e) { return failed(spec.name, { ...parseProblem(spec, e as Error & { code?: string }), code: "usage", usage: synopsis(spec), next: [[`mason ${spec.name} --help`, "its usage, with every option"]] }, { json: wantsJson(argv, spec) }); }
   if (parsed.values.help) { process.stdout.write(spec.usage); return 0; }
   return { values: parsed.values as Record<string, string | boolean | string[] | boolean[] | undefined>, positionals: parsed.positionals };
+}
+
+/** A command's synopsis: its usage's first lines, up to the first blank one (`usage: mason <name> …` and its other
+ *  forms), then where the rest is. What a wrong line is answered with: the whole usage is for `--help` (94 lines for
+ *  `mason status`, and the mistake scrolled away above it). */
+export function synopsis(spec: Pick<CommandSpec, "name" | "usage">): string {
+  const lines = spec.usage.split("\n");
+  const end = lines.findIndex((l) => l.trim() === "");
+  return `${lines.slice(0, end < 0 ? lines.length : end).join("\n")}\n\nmason ${spec.name} --help for more\n`;
+}
+
+/** What is wrong with a line the parser refused, in the CLI's words (never Node's, whose advice about `--` misleads):
+ *  an option it does not take, with the closest it does (`didYouMean` over the spec's options and `--help`); one that
+ *  needs a value and has none; one that takes none and was given one. */
+function parseProblem(spec: CommandSpec, e: Error & { code?: string }): { message: string; fix?: string } {
+  const options = { ...spec.options, ...HELP };
+  const names = Object.keys(options).map((n) => `--${n}`);
+  const shorts = Object.entries(options).flatMap(([n, d]) => d.short ? [[`-${d.short}`, `--${n}`] as const] : []);
+  const said = /'(-[^'\s,]*)/.exec(e.message)?.[1];
+  const flag = said === undefined ? undefined : said.startsWith("--") ? said.replace(/=.*$/, "") : said;
+  if (e.code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" && flag !== undefined) {
+    const near = closest(flag, [...names, ...shorts.map(([s]) => s)]);
+    return { message: `there is no option ${flag}${near !== null ? ` — did you mean \`${near}\`?` : ""}`,
+      fix: `its options are ${names.join(", ")}` };
+  }
+  if (e.code === "ERR_PARSE_ARGS_INVALID_OPTION_VALUE" && flag !== undefined) {
+    const long = shorts.find(([s]) => s === flag)?.[1] ?? flag;
+    const named = long === flag ? long : `${flag} (${long})`;
+    const takes = options[long.slice(2)]?.type === "string";
+    return takes ? { message: `${named} needs a value: ${flag} <value>` } : { message: `${named} takes no value: write ${flag} alone` };
+  }
+  return { message: e.message };
 }
 
 /** Where a command prints: stdout for what it answers, stderr for what went wrong. A test passes its own, never
@@ -275,8 +308,12 @@ export function jsonText(spec: CommandSpec, value: Record<string, unknown>, next
   return JSON.stringify({ ...value, next: nextJson(next) }, null, 2);
 }
 
+/** The commands that can run out of time, exit 124 (code `timeout`): the one list the codes and the agent's guide say. */
+export const TIMEOUT_COMMANDS = "mason wait, mason deploy, mason replica create, mason login (its code expired), mason share and mason ui --ssh (no address or answer in time)";
+
 /**
- * THE CODES A FAILURE CARRIES, a closed set a program can branch on (`mason help agent` lists them).
+ * THE CODES A FAILURE CARRIES, a closed set a program can branch on (`mason help agent` lists them): `Failure.code` is
+ * one of them, so a code outside the set does not compile.
  */
 export const FAILURE_CODES = {
   usage: "the command line is wrong: a flag, an argument, a value (exit 2; the usage follows for a person)",
@@ -286,13 +323,19 @@ export const FAILURE_CODES = {
   bad_roles: "the project's roles file (mason/roles.yml) names something wrong: a table the sources file does not sync, a column the synced table lacks, a role with no table; the file, the key and the way out are said",
   not_running: "Mason is not running for the project (mason start)",
   unreachable: "Mason is running but does not answer (mason logs says why)",
+  not_answering: "Mason's process is alive and does not answer its commands, hung: mason stop ends it (its synced data stays)",
   not_found: "a name nothing has: a table, a column, a user",
   nothing_yet: "nothing to work on yet: no table added (the next steps say what adds one)",
   refused: "Mason refused what was asked, with the reason",
   failed: "the command tried and could not finish: the reason, and what to do",
-  timeout: "ran out of time — mason wait, mason deploy, mason replica create; nothing stopped (exit 124)",
+  timeout: `ran out of time — ${TIMEOUT_COMMANDS}; nothing stopped (exit 124)`,
 } as const;
 export type FailureCode = keyof typeof FAILURE_CODES;
+
+/** A code another process sent (the run's refusal, the server's Mason over ssh) as one of ours: its own when it is in
+ *  the set, else `otherwise` — a code outside it never reaches a program that branches on the set. */
+export const failureCode = (code: unknown, otherwise: FailureCode): FailureCode =>
+  typeof code === "string" && Object.hasOwn(FAILURE_CODES, code) ? code as FailureCode : otherwise;
 
 /**
  * ONE SHAPE FOR EVERY FAILURE (a person wants short, scannable responses; an agent wants clear, unambiguous context and
@@ -313,8 +356,8 @@ export type FailureCode = keyof typeof FAILURE_CODES;
 export interface Failure {
   /** what is wrong, in the developer's words: one line, no "error:", no stack */
   message: string;
-  /** the CLI's code (FAILURE_CODES), or a code the run answered with */
-  code: FailureCode | (string & {});
+  /** the CLI's code (FAILURE_CODES), the closed set */
+  code: FailureCode;
   /** why it is wrong, when the message alone does not say */
   why?: string | undefined;
   /** the way out in words, when it is more than a command */

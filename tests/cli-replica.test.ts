@@ -180,6 +180,41 @@ test("mason replica create: an answer that does not come back may have made it â
   assert.ok(slow.requests.length >= 2, "it asked again after the 503");
 });
 
+test("mason replica status and list name their target as every hosted command does: the argument, --replica or MASON_REPLICA (said on stderr), --org; one named twice, or a flag of another verb, is a wrong line", async () => {
+  const v1 = (r: Req): Reply => r.path === ONE ? ok({ replica: replicaOf() }) : r.path === REPLICAS ? ok({ replicas: [replicaOf()], more: false })
+    : { status: 404, body: { error: { code: "not_found", message: "no" } } };
+  const fake = await fakeService({ v1 });
+  try {
+    const token = newToken();
+    const run = async (argv: string[], extra: Record<string, string> = {}): Promise<{ a: Answer; paths: string[] }> => {
+      const before = fake.requests.length;
+      const a = await runMason(home(), ["replica", ...argv, "--json"], envFor(home(), fake.url, { MASON_TOKEN: token, ...extra }));
+      return { a, paths: fake.requests.slice(before).map((q) => q.path).filter((p) => p.startsWith("/v1/")) };
+    };
+    const SAID = "using MASON_REPLICA=acme/shop (--replica names another; unset MASON_REPLICA for none)\n";
+    for (const [argv, extra, said] of [[["status", "acme/shop"], {}, ""], [["status", "--replica", "acme/shop"], {}, ""], [["status", "acme/shop", "--replica", "acme/shop"], {}, ""],
+      [["status"], { MASON_REPLICA: "acme/shop" }, SAID], [["status", "acme/shop"], { MASON_REPLICA: "other/one" }, ""], [["status", "--replica", "acme/shop"], { MASON_REPLICA: "other/one" }, ""]] as Array<[string[], Record<string, string>, string]>) {
+      const { a, paths } = await run(argv, extra);
+      assert.equal(a.code, 0, `${argv.join(" ")}: ${a.stdout}${a.stderr}`);
+      assert.deepEqual(paths, [ONE], argv.join(" "));
+      assert.equal((JSON.parse(a.stdout) as { replica: { name: string } }).replica.name, "shop");
+      assert.equal(a.stderr, said, argv.join(" "));
+    }
+    const org = await run(["list", "--org", "acme"]);
+    assert.deepEqual([org.a.code, org.paths], [0, [REPLICAS]], org.a.stdout);
+    for (const [argv, message] of [[["status", "acme/shop", "--replica", "acme/other"], "the replica is named twice: acme/shop and --replica acme/other"],
+      [["list", "acme", "--org", "beta"], "the organisation is named twice: acme and --org beta"], [["list", "--org", "Acme"], 'the organisation "Acme" is not an organisation\'s slug'],
+      [["status", "--replica", "acme"], '--replica "acme" is not <org>/<name>'], [["list", "--replica", "acme/shop"], "--replica goes with mason replica create and status"],
+      [["status", "acme/shop", "--org", "acme"], "--org goes with mason replica list"]] as Array<[string[], string]>) {
+      const { a, paths } = await run(argv);
+      assert.equal(a.code, 2, `${argv.join(" ")}: ${a.stdout}`);
+      const e = (JSON.parse(a.stdout) as { error: { code: string; message: string } }).error;
+      assert.deepEqual([e.code, e.message], ["usage", message], argv.join(" "));
+      assert.deepEqual(paths, [], argv.join(" "));
+    }
+  } finally { await fake.close(); }
+});
+
 test("mason replica list and status: the service's replicas, each value held, in the CLI's words; every organisation of the login when none is named; more said; a 404 not_found", async () => {
   const lists: Record<string, Reply> = {
     "/v1/replicas/acme": ok({ replicas: [replicaOf(), replicaOf({ name: "analytics", state: "creating", sizeGb: 100 })], more: true }),

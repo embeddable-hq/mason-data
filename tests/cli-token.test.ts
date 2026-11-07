@@ -127,6 +127,9 @@ test("mason token list and revoke: the tokens that act, each value held, never a
   assert.equal(one.a.code, 0, one.a.stderr);
   assert.match(one.a.stdout, new RegExp(`^2 CI tokens that act, in acme\\n {2}${ID} {3}github-actions: acme/shop, deploy, until ${LATER.replace(/\./g, "\\.")}, last used never, made by ada@example\\.com\\n {2}b2 {3}deploy-bot: acme/shop, deploy and users, until `));
   assert.match(one.a.stdout, /\nTip: acme has more CI tokens than the service lists at once/);
+  // --org names it as the argument does (as mason token revoke and mason replica list take it): the same request, the same answer
+  const org = await hosted(v1, ["list", "--org", "acme"]);
+  assert.deepEqual([org.a.code, org.requests.map((q) => q.path), org.a.stdout], [0, [TOKENS], one.a.stdout]);
   // every organisation the login is an admin or an owner of: acme and gamma, never the viewer's beta
   const all = await hosted(v1, ["list", "--json"], { me: ok(ME_TWO) });
   assert.equal(all.a.code, 0, all.a.stdout);
@@ -173,7 +176,7 @@ test("mason token: a wrong line is refused here, exit 2, and nothing is sent —
     for (const argv of [[], ["frobnicate"], ["create"], ["create", "acme/shop"], ["create", "--replica", "acme"], ["create", "--replica", "acme/shop", "--scope", "admin"],
       ["create", "--replica", "acme/shop", "--scope", "deploy", "--scope", "deploy"], ["create", "--replica", "acme/shop", "--name", ""], ["create", "--replica", "acme/shop", "--name", "a\nb"],
       ["create", "--replica", "acme/shop", "--name", "x".repeat(65)], ["create", "--replica", "acme/shop", "--days", "0"], ["create", "--replica", "acme/shop", "--days", "366"],
-      ["create", "--replica", "acme/shop", "--days", "1.5"], ["revoke"], ["revoke", "../x"], ["revoke", "a", "b"], ["revoke", "a", "--org", "Acme"], ["list", "Acme"], ["list", "--org", "acme"],
+      ["create", "--replica", "acme/shop", "--days", "1.5"], ["revoke"], ["revoke", "../x"], ["revoke", "a", "b"], ["revoke", "a", "--org", "Acme"], ["list", "Acme"], ["list", "--org", "Acme"], ["list", "acme", "--org", "beta"], ["create", "--replica", "acme/shop", "--org", "acme"],
       ["list", "--scope", "deploy"], ["revoke", "a", "--replica", "acme/shop"]]) {
       const a = await runMason(home(), ["token", ...argv, "--json"], envFor(home(), fake.url, { MASON_TOKEN: newToken() }));
       assert.equal(a.code, 2, `${argv.join(" ")}: ${a.stdout}`);

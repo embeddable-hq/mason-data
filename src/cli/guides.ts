@@ -114,11 +114,11 @@ ${keys}
 async function agentGuide(): Promise<string> {
   // imported here, not at the top: the registry imports this file for the HELP usage
   const { STEPS } = await import("./registry.ts");
-  const { FAILURE_CODES } = await import("./command.ts");
+  const { FAILURE_CODES, TIMEOUT_COMMANDS } = await import("./command.ts");
   const { GENERATED_DIR } = await import("./generated-files.ts");
   const w = Math.max(...STEPS.flatMap(([, cs]) => cs.map((c) => c.name.length))) + "mason  --json".length;
   const commands = STEPS.map(([step, cs]) => `  ${step}\n${cs.map((c) => `    ${`mason ${c.name}${Object.hasOwn(c.options, "json") ? " --json" : ""}`.padEnd(w)}  ${c.summary}`).join("\n")}`).join("\n");
-  const codes = Object.entries(FAILURE_CODES).map(([code, what]) => `    ${code.padEnd(12)} ${what}`).join("\n");
+  const codes = Object.entries(FAILURE_CODES).map(([code, what]) => `    ${code.padEnd(13)} ${what}`).join("\n");
   return `DRIVING MASON FROM A CODING AGENT — the same commands a person runs, answered as data
 
   Every command prints for a person, or with --json one JSON object for a program. One prints text alone: mason help
@@ -148,7 +148,7 @@ ${commands}
     0  done
     1  failed, with the reason
     2  the command line is wrong (without --json the usage follows)
-    124  ran out of time: mason wait, mason deploy, mason replica create (nothing stopped)
+    124  ran out of time: ${TIMEOUT_COMMANDS} (nothing stopped)
   The codes:
 ${codes}
 
