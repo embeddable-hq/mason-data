@@ -109,6 +109,26 @@ test("mason wait <generated table>: ready once a base change committed before th
   assert.deepEqual([sayAgain("a", "a", 0, SAY_AGAIN_MS - 1), sayAgain("a", "a", 0, SAY_AGAIN_MS), sayAgain("b", "a", 0, 1)], [false, true, true]);
 });
 
+test("mason wait <table>…: synced tables named wait for their own first syncs; a generated table alone waits for its chain; a table not added or not there refused with the way out", () => {
+  const waitPick = commands.waitPick;
+  assert.equal(typeof waitPick, "function", "mason wait names synced tables (src/cli/commands.ts waitPick)");
+  const daily = { table: "public.daily" } as GeneratedStatus;
+  const s = { tables: [t({ table: "public.orders", added: true }), t({ table: "billing.invoices", added: true }), t({ table: "public.logs" })], generatedTables: [daily] };
+  assert.deepEqual(waitPick(s, ["orders", "billing.invoices", "public.orders"]), { tables: ["public.orders", "billing.invoices"] });
+  assert.deepEqual(waitPick(s, ["daily"]), { generated: "daily" });
+  assert.deepEqual(waitPick(s, ["daily", "orders"]), { message: "daily is a generated table, which is waited for alone", code: "usage",
+    fix: "mason wait daily, then mason wait orders", next: [["mason wait --help", "what a wait waits for"]] });
+  assert.deepEqual(waitPick(s, ["logs"]), { message: "public.logs is not added, so Mason does not sync it", code: "not_found", fix: "mason add logs", next: [["mason status", "the added tables"]] });
+  const miss = waitPick(s, ["order"]) as Failure;
+  assert.equal(miss.code, "not_found");
+  assert.match(miss.message, /^there is no added or generated table "order" — did you mean `orders`\?/);
+  // and the wait itself reads the named tables alone: one added and synced is ready though another added one is still syncing
+  const synced = t({ table: "public.orders", added: true, copy: { phase: "done", rowsCopied: 7, updatedAt: at(5) } });
+  const syncing = t({ table: "public.lines", added: true, rows: 1000, copy: { phase: "copying", rowsCopied: 250, updatedAt: "" } });
+  assert.equal(readiness(state({ tables: [synced, syncing] })).ready, false);
+  assert.equal(readiness(state({ tables: [synced, syncing].filter((x) => x.table === "public.orders") })).ready, true);
+});
+
 test("mason wait shows a copy's progress: of the table's estimate, never 100% until it is done, never back once past a stale estimate", () => {
   assert.equal(copyProgress("public.t", 500, 1000), "public.t: syncing 50% · 500 of ~1,000 rows", "a run's state without the chunks' progress");
   assert.equal(copyProgress("public.t", 1500, 1000), "public.t: syncing 99% · 1,500 rows · past the ~1,000 estimated", "an estimate the copy passed: held at 99 %, said");
@@ -570,10 +590,25 @@ test("mason add and mason remove with Mason stopped: the entry written and cut a
   assert.match(person.stdout, /✓ Added public\.customers to mason\/sources\/shop\.yml: id, name\n {4}sync: off \(the default\): after its first sync it is read again only by mason sync customers — mason add customers --sync "poll 5m" polls it every 5 minutes\n {4}key added: id \(a synced table always has its key\)\n/);
   assert.match(person.stdout, /Next:\n {2}mason start +Mason in the background, for this project: the first sync of every added table begins\n/);
   assert.equal(fs.readFileSync(s.file, "utf8"), `kind: postgres\nurl: ${s.url}\ntables:\n  orders: {}\n  customers:\n    columns: [id, name]\n`);
+  // remove --dry-run: the entries that would go, the file not written (and neither the run nor the database asked)
+  const fileBefore = fs.readFileSync(s.file, "utf8");
+  const dry = await run(["remove", "customers", "orders", "--dry-run", "--json"]);
+  assert.equal(dry.code, 0, dry.stdout + dry.stderr);
+  assert.deepEqual(JSON.parse(dry.stdout), { dryRun: true, removedTables: ["public.customers", "public.orders"], file: s.file,
+    next: [{ command: "mason remove customers orders", what: "remove them" }] });
+  const dryPerson = await run(["remove", "customers", "--dry-run"]);
+  assert.equal(dryPerson.code, 0, dryPerson.stdout + dryPerson.stderr);
+  assert.match(dryPerson.stdout, /^mason remove would remove public\.customers; nothing was changed\n {2}from +mason\/sources\/shop\.yml\n(.*\n)*Tip: what an earlier run synced of it would be dropped at the next mason start\n/);
+  const dryUnknown = await run(["remove", "customer", "--dry-run", "--json"]);
+  assert.equal(dryUnknown.code, 1);
+  assert.match((JSON.parse(dryUnknown.stdout) as { error: { message: string; why: string } }).error.why, /shop\.yml names no table customer — did you mean `customers`\?/);
+  assert.equal(fs.readFileSync(s.file, "utf8"), fileBefore, "a dry run writes nothing");
   // remove: the entry cut; the copy an earlier run made goes at the next start
   const rm = await run(["remove", "customers", "--json"]);
   assert.equal(rm.code, 0, rm.stdout + rm.stderr);
   assert.deepEqual(JSON.parse(rm.stdout).removed, ["public.customers"]);
+  assert.deepEqual(JSON.parse(rm.stdout).removedTables, ["public.customers"], "removedTables, the clearer name, beside removed until 1.0");
+  assert.equal(JSON.parse(rm.stdout).dryRun, false);
   assert.deepEqual(nextOf(rm.stdout), ["mason start", "mason status"]);
   const rmPerson = await run(["remove", "orders"]);
   assert.equal(rmPerson.code, 0, rmPerson.stdout + rmPerson.stderr);
@@ -611,13 +646,15 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
   let runEdits = 0;
   // usage over time, as the run's samples answer it (src/duck/usage.ts): mason usage asks it
   const usageAsks: Array<{ since: string; until: string; stepSeconds?: number }> = [];
+  // the tables each POST /api/sync asked the sync to poll (mason sync)
+  const polled: string[][] = [];
   const ctx: RunContext = {
     page: false, users: { file: path.join(app, ".mason", "users.json"), apiKey: "k".repeat(48), database: "shop", postgresUrl: "postgresql://127.0.0.1:1/shop" },
     source: parsed.source, facts: () => facts, warnings: [], replication: () => null, port: 0, token: "t0ken-of-the-run",
     folder: () => s.folder, root: app, home: path.join(app, ".mason"), version: "test", startedAt: Date.now(), sources: () => { const r = read(); return { file: "message" in r ? null : r, problem: null }; }, sourcesChanged: () => {}, log: () => {},
     readSource: () => { runEdits++; return read(); }, runUrl: s.url, listener: { running: () => [], cancel: (session) => ({ unknown: session }), openSessions: () => ({ open: 0, byClient: [] }) },
     logs: { capacity: 2000, recent: () => [] },
-    duck: { copies: () => [], file: path.join(s.root, "duck.db"), poll: async () => ({ at: "", tables: [] }), stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
+    duck: { copies: () => [], file: path.join(s.root, "duck.db"), poll: async (tables) => { polled.push(tables); return { at: "2026-11-07T10:00:00.000Z", tables: [] }; }, stream: async () => null, disk: () => ({ path: "/x", freeBytes: null, projectedBytes: null }),
       requests: { days: 7, unsupported: async () => [], page: async () => ({ requests: [], before: null }), slow: async () => [], refused: async () => ({ total: 0, refused: [] }), summary: async () => { throw new Error("not asked here"); }, window: async () => { throw new Error("not asked here"); }, clients: async () => ({ clients: [], total: { clients: 0, sessions: 0 } }), slowest: async () => [], durationsBy: async () => new Map([[Date.parse(sample.at), { p50: sample.durationP50Ms, p95: sample.durationP95Ms }]]), 
         lastUsed: async (u) => u.map(() => null) }, events: { days: 7, recent: async () => [] },
       usage: { days: 7, sampleSeconds: 60, samples: async (o) => { usageAsks.push(o); return [sample]; }, copySizes: async () => [{ table: "public.orders", bytes: 3 * 2 ** 20, at: "2026-10-28T09:10:00.000Z" }], statementTotals: () => ({ completed: 0, refused: 0, failed: 0, cancelled: 0, completedMs: 0 }), lastDurations: () => null },
@@ -691,6 +728,35 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       assert.match(huge.stderr, /mason usage: --since "99999999999d" is further back than a time reaches/);
       assert.doesNotMatch(huge.stderr, /RangeError|Invalid time value/);
       assert.equal(usageAsks.length, asked, "refused before the run is asked");
+    } finally { writeRunning(s.root, null); }
+    // MASON SYNC --ALL: every table the sources file names, in one POST /api/sync; never beside names; none added is nothing yet
+    fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables:\n  customers: {}\n  orders: {}\n`);
+    writeRunning(s.root, { port: ctx.port, token: ctx.token });
+    try {
+      const all = await runMason(app, ["sync", "--all", "--json"], matrixEnv());
+      assert.equal(all.code, 0, all.stdout + all.stderr);
+      assert.deepEqual(polled, [["public.customers", "public.orders"]]);
+      assert.deepEqual(nextOf(all.stdout), ["mason sync --all", "mason status"]);
+      const both = await runMason(app, ["sync", "orders", "--all"], matrixEnv());
+      assert.equal(both.code, 2);
+      assert.match(both.stderr, /mason sync: --all syncs every added table: name tables \(orders\) or --all, not both/);
+      const neither = await runMason(app, ["sync", "--json"], matrixEnv());
+      assert.equal(neither.code, 2);
+      assert.match((JSON.parse(neither.stdout) as { error: { message: string } }).error.message, /, or mason sync --all$/);
+      // MASON WAIT <table>: the named synced table alone, its first sync not begun here (no copies), so out of time
+      const named = await runMason(app, ["wait", "customers", "--timeout", "1", "--json"], matrixEnv());
+      assert.equal(named.code, 124, named.stdout + named.stderr);
+      const w = JSON.parse(named.stdout) as { tables: Array<{ table: string }>; waiting: string[]; next: Array<{ command: string }> };
+      assert.deepEqual([w.tables.map((x) => x.table), w.waiting, w.next[0]!.command],
+        [["public.customers"], ["public.customers: waiting for its first sync to start"], "mason wait customers"]);
+      const notThere = await runMason(app, ["wait", "custommers", "--json"], matrixEnv());
+      assert.equal(notThere.code, 1);
+      assert.match((JSON.parse(notThere.stdout) as { error: { message: string } }).error.message, /^there is no added or generated table "custommers" — did you mean `customers`\?/);
+      fs.writeFileSync(s.file, `kind: postgres\nurl: ${s.url}\ntables: {}\n`);
+      const none = await runMason(app, ["sync", "--all", "--json"], matrixEnv());
+      assert.equal(none.code, 1, none.stdout + none.stderr);
+      assert.equal((JSON.parse(none.stdout) as { error: { code: string } }).error.code, "nothing_yet");
+      assert.equal(polled.length, 1, "nothing polled for no table, nor for a refused command line");
     } finally { writeRunning(s.root, null); }
     // WHAT TO RUN NEXT, Mason up (a review finding): --sync alone on a table already added starts no copy (it is caught up
     // by one poll), so the next step is mason status, never mason wait's "the copy has started"; a new table's is mason wait

@@ -40,7 +40,7 @@ import { newRolesText, rolesFile } from "./roles.ts";
 import { newSourceText, OLD_TABLES_DIR, parseSourceText, shownPath, sourceFileNames, sourceNameFor, sourceOf, sourcesDir } from "./sources.ts";
 
 
-export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <name>] [--database <name>] [--folder <dir>] [--remote] [--skip-check] [--json]
+export const INIT_USAGE = `usage: mason init [- | <postgres url> | demo] [--name <name>] [--database <name>] [--folder <dir>] [--remote] [--skip-check] [--json]
 
   Makes this folder a Mason project — run it in your app's folder. It checks it can read the database (and writes
   nothing when it cannot), then creates:
@@ -56,6 +56,9 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   .gitignore. Every other mason command then works anywhere in this folder. A source file already here (a clone of the
   project) is kept, and a bare mason init reads the variable it names; a roles file already here is kept. In a project
   with no source file (an older Mason's), it writes that file alone, and the roles file when there is none.
+  mason init - reads the URL from stdin (one line, from a pipe), so its password stays off the command line, where ps
+  shows it to this machine's users and your shell keeps it in its history: a URL with a password given as the argument
+  is still taken, with a warning on stderr.
   mason init demo, in a new folder, makes a project on a demo database Mason hosts itself (a shop: customers, products,
   orders, order_items): mason start makes it in .mason/demo/ and changes it every few seconds. Three of its tables are
   added; the fourth is yours to add after mason start (mason add ${DEMO_TABLE_TO_ADD}), to watch its first sync begin.
@@ -64,10 +67,10 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
   already there is kept.
 
     mason init                                          MASON_DATABASE_URL, else DATABASE_URL (.env or the shell)
-    mason init postgres://me:secret@localhost:5432/shop
+    mason init - < db-url.txt                           the URL on stdin, written to .env, never on the command line
     mason init demo                                     a demo database Mason hosts itself: nothing to install
     mason init --folder db/mason --name shop-admin      the project's files elsewhere; another name
-    mason init postgres://me:secret@db.example.com/shop --remote
+    mason init --remote                                 the database in .env is on another machine
 
   --name <name>     the project's name, which its replication slot is named for (default: this folder's)
   --database <name> the database name a tool connects with, written as database: in the source file (default: none
@@ -84,7 +87,7 @@ export const INIT_USAGE = `usage: mason init [<postgres url> | demo] [--name <na
 
 export const INIT: CommandSpec = {
   name: "init",
-  summary: "make this folder a Mason project on your Postgres: mason init (its URL from .env), mason init postgres://… or demo",
+  summary: "make this folder a Mason project on your Postgres: mason init (its URL from .env), mason init - (from stdin) or demo",
   usage: INIT_USAGE,
   options: { name: { type: "string" }, database: { type: "string" }, folder: { type: "string" }, remote: { type: "boolean" }, "skip-check": { type: "boolean" }, json: { type: "boolean" } },
   json: ["name", "root", "folder", "config", "demo", "source", "roles", "generated", "database", "warnings", "next"],
@@ -160,7 +163,63 @@ const addEnvLine = (root: string, line: string): void => appendEnvLine(root, lin
 /** A `.env` line as it is said: its value's password masked. */
 const maskedLine = (line: string): string => { const eq = line.indexOf("="); return `${line.slice(0, eq)}=${maskedUrl(line.slice(eq + 1))}`; };
 
-export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io; version?: string; env?: NodeJS.ProcessEnv } = {}): Promise<number> {
+/** The argument that reads the URL from stdin: `mason init -`. */
+export const STDIN_ARG = "-";
+/** The most of stdin `mason init -` reads (a URL is far shorter), and how long it waits for a pipe left open and silent. */
+const STDIN_MAX_BYTES = 8192, STDIN_TIMEOUT_MS = 10_000;
+
+/** What a stream must be for `readPipedUrl`: process.stdin, or a test's Readable. */
+export type UrlInput = NodeJS.ReadableStream & { isTTY?: boolean };
+
+/**
+ * THE URL FROM A PIPE (`mason init -`): stdin read whole, bounded in bytes and in time, one trailing newline trimmed;
+ * a terminal, nothing, more than one line, too much or nothing in time is said by kind — never by what was read, which
+ * may hold a password.
+ */
+export function readPipedUrl(input: UrlInput, max = STDIN_MAX_BYTES, timeoutMs = STDIN_TIMEOUT_MS): Promise<{ url: string } | { problem: string }> {
+  const way = "pipe one line into it (mason init - < db-url.txt), or put the URL in .env as DATABASE_URL=… and run mason init";
+  if (input.isTTY === true) return Promise.resolve({ problem: `mason init - reads the URL from a pipe, and stdin is a terminal: ${way}` });
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let size = 0, ended = false;
+    const finish = (r: { url: string } | { problem: string }): void => {
+      if (ended) return;
+      ended = true;
+      clearTimeout(timer);
+      input.removeListener("data", onData);
+      input.removeListener("end", onEnd);
+      input.removeListener("error", onError);
+      input.pause();
+      resolve(r);
+    };
+    const onData = (c: Buffer | string): void => {
+      const b = typeof c === "string" ? Buffer.from(c) : c;
+      size += b.length;
+      if (size > max) { finish({ problem: `stdin held more than ${max} bytes, which is no URL: ${way}` }); return; }
+      chunks.push(b);
+    };
+    const onEnd = (): void => {
+      const text = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
+      if (text.trim() === "") finish({ problem: `stdin was empty: ${way}` });
+      else if (/[\r\n]/.test(text)) finish({ problem: `stdin held more than one line: ${way}` });
+      else finish({ url: text.trim() });
+    };
+    const onError = (e: Error): void => finish({ problem: `stdin could not be read (${e.message}): ${way}` });
+    const timer = setTimeout(() => finish({ problem: `nothing ended on stdin within ${timeoutMs / 1000} s: ${way}` }), timeoutMs);
+    input.on("data", onData);
+    input.on("end", onEnd);
+    input.on("error", onError);
+    input.resume();
+  });
+}
+
+/** The warning for a URL whose password was given as the argument, naming the safer forms — `variable` the one the
+ *  sources file would name (DATABASE_URL, or MASON_DATABASE_URL for a database other than the app's) — never the password. */
+export const argvPasswordWarning = (variable: string): string =>
+  "the URL given on the command line holds its password, which ps shows to this machine's users and your shell keeps in its history: " +
+  `put it in .env as ${variable}=… and run mason init, or pipe it in with mason init - < db-url.txt`;
+
+export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io; version?: string; env?: NodeJS.ProcessEnv; stdin?: UrlInput } = {}): Promise<number> {
   const io = deps.io ?? STDIO;
   const { out: say } = io;
   const f = parseCommand(INIT, argv);
@@ -237,7 +296,15 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const keptVar = keptFile !== null && !("problems" in keptFile) && "env" in keptFile.url ? keptFile.url.env : null;
 
   // the demo's URL names a port free now, and is the one place the port is kept: mason start reads it from there
-  let url = demo ? demoUrl(await freePort(DEMO_PORT)) : f.positionals[0] ?? null;
+  // `mason init -`: the URL from a pipe, so its password never reaches the command line (ps, the shell's history)
+  const piped = f.positionals[0] === STDIN_ARG;
+  let url: string | null;
+  if (demo) url = demoUrl(await freePort(DEMO_PORT));
+  else if (piped) {
+    const r = await readPipedUrl(deps.stdin ?? process.stdin);
+    if ("problem" in r) return failed("init", { message: r.problem, code: "usage", usage: INIT_USAGE }, { json, io });
+    url = r.url;
+  } else url = f.positionals[0] ?? null;
   let from = "";
   let envFile: string | null = null; // the folder's file the URL was read from (.env.local or .env): ignored with .mason/
   let envVariable: string | null = null; // the variable envFile holds the URL in, set with it: the warning names it
@@ -253,16 +320,16 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
       if (v === null) {
         return failed("init", { message: `which database? ${file} names url: \${${keptVar}}, and this folder has no ${keptVar}`, code: "usage",
           why: `mason start reads the URL from ${keptVar}, so mason init checks that one`,
-          fix: `put it in this folder's .env as ${keptVar}=postgres://… (the variable ${file} names), or give its URL on the command line: mason init writes it there`,
-          next: [["mason init postgres://user:password@localhost:5432/your_app", `its URL, given: written to .env as ${keptVar}`], ["mason init", `again, once .env has ${keptVar}`]] }, { json, io });
+          fix: `put it in this folder's .env as ${keptVar}=postgres://… (the variable ${file} names), or pipe its URL in (mason init - < db-url.txt): mason init writes it there`,
+          next: [["mason init - < db-url.txt", `its URL on stdin: written to .env as ${keptVar}`], ["mason init", `again, once .env has ${keptVar}`]] }, { json, io });
       }
       found = { url: v.value, variable: keptVar, from: `${keptVar} in ${v.from}`, file: v.file };
     } else found = appDatabaseUrl(root, deps.env ?? process.env);
     if (!found) {
       // the fixes ARE the next commands, so a coding agent reads them as such too
       return failed("init", { message: "which database? none is named, and this folder has no MASON_DATABASE_URL or DATABASE_URL", code: "usage",
-        fix: "give its URL on the command line, or put it in this folder's .env as DATABASE_URL=postgres://… (your app's, usually) or as MASON_DATABASE_URL=postgres://… (read first: a database other than your app's)",
-        next: [["mason init postgres://user:password@localhost:5432/your_app", "its URL, given"], ["mason init", "again, once .env has MASON_DATABASE_URL or DATABASE_URL"],
+        fix: "pipe its URL in (mason init - < db-url.txt), or put it in this folder's .env as DATABASE_URL=postgres://… (your app's, usually) or as MASON_DATABASE_URL=postgres://… (read first: a database other than your app's)",
+        next: [["mason init - < db-url.txt", "its URL on stdin: written to .env"], ["mason init", "again, once .env has MASON_DATABASE_URL or DATABASE_URL"],
           ["mason init demo", "a demo database Mason makes itself: nothing to install"]] }, { json, io });
     }
     url = found.url;
@@ -271,14 +338,20 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
     envVariable = found.variable;
   }
   // a problem names where the URL is (DATABASE_URL in .env, the URL given), never the value (src/cli/preflight.ts shownUrl)
-  const urlName = found !== null ? found.from : demo ? "the demo database's URL" : "the URL given";
+  const urlName = found !== null ? found.from : demo ? "the demo database's URL" : piped ? "the URL read from stdin" : "the URL given";
   const parsed = parseSource(url, urlName);
   if ("problem" in parsed) return usage(parsed.problem);
+  // A PASSWORD ON THE COMMAND LINE: taken (refusing it would break scripts), and said on stderr with the safer forms;
+  // the password itself is never repeated
+  const argvPassword = !demo && !piped && found === null && parsed.source.password !== "";
   const remote = f.values.remote === true || sourceless?.config.remote === true;
   // a kept file's variable gets this URL in .env when the folder's files give it none; one they give another value is said
   const keptValue = keptVar === null ? null : appEnvValue(root, keptVar, {});
   const where = kept === null ? urlVariable(root, url, found)
     : { variable: keptVar ?? "", line: keptVar !== null && keptValue === null ? `${keptVar}=${url}` : null };
+  // the variable .env would hold it in: the one the sources file names (MASON_DATABASE_URL for another database than the app's)
+  const argvWarning = argvPassword ? argvPasswordWarning("problem" in where || where.variable === "" ? "DATABASE_URL" : where.variable) : null;
+  if (argvWarning !== null) io.err(`! ${argvWarning}`);
   if ("problem" in where) return failed("init", { message: where.problem, code: "refused" }, { json, io });
 
   // WHAT IT DOES, AS A CHECKLIST (each item it is doing, with a spinner left of it that turns into a checkmark when
@@ -290,6 +363,8 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   const db = maskedUrl(parsed.source.url);
   line(st.bold(`Making ${name} a Mason project in ${root}`));
   const notes: string[] = [];
+  // a person read the warning on stderr already; an agent reads warnings in the answer too
+  if (argvWarning !== null && json) notes.push(argvWarning);
   if (keptValue !== null && keptValue.value !== url) notes.push(`${kept} reads ${keptVar} from ${keptValue.from}, which is ${maskedUrl(keptValue.value)}: mason start syncs from that one, not ${db}`);
   let database: { url: string; from: string | null; version: string | null; tables: number | null } = { url: db, from: from ? from.slice(2, -1) : null, version: null, tables: null };
   const rel = (p: string): string => path.relative(root, p) || ".";

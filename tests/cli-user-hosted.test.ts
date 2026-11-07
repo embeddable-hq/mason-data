@@ -77,6 +77,8 @@ test("mason user --replica: each subcommand sends the run's own /api/users reque
   r = await hosted(v1, ["remove", "acme", "--json"], { extra: { MASON_REPLICA: R }, names: ["acme"] });
   assert.equal(r.a.stderr, "using MASON_REPLICA=acme/shop (--replica names another; unset MASON_REPLICA for none)\n", "under --json too: stderr, so stdout stays one document");
   assert.equal((JSON.parse(r.a.stdout) as { replica: string }).replica, R, "the answer names the replica it acted on");
+  const gone = JSON.parse(r.a.stdout) as { removed: { name: string }; removedUser: { name: string } };
+  assert.deepEqual([gone.removedUser, gone.removedUser.name], [gone.removed, "acme"], "removedUser, the clearer name, beside removed until 1.0");
   r = await hosted(v1, ["list", "--replica", R], { extra: { MASON_REPLICA: "other/one" }, names: ["acme"] });
   assert.deepEqual(r.requests.map((q) => q.path), [USERS]);
   assert.equal(r.a.stderr, "");
@@ -246,6 +248,10 @@ test("the same answer prints the same output: mason user --replica, whose servic
         // the same, and the replica it acted on, which a project's answer never has
         assert.deepEqual(rrest, { replica: R, ...lrest }, line);
         assert.ok(!("replica" in lrest), line);
+        if (argv[0] === "remove") {
+          const gone = lrest as { removed?: { name: string }; removedUser?: { name: string } };
+          assert.deepEqual([gone.removedUser?.name, gone.removedUser], ["bot", gone.removed], `${line}: removedUser, beside removed until 1.0`);
+        }
         assert.deepEqual(rn, ln.map((n) => ({ ...n, command: onReplica(n.command) })), `${line}: next`);
         continue;
       }
