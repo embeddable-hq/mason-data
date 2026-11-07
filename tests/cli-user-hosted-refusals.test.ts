@@ -286,9 +286,12 @@ test("mason user --replica: an answer nested deeper than any documented shape â€
 
 test("mason user --replica: what is tested is what is written (PR 645's class round) â€” an attribute's value of 10 of the token's body and a lone surrogate prints the surrogate as ?, never --json's \\udc00; a user's name of 10 of the body followed in the list by the CLI's word that is its 11th is refused at the write by the output's gate", { timeout: 120_000 }, async () => {
   const bodyOf = (r: Req): string => String(r.headers.authorization).replace(/^Bearer masondata_ci_/, "");
-  // a lone surrogate after 10 of the token's body: whatever its next character, the escape is never written
+  // a lone surrogate after 10 of the token's body: whatever its next character, the escape is never written. The token
+  // is fixed: the gate reads past punctuation, re-cased, so a random body whose 11th character is the first letter
+  // written after the value (`l` of lastUsedNote) made an honest 11 in a row and the gate refused, about 1 run in 10
   {
-    const { a, token } = await hosted((r) => ({ status: 200, json: JSON.stringify((listAnswer([row("metabase", { attributes: { tenant: "TENANT" } })]) as { body: unknown }).body).replace("TENANT", `${bodyOf(r).slice(0, 10)}\\udc00`) }), ["list", "--replica", R, "--json"], { names: ["metabase"] });
+    const token = ["masondata", "ci", "k7mw2qx9vbZTr4Lp8Zn3Hc6Df1Gs5Jy0Ue-Wa_Ob2Xm"].join("_"); SECRETS.push(token);
+    const { a } = await hosted((r) => ({ status: 200, json: JSON.stringify((listAnswer([row("metabase", { attributes: { tenant: "TENANT" } })]) as { body: unknown }).body).replace("TENANT", `${bodyOf(r).slice(0, 10)}\\udc00`) }), ["list", "--replica", R, "--json"], { names: ["metabase"], extra: { MASON_TOKEN: token } });
     assert.equal(a.code, 0, a.stdout + a.stderr);
     assert.ok(!a.stdout.includes("\\u"), a.stdout);
     assert.match(a.stdout, /"tenant": "[A-Za-z0-9_-]{10}\?"/);
