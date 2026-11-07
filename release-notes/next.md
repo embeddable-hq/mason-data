@@ -44,6 +44,9 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   statement to run on that database, and exits 1; run it, as a user that may drop a replication slot, then confirm on
   the replica's page in the service's web app, and the deletion finishes. `mason replica status` shows a deletion in
   progress the same way, and a replica deleted from the web app as being deleted.
+- **`mason doctor`'s warnings about a role that may write end in one plain sentence**: "Mason only reads, but, for
+  security reasons, we recommend using a role that only reads". The warning codes, and the statements that make such
+  a role, are unchanged.
 - **Every list flag takes a comma list or the flag repeated, meaning the same**: `mason add orders --columns id
   --columns status` is `--columns id,status`, and so for `--include`, `--key`, `mason logs --outcome`, `mason user add
   --from` and `mason token create --scope` (`--scope deploy,users`). `mason user add --set` stays one value a flag: a value may hold a comma.
@@ -62,6 +65,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   same units as an age (`2 hours` too) and still refuse a bare number, which as a time could be a timestamp. A `sync:`
   interval and a `target_lag:` take `d` (`poll 1d`); a bare number in the sources file is still refused, now with the
   line to write (`poll 30s`).
+- **`mason <command> --help` reads in the order you need it**: the usage line, a short description, the examples and
+  every flag first; then the longer explanations, and the `--json` answer's shape last (`The --json answer: …`), where
+  it once filled the flags in the middle (about 70 lines in `mason status --help`). The text is the same, moved;
+  `mason user --help` gains a line for each of its flags.
 - **A mistyped option is answered with the closest one and the command's synopsis** (`there is no option --jsn — did you
   mean --json?`), not with the whole usage; `mason <command> --help` still prints all of it.
 - **The commands that name a hosted replica all take it the same ways**: `mason replica create` and `status` take

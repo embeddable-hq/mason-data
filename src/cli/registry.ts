@@ -47,6 +47,17 @@ export const DEV: CommandSpec & { needs: "project" } = {
   its sync: says replication). It returns once Mason is up; run it again any time (it says so when Mason is
   already running). The synced data and Mason's state stay between runs: the next start resumes.
 
+    mason start
+    mason start --attach      in the foreground: Ctrl-C stops it
+    MASON_PG_HOST=0.0.0.0 mason start --self-signed-tls   the Postgres API for other machines, over TLS
+
+  --attach            stay in the foreground (Ctrl-C stops Mason)
+  --self-signed-tls   the Postgres API requires TLS, from a certificate made for this project in .mason/ (kept and
+                      served again by every later start with the flag); not with MASON_PG_TLS_CERT / _KEY
+  --ui-port <n>       the port of its web page and of the mason commands, on 127.0.0.1 (default ${DEFAULT_UI_PORT}, or the
+                      next free one); MASON_UI_PORT on a server, never the Postgres API's (MASON_PG_PORT)
+  --json              as data, once it is up: { running, pid, postgres: { url, host, port, database, sslmode }, next }
+
   After its first sync, each table is kept current as the sources file's sync: says — at the top for every table, or
   on a table's entry: off (the default, which mason init writes) reads it again only when you run mason sync <table>;
   poll <interval> (poll 5s, poll 5m, poll 1h) polls it with SELECTs at that interval; replication reads its changes
@@ -81,17 +92,6 @@ export const DEV: CommandSpec & { needs: "project" } = {
   any other address is refused.
 
   ${PROJECT_LINE}
-
-    mason start
-    mason start --attach      in the foreground: Ctrl-C stops it
-    MASON_PG_HOST=0.0.0.0 mason start --self-signed-tls   the Postgres API for other machines, over TLS
-
-  --attach            stay in the foreground (Ctrl-C stops Mason)
-  --self-signed-tls   the Postgres API requires TLS, from a certificate made for this project in .mason/ (kept and
-                      served again by every later start with the flag); not with MASON_PG_TLS_CERT / _KEY
-  --ui-port <n>       the port of its web page and of the mason commands, on 127.0.0.1 (default ${DEFAULT_UI_PORT}, or the
-                      next free one); MASON_UI_PORT on a server, never the Postgres API's (MASON_PG_PORT)
-  --json              as data, once it is up: { running, pid, postgres: { url, host, port, database, sslmode }, next }
 `,
   options: {
     "ui-port": { type: "string" }, attach: { type: "boolean", default: false }, json: { type: "boolean", default: false },

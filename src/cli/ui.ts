@@ -47,6 +47,25 @@ export const UI: CommandSpec & { needs: "run" } = {
   the URL to paste, or remove one); and Observability: the statements running and that ran (mason logs --requests,
   cancel one), usage over time (mason usage), and the sync's events (mason logs --events).
 
+    mason ui
+    mason ui --no-open        print the URL, open no browser
+    mason ui --json
+    mason ui --ssh deploy@mason.example.com
+    mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 mason"
+    mason ui --ssh deploy@mason.example.com --mason "cd /var/lib/mason && mason" --timeout 120 --no-open
+    mason ui --replica acme/shop     a replica's page on a hosted Mason service
+    mason ui --bridge --local-port 51000      what --ssh runs on the server; its stdout is a stream, not for reading
+
+  --no-open            print the URL only (as when its output is not a terminal: a browser opens only for one)
+  --ssh <target>       the server, as you give it to ssh: user@server, or a Host of your ssh config
+  --mason <command>    how to run mason on the server (default mason); a shell's text, kept to ssh's command line
+  --timeout <duration> how long ssh and the server have to answer (default ${DEFAULT_TIMEOUT_S}s; a bare number is seconds;
+                       2m): a passphrase or a touch counts; past it, exit 124
+  --bridge             the server's end of --ssh, on stdin and stdout
+  --local-port <n>     the port the browser names, for --bridge: the laptop's
+  --replica <org>/<name> a replica on a hosted Mason service, as the service lists it
+  --json               as data: its shape is at the end
+
   The URL carries this run's token: the page trades it for a cookie at once and drops it from the address
   bar. It is printed for you alone, like a user's password: paste it nowhere else. Every mason start makes a new
   token, so after a restart run mason ui again.
@@ -57,35 +76,18 @@ export const UI: CommandSpec & { needs: "run" } = {
   carries a ticket for one use, never the run's token, which stays on the server. The server's Mason must be this
   version or close to it, and must be a command ssh can run: --mason says how, for a container or a folder.
 
-    mason ui
-    mason ui --no-open        print the URL, open no browser
-    mason ui --json
-    mason ui --ssh deploy@mason.example.com
-    mason ui --ssh deploy@mason.example.com --mason "docker exec -i mason-mason-1 mason"
-    mason ui --ssh deploy@mason.example.com --mason "cd /var/lib/mason && mason" --timeout 120 --no-open
-    mason ui --replica acme/shop     a replica's page on a hosted Mason service
-    mason ui --bridge --local-port 51000      what --ssh runs on the server; its stdout is a stream, not for reading
-
   --replica opens the page of a replica on a hosted Mason service (else MASON_REPLICA, unless --ssh or --bridge names
   the target), for the organisation's owner alone: the service answers an address that opens it once, for a few
   minutes. The page is read-only: the service refuses changes through it, so add or remove users with mason user …
   --replica. It needs no project here, and goes with --no-open and --json alone. Opened in your browser, the address is
   not printed: run it again for another tab. A replica not ready yet is said, with when to try again.
 
-  --no-open            print the URL only (as when its output is not a terminal: a browser opens only for one)
-  --ssh <target>       the server, as you give it to ssh: user@server, or a Host of your ssh config
-  --mason <command>    how to run mason on the server (default mason); a shell's text, kept to ssh's command line
-  --timeout <duration> how long ssh and the server have to answer (default ${DEFAULT_TIMEOUT_S}s; a bare number is seconds;
-                       2m): a passphrase or a touch counts; past it, exit 124
-  --bridge             the server's end of --ssh, on stdin and stdout
-  --local-port <n>     the port the browser names, for --bridge: the laptop's
-  --replica <org>/<name> a replica on a hosted Mason service, as the service lists it
-  --json               as data: { url (with this run's token; with --ssh a ticket for one use; null when Ctrl-C came
-                       before the server answered, as port is, exit 0; with --replica the one-use address), port, server,
-                       project, version (with --ssh: the server's Mason, for what its answer may lack), replica
-                       (with --replica: "<org>/<name>"), expiresAt (with --replica: until when the address opens it)
-                       }, next; it never opens a
-                       browser. With --ssh it then holds the tunnel: the end is on stderr, exit 0 for Ctrl-C or SIGTERM, 1 otherwise
+  The --json answer: { url (with this run's token; with --ssh a ticket for one use; null when Ctrl-C came
+    before the server answered, as port is, exit 0; with --replica the one-use address), port, server,
+    project, version (with --ssh: the server's Mason, for what its answer may lack), replica
+    (with --replica: "<org>/<name>"), expiresAt (with --replica: until when the address opens it)
+    }, next; it never opens a
+    browser. With --ssh it then holds the tunnel: the end is on stderr, exit 0 for Ctrl-C or SIGTERM, 1 otherwise
 `,
   options: { "no-open": { type: "boolean", default: false }, json: { type: "boolean", default: false }, ssh: { type: "string" }, mason: { type: "string" },
     timeout: { type: "string" }, bridge: { type: "boolean", default: false }, "local-port": { type: "string" }, replica: { type: "string" } },

@@ -66,17 +66,6 @@ export const TOKEN: CommandSpec = {
   an owner of the organisation makes, lists and revokes them, signed in as a person (mason login): a CI token
   makes none.
 
-  create makes one and prints it ONCE: the service does not keep it, and nothing shows it again, so store it at once
-  (as MASON_TOKEN in CI's secrets). It is alone on the first line printed, never broken, or, with --json, in the
-  one field token.value of the document, so a setup step can pipe it straight into a secret store. Nothing else
-  this command prints ever holds it.
-
-  list says the CI tokens of <org> that still act (never a token itself), or of every organisation this login is
-  an admin or an owner of when none is named; revoke ends one at once, by its id (list says it), in --org, else in
-  the one organisation this login is an admin or an owner of.
-
-  The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default.
-
     mason token create --replica acme/shop --name github-actions
     mason token create --replica acme/shop --scope deploy --scope users --days 30 --json
     mason token list acme
@@ -88,14 +77,27 @@ export const TOKEN: CommandSpec = {
   --name <name>            create: what the list calls it, 1 to 64 characters (default ${DEFAULT_NAME})
   --days <n>               create: the days it acts, 1 to ${MAX_DAYS} (default ${DEFAULT_DAYS})
   --org <org>              list: the organisation, in place of the argument; revoke: the organisation it is of
-  --json                   as data: { token (create: { id, value (the token itself, this once), name,
-                           replica, scopes, createdAt, expiresAt }), tokens (list: [{ id, name, replica, scopes,
-                           madeBy, createdAt, lastUsedAt (null: never used), expiresAt }]), more (list: true when an
-                           organisation has more than the service lists), revokedToken (revoke: { org, id,
-                           name }), revoked (revoke: the same, kept until 1.0), next }
+  --json                   as data: its shape is at the end
+
+  create makes one and prints it ONCE: the service does not keep it, and nothing shows it again, so store it at once
+  (as MASON_TOKEN in CI's secrets). It is alone on the first line printed, never broken, or, with --json, in the
+  one field token.value of the document, so a setup step can pipe it straight into a secret store. Nothing else
+  this command prints ever holds it.
+
+  list says the CI tokens of <org> that still act (never a token itself), or of every organisation this login is
+  an admin or an owner of when none is named; revoke ends one at once, by its id (list says it), in --org, else in
+  the one organisation this login is an admin or an owner of.
+
+  The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default.
 
   Exit status: 0 done; 1 not signed in, refused by the service (its words printed as they came, the code the
   CLI's own), or the service answered outside its contract; 2 a wrong command line.
+
+  The --json answer: { token (create: { id, value (the token itself, this once), name,
+    replica, scopes, createdAt, expiresAt }), tokens (list: [{ id, name, replica, scopes,
+    madeBy, createdAt, lastUsedAt (null: never used), expiresAt }]), more (list: true when an
+    organisation has more than the service lists), revokedToken (revoke: { org, id,
+    name }), revoked (revoke: the same, kept until 1.0), next }
 `,
   options: { replica: { type: "string" }, scope: { type: "string", multiple: true }, name: { type: "string" }, days: { type: "string" }, org: { type: "string" },
     json: { type: "boolean", default: false } },

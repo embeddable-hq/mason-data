@@ -124,12 +124,27 @@ export const REPLICA: CommandSpec = {
        mason replica status <org>/<name> | --replica <org>/<name> [--json]
        mason replica delete <org>/<name> | --replica <org>/<name> [--yes] [--timeout <duration>] [--json]
 
+  A replica is Mason run for you by a hosted Mason service, on a machine of its own, syncing this project's
+  database. mason deploy then sends it the project's files, and mason token create a CI token for it.
+
+    mason replica create acme/shop --region <region> --size 50
+    my-secret-store read app-db-url | mason replica create --replica acme/shop --region <region> --size 50 --json
+    mason replica list
+    mason replica status acme/shop --json
+    mason replica delete acme/shop
+
+  --replica <org>/<name>   create, status, delete: the replica, in place of the argument (else MASON_REPLICA)
+  --org <org>              list: the organisation, in place of the argument
+  --region <region>        create: the region it runs in, one the service offers
+  --size <gb>              create: the synced data it holds, in GB, one size the service offers (50)
+  --timeout <duration>     create: how long to wait for its region to make it; delete: for its deletion to finish
+                           or to need a person (default ${DEFAULT_TIMEOUT}; 1s to 24h; a bare number is seconds)
+  --yes                    delete: delete it without asking for its name to be typed back (CI, a coding agent)
+  --json                   as data: its shape is at the end
+
   The replica can also be named as every other command names one, --replica <org>/<name> (else MASON_REPLICA, said
   on stderr when it chose): mason replica status --replica acme/shop. The organisation, as --org: mason replica
   list --org acme.
-
-  A replica is Mason run for you by a hosted Mason service, on a machine of its own, syncing this project's
-  database. mason deploy then sends it the project's files, and mason token create a CI token for it.
 
   create makes one in the organisation <org>, named <name>, in --region (one the service offers), sized by
   --size: the synced data it holds, in GB (one size the service offers, such as 50). The database's URL is
@@ -169,36 +184,6 @@ export const REPLICA: CommandSpec = {
   The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default.
   Progress goes to stderr; the answer is printed when it ends.
 
-    mason replica create acme/shop --region <region> --size 50
-    my-secret-store read app-db-url | mason replica create --replica acme/shop --region <region> --size 50 --json
-    mason replica list
-    mason replica status acme/shop --json
-    mason replica delete acme/shop
-
-  --replica <org>/<name>   create, status: the replica, in place of the argument (else MASON_REPLICA)
-  --org <org>              list: the organisation, in place of the argument
-  --region <region>        create: the region it runs in, one the service offers
-  --size <gb>              create: the synced data it holds, in GB, one size the service offers (50)
-  --timeout <duration>     create: how long to wait for its region to make it; delete: for its deletion to finish
-                           or to need a person (default ${DEFAULT_TIMEOUT}; 1s to 24h; a bare number is seconds)
-  --yes                    delete: delete it without asking for its name to be typed back (CI, a coding agent)
-  --json                   as data, once it ends: { replica (create, status, delete: { org, name, region, sizeGb,
-                           hostId, state, createdAt, allowlist, page (its page, null when the service names none),
-                           pending: [{ change (create, allowlist), state (pending, failed), attempts, failure,
-                           nextAttemptAt }] }), deletion (status, delete: null while it is in none, or when the
-                           service gave none; { stage (requested, in_region, needs_person, finished),
-                           requestedAt, handover: { attempts, failure, nextAttemptAt } or null, lastHeardAt,
-                           finishedAt, steps: [{ step, what, doneAt }], sources: [{ ordinal, outcome (dropped,
-                           no_slot, not_verified, confirmed), reason (not_verified: unreachable, refused, in_use,
-                           still_there, another_server, record_unreadable, failed, unprobed), why, slot,
-                           publication, publicationOwned, byHand (not_verified: Mason's statement to run by
-                           hand), reportedAt }] }), checks (create: [{ source, outcome (passed, failed,
-                           unknown), checks: [{ name, status (ok, warn, failed, unknown), detail, fix }],
-                           missing }], null when the service's answer was lost), replicas (list: each as replica
-                           is), more (list: true when an organisation has more than the service lists), error
-                           (create, delete: when it was not made, failed, needs a person, was refused or the
-                           wait timed out: { code, message, why, fix }), next }
-
   Exit status: 0 the replica is ready (create), said (list, status), or deleted, every replication slot dropped,
   none there or confirmed by a person (delete); 1 not signed in, the URL not given (cancelled, stdin empty, more
   than one line or past 2 KiB: nothing sent), refused by the service (its words printed as they came, the code
@@ -207,6 +192,20 @@ export const REPLICA: CommandSpec = {
   confirmed), or the service answered outside its contract; 2 a wrong command line (delete without a terminal
   and without --yes); 124 the wait timed out (nothing stopped: mason replica status says how it goes). Whatever
   the service sends, it never makes the exit 0, 2 or 124.
+
+  The --json answer, once it ends: { replica (create, status, delete: { org, name, region, sizeGb, hostId,
+    state, createdAt, allowlist, page (its page, null when the service names none), pending: [{ change
+    (create, allowlist), state (pending, failed), attempts, failure, nextAttemptAt }] }), deletion (status,
+    delete: null while it is in none, or when the service gave none; { stage (requested, in_region,
+    needs_person, finished), requestedAt, handover: { attempts, failure, nextAttemptAt } or null,
+    lastHeardAt, finishedAt, steps: [{ step, what, doneAt }], sources: [{ ordinal, outcome (dropped,
+    no_slot, not_verified, confirmed), reason (not_verified: unreachable, refused, in_use, still_there,
+    another_server, record_unreadable, failed, unprobed), why, slot, publication, publicationOwned, byHand
+    (not_verified: Mason's statement to run by hand), reportedAt }] }), checks (create: [{ source, outcome
+    (passed, failed, unknown), checks: [{ name, status (ok, warn, failed, unknown), detail, fix }],
+    missing }], null when the service's answer was lost), replicas (list: each as replica is), more (list:
+    true when an organisation has more than the service lists), error (create, delete: when it was not
+    made, failed, needs a person, was refused or the wait timed out: { code, message, why, fix }), next }
 `,
   options: { replica: { type: "string" }, org: { type: "string" }, region: { type: "string" }, size: { type: "string" }, timeout: { type: "string" },
     yes: { type: "boolean", default: false }, json: { type: "boolean", default: false } },

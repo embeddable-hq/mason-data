@@ -280,7 +280,7 @@ test("THE CLASS: ADMIN OPTION on a writer lets the role grant itself the writer'
   psql(db, `GRANT "${writers}" TO "${rv("admin")}" WITH ADMIN OPTION, INHERIT FALSE, SET FALSE`);
   const admin = said("admin");
   assert.deepEqual(admin.map((c) => c.code), ["role_may_become_another"], JSON.stringify(admin));
-  assert.equal(head(admin[0]), `${rv("admin")} has ADMIN OPTION on ${writers}: it may grant itself that role and its privileges`);
+  assert.equal(head(admin[0]), `${rv("admin")} has ADMIN OPTION on ${writers}`);
   // the writer's UPDATE of a synced table without row-level security, for the write to land (no WHERE: it may not SELECT)
   psql(db, `GRANT UPDATE ON public.ledger TO "${writers}"`);
   try {

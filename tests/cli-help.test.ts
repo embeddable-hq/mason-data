@@ -61,6 +61,67 @@ for (const c of COMMANDS) {
   });
 }
 
+/**
+ * What a command's --help says first is what a person needs first (#717's recommendation 15): the usage line, a short
+ * description, the examples, the flags; the long prose and a long --json shape after them, the shape last. Read from
+ * the text by its paragraphs, so a command added later is held to the same order: a flags block is lines that each
+ * start an entry (`--x`, `-x, --x`, `<word>`) or continue one (indented further).
+ */
+const DESCRIPTION_LINES = 8;
+const JSON_ENTRY_LINES = 3;
+const JSON_AT_END = "as data: its shape is at the end";
+const JSON_SHAPE = "  The --json answer";
+function layoutProblems(c: { name: string; usage: string; options: Record<string, { short?: string | undefined }> }): string[] {
+  const paras = c.usage.replace(/\n$/, "").split(/\n[ \t]*\n/).map((p) => p.split("\n"));
+  const problems: string[] = [];
+  const entry = /^ {2}(?:-\w, )?(?:--?[a-z][\w-]*|<[^>]+>)/;
+  const isFlags = (p: string[]) => entry.test(p[0]!) && p.every((l) => entry.test(l) || /^ {3,}\S/.test(l));
+  if (!paras[0]![0]!.startsWith(`usage: mason ${c.name}`)) problems.push("the usage line first");
+  const about = paras[1] ?? [];
+  if (!/^ {2}[^\s<-]/.test(about[0] ?? "") || /^ {2}mason\b/.test(about[0]!)) problems.push("a description second");
+  if (about.length > DESCRIPTION_LINES) problems.push(`a short description (${about.length} lines, at most ${DESCRIPTION_LINES}: the rest after the flags)`);
+  let i = 2;
+  const examplesAt = i;
+  // an example paragraph: indented example lines, perhaps under a heading of its own (`  Claude Code …:`)
+  const isExamples = (p: string[]) => /^ {4}\S/.test(p[0]!) || (/^ {2}\S.*:$/.test(p[0]!) && /^ {4}\S/.test(p[1] ?? ""));
+  while (paras[i] && isExamples(paras[i]!) && !isFlags(paras[i]!)) i++;
+  if (i === examplesAt) problems.push("the examples third");
+  const flagsAt = i;
+  while (paras[i] && isFlags(paras[i]!)) i++;
+  if (i === flagsAt) problems.push("the flags after the examples");
+  const flags = paras.slice(flagsAt, i).flat();
+  for (const [opt, def] of Object.entries(c.options)) {
+    const head = new RegExp(`^ {2}(?:${def.short ? `-${def.short}, ` : ""})?--${opt}\\b`);
+    if (!flags.some((l) => head.test(l))) problems.push(`--${opt} has its entry among the flags`);
+  }
+  const json = flags.findIndex((l) => /^ {2}--json\b/.test(l));
+  if (json >= 0) {
+    const next = flags.findIndex((l, k) => k > json && entry.test(l));
+    const lines = (next < 0 ? flags.length : next) - json;
+    if (lines > JSON_ENTRY_LINES) problems.push(`--json's entry is short (${lines} lines, at most ${JSON_ENTRY_LINES}: the shape at the end, "${JSON_SHAPE.trim()} …")`);
+    const atEnd = flags[json]!.includes(JSON_AT_END);
+    const shapeAt = paras.findIndex((p) => p[0]!.startsWith(JSON_SHAPE));
+    if (atEnd !== (shapeAt >= 0)) problems.push(`--json says "${JSON_AT_END}" exactly when "${JSON_SHAPE.trim()}" follows`);
+    if (shapeAt >= 0 && shapeAt !== paras.length - 1) problems.push("the --json shape is the last paragraph");
+  }
+  return problems;
+}
+
+test("every command's --help reads: the usage line, a short description, examples, the flags; then the long prose, the long --json shape last", () => {
+  const all = COMMANDS.flatMap((c) => layoutProblems(c).map((p) => `mason ${c.name}: ${p}`));
+  assert.deepEqual(all, []);
+  // the check tells a wrong order from a right one
+  const good = "usage: mason x [--json]\n\n  Does x.\n\n    mason x\n\n  --json   as data: its shape is at the end\n\n  More.\n\n  The --json answer: { a, next }\n";
+  const opts = { json: {} };
+  assert.deepEqual(layoutProblems({ name: "x", usage: good, options: opts }), []);
+  assert.deepEqual(layoutProblems({ name: "x", usage: good.replace("  Does x.\n\n    mason x\n", "    mason x\n\n  Does x.\n"), options: opts }), ["a description second", "the examples third", "the flags after the examples", "--json has its entry among the flags"]);
+  assert.deepEqual(layoutProblems({ name: "x", usage: good.replace("\n\n  More.\n\n  The --json answer: { a, next }\n", "\n\n  The --json answer: { a, next }\n\n  More.\n"), options: opts }), ["the --json shape is the last paragraph"]);
+  assert.deepEqual(layoutProblems({ name: "x", usage: "usage: mason x [--json]\n\n  Does x.\n\n    mason x\n\n  --json   as data: { a,\n           b,\n           c,\n           next }\n", options: opts }),
+    [`--json's entry is short (4 lines, at most 3: the shape at the end, "The --json answer …")`]);
+  assert.deepEqual(layoutProblems({ name: "x", usage: `usage: mason x [--json]\n\n${"  Does x.\n".repeat(9)}\n    mason x\n\n  --json   as data: { a, next }\n`, options: opts }),
+    ["a short description (9 lines, at most 8: the rest after the flags)"]);
+});
+
 test("every wrong command line, whatever check refused it, ends its next steps with mason <cmd> --help and carries a fix", () => {
   // the usage failures raised inside commands (wait, deploy, user, token, …) answered with next: [] and no fix
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mason-usage-"));

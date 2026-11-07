@@ -283,12 +283,12 @@ function via(x: Pick<RelationFact, "kind" | "entry">): string {
   return said[x.kind];
 }
 
-const WHY = "Mason only reads, so a role that may write lets a Mason bug or a stolen URL change your database";
+const WHY = "Mason only reads, but, for security reasons, we recommend using a role that only reads";
 
 /** The checks of the role, from its facts: one warning per code that applies, else one line saying it only reads. */
 export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
   const fix = readOnlyFix(f, ask);
-  const warn = (code: RoleCode, detail: string): Check => ({ name: "role", ok: true, warn: true, code, detail: `${detail}. ${WHY}: sync as a role that only reads`, fix });
+  const warn = (code: RoleCode, detail: string): Check => ({ name: "role", ok: true, warn: true, code, detail: `${detail}. ${WHY}`, fix });
   const out: Check[] = [];
   const supers = f.roles.filter((r) => r.superuser);
   if (supers.length) {
@@ -329,7 +329,7 @@ export function roleChecks(f: RoleFacts, ask: RoleAsk): Check[] {
     out.push(warn("role_reaches_foreign_server", `${f.user} ${held.join(", and ")}: what it sends there runs as the mapping's user, and the server may be this very database`));
   }
   if (f.adminOf.length || f.createRole || f.serverRoles.length) {
-    const held = [...(f.adminOf.length ? [`has ADMIN OPTION on ${list(f.adminOf)}: it may grant itself that role and its privileges`] : []),
+    const held = [...(f.adminOf.length ? [`has ADMIN OPTION on ${list(f.adminOf)}`] : []),
       ...(f.createRole ? ["has CREATEROLE, which before Postgres 16 lets it grant itself any role but a superuser"] : []),
       ...(f.serverRoles.length ? [`holds ${list(f.serverRoles)}: the server's programs or files, as its operating-system user`] : [])];
     out.push(warn("role_may_become_another", `${f.user} ${held.join("; ")}`));

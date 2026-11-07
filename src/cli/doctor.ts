@@ -36,8 +36,13 @@ export const DOCTOR_USAGE = `usage: mason doctor [--json]
   Says whether this machine is ready for Mason — Node ${NODE_MIN} or later, memory (what the engine may use and what it
   leaves beside it; MASON_DUCKDB_MEMORY=4GiB sets it), Mason's postgres and inet extensions (installed with Mason for this
   platform, so nothing is downloaded; else the first sync downloads them), the ports Mason listens on — with the way
-  out for anything missing. In a
-  project's folder it checks the project's database too; with Mason running for it, the run in a few lines instead: its
+  out for anything missing.
+
+    mason doctor
+
+  --json   as data: its shape is at the end
+
+  In a project's folder it checks the project's database too; with Mason running for it, the run in a few lines instead: its
   database, whether every added table is synced, the statements of the last day it refused or answered slowly. Both
   say whether the user Mason connects as could change a synced table's rows (a superuser, BYPASSRLS, an owner of a
   synced table, a write privilege on one or CREATE on its schema; or a write that reaches its rows through a
@@ -45,16 +50,14 @@ export const DOCTOR_USAGE = `usage: mason doctor [--json]
   reaches; a foreign server; ADMIN OPTION or a server role; directly or through a role it is a member of), with the
   statements that make a role that only reads.
 
-    mason doctor
-
-  --json   as data: { ready, verdict, checks: [{ name, ok, detail, warn, code, fix }], next: [{ command, what }] }; ok
-           is true, false, or null when it could not tell; warn (only when true): fine to run, but said loudly; code
-           (the role's lines): ${ROLE_CODES.slice(0, 5).join(", ")},
-           ${ROLE_CODES.slice(5).join(", ")};
-           fix (with code): the statements and the edit that make a role that only reads
-
   Exit status: 0 nothing failed — a warning (!) and a check that could not tell (?) are said, and leave it 0; 1
   something failed (said, with the way out).
+
+  The --json answer: { ready, verdict, checks: [{ name, ok, detail, warn, code, fix }], next: [{ command, what }] }; ok
+    is true, false, or null when it could not tell; warn (only when true): fine to run, but said loudly; code
+    (the role's lines): ${ROLE_CODES.slice(0, 5).join(", ")},
+    ${ROLE_CODES.slice(5).join(", ")};
+    fix (with code): the statements and the edit that make a role that only reads
 `;
 
 export const DOCTOR: CommandSpec = {

@@ -138,14 +138,6 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   project that would be refused is refused here, and nothing is sent. A url: written with its password is refused:
   write url: \${DATABASE_URL} and set it on the replica.
 
-  The replica is --replica <org>/<name>, else MASON_REPLICA (each part lower case letters, digits and -). The login
-  is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default. Progress
-  goes to stderr; the answer is printed when it ends.
-
-  While the replica is being created (or the service asks for a wait: too many deploys at once), it waits as the
-  service asks and sends the deploy again, within --timeout, saying the replica's state and how long it has waited.
-  A replica that failed or is being deleted is refused: mason replica status says its state.
-
     mason deploy --replica acme/shop
     mason deploy --replica acme/shop --dry-run     what would be sent, sending nothing
     MASON_REPLICA=acme/shop mason deploy --timeout 30m
@@ -155,19 +147,29 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
                            login needed)
   --timeout <duration>     how long to wait for the outcome, a wait to send included (default ${DEFAULT_TIMEOUT}; 1s
                            to 24h; a bare number is seconds); a deploy sent goes on after it
-  --json                   as data, once it ends: { dryRun, replica (null when none is named on a dry run),
-                           service, files: [{ path, size, sha256 }], totalBytes, warnings (the generated tables
-                           refused, as mason start says them, each one line), deploy ({ id, status (queued,
-                           applying, starting, running, refused, failed), phase (null, checking, writing,
-                           restarting, syncing), createdAt, finishedAt };
-                           null on a dry run), error (when the replica refused it, it failed or the wait timed out:
-                           { code, message, why, fix }), next }
+  --json                   as data: its shape is at the end
+
+  The replica is --replica <org>/<name>, else MASON_REPLICA (each part lower case letters, digits and -). The login
+  is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default. Progress
+  goes to stderr; the answer is printed when it ends.
+
+  While the replica is being created (or the service asks for a wait: too many deploys at once), it waits as the
+  service asks and sends the deploy again, within --timeout, saying the replica's state and how long it has waited.
+  A replica that failed or is being deleted is refused: mason replica status says its state.
 
   Exit status: 0 the replica runs it (or a dry run printed); 1 refused here or by the service, refused by Mason on
   the replica (its words printed as they came, the code the CLI's own), the deploy failed, or the service answered
   outside its contract; 2 a wrong command line; 124 the wait timed out (nothing stopped: the deploy's id says where
   to look; or, before one was sent, no deploy was made). Whatever the service sends, it never makes the exit 0, 2
   or 124.
+
+  The --json answer, once it ends: { dryRun, replica (null when none is named on a dry run),
+    service, files: [{ path, size, sha256 }], totalBytes, warnings (the generated tables
+    refused, as mason start says them, each one line), deploy ({ id, status (queued,
+    applying, starting, running, refused, failed), phase (null, checking, writing,
+    restarting, syncing), createdAt, finishedAt };
+    null on a dry run), error (when the replica refused it, it failed or the wait timed out:
+    { code, message, why, fix }), next }
 `,
   options: { replica: { type: "string" }, "dry-run": { type: "boolean", default: false }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
   json: ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "deploy", "error", "next"],
