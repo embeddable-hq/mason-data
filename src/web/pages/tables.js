@@ -14,14 +14,14 @@ import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, 
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
-const SIZES_PATH = "/api/usage?since=1m";
+const SIZES_PATH = "api/usage?since=1m";
 
 /** Where one table's columns are read, when its form opens (src/cli/run-server.ts tableColumns): never with the state,
  *  which is polled every 2 s and would carry every table's (3.4 MB at 800 tables of 50 columns). */
 /** A table's sync events: Observability › Sync events narrowed to it (src/web/pages/syncs.js `route`), over the week (its
  *  copy and failures are rarely in the last 15 minutes, Now's). */
 export const syncsHref = (table) => `#observability/syncs?table=${encodeURIComponent(table)}&range=7d`;
-export const columnsPath = (table) => `/api/tables/${encodeURIComponent(table)}/columns`;
+export const columnsPath = (table) => `api/tables/${encodeURIComponent(table)}/columns`;
 
 /** A table's sync in one word (`/api/state` `tables[].sync.state`, src/cli/readiness.ts `syncStateOf`). */
 const SYNC_WORDS = { synced: "Synced", syncing: "Syncing", behind: "Behind", failed: "Failed", waiting: "Waiting" };
@@ -301,7 +301,7 @@ export const page = {
   title: "Tables",
   create(ctx) {
     const m = { removing: null, choosing: null, columns: null, outcome: null, ticked: null, held: null, heldFilter: null, heldShow: null, filter: "", show: "all", syncing: [], adding: [], synced: null, limit: TABLE_ROWS };
-    const state = () => ctx.read("/api/state")?.body ?? null;
+    const state = () => ctx.read("api/state")?.body ?? null;
     const monotone = createMonotone();
     // the details open (a copy's whole error), by key: a poll rewrites the part, and they stay open
     const opened = createOpenSet();
@@ -325,12 +325,12 @@ export const page = {
         // from the click: the row says Adding… (the page paints before the answer), then the state read again shows the copy
         m.adding = [...m.adding, table];
         if (m.choosing !== table) { m.outcome = null; m.synced = null; }
-        const r = await ctx.ask("/api/pick", json("POST", pickBody(table, columns, key)));
+        const r = await ctx.ask("api/pick", json("POST", pickBody(table, columns, key)));
         m.adding = m.adding.filter((x) => x !== table);
         // refused: said over the form, in its popover, written again with the boxes the person had ticked
         if ("failure" in r) { m.outcome = { table, failure: r.failure }; if (m.choosing === table) m.ticked = { columns, key }; return false; }
         m.outcome = { table, added: r.body, at: ctx.now().getTime() }; m.choosing = null; m.columns = null; hold();
-        await ctx.refresh(["/api/state"]);
+        await ctx.refresh(["api/state"]);
         return true;
       },
       /** Open a table's form: its columns read now, once (the state the page polls carries none). */
@@ -348,11 +348,11 @@ export const page = {
       cancelRemoveTable() { m.removing = null; hold(); },
       /** Remove a table (`mason remove`), once asked: the answer beside its actions, then the state read again. */
       async confirmRemoveTable(table) {
-        const r = await ctx.ask("/api/remove", json("POST", { tables: [table] }));
+        const r = await ctx.ask("api/remove", json("POST", { tables: [table] }));
         m.removing = null; hold();
         if ("failure" in r) { m.outcome = { table, failure: r.failure }; return false; }
         m.outcome = { table, removed: r.body, at: ctx.now().getTime() };
-        await ctx.refresh(["/api/state"]);
+        await ctx.refresh(["api/state"]);
         return true;
       },
       dismissOutcome() { m.outcome = null; },
@@ -360,10 +360,10 @@ export const page = {
       async syncTable(table) {
         m.syncing = [...m.syncing, table];
         m.outcome = null; m.synced = null;
-        const r = await ctx.ask("/api/sync", json("POST", { tables: [table] }));
+        const r = await ctx.ask("api/sync", json("POST", { tables: [table] }));
         m.syncing = m.syncing.filter((x) => x !== table);
         m.synced = "failure" in r ? { table, failure: r.failure } : { table, synced: r.body, at: ctx.now().getTime() };
-        await ctx.refresh(["/api/state"]);
+        await ctx.refresh(["api/state"]);
         return !("failure" in r);
       },
       dismissSynced() { m.synced = null; },
@@ -377,7 +377,7 @@ export const page = {
     };
     return {
       model: m,
-      reads: () => [{ path: "/api/state", everyMs: POLL_MS }, { path: SIZES_PATH, everyMs: 60_000 }],
+      reads: () => [{ path: "api/state", everyMs: POLL_MS }, { path: SIZES_PATH, everyMs: 60_000 }],
       afterRead() {
         const s = state();
         if (s === null) return;

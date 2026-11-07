@@ -125,7 +125,7 @@ test("the page and /api/state answer on the socket behind the guard of mason ui 
     assert.equal((await ask(file, { path: "/", headers: tunnelHost })).status, 403, "a tunnel's page takes its ticket or its cookie");
     const traded = await ask(file, { path: `/?ticket=${ticket}`, headers: tunnelHost });
     assert.equal(traded.status, 303);
-    assert.equal(traded.headers.location, "/");
+    assert.equal(traded.headers.location, "./", "relative to the address asked, so a proxy's prefix is kept (issue 746)");
     const cookie = String(traded.headers["set-cookie"]).split(";")[0]!;
     assert.match(cookie, new RegExp(`^mason_dev_${tunnelPort}=[0-9a-f]{64}$`));
     assert.doesNotMatch(cookie, new RegExp(TOKEN), "the run's token never reaches the browser");

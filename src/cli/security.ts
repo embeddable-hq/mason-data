@@ -84,6 +84,12 @@ export type GuardVerdict =
   | { ok: false; status: 303; location: string; setCookie?: string }
   | { ok: false; status: 403 | 421; reason: string };
 
+/** Where a trade sends the browser: the same address without its secret, RELATIVE to the one asked (`./` for `/`), so a
+ *  page a reverse proxy serves under a prefix of its own lands back there, never on the proxy's root. */
+export function sameAddress(url: URL): string {
+  return `./${url.pathname.slice(url.pathname.lastIndexOf("/") + 1)}${url.search}${url.hash}`;
+}
+
 /** The Host a browser may send for a loopback port: its two names, that port, and nothing else. */
 const loopbackHosts = (port: number): string[] => [`127.0.0.1:${port}`, `localhost:${port}`];
 
@@ -104,7 +110,7 @@ function throughTunnel(req: GuardRequest, tunnels: readonly PageTunnel[], now: n
   const offered = url.searchParams.get("ticket");
   if (offered !== null && (req.method === "GET" || req.method === "HEAD")) {
     url.searchParams.delete("ticket");
-    const location = url.pathname + (url.search || "") + url.hash;
+    const location = sameAddress(url);
     const t = tunnels.find((x) => x.ticket !== null && now < x.ticketUntil && sameSecret(x.ticket, offered));
     if (t !== undefined) { t.ticket = null; return { ok: false, status: 303, location, setCookie: setCookieHeader(t.session, port) }; }
     if (held) return { ok: false, status: 303, location };
@@ -132,7 +138,7 @@ export function guard(req: GuardRequest, port: number, token: string, tunnels: r
   if (offered !== null) {
     if (!sameSecret(offered, token)) return { ok: false, status: 403, reason: "the token in the URL is not this run's" };
     url.searchParams.delete("token");
-    return { ok: false, status: 303, location: url.pathname + (url.search || "") + url.hash, setCookie: setCookieHeader(token, port) };
+    return { ok: false, status: 303, location: sameAddress(url), setCookie: setCookieHeader(token, port) };
   }
   const cookie = cookieOf(req.cookie, cookieName(port));
   if (cookie === null || !sameSecret(cookie, token)) {

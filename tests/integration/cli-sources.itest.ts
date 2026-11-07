@@ -141,10 +141,11 @@ test("init writes the sources file; tables, add and remove read and edit it; the
   const token = pageUrl.searchParams.get("token")!;
   const handed = await fetch(pageUrl, { redirect: "manual" });
   assert.equal(handed.status, 303);
+  assert.equal(handed.headers.get("location"), "./", "relative to the address asked, so a proxy's prefix is kept (issue 746)");
   const cookie = handed.headers.get("set-cookie")!.split(";")[0]!;
   const html = await fetch(new URL("/", pageUrl), { headers: { Cookie: cookie } });
   assert.equal(html.status, 200);
-  assert.match(await html.text(), /<script type="module" src="\/app\.js"><\/script>/);
+  assert.match(await html.text(), /<script type="module" src="app\.js"><\/script>/, "relative to the page's own address (issue 746)");
   const st = ok(mason("status"), "mason status");
   assert.match(st.stdout, new RegExp(`Web UI +http://127\\.0\\.0\\.1:${pageUrl.port}/  \\(mason ui opens it\\)`));
   assert.ok(!st.stdout.includes(token) && !fs.readFileSync(path.join(root, ".mason", "dev.log"), "utf8").includes(token), "the token is only mason ui's");

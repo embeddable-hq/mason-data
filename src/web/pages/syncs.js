@@ -15,9 +15,9 @@ import { esc, agoText, utcText, badge, empty, panel, n, sortTh, nextSort, moreRo
 const EVENTS_LIMIT = 500;
 const EVENTS_SHOWN = 100;
 /** The events of a range: the newest EVENTS_LIMIT since its start. */
-const eventsPath = (range = DEFAULT_RANGE) => `/api/events?limit=${EVENTS_LIMIT}&since=${RANGES[rangeOf(range)].since}`;
-const LOGS = "/api/logs?lines=200";
-const STATE = "/api/state";
+const eventsPath = (range = DEFAULT_RANGE) => `api/events?limit=${EVENTS_LIMIT}&since=${RANGES[rangeOf(range)].since}`;
+const LOGS = "api/logs?lines=200";
+const STATE = "api/state";
 
 const th = (cols) => cols.map((c) => `<th scope="col">${esc(c)}</th>`).join("");
 

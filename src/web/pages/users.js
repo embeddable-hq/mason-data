@@ -6,12 +6,12 @@
 import { actId, badge, button, code, copyable, copyClick, duration, empty, esc, json, panel, pop, renderFailure, ROOMS, serverHostNote, status, utcMinute } from "../shared.js";
 
 /** The users as the page reads them: with each one's last use (`mason user list` asks the same), then every 30 s. */
-const USERS = "/api/users?lastUsed=1";
-const USERS_POST = "/api/users";
+const USERS = "api/users?lastUsed=1";
+const USERS_POST = "api/users";
 const USERS_EVERY_MS = 30_000;
 /** The run's state: where a tool connects (`postgres`, src/cli/pg-url.ts postgresFacts), the Connect panel's; and the
  *  roles file's state (`roles`, src/cli/run-server.ts rolesState), what each user's role is held to. */
-const STATE = "/api/state";
+const STATE = "api/state";
 
 /** A time as `mason user list` stamps it: `2026-10-27 09:10`, UTC. */
 const stamp = utcMinute;
@@ -157,7 +157,7 @@ export const page = {
       async toggleUser(name, verb) {
         m.actionFailure = null;
         m.refused = null;
-        const r = await ctx.ask(`/api/users/${encodeURIComponent(name)}/${verb}`, json("POST"));
+        const r = await ctx.ask(`api/users/${encodeURIComponent(name)}/${verb}`, json("POST"));
         m.confirming = null;
         if ("failure" in r) { m.refused = { name, failure: r.failure }; return false; }
         await ctx.refresh([USERS]);
@@ -167,7 +167,7 @@ export const page = {
       enableUser(name) { return actions.toggleUser(name, "enable"); },
       async confirmRemove(name) {
         m.actionFailure = null;
-        const r = await ctx.ask(`/api/users/${encodeURIComponent(name)}`, json("DELETE"));
+        const r = await ctx.ask(`api/users/${encodeURIComponent(name)}`, json("DELETE"));
         m.confirming = null;
         // refused: said beside the user's Remove, as its question was (nothing above the table moves it)
         if ("failure" in r) { m.refused = { name, failure: r.failure }; return false; }

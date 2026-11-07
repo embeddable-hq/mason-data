@@ -55,7 +55,7 @@ test("mason ui --json: the page's URL with the run's token, and its port — the
     // the URL it printed is the one the guard trades for the cookie, and the page answers to the cookie
     const handed = await fetch(`http://127.0.0.1:${p.port}/?token=${TOKEN}`, { redirect: "manual" });
     assert.equal(handed.status, 303);
-    assert.equal(handed.headers.get("location"), "/");
+    assert.equal(handed.headers.get("location"), "./");
     const html = await fetch(`http://127.0.0.1:${p.port}/`, { headers: { Cookie: handed.headers.get("set-cookie")!.split(";")[0]! } });
     assert.equal(html.status, 200);
   } finally { p.close(); }

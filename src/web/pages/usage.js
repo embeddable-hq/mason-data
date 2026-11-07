@@ -87,15 +87,15 @@ export function renderCharts(usage, range = DEFAULT_RANGE) {
   return `<div class="chart-grid">${blocks.join("")}</div>`;
 }
 
-const RUNNING = "/api/running";
-const STATE = "/api/state";
+const RUNNING = "api/running";
+const STATE = "api/state";
 /** Who is connected: the clients with the most sessions (or statements) shown, this many; the rest in one row. */
 const SESSIONS_TOP = 10;
 /** What a past range's statements were (GET /api/activity): read once when chosen, every 5 s while the range is Now. */
-export const activityPath = (range = DEFAULT_RANGE) => `/api/activity?since=${RANGES[rangeOf(range)].since}`;
+export const activityPath = (range = DEFAULT_RANGE) => `api/activity?since=${RANGES[rangeOf(range)].since}`;
 const ACTIVITY_EVERY_MS = 5000;
 /** The unsupported SQL of a range (`/api/unsupported`: its 10 entries the most refused first): it says what to rewrite. */
-const unsupportedPath = (range = DEFAULT_RANGE) => `/api/unsupported?since=${RANGES[rangeOf(range)].since}`;
+const unsupportedPath = (range = DEFAULT_RANGE) => `api/unsupported?since=${RANGES[rangeOf(range)].since}`;
 const UNSUPPORTED_EVERY_MS = 60_000;
 const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
 /** The key a running statement is asked about by: its session and its statement's number. */
@@ -338,7 +338,7 @@ export const page = {
       dismissCancelled() { m.outcome = null; },
       /** POST /api/cancel { session, statement }: the statement listed, never the one the session runs next (409). */
       async confirmCancelStatement(session, statement) {
-        const r = await ctx.ask("/api/cancel", json("POST", { session, statement }));
+        const r = await ctx.ask("api/cancel", json("POST", { session, statement }));
         m.asking = null;
         m.outcome = "failure" in r ? { key: keyOf(session, statement), failure: r.failure } : { key: keyOf(session, statement), cancelled: r.body.cancelled, at: ctx.now().getTime() };
         // who is connected says its running statements too: both read again, so neither says the cancelled one runs

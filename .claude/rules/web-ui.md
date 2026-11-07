@@ -83,6 +83,9 @@ LOGS (docs/OBSERVABILITY.md "Pages" is their spec). All six pages are built on i
 - **The allowlist is the only way a file is served** (`PAGE_ROUTES`, read once at start by `pageFiles`): a new file is
   a new route there, never a path joined from the URL; `tests/cli-run-server.test.ts` holds every other path, `..` and
   encoded ones included, to the 404 it was, and `tests/cli-package.test.ts` every file under src/web/ to a route.
+  **The page names those routes relative to its own URL** (`api/state`, `app.js`, never `/…`), and the guard's redirect
+  is relative too (`sameAddress`, src/cli/security.ts), so the page works under any prefix a reverse proxy serves it at
+  (issue 746). Detector: tests/web-page.test.ts (no root-absolute path in a file; the fake `fetch` takes `api/…` alone).
 - **The guard is the auth, and the page never holds the token** (src/cli/security.ts): `mason ui` prints the URL with
   the run's token once, the first request trades it for an HttpOnly, SameSite=Strict cookie named for the run's port (`mason_dev_<port>`: a
   browser keeps cookies per host, so one name let a second run log the first out) and is redirected to a URL

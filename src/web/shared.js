@@ -65,7 +65,7 @@ export const rangeEvery = (range, everyMs) => isLive(range) ? everyMs : Infinity
 export const rangeOf = (text) => Object.hasOwn(RANGES, String(text ?? "")) ? String(text) : DEFAULT_RANGE;
 /** The usage samples of a range, its step a point (src/cli/run-server.ts `usage`): Usage's read, and the Overview's
  *  sparklines (the 24 hours', by name). */
-export const usagePath = (range = DEFAULT_RANGE) => { const r = RANGES[rangeOf(range)]; return `/api/usage?since=${r.since}&step=${r.stepSeconds}`; };
+export const usagePath = (range = DEFAULT_RANGE) => { const r = RANGES[rangeOf(range)]; return `api/usage?since=${r.since}&step=${r.stepSeconds}`; };
 
 /** How often the shown page is asked while the tab is seen (src/web/app.js polls; a page's every-poll reads use it). */
 export const POLL_MS = 2000;
