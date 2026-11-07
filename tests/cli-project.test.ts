@@ -72,11 +72,11 @@ test("the old names answer with the new ones; mason start takes no URL", () => {
   for (const [argv, said] of [
     [["purge"], /mason purge is now mason destroy/],
     [["poll", "orders"], /mason poll is now mason sync/],
-    [["rm"], /mason rm is gone: mason remove takes a table out of the project, mason destroy removes the project's synced data\n\nNext:\n {2}mason remove <table> {2}.*a table, and its synced data\n {2}mason destroy {2}.*this folder's project/],
-    [["dev"], /mason dev is now mason start\n\nNext:\n {2}mason init <postgres url> .*once, in your app's folder\n {2}mason start /],
+    [["rm"], /mason rm is gone: mason remove takes a table out of the project, mason destroy removes the project's synced data\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason remove <table> {2}.*a table, and its synced data\n {2}mason destroy {2}.*this folder's project/],
+    [["dev"], /mason dev is now mason start\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason init <postgres url> .*once, in your app's folder\n {2}mason start /],
     // mason connect and mason list are gone: mason user is enough, and a project is its folder
-    [["connect"], /mason connect is gone: mason user add <name> makes a user whose password does not expire, and prints the URL to paste\n\nNext:\n {2}mason user add <name> /],
-    [["list"], /mason list is gone: a project is its folder, and a command means the project of the folder it runs in\n\nNext:\n {2}mason status /],
+    [["connect"], /mason connect is gone: mason user add <name> makes a user whose password does not expire, and prints the URL to paste\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason user add <name> /],
+    [["list"], /mason list is gone: a project is its folder, and a command means the project of the folder it runs in\n {2}fix {3}run the command that does it now: the next steps name it\n\nNext:\n {2}mason status /],
     [["destroy", "shop"], /✗ mason destroy: it takes no name \(shop\): a project is its folder\n {2}fix {3}cd into the project's folder, then mason destroy/],
   ] as const) {
     const r = spawnSync(process.execPath, [MAIN, ...argv], { encoding: "utf8" });

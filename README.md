@@ -186,6 +186,7 @@ docker compose exec mason mason user add metabase   # users are kept on the serv
 | TLS | Required when clients connect from outside the container. Set `MASON_PG_SELF_SIGNED_TLS=1` to create a certificate on the volume (clients then connect with `sslmode=require`), or mount a certificate from your CA. |
 | Sync | The sources file you deploy says how each table stays up to date, so production runs exactly what you committed. Off and polling need a user that can `SELECT` the tables. Replication needs more (see [Logical replication](#logical-replication)). |
 | Settings | [`deploy/mason-data/README.md`](deploy/mason-data/README.md#settings) lists the settings you must set and the ones worth deciding. `mason serve --help` lists all of them. |
+| Hosted | A hosted Mason service runs the container for you: `mason login`, then `mason replica create <org>/<name>` makes a replica of your database, `mason deploy` sends it your `mason/` folder, and `mason token create` makes a CI token for a deploy from CI. [`docs/HOSTED-API.md`](docs/HOSTED-API.md) is the API they speak. |
 | Upgrades | Mason is pre-1.0, so a release may still rename a command, a key or a setting. `mason.yml` pins the version your project uses. The image refuses to run a project written for a different release line. The [release notes](release-notes/README.md) tell you what to do before each upgrade. |
 
 <details>
@@ -575,7 +576,8 @@ tool, and shows the setup for Claude Desktop.
 
 You and a coding agent (Claude Code, Codex, …) use the same commands. Each command prints output for a person. With
 `--json`, it prints one JSON object with a documented shape instead. Its exit code says whether it worked, and it
-always tells you what to run next. `mason help agent` is the page an agent should read first.
+always tells you what to run next. `mason help agent` is the page an agent should read first, and `mason help --json`
+is every command's options, `--json` keys and exit codes as data.
 
 ## Documentation
 
@@ -584,7 +586,7 @@ always tells you what to run next. `mason help agent` is the page an agent shoul
 | [`cli/README.md`](cli/README.md) | every command and option of `mason` |
 | [`docs/POSTGRES-API.md`](docs/POSTGRES-API.md) | the Postgres API: how a tool connects, which SQL is answered, and what is refused |
 | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | what you can see about a running Mason: each command, its endpoint and its JSON |
-| [`docs/HOSTED-API.md`](docs/HOSTED-API.md) | the API `mason login`, `mason logout`, `mason deploy` and `mason user --replica` speak to a hosted Mason service, and where the login is kept |
+| [`docs/HOSTED-API.md`](docs/HOSTED-API.md) | the API `mason login`, `mason logout`, `mason replica`, `mason token`, `mason deploy` and `mason user --replica` speak to a hosted Mason service, and where the login is kept |
 | [`docs/WEB-UI.md`](docs/WEB-UI.md) | the web page (`mason ui`): its pages, how access to it is protected, and how to extend it |
 | [`docs/SQL-SUPPORT.md`](docs/SQL-SUPPORT.md) | what is verified to answer exactly as Postgres does, and what is not (generated from the code) |
 | [`docs/MEASUREMENTS.md`](docs/MEASUREMENTS.md) | when Mason is faster than a Postgres read replica: every measurement and how it was taken (generated from the benchmark results) |

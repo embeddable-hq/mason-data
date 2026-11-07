@@ -3,7 +3,7 @@
  * command's summary, in this order — so a command cannot exist without being listed, and tests/cli-help.test.ts holds
  * each one to src/cli/command.ts's rules (its own --help, an example, every option documented).
  */
-import { failed, parseCommand, reportText, wantsJson, type Command, type CommandSpec, type NextStep } from "./command.ts";
+import { FAILURE_CODES, SPEC_NEXT, failed, jsonText, parseCommand, reportText, specAnswer, specJson, wantsJson, type Command, type CommandSpec, type NextStep } from "./command.ts";
 import { removedStartFlags, type SourcesTop } from "../lib/table-sync.ts";
 import { sourcesTop } from "./sources.ts";
 import { dev } from "./dev.ts";
@@ -128,7 +128,7 @@ function startSourcesTop(cwd: string): SourcesTop {
 export const HELP: CommandSpec = {
   name: "help",
   summary: "the commands by step, or one command's usage: mason help add",
-  usage: `usage: mason help [<command> | <guide>]
+  usage: `usage: mason help [<command> | <guide>] [--json]
 
   The commands by step (mason help), how to use one (mason help add — the same as mason add --help), or a guide,
   offline, short enough to read whole and listing exactly what Mason accepts:
@@ -136,22 +136,59 @@ export const HELP: CommandSpec = {
     mason help
     mason help add
 ${Object.entries(GUIDES).map(([k, v]) => `    mason help ${k.padEnd(14)} ${v}`).join("\n")}
+    mason help --json         every command's spec as data (mason help agent says its shape)
+
+  --json   as data: mason help, { version, commands: [<spec>…], guides: [{ name, summary }], failureCodes:
+           [{ code, meaning }], next }; mason help <command> (the same as mason <command> --help --json), { command:
+           <spec>, next }; mason help <guide>, { guide: { name, summary, text }, next }
 `,
-  options: {},
+  options: { json: { type: "boolean", default: false } },
+  json: ["version", "commands", "guides", "failureCodes", "command", "guide", "next"],
 };
+
+/** `mason version` (also `--version`, `-v`): the CLI's version, as text or with --json as data. Answered by main.ts
+ *  before the registry, so not one of COMMANDS; described here so `mason help version` and its --json read one spec. */
+export const VERSION: CommandSpec = {
+  name: "version",
+  summary: "the CLI's version",
+  usage: `usage: mason version [--json]
+
+  The CLI's version (mason --version and mason -v are the same):
+
+    mason version
+
+  --json   as data: { version, next }
+`,
+  options: { json: { type: "boolean", default: false } },
+  json: ["version", "next"],
+};
+
+/** `mason version`'s answer: the version, or with --json `{ version, next }`. */
+export const versionText = (argv: readonly string[]): string => argv.includes("--json") ? jsonText(VERSION, { version: version() }) : version();
 
 async function runHelp(argv: string[]): Promise<number> {
   const f = parseCommand(HELP, argv);
   if (typeof f === "number") return f;
+  const json = f.values.json === true;
   const [asked, ...rest] = f.positionals;
-  if (rest.length) return failed("help", { message: "one command or guide at a time", code: "usage", usage: HELP.usage }, { json: false });
-  if (asked === undefined) { process.stdout.write(topUsage()); return 0; }
-  if (asked === "version") { process.stdout.write("usage: mason version (or --version, -v): the CLI's version\n"); return 0; }
-  if (Object.hasOwn(GUIDES, asked)) { process.stdout.write(await guideText(asked as Guide)); return 0; }
-  const cmd = COMMANDS.find((c) => c.name === asked);
-  if (cmd) { process.stdout.write(cmd.usage); return 0; }
+  if (rest.length) return failed("help", { message: "one command or guide at a time", code: "usage", usage: HELP.usage }, { json });
+  if (asked === undefined) {
+    if (!json) { process.stdout.write(topUsage()); return 0; }
+    process.stdout.write(`${jsonText(HELP, {
+      version: version(), commands: [...COMMANDS, VERSION].map(specJson), guides: Object.entries(GUIDES).map(([name, summary]) => ({ name, summary })),
+      failureCodes: Object.entries(FAILURE_CODES).map(([code, meaning]) => ({ code, meaning })),
+    }, [["mason help agent", "driving Mason from a coding agent: these shapes, the failures and the exit codes"]])}\n`);
+    return 0;
+  }
+  if (Object.hasOwn(GUIDES, asked)) {
+    const text = await guideText(asked as Guide);
+    process.stdout.write(json ? `${jsonText(HELP, { guide: { name: asked, summary: GUIDES[asked as Guide], text } }, SPEC_NEXT)}\n` : text);
+    return 0;
+  }
+  const cmd = asked === "version" ? VERSION : COMMANDS.find((c) => c.name === asked);
+  if (cmd) { process.stdout.write(json ? `${specAnswer(cmd)}\n` : cmd.usage); return 0; }
   return failed("help", { message: `there is no command or guide ${JSON.stringify(asked)}${didYouMean(asked, [...COMMANDS.map((c) => c.name), ...Object.keys(GUIDES)])}`, code: "usage",
-    why: `the guides: ${Object.keys(GUIDES).join(", ")}`, next: [["mason help", "every command"]] }, { json: false });
+    why: `the guides: ${Object.keys(GUIDES).join(", ")}`, fix: "name a command or a guide mason help lists", next: [["mason help", "every command"]] }, { json });
 }
 
 /**
