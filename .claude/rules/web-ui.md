@@ -229,8 +229,8 @@ adds pages, not endpoints.
 
 ## What review probes
 
-Run each probe that applies before a push: the harness's implement and fix prompts say so, and its review runs them
-again at every round. Its Learn step adds to this list; each bullet names the PR or issue it was met in.
+Run each probe that applies: the implementer before each push, and the fresh reviewer at each review (CLAUDE.md
+"How work is done here", steps 3 and 4). A new probe is proposed to Tom; each bullet names the PR or issue it was met in.
 
 - A field `mason status --json` gained: shown on the page in the CLI's words, with a fixture that carries it (PR 135).
 - Enter or Space on a row's `<summary>`, then Tab: the focus kept on that row (issue 70).

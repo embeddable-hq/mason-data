@@ -27,7 +27,9 @@ how to run it.
    It reports the PR number and its head commit.
 3. **Start a fresh reviewer** (Agent, `model: "opus"`, `effort: "medium"`, or `"high"` when the diff touches
    `src/duck/`, `src/api/` or `src/cdc/`). Give it the PR number, the issue and the blocking list of CLAUDE.md step 4,
-   never the implementer's report. It runs what changed, at the head and at main, and reports each blocking finding as
+   never the implementer's report. It runs what changed, at the head and at main (for an engine or listener diff, the
+   touched statement shapes and their variants through `scripts/duck-repro.ts`, and every applicable rules file's
+   `## What review probes`: CLAUDE.md step 4), and reports each blocking finding as
    the input, what was expected and what happened, plus a short list of notes.
 4. **A blocking finding goes back** to the same implementer by SendMessage, as the failure, not the fix. The
    implementer comes back in one push. A fresh reviewer re-checks the fix's own diff, once. If something blocking is

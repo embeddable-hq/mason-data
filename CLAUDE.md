@@ -110,10 +110,15 @@ The session Tom talks to is the coordinator and follows `.claude/skills/coordina
    was tested and what was left out. It marks the PR ready when done, and reports the PR and its head.
 3. **Every change carries its test** in the matching `tests/*.test.ts` ("Checks and tests"), seen failing without the
    change (`scripts/fails-without.ts`, once, on the final tree). A product change gets its line in
-   `release-notes/next.md`.
+   `release-notes/next.md`. Before each push the implementer runs the `## What review probes` of every rules file its
+   paths fall under (`.claude/rules/`).
 4. **A fresh reviewer** (another agent, never the implementer, not given its report) reads the diff and the issue and
    RUNS what changed, at the head and at main. It is on Opus at medium effort, and at high effort when the diff touches
-   `src/duck/`, `src/api/` or `src/cdc/`, where a wrong answer is Mason's worst failure. **Only these block**: a wrong
+   `src/duck/`, `src/api/` or `src/cdc/`, where a wrong answer is Mason's worst failure. For such a diff it runs the
+   statement shapes the change touches, and their variants (each wrapper, type and form a tool might send:
+   `.claude/rules/duck-rewrite.md` lists them), through `scripts/duck-repro.ts` against a real Postgres at the head and
+   at main; a statement main answered that the head no longer answers the same is a regression. It also runs the
+   `## What review probes` of every rules file the diff's paths fall under. **Only these block**: a wrong
    answer (rows, text, types, order or SQLSTATE that differ from Postgres's where Mason answers), a crash, hang or stuck
    state, synced data lost or corrupted, a security hole, a regression of what main got right, or a red CI. Everything
    else is a note in the review: never a fix round and never an issue.
