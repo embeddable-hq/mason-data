@@ -1,9 +1,10 @@
 # Keeps the work board's Status in step with the issues and PRs, so no session moves a card by hand.
 #
 #   issue opened or reopened by a member      -> Backlog   (anyone else's waits for the owner to triage it)
+#   issue closed                               -> Done   (one by anyone else only if it is on the board already)
 #   PR opened as a draft, or made a draft      -> In progress   (each issue its body closes: "Closes #<issue>")
 #   PR opened ready, or marked ready           -> In review
-#   PR merged, or issue closed                 -> Done
+#   PR merged                                  -> Done
 #   PR closed without merging                  -> Backlog
 #   label `needs-owner` added                  -> Needs Tom   (the board's column for a question to the owner)
 #   label `needs-owner` removed                -> In review / In progress by its open PR, else Backlog
@@ -24,8 +25,10 @@ on:
 
 permissions: {}
 
+# one queue per issue or PR, never one for the repository: GitHub keeps one run waiting in a group and cancels an older
+# waiting run, so a single group would drop updates whenever events come close together
 concurrency:
-  group: board
+  group: board-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
@@ -78,7 +81,16 @@ jobs:
                 if (!MEMBERS.includes(issue.author_association)) return core.info(`#${issue.number} is by a ${issue.author_association}: left for the owner`);
                 return setStatus(issue.node_id, "Backlog");
               }
-              if (action === "closed") return setStatus(issue.node_id, "Done");
+              if (action === "closed") {
+                // a stranger's issue closed (by them, or as spam) is not put on the board: only moved if it is on it
+                if (!MEMBERS.includes(issue.author_association)) {
+                  const items = (await github.graphql(`
+                    query($id: ID!) { node(id: $id) { ... on Issue { projectItems(first: 50) { nodes { project { id } } } } } }`,
+                    { id: issue.node_id })).node.projectItems.nodes;
+                  if (!items.some(i => i.project.id === project.id)) return core.info(`#${issue.number} is by a ${issue.author_association} and not on the board: left alone`);
+                }
+                return setStatus(issue.node_id, "Done");
+              }
               if (label !== LABEL) return;
               if (action === "labeled") return setStatus(issue.node_id, WAITING);
               const prs = (await github.graphql(`
