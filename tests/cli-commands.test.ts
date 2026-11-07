@@ -473,12 +473,16 @@ test("mason usage: a span a line under its heading — the statements, their err
   assert.equal(sampleHeading(true).endsWith("oldest        lag  memory"), true);
   // the command line's one duration grammar: a bare number is seconds (0 alone is every sample)
   assert.deepEqual(["90s", "30m", "6h", "7d", "0", "300", "1w", "-1h", "1.5"].map(spanSeconds), [90, 1800, 21_600, 604_800, 0, 300, null, null, null]);
+  // a zero with its unit is every sample, as main read it (issue 717's grammar is a superset)
+  assert.deepEqual(["0s", "0m", "0h", "0d", "0 m", " 0s ", "-0", "-0s"].map(spanSeconds), [0, 0, 0, 0, 0, 0, null, null]);
   const now = Date.parse("2026-10-28T10:00:00.000Z");
   // --since and --until are read by the ONE time grammar of every entrance (timeOf): a time with no zone is refused
   const times = ["1h", "2026-10-28T09:00:00Z", "2026-10-28", "2026-10-28T09:00:00", "yesterday", "12", "0", "2 hours"].map((t) => timeOf("--since", t, now));
   assert.deepEqual(times.map((t) => typeof t === "string" ? t : t.message),
     ["2026-10-28T09:00:00.000Z", "2026-10-28T09:00:00.000Z", "2026-10-28T00:00:00.000Z", '--since "2026-10-28T09:00:00" is not a time', '--since "yesterday" is not a time', `--since "12" is not a time`,
       '--since "0" is not a time', "2026-10-28T08:00:00.000Z"], "a bare number is no time: an age in seconds and a Unix timestamp read alike");
+  // an age of zero is now, with its unit, as main read it, at the command line and the run's API alike
+  for (const zero of ["0s", "0m", "0h", "0d", "0 s"]) assert.equal(timeOf("--until", zero, now), "2026-10-28T10:00:00.000Z", zero);
   assert.equal("whenOf" in usageCli, false, "no second parser beside timeOf");
   for (const k of USAGE.json ?? []) if (k !== "next") assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names ${k}`);
   for (const k of Object.keys(sample)) assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names a sample's ${k}`);
@@ -487,13 +491,15 @@ test("mason usage: a span a line under its heading — the statements, their err
 // ONE DURATION GRAMMAR FOR EVERY FLAG THAT TAKES ONE (issue 717): --timeout was seconds for wait, share and ui, and an
 // interval (10m) for deploy and replica create, so `wait --timeout 10m` and `deploy --timeout 600` both failed
 test("a duration on the command line is one grammar: a bare number is seconds, <n>s|m|h|d and their words; a superset of every form each flag took", () => {
-  const { parseDuration, DURATION_FORMS } = tableSync as unknown as { parseDuration: (v: string, o?: { min?: number; max?: number }) => { every: string; seconds: number } | { problem: string }; DURATION_FORMS: string };
+  const { parseDuration, DURATION_FORMS } = tableSync as unknown as { parseDuration: (v: string, o?: { min?: number; max?: number; zero?: boolean }) => { every: string; seconds: number } | { problem: string }; DURATION_FORMS: string };
   const read = (v: string, o?: { min?: number; max?: number }): string | number => { const d = parseDuration(v, o); return "problem" in d ? d.problem : d.seconds; };
   // what wait, share and ui took (any number of seconds over 0, a fraction included), and what deploy took (10m, 1h, 5 minutes)
   assert.deepEqual(["600", "0.5", " 30 ", "1e3", "10m", "1h", "5 minutes", "1d", "2 days", "90s", "1.5m"].map((v) => read(v)), [600, 0.5, 30, 1000, 600, 3600, 300, 86_400, 172_800, 90, 90]);
   assert.deepEqual(parseDuration("10m"), { every: "10m", seconds: 600 });
   assert.deepEqual(parseDuration("600"), { every: "600s", seconds: 600 });
   for (const bad of ["", "soon", "0", "-5", "0s", "500ms", "1w", "Infinity"]) assert.equal(typeof read(bad), "string", bad);
+  // zero only where a flag takes it (an age of now, every sample): never a --timeout
+  assert.deepEqual(["0s", "0 m", "0d"].map((v) => parseDuration(v, { zero: true })), [{ every: "0s", seconds: 0 }, { every: "0m", seconds: 0 }, { every: "0d", seconds: 0 }]);
   assert.equal(read("soon"), `"soon" is not a duration: write ${DURATION_FORMS}`);
   // the flag's own range: deploy's and replica create's 1s to 24h
   assert.equal(read("25h", { min: 1, max: 86_400 }), "25h is over the longest, 24h");

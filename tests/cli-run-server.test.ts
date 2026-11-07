@@ -744,6 +744,7 @@ test("the sync's events: /api/events passes its filters to the record, merges th
     for (const bad of ["2026-10-28T09:00:00", "1"]) assert.equal((await get(`/api/events?since=${bad}`)).status, 400, bad);
     eventAsks.length = 0;
     assert.equal((await get("/api/events?since=2h")).status, 200);
+    for (const zero of ["0s", "0m", "0d"]) assert.equal((await get(`/api/events?until=${zero}`)).status, 200, `${zero}: an age of zero is now`);
     assert.ok(Math.abs(Date.parse((eventAsks[0] as { since: string }).since) - (Date.now() - 7_200_000)) < 60_000, "an age is that long ago");
   } finally { restarts = []; }
 });

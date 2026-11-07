@@ -110,9 +110,10 @@ export const DURATION_FORMS = "a number of seconds, or <n>s, <n>m, <n>h or <n>d 
  * `timeOf`, which refuses a bare number as a time): a bare number is seconds, as wait, share and ui read it before; `<n>s|m|h|d`, and the words a sync's
  * interval takes (`5 min`, `2 hours`, `7 days`), as a `sync:` interval and a `target_lag:` are written. A superset of
  * every form each flag took before, so nothing that parsed stops parsing. The range is the flag's (`min`, `max` in
- * seconds; over 0 always); the caller names the flag.
+ * seconds; over 0, unless `zero`: an age of now, `--since 0s`, and `--step 0s`, every sample, as each took it before);
+ * the caller names the flag.
  */
-export function parseDuration(v: string, o: { min?: number; max?: number } = {}): Duration | { problem: string } {
+export function parseDuration(v: string, o: { min?: number; max?: number; zero?: boolean } = {}): Duration | { problem: string } {
   const t = v.trim();
   let seconds: number, every: string;
   if (t !== "" && Number.isFinite(Number(t))) { seconds = Number(t); every = `${seconds}s`; }
@@ -122,6 +123,7 @@ export function parseDuration(v: string, o: { min?: number; max?: number } = {})
     if (m === null || unit === undefined) return { problem: `${JSON.stringify(v)} is not a duration: write ${DURATION_FORMS}` };
     seconds = Number(m[1]) * UNIT_SECONDS[unit]; every = `${Number(m[1])}${unit}`;
   }
+  if (o.zero === true && seconds === 0 && !Object.is(seconds, -0)) return { every, seconds: 0 };
   if (!(seconds > 0)) return { problem: `${JSON.stringify(v)} is not a duration over 0: write ${DURATION_FORMS}` };
   if (o.min !== undefined && seconds < o.min) return { problem: `${every} is under the shortest, ${intervalOf(o.min)}` };
   if (o.max !== undefined && seconds > o.max) return { problem: `${every} is over the longest, ${intervalOf(o.max)}` };

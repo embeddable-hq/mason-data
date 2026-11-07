@@ -57,7 +57,7 @@ export const USAGE: CommandSpec & { needs: "run" } = {
  *  90s, 30m, 6h, 7d, a bare number of seconds; 0 for every sample), in whole seconds, or null when it is not one. */
 export function spanSeconds(text: string): number | null {
   if (text.trim() === "0") return 0;
-  const d = parseDuration(text);
+  const d = parseDuration(text, { zero: true });
   return "problem" in d || !Number.isInteger(d.seconds) ? null : d.seconds;
 }
 

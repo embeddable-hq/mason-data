@@ -60,7 +60,7 @@ export const QUERY_NAMES = (k: FilterKey): string => k;
  * number is refused here, as it always was: as a TIME it reads as well as a Unix timestamp as an age in seconds.
  */
 export function timeOf(name: string, text: string, now: number): string | Failure {
-  const age = Number.isFinite(Number(text.trim())) ? null : parseDuration(text);
+  const age = Number.isFinite(Number(text.trim())) ? null : parseDuration(text, { zero: true });
   if (age !== null && !("problem" in age)) return new Date(now - age.seconds * 1000).toISOString();
   const t = ISO.test(text.trim()) ? Date.parse(text.trim()) : NaN;
   if (Number.isNaN(t)) {
