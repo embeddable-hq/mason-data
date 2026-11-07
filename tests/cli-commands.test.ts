@@ -1304,7 +1304,7 @@ test("a list flag takes a comma list or the flag repeated, meaning the same: --c
     const scopes = await runMason(root, ["token", "create", "--replica", "acme/shop", "--scope", "deploy,bogus", "--json"], matrixEnv());
     assert.equal(scopes.code, 2, scopes.stdout + scopes.stderr);
     assert.match((JSON.parse(scopes.stdout) as { error: { message: string } }).error.message, /^--scope "bogus" is not a scope/);
-    const twice = await runMason(root, ["token", "create", "--replica", "acme/shop", "--scope", "deploy,users", "--scope", "deploy", "--json"], matrixEnv());
+    const twice = await runMason(root, ["token", "create", "--replica", "acme/shop", "--scope", "deploy,users", "--scope=deploy", "--json"], matrixEnv());
     assert.equal(twice.code, 2);
     assert.equal((JSON.parse(twice.stdout) as { error: { message: string } }).error.message, "a --scope is named twice");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
