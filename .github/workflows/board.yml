@@ -11,6 +11,10 @@
 #
 # Up next is the owner's to order: nothing here moves a card into it.
 #
+# Run by hand (Actions > board > Run workflow), it brings every card of this repository on the board in step: a closed
+# issue to Done, an open one with an open PR that closes it to In progress or In review; any other open issue, and one
+# waiting on the owner (`needs-owner`), stays where it is.
+#
 # Needs: the repository variable PROJECT_NUMBER (the organisation project's number) and the secret PROJECT_TOKEN (a
 # fine-grained token with the organisation's Projects read and write, and this repository's issues and pull requests
 # read). Until the variable is set, the job is skipped. A PR from a fork is skipped too: it is given no secrets, and
@@ -22,6 +26,7 @@ on:
     types: [opened, reopened, closed, labeled, unlabeled]
   pull_request:
     types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+  workflow_dispatch:
 
 permissions: {}
 
@@ -35,7 +40,7 @@ jobs:
   status:
     if: vars.PROJECT_NUMBER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
@@ -71,6 +76,38 @@ jobs:
                     value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
                 }`, { project: project.id, item, field: project.field.id, option: option.id });
               core.info(`${issueNodeId} -> ${name}`);
+            }
+
+            if (ev === "workflow_dispatch") {
+              // every card on the board, a page at a time; only this repository's issues, and only a card that is wrong
+              let after = null, moved = 0, seen = 0;
+              do {
+                const page = (await github.graphql(`
+                  query($id: ID!, $after: String) { node(id: $id) { ... on ProjectV2 { items(first: 50, after: $after) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                      content { ... on Issue { id number state repository { nameWithOwner } labels(first: 20) { nodes { name } }
+                        closedByPullRequestsReferences(first: 5, includeClosedPrs: false) { nodes { isDraft } } } }
+                    }
+                  } } } }`, { id: project.id, after })).node.items;
+                for (const item of page.nodes) {
+                  const issue = item.content;
+                  if (!issue?.number || issue.repository.nameWithOwner !== `${owner}/${repo}`) continue;
+                  seen++;
+                  const prs = issue.closedByPullRequestsReferences.nodes;
+                  const waiting = issue.labels.nodes.some(l => l.name === LABEL);
+                  const want = issue.state === "CLOSED" ? "Done"
+                    : waiting || prs.length === 0 ? null
+                    : prs.some(p => !p.isDraft) ? "In review" : "In progress";
+                  if (want === null || item.status?.name === want) continue;
+                  core.info(`#${issue.number}: ${item.status?.name ?? "no status"} -> ${want}`);
+                  await setStatus(issue.id, want);
+                  moved++;
+                }
+                after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+              } while (after);
+              return core.info(`${seen} card(s) of ${owner}/${repo} read, ${moved} moved`);
             }
 
             if (ev === "issues") {
