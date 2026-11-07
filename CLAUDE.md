@@ -167,6 +167,10 @@ on every push. Locally:
 - **Node: CI's decides.** CI runs Node 26, never 24 (nodejs/node#66366: V8's
   `# Check failed: jit_page_->allocations_.erase(addr) == 1` after every test passed is that bug, not the change's).
   A test that differs between the two is read on Node 26.
+- **Match CI's tools before testing** (Tom, 2026-11-07). When the machine lacks what CI runs (Node 26, `psql`, a
+  Postgres for the integration tests), install it first: Node from nodejs.org with its `SHASUMS256.txt` checked, put
+  first on `PATH`. A local run on another Node is a guess at CI: on Node 22, `tests/cli-ui-ssh.test.ts` cancels most
+  of its tests, so PRs 725 and 728 could only be read there.
 
 ## Git workflow
 
