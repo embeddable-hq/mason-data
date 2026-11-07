@@ -172,6 +172,12 @@ export function dropStatements(o: ProjectReplication): string {
     (o.owned ? ` DROP PUBLICATION IF EXISTS ${o.publication};` : "");
 }
 
+/** The statement that lists Mason's replication slots on a database (each named `mason_…`, `replicationNames`), for a
+ *  person to find the one to drop when its name is not known (a hosted replica's record of it could not be read). */
+export function listSlotsStatement(): string {
+  return "SELECT slot_name, database, active FROM pg_replication_slots WHERE left(slot_name, 6) = 'mason_';";
+}
+
 /**
  * WHAT THE RECORD NAMES THAT THIS START NO LONGER READS, to drop before the record names the new one (each holds what
  * Mason made on a database nothing would drop otherwise): a slot under another name (the sources file renamed) goes

@@ -302,11 +302,12 @@ export function seenProblems(text: string, width: number | null, failed: boolean
 /** The terminal a run is given (`mason(…, { terminal: 80 })`): a preload that makes its stdout and stderr say they are
  *  a terminal that wide, as a terminal's would, so the CLI draws for one; colour off, so what is seen is the text. The
  *  file is the seam, as tests/cli-matrix.ts containerMemoryEnv's: nothing in src/ reads a test's variable. */
-function terminalEnv(width: number): Record<string, string> {
+function terminalEnv(width: number, stdin = false): Record<string, string> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mason-terminal-"));
   made.push(dir);
   const hook = path.join(dir, "terminal.mjs");
-  fs.writeFileSync(hook, `for (const s of [process.stdout, process.stderr]) {
+  // a person at it (`stdin`): its stdin says it is the terminal too, and what they type is the run's `stdin`
+  fs.writeFileSync(hook, `${stdin ? `Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });\n` : ""}for (const s of [process.stdout, process.stderr]) {
   Object.defineProperty(s, "isTTY", { value: true, configurable: true });
   Object.defineProperty(s, "columns", { value: ${width}, configurable: true });
 }
@@ -320,9 +321,16 @@ function terminalEnv(width: number): Record<string, string> {
  * is the CLI's; and every line a person sees is one the CLI began (`seenProblems`) — at `terminal` columns for a run on
  * a terminal, the logical lines of a pipe otherwise.
  */
-export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; lines?: Lines; stdin?: string } = {}): Promise<Answer> {
-  const a = await runMason(h, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal) } : env, o.timeoutMs ?? 60_000, undefined, o.stdin);
+export async function mason(h: string, argv: string[], env: Record<string, string>, o: { timeoutMs?: number; terminal?: number; lines?: Lines; stdin?: string; prompt?: string } = {}): Promise<Answer> {
+  // a `prompt` is a person typing `stdin` at the terminal: its stdin says it is the terminal too
+  const a = await runMason(h, argv, o.terminal ? { ...env, ...terminalEnv(o.terminal, o.prompt !== undefined) } : env, o.timeoutMs ?? 60_000, undefined, o.stdin);
   ANSWERS.push(a);
+  // what a person sees at a terminal they type at: the terminal echoes the line typed after the run's `prompt`
+  const echoed = (text: string): string => {
+    const at = o.prompt === undefined || o.stdin === undefined || !o.terminal ? -1 : text.indexOf(o.prompt);
+    const line = o.stdin?.split("\n")[0] ?? "";
+    return at < 0 ? text : `${text.slice(0, at + o.prompt!.length)}${line}${o.stdin!.includes("\n") ? "\n" : ""}${text.slice(at + o.prompt!.length)}`;
+  };
   const line = `mason ${argv.join(" ")}${o.terminal ? ` (a terminal ${o.terminal} wide)` : ""}`;
   const json = argv.includes("--json");
   if (json && a.code !== 0) {
@@ -330,7 +338,7 @@ export async function mason(h: string, argv: string[], env: Record<string, strin
     assert.ok(e?.code !== undefined && Object.hasOwn(FAILURE_CODES, e.code), `${line}: code ${e?.code} is not one of FAILURE_CODES`);
     assert.equal(a.code, exitOf({ message: "", code: e.code as FailureCode }), `${line}: exit ${a.code}, where ${e.code} exits ${exitOf({ message: "", code: e.code as FailureCode })}`);
   }
-  for (const [stream, text] of json ? [["stderr", a.stderr]] as const : [["stdout", a.stdout], ["stderr", a.stderr]] as const) {
+  for (const [stream, text] of json ? [["stderr", echoed(a.stderr)]] as const : [["stdout", a.stdout], ["stderr", echoed(a.stderr)]] as const) {
     const p = seenProblems(text, o.terminal ?? null, stream === "stderr" && !json ? a.code !== 0 : null, o.lines);
     assert.deepEqual(p, [], `${line}: what a person sees of its ${stream}:\n${text}`);
   }

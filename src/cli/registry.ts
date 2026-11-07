@@ -286,7 +286,7 @@ export function topUsage(s: Style = styleOut()): string {
     para("A command means the project of the folder it runs in (or above it); mason -C <folder> <command> runs it as if started in that folder."),
     para("Every command but help and mcp (whose stdout is the MCP protocol's) takes --json: one JSON object for a program, always with next (what to run " +
       "next); a failure is { error: { code, message, why, fix }, next }. The exit code says how it went: 0 done, 1 failed " +
-      "with the reason, 2 a wrong command line, 124 a wait timed out (mason wait, mason deploy, mason replica create). Driving Mason from a coding agent: mason help agent."),
+      "with the reason, 2 a wrong command line, 124 a wait timed out (mason wait, mason deploy, mason replica create, mason replica delete). Driving Mason from a coding agent: mason help agent."),
     "",
   ].join("\n");
 }

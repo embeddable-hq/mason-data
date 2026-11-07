@@ -78,8 +78,9 @@ export const MATRIX_MORE: Readonly<Record<string, ReadonlyArray<readonly string[
 export const MATRIX_EXTRA_ARGS: Readonly<Record<string, readonly (readonly string[])[]>> = {
   user: [["add", "nobody", "--role", "no_such_role"], ["add", "nobody", "--role", "no_such_role", "--set", "tenant=1"]],
   // create reads the project's sources file first: the state's answer, a url: written in the file (refused: the
-  // replica reads it by a variable), or, where it names one (the demo), not signed in; nothing is ever sent
-  replica: [["status", "acme/shop"], ["create", "acme/shop", "--region", "eu", "--size", "50"]],
+  // replica reads it by a variable), or, where it names one (the demo), not signed in; nothing is ever sent. delete
+  // needs no project: not signed in, in every state (without --yes, and no terminal, a wrong line before that)
+  replica: [["status", "acme/shop"], ["create", "acme/shop", "--region", "eu", "--size", "50"], ["delete", "acme/shop", "--yes"]],
   token: [["create", "--replica", "acme/shop"], ["revoke", "tok_1", "--org", "acme"]],
 };
 

@@ -122,7 +122,7 @@ retries one by itself.
 
 ## Replicas: `mason replica`
 
-`mason replica create | list | status` makes and reads the replicas of an organisation. Every request carries
+`mason replica create | list | status | delete` makes, reads and deletes the replicas of an organisation. Every request carries
 `Authorization: Bearer <token>`. `{org}` and `{name}` follow the deploy's grammar (each `^[a-z0-9][a-z0-9-]{0,62}$`,
 checked before a byte is sent).
 
@@ -131,6 +131,7 @@ checked before a byte is sent).
 | `list [<org>]` | `GET /v1/replicas/{org}` | a login, any role | `{ replicas: [Replica], more }` |
 | `create <org>/<name>` (or `--replica`, `MASON_REPLICA`) | `POST /v1/replicas/{org}` | a login, an admin or an owner | `201 { replica: Replica, checks: [SourceChecks] }` |
 | `status <org>/<name>` | `GET /v1/replicas/{org}/{name}` | a login, any role; a CI token made for that replica | `{ replica: Replica }` |
+| `delete <org>/<name>` | `DELETE /v1/replicas/{org}/{name}` | a login, an owner, made within the last 15 minutes | `202` / `200 { replica: Replica }` |
 
 `list` with no `<org>` asks `GET /v1/me` for the login's organisations (at most 20; past that it asks for one), then
 each one's list. `more` is `true` when the organisation has more replicas than the service answers at once.
@@ -268,14 +269,132 @@ service asks for (`the service asks for another try in 30 s`); the CLI does not 
 | `allowlist` | the address ranges that may query it, each IPv4 or IPv6 with its prefix length; at most 1000 |
 | `page` | optional: the replica's page in the service's web app, where its allowlist is set; an absolute URL on the service's own origin, with no user or password, tested as the URL parser prints it (one elsewhere refuses the answer). `mason replica create` prints it when the replica is ready, `status` beside its other facts |
 | `pending` | what of its region's work is not done, at most 16: `[{ change: "create" \| "allowlist", state: "pending" \| "failed", attempts, failure?, nextAttemptAt? }]`, `failure` a sentence (said as one line), `nextAttemptAt` ISO 8601 |
+| `deletion` | in one replica's answer (`GET …/{name}`, a `DELETE`'s): [`Deletion`](#deletion), always while `state` is `deleted`, optional while it is `deleting` (absent or `null` for a replica deleted another way, as from the service's web app: the CLI then says it is being deleted and nothing more), and never in any other state. One present is held whole: a malformed one refuses the answer |
 
-`--json` prints each replica with these keys, `page`, `failure` and `nextAttemptAt` `null` when absent.
+`--json` prints each replica with these keys, `page`, `failure` and `nextAttemptAt` `null` when absent; `status` and
+`delete` print its deletion beside it, as `deletion` (`null` while it is in none, or when the service gave none).
 
 **What is tested first.** Before any value is held to its grammar, every string of each answer, each key included, is
 put to the exact test (`carriesNoSecret`: the token and the URL's password, and the shapes of a token or a password),
 but the service's words alone: a check's `name`, `detail` and `fix`, `missing`, a pending change's `failure` — free
 text, masked as a failure's words are. An answer that carries a secret anywhere else is refused whole, said by its
 status. Any other answer outside these shapes is a failure naming the request and the status, never the body.
+
+### `DELETE /v1/replicas/{org}/{name}`
+
+`mason replica delete <org>/<name>` deletes a replica for good: it and its synced data go, and Mason's replication slot
+on each database it syncs is dropped. `Content-Type: application/json`, at most 512 bytes, one level deep:
+
+```json
+{ "confirm": "acme/shop" }
+```
+
+`confirm` names the replica exactly, `{org}/{name}`: nothing trimmed or case-folded. The CLI sends the name on its
+command line. At a terminal it first asks a person to type that name back, and sends nothing unless they typed exactly
+it; it never prints what was typed. Without a terminal, and with `--json`, it needs `--yes`, and is refused as a wrong
+line (exit 2) without it, before a byte is sent.
+
+Who may: an owner of the organisation, signed in as a person with a login made within the last 15 minutes (a fresh
+`mason login`). A CI token deletes none.
+
+| Status | `error.code` | When |
+|---|---|---|
+| `202` | | under way: `{ replica }`, its `state` `deleting`, with its `deletion` (optional, as for any replica `deleting`). A repeat is answered the same, changing nothing |
+| `200` | | deleted already: `{ replica }`, its `state` `deleted`, its deletion finished (the record the service keeps of it) |
+| `400` | `bad_request` | the body is not `{ confirm }`, or `confirm` does not name `{org}/{name}` exactly; the value sent is never repeated |
+| `401` | `unauthenticated` | no token, or one the service does not take |
+| `403` | `refused` | a CI token, or a role below owner |
+| `403` | `fresh_login_needed` | the login is more than 15 minutes old |
+| `404` | `not_found` | no such organisation or replica for this token, said the same way |
+| `409` | `refused` | the token was revoked, or its role lowered, while the request ran: nothing changed |
+| `413` | `too_large` | past 512 bytes |
+| `429` | `slow_down` | the account has made its deletions for the hour: nothing deleted; `Retry-After`. Never for a repeat |
+| `503` | `unavailable` | the organisation's changes are queued; `Retry-After` |
+
+The CLI's code follows the HTTP status, as for every `/v1/` failure, and its next step is its own: `mason login` "then
+delete it within 15 minutes, or on its page in the service's web app" for `fresh_login_needed`; `mason login` as an
+owner for any other `401` or `403`; `mason replica list <org>` for a `404`; for a `429` or a `503`, the same `mason
+replica delete`, again after the time its `Retry-After` asks for (said as a time), or "later" when it asks none; else
+the same `mason replica delete`.
+
+**The wait.** After `202` the CLI asks `GET /v1/replicas/{org}/{name}` every 5 s (or after the seconds a `Retry-After`
+asks for) until the deletion's `stage` is `finished` or `needs_person`, and stops at `--timeout` (default `15m`, `1s` to
+`24h`: exit 124, nothing stopped; `mason replica status` says how it goes). A replica `deleting` with no `deletion` is
+waited on the same way, said as being deleted. A `429`, a `5xx` or no answer is a wait. A `404` is a replica
+gone, whose deletion's outcome is not known (`not_found`, with the statement that lists Mason's slots, below). A
+replica that is in no deletion any more is an answer outside the contract. A `DELETE` that gets no answer may have
+begun it: the CLI asks its state once, and waits when it is being deleted, or says that its deletion did not begin, or
+that it cannot tell. It says each step once, as it is done, in the service's words, one line each.
+
+**A person is needed while a slot is not verified gone.** A replication slot left on a database holds its WAL for as
+long as it exists, so a service never deletes the replica, nor anything it needs to finish the deletion, while a
+source's slot is `not_verified`: once it has done all it can, the deletion's `stage` is `needs_person`, the replica
+stays `deleting`, and each such source carries its `slot` (and `publication`, `publicationOwned`) so a client renders
+the statement to run by hand (below). The service goes on to `finished` once each such slot is seen gone, or a person
+confirms in the service's web app that they dropped it by hand, or that its database is no more (that source's
+`outcome` is then `confirmed`). How a person confirms is the service's own; this API only reports it.
+
+**The outcome.** Exit 0 once the deletion is finished, every source's slot dropped, none there or confirmed. At
+`needs_person` the CLI stops waiting at once (nothing more comes of waiting, whatever `--timeout`), prints each
+source's outcome and what to run by hand, each statement alone on its line, then a failure (code `failed`, exit 1: the
+replica is not deleted yet) whose fix is to run the statement, then confirm it on the replica's page in the service's
+web app, and whose next step is `mason replica status <org>/<name>`. `--json` carries the same: `deletion.stage`
+`needs_person`, each source's `byHand` the CLI's statement, and `error`. `mason replica status` shows a deletion under
+way, needing a person, or finished, the same way, and exits 0.
+
+### `Deletion`
+
+| Key | Held to |
+|---|---|
+| `stage` | `requested` (asked for, not handed over to the replica's region yet: until then the addresses of its allowlist may still query it), `in_region` (under way: nobody may query it; its steps arrive), `needs_person` (all done that can be, but a source's slot is `not_verified`: at least one is, and the replica is kept until each is seen gone or confirmed) or `finished` (no source `not_verified`). A replica `deleting` is at `requested`, `in_region` or `needs_person`; one `deleted` at `finished` |
+| `requestedAt` | ISO 8601 with its zone |
+| `handover` | at `requested` alone, or absent: `{ attempts, failure?, nextAttemptAt? }`, `failure` a sentence (said as one line) |
+| `lastHeardAt` | ISO 8601, or `null` |
+| `finishedAt` | ISO 8601 once `stage` is `finished`, else `null` |
+| `steps` | every step of the deletion, in order, at most 64: `[{ step, what, doneAt }]`. `step` is an id (lower case letters, digits and `_`, each once); `what` is the service's words for it (said as one line); `doneAt` ISO 8601, `null` until it is done. The CLI assumes no count and no id |
+| `sources` | one per database the replica syncs, in order, at most 16: [`DeletionSource`](#deletionsource) |
+
+### `DeletionSource`
+
+| Key | Held to |
+|---|---|
+| `ordinal` | its place in `sources`, from 0 |
+| `outcome` | what the deletion did to Mason's replication slot on that database: `dropped` (and verified gone), `no_slot` (none there: nothing to drop), `not_verified`, or `confirmed` (not seen gone by the service: a person confirmed they dropped it by hand, or that its database is no more) |
+| `reason` | `not_verified` alone: `unreachable`, `refused`, `in_use`, `still_there`, `another_server`, `record_unreadable`, `failed` or `unprobed`, said in the CLI's words |
+| `why` | `not_verified` alone, optional: the service's words (said as one line) |
+| `slot` | the slot's name, or `null` when it is not known; `dropped` names it, and `not_verified` should, so the statement by hand drops it rather than lists the slots. Postgres's name grammar: `^[a-z0-9_]{1,63}$` |
+| `publication` | the publication's name, or `null`; the same grammar |
+| `publicationOwned` | absent for `no_slot`; else (`dropped`, `not_verified`, `confirmed`) `true` (the publication is Mason's own, named `mason_…`), `false` (the database owner's) or `null` (not said) |
+| `byHand` | optional, advisory: the service's own statement to run by hand. A string; a client renders its own from the names (below), and the CLI never prints this one nor compares it |
+| `reportedAt` | ISO 8601 |
+
+**What to run by hand is the CLI's own.** Mason is the one authority for the SQL that drops or lists its own slots. For a
+slot not verified gone the CLI prints the statement Mason itself gives for dropping its slot (`dropStatements` in
+src/cli/replication-mode.ts, which `mason start` and `mason destroy` print too), rendered from the names the service
+sent, each held to the grammar first: an answer with a name outside it is refused whole. A service's `byHand` is
+advisory: the CLI reads it only as a string that carries no secret, and never prints it, compares it or depends on its
+text, so any client renders its own from `slot`, `publication` and `publicationOwned`. For a slot named `<slot>`:
+
+```sql
+SELECT pg_drop_replication_slot('<slot>') FROM pg_replication_slots WHERE slot_name = '<slot>' AND NOT active;
+```
+
+followed, only when `publicationOwned` is `true`, by a space and `DROP PUBLICATION IF EXISTS <publication>;`. For a slot
+whose name is not known (`slot` `null`), the statement that lists Mason's slots on the database, to find it:
+
+```sql
+SELECT slot_name, database, active FROM pg_replication_slots WHERE left(slot_name, 6) = 'mason_';
+```
+
+The CLI prints each statement alone on a line of its own, indented, never broken at the terminal's width (a break
+inside a name would be pasted with it), after a line saying which source it is for; under `--json` it is
+`deletion.sources[].byHand`, the CLI's rendering. The same holds wherever the CLI prints a statement: a replica gone
+midway prints the statement that lists Mason's slots that way too, never inside a failure's words.
+
+**What is tested first.** As for every replica's answer, every string of it, each key included, is put to the exact
+test before any value is held to its grammar, but the service's words alone: a step's `what`, a source's `why`, the
+handover's `failure`, which are masked. A step's id, a slot's or a publication's name and `byHand` are no free text: an
+answer that carries a secret in one is refused whole.
 
 ## CI tokens: `mason token`
 

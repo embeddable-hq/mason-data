@@ -36,6 +36,14 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 
 ## What changes
 
+- **`mason replica delete <org>/<name>` deletes a hosted replica, and says what it did to your database.** At a
+  terminal it asks you to type the replica's name back (elsewhere it needs `--yes`); an owner deletes one, signed in
+  within the last 15 minutes. It waits until the deletion is finished (`--timeout`, exit 124 past it), then says, for
+  each database, whether Mason's replication slot was dropped and verified gone. When one was not, the service keeps
+  the replica (a slot left behind holds its WAL) and the command stops waiting at once: it prints why and the exact
+  statement to run on that database, and exits 1; run it, as a user that may drop a replication slot, then confirm on
+  the replica's page in the service's web app, and the deletion finishes. `mason replica status` shows a deletion in
+  progress the same way, and a replica deleted from the web app as being deleted.
 - **`mason doctor`'s warnings about a role that may write say what the role has, then one plain recommendation**:
   "Mason only reads, but, for security reasons, we recommend using a role that only reads" (for SECURITY DEFINER
   functions, to review each). They no longer spell out what the role could do. The warning codes, and the statements

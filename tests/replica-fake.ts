@@ -53,13 +53,15 @@ export function project(o: { env?: null; file?: string } = {}): string {
 }
 
 /** One run in `cwd` against a fresh fake whose replica endpoints `v1` answers, signed in by MASON_TOKEN, `stdin` piped to
- *  it (the database's URL: `URL_` unless said); its requests. */
-export async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: { cwd?: string; token?: string; terminal?: number; me?: Reply; stdin?: string; env?: Record<string, string> } = {}): Promise<{ a: Answer; requests: Req[]; token: string; url: string }> {
+ *  it (the database's URL: `URL_` unless said), or `input` typed at the terminal (a person answering a prompt); its
+ *  requests. */
+export async function hosted(v1: (r: Req) => Reply | Promise<Reply>, argv: string[], o: { cwd?: string; token?: string; terminal?: number; me?: Reply; lines?: Lines; stdin?: string; input?: string; env?: Record<string, string> } = {}): Promise<{ a: Answer; requests: Req[]; token: string; url: string }> {
   const token = o.token ?? newToken("pat"); SECRETS.push(token);
   const fake = await fakeService({ v1, ...(o.me ? { me: o.me } : {}) });
   const h = home();
   try {
-    const a = await mason(o.cwd ?? h, ["replica", ...argv], envFor(h, fake.url, { MASON_TOKEN: token, ...o.env }), { lines: LINES, stdin: o.stdin ?? URL_, ...(o.terminal ? { terminal: o.terminal } : {}) });
+    const a = await mason(o.cwd ?? h, ["replica", ...argv], envFor(h, fake.url, { MASON_TOKEN: token, ...o.env }), { lines: o.lines ?? LINES, ...(o.terminal ? { terminal: o.terminal } : {}),
+      ...(o.input !== undefined ? { stdin: o.input, prompt: "> " } : { stdin: o.stdin ?? URL_ }) });
     // the database's URL: never its password, in any form a run prints
     for (const text of [a.stdout, a.stderr]) assert.ok(!text.includes(PASSWORD) && !text.toLowerCase().includes(PASSWORD.toLowerCase()), `mason replica ${argv.join(" ")} printed the database's password:\n${a.stdout}${a.stderr}`);
     assert.ok(!a.argv.some((x) => x.includes(PASSWORD) || x.includes("postgres://")), "the URL is never on the command line");
