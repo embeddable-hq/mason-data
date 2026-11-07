@@ -346,7 +346,7 @@ test("the file: every mistake at its key, with the way out, all of them at once"
   refusedAt(refused("kind: scheduld\ntarget_lag: 5m\nsql: SELECT 1 AS a\n"), "kind", /did you mean `scheduled`/);
   refusedAt(refused("kind: live\ntarget_lag: 5m\nsql: SELECT 1 AS a\n"), "target_lag", /contradicts kind: live/);
   refusedAt(refused("kind: live\nsql: SELECT 1 AS a\n"), "kind", /isn't available yet/);
-  refusedAt(refused("kind: scheduled\ntarget_lag: 2d\nsql: SELECT 1 AS a\n"), "target_lag", /write 48h/);
+  refusedAt(refused("kind: scheduled\ntarget_lag: 2d\nsql: SELECT 1 AS a\n"), "target_lag", /over the longest interval, 24h: write 24h/);
   refusedAt(refused("kind: scheduled\ntarget_lag: 500ms\nsql: SELECT 1 AS a\n"), "target_lag", /shortest interval/);
   refusedAt(refused("kind: scheduled\ntarget_lag: 5\nsql: SELECT 1 AS a\n"), "target_lag", /the number 5/);
   refusedAt(refused("kind: scheduled\ntarget_lag: 5m\n"), "sql", /is missing/);
@@ -390,10 +390,10 @@ test("order_by is one clause over the table's columns, and the sql goes in as a 
 test("target_lag is a poll's interval read alone: one grammar, worded as written", () => {
   assert.deepEqual(parseLag("5m"), { every: "5m", seconds: 300 });
   assert.deepEqual(parseLag(" 30s "), { every: "30s", seconds: 30 });
-  assert.match((parseLag("2d") as { problem: string }).problem, /write 48h/);
+  assert.match((parseLag("2d") as { problem: string }).problem, /over the longest interval, 24h: write 24h/);
   assert.doesNotMatch((parseLag("2d") as { problem: string }).problem, /poll/);
-  assert.match((parseLag("5") as { problem: string }).problem, /not an interval/);
-  assert.match((parseSync("poll 2d") as { problem: string }).problem, /write poll 48h/, "a sync's words are as they were");
+  assert.match((parseLag("5") as { problem: string }).problem, /5 has no unit: write 5s/);
+  assert.match((parseSync("poll 2d") as { problem: string }).problem, /write poll 24h/, "a sync's words are as they were");
 });
 
 test("mason status says each table's kind, method, lag and last run, and a refusal whole", () => {
