@@ -14,7 +14,7 @@
  */
 import { esc, n, msText, bytesText, fileSize, duration, details, createOpenSet, cards, card, empty, panel, skeleton, sortTh, sortedBy, nextSort, readPart, usagePath, utcMinute,
   RANGES, DEFAULT_RANGE, rangeOf, isLive, rangeEvery, firstLine, spanText, agoText, utcText, clientText, clip, TITLE_MAX, unsupportedEntry, renderFailure, json, pop, fresh, actId,
-  statementCell, POLL_MS } from "../shared.js";
+  statementCell, POLL_MS, readOnlyLine } from "../shared.js";
 import { spark, seriesChart, seriesOf, drawable } from "../charts.js";
 
 const EVERY_MS = 60_000;
@@ -382,7 +382,8 @@ export const page = {
         const readOnly = ctx.read(STATE)?.body?.pageReadOnly ?? null;
         const now = ctx.now().getTime();
         return {
-          "usage-kpis": renderUsageKpis({ activity: a === undefined ? undefined : a.body ?? { failure: a.failure }, usage: ctx.read(samples())?.body, sessions, running: running?.running, range }),
+          // a read-only page (MASON_UI_READ_ONLY=1): why no statement has a Cancel, as Tables and Users say it
+          "usage-kpis": readOnlyLine("Statements are not cancelled", readOnly) + renderUsageKpis({ activity: a === undefined ? undefined : a.body ?? { failure: a.failure }, usage: ctx.read(samples())?.body, sessions, running: running?.running, range }),
           "usage-charts": renderCharts(ctx.read(samples())?.body, range),
           "usage-connected-h": live ? "Connected now" : `Connected in ${esc(span)}`,
           "usage-connected": live ? renderSessions(sessions, SESSIONS_TOP, range) : part(activity(), (b) => renderClients(b.clients, { range, now, total: b.clientsTotal.clients }), false),

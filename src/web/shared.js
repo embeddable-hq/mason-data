@@ -481,9 +481,10 @@ export const USERS_HASH = "#users";
  * Postgres API's URL with `<user>:<password>` in the credentials' place — the line `mason start` and `mason status`
  * print — and its psql line, each with Copy, and Create a user (the Users page), whose name and password go in that
  * place. `first` (nothing has asked Mason anything yet) leads with what the URL is for. Nothing from a run that does
- * not say it.
+ * not say it. `readOnly`: `/api/state` `pageReadOnly` (MASON_UI_READ_ONLY=1) — no Create a user, whose page could only
+ * refuse it; the URL, psql and their Copy stay.
  */
-export function renderConnect(pg, { first = false, table = null, served = false, share = "" } = {}) {
+export function renderConnect(pg, { first = false, table = null, served = false, share = "", readOnly = null } = {}) {
   if (!pg || typeof pg.shown !== "string") return "";
   // a first statement to type that the request log lists (one that reads a copied table: UNLISTED_STATEMENTS)
   const tryIt = first && table ? `<dt>Then try</dt><dd>${copyable("connect-try", `select count(*) from ${entryName(table)};`)} <span class="dim">it shows on Queries</span></dd>` : "";
@@ -491,8 +492,13 @@ export function renderConnect(pg, { first = false, table = null, served = false,
     (first ? `<p class="lead">Mason answers SQL over the Postgres protocol, as a read replica of your database would: point psql, a BI tool or your app's analytics code at this URL.</p>` : "") +
     `<dl class="facts"><dt>URL</dt><dd>${copyable("connect-url", pg.shown)}</dd><dt>psql</dt><dd>${copyable("connect-psql", pg.psql)}</dd>${tryIt}</dl>` +
     (served ? `<p class="tip">${serverHostNote(pg)}</p>` : "") +
-    `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p>${share}</div>`;
+    (readOnly !== null ? `<p class="tip">A user's name and password go in place of ${code("<user>:<password>")}: ${code("mason user add <name>")} prints the whole URL once.</p>`
+      : `<p class="tip"><a class="btn${first ? " primary" : ""}" href="${USERS_HASH}">Create a user</a> <span>Its name and password go in place of ${code("<user>:<password>")}: the Users page shows the whole URL once, as ${code("mason user add <name>")} prints it.</span></p>`) + `${share}</div>`;
 }
+
+/** Why a page offers no control that changes anything (`/api/state` `pageReadOnly`), in its own words — `what` is what is
+ *  not done from it ("Tables are not added, removed or synced") — as the Tables and Users pages say it; "" when it may. */
+export const readOnlyLine = (what, why) => why == null ? "" : `<p class="count">${esc(what)} from this page: ${esc(why)}.</p>`;
 
 /** On a server's page the Postgres URL's host is the server's own view of itself: said beside it, as a tool elsewhere needs the server's address. */
 export const serverHostNote = (pg) => `This is the address on the server: from elsewhere a tool connects to the server's own address, in place of ${code(pg.host ?? "localhost")}.`;

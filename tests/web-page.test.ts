@@ -631,7 +631,9 @@ const WRITE_CONTROLS = ["data-sync-table", "data-remove-table", "data-confirm-re
 const VIEW_BUTTONS = /^data-(copy|dismiss-[a-z-]+|pop-close|sort-table|sort-key|show-more|show-all|refresh-range|older|newest|open)$/;
 
 /** Every page of the app over a fake run whose state is `state`, a statement running and a user: what each page wrote. */
-async function everyPage(state: unknown): Promise<string> {
+async function everyPage(state: unknown): Promise<string> { return (await pageByPage(state)).all; }
+/** The same, each page's parts apart: `byPage.get(id)` is what the page `id` wrote. */
+async function pageByPage(state: unknown): Promise<{ all: string; byPage: Map<string, string> }> {
   const run = fakeRun();
   run.answers.set("GET api/state", () => new Response(JSON.stringify(state), { status: 200 }));
   run.answers.set("GET api/running", () => new Response(JSON.stringify({ running: [{ session: 4, statement: 9, user: "metabase", applicationName: "Metabase", method: "QUERY",
@@ -639,13 +641,13 @@ async function everyPage(state: unknown): Promise<string> {
   run.answers.set("GET api/users?lastUsed=1", () => new Response(JSON.stringify({ users: [{ name: "metabase", id: "0123456789abcdef", addedAt: "2026-10-27T09:10:11.000Z", live: true },
     { name: "old", id: "fedcba9876543210", addedAt: "2026-10-27T09:10:11.000Z", disabledAt: "2026-10-27T10:00:00.000Z", live: true }] }), { status: 200 }));
   const app = fn<[unknown], App>("createApp")(run.fetch);
-  let all = "";
+  const byPage = new Map<string, string>();
   for (const id of ["status", "tables", "queries", "users", "usage", "syncs"]) {
     app.show(id);
     await app.poll();
-    all += Object.values(app.view()).join("\n");
+    byPage.set(id, Object.values(app.view()).join("\n"));
   }
-  return all;
+  return { all: [...byPage.values()].join("\n"), byPage };
 }
 
 test("a read-only page (pageReadOnly): no page writes a control that sends a change — no Add, Remove, Sync, Columns…, Disable, Enable, Cancel, Add a user or Connect from anywhere; unset, each is there", async () => {
@@ -662,6 +664,37 @@ test("a read-only page (pageReadOnly): no page writes a control that sends a cha
   for (const said of ["public.customers", "public.accounts", "metabase", "SELECT count(*) FROM orders", "connect-psql"]) assert.ok(shown.includes(said), said);
   assert.ok(textOf(shown).includes(`Tables are not added, removed or synced from this page: ${why}.`));
   assert.ok(textOf(shown).includes(`Users are not added, disabled or removed from this page: ${why}.`));
+});
+
+test("a read-only page: no add, create or write link anywhere — the Connect panel's Create a user on the Overview and on Queries' empty log included; the Overview and Usage say why; unset, all as before", async () => {
+  const why = "the web page is read-only here (MASON_UI_READ_ONLY=1)";
+  // what leads to adding or creating something: a button-styled link to the page that does it, or its words
+  const LEADS = [/Create a user/, /Add a table/, /Add a user/, /Connect from anywhere/, /<a class="btn[^"]*" href="#users"/, /<a class="btn[^"]*" href="#tables[^"]*"/, /Cancel stops one/];
+  const open = await pageByPage(CATALOG_STATE);
+  const shown = await pageByPage({ ...CATALOG_STATE, pageReadOnly: why });
+  for (const lead of LEADS) assert.ok(!lead.test(shown.all), `read-only: ${lead}`);
+  // the Connect panel is on the Overview and on Queries' empty log, and keeps its URL, psql and Copy on both
+  for (const id of ["status", "queries"]) {
+    assert.match(open.byPage.get(id)!, /<a class="btn[^"]*" href="#users">Create a user<\/a>/, `unset: Connect's Create a user on ${id}`);
+    assert.match(shown.byPage.get(id)!, /data-copy="connect-url"[\s\S]*data-copy="connect-psql"/, `read-only: Connect's URL and psql on ${id}`);
+    assert.ok(textOf(shown.byPage.get(id)!).replace(/ :/g, ":").includes("A user's name and password go in place of <user>:<password>: mason user add <name> prints the whole URL once."), id);
+  }
+  // the Overview and Usage say why their controls are missing, as Tables and Users do; unset, none says it
+  const lines = new Map([["status", `Nothing is shared, added or created from this page: ${why}.`], ["usage", `Statements are not cancelled from this page: ${why}.`],
+    ["tables", `Tables are not added, removed or synced from this page: ${why}.`], ["users", `Users are not added, disabled or removed from this page: ${why}.`]]);
+  for (const [id, line] of lines) {
+    assert.ok(textOf(shown.byPage.get(id)!).includes(line), `${id}: ${line}`);
+    assert.match(shown.byPage.get(id)!, new RegExp(`<p class="count">${line.split(":")[0]!}`), `${id}: in the Tables and Users lines' style`);
+    assert.ok(!open.byPage.get(id)!.includes("read-only here"), `unset: ${id} says nothing of it`);
+  }
+  assert.match(open.byPage.get("usage")!, /Cancel stops one, as <code>mason cancel<\/code> does\./, "unset: Usage's lead names Cancel");
+  assert.match(shown.byPage.get("usage")!, /As <code>mason logs --running<\/code> lists them\./, "read-only: the lead without Cancel");
+  // the renderer alone: Connect with the setting, and without it as before
+  const renderConnect = fn<[unknown, unknown], string>("renderConnect");
+  const pg = CATALOG_STATE.postgres;
+  assert.ok(!renderConnect(pg, { first: true, readOnly: why }).includes("Create a user"));
+  assert.equal(renderConnect(pg, { first: true, readOnly: null }), renderConnect(pg, { first: true }), "unset: Connect as before");
+  assert.equal(fn<[string, unknown], string>("readOnlyLine")("Statements are not cancelled", null), "");
 });
 
 test("a read-only page: each renderer alone writes no control that changes anything — Tables, Users, the statements running, the share and the checklist", async () => {

@@ -10,7 +10,7 @@
  * `copySizes` every minute; a table's columns once, when its Columns… or Name its key… form opens
  * (`GET /api/tables/<table>/columns`, `columnsPath`).
  */
-import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, fresh, actId, ROOMS, POLL_MS } from "../shared.js";
+import { msText, bytesText, button, card, cards, code, createOpenSet, moreRows, details, empty, entryName, esc, fileSize, firstLine, json, n, panel, renderFailure, rowsHtml, spanText, duration, status, streamRows, utcText, pop, fresh, actId, ROOMS, POLL_MS, readOnlyLine } from "../shared.js";
 import { copyBar, copyingCount, createMonotone, tableLine } from "./status.js";
 
 /** `/api/usage` asked for the copies' own sizes alone: the last minute's samples (none needed), and `copySizes`. */
@@ -290,7 +290,7 @@ export function renderTables(s, ui = {}) {
   const matching = filter.trim() ? `<p class="count dim">${n(shown.length)} with “${esc(filter.trim())}” in the name</p>` : "";
   const sizesFailed = added && sizes && "failure" in sizes ? `<p class="count">The synced tables' own sizes: could not read them (${esc(firstLine(sizes.failure.message))}; ${code("mason usage")} has them)</p>` : "";
   const rowsHtml_ = written.map(line).join("");
-  return stray + (viewOnly !== null ? `<p class="count">Tables are not added, removed or synced from this page: ${esc(viewOnly)}.</p>`
+  return stray + (viewOnly !== null ? readOnlyLine("Tables are not added, removed or synced", viewOnly)
     : readOnly === null ? "" : `<p class="count">Tables are not added or removed from this page: ${esc(readOnly)}.</p>`) +
     (added ? "" : empty("No table added yet", readOnly === null ? `Add one from the list, as ${code("mason add <table>")} does.` : `The sources file names the tables to sync.`)) + matching +
     panel(`<table class="catalog"><thead><tr>${head.map(([h, c]) => `<th scope="col"${c ? ` class="${c}"` : ""}>${h}</th>`).join("")}</tr></thead>` +

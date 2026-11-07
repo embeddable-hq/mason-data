@@ -266,7 +266,8 @@ listens, and every browser connection crosses that one ssh connection as frames 
   run's token, or as a tunnel opened with that token (its ticket, then its cookie), never for arriving on the socket.
 - **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
   reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
-  Add, Remove, Sync, Disable, Enable, Cancel, Add a user or Connect from anywhere — and its server refuses every request
+  Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Create a user or Connect from anywhere, each page saying
+  why — and its server refuses every request
   of the page that is not a GET or a HEAD, whatever its path, with "the web page is read-only here" in the failure shape
   (`src/cli/ui-read-only.ts`). Viewing is unchanged. It covers the page alone: a request with the run's token is the
   `mason` commands' (`mason add`, `mason sync`, `mason cancel` beside the server, and the tunnel `mason ui --ssh`

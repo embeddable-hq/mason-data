@@ -21,7 +21,7 @@ const LINKS = { tables: "#tables", failedTables: "#tables?show=failed", usage: "
   slow: "#observability/queries?slow=1&range=24h", failedQueries: "#observability/queries?status=refused-or-failed&range=24h", failedEvents: "#observability/syncs?failures=1&range=7d" };
 import { msText, bytesText, code, esc, fileSize, firstLine, n, percent, leftText, spanText, duration, entryName, streamRows, slotWarns, masonRow, sessionsRows, diskRows, restartsRows, utcText,
   utcMinute, oneLine, clientText, eventCells, unsupportedEntry, usagePath, POLL_MS, card, cards, details, createOpenSet, skeleton, renderConnect, copyClick,
-  badge, button, copyable, pop, renderFailure, json } from "../shared.js";
+  badge, button, copyable, pop, renderFailure, json, readOnlyLine } from "../shared.js";
 import { spark, seriesOf, drawable } from "../charts.js";
 
 /** How many recent errors of each kind are shown: mason status's (src/cli/commands.ts `RECENT_ERRORS`, held equal by the tests). */
@@ -425,8 +425,9 @@ export function renderStatus(s, o = {}) {
   // day's and week's statements, read as none), else after the facts, for the next tool
   const first = isFirstConnect(o.queries);
   const connect = added ? renderConnect(s.postgres, { first, served: s.served === true, table: s.tables.find((t) => t.added && t.copy?.phase === "done")?.table ?? null,
-    share: renderShare(s, o.share ?? NO_SHARE, now) }) : "";
-  return renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
+    share: renderShare(s, o.share ?? NO_SHARE, now), readOnly: s.pageReadOnly ?? null }) : "";
+  // a read-only page (MASON_UI_READ_ONLY=1): why it offers no share, no user and no table to add, as Tables and Users say it
+  return readOnlyLine("Nothing is shared, added or created", s.pageReadOnly) + renderHealth(s) + renderChecklist(s, o.queries, o.users) + renderKpis(s, { ...o, now }) + (first ? connect : "") + renderProgress(s, o.open, o.shares, o.before) + renderFacts(s, now) + (first ? "" : connect) + renderStream(s, now) +
     (added ? renderQueries(o.queries) : "") + (added ? renderRecentErrors(o.events, o.requests, o.unsupported) : "");
 }
 
