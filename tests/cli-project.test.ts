@@ -167,6 +167,15 @@ test("mason init - reads the URL from a pipe, never the command line; a password
     fs.mkdirSync(four);
     const n = await quiet((io) => init(["postgres://me@localhost:5432/shop", "--skip-check"], four, { io }));
     assert.deepEqual([n.value, n.err], [0, ""]);
+    // another database than the app's DATABASE_URL: init writes it as MASON_DATABASE_URL, and the warning names that one
+    const six = path.join(root, "six");
+    fs.mkdirSync(six);
+    fs.writeFileSync(path.join(six, ".env"), "DATABASE_URL=postgres://app@localhost:5432/app\n");
+    const other = await quiet((io) => init(["postgres://me:s3cret@localhost:5432/shop", "--skip-check"], six, { io }));
+    assert.equal(other.value, 0, other.err);
+    assert.match(fs.readFileSync(path.join(six, ".env"), "utf8"), /\nMASON_DATABASE_URL=postgres:\/\/me:s3cret@localhost:5432\/shop\n$/);
+    assert.match(other.err, /^! the URL given on the command line holds its password, [^\n]*: put it in \.env as MASON_DATABASE_URL=… and run mason init, or pipe it in with mason init - < db-url\.txt\n$/);
+    assert.doesNotMatch(other.out + other.err, /s3cret/);
     // what the pipe cannot be: said by kind, never by what it held, exit 2, nothing written
     const five = path.join(root, "five");
     fs.mkdirSync(five);

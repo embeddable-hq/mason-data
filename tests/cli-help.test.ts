@@ -191,7 +191,9 @@ test("a command whose stdout is a protocol's says every failure on stderr, --jso
 test("mason help mcp's Claude Code lines name the server BEFORE --env (claude mcp add's --env takes every value after it)", async () => {
   const { MCP } = await import("../src/cli/mcp.ts");
   const lines = MCP.usage.split("\n").filter((l) => /^\s+claude mcp add /.test(l));
-  assert.ok(lines.length >= 2 && lines.some((l) => l.includes("--env")), MCP.usage);
+  assert.ok(lines.length >= 1 && lines.some((l) => l.includes("--env")), MCP.usage);
+  // no example puts the user's password on a command line (ps shows it): the URL goes in MASON_URL
+  assert.deepEqual(MCP.usage.split("\n").filter((l) => /^\s+(claude mcp add|mason mcp)\b.*--url/.test(l)), [], "no example passes --url");
   for (const l of lines) {
     const words = l.trim().split(/\s+/);
     const name = words.indexOf("mason");

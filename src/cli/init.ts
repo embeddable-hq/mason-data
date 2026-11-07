@@ -213,9 +213,11 @@ export function readPipedUrl(input: UrlInput, max = STDIN_MAX_BYTES, timeoutMs =
   });
 }
 
-/** The warning for a URL whose password was given as the argument, naming the safer forms and never the password. */
-export const ARGV_PASSWORD_WARNING = "the URL given on the command line holds its password, which ps shows to this machine's users and your shell keeps in its history: " +
-  "put it in .env as DATABASE_URL=… and run mason init, or pipe it in with mason init - < db-url.txt";
+/** The warning for a URL whose password was given as the argument, naming the safer forms — `variable` the one the
+ *  sources file would name (DATABASE_URL, or MASON_DATABASE_URL for a database other than the app's) — never the password. */
+export const argvPasswordWarning = (variable: string): string =>
+  "the URL given on the command line holds its password, which ps shows to this machine's users and your shell keeps in its history: " +
+  `put it in .env as ${variable}=… and run mason init, or pipe it in with mason init - < db-url.txt`;
 
 export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io; version?: string; env?: NodeJS.ProcessEnv; stdin?: UrlInput } = {}): Promise<number> {
   const io = deps.io ?? STDIO;
@@ -342,12 +344,14 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   // A PASSWORD ON THE COMMAND LINE: taken (refusing it would break scripts), and said on stderr with the safer forms;
   // the password itself is never repeated
   const argvPassword = !demo && !piped && found === null && parsed.source.password !== "";
-  if (argvPassword) io.err(`! ${ARGV_PASSWORD_WARNING}`);
   const remote = f.values.remote === true || sourceless?.config.remote === true;
   // a kept file's variable gets this URL in .env when the folder's files give it none; one they give another value is said
   const keptValue = keptVar === null ? null : appEnvValue(root, keptVar, {});
   const where = kept === null ? urlVariable(root, url, found)
     : { variable: keptVar ?? "", line: keptVar !== null && keptValue === null ? `${keptVar}=${url}` : null };
+  // the variable .env would hold it in: the one the sources file names (MASON_DATABASE_URL for another database than the app's)
+  const argvWarning = argvPassword ? argvPasswordWarning("problem" in where || where.variable === "" ? "DATABASE_URL" : where.variable) : null;
+  if (argvWarning !== null) io.err(`! ${argvWarning}`);
   if ("problem" in where) return failed("init", { message: where.problem, code: "refused" }, { json, io });
 
   // WHAT IT DOES, AS A CHECKLIST (each item it is doing, with a spinner left of it that turns into a checkmark when
@@ -360,7 +364,7 @@ export async function init(argv: string[], cwd = process.cwd(), deps: { io?: Io;
   line(st.bold(`Making ${name} a Mason project in ${root}`));
   const notes: string[] = [];
   // a person read the warning on stderr already; an agent reads warnings in the answer too
-  if (argvPassword && json) notes.push(ARGV_PASSWORD_WARNING);
+  if (argvWarning !== null && json) notes.push(argvWarning);
   if (keptValue !== null && keptValue.value !== url) notes.push(`${kept} reads ${keptVar} from ${keptValue.from}, which is ${maskedUrl(keptValue.value)}: mason start syncs from that one, not ${db}`);
   let database: { url: string; from: string | null; version: string | null; tables: number | null } = { url: db, from: from ? from.slice(2, -1) : null, version: null, tables: null };
   const rel = (p: string): string => path.relative(root, p) || ".";

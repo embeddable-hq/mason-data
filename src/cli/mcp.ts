@@ -51,8 +51,6 @@ export const MCP: CommandSpec = {
   Claude Code (in the project's folder, with Mason running), the URL in the server's environment:
     mason user add claude                          the URL to paste, printed once
     claude mcp add mason --env MASON_URL="${EXAMPLE_URL}" -- mason mcp
-  or on its command line, where ps shows it to this machine's users and claude mcp add prints it:
-    claude mcp add mason -- mason mcp --url "${EXAMPLE_URL}"
 
   Claude Desktop (claude_desktop_config.json). The app often starts servers without your shell's PATH, where neither
   mason nor the node its first line asks for is found: name both by their absolute paths (which node, which mason):
@@ -61,7 +59,6 @@ export const MCP: CommandSpec = {
 
   What the client runs:
     MASON_URL="${EXAMPLE_URL}" mason mcp
-    mason mcp --url "${EXAMPLE_URL}"
 
   --url <url>   the Postgres API as a mason user: what mason user add printed (default MASON_URL); TLS as its sslmode
                 says (a host off this machine: require when it names none). A URL with a password here is taken,
