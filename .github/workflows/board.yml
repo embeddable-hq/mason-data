@@ -30,15 +30,19 @@ on:
 
 permissions: {}
 
-# one queue per issue or PR, never one for the repository: GitHub keeps one run waiting in a group and cancels an older
-# waiting run, so a single group would drop updates whenever events come close together
-concurrency:
-  group: board-${{ github.event.issue.number || github.event.pull_request.number }}
-  cancel-in-progress: false
-
 jobs:
   status:
-    if: vars.PROJECT_NUMBER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # skipped: before the variable is set, a fork's PR, and a label other than needs-owner (skipped before it queues, so
+    # it never cancels a waiting run of the same issue)
+    if: >-
+      vars.PROJECT_NUMBER != ''
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && (github.event_name != 'issues' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'needs-owner')
+    # one queue per issue or PR, never one for the repository: GitHub keeps one run waiting in a group and cancels an
+    # older waiting run, so a single group would drop updates whenever events come close together
+    concurrency:
+      group: board-${{ github.event.issue.number || github.event.pull_request.number || 'sync' }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
