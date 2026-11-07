@@ -503,6 +503,13 @@ test("mason usage: a span a line under its heading — the statements, their err
       '--since "0" is not a time', "2026-10-28T08:00:00.000Z"], "a bare number is no time: an age in seconds and a Unix timestamp read alike");
   // an age of zero is now, with its unit, as main read it, at the command line and the run's API alike
   for (const zero of ["0s", "0m", "0h", "0d", "0 s"]) assert.equal(timeOf("--until", zero, now), "2026-10-28T10:00:00.000Z", zero);
+  // an age past what a time can hold is a refusal, never a throw (a RangeError the run's API answered 500)
+  for (const huge of ["99999999999d", "100000000000000s", `${"9".repeat(400)}d`]) {
+    const t = timeOf("--since", huge, now);
+    assert.ok(typeof t !== "string", huge);
+    assert.equal(t.message, `--since ${JSON.stringify(huge)} is further back than a time reaches`, huge);
+  }
+  assert.equal(timeOf("--since", "100000000d", now), new Date(now - 100_000_000 * 86_400_000).toISOString(), "within Date's range: read");
   assert.equal("whenOf" in usageCli, false, "no second parser beside timeOf");
   for (const k of USAGE.json ?? []) if (k !== "next") assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names ${k}`);
   for (const k of Object.keys(sample)) assert.match(USAGE.usage, new RegExp(`\\b${k}\\b`), `mason usage's usage names a sample's ${k}`);
@@ -715,6 +722,11 @@ test("the run and the commands refuse an edit in the SAME words, Mason up or dow
       const bad = await runMason(app, ["usage", "--since", "yesterday"], matrixEnv());
       assert.equal(bad.code, 2);
       assert.match(bad.stderr, /mason usage: --since "yesterday" is not a time/);
+      // an age too large for a time: a wrong line (exit 2), never a crash
+      const huge = await runMason(app, ["usage", "--since", "99999999999d"], matrixEnv());
+      assert.equal(huge.code, 2, huge.stderr);
+      assert.match(huge.stderr, /mason usage: --since "99999999999d" is further back than a time reaches/);
+      assert.doesNotMatch(huge.stderr, /RangeError|Invalid time value/);
       assert.equal(usageAsks.length, asked, "refused before the run is asked");
     } finally { writeRunning(s.root, null); }
     // MASON SYNC --ALL: every table the sources file names, in one POST /api/sync; never beside names; none added is nothing yet

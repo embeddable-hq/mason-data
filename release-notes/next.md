@@ -35,6 +35,19 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **`--json` keys that meant different things in different commands have names of their own beside the old ones**:
   `removedTables` (`mason remove`), `destroyed` (`mason destroy`), `removedUser` (`mason user remove`), `revokedToken`
   (`mason token revoke`) and `loginRevoked` (`mason logout`). The old keys (`removed`, `revoked`) stay until 1.0.
+- **`mason deploy` waits while its replica is being created**: when the service answers that the replica is being
+  checked or created, that the machine it runs on is not connected just now, or that too many deploys are being sent
+  at once, `mason deploy` waits as the service asks and sends the deploy again, within `--timeout`, saying what it
+  waits on and how long it has waited (on stderr; `--json` prints only the answer). Past `--timeout` it exits 124,
+  saying no deploy was made. A replica that failed or is being deleted is refused, and the next step is
+  `mason replica status <org>/<name>`, no longer `mason login`; a deleted one is answered as a replica that does not
+  exist, its next step `mason replica list <org>`.
+
+## What was wrong and is now right
+
+- **`mason usage --since` (and `mason logs --since`/`--until`) with an age too large for a date** (`99999999999d`) crashed
+  the command, and the run's HTTP API answered it with a 500. It is now refused as a wrong command line (exit 2), and
+  the API answers 400.
 - **A sources file can no longer name one of Mason's own settings** (`${MASON_…}`, such as `${MASON_API_KEY}`) in
   `publication:` or `url:`: it is refused when the file is read, with the way out, and the value is never shown. Before,
   `publication: ${MASON_API_KEY}` printed that key in the log as the publication's name and sent it to the source. If

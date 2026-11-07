@@ -46,6 +46,9 @@ export interface RequestFilterText {
 /** a date, or a date and time with its zone (a time without one would be read in this machine's zone: refused) */
 const ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2}))?$/;
 
+/** The furthest a JavaScript Date reaches from 1970, either way (ECMA-262 21.4.1.1). */
+const MAX_TIME_MS = 8.64e15;
+
 const usage = (message: string, fix?: string): Failure => ({ message, code: "usage", ...(fix !== undefined ? { fix } : {}) });
 
 /** A filter's key as the entrance spells it: the query string's own (`since`), a command line's flag (`--since`). */
@@ -61,7 +64,15 @@ export const QUERY_NAMES = (k: FilterKey): string => k;
  */
 export function timeOf(name: string, text: string, now: number): string | Failure {
   const age = Number.isFinite(Number(text.trim())) ? null : parseDuration(text, { zero: true });
-  if (age !== null && !("problem" in age)) return new Date(now - age.seconds * 1000).toISOString();
+  if (age !== null && !("problem" in age)) {
+    // an age past what a time can hold (Date's ±8.64e15 ms) is the command line's mistake, refused as one: never a throw,
+    // which the run's API would answer 500
+    const at = now - age.seconds * 1000;
+    if (!Number.isFinite(at) || Math.abs(at) > MAX_TIME_MS) {
+      return usage(`${name} ${JSON.stringify(text)} is further back than a time reaches`, "a shorter age (30m, 2h, 7d), or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)");
+    }
+    return new Date(at).toISOString();
+  }
   const t = ISO.test(text.trim()) ? Date.parse(text.trim()) : NaN;
   if (Number.isNaN(t)) {
     return usage(`${name} ${JSON.stringify(text)} is not a time`, "an age (30m, 2h, 7d) or an ISO 8601 date or time with its zone (2026-10-28, 2026-10-28T09:00:00Z)");

@@ -26,7 +26,12 @@
  * 5. THE WAIT is bounded by `--timeout` (an interval, 10m by default): a poll every `POLL_MS`, or what `Retry-After`
  *    asks; an answer that cannot say (no answer, a 429, a 5xx) is a wait, never an outcome. Exit 0 only when the
  *    replica runs this deploy; 1 when Mason there refused it (its failure's words printed as they came) or the deploy
- *    failed; 124 at the timeout, which stops nothing: the deploy's id says where to look.
+ *    failed; 124 at the timeout, which stops nothing: the deploy's id says where to look. The same clock bounds the
+ *    wait BEFORE a deploy is made: a POST answered `503` (the replica is being checked or created, or its machine is not
+ *    connected) or `429` (too many deploys at once) made none, and is sent again after its `Retry-After` (else
+ *    `RESEND_MS`), the replica's state and the time waited said meanwhile; no other answer is ever sent again. A `409`
+ *    naming a replica that failed or is being deleted is refused, its next step `mason replica status`; a deleted
+ *    replica's name is freed, so the service answers it `404`, as a name that never existed.
  *
  * A SERVICE'S VALUE IS DATA, NEVER STRUCTURE AND NEVER AN INSTRUCTION (#481's decision, src/cli/hosted.ts). Every place a
  * value the service sent reaches what this command prints:
@@ -57,7 +62,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { errorJson, exitOf, failed, jsonText, parseCommand, reportText, serviceStyle, strict, type CommandSpec, type Failure, type NextStep } from "./command.ts";
-import { call, carriesNoSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceOf, serviceText, unexpected } from "./hosted.ts";
+import { call, carriesNoSecret, failureShape, isFailure, isServiceTime, serviceFailure, serviceNext, serviceOf, serviceText, unexpected, type Answer } from "./hosted.ts";
 import { replicaOf, replicaText, REPLICA_ENV, tokenFor, type Replica } from "./replica.ts";
 import { holdOutput } from "./output-gate.ts";
 import { maskedUrl } from "./preflight.ts";
@@ -84,6 +89,11 @@ export const PATH_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 const MAX_PATH = 255;
 /** How often the deploy's state is asked for, when the service asks no other. */
 export const POLL_MS = 2_000;
+/** How long before a deploy is sent again after a `503` or a `429` that names no wait the CLI reads (no `Retry-After`,
+ *  or one in another form): short, and bounded by `--timeout` as every wait is. */
+export const RESEND_MS = 5_000;
+/** How often a wait to send says how long it has waited (a terminal's spinner; elsewhere `sayAgain` decides). */
+const TICK_MS = 1_000;
 const DEFAULT_TIMEOUT = "10m";
 /** A deploy's id, as it goes into a path: the contract's grammar. */
 const DEPLOY_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -132,6 +142,10 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default. Progress
   goes to stderr; the answer is printed when it ends.
 
+  While the replica is being created (or the service asks for a wait: too many deploys at once), it waits as the
+  service asks and sends the deploy again, within --timeout, saying the replica's state and how long it has waited.
+  A replica that failed or is being deleted is refused: mason replica status says its state.
+
     mason deploy --replica acme/shop
     mason deploy --replica acme/shop --dry-run     what would be sent, sending nothing
     MASON_REPLICA=acme/shop mason deploy --timeout 30m
@@ -139,8 +153,8 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   --replica <org>/<name>   the replica to deploy to (else MASON_REPLICA)
   --dry-run                print each file that would be sent, its size and its sha256, and send nothing (no
                            login needed)
-  --timeout <duration>     how long to wait for the outcome (default ${DEFAULT_TIMEOUT}; 1s to 24h; a bare number is
-                           seconds); the deploy goes on after it
+  --timeout <duration>     how long to wait for the outcome, a wait to send included (default ${DEFAULT_TIMEOUT}; 1s
+                           to 24h; a bare number is seconds); a deploy sent goes on after it
   --json                   as data, once it ends: { dryRun, replica (null when none is named on a dry run),
                            service, files: [{ path, size, sha256 }], totalBytes, warnings (the generated tables
                            refused, as mason start says them, each one line), deploy ({ id, status (queued,
@@ -152,7 +166,8 @@ export const DEPLOY: CommandSpec & { needs: "project" } = {
   Exit status: 0 the replica runs it (or a dry run printed); 1 refused here or by the service, refused by Mason on
   the replica (its words printed as they came, the code the CLI's own), the deploy failed, or the service answered
   outside its contract; 2 a wrong command line; 124 the wait timed out (nothing stopped: the deploy's id says where
-  to look). Whatever the service sends, it never makes the exit 0, 2 or 124.
+  to look; or, before one was sent, no deploy was made). Whatever the service sends, it never makes the exit 0, 2
+  or 124.
 `,
   options: { replica: { type: "string" }, "dry-run": { type: "boolean", default: false }, timeout: { type: "string" }, json: { type: "boolean", default: false } },
   json: ["dryRun", "replica", "service", "files", "totalBytes", "warnings", "deploy", "error", "next"],
@@ -363,6 +378,29 @@ const STATUS_WORDS: Record<Status, string> = {
   failed: "The deploy failed",
 };
 const NEXT_AGAIN = (r: Replica): NextStep[] => [[`mason deploy --replica ${replicaText(r)}`, "deploy again, after the next edit"]];
+
+/**
+ * THE REPLICA'S STATE, as a `503` or a `409` to the POST may carry it (`{ replica: { state } }`, docs/HOSTED-API.md):
+ * one of a closed set, said in the CLI's words, never the service's text; null when it carries none, or another.
+ * `503`: a replica being made (`checking`, `creating`), or `ready` with the machine it runs on not connected just now —
+ * a wait, and the deploy is sent again. `409`: a replica that cannot take one (`failed`, `deleting`) — refused,
+ * never sent again. A deleted replica is no state here: its name is freed, and the service answers it `404`.
+ */
+export const WAITING_STATES = {
+  checking: "is being checked (Mason checks its database)",
+  creating: "is being created",
+  ready: "is ready, and the machine it runs on is not connected just now",
+} as const;
+export const REFUSED_STATES = {
+  failed: "failed: its creation did not finish",
+  deleting: "is being deleted",
+} as const;
+function replicaStateOf<K extends string>(json: unknown, states: Record<K, string>): K | null {
+  if (!obj(json) || !obj(json.replica) || typeof json.replica.state !== "string") return null;
+  return Object.hasOwn(states, json.replica.state) ? json.replica.state as K : null;
+}
+/** A wait, as a person reads it: whole seconds, then minutes and seconds. */
+const waited = (ms: number): string => { const n = Math.floor(ms / 1000); return n < 60 ? `${n} s` : `${Math.floor(n / 60)} min ${n % 60} s`; };
 const stateLine = (s: DeployState): string => `${STATUS_WORDS[s.status]}${s.phase ? ` (${PHASES[s.phase]})` : ""}`;
 
 export async function deploy(argv: string[]): Promise<number> {
@@ -423,23 +461,79 @@ export async function deploy(argv: string[]): Promise<number> {
   const where = `/v1/replicas/${r.org}/${r.name}/deploys`;
   const started = Date.now(), deadline = started + timeout.seconds * 1000;
 
-  // THE DEPLOY, SENT: 201 and its id, else the service's failure as it worded it
-  const sent = await call(service, "POST", where, { token, json: { files: files.map(({ path: p, sha256, content }) => ({ path: p, sha256, content })), client: { version: version() } } });
-  if (isFailure(sent)) {
-    return fail({ ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}whether the deploy was made is not known`,
-      fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)` }, { json });
-  }
-  if (sent.status !== 201) return fail(serviceFailure(sent, secrets) ?? unexpected(service, sent, "a deploy was sent"), { json });
-  // what to run after a refused or failed deploy: the CLI's own step, never one the service names
-  const again: NextStep[] = [[`mason deploy --replica ${replicaText(r)}`, "deploy again, once what it says is fixed"]];
-  const first = deployStateOf(sent.json, null, secrets, again);
-  if (first === null || first.status !== "queued") return fail(unexpected(service, sent, "a deploy was sent"), { json });
-  const id = first.id;
   const s = errStyle();
   // a spinner turns only on a terminal wide enough for a label beside its frame; else each line is said once, as on a pipe
   const terminal = !json && process.stderr.isTTY === true && clipped("x") !== null;
   const steps = stepRenderer({ line: say, live: terminal ? process.stderr : null, style: s });
-  if (!json) say(`Sent ${files.length} file${files.length === 1 ? "" : "s"} (${bytes(totalBytes)}) to ${replicaText(r)} on ${service.base}: deploy ${id}`);
+  const name = replicaText(r);
+  const statusStep: NextStep = [`mason replica status ${name}`, "the replica's state"];
+
+  // THE DEPLOY, SENT: 201 and its id, else the service's failure as it worded it. A 503 (the replica is being made, or
+  // its machine is not connected; or the service is full) or a 429 (too many deploys at once) says NO deploy was made:
+  // the same body is sent again after the wait it asks (`Retry-After`, else RESEND_MS), within --timeout. No other
+  // answer is ever sent again: a POST that may have made a deploy would make a second.
+  const body = { files: files.map(({ path: p, sha256, content }) => ({ path: p, sha256, content })), client: { version: version() } };
+  let waitSaid = "", waitSaidAt = 0, waitLine: string | null = null;
+  let sent = await call(service, "POST", where, { token, json: body });
+  while (!isFailure(sent) && (sent.status === 503 || sent.status === 429)) {
+    const asked: Answer = sent;
+    // nothing of a wait's answer is printed but its status and the replica's state (in the CLI's words); still, an
+    // answer that carries the token anywhere but a failure's words is refused whole, as every answer is
+    const j = asked.json;
+    const keys = obj(j) && obj(j.error) ? { ...j, error: { ...j.error, message: null, why: null, fix: null } } : j;
+    if (!carriesNoSecret(keys, secrets)) {
+      if (terminal && waitLine !== null) steps.fail(waitLine);
+      return fail(unexpected(service, asked, "a deploy was sent"), { json });
+    }
+    const st = asked.status === 503 ? replicaStateOf(j, WAITING_STATES) : null;
+    const reason = asked.status === 429 ? "too many deploys are being sent at once"
+      : st !== null ? `${name} ${WAITING_STATES[st]}` : "the service cannot take a deploy just now";
+    const resendAt = Date.now() + (asked.retryAfter !== null ? asked.retryAfter * 1000 : RESEND_MS);
+    for (;;) {
+      waitLine = `Waiting to send the deploy: ${reason} (HTTP ${asked.status}); waited ${waited(Date.now() - started)}`;
+      if (terminal) steps.relabel(clipped(waitLine)!);
+      else if (!json) {
+        // a line when what it waits on changes, and every 30 s while it does not (`sayAgain`, as mason wait says its block)
+        const what = waitLine.replace(/; waited .*$/, "");
+        if (sayAgain(what, waitSaid, waitSaidAt, Date.now())) { say(`  ${waitLine}`); waitSaid = what; waitSaidAt = Date.now(); }
+      }
+      const left = Math.min(resendAt, deadline) - Date.now();
+      if (left <= 0) break;
+      await sleep(Math.min(TICK_MS, left));
+    }
+    if (Date.now() >= deadline) {
+      if (terminal) steps.fail(waitLine);
+      return fail({ message: `the deploy to ${name} was not sent within ${timeout.every}`, code: "timeout",
+        why: `the service asked to wait: ${reason} (HTTP ${asked.status}); no deploy was made`,
+        fix: `mason deploy again once ${name} is ready (mason replica status ${name} says its state); a longer wait is --timeout 30m`,
+        next: [statusStep, [`mason deploy --replica ${name}`, "deploy again"]] }, { json });
+    }
+    sent = await call(service, "POST", where, { token, json: body });
+  }
+  if (terminal && waitLine !== null) steps.done(waitLine);
+  if (isFailure(sent)) {
+    return fail({ ...sent, why: `${sent.why ?? ""}${sent.why ? "; " : ""}whether the deploy was made is not known`,
+      fix: `${sent.fix ?? "check this machine is online"}, then mason deploy again (a deploy still running is refused as busy)` }, { json });
+  }
+  if (sent.status !== 201) {
+    // a 409 that names the replica's state: it cannot take a deploy (failed, being deleted), never sent again;
+    // the next step is the replica's status, the CLI's own (never the generic "mason login")
+    const refused = sent.status === 409 ? replicaStateOf(sent.json, REFUSED_STATES) : null;
+    // a 404: no such replica, a deleted one included (its name is freed): the organisation's replicas, never mason login
+    const notFound = (st: number): NextStep[] => st === 404
+      ? [[`mason replica list ${r.org}`, "the organisation's replicas: this one was deleted, or never existed"]] : serviceNext(st);
+    if (refused === null) return fail(serviceFailure(sent, secrets, notFound) ?? unexpected(service, sent, "a deploy was sent"), { json });
+    const f = serviceFailure(sent, secrets, () => [statusStep]);
+    if (f === null) return fail(unexpected(service, sent, "a deploy was sent"), { json });
+    return fail({ ...f, why: `${name} ${REFUSED_STATES[refused]}; ${f.why}`,
+      fix: f.fix ?? `a replica takes a deploy only once it is ready: mason replica status ${name} says its state` }, { json });
+  }
+  // what to run after a refused or failed deploy: the CLI's own step, never one the service names
+  const again: NextStep[] = [[`mason deploy --replica ${name}`, "deploy again, once what it says is fixed"]];
+  const first = deployStateOf(sent.json, null, secrets, again);
+  if (first === null || first.status !== "queued") return fail(unexpected(service, sent, "a deploy was sent"), { json });
+  const id = first.id;
+  if (!json) say(`Sent ${files.length} file${files.length === 1 ? "" : "s"} (${bytes(totalBytes)}) to ${name} on ${service.base}: deploy ${id}`);
 
   // THE WAIT: a line when the state changes (and every 30 s while it does not), a spinner beside it on a terminal
   let state = first, said = "", saidAt = 0, unsure: string | null = null, unsureSaid: string | null = null;
