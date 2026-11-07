@@ -199,14 +199,14 @@ test("mason init writes the project — config, the sources file, the URL in .en
       "\nNext:\n" +
       "  mason init postgres://user:password@localhost:5432/your_app  its URL, given\n" +
       "  mason init                                    again, once .env has MASON_DATABASE_URL or DATABASE_URL\n" +
-      "  mason init demo                               a demo database Mason makes itself: nothing to install\n +
+      "  mason init demo                               a demo database Mason makes itself: nothing to install\n" +
       "  mason init --help                             its usage, with every option\n");
     const noneJson = await quiet((io) => init(["--json"], three, { io, env: {} }));
     assert.equal(noneJson.value, 2);
     const noneAnswer = JSON.parse(noneJson.out) as { error: { code: string; message: string; fix: string }; next: Array<{ command: string; what: string }> };
     assert.deepEqual([noneAnswer.error.code, noneAnswer.error.message], ["usage", "which database? none is named, and this folder has no MASON_DATABASE_URL or DATABASE_URL"]);
     assert.match(noneAnswer.error.fix, /as DATABASE_URL=postgres:\/\/… \(your app's, usually\) or as MASON_DATABASE_URL=postgres:\/\/… \(read first/);
-    assert.deepEqual(noneAnswer.next.map((n) => n.command), ["mason init postgres://user:password@localhost:5432/your_app", "mason init", "mason init demo"]);
+    assert.deepEqual(noneAnswer.next.map((n) => n.command), ["mason init postgres://user:password@localhost:5432/your_app", "mason init", "mason init demo", "mason init --help"]);
     assert.equal(noneAnswer.next[1]!.what, "again, once .env has MASON_DATABASE_URL or DATABASE_URL");
     // a database elsewhere needs --remote, even unchecked
     const remote = await quiet((io) => init(["postgres://u@db.example.com/x", "--skip-check"], three, { io }));
@@ -584,7 +584,7 @@ test("mason init in a clone naming ${MASON_DATABASE_URL}: read from the shell an
       "  fix   put it in this folder's .env as MASON_DATABASE_URL=postgres://… (the variable mason/sources/app.yml names), or give its URL on the command line: mason init writes it there\n" +
       "\nNext:\n" +
       "  mason init postgres://user:password@localhost:5432/your_app  its URL, given: written to .env as MASON_DATABASE_URL\n" +
-      "  mason init                                    again, once .env has MASON_DATABASE_URL\n +
+      "  mason init                                    again, once .env has MASON_DATABASE_URL\n" +
       "  mason init --help                             its usage, with every option\n");
     assert.equal(n.out, "");
     assert.ok(!fs.existsSync(path.join(none.dir, ".mason")), "no config written");
@@ -594,7 +594,7 @@ test("mason init in a clone naming ${MASON_DATABASE_URL}: read from the shell an
     const answer = JSON.parse(nj.out) as { error: { code: string; message: string; why: string; fix: string }; next: Array<{ command: string; what: string }> };
     assert.deepEqual([answer.error.code, answer.error.message], ["usage", "which database? mason/sources/app.yml names url: ${MASON_DATABASE_URL}, and this folder has no MASON_DATABASE_URL"]);
     assert.match(answer.error.fix, /^put it in this folder's \.env as MASON_DATABASE_URL=postgres:\/\/… \(the variable mason\/sources\/app\.yml names\)/);
-    assert.deepEqual(answer.next.map((x) => [x.command, x.what]), [["mason init postgres://user:password@localhost:5432/your_app", "its URL, given: written to .env as MASON_DATABASE_URL"], ["mason init", "again, once .env has MASON_DATABASE_URL"]]);
+    assert.deepEqual(answer.next.map((x) => [x.command, x.what]), [["mason init postgres://user:password@localhost:5432/your_app", "its URL, given: written to .env as MASON_DATABASE_URL"], ["mason init", "again, once .env has MASON_DATABASE_URL"], ["mason init --help", "its usage, with every option"]]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
