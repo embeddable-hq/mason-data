@@ -1568,7 +1568,9 @@ export function waitPick(s: Pick<RunState, "tables" | "generatedTables">, names:
       return { message: `${db.table} is not added, so Mason does not sync it`, code: "not_found", fix: `mason add ${tableArg(db.table)}`, next: [["mason status", "the added tables"]] };
     }
     const choices = [...added.flatMap((x) => [x.table, tableArg(x.table)]), ...generated.map((x) => entryName(x.table))];
+    const named = [...added.map((x) => tableArg(x.table)), ...generated.map((x) => entryName(x.table))];
     return { message: `there is no added or generated table ${JSON.stringify(name)}${didYouMean(name, choices)}`, code: "not_found",
+      ...(named.length ? { fix: `name one of: ${named.join(", ")}` } : {}),
       next: [["mason status", "the added tables and the generated ones"], ["mason tables", "the database's tables"]] };
   }
   return { tables: [...new Set(tables)] };

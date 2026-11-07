@@ -10,6 +10,7 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { findProject, ignoresStateDir, nameFromFolder, newConfig, readProject, theProject, writeConfig, type Project } from "../src/cli/project.ts";
 import { init, nameProblem, withIgnored } from "../src/cli/init.ts";
@@ -133,7 +134,6 @@ test("a name from the folder; .gitignore gains .mason/ once; the URL from .env.l
 });
 
 test("mason init - reads the URL from a pipe, never the command line; a password given as the argument is taken with a warning on stderr that never repeats it", async () => {
-  const { Readable } = await import("node:stream");
   const piped = (text: string): Readable => Readable.from([Buffer.from(text)]);
   const root = tmp();
   try {
