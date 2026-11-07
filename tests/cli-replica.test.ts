@@ -8,30 +8,36 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ANSWERS, envFor, fakeService, home, newToken, runForms, runToken, SECRETS, showsRun, type Reply, type Req } from "./hosted-fake.ts";
 import { runMason, type Answer } from "./cli-matrix.ts";
-import { AT, CHECKS, created, hosted, ok, ONE, PASSWORD, project, REPLICAS, replicaOf, URL_ } from "./replica-fake.ts";
+import { AT, CHECKS, created, ENV_MARK, hosted, ok, ONE, PASSWORD, project, REPLICAS, replicaOf, URL_, URL_MARK } from "./replica-fake.ts";
 import { checkLines, heldReplica, MIN_PASSWORD, ownWordsHold, urlPassword, wordless, type CreateRun } from "../src/cli/replica-hosted.ts";
 import { carriesNoSecret } from "../src/cli/hosted.ts";
 
-test("mason replica create: the URL is read by the variable the sources file names, sent once in the body beside that variable's name, never on the command line or printed; the checks are said one line each; the replica's state waited for until it is ready", async () => {
+test("mason replica create: the URL is read from stdin (never .env: its value there is never read), sent once in the body beside the name of the variable the sources file names, never on the command line or printed; the checks are said one line each; the replica's state waited for until it is ready, and its page printed", async () => {
   const root = project();
   let polls = 0;
+  const page = (r: Req): string => `http://${r.headers.host}/acme/replicas/shop`;
   const v1 = (r: Req): Reply => r.method === "POST" && r.path === REPLICAS ? created({ state: "creating", pending: [{ change: "create", state: "pending", attempts: 1, nextAttemptAt: AT }] })
-    : r.method === "GET" && r.path === ONE ? ok({ replica: replicaOf({ state: polls++ ? "ready" : "creating", allowlist: polls > 1 ? ["192.0.2.0/24"] : [] }) }, { "retry-after": "1" })
+    : r.method === "GET" && r.path === ONE ? ok({ replica: replicaOf({ state: polls++ ? "ready" : "creating", allowlist: polls > 1 ? ["192.0.2.0/24"] : [], page: page(r) }) }, { "retry-after": "1" })
     : { status: 404, body: { error: { code: "not_found", message: "no" } } };
   const { a, requests, token } = await hosted(v1, ["create", "acme/shop", "--region", "eu", "--size", "50"], { cwd: root });
   assert.equal(a.code, 0, a.stdout + a.stderr);
   assert.deepEqual(requests.map((q) => `${q.method} ${q.path}`), ["POST /v1/replicas/acme", "GET /v1/replicas/acme/shop", "GET /v1/replicas/acme/shop"]);
-  assert.deepEqual(JSON.parse(requests[0]!.body), { name: "shop", region: "eu", sizeGb: 50, sources: [{ name: "app", variable: "DATABASE_URL", url: URL_ }] });
+  const body = JSON.parse(requests[0]!.body) as { client: { version: unknown } };
+  assert.ok(typeof body.client.version === "string" && body.client.version.length > 0, "the CLI's version, as deploy sends it");
+  assert.deepEqual(body, { name: "shop", region: "eu", sizeGb: 50, sources: [{ name: "app", variable: "DATABASE_URL", url: URL_ }], client: { version: body.client.version } });
   assert.equal(requests[0]!.headers.authorization, `Bearer ${token}`);
   assert.equal(requests[0]!.headers["content-type"], "application/json");
   for (const q of requests.slice(1)) assert.equal(q.body, "", "only the creation carries the URL");
-  assert.equal(a.stdout, `Created acme/shop on ${a.stdout.match(/on (http:\/\/127\.0\.0\.1:\d+)/)![1]}: it is ready
+  const base = a.stdout.match(/on (http:\/\/127\.0\.0\.1:\d+)/)![1]!;
+  assert.equal(a.stdout, `Created acme/shop on ${base}: it is ready
   region      eu
   size        50 GB of synced data
   host        brisk-otter-4821
   created     ${AT}
   allowlist   192.0.2.0/24
+  page        ${base}/acme/replicas/shop
 
+Tip: Its allowlist, the addresses that may query it, is set on its page, above.
 Tip: The service does not keep the database's URL: the replica reads it by its variable, from its own environment.
 
 Next:
@@ -43,24 +49,33 @@ Next:
     "  ok connects: Postgres 16 answers",
     "  !  the role: it may write to a synced table (fix: a role that only reads)",
   ]);
-  assert.match(a.stderr, /^Creating acme\/shop on http:\/\/127\.0\.0\.1:\d+: Mason checks the database DATABASE_URL names \(DATABASE_URL in \.env\) from the replica's side, up to a minute$/m);
+  assert.match(a.stderr, /^Creating acme\/shop on http:\/\/127\.0\.0\.1:\d+: Mason checks the database \(DATABASE_URL, its URL read from stdin\) from the replica's side, up to a minute$/m);
+  assert.doesNotMatch(a.stderr, /not shown|Ctrl-C/, "stdin is a pipe: nothing is asked");
   assert.match(a.stderr, /^ {2}creating: its region is making it$/m);
   // --json: the replica and the checks, the URL nowhere
   const j = await hosted(() => created(), ["create", "acme/shop", "--region", "eu", "--size", "50", "--json"], { cwd: root });
   assert.equal(j.a.code, 0, j.a.stdout);
   const v = JSON.parse(j.a.stdout) as Record<string, unknown>;
   assert.deepEqual(Object.keys(v), ["replica", "checks", "next"]);
-  assert.deepEqual(v.replica, { ...replicaOf(), pending: [] });
+  assert.deepEqual(v.replica, { ...replicaOf(), page: null, pending: [] });
   assert.deepEqual(v.checks, [{ source: "app", outcome: "passed", missing: [],
     checks: [{ name: "connects", status: "ok", detail: "Postgres 16 answers", fix: null }, { name: "the role", status: "warn", detail: "it may write to a synced table", fix: "a role that only reads" }] }]);
   assert.equal(j.a.stderr, "", "--json prints no progress");
-  assert.ok(!j.a.stdout.includes("db.example"), "nothing of the URL is in --json");
+  assert.ok(!j.a.stdout.includes(URL_MARK), "nothing of the URL is in --json");
+  // with no .env at all, and stdin the URL ending in \r\n (a file written on Windows): the same body
+  const bare = await hosted(() => created(), ["create", "acme/shop", "--region", "eu", "--size", "50", "--json"], { cwd: project({ env: null }), stdin: `${URL_}\r\n` });
+  assert.equal(bare.a.code, 0, bare.a.stdout);
+  assert.equal(JSON.parse(bare.requests[0]!.body).sources[0].url, URL_);
+  // DATABASE_URL in the shell is not read either
+  const shell = await hosted(() => created(), ["create", "acme/shop", "--region", "eu", "--size", "50", "--json"], { cwd: project({ env: null }), env: { DATABASE_URL: `postgres://shell:${ENV_MARK}xx@h/d` } });
+  assert.equal(JSON.parse(shell.requests[0]!.body).sources[0].url, URL_);
 });
 
-test("mason replica create: what is refused here, before a byte is sent — a wrong line (exit 2), no project, a url: written in the file, a variable unset or not a database URL, not signed in", async () => {
+test("mason replica create: what is refused here, before a byte is sent — a wrong line (exit 2), no project, a url: written in the file, stdin empty, more than one line, past 2 KiB or not a database URL, not signed in", async () => {
   const fake = await fakeService({ v1: () => created() });
   try {
-    const run = (cwd: string, argv: string[], extra: Record<string, string> = {}): Promise<Answer> => runMason(cwd, ["replica", ...argv, "--json"], envFor(home(), fake.url, { MASON_TOKEN: newToken(), ...extra }));
+    const run = (cwd: string, argv: string[], extra: Record<string, string> = {}, stdin = URL_): Promise<Answer> =>
+      runMason(cwd, ["replica", ...argv, "--json"], envFor(home(), fake.url, { MASON_TOKEN: newToken(), ...extra }), 60_000, undefined, stdin);
     const root = project();
     for (const argv of [["create"], ["create", "acme"], ["create", "Acme/shop", "--region", "eu", "--size", "50"], ["create", "acme/shop", "--size", "50"], ["create", "acme/shop", "--region", "eu"],
       ["create", "acme/shop", "--region", "EU", "--size", "50"], ["create", "acme/shop", "--region", "eu", "--size", "50gb"], ["create", "acme/shop", "--region", "eu", "--size", "0"],
@@ -71,19 +86,22 @@ test("mason replica create: what is refused here, before a byte is sent — a wr
       assert.equal((JSON.parse(a.stdout) as { error: { code: string } }).error.code, "usage", argv.join(" "));
     }
     const line = ["create", "acme/shop", "--region", "eu", "--size", "50"];
-    const refusal = async (cwd: string, message: RegExp, code: string, extra: Record<string, string> = {}): Promise<void> => {
-      const a = await run(cwd, line, extra);
+    const refusal = async (cwd: string, message: RegExp, code: string, stdin = URL_): Promise<void> => {
+      const a = await run(cwd, line, {}, stdin);
       const e = (JSON.parse(a.stdout) as { error: { code: string; message: string; why?: string; fix?: string } }).error;
       assert.equal(a.code, 1, a.stdout);
       assert.equal(e.code, code, a.stdout);
       assert.match(e.message, message);
-      assert.ok(!a.stdout.includes(PASSWORD) && !a.stdout.includes("not-a-url-secret"), a.stdout);
+      assert.ok(!a.stdout.includes(PASSWORD) && !a.stdout.includes("not-a-url-secret") && !a.stdout.includes(URL_MARK), a.stdout);
     };
     await refusal(home(), /^no Mason project here or above$/, "no_project");
     await refusal(project({ file: `kind: postgres\nurl: ${URL_}\ntables:\n  orders: {}\n` }), /^mason\/sources\/app\.yml: url: is written in the file$/, "refused");
-    await refusal(project({ url: null }), /^mason\/sources\/app\.yml: url: \$\{DATABASE_URL\} is not set/, "bad_source");
-    await refusal(project({ url: "not-a-url-secret" }), /^DATABASE_URL \(DATABASE_URL in \.env\) is not a database URL a replica can be made for$/, "refused");
-    await refusal(project({ url: `mysql://u:${PASSWORD}@db.example/app` }), /is not a database URL a replica can be made for$/, "refused");
+    await refusal(project(), /^stdin was empty: no URL was given, and nothing was sent$/, "refused", "");
+    await refusal(project(), /^stdin was empty: no URL was given, and nothing was sent$/, "refused", "\n");
+    await refusal(project(), /^stdin holds more than one line: nothing was sent$/, "refused", `${URL_}\n${URL_}\n`);
+    await refusal(project(), /^the database's URL read from stdin is longer than 2048 bytes: nothing was sent$/, "refused", `postgres://u:${PASSWORD}@h/${"d".repeat(3000)}`);
+    await refusal(project(), /^the URL given for DATABASE_URL \(read from stdin\) is not a database URL a replica can be made for$/, "refused", "not-a-url-secret");
+    await refusal(project(), /^the URL given for DATABASE_URL \(read from stdin\) is not a database URL a replica can be made for$/, "refused", `mysql://u:${PASSWORD}@db-${URL_MARK}.example/app`);
     // not signed in: the login's refusal, naming mason login
     const b = await runMason(root, ["replica", ...line, "--json"], envFor(home(), fake.url));
     assert.equal(b.code, 1);
@@ -112,7 +130,9 @@ test("mason replica create: a creation not made says the service's words, its co
     assert.equal(j.a.code, exit, j.a.stdout);
     assert.equal(v.error.code, code);
     assert.equal(v.error.message, body.error.message, "the service's words, as they came");
-    assert.match(v.error.why, new RegExp(`(^|\\()the service said ${body.error.code}, HTTP ${(reply as { status: number }).status}\\)?$`));
+    // a 503 with Retry-After says when the service asks for another try (it is not waited for)
+    const retry = (reply as { status: number }).status === 503 ? "; the service asks for another try in 30 s: run the same command again then" : "";
+    assert.match(v.error.why, new RegExp(`(^|\\()the service said ${body.error.code}, HTTP ${(reply as { status: number }).status}\\)?${retry}$`));
     assert.deepEqual(v.next.map((n) => n.command), next, "the CLI's own steps, never the service's");
     assert.equal(j.requests.length, 1, "a refusal is never retried");
     if ((reply as { status: number }).status === 403) assert.match(v.next[0]!.what, /^sign in as an admin or an owner of acme; an account's first replica is made in the service's web app, http:\/\/127\.0\.0\.1:\d+$/);
@@ -320,7 +340,7 @@ test("the CLI's own words of every honest create — made and ready, waited for,
   for (const [, v1] of honest) for (const json of [[], ["--json"]]) {
     const { a, url } = await hosted(v1, ["create", "acme/shop", "--region", "eu", "--size", "50", ...json], { cwd: root });
     runs++;
-    const run: CreateRun = { r: { org: "acme", name: "shop", from: "argument" }, region: "eu", sizeGb: 50, timeout: { every: "15m", seconds: 900 }, base: url, variable: "DATABASE_URL", from: "DATABASE_URL in .env", source: "app" };
+    const run: CreateRun = { r: { org: "acme", name: "shop", from: "argument" }, region: "eu", sizeGb: 50, timeout: { every: "15m", seconds: 900 }, base: url, variable: "DATABASE_URL", from: "read from stdin", source: "app" };
     let text = `${a.stderr}\n${a.stdout}`;
     for (const re of theirs) text = text.replace(re, "#");
     for (const line of text.split("\n")) for (let i = 0; i + 11 <= line.length; i += 5) {
