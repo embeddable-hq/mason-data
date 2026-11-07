@@ -14,7 +14,9 @@ import { fileURLToPath } from "node:url";
 import { COMMANDS, STEPS, topUsage } from "../src/cli/registry.ts";
 import { GUIDES } from "../src/cli/guides.ts";
 import { PLAIN } from "../src/cli/style.ts";
-import { synopsis } from "../src/cli/command.ts";
+import * as commandModule from "../src/cli/command.ts";
+// read from the module's namespace: at a commit without synopsis the file loads, and the tests fail by name
+const synopsis = (c: { name: string; usage: string }): string => (commandModule as unknown as { synopsis?: (c: { name: string; usage: string }) => string }).synopsis?.(c) ?? "(no synopsis)";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const mason = (...args: string[]) => spawnSync(process.execPath, [MAIN, ...args], { encoding: "utf8", env: { ...process.env, HOME: "/nonexistent-home" } });
