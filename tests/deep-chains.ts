@@ -94,8 +94,8 @@ export function deepShapes(depth: number): Record<string, string> {
     with: `WITH ${qs.join(", ")} SELECT a, b FROM q${depth} ORDER BY 1, 2`,
     where: `${levels("SELECT a FROM t", (s, i) => `SELECT a + a - a AS a FROM (${s}) s${i} WHERE a > ${i}`)} ORDER BY 1`,
     "group by": `${levels("SELECT a FROM t", (s, i) => `SELECT a + a - a AS a FROM (${s}) s${i} GROUP BY a`)} ORDER BY 1`,
-    // this and "union, a bound at every level" at depth 32 are the review's deep variant form (pr-loop-slim.js
-    // VARIANT_FORMS), which Postgres executes: it never pulls a bounded derived table up into the level above, and without
+    // this and "union, a bound at every level" at depth 32 are a review's deep variant form
+    // (Postgres executes it): it never pulls a bounded derived table up into the level above, and without
     // the bound its own pull-up grows 3^depth (depth 10 took 14 s, and 11 brought down a Postgres given 2 GB)
     "order by and limit": levels("SELECT a, b FROM t", (s, i) => `SELECT ${ab} FROM (${s}) s${i} ORDER BY a, b LIMIT 100`),
     "union, a bound at every level": levels("SELECT a FROM t", (s, i) => `SELECT a + a - a AS a FROM ((${s}) UNION ALL SELECT a FROM t) s${i} ORDER BY a LIMIT 100`),

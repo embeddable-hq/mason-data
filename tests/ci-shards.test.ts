@@ -851,7 +851,6 @@ const DOCS_READ_EXEMPT: ReadonlyMap<string, string> = new Map([
   ["tests/duck-json-columns.test.ts", "\"docs\" is a synthetic table's name; it reads no doc"],
   ["tests/duck-extensions.test.ts", "README.md is a platform package's file list (written by cli/extensions.ts)"],
   ["tests/web-page.test.ts", "reads src/web/vendor/README.md, which the page serves: under src/, so code"],
-  ["tests/workflows.test.ts", "its docs paths are a PR's changed paths fed to the harness's evidence rules; it reads CLAUDE.md, which is code"],
 ]);
 
 test("docs tests: every DOCS_TESTS file exists, every pattern names a test in it, and every unit test that reads a doc is listed or exempted", () => {

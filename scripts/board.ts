@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * THE MASON WORK BOARD (CLAUDE.md "The board says where each piece is"): the one way a session moves an issue's card
+ * THE MASON WORK BOARD (CLAUDE.md "How work is done here"): the one way a session moves an issue's card
  * or makes a sub-issue, so every status is one of the board's and every sub-issue is on it.
  *
  *   scripts/board.ts status <issue> <status>                          move the issue's card (added to the board if it
