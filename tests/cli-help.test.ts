@@ -151,7 +151,7 @@ test("mason <cmd> --help --json, mason help <cmd> --json and mason help --json: 
   assert.equal((JSON.parse(nope.stdout) as { error: { code: string } }).error.code, "usage");
 });
 
-test("mason version --json is { version, next }; mason version, --version and -v print the version alone", () => {
+test("mason version --json is { version, next }; mason version, --version and -v print the version alone", async () => {
   const plain = mason("version");
   assert.equal(plain.status, 0);
   assert.match(plain.stdout, /^\S+\n$/);
@@ -163,6 +163,20 @@ test("mason version --json is { version, next }; mason version, --version and -v
   }
   const spec = JSON.parse(mason("help", "version", "--json").stdout) as { command: { name: string; json: string[] } };
   assert.deepEqual([spec.command.name, spec.command.json], ["version", ["version", "next"]]);
+  // what its spec says it takes is what it parses, under each of its names: --help, --help --json, a wrong option or an argument (exit 2)
+  const { VERSION } = await import("../src/cli/registry.ts");
+  for (const name of ["version", "--version", "-v"]) {
+    for (const h of ["--help", "-h"]) assert.deepEqual([mason(name, h).status, mason(name, h).stdout], [0, VERSION.usage], `mason ${name} ${h}`);
+    const asData = mason(name, "--help", "--json");
+    assert.equal(asData.status, 0);
+    assert.deepEqual(JSON.parse(asData.stdout), spec, `mason ${name} --help --json is its spec, as mason help version --json says it`);
+    for (const wrong of [["--bogus"], ["stray"]]) {
+      const r = mason(name, ...wrong, "--json");
+      assert.equal(r.status, 2, `mason ${name} ${wrong.join(" ")}: ${r.stdout}`);
+      const j = JSON.parse(r.stdout) as { error: { code: string }; next: Array<{ command: string }> };
+      assert.deepEqual([j.error.code, j.next.at(-1)?.command], ["usage", "mason version --help"], `mason ${name} ${wrong.join(" ")}`);
+    }
+  }
 });
 
 test("a wrong option is said in the CLI's words: the closest option, a value missing or not taken; never Node's advice about --", () => {

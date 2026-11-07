@@ -12,7 +12,7 @@
  */
 // FIRST: it sizes libuv's pool, which nothing below may have started (src/cli/pool-size.cjs)
 import "./pool-size.cjs";
-import { COMMANDS, orientation, topUsage, versionText } from "./registry.ts";
+import { COMMANDS, orientation, runVersion, topUsage } from "./registry.ts";
 import { didYouMean } from "../lib/did-you-mean.ts";
 import { spinUntilOutput } from "./style.ts";
 import { CommandFailed, failed, wantsJson } from "./command.ts";
@@ -26,7 +26,7 @@ async function main(argv: string[]): Promise<number> {
   if (command === undefined) { process.stdout.write(await orientation(process.cwd())); return 0; }
   // mason --help --json is mason help --json: every command's spec as data
   if (command === "--help" || command === "-h") { if (args.includes("--json")) return COMMANDS.find((c) => c.name === "help")!.run(["--json"]); process.stdout.write(topUsage()); return 0; }
-  if (command === "--version" || command === "-v" || command === "version") { process.stdout.write(`${versionText(args)}\n`); return 0; }
+  if (command === "--version" || command === "-v" || command === "version") return runVersion(args);
   const cmd = COMMANDS.find((c) => c.name === command);
   const json = wantsJson(args, cmd);
   // the commands' old names: said, never run as different ones

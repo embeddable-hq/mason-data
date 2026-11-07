@@ -163,8 +163,16 @@ export const VERSION: CommandSpec = {
   json: ["version", "next"],
 };
 
-/** `mason version`'s answer: the version, or with --json `{ version, next }`. */
-export const versionText = (argv: readonly string[]): string => argv.includes("--json") ? jsonText(VERSION, { version: version() }) : version();
+/** `mason version` (and `--version`, `-v`): its line read by VERSION, as every command's is by its spec, so what it
+ *  accepts is what its spec as data says — `--help`, `--help --json`, a wrong option or an argument refused (exit 2). */
+export function runVersion(argv: string[]): number {
+  const f = parseCommand(VERSION, argv);
+  if (typeof f === "number") return f;
+  const json = f.values.json === true;
+  if (f.positionals.length) return failed("version", { message: `it takes no argument: ${f.positionals.join(" ")}`, code: "usage", usage: VERSION.usage }, { json });
+  process.stdout.write(`${json ? jsonText(VERSION, { version: version() }) : version()}\n`);
+  return 0;
+}
 
 async function runHelp(argv: string[]): Promise<number> {
   const f = parseCommand(HELP, argv);
