@@ -514,6 +514,12 @@ Tables, the Users, Observability: what `mason ui` opens for a local run) in the 
 The CLI asks the service for a one-use, short-lived address of the page, and opens it, as `mason login` opens its
 sign-in page. How the service serves the page behind that address is the service's own; the CLI only opens it.
 
+**The page is read-only.** A page opened this way shows the replica; it changes nothing. The service passes the page
+and its reads (`GET`, such as `/api/state`, `/api/users`, `/api/requests`) to Mason on the replica, and refuses every
+request that would change the replica (every other method, such as `POST /api/users`, `POST /api/pick`, `POST
+/api/cancel`), because the service audits every change and a write through the page would skip that. A replica's users
+are changed with `mason user … --replica` ("The users of a replica", above), which the service audits.
+
 ### `POST /v1/replicas/{org}/{name}/ui`
 
 `Authorization: Bearer <token>`, no body. `{org}` and `{name}` follow the deploy's grammar (each
@@ -526,7 +532,7 @@ login's role or a token's kind (a token is opaque to it), so the refusal is the 
 `200`, JSON:
 
 ```json
-{ "url": "https://app.example.com/replicas/acme/shop/page?ticket=3q2-7Zk9", "expiresAt": "2026-11-07T10:05:00.000Z" }
+{ "url": "https://r-7f3a.ui.app.example.com/?ticket=3q2-7Zk9", "expiresAt": "2026-11-07T10:05:00.000Z" }
 ```
 
 | Key | Held to |
@@ -542,9 +548,16 @@ It carries no token of the login it was asked with, and no secret that outlives 
 before it is opened or printed, and refuses an answer that breaks any of it:
 
 - an absolute URL, at most 2048 characters;
-- on the service's own origin: the base URL's scheme, host and port (`MASON_CLOUD_URL`'s, or the default). An address
-  on any other origin, or of another scheme (`javascript:`, `file:`, `data:`), is refused naming the origin it named,
-  code `refused`, exit 1: it would send the person to an address nobody chose;
+- on one of two kinds of origin:
+  - the service's own: the base URL's scheme, host and port (`MASON_CLOUD_URL`'s, or the default); or
+  - a separate origin the service names, so that Mason's page shares neither the service's session cookie nor its
+    root-absolute paths (`/app.js`, `/api/state`): `https:`, on the base URL's port, and a host that is a subdomain of
+    the base URL's host, by its labels: `r-7f3a.ui.app.example.com` under `app.example.com`. Never another domain,
+    never a host that merely ends in the same letters (`evilapp.example.com`), never `http:`, never another port, and
+    none at all under a base URL whose host is an IP address.
+
+  An address on any other origin, or of another scheme (`javascript:`, `file:`, `data:`), is refused naming the origin
+  it named, code `refused`, exit 1: it would send the person to an address nobody chose;
 - no user or password in it;
 - as the URL parser writes it (dot segments removed, a host in its `xn--` form), only `https://` (or `http://` for a
   service on this machine), then the host and port, then a path and an optional query of letters, digits and

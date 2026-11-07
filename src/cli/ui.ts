@@ -67,7 +67,8 @@ export const UI: CommandSpec & { needs: "run" } = {
 
   --replica opens the page of a replica on a hosted Mason service (else MASON_REPLICA, unless --ssh or --bridge names
   the target), for the organisation's owner alone: the service answers an address that opens it once, for a few
-  minutes. It needs no project here, and goes with --no-open and --json alone. Opened in your browser, the address is
+  minutes. The page is read-only: the service refuses changes through it, so add or remove users with mason user …
+  --replica. It needs no project here, and goes with --no-open and --json alone. Opened in your browser, the address is
   not printed: run it again for another tab. A replica not ready yet is said, with when to try again.
 
   --no-open            print the URL only

@@ -1,7 +1,8 @@
 /**
  * `mason ui --replica <org>/<name>` — A HOSTED REPLICA'S WEB PAGE, IN THE BROWSER OF THE ORGANISATION'S OWNER
  * (docs/HOSTED-API.md "A replica's page"). ONE request, `POST /v1/replicas/{org}/{name}/ui`, whose answer is a one-use,
- * short-lived address of the replica's page on the service's own origin; the CLI opens it as `mason ui` opens a run's
+ * short-lived address of the replica's page (on the service's origin, or on https at a subdomain of its host), read-only
+ * (the service refuses every write through it: changes go by `mason user … --replica`, which it audits); the CLI opens it as `mason ui` opens a run's
  * page and `mason login` its sign-in page (`openBrowser`), or prints it (`--no-open`, `--json`, a browser that would not
  * start). Who may ask (the owner's login alone), and the audit row of each page opened, are the service's: the CLI cannot
  * write that row and never says it did.
@@ -10,7 +11,8 @@
  *
  *   value                      where it is printed                     what holds it
  *   every string, keys too     nowhere until held                      `carriesNoSecret`: an answer carrying a secret is refused whole
- *   url                        opened; printed where it was not        `pageUrl`: the service's own origin, no user, at most 2048, carries
+ *   url                        opened; printed where it was not        `pageOrigin`, `pageUrl`: the service's origin or https at a
+ *                                                                      subdomain of its host, its port; no user, at most 2048, carries
  *                              opened, and in --json                   no secret as printed; then `OPENABLE`: letters, digits and
  *                                                                      `. : [ ] - _ ~ / ? = +` alone, so no shell reads it
  *   expiresAt                  a row, --json                           `isServiceTime`
@@ -43,18 +45,38 @@ const STEP = "a replica's page was asked for";
 export interface ReplicaPage { url: string; expiresAt: string }
 
 /**
+ * THE ORIGIN A REPLICA'S PAGE MAY BE ON: the service's own, or an `https:` origin whose host is a subdomain of the
+ * service's host, on the service's port (a page of its own origin keeps the service's session cookie and its routes
+ * apart from Mason's page: `r-abc.ui.app.example` under `app.example`). A subdomain by its labels, never a suffix of the
+ * text (`evilapp.example` is not under `app.example`), and none under an IP address. The origin the page is held to,
+ * or null when `v` is on none of them (or is no URL).
+ */
+export function pageOrigin(service: Service, v: unknown): Service | null {
+  if (typeof v !== "string") return null;
+  let u: URL, base: URL;
+  try { u = new URL(v); base = new URL(service.base); } catch { return null; }
+  if (u.origin === service.base) return service;
+  const ip = /^[\d.]+$/.test(base.hostname) || base.hostname.startsWith("[");
+  if (u.protocol !== "https:" || u.port !== base.port || ip || !u.hostname.endsWith(`.${base.hostname}`)) return null;
+  return { base: u.origin };
+}
+
+/**
  * `POST …/ui`'s answer (200), held: every string of it, each key included, put to the exact test first
- * (`carriesNoSecret`), then the address on the service's own origin (`pageUrl`, refused naming both when it is not) and
- * of the characters a browser is handed (`OPENABLE`), and the time to its grammar. The page, or a Failure said by the
- * status alone (or naming the other origin).
+ * (`carriesNoSecret`), then the address on an origin it may be on (`pageOrigin`; refused naming the origin when it is
+ * not), held there by `pageUrl` (no user or password, at most 2048, no secret as printed), of the characters a browser
+ * is handed (`OPENABLE`), and the time to its grammar. The page, or a Failure said by the status alone (or naming the
+ * other origin).
  */
 export function heldPage(service: Service, a: Answer, secrets: readonly string[]): ReplicaPage | Failure {
   const j = a.json;
   if (!obj(j) || !carriesNoSecret(j, secrets)) return unexpected(service, a, STEP);
-  const page = pageUrl(service, j.url, secrets);
+  const origin = pageOrigin(service, j.url);
+  // on an origin it may be on, `pageUrl` holds it as on the service's own; elsewhere, `pageUrl` says the origin safely
+  const page = pageUrl(origin ?? service, j.url, secrets);
   if (page !== null && "elsewhere" in page) {
     return { message: `${service.base} named a replica's page on another address: ${page.elsewhere}`, code: "refused",
-      why: `a page is opened only on the service's own address, ${service.base}: anything else would send you to an address nobody chose`,
+      why: `a replica's page is opened only on the service's own address, ${service.base}, or on https at a subdomain of its host: anything else would send you to an address nobody chose`,
       fix: "check MASON_CLOUD_URL names the service you mean; if it does, the service is answering outside its documented API" };
   }
   if (page === null || !OPENABLE.test(page.href) || !isServiceTime(j.expiresAt)) return unexpected(service, a, STEP);

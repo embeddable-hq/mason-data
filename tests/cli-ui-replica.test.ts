@@ -262,3 +262,50 @@ test("mason ui --replica on a narrow terminal: every line the person sees is one
     }
   }
 });
+
+test("a replica's page on a separate origin: https at a subdomain of the service's host, on its port, held by every other check; never another domain, a look-alike suffix, http or another port", async () => {
+  const { heldPage } = await import("../src/cli/ui-hosted.ts");
+  const service = { base: "https://app.example" };
+  const answer = (url: string, more: Record<string, unknown> = {}) => ({ status: 200, json: { url, expiresAt: EXPIRES, ...more }, what: `POST ${PAGE}`, retryAfter: null });
+  const held = (url: string) => heldPage(service, answer(url), []);
+  for (const url of ["https://app.example/p?ticket=t1", "https://r-abc.ui.app.example/?ticket=t1", "https://R-ABC.UI.app.example/p", "https://x.app.example:443/p"]) {
+    const p = held(url);
+    assert.ok(!("message" in p), `${url}: ${JSON.stringify(p)}`);
+    assert.equal(p.url, new URL(url).href);
+  }
+  const elsewhere = /named a replica's page on another address/;
+  const outside = /where a replica's page was asked for/;
+  for (const [url, said] of [
+    ["https://r-abc.ui.app.example.evil/p", elsewhere], ["https://evilapp.example/p", elsewhere], ["https://app.example.evil/p", elsewhere],
+    ["https://example/p", elsewhere], ["http://r-abc.ui.app.example/p", elsewhere], ["https://r-abc.ui.app.example:8443/p", elsewhere],
+    ["https://app.example:8443/p", elsewhere], ["https://r-abc.ui.app.example./p", elsewhere], ["javascript:alert(1)", elsewhere],
+    ["https://u:p@r-abc.ui.app.example/p", outside], ["https://r-abc.ui.app.example/p?a=1&b=2", outside],
+    [`https://r-abc.ui.app.example/${"a".repeat(2100)}`, outside],
+  ] as Array<[string, RegExp]>) {
+    const p = held(url);
+    assert.ok("message" in p, `${url} is refused`);
+    assert.match(p.message, said, url);
+  }
+  // no expiresAt, and a secret, on a subdomain too
+  assert.ok("message" in heldPage(service, { status: 200, json: { url: "https://r.app.example/p" }, what: `POST ${PAGE}`, retryAfter: null }, []));
+  const token = newToken("pat");
+  assert.ok("message" in heldPage(service, answer(`https://r.app.example/p?ticket=${token.slice(-43)}`), [token]));
+  // a service on an IP address has no subdomains: its own origin alone
+  const ip = { base: "http://127.0.0.1:8080" };
+  assert.ok(!("message" in heldPage(ip, answer("http://127.0.0.1:8080/p"), [])));
+  assert.ok("message" in heldPage(ip, answer("https://x.127.0.0.1:8080/p"), []));
+});
+
+test("mason ui --replica: an address on https at a subdomain of the service's host is opened, end to end", async () => {
+  const token = newToken("ci"); SECRETS.push(token);
+  // the service named by localhost, so the page's host can be a subdomain of it
+  const fake = await fakeService({ v1: (q) => ({ status: 200, body: { url: `https://r-abc.ui.${String(q.headers.host)}/?ticket=t1`, expiresAt: EXPIRES } }) });
+  const h = home();
+  const b = browser();
+  try {
+    const service = fake.url.replace("127.0.0.1", "localhost");
+    const a = await mason(h, ["ui", "--replica", R], envFor(h, service, { MASON_TOKEN: token, PATH: `${b.dir}${path.delimiter}${path.dirname(process.execPath)}` }), { lines: LINES });
+    assert.equal(a.code, 0, a.stdout + a.stderr);
+    assert.deepEqual(b.opened(), [`https://r-abc.ui.${new URL(service).host}/?ticket=t1`]);
+  } finally { await fake.close(); }
+});
