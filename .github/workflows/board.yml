@@ -1,0 +1,104 @@
+# Keeps the work board's Status in step with the issues and PRs, so no session moves a card by hand.
+#
+#   issue opened or reopened by a member      -> Backlog   (anyone else's waits for the owner to triage it)
+#   PR opened as a draft, or made a draft      -> In progress   (each issue its body closes: "Closes #<issue>")
+#   PR opened ready, or marked ready           -> In review
+#   PR merged, or issue closed                 -> Done
+#   PR closed without merging                  -> Backlog
+#   label `needs-owner` added                  -> Needs Tom   (the board's column for a question to the owner)
+#   label `needs-owner` removed                -> In review / In progress by its open PR, else Backlog
+#
+# Up next is the owner's to order: nothing here moves a card into it.
+#
+# Needs: the repository variable PROJECT_NUMBER (the organisation project's number) and the secret PROJECT_TOKEN (a
+# fine-grained token with the organisation's Projects read and write, and this repository's issues and pull requests
+# read). Until the variable is set, the job is skipped. A PR from a fork is skipped too: it is given no secrets, and
+# this runs on `pull_request`, never `pull_request_target`, so no fork's code ever runs beside the token.
+name: board
+
+on:
+  issues:
+    types: [opened, reopened, closed, labeled, unlabeled]
+  pull_request:
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+
+permissions: {}
+
+concurrency:
+  group: board
+  cancel-in-progress: false
+
+jobs:
+  status:
+    if: vars.PROJECT_NUMBER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const number = Number(process.env.PROJECT_NUMBER);
+            const ev = context.eventName, action = context.payload.action;
+            const LABEL = "needs-owner", WAITING = "Needs Tom";
+            const MEMBERS = ["OWNER", "MEMBER", "COLLABORATOR"];
+
+            const project = (await github.graphql(`
+              query($owner: String!, $number: Int!) {
+                organization(login: $owner) { projectV2(number: $number) {
+                  id
+                  field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
+                } }
+              }`, { owner, number })).organization.projectV2;
+            if (!project?.field) throw new Error(`project ${number} has no single-select field named Status`);
+
+            async function setStatus(issueNodeId, name) {
+              const option = project.field.options.find(o => o.name === name);
+              if (!option) throw new Error(`the project's Status has no option named "${name}"`);
+              const item = (await github.graphql(`
+                mutation($project: ID!, $content: ID!) {
+                  addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
+                }`, { project: project.id, content: issueNodeId })).addProjectV2ItemById.item.id;
+              await github.graphql(`
+                mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+                  updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field,
+                    value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
+                }`, { project: project.id, item, field: project.field.id, option: option.id });
+              core.info(`${issueNodeId} -> ${name}`);
+            }
+
+            if (ev === "issues") {
+              const issue = context.payload.issue;
+              const label = context.payload.label?.name;
+              if (action === "opened" || action === "reopened") {
+                // the repository is public: an issue anyone opens is the owner's to triage, never put on the board here
+                if (!MEMBERS.includes(issue.author_association)) return core.info(`#${issue.number} is by a ${issue.author_association}: left for the owner`);
+                return setStatus(issue.node_id, "Backlog");
+              }
+              if (action === "closed") return setStatus(issue.node_id, "Done");
+              if (label !== LABEL) return;
+              if (action === "labeled") return setStatus(issue.node_id, WAITING);
+              const prs = (await github.graphql(`
+                query($id: ID!) { node(id: $id) { ... on Issue {
+                  closedByPullRequestsReferences(first: 5, includeClosedPrs: false) { nodes { isDraft } }
+                } } }`, { id: issue.node_id })).node.closedByPullRequestsReferences.nodes;
+              const status = prs.length === 0 ? "Backlog" : prs.some(p => !p.isDraft) ? "In review" : "In progress";
+              return setStatus(issue.node_id, status);
+            }
+
+            const pr = context.payload.pull_request;
+            const status = action === "closed" ? (pr.merged ? "Done" : "Backlog")
+              : pr.draft ? "In progress" : "In review";
+            const issues = (await github.graphql(`
+              query($id: ID!) { node(id: $id) { ... on PullRequest {
+                closingIssuesReferences(first: 10) { nodes { id labels(first: 20) { nodes { name } } } }
+              } } }`, { id: pr.node_id })).node.closingIssuesReferences.nodes;
+            if (issues.length === 0) core.warning(`PR #${pr.number} closes no issue: its body needs "Closes #<issue>"`);
+            for (const issue of issues) {
+              const waiting = issue.labels.nodes.some(l => l.name === LABEL);
+              if (waiting && action !== "closed") continue; // a question for the owner stays in sight until it is answered
+              await setStatus(issue.id, status);
+            }
