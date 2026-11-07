@@ -19,6 +19,8 @@
  *
  *   - ITS WEB PAGE ON LOOPBACK ALONE (src/cli/run-server.ts `listenOnLoopback`): the run's server, MASON_UI_PORT, reached
  *     from a developer's machine with `mason ui --ssh`, never published. No setting moves it to another address.
+ *     MASON_UI_SOCKET serves it on a Unix socket too, for a process on this machine (src/cli/ui-socket.ts): mode 0600, in
+ *     a folder only Mason's user can write, behind the same guard as `mason ui --ssh`'s requests.
  *
  * The commands beside it work as on a laptop, in the data folder: `docker compose exec mason mason add orders`.
  */
@@ -36,6 +38,7 @@ import { connectDatabase, DATABASE_SETTING, databaseNameProblem } from "../lib/d
 import { appEnvValue } from "../lib/dotenv.ts";
 import { imagePinProblem, PIN_FILE } from "../lib/project-version.ts";
 import { commandPinProblem } from "./pin.ts";
+import { listenOnUiSocket, prepareUiSocket, uiSocketSetting, type UiSocket } from "./ui-socket.ts";
 import { recordRefusal } from "./replication-mode.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
@@ -83,6 +86,10 @@ export const SERVE: CommandSpec = {
     MASON_UI_PORT           the web page's and the commands' port, on 127.0.0.1 alone: no setting moves the address, and
                             mason ui --ssh <user@server> opens the page from your machine (default ${DEFAULT_UI_PORT}, or the next
                             free one; a port named here is that port, or the start is refused)
+    MASON_UI_SOCKET         a Unix socket the web page is served on too, for a process on this machine (a supervisor,
+                            a local reverse proxy): made mode 0600 in a folder only Mason's user can write (else the
+                            start is refused), a stale one replaced, removed on exit; a request on it passes the same
+                            guard as mason ui --ssh's (default unset: none)
     MASON_PG_HOST, MASON_PG_PORT   the Postgres API's address (default 127.0.0.1:5433)
     MASON_PG_TLS_CERT, MASON_PG_TLS_KEY   its certificate, required off loopback; or MASON_PG_SELF_SIGNED_TLS=1
                             for one made in .mason/, or MASON_PG_PLAIN=1 behind a TLS proxy of your own
@@ -118,8 +125,9 @@ export interface ServeSettings {
   data: string;
   selfSignedTls: boolean;
   health: { host: string; port: number };
-  /** the port of the page and the commands; `named`: MASON_UI_PORT said it, so it is that port or a refusal */
-  ui: { port: number; named: boolean };
+  /** the port of the page and the commands; `named`: MASON_UI_PORT said it, so it is that port or a refusal; `socket`:
+   *  the Unix socket MASON_UI_SOCKET names, absolute, the page served there too (src/cli/ui-socket.ts), or null */
+  ui: { port: number; named: boolean; socket: string | null };
 }
 
 const MIN_API_KEY = 32;
@@ -171,6 +179,8 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   else if (env.MASON_UI_PORT && uiPort === port) wrong.push(`MASON_UI_PORT=${uiText} is MASON_HEALTH_PORT too: two ports`);
   else if (env.MASON_UI_PORT && uiPort === pgPortOf(env)) wrong.push(`MASON_UI_PORT=${uiText} is the Postgres API's port too (MASON_PG_PORT): two ports`);
   // a host would only be believed: the page has no address but loopback, and running on while one is asked for would hide that
+  const socket = uiSocketSetting(env, cwd);
+  if (socket !== null && typeof socket !== "string") wrong.push(socket.problem);
   if (env.MASON_UI_HOST) wrong.push("MASON_UI_HOST is set, and the web page has no address but 127.0.0.1: remove it (mason ui --ssh <user@server> opens the page from your machine)");
   if (wrong.length) {
     return { message: `${wrong.length === 1 ? "a setting is" : `${wrong.length} settings are`} missing or wrong: ${wrong.join("; ")}`, code: "bad_config",
@@ -182,7 +192,7 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
     name, apiKey, selfSignedTls: selfSigned === "1",
     project, data,
     health: { host: env.MASON_HEALTH_HOST || "0.0.0.0", port },
-    ui: { port: uiPort, named: !!env.MASON_UI_PORT },
+    ui: { port: uiPort, named: !!env.MASON_UI_PORT, socket: typeof socket === "string" ? socket : null },
   };
 }
 
@@ -408,6 +418,27 @@ export async function serve(argv: string[]): Promise<number> {
   // a port named is that port: said here, before anything listens, as the next free one would hide the setting
   const held = s.ui.named ? await portHolder(s.ui.port) : null;
   if (held !== null) return failed("serve", { message: `MASON_UI_PORT: ${heldText(s.ui.port, held)}`, code: "refused", fix: "name another port, or leave MASON_UI_PORT unset for the next free one" }, { json });
+  // the page's socket, before anything listens: its folder and its path held to the bar, a stale one replaced, then made
+  let page: UiSocket | null = null;
+  // what making it says, under the start's heading below
+  const socketSaid: string[] = [];
+  if (s.ui.socket !== null) {
+    const prepared = await prepareUiSocket(s.ui.socket, (l) => socketSaid.push(l));
+    if (prepared !== null) return failed("serve", prepared, { json });
+    const opened = await listenOnUiSocket(s.ui.socket, (l) => say(`  ${l}`));
+    if ("message" in opened) return failed("serve", opened, { json });
+    page = opened;
+  }
+  // a SIGTERM before the run has its own stop (it is still connecting) ends the process by its default action, which runs
+  // no finally: the socket is removed first, then the signal raised again as it was
+  const early = (signal: NodeJS.Signals): void => {
+    if (process.listenerCount(signal) > 1) return;   // the run's stop is in place: it stops, and the finally removes it
+    page?.close();
+    unhookEarly();
+    process.kill(process.pid, signal);
+  };
+  const unhookEarly = (): void => { process.removeListener("SIGTERM", early); process.removeListener("SIGINT", early); };
+  if (page !== null) { process.on("SIGTERM", early); process.on("SIGINT", early); }
   const startedAt = Date.now();
   let state: ServePhase = { phase: "starting" };
   const health = healthServer(() => state, startedAt);
@@ -416,6 +447,8 @@ export async function serve(argv: string[]): Promise<number> {
     health.listen(s.health.port, s.health.host, () => resolve(null));
   });
   if (listening !== null) {
+    page?.close();
+    unhookEarly();
     return failed("serve", { message: `the health endpoint cannot listen on ${s.health.host}:${s.health.port}: ${listening.message}`, code: "refused",
       fix: "MASON_HEALTH_PORT names a port free on this machine" }, { json });
   }
@@ -425,13 +458,19 @@ export async function serve(argv: string[]): Promise<number> {
   say(`  database  ${made.database}, what a tool connects with`);
   say(`  health    http://${s.health.host}:${s.health.port}/healthz`);
   say(`  metrics   http://${s.health.host}:${s.health.port}/metrics`);
+  for (const l of socketSaid) say(`  ${l}`);
+  if (page !== null) say(`  web page  ${page.file} (a Unix socket, mode 0600: a request on it passes the same guard as mason ui --ssh's)`);
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's
   process.chdir(s.data);
   let code: number;
   try {
     code = await dev({ port: s.ui.port, exactPort: s.ui.named, version: version(), selfSignedTls: s.selfSignedTls,
-      serve: { log: say, ready: (run) => { state = { phase: "ready", tables: run.tables, metrics: run.metrics }; }, stopping: () => { state = { phase: "stopping" }; } } });
+      serve: { log: say, ready: (run) => { state = { phase: "ready", tables: run.tables, metrics: run.metrics }; }, stopping: () => { state = { phase: "stopping" }; page?.close(); },
+        ...(page !== null ? { page: page.attach } : {}) } });
   } finally {
+    // removed whatever ended the run: a stop, a crash of the engine's thread, or a start that failed
+    page?.close();
+    unhookEarly();
     // a platform's health check may hold a keep-alive connection open, which close() alone would wait for
     health.closeAllConnections();
     await new Promise<void>((resolve) => health.close(() => resolve()));

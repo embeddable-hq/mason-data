@@ -251,6 +251,13 @@ listens, and every browser connection crosses that one ssh connection as frames 
 - **The server need not allow TCP forwarding**, and nobody needs to know the page's port. `MASON_UI_PORT` (default
   4039, the next free one when it is held) names it where another service wants that port; a port named is that port,
   or the start is refused.
+- **A process on the same machine can have a socket instead.** `MASON_UI_SOCKET=/mason/data/.mason/ui.sock` makes
+  `mason serve` serve the page on that Unix socket as well, for a supervisor or a local reverse proxy that should reach
+  it without a port published or a `docker exec` per request. The socket is mode 0600, in a folder only Mason's user can
+  write (else the start is refused, with the way out); a stale socket a crashed run left is replaced, anything else at
+  the path (a file, a link, another user's socket, one a process answers on) is refused and left as it is; it is removed
+  on exit. A request on it is judged by the same guard as one through `mason ui --bridge`: it reaches the page with the
+  run's token, or as a tunnel opened with that token (its ticket, then its cookie), never for arriving on the socket.
 - **Another page's cookie crosses too.** A browser keeps cookies by host, not port, so a local `mason start`'s cookie for
   127.0.0.1 is sent through the tunnel in the Cookie header. Each cookie is named for its port, and the server reads
   only the one for the Host it was asked by, so that one is ignored, though it does reach the server.

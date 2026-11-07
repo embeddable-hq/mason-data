@@ -22,6 +22,7 @@ import type { Failure, Problem } from "./command.ts";
 import { connectDatabase, databaseSettingRefusal } from "../lib/database-name.ts";
 import { changesRetired, pollMsRetired } from "../lib/table-sync.ts";
 import { readSource, sourcesTop, writtenDatabase, type ProjectSource } from "./sources.ts";
+import { UI_SOCKET_SETTING } from "./ui-socket.ts";
 
 export const STATE_DIR = ".mason";
 const CONFIG = "config.json";
@@ -349,5 +350,11 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   const changes = changesRetired(env, top);
   if (changes !== null) return { code: "refused", ...changes };
   const database = o.serve ? null : databaseSettingRefusal(env, top().shown);
-  return database === null ? null : { code: "refused", ...database };
+  if (database !== null) return { code: "refused", ...database };
+  // the page's Unix socket is a server's (src/cli/ui-socket.ts): a laptop's page is opened with mason ui
+  if (!o.serve && env[UI_SOCKET_SETTING]) {
+    return { message: `${UI_SOCKET_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${UI_SOCKET_SETTING}: mason ui opens this run's page` };
+  }
+  return null;
 }

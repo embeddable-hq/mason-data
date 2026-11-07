@@ -26,6 +26,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { Server } from "node:http";
 import { choosePgPort, freePort } from "./ports.ts";
 import { failed, type Problem } from "./command.ts";
 import { checkSource, connectSource, maskedUrl, readSourceFacts, remoteConfirmation, remoteWarning, type SourceFacts } from "./preflight.ts";
@@ -87,6 +88,8 @@ export interface ServeHooks {
   ready: (run: { tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">> }) => void;
   /** a SIGTERM or SIGINT is stopping it */
   stopping: () => void;
+  /** the page's Unix socket (MASON_UI_SOCKET, src/cli/ui-socket.ts) is given the run's server, whose requests it serves */
+  page?: (server: Server) => void;
 }
 
 const say = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -666,6 +669,7 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
       restarts: () => readRestarts(home), jsonPaths: () => sync.kept.status(), generated: () => sync.generated.status() },
   };
   const server = createRunServer(runCtx);
+  o.serve?.page?.(server);
   // a sample is /api/state's facts at its moment (src/cli/run-server.ts usageFacts): one computation of each
   usage.start(() => usageFacts(runCtx));
   await listenOnLoopback(server, setupPort);
