@@ -34,14 +34,16 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
   --until <when>   until when, the same way; default now
   --step <duration>  a line per span (1m to the days kept; default 5m; a bare number is seconds), or 0 for every
                    sample as it was taken
-  --json           as data: { since, until, stepSeconds (null: every sample), sampleSeconds, keptDays, samples: [{ at
-                   (with a step, the span's start), seconds, copyBytes, copyRows, tablesAdded, tablesCopied,
-                   tablesFailed, oldestSyncSeconds, statements, statementsRefused, statementsFailed, statementsCancelled,
-                   rowsSent, bytesSent, durationP50Ms, durationP95Ms, streamLagBytes, streamLagSeconds, rssBytes,
-                   heapUsedBytes, copyMemoryBytes, copyMemoryLimitBytes, slotWalHeldBytes (replication: the WAL the
-                   slot holds on the database), diskFreeBytes (free where the synced data is; with a step, the lowest),
-                   sessionsOpen (the Postgres API's sessions logged in) }],
-                   copySizes: [{ table, bytes, at }], next }
+  --json           as data: its shape is at the end
+
+  The --json answer: { since, until, stepSeconds (null: every sample), sampleSeconds, keptDays, samples: [{ at
+    (with a step, the span's start), seconds, copyBytes, copyRows, tablesAdded, tablesCopied,
+    tablesFailed, oldestSyncSeconds, statements, statementsRefused, statementsFailed, statementsCancelled,
+    rowsSent, bytesSent, durationP50Ms, durationP95Ms, streamLagBytes, streamLagSeconds, rssBytes,
+    heapUsedBytes, copyMemoryBytes, copyMemoryLimitBytes, slotWalHeldBytes (replication: the WAL the
+    slot holds on the database), diskFreeBytes (free where the synced data is; with a step, the lowest),
+    sessionsOpen (the Postgres API's sessions logged in) }],
+    copySizes: [{ table, bytes, at }], next }
 `;
 
 export const USAGE: CommandSpec & { needs: "run" } = {

@@ -54,6 +54,10 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
   same units as an age (`2 hours` too) and still refuse a bare number, which as a time could be a timestamp. A `sync:`
   interval and a `target_lag:` take `d` (`poll 1d`); a bare number in the sources file is still refused, now with the
   line to write (`poll 30s`).
+- **`mason <command> --help` reads in the order you need it**: the usage line, a short description, the examples and
+  every flag first; then the longer explanations, and the `--json` answer's shape last (`The --json answer: …`), where
+  it once filled the flags in the middle (about 70 lines in `mason status --help`). The text is the same, moved;
+  `mason user --help` gains a line for each of its flags.
 - **A mistyped option is answered with the closest one and the command's synopsis** (`there is no option --jsn — did you
   mean --json?`), not with the whole usage; `mason <command> --help` still prints all of it.
 - **The commands that name a hosted replica all take it the same ways**: `mason replica create` and `status` take

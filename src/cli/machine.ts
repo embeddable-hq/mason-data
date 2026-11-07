@@ -26,17 +26,17 @@ export const DESTROY_USAGE = `usage: mason destroy [--dry-run] [--json]
     mason destroy                this folder's project
     mason destroy --dry-run      what it would remove, changing nothing
 
-  mason stop keeps the synced data and the state, and the next mason start resumes in seconds; mason destroy frees the disk, and
-  the next mason start begins again. In replication mode the slot (and Mason's own publication) are dropped from the
-  database too: they hold its WAL for as long as they exist. A demo project's database (mason init demo, in .mason/demo/)
-  goes with the synced data: the next mason start makes and seeds it again.
-
   --dry-run  list what would go — Mason stopped, the replication slot and Mason's own publication on the database, the
              synced data and state in .mason/ — and change nothing: it stops nothing and never connects to the
              database (the slot and publication are named from what the start that made them recorded)
   --json     as data: { dryRun, destroyed: { project, removedItems: [what, in words], replication (null: nothing on
              the database; else { database, slot, publication (null: one the operator named, never dropped) }), error },
              removed (the same as [{ name, removed: [what], error }], kept until 1.0; not on a dry run), next }
+
+  mason stop keeps the synced data and the state, and the next mason start resumes in seconds; mason destroy frees the disk, and
+  the next mason start begins again. In replication mode the slot (and Mason's own publication) are dropped from the
+  database too: they hold its WAL for as long as they exist. A demo project's database (mason init demo, in .mason/demo/)
+  goes with the synced data: the next mason start makes and seeds it again.
 
   Exit status: 0 removed (or nothing to remove, or a dry run that found nothing in the way); 1 something could not be
   removed, or on a dry run would not be (said); 2 a wrong command line.

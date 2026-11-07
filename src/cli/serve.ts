@@ -61,6 +61,8 @@ export const SERVE: CommandSpec = {
     DATABASE_URL=postgres://mason:…@db.internal:5432/app MASON_API_KEY=… mason serve
     docker compose exec mason mason add public.orders     beside it, in its container
 
+  --json   a refusal to start as data: { error, next }; once it serves, its output is its log
+
   Settings (the environment):
     DATABASE_URL            the database to sync from, as the sources file's url: \${DATABASE_URL} names it (the variable
                             the file names is required); read-only: SELECTs, or a replication slot
@@ -99,8 +101,6 @@ export const SERVE: CommandSpec = {
     MASON_COPY_CHUNK_SECONDS   how long each chunk takes to read, at the rate measured (1 to 300, default 12)
     UV_THREADPOOL_SIZE      threads for running statements, one each, 1 to 1024 (default 32, lowered to fit a limit
                             on threads; one that does not fit, or is no such number, refuses the start)
-
-  --json   a refusal to start as data: { error, next }; once it serves, its output is its log
 
   Exit status: 0 stopped by SIGTERM or SIGINT; 1 it could not start (said); 2 a wrong command line.
 `,

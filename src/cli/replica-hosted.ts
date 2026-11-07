@@ -101,12 +101,25 @@ export const REPLICA: CommandSpec = {
        mason replica list [<org> | --org <org>] [--json]
        mason replica status <org>/<name> | --replica <org>/<name> [--json]
 
+  A replica is Mason run for you by a hosted Mason service, on a machine of its own, syncing this project's
+  database. mason deploy then sends it the project's files, and mason token create a CI token for it.
+
+    mason replica create acme/shop --region <region> --size 50
+    my-secret-store read app-db-url | mason replica create --replica acme/shop --region <region> --size 50 --json
+    mason replica list
+    mason replica status acme/shop --json
+
+  --replica <org>/<name>   create, status: the replica, in place of the argument (else MASON_REPLICA)
+  --org <org>              list: the organisation, in place of the argument
+  --region <region>        create: the region it runs in, one the service offers
+  --size <gb>              create: the synced data it holds, in GB, one size the service offers (50)
+  --timeout <duration>     create: how long to wait for its region to make it (default ${DEFAULT_TIMEOUT}; 1s to 24h; a
+                           bare number is seconds)
+  --json                   as data: its shape is at the end
+
   The replica can also be named as every other command names one, --replica <org>/<name> (else MASON_REPLICA, said
   on stderr when it chose): mason replica status --replica acme/shop. The organisation, as --org: mason replica
   list --org acme.
-
-  A replica is Mason run for you by a hosted Mason service, on a machine of its own, syncing this project's
-  database. mason deploy then sends it the project's files, and mason token create a CI token for it.
 
   create makes one in the organisation <org>, named <name>, in --region (one the service offers), sized by
   --size: the synced data it holds, in GB (one size the service offers, such as 50). The database's URL is
@@ -133,33 +146,22 @@ export const REPLICA: CommandSpec = {
   The login is MASON_TOKEN, else this machine's (mason login); the service is MASON_CLOUD_URL, else the default.
   Progress goes to stderr; the answer is printed when it ends.
 
-    mason replica create acme/shop --region <region> --size 50
-    my-secret-store read app-db-url | mason replica create --replica acme/shop --region <region> --size 50 --json
-    mason replica list
-    mason replica status acme/shop --json
-
-  --replica <org>/<name>   create, status: the replica, in place of the argument (else MASON_REPLICA)
-  --org <org>              list: the organisation, in place of the argument
-  --region <region>        create: the region it runs in, one the service offers
-  --size <gb>              create: the synced data it holds, in GB, one size the service offers (50)
-  --timeout <duration>     create: how long to wait for its region to make it (default ${DEFAULT_TIMEOUT}; 1s to 24h; a
-                           bare number is seconds)
-  --json                   as data, once it ends: { replica (create, status: { org, name, region, sizeGb, hostId,
-                           state, createdAt, allowlist, page (its page, null when the service names none),
-                           pending: [{ change (create, allowlist), state (pending, failed), attempts, failure,
-                           nextAttemptAt }] }), checks (create: [{ source, outcome
-                           (passed, failed, unknown), checks: [{ name, status (ok, warn, failed, unknown), detail,
-                           fix }], missing }], null when the service's answer was lost), replicas (list: each as
-                           replica is), more (list: true when an organisation has more than the service lists),
-                           error (create, when it was not made, failed or the wait timed out: { code, message,
-                           why, fix }), next }
-
   Exit status: 0 the replica is ready (create), or said (list, status); 1 not signed in, the URL not given
   (cancelled, stdin empty, more than one line or past 2 KiB: nothing sent), refused by the service
   (its words printed as they came, the code the CLI's own), not made (the checks failed: each is said), its
   region could not make it, or the service answered outside its contract; 2 a wrong command line; 124 the wait
   timed out (nothing stopped: mason replica status says how it goes). Whatever the service sends, it never
   makes the exit 0, 2 or 124.
+
+  The --json answer, once it ends: { replica (create, status: { org, name, region, sizeGb, hostId,
+    state, createdAt, allowlist, page (its page, null when the service names none),
+    pending: [{ change (create, allowlist), state (pending, failed), attempts, failure,
+    nextAttemptAt }] }), checks (create: [{ source, outcome
+    (passed, failed, unknown), checks: [{ name, status (ok, warn, failed, unknown), detail,
+    fix }], missing }], null when the service's answer was lost), replicas (list: each as
+    replica is), more (list: true when an organisation has more than the service lists),
+    error (create, when it was not made, failed or the wait timed out: { code, message,
+    why, fix }), next }
 `,
   options: { replica: { type: "string" }, org: { type: "string" }, region: { type: "string" }, size: { type: "string" }, timeout: { type: "string" },
     json: { type: "boolean", default: false } },
