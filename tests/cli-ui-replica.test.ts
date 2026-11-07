@@ -233,7 +233,11 @@ test("mason ui --replica beside --ssh, --bridge, --mason, --timeout or --local-p
       assert.deepEqual(r.requests, [], extra.join(" "));
       assert.deepEqual(r.opened, []);
       const message = `--replica opens a hosted replica's page: it goes with --no-open and --json alone, not ${extra.filter((x) => x.startsWith("--")).join(", ")}`;
-      if (json) assert.deepEqual((JSON.parse(r.a.stdout) as { error: { code: string; message: string } }).error, { code: "usage", message });
+      if (json) {
+        const j = JSON.parse(r.a.stdout) as { error: { code: string; message: string }; next: Array<{ command: string }> };
+        assert.deepEqual(j.error, { code: "usage", message, fix: "write the line as its usage says (mason ui --help)" });
+        assert.deepEqual(j.next.map((n) => n.command), ["mason ui --help"]);
+      }
       else assert.ok(r.a.stderr.includes(`mason ui: ${message}`) && r.a.stderr.includes("usage: mason ui"), r.a.stderr);
     }
   }

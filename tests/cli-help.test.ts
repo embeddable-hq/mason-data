@@ -137,7 +137,7 @@ test("mason <cmd> --help --json, mason help <cmd> --json and mason help --json: 
   for (const f of forms("user")) assert.equal(f.positionals[0], f.synopsis.split(" ")[2], f.synopsis);
   assert.deepEqual(forms("user").find((f) => f.positionals[0] === "add")?.positionals, ["add", "<name>"], "--role, --set and --replica are options");
   assert.deepEqual(forms("user").find((f) => f.positionals[0] === "list")?.positionals, ["list"]);
-  assert.deepEqual(forms("ui").map((f) => f.positionals), [[], []], "--ssh <user@server> is an option and its value");
+  for (const f of forms("ui")) assert.deepEqual(f.positionals, [], `${f.synopsis}: --ssh <user@server> is an option and its value`);
   assert.deepEqual(forms("replica").map((f) => f.positionals)[2], ["status", "<org>/<name>"]);
   assert.deepEqual(forms("status"), [{ synopsis: "mason status [--json]", positionals: [] }]);
   // mason mcp, whose stdout is a protocol's and takes no --json, has a spec as data too
