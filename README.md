@@ -569,6 +569,7 @@ tool, and shows the setup for Claude Desktop.
 | `mason status` | Each synced table and how up to date it is. The last day's and week's queries: their results, their p50 and p95 times, and the rows and bytes sent. Then the slow and refused queries, each with its reason. |
 | `mason ui` | All of this in your browser, on four tabs: Overview, Tables, Users, and Observability (queries, usage and sync events). You can also add and remove tables, sync one now, add and disable users, and cancel a running query. Its fonts and icons are bundled, so it works with no internet. |
 | `mason ui --ssh <user@server>` | The same page for a `mason serve` server, from your machine, with nothing public: your own `ssh` carries it, until Ctrl-C. Not yet run across a real network ([`docs/WEB-UI.md`](docs/WEB-UI.md#on-a-server)). |
+| `mason ui --replica <org>/<name>` | The same page for a replica on a hosted Mason service, for the organisation's owner: the service answers an address that opens it once ([`docs/HOSTED-API.md`](docs/HOSTED-API.md#a-replicas-page-mason-ui---replica)). Not yet run against a real service. |
 | `EXPLAIN` | For each table a query reads: its rows and how up to date it is, next to the SQL Mason runs. |
 
 ### A CLI for coding agents
