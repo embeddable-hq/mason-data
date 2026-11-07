@@ -36,3 +36,8 @@ The next release's notes, gathered here until its `v<version>.md` is written: a 
 - **`mason usage --since` (and `mason logs --since`/`--until`) with an age too large for a date** (`99999999999d`) crashed
   the command, and the run's HTTP API answered it with a 500. It is now refused as a wrong command line (exit 2), and
   the API answers 400.
+- **A sources file can no longer name one of Mason's own settings** (`${MASON_…}`, such as `${MASON_API_KEY}`) in
+  `publication:` or `url:`: it is refused when the file is read, with the way out, and the value is never shown. Before,
+  `publication: ${MASON_API_KEY}` printed that key in the log as the publication's name and sent it to the source. If
+  you run projects written by someone else (CI, a shared server), this closes that path. `url: ${MASON_DATABASE_URL}`,
+  which `mason init` writes, still works.
