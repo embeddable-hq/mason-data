@@ -40,7 +40,7 @@ import { imagePinProblem, PIN_FILE } from "../lib/project-version.ts";
 import { commandPinProblem } from "./pin.ts";
 import { listenOnUiSocket, prepareUiSocket, uiSocketSetting, type UiSocket } from "./ui-socket.ts";
 import { recordRefusal } from "./replication-mode.ts";
-import { PAGE_READ_ONLY_WHY, uiReadOnlySetting } from "./ui-read-only.ts";
+import { UI_READ_ONLY_SETTING, uiReadOnlySetting } from "./ui-read-only.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
 import { historyDaysSetting, historyDaysWrongText } from "../duck/history.ts";
 import { DEFAULT_MEMORY_RULE, memoryProblems, memoryProblemText, memorySize, MEMORY_FLOOR_BYTES } from "../duck/store.ts";
@@ -467,7 +467,7 @@ export async function serve(argv: string[]): Promise<number> {
   say(`  metrics   http://${s.health.host}:${s.health.port}/metrics`);
   for (const l of socketSaid) say(`  ${l}`);
   if (page !== null) say(`  web page  ${page.file} (a Unix socket, mode 0600: a request on it passes the same guard as mason ui --ssh's)`);
-  if (uiReadOnlySetting(process.env) === true) say(`  web page  ${PAGE_READ_ONLY_WHY}: it refuses every change it is sent; the mason commands beside it are unchanged`);
+  if (uiReadOnlySetting(process.env) === true) say(`  web page  read-only (${UI_READ_ONLY_SETTING}=1): it refuses every change it is sent; the mason commands beside it are unchanged`);
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's
   process.chdir(s.data);
   let code: number;
