@@ -373,8 +373,9 @@ every `.yml` and `.yaml` under the folder (`mason/`), outside any folder or file
 - `files` is the whole project, sorted by `path`, each path once. The replica's project becomes exactly these files: a
   file the replica had and the list lacks is removed. A deploy never merges.
 - `client.version` is the CLI's version (`dev` from a checkout).
-- The service checks each `sha256` against its `content`, the bounds above and the path grammar, and refuses what does
-  not hold (`422 invalid`). It may refuse a body over 8 MiB with `413` before reading it.
+- The service checks the bounds above, each `sha256` against its `content`, and the path grammar: past a bound is
+  `413 too_large`, a `sha256` or a path that does not hold `422 invalid` (the table below). It may refuse a body over
+  8 MiB with `413` before reading it.
 
 `201`:
 
@@ -386,16 +387,36 @@ every `.yml` and `.yaml` under the folder (`mason/`), outside any folder or file
 point the next request at another path, is a failure); `status` is `queued`. Other statuses, each with the failure
 shape, are said as "Failures of `/v1/`" says: their words as the service wrote them, each one line, the CLI's code
 from the HTTP status (`404` `not_found`, the others `refused`), exit 1, the service's code at the end of `why`, and the
-CLI's own next step (`next` is never read):
+CLI's own next step (`next` is never read), but for a `503` and a `429`, which are waited on (below):
 
 | Status | The service's `code` | When |
 |---|---|---|
 | `401` | `unauthenticated` | no token, or one the service does not take (the CLI's next step: `mason login`) |
 | `403` | `refused` | the token may not deploy this replica (a viewer's, or a CI token made for another replica) |
-| `404` | `not_found` | no such replica in that organisation, or the token's account is not in the organisation: said the same way, so it never tells whether the name exists elsewhere |
+| `404` | `not_found` | no such replica in that organisation (a deleted replica's included: its name is freed), or the token's account is not in the organisation: said the same way, so it never tells whether the name exists elsewhere (the CLI's next step: `mason replica list <org>`) |
 | `409` | `busy` | another deploy to this replica has not finished; `why` names its id |
+| `409` | `not_ready` | the replica cannot take a deploy: it failed, or is being deleted. The body carries its state beside the failure, `"replica": { "state": "failed" \| "deleting" }` (as `Replica`'s `state`). The CLI says the state in its own words at the start of `why`, and its next step is `mason replica status <org>/<name>`; it never sends the deploy again |
 | `413` | `too_large` | past a bound above; `why` names the file or the sizes |
 | `422` | `invalid` | the service's own check of the files: `message` names the file and what is wrong, `why` the rest |
+
+Two answers say the service made NO deploy and asks the CLI to send it again later. Each carries `Retry-After`
+(delta-seconds), and may carry the failure shape:
+
+| Status | When | The CLI |
+|---|---|---|
+| `503` | the replica is being made — `"replica": { "state": "checking" \| "creating" }` — or it is `ready` and the machine it runs on is not connected to the service just now (`"state": "ready"`); or the service cannot take a deploy just now (no `replica`) | waits, then sends the same POST again |
+| `429` | too many deploys are being sent at once | waits, then sends the same POST again |
+
+- The CLI waits the seconds `Retry-After` asks (1 to 3600), or 5 s when it sends none or one in another form, never
+  past what is left of `--timeout`. While it waits, a person sees what it waits on (the replica's state, in the CLI's
+  words, when the answer gives one) and how long it has waited, on stderr; `--json` prints nothing until the answer.
+- Nothing else of these answers is printed: the failure's words are not shown. Every string of the body but those words,
+  each key included, is put to the exact test first, as every answer's is, and one that carries the token is refused
+  whole.
+- When `--timeout` runs out first, the CLI exits 124 (code `timeout`), saying no deploy was made and what it waited on;
+  its next steps are `mason replica status <org>/<name>` and `mason deploy --replica <org>/<name>`.
+- A POST is sent again only on these two answers, which say no deploy was made. Any other answer, and no answer at all,
+  is never retried: a deploy that may have been made would be made twice.
 
 When no answer comes back to the POST, whether the deploy was made is not known: the CLI says so, and the next
 `mason deploy` is answered `409 busy` if it was.

@@ -617,8 +617,9 @@ test("usage over time: /api/usage passes since, until and step to the samples, a
   assert.deepEqual(usageAsks[1], { since: plain.body.since, until: plain.body.until });
   const span = Date.parse(String(plain.body.until)) - Date.parse(String(plain.body.since));
   assert.ok(span === 3_600_000 && Date.parse(String(plain.body.until)) >= t0 - 1000, `the last hour by default: ${plain.body.since} … ${plain.body.until}`);
-  const refusals = await Promise.all(["/api/usage?since=yesterday", "/api/usage?since=2026-10-28T09:00:00", "/api/usage?since=2026-10-28T10:00:00Z&until=2026-10-28T09:00:00Z", "/api/usage?step=30", "/api/usage?step=5m"].map(get));
+  const refusals = await Promise.all(["/api/usage?since=99999999999d", "/api/usage?since=yesterday", "/api/usage?since=2026-10-28T09:00:00", "/api/usage?since=2026-10-28T10:00:00Z&until=2026-10-28T09:00:00Z", "/api/usage?step=30", "/api/usage?step=5m"].map(get));
   assert.deepEqual(refusals.map((r) => [r.status, r.body.error]), [
+    [400, 'since "99999999999d" is further back than a time reaches'],
     [400, 'since "yesterday" is not a time'],
     [400, 'since "2026-10-28T09:00:00" is not a time'],
     [400, "since (2026-10-28T10:00:00.000Z) must be before until (2026-10-28T09:00:00.000Z)"],
