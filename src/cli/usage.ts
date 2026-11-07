@@ -12,11 +12,12 @@ import { fileSize, guarded, runFailure } from "./commands.ts";
 import { timeOf } from "./request-filter.ts";
 import { duration, msText } from "./readiness.ts";
 import { SIZE_EVERY_MS, type CopySize, type UsageSample } from "../duck/usage.ts";
+import { parseDuration } from "../lib/table-sync.ts";
 
 const out = (m: string): void => { process.stdout.write(`${m}\n`); };
 const n = (x: number): string => x.toLocaleString("en-US");
 
-export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>] [--step <span>] [--json]
+export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>] [--step <duration>] [--json]
 
   What Mason was and did over time, from a sample it takes every minute and keeps MASON_HISTORY_DAYS days
   (default 7): a line each span — the statements of the Postgres API (how many, how many were refused, failed or
@@ -31,7 +32,8 @@ export const USAGE_USAGE = `usage: mason usage [--since <when>] [--until <when>]
 
   --since <when>   from when: an age (90s, 30m, 6h, 7d) or an ISO 8601 date or time with its zone; default 1h
   --until <when>   until when, the same way; default now
-  --step <span>    a line per span (1m to the days kept; default 5m), or 0 for every sample as it was taken
+  --step <duration>  a line per span (1m to the days kept; default 5m; a bare number is seconds), or 0 for every
+                   sample as it was taken
   --json           as data: { since, until, stepSeconds (null: every sample), sampleSeconds, keptDays, samples: [{ at
                    (with a step, the span's start), seconds, copyBytes, copyRows, tablesAdded, tablesCopied,
                    tablesFailed, oldestSyncSeconds, statements, statementsRefused, statementsFailed, statementsCancelled,
@@ -51,13 +53,12 @@ export const USAGE: CommandSpec & { needs: "run" } = {
   json: ["since", "until", "stepSeconds", "sampleSeconds", "keptDays", "samples", "copySizes", "next"],
 };
 
-const UNIT: Readonly<Record<string, number>> = { s: 1, m: 60, h: 3600, d: 86_400 };
-
-/** A span as the options write it (90s, 30m, 6h, 7d; 0), in seconds, or null when it is not one. */
+/** A span as the options write it (the command line's one duration grammar, src/lib/table-sync.ts `parseDuration`:
+ *  90s, 30m, 6h, 7d, a bare number of seconds; 0 for every sample), in whole seconds, or null when it is not one. */
 export function spanSeconds(text: string): number | null {
   if (text.trim() === "0") return 0;
-  const m = /^\s*(\d+)\s*([smhd])\s*$/.exec(text);
-  return m ? Number(m[1]) * UNIT[m[2]!]! : null;
+  const d = parseDuration(text, { zero: true });
+  return "problem" in d || !Number.isInteger(d.seconds) ? null : d.seconds;
 }
 
 /** One sample on one line: the time, the statements, those refused, failed or cancelled, p95, rows sent, the copy, its rows, the stalest copy, the lag, the memory. */
@@ -89,7 +90,7 @@ export async function usage(argv: string[], now = Date.now()): Promise<number> {
   const since = timeOf("--since", v.since ?? "1h", now), until = v.until === undefined ? new Date(now).toISOString() : timeOf("--until", v.until, now);
   for (const t of [since, until]) if (typeof t !== "string") return failed("usage", { ...t, usage: USAGE_USAGE }, { json });
   const step = spanSeconds(v.step ?? "5m");
-  if (step === null) return failed("usage", { message: `--step is a span (1m, 5m, 1h, 1d) or 0 for every sample, not ${JSON.stringify(v.step)}`, code: "usage", usage: USAGE_USAGE }, { json });
+  if (step === null) return failed("usage", { message: `--step is a duration (300, 1m, 5m, 1h, 1d: a bare number is seconds) or 0 for every sample, not ${JSON.stringify(v.step)}`, code: "usage", usage: USAGE_USAGE }, { json });
   const w = await reach(USAGE, json);
   if (w === null || !("run" in w)) return 1;
   const run = w.run;

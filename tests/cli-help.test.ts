@@ -3,7 +3,8 @@
  * are src/cli/command.ts's; this holds every command in the registry to them, so a
  * command added later is held to them the day it is added: its own --help (and `mason help <name>`), a usage that
  * starts with its name and shows an example, every option its parser takes named in that usage, a line in
- * `mason --help`, and a wrong option answered with what is wrong and the usage.
+ * `mason --help`, and a wrong option answered with what is wrong, the closest option and the synopsis (never the whole
+ * usage: `mason <name> --help` for more).
  */
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
@@ -13,6 +14,9 @@ import { fileURLToPath } from "node:url";
 import { COMMANDS, STEPS, topUsage } from "../src/cli/registry.ts";
 import { GUIDES } from "../src/cli/guides.ts";
 import { PLAIN } from "../src/cli/style.ts";
+import * as commandModule from "../src/cli/command.ts";
+// read from the module's namespace: at a commit without synopsis the file loads, and the tests fail by name
+const synopsis = (c: { name: string; usage: string }): string => (commandModule as unknown as { synopsis?: (c: { name: string; usage: string }) => string }).synopsis?.(c) ?? "(no synopsis)";
 
 const MAIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli", "main.ts");
 const mason = (...args: string[]) => spawnSync(process.execPath, [MAIN, ...args], { encoding: "utf8", env: { ...process.env, HOME: "/nonexistent-home" } });
@@ -42,15 +46,41 @@ for (const c of COMMANDS) {
       assert.equal(r.status, 0, `mason ${args.join(" ")}: ${r.stderr}`);
       assert.equal(r.stdout, c.usage, `mason ${args.join(" ")} prints the usage`);
     }
-    // a wrong option: what is wrong, then the usage, exit 2
+    // a wrong option: what is wrong and every option, then the synopsis and where the rest is, exit 2
     const wrong = mason(c.name, "--no-such-option");
     assert.equal(wrong.status, 2, `${c.name}: ${wrong.stderr}`);
-    assert.match(wrong.stderr, new RegExp(`^✗ mason ${c.name}: .*no-such-option`));
-    assert.ok(wrong.stderr.endsWith(c.usage), "followed by the usage");
+    assert.match(wrong.stderr, new RegExp(`^✗ mason ${c.name}: there is no option --no-such-option\n {2}fix {3}its options are `));
+    for (const opt of Object.keys(c.options)) assert.ok(wrong.stderr.includes(`--${opt}`), `${c.name}: --${opt} is named`);
+    assert.ok(wrong.stderr.endsWith(synopsis(c)), "followed by the synopsis");
+    assert.ok(synopsis(c).startsWith(`usage: mason ${c.name}`) && synopsis(c).endsWith(`\n\nmason ${c.name} --help for more\n`), synopsis(c));
+    if (synopsis(c).length < c.usage.length) assert.ok(!wrong.stderr.includes(c.usage), "never the whole usage");
     // listed in mason --help, with its summary
     assert.ok(topUsage().includes(`mason ${c.name}`) && topUsage().includes(c.summary), "listed in mason --help");
   });
 }
+
+test("a wrong option is said in the CLI's words: the closest option, a value missing or not taken; never Node's advice about --", () => {
+  const typo = mason("status", "--jsn");
+  assert.equal(typo.status, 2);
+  assert.match(typo.stderr, /^✗ mason status: there is no option --jsn — did you mean `--json`\?\n {2}fix {3}its options are --json, --help\n/);
+  assert.doesNotMatch(typo.stderr, /positional argument|place it at the end/);
+  assert.ok(typo.stderr.endsWith("usage: mason status [--json]\n\nmason status --help for more\n"), typo.stderr);
+  const j = mason("status", "--jsn", "--json");
+  assert.equal(j.status, 2);
+  assert.deepEqual(JSON.parse(j.stdout), { error: { code: "usage", message: "there is no option --jsn — did you mean `--json`?", fix: "its options are --json, --help" },
+    next: [{ command: "mason status --help", what: "its usage, with every option" }] });
+  const missing = mason("logs", "-n");
+  assert.match(missing.stderr, /^✗ mason logs: -n \(--lines\) needs a value: -n <value>\n/);
+  const value = mason("wait", "--json=yes");
+  assert.match(value.stderr, /^✗ mason wait: --json takes no value: write --json alone\n/);
+  assert.equal(value.status, 2);
+});
+
+test("every flag that takes a duration says <duration> in its command's usage (one grammar, src/lib/table-sync.ts parseDuration)", () => {
+  const taking = COMMANDS.flatMap((c) => ["timeout", "step"].filter((k) => k in c.options).map((k) => [c, k] as const));
+  assert.deepEqual(taking.map(([c, k]) => `${c.name} --${k}`), ["wait --timeout", "share --timeout", "ui --timeout", "usage --step", "replica --timeout", "deploy --timeout"]);
+  for (const [c, k] of taking) assert.match(c.usage, new RegExp(`--${k} <duration>`), `mason ${c.name} --${k}`);
+});
 
 test("mason --help lists the commands; a misspelt one is answered with the closest", () => {
   const help = mason("--help");
@@ -222,6 +252,11 @@ test("a failure is one shape for a person and for a program: what, why, fix, nex
   assert.equal(errs[errs.length - 1], "✗ mason x: p");
   // every code has one sentence, and the guide lists them (tests/cli-guides.test.ts reads the guide)
   for (const [code, what] of Object.entries(FAILURE_CODES)) assert.ok(/^[a-z_]+$/.test(code) && what.length > 10, code);
+  // the set is closed: a hung run's not_answering is in it, and a code another process sent outside it becomes ours
+  const { failureCode, TIMEOUT_COMMANDS } = await import("../src/cli/command.ts");
+  assert.ok(Object.hasOwn(FAILURE_CODES, "not_answering"));
+  assert.deepEqual([failureCode("not_found", "failed"), failureCode("frobnicated", "failed"), failureCode(7, "usage")], ["not_found", "failed", "usage"]);
+  for (const c of ["mason wait", "mason deploy", "mason replica create", "mason login", "mason share", "mason ui --ssh"]) assert.ok(TIMEOUT_COMMANDS.includes(c), c);
 });
 
 // A FAILURE IS DRAWN BY ITS STREAM (the red ✘ and the bold message never showed on a person's terminal — mason
