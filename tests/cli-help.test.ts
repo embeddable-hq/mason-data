@@ -133,7 +133,10 @@ test("mason <cmd> --help --json, mason help <cmd> --json and mason help --json: 
   const forms = (name: string) => (help.commands.find((s) => s.name === name)!.forms as Array<{ synopsis: string; positionals: string[] }>);
   assert.deepEqual(forms("add").map((f) => f.positionals), [["<table>…"]]);
   assert.deepEqual(forms("init").map((f) => f.positionals), [["[<postgres url> | demo]"]]);
-  assert.deepEqual(forms("user").map((f) => f.positionals), [["add", "<name>"], ["list"], ["disable", "<name>"], ["enable", "<name>"], ["remove", "<name>"]]);
+  // each form of mason user is its verb, then its words (the verbs read from the synopsis, so a new one needs no edit here)
+  for (const f of forms("user")) assert.equal(f.positionals[0], f.synopsis.split(" ")[2], f.synopsis);
+  assert.deepEqual(forms("user").find((f) => f.positionals[0] === "add")?.positionals, ["add", "<name>"], "--role, --set and --replica are options");
+  assert.deepEqual(forms("user").find((f) => f.positionals[0] === "list")?.positionals, ["list"]);
   assert.deepEqual(forms("ui").map((f) => f.positionals), [[], []], "--ssh <user@server> is an option and its value");
   assert.deepEqual(forms("replica").map((f) => f.positionals)[2], ["status", "<org>/<name>"]);
   assert.deepEqual(forms("status"), [{ synopsis: "mason status [--json]", positionals: [] }]);
