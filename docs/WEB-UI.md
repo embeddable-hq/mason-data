@@ -264,6 +264,22 @@ listens, and every browser connection crosses that one ssh connection as frames 
   the path (a file, a link, another user's socket, one a process answers on) is refused and left as it is; it is removed
   on exit. A request on it is judged by the same guard as one through `mason ui --bridge`: it reaches the page with the
   run's token, or as a tunnel opened with that token (its ticket, then its cookie), never for arriving on the socket.
+- **A supervisor finds the run's port and token in a file: `MASON_UI_RUN_FILE`.** With
+  `MASON_UI_RUN_FILE=/mason/data/.mason/run.json`, `mason serve` writes `{ "port": …, "token": … }` there once it
+  answers (before `/healthz` says ready), and nothing else: the page's port and the run's token, which a process on the
+  same machine sends as `Authorization: Bearer` to open a tunnel (`POST /api/ui/tunnel`), without reading
+  `.mason/config.json`. The token grants what the token grants: the commands' writes (`mason add`, `mason sync`,
+  `mason user`) as well as a tunnel. So the file is held to the socket's bar (`src/cli/ui-run-file.ts`): mode 0600 from
+  the moment it exists, in a folder only Mason's user can write, never through a link, written whole (a reader finds no
+  file or all of it), never over anything but a stale run file of Mason's own (a link, another user's file, a file of
+  other content or mode, a run that still answers: refused and left as it is), and removed on exit. `mason start`
+  refuses it.
+- **`/healthz` says how the page is served, from the start:** `"page": { "socket": "/mason/data/.mason/ui.sock" | null,
+  "readOnly": true | false }`, while it is `starting` too, so a supervisor tells a Mason that serves no socket (`null`;
+  an older Mason has no `page`) from one still starting. `mason status --json` says `pageSocket` (the path or `null`)
+  beside `pageReadOnly`. Neither ever carries the token.
+- **`HEAD` answers as `GET` does**, on every route of the page and the API, without the body: routed as the GET, by rule
+  (`src/cli/run-server.ts`).
 - **A page that only shows: `MASON_UI_READ_ONLY=1`.** For a page shown to someone who should only look (behind a
   reverse proxy, on the socket), `mason serve` with it set makes the page offer no control that changes anything — no
   Add, Remove, Sync, Disable, Enable, Cancel, Add a user, Create a user or Connect from anywhere, each page saying

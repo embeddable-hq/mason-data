@@ -20,7 +20,9 @@
  *   - ITS WEB PAGE ON LOOPBACK ALONE (src/cli/run-server.ts `listenOnLoopback`): the run's server, MASON_UI_PORT, reached
  *     from a developer's machine with `mason ui --ssh`, never published. No setting moves it to another address.
  *     MASON_UI_SOCKET serves it on a Unix socket too, for a process on this machine (src/cli/ui-socket.ts): mode 0600, in
- *     a folder only Mason's user can write, behind the same guard as `mason ui --ssh`'s requests.
+ *     a folder only Mason's user can write, behind the same guard as `mason ui --ssh`'s requests. MASON_UI_RUN_FILE
+ *     writes the page's port and the run's token to a file for a supervisor on this machine (src/cli/ui-run-file.ts),
+ *     held to the same bar, once the run answers; /healthz says from the start where the page is served (`PageServed`).
  *
  * The commands beside it work as on a laptop, in the data folder: `docker compose exec mason mason add orders`.
  */
@@ -39,6 +41,7 @@ import { appEnvValue } from "../lib/dotenv.ts";
 import { imagePinProblem, PIN_FILE } from "../lib/project-version.ts";
 import { commandPinProblem } from "./pin.ts";
 import { listenOnUiSocket, prepareUiSocket, uiSocketSetting, type UiSocket } from "./ui-socket.ts";
+import { prepareUiRunFile, uiRunFileSetting, UI_RUN_FILE_SETTING, writeUiRunFile, type UiRunFile } from "./ui-run-file.ts";
 import { recordRefusal } from "./replication-mode.ts";
 import { UI_READ_ONLY_SETTING, uiReadOnlySetting } from "./ui-read-only.ts";
 import { changesRetiredText, pollMsRetiredText, type SourcesTop } from "../lib/table-sync.ts";
@@ -91,6 +94,11 @@ export const SERVE: CommandSpec = {
                             a local reverse proxy): made mode 0600 in a folder only Mason's user can write (else the
                             start is refused), a stale one replaced, removed on exit; a request on it passes the same
                             guard as mason ui --ssh's (default unset: none)
+    MASON_UI_RUN_FILE       a file Mason writes once it answers, for a process on this machine that supervises it:
+                            { "port", "token" }, the web page's port and the run's token, which grants what the token
+                            grants — the commands' writes (mason add, mason sync, mason user) as well as a tunnel to
+                            the page; written whole, mode 0600, in a folder only Mason's user can write (else the
+                            start is refused), a stale one replaced, removed on exit (default unset: none)
     MASON_UI_READ_ONLY      1 when the web page should only show: it offers no control that changes anything, and
                             refuses every change it is sent, through mason ui --ssh or the socket alike; the mason
                             commands beside it are unchanged (default 0)
@@ -130,8 +138,9 @@ export interface ServeSettings {
   selfSignedTls: boolean;
   health: { host: string; port: number };
   /** the port of the page and the commands; `named`: MASON_UI_PORT said it, so it is that port or a refusal; `socket`:
-   *  the Unix socket MASON_UI_SOCKET names, absolute, the page served there too (src/cli/ui-socket.ts), or null */
-  ui: { port: number; named: boolean; socket: string | null };
+   *  the Unix socket MASON_UI_SOCKET names, absolute, the page served there too (src/cli/ui-socket.ts), or null;
+   *  `runFile`: the file MASON_UI_RUN_FILE names, absolute, the port and the token written there (src/cli/ui-run-file.ts), or null */
+  ui: { port: number; named: boolean; socket: string | null; runFile: string | null };
 }
 
 const MIN_API_KEY = 32;
@@ -185,6 +194,10 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
   // a host would only be believed: the page has no address but loopback, and running on while one is asked for would hide that
   const socket = uiSocketSetting(env, cwd);
   if (socket !== null && typeof socket !== "string") wrong.push(socket.problem);
+  // the run's file (src/cli/ui-run-file.ts): never the socket's own path
+  const runFile = uiRunFileSetting(env, cwd);
+  if (runFile !== null && typeof runFile !== "string") wrong.push(runFile.problem);
+  else if (runFile !== null && runFile === socket) wrong.push(`${UI_RUN_FILE_SETTING} names the path MASON_UI_SOCKET names: two paths`);
   // the read-only page (src/cli/ui-read-only.ts): 1 or 0, anything else refused here, never read as off
   const pageReadOnly = uiReadOnlySetting(env);
   if (typeof pageReadOnly !== "boolean") wrong.push(pageReadOnly.problem);
@@ -199,7 +212,7 @@ export function serveSettings(env: Readonly<Record<string, string | undefined>>,
     name, apiKey, selfSignedTls: selfSigned === "1",
     project, data,
     health: { host: env.MASON_HEALTH_HOST || "0.0.0.0", port },
-    ui: { port: uiPort, named: !!env.MASON_UI_PORT, socket: typeof socket === "string" ? socket : null },
+    ui: { port: uiPort, named: !!env.MASON_UI_PORT, socket: typeof socket === "string" ? socket : null, runFile: typeof runFile === "string" ? runFile : null },
   };
 }
 
@@ -346,6 +359,14 @@ export type ServePhase = { phase: "starting" }
   | { phase: "ready"; tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">> }
   | { phase: "stopping" };
 
+/**
+ * WHERE THE WEB PAGE IS SERVED, as /healthz says it from the start: the Unix socket's path (MASON_UI_SOCKET) or null, and
+ * whether it is read-only (MASON_UI_READ_ONLY). Said while it starts too, so a supervisor tells a Mason that serves no
+ * socket (null; an older one has no `page`) from one still starting. Never the token.
+ */
+export interface PageServed { socket: string | null; readOnly: boolean }
+export const NO_PAGE_SERVED: PageServed = { socket: null, readOnly: false };
+
 /** seconds since the serve started: /healthz's `uptimeSeconds` and /metrics' `mason_uptime_seconds`, one number */
 const uptimeSeconds = (startedAt: number, now: number): number => Math.floor((now - startedAt) / 1000);
 
@@ -354,8 +375,8 @@ const uptimeSeconds = (startedAt: number, now: number): number => Math.floor((no
  * leaves the rest served: the counts say it); 503 while it starts and stops. Counts only, never a table's name: the
  * endpoint takes no credential.
  */
-export function healthBody(state: ServePhase, startedAt: number, now = Date.now()): { status: number; body: Record<string, unknown> } {
-  const base = { status: state.phase, version: version(), uptimeSeconds: uptimeSeconds(startedAt, now) };
+export function healthBody(state: ServePhase, startedAt: number, now = Date.now(), page: PageServed = NO_PAGE_SERVED): { status: number; body: Record<string, unknown> } {
+  const base = { status: state.phase, version: version(), uptimeSeconds: uptimeSeconds(startedAt, now), page: { socket: page.socket, readOnly: page.readOnly } };
   if (state.phase !== "ready") return { status: 503, body: base };
   return { status: 200, body: { ...base, tables: phaseCounts(state.tables()) } };
 }
@@ -371,7 +392,7 @@ export async function metricsBody(state: ServePhase, startedAt: number, now = Da
 }
 
 /** The health server: GET /healthz and GET /metrics, nothing else. `log` says a scrape whose numbers could not be read. */
-export function healthServer(state: () => ServePhase, startedAt: number, log: (line: string) => void = say): http.Server {
+export function healthServer(state: () => ServePhase, startedAt: number, log: (line: string) => void = say, page: PageServed = NO_PAGE_SERVED): http.Server {
   return http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://health");
     if (url.pathname !== "/healthz" && url.pathname !== "/metrics") { res.writeHead(404, { "content-type": "text/plain" }).end("GET /healthz or GET /metrics\n"); return; }
@@ -393,7 +414,7 @@ export function healthServer(state: () => ServePhase, startedAt: number, log: (l
         });
       return;
     }
-    const h = healthBody(state(), startedAt);
+    const h = healthBody(state(), startedAt, Date.now(), page);
     res.writeHead(h.status, { "content-type": "application/json", "cache-control": "no-store" }).end(`${JSON.stringify(h.body)}\n`);
   });
 }
@@ -436,11 +457,20 @@ export async function serve(argv: string[]): Promise<number> {
     if ("message" in opened) return failed("serve", opened, { json });
     page = opened;
   }
+  // the run's file: its folder and its path held to the bar now, a stale one removed; written once the run answers
+  // (asserted wide: they are set in the run's hooks, which the compiler does not follow)
+  let runFile = null as UiRunFile | null;
+  let runFileFailed = null as Failure | null;
+  if (s.ui.runFile !== null) {
+    const prepared = await prepareUiRunFile(s.ui.runFile, (l) => socketSaid.push(l));
+    if (prepared !== null) { page?.close(); return failed("serve", prepared, { json }); }
+  }
   // a SIGTERM before the run has its own stop (it is still connecting) ends the process by its default action, which runs
   // no finally: the socket is removed first, then the signal raised again as it was
   const early = (signal: NodeJS.Signals): void => {
     if (process.listenerCount(signal) > 1) return;   // the run's stop is in place: it stops, and the finally removes it
     page?.close();
+    runFile?.remove();
     unhookEarly();
     process.kill(process.pid, signal);
   };
@@ -448,7 +478,7 @@ export async function serve(argv: string[]): Promise<number> {
   if (page !== null) { process.on("SIGTERM", early); process.on("SIGINT", early); }
   const startedAt = Date.now();
   let state: ServePhase = { phase: "starting" };
-  const health = healthServer(() => state, startedAt);
+  const health = healthServer(() => state, startedAt, say, { socket: page?.file ?? null, readOnly: uiReadOnlySetting(process.env) === true });
   const listening = await new Promise<Error | null>((resolve) => {
     health.once("error", resolve);
     health.listen(s.health.port, s.health.host, () => resolve(null));
@@ -466,6 +496,7 @@ export async function serve(argv: string[]): Promise<number> {
   say(`  health    http://${s.health.host}:${s.health.port}/healthz`);
   say(`  metrics   http://${s.health.host}:${s.health.port}/metrics`);
   for (const l of socketSaid) say(`  ${l}`);
+  if (s.ui.runFile !== null) say(`  run file  ${s.ui.runFile}: written once Mason answers (mode 0600; it holds the run's token)`);
   if (page !== null) say(`  web page  ${page.file} (a Unix socket, mode 0600: a request on it passes the same guard as mason ui --ssh's)`);
   if (uiReadOnlySetting(process.env) === true) say(`  web page  read-only (${UI_READ_ONLY_SETTING}=1): it refuses every change it is sent; the mason commands beside it are unchanged`);
   // the run reads the project of the folder it runs in (src/cli/project.ts): the data folder's
@@ -473,16 +504,36 @@ export async function serve(argv: string[]): Promise<number> {
   let code: number;
   try {
     code = await dev({ port: s.ui.port, exactPort: s.ui.named, version: version(), selfSignedTls: s.selfSignedTls,
-      serve: { log: say, ready: (run) => { state = { phase: "ready", tables: run.tables, metrics: run.metrics }; }, stopping: () => { state = { phase: "stopping" }; page?.close(); },
-        ...(page !== null ? { page: page.attach } : {}) } });
+      serve: { log: say,
+        ready: (run) => {
+          // the run's file before /healthz says ready: a supervisor that sees ready finds it
+          if (s.ui.runFile !== null) {
+            const w = writeUiRunFile(s.ui.runFile, run.page, (l) => say(`  ${l}`));
+            if ("message" in w) {
+              // fail closed: a supervisor would wait on a file that never comes, so the run stops and the serve exits 1
+              runFileFailed = w;
+              say(`  ${w.message}: Mason stops (${w.fix})`);
+              state = { phase: "stopping" };
+              process.kill(process.pid, "SIGTERM");
+              return;
+            }
+            runFile = w;
+            say(`  run file  ${w.file} (the web page's port and the run's token, mode 0600)`);
+          }
+          state = { phase: "ready", tables: run.tables, metrics: run.metrics };
+        },
+        stopping: () => { state = { phase: "stopping" }; page?.close(); runFile?.remove(); },
+        ...(page !== null ? { page: page.attach, socket: page.file } : {}) } });
   } finally {
     // removed whatever ended the run: a stop, a crash of the engine's thread, or a start that failed
     page?.close();
+    runFile?.remove();
     unhookEarly();
     // a platform's health check may hold a keep-alive connection open, which close() alone would wait for
     health.closeAllConnections();
     await new Promise<void>((resolve) => health.close(() => resolve()));
   }
+  if (runFileFailed !== null) return failed("serve", runFileFailed, { json: false });
   if (code !== 0) return failed("serve", { message: "Mason did not start: what stopped it is said above", code: "failed",
     fix: "fix what it says, then start it again (a platform restarts it by itself)" }, { json: false });
   return 0;

@@ -86,11 +86,15 @@ export interface ServeHooks {
   log: (line: string) => void;
   /** the run answers: its listener is up and its tables are added (they may still be copying); `metrics` reads what
    *  `GET /metrics` says (src/cli/run-server.ts `metricsFacts`) */
-  ready: (run: { tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">> }) => void;
+  ready: (run: { tables: () => CopyState[]; metrics: () => Promise<Omit<RunMetrics, "uptimeSeconds">>;
+    /** the page's port on 127.0.0.1 and the run's token: what MASON_UI_RUN_FILE writes (src/cli/ui-run-file.ts) */
+    page: { port: number; token: string } }) => void;
   /** a SIGTERM or SIGINT is stopping it */
   stopping: () => void;
   /** the page's Unix socket (MASON_UI_SOCKET, src/cli/ui-socket.ts) is given the run's server, whose requests it serves */
   page?: (server: Server) => void;
+  /** that socket's path: `/api/state` `pageSocket` */
+  socket?: string;
 }
 
 const say = (m: string): void => { process.stdout.write(`${m}\n`); };
@@ -642,6 +646,8 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
     page: true, served: o.serve !== undefined,
     // MASON_UI_READ_ONLY=1: a server's page refuses every change it asks for (mason start refuses the setting above)
     pageReadOnly: o.serve !== undefined && uiReadOnlySetting(process.env) === true,
+    // MASON_UI_SOCKET: the page on a Unix socket too (src/cli/ui-socket.ts), or null
+    pageSocket: o.serve?.socket ?? null,
     demo: cfg.demo === true,
     users: { file: path.join(home, USERS_FILE), apiKey: cfg.apiKey, database, postgresUrl },
     // the roles as the listener holds them: their row filters checked by its catalog (a filter Postgres refuses is a problem)
@@ -776,9 +782,10 @@ async function run(o: DevOptions, hosted: Hosted): Promise<number> {
   if (demoChangeMs !== null) say(`  Demo  a new order lands every ${demoChangeMs / 1000} s: mason status shows the synced data keeping up`);
   const elsewhere = elsewhereTip(pgTls.listener);
   if (elsewhere) say(`  ${elsewhere}`);
+  // before the ready line: what a serve writes when it answers (MASON_UI_RUN_FILE) is there when a supervisor reads it
+  o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx), page: { port: setupPort, token } });
   say(READY);
   say("");
-  o.serve?.ready({ tables: () => sync.state(), metrics: () => metricsFacts(runCtx) });
   return await stopped;
 }
 

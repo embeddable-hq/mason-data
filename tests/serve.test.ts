@@ -55,7 +55,7 @@ test("the settings: every one missing or wrong said at once, each with what to s
   const s = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY }, "/srv");
   assert.ok(!("message" in s));
   assert.deepEqual(s, { name: "mason", apiKey: KEY, selfSignedTls: false, project: "/srv/mason", data: "/srv",
-    health: { host: "0.0.0.0", port: 4140 }, ui: { port: 4039, named: false, socket: null } });
+    health: { host: "0.0.0.0", port: 4140 }, ui: { port: 4039, named: false, socket: null, runFile: null } });
   const t = serveSettings({ DATABASE_URL: URL_, MASON_API_KEY: KEY, MASON_PROJECT: "/mason/project", MASON_DATA: "/mason/data", MASON_NAME: "shop",
     MASON_PG_SELF_SIGNED_TLS: "1", MASON_HEALTH_PORT: "8080", MASON_HEALTH_HOST: "127.0.0.1" }, "/srv");
   assert.ok(!("message" in t));
@@ -224,7 +224,7 @@ test("/healthz: 503 while it starts and stops, 200 once it answers whatever its 
   const t0 = Date.parse("2026-10-26T10:00:00Z");
   const starting = healthBody({ phase: "starting" }, t0, t0 + 5_500);
   assert.equal(starting.status, 503);
-  assert.deepEqual({ ...starting.body, version: "-" }, { status: "starting", version: "-", uptimeSeconds: 5 });
+  assert.deepEqual({ ...starting.body, version: "-" }, { status: "starting", version: "-", uptimeSeconds: 5, page: { socket: null, readOnly: false } });
   assert.equal(healthBody({ phase: "stopping" }, t0, t0).status, 503);
   const copy = (source: string, phase: CopyState["phase"]): CopyState => ({ source, phase, rows: null, bytes: null, seconds: null, copiedAt: null, error: phase === "failed" ? "boom" : null });
   const ready = healthBody({ phase: "ready", tables: () => [copy("public.orders", "copied"), copy("public.users", "copying"), copy("sales.secret_ledger", "failed")],

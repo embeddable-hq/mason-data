@@ -23,6 +23,7 @@ import { connectDatabase, databaseSettingRefusal } from "../lib/database-name.ts
 import { changesRetired, pollMsRetired } from "../lib/table-sync.ts";
 import { readSource, sourcesTop, writtenDatabase, type ProjectSource } from "./sources.ts";
 import { UI_SOCKET_SETTING } from "./ui-socket.ts";
+import { UI_RUN_FILE_SETTING } from "./ui-run-file.ts";
 import { UI_READ_ONLY_SETTING, uiReadOnlySetting } from "./ui-read-only.ts";
 
 export const STATE_DIR = ".mason";
@@ -363,6 +364,11 @@ export function startSettingRefusal(p: Project, env: NodeJS.ProcessEnv, o: { ser
   if (!o.serve && env[UI_SOCKET_SETTING]) {
     return { message: `${UI_SOCKET_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
       fix: `unset ${UI_SOCKET_SETTING}: mason ui opens this run's page` };
+  }
+  // the run's file is a server's supervisor's (src/cli/ui-run-file.ts): a laptop's commands read the project's config
+  if (!o.serve && env[UI_RUN_FILE_SETTING]) {
+    return { message: `${UI_RUN_FILE_SETTING} is mason serve's setting, and mason start ignores no setting silently`, code: "refused",
+      fix: `unset ${UI_RUN_FILE_SETTING}: mason ui opens this run's page, and the mason commands reach the run by themselves` };
   }
   return null;
 }

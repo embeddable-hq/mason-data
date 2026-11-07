@@ -131,6 +131,9 @@ export interface RunState {
   /** why the page offers no control that changes anything (MASON_UI_READ_ONLY=1, src/cli/ui-read-only.ts), or null:
    *  src/cli/run-server.ts runState; a run from before it has none */
   pageReadOnly?: string | null;
+  /** the Unix socket the page is served on too (mason serve with MASON_UI_SOCKET), or null: src/cli/run-server.ts
+   *  runState; a run from before it has none */
+  pageSocket?: string | null;
   /** the roles file (mason/roles.yml, src/cli/roles.ts) as the listener reads it now: the roles by name, and what is
    *  wrong with it (every statement of a user with a role is refused while there is); absent from a run before roles */
   roles?: { file: string | null; roles: string[]; problem: string | null; default: string | null; all?: string[];
@@ -432,7 +435,8 @@ const STATUS_USAGE = `usage: mason status [--json]
     mason serve's run: mason ui --ssh opens its page), sourcesReadOnly (why the page offers no Add or Remove — the
     project's files deployed read-only, MASON_PROJECT_READONLY, which mason add and mason remove refuse too, or a
     server's sources file it cannot write — or null), pageReadOnly (why the page changes nothing: mason serve with
-    MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), next }.
+    MASON_UI_READ_ONLY=1, which refuses every change the page sends — or null), pageSocket (the Unix socket the
+    page is served on too: mason serve with MASON_UI_SOCKET — or null), next }.
     Each table's kept is how it is kept current now (absent for a table the sync does not hold):
     { by: poll, sync: { mode: off } or { mode: poll, every (30s), seconds } (its entry's sync:, else the file's,
     else off), syncedAt (its last whole read or poll), nextAt (when its next poll is due; null: off, or not polled
@@ -474,7 +478,7 @@ export const STATUS: CommandSpec & { needs: "project" } = {
   usage: STATUS_USAGE,
   options: { json: { type: "boolean" } },
   json: ["running", "pid", "postgres", "source", "warnings", "folder", "project", "tables", "totals", "engine", "disk", "sessions", "stream", "jsonPaths", "generatedTables", "queries", "slowQueries", "refusedQueries",
-    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly",
+    "refusedTotal", "unsupported", "recentErrors", "readiness", "ui", "served", "sourcesReadOnly", "pageReadOnly", "pageSocket",
     "roles", "share", "shareEnded", "lastRun", "lastStop", "hung", "next"],
 };
 
@@ -552,7 +556,8 @@ export async function status(argv: string[]): Promise<number> {
       ["Listener", listenerText(run.postgresListener, postgresLink(run.postgresUrl).port)],
       ...shareRows(s.share),
       // the web page (mason ui), without its one-time token: mason ui prints the URL that carries it, and opens it
-      ...(s.ui === true ? [["Web UI", s.served === true ? "from your machine: mason ui --ssh <user@server>" : `${run.control.url}/  (mason ui opens it)`] as [string, string]] : []),
+      ...(s.ui === true ? [["Web UI", (s.served === true ? "from your machine: mason ui --ssh <user@server>" : `${run.control.url}/  (mason ui opens it)`) +
+        (typeof s.pageSocket === "string" ? `; on this machine, the Unix socket ${s.pageSocket} too` : "")] as [string, string]] : []),
       // the roles file as the listener reads it now (mason user add --role): its roles, or what is wrong with it
       ...(s.roles && s.roles.file !== null
         ? [["Roles", s.roles.problem !== null ? st.red(`${s.roles.problem} (every statement of a user with a role is refused until it is fixed)`)
